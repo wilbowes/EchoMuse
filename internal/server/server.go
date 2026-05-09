@@ -74,7 +74,8 @@ func NewServer(buttonController buttons.Controller, microphone mic.Microphone, s
 
 	go func() {
 		uptime, err := getUptime()
-		minUptime := time.Second * 90
+		// Reduced from 90 seconds as server is started at the end of the boot cycle anyway.
+		minUptime := time.Second * 5
 
 		if err != nil || uptime < minUptime {
 			// If we start too soon the native bootup from the echo will break (LEDs will spin forever)

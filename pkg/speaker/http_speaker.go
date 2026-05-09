@@ -60,3 +60,9 @@ func (h *HttpSpeaker) Close() {
 		h.pipeWriter.Close()
 	}
 }
+
+// PumpPeriod is not implemented for HttpSpeaker — streaming playback
+// is only supported by PcmSpeaker over the WS path.
+func (h *HttpSpeaker) PumpPeriod(data []byte) error {
+	return h.Pump(data)
+}

@@ -2,13 +2,9 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"io"
 	"log"
-	"net/http"
+	"math"
 	"os"
-	"strings"
 	"time"
 
 	internalbuttons "github.com/wilbowes/EchoMuse/internal/bindings/buttons"
@@ -19,6 +15,8 @@ import (
 	pkgbuttons "github.com/wilbowes/EchoMuse/pkg/buttons"
 	"github.com/wilbowes/EchoMuse/pkg/led"
 )
+
+const echoDotID = "echo-dot"
 
 func main() {
 	log.SetOutput(os.Stdout)
@@ -41,7 +39,7 @@ func main() {
 
 	s := server.NewServer(buttonController, microphone, pcmSpeaker)
 
-	// Volume buttons handled locally by EchoGo
+	// Volume buttons handled locally
 	buttonController.SetVolumeCallback(func(direction string) {
 		if direction == "up" {
 			s.VolumeStepUp()
@@ -50,62 +48,105 @@ func main() {
 		}
 	})
 
-	// Mute button handled locally by EchoGo
+	// Mute button handled locally
 	buttonController.SetMuteCallback(func() {
 		s.MuteToggle()
 	})
 
 	ctx := context.Background()
 
-	// Clara client — discovers server via mDNS, receives LED commands
-	claraClient := client.NewClient(func(ledsRaw json.RawMessage) {
-		var leds []led.Led
-		if err := json.Unmarshal(ledsRaw, &leds); err != nil {
-			log.Printf("LED unmarshal error: %v", err)
-			return
-		}
-		s.SetLEDs(leds)
-	})
+	// Data client — mic streaming and speaker playback over /data WS
+	dataClient := client.NewDataClient(echoDotID, microphone, pcmSpeaker)
 
-	// Subscribe to Dot button events — forward to Clara server
-	// Volume and mute events are intercepted locally and never reach this callback
+	// Control client — registration, LEDs, buttons, mic lifecycle over /control WS
+	controlClient := client.NewControlClient(
+		echoDotID,
+		func(leds []led.Led) {
+			s.SetLEDs(leds)
+		},
+		func() { dataClient.StartMic() },
+		func() { dataClient.StopMic() },
+	)
+
+	// Subscribe to Dot button events — forward to Clara server via control plane
 	_, err = buttonController.SubscribeToButton(func(event pkgbuttons.ButtonClickEvent) {
-		// Block dot button (action button) when muted
+		log.Printf("Button event: clickType=%d down=%v", event.ClickType, event.Down)
 		if event.ClickType == pkgbuttons.DotClick && s.IsMuted() {
 			log.Println("Dot button blocked — mic is muted")
 			return
 		}
-		claraClient.SendButton(event)
+		controlClient.SendButton(event)
 	})
 	if err != nil {
 		log.Fatalf("Button subscription failed: %v", err)
 	}
 
-	// Connect to Clara server in background — reconnects automatically on drop
+	// Disconnected state — gently pulse orange ring
+	var pulseCancel context.CancelFunc
+	controlClient.OnDisconnected(func() {
+		if pulseCancel != nil {
+			pulseCancel()
+		}
+		pulseCtx, cancel := context.WithCancel(ctx)
+		pulseCancel = cancel
+		go pulseOrange(pulseCtx, s)
+	})
+	controlClient.OnConnected(func() {
+		if pulseCancel != nil {
+			pulseCancel()
+			pulseCancel = nil
+		}
+		s.SetLEDs(allLEDs(0, 0, 0))
+	})
+
+	log.Println("Ready")
+	time.Sleep(2 * time.Second) // allow network stack to settle before mDNS
+
+	// Control client orchestrates discovery and signals data client after registration
 	go func() {
-		if err := claraClient.Run(ctx); err != nil && err != context.Canceled {
+		if err := controlClient.Run(ctx, dataClient); err != nil && err != context.Canceled {
 			log.Printf("Clara client stopped: %v", err)
 		}
 	}()
 
-	log.Println("Starting server")
+	select {} // block forever
+}
 
-	if err := s.Serve(); err != nil {
-		if strings.Contains(err.Error(), "address already in use") {
-			log.Println("Server is already running, killing")
-			response, err := http.Get(fmt.Sprintf("http://localhost:%d/kill", server.Port))
-			if err != nil {
-				log.Fatalf("Failed to send request to server: %v", err)
-			}
-			body, _ := io.ReadAll(response.Body)
-			log.Println("Kill response from server:", string(body))
-			response.Body.Close()
-			time.Sleep(time.Millisecond * 100)
-			log.Println("Now starting this instance")
-			if err = s.Serve(); err != nil {
-				log.Fatalf("Failed to start server: %v", err)
-			}
+// allLEDs returns all 12 LEDs set to the given colour.
+func allLEDs(r, g, b uint8) []led.Led {
+	leds := make([]led.Led, 12)
+	for i := range leds {
+		leds[i] = led.Led{ID: i, R: r, G: g, B: b}
+	}
+	return leds
+}
+
+// pulseOrange runs a gentle sine-wave brightness pulse on all LEDs in orange
+// until ctx is cancelled. Used to indicate the device is disconnected from
+// the Clara server.
+func pulseOrange(ctx context.Context, s *server.Server) {
+	const (
+		minBr    = 0.05
+		maxBr    = 0.6
+		periodMs = 2000
+		stepMs   = 50
+	)
+	ticker := time.NewTicker(stepMs * time.Millisecond)
+	defer ticker.Stop()
+
+	step := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			t := float64(step) / float64(periodMs/stepMs)
+			brightness := minBr + (maxBr-minBr)*(0.5+0.5*math.Sin(2*math.Pi*t))
+			r := uint8(255 * brightness)
+			g := uint8(40 * brightness)
+			b := uint8(0)
+			s.SetLEDs(allLEDs(r, g, b))
+			step = (step + 1) % (periodMs / stepMs)
 		}
-		log.Fatal(err)
 	}
 }

@@ -10,7 +10,7 @@ import (
 	"github.com/hashicorp/mdns"
 )
 
-const serviceType = "_clara._tcp"
+const serviceType = "_emcontroller._tcp"
 
 type ServerInfo struct {
 	Host string
@@ -18,8 +18,6 @@ type ServerInfo struct {
 	Addr string // host:port
 }
 
-// FindServer browses mDNS for _clara._tcp.local and returns the first result.
-// Retries indefinitely with backoff until a server is found.
 func FindServer(ctx context.Context) (*ServerInfo, error) {
 	backoff := 5 * time.Second
 	maxBackoff := 60 * time.Second
@@ -52,10 +50,16 @@ func FindServer(ctx context.Context) (*ServerInfo, error) {
 
 func browse(ctx context.Context) (*ServerInfo, error) {
 	entries := make(chan *mdns.ServiceEntry, 8)
-	timeout := 5 * time.Second
+	timeout := 10 * time.Second
 
 	browseCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+
+	iface, err := net.InterfaceByName("wlan0")
+	if err != nil {
+		log.Printf("mDNS: could not find wlan0, using default interface: %v", err)
+		iface = nil
+	}
 
 	go func() {
 		defer close(entries)
@@ -65,6 +69,7 @@ func browse(ctx context.Context) (*ServerInfo, error) {
 			Timeout:             timeout,
 			Entries:             entries,
 			WantUnicastResponse: false,
+			Interface:           iface,
 		}
 		if err := mdns.Query(params); err != nil {
 			log.Printf("mDNS query error: %v", err)
@@ -89,7 +94,6 @@ func browse(ctx context.Context) (*ServerInfo, error) {
 			}
 
 			if host == "" {
-				// Try resolving the hostname
 				addrs, err := net.LookupHost(entry.Host)
 				if err == nil && len(addrs) > 0 {
 					host = addrs[0]
@@ -100,14 +104,30 @@ func browse(ctx context.Context) (*ServerInfo, error) {
 				continue
 			}
 
+			addr := fmt.Sprintf("%s:%d", host, entry.Port)
+
+			if !verifyServer(addr) {
+				log.Printf("mDNS: candidate %s failed verification — skipping", addr)
+				continue
+			}
+
 			return &ServerInfo{
 				Host: host,
 				Port: entry.Port,
-				Addr: fmt.Sprintf("%s:%d", host, entry.Port),
+				Addr: addr,
 			}, nil
 
 		case <-browseCtx.Done():
 			return nil, fmt.Errorf("browse timeout")
 		}
 	}
+}
+
+func verifyServer(addr string) bool {
+	conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
 }

@@ -6,6 +6,7 @@ require (
 	github.com/Binozo/GoTinyAlsa v1.0.3
 	github.com/electricbubble/gadb v0.1.0
 	github.com/gin-gonic/gin v1.10.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/gvalkov/golang-evdev v0.0.0-20220815104727-7e27d6ce89b6
 	github.com/hashicorp/mdns v1.0.5
 	github.com/urfave/cli/v3 v3.1.1
