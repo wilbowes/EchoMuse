@@ -1,4 +1,2 @@
 .idea
-/build/main
-/binaries/strace/strace
-/build/server
+/device/build/server
