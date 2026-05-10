@@ -1,2 +1,3 @@
 .idea
 /device/build/server
+controller/.env
