@@ -7,7 +7,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/hashicorp/mdns"
+	"github.com/grandcat/zeroconf"
 )
 
 const serviceType = "_emcontroller._tcp"
@@ -49,32 +49,27 @@ func FindServer(ctx context.Context) (*ServerInfo, error) {
 }
 
 func browse(ctx context.Context) (*ServerInfo, error) {
-	entries := make(chan *mdns.ServiceEntry, 8)
+	entries := make(chan *zeroconf.ServiceEntry, 4)
 	timeout := 10 * time.Second
-
 	browseCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	opts := []zeroconf.ClientOption{}
 	iface, err := net.InterfaceByName("wlan0")
 	if err != nil {
 		log.Printf("mDNS: could not find wlan0, using default interface: %v", err)
-		iface = nil
+	} else {
+		opts = append(opts, zeroconf.SelectIfaces([]net.Interface{*iface}))
 	}
 
-	go func() {
-		defer close(entries)
-		params := &mdns.QueryParam{
-			Service:             serviceType,
-			Domain:              "local",
-			Timeout:             timeout,
-			Entries:             entries,
-			WantUnicastResponse: false,
-			Interface:           iface,
-		}
-		if err := mdns.Query(params); err != nil {
-			log.Printf("mDNS query error: %v", err)
-		}
-	}()
+	resolver, err := zeroconf.NewResolver(opts...)
+	if err != nil {
+		return nil, fmt.Errorf("mDNS resolver error: %v", err)
+	}
+
+	if err := resolver.Browse(browseCtx, serviceType, "local.", entries); err != nil {
+		return nil, fmt.Errorf("mDNS browse error: %v", err)
+	}
 
 	for {
 		select {
@@ -87,25 +82,18 @@ func browse(ctx context.Context) (*ServerInfo, error) {
 			}
 
 			host := ""
-			if len(entry.AddrV4) > 0 {
-				host = entry.AddrV4.String()
-			} else if len(entry.Addr) > 0 {
-				host = entry.Addr.String()
+			if len(entry.AddrIPv4) > 0 {
+				host = entry.AddrIPv4[0].String()
+			} else if len(entry.AddrIPv6) > 0 {
+				host = entry.AddrIPv6[0].String()
 			}
 
 			if host == "" {
-				addrs, err := net.LookupHost(entry.Host)
-				if err == nil && len(addrs) > 0 {
-					host = addrs[0]
-				}
-			}
-
-			if host == "" {
+				log.Printf("mDNS: skipping entry %s — no address (Host=%s)", entry.Instance, entry.HostName)
 				continue
 			}
 
 			addr := fmt.Sprintf("%s:%d", host, entry.Port)
-
 			if !verifyServer(addr) {
 				log.Printf("mDNS: candidate %s failed verification — skipping", addr)
 				continue

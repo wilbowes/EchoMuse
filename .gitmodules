@@ -1,0 +1,3 @@
+[submodule "GoTinyAlsa"]
+	path = GoTinyAlsa
+	url = https://github.com/Binozo/GoTinyAlsa

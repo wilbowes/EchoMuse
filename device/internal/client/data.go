@@ -7,12 +7,11 @@ import (
 	"log"
 	"math"
 	"net/http"
-	"os"
-	"strconv"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/pkg/mic"
 	"github.com/wilbowes/EchoMuse/pkg/speaker"
 )
@@ -20,9 +19,9 @@ import (
 // ─── Binary frame types ───────────────────────────────────────────────────────
 
 const (
-	frameTypeMic     = byte(0x01) // device → server: mic PCM
-	frameTypeSpeaker = byte(0x02) // server → device: speaker PCM
-	frameTypeEOS     = byte(0x03) // server → device: end of audio stream
+	frameTypeMic     = byte(0x01)
+	frameTypeSpeaker = byte(0x02)
+	frameTypeEOS     = byte(0x03)
 )
 
 // ─── VAD constants ────────────────────────────────────────────────────────────
@@ -34,42 +33,6 @@ const (
 	vadBytePeriod    = vadFramePeriod * vadMicChannels * vadByteSample // 13824
 	vadOwwChunkBytes = 1280 * 2                                        // 2560 bytes = 80ms
 )
-
-func vadCh() int {
-	if v := os.Getenv("VAD_CHANNEL"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
-	}
-	return 0
-}
-
-func vadThresh() float64 {
-	if v := os.Getenv("VAD_THRESHOLD"); v != "" {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			return f
-		}
-	}
-	return 0.004
-}
-
-func vadSpeechN() int {
-	if v := os.Getenv("VAD_SPEECH_MS"); v != "" {
-		if ms, err := strconv.Atoi(v); err == nil && ms > 0 {
-			return ms / 32
-		}
-	}
-	return 1
-}
-
-func vadSilenceN() int {
-	if v := os.Getenv("VAD_SILENCE_MS"); v != "" {
-		if ms, err := strconv.Atoi(v); err == nil && ms > 0 {
-			return ms / 32
-		}
-	}
-	return 19 // ~600ms
-}
 
 func vadExtractMono(raw []byte, channel int) []byte {
 	frameSize := vadMicChannels * vadByteSample
@@ -105,17 +68,12 @@ type DataClient struct {
 	mic      mic.Subscribable
 	spk      speaker.Speaker
 
-	// readyCh receives the server address from ControlClient after successful
-	// registration. This is the synchronisation point — data never connects
-	// before control has registered.
 	readyCh chan string
 
-	// micActive guards mic streaming lifecycle
 	micMu     sync.Mutex
 	micActive bool
 	micStopCh chan struct{}
 
-	// conn and write mutex for concurrent mic writes alongside speaker reads
 	conn   *websocket.Conn
 	connMu sync.Mutex
 }
@@ -129,13 +87,10 @@ func NewDataClient(deviceID string, microphone mic.Subscribable, spk speaker.Spe
 	}
 }
 
-// NotifyReady is called by ControlClient after successful registration.
-// It unblocks the data connection attempt with the confirmed server address.
 func (d *DataClient) NotifyReady(serverAddr string) {
 	select {
 	case d.readyCh <- serverAddr:
 	default:
-		// Previous notification not yet consumed — replace it
 		select {
 		case <-d.readyCh:
 		default:
@@ -144,8 +99,6 @@ func (d *DataClient) NotifyReady(serverAddr string) {
 	}
 }
 
-// StartMic signals the data client to begin streaming mic audio.
-// Called by ControlClient when it receives mic_start from server.
 func (d *DataClient) StartMic() {
 	d.micMu.Lock()
 	defer d.micMu.Unlock()
@@ -166,7 +119,6 @@ func (d *DataClient) StartMic() {
 	log.Println("[data] Mic streaming started")
 }
 
-// StopMic signals the mic streaming goroutine to stop.
 func (d *DataClient) StopMic() {
 	d.micMu.Lock()
 	defer d.micMu.Unlock()
@@ -178,9 +130,6 @@ func (d *DataClient) StopMic() {
 	log.Println("[data] Mic streaming stopped")
 }
 
-// Run waits for control to signal readiness, then connects to the data plane.
-// On disconnect, waits for control to signal again before reconnecting.
-// Blocks until ctx is cancelled.
 func (d *DataClient) Run(ctx context.Context) error {
 	for {
 		select {
@@ -191,15 +140,12 @@ func (d *DataClient) Run(ctx context.Context) error {
 			if err := d.connect(ctx, addr); err != nil && err != context.Canceled {
 				log.Printf("[data] Connection lost: %v — waiting for control to reconnect", err)
 			}
-			// Don't reconnect independently — wait for control to signal again
 		}
 	}
 }
 
 func (d *DataClient) connect(ctx context.Context, addr string) error {
-	dialer := websocket.Dialer{
-		HandshakeTimeout: 10 * time.Second,
-	}
+	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
 	conn, _, err := dialer.DialContext(ctx, "ws://"+addr+"/data", http.Header{})
 	if err != nil {
 		return err
@@ -223,7 +169,6 @@ func (d *DataClient) connect(ctx context.Context, addr string) error {
 		d.connMu.Unlock()
 	}()
 
-	// Identify so server can associate with control connection
 	identifyBytes, _ := json.Marshal(map[string]string{
 		"type":      "identify",
 		"device_id": d.deviceID,
@@ -233,18 +178,14 @@ func (d *DataClient) connect(ctx context.Context, addr string) error {
 	}
 	log.Printf("[data] Identified as %s", d.deviceID)
 
-	// Read loop — speaker frames arrive here
-	// gorilla: safe to have one reader and one writer concurrently
 	for {
 		msgType, data, err := conn.ReadMessage()
 		if err != nil {
 			return err
 		}
-
 		if msgType != websocket.BinaryMessage || len(data) == 0 {
 			continue
 		}
-
 		switch data[0] {
 		case frameTypeSpeaker:
 			if len(data) > 1 && d.spk != nil {
@@ -261,8 +202,8 @@ func (d *DataClient) connect(ctx context.Context, addr string) error {
 }
 
 // streamMic subscribes to the mic, runs VAD gate, streams binary frames.
-// gorilla supports one concurrent reader and one concurrent writer — this
-// is the writer; connect()'s read loop is the reader.
+// VAD parameters are read from the shared config on each frame so that
+// controller-pushed config changes take effect without a restart.
 func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}) {
 	if d.mic == nil {
 		log.Println("[data] streamMic: no mic")
@@ -272,10 +213,10 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}) {
 	ch := d.mic.Subscribe()
 	defer d.mic.Unsubscribe(ch)
 
-	channel      := vadCh()
-	threshold    := vadThresh()
-	speechNeeded := vadSpeechN()
-	silenceMax   := vadSilenceN()
+	// Snapshot config at stream start; the live config is re-read each
+	// frame for threshold so changes are picked up within one frame window.
+	cfg := config.Get()
+	channel := cfg.VadChannel
 
 	speechCount  := 0
 	silenceCount := 0
@@ -305,6 +246,14 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}) {
 			if !ok {
 				return
 			}
+
+			// Re-read live config each frame — picks up controller pushes
+			snap := cfg.Snapshot()
+			threshold    := snap.VadThreshold
+			speechNeeded := snap.VadSpeechMs / 32
+			silenceMax   := snap.VadSilenceMs / 32
+			if speechNeeded < 1 { speechNeeded = 1 }
+			if silenceMax   < 1 { silenceMax   = 1 }
 
 			mono   := vadExtractMono(raw, channel)
 			rms    := vadPeriodRMS(mono)

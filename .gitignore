@@ -1,3 +1,4 @@
 .idea
 /device/build/server
 controller/.env
+controller/data/

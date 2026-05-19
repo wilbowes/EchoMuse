@@ -5,22 +5,26 @@ import (
 	"log"
 	"math"
 	"os"
+	"os/exec"
+	"strconv"
 	"time"
 
 	internalbuttons "github.com/wilbowes/EchoMuse/internal/bindings/buttons"
 	"github.com/wilbowes/EchoMuse/internal/bindings/mic"
 	"github.com/wilbowes/EchoMuse/internal/bindings/speaker"
 	"github.com/wilbowes/EchoMuse/internal/client"
+	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/server"
 	pkgbuttons "github.com/wilbowes/EchoMuse/pkg/buttons"
 	"github.com/wilbowes/EchoMuse/pkg/led"
 )
 
-const echoDotID = "echo-dot"
-
 func main() {
 	log.SetOutput(os.Stdout)
-	log.Println("Initializing")
+	log.Printf("EchoMuse %s starting", client.Version)
+
+	deviceID := client.GetSerialNo()
+	log.Printf("Device ID: %s", deviceID)
 
 	buttonController, err := internalbuttons.NewButtonController()
 	if err != nil {
@@ -39,7 +43,6 @@ func main() {
 
 	s := server.NewServer(buttonController, microphone, pcmSpeaker)
 
-	// Volume buttons handled locally
 	buttonController.SetVolumeCallback(func(direction string) {
 		if direction == "up" {
 			s.VolumeStepUp()
@@ -47,28 +50,21 @@ func main() {
 			s.VolumeStepDown()
 		}
 	})
-
-	// Mute button handled locally
 	buttonController.SetMuteCallback(func() {
 		s.MuteToggle()
 	})
 
 	ctx := context.Background()
 
-	// Data client — mic streaming and speaker playback over /data WS
-	dataClient := client.NewDataClient(echoDotID, microphone, pcmSpeaker)
-
-	// Control client — registration, LEDs, buttons, mic lifecycle over /control WS
+	dataClient := client.NewDataClient(deviceID, microphone, pcmSpeaker)
 	controlClient := client.NewControlClient(
-		echoDotID,
-		func(leds []led.Led) {
-			s.SetLEDs(leds)
-		},
+		deviceID,
+		func(leds []led.Led) { s.SetLEDs(leds) },
 		func() { dataClient.StartMic() },
 		func() { dataClient.StopMic() },
 	)
 
-	// Subscribe to Dot button events — forward to Clara server via control plane
+	// Button events — forward to controller via control plane
 	_, err = buttonController.SubscribeToButton(func(event pkgbuttons.ButtonClickEvent) {
 		log.Printf("Button event: clickType=%d down=%v", event.ClickType, event.Down)
 		if event.ClickType == pkgbuttons.DotClick && s.IsMuted() {
@@ -81,7 +77,7 @@ func main() {
 		log.Fatalf("Button subscription failed: %v", err)
 	}
 
-	// Disconnected state — gently pulse orange ring
+	// Disconnected — orange pulse
 	var pulseCancel context.CancelFunc
 	controlClient.OnDisconnected(func() {
 		if pulseCancel != nil {
@@ -91,6 +87,18 @@ func main() {
 		pulseCancel = cancel
 		go pulseOrange(pulseCtx, s)
 	})
+
+	// Pending approval — slow white pulse
+	controlClient.OnPending(func() {
+		if pulseCancel != nil {
+			pulseCancel()
+		}
+		pulseCtx, cancel := context.WithCancel(ctx)
+		pulseCancel = cancel
+		go pulseWhite(pulseCtx, s)
+	})
+
+	// Connected — stop pulse, clear LEDs
 	controlClient.OnConnected(func() {
 		if pulseCancel != nil {
 			pulseCancel()
@@ -99,20 +107,45 @@ func main() {
 		s.SetLEDs(allLEDs(0, 0, 0))
 	})
 
-	log.Println("Ready")
-	time.Sleep(2 * time.Second) // allow network stack to settle before mDNS
+	// Config applied — apply hardware changes via tinymix
+	controlClient.OnConfigApplied(func(msg config.ConfigMessage) {
+		applyHardwareConfig(msg)
+	})
 
-	// Control client orchestrates discovery and signals data client after registration
+	log.Println("Ready")
+	time.Sleep(2 * time.Second)
+
 	go func() {
 		if err := controlClient.Run(ctx, dataClient); err != nil && err != context.Canceled {
-			log.Printf("Clara client stopped: %v", err)
+			log.Printf("Control client stopped: %v", err)
 		}
 	}()
 
-	select {} // block forever
+	select {}
 }
 
-// allLEDs returns all 12 LEDs set to the given colour.
+// applyHardwareConfig runs tinymix commands for fields that map to hardware.
+// Called whenever the controller pushes a config message.
+func applyHardwareConfig(msg config.ConfigMessage) {
+	if msg.AdcDigitalGain > 0 {
+		tinymix("89", strconv.Itoa(msg.AdcDigitalGain), strconv.Itoa(msg.AdcDigitalGain))
+	}
+	if msg.AdcMicpga > 0 {
+		tinymix("92", strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
+	}
+	if msg.StartupVolume > 0 {
+		tinymix("61", strconv.Itoa(msg.StartupVolume), strconv.Itoa(msg.StartupVolume))
+	}
+}
+
+func tinymix(ctl string, args ...string) {
+	cmdArgs := append([]string{"-D", "0", ctl}, args...)
+	out, err := exec.Command("tinymix", cmdArgs...).CombinedOutput()
+	if err != nil {
+		log.Printf("[tinymix] ctl %s failed: %v — %s", ctl, err, string(out))
+	}
+}
+
 func allLEDs(r, g, b uint8) []led.Led {
 	leds := make([]led.Led, 12)
 	for i := range leds {
@@ -121,9 +154,7 @@ func allLEDs(r, g, b uint8) []led.Led {
 	return leds
 }
 
-// pulseOrange runs a gentle sine-wave brightness pulse on all LEDs in orange
-// until ctx is cancelled. Used to indicate the device is disconnected from
-// the Clara server.
+// pulseOrange — sine-wave orange pulse while disconnected from server.
 func pulseOrange(ctx context.Context, s *server.Server) {
 	const (
 		minBr    = 0.05
@@ -133,7 +164,6 @@ func pulseOrange(ctx context.Context, s *server.Server) {
 	)
 	ticker := time.NewTicker(stepMs * time.Millisecond)
 	defer ticker.Stop()
-
 	step := 0
 	for {
 		select {
@@ -141,11 +171,34 @@ func pulseOrange(ctx context.Context, s *server.Server) {
 			return
 		case <-ticker.C:
 			t := float64(step) / float64(periodMs/stepMs)
-			brightness := minBr + (maxBr-minBr)*(0.5+0.5*math.Sin(2*math.Pi*t))
-			r := uint8(255 * brightness)
-			g := uint8(40 * brightness)
-			b := uint8(0)
-			s.SetLEDs(allLEDs(r, g, b))
+			br := minBr + (maxBr-minBr)*(0.5+0.5*math.Sin(2*math.Pi*t))
+			s.SetLEDs(allLEDs(uint8(255*br), uint8(40*br), 0))
+			step = (step + 1) % (periodMs / stepMs)
+		}
+	}
+}
+
+// pulseWhite — slow white pulse while pending controller approval.
+// Slower and dimmer than orange to be visually distinct.
+func pulseWhite(ctx context.Context, s *server.Server) {
+	const (
+		minBr    = 0.02
+		maxBr    = 0.35
+		periodMs = 3000 // slower than orange
+		stepMs   = 50
+	)
+	ticker := time.NewTicker(stepMs * time.Millisecond)
+	defer ticker.Stop()
+	step := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			t := float64(step) / float64(periodMs/stepMs)
+			br := minBr + (maxBr-minBr)*(0.5+0.5*math.Sin(2*math.Pi*t))
+			v := uint8(255 * br)
+			s.SetLEDs(allLEDs(v, v, v))
 			step = (step + 1) % (periodMs / stepMs)
 		}
 	}

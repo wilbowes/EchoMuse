@@ -7,15 +7,22 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/discovery"
 	"github.com/wilbowes/EchoMuse/pkg/buttons"
 	"github.com/wilbowes/EchoMuse/pkg/led"
 )
+
+// Version is set at build time via ldflags:
+//
+//	-ldflags "-X github.com/wilbowes/EchoMuse/internal/client.Version=v2.1.0"
+var Version = "dev"
 
 // ─── Message types ────────────────────────────────────────────────────────────
 
@@ -33,6 +40,7 @@ type LEDCallback func(leds []led.Led)
 type MicStartCallback func()
 type MicStopCallback func()
 type StateCallback func()
+type ConfigAppliedCallback func(msg config.ConfigMessage)
 
 // ─── ControlClient ────────────────────────────────────────────────────────────
 
@@ -40,11 +48,13 @@ type ControlClient struct {
 	deviceID string
 	ip       string
 
-	ledCallback         LEDCallback
-	micStartCallback    MicStartCallback
-	micStopCallback     MicStopCallback
-	disconnectedCallback StateCallback
-	connectedCallback    StateCallback
+	ledCallback           LEDCallback
+	micStartCallback      MicStartCallback
+	micStopCallback       MicStopCallback
+	disconnectedCallback  StateCallback
+	connectedCallback     StateCallback
+	pendingCallback       StateCallback
+	configAppliedCallback ConfigAppliedCallback
 
 	conn   *websocket.Conn
 	connMu sync.Mutex
@@ -65,23 +75,22 @@ func NewControlClient(
 	}
 }
 
-// OnDisconnected sets a callback invoked when the control connection is lost or not yet established.
-func (c *ControlClient) OnDisconnected(cb StateCallback) {
-	c.disconnectedCallback = cb
-}
+func (c *ControlClient) OnDisconnected(cb StateCallback)             { c.disconnectedCallback = cb }
+func (c *ControlClient) OnConnected(cb StateCallback)               { c.connectedCallback = cb }
+func (c *ControlClient) OnPending(cb StateCallback)                 { c.pendingCallback = cb }
+func (c *ControlClient) OnConfigApplied(cb ConfigAppliedCallback)   { c.configAppliedCallback = cb }
 
-// OnConnected sets a callback invoked when the control connection is established and registered.
-func (c *ControlClient) OnConnected(cb StateCallback) {
-	c.connectedCallback = cb
-}
+var errPending = fmt.Errorf("pending approval")
 
-// Run discovers the server via mDNS, notifies the data client after successful
-// registration, and maintains a persistent control connection.
-// Blocks until ctx is cancelled.
 func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+
+		// Show orange pulse while searching for server
+		if c.disconnectedCallback != nil {
+			c.disconnectedCallback()
 		}
 
 		server, err := discovery.FindServer(ctx)
@@ -89,39 +98,48 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 			return err
 		}
 
-		// dataCtx is cancelled when control drops — data connection tears down too
 		dataCtx, cancelData := context.WithCancel(ctx)
-
-		// Start data client run loop — it blocks on readyCh until we call NotifyReady
 		go func() {
 			if err := data.Run(dataCtx); err != nil && err != context.Canceled {
 				log.Printf("[data] stopped: %v", err)
 			}
 		}()
 
-		// Signal disconnected state before attempting connection
-		if c.disconnectedCallback != nil {
-			c.disconnectedCallback()
-		}
 
 		log.Printf("[control] Connecting to %s", server.Addr)
-		if err := c.connect(ctx, server.Addr, data); err != nil {
-			log.Printf("[control] Connection lost: %v — reconnecting in 5s", err)
-		}
+		err = c.connect(ctx, server.Addr, data)
 
-		// Control dropped — signal disconnected, cancel data, wait before retrying
-		if c.disconnectedCallback != nil {
-			c.disconnectedCallback()
-		}
 		cancelData()
-		time.Sleep(5 * time.Second)
+
+		switch err {
+		case errPending:
+			log.Printf("[control] Device pending approval — retrying in 30s")
+			if c.pendingCallback != nil {
+				c.pendingCallback()
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(30 * time.Second):
+			}
+		default:
+			if err != nil {
+				log.Printf("[control] Connection lost: %v — reconnecting in 5s", err)
+			}
+			if c.disconnectedCallback != nil {
+				c.disconnectedCallback()
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(5 * time.Second):
+			}
+		}
 	}
 }
 
 func (c *ControlClient) connect(ctx context.Context, addr string, data *DataClient) error {
-	dialer := websocket.Dialer{
-		HandshakeTimeout: 10 * time.Second,
-	}
+	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
 	conn, _, err := dialer.DialContext(ctx, "ws://"+addr+"/control", http.Header{})
 	if err != nil {
 		return err
@@ -131,87 +149,115 @@ func (c *ControlClient) connect(ctx context.Context, addr string, data *DataClie
 	c.connMu.Lock()
 	c.conn = conn
 	c.connMu.Unlock()
-
 	defer func() {
 		c.connMu.Lock()
 		c.conn = nil
 		c.connMu.Unlock()
 	}()
 
-	// Register
 	regBytes, _ := json.Marshal(map[string]interface{}{
 		"type":         "register",
 		"device_id":    c.deviceID,
 		"ip":           c.ip,
+		"version":      Version,
 		"capabilities": []string{"mic", "speaker", "leds", "buttons"},
 	})
 	if err := conn.WriteMessage(websocket.TextMessage, regBytes); err != nil {
 		return err
 	}
 
-	// Wait for ack
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-	var ack controlMessage
-	if err := conn.ReadJSON(&ack); err != nil {
+	var first controlMessage
+	if err := conn.ReadJSON(&first); err != nil {
 		return err
 	}
 	conn.SetReadDeadline(time.Time{})
-	if ack.Type != "ack" {
-		return fmt.Errorf("unexpected ack type: %s", ack.Type)
-	}
-	log.Printf("[control] Registered as %s", c.deviceID)
 
-	// Registration confirmed — signal connected state and unblock data client
+	switch first.Type {
+	case "pending":
+		return errPending
+	case "ack":
+		// proceed
+	default:
+		return fmt.Errorf("unexpected first message: %s", first.Type)
+	}
+
+	log.Printf("[control] Registered as %s (version %s)", c.deviceID, Version)
+
 	if c.connectedCallback != nil {
 		c.connectedCallback()
 	}
 	data.NotifyReady(addr)
 
-	// Ping loop
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
-			if err := c.writeJSON(map[string]string{"type": "ping"}); err != nil {
+			if err := c.writeJSON(map[string]string{"type": "pong"}); err != nil {
 				return
 			}
 		}
 	}()
 
-	// Read loop — only reader on this connection
 	for {
-		var msg controlMessage
-		if err := conn.ReadJSON(&msg); err != nil {
+		var raw json.RawMessage
+		if err := conn.ReadJSON(&raw); err != nil {
 			return err
 		}
 
-		switch msg.Type {
+		var peek struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(raw, &peek); err != nil {
+			continue
+		}
+
+		switch peek.Type {
 		case "leds":
-			if c.ledCallback != nil && msg.LEDs != nil {
+			var msg struct {
+				LEDs json.RawMessage `json:"leds"`
+			}
+			if err := json.Unmarshal(raw, &msg); err == nil && c.ledCallback != nil {
 				var leds []led.Led
 				if err := json.Unmarshal(msg.LEDs, &leds); err == nil {
 					c.ledCallback(leds)
 				}
 			}
+
 		case "mic_start":
 			if c.micStartCallback != nil {
 				c.micStartCallback()
 			}
+
 		case "mic_stop":
 			if c.micStopCallback != nil {
 				c.micStopCallback()
 			}
+
+		case "config":
+			var msg config.ConfigMessage
+			if err := json.Unmarshal(raw, &msg); err == nil {
+				cfg := config.Get()
+				cfg.Apply(msg)
+				log.Printf("[control] Config applied: vad_threshold=%.4f oww_threshold=%.2f",
+					cfg.VadThreshold, cfg.OwwThreshold)
+				if c.configAppliedCallback != nil {
+					c.configAppliedCallback(msg)
+				}
+			}
+
 		case "ping":
 			c.writeJSON(map[string]string{"type": "pong"})
+
 		case "pong":
-			// response to our ping
+			// ignore
+
 		default:
-			log.Printf("[control] Unknown message type: %s", msg.Type)
+			log.Printf("[control] Unknown message type: %s", peek.Type)
 		}
 	}
 }
 
-// SendButton sends a button event to the server. Safe for concurrent use.
 func (c *ControlClient) SendButton(event buttons.ButtonClickEvent) {
 	log.Printf("[control] SendButton: clickType=%d down=%v", event.ClickType, event.Down)
 	msg := map[string]interface{}{
@@ -227,7 +273,16 @@ func (c *ControlClient) SendButton(event buttons.ButtonClickEvent) {
 	}
 }
 
-// writeJSON marshals and sends a JSON message. Safe for concurrent use.
+// SendLog sends a structured log entry to the controller.
+// Safe for concurrent use — silently drops if not connected.
+func (c *ControlClient) SendLog(level, message string) {
+	_ = c.writeJSON(map[string]string{
+		"type":    "log",
+		"level":   level,
+		"message": message,
+	})
+}
+
 func (c *ControlClient) writeJSON(v interface{}) error {
 	c.connMu.Lock()
 	defer c.connMu.Unlock()
@@ -237,7 +292,20 @@ func (c *ControlClient) writeJSON(v interface{}) error {
 	return c.conn.WriteJSON(v)
 }
 
-// getLocalIP returns the device's LAN IP address.
+// GetSerialNo reads ro.serialno — stable device identifier matching adb devices output.
+func GetSerialNo() string {
+	out, err := exec.Command("getprop", "ro.serialno").Output()
+	if err != nil {
+		log.Printf("[control] Warning: could not read ro.serialno: %v", err)
+		return "unknown-device"
+	}
+	serial := strings.TrimSpace(string(out))
+	if serial == "" {
+		return "unknown-device"
+	}
+	return serial
+}
+
 func getLocalIP() string {
 	conn, err := net.Dial("udp", "8.8.8.8:80")
 	if err != nil {

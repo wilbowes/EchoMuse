@@ -1,0 +1,31 @@
+# EchoMuse Controller — Python dependencies
+#
+# Install with:
+#   pip install -r requirements.txt
+#
+# Tested with Python 3.12.
+
+# WebSocket server (device connections)
+websockets==16.0
+
+# HTTP API + dashboard server
+aiohttp==3.13.5
+
+# Password hashing
+bcrypt==5.0.0
+
+# mDNS advertisement (_emcontroller._tcp.local)
+zeroconf==0.148.0
+
+# Wake word inference — openwakeword deps installed manually to avoid
+# tflite-runtime which has no Python 3.12 x86_64 build.
+# openwakeword itself is installed via --no-deps in the Dockerfile.
+numpy==2.4.4
+scipy
+tqdm
+scikit-learn
+requests
+
+# ONNX runtime — GPU variant for openwakeword inference
+# Swap for onnxruntime==1.20.1 if no GPU available
+onnxruntime-gpu==1.20.1

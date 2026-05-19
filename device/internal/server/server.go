@@ -69,6 +69,7 @@ func NewServer(buttonController buttons.Controller, microphone mic.Microphone, s
 	router.POST("/speaker", server.speakerHandler)
 	router.GET("/volume", server.getVolumeHandler)
 	router.POST("/volume", server.setVolumeHandler)
+	router.GET("/shell", server.shellHandler)
 
 	server.router = router
 

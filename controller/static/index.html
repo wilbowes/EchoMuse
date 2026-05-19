@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EchoMuse Device Management</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #ccc8c0;
+      --surface:   #d8d4cc;
+      --card:      #e0dcd4;
+      --border:    #b8b4ac;
+      --lcd-bg:    #1e2219;
+      --lcd-green: #9aba80;
+      --lcd-dim:   #3a4a30;
+      --text:      #1e1c18;
+      --muted:     #8a8680;
+    }
+
+    html, body {
+      height: 100%;
+      background: linear-gradient(160deg, var(--bg) 0%, #b8b4ac 100%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: 'DM Sans', sans-serif;
+    }
+
+    .frame {
+      background: linear-gradient(170deg, var(--card) 0%, var(--surface) 100%);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      box-shadow:
+        0 32px 80px rgba(0,0,0,0.22),
+        0 2px 0 rgba(255,255,255,0.7) inset;
+      padding: 48px 56px;
+      text-align: center;
+      max-width: 480px;
+      width: 90vw;
+    }
+
+    .dot-wrap {
+      width: 180px;
+      height: 180px;
+      margin: 0 auto 32px;
+    }
+    .dot-wrap svg { display: block; }
+
+    @keyframes ledpulse {
+      0%, 100% { opacity: 0.4; }
+      50%       { opacity: 1;   }
+    }
+    .led-ring { animation: ledpulse 1.8s ease-in-out infinite; }
+
+    .lcd {
+      background: linear-gradient(160deg, #2a2e28 0%, var(--lcd-bg) 100%);
+      border: 1px solid #1a1c18;
+      border-radius: 8px;
+      padding: 14px 20px;
+      margin-bottom: 28px;
+      box-shadow: inset 0 2px 8px rgba(0,0,0,0.6);
+    }
+    .lcd-label {
+      font-family: 'DM Mono', monospace;
+      font-size: 8px;
+      color: var(--lcd-dim);
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+    .lcd-value {
+      font-family: 'DM Mono', monospace;
+      font-size: 13px;
+      color: var(--lcd-green);
+      letter-spacing: 0.08em;
+      text-shadow: 0 0 10px rgba(140,200,100,0.5);
+      line-height: 1.6;
+    }
+
+    .title {
+      font-size: 28px;
+      font-weight: 600;
+      color: var(--text);
+      letter-spacing: -0.02em;
+      margin-bottom: 6px;
+    }
+    .subtitle {
+      font-family: 'DM Mono', monospace;
+      font-size: 10px;
+      color: var(--muted);
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      margin-bottom: 32px;
+    }
+
+    .status-row {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 24px;
+    }
+    .status-pill {
+      flex: 1;
+      background: linear-gradient(160deg, #2a2e28, var(--lcd-bg));
+      border: 1px solid #1a1c18;
+      border-radius: 6px;
+      padding: 10px 8px;
+      box-shadow: inset 0 1px 4px rgba(0,0,0,0.5);
+    }
+    .status-pill .label {
+      font-family: 'DM Mono', monospace;
+      font-size: 7px;
+      color: var(--lcd-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.15em;
+      margin-bottom: 4px;
+    }
+    .status-pill .val {
+      font-family: 'DM Mono', monospace;
+      font-size: 18px;
+      line-height: 1;
+    }
+
+    .hint {
+      font-family: 'DM Mono', monospace;
+      font-size: 10px;
+      color: var(--muted);
+      letter-spacing: 0.05em;
+      margin-top: 20px;
+    }
+  </style>
+</head>
+<body>
+  <div class="frame">
+
+    <!--
+      Echo Dot Gen 2 — top-down view
+      Four buttons at N/S/E/W: vol+, vol-, mute, action
+      12-segment LED ring between outer shell and inner surface
+    -->
+    <div class="dot-wrap">
+      <svg viewBox="0 0 200 200" width="180" height="180" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <radialGradient id="em-shell" cx="38%" cy="32%" r="65%">
+            <stop offset="0%"   stop-color="#505050"/>
+            <stop offset="55%"  stop-color="#2c2c2c"/>
+            <stop offset="100%" stop-color="#181818"/>
+          </radialGradient>
+          <radialGradient id="em-inner" cx="42%" cy="36%" r="58%">
+            <stop offset="0%"   stop-color="#383838"/>
+            <stop offset="100%" stop-color="#202020"/>
+          </radialGradient>
+          <radialGradient id="em-btn" cx="38%" cy="28%" r="62%">
+            <stop offset="0%"   stop-color="#505050"/>
+            <stop offset="100%" stop-color="#2a2a2a"/>
+          </radialGradient>
+          <radialGradient id="em-sheen" cx="33%" cy="27%" r="50%">
+            <stop offset="0%"   stop-color="rgba(255,255,255,0.10)"/>
+            <stop offset="100%" stop-color="rgba(255,255,255,0)"/>
+          </radialGradient>
+          <filter id="em-glow" x="-80%" y="-80%" width="260%" height="260%">
+            <feGaussianBlur stdDeviation="3" result="blur"/>
+            <feMerge>
+              <feMergeNode in="blur"/>
+              <feMergeNode in="SourceGraphic"/>
+            </feMerge>
+          </filter>
+          <filter id="em-btn-shadow">
+            <feDropShadow dx="0" dy="1" stdDeviation="1.2"
+              flood-color="rgba(0,0,0,0.7)"/>
+          </filter>
+          <clipPath id="em-disc">
+            <circle cx="100" cy="100" r="96"/>
+          </clipPath>
+        </defs>
+
+        <!-- Outer shell -->
+        <circle cx="100" cy="100" r="98" fill="#0d0d0d"/>
+        <circle cx="100" cy="100" r="96" fill="url(#em-shell)"/>
+        <circle cx="100" cy="100" r="96" fill="url(#em-sheen)"/>
+        <circle cx="100" cy="100" r="96" fill="none"
+          stroke="rgba(255,255,255,0.07)" stroke-width="1.5"/>
+
+        <!-- LED ring channel + 12 segments -->
+        <g clip-path="url(#em-disc)">
+          <!-- Dark groove -->
+          <circle cx="100" cy="100" r="83.5"
+            fill="none" stroke="#0b0b0b" stroke-width="14"/>
+          <!--
+            12 LED segments via stroke-dasharray
+            Circumference = 2π × 83.5 ≈ 524.7
+            Per slot = 524.7 / 12 ≈ 43.7
+            Segment = 31px  Gap = 12.7px
+          -->
+          <circle class="led-ring" cx="100" cy="100" r="83.5"
+            fill="none"
+            stroke="#d4703a"
+            stroke-width="9"
+            stroke-dasharray="31 12.7"
+            stroke-linecap="butt"
+            transform="rotate(-90 100 100)"
+            filter="url(#em-glow)"
+          />
+          <!-- Segment dividers — thin black slots -->
+          <circle cx="100" cy="100" r="83.5"
+            fill="none"
+            stroke="#141414"
+            stroke-width="14"
+            stroke-dasharray="1.5 42.2"
+            stroke-linecap="butt"
+            transform="rotate(-90 100 100)"
+          />
+        </g>
+
+        <!-- Inner surface -->
+        <circle cx="100" cy="100" r="76" fill="url(#em-inner)"/>
+        <circle cx="100" cy="100" r="76" fill="none"
+          stroke="rgba(255,255,255,0.04)" stroke-width="0.8"/>
+
+        <!-- ── Buttons ── -->
+
+        <!-- Vol+ — 12 o'clock — up chevron -->
+        <g transform="translate(100,47)" filter="url(#em-btn-shadow)">
+          <circle r="12.5" fill="url(#em-btn)"
+            stroke="rgba(255,255,255,0.07)" stroke-width="0.8"/>
+          <polyline points="-5.5,3.5 0,-3.5 5.5,3.5"
+            fill="none" stroke="#b0b0b0" stroke-width="1.8"
+            stroke-linecap="round" stroke-linejoin="round"/>
+        </g>
+
+        <!-- Vol- — 6 o'clock — down chevron -->
+        <g transform="translate(100,153)" filter="url(#em-btn-shadow)">
+          <circle r="12.5" fill="url(#em-btn)"
+            stroke="rgba(255,255,255,0.07)" stroke-width="0.8"/>
+          <polyline points="-5.5,-3.5 0,3.5 5.5,-3.5"
+            fill="none" stroke="#b0b0b0" stroke-width="1.8"
+            stroke-linecap="round" stroke-linejoin="round"/>
+        </g>
+
+        <!-- Mute — 9 o'clock — microphone -->
+        <g transform="translate(47,100)" filter="url(#em-btn-shadow)">
+          <circle r="12.5" fill="url(#em-btn)"
+            stroke="rgba(255,255,255,0.07)" stroke-width="0.8"/>
+          <!-- Capsule -->
+          <rect x="-3.5" y="-7.5" width="7" height="9.5" rx="3.5"
+            fill="#b0b0b0"/>
+          <!-- Stand arc -->
+          <path d="M-6,1.5 Q-6,8.5 0,8.5 Q6,8.5 6,1.5"
+            fill="none" stroke="#b0b0b0" stroke-width="1.5"
+            stroke-linecap="round"/>
+          <!-- Post -->
+          <line x1="0" y1="8.5" x2="0" y2="11"
+            stroke="#b0b0b0" stroke-width="1.5" stroke-linecap="round"/>
+          <!-- Base -->
+          <line x1="-3.5" y1="11" x2="3.5" y2="11"
+            stroke="#b0b0b0" stroke-width="1.5" stroke-linecap="round"/>
+        </g>
+
+        <!-- Action — 3 o'clock — filled dot -->
+        <g transform="translate(153,100)" filter="url(#em-btn-shadow)">
+          <circle r="12.5" fill="url(#em-btn)"
+            stroke="rgba(255,255,255,0.07)" stroke-width="0.8"/>
+          <circle r="5" fill="#b0b0b0"/>
+        </g>
+
+        <!-- Specular dome highlight -->
+        <ellipse cx="80" cy="70" rx="32" ry="20"
+          fill="rgba(255,255,255,0.045)"
+          transform="rotate(-25 80 70)"/>
+      </svg>
+    </div>
+
+    <div class="title">EchoMuse</div>
+    <div class="subtitle">Device Management</div>
+
+    <div class="status-row">
+      <div class="status-pill">
+        <div class="label">Online</div>
+        <div class="val" id="val-online" style="color:#3a4a30">—</div>
+      </div>
+      <div class="status-pill">
+        <div class="label">Pending</div>
+        <div class="val" id="val-pending" style="color:#3a4a30">—</div>
+      </div>
+      <div class="status-pill">
+        <div class="label">Updates</div>
+        <div class="val" id="val-updates" style="color:#3a4a30">—</div>
+      </div>
+    </div>
+
+    <div class="lcd">
+      <div class="lcd-label">Controller</div>
+      <div class="lcd-value" id="lcd-status">
+        <span style="color:#3a4a30">Connecting to API…</span>
+      </div>
+    </div>
+
+    <div class="hint" id="hint">Dashboard initialising</div>
+
+  </div>
+
+  <script>
+    const lcd      = document.getElementById('lcd-status');
+    const hint     = document.getElementById('hint');
+    const vOnline  = document.getElementById('val-online');
+    const vPending = document.getElementById('val-pending');
+    const vUpdates = document.getElementById('val-updates');
+
+    const GREEN = '#9aba80';
+    const AMBER = '#a08020';
+    const DIM   = '#3a4a30';
+
+    function setLcd(text, color) {
+      lcd.innerHTML =
+        `<span style="color:${color};text-shadow:0 0 10px ${color}44">${text}</span>`;
+    }
+
+    async function fetchStatus() {
+      try {
+        const r = await fetch('/api/system/status', { credentials: 'include' });
+        if (r.status === 401) {
+          setLcd('Authentication required', AMBER);
+          hint.textContent = 'Visit /setup or log in to continue';
+          vOnline.textContent = vPending.textContent = vUpdates.textContent = '—';
+          return;
+        }
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const d = await r.json();
+
+        vOnline.textContent = `${d.connected}/${d.total_devices}`;
+        vOnline.style.color = d.connected === d.total_devices ? GREEN : AMBER;
+
+        vPending.textContent = d.pending;
+        vPending.style.color = d.pending > 0 ? AMBER : DIM;
+
+        vUpdates.textContent = d.updates_available;
+        vUpdates.style.color = d.updates_available > 0 ? AMBER : DIM;
+
+        const rel = d.latest_release ? `Latest: ${d.latest_release}` : 'No release data';
+        setLcd(`API ready  ·  ${rel}`, GREEN);
+        hint.textContent = `${d.approval_mode} mode  ·  dashboard loading`;
+
+      } catch (e) {
+        setLcd('API unreachable', AMBER);
+        hint.textContent = String(e);
+      }
+    }
+
+    fetchStatus();
+    setInterval(fetchStatus, 10_000);
+  </script>
+</body>
+</html>

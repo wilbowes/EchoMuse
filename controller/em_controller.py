@@ -1,26 +1,34 @@
 """
 EchoMuse Controller
 ===================
+
 WebSocket server. Echo Dot devices connect via mDNS discovery.
+
 mDNS advertisement is handled internally — no separate container required.
 
 Architecture:
-  - Advertise _emcontroller._tcp.local on SERVER_PORT (zeroconf, host network)
-  - Devices open TWO connections:
-      /control  — JSON control plane (buttons, LEDs, mic_start/stop, ping)
-      /data     — binary data plane (mic PCM frames in, speaker PCM frames out)
-  - Both connections are associated by device_id on connect
+- Advertise _emcontroller._tcp.local on SERVER_PORT (zeroconf, host network)
+- Devices open THREE connections:
+    /control — JSON control plane (buttons, LEDs, mic_start/stop, ping,
+                                   register, config, log, pending)
+    /data    — binary data plane (mic PCM frames in, speaker PCM frames out)
+    /shell   — raw binary stdin/stdout (demand-opened for shell sessions
+                                        and OTA binary transfer)
+- HTTP API and dashboard SPA served by aiohttp on API_PORT
 
 Device WebSocket protocol:
-
   /control — Device → Server:
-    {"type": "register", "device_id": "echo-dot", "ip": "...", "capabilities": [...]}
+    {"type": "register", "device_id": "G0K0XXXXXXXX", "ip": "...",
+     "version": "v2.0.1", "capabilities": [...]}
     {"type": "button", "clickType": 138, "down": false}
+    {"type": "log", "level": "info", "message": "..."}
     {"type": "pong"}
 
   /control — Server → Device:
-    {"type": "ack", "device_id": "echo-dot"}
-    {"type": "leds", "leds": [...]}
+    {"type": "ack",     "device_id": "..."}
+    {"type": "pending"}
+    {"type": "config",  "adcDigitalGain": 100, ...}
+    {"type": "leds",    "leds": [...]}
     {"type": "mic_start"}
     {"type": "mic_stop"}
     {"type": "ping"}
@@ -31,6 +39,11 @@ Device WebSocket protocol:
   /data — Server → Device:
     <binary> [0x02][PCM stereo S16_LE 48kHz — 8192 bytes per period]
     <binary> [0x03] end of audio stream
+
+  /shell — bidirectional raw binary (demand-opened by device on
+           receipt of shell_open control message — not yet implemented
+           in this revision; shell connections come inbound from the
+           Go binary to the controller's /shell/{device_id} path)
 """
 
 import asyncio
@@ -41,11 +54,16 @@ import socket
 import struct
 
 import numpy as np
+from aiohttp import web
 from openwakeword.model import Model as OWWModel
-from zeroconf import ServiceInfo, Zeroconf
 from zeroconf.asyncio import AsyncZeroconf
+from zeroconf import ServiceInfo
 import websockets
-from websockets.server import WebSocketServerProtocol
+from websockets.asyncio.server import ServerConnection as WebSocketServerProtocol
+
+import em_db as db
+import em_auth as auth
+import em_api as api
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,22 +71,28 @@ logging.basicConfig(
 )
 log = logging.getLogger("echomuse")
 
-# ─── Config ───────────────────────────────────────────────────────────
+logging.getLogger("websockets.server").setLevel(logging.CRITICAL)
+# ─── Config ───────────────────────────────────────────────────────────────────
 
 SERVER_HOST  = os.environ.get("SERVER_HOST", "0.0.0.0")
 SERVER_PORT  = int(os.environ.get("SERVER_PORT", "8767"))
+API_PORT     = int(os.environ.get("API_PORT", "8768"))
 SERVER_IP    = os.environ.get("SERVER_IP", "10.10.1.236")
 VOICE_WS_URI = os.environ.get("VOICE_WS_URI", "ws://clara-voice:8765")
 MDNS_NAME    = os.environ.get("MDNS_NAME", "echomuse")
+DB_PATH      = os.environ.get("DB_PATH", "echomuse.db")
+
+# Device approval mode — overridden by system_config after db.init()
+DEVICE_APPROVAL = os.environ.get("DEVICE_APPROVAL", "strict")
 
 # Mic
-CHUNK_BYTES           = 1280 * 2   # 2560 bytes = 80ms at 16kHz S16_LE mono
+CHUNK_BYTES          = 1280 * 2   # 2560 bytes = 80ms at 16kHz S16_LE mono
 VOICE_PREROLL_DISCARD = 4
 
 # Speaker — must match PcmSpeaker constants in Go
 SPEAKER_RATE   = 48000
 SPEAKER_PERIOD = 2048
-SPEAKER_BYTES  = SPEAKER_PERIOD * 2 * 2  # 8192 bytes/period
+SPEAKER_BYTES  = SPEAKER_PERIOD * 2 * 2   # 8192 bytes/period
 PIPER_RATE     = 22050
 
 # LEDs
@@ -85,23 +109,35 @@ MDNS_REFRESH_INTERVAL = 120
 MIC_FRAME_TYPE     = 0x01
 SPEAKER_FRAME_TYPE = 0x02
 SPEAKER_EOS_TYPE   = 0x03
-MIC_HEADER_LEN     = 3  # [type][seq_hi][seq_lo]
+MIC_HEADER_LEN     = 3   # [type][seq_hi][seq_lo]
 
-# ─── Device Registry ──────────────────────────────────────────────────
+# ─── Device registry ──────────────────────────────────────────────────────────
 
 class Device:
-    def __init__(self, device_id: str, ip: str, capabilities: list,
-                 control_ws: WebSocketServerProtocol):
+    def __init__(
+        self,
+        device_id: str,
+        ip: str,
+        capabilities: list,
+        control_ws: WebSocketServerProtocol,
+    ):
         self.device_id    = device_id
         self.ip           = ip
         self.capabilities = capabilities
         self.control_ws   = control_ws
+
         self.data_ws: WebSocketServerProtocol | None = None
         self.voice_lock   = asyncio.Lock()
         self.cancel_event = asyncio.Event()
         self.mic_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=64)
-        self.speaking     = False  # True while speaker is streaming — suppresses OWW
-        self.data_ready   = asyncio.Event()
+
+        # Transient state — read by em_api._merge_device()
+        self.speaking  = False
+        self.muted     = False
+        self.listening = False
+        self.thinking  = False
+
+        self.data_ready = asyncio.Event()
 
     async def send_control(self, msg: dict):
         try:
@@ -125,13 +161,15 @@ class Device:
         await self.send_control({"type": "ping"})
 
     async def mic_start(self):
+        self.listening = True
         await self.send_control({"type": "mic_start"})
 
     async def mic_stop(self):
+        self.listening = False
         await self.send_control({"type": "mic_stop"})
 
     async def stream_speaker(self, pcm: bytes):
-        """Stream resampled stereo 48kHz PCM as 0x02 binary frames, then 0x03 EOS."""
+        """Stream resampled stereo 48kHz PCM as 0x02 frames, then 0x03 EOS."""
         self.speaking = True
         try:
             offset = 0
@@ -146,6 +184,8 @@ class Device:
             self.speaking = False
 
 
+# The live device registry — keyed by device_id (ro.serialno).
+# em_api receives a reference to this dict at startup.
 _devices: dict[str, Device] = {}
 
 
@@ -153,16 +193,19 @@ def get_device(device_id: str) -> Device | None:
     return _devices.get(device_id)
 
 
-# ─── LED helpers ──────────────────────────────────────────────────────
+# ─── LED helpers ──────────────────────────────────────────────────────────────
 
 def _make_leds(r, g, b):
     return [{"id": i, "r": r, "g": g, "b": b} for i in range(NUM_LEDS)]
 
+
 async def leds_off(device: Device):
     await device.set_leds(_make_leds(0, 0, 0))
 
+
 async def leds_listening(device: Device):
     await device.set_leds(_make_leds(0, 180, 0))
+
 
 async def leds_spin_green(device: Device, stop_event: asyncio.Event):
     pos = 0
@@ -185,7 +228,7 @@ async def leds_spin_green(device: Device, stop_event: asyncio.Event):
         await leds_off(device)
 
 
-# ─── Audio conversion ─────────────────────────────────────────────────
+# ─── Audio conversion ─────────────────────────────────────────────────────────
 
 def resample_to_stereo_48k(pcm: bytes, from_rate: int) -> bytes:
     if len(pcm) < 2:
@@ -193,11 +236,11 @@ def resample_to_stereo_48k(pcm: bytes, from_rate: int) -> bytes:
     samples = struct.unpack(f"<{len(pcm)//2}h", pcm)
     n_in  = len(samples)
     n_out = int(n_in * SPEAKER_RATE / from_rate)
-    out = []
+    out   = []
     for i in range(n_out):
-        src  = i * from_rate / SPEAKER_RATE
-        lo   = int(src)
-        hi   = min(lo + 1, n_in - 1)
+        src = i * from_rate / SPEAKER_RATE
+        lo  = int(src)
+        hi  = min(lo + 1, n_in - 1)
         frac = src - lo
         val  = int(samples[lo] * (1 - frac) + samples[hi] * frac)
         val  = max(-32768, min(32767, val))
@@ -206,17 +249,20 @@ def resample_to_stereo_48k(pcm: bytes, from_rate: int) -> bytes:
     return struct.pack(f"<{len(out)}h", *out)
 
 
-# ─── Voice pipeline ───────────────────────────────────────────────────
+# ─── Voice pipeline ───────────────────────────────────────────────────────────
 
 async def run_voice_turn(device: Device):
     log.info(f"[{device.device_id}] Voice turn starting")
+    device.listening = True
     await leds_listening(device)
 
     voice_response: bytes = b""
-    stop_spin = asyncio.Event()
-    spin_task = None
+    stop_spin  = asyncio.Event()
+    spin_task  = None
 
     async def cleanup():
+        device.thinking  = False
+        device.listening = False
         stop_spin.set()
         if spin_task and not spin_task.done():
             spin_task.cancel()
@@ -227,7 +273,9 @@ async def run_voice_turn(device: Device):
         await leds_off(device)
 
     try:
-        async with websockets.connect(VOICE_WS_URI, max_size=10 * 1024 * 1024) as ws:
+        async with websockets.connect(
+            VOICE_WS_URI, max_size=10 * 1024 * 1024
+        ) as ws:
             log.info(f"[{device.device_id}] Connected to voice server")
             await ws.send("START")
 
@@ -259,18 +307,26 @@ async def run_voice_turn(device: Device):
                 try:
                     async for message in ws:
                         if isinstance(message, str) and message == "THINKING":
-                            log.info(f"[{device.device_id}] Transcribing — starting spinner")
-                            if not device.cancel_event.is_set() and (spin_task is None or spin_task.done()):
-                                spin_task = asyncio.create_task(leds_spin_green(device, stop_spin))
+                            device.thinking  = True
+                            device.listening = False
+                            log.info(f"[{device.device_id}] Thinking — starting spinner")
+                            if not device.cancel_event.is_set() and (
+                                spin_task is None or spin_task.done()
+                            ):
+                                spin_task = asyncio.create_task(
+                                    leds_spin_green(device, stop_spin)
+                                )
                         elif isinstance(message, bytes) and message:
                             voice_response = message
-                            log.info(f"[{device.device_id}] Received {len(voice_response)} bytes audio")
+                            log.info(
+                                f"[{device.device_id}] Received "
+                                f"{len(voice_response)} bytes audio"
+                            )
                             return
                 except Exception as e:
                     log.error(f"[{device.device_id}] WS receive error: {e}")
 
             await device.mic_start()
-
             mic_task     = asyncio.create_task(stream_mic())
             receive_task = asyncio.create_task(receive_response())
             cancel_task  = asyncio.create_task(device.cancel_event.wait())
@@ -315,18 +371,22 @@ async def run_voice_turn(device: Device):
 
     try:
         speaker_pcm = resample_to_stereo_48k(voice_response, PIPER_RATE)
-        log.info(f"[{device.device_id}] Streaming {len(speaker_pcm)} bytes to speaker ({len(speaker_pcm)//SPEAKER_BYTES} periods)")
-
-        cancel_task = asyncio.create_task(device.cancel_event.wait())
-        stream_task = asyncio.create_task(device.stream_speaker(speaker_pcm))
+        log.info(
+            f"[{device.device_id}] Streaming {len(speaker_pcm)} bytes "
+            f"({len(speaker_pcm)//SPEAKER_BYTES} periods)"
+        )
+        cancel_task  = asyncio.create_task(device.cancel_event.wait())
+        stream_task  = asyncio.create_task(device.stream_speaker(speaker_pcm))
 
         done, _ = await asyncio.wait(
             [stream_task, cancel_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
+
         if cancel_task in done:
             log.info(f"[{device.device_id}] Cancelled during playback")
             stream_task.cancel()
+
         cancel_task.cancel()
 
     except Exception as e:
@@ -343,17 +403,19 @@ async def _run_voice_locked(device: Device):
         await run_voice_turn(device)
 
 
-# ─── Wake word listener ────────────────────────────────────────────────
+# ─── Wake word listener ───────────────────────────────────────────────────────
 
 _oww_model: OWWModel | None = None
+
 
 def _get_oww_model() -> OWWModel:
     global _oww_model
     if _oww_model is None:
         log.info(f"Loading OpenWakeWord model: {OWW_MODEL}")
         _oww_model = OWWModel(
-            wakeword_model_paths=[
-                f"/usr/local/lib/python3.12/site-packages/openwakeword/resources/models/{OWW_MODEL}_v0.1.onnx"
+            wakeword_models=[
+                f"/usr/local/lib/python3.12/site-packages/openwakeword/resources/models/"
+                f"{OWW_MODEL}_v0.1.onnx"
             ],
             enable_speex_noise_suppression=False,
         )
@@ -366,41 +428,51 @@ async def wake_word_listener(device: Device):
     model     = await loop.run_in_executor(None, _get_oww_model)
     model_key = f"{OWW_MODEL}_v0.1"
 
-    log.info(f"[{device.device_id}] OWW: starting mic stream")
+    # Read OWW threshold from device config if available
+    cfg       = db.get_device_config(device.device_id)
+    threshold = float(cfg.get("owwThreshold", OWW_THRESHOLD))
+
+    log.info(f"[{device.device_id}] OWW: starting (threshold={threshold})")
     await device.mic_start()
 
     buf = bytearray()
-
     try:
         while True:
             try:
-                payload = await asyncio.wait_for(device.mic_queue.get(), timeout=10.0)
+                payload = await asyncio.wait_for(
+                    device.mic_queue.get(), timeout=10.0
+                )
             except asyncio.TimeoutError:
                 log.warning(f"[{device.device_id}] OWW: mic queue timeout")
                 continue
 
             buf.extend(payload)
-
             while len(buf) >= CHUNK_BYTES:
-                frame = bytes(buf[:CHUNK_BYTES])
+                frame   = bytes(buf[:CHUNK_BYTES])
                 del buf[:CHUNK_BYTES]
-
                 samples = np.frombuffer(frame, dtype=np.int16)
 
                 if device.speaking:
-                    continue  # discard — don't feed speaker output to OWW
+                    continue  # suppress OWW during speaker playback
 
-                prediction = await loop.run_in_executor(None, model.predict, samples)
-                score      = prediction.get(model_key, 0.0)
+                prediction = await loop.run_in_executor(
+                    None, model.predict, samples
+                )
+                score = prediction.get(model_key, 0.0)
 
-                if score >= OWW_THRESHOLD:
-                    log.info(f"[{device.device_id}] Wake word detected (score={score:.3f})")
-
+                if score >= threshold:
+                    log.info(
+                        f"[{device.device_id}] Wake word detected "
+                        f"(score={score:.3f})"
+                    )
+                    db.log_device(
+                        device.device_id, "info", "device",
+                        f"Wake word detected (score={score:.3f})"
+                    )
                     if not device.voice_lock.locked():
                         await device.mic_stop()
                         model.reset()
                         buf.clear()
-
                         await _run_voice_locked(device)
 
                         # Drain stale frames accumulated during voice turn
@@ -412,14 +484,19 @@ async def wake_word_listener(device: Device):
                             except asyncio.QueueEmpty:
                                 break
                         if drained:
-                            log.info(f"[{device.device_id}] OWW: drained {drained} stale frames")
+                            log.info(
+                                f"[{device.device_id}] OWW: "
+                                f"drained {drained} stale frames"
+                            )
                         model.reset()
                         buf.clear()
-
-                        log.info(f"[{device.device_id}] OWW: restarting mic stream")
+                        log.info(f"[{device.device_id}] OWW: restarting mic")
                         await device.mic_start()
                     else:
-                        log.info(f"[{device.device_id}] Voice turn already active — ignoring wake")
+                        log.info(
+                            f"[{device.device_id}] Voice turn active — "
+                            f"ignoring wake"
+                        )
                         model.reset()
 
     except asyncio.CancelledError:
@@ -427,14 +504,16 @@ async def wake_word_listener(device: Device):
         raise
 
 
-# ─── Button handler ───────────────────────────────────────────────────
+# ─── Button handler ───────────────────────────────────────────────────────────
 
 async def handle_button_event(device: Device, event: dict):
     click_type = event.get("clickType")
     down       = event.get("down", True)
+
     if down:
         return
-    if click_type == 138:  # DotClick
+
+    if click_type == 138:   # DotClick
         if device.voice_lock.locked():
             log.info(f"[{device.device_id}] Dot button — cancelling voice turn")
             device.cancel_event.set()
@@ -443,9 +522,19 @@ async def handle_button_event(device: Device, event: dict):
             asyncio.create_task(_run_voice_locked(device))
 
 
-# ─── Control plane handler ────────────────────────────────────────────
+# ─── Control plane handler ────────────────────────────────────────────────────
 
 async def handle_control(ws: WebSocketServerProtocol):
+    """
+    Handle a /control WebSocket connection from a device.
+
+    Registration flow:
+      1. Receive register message with device_id (ro.serialno) and version
+      2. Look up device in DB
+         - Not found → insert as pending, send {"type": "pending"}, close
+         - Found, approved=false → send {"type": "pending"}, close
+         - Found, approved=true → send ack + config, start pipeline
+    """
     device = None
     remote = ws.remote_address
 
@@ -454,20 +543,99 @@ async def handle_control(ws: WebSocketServerProtocol):
         msg = json.loads(raw)
 
         if msg.get("type") != "register":
-            log.warning(f"[control] First message from {remote} was not register — closing")
+            log.warning(
+                f"[control] First message from {remote} was not register — closing"
+            )
             await ws.close()
             return
 
         device_id    = msg["device_id"]
         ip           = msg.get("ip", str(remote[0]))
+        version      = msg.get("version")
         capabilities = msg.get("capabilities", [])
+
+        # ── Device approval check ─────────────────────────────────────────────
+        loop         = asyncio.get_event_loop()
+        approval_mode = db.get_config("device_approval", DEVICE_APPROVAL)
+        row          = await loop.run_in_executor(None, db.get_device, device_id)
+
+        if row is None:
+            if approval_mode == "auto":
+                # Auto-approve with generated label
+                label = f"Unknown {device_id[:8]}"
+                await loop.run_in_executor(
+                    None, db.register_new_device, device_id, ip, version
+                )
+                await loop.run_in_executor(
+                    None, db.approve_device, device_id, label, None
+                )
+                log.info(
+                    f"[control] Auto-approved new device: {device_id} "
+                    f"label={label!r}"
+                )
+                row = await loop.run_in_executor(None, db.get_device, device_id)
+            else:
+                # Strict mode — register as pending and reject
+                await loop.run_in_executor(
+                    None, db.register_new_device, device_id, ip, version
+                )
+                await ws.send(json.dumps({"type": "pending"}))
+                log.info(
+                    f"[control] Unknown device held as pending: {device_id} "
+                    f"from {ip}"
+                )
+                await api.notify_device_pending(device_id, ip)
+                db.log_device(
+                    device_id, "info", "controller",
+                    f"Device seen for first time — pending approval ({ip})"
+                )
+                await ws.close()
+                return
+
+        if not row["approved"]:
+            # Known but not yet approved
+            await loop.run_in_executor(
+                None, db.upsert_device_seen, device_id, ip, version
+            )
+            await ws.send(json.dumps({"type": "pending"}))
+            log.info(
+                f"[control] Device pending approval: {device_id} from {ip}"
+            )
+            await api.notify_device_pending(device_id, ip)
+            await ws.close()
+            return
+
+        # ── Approved — proceed with normal registration ────────────────────
+        await loop.run_in_executor(
+            None, db.upsert_device_seen, device_id, ip, version
+        )
 
         device = Device(device_id, ip, capabilities, ws)
         _devices[device_id] = device
 
-        log.info(f"[control] Device registered: {device_id} at {ip} caps={capabilities}")
+        log.info(
+            f"[control] Device connected: {device_id} v={version} "
+            f"at {ip} caps={capabilities}"
+        )
+        db.log_device(
+            device_id, "info", "controller",
+            f"Connected from {ip} version={version}"
+        )
+
+        # Send ack
         await device.send_control({"type": "ack", "device_id": device_id})
+
+        # Push stored config immediately after ack
+        config = await loop.run_in_executor(
+            None, db.get_device_config, device_id
+        )
+        await device.send_control({"type": "config", **config})
+        log.info(f"[control] Config pushed to {device_id}")
+
         await leds_off(device)
+        await api.notify_device_connected(device_id)
+
+        # ── Main message loop ─────────────────────────────────────────────
 
         async def ping_loop():
             while True:
@@ -485,12 +653,24 @@ async def handle_control(ws: WebSocketServerProtocol):
                     continue
 
                 msg_type = msg.get("type")
+
                 if msg_type == "button":
                     await handle_button_event(device, msg)
+
+                elif msg_type == "log":
+                    # Device-side log entry — persist and push to dashboard
+                    level   = msg.get("level", "info")
+                    message = msg.get("message", "")
+                    db.log_device(device_id, level, "device", message)
+                    await api._push_log_event(device_id, level, "device", message)
+
                 elif msg_type == "pong":
                     pass
+
                 else:
-                    log.debug(f"[{device_id}] Unknown control message: {msg_type}")
+                    log.debug(
+                        f"[{device_id}] Unknown control message: {msg_type}"
+                    )
 
         finally:
             ping_task.cancel()
@@ -498,17 +678,24 @@ async def handle_control(ws: WebSocketServerProtocol):
 
     except asyncio.TimeoutError:
         log.warning(f"[control] Registration timeout from {remote}")
+
     except websockets.exceptions.ConnectionClosed:
         pass
+
     except Exception as e:
         log.error(f"[control] Handler error: {e}")
+
     finally:
         if device:
             log.info(f"[control] Device disconnected: {device.device_id}")
+            db.log_device(
+                device.device_id, "info", "controller", "Disconnected"
+            )
             _devices.pop(device.device_id, None)
+            await api.notify_device_disconnected(device.device_id)
 
 
-# ─── Data plane handler ───────────────────────────────────────────────
+# ─── Data plane handler ───────────────────────────────────────────────────────
 
 async def handle_data(ws: WebSocketServerProtocol):
     device = None
@@ -519,13 +706,15 @@ async def handle_data(ws: WebSocketServerProtocol):
         msg = json.loads(raw)
 
         if msg.get("type") != "identify":
-            log.warning(f"[data] First message from {remote} was not identify — closing")
+            log.warning(
+                f"[data] First message from {remote} was not identify — closing"
+            )
             await ws.close()
             return
 
         device_id = msg["device_id"]
 
-        for _ in range(20):  # up to 2 seconds
+        for _ in range(20):   # up to 2 seconds
             device = _devices.get(device_id)
             if device is not None:
                 break
@@ -538,7 +727,7 @@ async def handle_data(ws: WebSocketServerProtocol):
 
         device.data_ws = ws
         device.data_ready.set()
-        log.info(f"[data] Data connection established for {device_id}")
+        log.info(f"[data] Data connection established: {device_id}")
 
         async for raw in ws:
             if not isinstance(raw, bytes):
@@ -551,35 +740,39 @@ async def handle_data(ws: WebSocketServerProtocol):
             try:
                 device.mic_queue.put_nowait(payload)
             except asyncio.QueueFull:
-                pass  # OWW fell behind — drop frame
+                pass   # OWW fell behind — drop frame
 
     except asyncio.TimeoutError:
         log.warning(f"[data] Identify timeout from {remote}")
+
     except websockets.exceptions.ConnectionClosed:
         pass
+
     except Exception as e:
         log.error(f"[data] Handler error: {e}")
+
     finally:
         if device:
             device.data_ws = None
             device.data_ready.clear()
-            log.info(f"[data] Data connection closed for {device.device_id}")
+            log.info(f"[data] Data connection closed: {device.device_id}")
 
 
-# ─── Router ───────────────────────────────────────────────────────────
+# ─── Router ───────────────────────────────────────────────────────────────────
 
 async def router(ws: WebSocketServerProtocol):
-    path = ws.request.path if hasattr(ws, 'request') else getattr(ws, 'path', '/')
+    path = ws.request.path if hasattr(ws, "request") else getattr(ws, "path", "/")
+
     if path == "/control":
         await handle_control(ws)
     elif path == "/data":
         await handle_data(ws)
     else:
-        log.warning(f"Unknown path: {path} from {ws.remote_address}")
+        log.warning(f"Unknown WebSocket path: {path} from {ws.remote_address}")
         await ws.close()
 
 
-# ─── mDNS ─────────────────────────────────────────────────────────────
+# ─── mDNS ─────────────────────────────────────────────────────────────────────
 
 def _make_mdns_info() -> ServiceInfo:
     return ServiceInfo(
@@ -592,24 +785,37 @@ def _make_mdns_info() -> ServiceInfo:
     )
 
 
-async def mdns_refresh_loop(azc: AsyncZeroconf, info: ServiceInfo):
-    while True:
-        await asyncio.sleep(MDNS_REFRESH_INTERVAL)
-        await azc.async_unregister_service(info)
-        await azc.async_register_service(info, allow_name_change=True)
-        log.info("mDNS re-registered (IGMP refresh)")
-
-# ─── Main ─────────────────────────────────────────────────────────────
+# ─── Main ─────────────────────────────────────────────────────────────────────
 
 async def main():
+    # ── Database ──────────────────────────────────────────────────────────────
+    db.init(DB_PATH)
+
+    # ── Auth — generate bootstrap token if no users exist ─────────────────
+    auth.maybe_generate_bootstrap_token()
+
+    # ── API server ────────────────────────────────────────────────────────────
+    runner = await api.create_runner(_devices)
+    await runner.setup()
+    site = web.TCPSite(runner, SERVER_HOST, API_PORT)
+    await site.start()
+    log.info(f"Dashboard + API listening on http://{SERVER_HOST}:{API_PORT}")
+
+    # ── Background tasks ──────────────────────────────────────────────────────
+    release_task      = asyncio.create_task(api.release_poll_loop())
+    session_prune_task = asyncio.create_task(api.session_prune_loop())
+
+    # ── mDNS ──────────────────────────────────────────────────────────────────
     azc  = AsyncZeroconf()
     info = _make_mdns_info()
     await azc.async_register_service(info, allow_name_change=True)
-    log.info(f"mDNS advertising {MDNS_NAME}._emcontroller._tcp.local → {SERVER_IP}:{SERVER_PORT}")
+    log.info(
+        f"mDNS advertising {MDNS_NAME}._emcontroller._tcp.local "
+        f"→ {SERVER_IP}:{SERVER_PORT}"
+    )
 
-    mdns_task = asyncio.create_task(mdns_refresh_loop(azc.zeroconf, info))
-
-    log.info(f"EchoMuse Controller starting on {SERVER_HOST}:{SERVER_PORT}")
+    # ── WebSocket server ──────────────────────────────────────────────────────
+    log.info(f"WebSocket server starting on {SERVER_HOST}:{SERVER_PORT}")
     log.info(f"Voice server: {VOICE_WS_URI}")
 
     try:
@@ -620,13 +826,18 @@ async def main():
             ping_interval=None,
             max_size=10 * 1024 * 1024,
         ):
-            log.info("Waiting for devices...")
+            log.info("EchoMuse Controller ready — waiting for devices")
             await asyncio.Future()
+
     finally:
+        release_task.cancel()
+        session_prune_task.cancel()
         mdns_task.cancel()
         await azc.async_unregister_service(info)
         await azc.async_close()
-        log.info("mDNS stopped")
+        await runner.cleanup()
+        log.info("EchoMuse Controller stopped")
+
 
 if __name__ == "__main__":
     asyncio.run(main())

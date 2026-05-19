@@ -6,6 +6,9 @@ services:
     network_mode: host
     env_file:
       - .env
+    volumes:
+      # Persist database across container rebuilds
+      - ~EchoMuse/controller/data:/app/data
     deploy:
       resources:
         reservations:
