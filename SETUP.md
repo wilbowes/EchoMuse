@@ -475,8 +475,12 @@ dns-sd -B _emcontroller._tcp local
 ✅ WiFi working
 ✅ Stable boot
 ✅ No HTTP server on device — no inbound ports, no iptables rules
-✅ Two outbound WebSocket connections (control + data plane)
-✅ On-device energy VAD (RMS threshold 0.004) — speech gating before sending to server
+✅ Three outbound WebSocket connections (control + data + shell planes)
+✅ Device identity via ro.serialno — stable across reboots, matches adb devices
+✅ Device approval flow — strict mode (pending) or auto mode
+✅ Orange LED pulse while disconnected / searching for server
+✅ Slow white LED pulse while pending controller approval
+✅ On-device energy VAD — VAD end signal (0x04) sent to controller on silence
 ✅ OpenWakeWord — "Hey Jarvis" detected server-side (threshold 0.3)
 ✅ Mute button — toggles mic mute, red LED ring, blocks action button
 ✅ Volume buttons — local interception, cyan LED ring feedback
@@ -486,8 +490,13 @@ dns-sd -B _emcontroller._tcp local
 ✅ Speech threshold — quiet recordings discarded without hitting Whisper
 ✅ OWW suppressed during speaker playback — prevents false wake triggers on own voice
 ✅ Stale mic queue drained after voice turn — prevents immediate re-trigger
-✅ Orange LED pulse while disconnected from server
+✅ Config pushed from controller on connect — VAD/OWW params applied at runtime
+✅ Device logs streamed to controller over control WebSocket
+✅ /shell WebSocket endpoint — root shell on device via browser dashboard
+✅ OTA updates via controller dashboard — GitHub releases, on-device rollback
 ✅ Boot logging to /tmp/server.log
+✅ mDNS via grandcat/zeroconf — RFC 6762/6763 compliant, reliable discovery
+✅ Controller management dashboard on port 8768 — auth, device registry, logs, config
 ```
 
 ---
@@ -496,16 +505,19 @@ dns-sd -B _emcontroller._tcp local
 
 ```
 "Hey Jarvis"
-    → on-device energy VAD (RMS ≥ 0.004)
+    → on-device energy VAD (RMS ≥ 0.004, normalised)
     → binary mic frames → /data WebSocket → server mic_queue
     → OpenWakeWord inference (hey_jarvis_v0.1, threshold 0.3)
     → wake detected
     → server: mic_stop
     → server: LEDs green (listening)
     → server: mic_start → mic frames resume
-    → voice_server: Whisper large-v3 STT
-    → silence detected → voice_server sends THINKING
+    → device: VAD gate open, streaming frames to controller
+    → device: speech ends → VAD gate closes → sends 0x04 (VAD end)
+    → controller: 0x04 received → sends "END" to voice server
+    → voice_server: END signal → sends THINKING → processes audio
     → server: LEDs spin (thinking)
+    → voice_server: Whisper large-v3 STT
     → Clara bot → response text
     → voice_server: Piper TTS (en_GB-alba-medium, 22050Hz)
     → server: resample 22050→48000Hz mono→stereo
@@ -528,14 +540,17 @@ Action button triggers the same pipeline directly, bypassing wake word detection
 
 Device → Server:
 ```json
-{"type": "register", "device_id": "echo-dot", "ip": "...", "capabilities": [...]}
+{"type": "register", "device_id": "G0K0XXXXXXXX", "ip": "...", "version": "v2.1.0", "capabilities": [...]}
 {"type": "button", "clickType": 138, "down": false}
+{"type": "log", "level": "info", "message": "..."}
 {"type": "pong"}
 ```
 
 Server → Device:
 ```json
-{"type": "ack", "device_id": "echo-dot"}
+{"type": "ack", "device_id": "G0K0XXXXXXXX"}
+{"type": "pending"}
+{"type": "config", "adcDigitalGain": 100, "adcMicpga": 60, "vadThreshold": 0.004, ...}
 {"type": "leds", "leds": [{"id": 0, "r": 0, "g": 180, "b": 0}, ...]}
 {"type": "mic_start"}
 {"type": "mic_stop"}
@@ -546,7 +561,8 @@ Server → Device:
 
 Device → Server (mic frames):
 ```
-[0x01][seq_hi][seq_lo][mono S16_LE PCM, 2560 bytes = 80ms]
+[0x01][seq_hi][seq_lo][mono S16_LE PCM, 2560 bytes = 80ms]  — VAD-gated speech
+[0x04]                                                        — VAD end (speech finished)
 ```
 
 Server → Device (speaker frames):
@@ -555,20 +571,33 @@ Server → Device (speaker frames):
 [0x03] end of stream
 ```
 
+### Shell plane (`ws://server:8767/shell`) — binary
+
+Demand-opened by the Go binary when the controller requests a shell session. Raw stdin/stdout piped from `/system/bin/sh`. Single session enforced. Used by the management dashboard (xterm.js terminal) and for OTA binary transfer.
+
 ---
 
 ## Connection Lifecycle
 
 ```
 Device boots
-  → orange LED pulse (disconnected)
-  → mDNS browse: _emcontroller._tcp.local
-  → connect /control → register → ack received
-  → LED off (connected)
-  → connect /data → identify
-  → server: mic_start sent
-  → device: mic streaming started
-  → OWW listening
+  → orange LED pulse (searching for server)
+  → mDNS browse: _emcontroller._tcp.local (grandcat/zeroconf)
+  → connect /control → register (device_id = ro.serialno, version)
+
+  CASE: unknown device, strict mode
+    → server: sends {"type": "pending"}
+    → device: slow white LED pulse — waiting for approval
+    → device retries every 30s
+
+  CASE: approved device
+    → server: sends {"type": "ack"} + {"type": "config"}
+    → device: applies config (tinymix for hardware params)
+    → LEDs off (connected)
+    → connect /data → identify
+    → server: mic_start sent
+    → device: mic streaming started (VAD-gated)
+    → OWW listening
 ```
 
 If control drops → data cancelled → orange pulse resumes → both reconnect together on next mDNS discovery.
@@ -584,7 +613,7 @@ If control drops → data cancelled → orange pulse resumes → both reconnect 
 | `Magisk-v17.3.zip` | Magisk installer |
 | `f1r30s.zip` | ADB enablement patch |
 | `update-kindle-csm_biscuit-272.6.8.0_user_680767620.bin` | FireOS 5 firmware |
-| `server` | Compiled EchoMuse binary (ARM, API 22) |
+| `server` | Compiled EchoMuse binary (ARM, API 22) — or fetch from GitHub releases |
 
 If you need to reflash: Steps 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9. Your saved `boot_patched.img` already contains the SELinux patch — no need to repatch from scratch.
 
@@ -599,9 +628,10 @@ adb shell su -c 'cat /tmp/server.log'
 ```
 
 Common causes:
-- **`mDNS: no server found`** — server not advertising, or Proxmox bridge multicast issue. Check `ip maddr show vmbr0 | grep fb` on Proxmox host.
-- **`failed to bind to any multicast udp port`** — p2p0 still up, or network not settled. Check `ip link show p2p0` — should be DOWN.
+- **`mDNS: no server found`** — server not advertising. Check `dns-sd -B _emcontroller._tcp local` from Mac — should show `echomuse`.
+- **White pulse, not orange** — device found the controller but hasn't been approved yet. Log into the management dashboard and approve the device.
 - **`Connection lost: unexpected EOF`** — connecting to wrong server (stale mDNS cache). Another device on network may be advertising `_emcontroller._tcp`. Check `dns-sd -B _emcontroller._tcp local` from Mac.
+- **p2p0 interference** — check `ip link show p2p0` on device — should be DOWN.
 
 ### No audio
 
@@ -611,7 +641,7 @@ adb shell su -c 'tinyplay /data/local/tmp/test48s.wav -D 0 -d 23 -p 2048 -n 4'
 
 If this hangs: mixer not initialised. Run the tinymix commands from Step 9 manually.
 
-### Mic not working / VAD never opens
+### Mic not working / wake word not triggering
 
 Check mic gain:
 ```bash
@@ -619,7 +649,9 @@ adb shell su -c 'tinymix -D 0 89'  # should be 100
 adb shell su -c 'tinymix -D 0 92'  # should be 60
 ```
 
-VAD threshold is 0.004 RMS — if the room is loud or quiet, this may need adjustment via `VAD_THRESHOLD` env var on the server.
+Check OWW model is loaded in controller logs — should see `OpenWakeWord model ready` on device connect. If not, check models were downloaded at image build time.
+
+VAD threshold is 0.004 normalised RMS — adjustable via config push from dashboard.
 
 ### ADB not available after boot
 
@@ -653,11 +685,15 @@ adb shell su -c 'start adbd'
 
 **OWW threshold.** 0.3 works well for a London/Bristol accent — the default 0.5 is calibrated for American English.
 
-**VAD threshold.** 0.004 RMS is the default. Calibrate for your room — too low causes noise to open the gate, too high means you have to shout. A future improvement is adaptive calibration on startup based on ambient noise floor.
+**VAD threshold.** 0.004 normalised RMS is the default. Calibrate for your room via config push from the management dashboard — no rebuild required. Too low causes noise to open the gate, too high means you have to shout.
+
+**VAD end signal.** When the device VAD gate closes (speech followed by `vadSilenceMs` of silence, default 600ms), the device sends a `0x04` binary frame. The controller forwards this as an `"END"` string to the voice server, which immediately processes the buffered audio without waiting for silence chunks. This is the correct architecture — the device owns VAD state and signals it explicitly rather than the server inferring it from audio gaps.
 
 **Stale queue drain.** After each voice turn, the mic queue is drained and the OWW model is reset before mic_start is sent. This prevents the device's own speaker output (buffered during playback) from immediately triggering another wake word detection.
 
 **OWW suppression during playback.** While the speaker is streaming, OWW inference is suppressed server-side (`device.speaking` flag). The mic continues streaming (barge-in via button remains possible), but audio picked up from the speaker doesn't trigger false detections.
+
+**mDNS library.** The `hashicorp/mdns` library fails to resolve the controller IP when python-zeroconf sends PTR responses with the A record under the hostname rather than the service name. Replaced with `grandcat/zeroconf` which is RFC 6762/6763 compliant and handles this correctly.
 
 ---
 
@@ -665,22 +701,22 @@ adb shell su -c 'start adbd'
 
 - **Adaptive VAD** — calibrate threshold on startup from ambient noise floor × multiplier
 - **Acoustic echo cancellation** — Echo Dot DSP has hardware AEC, investigating ALSA access
-- **On-device wake word** — TFLite C binary running alongside EchoMuse, eliminating server-side VAD stream
-- **Wyoming protocol** — upstream interface for Home Assistant / Rhasspy integration, turning EchoMuse into a proper HA voice satellite
-- **Fleet management** — GUID-based device identity, friendly names, admin portal, OTA updates
+- **On-device wake word** — TFLite C binary running alongside EchoMuse, eliminating server-side OWW stream
 - **Bermuda BT proxy** — room-level presence detection via Bluetooth, once fleet of 5-6 Echo Dots is deployed
 - **Startup chime** — short audio signature on EchoMuse init
 - **Holding response** — play audio while Clara is thinking if response takes >2s
+- **Browser-based provisioner** — WebUSB/ya-webadb installer for flashing new devices
 
 ---
 
-**Document version:** v2.0
-**Last updated:** 2026-05-09
+**Document version:** v2.1
+**Last updated:** 2026-05-19
 **Changelog:**
 - v1.0 — April 2026: Initial publication. Full pipeline confirmed working.
 - v1.1 — 2026-04-26: Fixed ambiguous init.csm.project.rc editing instruction; fixed `server &` → `exec` inconsistency.
 - v1.2 — 2026-04-26: Updated start_server.sh; added VAD stream, OpenWakeWord, mute button, amp click suppression; updated end state.
 - v1.3 — 2026-04-27: Added THINKING signal, preroll discard, speech threshold, mDNS conflict handling, OWW model loading notes.
 - v2.0 — 2026-05-09: Major architecture update. EchoGo replaced by EchoMuse. HTTP server removed from device entirely. Two-plane WebSocket architecture (control + data). gorilla/websocket replacing golang.org/x/net/websocket. p2p0 disable added. Proxmox bridge multicast fix documented. Orange disconnect LED pulse. OWW suppression during playback. Stale queue drain. Boot logging. Updated voice pipeline, end state, troubleshooting, and all file references.
+- v2.1 — 2026-05-19: Device ID changed to ro.serialno. Version embedded via ldflags. Three-plane WebSocket (added /shell). Device approval flow (strict/auto modes, pending white pulse). Config push on connect. Device log streaming. VAD end signal (0x04 frame type) replaces server-side silence detection. OWW model download at build time. mDNS library replaced with grandcat/zeroconf. Controller management dashboard (port 8768, auth, DB, API, GitHub release tracking, OTA updates).
 
 *Device: Echo Dot 2nd Gen (RS03QR). Tested on macOS with ADB 35.0.2.*

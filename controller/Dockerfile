@@ -8,7 +8,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Install openwakeword without deps — tflite-runtime has no Python 3.12
 # x86_64 build; onnxruntime handles inference instead
-RUN pip install --no-cache-dir --no-deps openwakeword==0.6.0
+RUN pip install --no-cache-dir --no-deps openwakeword==0.6.0 && python3 -c "import openwakeword; openwakeword.utils.download_models()"
 
 # Controller source
 COPY em_controller.py .

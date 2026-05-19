@@ -1,0 +1,43 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true   # fetches GoTinyAlsa submodule
+
+      - name: Build compiler image
+        run: docker build -t echomuse-compiler device/compiler/
+
+      - name: Compile
+        run: |
+          mkdir -p device/build
+          docker run --rm \
+            -e VERSION=${{ github.ref_name }} \
+            -e CGO_LDFLAGS="-Wl,--hash-style=both" \
+            -v "${{ github.workspace }}/device":/sdk \
+            -v "${{ github.workspace }}/GoTinyAlsa":/GoTinyAlsa \
+            echomuse-compiler
+
+      - name: Verify binary
+        run: |
+          file device/build/server
+          ls -lh device/build/server
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: EchoMuse ${{ github.ref_name }}
+          files: device/build/server
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

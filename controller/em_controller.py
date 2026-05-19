@@ -107,6 +107,7 @@ MDNS_REFRESH_INTERVAL = 120
 
 # Binary frame types
 MIC_FRAME_TYPE     = 0x01
+VAD_END_TYPE       = 0x04
 SPEAKER_FRAME_TYPE = 0x02
 SPEAKER_EOS_TYPE   = 0x03
 MIC_HEADER_LEN     = 3   # [type][seq_hi][seq_lo]
@@ -292,6 +293,11 @@ async def run_voice_turn(device: Device):
                             )
                         except asyncio.TimeoutError:
                             continue
+                        if payload is None:
+                            # VAD end sentinel — signal voice server speech has ended
+                            log.info(f"[{device.device_id}] VAD end — signalling voice server")
+                            await ws.send("END")
+                            return
                         pcm_buf.extend(payload)
                         while len(pcm_buf) >= CHUNK_BYTES:
                             chunk = bytes(pcm_buf[:CHUNK_BYTES])
@@ -414,8 +420,7 @@ def _get_oww_model() -> OWWModel:
         log.info(f"Loading OpenWakeWord model: {OWW_MODEL}")
         _oww_model = OWWModel(
             wakeword_models=[
-                f"/usr/local/lib/python3.12/site-packages/openwakeword/resources/models/"
-                f"{OWW_MODEL}_v0.1.onnx"
+                f"{OWW_MODEL}_v0.1"
             ],
             enable_speex_noise_suppression=False,
         )
@@ -446,6 +451,10 @@ async def wake_word_listener(device: Device):
                 log.warning(f"[{device.device_id}] OWW: mic queue timeout")
                 continue
 
+            if payload is None:
+                # VAD end sentinel — discard, OWW handles its own state
+                buf.clear()
+                continue
             buf.extend(payload)
             while len(buf) >= CHUNK_BYTES:
                 frame   = bytes(buf[:CHUNK_BYTES])
@@ -733,6 +742,13 @@ async def handle_data(ws: WebSocketServerProtocol):
             if not isinstance(raw, bytes):
                 continue
             if len(raw) <= MIC_HEADER_LEN:
+                continue
+            if raw[0] == VAD_END_TYPE:
+                # Device VAD gate closed — signal end of speech
+                try:
+                    device.mic_queue.put_nowait(None)
+                except asyncio.QueueFull:
+                    pass
                 continue
             if raw[0] != MIC_FRAME_TYPE:
                 continue

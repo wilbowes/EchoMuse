@@ -22,6 +22,7 @@ const (
 	frameTypeMic     = byte(0x01)
 	frameTypeSpeaker = byte(0x02)
 	frameTypeEOS     = byte(0x03)
+	frameTypeVADEnd  = byte(0x04)
 )
 
 // ─── VAD constants ────────────────────────────────────────────────────────────
@@ -283,6 +284,8 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}) {
 							}
 							buf = buf[:0]
 						}
+						// Signal end of speech to the controller
+						sendFrame([]byte{frameTypeVADEnd})
 					}
 				}
 			}
