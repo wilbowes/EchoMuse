@@ -492,11 +492,15 @@ dns-sd -B _emcontroller._tcp local
 ✅ Stale mic queue drained after voice turn — prevents immediate re-trigger
 ✅ Config pushed from controller on connect — VAD/OWW params applied at runtime
 ✅ Device logs streamed to controller over control WebSocket
-✅ /shell WebSocket endpoint — root shell on device via browser dashboard
+✅ Mute state change notifications — device sends mute_state message to controller
+✅ Shell access — device dials outbound to controller on shell_open, no inbound ports
 ✅ OTA updates via controller dashboard — GitHub releases, on-device rollback
 ✅ Boot logging to /tmp/server.log
 ✅ mDNS via grandcat/zeroconf — RFC 6762/6763 compliant, reliable discovery
-✅ Controller management dashboard on port 8768 — auth, device registry, logs, config
+✅ WebSocket protocol keepalives — dead connections detected within 30s
+✅ Controller management dashboard — React SPA, vendored assets, no CDN dependency
+✅ Dashboard live state — mute/listen/speak/offline via WebSocket events + 5s poll
+✅ Dashboard shell terminal — browser-based root shell, Ctrl+C support
 ```
 
 ---
@@ -540,8 +544,9 @@ Action button triggers the same pipeline directly, bypassing wake word detection
 
 Device → Server:
 ```json
-{"type": "register", "device_id": "G0K0XXXXXXXX", "ip": "...", "version": "v2.1.0", "capabilities": [...]}
+{"type": "register", "device_id": "G0K0XXXXXXXX", "ip": "...", "version": "v2.2.0", "capabilities": [...]}
 {"type": "button", "clickType": 138, "down": false}
+{"type": "mute_state", "muted": true}
 {"type": "log", "level": "info", "message": "..."}
 {"type": "pong"}
 ```
@@ -554,6 +559,8 @@ Server → Device:
 {"type": "leds", "leds": [{"id": 0, "r": 0, "g": 180, "b": 0}, ...]}
 {"type": "mic_start"}
 {"type": "mic_stop"}
+{"type": "shell_open"}
+{"type": "shell_close"}
 {"type": "ping"}
 ```
 
@@ -571,9 +578,9 @@ Server → Device (speaker frames):
 [0x03] end of stream
 ```
 
-### Shell plane (`ws://server:8767/shell`) — binary
+### Shell plane (`ws://server:8767/shell/{device_id}`) — binary
 
-Demand-opened by the Go binary when the controller requests a shell session. Raw stdin/stdout piped from `/system/bin/sh`. Single session enforced. Used by the management dashboard (xterm.js terminal) and for OTA binary transfer.
+Demand-opened by the Go binary dialling **outbound** to the controller on receipt of a `shell_open` control message. Raw stdin/stdout piped from `/system/bin/sh`. Single session enforced. The controller proxies this connection to the dashboard terminal. No inbound ports on the device.
 
 ---
 
@@ -597,10 +604,11 @@ Device boots
     → connect /data → identify
     → server: mic_start sent
     → device: mic streaming started (VAD-gated)
-    → OWW listening
+    → OWW listening (device shows IDLE state in dashboard)
 ```
 
 If control drops → data cancelled → orange pulse resumes → both reconnect together on next mDNS discovery.
+Controller detects dead connections within 30s via WebSocket protocol keepalives (ping 20s, timeout 10s).
 
 ---
 
@@ -699,6 +707,7 @@ adb shell su -c 'start adbd'
 
 ## What's Next
 
+- **PTY shell** — proper terminal emulator (top, vim, nano) via creack/pty + xterm.js in dashboard
 - **Adaptive VAD** — calibrate threshold on startup from ambient noise floor × multiplier
 - **Acoustic echo cancellation** — Echo Dot DSP has hardware AEC, investigating ALSA access
 - **On-device wake word** — TFLite C binary running alongside EchoMuse, eliminating server-side OWW stream
@@ -709,8 +718,8 @@ adb shell su -c 'start adbd'
 
 ---
 
-**Document version:** v2.1
-**Last updated:** 2026-05-19
+**Document version:** v2.2
+**Last updated:** 2026-05-20
 **Changelog:**
 - v1.0 — April 2026: Initial publication. Full pipeline confirmed working.
 - v1.1 — 2026-04-26: Fixed ambiguous init.csm.project.rc editing instruction; fixed `server &` → `exec` inconsistency.
@@ -718,5 +727,6 @@ adb shell su -c 'start adbd'
 - v1.3 — 2026-04-27: Added THINKING signal, preroll discard, speech threshold, mDNS conflict handling, OWW model loading notes.
 - v2.0 — 2026-05-09: Major architecture update. EchoGo replaced by EchoMuse. HTTP server removed from device entirely. Two-plane WebSocket architecture (control + data). gorilla/websocket replacing golang.org/x/net/websocket. p2p0 disable added. Proxmox bridge multicast fix documented. Orange disconnect LED pulse. OWW suppression during playback. Stale queue drain. Boot logging. Updated voice pipeline, end state, troubleshooting, and all file references.
 - v2.1 — 2026-05-19: Device ID changed to ro.serialno. Version embedded via ldflags. Three-plane WebSocket (added /shell). Device approval flow (strict/auto modes, pending white pulse). Config push on connect. Device log streaming. VAD end signal (0x04 frame type) replaces server-side silence detection. OWW model download at build time. mDNS library replaced with grandcat/zeroconf. Controller management dashboard (port 8768, auth, DB, API, GitHub release tracking, OTA updates).
+- v2.2 — 2026-05-20: Shell architecture corrected — device dials outbound to controller on shell_open, no inbound ports on device. Mute state tracking via mute_state control message. Dashboard live state updates via WebSocket events (mute/listen/speak/offline). WebSocket protocol keepalives — dead connection detection within 30s. Dashboard React SPA compiled via esbuild, fully vendored assets (no CDN). Ctrl+C support in browser terminal.
 
 *Device: Echo Dot 2nd Gen (RS03QR). Tested on macOS with ADB 35.0.2.*
