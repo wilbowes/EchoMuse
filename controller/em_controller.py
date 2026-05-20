@@ -162,11 +162,9 @@ class Device:
         await self.send_control({"type": "ping"})
 
     async def mic_start(self):
-        self.listening = True
         await self.send_control({"type": "mic_start"})
 
     async def mic_stop(self):
-        self.listening = False
         await self.send_control({"type": "mic_stop"})
 
     async def stream_speaker(self, pcm: bytes):
@@ -189,9 +187,31 @@ class Device:
 # em_api receives a reference to this dict at startup.
 _devices: dict[str, Device] = {}
 
+# Shell session coordination — keyed by device_id.
+#
+# _shell_pending:   Future resolved by handle_shell when proxying is complete.
+# _shell_dashboard: dashboard WebSocket, set by em_api before shell_open.
+_shell_pending:   dict[str, asyncio.Future] = {}
+_shell_dashboard: dict[str, object]         = {}
+
 
 def get_device(device_id: str) -> Device | None:
     return _devices.get(device_id)
+
+
+async def _push_device_state(device: Device) -> None:
+    """Push current transient device state to dashboard clients."""
+    await api._push_event({
+        "type":      "device_update",
+        "device_id": device.device_id,
+        "state": {
+            "connected": True,
+            "speaking":  device.speaking,
+            "muted":     device.muted,
+            "listening": device.listening,
+            "thinking":  device.thinking,
+        },
+    })
 
 
 # ─── LED helpers ──────────────────────────────────────────────────────────────
@@ -256,6 +276,7 @@ async def run_voice_turn(device: Device):
     log.info(f"[{device.device_id}] Voice turn starting")
     device.listening = True
     await leds_listening(device)
+    await _push_device_state(device)
 
     voice_response: bytes = b""
     stop_spin  = asyncio.Event()
@@ -264,6 +285,7 @@ async def run_voice_turn(device: Device):
     async def cleanup():
         device.thinking  = False
         device.listening = False
+        await _push_device_state(device)
         stop_spin.set()
         if spin_task and not spin_task.done():
             spin_task.cancel()
@@ -315,6 +337,7 @@ async def run_voice_turn(device: Device):
                         if isinstance(message, str) and message == "THINKING":
                             device.thinking  = True
                             device.listening = False
+                            await _push_device_state(device)
                             log.info(f"[{device.device_id}] Thinking — starting spinner")
                             if not device.cancel_event.is_set() and (
                                 spin_task is None or spin_task.done()
@@ -666,6 +689,14 @@ async def handle_control(ws: WebSocketServerProtocol):
                 if msg_type == "button":
                     await handle_button_event(device, msg)
 
+                elif msg_type == "mute_state":
+                    device.muted = msg.get("muted", False)
+                    await api._push_event({
+                        "type":      "device_update",
+                        "device_id": device_id,
+                        "state":     {"muted": device.muted},
+                    })
+
                 elif msg_type == "log":
                     # Device-side log entry — persist and push to dashboard
                     level   = msg.get("level", "info")
@@ -776,6 +807,75 @@ async def handle_data(ws: WebSocketServerProtocol):
 
 # ─── Router ───────────────────────────────────────────────────────────────────
 
+
+
+# ─── Shell plane handler ──────────────────────────────────────────────────────
+
+async def handle_shell(ws: WebSocketServerProtocol, path: str):
+    """
+    Handle an inbound /shell/{device_id} WebSocket connection from the device.
+
+    Owns all proxying between device shell and dashboard terminal.
+    em_api just coordinates signalling via shared dicts.
+    """
+    import aiohttp as _aiohttp
+
+    device_id = path.removeprefix("/shell/")
+    if not device_id:
+        log.warning("[shell] Missing device_id in path")
+        await ws.close()
+        return
+
+    log.info(f"[shell] Device connected: {device_id}")
+
+    done_future  = _shell_pending.get(device_id)
+    dashboard_ws = _shell_dashboard.get(device_id)
+
+    if done_future is None or done_future.done() or dashboard_ws is None:
+        log.warning(f"[shell] No pending shell request for {device_id} — closing")
+        await ws.close()
+        return
+
+    log.info(f"[shell] Proxying: {device_id}")
+
+    async def device_to_dashboard():
+        try:
+            async for msg in ws:
+                if isinstance(msg, bytes):
+                    await dashboard_ws.send_bytes(msg)
+                else:
+                    await dashboard_ws.send_str(msg)
+        except Exception:
+            pass
+
+    async def dashboard_to_device():
+        try:
+            async for msg in dashboard_ws:
+                if msg.type == _aiohttp.WSMsgType.BINARY:
+                    await ws.send(msg.data)
+                elif msg.type == _aiohttp.WSMsgType.TEXT:
+                    await ws.send(msg.data.encode())
+                elif msg.type in (_aiohttp.WSMsgType.CLOSE,
+                                  _aiohttp.WSMsgType.ERROR):
+                    break
+        except Exception:
+            pass
+
+    try:
+        done, pending = await asyncio.wait(
+            [
+                asyncio.create_task(device_to_dashboard()),
+                asyncio.create_task(dashboard_to_device()),
+            ],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+    finally:
+        log.info(f"[shell] Session ended: {device_id}")
+        if not done_future.done():
+            done_future.set_result(None)
+
 async def router(ws: WebSocketServerProtocol):
     path = ws.request.path if hasattr(ws, "request") else getattr(ws, "path", "/")
 
@@ -783,6 +883,8 @@ async def router(ws: WebSocketServerProtocol):
         await handle_control(ws)
     elif path == "/data":
         await handle_data(ws)
+    elif path.startswith("/shell/"):
+        await handle_shell(ws, path)
     else:
         log.warning(f"Unknown WebSocket path: {path} from {ws.remote_address}")
         await ws.close()
@@ -811,7 +913,7 @@ async def main():
     auth.maybe_generate_bootstrap_token()
 
     # ── API server ────────────────────────────────────────────────────────────
-    runner = await api.create_runner(_devices)
+    runner = await api.create_runner(_devices, _shell_pending, _shell_dashboard)
     await runner.setup()
     site = web.TCPSite(runner, SERVER_HOST, API_PORT)
     await site.start()
@@ -839,7 +941,8 @@ async def main():
             router,
             SERVER_HOST,
             SERVER_PORT,
-            ping_interval=None,
+            ping_interval=20,
+            ping_timeout=10,
             max_size=10 * 1024 * 1024,
         ):
             log.info("EchoMuse Controller ready — waiting for devices")

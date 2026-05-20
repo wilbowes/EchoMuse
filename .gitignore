@@ -2,3 +2,5 @@
 /device/build/server
 controller/.env
 controller/data/
+controller/static/vendor/
+controller/static/dashboard.js

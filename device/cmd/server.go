@@ -112,6 +112,11 @@ func main() {
 		applyHardwareConfig(msg)
 	})
 
+	// Mute state change — notify controller so dashboard can reflect it
+	s.SetMuteChangeCallback(func(muted bool) {
+		controlClient.SendMuteState(muted)
+	})
+
 	log.Println("Ready")
 	time.Sleep(2 * time.Second)
 

@@ -223,6 +223,18 @@ function Shell({ deviceId, token }) {
     setInput('');
   };
 
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter') {
+      send();
+    } else if (e.key === 'c' && e.ctrlKey) {
+      e.preventDefault();
+      if (ws && ws.readyState === 1) {
+        ws.send('\x03');
+        setLines(l => [...l, { type: 'in', text: '^C' }]);
+      }
+    }
+  };
+
   const lineColor = t => ({ sys: '#2a3020', in: '#c8d4b0', out: '#8aaa70', err: '#c04040' }[t] || '#8aaa70');
 
   return (
@@ -240,7 +252,7 @@ function Shell({ deviceId, token }) {
       <div style={{ display: 'flex', gap: 8, borderTop: '1px solid #1e2218', paddingTop: 10, alignItems: 'center' }}>
         <span style={{ color: '#6a9a50' }}>%</span>
         <input ref={inputRef} value={input} onChange={e => setInput(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && send()}
+          onKeyDown={handleKeyDown}
           placeholder="enter command..."
           style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', color: '#c8d4b0', fontFamily: "'DM Mono',monospace", fontSize: 12, caretColor: '#9aba80' }}
           autoFocus/>
@@ -651,14 +663,32 @@ function App() {
         case 'snapshot':
           setDevices(msg.devices);
           break;
+        case 'device_update':
+          // Merge partial state directly — no API round trip needed
+          if (msg.state) {
+            setDevices(prev => prev.map(d =>
+              d.device_id === msg.device_id ? { ...d, ...msg.state } : d
+            ));
+          }
+          break;
         case 'device_connected':
+          setDevices(prev => prev.map(d =>
+            d.device_id === msg.device_id ? { ...d, connected: true } : d
+          ));
+          break;
         case 'device_disconnected':
+          console.log('[ws] device_disconnected:', msg.device_id);
+          setDevices(prev => prev.map(d =>
+            d.device_id === msg.device_id
+              ? { ...d, connected: false, speaking: false, listening: false, thinking: false }
+              : d
+          ));
+          break;
         case 'device_updated':
         case 'device_rolled_back':
         case 'device_update_failed':
         case 'device_approved':
-        case 'device_update':
-          // Refresh device list on any state change
+          // Full refresh for structural changes
           API.get('/api/devices').then(setDevices).catch(() => {});
           break;
         case 'device_pending':
@@ -677,7 +707,16 @@ function App() {
       }, 5000);
     };
 
-    return () => ws.close();
+    // Polling fallback — catches anything the WebSocket misses
+    const poll = setInterval(() => {
+      API.get('/api/devices').then(setDevices).catch(() => {});
+    }, 5000);
+
+    return () => {
+      ws.close();
+      clearInterval(poll);
+    };
+
   }, [token]);
 
   if (!token) return <Login onLogin={handleLogin}/>;

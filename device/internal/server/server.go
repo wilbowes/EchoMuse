@@ -69,7 +69,6 @@ func NewServer(buttonController buttons.Controller, microphone mic.Microphone, s
 	router.POST("/speaker", server.speakerHandler)
 	router.GET("/volume", server.getVolumeHandler)
 	router.POST("/volume", server.setVolumeHandler)
-	router.GET("/shell", server.shellHandler)
 
 	server.router = router
 
@@ -116,6 +115,13 @@ func (s *Server) VolumeStepDown() {
 // MuteToggle toggles mic mute state — called by button handler.
 func (s *Server) MuteToggle() {
 	s.mute.Toggle()
+}
+
+// SetMuteChangeCallback wires a callback invoked when mute state changes.
+func (s *Server) SetMuteChangeCallback(cb func(muted bool)) {
+	s.mute.mu.Lock()
+	s.mute.onMuteChange = cb
+	s.mute.mu.Unlock()
 }
 
 // IsMuted returns true when the mic is muted — used to block dot button.

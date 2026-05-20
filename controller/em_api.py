@@ -71,14 +71,19 @@ _updates_in_progress: set[str] = set()
 
 # ─── Initialisation ───────────────────────────────────────────────────────────
 
-def init(devices_ref: dict) -> None:
+_shell_pending:   dict = {}
+_shell_dashboard: dict = {}
+
+def init(devices_ref: dict, shell_pending_ref: dict, shell_dashboard_ref: dict) -> None:
     """
-    Bind the live devices dict from em_controller.
+    Bind the live devices dict and shell_pending dict from em_controller.
 
     Must be called before create_app().
     """
-    global _devices
+    global _devices, _shell_pending, _shell_dashboard
     _devices = devices_ref
+    _shell_pending = shell_pending_ref
+    _shell_dashboard = shell_dashboard_ref
 
 
 async def create_app() -> web.Application:
@@ -91,8 +96,10 @@ async def create_app() -> web.Application:
     app = web.Application(middlewares=[_error_middleware])
 
     # Static / setup
-    app.router.add_get("/",       _serve_spa)
-    app.router.add_get("/setup",  _serve_spa)
+    app.router.add_get("/",           _serve_spa)
+    app.router.add_get("/setup",      _serve_spa)
+    app.router.add_get("/dashboard",  _serve_dashboard)
+    app.router.add_static("/static",  STATIC_DIR)
     app.router.add_post("/api/setup", _post_setup)
 
     # Auth
@@ -130,9 +137,9 @@ async def create_app() -> web.Application:
     return app
 
 
-async def create_runner(devices_ref: dict) -> web.AppRunner:
+async def create_runner(devices_ref: dict, shell_pending_ref: dict, shell_dashboard_ref: dict) -> web.AppRunner:
     """Convenience wrapper — init + create_app + AppRunner."""
-    init(devices_ref)
+    init(devices_ref, shell_pending_ref, shell_dashboard_ref)
     app = await create_app()
     return web.AppRunner(app)
 
@@ -169,6 +176,14 @@ async def _serve_spa(request: web.Request) -> web.Response:
             text="Dashboard not built — static/index.html not found",
         )
     return web.FileResponse(index)
+
+
+async def _serve_dashboard(request: web.Request) -> web.Response:
+    """Serve dashboard.html for /dashboard."""
+    dashboard = STATIC_DIR / "dashboard.html"
+    if not dashboard.exists():
+        return web.Response(status=503, text="dashboard.html not found in static/")
+    return web.FileResponse(dashboard)
 
 
 async def _post_setup(request: web.Request) -> web.Response:
@@ -616,15 +631,11 @@ async def _monitor_reconnect(
 
 async def _ws_shell(request: web.Request) -> web.WebSocketResponse:
     """
-    WS /api/devices/{id}/shell
+    WS /api/devices/{id}/shell — coordinates shell session.
 
-    Admin-only. Proxies the dashboard terminal (xterm.js) to the
-    device's /shell WebSocket endpoint on the Go binary.
-
-    The Go binary spawns sh as root and pipes its stdio as raw binary
-    frames. We proxy transparently — no framing added.
-
-    Auth via session cookie or ?token= query param.
+    Registers dashboard WS and done-Future, sends shell_open,
+    then waits for handle_shell to signal completion.
+    All proxying is done by handle_shell in em_controller.
     """
     device_id = request.match_info["id"]
 
@@ -641,46 +652,25 @@ async def _ws_shell(request: web.Request) -> web.WebSocketResponse:
     ws = web.WebSocketResponse()
     await ws.prepare(request)
 
-    device_ip = live.ip
-    shell_uri = f"ws://{device_ip}:8767/shell"
-
-    log.info(f"[api] Shell session opened: {device_id} by {user['username']}")
+    log.info(f"[api] Shell session requested: {device_id} by {user['username']}")
     await _push_log_event(device_id, "info", "controller",
                           f"Shell session opened by {user['username']}")
 
+    # Register BEFORE sending shell_open to avoid race with device
+    loop = asyncio.get_event_loop()
+    done_future = loop.create_future()
+    _shell_pending[device_id]   = done_future
+    _shell_dashboard[device_id] = ws
+
     try:
-        async with websockets.connect(shell_uri) as device_ws:
-
-            async def browser_to_device():
-                async for msg in ws:
-                    if msg.type == aiohttp.WSMsgType.BINARY:
-                        await device_ws.send(msg.data)
-                    elif msg.type == aiohttp.WSMsgType.TEXT:
-                        await device_ws.send(msg.data.encode())
-                    elif msg.type in (aiohttp.WSMsgType.CLOSE,
-                                      aiohttp.WSMsgType.ERROR):
-                        break
-
-            async def device_to_browser():
-                async for raw in device_ws:
-                    if isinstance(raw, bytes):
-                        await ws.send_bytes(raw)
-                    else:
-                        await ws.send_str(raw)
-
-            done, pending = await asyncio.wait(
-                [
-                    asyncio.create_task(browser_to_device()),
-                    asyncio.create_task(device_to_browser()),
-                ],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for task in pending:
-                task.cancel()
-
+        await live.send_control({"type": "shell_open"})
+        await done_future
     except Exception as e:
         log.warning(f"[api] Shell session error ({device_id}): {e}")
     finally:
+        _shell_pending.pop(device_id, None)
+        _shell_dashboard.pop(device_id, None)
+        await live.send_control({"type": "shell_close"})
         log.info(f"[api] Shell session closed: {device_id}")
         await _push_log_event(device_id, "info", "controller",
                               f"Shell session closed by {user['username']}")
@@ -1005,6 +995,24 @@ async def _fetch_binary(download_url: str) -> Optional[bytes]:
 
 # ─── Shell helpers ────────────────────────────────────────────────────────────
 
+async def _get_device_shell_ws(live) -> object:
+    """
+    Request a shell WebSocket from the device by sending shell_open
+    and waiting for the device to connect back.
+    Returns the device WebSocket or raises TimeoutError.
+    """
+    device_id = live.device_id
+    loop = asyncio.get_event_loop()
+    future = loop.create_future()
+    _shell_pending[device_id] = future
+    await live.send_control({"type": "shell_open"})
+    try:
+        return await asyncio.wait_for(future, timeout=15.0)
+    except asyncio.TimeoutError:
+        _shell_pending.pop(device_id, None)
+        raise
+
+
 async def _stream_binary_via_shell(live, binary: bytes) -> bool:
     """
     Transfer a binary to /data/local/bin/server.new on the device
@@ -1017,12 +1025,11 @@ async def _stream_binary_via_shell(live, binary: bytes) -> bool:
     """
     import base64
 
-    device_ip  = live.ip
-    shell_uri  = f"ws://{device_ip}:8767/shell"
     chunk_size = 4096  # bytes before base64 encoding
 
     try:
-        async with websockets.connect(shell_uri) as ws:
+        ws = await _get_device_shell_ws(live)
+        async with ws:
             # Prepare destination
             await ws.send("rm -f /data/local/bin/server.new\n")
             await asyncio.sleep(0.2)
@@ -1052,11 +1059,13 @@ async def _stream_binary_via_shell(live, binary: bytes) -> bool:
                     msg = await asyncio.wait_for(ws.recv(), timeout=5)
                     if "TRANSFER_OK" in str(msg):
                         log.info(f"[api] Binary transfer confirmed")
+                        await live.send_control({"type": "shell_close"})
                         return True
                 except asyncio.TimeoutError:
                     continue
 
             log.error("[api] Binary transfer timed out waiting for TRANSFER_OK")
+            await live.send_control({"type": "shell_close"})
             return False
 
     except Exception as e:
@@ -1066,12 +1075,12 @@ async def _stream_binary_via_shell(live, binary: bytes) -> bool:
 
 async def _exec_shell(live, cmd: str) -> None:
     """Send a command to the device shell and return immediately."""
-    device_ip = live.ip
-    shell_uri = f"ws://{device_ip}:8767/shell"
     try:
-        async with websockets.connect(shell_uri) as ws:
-            await ws.send(cmd + "\n")
-            await asyncio.sleep(0.5)
+        ws = await _get_device_shell_ws(live)
+        await ws.send(cmd + "\n")
+        await asyncio.sleep(0.5)
+        await ws.close()
+        await live.send_control({"type": "shell_close"})
     except Exception as e:
         log.warning(f"[api] Shell exec failed ({cmd!r}): {e}")
 

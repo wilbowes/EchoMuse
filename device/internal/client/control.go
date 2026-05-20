@@ -56,8 +56,17 @@ type ControlClient struct {
 	pendingCallback       StateCallback
 	configAppliedCallback ConfigAppliedCallback
 
-	conn   *websocket.Conn
-	connMu sync.Mutex
+	conn         *websocket.Conn
+	connMu       sync.Mutex
+
+	// serverAddr is the controller address (host:port), set on successful connect.
+	// Used by the shell dialler to connect back to the controller.
+	serverAddr   string
+	serverAddrMu sync.RWMutex
+
+	// shellCancel cancels a running shell session when shell_close is received.
+	shellCancel context.CancelFunc
+	shellMu     sync.Mutex
 }
 
 func NewControlClient(
@@ -75,10 +84,10 @@ func NewControlClient(
 	}
 }
 
-func (c *ControlClient) OnDisconnected(cb StateCallback)             { c.disconnectedCallback = cb }
-func (c *ControlClient) OnConnected(cb StateCallback)               { c.connectedCallback = cb }
-func (c *ControlClient) OnPending(cb StateCallback)                 { c.pendingCallback = cb }
-func (c *ControlClient) OnConfigApplied(cb ConfigAppliedCallback)   { c.configAppliedCallback = cb }
+func (c *ControlClient) OnDisconnected(cb StateCallback)           { c.disconnectedCallback = cb }
+func (c *ControlClient) OnConnected(cb StateCallback)             { c.connectedCallback = cb }
+func (c *ControlClient) OnPending(cb StateCallback)               { c.pendingCallback = cb }
+func (c *ControlClient) OnConfigApplied(cb ConfigAppliedCallback) { c.configAppliedCallback = cb }
 
 var errPending = fmt.Errorf("pending approval")
 
@@ -104,7 +113,6 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 				log.Printf("[data] stopped: %v", err)
 			}
 		}()
-
 
 		log.Printf("[control] Connecting to %s", server.Addr)
 		err = c.connect(ctx, server.Addr, data)
@@ -154,6 +162,11 @@ func (c *ControlClient) connect(ctx context.Context, addr string, data *DataClie
 		c.conn = nil
 		c.connMu.Unlock()
 	}()
+
+	// Store controller address for outbound shell connections
+	c.serverAddrMu.Lock()
+	c.serverAddr = addr
+	c.serverAddrMu.Unlock()
 
 	regBytes, _ := json.Marshal(map[string]interface{}{
 		"type":         "register",
@@ -246,6 +259,34 @@ func (c *ControlClient) connect(ctx context.Context, addr string, data *DataClie
 				}
 			}
 
+		case "shell_open":
+			// Controller is requesting a shell session.
+			// Dial outbound to ws://controller/shell/{device_id} and pipe sh stdio.
+			log.Printf("[control] shell_open received — dialling controller shell endpoint")
+			c.shellMu.Lock()
+			if c.shellCancel != nil {
+				// Close any existing session first
+				c.shellCancel()
+			}
+			shellCtx, shellCancel := context.WithCancel(ctx)
+			c.shellCancel = shellCancel
+			c.shellMu.Unlock()
+
+			c.serverAddrMu.RLock()
+			controllerAddr := c.serverAddr
+			c.serverAddrMu.RUnlock()
+
+			go c.runShellSession(shellCtx, controllerAddr)
+
+		case "shell_close":
+			log.Printf("[control] shell_close received — closing shell session")
+			c.shellMu.Lock()
+			if c.shellCancel != nil {
+				c.shellCancel()
+				c.shellCancel = nil
+			}
+			c.shellMu.Unlock()
+
 		case "ping":
 			c.writeJSON(map[string]string{"type": "pong"})
 
@@ -256,6 +297,86 @@ func (c *ControlClient) connect(ctx context.Context, addr string, data *DataClie
 			log.Printf("[control] Unknown message type: %s", peek.Type)
 		}
 	}
+}
+
+// runShellSession dials the controller's /shell/{device_id} endpoint,
+// spawns sh, and pipes its stdio bidirectionally until ctx is cancelled
+// or the connection drops.
+func (c *ControlClient) runShellSession(ctx context.Context, controllerAddr string) {
+	shellURL := "ws://" + controllerAddr + "/shell/" + c.deviceID
+	log.Printf("[shell] Connecting to controller: %s", shellURL)
+
+	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
+	conn, _, err := dialer.DialContext(ctx, shellURL, http.Header{})
+	if err != nil {
+		log.Printf("[shell] Failed to connect to controller: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	log.Println("[shell] Connected — spawning sh")
+
+	cmd := exec.CommandContext(ctx, "/system/bin/sh")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		log.Printf("[shell] StdinPipe: %v", err)
+		return
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		log.Printf("[shell] StdoutPipe: %v", err)
+		return
+	}
+	cmd.Stderr = cmd.Stdout // merge stderr into stdout
+
+	if err := cmd.Start(); err != nil {
+		log.Printf("[shell] cmd.Start: %v", err)
+		return
+	}
+
+	done := make(chan struct{})
+
+	// stdout → WebSocket
+	go func() {
+		defer close(done)
+		buf := make([]byte, 4096)
+		for {
+			n, err := stdout.Read(buf)
+			if n > 0 {
+				if werr := conn.WriteMessage(websocket.BinaryMessage, buf[:n]); werr != nil {
+					log.Printf("[shell] write to WS: %v", werr)
+					break
+				}
+			}
+			if err != nil {
+				break
+			}
+		}
+	}()
+
+	// WebSocket → stdin
+	go func() {
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				break
+			}
+			if _, err := stdin.Write(data); err != nil {
+				break
+			}
+		}
+		stdin.Close()
+	}()
+
+	// Wait for shell exit, ctx cancel, or connection drop
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+
+	cmd.Process.Kill()
+	cmd.Wait()
+	log.Println("[shell] Session closed")
 }
 
 func (c *ControlClient) SendButton(event buttons.ButtonClickEvent) {
@@ -271,6 +392,15 @@ func (c *ControlClient) SendButton(event buttons.ButtonClickEvent) {
 	if err := c.writeJSON(msg); err != nil {
 		log.Printf("[control] SendButton failed: %v", err)
 	}
+}
+
+// SendMuteState notifies the controller of the current mute state.
+// Safe for concurrent use — silently drops if not connected.
+func (c *ControlClient) SendMuteState(muted bool) {
+	_ = c.writeJSON(map[string]interface{}{
+		"type":  "mute_state",
+		"muted": muted,
+	})
 }
 
 // SendLog sends a structured log entry to the controller.
