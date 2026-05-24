@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/wilbowes/EchoMuse/internal/beamformer"
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/pkg/mic"
 	"github.com/wilbowes/EchoMuse/pkg/speaker"
@@ -35,18 +36,6 @@ const (
 	vadOwwChunkBytes = 1280 * 2                                        // 2560 bytes = 80ms
 )
 
-func vadExtractMono(raw []byte, channel int) []byte {
-	frameSize := vadMicChannels * vadByteSample
-	nFrames := len(raw) / frameSize
-	offset := channel * vadByteSample
-	out := make([]byte, nFrames*2)
-	for i := 0; i < nFrames; i++ {
-		base := i*frameSize + offset
-		out[i*2] = raw[base+1]
-		out[i*2+1] = raw[base+2]
-	}
-	return out
-}
 
 func vadPeriodRMS(mono []byte) float64 {
 	n := len(mono) / 2
@@ -77,6 +66,10 @@ type DataClient struct {
 
 	conn   *websocket.Conn
 	connMu sync.Mutex
+
+	beam            *beamformer.Beamformer
+	onDirectionChange func(angle float64)
+	directionMu       sync.Mutex
 }
 
 func NewDataClient(deviceID string, microphone mic.Subscribable, spk speaker.Speaker) *DataClient {
@@ -85,7 +78,16 @@ func NewDataClient(deviceID string, microphone mic.Subscribable, spk speaker.Spe
 		mic:      microphone,
 		spk:      spk,
 		readyCh:  make(chan string, 1),
+		beam:     beamformer.New(),
 	}
+}
+
+// OnDirectionChanged registers a callback invoked when the estimated dominant
+// source direction changes. Called from the mic streaming goroutine — keep it fast.
+func (d *DataClient) OnDirectionChanged(cb func(angle float64)) {
+	d.directionMu.Lock()
+	d.onDirectionChange = cb
+	d.directionMu.Unlock()
 }
 
 func (d *DataClient) NotifyReady(serverAddr string) {
@@ -217,7 +219,6 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}) {
 	// Snapshot config at stream start; the live config is re-read each
 	// frame for threshold so changes are picked up within one frame window.
 	cfg := config.Get()
-	channel := cfg.VadChannel
 
 	speechCount  := 0
 	silenceCount := 0
@@ -256,9 +257,21 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}) {
 			if speechNeeded < 1 { speechNeeded = 1 }
 			if silenceMax   < 1 { silenceMax   = 1 }
 
-			mono   := vadExtractMono(raw, channel)
+			// Beamform: produce mono S16_LE + estimated source angle
+			beamEnabled := snap.BeamformingEnabled != nil && *snap.BeamformingEnabled
+			mono, angle := d.beam.Process(raw, snap.BeamAngle, beamEnabled)
 			rms    := vadPeriodRMS(mono)
 			speech := rms >= threshold
+
+			// Notify direction listener — non-blocking, keep it fast
+			if angle >= 0 {
+				d.directionMu.Lock()
+				cb := d.onDirectionChange
+				d.directionMu.Unlock()
+				if cb != nil {
+					cb(angle)
+				}
+			}
 
 			if speech {
 				silenceCount = 0

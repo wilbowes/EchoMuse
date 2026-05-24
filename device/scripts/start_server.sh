@@ -17,9 +17,16 @@ tinymix -D 0 56 On
 tinymix -D 0 64 1 1
 tinymix -D 0 88 On
 tinymix -D 0 61 100 100
-# Mic gain — ADC_A channel 0, used for VAD and voice turns
-tinymix -D 0 89 100 100
-tinymix -D 0 92 60 60
+# Mic gain — equalised across all four ADCs (A/B/C/D)
+# Digital volume: 88/88, MICPGA: 40/40 — consistent across all channels
+tinymix -D 0 89 88 88
+tinymix -D 0 92 40 40
+tinymix -D 0 107 88 88
+tinymix -D 0 110 40 40
+tinymix -D 0 125 88 88
+tinymix -D 0 128 40 40
+tinymix -D 0 143 88 88
+tinymix -D 0 146 40 40
 /data/local/bin/volume_buttons.sh &
 kill $(ps | grep ledcontroller | grep -v grep)
 exec /data/local/bin/server > /tmp/server.log 2>&1

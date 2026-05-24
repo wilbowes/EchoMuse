@@ -123,7 +123,31 @@ function Slider({ label, sub, value, min, max, step = 1, unit = '', onChange }) 
   );
 }
 
-// ─── LED Ring ─────────────────────────────────────────────────────────────────
+function Toggle({ label, sub, value, onChange }) {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+      <div>
+        <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: 'var(--text2)' }}>{label}</span>
+        {sub && <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)', marginLeft: 8 }}>{sub}</span>}
+      </div>
+      <div onClick={() => onChange(!value)} style={{
+        width: 36, height: 20, borderRadius: 10, cursor: 'pointer', position: 'relative',
+        background: value ? '#405878' : '#888480',
+        border: value ? '1px solid #304860' : '1px solid #686460',
+        transition: 'background 0.15s',
+      }}>
+        <div style={{
+          position: 'absolute', top: 2, left: value ? 17 : 2,
+          width: 14, height: 14, borderRadius: 7,
+          background: value ? '#dde8f0' : '#ccc8c4',
+          transition: 'left 0.15s',
+        }}/>
+      </div>
+    </div>
+  );
+}
+
+
 
 function LedRing({ state, size = 120 }) {
   const cx = size / 2, cy = size / 2, r = size * 0.38;
@@ -435,10 +459,15 @@ function Detail({ device, token, onClose, onApprove, isAdmin }) {
           {/* CONFIG */}
           {tab === 'config' && (
             <div style={{ maxWidth: 440 }}>
-              <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 20 }}>Microphone · ADC_A ch0</div>
-              <Slider label="Digital Gain" sub="ctl 89" value={config.adcDigitalGain} min={0} max={100} onChange={v => setConf('adcDigitalGain', v)}/>
-              <Slider label="MICPGA" sub="ctl 92" value={config.adcMicpga} min={0} max={100} onChange={v => setConf('adcMicpga', v)}/>
+              <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 20 }}>Microphone · 7-mic array</div>
+              <Slider label="Digital Gain" sub="ctl 89–143 all ADCs" value={config.adcDigitalGain} min={0} max={100} onChange={v => setConf('adcDigitalGain', v)}/>
+              <Slider label="MICPGA" sub="ctl 92–146 all ADCs" value={config.adcMicpga} min={0} max={100} onChange={v => setConf('adcMicpga', v)}/>
               <Slider label="VAD Threshold" sub="RMS" value={config.vadThreshold} min={0.001} max={0.02} step={0.001} onChange={v => setConf('vadThreshold', v)}/>
+              <Slider label="VAD Speech Ms" sub="min speech to open gate" value={config.vadSpeechMs} min={32} max={320} step={32} onChange={v => setConf('vadSpeechMs', v)}/>
+              <Slider label="VAD Silence Ms" sub="silence to close gate" value={config.vadSilenceMs} min={200} max={2000} step={100} onChange={v => setConf('vadSilenceMs', v)}/>
+              <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', margin: '28px 0 20px' }}>Beamforming · Delay and Sum</div>
+              <Toggle label="Enabled" sub="7-mic delay-and-sum" value={config.beamformingEnabled ?? true} onChange={v => setConf('beamformingEnabled', v)}/>
+              <Slider label="Beam Angle" sub="-1 = auto" value={config.beamAngle ?? -1} min={-1} max={359} step={1} onChange={v => setConf('beamAngle', v)}/>
               <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', margin: '28px 0 20px' }}>Speaker · TLV320 · card 0 dev 23</div>
               <Slider label="Startup Volume" sub="ctl 61" value={config.startupVolume} min={0} max={100} onChange={v => setConf('startupVolume', v)}/>
               <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', margin: '28px 0 20px' }}>Wake Word · OpenWakeWord</div>

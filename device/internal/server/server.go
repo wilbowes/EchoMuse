@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"golang.org/x/sys/unix"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"sync"
@@ -18,6 +19,15 @@ import (
 )
 
 const Port = internal.Port
+
+// ledMode controls which subsystem currently owns the LED ring.
+// Higher value = higher priority.
+type ledMode int
+
+const (
+	ledModeDirection ledMode = iota // beamformer arc — lowest priority
+	ledModeSystem                   // controller/mute/pulse — highest priority
+)
 
 type Server struct {
 	router           *gin.Engine
@@ -28,6 +38,9 @@ type Server struct {
 	speaker          speaker.Speaker
 	volume           *volumeController
 	mute             *muteController
+
+	ledModeMu sync.Mutex
+	ledMode   ledMode
 }
 
 func NewServer(buttonController buttons.Controller, microphone mic.Microphone, speaker speaker.Speaker) *Server {
@@ -233,8 +246,64 @@ func getUptime() (time.Duration, error) {
 	return time.Second * time.Duration(info.Uptime), nil
 }
 
+// SetLEDMode sets the current LED priority mode.
+// Call with ledModeSystem when taking over the ring (pulse, mute, controller command).
+// Call with ledModeDirection when returning to idle so the beamformer arc shows again.
+func (s *Server) SetLEDMode(m ledMode) {
+	s.ledModeMu.Lock()
+	s.ledMode = m
+	s.ledModeMu.Unlock()
+}
+
+// LEDModeSystem claims the LED ring for system use.
+func (s *Server) LEDModeSystem() { s.SetLEDMode(ledModeSystem) }
+
+// LEDModeDirection releases the LED ring back to the beamformer arc.
+func (s *Server) LEDModeDirection() { s.SetLEDMode(ledModeDirection) }
+
+// SetDirectionLEDs lights a soft arc on the LED ring toward the estimated
+// source direction. Called from the data client's mic streaming goroutine.
+// Silently ignored when the system has claimed the ring.
+func (s *Server) SetDirectionLEDs(angleDeg float64) {
+	s.ledModeMu.Lock()
+	mode := s.ledMode
+	s.ledModeMu.Unlock()
+	if mode != ledModeDirection {
+		return
+	}
+
+	s.ledMu.Lock()
+	lc := s.ledController
+	s.ledMu.Unlock()
+	if lc == nil {
+		return
+	}
+
+	const (
+		nLEDs     = 12
+		bright    = uint8(18)
+		dimBright = uint8(8)
+	)
+
+	primary   := int(math.Round(angleDeg/30)) % nLEDs
+	secondary := (primary + 1) % nLEDs
+
+	leds := make([]led.Led, nLEDs)
+	for i := range leds {
+		leds[i] = led.Led{ID: i}
+	}
+	leds[primary]   = led.Led{ID: primary,   R: 0, G: dimBright, B: bright}
+	leds[secondary] = led.Led{ID: secondary, R: 0, G: 0,         B: dimBright}
+
+	if err := lc.SetLEDs(leds...); err != nil {
+		log.Printf("SetDirectionLEDs error: %v", err)
+	}
+}
+
 // SetLEDs applies LED state directly — called by the Clara client when server sends LED commands.
+// Always claims system mode — direction arc is suppressed while controller owns the ring.
 func (s *Server) SetLEDs(leds []led.Led) {
+	s.LEDModeSystem()
 	s.ledMu.Lock()
 	lc := s.ledController
 	s.ledMu.Unlock()

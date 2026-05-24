@@ -1,5 +1,5 @@
 .idea
-/device/build/server
+/device/build/
 controller/.env
 controller/data/
 controller/static/vendor/

@@ -32,14 +32,16 @@ log = logging.getLogger("echomuse.db")
 # ─── Default device config ────────────────────────────────────────────────────
 
 DEFAULT_DEVICE_CONFIG = {
-    "adcDigitalGain":  100,
-    "adcMicpga":       60,
-    "startupVolume":   85,
-    "vadThreshold":    0.004,
-    "vadSpeechMs":     80,
-    "vadSilenceMs":    600,
-    "owwThreshold":    0.3,
-    "owwModel":        "hey_jarvis_v0.1",
+    "adcDigitalGain":   88,
+    "adcMicpga":        40,
+    "startupVolume":    85,
+    "vadThreshold":     0.004,
+    "vadSpeechMs":      32,
+    "vadSilenceMs":     600,
+    "owwThreshold":     0.3,
+    "owwModel":         "hey_jarvis_v0.1",
+    "beamformingEnabled": True,
+    "beamAngle":        -1,
 }
 
 # Maximum log rows retained per device. Older rows are pruned on insert.

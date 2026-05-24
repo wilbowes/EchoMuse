@@ -130,7 +130,9 @@ class Device:
         self.data_ws: WebSocketServerProtocol | None = None
         self.voice_lock   = asyncio.Lock()
         self.cancel_event = asyncio.Event()
-        self.mic_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=64)
+        self.mic_queue:   asyncio.Queue[bytes] = asyncio.Queue(maxsize=64)
+        self.voice_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=256)
+        self.oww_paused   = asyncio.Event()  # set during voice turn
 
         # Transient state — read by em_api._merge_device()
         self.speaking  = False
@@ -166,6 +168,9 @@ class Device:
 
     async def mic_stop(self):
         await self.send_control({"type": "mic_stop"})
+
+    async def push_config(self, **kwargs):
+        await self.send_control({"type": "config", **kwargs})
 
     async def stream_speaker(self, pcm: bytes):
         """Stream resampled stereo 48kHz PCM as 0x02 frames, then 0x03 EOS."""
@@ -311,7 +316,7 @@ async def run_voice_turn(device: Device):
                             return
                         try:
                             payload = await asyncio.wait_for(
-                                device.mic_queue.get(), timeout=2.0
+                                device.voice_queue.get(), timeout=2.0
                             )
                         except asyncio.TimeoutError:
                             continue
@@ -427,9 +432,29 @@ async def run_voice_turn(device: Device):
 
 
 async def _run_voice_locked(device: Device):
-    device.cancel_event.clear()
-    async with device.voice_lock:
-        await run_voice_turn(device)
+    # oww_paused already set by caller (button handler or OWW trigger)
+    # Drain any frames already in the queues — stale from OWW
+    drained = 0
+    while not device.mic_queue.empty():
+        try:
+            device.mic_queue.get_nowait()
+            drained += 1
+        except asyncio.QueueEmpty:
+            break
+    while not device.voice_queue.empty():
+        try:
+            device.voice_queue.get_nowait()
+            drained += 1
+        except asyncio.QueueEmpty:
+            break
+    if drained:
+        log.info(f"[{device.device_id}] Voice turn: drained {drained} stale frames")
+    try:
+        async with device.voice_lock:
+            await run_voice_turn(device)
+    finally:
+        device.oww_paused.clear()
+        log.info(f"[{device.device_id}] oww_paused cleared")
 
 
 # ─── Wake word listener ───────────────────────────────────────────────────────
@@ -478,6 +503,12 @@ async def wake_word_listener(device: Device):
                 # VAD end sentinel — discard, OWW handles its own state
                 buf.clear()
                 continue
+
+            # During a voice turn the OWW loop stops consuming —
+            # frames go into voice_queue instead (see data handler)
+            if device.oww_paused.is_set():
+                continue
+
             buf.extend(payload)
             while len(buf) >= CHUNK_BYTES:
                 frame   = bytes(buf[:CHUNK_BYTES])
@@ -505,13 +536,15 @@ async def wake_word_listener(device: Device):
                         await device.mic_stop()
                         model.reset()
                         buf.clear()
+                        device.cancel_event.clear()
+                        device.oww_paused.set()
                         await _run_voice_locked(device)
 
                         # Drain stale frames accumulated during voice turn
                         drained = 0
-                        while not device.mic_queue.empty():
+                        while not device.voice_queue.empty():
                             try:
-                                device.mic_queue.get_nowait()
+                                device.voice_queue.get_nowait()
                                 drained += 1
                             except asyncio.QueueEmpty:
                                 break
@@ -551,7 +584,13 @@ async def handle_button_event(device: Device, event: dict):
             device.cancel_event.set()
         else:
             log.info(f"[{device.device_id}] Dot button → voice turn")
-            asyncio.create_task(_run_voice_locked(device))
+            device.cancel_event.clear()
+            device.oww_paused.set()
+            async def _button_voice_turn():
+                await _run_voice_locked(device)
+                log.info(f"[{device.device_id}] Button turn complete — restarting mic")
+                await device.mic_start()
+            asyncio.create_task(_button_voice_turn())
 
 
 # ─── Control plane handler ────────────────────────────────────────────────────
@@ -774,20 +813,26 @@ async def handle_data(ws: WebSocketServerProtocol):
                 continue
             if len(raw) <= MIC_HEADER_LEN:
                 continue
-            if raw[0] == VAD_END_TYPE:
-                # Device VAD gate closed — signal end of speech
+            if raw[0] != MIC_FRAME_TYPE:
+                continue
+            # VAD end sentinel: mic frame with single-byte payload 0x04
+            if len(raw) == MIC_HEADER_LEN + 1 and raw[MIC_HEADER_LEN] == VAD_END_TYPE:
                 try:
-                    device.mic_queue.put_nowait(None)
+                    if device.oww_paused.is_set():
+                        device.voice_queue.put_nowait(None)
+                    else:
+                        device.mic_queue.put_nowait(None)
                 except asyncio.QueueFull:
                     pass
                 continue
-            if raw[0] != MIC_FRAME_TYPE:
-                continue
             payload = raw[MIC_HEADER_LEN:]
             try:
-                device.mic_queue.put_nowait(payload)
+                if device.oww_paused.is_set():
+                    device.voice_queue.put_nowait(payload)
+                else:
+                    device.mic_queue.put_nowait(payload)
             except asyncio.QueueFull:
-                pass   # OWW fell behind — drop frame
+                pass
 
     except asyncio.TimeoutError:
         log.warning(f"[data] Identify timeout from {remote}")

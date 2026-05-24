@@ -57,6 +57,11 @@ func main() {
 	ctx := context.Background()
 
 	dataClient := client.NewDataClient(deviceID, microphone, pcmSpeaker)
+
+	// Direction callback — update LED ring to show estimated source angle
+	dataClient.OnDirectionChanged(func(angle float64) {
+		s.SetDirectionLEDs(angle)
+	})
 	controlClient := client.NewControlClient(
 		deviceID,
 		func(leds []led.Led) { s.SetLEDs(leds) },
@@ -98,13 +103,14 @@ func main() {
 		go pulseWhite(pulseCtx, s)
 	})
 
-	// Connected — stop pulse, clear LEDs
+	// Connected — stop pulse, clear LEDs, hand ring back to direction arc
 	controlClient.OnConnected(func() {
 		if pulseCancel != nil {
 			pulseCancel()
 			pulseCancel = nil
 		}
 		s.SetLEDs(allLEDs(0, 0, 0))
+		s.LEDModeDirection()
 	})
 
 	// Config applied — apply hardware changes via tinymix
@@ -113,8 +119,12 @@ func main() {
 	})
 
 	// Mute state change — notify controller so dashboard can reflect it
+	// When unmuting, release ring back to direction arc
 	s.SetMuteChangeCallback(func(muted bool) {
 		controlClient.SendMuteState(muted)
+		if !muted {
+			s.LEDModeDirection()
+		}
 	})
 
 	log.Println("Ready")
@@ -134,9 +144,15 @@ func main() {
 func applyHardwareConfig(msg config.ConfigMessage) {
 	if msg.AdcDigitalGain > 0 {
 		tinymix("89", strconv.Itoa(msg.AdcDigitalGain), strconv.Itoa(msg.AdcDigitalGain))
+		tinymix("107", strconv.Itoa(msg.AdcDigitalGain), strconv.Itoa(msg.AdcDigitalGain))
+		tinymix("125", strconv.Itoa(msg.AdcDigitalGain), strconv.Itoa(msg.AdcDigitalGain))
+		tinymix("143", strconv.Itoa(msg.AdcDigitalGain), strconv.Itoa(msg.AdcDigitalGain))
 	}
 	if msg.AdcMicpga > 0 {
 		tinymix("92", strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
+		tinymix("110", strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
+		tinymix("128", strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
+		tinymix("146", strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
 	}
 	if msg.StartupVolume > 0 {
 		tinymix("61", strconv.Itoa(msg.StartupVolume), strconv.Itoa(msg.StartupVolume))

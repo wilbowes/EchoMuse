@@ -33,6 +33,11 @@ type Device struct {
 	AdcDigitalGain int
 	AdcMicpga      int
 
+	// BeamAngle fixes the beamformer steering direction in degrees
+	// (0–360, clockwise from 12 o'clock). -1 = auto (track loudest source).
+	BeamAngle          float64
+	BeamformingEnabled bool
+
 	initialised bool
 }
 
@@ -60,8 +65,10 @@ func (d *Device) loadDefaults() {
 	d.StartupVolume = envInt("STARTUP_VOLUME", 85)
 	d.OwwThreshold  = envFloat("OWW_THRESHOLD", 0.3)
 	d.OwwModel      = envStr("OWW_MODEL", "hey_jarvis_v0.1")
-	d.AdcDigitalGain = envInt("ADC_DIGITAL_GAIN", 100)
-	d.AdcMicpga      = envInt("ADC_MICPGA", 60)
+	d.AdcDigitalGain    = envInt("ADC_DIGITAL_GAIN", 88)
+	d.AdcMicpga         = envInt("ADC_MICPGA", 40)
+	d.BeamAngle         = envFloat("BEAM_ANGLE", -1)
+	d.BeamformingEnabled = envBool("BEAMFORMING_ENABLED", true)
 }
 
 // Apply updates the config from a controller-pushed config message.
@@ -100,6 +107,12 @@ func (d *Device) Apply(msg ConfigMessage) {
 	if msg.AdcMicpga > 0 {
 		d.AdcMicpga = msg.AdcMicpga
 	}
+	if msg.BeamAngle != 0 {
+		d.BeamAngle = msg.BeamAngle
+	}
+	if msg.BeamformingEnabled != nil {
+		d.BeamformingEnabled = *msg.BeamformingEnabled
+	}
 }
 
 // Snapshot returns a consistent copy of all config values.
@@ -107,29 +120,34 @@ func (d *Device) Snapshot() ConfigMessage {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return ConfigMessage{
-		VadThreshold:   d.VadThreshold,
-		VadSpeechMs:    d.VadSpeechMs,
-		VadSilenceMs:   d.VadSilenceMs,
-		OwwThreshold:   d.OwwThreshold,
-		OwwModel:       d.OwwModel,
-		StartupVolume:  d.StartupVolume,
-		AdcDigitalGain: d.AdcDigitalGain,
-		AdcMicpga:      d.AdcMicpga,
+		VadThreshold:        d.VadThreshold,
+		VadSpeechMs:         d.VadSpeechMs,
+		VadSilenceMs:        d.VadSilenceMs,
+		OwwThreshold:        d.OwwThreshold,
+		OwwModel:            d.OwwModel,
+		StartupVolume:       d.StartupVolume,
+		AdcDigitalGain:      d.AdcDigitalGain,
+		AdcMicpga:           d.AdcMicpga,
+		BeamAngle:           d.BeamAngle,
+		BeamformingEnabled:  &d.BeamformingEnabled,
 	}
 }
 
 // ConfigMessage mirrors the JSON shape of the config control message
 // sent by the controller. JSON tags must match em_controller.py exactly.
 type ConfigMessage struct {
-	Type           string  `json:"type,omitempty"`
-	AdcDigitalGain int     `json:"adcDigitalGain,omitempty"`
-	AdcMicpga      int     `json:"adcMicpga,omitempty"`
-	StartupVolume  int     `json:"startupVolume,omitempty"`
-	VadThreshold   float64 `json:"vadThreshold,omitempty"`
-	VadSpeechMs    int     `json:"vadSpeechMs,omitempty"`
-	VadSilenceMs   int     `json:"vadSilenceMs,omitempty"`
-	OwwThreshold   float64 `json:"owwThreshold,omitempty"`
-	OwwModel       string  `json:"owwModel,omitempty"`
+	Type               string  `json:"type,omitempty"`
+	AdcDigitalGain     int     `json:"adcDigitalGain,omitempty"`
+	AdcMicpga          int     `json:"adcMicpga,omitempty"`
+	StartupVolume      int     `json:"startupVolume,omitempty"`
+	VadThreshold       float64 `json:"vadThreshold,omitempty"`
+	VadSpeechMs        int     `json:"vadSpeechMs,omitempty"`
+	VadSilenceMs       int     `json:"vadSilenceMs,omitempty"`
+	OwwThreshold       float64 `json:"owwThreshold,omitempty"`
+	OwwModel           string  `json:"owwModel,omitempty"`
+	BeamAngle           float64  `json:"beamAngle,omitempty"`
+	BeamformingEnabled  *bool    `json:"beamformingEnabled,omitempty"`
+	HasBeamforming      bool     `json:"hasBeamforming,omitempty"`
 }
 
 // ─── env helpers ──────────────────────────────────────────────────────────────
@@ -148,6 +166,13 @@ func envFloat(key string, def float64) float64 {
 		if f, err := strconv.ParseFloat(v, 64); err == nil {
 			return f
 		}
+	}
+	return def
+}
+
+func envBool(key string, def bool) bool {
+	if v := os.Getenv(key); v != "" {
+		return v == "1" || v == "true" || v == "True"
 	}
 	return def
 }
