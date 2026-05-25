@@ -36,7 +36,6 @@ const (
 	vadOwwChunkBytes = 1280 * 2                                        // 2560 bytes = 80ms
 )
 
-
 func vadPeriodRMS(mono []byte) float64 {
 	n := len(mono) / 2
 	if n == 0 {
@@ -67,7 +66,7 @@ type DataClient struct {
 	conn   *websocket.Conn
 	connMu sync.Mutex
 
-	beam            *beamformer.Beamformer
+	beam              *beamformer.Beamformer
 	onDirectionChange func(angle float64)
 	directionMu       sync.Mutex
 }
@@ -102,7 +101,7 @@ func (d *DataClient) NotifyReady(serverAddr string) {
 	}
 }
 
-func (d *DataClient) StartMic() {
+func (d *DataClient) StartMic(lockMic bool) {
 	d.micMu.Lock()
 	defer d.micMu.Unlock()
 	if d.micActive {
@@ -118,7 +117,7 @@ func (d *DataClient) StartMic() {
 	}
 	d.micActive = true
 	d.micStopCh = make(chan struct{})
-	go d.streamMic(conn, d.micStopCh)
+	go d.streamMic(conn, d.micStopCh, lockMic)
 	log.Println("[data] Mic streaming started")
 }
 
@@ -130,6 +129,7 @@ func (d *DataClient) StopMic() {
 	}
 	close(d.micStopCh)
 	d.micActive = false
+	d.beam.Unlock()
 	log.Println("[data] Mic streaming stopped")
 }
 
@@ -207,17 +207,19 @@ func (d *DataClient) connect(ctx context.Context, addr string) error {
 // streamMic subscribes to the mic, runs VAD gate, streams binary frames.
 // VAD parameters are read from the shared config on each frame so that
 // controller-pushed config changes take effect without a restart.
-func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}) {
+func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, lockMic bool) {
 	if d.mic == nil {
 		log.Println("[data] streamMic: no mic")
 		return
 	}
 
+	if lockMic {
+		d.beam.Lock()
+	}
+
 	ch := d.mic.Subscribe()
 	defer d.mic.Unsubscribe(ch)
 
-	// Snapshot config at stream start; the live config is re-read each
-	// frame for threshold so changes are picked up within one frame window.
 	cfg := config.Get()
 
 	speechCount  := 0
@@ -249,7 +251,6 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}) {
 				return
 			}
 
-			// Re-read live config each frame — picks up controller pushes
 			snap := cfg.Snapshot()
 			threshold    := snap.VadThreshold
 			speechNeeded := snap.VadSpeechMs / 32
@@ -257,7 +258,6 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}) {
 			if speechNeeded < 1 { speechNeeded = 1 }
 			if silenceMax   < 1 { silenceMax   = 1 }
 
-			// Beamform: produce mono S16_LE + estimated source angle
 			beamEnabled := snap.BeamformingEnabled != nil && *snap.BeamformingEnabled
 			mono, angle := d.beam.Process(raw, snap.BeamAngle, beamEnabled)
 			rms    := vadPeriodRMS(mono)
@@ -297,7 +297,6 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}) {
 							}
 							buf = buf[:0]
 						}
-						// Signal end of speech to the controller
 						sendFrame([]byte{frameTypeVADEnd})
 					}
 				}

@@ -1,4 +1,4 @@
-// Package beamformer implements delay-and-sum beamforming for the
+// Package beamformer implements directional mic selection for the
 // Echo Dot Gen 2 (biscuit) 7-microphone array.
 //
 // # Mic geometry (confirmed empirically, 2026-05)
@@ -16,23 +16,35 @@
 //
 // # Algorithm
 //
-// Delay-and-sum: for a target angle θ, each perimeter mic receives the
-// wavefront at a different time. We compensate by applying a fractional
-// sample delay per channel, then sum all 7 channels. Sound from θ adds
-// constructively; sound from other directions partially cancels.
+// Two modes:
 //
-// Delays are pre-computed at startup — per-period cost is a linear scan
-// with interpolation, well within the 32ms period budget.
+//  1. Disabled (beamforming off): output ch6 (centre/omni). Used for wake
+//     word detection — equidistant from all directions, no directional bias.
+//
+//  2. Enabled (voice turn): select the perimeter mic with the highest
+//     sustained high-frequency energy (2–4kHz band, where the 76mm array
+//     has genuine angular resolution). Lock that mic for the duration of
+//     the turn. Unlock on gate close. No delays, no phase math, no
+//     inter-period discontinuities.
 //
 // # Direction estimation
 //
-// We run delay-and-sum for each of the 6 candidate angles (mic positions)
-// and pick the one with highest output energy. This gives a coarse but
-// reliable estimate of the dominant sound source direction, updated every
-// period (32ms).
+// bandDiff (stride-2 difference, peak at 4kHz) emphasises the frequency
+// band where the array discriminates direction without grating lobes.
+// Smoothed with α=0.9 (320ms time constant) to prevent jitter.
+// Direction drives LED ring independently of mic selection.
+//
+// # Why not delay-and-sum?
+//
+// Delay-and-sum with incorrect direction estimates causes frequency-dependent
+// constructive/destructive interference that varies period-to-period,
+// producing choppy audio worse than single channel. Directional mic selection
+// avoids all phase math and produces clean, consistent output from the best
+// physically-positioned mic.
 package beamformer
 
 import (
+	"log"
 	"math"
 )
 
@@ -40,18 +52,14 @@ const (
 	// ALSA stream parameters — must match pcm_microphone.go
 	nChannels   = 9
 	sampleRate  = 16000
-	byteSample  = 3    // S24_3LE
+	byteSample  = 3 // S24_3LE
 	frameSize   = nChannels * byteSample // 27 bytes per frame
 	periodFrames = 512
-
-	// Physical array parameters
-	micRadius   = 0.0382 // metres — confirmed from PCB photo
-	speedSound  = 343.0  // m/s at ~20°C
 
 	// Number of candidate steering directions — one per perimeter mic
 	nDirections = 6
 
-	// Centre mic channel
+	// Centre mic channel — used for wake word detection (omnidirectional)
 	centreCh = 6
 )
 
@@ -64,164 +72,144 @@ var micAngles = [7]float64{
 	150, // ch3 — MK4
 	210, // ch4 — MK5
 	270, // ch5 — MK6
-	0,   // ch6 — MK7 centre (angle unused for delay calc)
+	0,   // ch6 — MK7 centre
 }
 
-// candidateAngles are the steering directions we test for direction estimation.
-// One per perimeter mic — coarse but fast.
+// candidateAngles are the steering directions tested for direction estimation.
+// One per perimeter mic, matching the mic positions exactly.
 var candidateAngles = [nDirections]float64{30, 90, 150, 210, 270, 330}
 
-// Beamformer holds pre-computed delay tables and processes mic periods.
+// directionToChannel maps candidateAngles index → ALSA channel number for
+// the perimeter mic at that direction.
+//
+//	candidateAngles[0]=30°  → ch0 (micAngles[0]=30°)
+//	candidateAngles[1]=90°  → ch2 (micAngles[2]=90°)
+//	candidateAngles[2]=150° → ch3 (micAngles[3]=150°)
+//	candidateAngles[3]=210° → ch4 (micAngles[4]=210°)
+//	candidateAngles[4]=270° → ch5 (micAngles[5]=270°)
+//	candidateAngles[5]=330° → ch1 (micAngles[1]=330°)
+var directionToChannel = [nDirections]int{0, 2, 3, 4, 5, 1}
+
+// Beamformer holds direction estimation state and locked mic selection.
 type Beamformer struct {
-	// delays[dirIdx][chIdx] = fractional sample delay for channel chIdx
-	// when steering toward candidateAngles[dirIdx].
-	// Positive = channel hears source earlier than array centre → delay it.
-	delays [nDirections][6]float64
+	// energySmooth holds an exponentially weighted moving average of the
+	// per-direction HF band energy. α=0.9 gives ~320ms time constant.
+	energySmooth [nDirections]float64
 
-	// intDelays and fracDelays split the above for fast interpolation
-	intDelays  [nDirections][6]int
-	fracDelays [nDirections][6]float64
+	// lockedChannel is the ALSA channel selected at gate open.
+	// -1 means unlocked (use live best-direction selection).
+	lockedChannel int
 }
 
-// New creates a Beamformer with pre-computed delay tables.
+// New creates a Beamformer.
 func New() *Beamformer {
-	b := &Beamformer{}
-	b.precompute()
-	return b
+	return &Beamformer{lockedChannel: -1}
 }
 
-// precompute fills the delay tables for all candidate steering directions.
-// Called once at startup.
-func (b *Beamformer) precompute() {
-	for di, steerDeg := range candidateAngles {
-		steerRad := steerDeg * math.Pi / 180.0
-		// Unit vector pointing toward the source
-		sx := math.Sin(steerRad)
-		sy := math.Cos(steerRad)
-
-		for ci := 0; ci < 6; ci++ {
-			micRad := micAngles[ci] * math.Pi / 180.0
-			// Mic position in metres
-			mx := micRadius * math.Sin(micRad)
-			my := micRadius * math.Cos(micRad)
-			// Projection of mic position onto steering vector.
-			// Positive = mic is closer to source than array centre.
-			proj := mx*sx + my*sy
-			// Delay in samples: positive = delay this channel (it heard
-			// source earlier, we push it back to align with later mics)
-			delaySamples := proj * sampleRate / speedSound
-			b.delays[di][ci] = delaySamples
-			b.intDelays[di][ci] = int(math.Floor(delaySamples))
-			b.fracDelays[di][ci] = delaySamples - math.Floor(delaySamples)
+// Lock selects the current best-direction mic and holds it until Unlock.
+// Call when the VAD gate opens (voice turn starts).
+// No-op if already locked — prevents mid-utterance mic changes from VAD
+// oscillation causing the gate to briefly close and reopen.
+func (b *Beamformer) Lock() {
+	if b.lockedChannel >= 0 {
+		return
+	}
+	best := 0
+	for di := 1; di < nDirections; di++ {
+		if b.energySmooth[di] > b.energySmooth[best] {
+			best = di
 		}
 	}
+	b.lockedChannel = directionToChannel[best]
+	log.Printf("[beam] locked to ch%d (%.0f°)", b.lockedChannel, candidateAngles[best])
 }
 
-// Process takes one raw period of 9-channel S24_3LE interleaved PCM,
-// applies delay-and-sum beamforming, and returns:
+// Unlock releases the locked mic selection.
+// Call when the VAD gate closes (voice turn ends).
+func (b *Beamformer) Unlock() {
+	if b.lockedChannel >= 0 {
+		log.Printf("[beam] unlocked from ch%d", b.lockedChannel)
+	}
+	b.lockedChannel = -1
+}
+
+// Process returns mono S16_LE audio and the estimated source angle.
 //
-//   - mono: beamformed mono audio as S16_LE (512 frames × 2 bytes = 1024 bytes)
-//   - angle: estimated dominant source direction in degrees (0–360, clockwise
-//     from 12 o'clock), or -1 if estimation is unreliable
+// When disabled: returns ch6 (centre/omni) — for wake word detection.
+// When enabled and locked: returns the locked perimeter mic.
+// When enabled and unlocked: returns the current best-direction perimeter mic.
 //
-// The steerAngle parameter fixes the output beam direction. Pass -1 to use
-// the auto-detected dominant direction (same as angle return value).
-//
-// Output format matches vadExtractMono — drop-in replacement.
+// angle is the estimated dominant source direction (0–360°, clockwise from
+// 12 o'clock), or -1 if estimation is unreliable.
 func (b *Beamformer) Process(raw []byte, steerAngle float64, enabled bool) (mono []byte, angle float64) {
-	if !enabled {
-		return extractChannel(raw, 0), -1
-	}
-
 	if len(raw) < periodFrames*frameSize {
-		// Undersized period — fall back to ch0
 		return extractChannel(raw, 0), -1
 	}
 
-	// Decode all 6 perimeter channels into float32 arrays.
-	// Centre mic (ch6) is summed in separately at the end.
+	if !enabled {
+		// OWW mode: centre mic, omnidirectional, no direction bias
+		return extractChannel(raw, centreCh), -1
+	}
+
+	// Decode 6 perimeter channels for HF direction estimation
 	channels := decodeChannels(raw)
+	hfChannels := bandDiff(channels)
 
-	// Run delay-and-sum for each candidate direction, track energy.
-	var bestEnergy float64
-	bestDir := 0
-
-	energies := [nDirections]float64{}
+	// Update smoothed HF energy per direction
+	const smoothAlpha = 0.9
 	for di := range candidateAngles {
-		energies[di] = b.beamEnergy(channels, di)
-		if energies[di] > bestEnergy {
-			bestEnergy = energies[di]
+		energy := hfEnergy(hfChannels, di)
+		b.energySmooth[di] = smoothAlpha*b.energySmooth[di] + (1-smoothAlpha)*energy
+	}
+
+	// Best direction from smoothed energies
+	bestDir := 0
+	for di := 1; di < nDirections; di++ {
+		if b.energySmooth[di] > b.energySmooth[bestDir] {
 			bestDir = di
 		}
 	}
 	angle = candidateAngles[bestDir]
 
-	// Choose which direction to steer the output beam.
-	outputDir := bestDir
-	if steerAngle >= 0 {
-		outputDir = nearestDirection(steerAngle)
+	// Select output channel
+	ch := b.lockedChannel
+	if ch < 0 {
+		ch = directionToChannel[bestDir]
 	}
 
-	// Generate beamformed output for the chosen direction.
-	beamed := b.beamOutput(channels, outputDir)
-
-	// Mix in centre mic at reduced weight — omnidirectional, boosts level
-	// without hurting directionality.
-	centreSamples := decodeOneCh(raw, centreCh)
-	const centreWeight = 0.3
-	for i, v := range centreSamples {
-		beamed[i] += float64(v) * centreWeight
-	}
-
-	// No normalisation — toS16LE clips to [-1,1] which is the correct
-	// behaviour for delay-and-sum. Averaging would reduce SNR benefit.
-
-	mono = toS16LE(beamed)
-	return mono, angle
+	return extractChannel(raw, ch), angle
 }
 
-// beamEnergy runs delay-and-sum for direction di and returns output energy.
-// Used for direction estimation — doesn't produce output samples.
-func (b *Beamformer) beamEnergy(channels [6][]float32, di int) float64 {
-	n := len(channels[0])
+// hfEnergy computes delay-and-sum energy for direction di using HF channels.
+// Used only for direction estimation, not for audio output.
+func hfEnergy(hfChannels [6][]float32, di int) float64 {
+	n := len(hfChannels[0])
+
+	// For direction estimation we use simple channel energy comparison
+	// rather than delay-and-sum — the mic at the candidate angle should
+	// have the highest HF energy when that direction is the source.
+	// This avoids the delay interpolation that caused choppy output.
+	ch := directionToChannel[di]
 	var energy float64
-	for i := 0; i < n; i++ {
-		var sum float64
-		for ci := 0; ci < 6; ci++ {
-			sum += float64(b.interpolate(channels[ci], i, b.intDelays[di][ci], b.fracDelays[di][ci]))
-		}
-		energy += sum * sum
+	for _, v := range hfChannels[ch] {
+		energy += float64(v) * float64(v)
 	}
-	return energy
+	return energy / float64(n)
 }
 
-// beamOutput runs delay-and-sum for direction di and returns float32 samples.
-func (b *Beamformer) beamOutput(channels [6][]float32, di int) []float64 {
-	n := len(channels[0])
-	out := make([]float64, n)
-	for i := 0; i < n; i++ {
-		var sum float64
-		for ci := 0; ci < 6; ci++ {
-			sum += float64(b.interpolate(channels[ci], i, b.intDelays[di][ci], b.fracDelays[di][ci]))
+// bandDiff returns the stride-2 difference of each channel: out[i] = (in[i] - in[i-2]) / 2.
+// Frequency response peaks at 4kHz (fs/4), zero at 0Hz and 8kHz.
+// Targets the 2–4kHz band where the 76mm array has angular resolution
+// without grating lobes.
+func bandDiff(channels [6][]float32) [6][]float32 {
+	var out [6][]float32
+	for ci := 0; ci < 6; ci++ {
+		out[ci] = make([]float32, len(channels[ci]))
+		for i := 2; i < len(channels[ci]); i++ {
+			out[ci][i] = (channels[ci][i] - channels[ci][i-2]) * 0.5
 		}
-		out[i] = sum
 	}
 	return out
-}
-
-// interpolate applies a fractional sample delay to channel data at frame i.
-// Uses linear interpolation between adjacent samples.
-// intD and fracD are the integer and fractional parts of the delay.
-func (b *Beamformer) interpolate(ch []float32, i, intD int, fracD float64) float32 {
-	j := i - intD
-	if j < 0 || j >= len(ch) {
-		return 0
-	}
-	if fracD == 0 || j+1 >= len(ch) {
-		return ch[j]
-	}
-	// Linear interpolation between ch[j] and ch[j+1]
-	return ch[j] + float32(fracD)*(ch[j+1]-ch[j])
 }
 
 // decodeChannels decodes all 6 perimeter channels from a raw S24_3LE period
@@ -241,52 +229,23 @@ func decodeChannels(raw []byte) [6][]float32 {
 	return out
 }
 
-// decodeOneCh decodes a single channel from a raw S24_3LE period.
-func decodeOneCh(raw []byte, ch int) []float32 {
-	out := make([]float32, periodFrames)
-	offset0 := ch * byteSample
-	for i := 0; i < periodFrames; i++ {
-		offset := i*frameSize + offset0
-		out[i] = decodeS24Sample(raw[offset], raw[offset+1], raw[offset+2])
-	}
-	return out
-}
-
 // decodeS24Sample decodes 3 bytes of S24_3LE to float32 in [-1, 1].
 func decodeS24Sample(b0, b1, b2 byte) float32 {
 	val := int32(b0) | int32(b1)<<8 | int32(b2)<<16
 	if val&0x800000 != 0 {
-		val |= ^int32(0xFFFFFF) // sign extend to 32-bit
+		val |= ^int32(0xFFFFFF)
 	}
 	return float32(val) / 8388608.0
 }
 
-// toS16LE converts float64 samples to S16_LE bytes with soft clipping.
-func toS16LE(samples []float64) []byte {
-	out := make([]byte, len(samples)*2)
-	for i, s := range samples {
-		// Soft clip
-		if s > 1.0 {
-			s = 1.0
-		} else if s < -1.0 {
-			s = -1.0
-		}
-		v := int16(s * 32767.0)
-		out[i*2] = byte(v)
-		out[i*2+1] = byte(v >> 8)
-	}
-	return out
-}
-
-// extractChannel extracts a single channel as S16_LE — used as fallback.
-// Matches the existing vadExtractMono behaviour.
+// extractChannel extracts a single channel as S16_LE mono.
+// Takes the upper 2 bytes of each 3-byte S24_3LE sample (drops LSB).
 func extractChannel(raw []byte, ch int) []byte {
 	n := len(raw) / frameSize
 	out := make([]byte, n*2)
 	offset0 := ch * byteSample
 	for i := 0; i < n; i++ {
 		base := i*frameSize + offset0
-		// Take upper 2 bytes of 3-byte S24_3LE sample (drop LSB)
 		out[i*2] = raw[base+1]
 		out[i*2+1] = raw[base+2]
 	}

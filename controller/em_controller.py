@@ -166,6 +166,10 @@ class Device:
     async def mic_start(self):
         await self.send_control({"type": "mic_start"})
 
+    async def mic_start_turn(self):
+        """Start mic for a voice turn — signals device to lock the best directional mic."""
+        await self.send_control({"type": "mic_start", "lock_mic": True})
+
     async def mic_stop(self):
         await self.send_control({"type": "mic_stop"})
 
@@ -360,15 +364,25 @@ async def run_voice_turn(device: Device):
                 except Exception as e:
                     log.error(f"[{device.device_id}] WS receive error: {e}")
 
-            await device.mic_start()
+            await device.mic_start_turn()
             mic_task     = asyncio.create_task(stream_mic())
             receive_task = asyncio.create_task(receive_response())
             cancel_task  = asyncio.create_task(device.cancel_event.wait())
 
-            done, _ = await asyncio.wait(
+            done, pending = await asyncio.wait(
                 [receive_task, cancel_task],
                 return_when=asyncio.FIRST_COMPLETED,
+                timeout=45.0,
             )
+
+            if not done:
+                log.warning(f"[{device.device_id}] Voice turn: voice server timeout — no response in 45s")
+                for task in pending:
+                    task.cancel()
+                await device.mic_stop()
+                mic_task.cancel()
+                await cleanup()
+                return
 
             await device.mic_stop()
             mic_task.cancel()

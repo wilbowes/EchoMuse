@@ -32,12 +32,13 @@ type controlMessage struct {
 	ClickType int             `json:"clickType,omitempty"`
 	Down      bool            `json:"down,omitempty"`
 	LEDs      json.RawMessage `json:"leds,omitempty"`
+	LockMic   bool            `json:"lock_mic,omitempty"`
 }
 
 // ─── Callbacks ────────────────────────────────────────────────────────────────
 
 type LEDCallback func(leds []led.Led)
-type MicStartCallback func()
+type MicStartCallback func(lockMic bool)
 type MicStopCallback func()
 type StateCallback func()
 type ConfigAppliedCallback func(msg config.ConfigMessage)
@@ -239,7 +240,9 @@ func (c *ControlClient) connect(ctx context.Context, addr string, data *DataClie
 
 		case "mic_start":
 			if c.micStartCallback != nil {
-				c.micStartCallback()
+				var msg controlMessage
+				_ = json.Unmarshal(raw, &msg)
+				c.micStartCallback(msg.LockMic)
 			}
 
 		case "mic_stop":

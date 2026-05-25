@@ -15,7 +15,8 @@ At the end you'll have:
 - EchoMuse running on boot with full LED, mic, button, and speaker control
 - Working audio output via TinyALSA directly (card 0, device 23)
 - On-device energy VAD streaming speech bursts to the server over WebSocket
-- OpenWakeWord wake word detection ("Hey Jarvis")
+- OpenWakeWord wake word detection ("Hey Jarvis") on the centre/omni mic
+- Directional mic selection — best perimeter mic locked for each voice turn
 - Hardware mute button with LED feedback and action button lockout
 - WiFi wake lock preventing FireOS from suspending the wireless interface
 - Orange LED pulse while disconnected from server
@@ -245,6 +246,8 @@ adb shell su -c 'pm disable com.amazon.mediaplayeragent'
 Reboot and check logcat. You should see "Unable to start service" messages for these packages — that's expected and harmless. No crash loops.
 
 > **Keep `com.amazon.device.echoaudioservice` enabled.** This service initialises the MediaTek audio DSP at boot. Without it, the I2S clock never starts and audio playback will hang silently. You can disable Alexa's voice stack without touching this service.
+>
+> **What echoaudioservice actually does:** The APK is a stub (manifest only, no Java classes). It triggers `audio.primary.mt8163.so` (the MT8163 audio HAL) to initialise the DSP when Android starts the service. The HAL does all the real work — echoaudioservice is just the trigger.
 
 ---
 
@@ -296,9 +299,16 @@ tinymix -D 0 56 On
 tinymix -D 0 64 1 1
 tinymix -D 0 88 On
 tinymix -D 0 61 100 100
-# Mic gain — ADC_A channel 0, used for VAD and voice turns
-tinymix -D 0 89 100 100
-tinymix -D 0 92 60 60
+# Mic gain — equalised across all four ADCs for directional mic selection
+# Values matched to Amazon's own initialisation (confirmed from firmware analysis)
+tinymix -D 0 89 88 88
+tinymix -D 0 92 40 40
+tinymix -D 0 107 88 88
+tinymix -D 0 110 40 40
+tinymix -D 0 125 88 88
+tinymix -D 0 128 40 40
+tinymix -D 0 143 88 88
+tinymix -D 0 146 40 40
 /data/local/bin/volume_buttons.sh &
 kill $(ps | grep ledcontroller | grep -v grep)
 exec /data/local/bin/server > /tmp/server.log 2>&1
@@ -465,7 +475,7 @@ dns-sd -B _emcontroller._tcp local
 ✅ EchoMuse running as init service on boot (exec mode, no crash loop)
 ✅ Dummy mixer service for EchoMuse init compatibility
 ✅ Audio mixer configured at boot (tinymix in start_server.sh)
-✅ Mic gain boosted — ADC_A digital volume 100, MICPGA 60 (channel 0)
+✅ Mic gain equalised across all four ADCs — digital volume 88, MICPGA 40
 ✅ WiFi wake lock — FireOS cannot suspend wireless interface
 ✅ p2p0 (WiFi Direct) disabled — no mDNS interference
 ✅ Full LED ring RGB control (IS31FL3236A, 12 RGB LEDs)
@@ -481,7 +491,11 @@ dns-sd -B _emcontroller._tcp local
 ✅ Orange LED pulse while disconnected / searching for server
 ✅ Slow white LED pulse while pending controller approval
 ✅ On-device energy VAD — VAD end signal (0x04) sent to controller on silence
+✅ Wake word detection on ch6 (centre/omni mic) — equidistant, no directional bias
 ✅ OpenWakeWord — "Hey Jarvis" detected server-side (threshold 0.3)
+✅ Directional mic selection — best perimeter mic locked at voice turn start
+✅ Direction estimation — HF energy (2–4kHz band) per-mic, smoothed α=0.9
+✅ LED direction ring — tracks dominant sound source direction
 ✅ Mute button — toggles mic mute, red LED ring, blocks action button
 ✅ Volume buttons — local interception, cyan LED ring feedback
 ✅ Amp boot click suppressed — mute/unmute around amp enable in pcm_speaker.go
@@ -495,6 +509,7 @@ dns-sd -B _emcontroller._tcp local
 ✅ Mute state change notifications — device sends mute_state message to controller
 ✅ Shell access — device dials outbound to controller on shell_open, no inbound ports
 ✅ OTA updates via controller dashboard — GitHub releases, on-device rollback
+✅ Voice server turn timeout (45s) — controller never hangs on unresponsive voice server
 ✅ Boot logging to /tmp/server.log
 ✅ mDNS via grandcat/zeroconf — RFC 6762/6763 compliant, reliable discovery
 ✅ WebSocket protocol keepalives — dead connections detected within 30s
@@ -505,17 +520,42 @@ dns-sd -B _emcontroller._tcp local
 
 ---
 
+## Mic Array Architecture
+
+The biscuit has a 7-microphone array captured on ALSA card 0, device 24 as 9 channels S24_3LE at 16kHz. Ch7 and Ch8 are unconnected.
+
+```
+Ch0 → MK2 →  30°  (1 o'clock)   perimeter
+Ch1 → MK1 → 330°  (11 o'clock)  perimeter
+Ch2 → MK3 →  90°  (3 o'clock)   perimeter
+Ch3 → MK4 → 150°  (5 o'clock)   perimeter
+Ch4 → MK5 → 210°  (7 o'clock)   perimeter
+Ch5 → MK6 → 270°  (9 o'clock)   perimeter
+Ch6 → MK7 → centre              omnidirectional
+```
+
+**Why ch6 for wake word?** The centre mic is equidistant from all directions. OWW receives consistent audio regardless of where you're standing, and ambient sounds cannot lock it to a suboptimal direction. Perimeter mics are directional by proximity — good for STT once direction is known, but wrong for always-on wake word detection.
+
+**Why directional mic selection for voice turns?** The mic physically closest to the speaker has the best SNR for that speaker. Selecting it at voice turn start (after wake word or button press) locks in the optimal channel for the duration of the turn. The lock happens at `mic_start` with `lock_mic: true` — not during ambient VAD activity — ensuring ambient sounds before the turn don't influence selection.
+
+**Why not delay-and-sum beamforming?** At speech frequencies (<2kHz, where most energy lives), a 76mm array has insufficient angular resolution to reliably discriminate between the 6 candidate directions. Near-equal per-direction energies mean the selection is noise-driven, and applying wrong delays creates frequency-dependent constructive/destructive interference that degrades audio quality below single-channel. Directional mic selection avoids all phase math.
+
+**How Amazon does it:** Amazon's `amazon.speech.sim` reads the same raw 9-channel array via Android AudioRecord and does software processing. There is no hardware beamforming output channel. The MediaTek MAGI Conference DOA feature (in `audio.primary.mt8163.so`) is designed for phone call use cases and is not active in voice assistant mode on this device.
+
+---
+
 ## Voice Pipeline
 
 ```
 "Hey Jarvis"
-    → on-device energy VAD (RMS ≥ 0.004, normalised)
-    → binary mic frames → /data WebSocket → server mic_queue
+    → on-device energy VAD (RMS ≥ 0.005, normalised)
+    → binary mic frames (ch6 omni) → /data WebSocket → server mic_queue
     → OpenWakeWord inference (hey_jarvis_v0.1, threshold 0.3)
     → wake detected
     → server: mic_stop
     → server: LEDs green (listening)
-    → server: mic_start → mic frames resume
+    → server: mic_start (lock_mic: true) → mic frames resume
+    → device: locks best perimeter mic (highest HF energy, smoothed)
     → device: VAD gate open, streaming frames to controller
     → device: speech ends → VAD gate closes → sends 0x04 (VAD end)
     → controller: 0x04 received → sends "END" to voice server
@@ -529,9 +569,11 @@ dns-sd -B _emcontroller._tcp local
     → server: 0x02 binary frames → /data WebSocket → device ALSA
     → server: 0x03 EOS
     → server: device.speaking = False
+    → server: mic_stop → device unlocks perimeter mic
     → server: LEDs off
     → server: stale queue drain + model reset
-    → server: mic_start → OWW resumes
+    → server: mic_start (no lock_mic) → device returns to ch6 omni
+    → OWW listening resumes
 ```
 
 Action button triggers the same pipeline directly, bypassing wake word detection. Second press cancels at any stage.
@@ -544,7 +586,7 @@ Action button triggers the same pipeline directly, bypassing wake word detection
 
 Device → Server:
 ```json
-{"type": "register", "device_id": "G0K0XXXXXXXX", "ip": "...", "version": "v2.2.0", "capabilities": [...]}
+{"type": "register", "device_id": "G0K0XXXXXXXX", "ip": "...", "version": "v2.3.0", "capabilities": [...]}
 {"type": "button", "clickType": 138, "down": false}
 {"type": "mute_state", "muted": true}
 {"type": "log", "level": "info", "message": "..."}
@@ -555,9 +597,10 @@ Server → Device:
 ```json
 {"type": "ack", "device_id": "G0K0XXXXXXXX"}
 {"type": "pending"}
-{"type": "config", "adcDigitalGain": 100, "adcMicpga": 60, "vadThreshold": 0.004, ...}
+{"type": "config", "adcDigitalGain": 88, "adcMicpga": 40, "vadThreshold": 0.005, ...}
 {"type": "leds", "leds": [{"id": 0, "r": 0, "g": 180, "b": 0}, ...]}
 {"type": "mic_start"}
+{"type": "mic_start", "lock_mic": true}
 {"type": "mic_stop"}
 {"type": "shell_open"}
 {"type": "shell_close"}
@@ -602,8 +645,8 @@ Device boots
     → device: applies config (tinymix for hardware params)
     → LEDs off (connected)
     → connect /data → identify
-    → server: mic_start sent
-    → device: mic streaming started (VAD-gated)
+    → server: mic_start sent (no lock_mic — OWW mode)
+    → device: mic streaming started on ch6 (centre/omni)
     → OWW listening (device shows IDLE state in dashboard)
 ```
 
@@ -653,13 +696,13 @@ If this hangs: mixer not initialised. Run the tinymix commands from Step 9 manua
 
 Check mic gain:
 ```bash
-adb shell su -c 'tinymix -D 0 89'  # should be 100
-adb shell su -c 'tinymix -D 0 92'  # should be 60
+adb shell su -c 'tinymix -D 0 89'  # should be 88
+adb shell su -c 'tinymix -D 0 92'  # should be 40
 ```
 
-Check OWW model is loaded in controller logs — should see `OpenWakeWord model ready` on device connect. If not, check models were downloaded at image build time.
+Wake word detection uses ch6 (centre/omni). VAD threshold is 0.005 normalised RMS — adjustable via config push from the dashboard. In noisy environments, raise to 0.010–0.020.
 
-VAD threshold is 0.004 normalised RMS — adjustable via config push from dashboard.
+Check OWW model is loaded in controller logs — should see `OpenWakeWord model ready` on device connect.
 
 ### ADB not available after boot
 
@@ -669,13 +712,40 @@ adb shell su -c 'setprop persist.sys.usb.config mtp,adb'
 adb shell su -c 'start adbd'
 ```
 
+### Monitor active PCM devices
+
+To see which processes own active ALSA devices in real time:
+
+```bash
+adb push pcm_watch.sh /data/local/tmp/pcm_watch.sh
+adb shell su -c 'chmod 755 /data/local/tmp/pcm_watch.sh && /data/local/tmp/pcm_watch.sh'
+```
+
+`pcm_watch.sh`:
+```sh
+#!/system/bin/sh
+while true; do
+    for f in /proc/asound/card0/pcm*/sub0/status; do
+        line=$(grep "owner_pid" "$f" 2>/dev/null)
+        if [ -n "$line" ]; then
+            pid=${line##*: }
+            name=$(cat /proc/$pid/comm 2>/dev/null)
+            state=$(grep "^state:" "$f")
+            state=${state##*: }
+            echo "$f pid=$pid state=$state -> $name"
+        fi
+    done
+    sleep 2
+done
+```
+
 ---
 
 ## Audio Notes
 
 **Why device 23?** The biscuit exposes 25+ PCM devices. Device 23 is the TLV320 DAC output path. Most other devices are modem/voice paths or internal DSP routes that hang or error on open.
 
-**Why keep echoaudioservice?** The MediaTek audio DSP requires initialisation that happens inside Amazon's audio HAL. Without `echoaudioservice` running, the I2S clock never starts and `tinyplay` hangs indefinitely. The service is benign once Alexa's cloud components are disabled — it initialises the audio hardware and then sits idle.
+**Why keep echoaudioservice?** The MediaTek audio DSP requires initialisation that happens inside Amazon's audio HAL (`audio.primary.mt8163.so`). Without `echoaudioservice` running, the I2S clock never starts and `tinyplay` hangs indefinitely. The service is a manifest stub — no Java code — its sole job is to trigger HAL initialisation via the Android audio framework.
 
 **The mixer defaults are wrong.** Three mixer controls must be set after every boot — `start_server.sh` handles this automatically. Without them, tinyplay hangs silently on device 23.
 
@@ -685,7 +755,7 @@ adb shell su -c 'start adbd'
 
 **Mute implementation.** The mute button (KEY_MUTE, evdev code 113) arrives on `/dev/input/event1`. Mute is implemented by setting ADC_A Left/Right Mute (tinymix ctls 105 and 106). The mute controller intercepts the button locally, applies the tinymix change, updates the LED ring (red = muted), and signals the server to block dot button events.
 
-**Mic gain — ADC_A only.** The 9-channel mic array uses four ADC pairs (A-D). Both VAD and voice capture use channel 0, which maps to ADC_A. Only ADC_A needs boosting — controls 89 (Digital Volume, 88→100) and 92 (MICPGA, 40→60).
+**Mic gain — all four ADCs.** All four ADC pairs (A–D) are set to digital volume 88 and MICPGA 40. This matches Amazon's own initialisation values confirmed by analysing the unmodified device mixer state. Equalising all four ensures consistent sensitivity across all perimeter mics for directional selection.
 
 **WiFi wake lock.** FireOS aggressively suspends the WiFi interface during inactivity, dropping WebSocket connections. Writing `"EchoMuse"` to `/sys/power/wake_lock` prevents this.
 
@@ -693,9 +763,15 @@ adb shell su -c 'start adbd'
 
 **OWW threshold.** 0.3 works well for a London/Bristol accent — the default 0.5 is calibrated for American English.
 
-**VAD threshold.** 0.004 normalised RMS is the default. Calibrate for your room via config push from the management dashboard — no rebuild required. Too low causes noise to open the gate, too high means you have to shout.
+**VAD threshold.** 0.005 normalised RMS is the default. Adjustable via config push from the dashboard — no rebuild required. In noisy environments (music, TV), raise to 0.015–0.020.
 
-**VAD end signal.** When the device VAD gate closes (speech followed by `vadSilenceMs` of silence, default 600ms), the device sends a `0x04` binary frame. The controller forwards this as an `"END"` string to the voice server, which immediately processes the buffered audio without waiting for silence chunks. This is the correct architecture — the device owns VAD state and signals it explicitly rather than the server inferring it from audio gaps.
+**VAD end signal.** When the device VAD gate closes (speech followed by `vadSilenceMs` of silence, default 600ms), the device sends a `0x04` binary frame. The controller forwards this as an `"END"` string to the voice server, which immediately processes the buffered audio. The device owns VAD state and signals it explicitly rather than the server inferring it from audio gaps.
+
+**Directional mic locking.** When the controller sends `mic_start` with `lock_mic: true` (voice turn start), the device locks to the perimeter mic with the highest smoothed HF energy (2–4kHz band, α=0.9, ~320ms time constant). The lock is idempotent — subsequent lock requests during VAD oscillation do not change the selected mic. The lock releases on `mic_stop`. This ensures ambient sounds before the turn do not influence mic selection.
+
+**Direction estimation for LEDs.** The LED direction ring always reflects the current best-direction estimate regardless of VAD state. The HF energy comparison uses the bandDiff filter (stride-2 difference, peak at 4kHz) targeting the frequency range where the 76mm array has genuine angular resolution without grating lobes.
+
+**Voice server turn timeout.** The controller waits a maximum of 45 seconds for the voice server to respond. Previously the controller would hang indefinitely if Whisper returned an empty transcription and the voice server closed silently. The timeout ensures the pipeline always resets cleanly.
 
 **Stale queue drain.** After each voice turn, the mic queue is drained and the OWW model is reset before mic_start is sent. This prevents the device's own speaker output (buffered during playback) from immediately triggering another wake word detection.
 
@@ -707,19 +783,21 @@ adb shell su -c 'start adbd'
 
 ## What's Next
 
+- **On-device wake word** — TFLite C binary running on-device, eliminating the continuous WiFi audio stream for OWW. OpenWakeWord has a TFLite backend; cross-compilation uses the existing echomuse-compiler Docker toolchain
 - **PTY shell** — proper terminal emulator (top, vim, nano) via creack/pty + xterm.js in dashboard
+- **Acoustic echo cancellation** — Echo Dot DSP has hardware AEC capability; investigating ALSA access via `audio.primary.mt8163.so`
+- **Wyoming protocol** — upstream interface for Home Assistant / Rhasspy integration, turning EchoMuse into a proper HA voice satellite
+- **Media player integration** — pause room audio on wake word, resume after response (Home Assistant `media_player` service call)
+- **Bermuda BT proxy** — room-level presence detection via Bluetooth, once fleet of 5–6 Echo Dots is deployed
 - **Adaptive VAD** — calibrate threshold on startup from ambient noise floor × multiplier
-- **Acoustic echo cancellation** — Echo Dot DSP has hardware AEC, investigating ALSA access
-- **On-device wake word** — TFLite C binary running alongside EchoMuse, eliminating server-side OWW stream
-- **Bermuda BT proxy** — room-level presence detection via Bluetooth, once fleet of 5-6 Echo Dots is deployed
 - **Startup chime** — short audio signature on EchoMuse init
 - **Holding response** — play audio while Clara is thinking if response takes >2s
 - **Browser-based provisioner** — WebUSB/ya-webadb installer for flashing new devices
 
 ---
 
-**Document version:** v2.2
-**Last updated:** 2026-05-20
+**Document version:** v2.3
+**Last updated:** 2026-05-25
 **Changelog:**
 - v1.0 — April 2026: Initial publication. Full pipeline confirmed working.
 - v1.1 — 2026-04-26: Fixed ambiguous init.csm.project.rc editing instruction; fixed `server &` → `exec` inconsistency.
@@ -728,5 +806,6 @@ adb shell su -c 'start adbd'
 - v2.0 — 2026-05-09: Major architecture update. EchoGo replaced by EchoMuse. HTTP server removed from device entirely. Two-plane WebSocket architecture (control + data). gorilla/websocket replacing golang.org/x/net/websocket. p2p0 disable added. Proxmox bridge multicast fix documented. Orange disconnect LED pulse. OWW suppression during playback. Stale queue drain. Boot logging. Updated voice pipeline, end state, troubleshooting, and all file references.
 - v2.1 — 2026-05-19: Device ID changed to ro.serialno. Version embedded via ldflags. Three-plane WebSocket (added /shell). Device approval flow (strict/auto modes, pending white pulse). Config push on connect. Device log streaming. VAD end signal (0x04 frame type) replaces server-side silence detection. OWW model download at build time. mDNS library replaced with grandcat/zeroconf. Controller management dashboard (port 8768, auth, DB, API, GitHub release tracking, OTA updates).
 - v2.2 — 2026-05-20: Shell architecture corrected — device dials outbound to controller on shell_open, no inbound ports on device. Mute state tracking via mute_state control message. Dashboard live state updates via WebSocket events (mute/listen/speak/offline). WebSocket protocol keepalives — dead connection detection within 30s. Dashboard React SPA compiled via esbuild, fully vendored assets (no CDN). Ctrl+C support in browser terminal.
+- v2.3 — 2026-05-25: Mic array architecture overhaul. Wake word detection moved to ch6 (centre/omni) for direction-independent reliability. Directional mic selection — best perimeter mic locked at voice turn start via `mic_start` with `lock_mic: true`, released on `mic_stop`. Lock is idempotent across VAD oscillation. Mic gain equalised across all four ADCs (88/40) matching Amazon's initialisation values. Voice server turn timeout added (45s). pcm_watch.sh diagnostic added. Hardware audio investigation documented — confirmed software-only processing, no hardware beamforming output channel on this device.
 
 *Device: Echo Dot 2nd Gen (RS03QR). Tested on macOS with ADB 35.0.2.*

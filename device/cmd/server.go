@@ -65,7 +65,7 @@ func main() {
 	controlClient := client.NewControlClient(
 		deviceID,
 		func(leds []led.Led) { s.SetLEDs(leds) },
-		func() { dataClient.StartMic() },
+		func(lockMic bool) { dataClient.StartMic(lockMic) },
 		func() { dataClient.StopMic() },
 	)
 
