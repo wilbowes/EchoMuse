@@ -493,9 +493,16 @@ dns-sd -B _emcontroller._tcp local
 ✅ On-device energy VAD — VAD end signal (0x04) sent to controller on silence
 ✅ Wake word detection on ch6 (centre/omni mic) — equidistant, no directional bias
 ✅ OpenWakeWord — "Hey Jarvis" detected server-side (threshold 0.3)
+✅ Mic channel mapping confirmed empirically (tone injection, analyse_capture.py)
 ✅ Directional mic selection — best perimeter mic locked at voice turn start
-✅ Direction estimation — HF energy (2–4kHz band) per-mic, smoothed α=0.9
-✅ LED direction ring — tracks dominant sound source direction
+✅ Direction estimation — onset ratio (fast/slow EWMA) robust to background noise (TV etc.)
+✅ LED direction overlay — light green segment on listening ring during voice turn only
+✅ LED mapping calibrated — LED 0 at 240°, confirmed from volume sweep
+✅ Audio processing pipeline — RNNoise NS (vendored v0.1 C source, cgo) + AGC per period
+✅ AGC release frozen during silence — prevents noise floor amplification past VAD threshold
+✅ Acoustic feedback fix — controller sleeps for audio duration after EOS before mic restart
+✅ Spinner runs for full response duration — duration calculated from PCM length
+✅ VAD threshold lowered to 0.003 for comfortable conversational speech level
 ✅ Mute button — toggles mic mute, red LED ring, blocks action button
 ✅ Volume buttons — local interception, cyan LED ring feedback
 ✅ Amp boot click suppressed — mute/unmute around amp enable in pcm_speaker.go
@@ -525,20 +532,27 @@ dns-sd -B _emcontroller._tcp local
 The biscuit has a 7-microphone array captured on ALSA card 0, device 24 as 9 channels S24_3LE at 16kHz. Ch7 and Ch8 are unconnected.
 
 ```
-Ch0 → MK2 →  30°  (1 o'clock)   perimeter
-Ch1 → MK1 → 330°  (11 o'clock)  perimeter
-Ch2 → MK3 →  90°  (3 o'clock)   perimeter
-Ch3 → MK4 → 150°  (5 o'clock)   perimeter
-Ch4 → MK5 → 210°  (7 o'clock)   perimeter
-Ch5 → MK6 → 270°  (9 o'clock)   perimeter
+Ch0 → MK1 → 330°  (11 o'clock)  perimeter   ← confirmed empirically 2026-05
+Ch1 → MK2 →  30°  ( 1 o'clock)  perimeter
+Ch2 → MK3 →  90°  ( 3 o'clock)  perimeter
+Ch3 → MK4 → 150°  ( 5 o'clock)  perimeter
+Ch4 → MK5 → 210°  ( 7 o'clock)  perimeter
+Ch5 → MK6 → 270°  ( 9 o'clock)  perimeter
 Ch6 → MK7 → centre              omnidirectional
+Ch7, Ch8 → unconnected
 ```
+
+**Mapping confirmed** by tone injection testing (2026-05): phone speaker pressed against each mic hole in turn, per-channel RMS measured via `analyse_capture.py`. Previous documentation had Ch0/Ch1 swapped — corrected.
+
+**ADC architecture:** Four TLV320ADC3101 stereo ADCs (I2C bus 0, addresses 0x18–0x1b). Probe order at boot determines channel assignment: 0x18→Ch0/1, 0x19→Ch2/3, 0x1a→Ch4/5, 0x1b→Ch6/7. All chips share a TDM data bus (confirmed from PCB trace analysis — DOUT shared, not daisy-chained). Array radius: 36mm (confirmed from PCB measurement).
 
 **Why ch6 for wake word?** The centre mic is equidistant from all directions. OWW receives consistent audio regardless of where you're standing, and ambient sounds cannot lock it to a suboptimal direction. Perimeter mics are directional by proximity — good for STT once direction is known, but wrong for always-on wake word detection.
 
 **Why directional mic selection for voice turns?** The mic physically closest to the speaker has the best SNR for that speaker. Selecting it at voice turn start (after wake word or button press) locks in the optimal channel for the duration of the turn. The lock happens at `mic_start` with `lock_mic: true` — not during ambient VAD activity — ensuring ambient sounds before the turn don't influence selection.
 
-**Why not delay-and-sum beamforming?** At speech frequencies (<2kHz, where most energy lives), a 76mm array has insufficient angular resolution to reliably discriminate between the 6 candidate directions. Near-equal per-direction energies mean the selection is noise-driven, and applying wrong delays creates frequency-dependent constructive/destructive interference that degrades audio quality below single-channel. Directional mic selection avoids all phase math.
+**Why mic selection rather than delay-and-sum?** At speech frequencies (<2kHz), a 72mm array has insufficient angular resolution to reliably discriminate between the 6 candidate directions. More critically, the maximum inter-mic delay is ~3.3 samples at 16kHz — requiring sub-sample fractional delay interpolation that introduces frequency-dependent phase errors causing comb filtering. Directional mic selection avoids all phase math and produces clean output.
+
+**Frequency-domain beamforming** (implemented in `bf_capture` diagnostic tool): A frequency-domain delay-and-sum implementation exists applying exact phase shifts via FFT. Testing confirmed the approach works — flat spectral response, no interpolation artefacts. For voice pickup at typical conversational distances the SNR improvement over mic selection is marginal; mic selection remains the production path. The `bf_capture` tool is retained for future research.
 
 **How Amazon does it:** Amazon's `amazon.speech.sim` reads the same raw 9-channel array via Android AudioRecord and does software processing. There is no hardware beamforming output channel. The MediaTek MAGI Conference DOA feature (in `audio.primary.mt8163.so`) is designed for phone call use cases and is not active in voice assistant mode on this device.
 
@@ -548,19 +562,22 @@ Ch6 → MK7 → centre              omnidirectional
 
 ```
 "Hey Jarvis"
-    → on-device energy VAD (RMS ≥ 0.005, normalised)
-    → binary mic frames (ch6 omni) → /data WebSocket → server mic_queue
+    → on-device energy VAD (RMS ≥ 0.003, normalised, pre-AGC)
+    → binary mic frames (ch6 omni, post-RNNoise NS + AGC) → /data WebSocket → server mic_queue
     → OpenWakeWord inference (hey_jarvis_v0.1, threshold 0.3)
     → wake detected
     → server: mic_stop
-    → server: LEDs green (listening)
+    → server: LEDs solid green (listening)
     → server: mic_start (lock_mic: true) → mic frames resume
-    → device: locks best perimeter mic (highest HF energy, smoothed)
-    → device: VAD gate open, streaming frames to controller
+    → device: direction estimation → locks best perimeter mic (highest onset ratio)
+    → device: LED direction overlay on green ring (light green segment, beam-locked direction)
+    → device: audio pipeline per period:
+        raw 9ch S24_3LE → beamformer (locked mic extract) → RNNoise NS → AGC → S16_LE mono
+    → device: VAD gate open (speech periods sent), silence dropped
     → device: speech ends → VAD gate closes → sends 0x04 (VAD end)
     → controller: 0x04 received → sends "END" to voice server
     → voice_server: END signal → sends THINKING → processes audio
-    → server: LEDs spin (thinking)
+    → server: LEDs spin green (thinking, direction overlay stops)
     → voice_server: Whisper large-v3 STT
     → Clara bot → response text
     → voice_server: Piper TTS (en_GB-alba-medium, 22050Hz)
@@ -568,8 +585,9 @@ Ch6 → MK7 → centre              omnidirectional
     → server: device.speaking = True (OWW suppressed)
     → server: 0x02 binary frames → /data WebSocket → device ALSA
     → server: 0x03 EOS
+    → server: sleep for audio duration (prevents acoustic feedback — speaker buffers ~341ms)
     → server: device.speaking = False
-    → server: mic_stop → device unlocks perimeter mic
+    → server: mic_stop → device unlocks perimeter mic, direction overlay clears
     → server: LEDs off
     → server: stale queue drain + model reset
     → server: mic_start (no lock_mic) → device returns to ch6 omni
@@ -767,9 +785,17 @@ done
 
 **VAD end signal.** When the device VAD gate closes (speech followed by `vadSilenceMs` of silence, default 600ms), the device sends a `0x04` binary frame. The controller forwards this as an `"END"` string to the voice server, which immediately processes the buffered audio. The device owns VAD state and signals it explicitly rather than the server inferring it from audio gaps.
 
-**Directional mic locking.** When the controller sends `mic_start` with `lock_mic: true` (voice turn start), the device locks to the perimeter mic with the highest smoothed HF energy (2–4kHz band, α=0.9, ~320ms time constant). The lock is idempotent — subsequent lock requests during VAD oscillation do not change the selected mic. The lock releases on `mic_stop`. This ensures ambient sounds before the turn do not influence mic selection.
+**Directional mic locking — onset ratio.** When the controller sends `mic_start` with `lock_mic: true` (voice turn start), the device locks to the perimeter mic with the highest onset ratio: `energySmooth[di] / energyBaseline[di]`. This selects the direction with the biggest *recent energy increase* rather than highest absolute energy, making the lock robust to continuous background noise sources (TV, fan). Two parallel smoothers: fast (α=0.9, ~320ms) and slow (α=0.995, ~10s baseline). The slow baseline is frozen while locked. The lock is idempotent across VAD oscillation. Releases on `mic_stop`.
 
-**Direction estimation for LEDs.** The LED direction ring always reflects the current best-direction estimate regardless of VAD state. The HF energy comparison uses the bandDiff filter (stride-2 difference, peak at 4kHz) targeting the frequency range where the 76mm array has genuine angular resolution without grating lobes.
+**Direction estimation — onset ratio.** Two parallel smoothers run per direction: fast (α=0.9, ~320ms) tracking instantaneous energy, and slow (α=0.995, ~10s) tracking the background noise floor. At lock time, the direction with the highest `energySmooth / energyBaseline` ratio is selected — this is the direction with the biggest *recent energy increase* (speech onset), not the direction with the highest absolute energy (TV, fan). The slow baseline is frozen during voice turns to prevent the speaker's own voice from corrupting the noise estimate. This reliably picks the speaker direction even with a television on in the room.
+
+**LED direction overlay.** The direction arc is overlaid on the solid green listening ring during voice turns only (not during idle wake word listening). The overlay uses the controller-set base ring state rather than accumulating — each period resets to the base green and applies the direction marker fresh. Primary direction LED: bright light green (R:0 G:255 B:80). Adjacent LEDs: base green boosted by 60. The overlay stops immediately when the controller sends the thinking spinner (spinner LEDs are not solid green, so `listeningLEDs` flag goes false).
+
+**LED physical mapping.** 12 LEDs (IS31FL3236A), one either side of each perimeter mic. LED 0 is physically at 240° (just clockwise of MK5 at 210°). Volume sweep confirmed: starts at LED 0, sweeps clockwise. Offset formula: `LED = ((angle - 240 + 360) % 360) / 30`.
+
+**Audio processing pipeline.** Each 32ms period of raw beamformed audio passes through: (1) RNNoise noise suppression — vendored xiph/rnnoise v0.1 C source compiled via cgo into the Go binary, no external library required; 480-sample frame size handled via ring buffer against our 512-sample periods. (2) AGC — targets -22dBFS RMS with fast attack (0.05) and slow release (0.005); release frozen during silence to prevent noise floor amplification past the VAD threshold. VAD decision is made on pre-NS/AGC audio to keep threshold stable.
+
+**Acoustic feedback prevention.** `stream_speaker` completes as soon as all frames are buffered on the device (~341ms ahead of actual playback). Without compensation, the mic restarts while the speaker is still playing, causing Clara to hear herself and trigger another voice turn. Fix: controller sleeps for `len(speaker_pcm) / (SPEAKER_RATE * 4)` seconds after streaming completes before calling `cleanup()`. The spinner continues running during this wait.
 
 **Voice server turn timeout.** The controller waits a maximum of 45 seconds for the voice server to respond. Previously the controller would hang indefinitely if Whisper returned an empty transcription and the voice server closed silently. The timeout ensures the pipeline always resets cleanly.
 
@@ -785,19 +811,20 @@ done
 
 - **On-device wake word** — TFLite C binary running on-device, eliminating the continuous WiFi audio stream for OWW. OpenWakeWord has a TFLite backend; cross-compilation uses the existing echomuse-compiler Docker toolchain
 - **PTY shell** — proper terminal emulator (top, vim, nano) via creack/pty + xterm.js in dashboard
-- **Acoustic echo cancellation** — Echo Dot DSP has hardware AEC capability; investigating ALSA access via `audio.primary.mt8163.so`
+- **Acoustic echo cancellation** — relevant once barge-in is implemented (speaker playing while mic active). Hardware AEC via MT8163 DSP is possible but complex; software AEC via speex or similar more practical.
 - **Wyoming protocol** — upstream interface for Home Assistant / Rhasspy integration, turning EchoMuse into a proper HA voice satellite
 - **Media player integration** — pause room audio on wake word, resume after response (Home Assistant `media_player` service call)
 - **Bermuda BT proxy** — room-level presence detection via Bluetooth, once fleet of 5–6 Echo Dots is deployed
-- **Adaptive VAD** — calibrate threshold on startup from ambient noise floor × multiplier
+- **Adaptive VAD** — calibrate threshold on startup from ambient noise floor × multiplier. Currently fixed at 0.003; in very noisy environments this may need runtime adjustment.
+- **RNNoise model upgrade** — vendored v0.1 model (2018). Newer models available via binary blob download; requires model loading API (rnnoise_model_from_file) present in newer source but needing the xiph.org CDN which was unavailable. v0.1 performs well for home environment use.
 - **Startup chime** — short audio signature on EchoMuse init
 - **Holding response** — play audio while Clara is thinking if response takes >2s
 - **Browser-based provisioner** — WebUSB/ya-webadb installer for flashing new devices
 
 ---
 
-**Document version:** v2.3
-**Last updated:** 2026-05-25
+**Document version:** v2.4
+**Last updated:** 2026-05-28
 **Changelog:**
 - v1.0 — April 2026: Initial publication. Full pipeline confirmed working.
 - v1.1 — 2026-04-26: Fixed ambiguous init.csm.project.rc editing instruction; fixed `server &` → `exec` inconsistency.
@@ -807,5 +834,6 @@ done
 - v2.1 — 2026-05-19: Device ID changed to ro.serialno. Version embedded via ldflags. Three-plane WebSocket (added /shell). Device approval flow (strict/auto modes, pending white pulse). Config push on connect. Device log streaming. VAD end signal (0x04 frame type) replaces server-side silence detection. OWW model download at build time. mDNS library replaced with grandcat/zeroconf. Controller management dashboard (port 8768, auth, DB, API, GitHub release tracking, OTA updates).
 - v2.2 — 2026-05-20: Shell architecture corrected — device dials outbound to controller on shell_open, no inbound ports on device. Mute state tracking via mute_state control message. Dashboard live state updates via WebSocket events (mute/listen/speak/offline). WebSocket protocol keepalives — dead connection detection within 30s. Dashboard React SPA compiled via esbuild, fully vendored assets (no CDN). Ctrl+C support in browser terminal.
 - v2.3 — 2026-05-25: Mic array architecture overhaul. Wake word detection moved to ch6 (centre/omni) for direction-independent reliability. Directional mic selection — best perimeter mic locked at voice turn start via `mic_start` with `lock_mic: true`, released on `mic_stop`. Lock is idempotent across VAD oscillation. Mic gain equalised across all four ADCs (88/40) matching Amazon's initialisation values. Voice server turn timeout added (45s). pcm_watch.sh diagnostic added. Hardware audio investigation documented — confirmed software-only processing, no hardware beamforming output channel on this device.
+- v2.4 — 2026-05-28: Mic channel mapping corrected (Ch0=MK1=330°, Ch1=MK2=30° — previous docs had these swapped; confirmed by tone injection testing). ADC architecture documented (four TLV320ADC3101, I2C 0x18–0x1b, TDM shared bus, array radius 36mm). Direction estimation upgraded to onset ratio (fast/slow EWMA) — robust to continuous background noise sources. Audio processing pipeline added: RNNoise noise suppression (vendored xiph/rnnoise v0.1 via cgo, no external dependencies) + AGC with speech-gated release. VAD threshold lowered to 0.003 for comfortable conversational level. Acoustic feedback bug fixed — controller sleeps for audio duration after streaming. Spinner duration fixed — runs until audio playback truly completes. LED direction overlay redesigned — light green segment on listening ring, shows during voice turns only, stops when spinner starts. LED physical mapping calibrated (LED 0 at 240°). `listeningLEDs` flag gates direction overlay to prevent interference with spinner/other animations. bf_capture diagnostic tool documented. Voice server END handler hardened — THINKING send failure no longer silently drops transcription.
 
 *Device: Echo Dot 2nd Gen (RS03QR). Tested on macOS with ADB 35.0.2.*

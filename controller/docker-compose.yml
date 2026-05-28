@@ -4,6 +4,8 @@ services:
     container_name: echomuse-controller
     restart: unless-stopped
     network_mode: host
+    environment:
+      - DEBUG=1
     env_file:
       - .env
     volumes:

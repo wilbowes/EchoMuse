@@ -3,15 +3,15 @@
 //
 // # Mic geometry (confirmed empirically, 2026-05)
 //
-// 6 perimeter mics at r=38.2mm, 60° intervals, 30° offset from 12 o'clock.
+// 6 perimeter mics at r=36mm, 60° intervals, 30° offset from 12 o'clock.
 // 1 centre mic. Ch7 and Ch8 are unconnected.
 //
-//	Ch0 → MK2 →  30°  (1 o'clock)
-//	Ch1 → MK1 → 330°  (11 o'clock)
-//	Ch2 → MK3 →  90°  (3 o'clock)
-//	Ch3 → MK4 → 150°  (5 o'clock)
-//	Ch4 → MK5 → 210°  (7 o'clock)
-//	Ch5 → MK6 → 270°  (9 o'clock)
+//	Ch0 → MK1 → 330°  (11 o'clock)  confirmed empirically 2026-05
+//	Ch1 → MK2 →  30°  ( 1 o'clock)
+//	Ch2 → MK3 →  90°  ( 3 o'clock)
+//	Ch3 → MK4 → 150°  ( 5 o'clock)
+//	Ch4 → MK5 → 210°  ( 7 o'clock)
+//	Ch5 → MK6 → 270°  ( 9 o'clock)
 //	Ch6 → MK7 → centre (omnidirectional)
 //
 // # Algorithm
@@ -22,25 +22,22 @@
 //     word detection — equidistant from all directions, no directional bias.
 //
 //  2. Enabled (voice turn): select the perimeter mic with the highest
-//     sustained high-frequency energy (2–4kHz band, where the 76mm array
-//     has genuine angular resolution). Lock that mic for the duration of
-//     the turn. Unlock on gate close. No delays, no phase math, no
-//     inter-period discontinuities.
+//     energy onset relative to its own noise floor baseline. Lock that mic
+//     for the duration of the turn. Unlock on gate close.
 //
 // # Direction estimation
 //
-// bandDiff (stride-2 difference, peak at 4kHz) emphasises the frequency
-// band where the array discriminates direction without grating lobes.
-// Smoothed with α=0.9 (320ms time constant) to prevent jitter.
-// Direction drives LED ring independently of mic selection.
+// Two parallel smoothers run continuously:
 //
-// # Why not delay-and-sum?
+//   - energySmooth (α=0.9, ~320ms): fast, tracks speech onset
+//   - energyBaseline (α=0.995, ~10s): slow, tracks steady background noise
 //
-// Delay-and-sum with incorrect direction estimates causes frequency-dependent
-// constructive/destructive interference that varies period-to-period,
-// producing choppy audio worse than single channel. Directional mic selection
-// avoids all phase math and produces clean, consistent output from the best
-// physically-positioned mic.
+// At Lock() time, the direction with the highest ratio of energySmooth to
+// energyBaseline is selected. This picks the direction that just had a
+// sudden energy increase (speech onset) rather than the direction with the
+// highest absolute energy (TV, fan, etc.).
+//
+// Direction is also exposed for LED ring visualisation.
 package beamformer
 
 import (
@@ -50,10 +47,10 @@ import (
 
 const (
 	// ALSA stream parameters — must match pcm_microphone.go
-	nChannels   = 9
-	sampleRate  = 16000
-	byteSample  = 3 // S24_3LE
-	frameSize   = nChannels * byteSample // 27 bytes per frame
+	nChannels    = 9
+	sampleRate   = 16000
+	byteSample   = 3 // S24_3LE
+	frameSize    = nChannels * byteSample // 27 bytes per frame
 	periodFrames = 512
 
 	// Number of candidate steering directions — one per perimeter mic
@@ -61,13 +58,18 @@ const (
 
 	// Centre mic channel — used for wake word detection (omnidirectional)
 	centreCh = 6
+
+	// Smoothing constants
+	smoothAlpha   = 0.9    // fast smoother (~320ms time constant at 32ms/period)
+	baselineAlpha = 0.995  // slow smoother (~10s time constant) — tracks background noise
 )
 
 // micAngles defines the physical angle (degrees, clockwise from 12 o'clock)
 // for each ALSA channel. Index = channel number.
+// Confirmed empirically 2026-05 via tone injection + analyse_capture.py.
 var micAngles = [7]float64{
-	30,  // ch0 — MK2
-	330, // ch1 — MK1
+	330, // ch0 — MK1
+	30,  // ch1 — MK2
 	90,  // ch2 — MK3
 	150, // ch3 — MK4
 	210, // ch4 — MK5
@@ -77,24 +79,31 @@ var micAngles = [7]float64{
 
 // candidateAngles are the steering directions tested for direction estimation.
 // One per perimeter mic, matching the mic positions exactly.
-var candidateAngles = [nDirections]float64{30, 90, 150, 210, 270, 330}
+var candidateAngles = [nDirections]float64{330, 30, 90, 150, 210, 270}
 
 // directionToChannel maps candidateAngles index → ALSA channel number for
 // the perimeter mic at that direction.
 //
-//	candidateAngles[0]=30°  → ch0 (micAngles[0]=30°)
-//	candidateAngles[1]=90°  → ch2 (micAngles[2]=90°)
-//	candidateAngles[2]=150° → ch3 (micAngles[3]=150°)
-//	candidateAngles[3]=210° → ch4 (micAngles[4]=210°)
-//	candidateAngles[4]=270° → ch5 (micAngles[5]=270°)
-//	candidateAngles[5]=330° → ch1 (micAngles[1]=330°)
-var directionToChannel = [nDirections]int{0, 2, 3, 4, 5, 1}
+//	candidateAngles[0]=330° → ch0 (MK1)
+//	candidateAngles[1]=30°  → ch1 (MK2)
+//	candidateAngles[2]=90°  → ch2 (MK3)
+//	candidateAngles[3]=150° → ch3 (MK4)
+//	candidateAngles[4]=210° → ch4 (MK5)
+//	candidateAngles[5]=270° → ch5 (MK6)
+var directionToChannel = [nDirections]int{0, 1, 2, 3, 4, 5}
 
 // Beamformer holds direction estimation state and locked mic selection.
 type Beamformer struct {
-	// energySmooth holds an exponentially weighted moving average of the
-	// per-direction HF band energy. α=0.9 gives ~320ms time constant.
+	// energySmooth: fast EWMA of per-direction HF energy (~320ms time constant).
+	// Tracks speech onset.
 	energySmooth [nDirections]float64
+
+	// energyBaseline: slow EWMA of per-direction HF energy (~10s time constant).
+	// Tracks steady background noise (TV, fan, etc.).
+	energyBaseline [nDirections]float64
+
+	// baselineReady counts periods until baseline is initialised (~3s warmup).
+	baselineReady int
 
 	// lockedChannel is the ALSA channel selected at gate open.
 	// -1 means unlocked (use live best-direction selection).
@@ -106,22 +115,38 @@ func New() *Beamformer {
 	return &Beamformer{lockedChannel: -1}
 }
 
-// Lock selects the current best-direction mic and holds it until Unlock.
-// Call when the VAD gate opens (voice turn starts).
-// No-op if already locked — prevents mid-utterance mic changes from VAD
-// oscillation causing the gate to briefly close and reopen.
+// Lock selects the mic with the highest energy onset relative to its noise
+// floor baseline and holds it until Unlock.
+//
+// Using onset ratio rather than absolute energy means a voice in a quiet
+// direction beats a TV in a loud direction.
 func (b *Beamformer) Lock() {
 	if b.lockedChannel >= 0 {
 		return
 	}
+
 	best := 0
+	bestRatio := b.onsetRatio(0)
 	for di := 1; di < nDirections; di++ {
-		if b.energySmooth[di] > b.energySmooth[best] {
+		r := b.onsetRatio(di)
+		if r > bestRatio {
+			bestRatio = r
 			best = di
 		}
 	}
 	b.lockedChannel = directionToChannel[best]
-	log.Printf("[beam] locked to ch%d (%.0f°)", b.lockedChannel, candidateAngles[best])
+	log.Printf("[beam] locked to ch%d (%.0f°) onset_ratio=%.2f",
+		b.lockedChannel, candidateAngles[best], bestRatio)
+}
+
+// onsetRatio returns energySmooth[di] / energyBaseline[di].
+// High ratio = sudden energy increase = likely speech onset.
+func (b *Beamformer) onsetRatio(di int) float64 {
+	baseline := b.energyBaseline[di]
+	if baseline < 1e-10 {
+		return b.energySmooth[di]
+	}
+	return b.energySmooth[di] / baseline
 }
 
 // Unlock releases the locked mic selection.
@@ -155,40 +180,49 @@ func (b *Beamformer) Process(raw []byte, steerAngle float64, enabled bool) (mono
 	channels := decodeChannels(raw)
 	hfChannels := bandDiff(channels)
 
-	// Update smoothed HF energy per direction
-	const smoothAlpha = 0.9
+	// Update both smoothers
 	for di := range candidateAngles {
 		energy := hfEnergy(hfChannels, di)
 		b.energySmooth[di] = smoothAlpha*b.energySmooth[di] + (1-smoothAlpha)*energy
+
+		// Only update baseline when unlocked — freeze it during voice turns
+		// so a loud voice doesn't corrupt the noise floor estimate
+		if b.lockedChannel < 0 {
+			b.energyBaseline[di] = baselineAlpha*b.energyBaseline[di] + (1-baselineAlpha)*energy
+		}
 	}
 
-	// Best direction from smoothed energies
+	if b.baselineReady < 100 { // ~3s warmup
+		b.baselineReady++
+	}
+
+	// Best direction from fast smoother (for LED ring and unlocked mic selection)
 	bestDir := 0
 	for di := 1; di < nDirections; di++ {
 		if b.energySmooth[di] > b.energySmooth[bestDir] {
 			bestDir = di
 		}
 	}
-	angle = candidateAngles[bestDir]
-
 	// Select output channel
 	ch := b.lockedChannel
 	if ch < 0 {
 		ch = directionToChannel[bestDir]
 	}
 
+	// Only report direction when locked — direction arc shows during voice
+	// turns only, not during idle wake word listening.
+	if b.lockedChannel >= 0 {
+		angle = candidateAngles[bestDir]
+	} else {
+		angle = -1
+	}
+
 	return extractChannel(raw, ch), angle
 }
 
-// hfEnergy computes delay-and-sum energy for direction di using HF channels.
-// Used only for direction estimation, not for audio output.
+// hfEnergy returns the mean squared HF energy for direction di.
 func hfEnergy(hfChannels [6][]float32, di int) float64 {
 	n := len(hfChannels[0])
-
-	// For direction estimation we use simple channel energy comparison
-	// rather than delay-and-sum — the mic at the candidate angle should
-	// have the highest HF energy when that direction is the source.
-	// This avoids the delay interpolation that caused choppy output.
 	ch := directionToChannel[di]
 	var energy float64
 	for _, v := range hfChannels[ch] {
@@ -199,8 +233,6 @@ func hfEnergy(hfChannels [6][]float32, di int) float64 {
 
 // bandDiff returns the stride-2 difference of each channel: out[i] = (in[i] - in[i-2]) / 2.
 // Frequency response peaks at 4kHz (fs/4), zero at 0Hz and 8kHz.
-// Targets the 2–4kHz band where the 76mm array has angular resolution
-// without grating lobes.
 func bandDiff(channels [6][]float32) [6][]float32 {
 	var out [6][]float32
 	for ci := 0; ci < 6; ci++ {

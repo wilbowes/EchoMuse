@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/wilbowes/EchoMuse/internal/beamformer"
 	"github.com/wilbowes/EchoMuse/internal/config"
+	"github.com/wilbowes/EchoMuse/internal/processor"
 	"github.com/wilbowes/EchoMuse/pkg/mic"
 	"github.com/wilbowes/EchoMuse/pkg/speaker"
 )
@@ -67,6 +68,7 @@ type DataClient struct {
 	connMu sync.Mutex
 
 	beam              *beamformer.Beamformer
+	proc              *processor.Processor
 	onDirectionChange func(angle float64)
 	directionMu       sync.Mutex
 }
@@ -78,6 +80,7 @@ func NewDataClient(deviceID string, microphone mic.Subscribable, spk speaker.Spe
 		spk:      spk,
 		readyCh:  make(chan string, 1),
 		beam:     beamformer.New(),
+		proc:     processor.New(),
 	}
 }
 
@@ -204,9 +207,8 @@ func (d *DataClient) connect(ctx context.Context, addr string) error {
 	}
 }
 
-// streamMic subscribes to the mic, runs VAD gate, streams binary frames.
-// VAD parameters are read from the shared config on each frame so that
-// controller-pushed config changes take effect without a restart.
+// streamMic subscribes to the mic, runs the processing pipeline and VAD gate,
+// streams binary frames to the controller.
 func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, lockMic bool) {
 	if d.mic == nil {
 		log.Println("[data] streamMic: no mic")
@@ -260,10 +262,21 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 
 			beamEnabled := snap.BeamformingEnabled != nil && *snap.BeamformingEnabled
 			mono, angle := d.beam.Process(raw, snap.BeamAngle, beamEnabled)
+
+			// ── Processing pipeline ──────────────────────────────────────
+			// Detect speech on raw beamformed output (pre-AGC) so VAD
+			// threshold is consistent regardless of AGC gain state.
 			rms    := vadPeriodRMS(mono)
 			speech := rms >= threshold
 
-			// Notify direction listener — non-blocking, keep it fast
+			// NS + AGC pipeline.
+			// NS uses RNNoise to reduce background noise before AGC.
+			// AGC release frozen during silence to prevent noise amplification.
+			mono = d.proc.Process(mono, true, speech)
+			// ─────────────────────────────────────────────────────────────
+
+			// Notify direction listener — non-blocking, keep it fast.
+			// Only fire when angle is valid (beam locked).
 			if angle >= 0 {
 				d.directionMu.Lock()
 				cb := d.onDirectionChange

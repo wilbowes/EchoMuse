@@ -122,9 +122,9 @@ func main() {
 	// When unmuting, release ring back to direction arc
 	s.SetMuteChangeCallback(func(muted bool) {
 		controlClient.SendMuteState(muted)
-		if !muted {
-			s.LEDModeDirection()
-		}
+		// Direction arc is controlled by beam lock state, not mute state.
+		// SetDirectionLEDs claims direction mode when beam is locked,
+		// and clears LEDs when beam unlocks (angle == -1).
 	})
 
 	log.Println("Ready")

@@ -41,6 +41,15 @@ type Server struct {
 
 	ledModeMu sync.Mutex
 	ledMode   ledMode
+
+	// baseLEDs stores the controller-set ring state so direction overlay
+	// can always be applied fresh on top without accumulating.
+	baseLEDs   [12]led.Led
+	baseLEDsMu sync.Mutex
+
+	// listeningLEDs is true when the controller has set the solid green
+	// listening ring — the only state where direction overlay is shown.
+	listeningLEDs bool
 }
 
 func NewServer(buttonController buttons.Controller, microphone mic.Microphone, speaker speaker.Speaker) *Server {
@@ -261,14 +270,26 @@ func (s *Server) LEDModeSystem() { s.SetLEDMode(ledModeSystem) }
 // LEDModeDirection releases the LED ring back to the beamformer arc.
 func (s *Server) LEDModeDirection() { s.SetLEDMode(ledModeDirection) }
 
-// SetDirectionLEDs lights a soft arc on the LED ring toward the estimated
-// source direction. Called from the data client's mic streaming goroutine.
-// Silently ignored when the system has claimed the ring.
+// SetDirectionLEDs overlays a direction marker onto the current LED ring state.
+//
+// When angle >= 0 (beam locked): overlays the direction marker onto whatever
+// the controller has set — e.g. solid green listening ring gets a brighter
+// white segment at the source direction.
+//
+// When angle < 0 (beam unlocked): no-op — the controller owns cleanup.
+// Spinner and leds_off are sent by the controller at the right times.
 func (s *Server) SetDirectionLEDs(angleDeg float64) {
-	s.ledModeMu.Lock()
-	mode := s.ledMode
-	s.ledModeMu.Unlock()
-	if mode != ledModeDirection {
+	// Beam unlocked — do nothing, controller handles LED state
+	if angleDeg < 0 {
+		return
+	}
+
+	// Only overlay during the solid green listening ring.
+	// Spinner, off, pulse etc. must not be interfered with.
+	s.baseLEDsMu.Lock()
+	listening := s.listeningLEDs
+	s.baseLEDsMu.Unlock()
+	if !listening {
 		return
 	}
 
@@ -281,29 +302,71 @@ func (s *Server) SetDirectionLEDs(angleDeg float64) {
 
 	const (
 		nLEDs     = 12
-		bright    = uint8(18)
-		dimBright = uint8(8)
+		// LED 0 is physically at 240° (just clockwise of MK5 at 210°).
+		ledOffset = 240
 	)
 
-	primary   := int(math.Round(angleDeg/30)) % nLEDs
+	// Convert steering angle to LED index
+	normAngle := int(math.Round(angleDeg/30)) * 30
+	primary   := ((normAngle - ledOffset + 360) % 360) / 30 % nLEDs
 	secondary := (primary + 1) % nLEDs
+	tertiary  := (primary + nLEDs - 1) % nLEDs
+
+	// Build overlay fresh on top of base ring state (not accumulated led.Leds)
+	s.baseLEDsMu.Lock()
+	base := s.baseLEDs
+	s.baseLEDsMu.Unlock()
 
 	leds := make([]led.Led, nLEDs)
 	for i := range leds {
-		leds[i] = led.Led{ID: i}
+		leds[i] = base[i]
+		leds[i].ID = i
 	}
-	leds[primary]   = led.Led{ID: primary,   R: 0, G: dimBright, B: bright}
-	leds[secondary] = led.Led{ID: secondary, R: 0, G: 0,         B: dimBright}
+
+	// Direction marker: bright light green on primary, boosted on adjacent
+	leds[primary]   = led.Led{ID: primary,   R: 0, G: 255, B: 80}
+	leds[secondary] = led.Led{ID: secondary, R: 0, G: clampAdd(base[secondary].G, 60), B: 0}
+	leds[tertiary]  = led.Led{ID: tertiary,  R: 0, G: clampAdd(base[tertiary].G,  60), B: 0}
 
 	if err := lc.SetLEDs(leds...); err != nil {
 		log.Printf("SetDirectionLEDs error: %v", err)
 	}
 }
 
+// clampAdd adds delta to v, clamping to 255.
+func clampAdd(v uint8, delta int) uint8 {
+	result := int(v) + delta
+	if result > 255 {
+		return 255
+	}
+	return uint8(result)
+}
+
 // SetLEDs applies LED state directly — called by the Clara client when server sends LED commands.
 // Always claims system mode — direction arc is suppressed while controller owns the ring.
+// Stores the state as baseLEDs so direction overlay can be applied fresh on top.
 func (s *Server) SetLEDs(leds []led.Led) {
 	s.LEDModeSystem()
+	// Detect if this is the solid green listening ring (all LEDs same green)
+	// Only in that state should the direction overlay be shown.
+	listeningRing := len(leds) == 12
+	if listeningRing {
+		for _, l := range leds {
+			if l.R != 0 || l.B != 0 || l.G == 0 {
+				listeningRing = false
+				break
+			}
+		}
+	}
+	// Store as base state for direction overlay
+	s.baseLEDsMu.Lock()
+	for _, l := range leds {
+		if l.ID >= 0 && l.ID < 12 {
+			s.baseLEDs[l.ID] = l
+		}
+	}
+	s.listeningLEDs = listeningRing
+	s.baseLEDsMu.Unlock()
 	s.ledMu.Lock()
 	lc := s.ledController
 	s.ledMu.Unlock()

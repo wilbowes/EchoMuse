@@ -66,7 +66,7 @@ import em_auth as auth
 import em_api as api
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG if os.environ.get("DEBUG") else logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
 )
 log = logging.getLogger("echomuse")
@@ -326,14 +326,25 @@ async def run_voice_turn(device: Device):
                             continue
                         if payload is None:
                             # VAD end sentinel — signal voice server speech has ended
-                            log.info(f"[{device.device_id}] VAD end — signalling voice server")
+                            log.info(
+                                f"[{device.device_id}] VAD end — signalling voice server "
+                                f"(pcm_buf={len(pcm_buf)}b queued)"
+                            )
                             await ws.send("END")
                             return
+                        log.debug(
+                            f"[{device.device_id}] stream_mic: chunk "
+                            f"{len(payload)}b (buf={len(pcm_buf)}b)"
+                        )
                         pcm_buf.extend(payload)
                         while len(pcm_buf) >= CHUNK_BYTES:
                             chunk = bytes(pcm_buf[:CHUNK_BYTES])
                             del pcm_buf[:CHUNK_BYTES]
                             await ws.send(chunk)
+                            log.debug(
+                                f"[{device.device_id}] stream_mic: sent "
+                                f"{len(chunk)}b to voice server"
+                            )
                 except asyncio.CancelledError:
                     pass
                 except Exception as e:
@@ -434,6 +445,21 @@ async def run_voice_turn(device: Device):
         if cancel_task in done:
             log.info(f"[{device.device_id}] Cancelled during playback")
             stream_task.cancel()
+        else:
+            # Wait for device audio buffer to drain before restarting mic.
+            # The device has ~341ms of buffered audio after the last frame
+            # is sent (4 audioCh + 4 ALSA hw periods at 2048 samples/48kHz).
+            # Without this wait, the mic restarts while the speaker is still
+            # playing, causing acoustic feedback into the next voice turn.
+            if not device.cancel_event.is_set():
+                # Sleep for the actual audio duration so the spinner keeps
+                # running until playback truly completes on the device.
+                # stream_speaker completes as soon as frames are buffered,
+                # not when they finish playing — hence this wait.
+                audio_duration = len(speaker_pcm) / (SPEAKER_RATE * 4)  # stereo S16LE
+                log.info(f"[{device.device_id}] Waiting {audio_duration:.1f}s for audio playback")
+                await asyncio.sleep(audio_duration)
+                log.info(f"[{device.device_id}] Playback complete")
 
         cancel_task.cancel()
 

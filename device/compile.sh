@@ -8,11 +8,28 @@ if echo "$GIT_VERSION" | grep -q "dirty"; then
 else
     VERSION="$GIT_VERSION"
 fi
-echo "Building EchoMuse $VERSION"
-docker run --rm \
+echo "Building EchoMuse $VERSION..."
+
+# Suppress known harmless warnings from vendored C sources:
+#   -Wno-null-dereference: rnnoise/rnn.c assert-style null checks
+#   -Wno-deprecated-declarations: tinyalsa pcm_read/pcm_write
+SUPPRESS="-Wno-deprecated-declarations -Wno-null-dereference"
+
+if docker run --rm \
   -e VERSION="$VERSION" \
   -e CGO_LDFLAGS="-Wl,--hash-style=both" \
-  -e CGO_CFLAGS="-Wno-deprecated-declarations" \
+  -e CGO_CFLAGS="$SUPPRESS" \
   -v "$(pwd)":/sdk \
   -v "$REPO_ROOT/GoTinyAlsa":/GoTinyAlsa \
-  echomuse-compiler
+  echomuse-compiler 2>/tmp/build_err.log; then
+    echo ""
+    echo "✓ Build succeeded → build/server"
+    echo ""
+else
+    echo ""
+    echo "✗ Build failed:"
+    echo ""
+    cat /tmp/build_err.log
+    echo ""
+    exit 1
+fi
