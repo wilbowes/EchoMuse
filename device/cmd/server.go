@@ -65,7 +65,15 @@ func main() {
 	controlClient := client.NewControlClient(
 		deviceID,
 		func(leds []led.Led) { s.SetLEDs(leds) },
-		func(lockMic bool) { dataClient.StartMic(lockMic) },
+		func(lockMic bool) {
+			if s.IsMuted() {
+				// Mute is device-sovereign — the physical button cannot be
+				// overridden remotely. Refuse the controller's mic_start.
+				log.Println("[cmd] mic_start from controller rejected — device is muted")
+				return
+			}
+			dataClient.StartMic(lockMic)
+		},
 		func() { dataClient.StopMic() },
 	)
 
@@ -103,14 +111,24 @@ func main() {
 		go pulseWhite(pulseCtx, s)
 	})
 
-	// Connected — stop pulse, clear LEDs, hand ring back to direction arc
+	// Connected — stop pulse, report current mute state, restore ring or hand
+	// back to direction arc depending on mute state.
 	controlClient.OnConnected(func() {
 		if pulseCancel != nil {
 			pulseCancel()
 			pulseCancel = nil
 		}
-		s.SetLEDs(allLEDs(0, 0, 0))
-		s.LEDModeDirection()
+		// Always report mute state on (re)connect — the controller may have
+		// restarted and lost its record of our state.
+		muted := s.IsMuted()
+		controlClient.SendMuteState(muted)
+		if muted {
+			// Orange pulse overwrote the red ring — restore it.
+			s.RestoreMuteRing()
+		} else {
+			s.SetLEDs(allLEDs(0, 0, 0))
+			s.LEDModeDirection()
+		}
 	})
 
 	// Config applied — apply hardware changes via tinymix

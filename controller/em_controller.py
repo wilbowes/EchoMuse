@@ -562,6 +562,12 @@ async def wake_word_listener(device: Device):
             if device.oww_paused.is_set():
                 continue
 
+            # Mic is hardware-muted — discard frames and clear the buffer so
+            # stale pre-mute audio can't accumulate and trigger OWW on unmute.
+            if device.muted:
+                buf.clear()
+                continue
+
             buf.extend(payload)
             while len(buf) >= CHUNK_BYTES:
                 frame   = bytes(buf[:CHUNK_BYTES])

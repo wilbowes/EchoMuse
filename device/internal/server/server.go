@@ -151,6 +151,12 @@ func (s *Server) IsMuted() bool {
 	return s.mute.IsMuted()
 }
 
+// RestoreMuteRing re-applies the red mute ring. Called on reconnect to
+// recover the visual state that the orange pulse animation overwrote.
+func (s *Server) RestoreMuteRing() {
+	s.mute.showMuteLEDs()
+}
+
 func (s *Server) rootHandler(c *gin.Context) {
 	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte("Echo up and running"))
 }
