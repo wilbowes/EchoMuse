@@ -107,8 +107,8 @@ func (d *Device) Apply(msg ConfigMessage) {
 	if msg.AdcMicpga > 0 {
 		d.AdcMicpga = msg.AdcMicpga
 	}
-	if msg.BeamAngle != 0 {
-		d.BeamAngle = msg.BeamAngle
+	if msg.BeamAngle != nil {
+		d.BeamAngle = *msg.BeamAngle
 	}
 	if msg.BeamformingEnabled != nil {
 		d.BeamformingEnabled = *msg.BeamformingEnabled
@@ -119,6 +119,7 @@ func (d *Device) Apply(msg ConfigMessage) {
 func (d *Device) Snapshot() ConfigMessage {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
+	beamAngle := d.BeamAngle
 	return ConfigMessage{
 		VadThreshold:        d.VadThreshold,
 		VadSpeechMs:         d.VadSpeechMs,
@@ -128,7 +129,7 @@ func (d *Device) Snapshot() ConfigMessage {
 		StartupVolume:       d.StartupVolume,
 		AdcDigitalGain:      d.AdcDigitalGain,
 		AdcMicpga:           d.AdcMicpga,
-		BeamAngle:           d.BeamAngle,
+		BeamAngle:           &beamAngle,
 		BeamformingEnabled:  &d.BeamformingEnabled,
 	}
 }
@@ -145,7 +146,7 @@ type ConfigMessage struct {
 	VadSilenceMs       int     `json:"vadSilenceMs,omitempty"`
 	OwwThreshold       float64 `json:"owwThreshold,omitempty"`
 	OwwModel           string  `json:"owwModel,omitempty"`
-	BeamAngle           float64  `json:"beamAngle,omitempty"`
+	BeamAngle           *float64 `json:"beamAngle,omitempty"`
 	BeamformingEnabled  *bool    `json:"beamformingEnabled,omitempty"`
 	HasBeamforming      bool     `json:"hasBeamforming,omitempty"`
 }

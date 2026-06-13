@@ -296,7 +296,11 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			if silenceMax   < 1 { silenceMax   = 1 }
 
 			beamEnabled := snap.BeamformingEnabled != nil && *snap.BeamformingEnabled
-			mono, angle := d.beam.Process(raw, snap.BeamAngle, beamEnabled)
+			beamAngle   := float64(-1)
+			if snap.BeamAngle != nil {
+				beamAngle = *snap.BeamAngle
+			}
+			mono, angle := d.beam.Process(raw, beamAngle, beamEnabled)
 
 			// ── Processing pipeline ──────────────────────────────────────
 			// Detect speech on raw beamformed output (pre-AGC) so VAD

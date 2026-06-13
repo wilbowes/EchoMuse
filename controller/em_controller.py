@@ -890,13 +890,21 @@ async def handle_data(ws: WebSocketServerProtocol):
                 continue
             # VAD end sentinel: mic frame with single-byte payload 0x04
             if len(raw) == MIC_HEADER_LEN + 1 and raw[MIC_HEADER_LEN] == VAD_END_TYPE:
+                q = device.voice_queue if device.oww_paused.is_set() else device.mic_queue
+                if q.full():
+                    # Sentinel must not be dropped — stream_mic waits for None
+                    # to send END to the voice server; losing it means the turn
+                    # hangs until the 45s timeout. Dropping one audio frame to
+                    # make room is acceptable; dropping the sentinel is not.
+                    try:
+                        q.get_nowait()
+                        log.warning(f"[{device.device_id}] queue full — dropped one frame to deliver VAD end sentinel")
+                    except asyncio.QueueEmpty:
+                        pass
                 try:
-                    if device.oww_paused.is_set():
-                        device.voice_queue.put_nowait(None)
-                    else:
-                        device.mic_queue.put_nowait(None)
+                    q.put_nowait(None)
                 except asyncio.QueueFull:
-                    pass
+                    log.error(f"[{device.device_id}] VAD end sentinel lost — queue still full after drain")
                 continue
             payload = raw[MIC_HEADER_LEN:]
             try:
@@ -958,40 +966,17 @@ async def handle_shell(ws: WebSocketServerProtocol, path: str):
 
     log.info(f"[shell] Proxying: {device_id}")
 
-    async def device_to_dashboard():
-        try:
-            async for msg in ws:
-                if isinstance(msg, bytes):
-                    await dashboard_ws.send_bytes(msg)
-                else:
-                    await dashboard_ws.send_str(msg)
-        except Exception:
-            pass
-
-    async def dashboard_to_device():
-        try:
-            async for msg in dashboard_ws:
-                if msg.type == _aiohttp.WSMsgType.BINARY:
-                    await ws.send(msg.data)
-                elif msg.type == _aiohttp.WSMsgType.TEXT:
-                    await ws.send(msg.data.encode())
-                elif msg.type in (_aiohttp.WSMsgType.CLOSE,
-                                  _aiohttp.WSMsgType.ERROR):
-                    break
-        except Exception:
-            pass
-
+    tasks = [
+        asyncio.create_task(device_to_dashboard()),
+        asyncio.create_task(dashboard_to_device()),
+    ]
     try:
-        done, pending = await asyncio.wait(
-            [
-                asyncio.create_task(device_to_dashboard()),
-                asyncio.create_task(dashboard_to_device()),
-            ],
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        for task in pending:
-            task.cancel()
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     finally:
+        # Cancel both tasks regardless of how asyncio.wait exited — if it
+        # raised, tasks were created but never cancelled and would leak.
+        for task in tasks:
+            task.cancel()
         log.info(f"[shell] Session ended: {device_id}")
         if not done_future.done():
             done_future.set_result(None)

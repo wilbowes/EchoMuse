@@ -309,7 +309,6 @@ tinymix -D 0 125 88 88
 tinymix -D 0 128 40 40
 tinymix -D 0 143 88 88
 tinymix -D 0 146 40 40
-/data/local/bin/volume_buttons.sh &
 kill $(ps | grep ledcontroller | grep -v grep)
 exec /data/local/bin/server > /tmp/server.log 2>&1
 EOF

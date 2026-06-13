@@ -3,9 +3,7 @@ package server
 import (
 	"fmt"
 	"github.com/wilbowes/EchoMuse/pkg/led"
-	"github.com/gin-gonic/gin"
 	"log"
-	"net/http"
 	"os/exec"
 	"sync"
 	"time"
@@ -138,46 +136,4 @@ func (vc *volumeController) showLEDs(level int) {
 		}
 	})
 	vc.mu.Unlock()
-}
-
-// ── HTTP handlers ─────────────────────────────────────────────────────
-
-func (s *Server) getVolumeHandler(c *gin.Context) {
-	level := s.volume.Get()
-	pct := level * 100 / volumeMax
-	c.JSON(http.StatusOK, gin.H{
-		"level":   level,
-		"percent": pct,
-		"max":     volumeMax,
-	})
-}
-
-type setVolumeRequest struct {
-	// Accept either raw level (0–175) or percent (0–100)
-	Level   *int `json:"level"`
-	Percent *int `json:"percent"`
-}
-
-func (s *Server) setVolumeHandler(c *gin.Context) {
-	var req setVolumeRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	var level int
-	if req.Level != nil {
-		level = *req.Level
-	} else if req.Percent != nil {
-		level = *req.Percent * volumeMax / 100
-	} else {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "provide level or percent"})
-		return
-	}
-
-	s.volume.Set(level)
-	c.JSON(http.StatusOK, gin.H{
-		"level":   s.volume.Get(),
-		"percent": s.volume.Get() * 100 / volumeMax,
-	})
 }
