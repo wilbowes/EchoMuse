@@ -15,15 +15,25 @@ echo "Building EchoMuse $VERSION..."
 #   -Wno-deprecated-declarations: tinyalsa pcm_read/pcm_write
 SUPPRESS="-Wno-deprecated-declarations -Wno-null-dereference"
 
+# Build explicitly with --entrypoint bash so we control ldflags directly.
+# Previously we relied on the base image entrypoint to use $VERSION, which
+# is opaque. This embeds the version string into the binary at compile time
+# so the device reports the correct version to the controller on connect.
+BUILD_CMD="cd /sdk && mkdir -p build && go build \
+    -tags server \
+    -ldflags \"-X github.com/wilbowes/EchoMuse/internal/client.Version=${VERSION}\" \
+    -o build/server ./cmd/"
+
 if docker run --rm \
-  -e VERSION="$VERSION" \
+  --entrypoint bash \
   -e CGO_LDFLAGS="-Wl,--hash-style=both" \
   -e CGO_CFLAGS="$SUPPRESS" \
   -v "$(pwd)":/sdk \
   -v "$REPO_ROOT/GoTinyAlsa":/GoTinyAlsa \
-  echomuse-compiler 2>/tmp/build_err.log; then
+  echomuse-compiler \
+  -c "$BUILD_CMD" 2>/tmp/build_err.log; then
     echo ""
-    echo "✓ Build succeeded → build/server"
+    echo "✓ Build succeeded → build/server  ($VERSION)"
     echo ""
 else
     echo ""

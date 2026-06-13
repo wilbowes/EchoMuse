@@ -7,6 +7,11 @@
 //
 // RNNoise processes 480-sample frames; our periods are 512 samples.
 // A ring buffer handles the size mismatch transparently.
+//
+// RNNoise returns a speech probability (0–1) on each frame. This is used
+// to refine AGC gating: if RNNoise says "not speech" even when RMS is above
+// threshold (e.g. loud TV or HVAC), AGC release is frozen rather than
+// amplifying the background noise. The stream VAD gate remains RMS-only.
 package processor
 
 import (
@@ -25,6 +30,11 @@ const (
 	agcMinGain   = 0.5
 	agcAttack    = 0.05  // fast attack — prevents clipping
 	agcRelease   = 0.005 // slow release — avoids pumping
+
+	// RNNoise VAD probability threshold for AGC gating.
+	// When RNNoise confidence is below this, AGC release is frozen even if
+	// RMS is above the stream VAD threshold. Tunable if needed.
+	vadProbThreshold = float32(0.5)
 )
 
 // Processor holds inter-period state for the audio pipeline.
@@ -33,6 +43,13 @@ type Processor struct {
 	ns      *rnnoise.State
 	nsBuf   []float32 // ring buffer for 480-sample frame alignment
 	nsOut   []float32 // output ring buffer
+
+	// RNNoise VAD probability from the most recently completed frame.
+	// Used to gate AGC release independently of the stream VAD.
+	// vadHasData is false until at least one RNNoise frame has been processed
+	// — during startup latency the probability is meaningless (0.0).
+	vadProb    float32
+	vadHasData bool
 
 	// AGC state
 	agcGain float64
@@ -76,7 +93,16 @@ func (p *Processor) Process(mono []byte, nsEnabled bool, speech bool) []byte {
 		samples = p.noiseSuppress(samples)
 	}
 
-	samples = p.agc(samples, speech)
+	// AGC gating: stream VAD (RMS) is the primary gate for what gets sent
+	// to the controller. RNNoise probability refines AGC release only —
+	// if RNNoise has warmed up and says "not speech", freeze AGC release
+	// even if RMS is above threshold. Prevents gain pumping on loud
+	// non-speech sources (TV, HVAC) that fool the RMS threshold.
+	agcSpeech := speech
+	if nsEnabled && p.vadHasData && p.vadProb < vadProbThreshold {
+		agcSpeech = false
+	}
+	samples = p.agc(samples, agcSpeech)
 
 	out := make([]byte, len(mono))
 	for i, s := range samples {
@@ -110,7 +136,12 @@ func (p *Processor) noiseSuppress(samples []float32) []float32 {
 	for len(p.nsBuf) >= rnnoise.FrameSize {
 		copy(frameIn, p.nsBuf[:rnnoise.FrameSize])
 		p.nsBuf = p.nsBuf[rnnoise.FrameSize:]
-		p.ns.ProcessFrame(frameOut, frameIn)
+		// ProcessFrame returns speech probability 0–1. Previously discarded;
+		// now stored for AGC gating. Only the most recent frame's probability
+		// is kept — for our 512-sample period, usually one frame completes,
+		// occasionally two. The latest is always the most relevant.
+		p.vadProb = p.ns.ProcessFrame(frameOut, frameIn)
+		p.vadHasData = true
 		p.nsOut = append(p.nsOut, frameOut...)
 	}
 

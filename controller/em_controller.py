@@ -966,6 +966,29 @@ async def handle_shell(ws: WebSocketServerProtocol, path: str):
 
     log.info(f"[shell] Proxying: {device_id}")
 
+    async def device_to_dashboard():
+        try:
+            async for msg in ws:
+                if isinstance(msg, bytes):
+                    await dashboard_ws.send_bytes(msg)
+                else:
+                    await dashboard_ws.send_str(msg)
+        except Exception:
+            pass
+
+    async def dashboard_to_device():
+        try:
+            async for msg in dashboard_ws:
+                if msg.type == _aiohttp.WSMsgType.BINARY:
+                    await ws.send(msg.data)
+                elif msg.type == _aiohttp.WSMsgType.TEXT:
+                    await ws.send(msg.data.encode())
+                elif msg.type in (_aiohttp.WSMsgType.CLOSE,
+                                  _aiohttp.WSMsgType.ERROR):
+                    break
+        except Exception:
+            pass
+
     tasks = [
         asyncio.create_task(device_to_dashboard()),
         asyncio.create_task(dashboard_to_device()),
