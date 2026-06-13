@@ -142,6 +142,12 @@ class Device:
 
         self.data_ready = asyncio.Event()
 
+        # Tunable at runtime — updated when a config push arrives.
+        # wake_word_listener reads this each detection cycle rather than
+        # caching a snapshot at startup, so config changes take effect
+        # without requiring a device reconnect.
+        self.oww_threshold: float = OWW_THRESHOLD
+
     async def send_control(self, msg: dict):
         try:
             await self.control_ws.send(json.dumps(msg))
@@ -181,11 +187,16 @@ class Device:
         self.speaking = True
         try:
             offset = 0
-            while offset + SPEAKER_BYTES <= len(pcm):
+            while offset < len(pcm):
                 if self.cancel_event.is_set():
                     break
-                period = pcm[offset:offset + SPEAKER_BYTES]
-                await self.send_data(bytes([SPEAKER_FRAME_TYPE]) + period)
+                chunk = pcm[offset:offset + SPEAKER_BYTES]
+                if len(chunk) < SPEAKER_BYTES:
+                    # Pad the final partial period with silence — without this,
+                    # up to one full period (~42ms at 48kHz) of the last word is
+                    # silently dropped because the old loop required a full period.
+                    chunk = chunk + bytes(SPEAKER_BYTES - len(chunk))
+                await self.send_data(bytes([SPEAKER_FRAME_TYPE]) + chunk)
                 offset += SPEAKER_BYTES
             await self.send_data(bytes([SPEAKER_EOS_TYPE]))
         finally:
@@ -261,22 +272,33 @@ async def leds_spin_green(device: Device, stop_event: asyncio.Event):
 # ─── Audio conversion ─────────────────────────────────────────────────────────
 
 def resample_to_stereo_48k(pcm: bytes, from_rate: int) -> bytes:
+    """
+    Resample mono S16_LE PCM from from_rate to 48kHz stereo S16_LE.
+
+    Uses linear interpolation via numpy. For a 10s Piper response (~220k samples)
+    the old pure-Python loop took ~1-2s of wall time in the asyncio event loop;
+    numpy completes it in <5ms, keeping the perceived latency budget intact.
+    """
     if len(pcm) < 2:
         return b""
-    samples = struct.unpack(f"<{len(pcm)//2}h", pcm)
+    samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
     n_in  = len(samples)
     n_out = int(n_in * SPEAKER_RATE / from_rate)
-    out   = []
-    for i in range(n_out):
-        src = i * from_rate / SPEAKER_RATE
-        lo  = int(src)
-        hi  = min(lo + 1, n_in - 1)
-        frac = src - lo
-        val  = int(samples[lo] * (1 - frac) + samples[hi] * frac)
-        val  = max(-32768, min(32767, val))
-        out.append(val)
-        out.append(val)
-    return struct.pack(f"<{len(out)}h", *out)
+
+    # Source indices for each output sample — fractional positions in input
+    src  = np.arange(n_out, dtype=np.float64) * from_rate / SPEAKER_RATE
+    lo   = src.astype(np.int32)
+    hi   = np.minimum(lo + 1, n_in - 1)
+    frac = (src - lo).astype(np.float32)
+
+    resampled = samples[lo] * (1.0 - frac) + samples[hi] * frac
+    resampled = np.clip(resampled, -32768, 32767).astype(np.int16)
+
+    # Duplicate mono → stereo (L = R)
+    stereo = np.empty(n_out * 2, dtype=np.int16)
+    stereo[0::2] = resampled
+    stereo[1::2] = resampled
+    return stereo.tobytes()
 
 
 # ─── Voice pipeline ───────────────────────────────────────────────────────────
@@ -516,11 +538,7 @@ async def wake_word_listener(device: Device):
     )
     model_key = f"{OWW_MODEL}_v0.1"
 
-    # Read OWW threshold from device config if available
-    cfg       = db.get_device_config(device.device_id)
-    threshold = float(cfg.get("owwThreshold", OWW_THRESHOLD))
-
-    log.info(f"[{device.device_id}] OWW: starting (threshold={threshold})")
+    log.info(f"[{device.device_id}] OWW: starting (initial threshold={device.oww_threshold:.3f})")
     await device.mic_start()
 
     buf = bytearray()
@@ -558,7 +576,7 @@ async def wake_word_listener(device: Device):
                 )
                 score = prediction.get(model_key, 0.0)
 
-                if score >= threshold:
+                if score >= device.oww_threshold:
                     log.info(
                         f"[{device.device_id}] Wake word detected "
                         f"(score={score:.3f})"
@@ -736,6 +754,7 @@ async def handle_control(ws: WebSocketServerProtocol):
             None, db.get_device_config, device_id
         )
         await device.send_control({"type": "config", **config})
+        device.oww_threshold = float(config.get("owwThreshold", OWW_THRESHOLD))
         log.info(f"[control] Config pushed to {device_id}")
 
         await leds_off(device)

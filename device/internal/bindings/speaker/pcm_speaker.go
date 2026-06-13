@@ -3,6 +3,7 @@
 package speaker
 
 import (
+	"fmt"
 	"log"
 	"os/exec"
 	"time"
@@ -25,12 +26,16 @@ type PcmSpeaker struct {
 	session  *tinyalsa.AudioSession
 	audioCh  chan []byte
 	stopCh   chan struct{}
+	// deadCh is closed by silenceLoop on any exit so PumpPeriod can return
+	// an error rather than block indefinitely waiting for a dead consumer.
+	deadCh   chan struct{}
 }
 
 func NewPcmSpeaker() (*PcmSpeaker, error) {
 	s := &PcmSpeaker{
 		audioCh: make(chan []byte, audioChanDepth),
 		stopCh:  make(chan struct{}),
+		deadCh:  make(chan struct{}),
 	}
 	if err := s.Init(); err != nil {
 		return nil, err
@@ -70,8 +75,10 @@ func (p *PcmSpeaker) Init() error {
 
 // silenceLoop runs continuously, playing real audio from audioCh when available
 // and silence when the channel is empty. No pause/resume needed — the select
-// naturally yields to real audio.
+// naturally yields to real audio. Closes deadCh on any exit so PumpPeriod
+// callers unblock and receive an error rather than hanging.
 func (p *PcmSpeaker) silenceLoop() {
+	defer close(p.deadCh)
 	for {
 		select {
 		case <-p.stopCh:
@@ -95,7 +102,11 @@ func (p *PcmSpeaker) silenceLoop() {
 func (p *PcmSpeaker) Pump(data []byte) error {
 	log.Printf("Pump called with %d bytes", len(data))
 	for len(data) >= periodBytes {
-		p.audioCh <- data[:periodBytes]
+		select {
+		case p.audioCh <- data[:periodBytes]:
+		case <-p.deadCh:
+			return fmt.Errorf("speaker: ALSA loop has died")
+		}
 		data = data[periodBytes:]
 	}
 	return nil
@@ -103,12 +114,17 @@ func (p *PcmSpeaker) Pump(data []byte) error {
 
 // PumpPeriod queues one period of audio for playback. Called by the WS client
 // for each incoming 0x02 binary frame. Blocks until the silence loop has
-// consumed a slot — this rate-limits the server to ALSA playback speed.
+// consumed a slot (rate-limiting to ALSA speed), or returns an error if the
+// silence loop has died — preventing an infinite block on a dead consumer.
 func (p *PcmSpeaker) PumpPeriod(data []byte) error {
 	period := make([]byte, len(data))
 	copy(period, data)
-	p.audioCh <- period
-	return nil
+	select {
+	case p.audioCh <- period:
+		return nil
+	case <-p.deadCh:
+		return fmt.Errorf("speaker: ALSA loop has died")
+	}
 }
 
 func (p *PcmSpeaker) Close() {

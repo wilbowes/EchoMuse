@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 from typing import Optional
@@ -126,6 +127,12 @@ MIGRATIONS: list[str] = [
 _db_path: str = ""
 _conn: Optional[sqlite3.Connection] = None
 
+# SQLite WAL mode allows concurrent readers, but writes must be serialised.
+# run_in_executor dispatches db calls across multiple threads sharing the same
+# connection; without a lock, concurrent _tx sequences can interleave — thread B's
+# commit landing mid-transaction-A, or a rollback eating another thread's writes.
+_write_lock = threading.Lock()
+
 
 def init(path: str = "echomuse.db") -> None:
     """
@@ -153,16 +160,18 @@ def _tx():
     Context manager for a write transaction.
 
     Commits on clean exit, rolls back on any exception and re-raises.
-    Using the module-level connection directly keeps things simple for a
-    single-process, single-thread-writing workload.
+    Acquires _write_lock to serialise concurrent executor-thread writes on the
+    shared connection — SQLite WAL allows concurrent reads but not concurrent
+    write transactions from the same connection object.
     """
     assert _conn is not None, "db.init() has not been called"
-    try:
-        yield _conn
-        _conn.commit()
-    except Exception:
-        _conn.rollback()
-        raise
+    with _write_lock:
+        try:
+            yield _conn
+            _conn.commit()
+        except Exception:
+            _conn.rollback()
+            raise
 
 
 def _q(sql: str, params: tuple = ()) -> list[sqlite3.Row]:

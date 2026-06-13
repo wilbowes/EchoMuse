@@ -2,6 +2,8 @@ package led
 
 import (
 	"bytes"
+	"sync"
+
 	"github.com/wilbowes/EchoMuse/pkg/led"
 	"os"
 	"os/exec"
@@ -20,6 +22,11 @@ const ledFrame = "/sys/devices/soc/11007000.i2c/i2c-0/0-003f/frame"
 const perm = os.FileMode(0644)
 
 type I2CController struct {
+	// mu serialises writes to led.Leds, which is a mutable package global written
+	// from multiple goroutines (mic direction callback, control plane, button
+	// handler, volume timer). Without this, concurrent SetLEDs calls produce
+	// torn frames written to the i2C device.
+	mu sync.Mutex
 }
 
 func (i *I2CController) Init() error {
@@ -70,7 +77,9 @@ func (i *I2CController) GetNumLEDs() (int, error) {
 //}
 
 func (i *I2CController) SetLEDs(LEDs ...led.Led) error {
-    var targetColor bytes.Buffer
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	var targetColor bytes.Buffer
     for _, curLed := range LEDs {
         for j, storedLed := range led.Leds {
             if curLed.ID == storedLed.ID {

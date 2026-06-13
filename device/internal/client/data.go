@@ -237,6 +237,16 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 		return
 	}
 
+	// Clear micActive on exit regardless of why we stopped — StopMic, stopCh
+	// signal, or ALSA stream death. Without this, a mic death leaves micActive=true
+	// and StartMic silently refuses to restart.
+	defer func() {
+		d.micMu.Lock()
+		d.micActive = false
+		d.micMu.Unlock()
+		log.Println("[data] streamMic: exited")
+	}()
+
 	if lockMic {
 		d.beam.Lock()
 	}

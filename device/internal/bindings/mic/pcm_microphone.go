@@ -57,6 +57,8 @@ func (p *PcmMicrophone) Init() error {
 
 // readLoop opens the ALSA device and reads periods forever, fanning each
 // period out to all current subscribers. Runs for the lifetime of the process.
+// When the stream ends (ALSA error), all subscriber channels are closed so
+// callers unblock and can detect the death rather than hanging on empty channels.
 func (p *PcmMicrophone) readLoop() {
 	stream := make(chan []byte, 16)
 
@@ -81,6 +83,16 @@ func (p *PcmMicrophone) readLoop() {
 		}
 		p.mu.Unlock()
 	}
+
+	// Stream ended — close all subscriber channels so callers see EOF rather
+	// than blocking on a channel that will never receive again.
+	log.Printf("mic: ALSA stream closed — notifying %d subscribers", len(p.subs))
+	p.mu.Lock()
+	for _, ch := range p.subs {
+		close(ch)
+	}
+	p.subs = nil
+	p.mu.Unlock()
 }
 
 // subscribe registers a new subscriber and returns its channel.
@@ -92,17 +104,23 @@ func (p *PcmMicrophone) Subscribe() chan []byte {
 	return ch
 }
 
-// unsubscribe removes a subscriber channel.
+// Unsubscribe removes a subscriber channel. Safe to call even if readLoop has
+// already closed the channel (e.g. after an ALSA stream error).
 func (p *PcmMicrophone) Unsubscribe(ch chan []byte) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for i, s := range p.subs {
 		if s == ch {
 			p.subs = append(p.subs[:i], p.subs[i+1:]...)
+			// Only close if readLoop hasn't already closed it (subs==nil means
+			// readLoop ran the close-all path and cleared the slice).
+			// We detect this by the channel still being in the slice — if we
+			// found it, readLoop hasn't closed it yet.
 			close(ch)
 			return
 		}
 	}
+	// Not found — readLoop already closed and cleared it. Nothing to do.
 }
 
 // Listen subscribes to the permanent mic stream and calls callback for each

@@ -359,6 +359,10 @@ async def _post_device_config(request: web.Request) -> web.Response:
     live = _devices.get(device_id)
     if live is not None:
         await live.send_control({"type": "config", **config})
+        # Update in-memory threshold so wake_word_listener picks it up
+        # immediately without requiring a device reconnect.
+        if "owwThreshold" in config:
+            live.oww_threshold = float(config["owwThreshold"])
         log.info(f"[api] Config pushed to live device: {device_id}")
         pushed = True
     else:
