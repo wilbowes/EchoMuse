@@ -499,26 +499,21 @@ async def _run_voice_locked(device: Device):
 
 # ─── Wake word listener ───────────────────────────────────────────────────────
 
-_oww_model: OWWModel | None = None
-
-
-def _get_oww_model() -> OWWModel:
-    global _oww_model
-    if _oww_model is None:
-        log.info(f"Loading OpenWakeWord model: {OWW_MODEL}")
-        _oww_model = OWWModel(
-            wakeword_models=[
-                f"{OWW_MODEL}_v0.1"
-            ],
-            enable_speex_noise_suppression=False,
-        )
-        log.info("OpenWakeWord model ready")
-    return _oww_model
-
-
 async def wake_word_listener(device: Device):
     loop      = asyncio.get_event_loop()
-    model     = await loop.run_in_executor(None, _get_oww_model)
+
+    # Each device gets its own model instance — the OWW model holds internal
+    # streaming state (feature buffer, VAD history) that is not thread-safe and
+    # must not be shared across devices. Models are small; the memory cost is
+    # acceptable for a fleet of 5-6 devices.
+    log.info(f"[{device.device_id}] OWW: loading model {OWW_MODEL}")
+    model = await loop.run_in_executor(
+        None,
+        lambda: OWWModel(
+            wakeword_models=[f"{OWW_MODEL}_v0.1"],
+            enable_speex_noise_suppression=False,
+        ),
+    )
     model_key = f"{OWW_MODEL}_v0.1"
 
     # Read OWW threshold from device config if available
@@ -810,7 +805,9 @@ async def handle_control(ws: WebSocketServerProtocol):
             db.log_device(
                 device.device_id, "info", "controller", "Disconnected"
             )
-            _devices.pop(device.device_id, None)
+            # Identity check — a reconnect may have already replaced our entry.
+            if _devices.get(device.device_id) is device:
+                _devices.pop(device.device_id, None)
             await api.notify_device_disconnected(device.device_id)
 
 
@@ -885,8 +882,10 @@ async def handle_data(ws: WebSocketServerProtocol):
 
     finally:
         if device:
-            device.data_ws = None
-            device.data_ready.clear()
+            # Identity check — a reconnect may have replaced our data_ws already.
+            if device.data_ws is ws:
+                device.data_ws = None
+                device.data_ready.clear()
             log.info(f"[data] Data connection closed: {device.device_id}")
 
 
@@ -988,6 +987,23 @@ def _make_mdns_info() -> ServiceInfo:
     )
 
 
+async def _mdns_refresh_loop(azc: AsyncZeroconf, info: ServiceInfo) -> None:
+    """
+    Periodically re-register the mDNS service to keep IGMP multicast group
+    membership alive on the LAN. Required when running behind a Proxmox bridge
+    (or any managed switch that ages out multicast memberships). Without this,
+    mDNS responses stop arriving at devices after MDNS_REFRESH_INTERVAL seconds
+    of silence and discovery fails silently.
+    """
+    while True:
+        await asyncio.sleep(MDNS_REFRESH_INTERVAL)
+        try:
+            await azc.async_update_service(info)
+            log.debug("mDNS registration refreshed")
+        except Exception as e:
+            log.warning(f"mDNS refresh failed: {e}")
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 async def main():
@@ -1005,7 +1021,7 @@ async def main():
     log.info(f"Dashboard + API listening on http://{SERVER_HOST}:{API_PORT}")
 
     # ── Background tasks ──────────────────────────────────────────────────────
-    release_task      = asyncio.create_task(api.release_poll_loop())
+    release_task       = asyncio.create_task(api.release_poll_loop())
     session_prune_task = asyncio.create_task(api.session_prune_loop())
 
     # ── mDNS ──────────────────────────────────────────────────────────────────
@@ -1016,6 +1032,7 @@ async def main():
         f"mDNS advertising {MDNS_NAME}._emcontroller._tcp.local "
         f"→ {SERVER_IP}:{SERVER_PORT}"
     )
+    mdns_task = asyncio.create_task(_mdns_refresh_loop(azc, info))
 
     # ── WebSocket server ──────────────────────────────────────────────────────
     log.info(f"WebSocket server starting on {SERVER_HOST}:{SERVER_PORT}")

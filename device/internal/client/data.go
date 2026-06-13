@@ -132,20 +132,42 @@ func (d *DataClient) StopMic() {
 	}
 	close(d.micStopCh)
 	d.micActive = false
-	d.beam.Unlock()
+	// beam.Unlock() is deferred inside streamMic — always runs on the mic
+	// goroutine, eliminating the data race with Process() and Lock().
 	log.Println("[data] Mic streaming stopped")
 }
 
 func (d *DataClient) Run(ctx context.Context) error {
+	var lastAddr string
 	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case addr := <-d.readyCh:
-			log.Printf("[data] Connecting to %s", addr)
-			if err := d.connect(ctx, addr); err != nil && err != context.Canceled {
-				log.Printf("[data] Connection lost: %v — waiting for control to reconnect", err)
+		var addr string
+		if lastAddr == "" {
+			// No previous address — block until control signals us.
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case addr = <-d.readyCh:
 			}
+		} else {
+			// Lost connection — retry same addr after 5s, or use new addr
+			// immediately if control signals one (e.g. controller moved).
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case addr = <-d.readyCh:
+			case <-time.After(5 * time.Second):
+				addr = lastAddr
+			}
+		}
+		// Drain any stale addr queued while we were connected.
+		select {
+		case addr = <-d.readyCh:
+		default:
+		}
+		lastAddr = addr
+		log.Printf("[data] Connecting to %s", addr)
+		if err := d.connect(ctx, addr); err != nil && err != context.Canceled {
+			log.Printf("[data] Connection lost: %v — retrying", err)
 		}
 	}
 }
@@ -218,6 +240,9 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 	if lockMic {
 		d.beam.Lock()
 	}
+	// Always unlock from this goroutine — prevents data race with Process()
+	// that would occur if StopMic called Unlock from the control goroutine.
+	defer d.beam.Unlock()
 
 	ch := d.mic.Subscribe()
 	defer d.mic.Unsubscribe(ch)

@@ -225,10 +225,9 @@ func (s *Server) pingHandler(c *gin.Context) {
 }
 
 func clearLeds(ledController led.Controller) {
-	// Clear LEDs
 	numLEDs, err := ledController.GetNumLEDs()
 	if err != nil {
-		log.Fatalf("Failed to get number of LEDs: %v", err)
+		log.Printf("clearLeds: failed to get LED count: %v", err)
 		return
 	}
 
@@ -242,8 +241,7 @@ func clearLeds(ledController led.Controller) {
 		}
 	}
 	if err = ledController.SetLEDs(leds...); err != nil {
-		log.Fatalf("Failed to set LEDs: %v", err)
-		return
+		log.Printf("clearLeds: failed to set LEDs: %v", err)
 	}
 }
 

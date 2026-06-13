@@ -155,15 +155,6 @@ func (c *ControlClient) connect(ctx context.Context, addr string, data *DataClie
 	}
 	defer conn.Close()
 
-	c.connMu.Lock()
-	c.conn = conn
-	c.connMu.Unlock()
-	defer func() {
-		c.connMu.Lock()
-		c.conn = nil
-		c.connMu.Unlock()
-	}()
-
 	// Store controller address for outbound shell connections
 	c.serverAddrMu.Lock()
 	c.serverAddr = addr
@@ -176,6 +167,8 @@ func (c *ControlClient) connect(ctx context.Context, addr string, data *DataClie
 		"version":      Version,
 		"capabilities": []string{"mic", "speaker", "leds", "buttons"},
 	})
+	// Send register BEFORE publishing conn — prevents concurrent SendButton /
+	// SendMuteState from racing this write on the same gorilla conn.
 	if err := conn.WriteMessage(websocket.TextMessage, regBytes); err != nil {
 		return err
 	}
@@ -198,6 +191,20 @@ func (c *ControlClient) connect(ctx context.Context, addr string, data *DataClie
 
 	log.Printf("[control] Registered as %s (version %s)", c.deviceID, Version)
 
+	// Handshake complete — now safe to publish conn for concurrent use.
+	// done is closed when this connection exits, stopping the pong ticker.
+	done := make(chan struct{})
+	defer close(done)
+
+	c.connMu.Lock()
+	c.conn = conn
+	c.connMu.Unlock()
+	defer func() {
+		c.connMu.Lock()
+		c.conn = nil
+		c.connMu.Unlock()
+	}()
+
 	if c.connectedCallback != nil {
 		c.connectedCallback()
 	}
@@ -206,9 +213,14 @@ func (c *ControlClient) connect(ctx context.Context, addr string, data *DataClie
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
-		for range ticker.C {
-			if err := c.writeJSON(map[string]string{"type": "pong"}); err != nil {
+		for {
+			select {
+			case <-done:
 				return
+			case <-ticker.C:
+				if err := c.writeJSON(map[string]string{"type": "pong"}); err != nil {
+					return
+				}
 			}
 		}
 	}()
