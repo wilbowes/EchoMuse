@@ -456,8 +456,9 @@ async def run_voice_turn(device: Device):
             f"[{device.device_id}] Streaming {len(speaker_pcm)} bytes "
             f"({len(speaker_pcm)//SPEAKER_BYTES} periods)"
         )
-        cancel_task  = asyncio.create_task(device.cancel_event.wait())
-        stream_task  = asyncio.create_task(device.stream_speaker(speaker_pcm))
+        cancel_task    = asyncio.create_task(device.cancel_event.wait())
+        stream_task    = asyncio.create_task(device.stream_speaker(speaker_pcm))
+        t_stream_start = asyncio.get_event_loop().time()
 
         done, _ = await asyncio.wait(
             [stream_task, cancel_task],
@@ -474,13 +475,23 @@ async def run_voice_turn(device: Device):
             # Without this wait, the mic restarts while the speaker is still
             # playing, causing acoustic feedback into the next voice turn.
             if not device.cancel_event.is_set():
-                # Sleep for the actual audio duration so the spinner keeps
-                # running until playback truly completes on the device.
-                # stream_speaker completes as soon as frames are buffered,
-                # not when they finish playing — hence this wait.
+                # stream_speaker completes when frames are buffered (network
+                # I/O), not when the device finishes playing them. For long
+                # responses, asyncio TCP backpressure means stream_speaker
+                # itself takes a significant fraction of audio_duration.
+                # Sleeping the full audio_duration after that overshoots —
+                # the spinner ran long after playback ended. Sleep only the
+                # remaining time instead.
                 audio_duration = len(speaker_pcm) / (SPEAKER_RATE * 4)  # stereo S16LE
-                log.info(f"[{device.device_id}] Waiting {audio_duration:.1f}s for audio playback")
-                await asyncio.sleep(audio_duration)
+                elapsed        = asyncio.get_event_loop().time() - t_stream_start
+                remaining      = max(0.0, audio_duration - elapsed)
+                log.info(
+                    f"[{device.device_id}] Streaming took {elapsed:.1f}s, "
+                    f"sleeping {remaining:.1f}s for buffer drain "
+                    f"(total={audio_duration:.1f}s)"
+                )
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
                 log.info(f"[{device.device_id}] Playback complete")
 
         cancel_task.cancel()

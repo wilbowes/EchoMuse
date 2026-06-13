@@ -119,24 +119,43 @@ func New() *Beamformer {
 // floor baseline and holds it until Unlock.
 //
 // Using onset ratio rather than absolute energy means a voice in a quiet
-// direction beats a TV in a loud direction.
+// direction beats a TV in a loud direction. Falls back to raw smooth energy
+// if the baseline hasn't warmed up yet (~3s after start), since onset ratios
+// are meaningless when energyBaseline is near zero.
 func (b *Beamformer) Lock() {
 	if b.lockedChannel >= 0 {
 		return
 	}
 
 	best := 0
-	bestRatio := b.onsetRatio(0)
-	for di := 1; di < nDirections; di++ {
-		r := b.onsetRatio(di)
-		if r > bestRatio {
-			bestRatio = r
-			best = di
+	var bestScore float64
+	if b.baselineReady >= 100 {
+		// Baseline warmed up — use onset ratio (energy spike vs noise floor)
+		bestScore = b.onsetRatio(0)
+		for di := 1; di < nDirections; di++ {
+			r := b.onsetRatio(di)
+			if r > bestScore {
+				bestScore = r
+				best = di
+			}
 		}
+		log.Printf("[beam] locked to ch%d (%.0f°) onset_ratio=%.2f",
+			directionToChannel[best], candidateAngles[best], bestScore)
+	} else {
+		// Baseline not ready — use raw smooth energy to avoid picking a
+		// direction based on a near-zero baseline inflating the ratio
+		bestScore = b.energySmooth[0]
+		for di := 1; di < nDirections; di++ {
+			if b.energySmooth[di] > bestScore {
+				bestScore = b.energySmooth[di]
+				best = di
+			}
+		}
+		log.Printf("[beam] locked to ch%d (%.0f°) energy=%.4f (baseline not ready)",
+			directionToChannel[best], candidateAngles[best], bestScore)
 	}
+
 	b.lockedChannel = directionToChannel[best]
-	log.Printf("[beam] locked to ch%d (%.0f°) onset_ratio=%.2f",
-		b.lockedChannel, candidateAngles[best], bestRatio)
 }
 
 // onsetRatio returns energySmooth[di] / energyBaseline[di].
@@ -161,11 +180,13 @@ func (b *Beamformer) Unlock() {
 // Process returns mono S16_LE audio and the estimated source angle.
 //
 // When disabled: returns ch6 (centre/omni) — for wake word detection.
-// When enabled and locked: returns the locked perimeter mic.
-// When enabled and unlocked: returns the current best-direction perimeter mic.
+// When enabled, steerAngle >= 0 (fixed-beam): returns the mic nearest to
+// steerAngle regardless of lock state — direction is config-driven.
+// When enabled, steerAngle < 0 and locked: returns the locked perimeter mic.
+// When enabled, steerAngle < 0 and unlocked: returns the current best-energy mic.
 //
 // angle is the estimated dominant source direction (0–360°, clockwise from
-// 12 o'clock), or -1 if estimation is unreliable.
+// 12 o'clock), or -1 if not reporting (unlocked or disabled).
 func (b *Beamformer) Process(raw []byte, steerAngle float64, enabled bool) (mono []byte, angle float64) {
 	if len(raw) < periodFrames*frameSize {
 		return extractChannel(raw, 0), -1
@@ -196,24 +217,37 @@ func (b *Beamformer) Process(raw []byte, steerAngle float64, enabled bool) (mono
 		b.baselineReady++
 	}
 
-	// Best direction from fast smoother (for LED ring and unlocked mic selection)
+	// Best direction from fast smoother (used in auto unlocked mode)
 	bestDir := 0
 	for di := 1; di < nDirections; di++ {
 		if b.energySmooth[di] > b.energySmooth[bestDir] {
 			bestDir = di
 		}
 	}
-	// Select output channel
-	ch := b.lockedChannel
-	if ch < 0 {
-		ch = directionToChannel[bestDir]
-	}
 
-	// Only report direction when locked — direction arc shows during voice
-	// turns only, not during idle wake word listening.
-	if b.lockedChannel >= 0 {
+	// Select output channel and reported angle.
+	//
+	// Fixed-beam (steerAngle >= 0): always use the nearest mic to the
+	// configured angle. Lock state is irrelevant since the direction is
+	// set by config, not by energy. Previously steerAngle was accepted
+	// by this function but silently ignored — nearestDirection never called.
+	//
+	// Auto (steerAngle < 0): locked → locked channel; unlocked → best energy.
+	var ch int
+	switch {
+	case steerAngle >= 0:
+		fixedDir := nearestDirection(steerAngle)
+		ch = directionToChannel[fixedDir]
+		if b.lockedChannel >= 0 {
+			angle = candidateAngles[fixedDir]
+		} else {
+			angle = -1
+		}
+	case b.lockedChannel >= 0:
+		ch = b.lockedChannel
 		angle = candidateAngles[bestDir]
-	} else {
+	default:
+		ch = directionToChannel[bestDir]
 		angle = -1
 	}
 
@@ -221,11 +255,13 @@ func (b *Beamformer) Process(raw []byte, steerAngle float64, enabled bool) (mono
 }
 
 // hfEnergy returns the mean squared HF energy for direction di.
+// hfChannels is indexed 0–5 by direction (matching decodeChannels output),
+// not by ALSA channel number — directionToChannel maps direction→channel
+// for audio extraction, but hfChannels uses direction as the index directly.
 func hfEnergy(hfChannels [6][]float32, di int) float64 {
 	n := len(hfChannels[0])
-	ch := directionToChannel[di]
 	var energy float64
-	for _, v := range hfChannels[ch] {
+	for _, v := range hfChannels[di] {
 		energy += float64(v) * float64(v)
 	}
 	return energy / float64(n)
