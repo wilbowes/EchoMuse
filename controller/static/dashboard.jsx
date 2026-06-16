@@ -43,6 +43,18 @@ const API = {
     if (!r.ok) throw data;
     return data;
   },
+
+  async upload(path, file) {
+    const h = {};
+    if (this.token) h['Authorization'] = `Bearer ${this.token}`;
+    const form = new FormData();
+    form.append('binary', file);
+    const r = await fetch(path, { method: 'POST', headers: h, body: form });
+    if (r.status === 401) throw { code: 'not_authenticated', status: 401 };
+    const data = await r.json();
+    if (!r.ok) throw data;
+    return data;
+  },
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -108,7 +120,8 @@ function Pill({ children, accent, danger, disabled, onClick, small }) {
   );
 }
 
-function Slider({ label, sub, value, min, max, step = 1, unit = '', onChange }) {
+function Slider({ label, sub, value, min, max, step = 1, unit = '', formatValue, onChange }) {
+  const display = formatValue ? formatValue(value) : `${value}${unit}`;
   return (
     <div style={{ marginBottom: 20 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 7 }}>
@@ -116,7 +129,7 @@ function Slider({ label, sub, value, min, max, step = 1, unit = '', onChange }) 
           <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: 'var(--text2)' }}>{label}</span>
           {sub && <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)', marginLeft: 8 }}>{sub}</span>}
         </div>
-        <Lcd value={`${value}${unit}`} size={12} />
+        <Lcd value={display} size={12} />
       </div>
       <input type="range" min={min} max={max} step={step} value={value} onChange={e => onChange(Number(e.target.value))} />
     </div>
@@ -142,6 +155,126 @@ function Toggle({ label, sub, value, onChange }) {
           background: value ? '#dde8f0' : '#ccc8c4',
           transition: 'left 0.15s',
         }}/>
+      </div>
+    </div>
+  );
+}
+
+// ─── EQ frequency response curve ─────────────────────────────────────────────
+
+function EqCurve({ bands, fs = 22050 }) {
+  const FREQS = [125, 250, 500, 1000, 2000, 3500, 5500, 8000];
+  const Q = 1.4, DB_RANGE = 14, N = 130, F_MIN = 60, F_MAX = 11000;
+  const W = 380, H = 90, PT = 8, PB = 20, PL = 8, PR = 8;
+  const IW = W - PL - PR, IH = H - PT - PB;
+
+  function peakCoeffs(fc, g) {
+    const A = Math.pow(10, g/40), w0 = 2*Math.PI*fc/fs;
+    const cw = Math.cos(w0), alpha = Math.sin(w0)/(2*Q), a0 = 1+alpha/A;
+    return { b:[(1+alpha*A)/a0,(-2*cw)/a0,(1-alpha*A)/a0], a:[1,(-2*cw)/a0,(1-alpha/A)/a0] };
+  }
+  function loShelfCoeffs(fc, g) {
+    const A = Math.pow(10, g/40), w0 = 2*Math.PI*fc/fs;
+    const cw = Math.cos(w0), sw = Math.sin(w0), sqA = Math.sqrt(A), al = sw/Math.SQRT2;
+    const a0 = (A+1)+(A-1)*cw+2*sqA*al;
+    return { b:[A*((A+1)-(A-1)*cw+2*sqA*al)/a0, 2*A*((A-1)-(A+1)*cw)/a0, A*((A+1)-(A-1)*cw-2*sqA*al)/a0],
+             a:[1, -2*((A-1)+(A+1)*cw)/a0, ((A+1)+(A-1)*cw-2*sqA*al)/a0] };
+  }
+  function hiShelfCoeffs(fc, g) {
+    const A = Math.pow(10, g/40), w0 = 2*Math.PI*fc/fs;
+    const cw = Math.cos(w0), sw = Math.sin(w0), sqA = Math.sqrt(A), al = sw/Math.SQRT2;
+    const a0 = (A+1)-(A-1)*cw+2*sqA*al;
+    return { b:[A*((A+1)+(A-1)*cw+2*sqA*al)/a0, -2*A*((A-1)+(A+1)*cw)/a0, A*((A+1)+(A-1)*cw-2*sqA*al)/a0],
+             a:[1, 2*((A-1)-(A+1)*cw)/a0, ((A+1)-(A-1)*cw-2*sqA*al)/a0] };
+  }
+  function biquadMag({b, a}, f) {
+    const w = 2*Math.PI*f/fs, c1=Math.cos(w), s1=Math.sin(w), c2=Math.cos(2*w), s2=Math.sin(2*w);
+    const nR=b[0]+b[1]*c1+b[2]*c2, nI=-(b[1]*s1+b[2]*s2);
+    const dR=1+a[1]*c1+a[2]*c2,    dI=-(a[1]*s1+a[2]*s2);
+    return Math.sqrt((nR*nR+nI*nI)/(dR*dR+dI*dI));
+  }
+
+  const pts = Array.from({length:N}, (_,i) => Math.exp(Math.log(F_MIN) + i/(N-1)*Math.log(F_MAX/F_MIN)));
+  const dbs = pts.map(f => {
+    let mag = 1;
+    bands.forEach((g,i) => {
+      mag *= biquadMag(i===0 ? loShelfCoeffs(FREQS[i],g) : i===7 ? hiShelfCoeffs(FREQS[i],g) : peakCoeffs(FREQS[i],g), f);
+    });
+    return 20*Math.log10(Math.max(mag, 1e-10));
+  });
+
+  const xOf = f  => PL + IW*(Math.log(f/F_MIN)/Math.log(F_MAX/F_MIN));
+  const yOf = db => PT + IH*(1 - (Math.max(-DB_RANGE, Math.min(DB_RANGE, db))+DB_RANGE)/(2*DB_RANGE));
+
+  const line = pts.map((f,i) => `${i===0?'M':'L'}${xOf(f).toFixed(1)},${yOf(dbs[i]).toFixed(1)}`).join(' ');
+  const fill = `${line} L${xOf(F_MAX).toFixed(1)},${yOf(0).toFixed(1)} L${xOf(F_MIN).toFixed(1)},${yOf(0).toFixed(1)}Z`;
+
+  const dbTicks = [-12,-6,0,6,12];
+  const fTicks  = [{f:125,label:'125'},{f:500,label:'500'},{f:1000,label:'1k'},{f:4000,label:'4k'},{f:8000,label:'8k'}];
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width:'100%', display:'block', marginBottom:4, borderRadius:4, overflow:'hidden' }}>
+      <rect x={PL} y={PT} width={IW} height={IH} fill="rgba(0,0,0,0.07)" rx="2"/>
+      {dbTicks.map(db => (
+        <line key={db} x1={PL} x2={PL+IW} y1={yOf(db)} y2={yOf(db)}
+          stroke={db===0?'rgba(0,0,0,0.18)':'rgba(0,0,0,0.07)'}
+          strokeWidth={db===0?1:0.5} strokeDasharray={db===0?undefined:'2,3'}/>
+      ))}
+      {fTicks.map(({f}) => (
+        <line key={f} x1={xOf(f)} x2={xOf(f)} y1={PT} y2={PT+IH}
+          stroke="rgba(0,0,0,0.06)" strokeWidth={0.5}/>
+      ))}
+      <path d={fill} fill="rgba(64,88,120,0.10)"/>
+      <path d={line} fill="none" stroke="#405878" strokeWidth="1.5"
+        style={{filter:'drop-shadow(0 0 4px rgba(64,88,120,0.4))'}}/>
+      {dbTicks.filter(d=>d!==0).map(db => (
+        <text key={db} x={PL+2} y={yOf(db)+4}
+          style={{fontFamily:"'DM Mono',monospace",fontSize:6,fill:'rgba(0,0,0,0.28)'}}>{db>0?'+':''}{db}</text>
+      ))}
+      {fTicks.map(({f,label}) => (
+        <text key={f} x={xOf(f)} y={H-4} textAnchor="middle"
+          style={{fontFamily:"'DM Mono',monospace",fontSize:6,fill:'rgba(0,0,0,0.28)'}}>{label}</text>
+      ))}
+    </svg>
+  );
+}
+
+// ─── WiFi signal bars ─────────────────────────────────────────────────────────
+
+function SignalBars({ rssi }) {
+  // 0 bars = no signal / null, 4 bars = excellent
+  const level = rssi == null ? 0
+              : rssi > -60   ? 4
+              : rssi > -70   ? 3
+              : rssi > -80   ? 2
+              : rssi > -90   ? 1
+              :                0;
+  const on  = level > 0 ? '#3a6a50' : 'rgba(0,0,0,0.13)';
+  const off = 'rgba(0,0,0,0.13)';
+  const bars = [{h:4,y:11},{h:7,y:8},{h:10,y:5},{h:14,y:1}];
+  return (
+    <svg width={20} height={16} style={{ display:'block', flexShrink:0 }}>
+      {bars.map((b,i) => (
+        <rect key={i} x={i*5} y={b.y} width={4} height={b.h} rx={1}
+          fill={i < level ? (level===1?'#9a3020':level===2?'#8a6010':'#3a6a50') : off}/>
+      ))}
+    </svg>
+  );
+}
+
+function StatBar({ label, pct, text }) {
+  const color = pct == null ? 'transparent'
+              : pct > 85   ? '#9a3020'
+              : pct > 65   ? '#8a6010'
+              :               '#3a6a50';
+  return (
+    <div style={{ marginBottom: 13 }}>
+      <div style={{ display:'flex', justifyContent:'space-between', marginBottom:5 }}>
+        <span style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.08em' }}>{label}</span>
+        <span style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--text2)' }}>{text ?? '—'}</span>
+      </div>
+      <div style={{ height:3, borderRadius:2, background:'rgba(0,0,0,0.10)', overflow:'hidden' }}>
+        {pct != null && <div style={{ height:'100%', width:`${pct}%`, background:color, borderRadius:2, transition:'width 0.6s' }}/>}
       </div>
     </div>
   );
@@ -299,6 +432,9 @@ function Detail({ device, token, onClose, onApprove, isAdmin }) {
   const [release, setRelease] = useState(null);
   const [approveLabel, setApproveLabel] = useState(device.label || '');
   const [approving, setApproving] = useState(false);
+  const [localFile, setLocalFile] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef(null);
   const state = deviceState(device);
   const needsUpdate = device.firmware_ver && release?.version && device.firmware_ver !== release.version;
 
@@ -330,39 +466,65 @@ function Detail({ device, token, onClose, onApprove, isAdmin }) {
   }
 
   async function doUpdate() {
-    setPushing(true); setPushLog([]);
+    setPushing(true); setPushLog(['Fetching latest release from GitHub…']);
     try {
-      await API.post(`/api/devices/${device.device_id}/update`, {});
-      setPushLog(['Update initiated — monitoring reconnection...']);
-      // Poll for version change
-      let attempts = 0;
-      const poll = setInterval(async () => {
-        attempts++;
-        try {
-          const devices = await API.get('/api/devices');
-          const d = devices.find(x => x.device_id === device.device_id);
-          if (d?.firmware_ver === release.version) {
-            setPushLog(l => [...l, `✓ Updated to ${release.version}`]);
-            clearInterval(poll);
-            setPushing(false);
-          } else if (attempts > 30) {
-            setPushLog(l => [...l, 'Timed out — check device logs']);
-            clearInterval(poll);
-            setPushing(false);
-          }
-        } catch(e) { clearInterval(poll); setPushing(false); }
-      }, 3000);
+      const res = await API.post(`/api/devices/${device.device_id}/update`, {});
+      setPushLog(l => [...l, `Deploying ${res.version} — waiting for reconnect…`]);
+      _pollReconnect(res.version);
     } catch(e) {
       setPushLog([`Error: ${e.error || 'Update failed'}`]);
       setPushing(false);
     }
   }
 
+  async function doLocalDeploy() {
+    if (!localFile) return;
+    setPushing(true); setUploading(true);
+    setPushLog([`Uploading ${localFile.name} (${(localFile.size/1024).toFixed(0)} KB)…`]);
+    try {
+      const up = await API.upload('/api/releases/upload', localFile);
+      setUploading(false);
+      setPushLog(l => [...l, '✓ Upload complete — deploying…']);
+      const res = await API.post(`/api/devices/${device.device_id}/update`, { upload_token: up.upload_token });
+      setPushLog(l => [...l, `Deploying ${res.version} — waiting for reconnect…`]);
+      _pollReconnect(res.version);
+    } catch(e) {
+      setUploading(false);
+      setPushLog(l => [...l, `Error: ${e.error || 'Deploy failed'}`]);
+      setPushing(false);
+    }
+  }
+
+  function _pollReconnect(targetVersion) {
+    let attempts = 0;
+    const poll = setInterval(async () => {
+      attempts++;
+      try {
+        const devices = await API.get('/api/devices');
+        const d = devices.find(x => x.device_id === device.device_id);
+        if (d?.firmware_ver === targetVersion) {
+          setPushLog(l => [...l, `✓ Running ${targetVersion}`]);
+          clearInterval(poll); setPushing(false);
+        } else if (d?.firmware_ver && d.firmware_ver !== targetVersion && attempts > 5) {
+          setPushLog(l => [...l, `⚠ Device reconnected on ${d.firmware_ver} — auto-rolled back`]);
+          clearInterval(poll); setPushing(false);
+        } else if (attempts > 40) {
+          setPushLog(l => [...l, 'Timed out — check device logs']);
+          clearInterval(poll); setPushing(false);
+        }
+      } catch(e) { clearInterval(poll); setPushing(false); }
+    }, 3000);
+  }
+
   async function doRollback() {
+    setPushing(true); setPushLog([`Rolling back to ${device.firmware_previous}…`]);
     try {
       await API.post(`/api/devices/${device.device_id}/rollback`, {});
-      setPushLog(['Rollback initiated...']);
-    } catch(e) { alert(e.error || 'Rollback failed'); }
+      _pollReconnect(device.firmware_previous);
+    } catch(e) {
+      setPushLog([`Error: ${e.error || 'Rollback failed'}`]);
+      setPushing(false);
+    }
   }
 
   async function doApprove() {
@@ -435,26 +597,42 @@ function Detail({ device, token, onClose, onApprove, isAdmin }) {
           )}
 
           {/* STATUS */}
-          {tab === 'status' && (
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24 }}>
-              <div>
-                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 12 }}>Device State</div>
-                {row('Connected', device.connected ? 'Yes' : 'No', device.connected ? '#286040' : '#c0601a')}
-                {row('Muted', device.muted ? 'Yes' : 'No', device.muted ? '#b03030' : 'var(--text2)')}
-                {row('Speaking', device.speaking ? 'Yes' : 'No', device.speaking ? '#2060b0' : 'var(--text2)')}
-                {row('Last seen', relTime(device.last_seen))}
+          {tab === 'status' && (() => {
+            const s = device.stats || null;
+            const cpuText  = s?.cpuPct    != null ? `${s.cpuPct.toFixed(0)}%` : null;
+            const ramText  = s?.memUsedMb != null ? `${s.memUsedMb} / ${s.memTotalMb} MB` : null;
+            const ramPct   = s?.memTotalMb? s.memUsedMb/s.memTotalMb*100 : null;
+            const stoPct   = s?.storageTotalMb ? s.storageUsedMb/s.storageTotalMb*100 : null;
+            const stoText  = s?.storageTotalMb != null
+              ? `${(s.storageUsedMb/1024).toFixed(1)} / ${(s.storageTotalMb/1024).toFixed(1)} GB` : null;
+            return (
+              <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:24 }}>
+                <div>
+                  <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.15em', marginBottom:12 }}>Device</div>
+                  {row('IP', device.ip || '—')}
+                  {row('Firmware', device.firmware_ver || '—')}
+                  {row('Last seen', relTime(device.last_seen))}
+                  {row('Connected', device.connected ? 'Yes' : 'No', device.connected ? '#286040' : '#c0601a')}
+                </div>
+                <div>
+                  <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.15em', marginBottom:14 }}>Resources</div>
+                  <StatBar label="CPU"     pct={s?.cpuPct}    text={cpuText}/>
+                  <StatBar label="RAM"     pct={ramPct}        text={ramText}/>
+                  <StatBar label="Storage" pct={stoPct}        text={stoText}/>
+                  <div style={{ marginBottom:13 }}>
+                    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:5 }}>
+                      <span style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.08em' }}>WiFi</span>
+                      <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                        <span style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--text2)' }}>{s?.wifiRssi != null ? `${s.wifiRssi} dBm` : '—'}</span>
+                        <SignalBars rssi={s?.wifiRssi ?? null}/>
+                      </div>
+                    </div>
+                  </div>
+                  {!s && <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', marginTop:4 }}>waiting for device stats…</div>}
+                </div>
               </div>
-              <div>
-                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 12 }}>Hardware</div>
-                {row('IP', device.ip || '—')}
-                {row('Firmware', device.firmware_ver || '—')}
-                {row('SoC', 'MT8163')}
-                {row('SELinux', 'Permissive')}
-                {row('Root', 'Magisk 17.3')}
-                {row('Audio', 'card 0 · dev 23')}
-              </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* CONFIG */}
           {tab === 'config' && (
@@ -470,6 +648,39 @@ function Detail({ device, token, onClose, onApprove, isAdmin }) {
               <Slider label="Beam Angle" sub="-1 = auto" value={config.beamAngle ?? -1} min={-1} max={359} step={1} onChange={v => setConf('beamAngle', v)}/>
               <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', margin: '28px 0 20px' }}>Speaker · TLV320 · card 0 dev 23</div>
               <Slider label="Startup Volume" sub="ctl 61" value={config.startupVolume} min={0} max={100} onChange={v => setConf('startupVolume', v)}/>
+              <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', margin: '28px 0 12px' }}>EQ · 8-Band · controller-side</div>
+              {(() => {
+                const EQ_FREQS = ['125 Hz','250 Hz','500 Hz','1 kHz','2 kHz','3.5 kHz','5.5 kHz','8 kHz'];
+                const EQ_DESCS = ['shelf','','','','','','','shelf'];
+                const bands = config.eqBands ?? [0,0,0,0,0,0,0,0];
+                const fmtDb = v => (v >= 0 ? '+' : '') + Number(v).toFixed(1) + ' dB';
+                const setEqBand = (i, v) => { const b=[...bands]; b[i]=v; setConf('eqBands',b); };
+                const LEFT  = [0,1,2,3];
+                const RIGHT = [4,5,6,7];
+                return (
+                  <div>
+                    <EqCurve bands={bands}/>
+                    <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'0 20px' }}>
+                      <div>{LEFT.map(i => (
+                        <Slider key={i} label={EQ_FREQS[i]} sub={EQ_DESCS[i]}
+                          value={bands[i]??0} min={-12} max={12} step={0.5}
+                          formatValue={fmtDb} onChange={v => setEqBand(i,v)}/>
+                      ))}</div>
+                      <div>{RIGHT.map(i => (
+                        <Slider key={i} label={EQ_FREQS[i]} sub={EQ_DESCS[i]}
+                          value={bands[i]??0} min={-12} max={12} step={0.5}
+                          formatValue={fmtDb} onChange={v => setEqBand(i,v)}/>
+                      ))}</div>
+                    </div>
+                    <div style={{ display:'flex', gap:8, marginBottom:20, marginTop:4 }}>
+                      <Pill small onClick={() => setConf('eqBands',[0,0,0,0,0,0,0,0])}>Flat</Pill>
+                      <Pill small onClick={() => setConf('eqBands',[0,0,0,0,0,7,4,2])}>Clarity</Pill>
+                      <Pill small onClick={() => setConf('eqBands',[0,3,2,0,-2,0,0,0])}>Warmth</Pill>
+                    </div>
+                    <Toggle label="Loudness" sub="speech-range presence boost" value={config.eqLoudness??false} onChange={v=>setConf('eqLoudness',v)}/>
+                  </div>
+                );
+              })()}
               <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', margin: '28px 0 20px' }}>Wake Word · OpenWakeWord</div>
               <Slider label="Detection Threshold" value={config.owwThreshold} min={0.1} max={0.9} step={0.05} onChange={v => setConf('owwThreshold', v)}/>
               <div style={{ marginBottom: 24 }}>
@@ -499,26 +710,66 @@ function Detail({ device, token, onClose, onApprove, isAdmin }) {
 
           {/* UPDATES */}
           {tab === 'updates' && (
-            <div>
-              <div style={{ display: 'flex', gap: 16, marginBottom: 28 }}>
-                <Lcd label="On device" value={device.firmware_ver || '—'} color={needsUpdate ? 'var(--lcd-amber)' : 'var(--lcd-green)'}/>
-                <Lcd label="Available" value={release?.version || '—'} color="var(--lcd-dim)"/>
-                {device.firmware_previous && <Lcd label="Rollback" value={device.firmware_previous} color="var(--lcd-dim)"/>}
-              </div>
-              <div style={{ display: 'flex', gap: 10 }}>
-                <Pill accent={device.connected && !pushing && needsUpdate} disabled={!device.connected || pushing || !needsUpdate} onClick={doUpdate}>
-                  {pushing ? 'Updating…' : 'Push update'}
-                </Pill>
+            <div style={{ maxWidth: 440 }}>
+              {/* Version LCDs */}
+              <div style={{ display:'flex', gap:16, marginBottom:28 }}>
+                <Lcd label="On device"  value={device.firmware_ver || '—'} color={needsUpdate ? 'var(--lcd-amber)' : 'var(--lcd-green)'}/>
+                <Lcd label="Available"  value={release?.version || '—'} color="var(--lcd-dim)"/>
                 {device.firmware_previous && (
-                  <Pill disabled={!device.connected} onClick={doRollback}>Roll back</Pill>
+                  <Lcd label="Rollback slot" value={device.firmware_previous} color="var(--lcd-dim)"/>
                 )}
               </div>
+
+              {/* GitHub release deploy */}
+              <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.15em', marginBottom:12 }}>GitHub Release</div>
+              <div style={{ display:'flex', gap:10, marginBottom:24 }}>
+                <Pill accent={device.connected && !pushing && needsUpdate}
+                      disabled={!device.connected || pushing || !needsUpdate}
+                      onClick={doUpdate}>
+                  {pushing && !localFile ? 'Updating…' : 'Push update'}
+                </Pill>
+                {device.firmware_previous && (
+                  <Pill disabled={!device.connected || pushing} onClick={doRollback}>
+                    Roll back
+                  </Pill>
+                )}
+              </div>
+
+              {/* Local binary deploy */}
+              <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.15em', marginBottom:12 }}>Local Build</div>
+              <input ref={fileInputRef} type="file" accept="*/*" style={{ display:'none' }}
+                onChange={e => setLocalFile(e.target.files[0] || null)}/>
+              <div style={{ display:'flex', gap:10, alignItems:'center', marginBottom:24, flexWrap:'wrap' }}>
+                <Pill small onClick={() => fileInputRef.current?.click()} disabled={pushing}>
+                  {localFile ? '⇄ Change' : 'Choose file'}
+                </Pill>
+                {localFile && (
+                  <>
+                    <span style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--text2)', flex:1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', minWidth:0 }}>
+                      {localFile.name} · {(localFile.size/1024).toFixed(0)} KB
+                    </span>
+                    <Pill small danger onClick={() => setLocalFile(null)} disabled={pushing}>✕</Pill>
+                    <Pill small accent disabled={!device.connected || pushing} onClick={doLocalDeploy}>
+                      {uploading ? 'Uploading…' : pushing ? 'Deploying…' : 'Deploy'}
+                    </Pill>
+                  </>
+                )}
+              </div>
+
+              {/* Activity log */}
               {pushLog.length > 0 && (
-                <div style={{ marginTop: 20, background: 'linear-gradient(160deg,#252820,#1e2219)', border: '1px solid #1a1c18', borderRadius: 6, padding: 14, fontFamily: "'DM Mono',monospace", fontSize: 12, boxShadow: 'inset 0 2px 6px rgba(0,0,0,0.5)' }}>
+                <div style={{ background:'linear-gradient(160deg,#252820,#1e2219)', border:'1px solid #1a1c18', borderRadius:6, padding:14, fontFamily:"'DM Mono',monospace", fontSize:12, boxShadow:'inset 0 2px 6px rgba(0,0,0,0.5)' }}>
                   {pushLog.map((line, i) => (
-                    <div key={i} style={{ color: line.startsWith('✓') ? '#9aba80' : line.startsWith('Error') ? '#c04040' : '#5a6a50', marginBottom: 4, textShadow: line.startsWith('✓') ? '0 0 8px rgba(140,200,100,0.4)' : 'none' }}>{line}</div>
+                    <div key={i} style={{
+                      color: line.startsWith('✓') ? '#9aba80'
+                           : line.startsWith('⚠') ? '#c09040'
+                           : line.startsWith('Error') ? '#c04040'
+                           : '#5a6a50',
+                      marginBottom:4,
+                      textShadow: line.startsWith('✓') ? '0 0 8px rgba(140,200,100,0.4)' : 'none',
+                    }}>{line}</div>
                   ))}
-                  {pushing && <span style={{ color: '#3a4a30' }}>▌</span>}
+                  {pushing && <span style={{ color:'#3a4a30' }}>▌</span>}
                 </div>
               )}
             </div>

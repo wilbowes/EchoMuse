@@ -43,6 +43,8 @@ DEFAULT_DEVICE_CONFIG = {
     "owwModel":         "hey_jarvis_v0.1",
     "beamformingEnabled": True,
     "beamAngle":        -1,
+    "eqBands":          [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    "eqLoudness":       False,
 }
 
 # Maximum log rows retained per device. Older rows are pruned on insert.

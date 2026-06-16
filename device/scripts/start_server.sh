@@ -1,4 +1,19 @@
 #!/system/bin/sh
+# EchoMuse start script — A/B slot aware with auto-rollback.
+#
+# Retry policy: if the server exits in under MIN_RUNTIME seconds,
+# it counts as a failed start. After MAX_ATTEMPTS consecutive fast
+# exits the inactive slot is restored via symlink and the script
+# exits cleanly so Android init restarts it with the old binary.
+#
+# If the server runs for >= MIN_RUNTIME seconds, the attempt counter
+# resets — this was a successful start that crashed later (operational
+# failure, not deployment failure), so we just restart without rollback.
+
+MAX_ATTEMPTS=3
+MIN_RUNTIME=15   # seconds below which an exit is treated as a failed start
+
+# ── Wait for echoaudioservice (up to 4 minutes) ──────────────────────────────
 i=0
 while [ $i -lt 120 ]; do
     pid=$(ps | grep echoaudio | grep -v grep)
@@ -9,16 +24,20 @@ while [ $i -lt 120 ]; do
     sleep 2
     i=$((i + 2))
 done
+
+# ── Hardware init ─────────────────────────────────────────────────────────────
 ip link set p2p0 down
+
 # Prevent WiFi suspension
 echo "EchoMuse" > /sys/power/wake_lock
+
 # Speaker mixer init
 tinymix -D 0 56 On
 tinymix -D 0 64 1 1
 tinymix -D 0 88 On
 tinymix -D 0 61 100 100
+
 # Mic gain — equalised across all four ADCs (A/B/C/D)
-# Digital volume: 88/88, MICPGA: 40/40 — consistent across all channels
 tinymix -D 0 89 88 88
 tinymix -D 0 92 40 40
 tinymix -D 0 107 88 88
@@ -27,5 +46,66 @@ tinymix -D 0 125 88 88
 tinymix -D 0 128 40 40
 tinymix -D 0 143 88 88
 tinymix -D 0 146 40 40
-kill $(ps | grep ledcontroller | grep -v grep)
-exec /data/local/bin/server > /tmp/server.log 2>&1
+
+kill $(ps | grep ledcontroller | grep -v grep) 2>/dev/null
+
+# ── Signal handling ───────────────────────────────────────────────────────────
+# Forward SIGTERM/SIGINT to the server subprocess so Android init can
+# cleanly stop the service (exec is no longer used, so init signals us).
+SERVER_PID=0
+trap 'kill $SERVER_PID 2>/dev/null; exit 0' TERM INT
+
+# ── Retry loop with auto-rollback ─────────────────────────────────────────────
+attempt=0
+
+while true; do
+    START_TIME=$(date +%s)
+
+    /data/local/bin/server >> /tmp/server.log 2>&1 &
+    SERVER_PID=$!
+    wait $SERVER_PID
+    EXIT_CODE=$?
+
+    END_TIME=$(date +%s)
+    RUNTIME=$(( END_TIME - START_TIME ))
+
+    if [ $RUNTIME -ge $MIN_RUNTIME ]; then
+        # Ran long enough — not a deployment failure.
+        # Reset counter and restart (handles operational crashes).
+        attempt=0
+        echo "[start_server] Server ran ${RUNTIME}s before exit (code $EXIT_CODE) — restarting" >> /tmp/server.log
+        sleep 2
+        continue
+    fi
+
+    attempt=$(( attempt + 1 ))
+    echo "[start_server] Fast exit ${attempt}/${MAX_ATTEMPTS}: runtime=${RUNTIME}s exit=$EXIT_CODE" >> /tmp/server.log
+
+    if [ $attempt -lt $MAX_ATTEMPTS ]; then
+        sleep 3
+        continue
+    fi
+
+    # ── Auto-rollback ─────────────────────────────────────────────────────────
+    CURRENT=$(readlink /data/local/bin/server 2>/dev/null)
+    case "$CURRENT" in
+        server_a) FALLBACK=server_b ;;
+        server_b) FALLBACK=server_a ;;
+        *)
+            echo "[start_server] Unknown slot '$CURRENT' — cannot auto-rollback, giving up" >> /tmp/server.log
+            exit 1
+            ;;
+    esac
+
+    # Verify fallback slot exists and is executable before committing
+    if [ ! -x "/data/local/bin/$FALLBACK" ]; then
+        echo "[start_server] Fallback slot $FALLBACK missing or not executable — cannot auto-rollback" >> /tmp/server.log
+        exit 1
+    fi
+
+    echo "[start_server] Auto-rollback: $CURRENT → $FALLBACK after $MAX_ATTEMPTS failed starts" >> /tmp/server.log
+    ln -sf "$FALLBACK" /data/local/bin/server
+
+    # Exit cleanly — Android init will restart the service, now using $FALLBACK
+    exit 0
+done

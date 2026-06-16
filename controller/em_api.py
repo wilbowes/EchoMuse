@@ -69,20 +69,25 @@ _event_clients: set[web.WebSocketResponse] = set()
 # Track in-progress OTA updates per device_id to enforce one-at-a-time.
 _updates_in_progress: set[str] = set()
 
+# Pending local binary uploads — keyed by UUID token, expire after 10 minutes.
+_pending_uploads: dict[str, bytes] = {}
+
 # ─── Initialisation ───────────────────────────────────────────────────────────
 
 _shell_pending:   dict = {}
 _shell_dashboard: dict = {}
+_shell_ws:        dict = {}   # device_id → live ws for programmatic sessions
+_shell_lock:      dict = {}   # device_id → asyncio.Lock (one session at a time)
 
 def init(devices_ref: dict, shell_pending_ref: dict, shell_dashboard_ref: dict) -> None:
     """
-    Bind the live devices dict and shell_pending dict from em_controller.
+    Bind live shared state from em_controller.
 
     Must be called before create_app().
     """
     global _devices, _shell_pending, _shell_dashboard
-    _devices = devices_ref
-    _shell_pending = shell_pending_ref
+    _devices         = devices_ref
+    _shell_pending   = shell_pending_ref
     _shell_dashboard = shell_dashboard_ref
 
 
@@ -119,6 +124,7 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/devices/{id}/logs",          _get_device_logs)
     app.router.add_post("/api/devices/{id}/update",       _post_device_update)
     app.router.add_post("/api/devices/{id}/rollback",     _post_device_rollback)
+    app.router.add_post("/api/releases/upload",           _post_upload_binary)
     app.router.add_get("/api/devices/{id}/shell",         _ws_shell)
 
     # Releases
@@ -137,7 +143,8 @@ async def create_app() -> web.Application:
     return app
 
 
-async def create_runner(devices_ref: dict, shell_pending_ref: dict, shell_dashboard_ref: dict) -> web.AppRunner:
+async def create_runner(devices_ref: dict, shell_pending_ref: dict,
+                        shell_dashboard_ref: dict) -> web.AppRunner:
     """Convenience wrapper — init + create_app + AppRunner."""
     init(devices_ref, shell_pending_ref, shell_dashboard_ref)
     app = await create_app()
@@ -363,6 +370,12 @@ async def _post_device_config(request: web.Request) -> web.Response:
         # immediately without requiring a device reconnect.
         if "owwThreshold" in config:
             live.oww_threshold = float(config["owwThreshold"])
+        if "owwModel" in config:
+            live.oww_model = config["owwModel"]
+        if "eqBands" in config:
+            live.eq_bands = config["eqBands"]
+        if "eqLoudness" in config:
+            live.eq_loudness = bool(config["eqLoudness"])
         log.info(f"[api] Config pushed to live device: {device_id}")
         pushed = True
     else:
@@ -425,14 +438,38 @@ async def _post_device_update(request: web.Request) -> web.Response:
     """
     POST /api/devices/{id}/update
 
-    Deploy the latest GitHub release to a single device.
-    Returns 202 Accepted immediately — update runs in the background.
-    Poll GET /api/devices/{id} to observe firmware_ver change.
+    Deploys a new binary to the device using A/B slots.
+    Accepts an optional JSON body with {"upload_token": "..."} to deploy a
+    locally uploaded binary instead of the latest GitHub release.
+
+    Returns 202 Accepted — update runs in the background.
     """
     device_id = request.match_info["id"]
 
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    upload_token = body.get("upload_token")
+    binary_override = None
+    release = None
+
+    if upload_token:
+        binary_override = _pending_uploads.pop(upload_token, None)
+        if binary_override is None:
+            return _error("invalid_token", "Upload token not found or expired", 404)
+        _embedded = _extract_binary_version(binary_override)
+        _ver      = _embedded or f"local-{time.strftime('%Y%m%d-%H%M')}"
+        release   = {"version": _ver, "url": None}
+    else:
+        release = await _get_cached_release()
+        if release is None:
+            return _error("no_release", "No release information available", 409)
+
     loop = asyncio.get_event_loop()
-    row = await loop.run_in_executor(None, db.get_device, device_id)
+    row  = await loop.run_in_executor(None, db.get_device, device_id)
     if row is None:
         return _error("device_not_found", f"No device: {device_id}", 404)
 
@@ -443,12 +480,8 @@ async def _post_device_update(request: web.Request) -> web.Response:
     if device_id in _updates_in_progress:
         return _error("update_in_progress", "An update is already in progress", 409)
 
-    release = await _get_cached_release()
-    if release is None:
-        return _error("no_release", "No release information available — check GitHub", 409)
-
-    asyncio.create_task(_run_update(device_id, release))
-    return _ok({"device_id": device_id, "version": release["version"]}, status=202)
+    asyncio.create_task(_run_update(device_id, release, binary_override))
+    return _ok({"status": "started", "version": release["version"]}, status=202)
 
 
 @auth.require_admin
@@ -456,19 +489,19 @@ async def _post_device_rollback(request: web.Request) -> web.Response:
     """
     POST /api/devices/{id}/rollback
 
-    Roll back to server.old on the device.
-    Requires firmware_previous to be set (i.e. an update was done).
-    Returns 202 Accepted — rollback runs in background.
+    Flips the inactive A/B slot back to active. Instant — no binary transfer.
+    Requires firmware_previous to be set.
+    Returns 202 Accepted.
     """
     device_id = request.match_info["id"]
-
     loop = asyncio.get_event_loop()
-    row = await loop.run_in_executor(None, db.get_device, device_id)
+    row  = await loop.run_in_executor(None, db.get_device, device_id)
     if row is None:
         return _error("device_not_found", f"No device: {device_id}", 404)
+
     if not row["firmware_previous"]:
         return _error("no_rollback_available",
-                      "No previous version available — server.old does not exist", 404)
+                      "No previous version recorded — cannot roll back", 404)
 
     live = _devices.get(device_id)
     if live is None:
@@ -478,91 +511,217 @@ async def _post_device_rollback(request: web.Request) -> web.Response:
         return _error("update_in_progress", "An update is already in progress", 409)
 
     asyncio.create_task(_run_rollback(device_id, row["firmware_previous"]))
-    return _ok({"device_id": device_id,
-                "rolling_back_to": row["firmware_previous"]}, status=202)
+    return _ok({"status": "started", "rolling_back_to": row["firmware_previous"]}, status=202)
+
+
+@auth.require_admin
+async def _post_upload_binary(request: web.Request) -> web.Response:
+    """
+    POST /api/releases/upload (multipart: field name "binary")
+
+    Upload a local binary for deployment. Returns an upload_token valid for
+    10 minutes. Pass the token to /api/devices/{id}/update or
+    /api/releases/deploy to deploy it.
+    """
+    import uuid as _uuid
+    try:
+        reader = await request.multipart()
+        field  = await reader.next()
+        if field is None or field.name != "binary":
+            return _error("invalid_upload", "Expected multipart field 'binary'", 400)
+        binary = await field.read()
+        if not binary:
+            return _error("empty_upload", "Uploaded binary is empty", 400)
+        if len(binary) > 50 * 1024 * 1024:
+            return _error("too_large", "Binary exceeds 50 MB limit", 413)
+
+        token = str(_uuid.uuid4())
+        _pending_uploads[token] = binary
+        log.info(f"[api] Binary uploaded: {len(binary):,} bytes token={token[:8]}…")
+
+        async def _expire():
+            await asyncio.sleep(600)
+            _pending_uploads.pop(token, None)
+        asyncio.create_task(_expire())
+
+        return _ok({"upload_token": token, "size": len(binary)})
+    except Exception as e:
+        log.error(f"[api] Upload error: {e}")
+        return _error("upload_failed", str(e), 500)
 
 
 # ─── OTA background tasks ─────────────────────────────────────────────────────
 
-async def _run_update(device_id: str, release: dict) -> None:
+
+def _extract_binary_version(binary: bytes) -> str | None:
     """
-    Background task: stream new binary to device and trigger update.sh.
-    Monitors reconnection for up to 90s to confirm or detect rollback.
+    Scan a compiled Go binary for its embedded EchoMuse version string.
+    The version is compiled in via -ldflags "-X ...Version=YYYYMMDD-HHMM-suffix".
+    Pattern matches e.g. 20260614-1152-dev, 20260614-0513-release, etc.
+    Falls back to None if not found, caller generates a local-YYYYMMDD-HHMM label.
+    """
+    import re as _re
+    match = _re.search(rb'20\d{6}-\d{4}-[a-z][a-z0-9]*', binary)
+    return match.group(0).decode("ascii") if match else None
+
+
+async def _run_update(device_id: str, release: dict,
+                      binary_override: bytes | None = None) -> None:
+    """
+    Background task: A/B slot update.
+
+    1. Fetch binary (GitHub or pre-uploaded).
+    2. Detect active slot via readlink; migrate legacy layout if needed.
+    3. Stream binary to inactive slot.
+    4. Flip symlink atomically.
+    5. Restart service and monitor reconnect.
+    6. Detect auto-rollback (start_server.sh retry exhausted).
     """
     _updates_in_progress.add(device_id)
     loop = asyncio.get_event_loop()
+    version = release["version"]
 
     try:
         await _push_log_event(device_id, "info", "controller",
-                              f"OTA update starting → {release['version']}")
+                              f"OTA update starting → {version}")
 
-        # Fetch binary from GitHub
-        binary = await _fetch_binary(release["url"])
-        if binary is None:
-            await _push_log_event(device_id, "error", "controller",
-                                  "Failed to fetch binary from GitHub")
-            return
+        # Fetch binary
+        if binary_override is not None:
+            binary = binary_override
+            await _push_log_event(device_id, "info", "controller",
+                                  f"Using uploaded binary ({len(binary):,} bytes)")
+        else:
+            binary = await _fetch_binary(release["url"])
+            if binary is None:
+                await _push_log_event(device_id, "error", "controller",
+                                      "Failed to fetch binary from GitHub")
+                return
 
-        # Record the current version as previous before updating
+        # Record current version as previous before anything changes
         row = await loop.run_in_executor(None, db.get_device, device_id)
         current_ver = row["firmware_ver"] if row else None
-        await loop.run_in_executor(
-            None, db.set_firmware_previous, device_id, current_ver
-        )
+        await loop.run_in_executor(None, db.set_firmware_previous, device_id, current_ver)
 
-        # Stream binary to device via shell
         live = _devices.get(device_id)
         if live is None:
             await _push_log_event(device_id, "error", "controller",
                                   "Device disconnected before update could start")
             return
 
-        ok = await _stream_binary_via_shell(live, binary)
-        if not ok:
+        # Detect active slot and migrate legacy layout if needed — single shell
+        # session to avoid the race condition of two sequential open/close cycles.
+        detect_cmd = (
+            "CURRENT=$(readlink /data/local/bin/server 2>/dev/null); "
+            "if [ \"$CURRENT\" = \"server_a\" ] || [ \"$CURRENT\" = \"server_b\" ]; then "
+            "  echo \"SLOT:$CURRENT\"; "
+            "else "
+            "  cp /data/local/bin/server /data/local/bin/server_a 2>&1 && "
+            "  chmod 755 /data/local/bin/server_a && "
+            "  ln -sf server_a /data/local/bin/server && "
+            "  echo \"SLOT:server_a MIGRATED\" || echo \"MIGRATE_FAILED\"; "
+            "fi"
+        )
+        detect_result = await _shell_run(live, detect_cmd, timeout=60.0)
+        log.info(f"[api] Slot detect result for {device_id}: {detect_result!r}")
+
+        if "MIGRATE_FAILED" in detect_result:
             await _push_log_event(device_id, "error", "controller",
-                                  "Binary transfer failed")
+                                  "A/B migration failed — aborting update")
             return
 
-        # Execute update.sh on device
-        await _push_log_event(device_id, "info", "controller",
-                              "Binary transferred — running update.sh")
-        await _exec_shell(live, "/data/local/bin/update.sh")
+        active_slot = None
+        for line in detect_result.splitlines():
+            if "SLOT:" in line:
+                candidate = line.split("SLOT:")[-1].strip().split()[0]
+                if candidate in ("server_a", "server_b"):
+                    active_slot = candidate
+                    break
 
-        # Monitor reconnection for up to 90s
-        confirmed = await _monitor_reconnect(device_id, release["version"], timeout=90)
+        if active_slot is None:
+            await _push_log_event(device_id, "error", "controller",
+                                  f"Could not determine active slot — output: {detect_result!r}")
+            return
+
+        if "MIGRATED" in detect_result:
+            await _push_log_event(device_id, "info", "controller",
+                                  "A/B migration complete — active slot: server_a")
+
+        inactive_slot = "server_b" if active_slot == "server_a" else "server_a"
+        await _push_log_event(device_id, "info", "controller",
+                              f"Deploying to slot {inactive_slot} (active: {active_slot})")
+
+        # Stream binary to inactive slot
+        ok = await _stream_binary_to_slot(live, binary, inactive_slot)
+        if not ok:
+            await _push_log_event(device_id, "error", "controller",
+                                  f"Binary transfer to {inactive_slot} failed")
+            return
+
+        # Brief pause so device can cleanly close the transfer shell before
+        # we open a new one for the symlink flip.
+        await asyncio.sleep(1.0)
+
+        # Atomic symlink flip + service restart
+        await _push_log_event(device_id, "info", "controller",
+                              f"Flipping symlink → {inactive_slot} and restarting")
+        result = await _shell_run(live,
+            f"ln -sf {inactive_slot} /data/local/bin/server && "
+            f"kill $PPID"
+        )
+        # Shell dies when the server process is killed — FLIP_OK will never arrive.
+        # _monitor_reconnect below detects whether the restart succeeded.
+
+        # Wait for device to come back
+        confirmed = await _monitor_reconnect(device_id, version, previous_version=current_ver, timeout=90)
 
         if confirmed:
             await _push_log_event(device_id, "info", "controller",
-                                  f"Update confirmed: {release['version']}")
+                                  f"✓ Update confirmed: {version}")
             await _push_event({
                 "type":      "device_updated",
                 "device_id": device_id,
-                "version":   release["version"],
+                "version":   version,
             })
         else:
-            # Check what version reconnected (may have rolled back on-device)
-            row = await loop.run_in_executor(None, db.get_device, device_id)
+            row     = await loop.run_in_executor(None, db.get_device, device_id)
             running = row["firmware_ver"] if row else "unknown"
-            await _push_log_event(
-                device_id, "warn", "controller",
-                f"Update failed or rolled back — running: {running}",
-            )
-            await _push_event({
-                "type":      "device_update_failed",
-                "device_id": device_id,
-                "running":   running,
-            })
+
+            if running == current_ver:
+                # Device came back on old version — auto-rollback by start_server.sh
+                await loop.run_in_executor(
+                    None, db.set_firmware_previous, device_id, None
+                )
+                await _push_log_event(device_id, "warn", "controller",
+                    f"Device auto-rolled back to {running} "
+                    f"— new binary failed {3} start attempts")
+                await _push_event({
+                    "type":      "device_auto_rolled_back",
+                    "device_id": device_id,
+                    "version":   running,
+                })
+            else:
+                await _push_log_event(device_id, "warn", "controller",
+                    f"Update timed out — device running: {running}")
+                await _push_event({
+                    "type":      "device_update_failed",
+                    "device_id": device_id,
+                    "running":   running,
+                })
 
     except Exception as e:
         log.exception(f"[api] OTA update error for {device_id}: {e}")
         await _push_log_event(device_id, "error", "controller",
-                              f"OTA update exception: {e}")
+                              f"OTA exception: {e}")
     finally:
         _updates_in_progress.discard(device_id)
 
 
 async def _run_rollback(device_id: str, target_version: str) -> None:
-    """Background task: roll back to server.old on device."""
+    """
+    Background task: flip to inactive A/B slot.
+
+    No binary transfer needed — the old binary is already in the inactive slot.
+    """
     _updates_in_progress.add(device_id)
     try:
         await _push_log_event(device_id, "info", "controller",
@@ -574,23 +733,50 @@ async def _run_rollback(device_id: str, target_version: str) -> None:
                                   "Device disconnected before rollback")
             return
 
-        rollback_cmds = (
-            "stop echomuse && "
-            "cp /data/local/bin/server.old /data/local/bin/server && "
-            "start echomuse"
+        active_slot = None
+        detect_result = await _shell_run(live,
+            "CURRENT=$(readlink /data/local/bin/server 2>/dev/null); "
+            "if [ \"$CURRENT\" = \"server_a\" ] || [ \"$CURRENT\" = \"server_b\" ]; then "
+            "  echo \"SLOT:$CURRENT\"; "
+            "else echo \"SLOT_UNKNOWN\"; fi"
         )
-        await _exec_shell(live, rollback_cmds)
+        for line in detect_result.splitlines():
+            if "SLOT:" in line:
+                candidate = line.split("SLOT:")[-1].strip().split()[0]
+                if candidate in ("server_a", "server_b"):
+                    active_slot = candidate
+                    break
 
-        confirmed = await _monitor_reconnect(device_id, target_version, timeout=90)
+        if active_slot is None:
+            await _push_log_event(device_id, "error", "controller",
+                                  "Cannot determine active slot — is A/B set up?")
+            return
+
+        inactive_slot = "server_b" if active_slot == "server_a" else "server_a"
+        await _push_log_event(device_id, "info", "controller",
+                              f"Flipping {active_slot} → {inactive_slot}")
+
+        result = await _shell_run(live,
+            f"ln -sf {inactive_slot} /data/local/bin/server && "
+            f"kill $PPID"
+        )
+        # Shell dies when the server process is killed — ROLLBACK_OK will never arrive.
+
         loop = asyncio.get_event_loop()
+        row_pre = await loop.run_in_executor(None, db.get_device, device_id)
+        current_fw = row_pre["firmware_ver"] if row_pre else None
+        confirmed = await _monitor_reconnect(
+            device_id, target_version,
+            previous_version=current_fw,
+            timeout=90,
+        )
 
         if confirmed:
-            # Clear firmware_previous — server.old is now current
             await loop.run_in_executor(
                 None, db.set_firmware_previous, device_id, None
             )
             await _push_log_event(device_id, "info", "controller",
-                                  f"Rollback confirmed: {target_version}")
+                                  f"✓ Rollback confirmed: {target_version}")
             await _push_event({
                 "type":      "device_rolled_back",
                 "device_id": device_id,
@@ -609,37 +795,259 @@ async def _run_rollback(device_id: str, target_version: str) -> None:
 async def _monitor_reconnect(
     device_id: str,
     expected_version: str,
+    previous_version: str | None = None,
     timeout: int = 90,
 ) -> bool:
     """
-    Poll until the device reconnects and reports expected_version,
-    or until timeout seconds elapse.
+    Poll until the device reconnects on a new version, or timeout elapses.
 
-    Returns True if the expected version is confirmed, False otherwise.
+    Accepts success if the device reports expected_version exactly (GitHub
+    releases where the tag matches the binary's embedded version), OR any
+    version that differs from previous_version (local uploads where the
+    binary reports its own version string, not the controller's local-YYYYMMDD
+    tracking string).
     """
-    loop = asyncio.get_event_loop()
+    loop     = asyncio.get_event_loop()
     deadline = time.monotonic() + timeout
-    await asyncio.sleep(5)  # give the device time to stop
+    await asyncio.sleep(8)  # give device time to stop and restart
 
     while time.monotonic() < deadline:
         if device_id in _devices:
             row = await loop.run_in_executor(None, db.get_device, device_id)
-            if row and row["firmware_ver"] == expected_version:
-                return True
+            if row:
+                running = row["firmware_ver"]
+                if running == expected_version:
+                    return True
+                if previous_version is not None and running != previous_version:
+                    return True
         await asyncio.sleep(2)
 
     return False
 
 
-# ─── Shell WebSocket proxy ────────────────────────────────────────────────────
+# ─── Shell helpers ────────────────────────────────────────────────────────────
+
+async def _get_device_shell_ws(live) -> object:
+    """
+    Request a programmatic shell connection from the device.
+
+    Acquires a per-device lock so sessions are strictly sequential.
+    handle_shell resolves the future with the ws, then waits for ws.close()
+    before returning — so the connection stays alive while we use it.
+    """
+    device_id = live.device_id
+    loop      = asyncio.get_event_loop()
+
+    if device_id not in _shell_lock:
+        _shell_lock[device_id] = asyncio.Lock()
+
+    try:
+        await asyncio.wait_for(_shell_lock[device_id].acquire(), timeout=20.0)
+    except asyncio.TimeoutError:
+        raise RuntimeError(f"Shell lock acquisition timed out for {device_id}")
+
+    future = loop.create_future()
+    _shell_pending[device_id] = future
+    # Deliberately do NOT set _shell_dashboard — signals programmatic mode.
+
+    await live.send_control({"type": "shell_open"})
+    try:
+        ws = await asyncio.wait_for(future, timeout=15.0)
+        _shell_ws[device_id] = ws
+        return ws
+    except asyncio.TimeoutError:
+        _shell_pending.pop(device_id, None)
+        _shell_ws.pop(device_id, None)
+        _shell_lock[device_id].release()
+        raise
+
+
+async def _release_shell_ws(device_id: str, live=None) -> None:
+    """
+    Close the programmatic shell session.
+
+    Closing ws wakes handle_shell's ws.wait_closed(), which then returns
+    and lets the device clean up its side too.
+    """
+    ws = _shell_ws.pop(device_id, None)
+    if ws:
+        try:
+            await ws.close()
+        except Exception:
+            pass
+    _shell_pending.pop(device_id, None)
+    if live is not None:
+        await live.send_control({"type": "shell_close"})
+    lock = _shell_lock.get(device_id)
+    if lock and lock.locked():
+        try:
+            lock.release()
+        except RuntimeError:
+            pass
+
+
+async def _shell_run(live, cmd: str, timeout: float = 30.0) -> str:
+    """
+    Run a shell command on the device and return its stdout as a string.
+
+    Appends a sentinel marker to detect when output is complete.
+    """
+    SENTINEL = "__CMD_DONE_9f3a__"
+    device_id = live.device_id
+    output: list[str] = []
+    try:
+        ws = await _get_device_shell_ws(live)
+        await ws.send(f"{cmd} ; echo '{SENTINEL}'\n")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                msg  = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                text = msg.decode("utf-8", errors="replace") if isinstance(msg, bytes) else msg
+                if SENTINEL in text:
+                    output.append(text[:text.index(SENTINEL)])
+                    break
+                output.append(text)
+            except asyncio.TimeoutError:
+                break
+        return "".join(output).strip()
+    except Exception as e:
+        log.error(f"[api] shell_run failed ({cmd!r}): {e}")
+        return ""
+    finally:
+        await _release_shell_ws(device_id, live)
+
+
+async def _stream_binary_to_slot(live, binary: bytes, slot: str) -> bool:
+    """
+    Transfer a binary to /data/local/bin/{slot} on the device via shell heredoc.
+
+    Detects available base64 decoder (busybox base64, python3, python) before
+    transferring, since 'base64' is not always in PATH on Android/FireOS.
+    Uses a heredoc so no intermediate .b64 file is needed.
+    The heredoc delimiter contains '_' which is not in the base64 alphabet.
+    """
+    import base64 as _b64
+
+    device_id     = live.device_id
+    dest          = f"/data/local/bin/{slot}"
+    DELIM         = "__END_B64_42__"
+    DETECT_MARKER = "__DETECT_DONE__"
+
+    try:
+        ws = await _get_device_shell_ws(live)
+
+        # Remove any previous attempt
+        await ws.send(f"rm -f {dest}\n")
+        await asyncio.sleep(0.2)
+
+        # ── Detect available base64 decoder ──────────────────────────────────
+        # Try busybox first (Magisk provides it), then python3/python.
+        # We run a round-trip sanity test so we know the decode flag works.
+        await ws.send(
+            "if echo dGVzdA== | busybox base64 -d >/dev/null 2>&1; then echo DECODER:busybox; "
+            "elif python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' </dev/null >/dev/null 2>&1; then echo DECODER:python3; "
+            "elif python  -c 'import base64,sys; sys.stdout.write(base64.b64decode(sys.stdin.read()))' </dev/null >/dev/null 2>&1; then echo DECODER:python; "
+            f"else echo DECODER:none; fi; echo {DETECT_MARKER}\n"
+        )
+
+        detect_buf = ""
+        detect_dl  = time.monotonic() + 15
+        while time.monotonic() < detect_dl:
+            try:
+                msg  = await asyncio.wait_for(ws.recv(), timeout=2)
+                text = msg.decode("utf-8", errors="replace") if isinstance(msg, bytes) else msg
+                detect_buf += text
+                if DETECT_MARKER in detect_buf:
+                    break
+            except asyncio.TimeoutError:
+                continue
+
+        if "DECODER:busybox" in detect_buf:
+            decode_cmd = "busybox base64 -d"
+        elif "DECODER:python3" in detect_buf:
+            decode_cmd = ("python3 -c "
+                          "'import sys,base64; "
+                          "sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))'")
+        elif "DECODER:python" in detect_buf:
+            decode_cmd = ("python -c "
+                          "'import sys,base64; "
+                          "sys.stdout.write(base64.b64decode(sys.stdin.read()))'")
+        else:
+            log.error(f"[api] No base64 decoder found on device. "
+                      f"Detection output: {detect_buf!r}")
+            return False
+
+        log.info(f"[api] Decoder: {decode_cmd.split()[0]} {decode_cmd.split()[1]}")
+
+        # ── Heredoc transfer ─────────────────────────────────────────────────
+        lines = _b64.encodebytes(binary).decode("ascii").splitlines(keepends=True)
+        log.info(f"[api] Transferring {len(binary):,} bytes to {slot} "
+                 f"({len(lines)} base64 lines via heredoc)")
+
+        # Single shell command: decode heredoc → dest, set permissions, confirm
+        await ws.send(
+            f"{decode_cmd} << '{DELIM}' > {dest} && "
+            f"chmod 755 {dest} && "
+            f"echo TRANSFER_OK\n"
+        )
+
+        # Stream base64 data — each line already ends with \n from encodebytes
+        for line in lines:
+            await ws.send(line)
+
+        # Close heredoc; shell now executes the decode pipeline
+        await ws.send(f"{DELIM}\n")
+        log.info(f"[api] Heredoc sent — waiting for TRANSFER_OK")
+
+        # Wait for confirmation (decode of ~13 MB on ARM takes a few seconds)
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            try:
+                msg  = await asyncio.wait_for(ws.recv(), timeout=5)
+                text = msg.decode("utf-8", errors="replace") if isinstance(msg, bytes) else msg
+                if "TRANSFER_OK" in text:
+                    log.info(f"[api] Transfer to {slot} confirmed")
+                    return True
+                if text.strip():
+                    log.debug(f"[api] Shell output during transfer: {text!r}")
+            except asyncio.TimeoutError:
+                continue
+
+        log.error(f"[api] Transfer to {slot} timed out waiting for TRANSFER_OK")
+        return False
+
+    except Exception as e:
+        log.error(f"[api] Binary transfer to {slot} failed: {e}")
+        return False
+    finally:
+        await _release_shell_ws(device_id, live)
+
+
+
+async def _exec_shell(live, cmd: str) -> None:
+    """Send a command to the device shell and return immediately (fire-and-forget)."""
+    try:
+        ws = await _get_device_shell_ws(live)
+        await ws.send(cmd + "\n")
+        await asyncio.sleep(0.5)
+    except Exception as e:
+        log.warning(f"[api] Shell exec failed ({cmd!r}): {e}")
+    finally:
+        await _release_shell_ws(live.device_id, live)
+
+
+# ─── Shell WebSocket proxy (interactive dashboard terminal) ───────────────────
 
 async def _ws_shell(request: web.Request) -> web.WebSocketResponse:
     """
-    WS /api/devices/{id}/shell — coordinates shell session.
+    WS /api/devices/{id}/shell — interactive shell terminal for dashboard.
 
-    Registers dashboard WS and done-Future, sends shell_open,
-    then waits for handle_shell to signal completion.
-    All proxying is done by handle_shell in em_controller.
+    Auth is handled via ws_resolve_session (checks cookie then ?token= query
+    param) because browser WebSocket clients cannot set custom headers.
+    Do NOT add @auth.require_admin here — _extract_token doesn't read query
+    params and would reject every connection before this function runs.
+
+    Sets _shell_dashboard so handle_shell proxies in interactive mode.
     """
     device_id = request.match_info["id"]
 
@@ -653,6 +1061,13 @@ async def _ws_shell(request: web.Request) -> web.WebSocketResponse:
     if live is None:
         raise web.HTTPConflict(reason="Device is not connected")
 
+    # Refuse if a programmatic shell session (e.g. OTA transfer) is in progress.
+    # Opening a terminal mid-transfer sends shell_open to the device, which cancels
+    # the current shell context and kills the transfer.
+    lock = _shell_lock.get(device_id)
+    if lock and lock.locked():
+        raise web.HTTPConflict(reason="Device shell is busy — an OTA update is in progress")
+
     ws = web.WebSocketResponse()
     await ws.prepare(request)
 
@@ -660,11 +1075,12 @@ async def _ws_shell(request: web.Request) -> web.WebSocketResponse:
     await _push_log_event(device_id, "info", "controller",
                           f"Shell session opened by {user['username']}")
 
-    # Register BEFORE sending shell_open to avoid race with device
     loop = asyncio.get_event_loop()
     done_future = loop.create_future()
     _shell_pending[device_id]   = done_future
     _shell_dashboard[device_id] = ws
+    # Do NOT set _shell_ws or acquire _shell_lock — interactive sessions
+    # bypass the programmatic shell mechanism entirely.
 
     try:
         await live.send_control({"type": "shell_open"})
@@ -707,12 +1123,29 @@ async def _post_deploy_all(request: web.Request) -> web.Response:
     """
     POST /api/releases/deploy
 
-    Deploy latest release to all connected, approved, non-current devices.
-    Returns list of device_ids that updates were started for.
+    Deploy to all connected, approved, non-current devices.
+    Accepts optional {"upload_token": "..."} to deploy a local binary
+    to the whole fleet instead of the latest GitHub release.
     """
-    release = await _get_cached_release()
-    if release is None:
-        return _error("no_release", "No release information available", 409)
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    upload_token = body.get("upload_token")
+    binary_override = None
+    release = None
+
+    if upload_token:
+        binary_override = _pending_uploads.pop(upload_token, None)
+        if binary_override is None:
+            return _error("invalid_token", "Upload token not found or expired", 404)
+        release = {"version": f"local-{time.strftime('%Y%m%d-%H%M')}", "url": None}
+    else:
+        release = await _get_cached_release()
+        if release is None:
+            return _error("no_release", "No release information available", 409)
 
     started = []
     skipped = []
@@ -723,14 +1156,14 @@ async def _post_deploy_all(request: web.Request) -> web.Response:
         if row is None or not row["approved"]:
             skipped.append({"device_id": device_id, "reason": "not_approved"})
             continue
-        if row["firmware_ver"] == release["version"]:
+        if not upload_token and row["firmware_ver"] == release["version"]:
             skipped.append({"device_id": device_id, "reason": "already_current"})
             continue
         if device_id in _updates_in_progress:
             skipped.append({"device_id": device_id, "reason": "update_in_progress"})
             continue
 
-        asyncio.create_task(_run_update(device_id, release))
+        asyncio.create_task(_run_update(device_id, release, binary_override))
         started.append(device_id)
 
     return _ok({
@@ -997,98 +1430,6 @@ async def _fetch_binary(download_url: str) -> Optional[bytes]:
         return None
 
 
-# ─── Shell helpers ────────────────────────────────────────────────────────────
-
-async def _get_device_shell_ws(live) -> object:
-    """
-    Request a shell WebSocket from the device by sending shell_open
-    and waiting for the device to connect back.
-    Returns the device WebSocket or raises TimeoutError.
-    """
-    device_id = live.device_id
-    loop = asyncio.get_event_loop()
-    future = loop.create_future()
-    _shell_pending[device_id] = future
-    await live.send_control({"type": "shell_open"})
-    try:
-        return await asyncio.wait_for(future, timeout=15.0)
-    except asyncio.TimeoutError:
-        _shell_pending.pop(device_id, None)
-        raise
-
-
-async def _stream_binary_via_shell(live, binary: bytes) -> bool:
-    """
-    Transfer a binary to /data/local/bin/server.new on the device
-    via the shell WebSocket connection.
-
-    Uses base64 encoding to safely transfer binary data through a
-    text-mode shell. The device decodes it on receipt.
-
-    Returns True on success.
-    """
-    import base64
-
-    chunk_size = 4096  # bytes before base64 encoding
-
-    try:
-        ws = await _get_device_shell_ws(live)
-        async with ws:
-            # Prepare destination
-            await ws.send("rm -f /data/local/bin/server.new\n")
-            await asyncio.sleep(0.2)
-
-            # Stream in base64 chunks, decoded on device
-            encoded = base64.b64encode(binary).decode("ascii")
-            for i in range(0, len(encoded), chunk_size):
-                chunk = encoded[i:i + chunk_size]
-                await ws.send(
-                    f"printf '%s' '{chunk}' >> /data/local/bin/server.new.b64\n"
-                )
-                await asyncio.sleep(0.05)
-
-            # Decode on device
-            await ws.send(
-                "base64 -d /data/local/bin/server.new.b64 "
-                "> /data/local/bin/server.new && "
-                "rm /data/local/bin/server.new.b64 && "
-                "chmod 755 /data/local/bin/server.new && "
-                "echo TRANSFER_OK\n"
-            )
-
-            # Wait for confirmation
-            deadline = time.monotonic() + 30
-            while time.monotonic() < deadline:
-                try:
-                    msg = await asyncio.wait_for(ws.recv(), timeout=5)
-                    if "TRANSFER_OK" in str(msg):
-                        log.info(f"[api] Binary transfer confirmed")
-                        await live.send_control({"type": "shell_close"})
-                        return True
-                except asyncio.TimeoutError:
-                    continue
-
-            log.error("[api] Binary transfer timed out waiting for TRANSFER_OK")
-            await live.send_control({"type": "shell_close"})
-            return False
-
-    except Exception as e:
-        log.error(f"[api] Binary transfer failed: {e}")
-        return False
-
-
-async def _exec_shell(live, cmd: str) -> None:
-    """Send a command to the device shell and return immediately."""
-    try:
-        ws = await _get_device_shell_ws(live)
-        await ws.send(cmd + "\n")
-        await asyncio.sleep(0.5)
-        await ws.close()
-        await live.send_control({"type": "shell_close"})
-    except Exception as e:
-        log.warning(f"[api] Shell exec failed ({cmd!r}): {e}")
-
-
 # ─── Periodic background tasks ────────────────────────────────────────────────
 
 async def release_poll_loop() -> None:
@@ -1225,6 +1566,7 @@ def _merge_device(row) -> dict:
         "muted":            getattr(live, "muted",     False) if live else False,
         "listening":        getattr(live, "listening", False) if live else False,
         "thinking":         getattr(live, "thinking",  False) if live else False,
+        "stats":            live.stats if live else None,
         # Update state
         "update_in_progress": device_id in _updates_in_progress,
     }

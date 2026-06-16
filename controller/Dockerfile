@@ -36,6 +36,7 @@ COPY em_controller.py .
 COPY em_api.py .
 COPY em_db.py .
 COPY em_auth.py .
+COPY em_eq.py .
 
 # Dashboard SPA — placeholder is index.html, full dashboard is dashboard.html
 COPY static/ ./static/

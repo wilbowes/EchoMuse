@@ -267,13 +267,17 @@ adb shell su -c 'ip link set p2p0 down'
 
 EchoMuse runs as a Go binary on the device. It abstracts the hardware (mic, speaker, LEDs, buttons) and connects outbound to the Clara server over two persistent WebSocket connections. There is no HTTP server on the device — no inbound ports, no iptables rules required.
 
-### Set up the binary directory:
+### Set up the binary directory (A/B slots):
+
+EchoMuse v2.4.4+ uses A/B slots: `server_a` and `server_b` with `/data/local/bin/server` as a symlink. This allows instant rollback without a binary transfer.
 
 ```bash
 adb shell "su -c 'mkdir -p /data/local/bin'"
 adb push server /sdcard/server
-adb shell "su -c 'cp /sdcard/server /data/local/bin/server && chmod 755 /data/local/bin/server && chown root:root /data/local/bin/server'"
+adb shell "su -c 'cp /sdcard/server /data/local/bin/server_a && chmod 755 /data/local/bin/server_a && ln -sf server_a /data/local/bin/server && chown root:root /data/local/bin/server_a'"
 ```
+
+`server_b` starts empty. The first OTA update from the dashboard populates it.
 
 ### Create the startup script:
 
@@ -318,7 +322,7 @@ adb shell "su -c 'cp /sdcard/start_server.sh /data/local/bin/start_server.sh && 
 
 > The script waits for `echoaudio` before starting — this ensures the audio DSP is initialised. `p2p0` is brought down to prevent mDNS interference. The WiFi wake lock prevents FireOS from suspending the wireless interface. All server output is logged to `/tmp/server.log` for debugging via `adb shell su -c 'cat /tmp/server.log'`.
 
-> **`exec /data/local/bin/server`** — `exec` replaces the shell with the server process. Using `server &` causes the script to exit immediately, which init interprets as a crash and restarts the service every 5 seconds.
+> The script runs the server as a subprocess (not via `exec`) so SIGTERM can be forwarded from Android init via the `trap`. If the binary exits in under 15 seconds three times in a row, the inactive A/B slot is restored via symlink and the script exits cleanly — init restarts it with the old binary. If the binary runs for ≥15s before crashing, the attempt counter resets (operational crash, not a deployment failure).
 
 ### Add EchoMuse and mixer service to the ramdisk:
 
@@ -514,7 +518,11 @@ dns-sd -B _emcontroller._tcp local
 ✅ Device logs streamed to controller over control WebSocket
 ✅ Mute state change notifications — device sends mute_state message to controller
 ✅ Shell access — device dials outbound to controller on shell_open, no inbound ports
-✅ OTA updates via controller dashboard — GitHub releases, on-device rollback
+✅ OTA updates via controller dashboard — A/B slot system, local binary upload, instant rollback (symlink flip, no transfer)
+✅ Auto-rollback on device — start_server.sh retries 3× before flipping to inactive slot; works without controller
+✅ 8-band parametric EQ (controller-side, SVG frequency response curve, live updating)
+✅ Wake word model hot-reload without device reconnect
+✅ Hardware resource monitoring — CPU%, RAM, storage, WiFi RSSI every 30s; dashboard signal bars
 ✅ Voice server turn timeout (45s) — controller never hangs on unresponsive voice server
 ✅ Boot logging to /tmp/server.log
 ✅ mDNS via grandcat/zeroconf — RFC 6762/6763 compliant, reliable discovery
@@ -822,8 +830,8 @@ done
 
 ---
 
-**Document version:** v2.4.3
-**Last updated:** 2026-06-13
+**Document version:** v2.4.4
+**Last updated:** 2026-06-14
 **Changelog:**
 - v1.0 — April 2026: Initial publication. Full pipeline confirmed working.
 - v1.1 — 2026-04-26: Fixed ambiguous init.csm.project.rc editing instruction; fixed `server &` → `exec` inconsistency.
@@ -837,5 +845,7 @@ done
 - v2.4.1 — 2026-06-13: Stability and correctness pass. Connection lifecycle: pong ticker goroutine leak fixed (done channel tied to connection lifetime); data-plane reconnects independently on /data drop without waiting for /control to cycle; register message sent before conn published to prevent concurrent write race; controller device registry guarded with identity checks to prevent reconnect races on handler teardown; per-device OWW model instances replace shared singleton (thread-safety, state isolation); mDNS refresh loop implemented fixing silent IGMP keepalive regression on Proxmox bridge; mdns_task NameError on shutdown fixed. Audio recovery: speaker silenceLoop death no longer causes PumpPeriod to block forever (deadCh); mic ALSA stream death closes subscriber channels so streamMic exits cleanly; streamMic defer resets micActive on exit from any cause. Concurrency: LED i2c writes serialised with mutex; SQLite write transactions serialised with threading.Lock; beamformer Unlock moved to mic goroutine (eliminates data race with Process). Beamformer: fixed-beam steerAngle now applied in Process() — nearestDirection was implemented but never called; Lock() uses raw energy during 3s baseline warmup rather than meaningless onset ratios; hfEnergy direction index corrected. Mute: physical mute button is now device-sovereign — controller mic_start refused when muted; mute state reported on every reconnect; red ring restored after orange pulse on reconnect; OWW detection suppressed and buffer cleared when muted. Controller: resample rewritten with numpy (~1-2s blocking loop replaced with <5ms); TTS tail padding prevents last ~42ms of audio being dropped; OWW threshold updates live without reconnect; spinner overshoot fixed — sleep tracks elapsed streaming time and waits only remaining playback duration.
 - v2.4.2 — 2026-06-13: Correctness fixes and HTTP layer removal. Small fixes: handle_shell task leak plugged (tasks now cancelled in finally regardless of asyncio.wait outcome); VAD-end sentinel no longer silently dropped when queue full — drains one audio frame to make room rather than losing the end-of-speech signal (previously caused voice turns to hang until 45s timeout); BeamAngle field changed to *float64 so 0° is distinguishable from absent-from-message. HTTP rip-out: gin stack, all HTTP handler files, and pkg HTTP client wrappers removed — the HTTP server was never started (Serve() was wired but never called since v2.0); volume_buttons.sh removed (was stuck in a curl wait loop since the HTTP endpoint never existed; volume buttons handled by Go binary via evdev throughout). go.mod cleaned of gin and 15 exclusive transitive dependencies; binary size reduced accordingly. Run `go mod tidy` inside the compiler container after checkout if go.sum needs regenerating.
 - v2.4.3 — 2026-06-13: RNNoise VAD probability, shell console fix, version embedding. RNNoise: ProcessFrame return value (speech probability 0–1) was previously discarded on every call; now stored in Processor and used to gate AGC release — if RNNoise confidence < 0.5, AGC release freezes even when RMS is above stream VAD threshold, preventing gain pumping on loud non-speech (TV, HVAC). Stream VAD gate remains RMS-only; vadHasData flag prevents incorrect gating during the ~30ms startup window before first RNNoise frame. Shell console: inner proxy functions (device_to_dashboard, dashboard_to_device) were accidentally removed in the v2.4.2 handle_shell task-leak fix, causing NameError on every shell connection attempt; restored. Version embedding: compile.sh now uses --entrypoint bash with explicit -ldflags to embed the git tag (or datetime-dev for dirty trees) into the binary at compile time; devices now report their running version to the controller dashboard correctly rather than always showing "dev".
+
+- v2.4.4 — 2026-06-14: EQ, stats, A/B OTA, shell fixes. Output codec documented: TLV320AIC32x4 on I2C bus 2 (separate from the 4x TLV320ADC3101 input chips); hardware biquad EQ (117-byte ALSA control) identified and decoded but software EQ chosen for flexibility. 8-band parametric EQ implemented controller-side using Audio EQ Cookbook biquad formulas (low shelf 125Hz, peaking Q=1.4, high shelf 8kHz); SVG frequency response curve in dashboard updates live as sliders move; 2-column layout with Flat/Clarity/Warmth preset buttons and loudness toggle. WiFi RSSI offset-encoding fix: /proc/net/wireless on this kernel encodes level as positive offset (0-255); values > 0 corrected by subtracting 256 (e.g. 206 -> -50 dBm). Device stats reporting: new stats.go in device/internal/client sends CPU%, RAM, storage, WiFi RSSI to controller every 30s and on connect; status tab redesigned with resource bars and 4-bar WiFi signal indicator. Wake word model hot-reload: owwModel config changes reload the model in the running wake_word_listener without device reconnect. A/B binary update system: start_server.sh rewritten with 3-attempt retry loop (15s minimum runtime threshold), SIGTERM trap, and auto-rollback via symlink flip before clean exit; controller OTA detects/migrates legacy layout in one shell session, streams binary to inactive slot, atomically flips symlink and restarts; rollback is instant symlink flip only; local binary upload (POST /api/releases/upload) with file picker in dashboard. Shell/console fixes: @auth.require_admin removed from _ws_shell (was rejecting WebSocket upgrades — browsers cannot set Authorization headers; auth handled by ws_resolve_session via ?token= query param); programmatic shell race fixed using ws.wait_closed() + per-device asyncio.Lock; _shell_pending cleanup moved exclusively to _release_shell_ws. OTA implementation fixes (all discovered against device): binary transfer uses shell heredoc piped to `busybox base64 -d` — printf and base64 are not in PATH on FireOS mksh, only available as BusyBox applets; decoder auto-detected at transfer time (busybox base64 → python3 → python); service restart uses `kill $PPID` from within the shell session rather than `stop/start echogo` — stop echogo kills the entire Android cgroup including the shell (child of server process), so start echogo never ran; kill $PPID sends SIGTERM to the server binary and start_server.sh's wait loop restarts cleanly from the updated symlink. Controller OTA fixes: `str(msg)` → `msg.decode('utf-8')` in _shell_run (device sends WebSocket binary frames; str() produced repr `b'SLOT:server_a\n'` as a literal string, breaking slot detection); duplicate _get_device_shell_ws/_stream_binary_via_shell/_exec_shell definitions removed (shadowed correct implementations in Python); _ws_shell now checks _shell_lock before opening interactive console (opening terminal mid-transfer previously overwrote _shell_pending, cancelled device shell context, and killed the transfer); _extract_binary_version() scans raw binary for embedded version string pattern (20\d{6}-\d{4}-[a-z]+) so local uploads report the binary's own version rather than a controller-generated local-YYYYMMDD-HHMM label; _monitor_reconnect accepts version != previous_version as success (covers local uploads where binary self-reports its own string); TRANSFER_OK wait extended to 120s; reconnect initial sleep 8s.
 
 *Device: Echo Dot 2nd Gen (RS03QR). Tested on macOS with ADB 35.0.2.*

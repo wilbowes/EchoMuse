@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"log"
 	"math"
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
+	"syscall"
 	"time"
 
 	internalbuttons "github.com/wilbowes/EchoMuse/internal/bindings/buttons"
@@ -129,6 +132,12 @@ func main() {
 			s.SetLEDs(allLEDs(0, 0, 0))
 			s.LEDModeDirection()
 		}
+		// Send an immediate stats snapshot so the dashboard populates on
+		// (re)connect rather than waiting up to 30s for the first tick.
+		go func() {
+			st := collectStats()
+			controlClient.SendStats(st)
+		}()
 	})
 
 	// Config applied — apply hardware changes via tinymix
@@ -154,8 +163,172 @@ func main() {
 		}
 	}()
 
+	// Periodic stats reporter — every 30s. SendStats silently drops when
+	// the device is not connected, so this goroutine runs unconditionally.
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			st := collectStats()
+			controlClient.SendStats(st)
+		}
+	}()
+
 	select {}
 }
+
+// ─── Hardware stats collection ────────────────────────────────────────────────
+
+func collectStats() client.DeviceStats {
+	cpuPct := cpuPercent()
+	memUsed, memTotal := memStats()
+	stoUsed, stoTotal := storageStats()
+	rssi := wifiRSSI()
+	return client.DeviceStats{
+		CPUPct:         cpuPct,
+		MemUsedMb:      memUsed,
+		MemTotalMb:     memTotal,
+		StorageUsedMb:  stoUsed,
+		StorageTotalMb: stoTotal,
+		WifiRssi:       rssi,
+	}
+}
+
+// cpuPercent samples /proc/stat twice over 500ms and returns utilisation %.
+func cpuPercent() float64 {
+	type snap struct{ total, idle uint64 }
+
+	read := func() (snap, bool) {
+		f, err := os.Open("/proc/stat")
+		if err != nil {
+			return snap{}, false
+		}
+		defer f.Close()
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+			line := sc.Text()
+			if !strings.HasPrefix(line, "cpu ") {
+				continue
+			}
+			fields := strings.Fields(line)[1:] // skip "cpu"
+			var vals [8]uint64
+			for i := 0; i < len(fields) && i < 8; i++ {
+				vals[i], _ = strconv.ParseUint(fields[i], 10, 64)
+			}
+			// user nice system idle iowait irq softirq steal
+			idle := vals[3] + vals[4] // idle + iowait
+			total := vals[0] + vals[1] + vals[2] + vals[3] +
+				vals[4] + vals[5] + vals[6] + vals[7]
+			return snap{total, idle}, true
+		}
+		return snap{}, false
+	}
+
+	s1, ok1 := read()
+	time.Sleep(500 * time.Millisecond)
+	s2, ok2 := read()
+	if !ok1 || !ok2 {
+		return 0
+	}
+	dTotal := float64(s2.total - s1.total)
+	if dTotal <= 0 {
+		return 0
+	}
+	dIdle := float64(s2.idle - s1.idle)
+	pct := (1 - dIdle/dTotal) * 100
+	// Round to one decimal place
+	return math.Round(pct*10) / 10
+}
+
+// memStats reads /proc/meminfo and returns (used MB, total MB).
+func memStats() (usedMb, totalMb int) {
+	f, err := os.Open("/proc/meminfo")
+	if err != nil {
+		return 0, 0
+	}
+	defer f.Close()
+
+	var totalKb, availKb uint64
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) < 2 {
+			continue
+		}
+		val, _ := strconv.ParseUint(fields[1], 10, 64)
+		switch fields[0] {
+		case "MemTotal:":
+			totalKb = val
+		case "MemAvailable:":
+			availKb = val
+		}
+	}
+	if totalKb == 0 {
+		return 0, 0
+	}
+	usedKb := totalKb - availKb
+	return int(usedKb / 1024), int(totalKb / 1024)
+}
+
+// storageStats returns (used MB, total MB) for /data via statfs.
+func storageStats() (usedMb, totalMb int) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs("/data", &st); err != nil {
+		return 0, 0
+	}
+	bsize := uint64(st.Bsize)
+	total := st.Blocks * bsize
+	free := st.Bfree * bsize
+	used := total - free
+	const mb = 1024 * 1024
+	return int(used / mb), int(total / mb)
+}
+
+// wifiRSSI reads /proc/net/wireless and returns the signal level in dBm,
+// or nil if the interface is not available.
+//
+// Some kernels encode the level field as a positive offset (0–255) rather
+// than signed dBm; values > 0 are adjusted by subtracting 256 to recover
+// the actual dBm reading (e.g. 206 → -50 dBm).
+func wifiRSSI() *int {
+	f, err := os.Open("/proc/net/wireless")
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	sc := bufio.NewScanner(f)
+	lineNum := 0
+	for sc.Scan() {
+		lineNum++
+		if lineNum <= 2 {
+			continue // skip two header lines
+		}
+		fields := strings.Fields(sc.Text())
+		// fields: [iface status link level noise ...]
+		if len(fields) < 4 {
+			continue
+		}
+		// level is fields[3], may have a trailing "."
+		rssiStr := strings.TrimRight(fields[3], ".")
+		rssi, err := strconv.Atoi(rssiStr)
+		if err != nil {
+			continue
+		}
+		// Correct offset encoding used by some kernels
+		if rssi > 0 {
+			rssi -= 256
+		}
+		// Sanity check — valid RSSI is roughly -30 to -100 dBm
+		if rssi < -120 || rssi > 0 {
+			continue
+		}
+		return &rssi
+	}
+	return nil
+}
+
+// ─── Hardware config ──────────────────────────────────────────────────────────
 
 // applyHardwareConfig runs tinymix commands for fields that map to hardware.
 // Called whenever the controller pushes a config message.
@@ -192,6 +365,8 @@ func allLEDs(r, g, b uint8) []led.Led {
 	}
 	return leds
 }
+
+// ─── LED animations ───────────────────────────────────────────────────────────
 
 // pulseOrange — sine-wave orange pulse while disconnected from server.
 func pulseOrange(ctx context.Context, s *server.Server) {

@@ -64,6 +64,7 @@ from websockets.asyncio.server import ServerConnection as WebSocketServerProtoco
 import em_db as db
 import em_auth as auth
 import em_api as api
+import em_eq
 
 logging.basicConfig(
     level=logging.DEBUG if os.environ.get("DEBUG") else logging.INFO,
@@ -147,6 +148,10 @@ class Device:
         # caching a snapshot at startup, so config changes take effect
         # without requiring a device reconnect.
         self.oww_threshold: float = OWW_THRESHOLD
+        self.oww_model:     str   = f"{OWW_MODEL}_v0.1"
+        self.eq_bands:      list  = [0.0] * 8
+        self.eq_loudness:   bool  = False
+        self.stats:         dict | None = None
 
     async def send_control(self, msg: dict):
         try:
@@ -209,10 +214,10 @@ _devices: dict[str, Device] = {}
 
 # Shell session coordination — keyed by device_id.
 #
-# _shell_pending:   Future resolved by handle_shell when proxying is complete.
-# _shell_dashboard: dashboard WebSocket, set by em_api before shell_open.
-_shell_pending:   dict[str, asyncio.Future] = {}
-_shell_dashboard: dict[str, object]         = {}
+# _shell_pending:   Future resolved with the device ws when handle_shell receives it.
+# _shell_dashboard: dashboard WebSocket set by em_api for interactive sessions.
+_shell_pending:    dict[str, asyncio.Future] = {}
+_shell_dashboard:  dict[str, object]         = {}
 
 
 def get_device(device_id: str) -> Device | None:
@@ -451,7 +456,12 @@ async def run_voice_turn(device: Device):
         spin_task = asyncio.create_task(leds_spin_green(device, stop_spin))
 
     try:
-        speaker_pcm = resample_to_stereo_48k(voice_response, PIPER_RATE)
+        log.info(
+            f"[{device.device_id}] EQ: bands={device.eq_bands} "
+            f"loudness={device.eq_loudness}"
+        )
+        eq_pcm      = em_eq.apply(voice_response, PIPER_RATE, device.eq_bands, device.eq_loudness)
+        speaker_pcm = resample_to_stereo_48k(eq_pcm, PIPER_RATE)
         log.info(
             f"[{device.device_id}] Streaming {len(speaker_pcm)} bytes "
             f"({len(speaker_pcm)//SPEAKER_BYTES} periods)"
@@ -533,21 +543,22 @@ async def _run_voice_locked(device: Device):
 # ─── Wake word listener ───────────────────────────────────────────────────────
 
 async def wake_word_listener(device: Device):
-    loop      = asyncio.get_event_loop()
+    loop = asyncio.get_event_loop()
 
     # Each device gets its own model instance — the OWW model holds internal
     # streaming state (feature buffer, VAD history) that is not thread-safe and
     # must not be shared across devices. Models are small; the memory cost is
     # acceptable for a fleet of 5-6 devices.
-    log.info(f"[{device.device_id}] OWW: loading model {OWW_MODEL}")
+    current_model_name = device.oww_model
+    log.info(f"[{device.device_id}] OWW: loading model {current_model_name}")
     model = await loop.run_in_executor(
         None,
         lambda: OWWModel(
-            wakeword_models=[f"{OWW_MODEL}_v0.1"],
+            wakeword_models=[current_model_name],
             enable_speex_noise_suppression=False,
         ),
     )
-    model_key = f"{OWW_MODEL}_v0.1"
+    model_key = current_model_name
 
     log.info(f"[{device.device_id}] OWW: starting (initial threshold={device.oww_threshold:.3f})")
     await device.mic_start()
@@ -555,6 +566,33 @@ async def wake_word_listener(device: Device):
     buf = bytearray()
     try:
         while True:
+            # Reload model if owwModel config changed at runtime
+            if device.oww_model != current_model_name:
+                new_name = device.oww_model
+                log.info(
+                    f"[{device.device_id}] OWW: reloading model "
+                    f"{current_model_name} → {new_name}"
+                )
+                try:
+                    _n = new_name
+                    new_model = await loop.run_in_executor(
+                        None,
+                        lambda: OWWModel(
+                            wakeword_models=[_n],
+                            enable_speex_noise_suppression=False,
+                        ),
+                    )
+                    model             = new_model
+                    model_key         = new_name
+                    current_model_name = new_name
+                    buf.clear()
+                    log.info(f"[{device.device_id}] OWW: model reloaded → {new_name}")
+                except Exception as e:
+                    log.error(
+                        f"[{device.device_id}] OWW: failed to load {new_name}: {e} "
+                        f"— reverting to {current_model_name}"
+                    )
+                    device.oww_model = current_model_name  # revert so we don't retry forever
             try:
                 payload = await asyncio.wait_for(
                     device.mic_queue.get(), timeout=10.0
@@ -772,6 +810,9 @@ async def handle_control(ws: WebSocketServerProtocol):
         )
         await device.send_control({"type": "config", **config})
         device.oww_threshold = float(config.get("owwThreshold", OWW_THRESHOLD))
+        device.oww_model     = config.get("owwModel", f"{OWW_MODEL}_v0.1")
+        device.eq_bands      = config.get("eqBands", [0.0] * 8)
+        device.eq_loudness   = bool(config.get("eqLoudness", False))
         log.info(f"[control] Config pushed to {device_id}")
 
         await leds_off(device)
@@ -805,6 +846,21 @@ async def handle_control(ws: WebSocketServerProtocol):
                         "type":      "device_update",
                         "device_id": device_id,
                         "state":     {"muted": device.muted},
+                    })
+
+                elif msg_type == "stats":
+                    device.stats = {
+                        "cpuPct":        msg.get("cpuPct"),
+                        "memUsedMb":     msg.get("memUsedMb"),
+                        "memTotalMb":    msg.get("memTotalMb"),
+                        "storageUsedMb": msg.get("storageUsedMb"),
+                        "storageTotalMb":msg.get("storageTotalMb"),
+                        "wifiRssi":      msg.get("wifiRssi"),
+                    }
+                    await api._push_event({
+                        "type":      "device_update",
+                        "device_id": device_id,
+                        "state":     {"stats": device.stats},
                     })
 
                 elif msg_type == "log":
@@ -943,8 +999,10 @@ async def handle_shell(ws: WebSocketServerProtocol, path: str):
     """
     Handle an inbound /shell/{device_id} WebSocket connection from the device.
 
-    Owns all proxying between device shell and dashboard terminal.
-    em_api just coordinates signalling via shared dicts.
+    Two modes:
+      Interactive — dashboard_ws is set; proxies between device and dashboard terminal.
+      Programmatic — dashboard_ws is None; resolves done_future with the ws so
+                     em_api shell helpers can send commands and read output directly.
     """
     import aiohttp as _aiohttp
 
@@ -959,11 +1017,30 @@ async def handle_shell(ws: WebSocketServerProtocol, path: str):
     done_future  = _shell_pending.get(device_id)
     dashboard_ws = _shell_dashboard.get(device_id)
 
-    if done_future is None or done_future.done() or dashboard_ws is None:
+    if done_future is None or done_future.done():
         log.warning(f"[shell] No pending shell request for {device_id} — closing")
         await ws.close()
         return
 
+    # ── Programmatic mode ─────────────────────────────────────────────────────
+    if dashboard_ws is None:
+        log.info(f"[shell] Programmatic session: {device_id}")
+        # Resolve the future with the live ws so the API caller can send
+        # commands and read output directly.
+        done_future.set_result(ws)
+        # Keep the connection alive until the caller closes ws (via
+        # _release_shell_ws → ws.close()), then exit cleanly.
+        # Do NOT pop _shell_pending here — _release_shell_ws owns that
+        # cleanup and by the time wait_closed() returns, the next session
+        # may already have written a new future into the dict.
+        try:
+            await asyncio.wait_for(ws.wait_closed(), timeout=300.0)
+        except (asyncio.TimeoutError, Exception):
+            pass
+        log.info(f"[shell] Programmatic session ended: {device_id}")
+        return
+
+    # ── Interactive (dashboard terminal) mode ─────────────────────────────────
     log.info(f"[shell] Proxying: {device_id}")
 
     async def device_to_dashboard():
@@ -996,8 +1073,6 @@ async def handle_shell(ws: WebSocketServerProtocol, path: str):
     try:
         await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     finally:
-        # Cancel both tasks regardless of how asyncio.wait exited — if it
-        # raised, tasks were created but never cancelled and would leak.
         for task in tasks:
             task.cancel()
         log.info(f"[shell] Session ended: {device_id}")
