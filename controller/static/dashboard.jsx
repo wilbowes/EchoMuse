@@ -497,15 +497,21 @@ function Detail({ device, token, onClose, onApprove, isAdmin }) {
 
   function _pollReconnect(targetVersion) {
     let attempts = 0;
+    let wasDisconnected = false;
     const poll = setInterval(async () => {
       attempts++;
       try {
         const devices = await API.get('/api/devices');
         const d = devices.find(x => x.device_id === device.device_id);
-        if (d?.firmware_ver === targetVersion) {
-          setPushLog(l => [...l, `✓ Running ${targetVersion}`]);
-          clearInterval(poll); setPushing(false);
-        } else if (d?.firmware_ver && d.firmware_ver !== targetVersion && attempts > 5) {
+        // Track when the device goes offline during the restart cycle.
+        // The rollback check must only fire after observing a disconnect —
+        // otherwise it triggers mid-transfer while the device is still
+        // connected and running the old firmware.
+        if (!d?.connected) wasDisconnected = true;
+        if (d?.connected && d?.firmware_ver === targetVersion) {
+          setPushLog(l => [...l, `✓ Running ${targetVersion}`, '✓ Update complete']);
+          clearInterval(poll); setPushing(false); setLocalFile(null);
+        } else if (wasDisconnected && d?.connected && d?.firmware_ver && d.firmware_ver !== targetVersion) {
           setPushLog(l => [...l, `⚠ Device reconnected on ${d.firmware_ver} — auto-rolled back`]);
           clearInterval(poll); setPushing(false);
         } else if (attempts > 40) {

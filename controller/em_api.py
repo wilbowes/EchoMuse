@@ -1466,9 +1466,28 @@ async def session_prune_loop() -> None:
 
 # ─── Helpers shared across em_controller ─────────────────────────────────────
 
-async def notify_device_connected(device_id: str) -> None:
-    """Called by em_controller when a device successfully registers."""
-    await _push_event({"type": "device_connected", "device_id": device_id})
+async def notify_device_connected(device_id: str, version: str | None = None) -> None:
+    """
+    Called by em_controller when a device successfully registers.
+
+    Includes firmware_ver in the event so the dashboard's device cache is
+    updated immediately on reconnect — prevents a stale-cache false-positive
+    where the frontend sees the old version during an OTA reconnect window
+    and incorrectly shows an auto-rollback warning.
+
+    Pass version directly from the device handshake (preferred — no DB round-trip).
+    If omitted, falls back to a DB lookup; assumes em_controller has already
+    written the new firmware_ver before calling this.
+    """
+    event: dict = {"type": "device_connected", "device_id": device_id}
+    if version is not None:
+        event["firmware_ver"] = version
+    else:
+        loop = asyncio.get_event_loop()
+        row = await loop.run_in_executor(None, db.get_device, device_id)
+        if row:
+            event["firmware_ver"] = row["firmware_ver"]
+    await _push_event(event)
 
 
 async def notify_device_disconnected(device_id: str) -> None:

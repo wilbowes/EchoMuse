@@ -24,16 +24,22 @@ jobs:
         run: |
           mkdir -p device/build
           docker run --rm \
-            -e VERSION=${{ github.ref_name }} \
+            --entrypoint bash \
             -e CGO_LDFLAGS="-Wl,--hash-style=both" \
             -v "${{ github.workspace }}/device":/sdk \
             -v "${{ github.workspace }}/GoTinyAlsa":/GoTinyAlsa \
-            echomuse-compiler
+            echomuse-compiler \
+            -c "cd /sdk && mkdir -p build && go build \
+              -tags server \
+              -ldflags \"-X github.com/wilbowes/EchoMuse/internal/client.Version=${{ github.ref_name }}\" \
+              -o build/server \
+              ./cmd/"
 
       - name: Verify binary
         run: |
           file device/build/server
           ls -lh device/build/server
+          strings device/build/server | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$'
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
