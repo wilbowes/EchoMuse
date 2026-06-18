@@ -1015,6 +1015,7 @@ const _ADB = (() => {
   class Client {
     constructor() {
       this._dev = null; this._epIn = null; this._epOut = null; this._iface = null;
+      this._packetSize = 512;
       this._streams = new Map(); this._nextId = 1; this._running = false;
       this._connRes = null; this._connRej = null;
     }
@@ -1049,7 +1050,7 @@ const _ADB = (() => {
             this._iface = iface.interfaceNumber;
             for (const ep of alt.endpoints) {
               if (ep.type === 'bulk') {
-                if (ep.direction === 'in') this._epIn = ep.endpointNumber;
+                if (ep.direction === 'in') { this._epIn = ep.endpointNumber; this._packetSize = ep.packetSize; }
                 else this._epOut = ep.endpointNumber;
               }
             }
@@ -1059,11 +1060,8 @@ const _ADB = (() => {
       this._dbgIfaces = dbgIfaces;
       if (this._iface === null) throw new Error(`No ADB interface on device. Interfaces: ${dbgIfaces.join(' | ')}`);
 
-      // Only call selectConfiguration if the device is not already configured.
-      // Sending SET_CONFIGURATION to an already-configured device resets the
-      // ADB gadget function, which stalls the IN endpoint until adbd restarts.
-      // ya-webadb uses the same conditional and works correctly on FireOS.
-      if (dev.configuration === null) {
+      // ya-webadb: only call selectConfiguration when the active config differs.
+      if (!dev.configuration) {
         await dev.selectConfiguration(1);
       }
       try {
@@ -1075,23 +1073,25 @@ const _ADB = (() => {
         );
       }
 
-      // FireOS adbd uses the device-initiates protocol: the device sends CNXN
-      // immediately after the host claims the interface, and expects the host
-      // to respond with its own CNXN.  Sending CNXN before reading confuses
-      // adbd (it receives an unexpected CNXN) and stalls the IN endpoint.
-      //
-      // Start the read loop first.  _dispatch handles CMD.CNXN from the device
-      // by sending our CNXN in reply.  If the device doesn't send anything
-      // within 1 s we fall back to sending CNXN ourselves (host-initiates).
+      this._dbgIfaces.push(`active config: ${dev.configuration?.configurationValue ?? 'null'}, packetSize: ${this._packetSize}`);
+
+      // adbd (via Linux functionfs) resets its endpoints when Chrome opens the
+      // device.  Any transferIn submitted before this reset completes returns
+      // TRANSFER_ERROR.  Give adbd time to finish before touching the endpoints.
+      await new Promise(r => setTimeout(r, 500));
+
+      // Android 4.4+ (API ≥ 19) = host-initiates ADB.
+      // Send CNXN before starting the read loop.  adbd will respond with AUTH
+      // TOKEN on the IN endpoint only after it has received a host CNXN.
       this._running = true;
-      this._cnxnSent = false;
+      try {
+        await this._sendMsg(CMD.CNXN, 0x01000000, 4096, new TextEncoder().encode('host::EchoMuse\0'));
+      } catch (e) {
+        this._running = false;
+        throw new Error(`ADB CNXN send failed: ${e.message}`);
+      }
       this._readLoop();
-      setTimeout(() => {
-        if (this._running && !this._cnxnSent) {
-          this._cnxnSent = true;
-          this._sendMsg(CMD.CNXN, 0x01000000, 4096, new TextEncoder().encode('host::EchoMuse\0'));
-        }
-      }, 1000);
+
       return new Promise((res, rej) => {
         this._connRes = res; this._connRej = rej;
         setTimeout(() => rej(new Error('ADB connect timeout — no response from device')), timeoutMs);
@@ -1102,27 +1102,19 @@ const _ADB = (() => {
       (async () => {
         while (this._running) {
           try {
-            const hr = await this._dev.transferIn(this._epIn, 65536);
-            if (!hr.data || hr.data.byteLength < 24) continue;
+            // Match ya-webadb: read one max-packet at a time for the header.
+            // adbd sends the 24-byte header as its own short USB packet.
+            const hr = await this._dev.transferIn(this._epIn, this._packetSize);
+            if (!hr.data || hr.data.byteLength !== 24) continue;
             const v = new DataView(hr.data.buffer, hr.data.byteOffset);
             const cmd = v.getUint32(0, true), arg0 = v.getUint32(4, true);
             const arg1 = v.getUint32(8, true), len = v.getUint32(12, true);
+            const magic = v.getUint32(20, true);
+            if (magic !== ((cmd ^ 0xFFFFFFFF) >>> 0)) continue;
             let data = new Uint8Array(0);
             if (len > 0) {
-              const inlined = hr.data.byteLength - 24;
-              if (inlined >= len) {
-                data = new Uint8Array(hr.data.buffer, hr.data.byteOffset + 24, len);
-              } else {
-                const buf = new Uint8Array(len);
-                if (inlined > 0) buf.set(new Uint8Array(hr.data.buffer, hr.data.byteOffset + 24, inlined));
-                let off = inlined;
-                while (off < len) {
-                  const r = await this._dev.transferIn(this._epIn, Math.min(65536, len - off));
-                  const c = new Uint8Array(r.data.buffer, r.data.byteOffset, r.data.byteLength);
-                  buf.set(c, off); off += c.length;
-                }
-                data = buf;
-              }
+              const pr = await this._dev.transferIn(this._epIn, len);
+              data = new Uint8Array(pr.data.buffer, pr.data.byteOffset, pr.data.byteLength);
             }
             this._dispatch(cmd, arg0, arg1, data);
           } catch (e) {
@@ -1139,15 +1131,8 @@ const _ADB = (() => {
     _dispatch(cmd, arg0, arg1, data) {
       switch (cmd) {
         case CMD.CNXN:
-          if (!this._cnxnSent) {
-            // Device-initiates: device sent CNXN first, respond with ours
-            this._cnxnSent = true;
-            this._sendMsg(CMD.CNXN, 0x01000000, 4096, new TextEncoder().encode('host::EchoMuse\0'));
-            // Don't resolve yet — AUTH exchange follows
-          } else {
-            // Second CNXN = device confirmed connection after AUTH
-            this._connRes?.(); this._connRes = this._connRej = null;
-          }
+          // Device sends CNXN after the AUTH exchange succeeds
+          this._connRes?.(); this._connRes = this._connRej = null;
           break;
         case CMD.AUTH:
           if (arg0 === 1) getKey().then(jwk => signToken(jwk, data)).then(sig => this._sendMsg(CMD.AUTH, 2, 0, sig)).catch(e => this._connRej?.(e));
