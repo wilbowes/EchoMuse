@@ -1016,6 +1016,7 @@ const _ADB = (() => {
     constructor() {
       this._dev = null; this._epIn = null; this._epOut = null; this._iface = null;
       this._packetSize = 512;
+      this._log = () => {};
       this._streams = new Map(); this._nextId = 1; this._running = false;
       this._connRes = null; this._connRej = null;
     }
@@ -1035,6 +1036,8 @@ const _ADB = (() => {
 
     async connect(timeoutMs = 20000) {
       const dev = this._dev;
+      const L = msg => this._log(msg);
+      L('open()');
       await dev.open();
       const dbgIfaces = [];
       for (const cfg of dev.configurations) {
@@ -1060,17 +1063,12 @@ const _ADB = (() => {
       this._dbgIfaces = dbgIfaces;
       if (this._iface === null) throw new Error(`No ADB interface on device. Interfaces: ${dbgIfaces.join(' | ')}`);
 
-      this._dbgIfaces.push(`pre-config: ${dev.configuration?.configurationValue ?? 'null'}, packetSize: ${this._packetSize}`);
-
-      // Always send SET_CONFIGURATION(1).  adbd (functionfs gadget) may have
-      // closed its ep1/ep2 after a previous host disconnected; it only reopens
-      // them on receiving BIND (triggered by SET_CONFIGURATION).  Skipping this
-      // leaves the IN endpoint in a non-open state → TRANSFER_ERROR.
-      // wadb (GoogleChromeLabs) does this unconditionally; ya-webadb skips it
-      // only if the config value already matches (which on Linux/Mac means it
-      // is always skipped — a likely Linux bug in ya-webadb).
+      L(`pre-config: ${dev.configuration?.configurationValue ?? 'null'}  epIn=${this._epIn} epOut=${this._epOut} packetSize=${this._packetSize}`);
+      L('selectConfiguration(1)…');
       await dev.selectConfiguration(1);
+      L('selectConfiguration done');
 
+      L(`claimInterface(${this._iface})…`);
       try {
         await dev.claimInterface(this._iface);
       } catch (e) {
@@ -1079,13 +1077,11 @@ const _ADB = (() => {
           'Run: adb kill-server  — then try connecting again.'
         );
       }
-
-      // Wait for adbd to process the BIND event and reopen ep1/ep2.
+      L('claimInterface done — settling 1s…');
       await new Promise(r => setTimeout(r, 1000));
+      L('settling done');
 
-      // Android 4.4+ (API ≥ 19) = host-initiates ADB.
-      // Send CNXN before starting the read loop.  adbd will respond with AUTH
-      // TOKEN on the IN endpoint only after it has received a host CNXN.
+      L('sending CNXN…');
       this._running = true;
       try {
         await this._sendMsg(CMD.CNXN, 0x01000000, 4096, new TextEncoder().encode('host::EchoMuse\0'));
@@ -1093,6 +1089,7 @@ const _ADB = (() => {
         this._running = false;
         throw new Error(`ADB CNXN send failed: ${e.message}`);
       }
+      L('CNXN sent — starting readLoop');
       this._readLoop();
 
       return new Promise((res, rej) => {
@@ -1103,17 +1100,25 @@ const _ADB = (() => {
 
     _readLoop() {
       (async () => {
+        let attempt = 0;
         while (this._running) {
           try {
-            // Match ya-webadb: read one max-packet at a time for the header.
-            // adbd sends the 24-byte header as its own short USB packet.
+            attempt++;
+            this._log(`transferIn attempt ${attempt} (ep=${this._epIn} len=${this._packetSize})…`);
             const hr = await this._dev.transferIn(this._epIn, this._packetSize);
-            if (!hr.data || hr.data.byteLength !== 24) continue;
+            const byteLen = hr.data?.byteLength ?? 0;
+            this._log(`transferIn got ${byteLen} bytes (status=${hr.status})`);
+            attempt = 0;
+            if (!hr.data || byteLen !== 24) continue;
             const v = new DataView(hr.data.buffer, hr.data.byteOffset);
             const cmd = v.getUint32(0, true), arg0 = v.getUint32(4, true);
             const arg1 = v.getUint32(8, true), len = v.getUint32(12, true);
             const magic = v.getUint32(20, true);
-            if (magic !== ((cmd ^ 0xFFFFFFFF) >>> 0)) continue;
+            if (magic !== ((cmd ^ 0xFFFFFFFF) >>> 0)) {
+              this._log(`bad magic 0x${magic.toString(16)} for cmd 0x${cmd.toString(16)} — skip`);
+              continue;
+            }
+            this._log(`cmd=0x${cmd.toString(16)} arg0=0x${arg0.toString(16)} payloadLen=${len}`);
             let data = new Uint8Array(0);
             if (len > 0) {
               const pr = await this._dev.transferIn(this._epIn, len);
@@ -1121,8 +1126,14 @@ const _ADB = (() => {
             }
             this._dispatch(cmd, arg0, arg1, data);
           } catch (e) {
+            this._log(`transferIn error [${e.name}]: ${e.message} (attempt ${attempt})`);
+            if (attempt < 10) {
+              this._log('retrying in 500ms…');
+              await new Promise(r => setTimeout(r, 500));
+              continue;
+            }
             if (this._running) {
-              this._connRej?.(new Error(e.message || String(e)));
+              this._connRej?.(new Error(`[${e.name}] ${e.message}`));
               this._connRej = null;
             }
             break;
@@ -1308,6 +1319,7 @@ function ProvisionWizard({ token, onClose }) {
   async function runConnectAndroid() {
     addLog('Requesting USB device — select the Echo Dot from the picker…');
     const c = await _ADB.Client.requestDevice();
+    c._log = msg => addLog(`  ADB: ${msg}`);
     addLog('Connecting ADB…');
     try {
       await c.connect();
