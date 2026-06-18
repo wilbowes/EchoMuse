@@ -1060,10 +1060,17 @@ const _ADB = (() => {
       this._dbgIfaces = dbgIfaces;
       if (this._iface === null) throw new Error(`No ADB interface on device. Interfaces: ${dbgIfaces.join(' | ')}`);
 
-      // ya-webadb: only call selectConfiguration when the active config differs.
-      if (!dev.configuration) {
-        await dev.selectConfiguration(1);
-      }
+      this._dbgIfaces.push(`pre-config: ${dev.configuration?.configurationValue ?? 'null'}, packetSize: ${this._packetSize}`);
+
+      // Always send SET_CONFIGURATION(1).  adbd (functionfs gadget) may have
+      // closed its ep1/ep2 after a previous host disconnected; it only reopens
+      // them on receiving BIND (triggered by SET_CONFIGURATION).  Skipping this
+      // leaves the IN endpoint in a non-open state → TRANSFER_ERROR.
+      // wadb (GoogleChromeLabs) does this unconditionally; ya-webadb skips it
+      // only if the config value already matches (which on Linux/Mac means it
+      // is always skipped — a likely Linux bug in ya-webadb).
+      await dev.selectConfiguration(1);
+
       try {
         await dev.claimInterface(this._iface);
       } catch (e) {
@@ -1073,12 +1080,8 @@ const _ADB = (() => {
         );
       }
 
-      this._dbgIfaces.push(`active config: ${dev.configuration?.configurationValue ?? 'null'}, packetSize: ${this._packetSize}`);
-
-      // adbd (via Linux functionfs) resets its endpoints when Chrome opens the
-      // device.  Any transferIn submitted before this reset completes returns
-      // TRANSFER_ERROR.  Give adbd time to finish before touching the endpoints.
-      await new Promise(r => setTimeout(r, 500));
+      // Wait for adbd to process the BIND event and reopen ep1/ep2.
+      await new Promise(r => setTimeout(r, 1000));
 
       // Android 4.4+ (API ≥ 19) = host-initiates ADB.
       // Send CNXN before starting the read loop.  adbd will respond with AUTH
