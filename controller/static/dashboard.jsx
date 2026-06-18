@@ -886,6 +886,766 @@ function Login({ onLogin }) {
   );
 }
 
+// ─── Provisioning Wizard ──────────────────────────────────────────────────────
+
+// ADB-over-WebUSB client — no external dependencies.
+// Implements: CNXN/AUTH(RSA)/OPEN/OKAY/WRTE/CLSE + exec: streams.
+const _ADB = (() => {
+  const CMD = {
+    CNXN: 0x4e584e43, AUTH: 0x48545541, OPEN: 0x4e45504f,
+    OKAY: 0x59414b4f, CLSE: 0x45534c43, WRTE: 0x45545257,
+  };
+
+  // ── CRC32 ──
+  const _T = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let j = 0; j < 8; j++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    _T[i] = c;
+  }
+  function crc32(d) {
+    let c = 0xFFFFFFFF;
+    for (const b of d) c = (c >>> 8) ^ _T[(c ^ b) & 0xFF];
+    return (c ^ 0xFFFFFFFF) >>> 0;
+  }
+
+  // ── BigInt RSA helpers ──
+  function b64uToBigInt(s) {
+    const b64 = s.replace(/-/g, '+').replace(/_/g, '/');
+    const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+    let v = 0n;
+    for (const b of bin) v = (v << 8n) | BigInt(b);
+    return v;
+  }
+  function bytesBigInt(arr) {
+    let v = 0n;
+    for (const b of arr) v = (v << 8n) | BigInt(b);
+    return v;
+  }
+  function bigIntBytes(v, len) {
+    const out = new Uint8Array(len);
+    for (let i = len - 1; i >= 0 && v > 0n; i--, v >>= 8n) out[i] = Number(v & 0xFFn);
+    return out;
+  }
+  function modPow(b, e, m) {
+    let r = 1n; b %= m;
+    for (; e > 0n; e >>= 1n) { if (e & 1n) r = r * b % m; b = b * b % m; }
+    return r;
+  }
+
+  // ── RSA key (generated once, stored in localStorage) ──
+  const _LS = 'em_adb_key';
+  async function getKey() {
+    const s = localStorage.getItem(_LS);
+    if (s) return JSON.parse(s);
+    const kp = await crypto.subtle.generateKey(
+      { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-1' },
+      true, ['sign']
+    );
+    const jwk = await crypto.subtle.exportKey('jwk', kp.privateKey);
+    localStorage.setItem(_LS, JSON.stringify(jwk));
+    return jwk;
+  }
+
+  // ADB AUTH: PKCS#1 v1.5 with SHA-1 DigestInfo; token is the raw digest.
+  // Web Crypto always pre-hashes, so we implement the RSA private op with BigInt.
+  async function signToken(jwk, token) {
+    const n = b64uToBigInt(jwk.n), d = b64uToBigInt(jwk.d);
+    const DI = new Uint8Array([0x30,0x21,0x30,0x09,0x06,0x05,0x2b,0x0e,0x03,0x02,0x1a,0x05,0x00,0x04,0x14]);
+    const T = new Uint8Array(DI.length + token.length);
+    T.set(DI); T.set(token, DI.length);
+    const k = 256;
+    const EM = new Uint8Array(k);
+    EM[1] = 0x01;
+    EM.fill(0xFF, 2, k - T.length - 1);
+    EM.set(T, k - T.length);
+    return bigIntBytes(modPow(bytesBigInt(EM), d, n), k);
+  }
+
+  // ── AdbStream ──
+  class Stream {
+    constructor(client, localId) {
+      this._c = client; this.localId = localId; this.remoteId = 0;
+      this._q = []; this._closed = false;
+      this._openRes = null; this._openRej = null;
+      this._dataNote = null; this._writeNote = null;
+    }
+    _onOkay(rid) {
+      if (!this.remoteId) {
+        this.remoteId = rid; this._openRes?.(); this._openRes = this._openRej = null;
+      } else {
+        const n = this._writeNote; this._writeNote = null; n?.();
+      }
+    }
+    _onData(data) {
+      this._q.push(data);
+      const n = this._dataNote; this._dataNote = null; n?.();
+      this._c._sendMsg(CMD.OKAY, this.localId, this.remoteId);
+    }
+    _onClose() {
+      this._closed = true;
+      this._dataNote?.(); this._dataNote = null;
+      this._writeNote?.(); this._writeNote = null;
+      this._c._streams.delete(this.localId);
+    }
+    async _next() {
+      if (this._q.length) return this._q.shift();
+      if (this._closed) return null;
+      return new Promise(r => { this._dataNote = () => r(this._q.length ? this._q.shift() : null); });
+    }
+    async readAll() {
+      const parts = [];
+      for (;;) { const c = await this._next(); if (!c) break; parts.push(c); }
+      let len = 0; for (const p of parts) len += p.length;
+      const out = new Uint8Array(len); let off = 0;
+      for (const p of parts) { out.set(p, off); off += p.length; }
+      return out;
+    }
+    async write(data) {
+      const SZ = 64 * 1024;
+      for (let i = 0; i < data.length; i += SZ) {
+        const sl = data.subarray(i, i + SZ);
+        await new Promise(r => { this._writeNote = r; this._c._sendMsg(CMD.WRTE, this.localId, this.remoteId, sl); });
+      }
+    }
+    close() { if (!this._closed) this._c._sendMsg(CMD.CLSE, this.localId, this.remoteId); }
+  }
+
+  // ── AdbClient ──
+  class Client {
+    constructor() {
+      this._dev = null; this._epIn = null; this._epOut = null; this._iface = null;
+      this._streams = new Map(); this._nextId = 1; this._running = false;
+      this._connRes = null; this._connRej = null;
+    }
+
+    static async requestDevice() {
+      const dev = await navigator.usb.requestDevice({
+        filters: [{ classCode: 0xFF, subclassCode: 0x42, protocolCode: 0x01 }],
+      });
+      const c = new Client(); c._dev = dev; return c;
+    }
+
+    async connect(timeoutMs = 20000) {
+      const dev = this._dev;
+      await dev.open();
+      for (const cfg of dev.configurations) {
+        for (const iface of cfg.interfaces) {
+          for (const alt of iface.alternates) {
+            if (alt.interfaceClass !== 0xFF || alt.interfaceSubclass !== 0x42 || alt.interfaceProtocol !== 0x01) continue;
+            this._iface = iface.interfaceNumber;
+            for (const ep of alt.endpoints) {
+              if (ep.type === 'bulk') {
+                if (ep.direction === 'in') this._epIn = ep.endpointNumber;
+                else this._epOut = ep.endpointNumber;
+              }
+            }
+          }
+        }
+      }
+      if (this._iface === null) throw new Error('No ADB interface on device');
+      await dev.selectConfiguration(1);
+      await dev.claimInterface(this._iface);
+      this._running = true;
+      this._readLoop();
+      await this._sendMsg(CMD.CNXN, 0x01000000, 1 << 20, new TextEncoder().encode('host::EchoMuse\0'));
+      return new Promise((res, rej) => {
+        this._connRes = res; this._connRej = rej;
+        setTimeout(() => rej(new Error('ADB connect timeout')), timeoutMs);
+      });
+    }
+
+    _readLoop() {
+      (async () => {
+        while (this._running) {
+          try {
+            const hr = await this._dev.transferIn(this._epIn, 24);
+            if (!hr.data || hr.data.byteLength < 24) continue;
+            const v = new DataView(hr.data.buffer, hr.data.byteOffset);
+            const cmd = v.getUint32(0, true), arg0 = v.getUint32(4, true);
+            const arg1 = v.getUint32(8, true), len = v.getUint32(12, true);
+            let data = new Uint8Array(0);
+            if (len > 0) {
+              const buf = new Uint8Array(len); let off = 0;
+              while (off < len) {
+                const r = await this._dev.transferIn(this._epIn, len - off);
+                const c = new Uint8Array(r.data.buffer, r.data.byteOffset, r.data.byteLength);
+                buf.set(c, off); off += c.length;
+              }
+              data = buf;
+            }
+            this._dispatch(cmd, arg0, arg1, data);
+          } catch (e) {
+            if (this._running) { this._connRej?.(e); this._connRej = null; }
+            break;
+          }
+        }
+      })();
+    }
+
+    _dispatch(cmd, arg0, arg1, data) {
+      switch (cmd) {
+        case CMD.CNXN: this._connRes?.(); this._connRes = this._connRej = null; break;
+        case CMD.AUTH:
+          if (arg0 === 1) getKey().then(jwk => signToken(jwk, data)).then(sig => this._sendMsg(CMD.AUTH, 2, 0, sig)).catch(e => this._connRej?.(e));
+          break;
+        case CMD.OKAY: this._streams.get(arg1)?._onOkay(arg0); break;
+        case CMD.WRTE: this._streams.get(arg1)?._onData(data); break;
+        case CMD.CLSE: this._streams.get(arg1)?._onClose(); break;
+      }
+    }
+
+    async _open(svc) {
+      const id = this._nextId++; const s = new Stream(this, id); this._streams.set(id, s);
+      await this._sendMsg(CMD.OPEN, id, 0, new TextEncoder().encode(svc + '\0'));
+      await new Promise((res, rej) => {
+        s._openRes = res; s._openRej = rej;
+        setTimeout(() => rej(new Error(`Stream open timeout: ${svc}`)), 15000);
+      });
+      return s;
+    }
+
+    async shell(cmd) {
+      const s = await this._open(`shell:${cmd}`);
+      return new TextDecoder().decode(await s.readAll()).replace(/\r\n/g, '\n').trim();
+    }
+
+    async exec(cmd) {
+      const s = await this._open(`exec:${cmd}`);
+      return new TextDecoder().decode(await s.readAll()).trim();
+    }
+
+    async push(remotePath, data, onProgress) {
+      const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+      const s = await this._open(`exec:cat > '${remotePath}'`);
+      const SZ = 64 * 1024;
+      for (let i = 0; i < bytes.length; i += SZ) {
+        await s.write(bytes.subarray(i, i + SZ));
+        onProgress?.((i + SZ) / bytes.length);
+      }
+      s.close(); onProgress?.(1);
+      await new Promise(r => setTimeout(r, 300));
+    }
+
+    async pull(remotePath) {
+      const s = await this._open(`exec:cat '${remotePath}'`);
+      return s.readAll();
+    }
+
+    async _sendMsg(cmd, arg0 = 0, arg1 = 0, data = new Uint8Array(0)) {
+      const d = data instanceof Uint8Array ? data : new Uint8Array(data);
+      const h = new ArrayBuffer(24); const v = new DataView(h);
+      v.setUint32(0, cmd, true); v.setUint32(4, arg0, true); v.setUint32(8, arg1, true);
+      v.setUint32(12, d.length, true); v.setUint32(16, crc32(d), true);
+      v.setUint32(20, (cmd ^ 0xFFFFFFFF) >>> 0, true);
+      await this._dev.transferOut(this._epOut, h);
+      if (d.length > 0) await this._dev.transferOut(this._epOut, d.buffer.slice(d.byteOffset, d.byteOffset + d.byteLength));
+    }
+
+    async close() {
+      this._running = false;
+      try { await this._dev?.releaseInterface(this._iface); } catch {}
+      try { await this._dev?.close(); } catch {}
+    }
+  }
+
+  return { Client };
+})();
+
+// ── AddDeviceTile ──
+
+function AddDeviceTile({ onClick }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <div
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        border: `2px dashed ${hover ? 'var(--text2)' : '#b0aa9f'}`,
+        borderRadius: 12, minHeight: 160, display: 'flex', flexDirection: 'column',
+        alignItems: 'center', justifyContent: 'center', gap: 8, cursor: 'pointer',
+        transition: 'border-color 0.15s, opacity 0.15s', opacity: hover ? 1 : 0.6,
+        userSelect: 'none',
+      }}
+    >
+      <div style={{ fontSize: 28, color: hover ? 'var(--text2)' : '#b0aa9f', lineHeight: 1 }}>+</div>
+      <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: hover ? 'var(--text2)' : '#b0aa9f', letterSpacing: '0.12em', textTransform: 'uppercase' }}>Provision Device</div>
+    </div>
+  );
+}
+
+// ── ProvisionWizard ──
+
+const _ALEXA_PKGS = [
+  'amazon.speech.davs.davcservice',
+  'amazon.speech.sim',
+  'com.amazon.alexa.beaconbroadcaster',
+  'com.amazon.alexa.externalmediaplayer.fireos',
+  'com.amazon.wha.mediabrowserservice',
+  'com.amazon.whisperjoin.middleware',
+  'com.amazon.whisperjoin.wss.wifiprovisioner',
+  'com.amazon.device.smarthome.dshs.services',
+  'com.amazon.mediaplayeragent',
+];
+
+const _INIT_RC_APPEND = `
+service mixer /system/bin/sh
+    oneshot
+    disabled
+    user root
+
+service echomuse /data/local/bin/start_server.sh
+    user root
+    group root system
+    class late_start
+`;
+
+// Steps:
+//  0  connect_android  — connect in Android mode, verify FireOS 5, reboot to recovery
+//  1  connect_twrp     — reconnect once TWRP menu appears
+//  2  patch_boot       — SELinux cmdline + init.rc in one boot image pass  [auto]
+//  3  install_magisk   — flash Magisk 17.3 via twrp install                [file]
+//  4  preseed_db       — push pre-seeded magisk.db                         [auto]
+//  5  reboot           — reboot device to Android                          [button]
+//  6  reconnect        — reconnect ADB after Android boots                 [button]
+//  7  verify_root      — confirm su works                                  [auto]
+//  8  wifi             — configure WiFi network                            [inputs]
+//  9  disable_alexa    — pm disable x9                                     [auto]
+// 10  install_em       — push binary + startup script                      [file]
+const _WIZARD_STEPS = [
+  { id: 'connect_android', label: 'Connect Device',     desc: 'Connect the Echo Dot via USB. Device should be on and booted into Android.' },
+  { id: 'connect_twrp',    label: 'Connect to TWRP',   desc: 'Wait for TWRP recovery to appear, then reconnect.' },
+  { id: 'patch_boot',      label: 'Patch Boot Image',  desc: 'Apply SELinux permissive patch and add init.rc service entries.' },
+  { id: 'install_magisk',  label: 'Install Magisk',    desc: 'Flash Magisk 17.3 for persistent root access.' },
+  { id: 'preseed_db',      label: 'Pre-seed Root DB',  desc: 'Grant root to ADB shell without a screen prompt.' },
+  { id: 'reboot',          label: 'Reboot to Android', desc: 'Reboot device to Android.' },
+  { id: 'reconnect',       label: 'Reconnect',         desc: 'Re-connect ADB after Android finishes booting.' },
+  { id: 'verify_root',     label: 'Verify Root',       desc: 'Confirm Magisk root is working.' },
+  { id: 'wifi',            label: 'Configure WiFi',    desc: 'Connect the device to your local WiFi network.' },
+  { id: 'disable_alexa',   label: 'Disable Alexa',     desc: 'Disable all 9 Alexa voice pipeline packages.' },
+  { id: 'install_em',      label: 'Install EchoMuse',  desc: 'Push server binary and startup script to device.' },
+];
+
+function ProvisionWizard({ token, onClose }) {
+  const [step, setStep]         = useState(0);
+  const [stepState, setStepState] = useState(_WIZARD_STEPS.map(() => 'pending'));
+  const [log, setLog]           = useState([]);
+  const [running, setRunning]   = useState(false);
+  const [adb, setAdb]           = useState(null);
+  const [magiskFile, setMagiskFile] = useState(null);
+  const [binaryFile, setBinaryFile] = useState(null);
+  const [wifiSsid, setWifiSsid] = useState('');
+  const [wifiPsk, setWifiPsk]   = useState('');
+  const [progress, setProgress] = useState(null);
+  const logRef = useRef(null);
+
+  function addLog(msg, type = 'info') {
+    setLog(l => [...l, { msg, type }].slice(-200));
+    setTimeout(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, 30);
+  }
+  function markStep(i, st) { setStepState(s => { const n = [...s]; n[i] = st; return n; }); }
+
+  // ── Step runners ──
+
+  async function runConnectAndroid() {
+    addLog('Requesting USB device — select the Echo Dot from the picker…');
+    const c = await _ADB.Client.requestDevice();
+    addLog('Connecting ADB…');
+    await c.connect();
+    setAdb(c);
+    const model   = await c.shell('getprop ro.product.model');
+    const release = await c.shell('getprop ro.build.version.release');
+    const name    = await c.shell('getprop ro.product.name');
+    addLog(`Model: ${model || '(unknown)'}  Build: Android ${release}  Codename: ${name || '(unknown)'}`);
+    if (!release.startsWith('5.')) {
+      throw new Error(`Expected FireOS 5 (Android 5.x), got Android ${release}. Wrong device?`);
+    }
+    if (model && !model.toLowerCase().includes('amazon') && !name.toLowerCase().includes('biscuit')) {
+      addLog('Warning: device may not be an Echo Dot 2nd gen — proceeding anyway.', 'warn');
+    }
+    addLog('FireOS 5 confirmed. Rebooting to TWRP recovery…');
+    try { await c.shell('reboot recovery'); } catch {}
+    await c.close();
+    setAdb(null);
+    addLog('Device is rebooting. Wait for the TWRP menu to appear, then click "Connect to TWRP".', 'warn');
+    return null;
+  }
+
+  async function runConnectTwrp() {
+    addLog('Requesting USB device…');
+    const c = await _ADB.Client.requestDevice();
+    addLog('Connecting ADB…');
+    await c.connect();
+    setAdb(c);
+    addLog('Verifying TWRP…');
+    const bootmode = await c.shell('getprop ro.bootmode 2>/dev/null || echo recovery');
+    const hasTwrp  = await c.shell('ls /sbin/recovery 2>/dev/null && echo YES || echo NO');
+    if (!bootmode.includes('recovery') && hasTwrp.trim() !== 'YES') {
+      throw new Error('Device does not appear to be in TWRP. Is the TWRP menu showing on the device?');
+    }
+    addLog('TWRP confirmed.', 'ok');
+    return c;
+  }
+
+  async function runPatchBoot(c) {
+    addLog('Setting up work directories…');
+    await c.shell('mkdir -p /tmp/work /tmp/bin');
+    addLog('Extracting magiskboot from /sdcard/f1r30s.zip…');
+    const unzipOut = await c.shell('unzip -o /sdcard/f1r30s.zip bin/magiskboot -d /tmp/ 2>&1');
+    addLog(unzipOut || '(done)');
+    await c.shell('chmod 755 /tmp/bin/magiskboot');
+
+    addLog('Pulling boot image from device (10–20s)…');
+    await c.shell('dd if=/dev/block/other-boot of=/tmp/work/boot.img bs=1048576 2>/dev/null');
+    const bootImg = await c.pull('/tmp/work/boot.img');
+    addLog(`Boot image: ${(bootImg.length / 1024 / 1024).toFixed(1)} MB`);
+
+    addLog('Patching cmdline for SELinux permissive…');
+    const patched = new Uint8Array(bootImg);
+    const newCmd  = new TextEncoder().encode('bootopt=64S3,32N2,64N2 androidboot.selinux=permissive');
+    patched.fill(0, 64, 576);
+    patched.set(newCmd, 64);
+
+    addLog('Pushing patched image…');
+    await c.push('/tmp/work/boot_patched.img', patched, pct => setProgress({ label: 'Pushing boot image', pct }));
+    setProgress(null);
+
+    addLog('Unpacking ramdisk…');
+    const unpackOut = await c.shell('cd /tmp/work && /tmp/bin/magiskboot unpack boot_patched.img 2>&1');
+    addLog(unpackOut || '(done)');
+    await c.shell('mkdir -p /tmp/ramdisk && cd /tmp/ramdisk && cpio -id < /tmp/work/ramdisk.cpio 2>/dev/null');
+
+    addLog('Patching init.csm.project.rc…');
+    const rcBytes  = await c.pull('/tmp/ramdisk/init.csm.project.rc');
+    const existing = new TextDecoder().decode(rcBytes);
+    if (existing.includes('service echomuse')) {
+      addLog('Service entries already present — skipping.', 'warn');
+    } else {
+      await c.push('/tmp/ramdisk/init.csm.project.rc', new TextEncoder().encode(existing + _INIT_RC_APPEND));
+      await c.shell('chmod 750 /tmp/ramdisk/init.csm.project.rc');
+    }
+
+    addLog('Repacking ramdisk…');
+    await c.shell('cd /tmp/ramdisk && find . | cpio -o -H newc > /tmp/work/ramdisk.cpio 2>/dev/null');
+    const repackOut = await c.shell('cd /tmp/work && /tmp/bin/magiskboot repack boot_patched.img 2>&1');
+    addLog(repackOut || '(done)');
+
+    addLog('Flashing patched boot image…');
+    await c.shell('dd if=/tmp/work/new-boot.img of=/dev/block/other-boot bs=1048576 2>/dev/null');
+    addLog('Boot image flashed.', 'ok');
+  }
+
+  async function runInstallMagisk(c, file) {
+    addLog(`Pushing ${file.name} to /sdcard/…`);
+    const buf = await file.arrayBuffer();
+    await c.push('/sdcard/Magisk-v17.3.zip', new Uint8Array(buf),
+      pct => setProgress({ label: 'Uploading Magisk', pct }));
+    setProgress(null);
+    addLog('Installing via TWRP (this takes ~30s)…');
+    const out = await c.shell('twrp install /sdcard/Magisk-v17.3.zip 2>&1');
+    addLog(out || '(done)');
+    if (out.toLowerCase().includes('error') || out.toLowerCase().includes('failed')) {
+      throw new Error('TWRP install reported an error — check the log.');
+    }
+    addLog('Magisk installed.', 'ok');
+  }
+
+  async function runPreseedDb(c) {
+    addLog('Downloading magisk.db from controller…');
+    const resp = await fetch('/api/provision/magisk_db', { headers: { Authorization: `Bearer ${token}` } });
+    if (!resp.ok) throw new Error(`Controller returned ${resp.status}`);
+    const dbBytes = new Uint8Array(await resp.arrayBuffer());
+    addLog(`magisk.db: ${dbBytes.length} bytes`);
+    await c.shell('mkdir -p /data/adb');
+    await c.push('/tmp/magisk_preseed.db', dbBytes);
+    await c.shell('cp /tmp/magisk_preseed.db /data/adb/magisk.db && chmod 600 /data/adb/magisk.db');
+    addLog('magisk.db installed.', 'ok');
+  }
+
+  async function runReboot(c) {
+    addLog('Sending reboot command…');
+    try { await c.shell('reboot'); } catch {}
+    await c.close();
+    setAdb(null);
+    addLog('Device rebooting to Android. Wait ~60s, then click Reconnect.', 'warn');
+    return null;
+  }
+
+  async function runReconnect() {
+    addLog('Requesting USB device…');
+    const c = await _ADB.Client.requestDevice();
+    await c.connect();
+    setAdb(c);
+    addLog('ADB connected.', 'ok');
+    return c;
+  }
+
+  async function runVerifyRoot(c) {
+    addLog('Testing su -c id…');
+    const out = await c.shell('su -c id 2>&1');
+    addLog(out);
+    if (!out.includes('uid=0')) throw new Error('Root not working — check Magisk install and magisk.db.');
+    addLog('Root confirmed.', 'ok');
+  }
+
+  async function runConfigWifi(c, ssid, psk) {
+    addLog('Enabling WiFi radio…');
+    await c.shell("su -c 'svc wifi enable' 2>&1");
+    await new Promise(r => setTimeout(r, 2000));
+
+    addLog('Checking existing connectivity…');
+    const existIp = await c.shell("su -c \"ip addr show wlan0 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1\"");
+    if (existIp && /\d+\.\d+\.\d+\.\d+/.test(existIp)) {
+      addLog(`Already connected (${existIp}) — skipping network add.`, 'ok');
+      return;
+    }
+
+    addLog(`Adding network "${ssid}"…`);
+    // Write a helper script to avoid shell quoting complexity
+    const script = `#!/system/bin/sh\nnetid=$(wpa_cli add_network | tail -1)\nwpa_cli set_network "$netid" ssid '"${ssid}"'\nwpa_cli set_network "$netid" psk '"${psk}"'\nwpa_cli enable_network "$netid"\nwpa_cli reconnect\nwpa_cli save_config\necho "NETID:$netid"`;
+    await c.push('/tmp/wificfg.sh', new TextEncoder().encode(script));
+    const out = await c.shell('su -c "chmod 755 /tmp/wificfg.sh && /tmp/wificfg.sh" 2>&1');
+    addLog(out || '(done)');
+
+    addLog('Waiting for IP address (up to 20s)…');
+    for (let i = 0; i < 20; i++) {
+      await new Promise(r => setTimeout(r, 1000));
+      const ip = await c.shell("su -c \"ip addr show wlan0 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1\"");
+      if (ip && /\d+\.\d+\.\d+\.\d+/.test(ip)) {
+        addLog(`Connected! IP: ${ip}`, 'ok');
+        return;
+      }
+    }
+    throw new Error(`WiFi did not associate within 20s. Check SSID "${ssid}" and password.`);
+  }
+
+  async function runDisableAlexa(c) {
+    for (const pkg of _ALEXA_PKGS) {
+      addLog(`Disabling ${pkg}…`);
+      const out = await c.shell(`su -c 'pm disable ${pkg}' 2>&1`);
+      addLog(`  → ${out || 'ok'}`);
+    }
+    addLog('Alexa stack disabled.', 'ok');
+  }
+
+  async function runInstallEchoMuse(c, file) {
+    addLog(`Pushing ${file.name} to /sdcard/server_new…`);
+    const buf = await file.arrayBuffer();
+    await c.push('/sdcard/server_new', new Uint8Array(buf),
+      pct => setProgress({ label: 'Uploading binary', pct }));
+    setProgress(null);
+    addLog('Installing to /data/local/bin/ (A slot)…');
+    await c.shell("su -c 'mkdir -p /data/local/bin && cp /sdcard/server_new /data/local/bin/server_a && chmod 755 /data/local/bin/server_a && ln -sf server_a /data/local/bin/server'");
+    addLog('Fetching startup script from controller…');
+    const resp = await fetch('/api/provision/start_script', { headers: { Authorization: `Bearer ${token}` } });
+    if (!resp.ok) throw new Error(`Controller returned ${resp.status}`);
+    await c.push('/sdcard/start_server.sh', new TextEncoder().encode(await resp.text()));
+    await c.shell("su -c 'cp /sdcard/start_server.sh /data/local/bin/start_server.sh && chmod 755 /data/local/bin/start_server.sh'");
+    addLog('EchoMuse installed.', 'ok');
+  }
+
+  // ── Step executor ──
+  async function runStep(stepIdx) {
+    setRunning(true);
+    markStep(stepIdx, 'running');
+    let c = adb;
+    try {
+      switch (stepIdx) {
+        case  0: c = await runConnectAndroid(); break;
+        case  1: c = await runConnectTwrp(); break;
+        case  2: await runPatchBoot(c); break;
+        case  3: await runInstallMagisk(c, magiskFile); break;
+        case  4: await runPreseedDb(c); break;
+        case  5: await runReboot(c); break;
+        case  6: c = await runReconnect(); break;
+        case  7: await runVerifyRoot(c); break;
+        case  8: await runConfigWifi(c, wifiSsid, wifiPsk); break;
+        case  9: await runDisableAlexa(c); break;
+        case 10: await runInstallEchoMuse(c, binaryFile); break;
+      }
+      markStep(stepIdx, 'done');
+      if (stepIdx < _WIZARD_STEPS.length - 1) setStep(stepIdx + 1);
+    } catch (e) {
+      addLog(`Error: ${e.message}`, 'error');
+      markStep(stepIdx, 'error');
+    }
+    setRunning(false);
+  }
+
+  // Auto-advance steps that need no user input once adb is connected
+  useEffect(() => {
+    const autoSteps = new Set([2, 4, 7, 9]);
+    if (autoSteps.has(step) && !running && stepState[step] === 'pending' && adb) {
+      runStep(step);
+    }
+  }, [step, running]);
+
+  const cur    = _WIZARD_STEPS[step];
+  const isDone = step === _WIZARD_STEPS.length - 1 && stepState[step] === 'done';
+
+  // Buttons are shown for manual steps; auto steps start themselves.
+  // CONNECT_STEPS: step is a connection step — show "Retry Connection" on error.
+  const CONNECT_STEPS = new Set([0, 1, 6]);
+  // FILE_STEPS: step needs a file before running.
+  const FILE_STEP_BUTTON = step === 3 && !!magiskFile ? 'Flash Magisk'
+                         : step === 10 && !!binaryFile ? 'Install EchoMuse'
+                         : null;
+
+  const statusColors = { pending: '#888', running: '#8ab0d0', done: '#7ab87a', error: '#c05050' };
+  const statusIcons  = { pending: '○', running: '◌', done: '●', error: '✕' };
+
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 200,
+      background: 'rgba(20,18,14,0.82)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+      backdropFilter: 'blur(4px)',
+    }}>
+      <div style={{
+        background: 'linear-gradient(160deg,#e8e4de,#d8d4cc)', border: '1px solid #b8b4ac',
+        borderRadius: 16, width: '92vw', maxWidth: 860, maxHeight: '90vh',
+        display: 'flex', flexDirection: 'column', overflow: 'hidden',
+        boxShadow: '0 32px 96px rgba(0,0,0,0.3)',
+      }}>
+
+        {/* Header */}
+        <div style={{ padding: '20px 24px 16px', borderBottom: '1px solid #c8c4bc', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 16, fontWeight: 600, color: 'var(--text)', letterSpacing: '-0.01em' }}>Provision Echo Dot</div>
+            <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', letterSpacing: '0.12em', textTransform: 'uppercase', marginTop: 2 }}>Chrome/Edge only · USB-A cable · amonet-biscuit prerequisite</div>
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 18, color: 'var(--muted)', padding: '4px 8px', lineHeight: 1 }}>✕</button>
+        </div>
+
+        <div style={{ display: 'flex', flex: 1, overflow: 'hidden', minHeight: 0 }}>
+
+          {/* Step list */}
+          <div style={{ width: 176, borderRight: '1px solid #c8c4bc', padding: '12px 0', overflowY: 'auto', flexShrink: 0 }}>
+            {_WIZARD_STEPS.map((s, i) => {
+              const st = stepState[i]; const active = i === step;
+              return (
+                <div key={s.id} style={{ padding: '6px 14px', display: 'flex', alignItems: 'center', gap: 7, background: active ? 'rgba(0,0,0,0.06)' : 'transparent' }}>
+                  <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: statusColors[st], flexShrink: 0 }}>{statusIcons[st]}</span>
+                  <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: active ? 'var(--text)' : 'var(--muted)', letterSpacing: '0.04em', lineHeight: 1.4 }}>{s.label}</span>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Content */}
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', padding: '18px 22px 14px' }}>
+
+            {/* Step title + desc */}
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 14, fontWeight: 600, color: 'var(--text)', marginBottom: 4 }}>{cur.label}</div>
+              <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)' }}>{cur.desc}</div>
+            </div>
+
+            {/* ── Step-specific controls ── */}
+
+            {/* Steps 0, 1, 6: connect / reconnect buttons */}
+            {CONNECT_STEPS.has(step) && stepState[step] === 'pending' && !running && (
+              <div style={{ marginBottom: 10 }}>
+                <Pill onClick={() => runStep(step)}>
+                  {step === 0 ? 'Connect Device' : step === 1 ? 'Connect to TWRP' : 'Reconnect Device'}
+                </Pill>
+              </div>
+            )}
+
+            {/* Step 5: reboot button */}
+            {step === 5 && stepState[5] === 'pending' && !running && (
+              <div style={{ marginBottom: 10 }}>
+                <Pill onClick={() => runStep(5)}>Reboot to Android</Pill>
+              </div>
+            )}
+
+            {/* Steps 3 and 10: file pickers */}
+            {(step === 3 || step === 10) && stepState[step] === 'pending' && (
+              <div style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--text2)', letterSpacing: '0.08em' }}>
+                  {step === 3 ? 'MAGISK-V17.3.ZIP' : 'ECHOMUSE SERVER BINARY (ARMv7)'}
+                </div>
+                <input
+                  type="file" accept={step === 3 ? '.zip' : undefined}
+                  onChange={e => step === 3 ? setMagiskFile(e.target.files[0]) : setBinaryFile(e.target.files[0])}
+                  style={{ fontFamily: "'DM Mono',monospace", fontSize: 11 }}
+                />
+                {FILE_STEP_BUTTON && <Pill onClick={() => runStep(step)}>{FILE_STEP_BUTTON}</Pill>}
+              </div>
+            )}
+
+            {/* Step 8: WiFi configuration */}
+            {step === 8 && stepState[8] === 'pending' && !running && (
+              <div style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end' }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--text2)', letterSpacing: '0.08em', marginBottom: 5 }}>SSID</div>
+                    <input type="text" value={wifiSsid} onChange={e => setWifiSsid(e.target.value)} placeholder="Network name" style={{ width: '100%', boxSizing: 'border-box' }}/>
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--text2)', letterSpacing: '0.08em', marginBottom: 5 }}>PASSWORD</div>
+                    <input type="password" value={wifiPsk} onChange={e => setWifiPsk(e.target.value)} placeholder="WPA password" style={{ width: '100%', boxSizing: 'border-box' }}/>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <Pill onClick={() => { if (wifiSsid) runStep(8); }} disabled={!wifiSsid}>Configure WiFi</Pill>
+                  <Pill onClick={() => { markStep(8, 'done'); setStep(9); }} small>Skip (already connected)</Pill>
+                </div>
+              </div>
+            )}
+
+            {/* Retry button — re-runs the step directly (runStep marks it running) */}
+            {!running && stepState[step] === 'error' && (
+              <div style={{ marginBottom: 10 }}>
+                <Pill onClick={() => runStep(step)}>Retry</Pill>
+              </div>
+            )}
+
+            {/* Progress bar */}
+            {progress && (
+              <div style={{ margin: '6px 0 10px' }}>
+                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', marginBottom: 4 }}>{progress.label}</div>
+                <div style={{ height: 4, background: '#c8c4bc', borderRadius: 2 }}>
+                  <div style={{ height: '100%', width: `${Math.min(100, (progress.pct || 0) * 100).toFixed(0)}%`, background: '#7ab87a', borderRadius: 2, transition: 'width 0.2s' }}/>
+                </div>
+              </div>
+            )}
+
+            {/* Done message */}
+            {isDone && (
+              <div style={{ margin: '6px 0 10px', fontFamily: "'DM Mono',monospace", fontSize: 11, color: '#5a9a5a', lineHeight: 1.7 }}>
+                Device provisioned. It will discover the controller via mDNS and appear in the dashboard within ~30s.
+              </div>
+            )}
+
+            {/* Log output */}
+            <div
+              ref={logRef}
+              style={{
+                flex: 1, minHeight: 0, overflowY: 'auto',
+                background: 'linear-gradient(160deg,#2a2e28,#1e2219)',
+                border: '1px solid #1a1c18', borderRadius: 6,
+                padding: '10px 12px',
+                fontFamily: "'DM Mono',monospace", fontSize: 10, lineHeight: 1.7,
+                marginTop: 10,
+              }}
+            >
+              {log.length === 0
+                ? <span style={{ color: '#556050' }}>No output yet.</span>
+                : log.map((e, i) => (
+                  <div key={i} style={{ color: e.type === 'error' ? '#c08080' : e.type === 'ok' ? '#7ab87a' : e.type === 'warn' ? '#c0a060' : '#a8c8a0' }}>
+                    {e.msg}
+                  </div>
+                ))
+              }
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 function App() {
@@ -896,6 +1656,7 @@ function App() {
   const [release, setRelease] = useState(null);
   const [status, setStatus] = useState(null);
   const [loadError, setLoadError] = useState(null);
+  const [showWizard, setShowWizard] = useState(false);
   const wsRef = useRef(null);
 
   const isAdmin = role === 'admin';
@@ -1073,18 +1834,21 @@ function App() {
       )}
 
       {/* Device grid */}
-      {approved.length > 0 && (
+      {(approved.length > 0 || isAdmin) && (
         <>
-          <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 14 }}>
-            Devices · {approved.length}
-          </div>
+          {approved.length > 0 && (
+            <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 14 }}>
+              Devices · {approved.length}
+            </div>
+          )}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(190px,1fr))', gap: 12, marginBottom: 48 }}>
             {approved.map(d => <Card key={d.device_id} device={d} onClick={() => setSelected(d.device_id)}/>)}
+            {isAdmin && <AddDeviceTile onClick={() => setShowWizard(true)}/>}
           </div>
         </>
       )}
 
-      {devices.length === 0 && !loadError && (
+      {devices.length === 0 && !loadError && !isAdmin && (
         <div style={{ textAlign: 'center', padding: '60px 0', fontFamily: "'DM Mono',monospace", fontSize: 12, color: 'var(--muted)' }}>
           No devices yet — power on an EchoMuse device to see it appear here
         </div>
@@ -1092,6 +1856,11 @@ function App() {
 
       {loadError && (
         <div style={{ textAlign: 'center', padding: '60px 0', fontFamily: "'DM Mono',monospace", fontSize: 12, color: '#c03030' }}>{loadError}</div>
+      )}
+
+      {/* Provisioning wizard */}
+      {showWizard && (
+        <ProvisionWizard token={token} onClose={() => setShowWizard(false)}/>
       )}
 
       {/* Detail modal */}
