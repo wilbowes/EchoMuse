@@ -1059,42 +1059,33 @@ const _ADB = (() => {
       this._dbgIfaces = dbgIfaces;
       if (this._iface === null) throw new Error(`No ADB interface on device. Interfaces: ${dbgIfaces.join(' | ')}`);
 
-      // USB bus reset: clearHalt alone does not fix persistent endpoint stalls
-      // left by adbd after the previous host session (adb kill-server).  A bus
-      // reset forces the ADB gadget driver to reinitialise completely, which is
-      // equivalent to a physical unplug+replug from adbd's perspective.
-      // reset() may trigger a disconnect+connect cycle, so we watch for a new
-      // device object with the same VID:PID and use it if one appears.
-      const reconnectPromise = new Promise(res => {
-        const h = e => {
-          if (e.device.vendorId === dev.vendorId && e.device.productId === dev.productId) {
-            navigator.usb.removeEventListener('connect', h);
-            res(e.device);
-          }
-        };
-        navigator.usb.addEventListener('connect', h);
-        // Fall back to the original handle after 4 s if no reconnect event fires
-        setTimeout(() => { navigator.usb.removeEventListener('connect', h); res(dev); }, 4000);
-      });
-      try { await dev.reset(); } catch {}
-      const activeDev = await reconnectPromise;
-      this._dev = activeDev;
-
-      try { await activeDev.open(); } catch {} // no-op if still open
-      await activeDev.selectConfiguration(1);
+      await dev.selectConfiguration(1);
       try {
-        await activeDev.claimInterface(this._iface);
+        await dev.claimInterface(this._iface);
       } catch (e) {
         throw new Error(
           'Could not claim USB interface — the ADB daemon on this machine has already claimed it. ' +
           'Run: adb kill-server  — then try connecting again.'
         );
       }
-      // Short pause for adbd to reinitialise after the bus reset
-      await new Promise(r => setTimeout(r, 500));
-      await this._sendMsg(CMD.CNXN, 0x01000000, 1 << 20, new TextEncoder().encode('host::EchoMuse\0'));
+
+      // FireOS adbd uses the device-initiates protocol: the device sends CNXN
+      // immediately after the host claims the interface, and expects the host
+      // to respond with its own CNXN.  Sending CNXN before reading confuses
+      // adbd (it receives an unexpected CNXN) and stalls the IN endpoint.
+      //
+      // Start the read loop first.  _dispatch handles CMD.CNXN from the device
+      // by sending our CNXN in reply.  If the device doesn't send anything
+      // within 1 s we fall back to sending CNXN ourselves (host-initiates).
       this._running = true;
+      this._cnxnSent = false;
       this._readLoop();
+      setTimeout(() => {
+        if (this._running && !this._cnxnSent) {
+          this._cnxnSent = true;
+          this._sendMsg(CMD.CNXN, 0x01000000, 4096, new TextEncoder().encode('host::EchoMuse\0'));
+        }
+      }, 1000);
       return new Promise((res, rej) => {
         this._connRes = res; this._connRej = rej;
         setTimeout(() => rej(new Error('ADB connect timeout — no response from device')), timeoutMs);
@@ -1105,9 +1096,6 @@ const _ADB = (() => {
       (async () => {
         while (this._running) {
           try {
-            // Use a large buffer: some ADB gadget drivers combine the 24-byte
-            // header and data payload into a single USB bulk packet. Requesting
-            // only 24 bytes causes a transfer error if the packet is larger.
             const hr = await this._dev.transferIn(this._epIn, 65536);
             if (!hr.data || hr.data.byteLength < 24) continue;
             const v = new DataView(hr.data.buffer, hr.data.byteOffset);
@@ -1117,10 +1105,8 @@ const _ADB = (() => {
             if (len > 0) {
               const inlined = hr.data.byteLength - 24;
               if (inlined >= len) {
-                // Header and data arrived in the same USB packet
                 data = new Uint8Array(hr.data.buffer, hr.data.byteOffset + 24, len);
               } else {
-                // Data arrives in subsequent packets
                 const buf = new Uint8Array(len);
                 if (inlined > 0) buf.set(new Uint8Array(hr.data.buffer, hr.data.byteOffset + 24, inlined));
                 let off = inlined;
@@ -1146,7 +1132,17 @@ const _ADB = (() => {
 
     _dispatch(cmd, arg0, arg1, data) {
       switch (cmd) {
-        case CMD.CNXN: this._connRes?.(); this._connRes = this._connRej = null; break;
+        case CMD.CNXN:
+          if (!this._cnxnSent) {
+            // Device-initiates: device sent CNXN first, respond with ours
+            this._cnxnSent = true;
+            this._sendMsg(CMD.CNXN, 0x01000000, 4096, new TextEncoder().encode('host::EchoMuse\0'));
+            // Don't resolve yet — AUTH exchange follows
+          } else {
+            // Second CNXN = device confirmed connection after AUTH
+            this._connRes?.(); this._connRes = this._connRej = null;
+          }
+          break;
         case CMD.AUTH:
           if (arg0 === 1) getKey().then(jwk => signToken(jwk, data)).then(sig => this._sendMsg(CMD.AUTH, 2, 0, sig)).catch(e => this._connRej?.(e));
           break;
