@@ -1064,9 +1064,15 @@ const _ADB = (() => {
       if (this._iface === null) throw new Error(`No ADB interface on device. Interfaces: ${dbgIfaces.join(' | ')}`);
 
       L(`pre-config: ${dev.configuration?.configurationValue ?? 'null'}  epIn=${this._epIn} epOut=${this._epOut} packetSize=${this._packetSize}`);
-      L('selectConfiguration(1)…');
-      await dev.selectConfiguration(1);
-      L('selectConfiguration done');
+
+      // Only call selectConfiguration if the active config differs (ya-webadb approach).
+      // Sending SET_CONFIGURATION to an already-configured device causes a full
+      // USB bus reset on the Echo Dot — it disconnects for >5 seconds.
+      if (!dev.configuration) {
+        L('selectConfiguration(1)…');
+        await dev.selectConfiguration(1);
+        L('selectConfiguration done');
+      }
 
       L(`claimInterface(${this._iface})…`);
       try {
@@ -1077,8 +1083,24 @@ const _ADB = (() => {
           'Run: adb kill-server  — then try connecting again.'
         );
       }
-      L('claimInterface done — settling 1s…');
-      await new Promise(r => setTimeout(r, 1000));
+      L('claimInterface done');
+
+      // Reset endpoint data toggles (DATA0/DATA1) via SET_INTERFACE.
+      // After native adb uses and releases the endpoints, the USB data toggle
+      // state on both sides is non-zero.  The first transferIn then fails with
+      // -EPROTO (toggle mismatch) → "A transfer error has occurred".
+      // SET_INTERFACE resets both host and device toggles to DATA0 without
+      // causing a full USB device disconnect (unlike SET_CONFIGURATION).
+      L('selectAlternateInterface(reset toggles)…');
+      try {
+        await dev.selectAlternateInterface(this._iface, 0);
+        L('selectAlternateInterface done');
+      } catch (e) {
+        L(`selectAlternateInterface failed (non-fatal): ${e.message}`);
+      }
+
+      L('settling 500ms…');
+      await new Promise(r => setTimeout(r, 500));
       L('settling done');
 
       L('sending CNXN…');
