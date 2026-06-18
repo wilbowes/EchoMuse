@@ -1059,12 +1059,16 @@ const _ADB = (() => {
           'Run: adb kill-server  — then try connecting again.'
         );
       }
+      // adbd on the device resets the USB stack when a new host claims the
+      // interface.  Without a settling pause the first transferIn races that
+      // reset and fails with "device was disconnected".
+      await new Promise(r => setTimeout(r, 1000));
       this._running = true;
       this._readLoop();
       await this._sendMsg(CMD.CNXN, 0x01000000, 1 << 20, new TextEncoder().encode('host::EchoMuse\0'));
       return new Promise((res, rej) => {
         this._connRes = res; this._connRej = rej;
-        setTimeout(() => rej(new Error('ADB connect timeout')), timeoutMs);
+        setTimeout(() => rej(new Error('ADB connect timeout — no response from device')), timeoutMs);
       });
     }
 
@@ -1089,7 +1093,17 @@ const _ADB = (() => {
             }
             this._dispatch(cmd, arg0, arg1, data);
           } catch (e) {
-            if (this._running) { this._connRej?.(e); this._connRej = null; }
+            if (this._running) {
+              const msg = e.message || String(e);
+              const isDisconnect = msg.toLowerCase().includes('disconnect') || msg.toLowerCase().includes('device was');
+              this._connRej?.(new Error(
+                isDisconnect
+                  ? 'USB connection lost — adbd on the device may still be resetting. ' +
+                    'Unplug and replug the USB cable, then click Retry.'
+                  : msg
+              ));
+              this._connRej = null;
+            }
             break;
           }
         }
