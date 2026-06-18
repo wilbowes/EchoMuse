@@ -1302,7 +1302,12 @@ function ProvisionWizard({ token, onClose }) {
     addLog('Requesting USB device — select the Echo Dot from the picker…');
     const c = await _ADB.Client.requestDevice();
     addLog('Connecting ADB…');
-    await c.connect();
+    try {
+      await c.connect();
+    } catch (err) {
+      (c._dbgIfaces || []).forEach(l => addLog(`  USB: ${l}`));
+      throw err;
+    }
     (c._dbgIfaces || []).forEach(l => addLog(`  USB: ${l}`));
     setAdb(c);
     const model   = await c.shell('getprop ro.product.model');
