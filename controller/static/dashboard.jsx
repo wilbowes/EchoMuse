@@ -1195,12 +1195,18 @@ const _ADB = (() => {
 
     async _sendMsg(cmd, arg0 = 0, arg1 = 0, data = new Uint8Array(0)) {
       const d = data instanceof Uint8Array ? data : new Uint8Array(data);
-      const h = new ArrayBuffer(24); const v = new DataView(h);
+      // Combine header and data into one USB bulk OUT packet — the native adb
+      // daemon does a single write() call.  Sending them as two separate
+      // transferOut calls can cause adbd to misinterpret the data portion as
+      // a new ADB header, corrupting the protocol state.
+      const pkt = new Uint8Array(24 + d.length);
+      const v = new DataView(pkt.buffer);
       v.setUint32(0, cmd, true); v.setUint32(4, arg0, true); v.setUint32(8, arg1, true);
       v.setUint32(12, d.length, true); v.setUint32(16, crc32(d), true);
       v.setUint32(20, (cmd ^ 0xFFFFFFFF) >>> 0, true);
-      await this._dev.transferOut(this._epOut, h);
-      if (d.length > 0) await this._dev.transferOut(this._epOut, d.buffer.slice(d.byteOffset, d.byteOffset + d.byteLength));
+      pkt.set(d, 24);
+      const r = await this._dev.transferOut(this._epOut, pkt.buffer);
+      if (r.status !== 'ok') throw new Error(`ADB OUT endpoint stalled (cmd=0x${cmd.toString(16)} status=${r.status})`);
     }
 
     async close() {
