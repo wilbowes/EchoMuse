@@ -1035,9 +1035,16 @@ const _ADB = (() => {
     async connect(timeoutMs = 20000) {
       const dev = this._dev;
       await dev.open();
+      const dbgIfaces = [];
       for (const cfg of dev.configurations) {
         for (const iface of cfg.interfaces) {
           for (const alt of iface.alternates) {
+            const epStr = alt.endpoints.map(e =>
+              `${e.direction[0].toUpperCase()}${e.endpointNumber}(${e.type})`).join(',');
+            dbgIfaces.push(
+              `cfg=${cfg.configurationValue} if=${iface.interfaceNumber} ` +
+              `cls=${alt.interfaceClass}/${alt.interfaceSubclass}/${alt.interfaceProtocol} [${epStr}]`
+            );
             if (alt.interfaceClass !== 0xFF || alt.interfaceSubclass !== 0x42 || alt.interfaceProtocol !== 0x01) continue;
             this._iface = iface.interfaceNumber;
             for (const ep of alt.endpoints) {
@@ -1049,7 +1056,8 @@ const _ADB = (() => {
           }
         }
       }
-      if (this._iface === null) throw new Error('No ADB interface on device');
+      this._dbgIfaces = dbgIfaces;
+      if (this._iface === null) throw new Error(`No ADB interface on device. Interfaces: ${dbgIfaces.join(' | ')}`);
       await dev.selectConfiguration(1);
       try {
         await dev.claimInterface(this._iface);
@@ -1059,10 +1067,12 @@ const _ADB = (() => {
           'Run: adb kill-server  — then try connecting again.'
         );
       }
-      // adbd on the device resets the USB stack when a new host claims the
-      // interface.  Without a settling pause the first transferIn races that
-      // reset and fails with "device was disconnected".
-      await new Promise(r => setTimeout(r, 1000));
+      // Clear any endpoint stall left by the previous ADB session.
+      try { await dev.clearHalt('in',  this._epIn);  } catch {}
+      try { await dev.clearHalt('out', this._epOut); } catch {}
+      // Brief pause — adbd needs a moment to re-initialise its USB stack after
+      // we claimed the interface away from the previous host.
+      await new Promise(r => setTimeout(r, 500));
       this._running = true;
       this._readLoop();
       await this._sendMsg(CMD.CNXN, 0x01000000, 1 << 20, new TextEncoder().encode('host::EchoMuse\0'));
@@ -1074,10 +1084,12 @@ const _ADB = (() => {
 
     _readLoop() {
       (async () => {
+        let handshakeRetries = 0;
         while (this._running) {
           try {
             const hr = await this._dev.transferIn(this._epIn, 24);
             if (!hr.data || hr.data.byteLength < 24) continue;
+            handshakeRetries = 0;
             const v = new DataView(hr.data.buffer, hr.data.byteOffset);
             const cmd = v.getUint32(0, true), arg0 = v.getUint32(4, true);
             const arg1 = v.getUint32(8, true), len = v.getUint32(12, true);
@@ -1093,13 +1105,24 @@ const _ADB = (() => {
             }
             this._dispatch(cmd, arg0, arg1, data);
           } catch (e) {
+            // During the ADB handshake adbd may not be ready yet — USB
+            // endpoints return transient errors while it reinitialises.
+            // Retry a few times before giving up.
+            if (this._running && this._connRes && handshakeRetries < 6) {
+              handshakeRetries++;
+              try { await this._dev.clearHalt('in', this._epIn); } catch {}
+              await new Promise(r => setTimeout(r, 600));
+              continue;
+            }
             if (this._running) {
               const msg = e.message || String(e);
-              const isDisconnect = msg.toLowerCase().includes('disconnect') || msg.toLowerCase().includes('device was');
+              const isTransient = msg.toLowerCase().includes('disconnect') ||
+                                  msg.toLowerCase().includes('transfer error') ||
+                                  msg.toLowerCase().includes('device was');
               this._connRej?.(new Error(
-                isDisconnect
-                  ? 'USB connection lost — adbd on the device may still be resetting. ' +
-                    'Unplug and replug the USB cable, then click Retry.'
+                isTransient
+                  ? 'USB connection failed after retries — unplug and replug the USB cable, ' +
+                    'then click Retry.'
                   : msg
               ));
               this._connRej = null;
@@ -1280,6 +1303,7 @@ function ProvisionWizard({ token, onClose }) {
     const c = await _ADB.Client.requestDevice();
     addLog('Connecting ADB…');
     await c.connect();
+    (c._dbgIfaces || []).forEach(l => addLog(`  USB: ${l}`));
     setAdb(c);
     const model   = await c.shell('getprop ro.product.model');
     const release = await c.shell('getprop ro.build.version.release');
