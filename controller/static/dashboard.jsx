@@ -1058,24 +1058,40 @@ const _ADB = (() => {
       }
       this._dbgIfaces = dbgIfaces;
       if (this._iface === null) throw new Error(`No ADB interface on device. Interfaces: ${dbgIfaces.join(' | ')}`);
-      await dev.selectConfiguration(1);
+
+      // USB bus reset: clearHalt alone does not fix persistent endpoint stalls
+      // left by adbd after the previous host session (adb kill-server).  A bus
+      // reset forces the ADB gadget driver to reinitialise completely, which is
+      // equivalent to a physical unplug+replug from adbd's perspective.
+      // reset() may trigger a disconnect+connect cycle, so we watch for a new
+      // device object with the same VID:PID and use it if one appears.
+      const reconnectPromise = new Promise(res => {
+        const h = e => {
+          if (e.device.vendorId === dev.vendorId && e.device.productId === dev.productId) {
+            navigator.usb.removeEventListener('connect', h);
+            res(e.device);
+          }
+        };
+        navigator.usb.addEventListener('connect', h);
+        // Fall back to the original handle after 4 s if no reconnect event fires
+        setTimeout(() => { navigator.usb.removeEventListener('connect', h); res(dev); }, 4000);
+      });
+      try { await dev.reset(); } catch {}
+      const activeDev = await reconnectPromise;
+      this._dev = activeDev;
+
+      try { await activeDev.open(); } catch {} // no-op if still open
+      await activeDev.selectConfiguration(1);
       try {
-        await dev.claimInterface(this._iface);
+        await activeDev.claimInterface(this._iface);
       } catch (e) {
         throw new Error(
           'Could not claim USB interface — the ADB daemon on this machine has already claimed it. ' +
           'Run: adb kill-server  — then try connecting again.'
         );
       }
-      // Clear any endpoint stall left by the previous ADB session.
-      try { await dev.clearHalt('in',  this._epIn);  } catch {}
-      try { await dev.clearHalt('out', this._epOut); } catch {}
-      // Brief pause — adbd needs a moment to re-initialise its USB stack after
-      // we claimed the interface away from the previous host.
-      await new Promise(r => setTimeout(r, 300));
-      // Send CNXN before the read loop so adbd has the host banner before
-      // we issue any IN tokens — some implementations open the IN endpoint
-      // only after receiving CNXN.
+      // Short pause for adbd to reinitialise after the bus reset
+      await new Promise(r => setTimeout(r, 500));
       await this._sendMsg(CMD.CNXN, 0x01000000, 1 << 20, new TextEncoder().encode('host::EchoMuse\0'));
       this._running = true;
       this._readLoop();
