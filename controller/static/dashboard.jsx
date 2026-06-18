@@ -1065,14 +1065,10 @@ const _ADB = (() => {
 
       L(`pre-config: ${dev.configuration?.configurationValue ?? 'null'}  epIn=${this._epIn} epOut=${this._epOut} packetSize=${this._packetSize}`);
 
-      // Only call selectConfiguration if the active config differs (ya-webadb approach).
-      // Sending SET_CONFIGURATION to an already-configured device causes a full
-      // USB bus reset on the Echo Dot — it disconnects for >5 seconds.
-      if (!dev.configuration) {
-        L('selectConfiguration(1)…');
-        await dev.selectConfiguration(1);
-        L('selectConfiguration done');
-      }
+      // SET_CONFIGURATION and SET_INTERFACE both cause a full USB disconnect on
+      // the Echo Dot Gen 2 (adbd/functionfs resets the gadget).  Do NOT call
+      // selectConfiguration or selectAlternateInterface here.
+      // ya-webadb skips both when the device is already in the right config/alt.
 
       L(`claimInterface(${this._iface})…`);
       try {
@@ -1085,24 +1081,9 @@ const _ADB = (() => {
       }
       L('claimInterface done');
 
-      // Reset endpoint data toggles (DATA0/DATA1) via SET_INTERFACE.
-      // After native adb uses and releases the endpoints, the USB data toggle
-      // state on both sides is non-zero.  The first transferIn then fails with
-      // -EPROTO (toggle mismatch) → "A transfer error has occurred".
-      // SET_INTERFACE resets both host and device toggles to DATA0 without
-      // causing a full USB device disconnect (unlike SET_CONFIGURATION).
-      L('selectAlternateInterface(reset toggles)…');
-      try {
-        await dev.selectAlternateInterface(this._iface, 0);
-        L('selectAlternateInterface done');
-      } catch (e) {
-        L(`selectAlternateInterface failed (non-fatal): ${e.message}`);
-      }
-
-      L('settling 500ms…');
-      await new Promise(r => setTimeout(r, 500));
-      L('settling done');
-
+      // Android 4.4+ / API 19+ = host-initiates ADB.  Send CNXN before
+      // starting the read loop so adbd responds with AUTH TOKEN.
+      // No settling delay — any delay risks a device-initiates CNXN timing out.
       L('sending CNXN…');
       this._running = true;
       try {
