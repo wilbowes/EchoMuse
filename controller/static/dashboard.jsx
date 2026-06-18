@@ -1051,7 +1051,14 @@ const _ADB = (() => {
       }
       if (this._iface === null) throw new Error('No ADB interface on device');
       await dev.selectConfiguration(1);
-      await dev.claimInterface(this._iface);
+      try {
+        await dev.claimInterface(this._iface);
+      } catch (e) {
+        throw new Error(
+          'Could not claim USB interface — the ADB daemon on this machine has already claimed it. ' +
+          'Run: adb kill-server  — then try connecting again.'
+        );
+      }
       this._running = true;
       this._readLoop();
       await this._sendMsg(CMD.CNXN, 0x01000000, 1 << 20, new TextEncoder().encode('host::EchoMuse\0'));
