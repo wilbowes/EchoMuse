@@ -1059,7 +1059,13 @@ const _ADB = (() => {
       this._dbgIfaces = dbgIfaces;
       if (this._iface === null) throw new Error(`No ADB interface on device. Interfaces: ${dbgIfaces.join(' | ')}`);
 
-      await dev.selectConfiguration(1);
+      // Only call selectConfiguration if the device is not already configured.
+      // Sending SET_CONFIGURATION to an already-configured device resets the
+      // ADB gadget function, which stalls the IN endpoint until adbd restarts.
+      // ya-webadb uses the same conditional and works correctly on FireOS.
+      if (dev.configuration === null) {
+        await dev.selectConfiguration(1);
+      }
       try {
         await dev.claimInterface(this._iface);
       } catch (e) {
