@@ -1020,6 +1020,12 @@ const _ADB = (() => {
     }
 
     static async requestDevice() {
+      if (!navigator.usb) {
+        throw new Error(
+          'WebUSB not available. This requires a secure context (HTTPS or localhost). ' +
+          'Access the dashboard via http://localhost:8768, or enable chrome://flags/#unsafely-treat-insecure-origin-as-secure for this origin.'
+        );
+      }
       const dev = await navigator.usb.requestDevice({
         filters: [{ classCode: 0xFF, subclassCode: 0x42, protocolCode: 0x01 }],
       });
