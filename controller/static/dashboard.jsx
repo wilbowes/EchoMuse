@@ -1072,10 +1072,13 @@ const _ADB = (() => {
       try { await dev.clearHalt('out', this._epOut); } catch {}
       // Brief pause — adbd needs a moment to re-initialise its USB stack after
       // we claimed the interface away from the previous host.
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise(r => setTimeout(r, 300));
+      // Send CNXN before the read loop so adbd has the host banner before
+      // we issue any IN tokens — some implementations open the IN endpoint
+      // only after receiving CNXN.
+      await this._sendMsg(CMD.CNXN, 0x01000000, 1 << 20, new TextEncoder().encode('host::EchoMuse\0'));
       this._running = true;
       this._readLoop();
-      await this._sendMsg(CMD.CNXN, 0x01000000, 1 << 20, new TextEncoder().encode('host::EchoMuse\0'));
       return new Promise((res, rej) => {
         this._connRes = res; this._connRej = rej;
         setTimeout(() => rej(new Error('ADB connect timeout — no response from device')), timeoutMs);
@@ -1084,47 +1087,39 @@ const _ADB = (() => {
 
     _readLoop() {
       (async () => {
-        let handshakeRetries = 0;
         while (this._running) {
           try {
-            const hr = await this._dev.transferIn(this._epIn, 24);
+            // Use a large buffer: some ADB gadget drivers combine the 24-byte
+            // header and data payload into a single USB bulk packet. Requesting
+            // only 24 bytes causes a transfer error if the packet is larger.
+            const hr = await this._dev.transferIn(this._epIn, 65536);
             if (!hr.data || hr.data.byteLength < 24) continue;
-            handshakeRetries = 0;
             const v = new DataView(hr.data.buffer, hr.data.byteOffset);
             const cmd = v.getUint32(0, true), arg0 = v.getUint32(4, true);
             const arg1 = v.getUint32(8, true), len = v.getUint32(12, true);
             let data = new Uint8Array(0);
             if (len > 0) {
-              const buf = new Uint8Array(len); let off = 0;
-              while (off < len) {
-                const r = await this._dev.transferIn(this._epIn, len - off);
-                const c = new Uint8Array(r.data.buffer, r.data.byteOffset, r.data.byteLength);
-                buf.set(c, off); off += c.length;
+              const inlined = hr.data.byteLength - 24;
+              if (inlined >= len) {
+                // Header and data arrived in the same USB packet
+                data = new Uint8Array(hr.data.buffer, hr.data.byteOffset + 24, len);
+              } else {
+                // Data arrives in subsequent packets
+                const buf = new Uint8Array(len);
+                if (inlined > 0) buf.set(new Uint8Array(hr.data.buffer, hr.data.byteOffset + 24, inlined));
+                let off = inlined;
+                while (off < len) {
+                  const r = await this._dev.transferIn(this._epIn, Math.min(65536, len - off));
+                  const c = new Uint8Array(r.data.buffer, r.data.byteOffset, r.data.byteLength);
+                  buf.set(c, off); off += c.length;
+                }
+                data = buf;
               }
-              data = buf;
             }
             this._dispatch(cmd, arg0, arg1, data);
           } catch (e) {
-            // During the ADB handshake adbd may not be ready yet — USB
-            // endpoints return transient errors while it reinitialises.
-            // Retry a few times before giving up.
-            if (this._running && this._connRes && handshakeRetries < 6) {
-              handshakeRetries++;
-              try { await this._dev.clearHalt('in', this._epIn); } catch {}
-              await new Promise(r => setTimeout(r, 600));
-              continue;
-            }
             if (this._running) {
-              const msg = e.message || String(e);
-              const isTransient = msg.toLowerCase().includes('disconnect') ||
-                                  msg.toLowerCase().includes('transfer error') ||
-                                  msg.toLowerCase().includes('device was');
-              this._connRej?.(new Error(
-                isTransient
-                  ? 'USB connection failed after retries — unplug and replug the USB cable, ' +
-                    'then click Retry.'
-                  : msg
-              ));
+              this._connRej?.(new Error(e.message || String(e)));
               this._connRej = null;
             }
             break;
