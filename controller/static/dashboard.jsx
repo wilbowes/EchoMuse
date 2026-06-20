@@ -888,335 +888,151 @@ function Login({ onLogin }) {
 
 // ─── Provisioning Wizard ──────────────────────────────────────────────────────
 
-// ADB-over-WebUSB client — no external dependencies.
-// Implements: CNXN/AUTH(RSA)/OPEN/OKAY/WRTE/CLSE + exec: streams.
+// ADB-over-WebUSB client — thin wrapper around @yume-chan/adb 2.1.0.
+// Lazy-loads from esm.sh on first use (dynamic import works in classic scripts).
+// Exposes the same interface the wizard step runners expect:
+//   Client.requestDevice() -> client
+//   client.connect()
+//   client.shell(cmd)   -> string
+//   client.push(path, Uint8Array, onProgress?)
+//   client.pull(path)   -> Uint8Array
+//   client.close()
 const _ADB = (() => {
-  const CMD = {
-    CNXN: 0x4e584e43, AUTH: 0x48545541, OPEN: 0x4e45504f,
-    OKAY: 0x59414b4f, CLSE: 0x45534c43, WRTE: 0x45545257,
-  };
+  // Module cache — loaded once on first requestDevice() call.
+  let _mods = null;
 
-  // ── CRC32 ──
-  const _T = new Uint32Array(256);
-  for (let i = 0; i < 256; i++) {
-    let c = i;
-    for (let j = 0; j < 8; j++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
-    _T[i] = c;
-  }
-  function crc32(d) {
-    let c = 0xFFFFFFFF;
-    for (const b of d) c = (c >>> 8) ^ _T[(c ^ b) & 0xFF];
-    return (c ^ 0xFFFFFFFF) >>> 0;
+  async function _load(logFn) {
+    if (_mods) return _mods;
+    logFn('Loading ADB library from esm.sh…');
+    const [webUsbMod, adbMod] = await Promise.all([
+      import('https://esm.sh/@yume-chan/adb-daemon-webusb@2.1.0?bundle&deps=@yume-chan/adb@2.1.0'),
+      import('https://esm.sh/@yume-chan/adb@2.1.0?bundle'),
+    ]);
+    _mods = {
+      manager:       webUsbMod.AdbDaemonWebUsbDeviceManager,
+      Transport:     adbMod.AdbDaemonTransport,
+      Adb:           adbMod.Adb,
+      defaultAuths:  adbMod.ADB_DEFAULT_AUTHENTICATORS,
+    };
+    logFn('ADB library loaded.');
+    return _mods;
   }
 
-  // ── BigInt RSA helpers ──
-  function b64uToBigInt(s) {
-    const b64 = s.replace(/-/g, '+').replace(/_/g, '/');
-    const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
-    let v = 0n;
-    for (const b of bin) v = (v << 8n) | BigInt(b);
-    return v;
-  }
-  function bytesBigInt(arr) {
-    let v = 0n;
-    for (const b of arr) v = (v << 8n) | BigInt(b);
-    return v;
-  }
-  function bigIntBytes(v, len) {
-    const out = new Uint8Array(len);
-    for (let i = len - 1; i >= 0 && v > 0n; i--, v >>= 8n) out[i] = Number(v & 0xFFn);
+  // Drain a WHATWG ReadableStream<Uint8Array> into a single Uint8Array.
+  async function _readAll(stream) {
+    const reader = stream.getReader();
+    const chunks = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      total += value.length;
+    }
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) { out.set(c, off); off += c.length; }
     return out;
   }
-  function modPow(b, e, m) {
-    let r = 1n; b %= m;
-    for (; e > 0n; e >>= 1n) { if (e & 1n) r = r * b % m; b = b * b % m; }
-    return r;
-  }
 
-  // ── RSA key (generated once, stored in localStorage) ──
-  const _LS = 'em_adb_key';
-  async function getKey() {
-    const s = localStorage.getItem(_LS);
-    if (s) return JSON.parse(s);
-    const kp = await crypto.subtle.generateKey(
-      { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-1' },
-      true, ['sign']
-    );
-    const jwk = await crypto.subtle.exportKey('jwk', kp.privateKey);
-    localStorage.setItem(_LS, JSON.stringify(jwk));
-    return jwk;
-  }
+  // Track the last usbDevice so we can release it before reconnecting.
+  let _lastUsbDevice = null;
 
-  // ADB AUTH: PKCS#1 v1.5 with SHA-1 DigestInfo; token is the raw digest.
-  // Web Crypto always pre-hashes, so we implement the RSA private op with BigInt.
-  async function signToken(jwk, token) {
-    const n = b64uToBigInt(jwk.n), d = b64uToBigInt(jwk.d);
-    const DI = new Uint8Array([0x30,0x21,0x30,0x09,0x06,0x05,0x2b,0x0e,0x03,0x02,0x1a,0x05,0x00,0x04,0x14]);
-    const T = new Uint8Array(DI.length + token.length);
-    T.set(DI); T.set(token, DI.length);
-    const k = 256;
-    const EM = new Uint8Array(k);
-    EM[1] = 0x01;
-    EM.fill(0xFF, 2, k - T.length - 1);
-    EM.set(T, k - T.length);
-    return bigIntBytes(modPow(bytesBigInt(EM), d, n), k);
-  }
-
-  // ── AdbStream ──
-  class Stream {
-    constructor(client, localId) {
-      this._c = client; this.localId = localId; this.remoteId = 0;
-      this._q = []; this._closed = false;
-      this._openRes = null; this._openRej = null;
-      this._dataNote = null; this._writeNote = null;
-    }
-    _onOkay(rid) {
-      if (!this.remoteId) {
-        this.remoteId = rid; this._openRes?.(); this._openRes = this._openRej = null;
-      } else {
-        const n = this._writeNote; this._writeNote = null; n?.();
-      }
-    }
-    _onData(data) {
-      this._q.push(data);
-      const n = this._dataNote; this._dataNote = null; n?.();
-      this._c._sendMsg(CMD.OKAY, this.localId, this.remoteId);
-    }
-    _onClose() {
-      this._closed = true;
-      this._dataNote?.(); this._dataNote = null;
-      this._writeNote?.(); this._writeNote = null;
-      this._c._streams.delete(this.localId);
-    }
-    async _next() {
-      if (this._q.length) return this._q.shift();
-      if (this._closed) return null;
-      return new Promise(r => { this._dataNote = () => r(this._q.length ? this._q.shift() : null); });
-    }
-    async readAll() {
-      const parts = [];
-      for (;;) { const c = await this._next(); if (!c) break; parts.push(c); }
-      let len = 0; for (const p of parts) len += p.length;
-      const out = new Uint8Array(len); let off = 0;
-      for (const p of parts) { out.set(p, off); off += p.length; }
-      return out;
-    }
-    async write(data) {
-      const SZ = 64 * 1024;
-      for (let i = 0; i < data.length; i += SZ) {
-        const sl = data.subarray(i, i + SZ);
-        await new Promise(r => { this._writeNote = r; this._c._sendMsg(CMD.WRTE, this.localId, this.remoteId, sl); });
-      }
-    }
-    close() { if (!this._closed) this._c._sendMsg(CMD.CLSE, this.localId, this.remoteId); }
-  }
-
-  // ── AdbClient ──
   class Client {
-    constructor() {
-      this._dev = null; this._epIn = null; this._epOut = null; this._iface = null;
-      this._packetSize = 512;
+    constructor(adb, transport, banner) {
+      this._adb = adb;
+      this._transport = transport;
+      this.banner = banner;  // product name string, e.g. "omni_biscuit" or "csm_biscuit"
       this._log = () => {};
-      this._streams = new Map(); this._nextId = 1; this._running = false;
-      this._connRes = null; this._connRej = null;
     }
 
-    static async requestDevice() {
-      if (!navigator.usb) {
-        throw new Error(
-          'WebUSB not available. This requires a secure context (HTTPS or localhost). ' +
-          'Access the dashboard via http://localhost:8768, or enable chrome://flags/#unsafely-treat-insecure-origin-as-secure for this origin.'
-        );
-      }
-      const dev = await navigator.usb.requestDevice({
-        filters: [{ classCode: 0xFF, subclassCode: 0x42, protocolCode: 0x01 }],
-      });
-      const c = new Client(); c._dev = dev; return c;
-    }
-
-    async connect(timeoutMs = 20000) {
-      const dev = this._dev;
-      const L = msg => this._log(msg);
-      L('open()');
-      await dev.open();
-      const dbgIfaces = [];
-      for (const cfg of dev.configurations) {
-        for (const iface of cfg.interfaces) {
-          for (const alt of iface.alternates) {
-            const epStr = alt.endpoints.map(e =>
-              `${e.direction[0].toUpperCase()}${e.endpointNumber}(${e.type})`).join(',');
-            dbgIfaces.push(
-              `cfg=${cfg.configurationValue} if=${iface.interfaceNumber} ` +
-              `cls=${alt.interfaceClass}/${alt.interfaceSubclass}/${alt.interfaceProtocol} [${epStr}]`
-            );
-            if (alt.interfaceClass !== 0xFF || alt.interfaceSubclass !== 0x42 || alt.interfaceProtocol !== 0x01) continue;
-            this._iface = iface.interfaceNumber;
-            for (const ep of alt.endpoints) {
-              if (ep.type === 'bulk') {
-                if (ep.direction === 'in') { this._epIn = ep.endpointNumber; this._packetSize = ep.packetSize; }
-                else this._epOut = ep.endpointNumber;
-              }
-            }
-          }
-        }
-      }
-      this._dbgIfaces = dbgIfaces;
-      if (this._iface === null) throw new Error(`No ADB interface on device. Interfaces: ${dbgIfaces.join(' | ')}`);
-
-      L(`pre-config: ${dev.configuration?.configurationValue ?? 'null'}  epIn=${this._epIn} epOut=${this._epOut} packetSize=${this._packetSize}`);
-
-      // SET_CONFIGURATION and SET_INTERFACE both cause a full USB disconnect on
-      // the Echo Dot Gen 2 (adbd/functionfs resets the gadget).  Do NOT call
-      // selectConfiguration or selectAlternateInterface here.
-      // ya-webadb skips both when the device is already in the right config/alt.
-
-      L(`claimInterface(${this._iface})…`);
-      try {
-        await dev.claimInterface(this._iface);
-      } catch (e) {
-        throw new Error(
-          'Could not claim USB interface — the ADB daemon on this machine has already claimed it. ' +
-          'Run: adb kill-server  — then try connecting again.'
-        );
-      }
-      L('claimInterface done');
-
-      // Android 4.4+ / API 19+ = host-initiates ADB.  Send CNXN before
-      // starting the read loop so adbd responds with AUTH TOKEN.
-      // No settling delay — any delay risks a device-initiates CNXN timing out.
-      L('sending CNXN…');
-      this._running = true;
-      try {
-        await this._sendMsg(CMD.CNXN, 0x01000000, 4096, new TextEncoder().encode('host::EchoMuse\0'));
-      } catch (e) {
-        this._running = false;
-        throw new Error(`ADB CNXN send failed: ${e.message}`);
-      }
-      L('CNXN sent — starting readLoop');
-      this._readLoop();
-
-      return new Promise((res, rej) => {
-        this._connRes = res; this._connRej = rej;
-        setTimeout(() => rej(new Error('ADB connect timeout — no response from device')), timeoutMs);
-      });
-    }
-
-    _readLoop() {
-      (async () => {
-        let attempt = 0;
-        while (this._running) {
-          try {
-            attempt++;
-            this._log(`transferIn attempt ${attempt} (ep=${this._epIn} len=${this._packetSize})…`);
-            const hr = await this._dev.transferIn(this._epIn, this._packetSize);
-            const byteLen = hr.data?.byteLength ?? 0;
-            this._log(`transferIn got ${byteLen} bytes (status=${hr.status})`);
-            attempt = 0;
-            if (!hr.data || byteLen !== 24) continue;
-            const v = new DataView(hr.data.buffer, hr.data.byteOffset);
-            const cmd = v.getUint32(0, true), arg0 = v.getUint32(4, true);
-            const arg1 = v.getUint32(8, true), len = v.getUint32(12, true);
-            const magic = v.getUint32(20, true);
-            if (magic !== ((cmd ^ 0xFFFFFFFF) >>> 0)) {
-              this._log(`bad magic 0x${magic.toString(16)} for cmd 0x${cmd.toString(16)} — skip`);
-              continue;
-            }
-            this._log(`cmd=0x${cmd.toString(16)} arg0=0x${arg0.toString(16)} payloadLen=${len}`);
-            let data = new Uint8Array(0);
-            if (len > 0) {
-              const pr = await this._dev.transferIn(this._epIn, len);
-              data = new Uint8Array(pr.data.buffer, pr.data.byteOffset, pr.data.byteLength);
-            }
-            this._dispatch(cmd, arg0, arg1, data);
-          } catch (e) {
-            this._log(`transferIn error [${e.name}]: ${e.message} (attempt ${attempt})`);
-            if (attempt < 10) {
-              this._log('retrying in 500ms…');
-              await new Promise(r => setTimeout(r, 500));
-              continue;
-            }
-            if (this._running) {
-              this._connRej?.(new Error(`[${e.name}] ${e.message}`));
-              this._connRej = null;
-            }
-            break;
-          }
-        }
-      })();
-    }
-
-    _dispatch(cmd, arg0, arg1, data) {
-      switch (cmd) {
-        case CMD.CNXN:
-          // Device sends CNXN after the AUTH exchange succeeds
-          this._connRes?.(); this._connRes = this._connRej = null;
-          break;
-        case CMD.AUTH:
-          if (arg0 === 1) getKey().then(jwk => signToken(jwk, data)).then(sig => this._sendMsg(CMD.AUTH, 2, 0, sig)).catch(e => this._connRej?.(e));
-          break;
-        case CMD.OKAY: this._streams.get(arg1)?._onOkay(arg0); break;
-        case CMD.WRTE: this._streams.get(arg1)?._onData(data); break;
-        case CMD.CLSE: this._streams.get(arg1)?._onClose(); break;
-      }
-    }
-
-    async _open(svc) {
-      const id = this._nextId++; const s = new Stream(this, id); this._streams.set(id, s);
-      await this._sendMsg(CMD.OPEN, id, 0, new TextEncoder().encode(svc + '\0'));
-      await new Promise((res, rej) => {
-        s._openRes = res; s._openRej = rej;
-        setTimeout(() => rej(new Error(`Stream open timeout: ${svc}`)), 15000);
-      });
-      return s;
-    }
-
+    // Spawn a command and return its stdout as a trimmed string.
+    // Must use noneProtocol — shellProtocol requires Android 7+.
     async shell(cmd) {
-      const s = await this._open(`shell:${cmd}`);
-      return new TextDecoder().decode(await s.readAll()).replace(/\r\n/g, '\n').trim();
+      const proc = await this._adb.subprocess.noneProtocol.spawn(cmd);
+      const out = await _readAll(proc.output);
+      return new TextDecoder().decode(out).replace(/\r\n/g, '\n').trim();
     }
 
-    async exec(cmd) {
-      const s = await this._open(`exec:${cmd}`);
-      return new TextDecoder().decode(await s.readAll()).trim();
-    }
-
+    // Push bytes to a remote path via `cat >`.
+    // stdin is a WritableStream<Uint8Array>; we write in 64 KB chunks.
     async push(remotePath, data, onProgress) {
       const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
-      const s = await this._open(`exec:cat > '${remotePath}'`);
+      this._log(`push: opening cat > '${remotePath}' (${(bytes.length/1024/1024).toFixed(1)} MB)`);
+      const proc  = await this._adb.subprocess.noneProtocol.spawn(`cat > '${remotePath}'`);
+      this._log('push: stream open, writing chunks…');
+      const writer = proc.stdin.getWriter();
       const SZ = 64 * 1024;
       for (let i = 0; i < bytes.length; i += SZ) {
-        await s.write(bytes.subarray(i, i + SZ));
+        await writer.write(bytes.subarray(i, Math.min(i + SZ, bytes.length)));
         onProgress?.((i + SZ) / bytes.length);
       }
-      s.close(); onProgress?.(1);
-      await new Promise(r => setTimeout(r, 300));
+      this._log('push: all chunks written, closing stdin…');
+      await writer.close();
+      onProgress?.(1);
+      this._log('push: done.');
+      // No drain — busybox cat on TWRP does not close stdout when stdin closes,
+      // so _readAll would hang forever. The next shell command provides sequencing.
     }
 
+    // Pull a remote file as a Uint8Array via `cat`.
     async pull(remotePath) {
-      const s = await this._open(`exec:cat '${remotePath}'`);
-      return s.readAll();
-    }
-
-    async _sendMsg(cmd, arg0 = 0, arg1 = 0, data = new Uint8Array(0)) {
-      const d = data instanceof Uint8Array ? data : new Uint8Array(data);
-      // Combine header and data into one USB bulk OUT packet — the native adb
-      // daemon does a single write() call.  Sending them as two separate
-      // transferOut calls can cause adbd to misinterpret the data portion as
-      // a new ADB header, corrupting the protocol state.
-      const pkt = new Uint8Array(24 + d.length);
-      const v = new DataView(pkt.buffer);
-      v.setUint32(0, cmd, true); v.setUint32(4, arg0, true); v.setUint32(8, arg1, true);
-      v.setUint32(12, d.length, true); v.setUint32(16, crc32(d), true);
-      v.setUint32(20, (cmd ^ 0xFFFFFFFF) >>> 0, true);
-      pkt.set(d, 24);
-      const r = await this._dev.transferOut(this._epOut, pkt.buffer);
-      if (r.status !== 'ok') throw new Error(`ADB OUT endpoint stalled (cmd=0x${cmd.toString(16)} status=${r.status})`);
+      this._log(`pull: cat '${remotePath}'`);
+      const proc = await this._adb.subprocess.noneProtocol.spawn(`cat '${remotePath}'`);
+      this._log('pull: draining output…');
+      const out = await _readAll(proc.output);
+      this._log(`pull: done (${(out.length/1024/1024).toFixed(1)} MB)`);
+      return out;
     }
 
     async close() {
-      this._running = false;
-      try { await this._dev?.releaseInterface(this._iface); } catch {}
-      try { await this._dev?.close(); } catch {}
+      try { await this._transport.close(); } catch {}
+    }
+
+    // ── Static factory ──────────────────────────────────────────────────────
+
+    // Open the browser USB picker, load the library, authenticate, return a
+    // ready Client.  logFn is optional — wizard passes addLog.
+    static async requestDevice(logFn = () => {}) {
+      if (!navigator.usb) {
+        throw new Error(
+          'WebUSB not available — requires a secure context (HTTPS or localhost). ' +
+          'Access the dashboard at http://localhost:8768, or enable ' +
+          'chrome://flags/#unsafely-treat-insecure-origin-as-secure for this origin.'
+        );
+      }
+
+      const { manager, Transport, Adb, defaultAuths } = await _load(logFn);
+
+      // Release any previous connection — calling connect() on an already-claimed
+      // interface hangs indefinitely. This happens on retry after a reboot.
+      if (_lastUsbDevice) {
+        try { await _lastUsbDevice.disconnect(); } catch {}
+        _lastUsbDevice = null;
+      }
+
+      logFn('Requesting USB device — select the Echo Dot from the picker…');
+      const usbDevice = await manager.BROWSER.requestDevice();
+      if (!usbDevice) throw new Error('No device selected.');
+      logFn(`Device selected: ${usbDevice.name ?? usbDevice.serial ?? 'unknown'}`);
+      _lastUsbDevice = usbDevice;
+
+      logFn('Opening USB connection…');
+      const connection = await usbDevice.connect();
+
+      logFn('Authenticating ADB…');
+      const transport = await Transport.authenticate({
+        serial:         usbDevice.serial ?? 'echomuse',
+        connection,
+        authenticators: defaultAuths,
+      });
+      logFn('ADB authenticated.');
+
+      const adb = new Adb(transport);
+      const banner = adb.banner?.product ?? '(unknown)';
+      logFn(`Connected. Banner: ${banner}`);
+
+      return new Client(adb, transport, banner);
     }
   }
 
@@ -1258,6 +1074,15 @@ const _ALEXA_PKGS = [
   'com.amazon.whisperjoin.wss.wifiprovisioner',
   'com.amazon.device.smarthome.dshs.services',
   'com.amazon.mediaplayeragent',
+  // Both proven on hardware to fight our manual wpa_supplicant.conf writes:
+  // wifiprofilemanager re-asserts its own saved network profile through the
+  // framework WifiManager path, silently overriding whatever we configure.
+  'com.amazon.android.service.wifiprofilemanager',
+  // smarthome's wifi adapter package — note pm disable alone does NOT stop
+  // the native SmartHomeWifid binary (it's init-launched, not a Java
+  // component), see persist.wifi.migrate.complete handling in
+  // runDisableAlexa for the actual fix for that part.
+  'com.amazon.device.smarthome.adapters.wifi',
 ];
 
 const _INIT_RC_APPEND = `
@@ -1281,24 +1106,113 @@ service echomuse /data/local/bin/start_server.sh
 //  5  reboot           — reboot device to Android                          [button]
 //  6  reconnect        — reconnect ADB after Android boots                 [button]
 //  7  verify_root      — confirm su works                                  [auto]
-//  8  wifi             — configure WiFi network                            [inputs]
-//  9  disable_alexa    — pm disable x9                                     [auto]
+//  8  disable_alexa    — pm disable x9 BEFORE wifi — stops phoning home    [auto]
+//  9  wifi             — configure WiFi network                            [inputs]
 // 10  install_em       — push binary + startup script                      [file]
 const _WIZARD_STEPS = [
-  { id: 'connect_android', label: 'Connect Device',     desc: 'Connect the Echo Dot via USB. Device should be on and booted into Android.' },
-  { id: 'connect_twrp',    label: 'Connect to TWRP',   desc: 'Wait for TWRP recovery to appear, then reconnect.' },
+  { id: 'connect_android', label: 'Connect Device',     desc: 'Connect the Echo Dot via USB. Device should be on and booted into Android. Appears as "AEOBC" in the USB picker.' },
+  { id: 'connect_twrp',    label: 'Connect to TWRP',   desc: 'Wait for TWRP recovery to appear, then reconnect. Appears as "Echo" in the USB picker.' },
   { id: 'patch_boot',      label: 'Patch Boot Image',  desc: 'Apply SELinux permissive patch and add init.rc service entries.' },
   { id: 'install_magisk',  label: 'Install Magisk',    desc: 'Flash Magisk 17.3 for persistent root access.' },
   { id: 'preseed_db',      label: 'Pre-seed Root DB',  desc: 'Grant root to ADB shell without a screen prompt.' },
   { id: 'reboot',          label: 'Reboot to Android', desc: 'Reboot device to Android.' },
-  { id: 'reconnect',       label: 'Reconnect',         desc: 'Re-connect ADB after Android finishes booting.' },
+  { id: 'reconnect',       label: 'Reconnect',         desc: 'Re-connect ADB after Android finishes booting. Appears as "AEOBC" in the USB picker.' },
   { id: 'verify_root',     label: 'Verify Root',       desc: 'Confirm Magisk root is working.' },
+  { id: 'disable_alexa',   label: 'Disable Alexa',     desc: 'Disable all 9 Alexa voice pipeline packages before connecting to WiFi.' },
   { id: 'wifi',            label: 'Configure WiFi',    desc: 'Connect the device to your local WiFi network.' },
-  { id: 'disable_alexa',   label: 'Disable Alexa',     desc: 'Disable all 9 Alexa voice pipeline packages.' },
   { id: 'install_em',      label: 'Install EchoMuse',  desc: 'Push server binary and startup script to device.' },
 ];
 
-function ProvisionWizard({ token, onClose }) {
+// ── WifiPanel ──
+
+function WifiPanel({ adb, wifiSsid, setWifiSsid, wifiPsk, setWifiPsk, onScan, networks, onConnect, onSkip, onAbort }) {
+  const [scanning, setScanning] = useState(false);
+  const [showPsk, setShowPsk]   = useState(false);
+
+  async function doScan() {
+    setScanning(true);
+    await onScan();
+    setScanning(false);
+  }
+
+  return (
+    <div style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+
+      {/* Scan row */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <Pill small onClick={doScan} disabled={scanning || !adb}>
+          {scanning ? 'Scanning…' : 'Scan for networks'}
+        </Pill>
+        {networks.length > 0 && (
+          <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)' }}>
+            {networks.length} network{networks.length !== 1 ? 's' : ''} found
+          </span>
+        )}
+      </div>
+
+      {/* Network list */}
+      {networks.length > 0 && (
+        <div style={{
+          border: '1px solid #c0bcb4', borderRadius: 6, overflow: 'hidden',
+          maxHeight: 140, overflowY: 'auto',
+        }}>
+          {networks.map(n => (
+            <div key={n.ssid}
+              onClick={() => setWifiSsid(n.ssid)}
+              style={{
+                padding: '6px 10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                background: wifiSsid === n.ssid ? 'rgba(64,88,120,0.12)' : 'transparent',
+                borderBottom: '1px solid #d0ccc4', cursor: 'pointer',
+              }}>
+              <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: wifiSsid === n.ssid ? '#405878' : 'var(--text)' }}>
+                {n.ssid}
+              </span>
+              <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)' }}>
+                {n.signal} dBm
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Manual SSID entry */}
+      <div>
+        <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--text2)', letterSpacing: '0.08em', marginBottom: 4 }}>SSID</div>
+        <input
+          type="text" value={wifiSsid} onChange={e => setWifiSsid(e.target.value)}
+          placeholder="Select above or type network name"
+          style={{ width: '100%', boxSizing: 'border-box' }}
+        />
+      </div>
+
+      {/* Password */}
+      <div>
+        <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--text2)', letterSpacing: '0.08em', marginBottom: 4 }}>PASSWORD</div>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <input
+            type={showPsk ? 'text' : 'password'} value={wifiPsk} onChange={e => setWifiPsk(e.target.value)}
+            placeholder="WPA passphrase" style={{ flex: 1, boxSizing: 'border-box' }}
+            onKeyDown={e => e.key === 'Enter' && wifiSsid && onConnect()}
+          />
+          <button onClick={() => setShowPsk(v => !v)} style={{
+            background: 'rgba(0,0,0,0.06)', border: '1px solid #c0bcb4', borderRadius: 6,
+            fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)',
+            padding: '0 8px', cursor: 'pointer', flexShrink: 0,
+          }}>{showPsk ? 'hide' : 'show'}</button>
+        </div>
+      </div>
+
+      {/* Actions */}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <Pill accent onClick={onConnect} disabled={!wifiSsid || !adb}>Connect</Pill>
+        <Pill small onClick={onSkip}>Skip (already connected)</Pill>
+        <Pill small danger onClick={onAbort}>Abort provisioning</Pill>
+      </div>
+    </div>
+  );
+}
+
+function ProvisionWizard({ token, onClose, knownDevices }) {
   const [step, setStep]         = useState(0);
   const [stepState, setStepState] = useState(_WIZARD_STEPS.map(() => 'pending'));
   const [log, setLog]           = useState([]);
@@ -1308,6 +1222,8 @@ function ProvisionWizard({ token, onClose }) {
   const [binaryFile, setBinaryFile] = useState(null);
   const [wifiSsid, setWifiSsid] = useState('');
   const [wifiPsk, setWifiPsk]   = useState('');
+  const [wifiNetworks, setWifiNetworks] = useState([]);
+  const [duplicateDeviceId, setDuplicateDeviceId] = useState(null);
   const [progress, setProgress] = useState(null);
   const logRef = useRef(null);
 
@@ -1320,28 +1236,41 @@ function ProvisionWizard({ token, onClose }) {
   // ── Step runners ──
 
   async function runConnectAndroid() {
-    addLog('Requesting USB device — select the Echo Dot from the picker…');
-    const c = await _ADB.Client.requestDevice();
-    c._log = msg => addLog(`  ADB: ${msg}`);
-    addLog('Connecting ADB…');
-    try {
-      await c.connect();
-    } catch (err) {
-      (c._dbgIfaces || []).forEach(l => addLog(`  USB: ${l}`));
-      throw err;
-    }
-    (c._dbgIfaces || []).forEach(l => addLog(`  USB: ${l}`));
+    // requestDevice() handles USB open + ADB auth in one call.
+    const c = await _ADB.Client.requestDevice(addLog);
+    c._log = msg => addLog(`  adb: ${msg}`);
     setAdb(c);
     const model   = await c.shell('getprop ro.product.model');
     const release = await c.shell('getprop ro.build.version.release');
     const name    = await c.shell('getprop ro.product.name');
-    addLog(`Model: ${model || '(unknown)'}  Build: Android ${release}  Codename: ${name || '(unknown)'}`);
+    const serial  = await c.shell('getprop ro.serialno') || await c.shell('getprop ro.boot.serialno');
+    addLog(`Model: ${model || '(unknown)'}  Build: Android ${release}  Codename: ${name || '(unknown)'}  Serial: ${serial || '(unknown)'}`);
     if (!release.startsWith('5.')) {
       throw new Error(`Expected FireOS 5 (Android 5.x), got Android ${release}. Wrong device?`);
     }
     if (model && !model.toLowerCase().includes('amazon') && !name.toLowerCase().includes('biscuit')) {
       addLog('Warning: device may not be an Echo Dot 2nd gen — proceeding anyway.', 'warn');
     }
+
+    // Refuse to re-provision a device already known to the controller —
+    // this flow reboots into recovery, flashes a patched boot image, and
+    // is destructive to wipe through. Cross-check defensively since we
+    // don't know the exact field name the controller uses for serial.
+    if (serial && knownDevices && knownDevices.length) {
+      const match = knownDevices.find(d =>
+        [d.serial, d.serial_number, d.device_id, d.id].some(f => f && String(f).includes(serial))
+      );
+      if (match) {
+        const err = new Error(
+          `This device (serial ${serial}) appears to already be registered with the controller ` +
+          `as "${match.label || match.device_id || match.id}". Delete it from the controller first ` +
+          `if you want to re-provision, then retry.`
+        );
+        err.matchedDeviceId = match.device_id || match.id;
+        throw err;
+      }
+    }
+
     addLog('FireOS 5 confirmed. Rebooting to TWRP recovery…');
     try { await c.shell('reboot recovery'); } catch {}
     await c.close();
@@ -1351,16 +1280,15 @@ function ProvisionWizard({ token, onClose }) {
   }
 
   async function runConnectTwrp() {
-    addLog('Requesting USB device…');
-    const c = await _ADB.Client.requestDevice();
-    addLog('Connecting ADB…');
-    await c.connect();
+    const c = await _ADB.Client.requestDevice(addLog);
+    c._log = msg => addLog(`  adb: ${msg}`);
     setAdb(c);
-    addLog('Verifying TWRP…');
-    const bootmode = await c.shell('getprop ro.bootmode 2>/dev/null || echo recovery');
-    const hasTwrp  = await c.shell('ls /sbin/recovery 2>/dev/null && echo YES || echo NO');
-    if (!bootmode.includes('recovery') && hasTwrp.trim() !== 'YES') {
-      throw new Error('Device does not appear to be in TWRP. Is the TWRP menu showing on the device?');
+    // TWRP on this device identifies itself via the ADB banner product name
+    // ("omni_biscuit"), not via ro.bootmode or /sbin/recovery.
+    // The banner is already logged by requestDevice; check it directly.
+    const banner = c.banner ?? '';
+    if (!banner.toLowerCase().includes('omni') && !banner.toLowerCase().includes('twrp') && !banner.toLowerCase().includes('recovery')) {
+      throw new Error(`Device banner is "${banner}" — expected TWRP (omni_biscuit). Is TWRP showing on screen?`);
     }
     addLog('TWRP confirmed.', 'ok');
     return c;
@@ -1451,80 +1379,320 @@ function ProvisionWizard({ token, onClose }) {
   }
 
   async function runReconnect() {
-    addLog('Requesting USB device…');
-    const c = await _ADB.Client.requestDevice();
-    await c.connect();
+    const c = await _ADB.Client.requestDevice(addLog);
+    c._log = msg => addLog(`  adb: ${msg}`);
     setAdb(c);
     addLog('ADB connected.', 'ok');
     return c;
   }
 
   async function runVerifyRoot(c) {
-    addLog('Testing su -c id…');
+    addLog('Testing su -c id… (can take 30s+ on first boot while Magisk initialises — be patient)');
     const out = await c.shell('su -c id 2>&1');
     addLog(out);
     if (!out.includes('uid=0')) throw new Error('Root not working — check Magisk install and magisk.db.');
     addLog('Root confirmed.', 'ok');
   }
 
+  async function scanWifi(c) {
+    addLog('Scanning for WiFi networks…');
+    await c.shell("su -c 'svc wifi enable'");
+    await new Promise(r => setTimeout(r, 2000));
+    // wpa_cli on this build needs BOTH -p (socket dir, since
+    // ctrl_interface=/data/misc/wifi/sockets is non-default) AND -i wlan0
+    // (interface) explicitly — without -p it sometimes silently works by
+    // luck of default-selecting the only non-p2p interface, but once other
+    // client sockets exist in the dir (e.g. from system/smarthome
+    // processes) it mis-selects one of those instead and fails with
+    // "Operation not permitted". -i alone without -p fails outright with
+    // "Failed to connect to non-global ctrl_ifname". Always pass both.
+    await c.shell("su -c 'wpa_cli -p /data/misc/wifi/sockets -i wlan0 scan'");
+    await new Promise(r => setTimeout(r, 3000));
+    const raw = await c.shell("su -c 'wpa_cli -p /data/misc/wifi/sockets -i wlan0 scan_results'");
+    addLog('Scan complete.');
+    // Parse wpa_cli scan_results: bssid / frequency / signal / flags / ssid
+    const networks = [];
+    for (const line of raw.split('\n')) {
+      const parts = line.split('\t');
+      if (parts.length < 5) continue;
+      const ssid = parts[4].trim();
+      if (!ssid || ssid === 'SSID') continue;
+      const signal = parseInt(parts[2], 10);
+      const existing = networks.find(n => n.ssid === ssid);
+      if (!existing) {
+        networks.push({ ssid, signal });
+      } else if (signal > existing.signal) {
+        existing.signal = signal; // keep strongest AP's signal for duplicate SSIDs (multiple APs/bands)
+      }
+    }
+    networks.sort((a, b) => b.signal - a.signal);
+    return networks;
+  }
+
+  // Quote a value for safe embedding inside a wpa_supplicant.conf network
+  // block. SSIDs/PSKs containing a literal " or \ would break the file
+  // format — reject rather than mis-escape, since this is config content,
+  // not a shell string.
+  function wpaConfEscape(value) {
+    if (/["\\]/.test(value)) {
+      throw new Error(`Value contains a double-quote or backslash character, which wpa_supplicant.conf cannot represent safely: "${value}"`);
+    }
+    return value;
+  }
+
   async function runConfigWifi(c, ssid, psk) {
+    if (!ssid) throw new Error('No SSID selected.');
+    wpaConfEscape(ssid);
+    wpaConfEscape(psk);
+
     addLog('Enabling WiFi radio…');
-    await c.shell("su -c 'svc wifi enable' 2>&1");
+    await c.shell("su -c 'svc wifi enable'");
     await new Promise(r => setTimeout(r, 2000));
 
-    addLog('Checking existing connectivity…');
-    const existIp = await c.shell("su -c \"ip addr show wlan0 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1\"");
-    if (existIp && /\d+\.\d+\.\d+\.\d+/.test(existIp)) {
-      addLog(`Already connected (${existIp}) — skipping network add.`, 'ok');
-      return;
+    // Read device identity fields from getprop rather than assuming any
+    // existing wpa_supplicant.conf — this must work on a bare device that
+    // never had the Alexa WiFi setup flow run.
+    addLog('Reading device identity…');
+    const deviceName   = await c.shell('getprop ro.product.name')          || 'echomuse';
+    const manufacturer = await c.shell('getprop ro.product.manufacturer')  || 'Amazon';
+    const model        = await c.shell('getprop ro.product.model')        || 'AEOBC';
+    const serial       = await c.shell('getprop ro.serialno')             || await c.shell('getprop ro.boot.serialno') || 'unknown';
+
+    // Full config replacement — single network only, no ambiguity about
+    // which AP it joins. Deliberately drops any prior (e.g. Alexa-era)
+    // network entries.
+    const confLines = [
+      'ctrl_interface=/data/misc/wifi/sockets',
+      'driver_param=use_p2p_group_interface=1',
+      'update_config=1',
+      `device_name=${deviceName}`,
+      `manufacturer=${manufacturer}`,
+      `model_name=${model}`,
+      `model_number=${model}`,
+      `serial_number=${serial}`,
+      'device_type=1-0050F204-9',
+      'os_version=01020300',
+      'config_methods=physical_display virtual_push_button',
+      'p2p_no_group_iface=1',
+      'external_sim=1',
+      'wowlan_triggers=disconnect',
+      'network={',
+      `\tssid="${ssid}"`,
+      `\tpsk="${psk}"`,
+      '\tkey_mgmt=WPA-PSK',
+      '\tpriority=1',
+      '}',
+      '',
+    ].join('\n');
+
+    addLog(`Writing config for "${ssid}"…`);
+    // The full sequence below was hard-won on real hardware — do not
+    // simplify without re-testing on device:
+    //  1. chmod 770 the wifi dir — 666 strips the execute/traverse bit and
+    //     makes every file inside unopenable even though file perms look fine.
+    //  2. Never use a raw shell redirect (> or >>) on this mksh build —
+    //     it silently fails ("can't create ... Permission denied") for
+    //     reasons never fully root-caused. cp and `tee` (no -a) both work.
+    //  3. rm any stale /tmp target first — tee can fail against a leftover
+    //     file from a previous attempt even though it succeeds against a
+    //     fresh path.
+    //  4. cp from /tmp to the real path, then explicitly chown/chmod back —
+    //     cp as root does not preserve the destination dir's expected
+    //     wifi:wifi ownership.
+    //  5. Reload via `svc wifi disable` + `svc wifi enable` (NOT raw
+    //     stop/start wpa_supplicant — see the big comment further down for
+    //     why). This goes through the proper Android-managed wpa_supplicant
+    //     instance, which auto-associates and gets a DHCP lease on its own
+    //     with no manual reconnect/dhcpcd needed.
+    const b64 = btoa(unescape(encodeURIComponent(confLines)));
+    await c.shell('su -c "chmod 770 /data/misc/wifi"');
+    await c.shell('su -c "rm -f /tmp/wpa_supplicant.conf"');
+    await c.shell(`su -c "echo ${b64} | busybox base64 -d | busybox tee /tmp/wpa_supplicant.conf"`);
+
+    // Verify the staged file actually has the SSID we intended — catches
+    // the b64-via-shell-arg path silently mangling content before we ever
+    // touch the real config.
+    const staged = await c.shell('su -c "cat /tmp/wpa_supplicant.conf"');
+    if (!staged.includes(`ssid="${ssid}"`)) {
+      throw new Error(`Staged config in /tmp does not contain ssid="${ssid}" — write failed before reaching the device. Staged content:\n${staged}`);
     }
 
-    addLog(`Adding network "${ssid}"…`);
-    // Write a helper script to avoid shell quoting complexity
-    const script = `#!/system/bin/sh\nnetid=$(wpa_cli add_network | tail -1)\nwpa_cli set_network "$netid" ssid '"${ssid}"'\nwpa_cli set_network "$netid" psk '"${psk}"'\nwpa_cli enable_network "$netid"\nwpa_cli reconnect\nwpa_cli save_config\necho "NETID:$netid"`;
-    await c.push('/tmp/wificfg.sh', new TextEncoder().encode(script));
-    const out = await c.shell('su -c "chmod 755 /tmp/wificfg.sh && /tmp/wificfg.sh" 2>&1');
-    addLog(out || '(done)');
+    await c.shell('su -c "cp /tmp/wpa_supplicant.conf /data/misc/wifi/wpa_supplicant.conf"');
+    await c.shell('su -c "chown wifi:wifi /data/misc/wifi/wpa_supplicant.conf"');
+    await c.shell('su -c "chmod 660 /data/misc/wifi/wpa_supplicant.conf"');
+
+    // Verify the final on-device file too — catches the cp step itself
+    // failing or writing to the wrong place.
+    const onDevice = await c.shell('su -c "cat /data/misc/wifi/wpa_supplicant.conf"');
+    if (!onDevice.includes(`ssid="${ssid}"`)) {
+      throw new Error(`Config at /data/misc/wifi/wpa_supplicant.conf does not contain ssid="${ssid}" after cp — the write did not take. On-device content:\n${onDevice}`);
+    }
+    addLog('Config written and verified on device.', 'ok');
+
+    addLog('Reloading WiFi via the Android framework…');
+    // Diagnostic: confirm the known interferers are actually gone right
+    // before we touch wpa_supplicant — if either shows up here despite
+    // runDisableAlexa having run, that's the smoking gun for the clobber.
+    const interferers = await c.shell("su -c 'ps' | grep -iE 'wifiprofilemanager|SmartHomeWifid'");
+    addLog(`Interferer check: ${interferers.trim() || '(none running — clean)'}`);
+
+    // IMPORTANT — found the hard way on real hardware: this device runs
+    // TWO independent things that can each launch /system/bin/wpa_supplicant:
+    //  1. The bare init service (`start`/`stop wpa_supplicant`) — a minimal
+    //     invocation with no p2p, no overlay config, no Android control
+    //     socket. This is what `stop`/`start wpa_supplicant` controls, and
+    //     what our earlier kill -9-based reload was fighting with.
+    //  2. The proper Android-framework-managed instance, launched by
+    //     `svc wifi enable` with the FULL correct flags (wlan0 + p2p0,
+    //     overlay configs, entropy file, -g@android:wpa_wlan0 abstract
+    //     socket for the framework's own WifiStateMachine/WifiNative).
+    // If both end up running simultaneously (e.g. because something earlier
+    // called `svc wifi enable` and we separately kill -9/start the bare
+    // service), they fight over the wlan0 netdev and one disables the
+    // interface out from under the other — symptom: wpa_state sits at
+    // DISCONNECTED then flips to INTERFACE_DISABLED and never recovers.
+    // The correct reload mechanism is `svc wifi disable` + `svc wifi
+    // enable` — this manages the proper framework instance exclusively,
+    // and on this device it auto-associates and gets an IP via the
+    // framework's own DHCP handling with NO manual reconnect or dhcpcd
+    // call needed. Do not reintroduce kill -9 / raw start wpa_supplicant /
+    // manual wpa_cli reconnect / manual dhcpcd here — all proven
+    // unnecessary and actively harmful (causes the dual-process conflict)
+    // once `svc wifi enable` is already used earlier in this function.
+    await c.shell('su -c "svc wifi disable"');
+    await new Promise(r => setTimeout(r, 2000));
+    await c.shell('su -c "svc wifi enable"');
+    await new Promise(r => setTimeout(r, 3000));
+
+    const psCheck = await c.shell("su -c 'ps | grep /system/bin/wpa_supplicant | while read user pid rest; do echo $pid; done'");
+    const pidCount = psCheck.split('\n').map(s => s.trim()).filter(Boolean).length;
+    if (pidCount === 0) throw new Error('wpa_supplicant did not start after svc wifi enable — check device logcat.');
+    if (pidCount > 1) throw new Error(`Multiple wpa_supplicant processes running (${pidCount}) — the bare init service and the framework instance are both up and will conflict. Check for a stray "start wpa_supplicant" call.`);
+    addLog(`wpa_supplicant running (1 process, pid ${psCheck.trim()}).`, 'ok');
+
+    addLog('Waiting for association (up to 20s)…');
+    let associated = false;
+    let lastStatus = '';
+    for (let i = 0; i < 20; i++) {
+      await new Promise(r => setTimeout(r, 1000));
+      lastStatus = await c.shell("su -c 'wpa_cli -p /data/misc/wifi/sockets -i wlan0 status'");
+      const stateMatch = lastStatus.match(/wpa_state=(\S+)/);
+      addLog(`  [${i+1}s] wpa_state=${stateMatch ? stateMatch[1] : '?'}`);
+      if (lastStatus.includes('wpa_state=COMPLETED')) { associated = true; break; }
+    }
+    if (!associated) {
+      throw new Error(`Did not associate to "${ssid}" within 20s. Last status:\n${lastStatus}`);
+    }
+    addLog('Associated.', 'ok');
 
     addLog('Waiting for IP address (up to 20s)…');
     for (let i = 0; i < 20; i++) {
       await new Promise(r => setTimeout(r, 1000));
-      const ip = await c.shell("su -c \"ip addr show wlan0 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1\"");
+      const ip = await c.shell("su -c 'ip addr show wlan0 | grep \"inet \" | while read proto addr rest; do echo ${addr%/*}; done'");
       if (ip && /\d+\.\d+\.\d+\.\d+/.test(ip)) {
         addLog(`Connected! IP: ${ip}`, 'ok');
         return;
       }
     }
-    throw new Error(`WiFi did not associate within 20s. Check SSID "${ssid}" and password.`);
+    throw new Error(`Associated to "${ssid}" but did not get an IP within 20s. Check device logcat for DHCP issues.`);
   }
 
   async function runDisableAlexa(c) {
+    // `su -c id` succeeding (the previous step) only confirms Magisk/root
+    // is up — it does NOT mean the Android framework has finished booting.
+    // Found on hardware: pm disable calls made too early fail with
+    // "Could not access the Package Manager. Is the system running?" for
+    // the first several packages, then start succeeding once the system
+    // server catches up mid-loop. sys.boot_completed=1 is the actual
+    // readiness signal for the package manager being available — poll for
+    // it explicitly rather than guessing a fixed delay.
+    addLog('Waiting for Android framework to finish booting…');
+    let bootReady = false;
+    for (let i = 0; i < 30; i++) {
+      const boot = (await c.shell('getprop sys.boot_completed')).trim();
+      if (boot === '1') { bootReady = true; break; }
+      await new Promise(r => setTimeout(r, 1000));
+    }
+    addLog(bootReady ? 'Framework ready.' : 'Timed out waiting for boot_completed — proceeding anyway, some pm disable calls may fail.', bootReady ? 'ok' : 'warn');
+
     for (const pkg of _ALEXA_PKGS) {
       addLog(`Disabling ${pkg}…`);
       const out = await c.shell(`su -c 'pm disable ${pkg}' 2>&1`);
       addLog(`  → ${out || 'ok'}`);
+      if (out.includes('Could not access the Package Manager')) {
+        // Still not ready despite boot_completed — give it a moment and retry once.
+        addLog('  Package Manager not ready yet, waiting 3s and retrying…', 'warn');
+        await new Promise(r => setTimeout(r, 3000));
+        const retry = await c.shell(`su -c 'pm disable ${pkg}' 2>&1`);
+        addLog(`  → retry: ${retry || 'ok'}`);
+      }
     }
+
+    // pm disable on com.amazon.device.smarthome.adapters.wifi does NOT stop
+    // /system/bin/SmartHomeWifid — it's launched directly by init via
+    // /init.smarthome.rc's property-trigger chain (wifi.launch reaching
+    // "111"), independent of the Android package manager. That trigger
+    // chain only fires once persist.wifi.migrate.complete=1 — clearing it
+    // prevents wifi.launch from ever reaching "111", so SmartHomeWifid
+    // never starts. This is a persist. property so it survives reboots;
+    // proven on hardware to durably stop the interference.
+    addLog('Clearing wifi migration flag to prevent SmartHomeWifid from starting…');
+    await c.shell('su -c "setprop persist.wifi.migrate.complete 0"');
+    const check = await c.shell('su -c "getprop persist.wifi.migrate.complete"');
+    addLog(`  → persist.wifi.migrate.complete=${check.trim()}`);
+
+    // SmartHomeWifid may already be running from this boot (started before
+    // we cleared the property) — kill it now rather than waiting for next
+    // reboot, since the wizard proceeds straight to WiFi config next.
+    const smartHomeWifidPid = (await c.shell("su -c 'ps | grep /system/bin/SmartHomeWifid | while read user pid rest; do echo $pid; done'")).trim();
+    if (smartHomeWifidPid) {
+      addLog(`Killing already-running SmartHomeWifid (pid ${smartHomeWifidPid})…`);
+      await c.shell(`su -c "kill -9 ${smartHomeWifidPid}"`);
+    }
+
     addLog('Alexa stack disabled.', 'ok');
   }
 
-  async function runInstallEchoMuse(c, file) {
-    addLog(`Pushing ${file.name} to /sdcard/server_new…`);
-    const buf = await file.arrayBuffer();
+  async function runInstallEchoMuse(c, file, useLatest) {
+    let buf;
+    if (useLatest) {
+      addLog('Fetching latest EchoMuse build from controller…');
+      // ASSUMPTION: controller exposes the latest known-good binary via this
+      // route — backed by release_poll_loop() in em_api.py (same mechanism
+      // the OTA pipeline uses to track GitHub releases). Confirm the actual
+      // route name against em_api.py before relying on this in production.
+      const resp = await fetch('/api/provision/latest_binary', { headers: { Authorization: `Bearer ${token}` } });
+      if (!resp.ok) throw new Error(`Controller returned ${resp.status} fetching latest binary — check /api/provision/latest_binary exists in em_api.py.`);
+      buf = await resp.arrayBuffer();
+      addLog(`Latest build: ${(buf.byteLength/1024/1024).toFixed(1)} MB`);
+    } else {
+      addLog(`Pushing ${file.name} to /sdcard/server_new…`);
+      buf = await file.arrayBuffer();
+    }
     await c.push('/sdcard/server_new', new Uint8Array(buf),
       pct => setProgress({ label: 'Uploading binary', pct }));
     setProgress(null);
     addLog('Installing to /data/local/bin/ (A slot)…');
     await c.shell("su -c 'mkdir -p /data/local/bin && cp /sdcard/server_new /data/local/bin/server_a && chmod 755 /data/local/bin/server_a && ln -sf server_a /data/local/bin/server'");
     addLog('Fetching startup script from controller…');
-    const resp = await fetch('/api/provision/start_script', { headers: { Authorization: `Bearer ${token}` } });
-    if (!resp.ok) throw new Error(`Controller returned ${resp.status}`);
-    await c.push('/sdcard/start_server.sh', new TextEncoder().encode(await resp.text()));
+    const resp2 = await fetch('/api/provision/start_script', { headers: { Authorization: `Bearer ${token}` } });
+    if (!resp2.ok) throw new Error(`Controller returned ${resp2.status}`);
+    const script = await resp2.text();
+    // Same "Text file busy" risk as wificfg.sh — push + immediate chmod/exec
+    // can race with the cat process. start_server.sh isn't executed
+    // immediately here (only copied), so push() is safe for this one.
+    await c.push('/sdcard/start_server.sh', new TextEncoder().encode(script));
     await c.shell("su -c 'cp /sdcard/start_server.sh /data/local/bin/start_server.sh && chmod 755 /data/local/bin/start_server.sh'");
     addLog('EchoMuse installed.', 'ok');
+    addLog('Rebooting device to finish provisioning…');
+    try { await c.shell('su -c reboot'); } catch {}
+    await c.close();
+    setAdb(null);
+    addLog('Device rebooting. It will appear in the controller dashboard within ~30s via mDNS.', 'ok');
   }
 
   // ── Step executor ──
-  async function runStep(stepIdx) {
+  async function runStep(stepIdx, useLatest) {
     setRunning(true);
     markStep(stepIdx, 'running');
     let c = adb;
@@ -1538,22 +1706,24 @@ function ProvisionWizard({ token, onClose }) {
         case  5: await runReboot(c); break;
         case  6: c = await runReconnect(); break;
         case  7: await runVerifyRoot(c); break;
-        case  8: await runConfigWifi(c, wifiSsid, wifiPsk); break;
-        case  9: await runDisableAlexa(c); break;
-        case 10: await runInstallEchoMuse(c, binaryFile); break;
+        case  8: await runDisableAlexa(c); break;
+        case  9: await runConfigWifi(c, wifiSsid, wifiPsk); break;
+        case 10: await runInstallEchoMuse(c, binaryFile, useLatest); break;
       }
       markStep(stepIdx, 'done');
       if (stepIdx < _WIZARD_STEPS.length - 1) setStep(stepIdx + 1);
     } catch (e) {
       addLog(`Error: ${e.message}`, 'error');
       markStep(stepIdx, 'error');
+      if (e.matchedDeviceId) setDuplicateDeviceId(e.matchedDeviceId);
     }
     setRunning(false);
   }
 
-  // Auto-advance steps that need no user input once adb is connected
+  // Auto-advance steps that need no user input once adb is connected.
+  // Step 8 (disable_alexa) is now before WiFi so Alexa can't phone home.
   useEffect(() => {
-    const autoSteps = new Set([2, 4, 7, 9]);
+    const autoSteps = new Set([2, 4, 7, 8]);
     if (autoSteps.has(step) && !running && stepState[step] === 'pending' && adb) {
       runStep(step);
     }
@@ -1565,10 +1735,6 @@ function ProvisionWizard({ token, onClose }) {
   // Buttons are shown for manual steps; auto steps start themselves.
   // CONNECT_STEPS: step is a connection step — show "Retry Connection" on error.
   const CONNECT_STEPS = new Set([0, 1, 6]);
-  // FILE_STEPS: step needs a file before running.
-  const FILE_STEP_BUTTON = step === 3 && !!magiskFile ? 'Flash Magisk'
-                         : step === 10 && !!binaryFile ? 'Install EchoMuse'
-                         : null;
 
   const statusColors = { pending: '#888', running: '#8ab0d0', done: '#7ab87a', error: '#c05050' };
   const statusIcons  = { pending: '○', running: '◌', done: '●', error: '✕' };
@@ -1601,8 +1767,16 @@ function ProvisionWizard({ token, onClose }) {
           <div style={{ width: 176, borderRight: '1px solid #c8c4bc', padding: '12px 0', overflowY: 'auto', flexShrink: 0 }}>
             {_WIZARD_STEPS.map((s, i) => {
               const st = stepState[i]; const active = i === step;
+              const jumpable = !running && i !== step && (st === 'done' || st === 'error' || st === 'pending');
               return (
-                <div key={s.id} style={{ padding: '6px 14px', display: 'flex', alignItems: 'center', gap: 7, background: active ? 'rgba(0,0,0,0.06)' : 'transparent' }}>
+                <div key={s.id}
+                  onClick={() => jumpable && setStep(i)}
+                  style={{
+                    padding: '6px 14px', display: 'flex', alignItems: 'center', gap: 7,
+                    background: active ? 'rgba(0,0,0,0.06)' : 'transparent',
+                    cursor: jumpable ? 'pointer' : 'default',
+                    opacity: running && !active ? 0.5 : 1,
+                  }}>
                   <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: statusColors[st], flexShrink: 0 }}>{statusIcons[st]}</span>
                   <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: active ? 'var(--text)' : 'var(--muted)', letterSpacing: '0.04em', lineHeight: 1.4 }}>{s.label}</span>
                 </div>
@@ -1637,45 +1811,70 @@ function ProvisionWizard({ token, onClose }) {
               </div>
             )}
 
-            {/* Steps 3 and 10: file pickers */}
-            {(step === 3 || step === 10) && stepState[step] === 'pending' && (
+            {/* Step 3: Magisk zip file picker */}
+            {step === 3 && stepState[3] === 'pending' && (
               <div style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
-                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--text2)', letterSpacing: '0.08em' }}>
-                  {step === 3 ? 'MAGISK-V17.3.ZIP' : 'ECHOMUSE SERVER BINARY (ARMv7)'}
-                </div>
+                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--text2)', letterSpacing: '0.08em' }}>MAGISK-V17.3.ZIP</div>
                 <input
-                  type="file" accept={step === 3 ? '.zip' : undefined}
-                  onChange={e => step === 3 ? setMagiskFile(e.target.files[0]) : setBinaryFile(e.target.files[0])}
+                  type="file" accept=".zip"
+                  onChange={e => setMagiskFile(e.target.files[0])}
                   style={{ fontFamily: "'DM Mono',monospace", fontSize: 11 }}
                 />
-                {FILE_STEP_BUTTON && <Pill onClick={() => runStep(step)}>{FILE_STEP_BUTTON}</Pill>}
+                {!!magiskFile && <Pill onClick={() => runStep(3)}>Flash Magisk</Pill>}
               </div>
             )}
 
-            {/* Step 8: WiFi configuration */}
-            {step === 8 && stepState[8] === 'pending' && !running && (
-              <div style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
-                <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end' }}>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--text2)', letterSpacing: '0.08em', marginBottom: 5 }}>SSID</div>
-                    <input type="text" value={wifiSsid} onChange={e => setWifiSsid(e.target.value)} placeholder="Network name" style={{ width: '100%', boxSizing: 'border-box' }}/>
-                  </div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--text2)', letterSpacing: '0.08em', marginBottom: 5 }}>PASSWORD</div>
-                    <input type="password" value={wifiPsk} onChange={e => setWifiPsk(e.target.value)} placeholder="WPA password" style={{ width: '100%', boxSizing: 'border-box' }}/>
-                  </div>
-                </div>
+            {/* Step 10: EchoMuse binary — custom upload or latest from controller */}
+            {step === 10 && stepState[10] === 'pending' && (
+              <div style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
                 <div style={{ display: 'flex', gap: 8 }}>
-                  <Pill onClick={() => { if (wifiSsid) runStep(8); }} disabled={!wifiSsid}>Configure WiFi</Pill>
-                  <Pill onClick={() => { markStep(8, 'done'); setStep(9); }} small>Skip (already connected)</Pill>
+                  <Pill accent onClick={() => runStep(10, true)}>Install latest from GitHub</Pill>
                 </div>
+                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', letterSpacing: '0.04em' }}>— or —</div>
+                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--text2)', letterSpacing: '0.08em' }}>CUSTOM ECHOMUSE SERVER BINARY (ARMv7)</div>
+                <input
+                  type="file"
+                  onChange={e => setBinaryFile(e.target.files[0])}
+                  style={{ fontFamily: "'DM Mono',monospace", fontSize: 11 }}
+                />
+                {!!binaryFile && <Pill onClick={() => runStep(10, false)}>Install Custom Build</Pill>}
               </div>
+            )}
+
+            {/* Step 9: WiFi configuration */}
+            {step === 9 && stepState[9] !== 'done' && !running && (
+              <WifiPanel
+                adb={adb}
+                wifiSsid={wifiSsid} setWifiSsid={setWifiSsid}
+                wifiPsk={wifiPsk}   setWifiPsk={setWifiPsk}
+                onScan={() => scanWifi(adb).then(nets => setWifiNetworks(nets)).catch(e => addLog(`Scan failed: ${e.message}`, 'error'))}
+                networks={wifiNetworks}
+                onConnect={() => { if (wifiSsid) runStep(9); }}
+                onSkip={() => { markStep(9, 'done'); setStep(10); }}
+                onAbort={() => { markStep(9, 'error'); addLog('WiFi skipped — provision incomplete.', 'warn'); }}
+              />
             )}
 
             {/* Retry button — re-runs the step directly (runStep marks it running) */}
             {!running && stepState[step] === 'error' && (
-              <div style={{ marginBottom: 10 }}>
+              <div style={{ marginBottom: 10, display: 'flex', gap: 8 }}>
                 <Pill onClick={() => runStep(step)}>Retry</Pill>
+                {step === 0 && duplicateDeviceId && (
+                  <Pill danger onClick={async () => {
+                    try {
+                      // Route shape inferred from the dashboard's existing
+                      // /api/devices/{id}/... convention — not yet confirmed
+                      // against em_api.py. If this 404s, the real route name
+                      // needs checking there.
+                      await API.del(`/api/devices/${duplicateDeviceId}`);
+                      addLog(`Deleted "${duplicateDeviceId}" from controller. You can retry now.`, 'ok');
+                      setDuplicateDeviceId(null);
+                      markStep(0, 'pending');
+                    } catch (e) {
+                      addLog(`Delete failed: ${e.error || e.message || 'unknown error'} — check /api/devices/{id} DELETE exists in em_api.py.`, 'error');
+                    }
+                  }}>Delete "{duplicateDeviceId}" from controller</Pill>
+                )}
               </div>
             )}
 
@@ -1691,8 +1890,12 @@ function ProvisionWizard({ token, onClose }) {
 
             {/* Done message */}
             {isDone && (
-              <div style={{ margin: '6px 0 10px', fontFamily: "'DM Mono',monospace", fontSize: 11, color: '#5a9a5a', lineHeight: 1.7 }}>
-                Device provisioned. It will discover the controller via mDNS and appear in the dashboard within ~30s.
+              <div style={{ margin: '6px 0 10px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: '#5a9a5a', lineHeight: 1.7 }}>
+                  Provisioning complete. The device has rebooted and will discover the controller via mDNS,
+                  appearing in the dashboard as a pending device within ~30s.
+                </div>
+                <div><Pill accent onClick={onClose}>Done</Pill></div>
               </div>
             )}
 
@@ -1938,7 +2141,7 @@ function App() {
 
       {/* Provisioning wizard */}
       {showWizard && (
-        <ProvisionWizard token={token} onClose={() => setShowWizard(false)}/>
+        <ProvisionWizard token={token} onClose={() => setShowWizard(false)} knownDevices={devices}/>
       )}
 
       {/* Detail modal */}
