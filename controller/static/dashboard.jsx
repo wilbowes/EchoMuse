@@ -430,10 +430,16 @@ function Detail({ device, token, onClose, onApprove, isAdmin }) {
   const [pushLog, setPushLog] = useState([]);
   const [pushing, setPushing] = useState(false);
   const [release, setRelease] = useState(null);
+  const [checkingRelease, setCheckingRelease] = useState(false);
   const [approveLabel, setApproveLabel] = useState(device.label || '');
   const [approving, setApproving] = useState(false);
   const [localFile, setLocalFile] = useState(null);
   const [uploading, setUploading] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState(device.label || '');
+  const [renameSaving, setRenameSaving] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const fileInputRef = useRef(null);
   const state = deviceState(device);
   const needsUpdate = device.firmware_ver && release?.version && device.firmware_ver !== release.version;
@@ -455,6 +461,22 @@ function Detail({ device, token, onClose, onApprove, isAdmin }) {
   }, [tab, device.device_id]);
 
   function setConf(k, v) { setConfig(c => ({ ...c, [k]: v })); setDirty(true); }
+
+  async function doCheckRelease() {
+    setCheckingRelease(true);
+    try {
+      // POST /api/releases/check force-polls GitHub directly, bypassing
+      // both the 60s in-memory cache and the (default 1h) DB cache that
+      // GET /api/releases/latest reads from. That route exists already
+      // but nothing in the dashboard called it — this is the only place
+      // that does.
+      const rel = await API.post('/api/releases/check', {});
+      setRelease(rel);
+    } catch(e) {
+      alert(e.error || 'Release check failed');
+    }
+    setCheckingRelease(false);
+  }
 
   async function pushConfig() {
     setSaving(true);
@@ -544,6 +566,39 @@ function Detail({ device, token, onClose, onApprove, isAdmin }) {
     setApproving(false);
   }
 
+  async function doRename() {
+    const trimmed = renameValue.trim();
+    if (!trimmed) { alert('Label cannot be empty'); return; }
+    if (trimmed === device.label) { setRenaming(false); return; }
+    setRenameSaving(true);
+    try {
+      // PATCH /api/devices/{id} — confirmed against em_api.py: requires
+      // {label}, broadcasts a device_update event over /api/events that
+      // App's WebSocket listener already applies to live device state,
+      // so no manual setDevices() needed here.
+      await API.patch(`/api/devices/${device.device_id}`, { label: trimmed });
+      setRenaming(false);
+    } catch(e) {
+      alert(e.error || 'Rename failed');
+    }
+    setRenameSaving(false);
+  }
+
+  async function doDelete() {
+    setDeleting(true);
+    try {
+      // DELETE /api/devices/{id} — confirmed against em_api.py. Broadcasts
+      // device_deleted, which App's WebSocket listener already filters out
+      // of device state, so closing here is enough — no manual cleanup.
+      await API.del(`/api/devices/${device.device_id}`);
+      onClose();
+    } catch(e) {
+      alert(e.error || 'Delete failed');
+      setDeleting(false);
+      setConfirmDelete(false);
+    }
+  }
+
   const row = (k, v, c) => (
     <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid rgba(0,0,0,0.06)' }}>
       <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 12, color: 'var(--muted)' }}>{k}</span>
@@ -559,10 +614,33 @@ function Detail({ device, token, onClose, onApprove, isAdmin }) {
         <div style={{ background: 'linear-gradient(180deg,#dedad2,#ccc8c0)', borderBottom: '1px solid #b0aca4', padding: '20px 24px 0', boxShadow: '0 1px 0 rgba(255,255,255,0.5) inset' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 20, marginBottom: 16 }}>
             <LedRing state={state} size={72}/>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 26, color: 'var(--text)', fontWeight: 600, letterSpacing: '-0.02em', lineHeight: 1 }}>
-                {device.label || <span style={{ color: 'var(--muted)', fontSize: 20 }}>{device.device_id.slice(0,8)}…</span>}
-              </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              {renaming ? (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <input
+                    type="text" value={renameValue} autoFocus
+                    onChange={e => setRenameValue(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') doRename();
+                      if (e.key === 'Escape') { setRenaming(false); setRenameValue(device.label || ''); }
+                    }}
+                    style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 20, fontWeight: 600, padding: '4px 8px', maxWidth: 280 }}
+                  />
+                  <Pill small onClick={doRename} disabled={renameSaving}>{renameSaving ? 'Saving…' : 'Save'}</Pill>
+                  <Pill small onClick={() => { setRenaming(false); setRenameValue(device.label || ''); }}>Cancel</Pill>
+                </div>
+              ) : (
+                <div
+                  onClick={() => isAdmin && setRenaming(true)}
+                  title={isAdmin ? 'Click to rename' : undefined}
+                  style={{
+                    fontFamily: "'DM Sans',sans-serif", fontSize: 26, color: 'var(--text)', fontWeight: 600,
+                    letterSpacing: '-0.02em', lineHeight: 1, cursor: isAdmin ? 'pointer' : 'default',
+                    display: 'inline-block',
+                  }}>
+                  {device.label || <span style={{ color: 'var(--muted)', fontSize: 20 }}>{device.device_id.slice(0,8)}…</span>}
+                </div>
+              )}
               <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)', marginTop: 4, letterSpacing: '0.05em' }}>
                 {device.ip} · {device.device_id} · {device.firmware_ver || 'unknown'}
                 {needsUpdate && <span style={{ color: '#806010', marginLeft: 10 }}>Update available</span>}
@@ -572,6 +650,17 @@ function Detail({ device, token, onClose, onApprove, isAdmin }) {
               <div style={{ background: 'linear-gradient(160deg,#2a2e28,#1c1f18)', border: '1px solid #1a1c16', borderRadius: 6, padding: '5px 12px', boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.5)' }}>
                 <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: state.dot, textShadow: `0 0 8px ${state.dot}88`, letterSpacing: '0.05em' }}>{state.label.toUpperCase()}</span>
               </div>
+              {isAdmin && !confirmDelete && (
+                <button onClick={() => setConfirmDelete(true)} title="Delete device"
+                  style={{ background: 'linear-gradient(180deg,#d0ccc4,#bab6ae)', border: '1px solid #a0a098', borderRadius: '50%', width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', boxShadow: '0 1px 0 rgba(255,255,255,0.5) inset', color: '#a04848', fontSize: 13 }}>🗑</button>
+              )}
+              {isAdmin && confirmDelete && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: '#a04848' }}>Delete?</span>
+                  <Pill small danger disabled={deleting} onClick={doDelete}>{deleting ? '…' : 'Confirm'}</Pill>
+                  <Pill small onClick={() => setConfirmDelete(false)} disabled={deleting}>Cancel</Pill>
+                </div>
+              )}
               <button onClick={onClose} style={{ background: 'linear-gradient(180deg,#d0ccc4,#bab6ae)', border: '1px solid #a0a098', borderRadius: '50%', width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', boxShadow: '0 1px 0 rgba(255,255,255,0.5) inset', color: '#5a5650', fontSize: 16, fontWeight: 300 }}>×</button>
             </div>
           </div>
@@ -718,12 +807,17 @@ function Detail({ device, token, onClose, onApprove, isAdmin }) {
           {tab === 'updates' && (
             <div style={{ maxWidth: 440 }}>
               {/* Version LCDs */}
-              <div style={{ display:'flex', gap:16, marginBottom:28 }}>
+              <div style={{ display:'flex', gap:16, marginBottom:12, alignItems:'flex-end' }}>
                 <Lcd label="On device"  value={device.firmware_ver || '—'} color={needsUpdate ? 'var(--lcd-amber)' : 'var(--lcd-green)'}/>
                 <Lcd label="Available"  value={release?.version || '—'} color="var(--lcd-dim)"/>
                 {device.firmware_previous && (
                   <Lcd label="Rollback slot" value={device.firmware_previous} color="var(--lcd-dim)"/>
                 )}
+              </div>
+              <div style={{ marginBottom:24 }}>
+                <Pill small onClick={doCheckRelease} disabled={checkingRelease}>
+                  {checkingRelease ? 'Checking…' : 'Check now'}
+                </Pill>
               </div>
 
               {/* GitHub release deploy */}
@@ -1097,6 +1191,18 @@ service echomuse /data/local/bin/start_server.sh
     class late_start
 `;
 
+// Known-good Magisk release for this device/Android version. Checked
+// against the uploaded file's SHA-256 before flashing — catches wrong-
+// version uploads (e.g. a newer Magisk that doesn't support Android 5.1's
+// non-namespaced su, or a corrupted download) before they hit TWRP.
+const _MAGISK_FILENAME = 'Magisk-v17.3.zip';
+const _MAGISK_SHA256    = '18e46b16b25ebe691c282fe311beccd4811cd533848a64e2efbd754fb85efde7';
+
+async function _sha256Hex(buf) {
+  const digest = await crypto.subtle.digest('SHA-256', buf);
+  return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 // Steps:
 //  0  connect_android  — connect in Android mode, verify FireOS 5, reboot to recovery
 //  1  connect_twrp     — reconnect once TWRP menu appears
@@ -1225,6 +1331,8 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   const [wifiNetworks, setWifiNetworks] = useState([]);
   const [duplicateDeviceId, setDuplicateDeviceId] = useState(null);
   const [progress, setProgress] = useState(null);
+  const [latestRelease, setLatestRelease] = useState(null);
+  const [checkingRelease, setCheckingRelease] = useState(false);
   const logRef = useRef(null);
 
   function addLog(msg, type = 'info') {
@@ -1232,6 +1340,25 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     setTimeout(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, 30);
   }
   function markStep(i, st) { setStepState(s => { const n = [...s]; n[i] = st; return n; }); }
+
+  async function doCheckRelease() {
+    setCheckingRelease(true);
+    try {
+      // Same force-check route as the dashboard's Updates tab — bypasses
+      // the 60s in-memory cache and the (default 1h) DB cache that
+      // /api/provision/latest_binary's underlying _get_cached_release()
+      // would otherwise silently serve stale. This doesn't change what
+      // "Install latest from GitHub" actually installs (that still goes
+      // through the cache, now freshly populated by this call) — it just
+      // shows the available version before committing to the install.
+      const rel = await API.post('/api/releases/check', {});
+      setLatestRelease(rel);
+      addLog(`Latest GitHub release: ${rel.version}`, 'ok');
+    } catch (e) {
+      addLog(`Release check failed: ${e.error || e.message || 'unknown error'}`, 'error');
+    }
+    setCheckingRelease(false);
+  }
 
   // ── Step runners ──
 
@@ -1254,19 +1381,28 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
 
     // Refuse to re-provision a device already known to the controller —
     // this flow reboots into recovery, flashes a patched boot image, and
-    // is destructive to wipe through. Cross-check defensively since we
-    // don't know the exact field name the controller uses for serial.
+    // is destructive to wipe through. Confirmed against em_api.py
+    // _merge_device(): device_id is the only identifying field on the
+    // device object, and it IS ro.serialno (set at registration time in
+    // em_controller.py), not a separate serial/serial_number/id field.
     if (serial && knownDevices && knownDevices.length) {
-      const match = knownDevices.find(d =>
-        [d.serial, d.serial_number, d.device_id, d.id].some(f => f && String(f).includes(serial))
-      );
+      const match = knownDevices.find(d => d.device_id && d.device_id.includes(serial));
       if (match) {
+        // Close the live ADB session before throwing — otherwise the
+        // transport stays open and _lastUsbDevice keeps pointing at it.
+        // On retry, requestDevice() disconnects the WebUSB interface but
+        // the device-side adbd session was never told to close, so the
+        // next Transport.authenticate() races a half-torn-down session
+        // and hangs at "Authenticating ADB…". Mirrors the clean-exit
+        // close()/setAdb(null) a few lines below.
+        await c.close();
+        setAdb(null);
         const err = new Error(
           `This device (serial ${serial}) appears to already be registered with the controller ` +
-          `as "${match.label || match.device_id || match.id}". Delete it from the controller first ` +
+          `as "${match.label || match.device_id}". Delete it from the controller first ` +
           `if you want to re-provision, then retry.`
         );
-        err.matchedDeviceId = match.device_id || match.id;
+        err.matchedDeviceId = match.device_id;
         throw err;
       }
     }
@@ -1307,34 +1443,61 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     const bootImg = await c.pull('/tmp/work/boot.img');
     addLog(`Boot image: ${(bootImg.length / 1024 / 1024).toFixed(1)} MB`);
 
-    addLog('Patching cmdline for SELinux permissive…');
-    const patched = new Uint8Array(bootImg);
-    const newCmd  = new TextEncoder().encode('bootopt=64S3,32N2,64N2 androidboot.selinux=permissive');
-    patched.fill(0, 64, 576);
-    patched.set(newCmd, 64);
+    // Check the CURRENT cmdline before touching anything — magiskboot's
+    // own unpack log already echoes CMDLINE [...] for the unmodified
+    // image, so use that as the source of truth instead of re-deriving
+    // it from the manual byte-offset patch logic. If a previous wizard
+    // run already flipped SELinux to permissive, re-running the blind
+    // overwrite is unnecessary risk (another write to a device with no
+    // real recovery path if it goes wrong) for zero benefit.
+    addLog('Checking current boot image cmdline…');
+    const probeOut = await c.shell('cd /tmp/work && /tmp/bin/magiskboot unpack boot.img 2>&1');
+    addLog(probeOut || '(done)');
+    const cmdlineAlreadyPermissive = probeOut.includes('androidboot.selinux=permissive');
 
-    addLog('Pushing patched image…');
-    await c.push('/tmp/work/boot_patched.img', patched, pct => setProgress({ label: 'Pushing boot image', pct }));
-    setProgress(null);
+    let workImg = 'boot.img';
+    if (cmdlineAlreadyPermissive) {
+      addLog('cmdline already has androidboot.selinux=permissive — skipping cmdline patch.', 'warn');
+    } else {
+      addLog('Patching cmdline for SELinux permissive…');
+      const patched = new Uint8Array(bootImg);
+      const newCmd  = new TextEncoder().encode('bootopt=64S3,32N2,64N2 androidboot.selinux=permissive');
+      patched.fill(0, 64, 576);
+      patched.set(newCmd, 64);
 
-    addLog('Unpacking ramdisk…');
-    const unpackOut = await c.shell('cd /tmp/work && /tmp/bin/magiskboot unpack boot_patched.img 2>&1');
-    addLog(unpackOut || '(done)');
+      addLog('Pushing patched image…');
+      await c.push('/tmp/work/boot_patched.img', patched, pct => setProgress({ label: 'Pushing boot image', pct }));
+      setProgress(null);
+      workImg = 'boot_patched.img';
+
+      addLog('Unpacking ramdisk…');
+      const unpackOut = await c.shell(`cd /tmp/work && /tmp/bin/magiskboot unpack ${workImg} 2>&1`);
+      addLog(unpackOut || '(done)');
+    }
+    // Either branch leaves /tmp/work/ramdisk.cpio in place — the probe
+    // unpack above already extracted it from boot.img when cmdline was
+    // already permissive, so no second unpack is needed in that case.
     await c.shell('mkdir -p /tmp/ramdisk && cd /tmp/ramdisk && cpio -id < /tmp/work/ramdisk.cpio 2>/dev/null');
 
     addLog('Patching init.csm.project.rc…');
     const rcBytes  = await c.pull('/tmp/ramdisk/init.csm.project.rc');
     const existing = new TextDecoder().decode(rcBytes);
-    if (existing.includes('service echomuse')) {
+    const rcAlreadyPatched = existing.includes('service echomuse');
+    if (rcAlreadyPatched) {
       addLog('Service entries already present — skipping.', 'warn');
     } else {
       await c.push('/tmp/ramdisk/init.csm.project.rc', new TextEncoder().encode(existing + _INIT_RC_APPEND));
       await c.shell('chmod 750 /tmp/ramdisk/init.csm.project.rc');
     }
 
+    if (cmdlineAlreadyPermissive && rcAlreadyPatched) {
+      addLog('Boot image already fully patched — nothing to flash.', 'ok');
+      return;
+    }
+
     addLog('Repacking ramdisk…');
     await c.shell('cd /tmp/ramdisk && find . | cpio -o -H newc > /tmp/work/ramdisk.cpio 2>/dev/null');
-    const repackOut = await c.shell('cd /tmp/work && /tmp/bin/magiskboot repack boot_patched.img 2>&1');
+    const repackOut = await c.shell(`cd /tmp/work && /tmp/bin/magiskboot repack ${workImg} 2>&1`);
     addLog(repackOut || '(done)');
 
     addLog('Flashing patched boot image…');
@@ -1343,13 +1506,24 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   }
 
   async function runInstallMagisk(c, file) {
-    addLog(`Pushing ${file.name} to /sdcard/…`);
+    addLog(`Hashing ${file.name}…`);
     const buf = await file.arrayBuffer();
-    await c.push('/sdcard/Magisk-v17.3.zip', new Uint8Array(buf),
+    const hash = await _sha256Hex(buf);
+    addLog(`SHA256: ${hash}`);
+    if (hash !== _MAGISK_SHA256) {
+      throw new Error(
+        `Hash mismatch — expected ${_MAGISK_SHA256.slice(0, 12)}… (${_MAGISK_FILENAME}), ` +
+        `got ${hash.slice(0, 12)}… for "${file.name}". Wrong file or wrong Magisk version — ` +
+        `not flashing. If you've intentionally updated the Magisk build, update _MAGISK_SHA256.`
+      );
+    }
+    addLog('Hash verified.', 'ok');
+    addLog(`Pushing ${file.name} to /sdcard/…`);
+    await c.push(`/sdcard/${_MAGISK_FILENAME}`, new Uint8Array(buf),
       pct => setProgress({ label: 'Uploading Magisk', pct }));
     setProgress(null);
     addLog('Installing via TWRP (this takes ~30s)…');
-    const out = await c.shell('twrp install /sdcard/Magisk-v17.3.zip 2>&1');
+    const out = await c.shell(`twrp install /sdcard/${_MAGISK_FILENAME} 2>&1`);
     addLog(out || '(done)');
     if (out.toLowerCase().includes('error') || out.toLowerCase().includes('failed')) {
       throw new Error('TWRP install reported an error — check the log.');
@@ -1358,12 +1532,44 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   }
 
   async function runPreseedDb(c) {
+    // Clear any leftover Magisk state from a prior root install before
+    // pushing the fresh DB. This device's own logs showed magiskd
+    // rejecting every su call with "sqlite3_exec: no such table" against
+    // a freshly-preseeded DB — but that exact preseed code has worked on
+    // many prior FRESH-device provisions, so the DB content alone isn't
+    // sufficient explanation. The actual differentiator on a re-provision
+    // (boot image re-patched, Magisk re-flashed, but /data NOT wiped) is
+    // that /data/adb/magisk.img — Magisk's own module/data image, separate
+    // from magisk.db — survives from the old install. Per Magisk's own
+    // docs, magisk.img gets merged/mounted at post-fs-data before the
+    // daemon handles any su request; stale state there plausibly disrupts
+    // magiskd's normal first-boot DB migration, leaving an incomplete
+    // preseeded DB un-migrated. Rather than rely on that being the full
+    // explanation, just clear both files unconditionally — a fresh
+    // provision shouldn't inherit ANY prior Magisk state, full stop, same
+    // principle as wiping server_a/server_b before a fresh EchoMuse
+    // install. Scoped to magisk.db + magisk.img specifically, not the
+    // whole /data/adb directory — TWRP's Magisk zip install (the previous
+    // step) writes Magisk's own binaries/scripts under there too, and
+    // there's no reason to risk interfering with that.
+    //
+    // NOTE: this step runs in the TWRP shell (no reconnect happens
+    // between install_magisk and preseed_db — same session throughout),
+    // where the shell is already root and there's no magiskd/su to broker
+    // through yet (magiskd only starts once Android actually boots). Plain
+    // rm, not `su -c rm` — matches every other command in runPatchBoot/
+    // runInstallMagisk, which run in this identical TWRP context.
+    addLog('Clearing any pre-existing Magisk state (magisk.db, magisk.img)…');
+    await c.shell('mkdir -p /data/adb');
+    const rmOut = (await c.shell('rm -f /data/adb/magisk.db /data/adb/magisk.img 2>&1')).trim();
+    if (rmOut) addLog(`  → ${rmOut}`);
+    addLog('Cleared.', 'ok');
+
     addLog('Downloading magisk.db from controller…');
     const resp = await fetch('/api/provision/magisk_db', { headers: { Authorization: `Bearer ${token}` } });
     if (!resp.ok) throw new Error(`Controller returned ${resp.status}`);
     const dbBytes = new Uint8Array(await resp.arrayBuffer());
     addLog(`magisk.db: ${dbBytes.length} bytes`);
-    await c.shell('mkdir -p /data/adb');
     await c.push('/tmp/magisk_preseed.db', dbBytes);
     await c.shell('cp /tmp/magisk_preseed.db /data/adb/magisk.db && chmod 600 /data/adb/magisk.db');
     addLog('magisk.db installed.', 'ok');
@@ -1387,10 +1593,46 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   }
 
   async function runVerifyRoot(c) {
-    addLog('Testing su -c id… (can take 30s+ on first boot while Magisk initialises — be patient)');
-    const out = await c.shell('su -c id 2>&1');
-    addLog(out);
-    if (!out.includes('uid=0')) throw new Error('Root not working — check Magisk install and magisk.db.');
+    // Same lesson as runDisableAlexa: reconnecting over ADB just means the
+    // USB/adbd link is up, not that Android has finished booting — and for
+    // root specifically there's a second gate on top of that, magiskd
+    // itself needs to attach and start granting su requests. A premature
+    // `su -c id` here doesn't just fail cleanly: repeated permission-denied
+    // calls against a magiskd that's still initialising have been observed
+    // to corrupt the grant state from the preseeded magisk.db, leaving
+    // root broken even on later, correctly-timed retries. Wait for both
+    // gates explicitly rather than relying on a single timed attempt.
+    addLog('Waiting for Android framework to finish booting…');
+    let bootReady = false;
+    for (let i = 0; i < 30; i++) {
+      const boot = (await c.shell('getprop sys.boot_completed')).trim();
+      if (boot === '1') { bootReady = true; break; }
+      await new Promise(r => setTimeout(r, 1000));
+    }
+    addLog(bootReady ? 'Framework ready.' : 'Timed out waiting for boot_completed — proceeding anyway.', bootReady ? 'ok' : 'warn');
+
+    addLog('Testing su -c id… (magiskd can take a while to attach after boot — retrying if needed)');
+    let out = '';
+    let rooted = false;
+    const attemptStart = Date.now();
+    for (let i = 0; i < 15; i++) {
+      const callStart = Date.now();
+      out = await c.shell('su -c id 2>&1');
+      const callMs = Date.now() - callStart;
+      // Log every attempt with timing — the previous version of this loop
+      // was silent inside the loop body, so a single su -c id call that's
+      // unexpectedly slow (e.g. blocking on a magiskd socket that isn't
+      // listening yet, rather than failing fast with permission-denied)
+      // was indistinguishable from a true hang. This makes that visible:
+      // if callMs is large, the call itself is slow, not the wizard stuck.
+      addLog(`  attempt ${i + 1}/15 (${(callMs / 1000).toFixed(1)}s): ${out || '(empty)'}`);
+      if (out.includes('uid=0')) { rooted = true; break; }
+      // If a single su call already took a while, don't add the full 2s
+      // sleep on top — just move to the next attempt.
+      if (callMs < 2000) await new Promise(r => setTimeout(r, 2000 - callMs));
+    }
+    addLog(`Total wait: ${((Date.now() - attemptStart) / 1000).toFixed(0)}s.`);
+    if (!rooted) throw new Error('Root not working after waiting for boot + magiskd — check Magisk install and magisk.db.');
     addLog('Root confirmed.', 'ok');
   }
 
@@ -1657,14 +1899,18 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     let buf;
     if (useLatest) {
       addLog('Fetching latest EchoMuse build from controller…');
-      // ASSUMPTION: controller exposes the latest known-good binary via this
-      // route — backed by release_poll_loop() in em_api.py (same mechanism
-      // the OTA pipeline uses to track GitHub releases). Confirm the actual
-      // route name against em_api.py before relying on this in production.
+      // Confirmed against em_api.py: /api/provision/latest_binary streams
+      // the binary itself (distinct from /api/releases/latest, which only
+      // returns {version, url} metadata). Server-side download from
+      // GitHub via the same _get_cached_release()/_fetch_binary() the OTA
+      // pipeline uses — needed because a freshly-flashed device isn't in
+      // _devices yet, so /api/devices/{id}/update (which requires a live
+      // WebSocket session) isn't usable at this point in the wizard.
       const resp = await fetch('/api/provision/latest_binary', { headers: { Authorization: `Bearer ${token}` } });
-      if (!resp.ok) throw new Error(`Controller returned ${resp.status} fetching latest binary — check /api/provision/latest_binary exists in em_api.py.`);
+      if (!resp.ok) throw new Error(`Controller returned ${resp.status} fetching latest binary.`);
       buf = await resp.arrayBuffer();
-      addLog(`Latest build: ${(buf.byteLength/1024/1024).toFixed(1)} MB`);
+      const ver = resp.headers.get('X-Release-Version');
+      addLog(`Latest build${ver ? ` (${ver})` : ''}: ${(buf.byteLength/1024/1024).toFixed(1)} MB`);
     } else {
       addLog(`Pushing ${file.name} to /sdcard/server_new…`);
       buf = await file.arrayBuffer();
@@ -1672,8 +1918,86 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     await c.push('/sdcard/server_new', new Uint8Array(buf),
       pct => setProgress({ label: 'Uploading binary', pct }));
     setProgress(null);
+
+    // Wipe any pre-existing install before writing fresh. A device that's
+    // been through OTA before (or a previous, possibly-failed, wizard run)
+    // can have server, server_a, AND server_b all present — OTA's slot
+    // logic deliberately keeps the inactive slot around for rollback, but
+    // that's the wrong default for a fresh provision: there's no good
+    // "previous version" here, and leaving stale state behind is exactly
+    // what let the GitHub-install bug silently keep an old dev build in
+    // place. Each step is checked individually rather than && chained —
+    // that's what let the original bug stay silent in the first place.
+    addLog('Clearing any pre-existing EchoMuse install…');
+    await c.shell('su -c "mkdir -p /data/local/bin"');
+    const rmOut = (await c.shell('su -c "rm -f /data/local/bin/server /data/local/bin/server_a /data/local/bin/server_b" 2>&1')).trim();
+    if (rmOut) addLog(`  → ${rmOut}`);
+    // Confirm the symlink itself is gone — readlink is already proven on
+    // this device (the OTA pipeline's slot detection relies on it, always
+    // with 2>/dev/null, never 2>&1). Confirmed on hardware: readlink on a
+    // missing target prints an error message rather than returning truly
+    // empty output, so capturing stderr here would corrupt the "empty
+    // means gone" check below. Discard stderr instead, matching the
+    // existing proven pattern in em_api.py exactly.
+    const linkAfterClear = (await c.shell('su -c "readlink /data/local/bin/server" 2>/dev/null')).trim();
+    if (linkAfterClear) {
+      throw new Error(`Failed to clear pre-existing install — /data/local/bin/server still links to "${linkAfterClear}" after rm. Check permissions/mount state with "su -c mount" before retrying.`);
+    }
+    // Deliberately NOT separately checking that server_a/server_b are
+    // gone via `ls`, `test -f`, or c.pull()/cat: readlink above just
+    // demonstrated that this device's toolbox/mksh emits error TEXT for
+    // a missing target rather than empty output, on a command this
+    // codebase already trusted to behave the "normal" way. cat is a
+    // strong candidate to do the same (`cat: ...: No such file`), which
+    // would leak into c.pull()'s captured output and make this check
+    // false-positive on a perfectly clean device — turning a working
+    // provision into a hard abort, which is worse than the silent-stale
+    // bug this whole block exists to fix. The rm output above is already
+    // logged for visibility, and the install verification below checks
+    // server_a's PRESENCE with correct content after the fresh write —
+    // checking something exists with known content is safe to verify;
+    // checking something doesn't exist, on this device, has already
+    // proven not to be straightforward. If rm silently failed on a
+    // locked/mounted-readonly server_a, the subsequent cp in the install
+    // step would either overwrite it (fine) or fail loudly and get
+    // caught by that verification anyway.
+    addLog('Cleared.', 'ok');
+
     addLog('Installing to /data/local/bin/ (A slot)…');
-    await c.shell("su -c 'mkdir -p /data/local/bin && cp /sdcard/server_new /data/local/bin/server_a && chmod 755 /data/local/bin/server_a && ln -sf server_a /data/local/bin/server'");
+    // Each step checked individually instead of && chained — the original
+    // bug here was a chained mkdir/cp/chmod/ln with no stderr capture and
+    // no output check, so a silent cp/ln failure (disk full, permission,
+    // anything) would short-circuit the chain before ln -sf ran. With the
+    // directory now guaranteed empty above, a partial failure here is
+    // unambiguous: if cp fails, server_a simply won't exist, and the
+    // verification below catches it precisely rather than guessing.
+    const cpOut = (await c.shell('su -c "cp /sdcard/server_new /data/local/bin/server_a" 2>&1')).trim();
+    if (cpOut) addLog(`  → cp: ${cpOut}`);
+    const chmodOut = (await c.shell('su -c "chmod 755 /data/local/bin/server_a" 2>&1')).trim();
+    if (chmodOut) addLog(`  → chmod: ${chmodOut}`);
+    const lnOut = (await c.shell('su -c "ln -sf server_a /data/local/bin/server" 2>&1')).trim();
+    if (lnOut) addLog(`  → ln: ${lnOut}`);
+
+    // Verify the symlink actually points where we just told it to, and
+    // that the bytes on disk match what we pushed. Deliberately NOT using
+    // `wc -c` or any other shell tool here that hasn't already been
+    // proven on this device — this device has burned multiple sessions on
+    // assumed-present tools turning out missing (awk/cut/head/printf/
+    // which all confirmed absent), and a verification step that throws a
+    // false positive because of a missing tool is worse than no
+    // verification at all. c.pull() is already proven (it's how every
+    // other pull in this wizard works), so reuse it for the size check
+    // instead of trusting a new shell command's availability.
+    const linkTarget = (await c.shell('su -c "readlink /data/local/bin/server" 2>/dev/null')).trim();
+    if (linkTarget !== 'server_a') {
+      throw new Error(`Install verification failed: /data/local/bin/server points to "${linkTarget || '(empty — symlink missing)'}", expected "server_a". The cp/ln chain likely failed — check the install output above and free space on /data with "su -c df".`);
+    }
+    const installedBytes = await c.pull('/data/local/bin/server_a');
+    if (installedBytes.length !== buf.byteLength) {
+      throw new Error(`Install verification failed: /data/local/bin/server_a is ${installedBytes.length.toLocaleString()} bytes on device, expected ${buf.byteLength.toLocaleString()}. The copy likely failed or was truncated — check free space on /data.`);
+    }
+    addLog(`Verified: server → server_a (${installedBytes.length.toLocaleString()} bytes, matches pushed binary).`, 'ok');
+
     addLog('Fetching startup script from controller…');
     const resp2 = await fetch('/api/provision/start_script', { headers: { Authorization: `Bearer ${token}` } });
     if (!resp2.ok) throw new Error(`Controller returned ${resp2.status}`);
@@ -1716,6 +2040,11 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       addLog(`Error: ${e.message}`, 'error');
       markStep(stepIdx, 'error');
       if (e.matchedDeviceId) setDuplicateDeviceId(e.matchedDeviceId);
+      // Clear the file selection on failure — forces a deliberate reselect
+      // before retry rather than silently re-flashing whatever was picked
+      // last time (which, on a hash-mismatch failure, is the wrong file).
+      if (stepIdx === 3) setMagiskFile(null);
+      if (stepIdx === 10) setBinaryFile(null);
     }
     setRunning(false);
   }
@@ -1767,14 +2096,12 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
           <div style={{ width: 176, borderRight: '1px solid #c8c4bc', padding: '12px 0', overflowY: 'auto', flexShrink: 0 }}>
             {_WIZARD_STEPS.map((s, i) => {
               const st = stepState[i]; const active = i === step;
-              const jumpable = !running && i !== step && (st === 'done' || st === 'error' || st === 'pending');
               return (
                 <div key={s.id}
-                  onClick={() => jumpable && setStep(i)}
                   style={{
                     padding: '6px 14px', display: 'flex', alignItems: 'center', gap: 7,
                     background: active ? 'rgba(0,0,0,0.06)' : 'transparent',
-                    cursor: jumpable ? 'pointer' : 'default',
+                    cursor: 'default',
                     opacity: running && !active ? 0.5 : 1,
                   }}>
                   <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: statusColors[st], flexShrink: 0 }}>{statusIcons[st]}</span>
@@ -1811,10 +2138,13 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
               </div>
             )}
 
-            {/* Step 3: Magisk zip file picker */}
-            {step === 3 && stepState[3] === 'pending' && (
+            {/* Step 3: Magisk zip file picker — stays visible through error so a
+                different file can be picked, not just gone after one attempt */}
+            {step === 3 && stepState[3] !== 'done' && !running && (
               <div style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
-                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--text2)', letterSpacing: '0.08em' }}>MAGISK-V17.3.ZIP</div>
+                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--text2)', letterSpacing: '0.08em' }}>
+                  {stepState[3] === 'error' ? 'SELECT A DIFFERENT FILE' : 'MAGISK-V17.3.ZIP'}
+                </div>
                 <input
                   type="file" accept=".zip"
                   onChange={e => setMagiskFile(e.target.files[0])}
@@ -1824,14 +2154,26 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
               </div>
             )}
 
-            {/* Step 10: EchoMuse binary — custom upload or latest from controller */}
-            {step === 10 && stepState[10] === 'pending' && (
+            {/* Step 10: EchoMuse binary — custom upload or latest from controller.
+                Stays visible through error so a different file/source can be
+                tried instead of being stuck retrying whatever failed. */}
+            {step === 10 && stepState[10] !== 'done' && !running && (
               <div style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
-                <div style={{ display: 'flex', gap: 8 }}>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                   <Pill accent onClick={() => runStep(10, true)}>Install latest from GitHub</Pill>
+                  <Pill small onClick={doCheckRelease} disabled={checkingRelease}>
+                    {checkingRelease ? 'Checking…' : 'Check for newer release'}
+                  </Pill>
+                  {latestRelease && (
+                    <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)' }}>
+                      Latest on GitHub: {latestRelease.version}
+                    </span>
+                  )}
                 </div>
                 <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', letterSpacing: '0.04em' }}>— or —</div>
-                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--text2)', letterSpacing: '0.08em' }}>CUSTOM ECHOMUSE SERVER BINARY (ARMv7)</div>
+                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--text2)', letterSpacing: '0.08em' }}>
+                  {stepState[10] === 'error' ? 'SELECT A DIFFERENT BUILD (ARMv7)' : 'CUSTOM ECHOMUSE SERVER BINARY (ARMv7)'}
+                </div>
                 <input
                   type="file"
                   onChange={e => setBinaryFile(e.target.files[0])}
@@ -1855,17 +2197,18 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
               />
             )}
 
-            {/* Retry button — re-runs the step directly (runStep marks it running) */}
-            {!running && stepState[step] === 'error' && (
+            {/* Retry button — re-runs the step directly (runStep marks it running).
+                Excludes steps with their own dedicated retry UI above (file
+                pickers for 3/10, WifiPanel for 9) — those already give a
+                complete retry path with fresh input, so a second generic
+                "Retry" here would just compete with it and, for the file
+                steps, retry with no file selected (since failure clears it). */}
+            {!running && stepState[step] === 'error' && ![3, 9, 10].includes(step) && (
               <div style={{ marginBottom: 10, display: 'flex', gap: 8 }}>
                 <Pill onClick={() => runStep(step)}>Retry</Pill>
                 {step === 0 && duplicateDeviceId && (
                   <Pill danger onClick={async () => {
                     try {
-                      // Route shape inferred from the dashboard's existing
-                      // /api/devices/{id}/... convention — not yet confirmed
-                      // against em_api.py. If this 404s, the real route name
-                      // needs checking there.
                       await API.del(`/api/devices/${duplicateDeviceId}`);
                       addLog(`Deleted "${duplicateDeviceId}" from controller. You can retry now.`, 'ok');
                       setDuplicateDeviceId(null);
@@ -1935,6 +2278,7 @@ function App() {
   const [devices, setDevices] = useState([]);
   const [selected, setSelected] = useState(null);
   const [release, setRelease] = useState(null);
+  const [checkingRelease, setCheckingRelease] = useState(false);
   const [status, setStatus] = useState(null);
   const [loadError, setLoadError] = useState(null);
   const [showWizard, setShowWizard] = useState(false);
@@ -2091,12 +2435,23 @@ function App() {
               <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 8, color: 'var(--lcd-dim)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 6 }}>Latest Release</div>
               <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 18, color: 'var(--lcd-green)', lineHeight: 1 }}>{release.version}</div>
             </div>
-            {isAdmin && updates > 0 && (
-              <Pill small accent onClick={async () => {
+            {isAdmin && (
+              <Pill small accent={!checkingRelease} disabled={checkingRelease} onClick={async () => {
+                setCheckingRelease(true);
                 try {
-                  await API.post('/api/releases/deploy', {});
-                } catch(e) { alert(e.error || 'Deploy failed'); }
-              }}>Deploy all</Pill>
+                  // Same force-check route used by the Updates tab and
+                  // wizard (POST /api/releases/check) — bypasses the
+                  // cache so this is a genuine live GitHub check, not
+                  // just re-reading whatever was last polled.
+                  const rel = await API.post('/api/releases/check', {});
+                  setRelease(rel);
+                } catch(e) {
+                  alert(e.error || 'Release check failed');
+                }
+                setCheckingRelease(false);
+              }}>
+                {checkingRelease ? 'Checking…' : 'Check for updates'}
+              </Pill>
             )}
           </div>
         )}

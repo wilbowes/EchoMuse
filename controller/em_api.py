@@ -142,6 +142,7 @@ async def create_app() -> web.Application:
     # Provisioning
     app.router.add_get("/api/provision/start_script", _get_provision_start_script)
     app.router.add_get("/api/provision/magisk_db",    _get_provision_magisk_db)
+    app.router.add_get("/api/provision/latest_binary", _get_provision_latest_binary)
 
     # Live events WebSocket
     app.router.add_get("/api/events", _ws_events)
@@ -1280,6 +1281,38 @@ async def _get_provision_start_script(request: web.Request) -> web.Response:
 
 
 @auth.require_admin
+async def _get_provision_latest_binary(request: web.Request) -> web.Response:
+    """
+    GET /api/provision/latest_binary — serves the bytes of the latest
+    GitHub release binary, for the provisioning wizard's "Install latest
+    from GitHub" step.
+
+    Distinct from /api/releases/latest (metadata only: {version, url}) —
+    this route does the actual download from GitHub on the server side
+    and streams the binary back, since a freshly-flashed device isn't
+    registered in _devices yet and can't go through the
+    /api/devices/{id}/update fleet-OTA path (that requires a live
+    WebSocket session). Reuses the same cache/fetch machinery as OTA.
+    """
+    release = await _get_cached_release()
+    if release is None:
+        return _error("no_release", "No release information available", 404)
+
+    binary = await _fetch_binary(release["url"])
+    if binary is None:
+        return _error("fetch_failed", "Could not download binary from GitHub", 502)
+
+    return web.Response(
+        body=binary,
+        content_type='application/octet-stream',
+        headers={
+            'Content-Disposition': 'attachment; filename="server"',
+            'X-Release-Version': release["version"],
+        },
+    )
+
+
+@auth.require_admin
 async def _get_provision_magisk_db(request: web.Request) -> web.Response:
     """GET /api/provision/magisk_db — generates a pre-seeded Magisk grant DB.
 
@@ -1291,19 +1324,42 @@ async def _get_provision_magisk_db(request: web.Request) -> web.Response:
         os.close(fd)
         try:
             con = _sqlite3.connect(path)
+            # Schema confirmed against a real Magisk v17.3 device dump
+            # (sqlite> .schema on a working /data/adb/magisk.db) — NOT
+            # guessed. magiskd queries settings and strings on every su
+            # request regardless of whether anything's stored in them;
+            # the previous version of this function only created
+            # `policies` (and with the wrong columns — no package_name in
+            # the real schema, PRIMARY KEY is uid alone). Missing
+            # settings/strings meant every single su call hit
+            # "sqlite3_exec: no such table" on each of those two tables
+            # and got hard-rejected — which looked like a hang from the
+            # wizard side because su was taking up to ~60s per rejection
+            # cycle, far longer than the wizard's retry loop accounted for.
             con.execute(
                 "CREATE TABLE policies ("
-                "  uid INTEGER NOT NULL,"
-                "  package_name TEXT,"
-                "  policy INTEGER NOT NULL DEFAULT 0,"
-                "  until INTEGER NOT NULL DEFAULT 0,"
-                "  logging INTEGER NOT NULL DEFAULT 1,"
-                "  notification INTEGER NOT NULL DEFAULT 1"
+                "  uid INT,"
+                "  policy INT,"
+                "  until INT,"
+                "  logging INT,"
+                "  notification INT,"
+                "  PRIMARY KEY(uid)"
                 ")"
             )
-            # policy=2 → always grant
-            con.execute("INSERT INTO policies (uid, package_name, policy) VALUES (2000, 'com.android.shell', 2)")
-            con.execute("INSERT INTO policies (uid, package_name, policy) VALUES (0, '', 2)")
+            con.execute(
+                "CREATE TABLE settings (key TEXT, value INT, PRIMARY KEY(key))"
+            )
+            con.execute(
+                "CREATE TABLE strings (key TEXT, value TEXT, PRIMARY KEY(key))"
+            )
+            con.execute(
+                "CREATE TABLE denylist (package_name TEXT, process TEXT, "
+                "PRIMARY KEY(package_name, process))"
+            )
+            # policy=2 → always grant. Matches the confirmed real schema:
+            # uid, policy, until, logging, notification — no package_name.
+            con.execute("INSERT INTO policies (uid, policy, until, logging, notification) VALUES (2000, 2, 0, 1, 1)")
+            con.execute("INSERT INTO policies (uid, policy, until, logging, notification) VALUES (0, 2, 0, 1, 1)")
             con.commit()
             con.close()
             return Path(path).read_bytes()
