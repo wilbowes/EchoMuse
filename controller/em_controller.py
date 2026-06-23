@@ -308,28 +308,26 @@ def resample_to_stereo_48k(pcm: bytes, from_rate: int) -> bytes:
 
 # ─── Voice pipeline ───────────────────────────────────────────────────────────
 
-async def run_voice_turn(device: Device):
-    log.info(f"[{device.device_id}] Voice turn starting")
-    device.listening = True
-    await leds_listening(device)
-    await _push_device_state(device)
+async def _run_claracore_backend(
+    device: Device,
+    on_thinking,
+) -> bytes:
+    """
+    Wire-protocol concern: bespoke ClaraCore WebSocket exchange.
 
+    Connects to VOICE_WS_URI, streams mic audio from device.voice_queue,
+    signals END on VAD sentinel, and returns the raw TTS PCM bytes when
+    they arrive.
+
+    Calls on_thinking() (async callable, no args) once when the "THINKING"
+    sentinel is received from the voice server — device mechanics layer
+    uses this to update LED/state without this function knowing about any
+    of that.
+
+    Returns b"" if cancelled, timed out, or the server sent no audio.
+    Returns the raw PCM bytes on success.
+    """
     voice_response: bytes = b""
-    stop_spin  = asyncio.Event()
-    spin_task  = None
-
-    async def cleanup():
-        device.thinking  = False
-        device.listening = False
-        await _push_device_state(device)
-        stop_spin.set()
-        if spin_task and not spin_task.done():
-            spin_task.cancel()
-            try:
-                await spin_task
-            except asyncio.CancelledError:
-                pass
-        await leds_off(device)
 
     try:
         async with websockets.connect(
@@ -378,20 +376,12 @@ async def run_voice_turn(device: Device):
                     log.error(f"[{device.device_id}] Mic stream error: {e}")
 
             async def receive_response():
-                nonlocal voice_response, spin_task
+                nonlocal voice_response
                 try:
                     async for message in ws:
                         if isinstance(message, str) and message == "THINKING":
-                            device.thinking  = True
-                            device.listening = False
-                            await _push_device_state(device)
-                            log.info(f"[{device.device_id}] Thinking — starting spinner")
-                            if not device.cancel_event.is_set() and (
-                                spin_task is None or spin_task.done()
-                            ):
-                                spin_task = asyncio.create_task(
-                                    leds_spin_green(device, stop_spin)
-                                )
+                            log.info(f"[{device.device_id}] Thinking signal from voice server")
+                            await on_thinking()
                         elif isinstance(message, bytes) and message:
                             voice_response = message
                             log.info(
@@ -402,7 +392,6 @@ async def run_voice_turn(device: Device):
                 except Exception as e:
                     log.error(f"[{device.device_id}] WS receive error: {e}")
 
-            await device.mic_start_turn()
             mic_task     = asyncio.create_task(stream_mic())
             receive_task = asyncio.create_task(receive_response())
             cancel_task  = asyncio.create_task(device.cancel_event.wait())
@@ -417,19 +406,15 @@ async def run_voice_turn(device: Device):
                 log.warning(f"[{device.device_id}] Voice turn: voice server timeout — no response in 45s")
                 for task in pending:
                     task.cancel()
-                await device.mic_stop()
                 mic_task.cancel()
-                await cleanup()
-                return
+                return b""
 
-            await device.mic_stop()
             mic_task.cancel()
 
             if cancel_task in done:
-                log.info(f"[{device.device_id}] Voice turn cancelled")
+                log.info(f"[{device.device_id}] Voice turn cancelled during backend exchange")
                 receive_task.cancel()
-                await cleanup()
-                return
+                return b""
 
             cancel_task.cancel()
             try:
@@ -439,8 +424,124 @@ async def run_voice_turn(device: Device):
 
     except Exception as e:
         log.error(f"[{device.device_id}] Voice turn WS failed: {e}")
+        return b""
+
+    return voice_response
+
+
+async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None:
+    """
+    Post-turn timing concern: EQ, resample, stream to device, acoustic-feedback wait.
+
+    voice_response is raw Piper-rate mono S16_LE PCM. Returns once the
+    device audio buffer has drained (or cancel_event fires), so the caller
+    can safely restart the mic without acoustic feedback into the next turn.
+    """
+    log.info(
+        f"[{device.device_id}] EQ: bands={device.eq_bands} "
+        f"loudness={device.eq_loudness}"
+    )
+    eq_pcm      = em_eq.apply(voice_response, PIPER_RATE, device.eq_bands, device.eq_loudness)
+    speaker_pcm = resample_to_stereo_48k(eq_pcm, PIPER_RATE)
+    log.info(
+        f"[{device.device_id}] Streaming {len(speaker_pcm)} bytes "
+        f"({len(speaker_pcm)//SPEAKER_BYTES} periods)"
+    )
+    cancel_task    = asyncio.create_task(device.cancel_event.wait())
+    stream_task    = asyncio.create_task(device.stream_speaker(speaker_pcm))
+    t_stream_start = asyncio.get_event_loop().time()
+
+    done, _ = await asyncio.wait(
+        [stream_task, cancel_task],
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+
+    if cancel_task in done:
+        log.info(f"[{device.device_id}] Cancelled during playback")
+        stream_task.cancel()
+    else:
+        # Wait for device audio buffer to drain before restarting mic.
+        # The device has ~341ms of buffered audio after the last frame
+        # is sent (4 audioCh + 4 ALSA hw periods at 2048 samples/48kHz).
+        # Without this wait, the mic restarts while the speaker is still
+        # playing, causing acoustic feedback into the next voice turn.
+        if not device.cancel_event.is_set():
+            # stream_speaker completes when frames are buffered (network
+            # I/O), not when the device finishes playing them. For long
+            # responses, asyncio TCP backpressure means stream_speaker
+            # itself takes a significant fraction of audio_duration.
+            # Sleeping the full audio_duration after that overshoots —
+            # the spinner ran long after playback ended. Sleep only the
+            # remaining time instead.
+            audio_duration = len(speaker_pcm) / (SPEAKER_RATE * 4)  # stereo S16LE
+            elapsed        = asyncio.get_event_loop().time() - t_stream_start
+            remaining      = max(0.0, audio_duration - elapsed)
+            log.info(
+                f"[{device.device_id}] Streaming took {elapsed:.1f}s, "
+                f"sleeping {remaining:.1f}s for buffer drain "
+                f"(total={audio_duration:.1f}s)"
+            )
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+            log.info(f"[{device.device_id}] Playback complete")
+
+    cancel_task.cancel()
+
+
+async def run_voice_turn(device: Device):
+    """
+    Device mechanics concern: coordinates a single voice turn end-to-end.
+
+    Owns mic_start_turn/mic_stop, LED transitions, listening/thinking/speaking
+    flags, _push_device_state, cancel_event handling, and the 45s turn guard.
+    Delegates the actual voice backend exchange to _run_claracore_backend()
+    and post-turn audio playback + timing to _run_post_turn_playback().
+
+    VOICE_MODE gating lives in the caller (_run_voice_locked) — this
+    function always runs the claracore path. esphome mode will add a
+    parallel entry point here once PR2 lands.
+    """
+    log.info(f"[{device.device_id}] Voice turn starting")
+    device.listening = True
+    await leds_listening(device)
+    await _push_device_state(device)
+
+    stop_spin  = asyncio.Event()
+    spin_task  = None
+
+    async def cleanup():
+        device.thinking  = False
+        device.listening = False
+        await _push_device_state(device)
+        stop_spin.set()
+        if spin_task and not spin_task.done():
+            spin_task.cancel()
+            try:
+                await spin_task
+            except asyncio.CancelledError:
+                pass
+        await leds_off(device)
+
+    async def on_thinking():
+        nonlocal spin_task
+        device.thinking  = True
+        device.listening = False
+        await _push_device_state(device)
+        log.info(f"[{device.device_id}] Thinking — starting spinner")
+        if not device.cancel_event.is_set() and (spin_task is None or spin_task.done()):
+            spin_task = asyncio.create_task(leds_spin_green(device, stop_spin))
+
+    await device.mic_start_turn()
+
+    try:
+        voice_response = await _run_claracore_backend(device, on_thinking)
+    except Exception as e:
+        log.error(f"[{device.device_id}] Backend error: {e}")
+        await device.mic_stop()
         await cleanup()
         return
+
+    await device.mic_stop()
 
     if not voice_response:
         log.warning(f"[{device.device_id}] No audio response — ignoring")
@@ -452,60 +553,13 @@ async def run_voice_turn(device: Device):
         await cleanup()
         return
 
+    # Start spinner now if THINKING never arrived (e.g. very fast response
+    # where audio bytes came back before the THINKING sentinel).
     if spin_task is None or spin_task.done():
         spin_task = asyncio.create_task(leds_spin_green(device, stop_spin))
 
     try:
-        log.info(
-            f"[{device.device_id}] EQ: bands={device.eq_bands} "
-            f"loudness={device.eq_loudness}"
-        )
-        eq_pcm      = em_eq.apply(voice_response, PIPER_RATE, device.eq_bands, device.eq_loudness)
-        speaker_pcm = resample_to_stereo_48k(eq_pcm, PIPER_RATE)
-        log.info(
-            f"[{device.device_id}] Streaming {len(speaker_pcm)} bytes "
-            f"({len(speaker_pcm)//SPEAKER_BYTES} periods)"
-        )
-        cancel_task    = asyncio.create_task(device.cancel_event.wait())
-        stream_task    = asyncio.create_task(device.stream_speaker(speaker_pcm))
-        t_stream_start = asyncio.get_event_loop().time()
-
-        done, _ = await asyncio.wait(
-            [stream_task, cancel_task],
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-
-        if cancel_task in done:
-            log.info(f"[{device.device_id}] Cancelled during playback")
-            stream_task.cancel()
-        else:
-            # Wait for device audio buffer to drain before restarting mic.
-            # The device has ~341ms of buffered audio after the last frame
-            # is sent (4 audioCh + 4 ALSA hw periods at 2048 samples/48kHz).
-            # Without this wait, the mic restarts while the speaker is still
-            # playing, causing acoustic feedback into the next voice turn.
-            if not device.cancel_event.is_set():
-                # stream_speaker completes when frames are buffered (network
-                # I/O), not when the device finishes playing them. For long
-                # responses, asyncio TCP backpressure means stream_speaker
-                # itself takes a significant fraction of audio_duration.
-                # Sleeping the full audio_duration after that overshoots —
-                # the spinner ran long after playback ended. Sleep only the
-                # remaining time instead.
-                audio_duration = len(speaker_pcm) / (SPEAKER_RATE * 4)  # stereo S16LE
-                elapsed        = asyncio.get_event_loop().time() - t_stream_start
-                remaining      = max(0.0, audio_duration - elapsed)
-                log.info(
-                    f"[{device.device_id}] Streaming took {elapsed:.1f}s, "
-                    f"sleeping {remaining:.1f}s for buffer drain "
-                    f"(total={audio_duration:.1f}s)"
-                )
-                if remaining > 0:
-                    await asyncio.sleep(remaining)
-                log.info(f"[{device.device_id}] Playback complete")
-
-        cancel_task.cancel()
-
+        await _run_post_turn_playback(device, voice_response)
     except Exception as e:
         log.error(f"[{device.device_id}] Speaker failed: {e}")
     finally:
