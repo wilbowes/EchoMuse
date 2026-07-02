@@ -117,11 +117,15 @@ MIGRATIONS: list[str] = [
     INSERT OR IGNORE INTO system_config VALUES ('last_update_check',     NULL);
     """,
 
-    # ── v2 — example future migration (uncomment and adapt as needed) ────────
-    # """
-    # ALTER TABLE devices ADD COLUMN some_new_column TEXT;
-    # UPDATE system_config SET value = '2' WHERE key = 'schema_version';
-    # """,
+    # ── v2 — ESPHome native API integration ─────────────────────────────────
+    """
+    ALTER TABLE devices ADD COLUMN esphome_api_port INTEGER;
+    ALTER TABLE devices ADD COLUMN esphome_noise_psk TEXT;
+
+    INSERT OR IGNORE INTO system_config VALUES ('next_esphome_port', '16001');
+
+    UPDATE system_config SET value = '2' WHERE key = 'schema_version';
+    """,
 ]
 
 # ─── Connection management ────────────────────────────────────────────────────
@@ -392,6 +396,83 @@ def delete_device(device_id: str) -> None:
         conn.execute("DELETE FROM device_logs WHERE device_id = ?", (device_id,))
         conn.execute("DELETE FROM devices WHERE device_id = ?", (device_id,))
     log.info(f"[db] Device deleted: {device_id}")
+
+
+# ─── ESPHome port allocation ──────────────────────────────────────────────────
+
+def get_esphome_port(device_id: str) -> Optional[int]:
+    """
+    Return the ESPHome API port assigned to this device, or None if unassigned.
+
+    A None return means the device has never been assigned a port in esphome
+    mode — call assign_esphome_port() to allocate one.
+    """
+    row = _q1("SELECT esphome_api_port FROM devices WHERE device_id = ?", (device_id,))
+    if row is None:
+        return None
+    return row["esphome_api_port"]  # may be None (unassigned)
+
+
+def assign_esphome_port(device_id: str) -> int:
+    """
+    Allocate and persist an ESPHome API port for this device.
+
+    Takes the next available port from next_esphome_port in system_config,
+    increments the counter, persists both atomically, and returns the
+    allocated port.
+
+    Port allocation is monotonically increasing and never reuses freed ports
+    (see ESPHOME_SPEC.md §2.2 for the rationale — sparse range is intentional
+    to prevent silent misrouting if HA still holds a stale config entry for a
+    deprovisioned device's old port number).
+
+    Raises ValueError if the device is not found.
+    Raises RuntimeError if a port is already assigned — caller should use
+    get_esphome_port() first to check.
+    """
+    with _tx() as conn:
+        row = conn.execute(
+            "SELECT esphome_api_port FROM devices WHERE device_id = ?", (device_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"Device not found: {device_id}")
+        if row["esphome_api_port"] is not None:
+            raise RuntimeError(
+                f"Device {device_id} already has ESPHome port {row['esphome_api_port']} — "
+                f"use get_esphome_port() to retrieve it"
+            )
+
+        next_row = conn.execute(
+            "SELECT value FROM system_config WHERE key = 'next_esphome_port'"
+        ).fetchone()
+        port = int(next_row["value"])
+
+        conn.execute(
+            "UPDATE devices SET esphome_api_port = ? WHERE device_id = ?",
+            (port, device_id),
+        )
+        conn.execute(
+            "UPDATE system_config SET value = ? WHERE key = 'next_esphome_port'",
+            (str(port + 1),),
+        )
+
+    log.info(f"[db] ESPHome port assigned: {device_id} → {port}")
+    return port
+
+
+def free_esphome_port(device_id: str) -> None:
+    """
+    Clear the ESPHome API port assignment for a device.
+
+    Called on device deprovisioning. The freed port number is NOT returned
+    to the pool — next_esphome_port only ever increments (see assign_esphome_port).
+    """
+    with _tx() as conn:
+        conn.execute(
+            "UPDATE devices SET esphome_api_port = NULL WHERE device_id = ?",
+            (device_id,),
+        )
+    log.info(f"[db] ESPHome port freed: {device_id}")
 
 
 # ─── Device logs ──────────────────────────────────────────────────────────────

@@ -65,6 +65,7 @@ import em_db as db
 import em_auth as auth
 import em_api as api
 import em_eq
+import em_esphome as esphome
 
 logging.basicConfig(
     level=logging.DEBUG if os.environ.get("DEBUG") else logging.INFO,
@@ -82,6 +83,10 @@ SERVER_IP    = os.environ.get("SERVER_IP", "10.10.1.236")
 VOICE_WS_URI = os.environ.get("VOICE_WS_URI", "ws://clara-voice:8765")
 MDNS_NAME    = os.environ.get("MDNS_NAME", "echomuse")
 DB_PATH      = os.environ.get("DB_PATH", "echomuse.db")
+
+# Voice mode — 'claracore' (default) or 'esphome'.
+# See ESPHOME_SPEC.md §1.2. Changing requires a controller restart.
+VOICE_MODE   = os.environ.get("VOICE_MODE", "claracore")
 
 # Device approval mode — overridden by system_config after db.init()
 DEVICE_APPROVAL = os.environ.get("DEVICE_APPROVAL", "strict")
@@ -588,7 +593,66 @@ async def _run_voice_locked(device: Device):
         log.info(f"[{device.device_id}] Voice turn: drained {drained} stale frames")
     try:
         async with device.voice_lock:
-            await run_voice_turn(device)
+            if VOICE_MODE == "esphome":
+                # ESPHome mode: device mechanics live here (LED, flags, mic),
+                # voice exchange is delegated to the active HA connection.
+                log.info(f"[{device.device_id}] Voice turn starting (esphome mode)")
+                device.listening = True
+                await leds_listening(device)
+                await _push_device_state(device)
+
+                stop_spin = asyncio.Event()
+                spin_task = None
+
+                async def cleanup_esphome():
+                    device.thinking  = False
+                    device.listening = False
+                    await _push_device_state(device)
+                    stop_spin.set()
+                    if spin_task and not spin_task.done():
+                        spin_task.cancel()
+                        try:
+                            await spin_task
+                        except asyncio.CancelledError:
+                            pass
+                    await leds_off(device)
+
+                async def on_thinking_esphome():
+                    nonlocal spin_task
+                    device.thinking  = True
+                    device.listening = False
+                    await _push_device_state(device)
+                    log.info(f"[{device.device_id}] Thinking (esphome)")
+                    if not device.cancel_event.is_set() and (
+                        spin_task is None or spin_task.done()
+                    ):
+                        spin_task = asyncio.create_task(
+                            leds_spin_green(device, stop_spin)
+                        )
+
+                async def post_turn_play_esphome(voice_response: bytes):
+                    nonlocal spin_task
+                    if spin_task is None or spin_task.done():
+                        spin_task = asyncio.create_task(
+                            leds_spin_green(device, stop_spin)
+                        )
+                    await _run_post_turn_playback(device, voice_response)
+
+                await device.mic_start_turn()
+                try:
+                    await esphome.trigger_voice_turn(
+                        device=device,
+                        on_thinking=on_thinking_esphome,
+                        post_turn_play=post_turn_play_esphome,
+                    )
+                finally:
+                    await device.mic_stop()
+                    await cleanup_esphome()
+                    log.info(f"[{device.device_id}] Voice turn complete (esphome mode)")
+
+            else:
+                # claracore mode — unchanged
+                await run_voice_turn(device)
     finally:
         device.oww_paused.clear()
         log.info(f"[{device.device_id}] oww_paused cleared")
@@ -744,6 +808,8 @@ async def handle_button_event(device: Device, event: dict):
         if device.voice_lock.locked():
             log.info(f"[{device.device_id}] Dot button — cancelling voice turn")
             device.cancel_event.set()
+            if VOICE_MODE == "esphome":
+                esphome.cancel_voice_turn(device.device_id)
         else:
             log.info(f"[{device.device_id}] Dot button → voice turn")
             device.cancel_event.clear()
@@ -871,6 +937,13 @@ async def handle_control(ws: WebSocketServerProtocol):
 
         await leds_off(device)
         await api.notify_device_connected(device_id)
+        if VOICE_MODE == "esphome":
+            # Closure over device — used by standalone announce path
+            # (setup wizard audio test, push TTS) when no voice turn is active.
+            _device_ref = device
+            async def _standalone_play(pcm_bytes: bytes, _d=_device_ref) -> None:
+                await _run_post_turn_playback(_d, pcm_bytes)
+            await esphome.device_connected(device_id, SERVER_HOST, standalone_play=_standalone_play)
 
         # ── Main message loop ─────────────────────────────────────────────
 
@@ -955,6 +1028,8 @@ async def handle_control(ws: WebSocketServerProtocol):
             if _devices.get(device.device_id) is device:
                 _devices.pop(device.device_id, None)
             await api.notify_device_disconnected(device.device_id)
+            if VOICE_MODE == "esphome":
+                await esphome.device_disconnected(device.device_id)
 
 
 # ─── Data plane handler ───────────────────────────────────────────────────────
@@ -1209,7 +1284,9 @@ async def main():
 
     # ── WebSocket server ──────────────────────────────────────────────────────
     log.info(f"WebSocket server starting on {SERVER_HOST}:{SERVER_PORT}")
-    log.info(f"Voice server: {VOICE_WS_URI}")
+    log.info(f"Voice mode: {VOICE_MODE}")
+    if VOICE_MODE != "esphome":
+        log.info(f"Voice server: {VOICE_WS_URI}")
 
     try:
         async with websockets.serve(
@@ -1220,10 +1297,16 @@ async def main():
             ping_timeout=10,
             max_size=10 * 1024 * 1024,
         ):
+            # ── ESPHome satellite servers (esphome mode only) ──────────────
+            if VOICE_MODE == "esphome":
+                await esphome.start_esphome_servers(_devices, SERVER_HOST)
+
             log.info("EchoMuse Controller ready — waiting for devices")
             await asyncio.Future()
 
     finally:
+        if VOICE_MODE == "esphome":
+            await esphome.stop_esphome_servers()
         release_task.cancel()
         session_prune_task.cancel()
         mdns_task.cancel()

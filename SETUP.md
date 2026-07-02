@@ -541,6 +541,16 @@ dns-sd -B _emcontroller._tcp local
 ✅ Controller management dashboard — React SPA, vendored assets, no CDN dependency
 ✅ Dashboard live state — mute/listen/speak/offline via WebSocket events + 5s poll
 ✅ Dashboard shell terminal — browser-based root shell, Ctrl+C support
+✅ ESPHome native API satellite integration (VOICE_MODE=esphome)
+✅ Both devices registered in HA as voice satellites (port 16001, 16002)
+✅ ESPHome setup wizard passes on both devices
+✅ TTS announcements via HA Assist pipeline (MP3→PCM via ffmpeg, standalone play)
+✅ MediaPlayerState ANNOUNCING/IDLE transitions for wizard audio test
+✅ ESPHome port lifecycle — ports up/down with physical device connect/disconnect
+✅ mDNS _esphomelib._tcp per device (device_id[-12:] suffix to avoid prefix collision)
+✅ DB migration v2 — esphome_api_port, esphome_noise_psk columns, next_esphome_port
+✅ VOICE_MODE env var — claracore (default) or esphome, restart-to-apply
+✅ OWW/button-triggered voice turns in esphome mode (inbound pipeline in progress)
 ```
 
 ---
@@ -610,6 +620,22 @@ Ch7, Ch8 → unconnected
     → server: stale queue drain + model reset
     → server: mic_start (no lock_mic) → device returns to ch6 omni
     → OWW listening resumes
+```
+
+### ESPHome mode (VOICE_MODE=esphome)
+
+```
+"Hey Jarvis"
+    → [same on-device path through OWW detection]
+    → controller: VoiceAssistantRequest(start=True, flags=0) → HA Assist
+    → mic audio streamed as VoiceAssistantAudio chunks to HA
+    → VAD end → VoiceAssistantAudio(end=True)
+    → HA: STT (Whisper) → intent → TTS
+    → HA: VoiceAssistantAnnounceRequest(media_id=url, text="...")
+    → controller: fetch MP3, decode via ffmpeg → 22050Hz mono S16_LE PCM
+    → controller: EQ + resample 22050→48000Hz stereo → stream to device ALSA
+    → controller: MediaPlayerState ANNOUNCING → AnnounceFinished → IDLE
+    → LED off, mic restart
 ```
 
 Action button triggers the same pipeline directly, bypassing wake word detection. Second press cancels at any stage.
@@ -830,18 +856,18 @@ done
 - **On-device wake word** — TFLite C binary running on-device, eliminating the continuous WiFi audio stream for OWW. OpenWakeWord has a TFLite backend; cross-compilation uses the existing echomuse-compiler Docker toolchain
 - **PTY shell** — proper terminal emulator (top, vim, nano) via creack/pty + xterm.js in dashboard
 - **Acoustic echo cancellation** — relevant once barge-in is implemented (speaker playing while mic active). Hardware AEC via MT8163 DSP is possible but complex; software AEC via speex or similar more practical.
-- **Wyoming protocol** — upstream interface for Home Assistant / Rhasspy integration, turning EchoMuse into a proper HA voice satellite
 - **Media player integration** — pause room audio on wake word, resume after response (Home Assistant `media_player` service call)
 - **Bermuda BT proxy** — room-level presence detection via Bluetooth, once fleet of 5–6 Echo Dots is deployed
 - **Adaptive VAD** — calibrate threshold on startup from ambient noise floor × multiplier. Currently fixed at 0.003; in very noisy environments this may need runtime adjustment.
 - **RNNoise model upgrade** — vendored v0.1 model (2018). Newer models available via binary blob download; requires model loading API (rnnoise_model_from_file) present in newer source but needing the xiph.org CDN which was unavailable. v0.1 performs well for home environment use.
 - **Startup chime** — short audio signature on EchoMuse init
 - **Holding response** — play audio while Clara is thinking if response takes >2s
+- **ESPHome native API satellite integration** ✅ — complete as of v2.6.0. Both devices registered in HA, voice turns working end-to-end.
 
 ---
 
-**Document version:** v2.5.1
-**Last updated:** 2026-06-20
+**Document version:** v2.6.0
+**Last updated:** 2026-07-02
 **Changelog:**
 - v1.0 — April 2026: Initial publication. Full pipeline confirmed working.
 - v1.1 — 2026-04-26: Fixed ambiguous init.csm.project.rc editing instruction; fixed `server &` → `exec` inconsistency.
@@ -886,5 +912,27 @@ done
   **Device rename and delete added to the dashboard's device detail modal**, both admin-gated to match the existing `@auth.require_admin` on `PATCH`/`DELETE /api/devices/{id}`. Rename is inline (click the device name, edit, Enter/Save or Escape/Cancel); delete requires a two-step confirm given it's unrecoverable from the UI. Neither needed new client-side state-sync logic — both routes already broadcast events (`device_update`, `device_deleted`) over the existing `/api/events` WebSocket that the dashboard already merges into device state.
   **Force release-check (`POST /api/releases/check`) wired up — existed server-side, nothing called it.** `_get_cached_release()` serves a 60s in-memory cache, falling back to a DB cache that's only re-polled in the background once it's older than `update_check_interval` (default 1h) — both the Updates tab and the wizard's GitHub-install step only ever read that cache, so neither could surface a release published in the last hour without waiting. `_post_check_release` (force-poll, bypasses both caches) already existed and worked but had no UI calling it. Added a "Check now" button to the Updates tab and a "Check for newer release" button to the wizard's GitHub-install step (shown inline before committing to install, doesn't change what gets installed — that still reads the now-freshly-populated cache).
   **"Deploy all" on the main dashboard replaced with "Check for updates" — it was not inert, it was silently working.** The button called `POST /api/releases/deploy` (real, fully implemented, fleet-wide: pushes the cached latest release to every connected/approved/not-already-current device via `_run_update`, no confirmation step) and discarded the response on success with zero feedback — no log, no toast, no state change. Any prior click most likely deployed to the whole fleet silently. Server-side route is untouched and still fully functional, `@auth.require_admin`-gated as before; the dashboard's only call site for it is gone. Replaced with the same force-check pattern as the Updates tab — genuine live GitHub check, visible loading state, result feeds the existing "Latest Release" display. If fleet deploy is wanted back later, it should get a deliberate UI (e.g. a confirm step listing exactly which devices and versions) rather than a single bare button.
+- v2.6.0 — 2026-07-02: ESPHome native API satellite integration.
+  EchoMuse devices now speak the ESPHome native API on the controller's
+  outward-facing side, making them HA-compatible voice satellites via HA's
+  built-in ESPHome integration (no custom HACS component). 
+
+  New: em_esphome.py + esphome/ subpackage (frame_protocol, message_registry,
+  feature_flags, satellite_server, vendored api_pb2 from aioesphomeapi==45.3.1).
+  DB migration v2 adds esphome_api_port and esphome_noise_psk per-device columns.
+  VOICE_MODE env var gates the new path (claracore unchanged, esphome new).
+
+  Key protocol findings confirmed against real HA Core 2026.6.4:
+  project_name dot-notation required; media_player entity mandatory for device
+  visibility; ANNOUNCE flag gates VoiceAssistantConfigurationRequest;
+  AnnounceFinished must be sent synchronously with MediaPlayerState transitions;
+  ffmpeg required for MP3→PCM decode of HA TTS audio.
+
+  ESPHome ports keyed to physical device lifecycle — port comes up on Echo Dot
+  connect, goes down on disconnect (wizard only runs against live devices).
+  mDNS uses device_id[-12:] suffix to avoid G090LF11 prefix collision.
+  Both devices registered, wizard passing, TTS announcements playing on device.
+  Voice turn inbound pipeline (mic→HA→TTS→speaker) functional with one
+  remaining import fix in progress.
 
 *Device: Echo Dot 2nd Gen (RS03QR). Tested on macOS with ADB 35.0.2.*
