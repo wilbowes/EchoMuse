@@ -550,8 +550,12 @@ dns-sd -B _emcontroller._tcp local
 ✅ mDNS _esphomelib._tcp per device (device_id[-12:] suffix to avoid prefix collision)
 ✅ DB migration v2 — esphome_api_port, esphome_noise_psk columns, next_esphome_port
 ✅ VOICE_MODE env var — claracore (default) or esphome, restart-to-apply
-✅ OWW/button-triggered voice turns in esphome mode (inbound pipeline in progress)
+✅ OWW/button-triggered voice turns in esphome mode — full wake word → STT → intent → TTS → speaker round-trip confirmed working end-to-end against real HA Core 2026.6.4
+✅ HA-side announce (setup wizard test, push TTS) plays correctly on device — live callback lookup, not a snapshot taken at connect
+✅ Local no-speech timeout (5s) — matches Alexa's "wake word, then silence" behaviour; scoped correctly to bounded voice turns only, never the permanent OWW listening stream
 ```
+
+**HA MVP reached** — this is the milestone ESPHOME_SPEC.md §1 called "the last functional barrier before a public v1 announcement." EchoMuse devices work as real Home Assistant voice satellites without ClaraCore.
 
 ---
 
@@ -638,6 +642,16 @@ Ch7, Ch8 → unconnected
     → LED off, mic restart
 ```
 
+No-speech branch (device's 0x05 sentinel — see WebSocket Protocol below):
+```
+"Hey Jarvis" → [silence for 5s, nothing said]
+    → device: 0x05 (no-speech timeout) instead of 0x04
+    → controller: empty VoiceAssistantAudio(end=True) sent to close HA's
+      already-open pipeline cleanly, but the 30s wait for a TTS response
+      is skipped entirely — no HA round-trip result is awaited
+    → turn ends quietly, mic restart
+```
+
 Action button triggers the same pipeline directly, bypassing wake word detection. Second press cancels at any stage.
 
 ---
@@ -674,8 +688,12 @@ Server → Device:
 Device → Server (mic frames):
 ```
 [0x01][seq_hi][seq_lo][mono S16_LE PCM, 2560 bytes = 80ms]  — VAD-gated speech
-[0x04]                                                        — VAD end (speech finished)
+[0x01][seq_hi][seq_lo][0x04]                                 — VAD end (speech detected, then ended)
+[0x01][seq_hi][seq_lo][0x05]                                 — no-speech timeout (see below)
 ```
+All three share the same `frameTypeMic` (`0x01`) wrapper and seq header — the VAD sentinels are single-byte *payloads*, not distinct top-level frame types. (0x02/0x03 below are genuinely distinct top-level types, speaker-direction only, no seq header — don't confuse the two framing conventions.)
+
+**No-speech timeout (0x05), added v2.6.0.** `streamMic` (device/internal/client/data.go) only arms this when `lock_mic: true` was set on the `mic_start` that began the stream — i.e. only for a bounded voice turn (post-wake-word or button press), never for the permanent `lock_mic`-absent OWW listening stream. If no speech is ever detected (RMS never crosses `VadThreshold` for `VadSpeechMs` consecutive periods) within 5s of turn start, the device gives up locally and sends `0x05` instead of waiting on the existing silence-after-speech hysteresis, which never engages if speech never started. Distinguishing 0x05 from 0x04 lets the controller skip contacting HA's Assist pipeline entirely for a turn that never had anything to transcribe — mirrors Alexa's behaviour of quietly giving up on "wake word, then silence" rather than round-tripping to the backend just to receive `stt-no-text-recognized`. **This must never be armed for `lock_mic`-absent streams** — an earlier build armed it unconditionally, which silently killed the permanent wake-word listening stream 5s after every boot/reconnect with nothing to restart it (wake word "stopped working entirely," diagnosed via device log showing repeated `no speech detected within timeout` firing exactly 5s after every idle `Mic streaming started`, with no corresponding `mic_start` to revive it). Device-side test coverage (`internal/client/streamMic_test.go`) includes a regression test asserting a `lock_mic`-absent stream survives extended silence indefinitely.
 
 Server → Device (speaker frames):
 ```
@@ -912,27 +930,22 @@ done
   **Device rename and delete added to the dashboard's device detail modal**, both admin-gated to match the existing `@auth.require_admin` on `PATCH`/`DELETE /api/devices/{id}`. Rename is inline (click the device name, edit, Enter/Save or Escape/Cancel); delete requires a two-step confirm given it's unrecoverable from the UI. Neither needed new client-side state-sync logic — both routes already broadcast events (`device_update`, `device_deleted`) over the existing `/api/events` WebSocket that the dashboard already merges into device state.
   **Force release-check (`POST /api/releases/check`) wired up — existed server-side, nothing called it.** `_get_cached_release()` serves a 60s in-memory cache, falling back to a DB cache that's only re-polled in the background once it's older than `update_check_interval` (default 1h) — both the Updates tab and the wizard's GitHub-install step only ever read that cache, so neither could surface a release published in the last hour without waiting. `_post_check_release` (force-poll, bypasses both caches) already existed and worked but had no UI calling it. Added a "Check now" button to the Updates tab and a "Check for newer release" button to the wizard's GitHub-install step (shown inline before committing to install, doesn't change what gets installed — that still reads the now-freshly-populated cache).
   **"Deploy all" on the main dashboard replaced with "Check for updates" — it was not inert, it was silently working.** The button called `POST /api/releases/deploy` (real, fully implemented, fleet-wide: pushes the cached latest release to every connected/approved/not-already-current device via `_run_update`, no confirmation step) and discarded the response on success with zero feedback — no log, no toast, no state change. Any prior click most likely deployed to the whole fleet silently. Server-side route is untouched and still fully functional, `@auth.require_admin`-gated as before; the dashboard's only call site for it is gone. Replaced with the same force-check pattern as the Updates tab — genuine live GitHub check, visible loading state, result feeds the existing "Latest Release" display. If fleet deploy is wanted back later, it should get a deliberate UI (e.g. a confirm step listing exactly which devices and versions) rather than a single bare button.
-- v2.6.0 — 2026-07-02: ESPHome native API satellite integration.
-  EchoMuse devices now speak the ESPHome native API on the controller's
-  outward-facing side, making them HA-compatible voice satellites via HA's
-  built-in ESPHome integration (no custom HACS component). 
+- v2.6.0 — 2026-07-02: ESPHome native API satellite integration — HA MVP. EchoMuse devices now speak the ESPHome native API on the controller's outward-facing side, making them HA-compatible voice satellites via HA's built-in ESPHome integration (no custom HACS component). Full wake-word → STT → intent → TTS → speaker round-trip confirmed working end-to-end on both physical devices against real HA Core 2026.6.4, alongside the existing `claracore` mode (`VOICE_MODE` env var gates the two, never concurrent).
 
-  New: em_esphome.py + esphome/ subpackage (frame_protocol, message_registry,
-  feature_flags, satellite_server, vendored api_pb2 from aioesphomeapi==45.3.1).
-  DB migration v2 adds esphome_api_port and esphome_noise_psk per-device columns.
-  VOICE_MODE env var gates the new path (claracore unchanged, esphome new).
+  **New:** `em_esphome.py` + `esphome/` subpackage (`frame_protocol`, `message_registry`, `feature_flags`, `satellite_server`, vendored `api_pb2`/`api_options_pb2` from `aioesphomeapi==45.3.1`). DB migration v2 adds `esphome_api_port` and `esphome_noise_psk` (nullable placeholder, unused pending a future Noise-PSK follow-up) per-device columns. Ports allocated monotonically from 16001, never reused after deprovisioning (ESPHOME_SPEC.md §2.2) — a stale HA-side "add device" entry pointed at a freed port must never silently reattach to a different physical speaker.
 
-  Key protocol findings confirmed against real HA Core 2026.6.4:
-  project_name dot-notation required; media_player entity mandatory for device
-  visibility; ANNOUNCE flag gates VoiceAssistantConfigurationRequest;
-  AnnounceFinished must be sent synchronously with MediaPlayerState transitions;
-  ffmpeg required for MP3→PCM decode of HA TTS audio.
+  **Protocol findings confirmed against real HA Core 2026.6.4** (some corrected earlier assumptions from the design spec): `project_name` requires dot-notation (`EchoMuse.<label>`) — HA's `manager.py` splits on it unconditionally, IndexErrors silently and the device never appears in Devices & Services without it. Zero entities on `ListEntitiesResponse` → device silently ignored — `media_player` entity is mandatory. `ANNOUNCE` feature flag gates whether HA sends `VoiceAssistantConfigurationRequest` at all. `AuthenticationRequest` is sent by real HA regardless of `uses_password=False` — must be acknowledged, not ignored. `SubscribeVoiceAssistantRequest` **is** sent by real HA (an earlier design-phase assumption said it wasn't). `AnnounceFinished` must be yielded synchronously from `handle_message()` — the base dispatcher calls `list(handle_message(msg))`, so anything from an async task arrives too late for the wizard's own timeout. `MediaPlayerState` transitions `ANNOUNCING → AnnounceFinished → IDLE`, all three, are required for the setup wizard to pass. `ffmpeg` (apt-installed in the controller Dockerfile) decodes HA's MP3 TTS delivery to PCM. mDNS service names use `device_id[-12:]` rather than a prefix — both devices share a `G090LF11` prefix and would otherwise collide in HA's auto-discovery.
 
-  ESPHome ports keyed to physical device lifecycle — port comes up on Echo Dot
-  connect, goes down on disconnect (wizard only runs against live devices).
-  mDNS uses device_id[-12:] suffix to avoid G090LF11 prefix collision.
-  Both devices registered, wizard passing, TTS announcements playing on device.
-  Voice turn inbound pipeline (mic→HA→TTS→speaker) functional with one
-  remaining import fix in progress.
+  **Bug: `VoiceAssistantEventType` import — wrong enum name, one-line fix.** The real enum (confirmed by installing `aioesphomeapi==45.3.1` fresh from PyPI and inspecting the generated `api_pb2.py` directly, not assumed from memory) is `VoiceAssistantEvent`, not `VoiceAssistantEventType`. Every `ET.VOICE_ASSISTANT_*` member reference downstream was already correct — only the import alias was wrong.
+
+  **Non-bug: `VoiceAssistantResponse` "unhandled" log line was never a problem.** Cloned `OHF-Voice/linux-voice-assistant` (the official non-firmware reference satellite) directly and confirmed its `handle_message` dispatch has no branch for this message at all — it's HA's ack to the satellite's `VoiceAssistantRequest`, and its `port` field is only meaningful for the UDP-audio-return path real ESP32 firmware uses outside `API_AUDIO` mode; response audio here continues over the same TCP connection via `VoiceAssistantAudio` regardless. An explicit no-op branch with a comment was added anyway (cheap insurance against the next debugging session mistaking a `log.debug` no-op for a gap) — no behavioural change.
+
+  **Bug: premature `RUN_END` silently ended turns before STT/TTS ever ran.** HA can — confirmed repeatedly on real hardware — emit a spurious `RUN_END` event moments after `VoiceAssistantRequest(start=True)`, before `STT_START` even arrives, distinct from the genuine terminal `RUN_END` that follows the real TTS sequence several seconds later. The old code treated *any* `RUN_END` as "nothing more is coming" and unblocked the turn-waiter immediately; that early unblock then won the race against `_stream_mic_audio` (still waiting on the device's VAD-end sentinel), so by the time the turn actually reached its TTS wait, the wait was already satisfied with no TTS URL — the turn ended silently, HA's STT/intent/TTS completed correctly in the background entirely unread, and HA's stock "Sorry, I couldn't understand that" response (the reply for a satellite that dropped off mid-pipeline, not a real transcription failure) is what actually played, if anything did. Fixed by tracking `INTENT_END` (the reliable "STT + intent resolution genuinely finished" marker, always after `STT_END`, always before `TTS_START`) and only letting `RUN_END` close the turn once that's been seen — a turn that legitimately ends with no spoken response still passes through `INTENT_END` first, so this doesn't introduce a stall for that case. Verified by replaying the exact logged event sequence from a real broken turn through the patched method and confirming it now survives the premature `RUN_END` and completes correctly on the real terminal sequence; separately confirmed the old logic reproduces the exact failure when fed the same sequence.
+
+  **Bug: standalone announce (setup wizard audio test, push TTS) silently never reached the speaker.** `EchoMuseSatellite._on_announce` was a one-time value copy of `DeviceESPhomeServer._standalone_play`, taken at the moment HA's TCP connection was accepted (`_protocol_factory()`). `_standalone_play` itself is set by `device_connected()`, fired independently by the **physical Echo Dot's own** `/control` reconnect — no ordering guarantee exists between that and HA's independent ESPHome TCP connect, and in practice the HA-side connection routinely won the race, leaving the snapshot at `None` even on freshly-established connections (ruling out a simpler "just goes stale on reconnect" explanation — confirmed on multiple fresh connections in a row). Fixed by giving `EchoMuseSatellite` a back-reference to its owning `DeviceESPhomeServer` and reading `_standalone_play` live at call time in `_fetch_and_play_announce`, instead of ever snapshotting it. Verified by reproducing the exact ordering (satellite constructed before `_standalone_play` is set, callback wired afterward, announce arrives on that same already-constructed connection) and confirming audio now reaches the callback; separately confirmed the old snapshot logic reliably reproduces the exact "no playback callback set" log line under the same conditions.
+
+  **New feature: local no-speech timeout, matching Alexa's "wake word, then silence" behaviour.** Previously, saying the wake word and then nothing left the listening ring lit for as long as HA's server-side VAD took to notice (observed: over two minutes of silence with no local bound at all — the satellite had no independent liveness guard for "no speech was ever detected," only the existing post-speech silence hysteresis and the unrelated 30s TTS-wait timeout, neither of which engages if speech never starts). `streamMic` (device/internal/client/data.go) now runs a 5s deadline from turn start, armed **only when `lock_mic: true`** — see the WebSocket Protocol section above for the wire-level detail and the regression this caused when first shipped without that gate (armed unconditionally, it silently killed the permanent wake-word listening stream 5s after every boot). Cancelled cleanly via `Timer.Stop()` (with the documented drain-on-race pattern) the instant real speech is first detected; from that point on, end-of-turn is owned entirely by the existing silence-after-speech hysteresis, unchanged. On the controller side, the resulting `0x05` sentinel sends an empty `VoiceAssistantAudio(end=True)` to close HA's already-open pipeline cleanly (a real, valid protocol message — confirmed against the actual `VoiceAssistantAudio` protobuf schema, not invented for this purpose) but skips the 30s TTS-response wait entirely, so a no-speech turn closes in ~5s rather than potentially 35s and without generating a spurious `stt-no-text-recognized` round-trip to HA. Device-side test coverage added (`internal/client/streamMic_test.go`, run against a reconstructed minimal module tree with stubbed `gorilla/websocket`/internal packages since this environment can't reach `proxy.golang.org`/`golang.org`): confirms idle listening survives extended silence indefinitely, a bounded voice turn correctly times out and sends the exact expected wire bytes, and mid-turn speech correctly cancels a genuinely-armed timer. Two of the three tests were initially written against the pre-gating design and passed for the wrong reason (no timer was ever armed in either) — caught and corrected once the `lock_mic` gate was added, since a test that can't fail isn't testing anything.
+
+  **Cosmetic, not fixed:** every `VoiceAssistantEventResponse`/`VoiceAssistantResponse` still logs `unhandled message type ... (no response)` from the base dispatcher even when `EchoMuseSatellite.handle_message` genuinely handled it — a `return` (no `yield`) inside a generator function yields nothing, so `list(handle_message(msg))` comes back empty regardless of whether real work happened. Purely a misleading debug-log line, not a functional gap; left alone this session to avoid touching shared base-class logging behaviour in the same cycle as the real fixes above.
 
 *Device: Echo Dot 2nd Gen (RS03QR). Tested on macOS with ADB 35.0.2.*

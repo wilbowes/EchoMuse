@@ -137,6 +137,13 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         mac_address: str,
         oww_model_id: str,
         on_disconnected_cb,
+        owning_server=None,   # DeviceESPhomeServer — back-reference so the
+                              # standalone-announce path can read the live
+                              # _standalone_play callback rather than a
+                              # point-in-time copy taken at connect (see
+                              # _fetch_and_play_announce). Optional/typed
+                              # loosely to avoid a circular import; may be
+                              # None in tests or the reject-connection path.
     ) -> None:
         super().__init__(
             server_name=f"echomuse-{device_id[-12:].lower()}",
@@ -146,6 +153,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self.label          = label
         self.mac_address    = mac_address
         self.oww_model_id   = oww_model_id
+        self._owning_server  = owning_server
 
         # Set on the base class so connection_lost dispatches back to
         # DeviceESPhomeServer for claimant cleanup.
@@ -159,13 +167,25 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._tts_audio_data:   Optional[bytes] = None
         self._tts_event         = asyncio.Event()
         self._conversation_id:  str = ""
+        # Set on VOICE_ASSISTANT_INTENT_END — the reliable "STT + intent
+        # resolution have genuinely completed" marker. Used to distinguish a
+        # real terminal RUN_END from a premature/duplicate one that HA can
+        # send before the turn has actually progressed (observed in practice —
+        # see _handle_voice_event's RUN_END branch).
+        self._intent_ended      = False
+        # Set by _stream_mic_audio when the device's local no-speech timeout
+        # fired (VAD_NO_SPEECH_TIMEOUT_TYPE) rather than a normal VAD end.
+        # Checked by run_esphome_voice_turn to skip the HA round-trip and
+        # close the turn quietly instead of waiting on a TTS response that
+        # was never going to come.
+        self._no_speech_timeout = False
 
         # Callbacks injected by trigger_voice_turn() for each turn —
         # cleared at turn end.
         self._on_tts_received   = None   # async callable(pcm_url_or_bytes)
         self._on_thinking       = None   # async callable()
         self._on_stt_end        = None   # async callable(text: str)
-        self._on_announce       = None   # async callable(pcm_bytes) — set during voice turn, None for standalone announces
+        self._on_announce       = None   # async callable(pcm_bytes) — set only during an active voice turn (run_esphome_voice_turn); None otherwise. The standalone-announce path (setup wizard, push TTS) does NOT use this — it reads self._owning_server._standalone_play live at call time instead, since that value can legitimately change after this satellite was constructed (see _fetch_and_play_announce).
 
     # ── Message handling ─────────────────────────────────────────────────
 
@@ -257,6 +277,18 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             log.debug(f"[{self._log_name}] SubscribeHomeassistantServicesRequest (no response)")
             return
 
+        if isinstance(msg, api_pb2.VoiceAssistantResponse):
+            # HA's ack to our VoiceAssistantRequest. `port` is only meaningful
+            # for the UDP audio-return path used by real ESP32 firmware in
+            # non-API_AUDIO mode; linux-voice-assistant (confirmed by reading
+            # satellite.py directly) never handles this message at all — audio
+            # continues over the same TCP connection via VoiceAssistantAudio.
+            # Intentional no-op, not a gap. `error` is also unused here: a
+            # true HA-side failure surfaces via VOICE_ASSISTANT_ERROR on the
+            # event stream instead, which _handle_voice_event already covers.
+            log.debug(f"[{self._log_name}] VoiceAssistantResponse port={msg.port} error={msg.error}")
+            return
+
         if isinstance(msg, api_pb2.VoiceAssistantEventResponse):
             self._handle_voice_event(msg)
             return
@@ -298,7 +330,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         voice turn. Event types confirmed from linux-voice-assistant/satellite.py
         and ESPHOME_SPEC.md §4.
         """
-        from esphome.vendor.api_pb2 import VoiceAssistantEventType as ET
+        from esphome.vendor.api_pb2 import VoiceAssistantEvent as ET
 
         event_type = msg.event_type
         data = {item.name: item.value for item in msg.data}
@@ -318,6 +350,13 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             if self._on_stt_end and not self._turn_cancelled:
                 asyncio.create_task(self._on_stt_end(text))
 
+        elif event_type == ET.VOICE_ASSISTANT_INTENT_END:
+            # Reliable "STT + intent resolution genuinely finished" marker —
+            # always arrives after STT_END, always before TTS_START/RUN_END
+            # in a normal turn. Used to tell a real terminal RUN_END apart
+            # from a premature/duplicate one (see RUN_END branch below).
+            self._intent_ended = True
+
         elif event_type == ET.VOICE_ASSISTANT_TTS_START:
             log.info(f"[{self._log_name}] TTS starting")
 
@@ -331,10 +370,24 @@ class EchoMuseSatellite(SatelliteServerProtocol):
 
         elif event_type == ET.VOICE_ASSISTANT_RUN_END:
             log.info(f"[{self._log_name}] Pipeline run ended")
-            # If we haven't received TTS audio yet, unblock the turn waiter
-            # so it can clean up rather than hanging until timeout.
-            if not self._tts_event.is_set():
+            # HA can emit a RUN_END that isn't the turn's real terminal event —
+            # confirmed in practice: a RUN_END arriving before STT_START, with
+            # the genuine terminal RUN_END following ~5s later after TTS_END.
+            # Only treat RUN_END as "nothing more is coming" once the turn has
+            # reached INTENT_END (STT + intent resolution genuinely done) or
+            # was cancelled locally — otherwise a premature/duplicate RUN_END
+            # wins the race against _stream_mic_audio and ends the turn before
+            # STT/intent/TTS ever ran. A turn that legitimately ends with no
+            # spoken response (e.g. a silent light-toggle intent) still passes
+            # through INTENT_END first, so this doesn't add a 30s stall for
+            # that case — only a premature RUN_END before INTENT_END is held.
+            if self._intent_ended or self._turn_cancelled:
                 self._tts_event.set()
+            else:
+                log.debug(
+                    f"[{self._log_name}] Ignoring RUN_END — INTENT_END not yet "
+                    f"seen, treating as premature/duplicate rather than turn end"
+                )
 
         elif event_type == ET.VOICE_ASSISTANT_ERROR:
             code = data.get("code", "")
@@ -353,18 +406,36 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         happens asynchronously — if it fails, the wizard has already passed.
 
         During a voice turn, _on_announce is set by run_esphome_voice_turn()
-        and will route audio to the device's speaker pipeline. Outside a turn
-        (setup wizard, standalone push TTS), _on_announce is None and the
-        audio is fetched but not played (device playback wiring is TODO for
-        standalone announce path).
+        and takes priority — it routes audio to the device's speaker pipeline
+        as part of the in-progress turn. Outside a turn (setup wizard,
+        standalone push TTS), _on_announce is always None by design (it's
+        turn-scoped — see the attribute's docstring in __init__), so we read
+        self._owning_server._standalone_play directly instead. This has to be
+        a live read, not a copy taken at connect time: _standalone_play is
+        set by em_controller.py's device_connected() on the physical Echo
+        Dot's own connect event, which is independent of and not ordered
+        relative to HA's ESPHome TCP connect — copying it once into
+        self._on_announce at construction (the original approach) meant the
+        callback was frequently still None at that point even though the
+        device was really connected, since device_connected() just hadn't
+        run yet for this session. Confirmed in practice: this fired as
+        "no playback callback set" on freshly-established connections, not
+        just stale reconnects, which ruled out a staleness-only explanation.
         """
         if not media_id:
             return
         try:
             pcm_bytes = await _fetch_tts_audio(media_id)
-            if pcm_bytes and self._on_announce:
-                await self._on_announce(pcm_bytes)
-            elif pcm_bytes:
+            if not pcm_bytes:
+                return
+
+            play_cb = self._on_announce
+            if play_cb is None and self._owning_server is not None:
+                play_cb = self._owning_server._standalone_play
+
+            if play_cb:
+                await play_cb(pcm_bytes)
+            else:
                 log.info(f"[{self._log_name}] Announce audio fetched ({len(pcm_bytes)}b) — no playback callback set (standalone announce)")
         except Exception as e:
             log.error(f"[{self._log_name}] Announce fetch/play error: {e}")
@@ -398,6 +469,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._tts_event.clear()
         self._tts_audio_url  = None
         self._tts_audio_data = None
+        self._intent_ended   = False
+        self._no_speech_timeout = False
         self._on_thinking    = on_thinking
         self._on_announce    = None   # set below after announcement path is confirmed
 
@@ -422,6 +495,14 @@ class EchoMuseSatellite(SatelliteServerProtocol):
 
             if self._turn_cancelled:
                 log.info(f"[{self._log_name}] Turn cancelled during mic streaming")
+                return
+
+            if self._no_speech_timeout:
+                # Device gave up locally before any speech was detected —
+                # _stream_mic_audio already skipped sending end=True to HA,
+                # so there's no in-flight HA pipeline to wait on. Close the
+                # turn immediately rather than sitting on the 30s TTS wait
+                # for a response that was never requested.
                 return
 
             # ── Wait for TTS response (or RUN_END / error / timeout) ──────
@@ -461,7 +542,23 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         Pull PCM frames from device.voice_queue and send them to HA as
         VoiceAssistantAudio messages.
 
-        Exits when the VAD end sentinel (None) is received or cancel_event fires.
+        Exits when a VAD sentinel (None) is received or cancel_event fires.
+        The sentinel comes in two flavours, distinguished via
+        device.last_vad_was_timeout (set by em_controller.py's /data frame
+        parser immediately before queueing): a normal VAD end (speech was
+        detected, then ended — the ordinary case) or a no-speech timeout
+        (the device's local grace period elapsed with no speech ever
+        detected — see device/internal/client/data.go noSpeechTimeout).
+
+        The no-speech-timeout case sends an empty VoiceAssistantAudio(end=True)
+        to close HA's pipeline cleanly (HA already has an open turn from the
+        VoiceAssistantRequest sent at turn start), then sets
+        self._no_speech_timeout and returns. run_esphome_voice_turn checks
+        this flag and skips the TTS wait entirely rather than waiting up to
+        30s for a response to an utterance that was never sent — mirroring
+        how a real Alexa device gives up quickly and quietly on "wake word,
+        then nothing," rather than treating it the same as a real pipeline
+        error.
         """
         pcm_buf = bytearray()
 
@@ -476,7 +573,21 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 continue
 
             if payload is None:
-                # VAD end — signal HA that speech has finished
+                if device.last_vad_was_timeout:
+                    # No speech was ever detected, but VoiceAssistantRequest
+                    # (start=True) was already sent before this fired — HA
+                    # has an open pipeline expecting an audio stream. Close
+                    # it cleanly with an empty end=True (a real, valid
+                    # protocol message — same call used below for a normal
+                    # VAD end, just with nothing buffered) rather than
+                    # abandoning the stream and leaving HA to notice via its
+                    # own inactivity timeout. run_esphome_voice_turn still
+                    # skips the TTS wait afterward — see _no_speech_timeout.
+                    log.info(f"[{self._log_name}] No speech detected — closing HA pipeline with empty end=True, not waiting for a response")
+                    self._send_one(api_pb2.VoiceAssistantAudio(data=b"", end=True))
+                    self._no_speech_timeout = True
+                    return
+                # Normal VAD end — signal HA that speech has finished
                 log.info(f"[{self._log_name}] VAD end — sending audio end to HA")
                 self._send_one(api_pb2.VoiceAssistantAudio(data=b"", end=True))
                 return
@@ -594,8 +705,8 @@ class DeviceESPhomeServer:
             mac_address=self.mac_address,
             oww_model_id=self.oww_model_id,
             on_disconnected_cb=self._on_satellite_disconnected,
+            owning_server=self,
         )
-        satellite._on_announce = self._standalone_play
         self._active_satellite = satellite
         log.info(f"[esphome.{self.device_id[-8:]}] HA connected on port {self.port}")
         return satellite

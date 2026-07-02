@@ -21,10 +21,20 @@ import (
 // ─── Binary frame types ───────────────────────────────────────────────────────
 
 const (
-	frameTypeMic     = byte(0x01)
-	frameTypeSpeaker = byte(0x02)
-	frameTypeEOS     = byte(0x03)
-	frameTypeVADEnd  = byte(0x04)
+	frameTypeMic             = byte(0x01)
+	frameTypeSpeaker         = byte(0x02)
+	frameTypeEOS              = byte(0x03)
+	frameTypeVADEnd          = byte(0x04)
+	// frameTypeNoSpeechTimeout signals that the turn ended because no speech
+	// was ever detected — distinct from frameTypeVADEnd (speech detected,
+	// then ended). Sent when noSpeechTimeout elapses with active==false the
+	// entire time. Distinguishing the two lets the controller treat "wake
+	// word then silence" (Alexa-equivalent: quietly give up) differently
+	// from "spoke, pipeline processed it, HA had nothing to say" — the two
+	// cases were previously indistinguishable on the wire, which is also
+	// why the controller had no way to short-circuit the former without
+	// risking mishandling the latter.
+	frameTypeNoSpeechTimeout = byte(0x05)
 )
 
 // ─── VAD constants ────────────────────────────────────────────────────────────
@@ -35,7 +45,30 @@ const (
 	vadFramePeriod   = 512
 	vadBytePeriod    = vadFramePeriod * vadMicChannels * vadByteSample // 13824
 	vadOwwChunkBytes = 1280 * 2                                        // 2560 bytes = 80ms
+
+	// noSpeechTimeout bounds how long streamMic will wait for speech to
+	// ever be detected after a turn starts. If active never becomes true
+	// within this window, the turn ends via frameTypeNoSpeechTimeout rather
+	// than sitting open indefinitely — mirrors Alexa's behaviour of giving
+	// up quickly on a wake word followed by silence, rather than depending
+	// on the upstream pipeline's own (much longer, HA VAD-driven) timeout.
+	// Only guards the "never spoke" case; once active==true this deadline
+	// no longer applies — the existing silenceMax hysteresis owns speech
+	// end-of-turn detection from that point on.
+	noSpeechTimeout = 5 * time.Second
 )
+
+// noSpeechTimeoutForTest overrides noSpeechTimeout when non-zero — set only
+// from tests, to avoid needing a real 5s wait per test run. Left at its
+// zero value in production; streamMic falls back to the real constant.
+var noSpeechTimeoutForTest time.Duration
+
+func effectiveNoSpeechTimeout() time.Duration {
+	if noSpeechTimeoutForTest > 0 {
+		return noSpeechTimeoutForTest
+	}
+	return noSpeechTimeout
+}
 
 func vadPeriodRMS(mono []byte) float64 {
 	n := len(mono) / 2
@@ -262,6 +295,7 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 	speechCount  := 0
 	silenceCount := 0
 	active       := false
+	everActive   := false // true once active has been true at least once this turn
 	buf          := make([]byte, 0, vadOwwChunkBytes*4)
 	var seqNum   uint16
 
@@ -279,10 +313,51 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 		}
 	}
 
+	// noSpeechTimer fires if speech is never detected within noSpeechTimeout
+	// of turn start. Stopped (and its channel drained) the instant active
+	// first becomes true — from that point on, end-of-turn is entirely
+	// owned by the existing silenceMax hysteresis below, same as before
+	// this change.
+	//
+	// Only armed when lockMic is true. Per SETUP.md's mic_start semantics:
+	// mic_start with no lock_mic is the permanent, always-on ch6/omni
+	// wake-word listening stream (started once at connect, meant to run
+	// indefinitely) — mic_start with lock_mic:true is a bounded voice turn
+	// (post-wake-word or button press, perimeter mic locked for the turn's
+	// duration). The no-speech timeout is only meaningful for the latter;
+	// arming it unconditionally silently killed the permanent listening
+	// stream after 5s of ordinary silence, with nothing to restart it,
+	// breaking wake-word detection entirely until a button press happened
+	// to re-enter streamMic fresh. Confirmed against real device logs
+	// before this fix: "no speech detected within timeout" fired 5s after
+	// every idle-listening Mic streaming started, with no corresponding
+	// StartMic call to bring it back.
+	//
+	// When not armed, noSpeechTimerC stays nil — a nil channel blocks
+	// forever in a select, which is the idiomatic Go way to permanently
+	// disable a select case at zero runtime cost.
+	var noSpeechTimer *time.Timer
+	var noSpeechTimerC <-chan time.Time
+	if lockMic {
+		noSpeechTimer = time.NewTimer(effectiveNoSpeechTimeout())
+		defer noSpeechTimer.Stop()
+		noSpeechTimerC = noSpeechTimer.C
+	}
+
 	for {
 		select {
 		case <-stopCh:
 			return
+
+		case <-noSpeechTimerC:
+			// Timer firing implies active was never true — if it had been,
+			// this case would already be unreachable (timer stopped below).
+			// Unreachable entirely when !lockMic, since noSpeechTimerC is
+			// nil in that case and a nil channel never becomes ready.
+			log.Println("[data] streamMic: no speech detected within timeout — ending turn")
+			sendFrame([]byte{frameTypeNoSpeechTimeout})
+			return
+
 		case raw, ok := <-ch:
 			if !ok {
 				return
@@ -331,6 +406,23 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 					speechCount++
 					if speechCount >= speechNeeded {
 						active = true
+						if !everActive {
+							everActive = true
+							// Speech has genuinely started — the no-speech
+							// grace period no longer applies (if it was ever
+							// armed; nil when !lockMic — see construction
+							// above). Stop the timer; drain per
+							// time.Timer.Stop's documented pattern in case
+							// it raced and already fired.
+							if noSpeechTimer != nil {
+								if !noSpeechTimer.Stop() {
+									select {
+									case <-noSpeechTimerC:
+									default:
+									}
+								}
+							}
+						}
 					}
 				}
 			} else {

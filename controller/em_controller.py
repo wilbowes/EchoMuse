@@ -114,6 +114,15 @@ MDNS_REFRESH_INTERVAL = 120
 # Binary frame types
 MIC_FRAME_TYPE     = 0x01
 VAD_END_TYPE       = 0x04
+# Distinct from VAD_END_TYPE — device never detected speech at all within its
+# local no-speech grace period (see device/internal/client/data.go
+# noSpeechTimeout), as opposed to VAD_END_TYPE which means speech was
+# detected and then ended normally. Both still push a plain None sentinel
+# onto the queue (existing claracore/OWW consumers don't need to
+# differentiate), but esphome-mode's _stream_mic_audio checks
+# device.last_vad_was_timeout to skip straight to a quiet turn-end rather
+# than treating it as "waiting on a real pipeline response that never came."
+VAD_NO_SPEECH_TIMEOUT_TYPE = 0x05
 SPEAKER_FRAME_TYPE = 0x02
 SPEAKER_EOS_TYPE   = 0x03
 MIC_HEADER_LEN     = 3   # [type][seq_hi][seq_lo]
@@ -139,6 +148,13 @@ class Device:
         self.mic_queue:   asyncio.Queue[bytes] = asyncio.Queue(maxsize=64)
         self.voice_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=256)
         self.oww_paused   = asyncio.Event()  # set during voice turn
+        # Set immediately before queueing the None sentinel that resulted
+        # from VAD_NO_SPEECH_TIMEOUT_TYPE, cleared immediately after —
+        # esphome-mode's _stream_mic_audio checks this right after receiving
+        # the sentinel to distinguish "never spoke" from a normal VAD end.
+        # claracore mode and the OWW loop ignore it; both already treat any
+        # None sentinel identically and don't need the distinction.
+        self.last_vad_was_timeout = False
 
         # Transient state — read by em_api._merge_device()
         self.speaking  = False
@@ -1073,8 +1089,12 @@ async def handle_data(ws: WebSocketServerProtocol):
                 continue
             if raw[0] != MIC_FRAME_TYPE:
                 continue
-            # VAD end sentinel: mic frame with single-byte payload 0x04
-            if len(raw) == MIC_HEADER_LEN + 1 and raw[MIC_HEADER_LEN] == VAD_END_TYPE:
+            # VAD sentinel: mic frame with single-byte payload 0x04 (normal
+            # VAD end — speech detected then ended) or 0x05 (no-speech
+            # timeout — speech never detected). Both push None; the flag
+            # lets esphome-mode's _stream_mic_audio tell them apart.
+            if len(raw) == MIC_HEADER_LEN + 1 and raw[MIC_HEADER_LEN] in (VAD_END_TYPE, VAD_NO_SPEECH_TIMEOUT_TYPE):
+                device.last_vad_was_timeout = (raw[MIC_HEADER_LEN] == VAD_NO_SPEECH_TIMEOUT_TYPE)
                 q = device.voice_queue if device.oww_paused.is_set() else device.mic_queue
                 if q.full():
                     # Sentinel must not be dropped — stream_mic waits for None
@@ -1083,13 +1103,13 @@ async def handle_data(ws: WebSocketServerProtocol):
                     # make room is acceptable; dropping the sentinel is not.
                     try:
                         q.get_nowait()
-                        log.warning(f"[{device.device_id}] queue full — dropped one frame to deliver VAD end sentinel")
+                        log.warning(f"[{device.device_id}] queue full — dropped one frame to deliver VAD sentinel")
                     except asyncio.QueueEmpty:
                         pass
                 try:
                     q.put_nowait(None)
                 except asyncio.QueueFull:
-                    log.error(f"[{device.device_id}] VAD end sentinel lost — queue still full after drain")
+                    log.error(f"[{device.device_id}] VAD sentinel lost — queue still full after drain")
                 continue
             payload = raw[MIC_HEADER_LEN:]
             try:
