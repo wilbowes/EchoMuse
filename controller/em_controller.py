@@ -906,7 +906,7 @@ async def handle_control(ws: WebSocketServerProtocol):
         await device.send_control({"type": "ack", "device_id": device_id})
 
         config = await loop.run_in_executor(
-            None, db.get_device_config, device_id
+            None, db.get_effective_device_config, device_id
         )
         await device.send_control({"type": "config", **config})
         device.oww_threshold = float(config.get("owwThreshold", OWW_THRESHOLD))

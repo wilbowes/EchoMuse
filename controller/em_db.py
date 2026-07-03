@@ -126,6 +126,22 @@ MIGRATIONS: list[str] = [
 
     UPDATE system_config SET value = '2' WHERE key = 'schema_version';
     """,
+
+    # ── v3 — Global device config and per-device override flag ───────────────
+    #
+    # use_global_config=1 (default): device inherits fleet-wide defaults.
+    # use_global_config=0: device has its own config stored in the config column.
+    #
+    # global_device_config: JSON blob in system_config, same shape as
+    # DEFAULT_DEVICE_CONFIG. Seeded from DEFAULT_DEVICE_CONFIG at migration time
+    # so existing installs get the same values they were already using.
+    f"""
+    ALTER TABLE devices ADD COLUMN use_global_config INTEGER NOT NULL DEFAULT 1;
+
+    INSERT OR IGNORE INTO system_config VALUES ('global_device_config', '{json.dumps(DEFAULT_DEVICE_CONFIG)}');
+
+    UPDATE system_config SET value = '3' WHERE key = 'schema_version';
+    """,
 ]
 
 # ─── Connection management ────────────────────────────────────────────────────
@@ -371,6 +387,96 @@ def get_device_config(device_id: str) -> dict:
         return dict(DEFAULT_DEVICE_CONFIG)
 
 
+def get_global_device_config() -> dict:
+    """
+    Return the fleet-wide default device config.
+
+    Falls back to DEFAULT_DEVICE_CONFIG if the key is missing or unparseable
+    (should only occur on a fresh DB before migration v3 has run).
+    """
+    row = _q1("SELECT value FROM system_config WHERE key = 'global_device_config'")
+    if row is None or not row["value"]:
+        return dict(DEFAULT_DEVICE_CONFIG)
+    try:
+        return json.loads(row["value"]) or dict(DEFAULT_DEVICE_CONFIG)
+    except (json.JSONDecodeError, TypeError):
+        log.warning("[db] Invalid global_device_config JSON — using defaults")
+        return dict(DEFAULT_DEVICE_CONFIG)
+
+
+def set_global_device_config(config: dict) -> None:
+    """Persist updated fleet-wide default device config."""
+    with _tx() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO system_config (key, value) VALUES ('global_device_config', ?)",
+            (json.dumps(config),),
+        )
+
+
+def get_effective_device_config(device_id: str) -> dict:
+    """
+    Return the config that should be pushed to a device.
+
+    If use_global_config=1 (or the device is not found), returns the
+    fleet-wide global config — but always overrides startupVolume with
+    the device's own stored value. Volume is hardware state set at
+    provisioning time; it should never be clobbered by a fleet default.
+
+    If use_global_config=0, returns the device's own config entirely.
+
+    This is the authoritative source for what config a device should
+    actually run — use it in device_connected() and any config-push path.
+    """
+    row = _q1(
+        "SELECT use_global_config, config FROM devices WHERE device_id = ?",
+        (device_id,),
+    )
+    if row is None:
+        return get_global_device_config()
+
+    try:
+        per_device = json.loads(row["config"]) or {}
+    except (json.JSONDecodeError, TypeError):
+        log.warning(f"[db] Invalid config JSON for {device_id} — using global")
+        per_device = {}
+
+    if row["use_global_config"]:
+        config = get_global_device_config()
+        # startupVolume is per-device hardware state — never inherit from global
+        if "startupVolume" in per_device:
+            config["startupVolume"] = per_device["startupVolume"]
+        return config
+    else:
+        return per_device or get_global_device_config()
+
+
+def set_device_use_global(device_id: str, enabled: bool) -> None:
+    """
+    Set the use_global_config flag for a device.
+
+    When enabling (reverting to global): also resets the device's own
+    config column to a copy of the current global config, so the stored
+    value stays coherent if the flag is toggled again later.
+
+    When disabling (enabling per-device override): the config column is
+    left as-is; the caller is expected to immediately follow with
+    set_device_config() to write the desired override values.
+    """
+    with _tx() as conn:
+        if enabled:
+            global_cfg = get_global_device_config()
+            conn.execute(
+                "UPDATE devices SET use_global_config = 1, config = ? WHERE device_id = ?",
+                (json.dumps(global_cfg), device_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE devices SET use_global_config = 0 WHERE device_id = ?",
+                (device_id,),
+            )
+    log.info(f"[db] use_global_config={'1' if enabled else '0'}: {device_id}")
+
+
 def set_firmware_previous(device_id: str, version: Optional[str]) -> None:
     """
     Record the version that server.old holds after an OTA update.
@@ -582,6 +688,23 @@ def create_user(username: str, password_hash: str, role: str = "readonly") -> in
             (username, password_hash, role, now),
         )
         return cur.lastrowid
+
+
+def update_user_password(user_id: int, new_hash: str) -> None:
+    """
+    Update the password hash for a user.
+
+    new_hash must already be bcrypt-hashed — this function does not hash
+    passwords itself. Raises ValueError if the user is not found.
+    """
+    with _tx() as conn:
+        cur = conn.execute(
+            "UPDATE users SET password_hash = ? WHERE id = ?",
+            (new_hash, user_id),
+        )
+        if cur.rowcount == 0:
+            raise ValueError(f"User not found: {user_id}")
+    log.info(f"[db] Password updated for user id={user_id}")
 
 
 def get_all_users() -> list[sqlite3.Row]:

@@ -110,9 +110,10 @@ async def create_app() -> web.Application:
     app.router.add_post("/api/setup", _post_setup)
 
     # Auth
-    app.router.add_post("/api/auth/login",  _post_login)
-    app.router.add_post("/api/auth/logout", _post_logout)
-    app.router.add_get("/api/auth/me",      _get_me)
+    app.router.add_post("/api/auth/login",           _post_login)
+    app.router.add_post("/api/auth/logout",          _post_logout)
+    app.router.add_get("/api/auth/me",               _get_me)
+    app.router.add_post("/api/auth/change-password", _post_change_password)
 
     # Devices — order matters: specific paths before parameterised ones
     app.router.add_get("/api/devices",                    _get_devices)
@@ -133,6 +134,10 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/releases/latest",   _get_latest_release)
     app.router.add_post("/api/releases/check",   _post_check_release)
     app.router.add_post("/api/releases/deploy",  _post_deploy_all)
+
+    # Global device config
+    app.router.add_get("/api/global/config",   _get_global_config)
+    app.router.add_post("/api/global/config",  _post_global_config)
 
     # System
     app.router.add_get("/api/system/status",    _get_system_status)
@@ -341,14 +346,14 @@ async def _post_approve(request: web.Request) -> web.Response:
 
 @auth.require_auth
 async def _get_device_config(request: web.Request) -> web.Response:
-    """GET /api/devices/{id}/config"""
+    """GET /api/devices/{id}/config — returns effective config and override flag."""
     device_id = request.match_info["id"]
     loop = asyncio.get_event_loop()
     row = await loop.run_in_executor(None, db.get_device, device_id)
     if row is None:
         return _error("device_not_found", f"No device: {device_id}", 404)
-    config = await loop.run_in_executor(None, db.get_device_config, device_id)
-    return _ok(config)
+    config = await loop.run_in_executor(None, db.get_effective_device_config, device_id)
+    return _ok({"config": config, "use_global_config": bool(row["use_global_config"])})
 
 
 @auth.require_admin
@@ -356,25 +361,50 @@ async def _post_device_config(request: web.Request) -> web.Response:
     """
     POST /api/devices/{id}/config
 
-    Persists new config and pushes it to the device immediately if
-    connected. The Go binary applies tinymix changes on receipt.
+    Body may include use_global_config (bool) and any config fields.
+
+    If use_global_config=true: revert device to fleet defaults. The config
+    fields in the body are ignored — the effective config is the global one.
+
+    If use_global_config=false: enable per-device override. Config fields
+    in the body are persisted as the device's own config and pushed live.
+    If the device was previously on global, set_device_use_global(False)
+    is called first, which marks the flag without touching the config
+    column — the supplied config is then written over it.
+
+    If use_global_config is absent: behave as before (update config only,
+    leave the flag unchanged). This path is used by the global config push
+    to all on-global devices — it should not alter per-device flag state.
     """
     device_id = request.match_info["id"]
-    config = await _json_body(request)
+    body = await _json_body(request)
 
     loop = asyncio.get_event_loop()
     row = await loop.run_in_executor(None, db.get_device, device_id)
     if row is None:
         return _error("device_not_found", f"No device: {device_id}", 404)
 
-    await loop.run_in_executor(None, db.set_device_config, device_id, config)
+    use_global = body.pop("use_global_config", None)  # extract flag, not a config key
 
-    # Push to live device if connected
+    if use_global is True:
+        # Revert to global: reset flag + config column, ignore body
+        await loop.run_in_executor(None, db.set_device_use_global, device_id, True)
+        config = await loop.run_in_executor(None, db.get_effective_device_config, device_id)
+    elif use_global is False:
+        # Enable per-device override: mark flag, then write supplied config
+        await loop.run_in_executor(None, db.set_device_use_global, device_id, False)
+        config = body
+        await loop.run_in_executor(None, db.set_device_config, device_id, config)
+    else:
+        # No flag in body — plain config update, flag unchanged
+        config = body
+        await loop.run_in_executor(None, db.set_device_config, device_id, config)
+
+    # Push effective config to live device if connected
+    pushed = False
     live = _devices.get(device_id)
     if live is not None:
         await live.send_control({"type": "config", **config})
-        # Update in-memory threshold so wake_word_listener picks it up
-        # immediately without requiring a device reconnect.
         if "owwThreshold" in config:
             live.oww_threshold = float(config["owwThreshold"])
         if "owwModel" in config:
@@ -385,12 +415,12 @@ async def _post_device_config(request: web.Request) -> web.Response:
             live.eq_loudness = bool(config["eqLoudness"])
         log.info(f"[api] Config pushed to live device: {device_id}")
         pushed = True
-    else:
-        pushed = False
 
+    effective_use_global = use_global if use_global is not None else bool(row["use_global_config"])
     await _push_event({"type": "device_update", "device_id": device_id,
-                       "state": {"config": config}})
-    return _ok({"device_id": device_id, "config": config, "pushed": pushed})
+                       "state": {"config": config, "use_global_config": effective_use_global}})
+    return _ok({"device_id": device_id, "config": config,
+                "use_global_config": effective_use_global, "pushed": pushed})
 
 
 @auth.require_auth
@@ -1443,6 +1473,85 @@ async def _patch_system_config(request: web.Request) -> web.Response:
     return _ok(updated)
 
 
+# ─── Global device config ─────────────────────────────────────────────────────
+
+@auth.require_auth
+async def _get_global_config(request: web.Request) -> web.Response:
+    """GET /api/global/config — fleet-wide default device config."""
+    loop = asyncio.get_event_loop()
+    config = await loop.run_in_executor(None, db.get_global_device_config)
+    return _ok(config)
+
+
+@auth.require_admin
+async def _post_global_config(request: web.Request) -> web.Response:
+    """
+    POST /api/global/config
+
+    Persists new fleet-wide device defaults, then pushes the updated config
+    to every currently-connected device that still has use_global_config=1.
+    Devices with per-device overrides are not affected.
+    """
+    config = await _json_body(request)
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, db.set_global_device_config, config)
+
+    # Push to all connected devices on global config
+    pushed = []
+    for device_id, live in list(_devices.items()):
+        row = await loop.run_in_executor(None, db.get_device, device_id)
+        if row is None or not row["use_global_config"]:
+            continue
+        await live.send_control({"type": "config", **config})
+        if "owwThreshold" in config:
+            live.oww_threshold = float(config["owwThreshold"])
+        if "owwModel" in config:
+            live.oww_model = config["owwModel"]
+        if "eqBands" in config:
+            live.eq_bands = config["eqBands"]
+        if "eqLoudness" in config:
+            live.eq_loudness = bool(config["eqLoudness"])
+        pushed.append(device_id)
+
+    if pushed:
+        log.info(f"[api] Global config pushed to {len(pushed)} device(s): {pushed}")
+
+    return _ok({"config": config, "pushed_to": pushed})
+
+
+# ─── Auth — change password ───────────────────────────────────────────────────
+
+@auth.require_auth
+async def _post_change_password(request: web.Request) -> web.Response:
+    """
+    POST /api/auth/change-password
+
+    Body: {current_password, new_password}
+    Any authenticated user can change their own password.
+    Verifies current password before accepting the new one.
+    """
+    user = request["user"]
+    body = await _json_body(request)
+    current_password = _require_str(body, "current_password")
+    new_password     = _require_str(body, "new_password")
+
+    if len(new_password) < 8:
+        return _error("invalid_input", "New password must be at least 8 characters", 400)
+
+    loop = asyncio.get_event_loop()
+    db_user = await loop.run_in_executor(None, db.get_user_by_id, user["id"])
+    if db_user is None:
+        return _error("user_not_found", "User not found", 404)
+
+    if not await auth.verify_password_async(current_password, db_user["password_hash"]):
+        return _error("invalid_credentials", "Current password is incorrect", 401)
+
+    new_hash = await auth.hash_password_async(new_password)
+    await loop.run_in_executor(None, db.update_user_password, user["id"], new_hash)
+    log.info(f"[api] Password changed for user: {user['username']}")
+    return _ok({"ok": True})
+
+
 # ─── Live events WebSocket ────────────────────────────────────────────────────
 
 async def _ws_events(request: web.Request) -> web.WebSocketResponse:
@@ -1772,15 +1881,16 @@ def _merge_device(row) -> dict:
 
     return {
         # Persistent
-        "device_id":        device_id,
-        "label":            row["label"],
-        "approved":         bool(row["approved"]),
-        "ip":               row["ip"],
-        "firmware_ver":     row["firmware_ver"],
-        "firmware_previous": row["firmware_previous"],
-        "first_seen":       row["first_seen"],
-        "last_seen":        row["last_seen"],
-        "config":           json.loads(row["config"] or "{}"),
+        "device_id":          device_id,
+        "label":              row["label"],
+        "approved":           bool(row["approved"]),
+        "ip":                 row["ip"],
+        "firmware_ver":       row["firmware_ver"],
+        "firmware_previous":  row["firmware_previous"],
+        "first_seen":         row["first_seen"],
+        "last_seen":          row["last_seen"],
+        "config":             json.loads(row["config"] or "{}"),
+        "use_global_config":  bool(row["use_global_config"]),
         # Live — defaults when device is not connected
         "connected":        live is not None,
         "speaking":         live.speaking  if live else False,

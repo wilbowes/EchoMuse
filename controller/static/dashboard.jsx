@@ -420,11 +420,12 @@ function Shell({ deviceId, token }) {
 
 // ─── Device detail modal ──────────────────────────────────────────────────────
 
-function Detail({ device, token, onClose, onApprove, isAdmin }) {
+function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDeviceConfigChange }) {
   const [tab, setTab] = useState('status');
   const [config, setConfig] = useState({ ...device.config });
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [useGlobalConfig, setUseGlobalConfig] = useState(device.use_global_config ?? true);
   const [logs, setLogs] = useState([]);
   const [logsLoading, setLogsLoading] = useState(false);
   const [pushLog, setPushLog] = useState([]);
@@ -481,8 +482,18 @@ function Detail({ device, token, onClose, onApprove, isAdmin }) {
   async function pushConfig() {
     setSaving(true);
     try {
-      await API.post(`/api/devices/${device.device_id}/config`, config);
+      const body = useGlobalConfig
+        ? { use_global_config: true }
+        : { use_global_config: false, ...config };
+      const res = await API.post(`/api/devices/${device.device_id}/config`, body);
       setDirty(false);
+      // Keep parent device list in sync so re-opening the modal is consistent
+      if (onDeviceConfigChange) {
+        onDeviceConfigChange(device.device_id, {
+          config: res.config,
+          use_global_config: res.use_global_config,
+        });
+      }
     } catch(e) { alert(e.error || 'Failed to push config'); }
     setSaving(false);
   }
@@ -732,65 +743,60 @@ function Detail({ device, token, onClose, onApprove, isAdmin }) {
           {/* CONFIG */}
           {tab === 'config' && (
             <div style={{ maxWidth: 440 }}>
-              <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 20 }}>Microphone · 7-mic array</div>
-              <Slider label="Digital Gain" sub="ctl 89–143 all ADCs" value={config.adcDigitalGain} min={0} max={100} onChange={v => setConf('adcDigitalGain', v)}/>
-              <Slider label="MICPGA" sub="ctl 92–146 all ADCs" value={config.adcMicpga} min={0} max={100} onChange={v => setConf('adcMicpga', v)}/>
-              <Slider label="VAD Threshold" sub="RMS" value={config.vadThreshold} min={0.001} max={0.02} step={0.001} onChange={v => setConf('vadThreshold', v)}/>
-              <Slider label="VAD Speech Ms" sub="min speech to open gate" value={config.vadSpeechMs} min={32} max={320} step={32} onChange={v => setConf('vadSpeechMs', v)}/>
-              <Slider label="VAD Silence Ms" sub="silence to close gate" value={config.vadSilenceMs} min={200} max={2000} step={100} onChange={v => setConf('vadSilenceMs', v)}/>
-              <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', margin: '28px 0 20px' }}>Beamforming · Delay and Sum</div>
-              <Toggle label="Enabled" sub="7-mic delay-and-sum" value={config.beamformingEnabled ?? true} onChange={v => setConf('beamformingEnabled', v)}/>
-              <Slider label="Beam Angle" sub="-1 = auto" value={config.beamAngle ?? -1} min={-1} max={359} step={1} onChange={v => setConf('beamAngle', v)}/>
-              <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', margin: '28px 0 20px' }}>Speaker · TLV320 · card 0 dev 23</div>
-              <Slider label="Startup Volume" sub="ctl 61" value={config.startupVolume} min={0} max={100} onChange={v => setConf('startupVolume', v)}/>
-              <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', margin: '28px 0 12px' }}>EQ · 8-Band · controller-side</div>
-              {(() => {
-                const EQ_FREQS = ['125 Hz','250 Hz','500 Hz','1 kHz','2 kHz','3.5 kHz','5.5 kHz','8 kHz'];
-                const EQ_DESCS = ['shelf','','','','','','','shelf'];
-                const bands = config.eqBands ?? [0,0,0,0,0,0,0,0];
-                const fmtDb = v => (v >= 0 ? '+' : '') + Number(v).toFixed(1) + ' dB';
-                const setEqBand = (i, v) => { const b=[...bands]; b[i]=v; setConf('eqBands',b); };
-                const LEFT  = [0,1,2,3];
-                const RIGHT = [4,5,6,7];
-                return (
+              {/* Global override toggle */}
+              {isAdmin && globalConfig && (
+                <div style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                  background: useGlobalConfig ? 'rgba(64,88,120,0.08)' : 'rgba(40,96,64,0.08)',
+                  border: `1px solid ${useGlobalConfig ? 'rgba(64,88,120,0.2)' : 'rgba(40,96,64,0.2)'}`,
+                  borderRadius: 8, padding: '12px 16px', marginBottom: 24,
+                }}>
                   <div>
-                    <EqCurve bands={bands}/>
-                    <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'0 20px' }}>
-                      <div>{LEFT.map(i => (
-                        <Slider key={i} label={EQ_FREQS[i]} sub={EQ_DESCS[i]}
-                          value={bands[i]??0} min={-12} max={12} step={0.5}
-                          formatValue={fmtDb} onChange={v => setEqBand(i,v)}/>
-                      ))}</div>
-                      <div>{RIGHT.map(i => (
-                        <Slider key={i} label={EQ_FREQS[i]} sub={EQ_DESCS[i]}
-                          value={bands[i]??0} min={-12} max={12} step={0.5}
-                          formatValue={fmtDb} onChange={v => setEqBand(i,v)}/>
-                      ))}</div>
+                    <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: 'var(--text2)' }}>
+                      {useGlobalConfig ? 'Using fleet config' : 'Device-specific config'}
                     </div>
-                    <div style={{ display:'flex', gap:8, marginBottom:20, marginTop:4 }}>
-                      <Pill small onClick={() => setConf('eqBands',[0,0,0,0,0,0,0,0])}>Flat</Pill>
-                      <Pill small onClick={() => setConf('eqBands',[0,0,0,0,0,7,4,2])}>Clarity</Pill>
-                      <Pill small onClick={() => setConf('eqBands',[0,3,2,0,-2,0,0,0])}>Warmth</Pill>
+                    <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)', marginTop: 3 }}>
+                      {useGlobalConfig
+                        ? 'Enable override to customise settings for this device only'
+                        : 'Disable override to revert this device to fleet defaults'}
                     </div>
-                    <Toggle label="Loudness" sub="speech-range presence boost" value={config.eqLoudness??false} onChange={v=>setConf('eqLoudness',v)}/>
                   </div>
-                );
-              })()}
-              <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', margin: '28px 0 20px' }}>Wake Word · OpenWakeWord</div>
-              <Slider label="Detection Threshold" value={config.owwThreshold} min={0.1} max={0.9} step={0.05} onChange={v => setConf('owwThreshold', v)}/>
-              <div style={{ marginBottom: 24 }}>
-                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: 'var(--text2)', marginBottom: 8 }}>Model</div>
-                <select value={config.owwModel} onChange={e => setConf('owwModel', e.target.value)}>
-                  <option value="hey_jarvis_v0.1">hey_jarvis_v0.1</option>
-                  <option value="alexa_v0.1">alexa_v0.1</option>
-                  <option value="hey_mycroft_v0.1">hey_mycroft_v0.1</option>
-                  <option value="hey_rhasspy_v0.1">hey_rhasspy_v0.1</option>
-                </select>
-              </div>
+                  <Toggle
+                    label="" sub=""
+                    value={!useGlobalConfig}
+                    onChange={enabled => {
+                      if (enabled) {
+                        // Enabling per-device: seed from current global config
+                        setConfig({ ...(globalConfig || device.config) });
+                        setUseGlobalConfig(false);
+                        setDirty(true);
+                      } else {
+                        // Reverting to global
+                        setUseGlobalConfig(true);
+                        setDirty(true);
+                      }
+                    }}
+                  />
+                </div>
+              )}
+
+              {/* Config form — read-only when on global, editable when overridden */}
+              <DeviceConfigForm
+                config={useGlobalConfig ? (globalConfig || config) : config}
+                onChange={(k, v) => setConf(k, v)}
+                disabled={useGlobalConfig}
+              />
+
               {isAdmin && dirty && (
                 <div style={{ display: 'flex', gap: 10, marginTop: 24 }}>
-                  <Pill accent disabled={saving} onClick={pushConfig}>{saving ? 'Pushing…' : 'Push config'}</Pill>
-                  <Pill onClick={() => { setConfig({ ...device.config }); setDirty(false); }}>Revert</Pill>
+                  <Pill accent disabled={saving} onClick={pushConfig}>
+                    {saving ? 'Pushing…' : useGlobalConfig ? 'Revert to fleet config' : 'Push config'}
+                  </Pill>
+                  <Pill onClick={() => {
+                    setConfig({ ...device.config });
+                    setUseGlobalConfig(device.use_global_config ?? true);
+                    setDirty(false);
+                  }}>Cancel</Pill>
                 </div>
               )}
             </div>
@@ -2272,6 +2278,203 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
 
 // ─── App ──────────────────────────────────────────────────────────────────────
 
+// ─── DeviceConfigForm ─────────────────────────────────────────────────────────
+// Shared config form used by both the per-device config tab and the global
+// settings panel. disabled=true renders all controls read-only.
+
+function DeviceConfigForm({ config, onChange, disabled }) {
+  const EQ_FREQS = ['125 Hz','250 Hz','500 Hz','1 kHz','2 kHz','3.5 kHz','5.5 kHz','8 kHz'];
+  const EQ_DESCS = ['shelf','','','','','','','shelf'];
+  const bands    = config.eqBands ?? [0,0,0,0,0,0,0,0];
+  const fmtDb    = v => (v >= 0 ? '+' : '') + Number(v).toFixed(1) + ' dB';
+
+  const set = disabled ? () => {} : onChange;
+  const setEqBand = (i, v) => { const b=[...bands]; b[i]=v; set('eqBands', b); };
+
+  const inputStyle = disabled ? { opacity: 0.45, pointerEvents: 'none' } : {};
+
+  return (
+    <div style={{ maxWidth: 440 }}>
+      <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 20 }}>Microphone · 7-mic array</div>
+      <div style={inputStyle}>
+        <Slider label="Digital Gain" sub="ctl 89–143 all ADCs" value={config.adcDigitalGain} min={0} max={100} onChange={v => set('adcDigitalGain', v)}/>
+        <Slider label="MICPGA" sub="ctl 92–146 all ADCs" value={config.adcMicpga} min={0} max={100} onChange={v => set('adcMicpga', v)}/>
+        <Slider label="VAD Threshold" sub="RMS" value={config.vadThreshold} min={0.001} max={0.02} step={0.001} onChange={v => set('vadThreshold', v)}/>
+        <Slider label="VAD Speech Ms" sub="min speech to open gate" value={config.vadSpeechMs} min={32} max={320} step={32} onChange={v => set('vadSpeechMs', v)}/>
+        <Slider label="VAD Silence Ms" sub="silence to close gate" value={config.vadSilenceMs} min={200} max={2000} step={100} onChange={v => set('vadSilenceMs', v)}/>
+      </div>
+      <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', margin: '28px 0 20px' }}>Beamforming · Delay and Sum</div>
+      <div style={inputStyle}>
+        <Toggle label="Enabled" sub="7-mic delay-and-sum" value={config.beamformingEnabled ?? true} onChange={v => set('beamformingEnabled', v)}/>
+        <Slider label="Beam Angle" sub="-1 = auto" value={config.beamAngle ?? -1} min={-1} max={359} step={1} onChange={v => set('beamAngle', v)}/>
+      </div>
+      <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', margin: '28px 0 20px' }}>Speaker · TLV320 · card 0 dev 23</div>
+      <div style={inputStyle}>
+        <Slider label="Startup Volume" sub="ctl 61" value={config.startupVolume} min={0} max={100} onChange={v => set('startupVolume', v)}/>
+      </div>
+      <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', margin: '28px 0 12px' }}>EQ · 8-Band · controller-side</div>
+      <div style={inputStyle}>
+        <EqCurve bands={bands}/>
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'0 20px' }}>
+          <div>{[0,1,2,3].map(i => (
+            <Slider key={i} label={EQ_FREQS[i]} sub={EQ_DESCS[i]}
+              value={bands[i]??0} min={-12} max={12} step={0.5}
+              formatValue={fmtDb} onChange={v => setEqBand(i,v)}/>
+          ))}</div>
+          <div>{[4,5,6,7].map(i => (
+            <Slider key={i} label={EQ_FREQS[i]} sub={EQ_DESCS[i]}
+              value={bands[i]??0} min={-12} max={12} step={0.5}
+              formatValue={fmtDb} onChange={v => setEqBand(i,v)}/>
+          ))}</div>
+        </div>
+        {!disabled && (
+          <div style={{ display:'flex', gap:8, marginBottom:20, marginTop:4 }}>
+            <Pill small onClick={() => set('eqBands',[0,0,0,0,0,0,0,0])}>Flat</Pill>
+            <Pill small onClick={() => set('eqBands',[0,0,0,0,0,7,4,2])}>Clarity</Pill>
+            <Pill small onClick={() => set('eqBands',[0,3,2,0,-2,0,0,0])}>Warmth</Pill>
+          </div>
+        )}
+        <Toggle label="Loudness" sub="speech-range presence boost" value={config.eqLoudness??false} onChange={v => set('eqLoudness',v)}/>
+      </div>
+      <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', margin: '28px 0 20px' }}>Wake Word · OpenWakeWord</div>
+      <div style={inputStyle}>
+        <Slider label="Detection Threshold" value={config.owwThreshold} min={0.1} max={0.9} step={0.05} onChange={v => set('owwThreshold', v)}/>
+        <div style={{ marginBottom: 24 }}>
+          <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: 'var(--text2)', marginBottom: 8 }}>Model</div>
+          <select value={config.owwModel} onChange={e => set('owwModel', e.target.value)} disabled={disabled}>
+            <option value="hey_jarvis_v0.1">hey_jarvis_v0.1</option>
+            <option value="alexa_v0.1">alexa_v0.1</option>
+            <option value="hey_mycroft_v0.1">hey_mycroft_v0.1</option>
+            <option value="hey_rhasspy_v0.1">hey_rhasspy_v0.1</option>
+          </select>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+// ─── SettingsPanel ─────────────────────────────────────────────────────────────
+// Gear icon → modal with two tabs: Fleet Config and Account.
+
+function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username }) {
+  const [tab, setTab]             = useState('fleet');
+  const [config, setConfig]       = useState({ ...globalConfig });
+  const [dirty, setDirty]         = useState(false);
+  const [saving, setSaving]       = useState(false);
+
+  const [curPw, setCurPw]         = useState('');
+  const [newPw, setNewPw]         = useState('');
+  const [confirmPw, setConfirmPw] = useState('');
+  const [pwSaving, setPwSaving]   = useState(false);
+  const [pwMsg, setPwMsg]         = useState(null); // {ok, text}
+
+  function setConf(k, v) { setConfig(c => ({ ...c, [k]: v })); setDirty(true); }
+
+  async function saveGlobalConfig() {
+    setSaving(true);
+    try {
+      const res = await API.post('/api/global/config', config);
+      onGlobalConfigChange(config);
+      setDirty(false);
+      const n = res.pushed_to?.length ?? 0;
+      if (n > 0) alert(`Saved and pushed to ${n} device${n === 1 ? '' : 's'} on fleet config.`);
+    } catch(e) {
+      alert(e.error || 'Failed to save global config');
+    }
+    setSaving(false);
+  }
+
+  async function changePassword() {
+    setPwMsg(null);
+    if (newPw !== confirmPw) { setPwMsg({ ok: false, text: 'New passwords do not match' }); return; }
+    if (newPw.length < 8)    { setPwMsg({ ok: false, text: 'Password must be at least 8 characters' }); return; }
+    setPwSaving(true);
+    try {
+      await API.post('/api/auth/change-password', { current_password: curPw, new_password: newPw });
+      setPwMsg({ ok: true, text: 'Password updated' });
+      setCurPw(''); setNewPw(''); setConfirmPw('');
+    } catch(e) {
+      setPwMsg({ ok: false, text: e.error || 'Failed to change password' });
+    }
+    setPwSaving(false);
+  }
+
+  const TABS = ['fleet', 'account'];
+  const TAB_LABELS = { fleet: 'Fleet Config', account: 'Account' };
+
+  return (
+    <div style={{ position:'fixed', inset:0, background:'rgba(180,176,168,0.5)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:200, backdropFilter:'blur(8px)' }}
+      onClick={e => e.target === e.currentTarget && onClose()}>
+      <div style={{ width:'min(900px,95vw)', maxHeight:'90vh', background:'linear-gradient(170deg,#e8e4de,#d8d4cc)', border:'1px solid #b8b4ac', borderRadius:16, boxShadow:'0 24px 80px rgba(0,0,0,0.3),0 2px 0 rgba(255,255,255,0.8) inset', display:'flex', flexDirection:'column', overflow:'hidden', animation:'fadeIn 0.15s ease' }}>
+
+        {/* Header */}
+        <div style={{ background:'linear-gradient(180deg,#dedad2,#ccc8c0)', borderBottom:'1px solid #b0aca4', padding:'20px 24px 0', boxShadow:'0 1px 0 rgba(255,255,255,0.5) inset' }}>
+          <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:16 }}>
+            <div style={{ fontFamily:"'DM Sans',sans-serif", fontSize:22, color:'var(--text)', fontWeight:600, letterSpacing:'-0.02em' }}>Settings</div>
+            <button onClick={onClose} style={{ background:'none', border:'none', fontSize:20, color:'var(--muted)', cursor:'pointer', lineHeight:1, padding:'0 4px' }}>✕</button>
+          </div>
+          <div style={{ display:'flex', gap:0 }}>
+            {TABS.map(t => (
+              <div key={t} onClick={() => setTab(t)} style={{
+                fontFamily:"'DM Mono',monospace", fontSize:10, textTransform:'uppercase', letterSpacing:'0.12em',
+                padding:'8px 18px', cursor:'pointer', borderBottom: t === tab ? '2px solid #405878' : '2px solid transparent',
+                color: t === tab ? '#405878' : 'var(--muted)', transition:'color 0.1s',
+              }}>{TAB_LABELS[t]}</div>
+            ))}
+          </div>
+        </div>
+
+        {/* Body */}
+        <div style={{ overflowY:'auto', padding:'24px 28px 32px', flex:1 }}>
+
+          {tab === 'fleet' && (
+            <>
+              <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)', marginBottom:20, lineHeight:1.6 }}>
+                Default config applied to all devices unless overridden per-device.
+              </div>
+              <DeviceConfigForm config={config} onChange={setConf} disabled={false}/>
+              {dirty && (
+                <div style={{ display:'flex', gap:10, marginTop:24 }}>
+                  <Pill accent disabled={saving} onClick={saveGlobalConfig}>{saving ? 'Saving…' : 'Save & push to fleet'}</Pill>
+                  <Pill onClick={() => { setConfig({...globalConfig}); setDirty(false); }}>Revert</Pill>
+                </div>
+              )}
+            </>
+          )}
+
+          {tab === 'account' && (
+            <div style={{ maxWidth: 360 }}>
+              <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.15em', marginBottom:20 }}>Change Password · {username}</div>
+              {[
+                ['Current password', curPw, setCurPw],
+                ['New password',     newPw, setNewPw],
+                ['Confirm new',      confirmPw, setConfirmPw],
+              ].map(([label, val, setter]) => (
+                <div key={label} style={{ marginBottom:16 }}>
+                  <div style={{ fontFamily:"'DM Mono',monospace", fontSize:11, color:'var(--text2)', marginBottom:6 }}>{label}</div>
+                  <input type="password" value={val} onChange={e => setter(e.target.value)}
+                    style={{ width:'100%', boxSizing:'border-box' }}/>
+                </div>
+              ))}
+              {pwMsg && (
+                <div style={{ fontFamily:"'DM Mono',monospace", fontSize:11, color: pwMsg.ok ? '#286040' : '#b03030', marginBottom:12 }}>
+                  {pwMsg.text}
+                </div>
+              )}
+              <Pill accent disabled={pwSaving || !curPw || !newPw || !confirmPw} onClick={changePassword}>
+                {pwSaving ? 'Updating…' : 'Update password'}
+              </Pill>
+            </div>
+          )}
+
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 function App() {
   const [token, setToken] = useState(() => sessionStorage.getItem('em_token'));
   const [role, setRole] = useState(() => sessionStorage.getItem('em_role'));
@@ -2282,6 +2485,8 @@ function App() {
   const [status, setStatus] = useState(null);
   const [loadError, setLoadError] = useState(null);
   const [showWizard, setShowWizard] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [globalConfig, setGlobalConfig] = useState(null);
   const wsRef = useRef(null);
 
   const isAdmin = role === 'admin';
@@ -2312,10 +2517,12 @@ function App() {
       API.get('/api/devices'),
       API.get('/api/system/status'),
       API.get('/api/releases/latest').catch(() => null),
-    ]).then(([devs, stat, rel]) => {
+      API.get('/api/global/config').catch(() => null),
+    ]).then(([devs, stat, rel, gcfg]) => {
       setDevices(devs);
       setStatus(stat);
       setRelease(rel);
+      if (gcfg) setGlobalConfig(gcfg);
     }).catch(e => {
       if (e.code === 'not_authenticated') { handleLogout(); }
       else setLoadError(e.error || 'Failed to load');
@@ -2412,6 +2619,11 @@ function App() {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)' }}>{role}</div>
+          <button onClick={() => setShowSettings(true)} title="Settings" style={{
+            background: 'none', border: 'none', cursor: 'pointer', padding: '2px 4px',
+            color: 'var(--muted)', fontSize: 16, lineHeight: 1, opacity: 0.7,
+            transition: 'opacity 0.15s',
+          }} onMouseEnter={e => e.target.style.opacity=1} onMouseLeave={e => e.target.style.opacity=0.7}>⚙</button>
           <Pill small onClick={handleLogout}>Sign out</Pill>
         </div>
       </div>
@@ -2499,6 +2711,16 @@ function App() {
         <ProvisionWizard token={token} onClose={() => setShowWizard(false)} knownDevices={devices}/>
       )}
 
+      {/* Settings panel */}
+      {showSettings && globalConfig && (
+        <SettingsPanel
+          globalConfig={globalConfig}
+          onGlobalConfigChange={setGlobalConfig}
+          onClose={() => setShowSettings(false)}
+          username={role}
+        />
+      )}
+
       {/* Detail modal */}
       {selectedDevice && (
         <Detail
@@ -2507,6 +2729,12 @@ function App() {
           onClose={() => setSelected(null)}
           onApprove={() => API.get('/api/devices').then(setDevices).catch(() => {})}
           isAdmin={isAdmin}
+          globalConfig={globalConfig}
+          onDeviceConfigChange={(device_id, patch) =>
+            setDevices(prev => prev.map(d =>
+              d.device_id === device_id ? { ...d, ...patch } : d
+            ))
+          }
         />
       )}
     </div>
