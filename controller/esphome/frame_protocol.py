@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import socket
 from typing import Callable, Optional
 
 log = logging.getLogger("echomuse.esphome.frame")
@@ -50,6 +51,59 @@ _MAX_VARUINT_BITPOS = 7 * _MAX_VARUINT_BYTES
 
 # Matches the firmware's uint16_t wire-format frame length cap.
 MAX_PLAINTEXT_FRAME_SIZE = 65535
+
+# TCP keepalive tuning for accepted HA connections.
+#
+# Why this exists: a real ESP32 losing its HA connection gets a proper TCP
+# FIN/RST from the OS in basically every failure mode. Our situation is
+# different — em_esphome.py's device_connected()/device_disconnected()
+# lifecycle correctly tears the *listener* down when the physical Echo Dot
+# drops, but there's no equivalent signal for the *client* (HA) side. If
+# HA's host restarts in a way that doesn't cleanly close its socket (hard
+# reboot, container kill, network blip) rather than a graceful shutdown,
+# asyncio has no way to know — connection_lost() only fires when the OS
+# tells it the peer is gone, and with no keepalive that can be never. The
+# controller is then left with a stale _active_satellite that
+# get_satellite() keeps returning, so trigger_voice_turn() silently no-ops
+# forever until something else (a device reboot) forces the listener to
+# restart. Keepalive gives the OS a way to actually detect the dead peer
+# instead of waiting indefinitely for a FIN that may never come.
+#
+# Values chosen for "a human already knows something's wrong" latency, not
+# ESPHome-protocol-mandated — the protocol has no opinion on this, it's
+# pure TCP hygiene sitting below it. ~30s to first probe, 3 missed probes
+# 10s apart = dead connection reaped within ~60s of actually going dark.
+_KEEPALIVE_IDLE_SEC = 30
+_KEEPALIVE_INTERVAL_SEC = 10
+_KEEPALIVE_COUNT = 3
+
+
+def _enable_tcp_keepalive(transport: asyncio.BaseTransport, log_name: str) -> None:
+    """
+    Turn on SO_KEEPALIVE with explicit Linux tuning on an accepted socket.
+
+    Best-effort: asyncio's transport wraps a real socket, but reaching it
+    is via get_extra_info("socket") rather than a typed API, and the
+    per-platform TCP_KEEPIDLE/TCP_KEEPINTVL/TCP_KEEPCNT options are
+    Linux-specific (absent on macOS/BSD). Controller runs in a Linux
+    Docker container per the Dockerfile, so this is the only platform
+    that actually matters here — the try/except is defensive for local
+    dev on other platforms, not a sign this is expected to fail in prod.
+    """
+    sock = transport.get_extra_info("socket")
+    if sock is None:
+        log.warning(f"[{log_name}] no underlying socket — keepalive not set")
+        return
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        if hasattr(socket, "TCP_KEEPIDLE"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, _KEEPALIVE_IDLE_SEC)
+        if hasattr(socket, "TCP_KEEPINTVL"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, _KEEPALIVE_INTERVAL_SEC)
+        if hasattr(socket, "TCP_KEEPCNT"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, _KEEPALIVE_COUNT)
+    except OSError as e:
+        log.warning(f"[{log_name}] failed to set TCP keepalive: {e}")
 
 # Sentinels for the streaming varuint reader (negative — varuints are
 # never negative, so these can't collide with a real decoded value).
@@ -183,6 +237,7 @@ class PlaintextFrameProtocol(asyncio.Protocol):
         peer = transport.get_extra_info("peername")
         self.peer = f"{peer[0]}:{peer[1]}" if peer else "unknown"
         log.info(f"[{self._log_name}] Connection from {self.peer}")
+        _enable_tcp_keepalive(transport, self._log_name)
         if self._on_connected:
             self._on_connected(self)
 

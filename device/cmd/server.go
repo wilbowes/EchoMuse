@@ -121,10 +121,11 @@ func main() {
 			pulseCancel()
 			pulseCancel = nil
 		}
-		// Always report mute state on (re)connect — the controller may have
-		// restarted and lost its record of our state.
+		// Always report mute and volume state on (re)connect — the controller
+		// may have restarted and lost its record of our state.
 		muted := s.IsMuted()
 		controlClient.SendMuteState(muted)
+		controlClient.SendVolumeState(s.VolumeLevel())
 		if muted {
 			// Orange pulse overwrote the red ring — restore it.
 			s.RestoreMuteRing()
@@ -146,12 +147,21 @@ func main() {
 	})
 
 	// Mute state change — notify controller so dashboard can reflect it
-	// When unmuting, release ring back to direction arc
 	s.SetMuteChangeCallback(func(muted bool) {
 		controlClient.SendMuteState(muted)
-		// Direction arc is controlled by beam lock state, not mute state.
-		// SetDirectionLEDs claims direction mode when beam is locked,
-		// and clears LEDs when beam unlocks (angle == -1).
+	})
+
+	// Volume change — notify controller so HA entity and dashboard reflect it.
+	// Fires on every Set() call: physical button press or future volume_set command.
+	s.SetVolumeChangeCallback(func(level int) {
+		controlClient.SendVolumeState(level)
+	})
+
+	// Volume set from controller (HA MediaPlayerCommandRequest forwarded down).
+	// Calls Set() which applies tinymix, updates LEDs, and fires the change
+	// callback above — so SendVolumeState fires automatically, closing the loop.
+	controlClient.OnVolumeSet(func(level int) {
+		s.SetVolume(level)
 	})
 
 	log.Println("Ready")

@@ -189,6 +189,13 @@ class EchoMuseSatellite(SatelliteServerProtocol):
 
     # ── Message handling ─────────────────────────────────────────────────
 
+    @property
+    def _current_volume(self) -> float:
+        """Current volume as HA float (0.0–1.0), read from owning server."""
+        if self._owning_server is not None:
+            return self._owning_server.volume
+        return 1.0
+
     def handle_message(self, msg):
         """
         Handle all messages beyond Hello/Ping/Disconnect/Authentication
@@ -233,7 +240,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             yield api_pb2.MediaPlayerStateResponse(
                 key=MEDIA_PLAYER_KEY,
                 state=MediaPlayerState.IDLE,
-                volume=1.0,
+                volume=self._current_volume,
                 muted=False,
             )
             return
@@ -263,11 +270,28 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             return
 
         if isinstance(msg, api_pb2.MediaPlayerCommandRequest):
-            log.debug(f"[{self._log_name}] MediaPlayerCommandRequest (no-op)")
+            if msg.has_volume and self._owning_server is not None:
+                # HA set an explicit volume — convert float (0.0–1.0) to device
+                # integer (0–175) and forward to the physical device.
+                level = max(0, min(175, round(msg.volume * 175)))
+                log.debug(
+                    f"[{self._log_name}] MediaPlayerCommandRequest: "
+                    f"volume={msg.volume:.3f} → level={level}"
+                )
+                send_fn = self._owning_server._send_volume_set
+                if send_fn is not None:
+                    asyncio.create_task(send_fn(level))
+                else:
+                    log.warning(f"[{self._log_name}] volume set requested but device not connected")
+            elif msg.has_command:
+                log.debug(
+                    f"[{self._log_name}] MediaPlayerCommandRequest: "
+                    f"command={msg.command} (unhandled)"
+                )
             yield api_pb2.MediaPlayerStateResponse(
                 key=MEDIA_PLAYER_KEY,
                 state=MediaPlayerState.IDLE,
-                volume=1.0,
+                volume=self._current_volume,
                 muted=False,
             )
             return
@@ -306,14 +330,14 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             yield api_pb2.MediaPlayerStateResponse(
                 key=MEDIA_PLAYER_KEY,
                 state=MediaPlayerState.ANNOUNCING,
-                volume=1.0,
+                volume=self._current_volume,
                 muted=False,
             )
             yield api_pb2.VoiceAssistantAnnounceFinished(success=True)
             yield api_pb2.MediaPlayerStateResponse(
                 key=MEDIA_PLAYER_KEY,
                 state=MediaPlayerState.IDLE,
-                volume=1.0,
+                volume=self._current_volume,
                 muted=False,
             )
             return
@@ -531,6 +555,21 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 log.info(f"[{self._log_name}] No TTS audio URL received — turn ended without response")
 
         finally:
+            # Signal HA that the satellite has finished playing TTS and is
+            # back at idle. The reference implementation (linux-voice-assistant
+            # _tts_finished callback) sends VoiceAssistantAnnounceFinished —
+            # not VoiceAssistantRequest(start=False), not MediaPlayerStateResponse.
+            # This is what actually transitions HA's Assist satellite panel out
+            # of "Responding." RUN_END only signals server-side pipeline completion;
+            # the satellite may still be fetching and playing audio at that point.
+            if self._transport and not self._transport.is_closing():
+                self._send_one(api_pb2.VoiceAssistantAnnounceFinished(success=True))
+                self._send_one(api_pb2.MediaPlayerStateResponse(
+                    key=MEDIA_PLAYER_KEY,
+                    state=MediaPlayerState.IDLE,
+                    volume=self._current_volume,
+                    muted=False,
+                ))
             self._turn_active    = False
             self._on_thinking    = None
             self._on_announce    = None
@@ -676,14 +715,27 @@ class DeviceESPhomeServer:
         self._server: Optional[asyncio.AbstractServer] = None
         self._active_satellite: Optional[EchoMuseSatellite] = None
         self._mdns_info: Optional[ServiceInfo] = None
+        # Current volume as HA float (0.0–1.0). Seeded from stored config
+        # by update_device_volume() when the device connects; updated on
+        # every volume_state message from the device. Read by the satellite
+        # for MediaPlayerStateResponse rather than hardcoding 1.0.
+        self.volume: float = 1.0
         # Injected by device_connected() — async callable(pcm_bytes) for
         # standalone announce playback (setup wizard, push TTS) when no
         # voice turn is active.
         self._standalone_play = None
+        # Injected by device_connected() — async callable(level: int) that
+        # sends a volume_set control-plane message to the physical device.
+        # None when no device is connected.
+        self._send_volume_set = None
 
     def get_satellite(self) -> Optional[EchoMuseSatellite]:
         """Return the active HA connection's satellite instance, or None."""
         return self._active_satellite
+
+    def set_volume(self, volume: float) -> None:
+        """Update stored volume (0.0–1.0) from a device volume_state report."""
+        self.volume = max(0.0, min(1.0, volume))
 
     def _protocol_factory(self):
         """
@@ -915,6 +967,7 @@ async def device_connected(
     device_id: str,
     host: str = "0.0.0.0",
     standalone_play=None,
+    send_volume_set=None,
 ) -> None:
     """
     Called by em_controller.handle_control() when an Echo Dot connects.
@@ -927,13 +980,18 @@ async def device_connected(
     speaker pipeline for standalone announces (setup wizard audio test,
     push TTS) when no voice turn is active. Provided by the controller
     as a closure over the Device object.
+
+    send_volume_set: async callable(level: int) — sends a volume_set
+    control-plane message to the physical device. Provided by the controller
+    as a closure over the Device object. Used by the satellite to forward
+    HA MediaPlayerCommandRequest volume changes down to the device.
     """
     server = _servers.get(device_id)
     if server is None:
         return
     server._standalone_play = standalone_play
+    server._send_volume_set = send_volume_set
     if server._server is not None:
-        # Already up — device reconnected without a clean disconnect
         log.debug(f"[esphome.{device_id[-8:]}] device_connected: port {server.port} already listening")
         return
     await server.start(host)
@@ -954,8 +1012,33 @@ async def device_disconnected(device_id: str) -> None:
     if server._server is None:
         log.debug(f"[esphome.{device_id[-8:]}] device_disconnected: port already down")
         return
+    server._send_volume_set = None
     await server.stop()
     log.info(f"[esphome.{device_id[-8:]}] ESPHome port {server.port} down (device disconnected)")
+
+
+def update_device_volume(device_id: str, volume: float) -> None:
+    """
+    Called by em_controller when a volume_state message arrives from the device.
+
+    Updates the server's stored volume and pushes an unsolicited
+    MediaPlayerStateResponse to HA so the entity reflects the new value
+    immediately — without waiting for HA to poll on its next refresh cycle.
+    No-op if no server is registered for this device.
+    """
+    server = _servers.get(device_id)
+    if server is None:
+        return
+    server.set_volume(volume)
+    log.debug(f"[esphome.{device_id[-8:]}] volume updated → {volume:.3f}")
+    satellite = server.get_satellite()
+    if satellite is not None:
+        satellite._send_one(api_pb2.MediaPlayerStateResponse(
+            key=MEDIA_PLAYER_KEY,
+            state=MediaPlayerState.IDLE,
+            volume=volume,
+            muted=False,
+        ))
 
 
 # ─── mDNS helpers ────────────────────────────────────────────────────────────

@@ -107,6 +107,24 @@ func (s *Server) VolumeStepDown() {
 	s.volume.StepDown()
 }
 
+// SetVolume sets volume to an explicit level (0–175) — called by controller command.
+func (s *Server) SetVolume(level int) {
+	s.volume.Set(level)
+}
+
+// VolumeLevel returns the current volume level (0–175).
+func (s *Server) VolumeLevel() int {
+	return s.volume.Get()
+}
+
+// SetVolumeChangeCallback wires a callback invoked when volume changes.
+// The callback receives the new level (0–175).
+func (s *Server) SetVolumeChangeCallback(cb func(level int)) {
+	s.volume.mu.Lock()
+	s.volume.onVolumeChange = cb
+	s.volume.mu.Unlock()
+}
+
 // MuteToggle toggles mic mute state — called by button handler.
 func (s *Server) MuteToggle() {
 	s.mute.Toggle()

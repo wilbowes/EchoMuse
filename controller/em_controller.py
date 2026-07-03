@@ -7,7 +7,7 @@ WebSocket server. Echo Dot devices connect via mDNS discovery.
 mDNS advertisement is handled internally — no separate container required.
 
 Architecture:
-- Advertise _emcontroller._tcp.local on SERVER_PORT (zeroconf, host network)
+- Advertise _emcontroller._tcp on SERVER_PORT (zeroconf, host network)
 - Devices open THREE connections:
     /control — JSON control plane (buttons, LEDs, mic_start/stop, ping,
                                    register, config, log, pending)
@@ -127,6 +127,17 @@ SPEAKER_FRAME_TYPE = 0x02
 SPEAKER_EOS_TYPE   = 0x03
 MIC_HEADER_LEN     = 3   # [type][seq_hi][seq_lo]
 
+# Volume conversion — device uses integer 0–175, HA expects float 0.0–1.0.
+VOLUME_MAX_DEVICE = 175
+
+def _device_level_to_ha(level: int) -> float:
+    """Convert device volume (0–175) to HA float (0.0–1.0)."""
+    return max(0.0, min(1.0, level / VOLUME_MAX_DEVICE))
+
+def _ha_volume_to_device(volume: float) -> int:
+    """Convert HA volume float (0.0–1.0) to device integer (0–175)."""
+    return max(0, min(VOLUME_MAX_DEVICE, round(volume * VOLUME_MAX_DEVICE)))
+
 # ─── Device registry ──────────────────────────────────────────────────────────
 
 class Device:
@@ -161,6 +172,12 @@ class Device:
         self.muted     = False
         self.listening = False
         self.thinking  = False
+
+        # Volume as HA float (0.0–1.0). Initialised from stored config in
+        # handle_control() after config is read; updated on volume_state
+        # messages from the device and persisted back to config.
+        # Default matches DEFAULT_DEVICE_CONFIG startupVolume=85.
+        self.volume: float = _device_level_to_ha(85)
 
         self.data_ready = asyncio.Event()
 
@@ -481,19 +498,7 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
         log.info(f"[{device.device_id}] Cancelled during playback")
         stream_task.cancel()
     else:
-        # Wait for device audio buffer to drain before restarting mic.
-        # The device has ~341ms of buffered audio after the last frame
-        # is sent (4 audioCh + 4 ALSA hw periods at 2048 samples/48kHz).
-        # Without this wait, the mic restarts while the speaker is still
-        # playing, causing acoustic feedback into the next voice turn.
         if not device.cancel_event.is_set():
-            # stream_speaker completes when frames are buffered (network
-            # I/O), not when the device finishes playing them. For long
-            # responses, asyncio TCP backpressure means stream_speaker
-            # itself takes a significant fraction of audio_duration.
-            # Sleeping the full audio_duration after that overshoots —
-            # the spinner ran long after playback ended. Sleep only the
-            # remaining time instead.
             audio_duration = len(speaker_pcm) / (SPEAKER_RATE * 4)  # stereo S16LE
             elapsed        = asyncio.get_event_loop().time() - t_stream_start
             remaining      = max(0.0, audio_duration - elapsed)
@@ -512,15 +517,6 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
 async def run_voice_turn(device: Device):
     """
     Device mechanics concern: coordinates a single voice turn end-to-end.
-
-    Owns mic_start_turn/mic_stop, LED transitions, listening/thinking/speaking
-    flags, _push_device_state, cancel_event handling, and the 45s turn guard.
-    Delegates the actual voice backend exchange to _run_claracore_backend()
-    and post-turn audio playback + timing to _run_post_turn_playback().
-
-    VOICE_MODE gating lives in the caller (_run_voice_locked) — this
-    function always runs the claracore path. esphome mode will add a
-    parallel entry point here once PR2 lands.
     """
     log.info(f"[{device.device_id}] Voice turn starting")
     device.listening = True
@@ -574,8 +570,6 @@ async def run_voice_turn(device: Device):
         await cleanup()
         return
 
-    # Start spinner now if THINKING never arrived (e.g. very fast response
-    # where audio bytes came back before the THINKING sentinel).
     if spin_task is None or spin_task.done():
         spin_task = asyncio.create_task(leds_spin_green(device, stop_spin))
 
@@ -590,8 +584,6 @@ async def run_voice_turn(device: Device):
 
 
 async def _run_voice_locked(device: Device):
-    # oww_paused already set by caller (button handler or OWW trigger)
-    # Drain any frames already in the queues — stale from OWW
     drained = 0
     while not device.mic_queue.empty():
         try:
@@ -610,8 +602,6 @@ async def _run_voice_locked(device: Device):
     try:
         async with device.voice_lock:
             if VOICE_MODE == "esphome":
-                # ESPHome mode: device mechanics live here (LED, flags, mic),
-                # voice exchange is delegated to the active HA connection.
                 log.info(f"[{device.device_id}] Voice turn starting (esphome mode)")
                 device.listening = True
                 await leds_listening(device)
@@ -667,7 +657,6 @@ async def _run_voice_locked(device: Device):
                     log.info(f"[{device.device_id}] Voice turn complete (esphome mode)")
 
             else:
-                # claracore mode — unchanged
                 await run_voice_turn(device)
     finally:
         device.oww_paused.clear()
@@ -679,10 +668,6 @@ async def _run_voice_locked(device: Device):
 async def wake_word_listener(device: Device):
     loop = asyncio.get_event_loop()
 
-    # Each device gets its own model instance — the OWW model holds internal
-    # streaming state (feature buffer, VAD history) that is not thread-safe and
-    # must not be shared across devices. Models are small; the memory cost is
-    # acceptable for a fleet of 5-6 devices.
     current_model_name = device.oww_model
     log.info(f"[{device.device_id}] OWW: loading model {current_model_name}")
     model = await loop.run_in_executor(
@@ -700,7 +685,6 @@ async def wake_word_listener(device: Device):
     buf = bytearray()
     try:
         while True:
-            # Reload model if owwModel config changed at runtime
             if device.oww_model != current_model_name:
                 new_name = device.oww_model
                 log.info(
@@ -726,7 +710,7 @@ async def wake_word_listener(device: Device):
                         f"[{device.device_id}] OWW: failed to load {new_name}: {e} "
                         f"— reverting to {current_model_name}"
                     )
-                    device.oww_model = current_model_name  # revert so we don't retry forever
+                    device.oww_model = current_model_name
             try:
                 payload = await asyncio.wait_for(
                     device.mic_queue.get(), timeout=10.0
@@ -736,17 +720,12 @@ async def wake_word_listener(device: Device):
                 continue
 
             if payload is None:
-                # VAD end sentinel — discard, OWW handles its own state
                 buf.clear()
                 continue
 
-            # During a voice turn the OWW loop stops consuming —
-            # frames go into voice_queue instead (see data handler)
             if device.oww_paused.is_set():
                 continue
 
-            # Mic is hardware-muted — discard frames and clear the buffer so
-            # stale pre-mute audio can't accumulate and trigger OWW on unmute.
             if device.muted:
                 buf.clear()
                 continue
@@ -758,7 +737,7 @@ async def wake_word_listener(device: Device):
                 samples = np.frombuffer(frame, dtype=np.int16)
 
                 if device.speaking:
-                    continue  # suppress OWW during speaker playback
+                    continue
 
                 prediction = await loop.run_in_executor(
                     None, model.predict, samples
@@ -782,7 +761,6 @@ async def wake_word_listener(device: Device):
                         device.oww_paused.set()
                         await _run_voice_locked(device)
 
-                        # Drain stale frames accumulated during voice turn
                         drained = 0
                         while not device.voice_queue.empty():
                             try:
@@ -842,13 +820,6 @@ async def handle_button_event(device: Device, event: dict):
 async def handle_control(ws: WebSocketServerProtocol):
     """
     Handle a /control WebSocket connection from a device.
-
-    Registration flow:
-      1. Receive register message with device_id (ro.serialno) and version
-      2. Look up device in DB
-         - Not found → insert as pending, send {"type": "pending"}, close
-         - Found, approved=false → send {"type": "pending"}, close
-         - Found, approved=true → send ack + config, start pipeline
     """
     device = None
     remote = ws.remote_address
@@ -869,14 +840,12 @@ async def handle_control(ws: WebSocketServerProtocol):
         version      = msg.get("version")
         capabilities = msg.get("capabilities", [])
 
-        # ── Device approval check ─────────────────────────────────────────────
         loop         = asyncio.get_event_loop()
         approval_mode = db.get_config("device_approval", DEVICE_APPROVAL)
         row          = await loop.run_in_executor(None, db.get_device, device_id)
 
         if row is None:
             if approval_mode == "auto":
-                # Auto-approve with generated label
                 label = f"Unknown {device_id[:8]}"
                 await loop.run_in_executor(
                     None, db.register_new_device, device_id, ip, version
@@ -890,7 +859,6 @@ async def handle_control(ws: WebSocketServerProtocol):
                 )
                 row = await loop.run_in_executor(None, db.get_device, device_id)
             else:
-                # Strict mode — register as pending and reject
                 await loop.run_in_executor(
                     None, db.register_new_device, device_id, ip, version
                 )
@@ -908,7 +876,6 @@ async def handle_control(ws: WebSocketServerProtocol):
                 return
 
         if not row["approved"]:
-            # Known but not yet approved
             await loop.run_in_executor(
                 None, db.upsert_device_seen, device_id, ip, version
             )
@@ -920,7 +887,6 @@ async def handle_control(ws: WebSocketServerProtocol):
             await ws.close()
             return
 
-        # ── Approved — proceed with normal registration ────────────────────
         await loop.run_in_executor(
             None, db.upsert_device_seen, device_id, ip, version
         )
@@ -937,10 +903,8 @@ async def handle_control(ws: WebSocketServerProtocol):
             f"Connected from {ip} version={version}"
         )
 
-        # Send ack
         await device.send_control({"type": "ack", "device_id": device_id})
 
-        # Push stored config immediately after ack
         config = await loop.run_in_executor(
             None, db.get_device_config, device_id
         )
@@ -949,17 +913,28 @@ async def handle_control(ws: WebSocketServerProtocol):
         device.oww_model     = config.get("owwModel", f"{OWW_MODEL}_v0.1")
         device.eq_bands      = config.get("eqBands", [0.0] * 8)
         device.eq_loudness   = bool(config.get("eqLoudness", False))
-        log.info(f"[control] Config pushed to {device_id}")
+        # Initialise volume from stored config — device will report its real
+        # value via volume_state on connect, but this seeds a sane default
+        # in the window before that first message arrives.
+        device.volume = _device_level_to_ha(
+            int(config.get("startupVolume", 85))
+        )
+        log.info(f"[control] Config pushed to {device_id} (volume={device.volume:.3f})")
 
         await leds_off(device)
         await api.notify_device_connected(device_id)
         if VOICE_MODE == "esphome":
-            # Closure over device — used by standalone announce path
-            # (setup wizard audio test, push TTS) when no voice turn is active.
             _device_ref = device
             async def _standalone_play(pcm_bytes: bytes, _d=_device_ref) -> None:
                 await _run_post_turn_playback(_d, pcm_bytes)
-            await esphome.device_connected(device_id, SERVER_HOST, standalone_play=_standalone_play)
+            async def _send_volume_set(level: int, _d=_device_ref) -> None:
+                await _d.send_control({"type": "volume_set", "level": level})
+            await esphome.device_connected(
+                device_id,
+                SERVER_HOST,
+                standalone_play=_standalone_play,
+                send_volume_set=_send_volume_set,
+            )
 
         # ── Main message loop ─────────────────────────────────────────────
 
@@ -991,6 +966,28 @@ async def handle_control(ws: WebSocketServerProtocol):
                         "state":     {"muted": device.muted},
                     })
 
+                elif msg_type == "volume_state":
+                    # Device reports current volume level (0–175 int).
+                    # Convert to HA float, update in-memory state, persist to
+                    # config so the value survives controller and device restarts.
+                    raw_level = int(msg.get("level", 85))
+                    device.volume = _device_level_to_ha(raw_level)
+                    log.debug(
+                        f"[{device_id}] volume_state: level={raw_level} "
+                        f"→ {device.volume:.3f}"
+                    )
+                    # Persist — read-modify-write to avoid stomping other fields
+                    stored_config = await loop.run_in_executor(
+                        None, db.get_device_config, device_id
+                    )
+                    stored_config["startupVolume"] = raw_level
+                    await loop.run_in_executor(
+                        None, db.set_device_config, device_id, stored_config
+                    )
+                    # Notify ESPHome satellite so HA's media player entity updates
+                    if VOICE_MODE == "esphome":
+                        esphome.update_device_volume(device_id, device.volume)
+
                 elif msg_type == "stats":
                     device.stats = {
                         "cpuPct":        msg.get("cpuPct"),
@@ -1007,7 +1004,6 @@ async def handle_control(ws: WebSocketServerProtocol):
                     })
 
                 elif msg_type == "log":
-                    # Device-side log entry — persist and push to dashboard
                     level   = msg.get("level", "info")
                     message = msg.get("message", "")
                     db.log_device(device_id, level, "device", message)
@@ -1040,7 +1036,6 @@ async def handle_control(ws: WebSocketServerProtocol):
             db.log_device(
                 device.device_id, "info", "controller", "Disconnected"
             )
-            # Identity check — a reconnect may have already replaced our entry.
             if _devices.get(device.device_id) is device:
                 _devices.pop(device.device_id, None)
             await api.notify_device_disconnected(device.device_id)
@@ -1067,7 +1062,7 @@ async def handle_data(ws: WebSocketServerProtocol):
 
         device_id = msg["device_id"]
 
-        for _ in range(20):   # up to 2 seconds
+        for _ in range(20):
             device = _devices.get(device_id)
             if device is not None:
                 break
@@ -1089,18 +1084,10 @@ async def handle_data(ws: WebSocketServerProtocol):
                 continue
             if raw[0] != MIC_FRAME_TYPE:
                 continue
-            # VAD sentinel: mic frame with single-byte payload 0x04 (normal
-            # VAD end — speech detected then ended) or 0x05 (no-speech
-            # timeout — speech never detected). Both push None; the flag
-            # lets esphome-mode's _stream_mic_audio tell them apart.
             if len(raw) == MIC_HEADER_LEN + 1 and raw[MIC_HEADER_LEN] in (VAD_END_TYPE, VAD_NO_SPEECH_TIMEOUT_TYPE):
                 device.last_vad_was_timeout = (raw[MIC_HEADER_LEN] == VAD_NO_SPEECH_TIMEOUT_TYPE)
                 q = device.voice_queue if device.oww_paused.is_set() else device.mic_queue
                 if q.full():
-                    # Sentinel must not be dropped — stream_mic waits for None
-                    # to send END to the voice server; losing it means the turn
-                    # hangs until the 45s timeout. Dropping one audio frame to
-                    # make room is acceptable; dropping the sentinel is not.
                     try:
                         q.get_nowait()
                         log.warning(f"[{device.device_id}] queue full — dropped one frame to deliver VAD sentinel")
@@ -1131,7 +1118,6 @@ async def handle_data(ws: WebSocketServerProtocol):
 
     finally:
         if device:
-            # Identity check — a reconnect may have replaced our data_ws already.
             if device.data_ws is ws:
                 device.data_ws = None
                 device.data_ready.clear()
@@ -1140,19 +1126,9 @@ async def handle_data(ws: WebSocketServerProtocol):
 
 # ─── Router ───────────────────────────────────────────────────────────────────
 
-
-
 # ─── Shell plane handler ──────────────────────────────────────────────────────
 
 async def handle_shell(ws: WebSocketServerProtocol, path: str):
-    """
-    Handle an inbound /shell/{device_id} WebSocket connection from the device.
-
-    Two modes:
-      Interactive — dashboard_ws is set; proxies between device and dashboard terminal.
-      Programmatic — dashboard_ws is None; resolves done_future with the ws so
-                     em_api shell helpers can send commands and read output directly.
-    """
     import aiohttp as _aiohttp
 
     device_id = path.removeprefix("/shell/")
@@ -1171,17 +1147,9 @@ async def handle_shell(ws: WebSocketServerProtocol, path: str):
         await ws.close()
         return
 
-    # ── Programmatic mode ─────────────────────────────────────────────────────
     if dashboard_ws is None:
         log.info(f"[shell] Programmatic session: {device_id}")
-        # Resolve the future with the live ws so the API caller can send
-        # commands and read output directly.
         done_future.set_result(ws)
-        # Keep the connection alive until the caller closes ws (via
-        # _release_shell_ws → ws.close()), then exit cleanly.
-        # Do NOT pop _shell_pending here — _release_shell_ws owns that
-        # cleanup and by the time wait_closed() returns, the next session
-        # may already have written a new future into the dict.
         try:
             await asyncio.wait_for(ws.wait_closed(), timeout=300.0)
         except (asyncio.TimeoutError, Exception):
@@ -1189,7 +1157,6 @@ async def handle_shell(ws: WebSocketServerProtocol, path: str):
         log.info(f"[shell] Programmatic session ended: {device_id}")
         return
 
-    # ── Interactive (dashboard terminal) mode ─────────────────────────────────
     log.info(f"[shell] Proxying: {device_id}")
 
     async def device_to_dashboard():
@@ -1256,13 +1223,6 @@ def _make_mdns_info() -> ServiceInfo:
 
 
 async def _mdns_refresh_loop(azc: AsyncZeroconf, info: ServiceInfo) -> None:
-    """
-    Periodically re-register the mDNS service to keep IGMP multicast group
-    membership alive on the LAN. Required when running behind a Proxmox bridge
-    (or any managed switch that ages out multicast memberships). Without this,
-    mDNS responses stop arriving at devices after MDNS_REFRESH_INTERVAL seconds
-    of silence and discovery fails silently.
-    """
     while True:
         await asyncio.sleep(MDNS_REFRESH_INTERVAL)
         try:
@@ -1275,24 +1235,18 @@ async def _mdns_refresh_loop(azc: AsyncZeroconf, info: ServiceInfo) -> None:
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 async def main():
-    # ── Database ──────────────────────────────────────────────────────────────
     db.init(DB_PATH)
-
-    # ── Auth — generate bootstrap token if no users exist ─────────────────
     auth.maybe_generate_bootstrap_token()
 
-    # ── API server ────────────────────────────────────────────────────────────
     runner = await api.create_runner(_devices, _shell_pending, _shell_dashboard)
     await runner.setup()
     site = web.TCPSite(runner, SERVER_HOST, API_PORT)
     await site.start()
     log.info(f"Dashboard + API listening on http://{SERVER_HOST}:{API_PORT}")
 
-    # ── Background tasks ──────────────────────────────────────────────────────
     release_task       = asyncio.create_task(api.release_poll_loop())
     session_prune_task = asyncio.create_task(api.session_prune_loop())
 
-    # ── mDNS ──────────────────────────────────────────────────────────────────
     azc  = AsyncZeroconf()
     info = _make_mdns_info()
     await azc.async_register_service(info, allow_name_change=True)
@@ -1302,7 +1256,6 @@ async def main():
     )
     mdns_task = asyncio.create_task(_mdns_refresh_loop(azc, info))
 
-    # ── WebSocket server ──────────────────────────────────────────────────────
     log.info(f"WebSocket server starting on {SERVER_HOST}:{SERVER_PORT}")
     log.info(f"Voice mode: {VOICE_MODE}")
     if VOICE_MODE != "esphome":
@@ -1317,7 +1270,6 @@ async def main():
             ping_timeout=10,
             max_size=10 * 1024 * 1024,
         ):
-            # ── ESPHome satellite servers (esphome mode only) ──────────────
             if VOICE_MODE == "esphome":
                 await esphome.start_esphome_servers(_devices, SERVER_HOST)
 

@@ -42,6 +42,7 @@ type MicStartCallback func(lockMic bool)
 type MicStopCallback func()
 type StateCallback func()
 type ConfigAppliedCallback func(msg config.ConfigMessage)
+type VolumeSetCallback func(level int)
 
 // ─── ControlClient ────────────────────────────────────────────────────────────
 
@@ -56,6 +57,7 @@ type ControlClient struct {
 	connectedCallback     StateCallback
 	pendingCallback       StateCallback
 	configAppliedCallback ConfigAppliedCallback
+	volumeSetCallback     VolumeSetCallback
 
 	conn         *websocket.Conn
 	connMu       sync.Mutex
@@ -89,6 +91,7 @@ func (c *ControlClient) OnDisconnected(cb StateCallback)           { c.disconnec
 func (c *ControlClient) OnConnected(cb StateCallback)             { c.connectedCallback = cb }
 func (c *ControlClient) OnPending(cb StateCallback)               { c.pendingCallback = cb }
 func (c *ControlClient) OnConfigApplied(cb ConfigAppliedCallback) { c.configAppliedCallback = cb }
+func (c *ControlClient) OnVolumeSet(cb VolumeSetCallback)         { c.volumeSetCallback = cb }
 
 var errPending = fmt.Errorf("pending approval")
 
@@ -262,6 +265,16 @@ func (c *ControlClient) connect(ctx context.Context, addr string, data *DataClie
 				c.micStopCallback()
 			}
 
+		case "volume_set":
+			// Controller forwarding a volume command from HA (MediaPlayerCommandRequest).
+			// level is an integer 0–175 matching the device's native tinymix range.
+			var msg struct {
+				Level int `json:"level"`
+			}
+			if err := json.Unmarshal(raw, &msg); err == nil && c.volumeSetCallback != nil {
+				c.volumeSetCallback(msg.Level)
+			}
+
 		case "config":
 			var msg config.ConfigMessage
 			if err := json.Unmarshal(raw, &msg); err == nil {
@@ -415,6 +428,16 @@ func (c *ControlClient) SendMuteState(muted bool) {
 	_ = c.writeJSON(map[string]interface{}{
 		"type":  "mute_state",
 		"muted": muted,
+	})
+}
+
+// SendVolumeState notifies the controller of the current volume level (0–175).
+// Called on connect (to sync controller state) and after every local change.
+// Safe for concurrent use — silently drops if not connected.
+func (c *ControlClient) SendVolumeState(level int) {
+	_ = c.writeJSON(map[string]interface{}{
+		"type":  "volume_state",
+		"level": level,
 	})
 }
 

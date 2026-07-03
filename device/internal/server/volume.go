@@ -18,11 +18,12 @@ const (
 )
 
 type volumeController struct {
-	mu      sync.Mutex
-	level   int
-	ledCtrl func() led.Controller // getter so we handle nil during boot
-	timer   *time.Timer
-	isMuted func() bool // set after construction to avoid circular dependency
+	mu             sync.Mutex
+	level          int
+	ledCtrl        func() led.Controller // getter so we handle nil during boot
+	timer          *time.Timer
+	isMuted        func() bool // set after construction to avoid circular dependency
+	onVolumeChange func(int)   // set after construction; called after every Set()
 }
 
 func newVolumeController(ledGetter func() led.Controller) *volumeController {
@@ -72,6 +73,9 @@ func (vc *volumeController) Set(level int) {
 
 	log.Printf("Volume set to %d/%d", level, volumeMax)
 	vc.showLEDs(level)
+	if vc.onVolumeChange != nil {
+		vc.onVolumeChange(level)
+	}
 }
 
 // Get returns current volume level.
