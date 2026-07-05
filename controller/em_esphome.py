@@ -232,6 +232,11 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         # send before the turn has actually progressed (observed in practice —
         # see _handle_voice_event's RUN_END branch).
         self._intent_ended      = False
+        # Set on VOICE_ASSISTANT_INTENT_END when HA requests conversation
+        # continuation (continue_conversation == "1"). Read by trigger_voice_turn
+        # after run_esphome_voice_turn returns to decide whether to re-trigger
+        # immediately rather than returning to OWW idle.
+        self._continue_conversation = False
         # Set by _stream_mic_audio when the device's local no-speech timeout
         # fired (VAD_NO_SPEECH_TIMEOUT_TYPE) rather than a normal VAD end.
         # Checked by run_esphome_voice_turn to skip the HA round-trip and
@@ -446,6 +451,9 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # in a normal turn. Used to tell a real terminal RUN_END apart
             # from a premature/duplicate one (see RUN_END branch below).
             self._intent_ended = True
+            if data.get("continue_conversation") == "1":
+                self._continue_conversation = True
+                log.debug(f"[{self._log_name}] HA requested conversation continuation")
 
         elif event_type == ET.VOICE_ASSISTANT_TTS_START:
             log.info(f"[{self._log_name}] TTS starting")
@@ -457,8 +465,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 log.info(f"[{self._log_name}] TTS URL: {url}")
             if self._trace:
                 self._trace.t_tts_url_ms = self._trace.elapsed_ms()
-                self._tts_audio_url = url
-                self._tts_event.set()
+            self._tts_audio_url = url
+            self._tts_event.set()
 
         elif event_type == ET.VOICE_ASSISTANT_RUN_END:
             log.info(f"[{self._log_name}] Pipeline run ended")
@@ -557,13 +565,14 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             log.warning(f"[{self._log_name}] No active HA connection — cannot start voice turn")
             return
 
-        self._turn_active    = True
-        self._turn_cancelled = False
+        self._turn_active           = True
+        self._turn_cancelled        = False
         self._tts_event.clear()
-        self._tts_audio_url  = None
-        self._tts_audio_data = None
-        self._intent_ended   = False
-        self._no_speech_timeout = False
+        self._tts_audio_url         = None
+        self._tts_audio_data        = None
+        self._intent_ended          = False
+        self._continue_conversation = False
+        self._no_speech_timeout     = False
         self._on_thinking    = on_thinking
         self._on_announce    = None   # set below after announcement path is confirmed
         self._trace          = trace  # may be None — all trace.x calls guard against this
@@ -1048,7 +1057,7 @@ async def trigger_voice_turn(
     on_thinking,      # async callable() — LED/state transition
     post_turn_play,   # async callable(pcm_bytes: bytes) — playback + drain
     trigger_label: str = "unknown",  # "wakeword(0.522)" or "button" for trace
-) -> None:
+) -> bool:
     """
     Entry point for OWW/button-triggered voice turns in esphome mode.
 
@@ -1056,7 +1065,12 @@ async def trigger_voice_turn(
     when VOICE_MODE=esphome. Finds the active HA connection for this device
     and delegates to EchoMuseSatellite.run_esphome_voice_turn().
 
-    If no active HA connection exists, logs and returns — same behaviour as
+    Returns True if HA requested conversation continuation (continue_conversation
+    flag set in INTENT_END) — the controller uses this to re-trigger immediately
+    rather than returning to OWW idle. Returns False in all other cases including
+    no active HA connection.
+
+    If no active HA connection exists, logs and returns False — same behaviour as
     the claracore path when voice_server.py is unreachable.
     """
     server = get_server(device.device_id)
@@ -1065,7 +1079,7 @@ async def trigger_voice_turn(
             f"[{device.device_id}] esphome: no server registered for this device "
             f"— was start_esphome_servers() called?"
         )
-        return
+        return False
 
     satellite = server.get_satellite()
     if satellite is None:
@@ -1073,7 +1087,7 @@ async def trigger_voice_turn(
             f"[{device.device_id}] esphome: no active HA connection — "
             f"cannot start voice turn (HA not connected to this device's port)"
         )
-        return
+        return False
 
     trace = TurnTrace(trigger=trigger_label, t0=time.monotonic())
 
@@ -1083,6 +1097,8 @@ async def trigger_voice_turn(
         post_turn_play=post_turn_play,
         trace=trace,
     )
+
+    return satellite._continue_conversation
 
 
 def cancel_voice_turn(device_id: str) -> None:

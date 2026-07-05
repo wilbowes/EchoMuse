@@ -631,6 +631,8 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown"):
 
                 async def on_thinking_esphome():
                     nonlocal spin_task
+                    if stop_spin.is_set():
+                        return  # cleanup already ran; turn is over
                     device.thinking  = True
                     device.listening = False
                     await _push_device_state(device)
@@ -654,17 +656,53 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown"):
                 # running on ch6; oww_paused routes frames to voice_queue.
                 # mic_stop is still sent after the turn (before TTS playback)
                 # as the acoustic-feedback guard — that remains load-bearing.
-                try:
-                    await esphome.trigger_voice_turn(
-                        device=device,
-                        on_thinking=on_thinking_esphome,
-                        post_turn_play=post_turn_play_esphome,
-                        trigger_label=trigger_label,
-                    )
-                finally:
-                    await device.mic_stop()
-                    await cleanup_esphome()
-                    log.info(f"[{device.device_id}] Voice turn complete (esphome mode)")
+                #
+                # Continuation loop: if HA sets continue_conversation on
+                # INTENT_END, re-trigger immediately after TTS+drain rather
+                # than returning to OWW idle. oww_paused stays set throughout
+                # so voice_queue routing stays active. The reference
+                # implementation (linux-voice-assistant) uses a 0.5s settle
+                # delay after TTS before opening the mic — that's already
+                # covered by _run_post_turn_playback's buffer drain sleep, so
+                # no additional delay is needed here.
+                turn_label = trigger_label
+                while True:
+                    should_continue = False
+                    try:
+                        should_continue = await esphome.trigger_voice_turn(
+                            device=device,
+                            on_thinking=on_thinking_esphome,
+                            post_turn_play=post_turn_play_esphome,
+                            trigger_label=turn_label,
+                        )
+                    finally:
+                        await device.mic_stop()
+                        await cleanup_esphome()
+                        log.info(f"[{device.device_id}] Voice turn complete (esphome mode)")
+
+                    if should_continue and not device.cancel_event.is_set():
+                        log.info(f"[{device.device_id}] Continuing conversation (HA requested)")
+                        # Drain stale frames accumulated during TTS playback
+                        # before the next turn begins — same as post-wake drain.
+                        drained = 0
+                        while not device.voice_queue.empty():
+                            try:
+                                device.voice_queue.get_nowait()
+                                drained += 1
+                            except asyncio.QueueEmpty:
+                                break
+                        if drained:
+                            log.debug(f"[{device.device_id}] Continuation: drained {drained} stale frames")
+                        # Re-arm listening state for the follow-up turn.
+                        device.listening = True
+                        await leds_listening(device)
+                        await _push_device_state(device)
+                        turn_label = "continuation"
+                        # Reset spinner state for the next turn's thinking animation.
+                        stop_spin.clear()
+                        spin_task = None
+                    else:
+                        break
 
             else:
                 await run_voice_turn(device)

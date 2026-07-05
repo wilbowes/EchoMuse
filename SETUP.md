@@ -514,6 +514,9 @@ dns-sd -B _emcontroller._tcp local
 ✅ LED mapping calibrated — LED 0 at 240°, confirmed from volume sweep
 ✅ Audio processing pipeline — RNNoise NS (vendored v0.1 C source, cgo) + AGC per period
 ✅ NS and AGC independently toggleable from dashboard — both off by default (v2.6.3)
+✅ HA-driven conversation continuation — continue_conversation flag wired; after TTS playback, re-triggers voice turn immediately if HA sets flag in INTENT_END (v2.6.4)
+✅ Speaker audioChanDepth 32 — prevents mid-stream underrun stutter on longer TTS responses (v2.6.4)
+✅ Dashboard offline IP display — shows last known IP with "(last seen)" annotation when offline; suppresses Docker-NAT 127.0.0.1 artefact (v2.6.4)
 ✅ Per-turn structured trace — [TURN] log line with full stage timing at turn end
 ✅ OWW near-miss score logging — DEBUG scores > 0.05 for diagnostics
 ✅ VAD threshold tunable down to 0.0001 (dashboard slider floor corrected)
@@ -1013,12 +1016,13 @@ done
 - **Holding response** — play audio while Clara is thinking if response takes >2s
 - **ESPHome native API satellite integration** ✅ — complete as of v2.6.0. Both devices registered in HA, voice turns working end-to-end.
 - **Bidirectional volume control** ✅ — complete as of v2.6.1. Physical buttons, HA media player slider, and ALSA mixer all stay in sync. Survives controller and device restarts.
-- **Continue-conversation without re-waking** — next up. `INTENT_END` already carries `continue_conversation` flag on every turn (confirmed in logs, currently discarded). Controller-only change — if flag is `'1'`, re-trigger `trigger_voice_turn()` after response finishes instead of returning to idle OWW listening. Zero device-side changes needed.
+- **Continue-conversation without re-waking** ✅ — complete as of v2.6.4. HA-driven: `continue_conversation` flag in `INTENT_END` re-triggers a voice turn immediately after TTS playback without requiring the wake word. User-driven follow-up window (always-on N-second listen after any response) is the next step — recommend as a dashboard toggle, default off, to avoid false triggers in noisy rooms.
+- **Rubbish transcription suppression** — wake word triggers on background noise still result in HA's "Sorry, I couldn't understand that" response. Options: audio energy gate in `_stream_mic_audio` before sending to HA (cleanest); or discard HA's stock apology in the TTS handler (tactical). Deferred pending P0-3 NS fix — noise floor situation needs to settle first.
 
 ---
 
-**Document version:** v2.6.3
-**Last updated:** 2026-07-04
+**Document version:** v2.6.4
+**Last updated:** 2026-07-05
 **Changelog:**
 - v1.0 — April 2026: Initial publication. Full pipeline confirmed working.
 - v1.1 — 2026-04-26: Fixed ambiguous init.csm.project.rc editing instruction; fixed `server &` → `exec` inconsistency.
@@ -1128,5 +1132,12 @@ done
   **Known working state as of this version.** NS off, AGC off, vadThreshold 0.001, beamforming off, vadSilenceMs 900. Responding reliably at conversational voice level from 1.3m in a quiet room. Lounge device (TV background) also confirmed working. The "must pause and enunciate" behaviour is gone.
 
   **Still open (deferred).** P0-3 proper NS fix: resample 16→48 kHz around RNNoise, or replace with a 16 kHz-native model. P0-4 AGC: if re-enabled, needs gain state reset on stream restart and lower max gain (current 20× is too aggressive). P0-5 device-side preroll ring. P0-6 OWW stream continuity (VAD-gated → continuous with zero-fill). Beamformer direction presets in dashboard (Front/Rear/All-round) advertise DSP the device implements but which isn't useful until P0-3/P0-4 are resolved and the baseline is solid.
+
+- v2.6.4 — 2026-07-05: Bug fixes, conversation continuation, speaker stutter fix.
+  **Bug: stuck LED ring on error/no-speech turns.** `on_thinking_esphome()` is scheduled via `asyncio.create_task()` at STT_VAD_END. On fast-exit turns (STT error, no-speech timeout), `cleanup_esphome()` ran and set `stop_spin` before the task actually executed. The task then created a new spinner task that nothing owned — LED ring spun forever with no wake or cancel able to clear it. Fixed by guarding `on_thinking_esphome` with `if stop_spin.is_set(): return` at the top — `cleanup_esphome` always sets `stop_spin` first, so this is an unambiguous "turn is over" signal.
+  **Bug: TTS audio silently never played.** In `EchoMuseSatellite._handle_voice_event`'s `TTS_END` branch, `self._tts_audio_url = url` and `self._tts_event.set()` were incorrectly indented inside `if self._trace:`. The turn would unblock via RUN_END instead (after INTENT_END), find `_tts_audio_url = None`, log "No TTS audio URL received", and return silently — device said nothing, LED ring kept spinning. Fixed by moving both lines outside the `if self._trace:` block; only the timestamp recording belongs inside it.
+  **Feature: HA-driven conversation continuation.** Wired up `continue_conversation` flag in `INTENT_END` data (confirmed present in logs since v2.6.0, previously discarded). `_handle_voice_event` now sets `self._continue_conversation = True` when flag is `'1'`. `trigger_voice_turn()` return type changed `None` → `bool`, returns the flag. `_run_voice_locked` continuation loop: if `should_continue` and not cancelled, drains stale frames, re-arms listening LEDs, loops back into `trigger_voice_turn` without clearing `oww_paused` or returning to OWW idle. Follow-up `VoiceAssistantRequest` is `start=True` with no `conversation_id` — HA threads conversation context server-side (confirmed from linux-voice-assistant source; the settle delay the reference uses after TTS is already covered by `_run_post_turn_playback`'s buffer drain sleep).
+  **Fix: speaker mid-stream stutter.** `silenceLoop` in `pcm_speaker.go` uses a non-blocking `select` with a `default` silence-pump case. With `audioChanDepth = 4`, the channel could drain momentarily mid-stream (WebSocket jitter, goroutine scheduling), causing the `default` case to fire and inject a 42ms silence period — audible as a brief "CD skip" dropout. Fixed by raising `audioChanDepth` from 4 to 32 (~1.3s of headroom). Underrun instrumentation added to `silenceLoop` (`[speaker] underrun` log line) — remove once confirmed resolved across a few sessions.
+  **Fix: dashboard offline IP display.** When a device is disconnected the dashboard was showing `127.0.0.1` — a Docker NAT artefact where `ws.remote_address` resolves to loopback when traffic comes through the Docker network, used as fallback if the device register message's `ip` field is missing. Fixed at the display layer: `127.0.0.1` treated as absent (shown as `—`); real IPs shown as `X.X.X.X (last seen)` in card subtitle and status tab when offline; small card badge shows `X.X.X.X ↑`. The DB write of `127.0.0.1` only occurs if the device doesn't send an `ip` field in its register message — devices do send it correctly, so this only affects early-registered devices and isn't worth correcting in the DB retroactively.
 
 *Device: Echo Dot 2nd Gen (RS03QR). Tested on macOS with ADB 35.0.2.*

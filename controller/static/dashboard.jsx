@@ -653,7 +653,11 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 </div>
               )}
               <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)', marginTop: 4, letterSpacing: '0.05em' }}>
-                {device.ip} · {device.device_id} · {device.firmware_ver || 'unknown'}
+                {(() => {
+                  const ip = device.ip && device.ip !== '127.0.0.1' ? device.ip : null;
+                  const ipStr = device.connected ? (ip || '—') : (ip ? `${ip} (last seen)` : '—');
+                  return <>{ipStr} · {device.device_id} · {device.firmware_ver || 'unknown'}</>;
+                })()}
                 {needsUpdate && <span style={{ color: '#806010', marginLeft: 10 }}>Update available</span>}
               </div>
             </div>
@@ -690,7 +694,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
             <div style={{ maxWidth: 400 }}>
               <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 16 }}>New Device — Pending Approval</div>
               {row('Serial', device.device_id)}
-              {row('IP', device.ip)}
+              {row('IP', device.ip && device.ip !== '127.0.0.1' ? device.ip : '—')}
               {row('First seen', relTime(device.first_seen))}
               <div style={{ marginTop: 24, marginBottom: 8 }}>
                 <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: 'var(--text2)', marginBottom: 8 }}>Label</div>
@@ -715,7 +719,10 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
               <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:24 }}>
                 <div>
                   <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.15em', marginBottom:12 }}>Device</div>
-                  {row('IP', device.ip || '—')}
+                  {row('IP', (() => {
+                    const ip = device.ip && device.ip !== '127.0.0.1' ? device.ip : null;
+                    return device.connected ? (ip || '—') : (ip ? `${ip} (last seen)` : '—');
+                  })())}
                   {row('Firmware', device.firmware_ver || '—')}
                   {row('Last seen', relTime(device.last_seen))}
                   {row('Connected', device.connected ? 'Yes' : 'No', device.connected ? '#286040' : '#c0601a')}
@@ -934,7 +941,10 @@ function Card({ device, onClick }) {
       <div style={{ padding: '0 16px 16px' }}>
         <div style={{ background: 'linear-gradient(160deg,#2a2e28,#1e2219)', border: '1px solid #1a1c18', borderRadius: 6, padding: '7px 12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', boxShadow: 'inset 0 2px 4px rgba(0,0,0,0.5)' }}>
           <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: state.dot, letterSpacing: '0.12em', textShadow: `0 0 8px ${state.dot}88` }}>{state.label.toUpperCase()}</span>
-          <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--lcd-dim)', letterSpacing: '0.08em' }}>{device.ip || '—'}</span>
+          <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--lcd-dim)', letterSpacing: '0.08em' }}>{(() => {
+            const ip = device.ip && device.ip !== '127.0.0.1' ? device.ip : null;
+            return device.connected ? (ip || '—') : (ip ? `${ip} ↑` : '—');
+          })()}</span>
         </div>
       </div>
     </div>

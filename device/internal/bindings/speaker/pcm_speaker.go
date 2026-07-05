@@ -17,8 +17,13 @@ const deviceNr    = 23
 const periodSize  = 2048
 const periodBytes = periodSize * 2 * 2 // 2 channels * 2 bytes = 8192
 
-// audioCh depth — shallow so the WS sender gets backpressure if ALSA falls behind.
-const audioChanDepth = 4
+// audioCh depth — deep enough that the WS sender stays well ahead of the
+// silence loop on any realistic LAN jitter. At 4 the channel drained
+// momentarily mid-stream, causing the default silence case to fire and
+// inject a 42ms silence gap (audible stutter). 32 periods = ~1.3s of
+// headroom; the WS reader would need to stall for over a second before
+// the channel empties mid-stream.
+const audioChanDepth = 32
 
 var silencePeriod = make([]byte, periodBytes)
 
@@ -45,9 +50,9 @@ func NewPcmSpeaker() (*PcmSpeaker, error) {
 
 func (p *PcmSpeaker) Init() error {
 	exec.Command("stop", "mixer").Run()
-	exec.Command("tinymix", "-D", "0", "61", "0", "0").Run()   // mute before amp enable
-	exec.Command("tinymix", "-D", "0", "5", "On").Run()         // enable amp
-	time.Sleep(50 * time.Millisecond)                            // let amp settle
+	exec.Command("tinymix", "-D", "0", "61", "0", "0").Run()    // mute before amp enable
+	exec.Command("tinymix", "-D", "0", "5", "On").Run()          // enable amp
+	time.Sleep(50 * time.Millisecond)                             // let amp settle
 	exec.Command("tinymix", "-D", "0", "61", "100", "100").Run() // unmute
 
 	device := tinyalsa.NewDevice(cardNr, deviceNr, pcm.Config{
@@ -77,18 +82,29 @@ func (p *PcmSpeaker) Init() error {
 // and silence when the channel is empty. No pause/resume needed — the select
 // naturally yields to real audio. Closes deadCh on any exit so PumpPeriod
 // callers unblock and receive an error rather than hanging.
+//
+// audioStreaming tracks whether we are mid-stream. When the channel drains
+// while audioStreaming is true, that's an underrun — a silence period is
+// being injected mid-content. Logged at WARNING so it shows up in server.log
+// against the stutter symptom. Remove once the cause is confirmed and fixed.
 func (p *PcmSpeaker) silenceLoop() {
 	defer close(p.deadCh)
+	audioStreaming := false
 	for {
 		select {
 		case <-p.stopCh:
 			return
 		case period := <-p.audioCh:
+			audioStreaming = true
 			if err := p.session.Pump(period); err != nil {
 				log.Printf("silenceLoop: pump error: %v", err)
 				return
 			}
 		default:
+			if audioStreaming {
+				log.Printf("[speaker] underrun: silence injected mid-stream (audioCh drained)")
+				audioStreaming = false
+			}
 			if err := p.session.Pump(silencePeriod); err != nil {
 				log.Printf("silenceLoop: silence pump error: %v", err)
 				return
