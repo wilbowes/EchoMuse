@@ -38,6 +38,12 @@ type Device struct {
 	BeamAngle          float64
 	BeamformingEnabled bool
 
+	// Pipeline toggles — pointer typed so false is expressible over the wire.
+	// Both default true. Set false via dashboard to A/B test pipeline stages
+	// without a rebuild. NsEnabled gates RNNoise; AgcEnabled gates AGC.
+	NsEnabled  *bool
+	AgcEnabled *bool
+
 	initialised bool
 }
 
@@ -69,6 +75,10 @@ func (d *Device) loadDefaults() {
 	d.AdcMicpga         = envInt("ADC_MICPGA", 40)
 	d.BeamAngle         = envFloat("BEAM_ANGLE", -1)
 	d.BeamformingEnabled = envBool("BEAMFORMING_ENABLED", true)
+	nsEnabled  := envBool("NS_ENABLED", true)
+	agcEnabled := envBool("AGC_ENABLED", true)
+	d.NsEnabled  = &nsEnabled
+	d.AgcEnabled = &agcEnabled
 }
 
 // Apply updates the config from a controller-pushed config message.
@@ -113,6 +123,12 @@ func (d *Device) Apply(msg ConfigMessage) {
 	if msg.BeamformingEnabled != nil {
 		d.BeamformingEnabled = *msg.BeamformingEnabled
 	}
+	if msg.NsEnabled != nil {
+		d.NsEnabled = msg.NsEnabled
+	}
+	if msg.AgcEnabled != nil {
+		d.AgcEnabled = msg.AgcEnabled
+	}
 }
 
 // Snapshot returns a consistent copy of all config values.
@@ -120,6 +136,14 @@ func (d *Device) Snapshot() ConfigMessage {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	beamAngle := d.BeamAngle
+	nsEnabled  := true
+	if d.NsEnabled != nil {
+		nsEnabled = *d.NsEnabled
+	}
+	agcEnabled := true
+	if d.AgcEnabled != nil {
+		agcEnabled = *d.AgcEnabled
+	}
 	return ConfigMessage{
 		VadThreshold:        d.VadThreshold,
 		VadSpeechMs:         d.VadSpeechMs,
@@ -131,6 +155,8 @@ func (d *Device) Snapshot() ConfigMessage {
 		AdcMicpga:           d.AdcMicpga,
 		BeamAngle:           &beamAngle,
 		BeamformingEnabled:  &d.BeamformingEnabled,
+		NsEnabled:           &nsEnabled,
+		AgcEnabled:          &agcEnabled,
 	}
 }
 
@@ -149,6 +175,8 @@ type ConfigMessage struct {
 	BeamAngle           *float64 `json:"beamAngle,omitempty"`
 	BeamformingEnabled  *bool    `json:"beamformingEnabled,omitempty"`
 	HasBeamforming      bool     `json:"hasBeamforming,omitempty"`
+	NsEnabled           *bool    `json:"nsEnabled,omitempty"`
+	AgcEnabled          *bool    `json:"agcEnabled,omitempty"`
 }
 
 // ─── env helpers ──────────────────────────────────────────────────────────────

@@ -742,7 +742,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
 
           {/* CONFIG */}
           {tab === 'config' && (
-            <div style={{ maxWidth: 440 }}>
+            <div>
               {/* Global override toggle */}
               {isAdmin && globalConfig && (
                 <div style={{
@@ -2282,72 +2282,319 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
 // Shared config form used by both the per-device config tab and the global
 // settings panel. disabled=true renders all controls read-only.
 
-function DeviceConfigForm({ config, onChange, disabled }) {
-  const EQ_FREQS = ['125 Hz','250 Hz','500 Hz','1 kHz','2 kHz','3.5 kHz','5.5 kHz','8 kHz'];
-  const EQ_DESCS = ['shelf','','','','','','','shelf'];
-  const bands    = config.eqBands ?? [0,0,0,0,0,0,0,0];
-  const fmtDb    = v => (v >= 0 ? '+' : '') + Number(v).toFixed(1) + ' dB';
+// ─── DeviceDiagram ────────────────────────────────────────────────────────────
+// Top-down Echo Dot diagram. 0°=top (vol+ button / cable), clockwise.
+// SVG coords: x=sin(deg)*r, y=-cos(deg)*r
+// MK1=330° (-45,-78), MK2=30° (45,-78), MK3=90° (90,0),
+// MK4=150° (45,78),   MK5=210° (-45,78), MK6=270° (-90,0)
 
-  const set = disabled ? () => {} : onChange;
-  const setEqBand = (i, v) => { const b=[...bands]; b[i]=v; set('eqBands', b); };
-
-  const inputStyle = disabled ? { opacity: 0.45, pointerEvents: 'none' } : {};
+function DeviceDiagram({ activeMics, patternType }) {
+  const MIC_POS = {
+    mk1: [-45,-78], mk2: [45,-78], mk3: [90,0],
+    mk4: [45,78],   mk5: [-45,78], mk6: [-90,0],
+  };
+  const ALL = Object.keys(MIC_POS);
 
   return (
-    <div style={{ maxWidth: 440 }}>
-      <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 20 }}>Microphone · 7-mic array</div>
-      <div style={inputStyle}>
-        <Slider label="Digital Gain" sub="ctl 89–143 all ADCs" value={config.adcDigitalGain} min={0} max={100} onChange={v => set('adcDigitalGain', v)}/>
-        <Slider label="MICPGA" sub="ctl 92–146 all ADCs" value={config.adcMicpga} min={0} max={100} onChange={v => set('adcMicpga', v)}/>
-        <Slider label="VAD Threshold" sub="RMS" value={config.vadThreshold} min={0.001} max={0.02} step={0.001} onChange={v => set('vadThreshold', v)}/>
-        <Slider label="VAD Speech Ms" sub="min speech to open gate" value={config.vadSpeechMs} min={32} max={320} step={32} onChange={v => set('vadSpeechMs', v)}/>
-        <Slider label="VAD Silence Ms" sub="silence to close gate" value={config.vadSilenceMs} min={200} max={2000} step={100} onChange={v => set('vadSilenceMs', v)}/>
-      </div>
-      <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', margin: '28px 0 20px' }}>Beamforming · Delay and Sum</div>
-      <div style={inputStyle}>
-        <Toggle label="Enabled" sub="7-mic delay-and-sum" value={config.beamformingEnabled ?? true} onChange={v => set('beamformingEnabled', v)}/>
-        <Slider label="Beam Angle" sub="-1 = auto" value={config.beamAngle ?? -1} min={-1} max={359} step={1} onChange={v => set('beamAngle', v)}/>
-      </div>
-      <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', margin: '28px 0 20px' }}>Speaker · TLV320 · card 0 dev 23</div>
-      <div style={inputStyle}>
-        <Slider label="Startup Volume" sub="ctl 61" value={config.startupVolume} min={0} max={100} onChange={v => set('startupVolume', v)}/>
-      </div>
-      <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', margin: '28px 0 12px' }}>EQ · 8-Band · controller-side</div>
-      <div style={inputStyle}>
-        <EqCurve bands={bands}/>
-        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'0 20px' }}>
-          <div>{[0,1,2,3].map(i => (
-            <Slider key={i} label={EQ_FREQS[i]} sub={EQ_DESCS[i]}
-              value={bands[i]??0} min={-12} max={12} step={0.5}
-              formatValue={fmtDb} onChange={v => setEqBand(i,v)}/>
-          ))}</div>
-          <div>{[4,5,6,7].map(i => (
-            <Slider key={i} label={EQ_FREQS[i]} sub={EQ_DESCS[i]}
-              value={bands[i]??0} min={-12} max={12} step={0.5}
-              formatValue={fmtDb} onChange={v => setEqBand(i,v)}/>
-          ))}</div>
+    <svg width="200" height="200" viewBox="-110 -110 220 220" style={{ display:'block', overflow:'visible' }}>
+      <defs>
+        <radialGradient id="dcfsg" cx="35%" cy="30%" r="70%">
+          <stop offset="0%" stopColor="#3a3a3a"/>
+          <stop offset="40%" stopColor="#242424"/>
+          <stop offset="100%" stopColor="#161616"/>
+        </radialGradient>
+        <radialGradient id="dcfbg" cx="35%" cy="30%" r="65%">
+          <stop offset="0%" stopColor="#323232"/>
+          <stop offset="100%" stopColor="#1c1c1c"/>
+        </radialGradient>
+        <filter id="dcfmg" x="-100%" y="-100%" width="300%" height="300%">
+          <feGaussianBlur stdDeviation="3.5" result="b"/>
+          <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+        <filter id="dcfpg" x="-30%" y="-30%" width="160%" height="160%">
+          <feGaussianBlur stdDeviation="5" result="b"/>
+          <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+        <clipPath id="dcfsc"><circle cx="0" cy="0" r="104"/></clipPath>
+        <pattern id="dcfgr" patternUnits="userSpaceOnUse" width="5" height="5">
+          <circle cx="2.5" cy="2.5" r="0.8" fill="rgba(0,0,0,0.3)"/>
+        </pattern>
+      </defs>
+
+      {/* Pickup pattern — behind shell */}
+      {patternType === 'omni' && <>
+        <circle cx="0" cy="0" r="116" fill="rgba(64,88,120,0.07)" stroke="rgba(64,88,120,0.25)" strokeWidth="5" filter="url(#dcfpg)"/>
+        <circle cx="0" cy="0" r="116" fill="none" stroke="#405878" strokeWidth="1.5" strokeDasharray="5 3"/>
+      </>}
+      {patternType === 'front' && <>
+        <path d="M-116,0 A116,116 0 0,0 116,0 Z" fill="rgba(64,88,120,0.07)" stroke="rgba(64,88,120,0.25)" strokeWidth="5" filter="url(#dcfpg)"/>
+        <path d="M-116,0 A116,116 0 0,0 116,0 Z" fill="rgba(64,88,120,0.09)" stroke="#405878" strokeWidth="1.5"/>
+      </>}
+      {patternType === 'rear' && <>
+        <path d="M-116,0 A116,116 0 0,1 116,0 Z" fill="rgba(64,88,120,0.07)" stroke="rgba(64,88,120,0.25)" strokeWidth="5" filter="url(#dcfpg)"/>
+        <path d="M-116,0 A116,116 0 0,1 116,0 Z" fill="rgba(64,88,120,0.09)" stroke="#405878" strokeWidth="1.5"/>
+      </>}
+
+      {/* Shell */}
+      <circle cx="0" cy="0" r="108" fill="#0a0a0a"/>
+      <circle cx="0" cy="0" r="104" fill="url(#dcfsg)"/>
+
+      {/* LED ring */}
+      <circle cx="0" cy="0" r="96" fill="none" stroke="#0d0d0d" strokeWidth="11" clipPath="url(#dcfsc)"/>
+      <circle cx="0" cy="0" r="96" fill="none"
+        stroke={patternType === 'omni' ? '#40906a' : '#40906a'}
+        strokeWidth="7" strokeDasharray="36.3 14.0"
+        transform="rotate(-90)" clipPath="url(#dcfsc)"/>
+      <circle cx="0" cy="0" r="96" fill="none" stroke="#161616" strokeWidth="11"
+        strokeDasharray="1.5 49" transform="rotate(-90)" clipPath="url(#dcfsc)"/>
+
+      {/* Inner disc */}
+      <circle cx="0" cy="0" r="82" fill="#1a1a1a"/>
+      <circle cx="0" cy="0" r="82" fill="url(#dcfgr)" clipPath="url(#dcfsc)"/>
+      <circle cx="0" cy="0" r="82" fill="none" stroke="rgba(255,255,255,0.04)" strokeWidth="1"/>
+
+      {/* Buttons */}
+      <circle cx="0"   cy="-44" r="15" fill="url(#dcfbg)" stroke="rgba(255,255,255,0.05)" strokeWidth="0.5"/>
+      <text x="0" y="-39" textAnchor="middle" fontSize="15" fill="rgba(255,255,255,0.55)" fontFamily="sans-serif" fontWeight="300">+</text>
+      <circle cx="44"  cy="0"   r="15" fill="url(#dcfbg)" stroke="rgba(255,255,255,0.05)" strokeWidth="0.5"/>
+      <circle cx="44"  cy="0"   r="4.5" fill="rgba(255,255,255,0.5)"/>
+      <circle cx="0"   cy="44"  r="15" fill="url(#dcfbg)" stroke="rgba(255,255,255,0.05)" strokeWidth="0.5"/>
+      <text x="0" y="50" textAnchor="middle" fontSize="15" fill="rgba(255,255,255,0.55)" fontFamily="sans-serif" fontWeight="300">−</text>
+      <circle cx="-44" cy="0"   r="15" fill="url(#dcfbg)" stroke="rgba(255,255,255,0.05)" strokeWidth="0.5"/>
+      <g transform="translate(-44,0)">
+        <rect x="-3.5" y="-7.5" width="7" height="10" rx="3.5" fill="rgba(255,255,255,0.5)"/>
+        <path d="M-6,1.5 Q-6,8 0,8 Q6,8 6,1.5" fill="none" stroke="rgba(255,255,255,0.5)" strokeWidth="1.5" strokeLinecap="round"/>
+        <line x1="0" y1="8" x2="0" y2="11" stroke="rgba(255,255,255,0.5)" strokeWidth="1.5" strokeLinecap="round"/>
+      </g>
+
+      {/* Centre mic */}
+      <circle cx="0" cy="0" r="2.5" fill="rgba(255,255,255,0.18)"/>
+
+      {/* Perimeter mics */}
+      {ALL.map(id => {
+        const [cx, cy] = MIC_POS[id];
+        const active = activeMics.includes(id);
+        return (
+          <g key={id}>
+            <circle cx={cx} cy={cy} r="6"
+              fill={active ? '#1a3a5a' : '#1e2020'}
+              filter={active ? 'url(#dcfmg)' : undefined}/>
+            <circle cx={cx} cy={cy} r="4" fill={active ? '#4a7ab8' : '#2a2a2a'}/>
+          </g>
+        );
+      })}
+
+      <ellipse cx="-14" cy="-20" rx="22" ry="13" fill="rgba(255,255,255,0.04)"/>
+    </svg>
+  );
+}
+
+// Mini version for preset cards
+function DeviceDiagramMini({ activeMics, patternType }) {
+  const MIC_POS = {
+    mk1: [-45,-78], mk2: [45,-78], mk3: [90,0],
+    mk4: [45,78],   mk5: [-45,78], mk6: [-90,0],
+  };
+  return (
+    <svg width="52" height="52" viewBox="-110 -110 220 220">
+      <circle cx="0" cy="0" r="108" fill="#0a0a0a"/>
+      <circle cx="0" cy="0" r="104" fill="#222"/>
+      <circle cx="0" cy="0" r="96" fill="none" stroke="#0d0d0d" strokeWidth="11"/>
+      <circle cx="0" cy="0" r="96" fill="none"
+        stroke={patternType === 'omni' ? '#40906a' : '#40906a'}
+        strokeWidth="7" strokeDasharray="36.3 14" transform="rotate(-90)"/>
+      <circle cx="0" cy="0" r="96" fill="none" stroke="#161616" strokeWidth="11"
+        strokeDasharray="1.5 49" transform="rotate(-90)"/>
+      <circle cx="0" cy="0" r="82" fill="#1a1a1a"/>
+      {patternType === 'omni' && <circle cx="0" cy="0" r="68" fill="rgba(64,88,120,0.18)" stroke="#405878" strokeWidth="2"/>}
+      {patternType === 'front' && <path d="M-68,0 A68,68 0 0,0 68,0 Z" fill="rgba(64,88,120,0.18)" stroke="#405878" strokeWidth="2"/>}
+      {patternType === 'rear'  && <path d="M-68,0 A68,68 0 0,1 68,0 Z" fill="rgba(64,88,120,0.18)" stroke="#405878" strokeWidth="2"/>}
+      {Object.entries(MIC_POS).map(([id,[cx,cy]]) => (
+        <circle key={id} cx={cx} cy={cy} r="4"
+          fill={activeMics.includes(id) ? '#4a7ab8' : '#2a2a2a'}/>
+      ))}
+    </svg>
+  );
+}
+
+
+// ─── DeviceConfigForm ─────────────────────────────────────────────────────────
+// Two-column layout: Listening (left) + Sound (right).
+// disabled=true = read-only (used when device is on global config).
+
+function DeviceConfigForm({ config, onChange, disabled }) {
+  const set = disabled ? () => {} : onChange;
+
+  // Derive current mic preset from beamAngle
+  const angle = config.beamAngle ?? -1;
+  const currentPreset = angle === -1 ? 'omni' : (angle === 90 ? 'front' : angle === 270 ? 'rear' : 'omni');
+
+  const PRESETS = {
+    omni:  { beamAngle: -1,  beamformingEnabled: true,  activeMics: ['mk1','mk2','mk3','mk4','mk5','mk6'], patternType: 'omni'  },
+    front: { beamAngle: 90,  beamformingEnabled: true,  activeMics: ['mk3','mk4','mk5','mk6'],             patternType: 'front' },
+    rear:  { beamAngle: 270, beamformingEnabled: true,  activeMics: ['mk1','mk2','mk3','mk6'],             patternType: 'rear'  },
+  };
+
+  function selectPreset(key) {
+    if (disabled) return;
+    const p = PRESETS[key];
+    onChange('beamAngle', p.beamAngle);
+    onChange('beamformingEnabled', p.beamformingEnabled);
+  }
+
+  const WW_MODELS = [
+    { value: 'hey_jarvis_v0.1',   label: 'Hey Jarvis'   },
+    { value: 'alexa_v0.1',        label: 'Alexa'         },
+    { value: 'hey_mycroft_v0.1',  label: 'Hey Mycroft'   },
+    { value: 'hey_rhasspy_v0.1',  label: 'Hey Rhasspy'   },
+  ];
+
+  // Sensitivity: map owwThreshold (0.1–0.9) to 1–9 int, inverted (low threshold = eager)
+  const sensitivityToThreshold = v => Number((1.0 - (v - 1) / 8 * 0.8).toFixed(2));
+  const thresholdToSensitivity = t => Math.round((1.0 - t) / 0.8 * 8) + 1;
+  const sensitivity = thresholdToSensitivity(config.owwThreshold ?? 0.5);
+
+  const bands = config.eqBands ?? [0,0,0,0,0,0,0,0];
+  const fmtDb = v => (v >= 0 ? '+' : '') + Number(v).toFixed(1) + ' dB';
+
+  const [advOpen, setAdvOpen] = useState(false);
+
+  const inputStyle = disabled ? { opacity: 0.45, pointerEvents: 'none' } : {};
+  const sectionLabel = { fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 14 };
+  const colLabel = { ...sectionLabel, marginBottom: 16 };
+
+  return (
+    <div>
+      {/* Two-column main layout */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 28 }}>
+
+        {/* ── LEFT: LISTENING ── */}
+        <div>
+          <div style={colLabel}>Listening</div>
+
+          {/* Device diagram */}
+          <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 12 }}>
+            <DeviceDiagram
+              activeMics={PRESETS[currentPreset].activeMics}
+              patternType={PRESETS[currentPreset].patternType}
+            />
+          </div>
+
+          {/* Preset cards */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6, ...inputStyle }}>
+            {Object.entries(PRESETS).map(([key, p]) => (
+              <div key={key} onClick={() => selectPreset(key)} style={{
+                background: currentPreset === key
+                  ? 'linear-gradient(160deg,#dde8f4,#ccd8ec)'
+                  : 'linear-gradient(160deg,#e4e0d8,#d4d0c8)',
+                border: `1px solid ${currentPreset === key ? '#405878' : '#c0bdb6'}`,
+                borderRadius: 10, padding: '9px 6px 8px',
+                cursor: disabled ? 'default' : 'pointer',
+                display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
+                transition: 'border-color 0.15s, background 0.15s',
+              }}>
+                <DeviceDiagramMini activeMics={p.activeMics} patternType={p.patternType}/>
+                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: '#3a3830' }}>
+                  {key.charAt(0).toUpperCase() + key.slice(1)}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Wake word */}
+          <div style={{ marginTop: 22 }}>
+            <div style={sectionLabel}>Wake word</div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 14, ...inputStyle }}>
+              {WW_MODELS.map(m => (
+                <div key={m.value} onClick={() => set('owwModel', m.value)} style={{
+                  background: config.owwModel === m.value
+                    ? 'linear-gradient(160deg,#dde8f4,#ccd8ec)'
+                    : 'linear-gradient(160deg,#e4e0d8,#d4d0c8)',
+                  border: `1px solid ${config.owwModel === m.value ? '#405878' : '#c0bdb6'}`,
+                  borderRadius: 8, padding: '8px 10px',
+                  cursor: disabled ? 'default' : 'pointer',
+                  transition: 'border-color 0.15s, background 0.15s',
+                }}>
+                  <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 12, fontWeight: 600, color: '#1a1c18' }}>{m.label}</div>
+                  <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: '#888480', marginTop: 2 }}>{m.value}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Sensitivity */}
+            <div style={inputStyle}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 6 }}>
+                <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: 'var(--text2)' }}>Sensitivity</span>
+              </div>
+              <input type="range" min={1} max={9} step={1} value={sensitivity}
+                style={{ width: '100%' }}
+                onChange={e => set('owwThreshold', sensitivityToThreshold(Number(e.target.value)))}/>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
+                <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)' }}>Precise</span>
+                <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)' }}>Eager</span>
+              </div>
+            </div>
+          </div>
         </div>
-        {!disabled && (
-          <div style={{ display:'flex', gap:8, marginBottom:20, marginTop:4 }}>
-            <Pill small onClick={() => set('eqBands',[0,0,0,0,0,0,0,0])}>Flat</Pill>
-            <Pill small onClick={() => set('eqBands',[0,0,0,0,0,7,4,2])}>Clarity</Pill>
-            <Pill small onClick={() => set('eqBands',[0,3,2,0,-2,0,0,0])}>Warmth</Pill>
+
+        {/* ── RIGHT: SOUND ── */}
+        <div>
+          <div style={colLabel}>Sound</div>
+
+          {/* EQ */}
+          <div style={{ marginBottom: 6 }}>
+            <EqCurve bands={bands}/>
+          </div>
+          <div style={{ display: 'flex', gap: 6, marginBottom: 14, ...inputStyle }}>
+            {[['Flat',[0,0,0,0,0,0,0,0]],['Clarity',[0,0,0,0,0,7,4,2]],['Warmth',[0,3,2,0,-2,0,0,0]]].map(([label, vals]) => (
+              <Pill key={label} small onClick={() => set('eqBands', vals)}>{label}</Pill>
+            ))}
+          </div>
+          <div style={inputStyle}>
+            <Toggle label="Speech boost" sub="presence boost for voice" value={config.eqLoudness ?? false} onChange={v => set('eqLoudness', v)}/>
+          </div>
+
+          {/* Volume */}
+          <div style={{ marginTop: 20 }}>
+            <div style={sectionLabel}>Volume</div>
+            <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 28, color: '#405878', textAlign: 'center', marginBottom: 8, textShadow: '0 0 12px rgba(64,88,120,0.3)', ...inputStyle }}>
+              {config.startupVolume ?? 70}%
+            </div>
+            <div style={inputStyle}>
+              <input type="range" min={0} max={100} step={1} value={config.startupVolume ?? 70}
+                style={{ width: '100%' }}
+                onChange={e => set('startupVolume', Number(e.target.value))}/>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
+                <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)' }}>Silent</span>
+                <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)' }}>Full</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ── ADVANCED DISCLOSURE ── */}
+      <div style={{ marginTop: 24, borderTop: '1px solid rgba(0,0,0,0.08)', paddingTop: 12 }}>
+        <div onClick={() => setAdvOpen(o => !o)} style={{
+          fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)',
+          textTransform: 'uppercase', letterSpacing: '0.15em',
+          cursor: 'pointer', userSelect: 'none', display: 'flex', alignItems: 'center', gap: 6,
+        }}>
+          <span>{advOpen ? '▾' : '▸'}</span> Advanced
+        </div>
+        {advOpen && (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '16px 20px', marginTop: 14, ...inputStyle }}>
+            <Slider label="Digital gain"   value={config.adcDigitalGain ?? 88} min={0} max={100} onChange={v => set('adcDigitalGain', v)}/>
+            <Slider label="MICPGA"         value={config.adcMicpga ?? 40}      min={0} max={59}  onChange={v => set('adcMicpga', v)}/>
+            <Slider label="Beam angle"     value={config.beamAngle ?? -1}      min={-1} max={359} step={1} onChange={v => set('beamAngle', v)}/>
+            <Slider label="VAD threshold"  value={config.vadThreshold ?? 0.001} min={0.0001} max={0.02} step={0.0001} onChange={v => set('vadThreshold', v)}/>
+            <Slider label="Speech gate"    value={config.vadSpeechMs ?? 160}   min={32} max={320} step={32} unit="ms" onChange={v => set('vadSpeechMs', v)}/>
+            <Slider label="Silence gate"   value={config.vadSilenceMs ?? 800}  min={200} max={2000} step={100} unit="ms" onChange={v => set('vadSilenceMs', v)}/>
+            <Toggle label="Beamforming"    value={config.beamformingEnabled ?? false} onChange={v => set('beamformingEnabled', v)}/>
+            <Toggle label="Noise suppression (NS)" value={config.nsEnabled ?? true} onChange={v => set('nsEnabled', v)}/>
+            <Toggle label="Auto gain (AGC)"        value={config.agcEnabled ?? true} onChange={v => set('agcEnabled', v)}/>
           </div>
         )}
-        <Toggle label="Loudness" sub="speech-range presence boost" value={config.eqLoudness??false} onChange={v => set('eqLoudness',v)}/>
-      </div>
-      <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', margin: '28px 0 20px' }}>Wake Word · OpenWakeWord</div>
-      <div style={inputStyle}>
-        <Slider label="Detection Threshold" value={config.owwThreshold} min={0.1} max={0.9} step={0.05} onChange={v => set('owwThreshold', v)}/>
-        <div style={{ marginBottom: 24 }}>
-          <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: 'var(--text2)', marginBottom: 8 }}>Model</div>
-          <select value={config.owwModel} onChange={e => set('owwModel', e.target.value)} disabled={disabled}>
-            <option value="hey_jarvis_v0.1">hey_jarvis_v0.1</option>
-            <option value="alexa_v0.1">alexa_v0.1</option>
-            <option value="hey_mycroft_v0.1">hey_mycroft_v0.1</option>
-            <option value="hey_rhasspy_v0.1">hey_rhasspy_v0.1</option>
-          </select>
-        </div>
       </div>
     </div>
   );

@@ -57,6 +57,7 @@ import asyncio
 import logging
 import os
 import socket
+import time
 import uuid
 from typing import TYPE_CHECKING, Optional
 
@@ -64,7 +65,64 @@ from zeroconf.asyncio import AsyncZeroconf
 from zeroconf import ServiceInfo
 
 import em_db as db
-from esphome.satellite_server import SatelliteServerProtocol, serve
+
+# ── Per-turn trace ─────────────────────────────────────────────────────────────
+# Collects timestamps and key metrics through a voice turn and emits a single
+# structured [TURN] log line at completion. Makes it possible to see at a glance
+# where time is going and whether quality correlates with any specific stage.
+#
+# All times are offsets in milliseconds from t0 (turn start / wake detected).
+# -1 means the stage was not reached in this turn.
+
+import dataclasses
+
+@dataclasses.dataclass
+class TurnTrace:
+    trigger:          str   = ""      # "wakeword(0.522)" or "button"
+    t0:               float = 0.0     # turn start (time.monotonic())
+    t_first_frame_ms: int   = -1      # ms from t0 to first real audio frame
+    t_vad_end_ms:     int   = -1      # ms from t0 to VAD sentinel received
+    audio_frames:     int   = 0       # number of PCM frames sent to HA
+    t_stt_ms:         int   = -1      # ms from t0 to STT result received
+    stt_text:         str   = ""      # STT transcript
+    t_tts_url_ms:     int   = -1      # ms from t0 to TTS URL received
+    t_tts_fetched_ms: int   = -1      # ms from t0 to TTS audio fetched+decoded
+    tts_bytes:        int   = 0       # decoded PCM bytes
+    t_playback_ms:    int   = -1      # ms from t0 to playback started
+    t_complete_ms:    int   = -1      # ms from t0 to turn complete
+    outcome:          str   = ""      # "ok", "no_speech", "cancelled", "tts_error", "timeout"
+
+    def elapsed_ms(self) -> int:
+        return int((time.monotonic() - self.t0) * 1000)
+
+    def mark(self, attr: str) -> None:
+        """Record current elapsed time into the named timestamp field."""
+        setattr(self, attr, self.elapsed_ms())
+
+    def emit(self) -> None:
+        """Emit a single structured [TURN] log line."""
+        def fmt(v: int) -> str:
+            return f"+{v}ms" if v >= 0 else "—"
+
+        audio_ms = self.audio_frames * 80  # each frame is 80ms at 16kHz
+        log.info(
+            f"[TURN] trigger={self.trigger} outcome={self.outcome} "
+            f"total={fmt(self.t_complete_ms)} "
+            f"first_frame={fmt(self.t_first_frame_ms)} "
+            f"vad_end={fmt(self.t_vad_end_ms)} audio={self.audio_frames}frames/{audio_ms}ms "
+            f"stt={fmt(self.t_stt_ms)} text={self.stt_text!r} "
+            f"tts_url={fmt(self.t_tts_url_ms)} "
+            f"tts_fetch={fmt(self.t_tts_fetched_ms)} tts_bytes={self.tts_bytes} "
+            f"playback={fmt(self.t_playback_ms)}"
+        )
+
+# Frames to discard from voice_queue at the start of each turn.
+# The stream no longer stops at wake, so voice_queue contains the tail of
+# "...Jarvis" before the command arrives. N×80ms of bleed removed upfront.
+# 3 = 240ms. Lower if first command word gets clipped; raise if wake-word
+# tail bleeds into transcripts.
+VOICE_PREROLL_DISCARD = 3
+from esphome.satellite_server import SatelliteServerProtocol, serve, _HANDLED
 from esphome.feature_flags import (
     MediaPlayerEntityFeature,
     MediaPlayerState,
@@ -167,6 +225,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._tts_audio_data:   Optional[bytes] = None
         self._tts_event         = asyncio.Event()
         self._conversation_id:  str = ""
+        self._trace:            "TurnTrace | None" = None
         # Set on VOICE_ASSISTANT_INTENT_END — the reliable "STT + intent
         # resolution have genuinely completed" marker. Used to distinguish a
         # real terminal RUN_END from a premature/duplicate one that HA can
@@ -252,6 +311,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 f"[{self._log_name}] SubscribeVoiceAssistantRequest "
                 f"subscribe={msg.subscribe} flags={msg.flags}"
             )
+            yield _HANDLED
             return
 
         if isinstance(msg, api_pb2.VoiceAssistantConfigurationRequest):
@@ -299,6 +359,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         if isinstance(msg, api_pb2.SubscribeHomeassistantServicesRequest):
             # No response defined; HA proceeds fine without one.
             log.debug(f"[{self._log_name}] SubscribeHomeassistantServicesRequest (no response)")
+            yield _HANDLED
             return
 
         if isinstance(msg, api_pb2.VoiceAssistantResponse):
@@ -311,10 +372,12 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # true HA-side failure surfaces via VOICE_ASSISTANT_ERROR on the
             # event stream instead, which _handle_voice_event already covers.
             log.debug(f"[{self._log_name}] VoiceAssistantResponse port={msg.port} error={msg.error}")
+            yield _HANDLED
             return
 
         if isinstance(msg, api_pb2.VoiceAssistantEventResponse):
             self._handle_voice_event(msg)
+            yield _HANDLED
             return
 
         if isinstance(msg, api_pb2.VoiceAssistantAnnounceRequest):
@@ -371,6 +434,9 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         elif event_type == ET.VOICE_ASSISTANT_STT_END:
             text = data.get("text", "")
             log.info(f"[{self._log_name}] STT result: {text!r}")
+            if self._trace:
+                self._trace.stt_text = text
+                self._trace.t_stt_ms = self._trace.elapsed_ms()
             if self._on_stt_end and not self._turn_cancelled:
                 asyncio.create_task(self._on_stt_end(text))
 
@@ -389,6 +455,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             url = data.get("url", "")
             if url:
                 log.info(f"[{self._log_name}] TTS URL: {url}")
+            if self._trace:
+                self._trace.t_tts_url_ms = self._trace.elapsed_ms()
                 self._tts_audio_url = url
                 self._tts_event.set()
 
@@ -471,6 +539,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         device,            # em_controller.Device — avoids circular import
         on_thinking,       # async callable()
         post_turn_play,    # async callable(voice_response: bytes)
+        trace: "TurnTrace | None" = None,
     ) -> None:
         """
         Execute one voice turn over the live HA connection.
@@ -497,6 +566,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._no_speech_timeout = False
         self._on_thinking    = on_thinking
         self._on_announce    = None   # set below after announcement path is confirmed
+        self._trace          = trace  # may be None — all trace.x calls guard against this
 
         self._conversation_id = str(uuid.uuid4())
 
@@ -519,6 +589,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
 
             if self._turn_cancelled:
                 log.info(f"[{self._log_name}] Turn cancelled during mic streaming")
+                if trace: trace.outcome = "cancelled"
                 return
 
             if self._no_speech_timeout:
@@ -527,6 +598,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 # so there's no in-flight HA pipeline to wait on. Close the
                 # turn immediately rather than sitting on the 30s TTS wait
                 # for a response that was never requested.
+                if trace: trace.outcome = "no_speech"
                 return
 
             # ── Wait for TTS response (or RUN_END / error / timeout) ──────
@@ -534,10 +606,12 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 await asyncio.wait_for(self._tts_event.wait(), timeout=30.0)
             except asyncio.TimeoutError:
                 log.warning(f"[{self._log_name}] Timeout waiting for TTS response from HA")
+                if trace: trace.outcome = "timeout"
                 return
 
             if self._turn_cancelled:
                 log.info(f"[{self._log_name}] Turn cancelled while waiting for TTS")
+                if trace: trace.outcome = "cancelled"
                 return
 
             if self._tts_audio_url:
@@ -547,12 +621,20 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     pcm_bytes = await _fetch_tts_audio(self._tts_audio_url)
                 except Exception as e:
                     log.error(f"[{self._log_name}] TTS audio fetch failed: {e}")
+                    if trace: trace.outcome = "tts_error"
                     return
 
+                if trace:
+                    trace.t_tts_fetched_ms = trace.elapsed_ms()
+                    trace.tts_bytes = len(pcm_bytes) if pcm_bytes else 0
+
                 if pcm_bytes and not self._turn_cancelled:
+                    if trace: trace.t_playback_ms = trace.elapsed_ms()
                     await post_turn_play(pcm_bytes)
+                    if trace: trace.outcome = "ok"
             else:
                 log.info(f"[{self._log_name}] No TTS audio URL received — turn ended without response")
+                if trace: trace.outcome = "no_tts"
 
         finally:
             # Signal HA that the satellite has finished playing TTS and is
@@ -573,7 +655,13 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             self._turn_active    = False
             self._on_thinking    = None
             self._on_announce    = None
+            self._trace          = None
             self._conversation_id = ""
+            if trace:
+                trace.t_complete_ms = trace.elapsed_ms()
+                if not trace.outcome:
+                    trace.outcome = "ok"
+                trace.emit()
             log.info(f"[{self._log_name}] ESPHome voice turn complete")
 
     async def _stream_mic_audio(self, device) -> None:
@@ -601,13 +689,44 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         """
         pcm_buf = bytearray()
 
+        # Preroll discard — drop wake-word tail from voice_queue before
+        # streaming to HA. See module-level VOICE_PREROLL_DISCARD.
+        preroll_remaining = VOICE_PREROLL_DISCARD
+        if preroll_remaining > 0:
+            log.debug(
+                f"[{self._log_name}] Discarding {preroll_remaining} preroll frames "
+                f"({preroll_remaining * 80}ms) to skip wake-word tail"
+            )
+
+        # Controller-side no-speech timeout (replaces device's 0x05 sentinel,
+        # which only fires when lock_mic=True — a condition P0-1 eliminates).
+        # If no real audio frame (non-sentinel) arrives within this window
+        # after the turn starts, the wake was accidental and we close quietly.
+        # 5s matches the device's own noSpeechTimeout and Alexa's behaviour.
+        NO_SPEECH_TIMEOUT = 5.0
+        first_real_frame_seen = False
+        turn_start = time.monotonic()
+
         while True:
             if device.cancel_event.is_set():
                 self._turn_cancelled = True
                 return
 
+            # No-speech timeout: if no real (non-preroll) frame has arrived
+            # within NO_SPEECH_TIMEOUT seconds, treat as accidental wake.
+            # We only enforce this before the first real frame arrives —
+            # once speech starts, the normal VAD sentinel owns end-of-turn.
+            if not first_real_frame_seen and (time.monotonic() - turn_start) > NO_SPEECH_TIMEOUT:
+                log.info(
+                    f"[{self._log_name}] No speech within {NO_SPEECH_TIMEOUT}s — "
+                    f"closing HA pipeline quietly (controller-side no-speech timeout)"
+                )
+                self._send_one(api_pb2.VoiceAssistantAudio(data=b"", end=True))
+                self._no_speech_timeout = True
+                return
+
             try:
-                payload = await asyncio.wait_for(device.voice_queue.get(), timeout=2.0)
+                payload = await asyncio.wait_for(device.voice_queue.get(), timeout=1.0)
             except asyncio.TimeoutError:
                 continue
 
@@ -628,9 +747,24 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     return
                 # Normal VAD end — signal HA that speech has finished
                 log.info(f"[{self._log_name}] VAD end — sending audio end to HA")
+                if self._trace:
+                    self._trace.t_vad_end_ms = self._trace.elapsed_ms()
                 self._send_one(api_pb2.VoiceAssistantAudio(data=b"", end=True))
                 return
 
+            if preroll_remaining > 0:
+                preroll_remaining -= 1
+                log.debug(f"[{self._log_name}] Preroll discard: skipped frame ({preroll_remaining} remaining)")
+                continue
+
+            if not first_real_frame_seen:
+                first_real_frame_seen = True
+                log.debug(f"[{self._log_name}] First real audio frame received — no-speech timeout disarmed")
+                if self._trace:
+                    self._trace.t_first_frame_ms = self._trace.elapsed_ms()
+
+            if self._trace:
+                self._trace.audio_frames += 1
             pcm_buf.extend(payload)
 
             # Send in 320-byte chunks (20ms at 16kHz mono S16_LE) —
@@ -777,6 +911,9 @@ class DeviceESPhomeServer:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
+        # Clear active satellite so get_satellite() never returns a dead
+        # connection's object after a device bounce (B3).
+        self._active_satellite = None
         log.info(f"[esphome.{self.device_id[-8:]}] Server stopped")
 
     def set_mdns_info(self, info: ServiceInfo) -> None:
@@ -910,6 +1047,7 @@ async def trigger_voice_turn(
     device,           # em_controller.Device
     on_thinking,      # async callable() — LED/state transition
     post_turn_play,   # async callable(pcm_bytes: bytes) — playback + drain
+    trigger_label: str = "unknown",  # "wakeword(0.522)" or "button" for trace
 ) -> None:
     """
     Entry point for OWW/button-triggered voice turns in esphome mode.
@@ -937,10 +1075,13 @@ async def trigger_voice_turn(
         )
         return
 
+    trace = TurnTrace(trigger=trigger_label, t0=time.monotonic())
+
     await satellite.run_esphome_voice_turn(
         device=device,
         on_thinking=on_thinking,
         post_turn_play=post_turn_play,
+        trace=trace,
     )
 
 

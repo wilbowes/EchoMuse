@@ -36,15 +36,35 @@ DEFAULT_DEVICE_CONFIG = {
     "adcDigitalGain":   88,
     "adcMicpga":        40,
     "startupVolume":    85,
-    "vadThreshold":     0.004,
+    # vadThreshold: 0.003 (normalised RMS pre-AGC). Lower than the previous
+    # 0.004 to capture soft speech onsets (fricatives, quiet first syllables).
+    # SETUP.md documents 0.003 as the comfortable conversational level; the
+    # DB was drifted above that. Raise to 0.010-0.020 only in noisy rooms.
+    "vadThreshold":     0.003,
     "vadSpeechMs":      32,
-    "vadSilenceMs":     600,
+    # vadSilenceMs: 900ms — up from 600. Prevents premature endpoint on
+    # natural mid-sentence pauses. Dashboard UI already defaults to 800;
+    # this closes the DB/UI mismatch. Tune up to 1200 if sentences still
+    # get clipped; 600 caused the "must finish quickly" behaviour.
+    "vadSilenceMs":     900,
     "owwThreshold":     0.3,
     "owwModel":         "hey_jarvis_v0.1",
-    "beamformingEnabled": True,
+    # beamformingEnabled: False — ch6 (centre/omni) for all audio.
+    # beamforming=True was routing OWW audio through a perimeter mic selected
+    # every 32ms frame, injecting channel-splice discontinuities. The SNR
+    # difference between ch6 and the "best" perimeter mic at conversational
+    # distance is negligible; the downside (wrong-mic locks, discontinuities)
+    # is real. Off = ch6 for everything, consistent with what makes OWW work.
+    "beamformingEnabled": False,
     "beamAngle":        -1,
     "eqBands":          [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     "eqLoudness":       False,
+    # Pipeline toggles — both default on. Disable via dashboard for A/B testing.
+    # nsEnabled: RNNoise noise suppression. Running at 16kHz (wrong rate for
+    # the model — see P0-3). Disable to A/B test whether it's helping or hurting.
+    # agcEnabled: automatic gain control. Disable to hear raw mic levels.
+    "nsEnabled":        True,
+    "agcEnabled":       True,
 }
 
 # Maximum log rows retained per device. Older rows are pruned on insert.

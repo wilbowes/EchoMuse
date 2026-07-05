@@ -16,14 +16,18 @@
 //
 // # Algorithm
 //
-// Two modes:
+// Direction estimation always runs — smoothers update on every Process() call
+// regardless of BeamformingEnabled. This keeps the baseline warm so Lock()
+// gets a meaningful onset ratio the instant beamforming is turned on.
 //
-//  1. Disabled (beamforming off): output ch6 (centre/omni). Used for wake
-//     word detection — equidistant from all directions, no directional bias.
+// Output channel is determined by lock state, not by the config flag:
+//   - Unlocked: always ch6 (centre/omni). Covers OWW listening and any turn
+//     where Lock() was a no-op (beamforming disabled).
+//   - Locked: the perimeter mic selected at Lock() time, or the mic nearest
+//     to BeamAngle if a fixed steering direction is configured.
 //
-//  2. Enabled (voice turn): select the perimeter mic with the highest
-//     energy onset relative to its own noise floor baseline. Lock that mic
-//     for the duration of the turn. Unlock on gate close.
+// BeamformingEnabled only gates Lock() — if false, Lock() is a no-op and
+// the device stays on ch6 for both OWW and voice turns.
 //
 // # Direction estimation
 //
@@ -118,11 +122,23 @@ func New() *Beamformer {
 // Lock selects the mic with the highest energy onset relative to its noise
 // floor baseline and holds it until Unlock.
 //
+// enabled is the BeamformingEnabled config flag. If false, Lock() is a no-op
+// and the beamformer continues outputting ch6 (centre/omni). This means the
+// config flag only gates directional selection — not whether smoothers run.
+// Smoothers always run so the baseline is warm if beamforming is later enabled.
+//
 // Using onset ratio rather than absolute energy means a voice in a quiet
 // direction beats a TV in a loud direction. Falls back to raw smooth energy
 // if the baseline hasn't warmed up yet (~3s after start), since onset ratios
 // are meaningless when energyBaseline is near zero.
-func (b *Beamformer) Lock() {
+func (b *Beamformer) Lock(enabled bool) {
+	if !enabled {
+		// Beamforming disabled — stay on ch6 (lockedChannel remains -1).
+		// Smoothers are still running, so if beamforming is turned on later
+		// the baseline will already be warmed up.
+		log.Printf("[beam] Lock() called but beamforming disabled — staying on ch6 (omni)")
+		return
+	}
 	if b.lockedChannel >= 0 {
 		return
 	}
@@ -179,45 +195,53 @@ func (b *Beamformer) Unlock() {
 
 // Process returns mono S16_LE audio and the estimated source angle.
 //
-// When disabled: returns ch6 (centre/omni) — for wake word detection.
-// When enabled, steerAngle >= 0 (fixed-beam): returns the mic nearest to
-// steerAngle regardless of lock state — direction is config-driven.
-// When enabled, steerAngle < 0 and locked: returns the locked perimeter mic.
-// When enabled, steerAngle < 0 and unlocked: returns the current best-energy mic.
+// The enabled flag (BeamformingEnabled) no longer gates smoother updates —
+// direction estimation always runs so the baseline stays warm regardless of
+// config state. The flag only affects Lock() behaviour (see Lock() docs).
+//
+// Output channel is determined by lock state alone:
+//   - Unlocked (lockedChannel == -1): always ch6 (centre/omni). This covers
+//     OWW listening and any voice turn where Lock() was a no-op (beamforming
+//     disabled). ch6 is equidistant from all directions — no directional bias.
+//   - Locked, steerAngle >= 0 (fixed-beam): mic nearest to steerAngle. Config-
+//     driven direction, ignores the energy-based lock channel.
+//   - Locked, steerAngle < 0 (auto): the perimeter mic selected at Lock() time.
 //
 // angle is the estimated dominant source direction (0–360°, clockwise from
-// 12 o'clock), or -1 if not reporting (unlocked or disabled).
-func (b *Beamformer) Process(raw []byte, steerAngle float64, enabled bool) (mono []byte, angle float64) {
+// 12 o'clock), or -1 when unlocked.
+func (b *Beamformer) Process(raw []byte, steerAngle float64) (mono []byte, angle float64) {
 	if len(raw) < periodFrames*frameSize {
-		return extractChannel(raw, 0), -1
-	}
-
-	if !enabled {
-		// OWW mode: centre mic, omnidirectional, no direction bias
 		return extractChannel(raw, centreCh), -1
 	}
 
-	// Decode 6 perimeter channels for HF direction estimation
+	// Always decode and update smoothers — direction estimation runs
+	// continuously regardless of BeamformingEnabled. This keeps the baseline
+	// warm so Lock() gets a good onset ratio the moment beamforming is enabled.
 	channels := decodeChannels(raw)
 	hfChannels := bandDiff(channels)
 
-	// Update both smoothers
 	for di := range candidateAngles {
 		energy := hfEnergy(hfChannels, di)
 		b.energySmooth[di] = smoothAlpha*b.energySmooth[di] + (1-smoothAlpha)*energy
 
-		// Only update baseline when unlocked — freeze it during voice turns
-		// so a loud voice doesn't corrupt the noise floor estimate
+		// Freeze baseline during voice turns (locked) so the speaker's own
+		// voice doesn't corrupt the noise floor estimate.
 		if b.lockedChannel < 0 {
 			b.energyBaseline[di] = baselineAlpha*b.energyBaseline[di] + (1-baselineAlpha)*energy
 		}
 	}
 
-	if b.baselineReady < 100 { // ~3s warmup
+	if b.baselineReady < 100 { // ~3s warmup at 32ms/period
 		b.baselineReady++
 	}
 
-	// Best direction from fast smoother (used in auto unlocked mode)
+	// Unlocked: always ch6 (omni). Covers OWW listening and disabled-beamforming
+	// voice turns. No directional bias, no channel splices.
+	if b.lockedChannel < 0 {
+		return extractChannel(raw, centreCh), -1
+	}
+
+	// Locked — select output channel and reported angle.
 	bestDir := 0
 	for di := 1; di < nDirections; di++ {
 		if b.energySmooth[di] > b.energySmooth[bestDir] {
@@ -225,30 +249,16 @@ func (b *Beamformer) Process(raw []byte, steerAngle float64, enabled bool) (mono
 		}
 	}
 
-	// Select output channel and reported angle.
-	//
-	// Fixed-beam (steerAngle >= 0): always use the nearest mic to the
-	// configured angle. Lock state is irrelevant since the direction is
-	// set by config, not by energy. Previously steerAngle was accepted
-	// by this function but silently ignored — nearestDirection never called.
-	//
-	// Auto (steerAngle < 0): locked → locked channel; unlocked → best energy.
 	var ch int
-	switch {
-	case steerAngle >= 0:
+	if steerAngle >= 0 {
+		// Fixed-beam: config-driven direction, ignores energy-based lock
 		fixedDir := nearestDirection(steerAngle)
 		ch = directionToChannel[fixedDir]
-		if b.lockedChannel >= 0 {
-			angle = candidateAngles[fixedDir]
-		} else {
-			angle = -1
-		}
-	case b.lockedChannel >= 0:
+		angle = candidateAngles[fixedDir]
+	} else {
+		// Auto: use the channel selected at Lock() time
 		ch = b.lockedChannel
 		angle = candidateAngles[bestDir]
-	default:
-		ch = directionToChannel[bestDir]
-		angle = -1
 	}
 
 	return extractChannel(raw, ch), angle

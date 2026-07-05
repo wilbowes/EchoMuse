@@ -74,10 +74,12 @@ func (p *Processor) Destroy() {
 }
 
 // Process applies the audio pipeline to one period of mono S16_LE audio.
-// nsEnabled gates noise suppression; AGC is always active.
+// nsEnabled gates RNNoise noise suppression.
+// agcEnabled gates automatic gain control — when false, audio passes through
+// at unity gain (agcGain state is preserved so re-enabling is smooth).
 // speech should be true when VAD has detected speech — AGC release is
 // frozen during silence to prevent noise floor amplification.
-func (p *Processor) Process(mono []byte, nsEnabled bool, speech bool) []byte {
+func (p *Processor) Process(mono []byte, nsEnabled bool, agcEnabled bool, speech bool) []byte {
 	if len(mono) == 0 {
 		return mono
 	}
@@ -98,11 +100,13 @@ func (p *Processor) Process(mono []byte, nsEnabled bool, speech bool) []byte {
 	// if RNNoise has warmed up and says "not speech", freeze AGC release
 	// even if RMS is above threshold. Prevents gain pumping on loud
 	// non-speech sources (TV, HVAC) that fool the RMS threshold.
-	agcSpeech := speech
-	if nsEnabled && p.vadHasData && p.vadProb < vadProbThreshold {
-		agcSpeech = false
+	if agcEnabled {
+		agcSpeech := speech
+		if nsEnabled && p.vadHasData && p.vadProb < vadProbThreshold {
+			agcSpeech = false
+		}
+		samples = p.agc(samples, agcSpeech)
 	}
-	samples = p.agc(samples, agcSpeech)
 
 	out := make([]byte, len(mono))
 	for i, s := range samples {

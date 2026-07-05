@@ -513,6 +513,11 @@ dns-sd -B _emcontroller._tcp local
 ✅ LED direction overlay — light green segment on listening ring during voice turn only
 ✅ LED mapping calibrated — LED 0 at 240°, confirmed from volume sweep
 ✅ Audio processing pipeline — RNNoise NS (vendored v0.1 C source, cgo) + AGC per period
+✅ NS and AGC independently toggleable from dashboard — both off by default (v2.6.3)
+✅ Per-turn structured trace — [TURN] log line with full stage timing at turn end
+✅ OWW near-miss score logging — DEBUG scores > 0.05 for diagnostics
+✅ VAD threshold tunable down to 0.0001 (dashboard slider floor corrected)
+✅ Beamformer structural fix — smoothers always run, output by lock state not flag
 ✅ AGC release frozen during silence — prevents noise floor amplification past VAD threshold
 ✅ Acoustic feedback fix — controller sleeps for audio duration after EOS before mic restart
 ✅ Spinner runs for full response duration — duration calculated from PCM length
@@ -587,6 +592,132 @@ Ch7, Ch8 → unconnected
 **Frequency-domain beamforming** (implemented in `bf_capture` diagnostic tool): A frequency-domain delay-and-sum implementation exists applying exact phase shifts via FFT. Testing confirmed the approach works — flat spectral response, no interpolation artefacts. For voice pickup at typical conversational distances the SNR improvement over mic selection is marginal; mic selection remains the production path. The `bf_capture` tool is retained for future research.
 
 **How Amazon does it:** Amazon's `amazon.speech.sim` reads the same raw 9-channel array via Android AudioRecord and does software processing. There is no hardware beamforming output channel. The MediaTek MAGI Conference DOA feature (in `audio.primary.mt8163.so`) is designed for phone call use cases and is not active in voice assistant mode on this device.
+
+---
+
+## Mic Array — What Actually Happens at Each Stage
+
+This describes the pipeline as it works in v2.6.3 with NS and AGC disabled (current working baseline). The stages are in order from hardware to HA.
+
+### Idle — waiting for wake word
+
+```
+ALSA card 0 device 24 (9ch S24_3LE 16kHz)
+  → pcm_microphone.go subscriber channel (raw 13824-byte periods at ~31ms intervals)
+  → beamformer.Process(raw, beamAngle)
+      — beamformingEnabled=false: always returns ch6 (centre/omni mic)
+      — smoothers still update every period regardless of flag (baseline stays warm)
+      — returns mono S16_LE 512 samples
+  → vadPeriodRMS(mono) — RMS on raw beamformed output, pre-processing
+  → if rms >= vadThreshold (0.001): VAD gate opens
+  → [if NS enabled] proc.noiseSuppress() — RNNoise (currently OFF)
+  → [if AGC enabled] proc.agc() — automatic gain control (currently OFF)
+  → [if gate open] frame buffered → sent as binary WS frame to controller /data
+      frame: [0x01][seq_hi][seq_lo][2560 bytes PCM = 80ms]
+  → [if gate closed] frame discarded — silence is not sent
+
+Controller handle_data():
+  → oww_paused.is_set()? → voice_queue (during a turn)
+  → else → mic_queue (during idle)
+
+wake_word_listener():
+  → pulls from mic_queue
+  → accumulates into 80ms chunks
+  → OWW inference (hey_jarvis_v0.1, threshold 0.30)
+  → DEBUG logs any score > 0.05 for near-miss visibility
+  → score >= threshold → wake detected
+```
+
+**Key: the stream runs continuously. VAD gate controls what gets sent — silence is dropped, speech bursts are forwarded. ch6 is always the channel during idle (beamforming off). Smoothers run every period.**
+
+### Wake word detected → command capture
+
+```
+wake_word_listener():
+  → oww_paused.set() — routing flips: handle_data() now sends to voice_queue
+  → model.reset(), buf.clear()
+  → _run_voice_locked(device, trigger_label="wakeword(score)")
+      → [esphome path] trigger_voice_turn()
+          → TurnTrace created (t0 = now)
+          → satellite.run_esphome_voice_turn()
+              → VoiceAssistantRequest(start=True) → HA Assist pipeline opens
+              → _stream_mic_audio() starts reading from voice_queue:
+                  → first 3 frames discarded (VOICE_PREROLL_DISCARD=3, 240ms)
+                    — removes wake-word tail ("...Jarvis") from audio
+                  → controller-side 5s no-speech timeout armed
+                  → first real frame arrives → timeout disarmed, t_first_frame logged
+                  → frames sent as VoiceAssistantAudio chunks to HA
+                  → VAD sentinel (0x04 from device) → VoiceAssistantAudio(end=True)
+                  → t_vad_end logged
+
+NOTE: the stream never stops. No mic_stop, no mic_start_turn on OWW path.
+The device is still on ch6 omni. The only change at wake is oww_paused flag
+flipping the queue routing. Command audio flows in with zero gap.
+```
+
+### HA pipeline → response
+
+```
+HA Assist:
+  → STT (Whisper) → intent resolution → TTS generation
+  → VoiceAssistantEvent stream: RUN_START → STT_START → STT_END →
+    INTENT_END → TTS_START → TTS_END → RUN_END
+
+Controller satellite:
+  → INTENT_END received → tts_event armed (prevents premature RUN_END close)
+  → TTS_URL received → t_tts_url_ms logged
+  → fetch MP3 from HA TTS proxy → ffmpeg decode → 22050Hz mono S16_LE PCM
+  → t_tts_fetched_ms, tts_bytes logged
+  → EQ + resample 22050→48000Hz stereo
+  → mic_stop → device stream stops
+  → stream PCM to device ALSA as 0x02 binary frames, 0x03 EOS
+  → sleep for audio duration (acoustic feedback prevention)
+  → mic_start (no lock_mic) → stream restarts on ch6 omni
+  → oww_paused.clear() → routing returns to mic_queue
+  → stale frames drained, OWW model reset
+  → [TURN] log line emitted with full timing breakdown
+```
+
+### Button-triggered turn (differs from OWW path)
+
+```
+Button press (clickType=138):
+  → oww_paused.set()
+  → mic_stop → device stream stops
+  → mic_start(lock_mic:true) → new stream with lockMic=true
+      → beam.Lock(beamformingEnabled) called
+        — beamformingEnabled=true: selects perimeter mic with highest onset ratio
+        — beamformingEnabled=false: Lock() no-ops, stays on ch6
+      → [beam] locked to chX (Y°) onset_ratio=Z logged
+  → _run_voice_locked(device, trigger_label="button")
+  → [same HA pipeline as above]
+  → mic_stop → mic_start (no lock_mic) → back to ch6 omni
+
+Button path retains stop/start because: (a) no dead zone cost — button is
+pressed before speech starts, (b) directional lock is appropriate — user
+just deliberately pressed a button, their direction is known.
+```
+
+### What's currently off and why
+
+| Stage | State | Reason |
+|---|---|---|
+| RNNoise NS | OFF | Model calibrated for 48kHz, fed 16kHz — miscalibrates speech probability, degrades HF consonants. Measured improvement when disabled. |
+| AGC | OFF | Was drifting to 20× during idle, amplifying room noise above VAD threshold, filling mic_queue with noise, poisoning OWW state. Turned off; issue disappears. |
+| Beamforming | OFF | At ≤1.5m typical distance, inter-mic SNR differences are below the onset ratio discrimination threshold. Wrong locks hurt more than right locks help. Re-evaluate at 2–3m. |
+
+### VAD threshold guidance
+
+Measured signal levels at 16kHz on ch6, MICPGA=40, digital gain=88:
+
+| Condition | Typical RMS |
+|---|---|
+| Dead silence (quiet room) | 0.00017–0.00019 |
+| Ambient room noise | 0.00020–0.00050 |
+| Conversational speech at 1.3m | 0.0004–0.0010 |
+| Raised voice at 1.3m | 0.004–0.010 |
+
+vadThreshold 0.001 sits comfortably between ambient and speech. Raise to 0.003–0.005 in noisy rooms (TV on). Dashboard slider now goes down to 0.0001 for quiet environments.
 
 ---
 
@@ -886,8 +1017,8 @@ done
 
 ---
 
-**Document version:** v2.6.1
-**Last updated:** 2026-07-03
+**Document version:** v2.6.3
+**Last updated:** 2026-07-04
 **Changelog:**
 - v1.0 — April 2026: Initial publication. Full pipeline confirmed working.
 - v1.1 — 2026-04-26: Fixed ambiguous init.csm.project.rc editing instruction; fixed `server &` → `exec` inconsistency.
@@ -969,5 +1100,33 @@ done
   **Dashboard — gear icon settings panel.** New `⚙` button in the header opens a `SettingsPanel` modal with two tabs. "Fleet Config" tab: `DeviceConfigForm` (new shared component, also used by the per-device config tab) pointing at global defaults — "Save & push to fleet" persists and pushes to all on-global devices immediately. "Account" tab: change-password form (current password, new password, confirm) backed by new `POST /api/auth/change-password` endpoint — any authenticated user, verifies current password via bcrypt before accepting the new hash. Does not invalidate existing sessions.
 
   **Dashboard — per-device config tab redesigned.** Toggle banner at the top shows current state: blue tint ("Using fleet config") or green tint ("Device-specific config"). Enabling the toggle seeds local config state from the current global config and makes all controls editable; push sends `{use_global_config: false, ...config}`. Disabling reverts to fleet defaults — push sends `{use_global_config: true}`, body otherwise ignored. Controls render at 45% opacity with `pointer-events: none` when on global — values visible but not interactive without explicitly enabling the override.
+
+- v2.6.3 — 2026-07-04: Speech quality overhaul — dead zone removal, pipeline diagnostics, beamformer structural fix, pipeline toggles.
+
+  This session was driven by a formal speech quality review (SPEECH_QUALITY_REVIEW_Findings_-_4-7-26.md) identifying multiple architectural issues in the mic→OWW→STT chain. The primary symptom was needing to pause after the wake word and over-enunciate the command — same hardware had worked fine under Alexa. Changes are ordered by actual impact as discovered through instrumentation.
+
+  **Root cause analysis — what the instrumentation revealed.** Before fixing anything, VAD diagnostic logging was added to `streamMic` (periodic RMS every ~3.2s) and OWW near-miss score logging added to `wake_word_listener` (scores above 0.05 logged at DEBUG). The data showed: idle RMS at 1.3m is 0.00017–0.00019; conversational speech hits 0.0004–0.0009; vadThreshold was 0.003–0.004 — a 6–10× gap. The device VAD gate was barely opening at conversational distance, so OWW was receiving near-silence. Additionally, AGC was drifting to near its 20× maximum during idle periods, amplifying room noise above VAD threshold and poisoning OWW's internal state with noise frames. RNNoise, running at 16 kHz against a model calibrated for 48 kHz, was miscalibrating speech probability — feeding bad AGC gating decisions and degrading the audio OWW received.
+
+  **P0-1: Wake→turn dead zone removed (controller-only).** The most impactful single change. Previously, on wake word detection: controller sent `mic_stop` → drained queues → sent `mic_start(lock_mic:true)` → device tore down and restarted `streamMic`. Every sample spoken between wake-word end and the new VAD gate opening was lost — OWW chunk quantisation + inference latency + two WebSocket RTTs + fresh gate re-trigger. For a naturally spoken "Hey Jarvis turn on the lamp", the first word of the command fell in this hole, forcing the pause-and-enunciate behaviour. Fix: controller no longer sends `mic_stop`/`mic_start_turn` on wake. Sequence is now: wake detected → `oww_paused.set()` → routing flips from `mic_queue` to `voice_queue` — the stream was already running and the VAD gate was already open (that's how the wake word arrived), so command audio flows in with zero gap. `VOICE_PREROLL_DISCARD = 3` (240ms) discards the wake-word tail ("...Jarvis") from `voice_queue` before sending to HA. Controller-side 5s no-speech timeout replaces the device's `0x05` sentinel (which only arms on `lock_mic` streams). Button path retains `mic_stop`/`mic_start_turn` since there's no dead zone cost — button press happens before speech, so stop/start RTT is fine and directional lock is appropriate.
+
+  **P0-2: Beamformer structural fix (device rebuild).** `BeamformingEnabled` flag previously controlled both smoother updates and output channel selection in `beamformer.Process()`. When disabled, smoothers froze — turning beamforming on mid-session gave cold baselines and garbage direction picks. Fixed by decoupling: smoothers always update regardless of flag; output channel is determined by lock state alone (unlocked → always ch6 omni, locked → selected perimeter mic); flag only gates whether `Lock()` does directional selection or no-ops. This means the baseline is always warm when beamforming is enabled. `Lock()` now takes `enabled bool` parameter; `Process()` signature drops the `enabled` parameter entirely. Button path sends `mic_stop`/`mic_start(lock_mic:true)` to engage directional lock — wake word path does not (stays on ch6 per P0-1). Beamforming is currently off by default: at typical conversational distances (≤1.5m) inter-mic SNR differences are marginal and the wrong-lock risk outweighs the directional benefit. Re-enable once the baseline audio quality issues (P0-3, P0-4) are properly addressed.
+
+  **AGC identified as primary stability problem; disabled.** Instrumentation revealed AGC was the main culprit for the "works for a bit then stops" pattern: during idle periods, AGC drifted toward its 20× maximum gain chasing the -22dBFS target against near-silence. Amplified room noise crossed vadThreshold, filling `mic_queue` with noise frames, running OWW inference on continuous "speech" that wasn't — poisoning OWW's internal state until detection failed entirely. The gain state persisted across stream restarts (mic stream stops/starts on every TTS playback), so there was no natural recovery. AGC is now off by default. The AGC code remains and is re-engageable via dashboard toggle for A/B testing.
+
+  **RNNoise (NS) identified as secondary problem; disabled.** RNNoise vendored model operates natively at 48 kHz. The pipeline feeds it 16 kHz audio — speech energy is squashed into the bottom third of the model's Bark bands, suppression decisions are miscalibrated, and consonant/HF content (exactly what STT needs) gets chewed. Additionally, the miscalibrated speech probability fed back into AGC gating was compounding the AGC drift problem. NS is now off by default. The RNNoise code remains and is re-engageable via dashboard toggle. Proper fix (P0-3) is to either resample 16→48 kHz around RNNoise or replace with a 16 kHz-native suppressor — deferred, but now clearly worth doing since disabling NS+AGC produced the best observed speech quality to date.
+
+  **Pipeline toggles added (device + controller + dashboard).** `nsEnabled` and `agcEnabled` added as `*bool` fields to `config.go` `Device` struct, `ConfigMessage`, `Apply()`, `Snapshot()`, and `loadDefaults()`. Both default true (no behaviour change on upgrade; dashboard global config stores the actual values). `processor.go` `Process()` gains `agcEnabled bool` parameter — AGC block only runs when true, gain state preserved so re-enabling is smooth. `data.go` reads both flags from config snapshot each period. Dashboard advanced section: two new toggles ("Noise suppression (NS)", "Auto gain (AGC)"); VAD threshold slider floor dropped from 0.001 to 0.0001 to allow tuning to the actual measured signal levels.
+
+  **VAD threshold corrected.** Dashboard slider floor was 0.001; measured conversational speech at 1.3m is 0.0004–0.0009; idle noise floor is 0.00017–0.00019. Default now 0.001 (down from 0.003–0.004), slider goes to 0.0001. With NS+AGC off, 0.001 gives reliable gate-open at normal voice levels with adequate noise margin.
+
+  **Controller code quality fixes (no behaviour change).** B3: `DeviceESPhomeServer.stop()` now clears `_active_satellite = None` — previously a device bounce could leave a stale satellite reference causing `get_satellite()` to return a dead connection. B4: `satellite_server.py` dispatch now distinguishes handled-but-no-response from genuinely-unhandled messages via `_HANDLED` sentinel — `handle_message()` implementations yield `_HANDLED` for silent no-ops; only truly unrecognised message types log "unhandled". Four handlers in `em_esphome.py` updated (`SubscribeVoiceAssistantRequest`, `SubscribeHomeassistantServicesRequest`, `VoiceAssistantResponse`, `VoiceAssistantEventResponse`). `VOICE_PREROLL_DISCARD` moved to `em_esphome.py` module level (was a dead constant in `em_controller.py` doing nothing). Inline `import time` and `import em_controller` inside `_stream_mic_audio` replaced with proper module-level imports.
+
+  **Per-turn structured trace added (controller).** `TurnTrace` dataclass in `em_esphome.py` collects timestamps at each pipeline stage (first audio frame, VAD end, STT result, TTS URL, TTS fetch, playback start, completion) and emits a single `[TURN]` log line at turn end. Example: `[TURN] trigger=wakeword(0.522) outcome=ok total=+9216ms first_frame=+257ms vad_end=+5973ms audio=74frames/5920ms stt=+7382ms text='What time is it?' tts_url=+7397ms tts_fetch=+8355ms tts_bytes=74880 playback=+8355ms`. Wake word turns carry the OWW score in the trigger label; button turns are labelled "button". Makes per-turn latency attribution possible without manual log reconstruction.
+
+  **OWW near-miss score logging added (controller).** `wake_word_listener` now logs OWW scores above 0.05 at DEBUG level on every inference chunk. Critical for diagnosing "not responding" — distinguishes "score consistently 0.15–0.25, just below threshold" (tuning problem) from "score 0.01–0.03" (audio quality or pipeline problem). Previously only detections were logged.
+
+  **Known working state as of this version.** NS off, AGC off, vadThreshold 0.001, beamforming off, vadSilenceMs 900. Responding reliably at conversational voice level from 1.3m in a quiet room. Lounge device (TV background) also confirmed working. The "must pause and enunciate" behaviour is gone.
+
+  **Still open (deferred).** P0-3 proper NS fix: resample 16→48 kHz around RNNoise, or replace with a 16 kHz-native model. P0-4 AGC: if re-enabled, needs gain state reset on stream restart and lower max gain (current 20× is too aggressive). P0-5 device-side preroll ring. P0-6 OWW stream continuity (VAD-gated → continuous with zero-fill). Beamformer direction presets in dashboard (Front/Rear/All-round) advertise DSP the device implements but which isn't useful until P0-3/P0-4 are resolved and the baseline is solid.
 
 *Device: Echo Dot 2nd Gen (RS03QR). Tested on macOS with ADB 35.0.2.*

@@ -93,7 +93,13 @@ DEVICE_APPROVAL = os.environ.get("DEVICE_APPROVAL", "strict")
 
 # Mic
 CHUNK_BYTES          = 1280 * 2   # 2560 bytes = 80ms at 16kHz S16_LE mono
-VOICE_PREROLL_DISCARD = 4
+# VOICE_PREROLL_DISCARD: frames to drop from voice_queue at the start of each
+# turn. Under the P0-1 architecture the stream never stops, so voice_queue
+# contains the tail of the wake word utterance ("…Jarvis") before the command
+# audio arrives. Discarding the first N×80ms chunks removes most of that bleed.
+# N=3 = 240ms. Tune empirically: if the first word of commands is still being
+# clipped, lower; if "Hey Jarvis" bleed still reaches STT, raise.
+VOICE_PREROLL_DISCARD = 3
 
 # Speaker — must match PcmSpeaker constants in Go
 SPEAKER_RATE   = 48000
@@ -548,8 +554,8 @@ async def run_voice_turn(device: Device):
         if not device.cancel_event.is_set() and (spin_task is None or spin_task.done()):
             spin_task = asyncio.create_task(leds_spin_green(device, stop_spin))
 
-    await device.mic_start_turn()
-
+    # P0-1: no mic_start_turn(). Stream already running; oww_paused routes
+    # frames to voice_queue. mic_stop after response remains for TTS feedback.
     try:
         voice_response = await _run_claracore_backend(device, on_thinking)
     except Exception as e:
@@ -583,7 +589,7 @@ async def run_voice_turn(device: Device):
     log.info(f"[{device.device_id}] Voice turn complete")
 
 
-async def _run_voice_locked(device: Device):
+async def _run_voice_locked(device: Device, trigger_label: str = "unknown"):
     drained = 0
     while not device.mic_queue.empty():
         try:
@@ -644,12 +650,16 @@ async def _run_voice_locked(device: Device):
                         )
                     await _run_post_turn_playback(device, voice_response)
 
-                await device.mic_start_turn()
+                # P0-1: no mic_start_turn() here. The stream is already
+                # running on ch6; oww_paused routes frames to voice_queue.
+                # mic_stop is still sent after the turn (before TTS playback)
+                # as the acoustic-feedback guard — that remains load-bearing.
                 try:
                     await esphome.trigger_voice_turn(
                         device=device,
                         on_thinking=on_thinking_esphome,
                         post_turn_play=post_turn_play_esphome,
+                        trigger_label=trigger_label,
                     )
                 finally:
                     await device.mic_stop()
@@ -744,6 +754,16 @@ async def wake_word_listener(device: Device):
                 )
                 score = prediction.get(model_key, 0.0)
 
+                # Log any score above noise floor so we can see near-misses
+                # and understand whether failed wakes are "close but below
+                # threshold" vs "not registering at all". Only at DEBUG to
+                # avoid flooding logs during normal idle operation.
+                if score > 0.05:
+                    log.debug(
+                        f"[{device.device_id}] OWW score: {score:.3f} "
+                        f"(threshold={device.oww_threshold:.3f})"
+                    )
+
                 if score >= device.oww_threshold:
                     log.info(
                         f"[{device.device_id}] Wake word detected "
@@ -754,12 +774,26 @@ async def wake_word_listener(device: Device):
                         f"Wake word detected (score={score:.3f})"
                     )
                     if not device.voice_lock.locked():
-                        await device.mic_stop()
+                        # P0-1: do NOT send mic_stop/mic_start_turn.
+                        # The stream stays running continuously. Flipping
+                        # oww_paused routes subsequent frames to voice_queue.
+                        # The VAD gate is already open mid-utterance — that's
+                        # how OWW got the wake-word audio — so command audio
+                        # flows in with zero re-trigger delay and zero RTT gap.
+                        # Wake-word tail bleed ("…Jarvis") is handled by the
+                        # preroll discard in _stream_mic_audio (esphome path)
+                        # and the claracore stream_mic equivalent.
+                        # TTS mic_stop/mic_start remains untouched — that
+                        # acoustic-feedback guard is load-bearing.
                         model.reset()
                         buf.clear()
                         device.cancel_event.clear()
                         device.oww_paused.set()
-                        await _run_voice_locked(device)
+                        log.debug(
+                            f"[{device.device_id}] OWW: oww_paused set, "
+                            f"routing to voice_queue (no mic_stop/mic_start_turn)"
+                        )
+                        await _run_voice_locked(device, trigger_label=f"wakeword({score:.3f})")
 
                         drained = 0
                         while not device.voice_queue.empty():
@@ -771,11 +805,16 @@ async def wake_word_listener(device: Device):
                         if drained:
                             log.info(
                                 f"[{device.device_id}] OWW: "
-                                f"drained {drained} stale frames"
+                                f"drained {drained} stale frames post-turn"
                             )
                         model.reset()
                         buf.clear()
-                        log.info(f"[{device.device_id}] OWW: restarting mic")
+                        # mic_start without lock_mic — device stays on ch6 omni
+                        # (beamforming=off), same stream as OWW listening.
+                        # This is a defensive restart only: if the stream
+                        # somehow died during the turn, this revives it.
+                        # If already running, the device no-ops it.
+                        log.info(f"[{device.device_id}] OWW: defensive mic_start (no lock_mic)")
                         await device.mic_start()
                     else:
                         log.info(
@@ -809,8 +848,17 @@ async def handle_button_event(device: Device, event: dict):
             device.cancel_event.clear()
             device.oww_paused.set()
             async def _button_voice_turn():
-                await _run_voice_locked(device)
+                # Button is a deliberate act with no dead zone cost — nothing
+                # is being said at the moment of press, so stop/start RTT is
+                # fine. Stop the running ch6 stream, restart with lock_mic:true
+                # so streamMic calls beam.Lock(beamformingEnabled) and the
+                # beamformer selects the best perimeter mic for this turn.
+                # mic_start_turn() no-ops if already running, so stop first.
+                await device.mic_stop()
+                await device.mic_start_turn()
+                await _run_voice_locked(device, trigger_label="button")
                 log.info(f"[{device.device_id}] Button turn complete — restarting mic")
+                # Post-turn: back to ch6 omni for OWW listening.
                 await device.mic_start()
             asyncio.create_task(_button_voice_turn())
 

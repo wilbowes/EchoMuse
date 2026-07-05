@@ -43,6 +43,19 @@ log = logging.getLogger("echomuse.esphome.satellite")
 API_VERSION_MAJOR = 1
 API_VERSION_MINOR = 10
 
+# Sentinel yielded by handle_message() subclass implementations that handle
+# a message but have nothing to send in response. Distinguishes "handled,
+# no wire response" from "not handled at all" so _process_message can log
+# genuinely unhandled messages without false-positives on intentional no-ops
+# (SubscribeVoiceAssistantRequest, VoiceAssistantResponse, etc).
+#
+# Usage in subclass:
+#   if isinstance(msg, SomeSilentMessageType):
+#       do_work()
+#       yield HANDLED
+#       return
+_HANDLED = object()
+
 
 class SatelliteServerProtocol(PlaintextFrameProtocol):
     """
@@ -145,9 +158,16 @@ class SatelliteServerProtocol(PlaintextFrameProtocol):
             )
             return
 
-        if responses:
-            self._send_many(responses)
-        else:
+        # Filter out _HANDLED sentinels before deciding what to send.
+        # A subclass yields _HANDLED to signal "I dealt with this, nothing
+        # to send" — distinct from an empty list which means the message
+        # wasn't recognised at all.
+        was_handled = any(r is _HANDLED for r in responses)
+        to_send = [r for r in responses if r is not _HANDLED]
+
+        if to_send:
+            self._send_many(to_send)
+        elif not was_handled:
             log.debug(
                 f"[{self._log_name}] {self.peer}: unhandled message type "
                 f"{type(msg).__name__} (no response)"

@@ -281,7 +281,9 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 	}()
 
 	if lockMic {
-		d.beam.Lock()
+		lockSnap := config.Get().Snapshot()
+		turnBeamEnabled := lockSnap.BeamformingEnabled != nil && *lockSnap.BeamformingEnabled
+		d.beam.Lock(turnBeamEnabled)
 	}
 	// Always unlock from this goroutine — prevents data race with Process()
 	// that would occur if StopMic called Unlock from the control goroutine.
@@ -298,6 +300,7 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 	everActive   := false // true once active has been true at least once this turn
 	buf          := make([]byte, 0, vadOwwChunkBytes*4)
 	var seqNum   uint16
+	var periodCount uint64 // periodic RMS diagnostic
 
 	sendFrame := func(payload []byte) {
 		frame := make([]byte, 3+len(payload))
@@ -370,23 +373,35 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			if speechNeeded < 1 { speechNeeded = 1 }
 			if silenceMax   < 1 { silenceMax   = 1 }
 
-			beamEnabled := snap.BeamformingEnabled != nil && *snap.BeamformingEnabled
-			beamAngle   := float64(-1)
+			beamAngle := float64(-1)
 			if snap.BeamAngle != nil {
 				beamAngle = *snap.BeamAngle
 			}
-			mono, angle := d.beam.Process(raw, beamAngle, beamEnabled)
+			nsEnabled  := snap.NsEnabled == nil || *snap.NsEnabled
+			agcEnabled := snap.AgcEnabled == nil || *snap.AgcEnabled
+			mono, angle := d.beam.Process(raw, beamAngle)
 
 			// ── Processing pipeline ──────────────────────────────────────
-			// Detect speech on raw beamformed output (pre-AGC) so VAD
-			// threshold is consistent regardless of AGC gain state.
+			// VAD on raw beamformed output — pre-NS/AGC so threshold is
+			// consistent regardless of gain state.
 			rms    := vadPeriodRMS(mono)
 			speech := rms >= threshold
 
-			// NS + AGC pipeline.
-			// NS uses RNNoise to reduce background noise before AGC.
-			// AGC release frozen during silence to prevent noise amplification.
-			mono = d.proc.Process(mono, true, speech)
+			// Periodic RMS diagnostic — every 100 periods (~3.2s).
+			// Remove once idle audio level is fully characterised.
+			if periodCount%100 == 0 {
+				log.Printf("[data] VAD diag: rms=%.5f threshold=%.5f gate=%v active=%v ns=%v agc=%v",
+					rms, threshold, speech, active, nsEnabled, agcEnabled)
+			}
+			periodCount++
+
+			// NS + AGC — both independently toggleable from dashboard.
+			// NS: RNNoise noise suppression (hardcoded true previously).
+			// AGC: automatic gain control. Pass speech flag so AGC release
+			// freezes during silence, preventing noise floor amplification.
+			// processor.Process handles agcEnabled internally via nsEnabled
+			// param — AGC is always computed but gain held when !agcEnabled.
+			mono = d.proc.Process(mono, nsEnabled, agcEnabled, speech)
 			// ─────────────────────────────────────────────────────────────
 
 			// Notify direction listener — non-blocking, keep it fast.
