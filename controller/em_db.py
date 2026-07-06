@@ -36,11 +36,21 @@ DEFAULT_DEVICE_CONFIG = {
     "adcDigitalGain":   88,
     "adcMicpga":        40,
     "startupVolume":    85,
-    # vadThreshold: 0.003 (normalised RMS pre-AGC). Lower than the previous
-    # 0.004 to capture soft speech onsets (fricatives, quiet first syllables).
-    # SETUP.md documents 0.003 as the comfortable conversational level; the
-    # DB was drifted above that. Raise to 0.010-0.020 only in noisy rooms.
-    "vadThreshold":     0.003,
+    # vadThreshold: 0.001 (normalised RMS pre-AGC).
+    # Q2 fix (2026-07-05 review, tracked as B6): this was drifted to 0.003 in
+    # a previous "reconciliation" that got it backwards — 0.003 sits *above*
+    # the measured conversational speech range (0.0004–0.0010 at 1.3m per
+    # SETUP.md's handoff table), meaning a fresh device or a config reset
+    # would fail to gate speech at all at normal distance. 0.001 is the
+    # value actually validated during the v2.6.3 speech-quality session and
+    # confirmed working in both quiet-office and TV-on-lounge testing — it's
+    # also what the dashboard slider's own fallback already defaulted to
+    # (config.vadThreshold ?? 0.001 in dashboard.jsx), so this closes a
+    # three-way mismatch between the DB default, this comment, and the UI
+    # rather than resolving it in favour of the wrong side. Raise to
+    # 0.003–0.005 only in genuinely noisy rooms (TV, music) via the
+    # dashboard, not as the shipped default.
+    "vadThreshold":     0.001,
     "vadSpeechMs":      32,
     # vadSilenceMs: 900ms — up from 600. Prevents premature endpoint on
     # natural mid-sentence pauses. Dashboard UI already defaults to 800;
@@ -49,6 +59,15 @@ DEFAULT_DEVICE_CONFIG = {
     "vadSilenceMs":     900,
     "owwThreshold":     0.3,
     "owwModel":         "hey_jarvis_v0.1",
+    # owwSpeexNs: openwakeword's built-in speexdsp noise suppressor (Q1,
+    # 2026-07-05 review). 16kHz-native, applied controller-side, only to
+    # the wake-word detection path — cannot affect STT audio since STT
+    # never sees it. Distinct from nsEnabled/RNNoise below, which run
+    # device-side on the whole pipeline. Defaults False: needs the
+    # speexdsp-ns pip package confirmed installable in the Docker build
+    # (see review Q1 fix sequence) before enabling fleet-wide; flip on and
+    # A/B test wake rate in a noisy room once confirmed.
+    "owwSpeexNs":       False,
     # beamformingEnabled: False — ch6 (centre/omni) for all audio.
     # beamforming=True was routing OWW audio through a perimeter mic selected
     # every 32ms frame, injecting channel-splice discontinuities. The SNR

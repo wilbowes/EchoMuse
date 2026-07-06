@@ -120,9 +120,7 @@ func (s *Server) VolumeLevel() int {
 // SetVolumeChangeCallback wires a callback invoked when volume changes.
 // The callback receives the new level (0–175).
 func (s *Server) SetVolumeChangeCallback(cb func(level int)) {
-	s.volume.mu.Lock()
-	s.volume.onVolumeChange = cb
-	s.volume.mu.Unlock()
+	s.volume.SetOnVolumeChange(cb)
 }
 
 // MuteToggle toggles mic mute state — called by button handler.
@@ -132,9 +130,7 @@ func (s *Server) MuteToggle() {
 
 // SetMuteChangeCallback wires a callback invoked when mute state changes.
 func (s *Server) SetMuteChangeCallback(cb func(muted bool)) {
-	s.mute.mu.Lock()
-	s.mute.onMuteChange = cb
-	s.mute.mu.Unlock()
+	s.mute.SetOnMuteChange(cb)
 }
 
 // IsMuted returns true when the mic is muted — used to block dot button.
@@ -216,9 +212,9 @@ func (s *Server) SetDirectionLEDs(angleDeg float64) {
 	)
 
 	normAngle := int(math.Round(angleDeg/30)) * 30
-	primary   := ((normAngle - ledOffset + 360) % 360) / 30 % nLEDs
+	primary := ((normAngle - ledOffset + 360) % 360) / 30 % nLEDs
 	secondary := (primary + 1) % nLEDs
-	tertiary  := (primary + nLEDs - 1) % nLEDs
+	tertiary := (primary + nLEDs - 1) % nLEDs
 
 	s.baseLEDsMu.Lock()
 	base := s.baseLEDs
@@ -230,9 +226,9 @@ func (s *Server) SetDirectionLEDs(angleDeg float64) {
 		leds[i].ID = i
 	}
 
-	leds[primary]   = led.Led{ID: primary,   R: 0, G: 255, B: 80}
+	leds[primary] = led.Led{ID: primary, R: 0, G: 255, B: 80}
 	leds[secondary] = led.Led{ID: secondary, R: 0, G: clampAdd(base[secondary].G, 60), B: 0}
-	leds[tertiary]  = led.Led{ID: tertiary,  R: 0, G: clampAdd(base[tertiary].G,  60), B: 0}
+	leds[tertiary] = led.Led{ID: tertiary, R: 0, G: clampAdd(base[tertiary].G, 60), B: 0}
 
 	if err := lc.SetLEDs(leds...); err != nil {
 		log.Printf("SetDirectionLEDs error: %v", err)

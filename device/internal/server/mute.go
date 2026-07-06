@@ -23,6 +23,17 @@ func newMuteController(ledGetter func() led.Controller, onMuteChange func(muted 
 	}
 }
 
+// SetOnMuteChange wires a callback invoked when mute state changes.
+// B7 fix (2026-07-05 review): previously Server.SetMuteChangeCallback
+// reached directly into m.mu/m.onMuteChange from outside this struct.
+// Encapsulating the lock here keeps muteController responsible for its
+// own synchronisation, matching every other muteController method.
+func (m *muteController) SetOnMuteChange(cb func(muted bool)) {
+	m.mu.Lock()
+	m.onMuteChange = cb
+	m.mu.Unlock()
+}
+
 func (m *muteController) IsMuted() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -21,10 +21,10 @@ import (
 // ─── Binary frame types ───────────────────────────────────────────────────────
 
 const (
-	frameTypeMic             = byte(0x01)
-	frameTypeSpeaker         = byte(0x02)
-	frameTypeEOS              = byte(0x03)
-	frameTypeVADEnd          = byte(0x04)
+	frameTypeMic     = byte(0x01)
+	frameTypeSpeaker = byte(0x02)
+	frameTypeEOS     = byte(0x03)
+	frameTypeVADEnd  = byte(0x04)
 	// frameTypeNoSpeechTimeout signals that the turn ended because no speech
 	// was ever detected — distinct from frameTypeVADEnd (speech detected,
 	// then ended). Sent when noSpeechTimeout elapses with active==false the
@@ -45,6 +45,15 @@ const (
 	vadFramePeriod   = 512
 	vadBytePeriod    = vadFramePeriod * vadMicChannels * vadByteSample // 13824
 	vadOwwChunkBytes = 1280 * 2                                        // 2560 bytes = 80ms
+
+	// prerollPeriods is how many processed 32ms periods of pre-gate audio are
+	// retained while the VAD gate is closed and flushed upstream the moment it
+	// opens (~512ms at 16). Wake-word models score a continuous stream; without
+	// preroll, every utterance arrives as a splice starting at speech onset
+	// with no acoustic context, which measurably depresses OWW scores
+	// (2026-07-06 test: real attempts scoring 0.05-0.27 against a 0.3
+	// threshold). Also gives STT the true first phoneme.
+	prerollPeriods = 16
 
 	// noSpeechTimeout bounds how long streamMic will wait for speech to
 	// ever be detected after a turn starts. If active never becomes true
@@ -256,6 +265,9 @@ func (d *DataClient) connect(ctx context.Context, addr string) error {
 			}
 		case frameTypeEOS:
 			log.Println("[data] Speaker: end of stream")
+			if d.spk != nil {
+				d.spk.EndStream()
+			}
 		default:
 			log.Printf("[data] Unknown binary frame type: 0x%02x", data[0])
 		}
@@ -289,17 +301,26 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 	// that would occur if StopMic called Unlock from the control goroutine.
 	defer d.beam.Unlock()
 
+	// Fresh stream = fresh gain. See Processor.ResetAGC — without this, a
+	// gain crushed by TTS echo persists into the next listening stream.
+	d.proc.ResetAGC()
+
 	ch := d.mic.Subscribe()
 	defer d.mic.Unsubscribe(ch)
 
 	cfg := config.Get()
 
-	speechCount  := 0
+	speechCount := 0
 	silenceCount := 0
-	active       := false
-	everActive   := false // true once active has been true at least once this turn
-	buf          := make([]byte, 0, vadOwwChunkBytes*4)
-	var seqNum   uint16
+	active := false
+	everActive := false // true once active has been true at least once this turn
+	buf := make([]byte, 0, vadOwwChunkBytes*4)
+	// preroll ring — processed mono periods captured while the gate is
+	// closed, oldest first. Flushed into buf at gate open, cleared while
+	// active. Slices are retained (not copied): Process() returns a fresh
+	// allocation each period, so nothing aliases them.
+	preroll := make([][]byte, 0, prerollPeriods)
+	var seqNum uint16
 	var periodCount uint64 // periodic RMS diagnostic
 
 	sendFrame := func(payload []byte) {
@@ -367,24 +388,28 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			}
 
 			snap := cfg.Snapshot()
-			threshold    := snap.VadThreshold
+			threshold := snap.VadThreshold
 			speechNeeded := snap.VadSpeechMs / 32
-			silenceMax   := snap.VadSilenceMs / 32
-			if speechNeeded < 1 { speechNeeded = 1 }
-			if silenceMax   < 1 { silenceMax   = 1 }
+			silenceMax := snap.VadSilenceMs / 32
+			if speechNeeded < 1 {
+				speechNeeded = 1
+			}
+			if silenceMax < 1 {
+				silenceMax = 1
+			}
 
 			beamAngle := float64(-1)
 			if snap.BeamAngle != nil {
 				beamAngle = *snap.BeamAngle
 			}
-			nsEnabled  := snap.NsEnabled == nil || *snap.NsEnabled
+			nsEnabled := snap.NsEnabled == nil || *snap.NsEnabled
 			agcEnabled := snap.AgcEnabled == nil || *snap.AgcEnabled
 			mono, angle := d.beam.Process(raw, beamAngle)
 
 			// ── Processing pipeline ──────────────────────────────────────
 			// VAD on raw beamformed output — pre-NS/AGC so threshold is
 			// consistent regardless of gain state.
-			rms    := vadPeriodRMS(mono)
+			rms := vadPeriodRMS(mono)
 			speech := rms >= threshold
 
 			// Periodic RMS diagnostic — every 100 periods (~3.2s).
@@ -399,8 +424,16 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			// NS: RNNoise noise suppression (hardcoded true previously).
 			// AGC: automatic gain control. Pass speech flag so AGC release
 			// freezes during silence, preventing noise floor amplification.
-			// processor.Process handles agcEnabled internally via nsEnabled
-			// param — AGC is always computed but gain held when !agcEnabled.
+			// Q3 fix (2026-07-05 review): this comment previously claimed
+			// "AGC is always computed but gain held when !agcEnabled" —
+			// that's wrong. processor.Process actually skips the agc() call
+			// entirely when agcEnabled is false (see the `if agcEnabled`
+			// guard around p.agc() in processor.go) — gain state is frozen
+			// at whatever it last was (or its zero value if AGC has never
+			// run), not recomputed and discarded. The distinction matters:
+			// re-enabling AGC after a period disabled resumes from stale
+			// state, it doesn't pick up where a live-but-ignored computation
+			// left off.
 			mono = d.proc.Process(mono, nsEnabled, agcEnabled, speech)
 			// ─────────────────────────────────────────────────────────────
 
@@ -421,6 +454,15 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 					speechCount++
 					if speechCount >= speechNeeded {
 						active = true
+						// Gate open — flush the preroll ring ahead of the
+						// current period so the controller receives ~500ms of
+						// pre-onset context (and the true start of speech,
+						// including periods consumed by the speechNeeded
+						// count-up) instead of a hard splice at onset.
+						for _, p := range preroll {
+							buf = append(buf, p...)
+						}
+						preroll = preroll[:0]
 						if !everActive {
 							everActive = true
 							// Speech has genuinely started — the no-speech
@@ -467,6 +509,14 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 					sendFrame(buf[:vadOwwChunkBytes])
 					buf = buf[vadOwwChunkBytes:]
 				}
+			} else {
+				// Gate closed — keep the most recent periods for the next
+				// gate open.
+				if len(preroll) >= prerollPeriods {
+					copy(preroll, preroll[1:])
+					preroll = preroll[:prerollPeriods-1]
+				}
+				preroll = append(preroll, mono)
 			}
 		}
 	}

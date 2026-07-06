@@ -15,8 +15,8 @@ The Echo Dot runs FireOS 5 (API 22). Standard Go cross-compilation won't work �
 
 **One-time setup:**
 ```bash
-# GoTinyAlsa must be a sibling to this repo
-git clone https://github.com/Binozo/GoTinyAlsa ../GoTinyAlsa
+# GoTinyAlsa is a git submodule at the repo root
+git submodule update --init
 
 # Build the compiler Docker image (from device/)
 cd device
@@ -40,6 +40,10 @@ go test ./...
 
 Tests only cover pure-Go logic in `pkg/led/` — hardware-dependent code is not testable on the host.
 
+**Release:** pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds the binary in the compiler image and attaches it to a GitHub release.
+
+`device/tools/` contains standalone diagnostics (`capture_mics`, `bf_capture` + analysis scripts) for mapping the 9-channel mic array; they build inside the same compiler image.
+
 ## Running the controller
 
 **Bare metal (Python 3.12):**
@@ -58,11 +62,17 @@ docker-compose up --build
 
 Dashboard available at `http://<SERVER_IP>:8768`. WebSocket devices connect to port 8767.
 
-Key env vars in `.env`:
+Key env vars in `.env` (see `.env.example` for the full list):
 - `SERVER_IP` — LAN IP advertised via mDNS (devices connect here)
-- `VOICE_WS_URI` — WebSocket URI of the downstream voice server (e.g. `ws://clara-voice:8765`)
+- `VOICE_MODE` — `claracore` (default) or `esphome`; changing it requires a controller restart
+- `VOICE_WS_URI` — WebSocket URI of the downstream voice server (claracore mode only)
 - `OWW_MODEL` / `OWW_THRESHOLD` — OpenWakeWord model name and detection threshold
 - `DEVICE_APPROVAL` — `strict` (admin must approve new devices) or `auto`
+
+### Voice backend modes
+
+- **claracore** — controller streams the voice turn to `VOICE_WS_URI` over WebSocket and plays back the PCM response (`run_voice_turn()`).
+- **esphome** — controller impersonates ESPHome voice satellites: one asyncio TCP listener per device on ports 16001+ (persisted in the device registry, never reused). Home Assistant's built-in ESPHome integration dials in and drives voice turns via Assist. Implemented in `em_esphome.py` on top of the protocol layer in `controller/esphome/` (`frame_protocol.py`, `satellite_server.py`, vendored aioesphomeapi protobufs in `esphome/vendor/`).
 
 ## Architecture
 
@@ -94,7 +104,7 @@ raw 9ch S24_3LE → beamformer → RNNoise NS → AGC → mono S16_LE → VAD ga
 ### Controller audio pipeline
 
 1. **Wake word** — openwakeword (ONNX) runs in a thread executor per device on `mic_queue`
-2. **Voice turn** — on wake or dot-button: drain stale frames → acquire `voice_lock` → stream mic to `VOICE_WS_URI` → receive PCM response → EQ (`em_eq.py`) → resample to 48kHz stereo → stream back as 0x02 frames
+2. **Voice turn** — on wake or dot-button: drain stale frames → acquire `voice_lock` → stream mic to the voice backend (ClaraCore WebSocket or ESPHome/HA, per `VOICE_MODE`) → receive PCM response → EQ (`em_eq.py`) → resample to 48kHz stereo → stream back as 0x02 frames
 3. **Speaker** — `resample_to_stereo_48k()` uses numpy linear interpolation (not pure Python)
 
 ### Key Go packages
@@ -118,6 +128,8 @@ raw 9ch S24_3LE → beamformer → RNNoise NS → AGC → mono S16_LE → VAD ga
 | `em_db.py` | SQLite persistence (devices, config, logs, users) |
 | `em_auth.py` | Session auth with bcrypt |
 | `em_eq.py` | Parametric EQ applied to TTS audio before playback |
+| `em_esphome.py` | ESPHome-mode satellite servers (`EchoMuseSatellite`, `DeviceESPhomeServer`) |
+| `esphome/` | ESPHome native API protocol layer (framing, handshake, vendored protobufs) |
 
 ## OTA update system
 

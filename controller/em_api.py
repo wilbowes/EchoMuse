@@ -409,6 +409,8 @@ async def _post_device_config(request: web.Request) -> web.Response:
             live.oww_threshold = float(config["owwThreshold"])
         if "owwModel" in config:
             live.oww_model = config["owwModel"]
+        if "owwSpeexNs" in config:
+            live.oww_speex_ns = bool(config["owwSpeexNs"])
         if "eqBands" in config:
             live.eq_bands = config["eqBands"]
         if "eqLoudness" in config:
@@ -1507,6 +1509,8 @@ async def _post_global_config(request: web.Request) -> web.Response:
             live.oww_threshold = float(config["owwThreshold"])
         if "owwModel" in config:
             live.oww_model = config["owwModel"]
+        if "owwSpeexNs" in config:
+            live.oww_speex_ns = bool(config["owwSpeexNs"])
         if "eqBands" in config:
             live.eq_bands = config["eqBands"]
         if "eqLoudness" in config:
@@ -1898,6 +1902,10 @@ def _merge_device(row) -> dict:
         "listening":        getattr(live, "listening", False) if live else False,
         "thinking":         getattr(live, "thinking",  False) if live else False,
         "stats":            live.stats if live else None,
+        # Q4 fix (2026-07-05 review): near-miss counter — same lifecycle as
+        # the rest of this "Live" section (resets on reconnect, since it
+        # lives on the per-connection Device object, not the DB row).
+        "owwNearMisses":    getattr(live, "oww_near_misses", 0) if live else 0,
         # Update state
         "update_in_progress": device_id in _updates_in_progress,
     }

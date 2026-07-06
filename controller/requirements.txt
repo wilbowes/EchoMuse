@@ -20,6 +20,11 @@ scipy
 tqdm
 scikit-learn
 requests
+# speexdsp-ns: openwakeword's optional built-in noise suppressor (Q1,
+# 2026-07-05 review). 16kHz-native, applied only to the wake-word path —
+# confirmed installable for python:3.12-slim x86_64 (manylinux_2_28 wheel,
+# no build step needed) before wiring the owwSpeexNs config toggle.
+speexdsp-ns==0.1.2
 # ONNX runtime — GPU variant for openwakeword inference
 # Swap for onnxruntime==1.20.1 if no GPU available
 onnxruntime-gpu==1.20.1

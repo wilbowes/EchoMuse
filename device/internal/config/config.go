@@ -17,10 +17,10 @@ type Device struct {
 	mu sync.RWMutex
 
 	// Microphone / VAD
-	VadChannel    int
-	VadThreshold  float64
-	VadSpeechMs   int
-	VadSilenceMs  int
+	VadChannel   int
+	VadThreshold float64
+	VadSpeechMs  int
+	VadSilenceMs int
 
 	// Speaker
 	StartupVolume int
@@ -64,20 +64,20 @@ func Get() *Device {
 // loadDefaults populates from environment variables, falling back to
 // hard-coded defaults. Must be called with mu held.
 func (d *Device) loadDefaults() {
-	d.VadChannel    = envInt("VAD_CHANNEL", 0)
-	d.VadThreshold  = envFloat("VAD_THRESHOLD", 0.004)
-	d.VadSpeechMs   = envInt("VAD_SPEECH_MS", 80)
-	d.VadSilenceMs  = envInt("VAD_SILENCE_MS", 600)
+	d.VadChannel = envInt("VAD_CHANNEL", 0)
+	d.VadThreshold = envFloat("VAD_THRESHOLD", 0.004)
+	d.VadSpeechMs = envInt("VAD_SPEECH_MS", 80)
+	d.VadSilenceMs = envInt("VAD_SILENCE_MS", 600)
 	d.StartupVolume = envInt("STARTUP_VOLUME", 85)
-	d.OwwThreshold  = envFloat("OWW_THRESHOLD", 0.3)
-	d.OwwModel      = envStr("OWW_MODEL", "hey_jarvis_v0.1")
-	d.AdcDigitalGain    = envInt("ADC_DIGITAL_GAIN", 88)
-	d.AdcMicpga         = envInt("ADC_MICPGA", 40)
-	d.BeamAngle         = envFloat("BEAM_ANGLE", -1)
+	d.OwwThreshold = envFloat("OWW_THRESHOLD", 0.3)
+	d.OwwModel = envStr("OWW_MODEL", "hey_jarvis_v0.1")
+	d.AdcDigitalGain = envInt("ADC_DIGITAL_GAIN", 88)
+	d.AdcMicpga = envInt("ADC_MICPGA", 40)
+	d.BeamAngle = envFloat("BEAM_ANGLE", -1)
 	d.BeamformingEnabled = envBool("BEAMFORMING_ENABLED", true)
-	nsEnabled  := envBool("NS_ENABLED", true)
+	nsEnabled := envBool("NS_ENABLED", true)
 	agcEnabled := envBool("AGC_ENABLED", true)
-	d.NsEnabled  = &nsEnabled
+	d.NsEnabled = &nsEnabled
 	d.AgcEnabled = &agcEnabled
 }
 
@@ -136,7 +136,13 @@ func (d *Device) Snapshot() ConfigMessage {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	beamAngle := d.BeamAngle
-	nsEnabled  := true
+	// C4 fix (2026-07-05 review): previously &d.BeamformingEnabled leaked a
+	// pointer into the live mutex-guarded struct — the caller (streamMic,
+	// every period) dereferences it after RUnlock, racing with Apply()
+	// writing the same bool on a config push. Copy to a local like
+	// beamAngle/nsEnabled/agcEnabled above.
+	beamformingEnabled := d.BeamformingEnabled
+	nsEnabled := true
 	if d.NsEnabled != nil {
 		nsEnabled = *d.NsEnabled
 	}
@@ -145,38 +151,38 @@ func (d *Device) Snapshot() ConfigMessage {
 		agcEnabled = *d.AgcEnabled
 	}
 	return ConfigMessage{
-		VadThreshold:        d.VadThreshold,
-		VadSpeechMs:         d.VadSpeechMs,
-		VadSilenceMs:        d.VadSilenceMs,
-		OwwThreshold:        d.OwwThreshold,
-		OwwModel:            d.OwwModel,
-		StartupVolume:       d.StartupVolume,
-		AdcDigitalGain:      d.AdcDigitalGain,
-		AdcMicpga:           d.AdcMicpga,
-		BeamAngle:           &beamAngle,
-		BeamformingEnabled:  &d.BeamformingEnabled,
-		NsEnabled:           &nsEnabled,
-		AgcEnabled:          &agcEnabled,
+		VadThreshold:       d.VadThreshold,
+		VadSpeechMs:        d.VadSpeechMs,
+		VadSilenceMs:       d.VadSilenceMs,
+		OwwThreshold:       d.OwwThreshold,
+		OwwModel:           d.OwwModel,
+		StartupVolume:      d.StartupVolume,
+		AdcDigitalGain:     d.AdcDigitalGain,
+		AdcMicpga:          d.AdcMicpga,
+		BeamAngle:          &beamAngle,
+		BeamformingEnabled: &beamformingEnabled,
+		NsEnabled:          &nsEnabled,
+		AgcEnabled:         &agcEnabled,
 	}
 }
 
 // ConfigMessage mirrors the JSON shape of the config control message
 // sent by the controller. JSON tags must match em_controller.py exactly.
 type ConfigMessage struct {
-	Type               string  `json:"type,omitempty"`
-	AdcDigitalGain     int     `json:"adcDigitalGain,omitempty"`
-	AdcMicpga          int     `json:"adcMicpga,omitempty"`
-	StartupVolume      int     `json:"startupVolume,omitempty"`
-	VadThreshold       float64 `json:"vadThreshold,omitempty"`
-	VadSpeechMs        int     `json:"vadSpeechMs,omitempty"`
-	VadSilenceMs       int     `json:"vadSilenceMs,omitempty"`
-	OwwThreshold       float64 `json:"owwThreshold,omitempty"`
-	OwwModel           string  `json:"owwModel,omitempty"`
-	BeamAngle           *float64 `json:"beamAngle,omitempty"`
-	BeamformingEnabled  *bool    `json:"beamformingEnabled,omitempty"`
-	HasBeamforming      bool     `json:"hasBeamforming,omitempty"`
-	NsEnabled           *bool    `json:"nsEnabled,omitempty"`
-	AgcEnabled          *bool    `json:"agcEnabled,omitempty"`
+	Type               string   `json:"type,omitempty"`
+	AdcDigitalGain     int      `json:"adcDigitalGain,omitempty"`
+	AdcMicpga          int      `json:"adcMicpga,omitempty"`
+	StartupVolume      int      `json:"startupVolume,omitempty"`
+	VadThreshold       float64  `json:"vadThreshold,omitempty"`
+	VadSpeechMs        int      `json:"vadSpeechMs,omitempty"`
+	VadSilenceMs       int      `json:"vadSilenceMs,omitempty"`
+	OwwThreshold       float64  `json:"owwThreshold,omitempty"`
+	OwwModel           string   `json:"owwModel,omitempty"`
+	BeamAngle          *float64 `json:"beamAngle,omitempty"`
+	BeamformingEnabled *bool    `json:"beamformingEnabled,omitempty"`
+	HasBeamforming     bool     `json:"hasBeamforming,omitempty"`
+	NsEnabled          *bool    `json:"nsEnabled,omitempty"`
+	AgcEnabled         *bool    `json:"agcEnabled,omitempty"`
 }
 
 // ─── env helpers ──────────────────────────────────────────────────────────────

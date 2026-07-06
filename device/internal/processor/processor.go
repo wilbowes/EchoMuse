@@ -25,7 +25,7 @@ const (
 	periodSize = 512
 
 	// AGC parameters
-	agcTargetRMS = 0.08  // target RMS (~-22dBFS)
+	agcTargetRMS = 0.08 // target RMS (~-22dBFS)
 	agcMaxGain   = 20.0
 	agcMinGain   = 0.5
 	agcAttack    = 0.05  // fast attack — prevents clipping
@@ -40,9 +40,9 @@ const (
 // Processor holds inter-period state for the audio pipeline.
 type Processor struct {
 	// NS state
-	ns      *rnnoise.State
-	nsBuf   []float32 // ring buffer for 480-sample frame alignment
-	nsOut   []float32 // output ring buffer
+	ns    *rnnoise.State
+	nsBuf []float32 // ring buffer for 480-sample frame alignment
+	nsOut []float32 // output ring buffer
 
 	// RNNoise VAD probability from the most recently completed frame.
 	// Used to gate AGC release independently of the stream VAD.
@@ -63,6 +63,15 @@ func New() *Processor {
 		nsOut:   make([]float32, 0, rnnoise.FrameSize*2),
 		agcGain: 1.0,
 	}
+}
+
+// ResetAGC returns the AGC gain to unity. Called at mic stream start so a
+// contaminated gain (e.g. loud TTS echo driving it to agcMinGain via the
+// always-active attack path, which then takes many seconds of speech-gated
+// release to recover) cannot carry across voice turns or survive a mic
+// restart.
+func (p *Processor) ResetAGC() {
+	p.agcGain = 1.0
 }
 
 // Destroy frees resources held by the Processor. Call when done.
@@ -100,6 +109,17 @@ func (p *Processor) Process(mono []byte, nsEnabled bool, agcEnabled bool, speech
 	// if RNNoise has warmed up and says "not speech", freeze AGC release
 	// even if RMS is above threshold. Prevents gain pumping on loud
 	// non-speech sources (TV, HVAC) that fool the RMS threshold.
+	//
+	// Q3 fix (2026-07-05 review): p.vadProb is only ever set inside
+	// noiseSuppress() above, which only runs when nsEnabled is true. Under
+	// the current shipped default (nsEnabled=false, agcEnabled=false — see
+	// SETUP.md "known working state"), p.vadHasData never becomes true, so
+	// this whole interlock is dead code: agcSpeech always just equals
+	// speech (the RMS gate), unmodified. Don't trust p.vadProb for
+	// anything while NS is disabled — it's stale (zero-value), not a live
+	// "no speech detected" signal. This only does real work when NS is
+	// re-enabled, which the P0-3 fix (resample or 16kHz-native suppressor)
+	// may eventually make the default again.
 	if agcEnabled {
 		agcSpeech := speech
 		if nsEnabled && p.vadHasData && p.vadProb < vadProbThreshold {
@@ -134,7 +154,7 @@ func (p *Processor) noiseSuppress(samples []float32) []float32 {
 
 	p.nsBuf = append(p.nsBuf, scaled...)
 
-	frameIn  := make([]float32, rnnoise.FrameSize)
+	frameIn := make([]float32, rnnoise.FrameSize)
 	frameOut := make([]float32, rnnoise.FrameSize)
 
 	for len(p.nsBuf) >= rnnoise.FrameSize {

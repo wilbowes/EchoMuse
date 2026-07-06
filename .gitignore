@@ -1,7 +1,9 @@
 .idea
+__pycache__
 /device/build/
 controller/.env
 controller/data/
 controller/static/vendor/
 controller/static/dashboard.js
 .claude/
+scratchpad/

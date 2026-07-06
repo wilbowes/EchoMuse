@@ -243,6 +243,14 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         # close the turn quietly instead of waiting on a TTS response that
         # was never going to come.
         self._no_speech_timeout = False
+        # C1 fix (2026-07-05 review): set on STT_VAD_END and on ERROR —
+        # tells _stream_mic_audio that HA has already ended its side of the
+        # turn, so continuing to feed it audio is pointless. Without this,
+        # in a noisy room the device's own RMS gate (900ms below threshold)
+        # may never close, and _stream_mic_audio sits parked forever after
+        # HA has already produced (or errored out on) a result. Cleared at
+        # the start of every turn alongside the other per-turn flags.
+        self._ha_vad_end = asyncio.Event()
 
         # Callbacks injected by trigger_voice_turn() for each turn —
         # cleared at turn end.
@@ -433,6 +441,10 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # Speech ended — HA is now processing (STT → intent → TTS).
             # This is the "thinking" boundary: device detected VAD end,
             # HA now owns the processing pipeline.
+            # C1 fix: also tell _stream_mic_audio to stop feeding HA. HA's
+            # VAD is the endpointing authority for the turn from here on —
+            # the device's own RMS gate becomes advisory (see review §3.1).
+            self._ha_vad_end.set()
             if self._on_thinking and not self._turn_cancelled:
                 asyncio.create_task(self._on_thinking())
 
@@ -493,6 +505,11 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             code = data.get("code", "")
             message = data.get("message", "")
             log.warning(f"[{self._log_name}] Pipeline error: {code} — {message}")
+            # C1c fix: if the HA pipeline dies mid-STT, _stream_mic_audio may
+            # still be running (waiting on the device's own VAD-end sentinel).
+            # Unblock it too, not just the TTS waiter — otherwise the mic
+            # stream stays parked until the device's own gate closes.
+            self._ha_vad_end.set()
             self._tts_event.set()  # unblock turn waiter
 
     # ── Announcement handling ────────────────────────────────────────────
@@ -548,6 +565,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         on_thinking,       # async callable()
         post_turn_play,    # async callable(voice_response: bytes)
         trace: "TurnTrace | None" = None,
+        preroll_discard: int = VOICE_PREROLL_DISCARD,
     ) -> None:
         """
         Execute one voice turn over the live HA connection.
@@ -560,6 +578,15 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         transition point as the ClaraCore "THINKING" sentinel.
         post_turn_play(pcm_bytes) mirrors _run_post_turn_playback() from the
         claracore path — EQ, resample, stream_speaker, acoustic-feedback drain.
+
+        preroll_discard: number of ~80ms voice_queue frames to drop before
+        streaming to HA. Wake-word turns pass VOICE_PREROLL_DISCARD (removes
+        the "...Jarvis" tail); button and continuation turns pass 0 — they
+        have no wake-word bleed to remove, and discarding real command audio
+        just re-introduces the onset-clipping bug P0-1 fixed on the wake path
+        (see review C3). Returns nothing; the caller reads
+        self._continue_conversation after this returns to decide whether to
+        re-trigger — see trigger_voice_turn().
         """
         if not self._transport or self._transport.is_closing():
             log.warning(f"[{self._log_name}] No active HA connection — cannot start voice turn")
@@ -573,6 +600,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._intent_ended          = False
         self._continue_conversation = False
         self._no_speech_timeout     = False
+        self._ha_vad_end.clear()
         self._on_thinking    = on_thinking
         self._on_announce    = None   # set below after announcement path is confirmed
         self._trace          = trace  # may be None — all trace.x calls guard against this
@@ -594,7 +622,27 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             ))
 
             # ── Stream mic audio from device.voice_queue ──────────────────
-            await self._stream_mic_audio(device)
+            # C1 fix: hard cap on the whole streaming phase as a belt-and-
+            # braces guard, on top of the _ha_vad_end early-exit inside the
+            # loop itself. If somehow neither HA's VAD-end event nor the
+            # device's own sentinel ever arrives, this bounds the damage
+            # instead of hanging the turn (and the spinner) indefinitely.
+            try:
+                await asyncio.wait_for(
+                    self._stream_mic_audio(device, preroll_discard=preroll_discard),
+                    timeout=20.0,
+                )
+            except asyncio.TimeoutError:
+                log.warning(
+                    f"[{self._log_name}] Mic streaming phase hit the 20s hard "
+                    f"cap — forcing end=True to HA and falling through to the "
+                    f"TTS wait (HA may already have produced a result)"
+                )
+                if self._trace:
+                    self._trace.t_vad_end_ms = self._trace.elapsed_ms()
+                if self._transport and not self._transport.is_closing():
+                    self._send_one(api_pb2.VoiceAssistantAudio(data=b"", end=True))
+                if trace: trace.outcome = "stream_timeout"
 
             if self._turn_cancelled:
                 log.info(f"[{self._log_name}] Turn cancelled during mic streaming")
@@ -673,13 +721,19 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 trace.emit()
             log.info(f"[{self._log_name}] ESPHome voice turn complete")
 
-    async def _stream_mic_audio(self, device) -> None:
+    async def _stream_mic_audio(self, device, preroll_discard: int = VOICE_PREROLL_DISCARD) -> None:
         """
         Pull PCM frames from device.voice_queue and send them to HA as
         VoiceAssistantAudio messages.
 
-        Exits when a VAD sentinel (None) is received or cancel_event fires.
-        The sentinel comes in two flavours, distinguished via
+        Exits on any of: HA's own VAD end (self._ha_vad_end — see C1 below),
+        a device VAD sentinel (None) received via voice_queue, or
+        cancel_event firing. Whichever fires first ends the stream; the
+        others are then advisory only (see the _ha_vad_end check below) —
+        both paths send end=True idempotently, so a race between them is
+        harmless.
+
+        The device sentinel comes in two flavours, distinguished via
         device.last_vad_was_timeout (set by em_controller.py's /data frame
         parser immediately before queueing): a normal VAD end (speech was
         detected, then ended — the ordinary case) or a no-speech timeout
@@ -695,12 +749,28 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         how a real Alexa device gives up quickly and quietly on "wake word,
         then nothing," rather than treating it the same as a real pipeline
         error.
+
+        C1 fix (2026-07-05 review): previously this loop's only exits were
+        cancel_event or the device's own RMS-gate sentinel — in a noisy room
+        (TV on, kitchen fan) the device gate can stay open indefinitely
+        (RMS never drops below threshold for the required 900ms), so this
+        loop would sit here forever shovelling room noise at HA long after
+        HA's own model-driven VAD had already ended STT and moved on. Now
+        self._ha_vad_end (set on STT_VAD_END or ERROR — see
+        _handle_voice_event) is checked every iteration and treated as
+        authoritative: HA's endpointing is model-driven and pause-tolerant,
+        strictly better than a fixed RMS threshold + fixed silence timer.
+        The device sentinel is still handled if it arrives first (quiet-room
+        case, likely wins the race there) — either path is a valid, clean
+        end to the stream.
         """
         pcm_buf = bytearray()
 
         # Preroll discard — drop wake-word tail from voice_queue before
-        # streaming to HA. See module-level VOICE_PREROLL_DISCARD.
-        preroll_remaining = VOICE_PREROLL_DISCARD
+        # streaming to HA. Wake turns pass VOICE_PREROLL_DISCARD; button and
+        # continuation turns pass 0 (see C3 — they have no wake-word tail to
+        # remove, and discarding real audio here just clips the first word).
+        preroll_remaining = preroll_discard
         if preroll_remaining > 0:
             log.debug(
                 f"[{self._log_name}] Discarding {preroll_remaining} preroll frames "
@@ -721,6 +791,23 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 self._turn_cancelled = True
                 return
 
+            if self._ha_vad_end.is_set():
+                # HA has already ended its side of the turn (STT_VAD_END or
+                # ERROR) — nothing further sent here can matter. Send end=True
+                # defensively in case the device sentinel never arrives (the
+                # noisy-room case this fix targets); if the device sentinel
+                # already sent it, a second end=True is harmless.
+                log.info(
+                    f"[{self._log_name}] HA VAD end — stopping mic streaming "
+                    f"(device's own RMS gate may still be open; noise-robust "
+                    f"HA endpointing wins the race)"
+                )
+                if self._trace and self._trace.t_vad_end_ms == -1:
+                    self._trace.t_vad_end_ms = self._trace.elapsed_ms()
+                if self._transport and not self._transport.is_closing():
+                    self._send_one(api_pb2.VoiceAssistantAudio(data=b"", end=True))
+                return
+
             # No-speech timeout: if no real (non-preroll) frame has arrived
             # within NO_SPEECH_TIMEOUT seconds, treat as accidental wake.
             # We only enforce this before the first real frame arrives —
@@ -734,10 +821,38 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 self._no_speech_timeout = True
                 return
 
+            # Race the queue-get against _ha_vad_end directly rather than a
+            # flat 1s poll timeout — this notices HA's VAD end within
+            # milliseconds instead of up to 1s late, without a busy loop.
+            get_task = asyncio.ensure_future(device.voice_queue.get())
+            vad_task = asyncio.ensure_future(self._ha_vad_end.wait())
             try:
-                payload = await asyncio.wait_for(device.voice_queue.get(), timeout=1.0)
-            except asyncio.TimeoutError:
+                done, pending = await asyncio.wait(
+                    [get_task, vad_task],
+                    timeout=1.0,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                # Belt-and-braces: if this coroutine itself gets cancelled
+                # while parked in the wait above (e.g. the 20s hard-cap
+                # asyncio.wait_for in run_esphome_voice_turn firing), the
+                # CancelledError propagates straight through asyncio.wait()
+                # without touching get_task/vad_task — they're independent
+                # tasks, not sub-awaits, so nothing cancels them for us.
+                # Cancelling both unconditionally here (a no-op if already
+                # done) prevents that from leaking a Queue.get() waiter and
+                # an Event.wait() waiter on every turn that hits the cap.
+                get_task.cancel()
+                vad_task.cancel()
+
+            if get_task not in done:
+                # Either _ha_vad_end fired (handled at the top of the loop
+                # on the next iteration) or the 1s poll elapsed with nothing
+                # — loop back to the top where cancel_event/_ha_vad_end/
+                # no-speech-timeout are all checked explicitly.
                 continue
+
+            payload = get_task.result()
 
             if payload is None:
                 if device.last_vad_was_timeout:
@@ -754,9 +869,12 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     self._send_one(api_pb2.VoiceAssistantAudio(data=b"", end=True))
                     self._no_speech_timeout = True
                     return
-                # Normal VAD end — signal HA that speech has finished
-                log.info(f"[{self._log_name}] VAD end — sending audio end to HA")
-                if self._trace:
+                # Normal VAD end (device sentinel) — signal HA that speech
+                # has finished. If self._ha_vad_end is already set, this is
+                # just the device catching up on the same conclusion HA
+                # already reached; sending end=True twice is harmless.
+                log.info(f"[{self._log_name}] VAD end (device sentinel) — sending audio end to HA")
+                if self._trace and self._trace.t_vad_end_ms == -1:
                     self._trace.t_vad_end_ms = self._trace.elapsed_ms()
                 self._send_one(api_pb2.VoiceAssistantAudio(data=b"", end=True))
                 return
@@ -815,10 +933,25 @@ async def _fetch_tts_audio(url: str) -> bytes:
     Requires ffmpeg in PATH (installed via Dockerfile apt-get).
     """
     import aiohttp
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            resp.raise_for_status()
-            audio_bytes = await resp.read()
+    # One retry on fetch failure — observed intermittent tts_proxy fetch
+    # failures (outcome=tts_error, tts_bytes=0) where the URL was valid and
+    # the very next turn fetched fine. A single 0.5s-backoff retry converts
+    # those from a silent dead turn into ~1s of extra latency.
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    resp.raise_for_status()
+                    audio_bytes = await resp.read()
+            break
+        except Exception as e:
+            last_exc = e
+            if attempt == 0:
+                log.warning(f"_fetch_tts_audio: fetch failed ({e}) — retrying once")
+                await asyncio.sleep(0.5)
+    else:
+        raise last_exc
 
     log.debug(f"_fetch_tts_audio: fetched {len(audio_bytes)}b, decoding via ffmpeg")
 
@@ -831,7 +964,18 @@ async def _fetch_tts_audio(url: str) -> bytes:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    pcm, err = await proc.communicate(input=audio_bytes)
+    # C1b fix (2026-07-05 review): the aiohttp fetch above is capped at 10s,
+    # but proc.communicate() had no timeout at all — if ffmpeg wedges on
+    # malformed/truncated input, this could hang the turn indefinitely with
+    # no way out. Cheap insurance: 15s cap, kill the process on timeout.
+    try:
+        pcm, err = await asyncio.wait_for(
+            proc.communicate(input=audio_bytes), timeout=15.0
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise RuntimeError("ffmpeg decode timed out after 15s")
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg decode failed: {err.decode()[:200]}")
 
@@ -1057,6 +1201,7 @@ async def trigger_voice_turn(
     on_thinking,      # async callable() — LED/state transition
     post_turn_play,   # async callable(pcm_bytes: bytes) — playback + drain
     trigger_label: str = "unknown",  # "wakeword(0.522)" or "button" for trace
+    preroll_discard: int = VOICE_PREROLL_DISCARD,
 ) -> bool:
     """
     Entry point for OWW/button-triggered voice turns in esphome mode.
@@ -1064,6 +1209,13 @@ async def trigger_voice_turn(
     Called from em_controller._run_voice_locked() instead of run_voice_turn()
     when VOICE_MODE=esphome. Finds the active HA connection for this device
     and delegates to EchoMuseSatellite.run_esphome_voice_turn().
+
+    preroll_discard: forwarded to run_esphome_voice_turn/_stream_mic_audio.
+    Callers should pass VOICE_PREROLL_DISCARD for wake-word turns and 0 for
+    button or continuation turns — see review C3. Defaults to
+    VOICE_PREROLL_DISCARD for backward compatibility with any caller that
+    doesn't specify it, but em_controller.py's call sites should always pass
+    it explicitly so the choice is visible at the call site.
 
     Returns True if HA requested conversation continuation (continue_conversation
     flag set in INTENT_END) — the controller uses this to re-trigger immediately
@@ -1093,6 +1245,7 @@ async def trigger_voice_turn(
 
     await satellite.run_esphome_voice_turn(
         device=device,
+        preroll_discard=preroll_discard,
         on_thinking=on_thinking,
         post_turn_play=post_turn_play,
         trace=trace,

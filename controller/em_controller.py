@@ -74,6 +74,26 @@ logging.basicConfig(
 log = logging.getLogger("echomuse")
 
 logging.getLogger("websockets.server").setLevel(logging.CRITICAL)
+
+
+def _log_task_exception(task: asyncio.Task) -> None:
+    """
+    Standard done-callback for fire-and-forget asyncio.create_task() calls.
+
+    Without this, an exception raised inside a task nobody awaits vanishes
+    silently — asyncio only surfaces it via a "Task exception was never
+    retrieved" warning at garbage-collection time, easy to miss in normal
+    logs. Attach via task.add_done_callback(_log_task_exception) at every
+    fire-and-forget create_task() call site (see M1 in the 2026-07-05
+    review — currently applied to the button-triggered voice turn task).
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.error(f"Unhandled exception in background task {task.get_name()}: {exc}", exc_info=exc)
+
+
 # ─── Config ───────────────────────────────────────────────────────────────────
 
 SERVER_HOST  = os.environ.get("SERVER_HOST", "0.0.0.0")
@@ -93,13 +113,12 @@ DEVICE_APPROVAL = os.environ.get("DEVICE_APPROVAL", "strict")
 
 # Mic
 CHUNK_BYTES          = 1280 * 2   # 2560 bytes = 80ms at 16kHz S16_LE mono
-# VOICE_PREROLL_DISCARD: frames to drop from voice_queue at the start of each
-# turn. Under the P0-1 architecture the stream never stops, so voice_queue
-# contains the tail of the wake word utterance ("…Jarvis") before the command
-# audio arrives. Discarding the first N×80ms chunks removes most of that bleed.
-# N=3 = 240ms. Tune empirically: if the first word of commands is still being
-# clipped, lower; if "Hey Jarvis" bleed still reaches STT, raise.
-VOICE_PREROLL_DISCARD = 3
+# NOTE: VOICE_PREROLL_DISCARD lives in em_esphome.py (esphome.VOICE_PREROLL_DISCARD)
+# — it's used there in _stream_mic_audio, and _run_voice_locked below reads it
+# via that single source of truth rather than keeping a second copy here that
+# could drift out of sync (a duplicate here was previously dead code — see
+# v2.6.3 changelog — resist the temptation to reintroduce it).
+
 
 # Speaker — must match PcmSpeaker constants in Go
 SPEAKER_RATE   = 48000
@@ -193,9 +212,28 @@ class Device:
         # without requiring a device reconnect.
         self.oww_threshold: float = OWW_THRESHOLD
         self.oww_model:     str   = f"{OWW_MODEL}_v0.1"
+        # Q1 fix (2026-07-05 review): openwakeword's built-in speexdsp noise
+        # suppressor — 16kHz-native, applied controller-side, only to the
+        # wake path (cannot affect STT audio since STT never sees it). Like
+        # oww_model, a change here requires reconstructing the OWWModel
+        # instance — wake_word_listener's reload loop checks this alongside
+        # oww_model. Config key: owwSpeexNs. Defaults False (opt-in — needs
+        # the speexdsp-ns pip package confirmed installable in the Docker
+        # build before enabling fleet-wide; see review Q1 fix sequence).
+        self.oww_speex_ns:  bool  = False
         self.eq_bands:      list  = [0.0] * 8
         self.eq_loudness:   bool  = False
         self.stats:         dict | None = None
+        # Q4 fix (2026-07-05 review): dashboard-visible near-miss counter —
+        # incremented in wake_word_listener whenever a score exceeds 0.05
+        # but doesn't clear device.oww_threshold. Separate field from
+        # self.stats deliberately: self.stats is entirely overwritten every
+        # ~30s by the device's own hardware-stats report (msg_type=="stats"
+        # in handle_control), so anything stashed inside it would get wiped
+        # on the next report. This field is controller-owned and persists
+        # independently, reset only on device reconnect (see Device.__init__
+        # semantics generally — a fresh Device is created per connection).
+        self.oww_near_misses: int = 0
 
     async def send_control(self, msg: dict):
         try:
@@ -589,7 +627,15 @@ async def run_voice_turn(device: Device):
     log.info(f"[{device.device_id}] Voice turn complete")
 
 
-async def _run_voice_locked(device: Device, trigger_label: str = "unknown"):
+async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_wakeword: bool = False):
+    """
+    is_wakeword: explicit flag for whether this turn was triggered by wake-
+    word detection (as opposed to a button press). Used to decide preroll
+    discard (see C3) — kept as its own parameter rather than inferred by
+    parsing trigger_label (which is a free-form string meant for logging/
+    trace display, not a control-flow key) so a future change to the label
+    format can't silently change behaviour here.
+    """
     drained = 0
     while not device.mic_queue.empty():
         try:
@@ -650,22 +696,52 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown"):
                         spin_task = asyncio.create_task(
                             leds_spin_green(device, stop_spin)
                         )
+                    # Acoustic-feedback guard: stop the mic BEFORE playback,
+                    # not just in the post-turn finally. With the mic running
+                    # through TTS, the device processes its own speaker echo
+                    # (63-65 junk frames per turn measured 2026-07-06), sends
+                    # it upstream on the same Wi-Fi radio receiving the TTS
+                    # frames (speaker underruns → audible stutter), and — when
+                    # AGC is enabled — slams agcGain to minimum, deafening the
+                    # wake word for the next several seconds. The finally's
+                    # mic_stop stays as a safety net (StopMic no-ops when
+                    # already stopped); restart is owned by the continuation
+                    # branch / wake listener / button handler as before.
+                    await device.mic_stop()
                     await _run_post_turn_playback(device, voice_response)
 
-                # P0-1: no mic_start_turn() here. The stream is already
-                # running on ch6; oww_paused routes frames to voice_queue.
-                # mic_stop is still sent after the turn (before TTS playback)
-                # as the acoustic-feedback guard — that remains load-bearing.
+                # P0-1: no mic_start_turn() here on the initial (wake/button)
+                # entry — for a wake turn the stream is already running on
+                # ch6 and oww_paused routes frames to voice_queue. The
+                # acoustic-feedback guard is mic_stop in
+                # post_turn_play_esphome, sent immediately before TTS
+                # playback; the finally below is only the safety net.
                 #
                 # Continuation loop: if HA sets continue_conversation on
                 # INTENT_END, re-trigger immediately after TTS+drain rather
-                # than returning to OWW idle. oww_paused stays set throughout
-                # so voice_queue routing stays active. The reference
-                # implementation (linux-voice-assistant) uses a 0.5s settle
-                # delay after TTS before opening the mic — that's already
-                # covered by _run_post_turn_playback's buffer drain sleep, so
-                # no additional delay is needed here.
-                turn_label = trigger_label
+                # than returning to OWW idle. The reference implementation
+                # (linux-voice-assistant) uses a 0.5s settle delay after TTS
+                # before opening the mic — that's already covered by
+                # _run_post_turn_playback's buffer drain sleep, so no
+                # additional delay is needed here.
+                #
+                # C2 fix (2026-07-05 review): the `finally` below runs
+                # device.mic_stop() on every iteration, including the one
+                # that decides to continue — previously nothing ever put the
+                # stream back before looping into the next trigger_voice_turn,
+                # so a continuation turn streamed from a stopped mic and
+                # silently timed out as no_speech every time. Fixed by
+                # calling device.mic_start() (no lock_mic — same ch6 stream
+                # as the wake path; no-ops if somehow already running) in the
+                # continuation branch, before looping.
+                #
+                # C3 fix: preroll_discard is 0 for button/continuation turns
+                # (no wake-word tail to remove — discarding real audio here
+                # just clips the first word/words, the exact bug P0-1 fixed
+                # on the wake path) and VOICE_PREROLL_DISCARD only for the
+                # initial wakeword-triggered turn.
+                turn_label      = trigger_label
+                preroll_discard = esphome.VOICE_PREROLL_DISCARD if is_wakeword else 0
                 while True:
                     should_continue = False
                     try:
@@ -674,6 +750,7 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown"):
                             on_thinking=on_thinking_esphome,
                             post_turn_play=post_turn_play_esphome,
                             trigger_label=turn_label,
+                            preroll_discard=preroll_discard,
                         )
                     finally:
                         await device.mic_stop()
@@ -682,6 +759,17 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown"):
 
                     if should_continue and not device.cancel_event.is_set():
                         log.info(f"[{device.device_id}] Continuing conversation (HA requested)")
+                        # C2 fix: put the mic stream back before looping —
+                        # the finally above just stopped it, and the next
+                        # trigger_voice_turn will read from voice_queue,
+                        # which is fed only while the device stream is
+                        # running. No lock_mic — same ch6 stream as wake.
+                        await device.mic_start()
+                        # Fresh stream starts with the VAD gate closed — the
+                        # user must speak again from zero, same onset cost
+                        # as any post-mic_stop restart. Acceptable for v1 of
+                        # continuation (see review C2 wrinkle note); §3.4's
+                        # device preroll ring will fix this properly later.
                         # Drain stale frames accumulated during TTS playback
                         # before the next turn begins — same as post-wake drain.
                         drained = 0
@@ -697,7 +785,8 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown"):
                         device.listening = True
                         await leds_listening(device)
                         await _push_device_state(device)
-                        turn_label = "continuation"
+                        turn_label      = "continuation"
+                        preroll_discard = 0
                         # Reset spinner state for the next turn's thinking animation.
                         stop_spin.clear()
                         spin_task = None
@@ -707,6 +796,29 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown"):
             else:
                 await run_voice_turn(device)
     finally:
+        # Drain voice_queue BEFORE clearing oww_paused. If we clear first,
+        # handle_data immediately starts routing new frames to mic_queue —
+        # correct. But voice_queue still contains frames that arrived during
+        # the turn (post-TTS playback, during the buffer drain sleep). Those
+        # frames will sit in voice_queue until the NEXT wake detection flips
+        # oww_paused back, at which point they arrive at _stream_mic_audio as
+        # preamble before the user has said anything — Whisper then transcribes
+        # 10+ seconds of ambient noise mixed with the actual utterance.
+        # Draining here, while oww_paused is still set, ensures voice_queue is
+        # empty before routing flips. The post-turn drain in wake_word_listener
+        # (after _run_voice_locked returns) becomes a belt-and-braces no-op.
+        _drained = 0
+        while not device.voice_queue.empty():
+            try:
+                device.voice_queue.get_nowait()
+                _drained += 1
+            except asyncio.QueueEmpty:
+                break
+        if _drained:
+            log.info(
+                f"[{device.device_id}] oww_paused drain: "
+                f"{_drained} stale frames cleared before routing flip"
+            )
         device.oww_paused.clear()
         log.info(f"[{device.device_id}] oww_paused cleared")
 
@@ -717,12 +829,16 @@ async def wake_word_listener(device: Device):
     loop = asyncio.get_event_loop()
 
     current_model_name = device.oww_model
-    log.info(f"[{device.device_id}] OWW: loading model {current_model_name}")
+    current_speex_ns    = device.oww_speex_ns
+    log.info(
+        f"[{device.device_id}] OWW: loading model {current_model_name} "
+        f"(speex_ns={current_speex_ns})"
+    )
     model = await loop.run_in_executor(
         None,
         lambda: OWWModel(
             wakeword_models=[current_model_name],
-            enable_speex_noise_suppression=False,
+            enable_speex_noise_suppression=current_speex_ns,
         ),
     )
     model_key = current_model_name
@@ -731,40 +847,50 @@ async def wake_word_listener(device: Device):
     await device.mic_start()
 
     buf = bytearray()
+    last_near_miss_log_ts = 0.0  # Q4: rate-limit near-miss INFO logging to 1/2s
     try:
         while True:
-            if device.oww_model != current_model_name:
-                new_name = device.oww_model
+            if device.oww_model != current_model_name or device.oww_speex_ns != current_speex_ns:
+                new_name  = device.oww_model
+                new_speex = device.oww_speex_ns
                 log.info(
                     f"[{device.device_id}] OWW: reloading model "
-                    f"{current_model_name} → {new_name}"
+                    f"{current_model_name} → {new_name} "
+                    f"(speex_ns {current_speex_ns} → {new_speex})"
                 )
                 try:
                     _n = new_name
+                    _s = new_speex
                     new_model = await loop.run_in_executor(
                         None,
                         lambda: OWWModel(
                             wakeword_models=[_n],
-                            enable_speex_noise_suppression=False,
+                            enable_speex_noise_suppression=_s,
                         ),
                     )
                     model             = new_model
                     model_key         = new_name
                     current_model_name = new_name
+                    current_speex_ns  = new_speex
                     buf.clear()
-                    log.info(f"[{device.device_id}] OWW: model reloaded → {new_name}")
+                    log.info(f"[{device.device_id}] OWW: model reloaded → {new_name} (speex_ns={new_speex})")
                 except Exception as e:
                     log.error(
-                        f"[{device.device_id}] OWW: failed to load {new_name}: {e} "
-                        f"— reverting to {current_model_name}"
+                        f"[{device.device_id}] OWW: failed to load {new_name} "
+                        f"(speex_ns={new_speex}): {e} "
+                        f"— reverting to {current_model_name} (speex_ns={current_speex_ns})"
                     )
-                    device.oww_model = current_model_name
+                    device.oww_model     = current_model_name
+                    device.oww_speex_ns  = current_speex_ns
             try:
                 payload = await asyncio.wait_for(
                     device.mic_queue.get(), timeout=10.0
                 )
             except asyncio.TimeoutError:
-                log.warning(f"[{device.device_id}] OWW: mic queue timeout")
+                # Normal during silence — the device VAD gate is closed, so no
+                # frames flow. DEBUG, not WARNING: at WARNING this fired every
+                # 10s per idle device and dominated the logs.
+                log.debug(f"[{device.device_id}] OWW: mic queue idle (VAD gate closed)")
                 continue
 
             if payload is None:
@@ -794,13 +920,36 @@ async def wake_word_listener(device: Device):
 
                 # Log any score above noise floor so we can see near-misses
                 # and understand whether failed wakes are "close but below
-                # threshold" vs "not registering at all". Only at DEBUG to
-                # avoid flooding logs during normal idle operation.
+                # threshold" vs "not registering at all".
+                #
+                # Q4 fix (2026-07-05 review): this was DEBUG-only, invisible
+                # in a normal INFO deployment — exactly the data needed for
+                # threshold tuning was blind by default. Now: (1) the debug
+                # line stays for verbose troubleshooting, (2) an INFO line
+                # fires too, rate-limited to at most once per 2s per device
+                # so a run of near-misses doesn't flood the log, and (3) a
+                # persistent near_misses counter is exposed to the dashboard
+                # via device_update so the count is visible without tailing
+                # logs at all.
                 if score > 0.05:
+                    device.oww_near_misses += 1
                     log.debug(
                         f"[{device.device_id}] OWW score: {score:.3f} "
                         f"(threshold={device.oww_threshold:.3f})"
                     )
+                    now = asyncio.get_event_loop().time()
+                    if now - last_near_miss_log_ts >= 2.0:
+                        last_near_miss_log_ts = now
+                        log.info(
+                            f"[{device.device_id}] OWW near-miss: score={score:.3f} "
+                            f"(threshold={device.oww_threshold:.3f}, "
+                            f"total near-misses={device.oww_near_misses})"
+                        )
+                        await api._push_event({
+                            "type":      "device_update",
+                            "device_id": device.device_id,
+                            "state":     {"owwNearMisses": device.oww_near_misses},
+                        })
 
                 if score >= device.oww_threshold:
                     log.info(
@@ -831,7 +980,7 @@ async def wake_word_listener(device: Device):
                             f"[{device.device_id}] OWW: oww_paused set, "
                             f"routing to voice_queue (no mic_stop/mic_start_turn)"
                         )
-                        await _run_voice_locked(device, trigger_label=f"wakeword({score:.3f})")
+                        await _run_voice_locked(device, trigger_label=f"wakeword({score:.3f})", is_wakeword=True)
 
                         drained = 0
                         while not device.voice_queue.empty():
@@ -894,11 +1043,16 @@ async def handle_button_event(device: Device, event: dict):
                 # mic_start_turn() no-ops if already running, so stop first.
                 await device.mic_stop()
                 await device.mic_start_turn()
-                await _run_voice_locked(device, trigger_label="button")
+                await _run_voice_locked(device, trigger_label="button", is_wakeword=False)
                 log.info(f"[{device.device_id}] Button turn complete — restarting mic")
                 # Post-turn: back to ch6 omni for OWW listening.
                 await device.mic_start()
-            asyncio.create_task(_button_voice_turn())
+            # M1 fix (2026-07-05 review): keep a reference and log exceptions
+            # instead of a bare fire-and-forget create_task() — previously
+            # any exception raised in this task vanished silently with no
+            # log line, standard asyncio fire-and-forget hygiene issue.
+            _btn_task = asyncio.create_task(_button_voice_turn())
+            _btn_task.add_done_callback(_log_task_exception)
 
 
 # ─── Control plane handler ────────────────────────────────────────────────────
@@ -997,6 +1151,7 @@ async def handle_control(ws: WebSocketServerProtocol):
         await device.send_control({"type": "config", **config})
         device.oww_threshold = float(config.get("owwThreshold", OWW_THRESHOLD))
         device.oww_model     = config.get("owwModel", f"{OWW_MODEL}_v0.1")
+        device.oww_speex_ns  = bool(config.get("owwSpeexNs", False))
         device.eq_bands      = config.get("eqBands", [0.0] * 8)
         device.eq_loudness   = bool(config.get("eqLoudness", False))
         # Initialise volume from stored config — device will report its real
@@ -1012,7 +1167,14 @@ async def handle_control(ws: WebSocketServerProtocol):
         if VOICE_MODE == "esphome":
             _device_ref = device
             async def _standalone_play(pcm_bytes: bytes, _d=_device_ref) -> None:
-                await _run_post_turn_playback(_d, pcm_bytes)
+                # Same acoustic-feedback guard as voice turns: announcements
+                # play outside a turn, so the always-on OWW stream is live —
+                # stop it for the duration and put it back after.
+                await _d.mic_stop()
+                try:
+                    await _run_post_turn_playback(_d, pcm_bytes)
+                finally:
+                    await _d.mic_start()
             async def _send_volume_set(level: int, _d=_device_ref) -> None:
                 await _d.send_control({"type": "volume_set", "level": level})
             await esphome.device_connected(
@@ -1185,13 +1347,19 @@ async def handle_data(ws: WebSocketServerProtocol):
                     log.error(f"[{device.device_id}] VAD sentinel lost — queue still full after drain")
                 continue
             payload = raw[MIC_HEADER_LEN:]
+            q = device.voice_queue if device.oww_paused.is_set() else device.mic_queue
             try:
-                if device.oww_paused.is_set():
-                    device.voice_queue.put_nowait(payload)
-                else:
-                    device.mic_queue.put_nowait(payload)
+                q.put_nowait(payload)
             except asyncio.QueueFull:
-                pass
+                # Drop the OLDEST frame, not the newest — keeps the tail of
+                # the audio contiguous with real time, which is what OWW and
+                # STT care about. Dropping the newest froze the queue at a
+                # stale snapshot while fresh speech was discarded.
+                try:
+                    q.get_nowait()
+                    q.put_nowait(payload)
+                except (asyncio.QueueEmpty, asyncio.QueueFull):
+                    pass
 
     except asyncio.TimeoutError:
         log.warning(f"[data] Identify timeout from {remote}")

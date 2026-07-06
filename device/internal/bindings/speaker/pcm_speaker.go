@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"sync/atomic"
 	"time"
 
 	"github.com/Binozo/GoTinyAlsa/pkg/pcm"
@@ -34,6 +35,10 @@ type PcmSpeaker struct {
 	// deadCh is closed by silenceLoop on any exit so PumpPeriod can return
 	// an error rather than block indefinitely waiting for a dead consumer.
 	deadCh   chan struct{}
+	// eosPending is set by EndStream (WS reader received 0x03) and consumed
+	// by silenceLoop when audioCh drains, so a drain at natural end of
+	// stream isn't misreported as an underrun.
+	eosPending atomic.Bool
 }
 
 func NewPcmSpeaker() (*PcmSpeaker, error) {
@@ -102,7 +107,12 @@ func (p *PcmSpeaker) silenceLoop() {
 			}
 		default:
 			if audioStreaming {
-				log.Printf("[speaker] underrun: silence injected mid-stream (audioCh drained)")
+				if p.eosPending.Swap(false) {
+					// Natural end of stream (0x03 received) — not an underrun.
+					log.Printf("[speaker] stream complete — returning to silence")
+				} else {
+					log.Printf("[speaker] underrun: silence injected mid-stream (audioCh drained)")
+				}
 				audioStreaming = false
 			}
 			if err := p.session.Pump(silencePeriod); err != nil {
@@ -141,6 +151,14 @@ func (p *PcmSpeaker) PumpPeriod(data []byte) error {
 	case <-p.deadCh:
 		return fmt.Errorf("speaker: ALSA loop has died")
 	}
+}
+
+// EndStream marks the in-flight stream as complete. Called by the WS client
+// on the 0x03 EOS frame — always after every 0x02 period of that stream has
+// already been handed to PumpPeriod (frames are processed sequentially on
+// the read loop), so by the time silenceLoop drains audioCh the flag is set.
+func (p *PcmSpeaker) EndStream() {
+	p.eosPending.Store(true)
 }
 
 func (p *PcmSpeaker) Close() {

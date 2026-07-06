@@ -146,9 +146,31 @@ func main() {
 		applyHardwareConfig(msg)
 	})
 
-	// Mute state change — notify controller so dashboard can reflect it
+	// Mute state change — notify controller so dashboard can reflect it,
+	// and stop/restart the mic stream device-side so mute is authoritative
+	// regardless of controller state (C5 fix, 2026-07-05 review). Previously
+	// only the *controller-initiated* mic_start was refused while muted (see
+	// the mic_start callback above) — an already-running stream (e.g. the
+	// permanent OWW listening stream) kept running if mute was toggled
+	// mid-stream, so audio kept leaving the device while the ring showed
+	// red. Note this is a partial fix: it stops audio leaving the device
+	// over the network, but does not address the still-open, hardware-
+	// unverified half of C5 — whether tinymix ctls 105/106 (chip A only)
+	// actually silence the physical ADC path for ch6 and the perimeter
+	// mics on chips B–D. That requires an on-device `tinymix -D 0` full
+	// dump to confirm the sibling mute controls before touching them (see
+	// review C5 fix sequence) — deliberately not guessed at here.
 	s.SetMuteChangeCallback(func(muted bool) {
 		controlClient.SendMuteState(muted)
+		if muted {
+			dataClient.StopMic()
+		} else {
+			// Restore the permanent OWW listening stream on unmute — no
+			// lock_mic, matching the normal idle state. If the controller
+			// also sends its own mic_start around the same time, StartMic
+			// is idempotent (ignores the call while already active).
+			dataClient.StartMic(false)
+		}
 	})
 
 	// Volume change — notify controller so HA entity and dashboard reflect it.

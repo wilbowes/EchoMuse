@@ -12,8 +12,8 @@ import (
 const (
 	volumeMin     = 0
 	volumeMax     = 175
-	volumeStep    = 17  // ~10% per press
-	volumeLEDSecs = 2   // how long to show volume ring
+	volumeStep    = 17 // ~10% per press
+	volumeLEDSecs = 2  // how long to show volume ring
 	numLEDs       = 12
 )
 
@@ -24,6 +24,17 @@ type volumeController struct {
 	timer          *time.Timer
 	isMuted        func() bool // set after construction to avoid circular dependency
 	onVolumeChange func(int)   // set after construction; called after every Set()
+}
+
+// SetOnVolumeChange wires a callback invoked after every Set() call.
+// B7 fix (2026-07-05 review): previously Server.SetVolumeChangeCallback
+// reached directly into vc.mu/vc.onVolumeChange from outside this struct.
+// Encapsulating the lock here keeps volumeController responsible for its
+// own synchronisation, matching every other volumeController method.
+func (vc *volumeController) SetOnVolumeChange(cb func(int)) {
+	vc.mu.Lock()
+	vc.onVolumeChange = cb
+	vc.mu.Unlock()
 }
 
 func newVolumeController(ledGetter func() led.Controller) *volumeController {

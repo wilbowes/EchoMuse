@@ -1,0 +1,246 @@
+% tinymix -D 0
+Mixer name: 'mt-snd-card'
+Number of controls: 239
+ctl	type	num	name                                     value
+0	ENUM	1	Audio_Amp_R_Switch                       Off
+1	ENUM	1	Audio_Amp_L_Switch                       Off
+2	ENUM	1	Voice_Amp_Switch                         Off
+3	ENUM	1	Speaker_Amp_Switch                       Off
+4	ENUM	1	Headset_Speaker_Amp_Switch               Off
+5	ENUM	1	Ext_Speaker_Amp_Switch                   On
+6	ENUM	1	Ext_Headphone_Amp_Switch                 Off
+7	ENUM	1	Headphone_Speaker_Mux                    Speaker
+8	ENUM	1	Headset_PGAL_GAIN                       
+9	ENUM	1	Headset_PGAR_GAIN                       
+10	ENUM	1	Handset_PGA_GAIN                         XXX
+11	ENUM	1	Lineout_PGAR_GAIN                        8Db
+12	ENUM	1	Lineout_PGAL_GAIN                        8Db
+13	ENUM	1	Ext_Amp_Gain                             6dB
+14	ENUM	1	AUD_CLK_BUF_Switch                       Off
+15	ENUM	1	Audio_Preamp1_Switch                     OPEN
+16	ENUM	1	Audio_Preamp2_Switch                     OPEN
+17	ENUM	1	Audio_ADC_1_Switch                       Off
+18	ENUM	1	Audio_ADC_2_Switch                       Off
+19	ENUM	1	Audio_ADC_3_Switch                       Off
+20	ENUM	1	Audio_ADC_4_Switch                       Off
+21	ENUM	1	Audio_PGA1_Setting                       12Db
+22	ENUM	1	Audio_PGA2_Setting                       12Db
+23	ENUM	1	Audio_PGA3_Setting                       -6Db
+24	ENUM	1	Audio_PGA4_Setting                       -6Db
+25	ENUM	1	Audio_MicSource1_Setting                 ADC1
+26	ENUM	1	Audio_MicSource2_Setting                 ADC1
+27	ENUM	1	Audio_MicSource3_Setting                 ADC1
+28	ENUM	1	Audio_MicSource4_Setting                 ADC1
+29	ENUM	1	Audio_MIC1_Mode_Select                   ACCMODE
+30	ENUM	1	Audio_MIC2_Mode_Select                   ACCMODE
+31	ENUM	1	Audio_MIC3_Mode_Select                   ACCMODE
+32	ENUM	1	Audio_MIC4_Mode_Select                   ACCMODE
+33	ENUM	1	SineTable_DL_DAC                         Off
+34	ENUM	1	SineTable_UL_ADC                         Off
+35	ENUM	1	Codec_Loopback_Setting                   OFF
+36	ENUM	1	Speech_MD_USAGE                          Off
+37	ENUM	1	Audio_Hdmi_SideGen_Switch                Off
+38	ENUM	1	AP_Loopback_Select                       AP_LOOPBACK_NONE
+39	ENUM	1	Audio_i2s0_SideGen_Switch                Off
+40	ENUM	1	Audio_i2s0_hd_Switch                     Off
+41	ENUM	1	Audio_ExtCodec_EchoRef_Switch            Off
+42	INT	1	Audio Mrgrx Volume                       65536
+43	ENUM	1	cmb stub Audio Control                   CMB_STUB_AIF_3
+44	ENUM	1	Audio_I2S0dl1_hd_Switch                  Off
+45	BYTE	8	Audio_I2S0dl1_get_timestamp             912a86e9f3000000
+46	ENUM	1	Audio_FMTX_hd_Switch                     On
+47	ENUM	1	Audio_SideGen_Switch                     OFF
+48	ENUM	1	Audio_SideGen_SampleRate                 48K
+49	ENUM	1	Audio_SideGen_Amplitude                  1/128
+50	ENUM	1	Audio_Sidetone_Switch                    Off
+51	ENUM	1	Audio_Mode_Switch                        Normal_Mode
+52	INT	1	Audio IRQ1 CNT                           2048
+53	INT	1	Audio IRQ2 CNT                           0
+54	ENUM	1	Audio_Debug_Setting                      Off
+55	ENUM	1	Audio_Ipoh_Setting                       Off
+56	ENUM	1	Audio_I2S1_Setting                       On
+57	ENUM	1	Audio_DacMux_Setting                     Off
+58	ENUM	1	Audio_LineOut_Setting                    Off
+59	ENUM	1	Pmic_Anc_Switch                          ANCON
+60	INT	1	Audio FM I2S Volume                      65536
+61	INT	2	PCM Playback Volume                      83 83
+62	INT	2	HP Driver Gain Volume                    6 6
+63	INT	2	LO Driver Gain Volume                    6 6
+64	BOOL	2	HP DAC Playback Switch                   On On
+65	BOOL	2	LO DAC Playback Switch                   Off Off
+66	BOOL	2	Mic PGA Switch                           Off Off
+67	ENUM	2	DRC Control                              Disabled Disabled
+68	BOOL	1	ADCFGA Left Mute Switch                  On
+69	BOOL	1	ADCFGA Right Mute Switch                 On
+70	INT	2	ADC Level Volume                         24 24
+71	INT	2	PGA Level Volume                         0 0
+72	INT	1	Auto-mute Switch                         0
+73	BOOL	1	AGC Left Switch                          Off
+74	BOOL	1	AGC Right Switch                         Off
+75	INT	2	AGC Target Level                         0 0
+76	INT	2	AGC Gain Hysteresis                      0 0
+77	INT	2	AGC Hysteresis                           0 0
+78	INT	2	AGC Noise Threshold                      0 0
+79	INT	2	AGC Max PGA                              127 127
+80	INT	2	AGC Attack Time                          0 0
+81	INT	2	AGC Decay Time                           0 0
+82	INT	2	AGC Noise Debounce                       0 0
+83	INT	2	AGC Signal Debounce                      0 0
+84	BYTE	117	biquad coefficients                     000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+85	ENUM	1	DAC Soft Stepping                        disabled
+86	ENUM	1	Right Channel Only                       Off
+87	ENUM	1	Ignore Ramp Up                           Off
+88	ENUM	1	MFP Gpio Mute                            On
+89	INT	2	ADC_A Digital Volume Control             88 88
+90	INT	1	ADC_A Left Fine Volume                   4
+91	INT	1	ADC_A Right Fine Volume                  4
+92	INT	2	ADC_A MICPGA Volume Ctrl                 40 40
+93	BOOL	1	ADC_A IN1_L Input Gain                   On
+94	BOOL	1	ADC_A IN2_L Input Gain                   On
+95	BOOL	1	ADC_A IN3_L Input Gain                   On
+96	BOOL	1	ADC_A DIF1_L Input Gain                  Off
+97	BOOL	1	ADC_A DIF2_L Input Gain                  On
+98	BOOL	1	ADC_A DIF3_L Input Gain                  On
+99	BOOL	1	ADC_A IN1_R Input Gain                   On
+100	BOOL	1	ADC_A IN2_R Input Gain                   On
+101	BOOL	1	ADC_A IN3_R Input Gain                   On
+102	BOOL	1	ADC_A DIF1_R Input Gain                  Off
+103	BOOL	1	ADC_A DIF2_R Input Gain                  On
+104	BOOL	1	ADC_A DIF3_R Input Gain                  On
+105	BOOL	1	ADC_A Left Mute                          Off
+106	BOOL	1	ADC_A Right Mute                         Off
+107	INT	2	ADC_B Digital Volume Control             88 88
+108	INT	1	ADC_B Left Fine Volume                   4
+109	INT	1	ADC_B Right Fine Volume                  4
+110	INT	2	ADC_B MICPGA Volume Ctrl                 40 40
+111	BOOL	1	ADC_B IN1_L Input Gain                   On
+112	BOOL	1	ADC_B IN2_L Input Gain                   On
+113	BOOL	1	ADC_B IN3_L Input Gain                   On
+114	BOOL	1	ADC_B DIF1_L Input Gain                  Off
+115	BOOL	1	ADC_B DIF2_L Input Gain                  On
+116	BOOL	1	ADC_B DIF3_L Input Gain                  On
+117	BOOL	1	ADC_B IN1_R Input Gain                   On
+118	BOOL	1	ADC_B IN2_R Input Gain                   On
+119	BOOL	1	ADC_B IN3_R Input Gain                   On
+120	BOOL	1	ADC_B DIF1_R Input Gain                  Off
+121	BOOL	1	ADC_B DIF2_R Input Gain                  On
+122	BOOL	1	ADC_B DIF3_R Input Gain                  On
+123	BOOL	1	ADC_B Left Mute                          Off
+124	BOOL	1	ADC_B Right Mute                         Off
+125	INT	2	ADC_C Digital Volume Control             88 88
+126	INT	1	ADC_C Left Fine Volume                   4
+127	INT	1	ADC_C Right Fine Volume                  4
+128	INT	2	ADC_C MICPGA Volume Ctrl                 40 40
+129	BOOL	1	ADC_C IN1_L Input Gain                   On
+130	BOOL	1	ADC_C IN2_L Input Gain                   On
+131	BOOL	1	ADC_C IN3_L Input Gain                   On
+132	BOOL	1	ADC_C DIF1_L Input Gain                  Off
+133	BOOL	1	ADC_C DIF2_L Input Gain                  On
+134	BOOL	1	ADC_C DIF3_L Input Gain                  On
+135	BOOL	1	ADC_C IN1_R Input Gain                   On
+136	BOOL	1	ADC_C IN2_R Input Gain                   On
+137	BOOL	1	ADC_C IN3_R Input Gain                   On
+138	BOOL	1	ADC_C DIF1_R Input Gain                  Off
+139	BOOL	1	ADC_C DIF2_R Input Gain                  On
+140	BOOL	1	ADC_C DIF3_R Input Gain                  On
+141	BOOL	1	ADC_C Left Mute                          Off
+142	BOOL	1	ADC_C Right Mute                         Off
+143	INT	2	ADC_D Digital Volume Control             88 88
+144	INT	1	ADC_D Left Fine Volume                   4
+145	INT	1	ADC_D Right Fine Volume                  4
+146	INT	2	ADC_D MICPGA Volume Ctrl                 40 40
+147	BOOL	1	ADC_D IN1_L Input Gain                   On
+148	BOOL	1	ADC_D IN2_L Input Gain                   On
+149	BOOL	1	ADC_D IN3_L Input Gain                   On
+150	BOOL	1	ADC_D DIF1_L Input Gain                  Off
+151	BOOL	1	ADC_D DIF2_L Input Gain                  On
+152	BOOL	1	ADC_D DIF3_L Input Gain                  On
+153	BOOL	1	ADC_D IN1_R Input Gain                   On
+154	BOOL	1	ADC_D IN2_R Input Gain                   On
+155	BOOL	1	ADC_D IN3_R Input Gain                   On
+156	BOOL	1	ADC_D DIF1_R Input Gain                  Off
+157	BOOL	1	ADC_D DIF2_R Input Gain                  On
+158	BOOL	1	ADC_D DIF3_R Input Gain                  On
+159	BOOL	1	ADC_D Left Mute                          Off
+160	BOOL	1	ADC_D Right Mute                         Off
+161	INT	1	IDC Enable                               0
+162	ENUM	1	SpiTimeStamps                            Off
+163	ENUM	1	I2S low Jitter function                  Off
+164	ENUM	1	Board Channel Config                     MonoRight
+165	ENUM	1	LineIn ADC                               Off
+166	ENUM	1	Amp Fault Enable                         Off
+167	BOOL	1	ADC_D Right Ip Select ADC_D IN1_R switch Off
+168	BOOL	1	ADC_D Right Ip Select ADC_D IN2_R switch Off
+169	BOOL	1	ADC_D Right Ip Select ADC_D IN3_R switch Off
+170	BOOL	1	ADC_D Right Ip Select ADC_D DIF1_R switch On
+171	BOOL	1	ADC_D Right Ip Select ADC_D DIF2_R switch Off
+172	BOOL	1	ADC_D Right Ip Select ADC_D DIF3_R switch Off
+173	BOOL	1	ADC_D Right Ip Select ADC_D IN1_L switch Off
+174	BOOL	1	ADC_D Left Ip Select ADC_D IN1_L switch  Off
+175	BOOL	1	ADC_D Left Ip Select ADC_D IN2_L switch  Off
+176	BOOL	1	ADC_D Left Ip Select ADC_D IN3_L switch  Off
+177	BOOL	1	ADC_D Left Ip Select ADC_D DIF1_L switch On
+178	BOOL	1	ADC_D Left Ip Select ADC_D DIF2_L switch Off
+179	BOOL	1	ADC_D Left Ip Select ADC_D DIF3_L switch Off
+180	BOOL	1	ADC_D Left Ip Select ADC_D IN1_R switch  Off
+181	BOOL	1	ADC_C Right Ip Select ADC_C IN1_R switch Off
+182	BOOL	1	ADC_C Right Ip Select ADC_C IN2_R switch Off
+183	BOOL	1	ADC_C Right Ip Select ADC_C IN3_R switch Off
+184	BOOL	1	ADC_C Right Ip Select ADC_C DIF1_R switch On
+185	BOOL	1	ADC_C Right Ip Select ADC_C DIF2_R switch Off
+186	BOOL	1	ADC_C Right Ip Select ADC_C DIF3_R switch Off
+187	BOOL	1	ADC_C Right Ip Select ADC_C IN1_L switch Off
+188	BOOL	1	ADC_C Left Ip Select ADC_C IN1_L switch  Off
+189	BOOL	1	ADC_C Left Ip Select ADC_C IN2_L switch  Off
+190	BOOL	1	ADC_C Left Ip Select ADC_C IN3_L switch  Off
+191	BOOL	1	ADC_C Left Ip Select ADC_C DIF1_L switch On
+192	BOOL	1	ADC_C Left Ip Select ADC_C DIF2_L switch Off
+193	BOOL	1	ADC_C Left Ip Select ADC_C DIF3_L switch Off
+194	BOOL	1	ADC_C Left Ip Select ADC_C IN1_R switch  Off
+195	BOOL	1	ADC_B Right DMic Ip ADC_B Right ADC switch Off
+196	BOOL	1	ADC_B Left DMic Ip ADC_B Left ADC switch Off
+197	BOOL	1	ADC_B Right Ip Select ADC_B IN1_R switch Off
+198	BOOL	1	ADC_B Right Ip Select ADC_B IN2_R switch Off
+199	BOOL	1	ADC_B Right Ip Select ADC_B IN3_R switch Off
+200	BOOL	1	ADC_B Right Ip Select ADC_B DIF1_R switch On
+201	BOOL	1	ADC_B Right Ip Select ADC_B DIF2_R switch Off
+202	BOOL	1	ADC_B Right Ip Select ADC_B DIF3_R switch Off
+203	BOOL	1	ADC_B Right Ip Select ADC_B IN1_L switch Off
+204	BOOL	1	ADC_B Left Ip Select ADC_B IN1_L switch  Off
+205	BOOL	1	ADC_B Left Ip Select ADC_B IN2_L switch  Off
+206	BOOL	1	ADC_B Left Ip Select ADC_B IN3_L switch  Off
+207	BOOL	1	ADC_B Left Ip Select ADC_B DIF1_L switch On
+208	BOOL	1	ADC_B Left Ip Select ADC_B DIF2_L switch Off
+209	BOOL	1	ADC_B Left Ip Select ADC_B DIF3_L switch Off
+210	BOOL	1	ADC_B Left Ip Select ADC_B IN1_R switch  Off
+211	BOOL	1	ADC_A Right DMic Ip ADC_A Right ADC switch Off
+212	BOOL	1	ADC_A Left DMic Ip ADC_A Left ADC switch Off
+213	BOOL	1	ADC_A Right Ip Select ADC_A IN1_R switch Off
+214	BOOL	1	ADC_A Right Ip Select ADC_A IN2_R switch Off
+215	BOOL	1	ADC_A Right Ip Select ADC_A IN3_R switch Off
+216	BOOL	1	ADC_A Right Ip Select ADC_A DIF1_R switch On
+217	BOOL	1	ADC_A Right Ip Select ADC_A DIF2_R switch Off
+218	BOOL	1	ADC_A Right Ip Select ADC_A DIF3_R switch Off
+219	BOOL	1	ADC_A Right Ip Select ADC_A IN1_L switch Off
+220	BOOL	1	ADC_A Left Ip Select ADC_A IN1_L switch  Off
+221	BOOL	1	ADC_A Left Ip Select ADC_A IN2_L switch  Off
+222	BOOL	1	ADC_A Left Ip Select ADC_A IN3_L switch  Off
+223	BOOL	1	ADC_A Left Ip Select ADC_A DIF1_L switch On
+224	BOOL	1	ADC_A Left Ip Select ADC_A DIF2_L switch Off
+225	BOOL	1	ADC_A Left Ip Select ADC_A DIF3_L switch Off
+226	BOOL	1	ADC_A Left Ip Select ADC_A IN1_R switch  Off
+227	BOOL	1	Right Input Mixer IN1_R P Switch         Off
+228	BOOL	1	Right Input Mixer IN2_R P Switch         Off
+229	BOOL	1	Right Input Mixer IN3_R P Switch         Off
+230	BOOL	1	Left Input Mixer IN1_L P Switch          Off
+231	BOOL	1	Left Input Mixer IN2_L P Switch          Off
+232	BOOL	1	Left Input Mixer IN3_L P Switch          Off
+233	BOOL	1	LOR Output Mixer R_DAC Switch            Off
+234	BOOL	1	HPR Output Mixer R_DAC Switch            On
+235	BOOL	1	HPR Output Mixer IN1_R Switch            Off
+236	BOOL	1	LOL Output Mixer L_DAC Switch            Off
+237	BOOL	1	HPL Output Mixer L_DAC Switch            On
+238	BOOL	1	HPL Output Mixer IN1_L Switch            Off
+
+% tinymix -D 0 13
+Ext_Amp_Gain:	>6dB	12dB	18dB	24dB

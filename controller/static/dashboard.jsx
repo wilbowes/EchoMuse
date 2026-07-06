@@ -726,6 +726,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                   {row('Firmware', device.firmware_ver || '—')}
                   {row('Last seen', relTime(device.last_seen))}
                   {row('Connected', device.connected ? 'Yes' : 'No', device.connected ? '#286040' : '#c0601a')}
+                  {row('OWW near-misses', device.owwNearMisses != null ? device.owwNearMisses : '—')}
                 </div>
                 <div>
                   <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.15em', marginBottom:14 }}>Resources</div>
@@ -2440,7 +2441,11 @@ function DeviceConfigForm({ config, onChange, disabled }) {
   const currentPreset = angle === -1 ? 'omni' : (angle === 90 ? 'front' : angle === 270 ? 'rear' : 'omni');
 
   const PRESETS = {
-    omni:  { beamAngle: -1,  beamformingEnabled: true,  activeMics: ['mk1','mk2','mk3','mk4','mk5','mk6'], patternType: 'omni'  },
+    // omni = centre mic (ch6) for everything, beamforming genuinely off.
+    // beamformingEnabled:true with beamAngle -1 is AUTO mode (onset-ratio
+    // perimeter mic selection at turn start), which is not what this
+    // preset's label or polar plot promise.
+    omni:  { beamAngle: -1,  beamformingEnabled: false, activeMics: ['mk1','mk2','mk3','mk4','mk5','mk6'], patternType: 'omni'  },
     front: { beamAngle: 90,  beamformingEnabled: true,  activeMics: ['mk3','mk4','mk5','mk6'],             patternType: 'front' },
     rear:  { beamAngle: 270, beamformingEnabled: true,  activeMics: ['mk1','mk2','mk3','mk6'],             patternType: 'rear'  },
   };
@@ -2603,6 +2608,7 @@ function DeviceConfigForm({ config, onChange, disabled }) {
             <Toggle label="Beamforming"    value={config.beamformingEnabled ?? false} onChange={v => set('beamformingEnabled', v)}/>
             <Toggle label="Noise suppression (NS)" value={config.nsEnabled ?? true} onChange={v => set('nsEnabled', v)}/>
             <Toggle label="Auto gain (AGC)"        value={config.agcEnabled ?? true} onChange={v => set('agcEnabled', v)}/>
+            <Toggle label="OWW speex NS"    value={config.owwSpeexNs ?? false} onChange={v => set('owwSpeexNs', v)}/>
           </div>
         )}
       </div>
