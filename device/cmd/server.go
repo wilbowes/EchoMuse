@@ -146,6 +146,17 @@ func main() {
 		applyHardwareConfig(msg)
 	})
 
+	// Beam lock/unlock — controller locks the beamformer onto the speaker's
+	// perimeter mic at wake detection (mid-stream, no restart) and releases
+	// it at turn end. Requests are consumed by the mic streaming goroutine.
+	controlClient.OnBeamLock(func(lock bool) {
+		if lock {
+			dataClient.RequestBeamLock()
+		} else {
+			dataClient.RequestBeamUnlock()
+		}
+	})
+
 	// Mute state change — notify controller so dashboard can reflect it,
 	// and stop/restart the mic stream device-side so mute is authoritative
 	// regardless of controller state (C5 fix, 2026-07-05 review). Previously

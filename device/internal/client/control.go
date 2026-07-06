@@ -43,6 +43,7 @@ type MicStopCallback func()
 type StateCallback func()
 type ConfigAppliedCallback func(msg config.ConfigMessage)
 type VolumeSetCallback func(level int)
+type BeamLockCallback func(lock bool)
 
 // ─── ControlClient ────────────────────────────────────────────────────────────
 
@@ -58,6 +59,7 @@ type ControlClient struct {
 	pendingCallback       StateCallback
 	configAppliedCallback ConfigAppliedCallback
 	volumeSetCallback     VolumeSetCallback
+	beamLockCallback      BeamLockCallback
 
 	conn         *websocket.Conn
 	connMu       sync.Mutex
@@ -92,6 +94,7 @@ func (c *ControlClient) OnConnected(cb StateCallback)             { c.connectedC
 func (c *ControlClient) OnPending(cb StateCallback)               { c.pendingCallback = cb }
 func (c *ControlClient) OnConfigApplied(cb ConfigAppliedCallback) { c.configAppliedCallback = cb }
 func (c *ControlClient) OnVolumeSet(cb VolumeSetCallback)         { c.volumeSetCallback = cb }
+func (c *ControlClient) OnBeamLock(cb BeamLockCallback)           { c.beamLockCallback = cb }
 
 var errPending = fmt.Errorf("pending approval")
 
@@ -263,6 +266,20 @@ func (c *ControlClient) connect(ctx context.Context, addr string, data *DataClie
 		case "mic_stop":
 			if c.micStopCallback != nil {
 				c.micStopCallback()
+			}
+
+		// beam_lock/beam_unlock: controller-driven beamformer control for the
+		// continuous wake stream. Sent at wake detection (lock onto the
+		// speaker's perimeter mic mid-utterance, no stream restart) and at
+		// turn end (back to ch6 omni for wake listening).
+		case "beam_lock":
+			if c.beamLockCallback != nil {
+				c.beamLockCallback(true)
+			}
+
+		case "beam_unlock":
+			if c.beamLockCallback != nil {
+				c.beamLockCallback(false)
 			}
 
 		case "volume_set":

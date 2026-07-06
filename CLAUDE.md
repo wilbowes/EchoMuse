@@ -93,13 +93,15 @@ Controller is discovered by the device via mDNS (`_emcontroller._tcp.local`).
 Each 32ms period passes through, in order:
 
 ```
-raw 9ch S24_3LE → beamformer → RNNoise NS → AGC → mono S16_LE → VAD gate → /data WebSocket
+raw 9ch S24_3LE → beamformer → RNNoise NS → [AGC] → mono S16_LE → [VAD gate] → /data WebSocket
 ```
+
+The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-free**: every 32ms period is sent continuously (batched into 80ms frames) so openwakeword scores an uninterrupted stream, and no adaptive gain state can drift with room noise. The VAD gate and AGC apply only to bounded `lock_mic` turn streams (button-triggered), which get a fresh `ResetAGC()` per stream.
 
 - **Beamformer** (`internal/beamformer/`) — selects the perimeter mic with the highest onset energy ratio (fast/slow EWMA) at voice turn start, then locks for the duration
 - **RNNoise** (`internal/rnnoise/`) — vendored C source (xiph/rnnoise v0.1), compiled via cgo; no external library required
-- **AGC** (`internal/processor/`) — release is frozen during silence and when RNNoise speech probability < 0.5, preventing noise floor amplification
-- **VAD** runs on pre-NS/AGC audio; opens gate after `VAD_SPEECH_MS` of speech, closes after `VAD_SILENCE_MS` of silence
+- **AGC** (`internal/processor/`) — lock_mic turns only; release is frozen during silence and when RNNoise speech probability < 0.5, preventing noise floor amplification
+- **VAD** (lock_mic turns only) runs on pre-NS/AGC audio; opens gate after `VAD_SPEECH_MS` of speech, closes after `VAD_SILENCE_MS` of silence, then sends an end-of-speech sentinel
 
 ### Controller audio pipeline
 

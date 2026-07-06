@@ -61,6 +61,8 @@ import time
 import uuid
 from typing import TYPE_CHECKING, Optional
 
+import numpy as np
+
 from zeroconf.asyncio import AsyncZeroconf
 from zeroconf import ServiceInfo
 
@@ -252,6 +254,12 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         # the start of every turn alongside the other per-turn flags.
         self._ha_vad_end = asyncio.Event()
 
+        # Set on STT_VAD_START — HA's VAD heard speech begin. Used by
+        # _stream_mic_audio to disarm the no-speech timeout when the
+        # controller's own SNR-relative check misses quiet speech. Cleared
+        # at the start of every turn alongside _ha_vad_end.
+        self._ha_vad_start = asyncio.Event()
+
         # Callbacks injected by trigger_voice_turn() for each turn —
         # cleared at turn end.
         self._on_tts_received   = None   # async callable(pcm_url_or_bytes)
@@ -437,7 +445,14 @@ class EchoMuseSatellite(SatelliteServerProtocol):
 
         log.debug(f"[{self._log_name}] VoiceAssistantEvent type={event_type} data={data}")
 
-        if event_type == ET.VOICE_ASSISTANT_STT_VAD_END:
+        if event_type == ET.VOICE_ASSISTANT_STT_VAD_START:
+            # HA's model-driven VAD heard speech begin — authoritative
+            # counterpart to the controller's SNR-relative check in
+            # _stream_mic_audio (covers quiet speech in a noisy room that
+            # misses the 3×-floor test there).
+            self._ha_vad_start.set()
+
+        elif event_type == ET.VOICE_ASSISTANT_STT_VAD_END:
             # Speech ended — HA is now processing (STT → intent → TTS).
             # This is the "thinking" boundary: device detected VAD end,
             # HA now owns the processing pipeline.
@@ -601,6 +616,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._continue_conversation = False
         self._no_speech_timeout     = False
         self._ha_vad_end.clear()
+        self._ha_vad_start.clear()
         self._on_thinking    = on_thinking
         self._on_announce    = None   # set below after announcement path is confirmed
         self._trace          = trace  # may be None — all trace.x calls guard against this
@@ -779,12 +795,30 @@ class EchoMuseSatellite(SatelliteServerProtocol):
 
         # Controller-side no-speech timeout (replaces device's 0x05 sentinel,
         # which only fires when lock_mic=True — a condition P0-1 eliminates).
-        # If no real audio frame (non-sentinel) arrives within this window
-        # after the turn starts, the wake was accidental and we close quietly.
         # 5s matches the device's own noSpeechTimeout and Alexa's behaviour.
+        #
+        # SNR-relative speech detection (2026-07-06): with the ungated wake
+        # stream, frames flow continuously — silence included — so "a frame
+        # arrived" no longer means "the user spoke". Disarming on the first
+        # frame made this timeout dead code, and accidental wakes sat open
+        # until HA's own STT timeout (~10s) plus error cleanup. The timeout
+        # now disarms only on the first frame whose RMS clears the device's
+        # measured noise floor by 3× (with an absolute lower bound matching
+        # the old device VAD default, for the floor-not-yet-warmed case).
+        # This is the noise floor as *measurement*: the threshold adapts per
+        # room, the audio itself is untouched.
         NO_SPEECH_TIMEOUT = 5.0
+        speech_seen = False
         first_real_frame_seen = False
         turn_start = time.monotonic()
+
+        def _is_speech(chunk: bytes) -> bool:
+            samples = np.frombuffer(chunk, dtype=np.int16)
+            if samples.size == 0:
+                return False
+            rms = float(np.sqrt(np.mean((samples.astype(np.float64) / 32768.0) ** 2)))
+            floor = getattr(device, "noise_floor", 0.0)
+            return rms >= max(3.0 * floor, 0.004)
 
         while True:
             if device.cancel_event.is_set():
@@ -808,11 +842,17 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     self._send_one(api_pb2.VoiceAssistantAudio(data=b"", end=True))
                 return
 
-            # No-speech timeout: if no real (non-preroll) frame has arrived
-            # within NO_SPEECH_TIMEOUT seconds, treat as accidental wake.
-            # We only enforce this before the first real frame arrives —
-            # once speech starts, the normal VAD sentinel owns end-of-turn.
-            if not first_real_frame_seen and (time.monotonic() - turn_start) > NO_SPEECH_TIMEOUT:
+            # No-speech timeout: if nothing above the room's noise floor has
+            # arrived within NO_SPEECH_TIMEOUT seconds, treat as accidental
+            # wake and close quietly. Once speech is detected, HA's VAD owns
+            # end-of-turn.
+            # HA's VAD hearing speech also disarms the timeout — covers quiet
+            # speech in a noisy room that misses the 3×-floor check below.
+            if not speech_seen and self._ha_vad_start.is_set():
+                speech_seen = True
+                log.debug(f"[{self._log_name}] Speech detected (HA VAD start) — no-speech timeout disarmed")
+
+            if not speech_seen and (time.monotonic() - turn_start) > NO_SPEECH_TIMEOUT:
                 log.info(
                     f"[{self._log_name}] No speech within {NO_SPEECH_TIMEOUT}s — "
                     f"closing HA pipeline quietly (controller-side no-speech timeout)"
@@ -886,9 +926,22 @@ class EchoMuseSatellite(SatelliteServerProtocol):
 
             if not first_real_frame_seen:
                 first_real_frame_seen = True
-                log.debug(f"[{self._log_name}] First real audio frame received — no-speech timeout disarmed")
+                log.debug(f"[{self._log_name}] First real audio frame received")
                 if self._trace:
                     self._trace.t_first_frame_ms = self._trace.elapsed_ms()
+
+            if not speech_seen and _is_speech(payload):
+                speech_seen = True
+                log.debug(
+                    f"[{self._log_name}] Speech detected (above noise floor "
+                    f"{getattr(device, 'noise_floor', 0.0):.4f}) — no-speech timeout disarmed"
+                )
+                # Lock the beamformer onto the speaker now that they're
+                # audibly talking. Matters for continuation turns (the wake
+                # turn already locked at detection — the device no-ops a
+                # second lock) and after any TTS mic restart, which resets
+                # the beam to ch6 omni.
+                asyncio.ensure_future(device.beam_lock())
 
             if self._trace:
                 self._trace.audio_frames += 1

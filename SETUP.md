@@ -513,7 +513,11 @@ dns-sd -B _emcontroller._tcp local
 ✅ LED direction overlay — light green segment on listening ring during voice turn only
 ✅ LED mapping calibrated — LED 0 at 240°, confirmed from volume sweep
 ✅ Audio processing pipeline — RNNoise NS (vendored v0.1 C source, cgo) + AGC per period
-✅ NS and AGC independently toggleable from dashboard — NS off (pending P0-3), AGC on (v2.6.5, after echo fixes)
+✅ NS and AGC independently toggleable from dashboard — NS off (pending P0-3); AGC applies to lock_mic turns only since v2.7.0 (wake stream is permanently AGC-free)
+✅ Ungated continuous wake stream (v2.7.0) — no VAD gate/AGC/preroll on the always-on stream; OWW scores uninterrupted audio; ~32KB/s per device
+✅ Mic stream leak fixed (v2.7.0) — ownership check in streamMic exit; stop/start pairs can no longer leak a concurrent duplicate stream (historical "wake degrades over days, reboot fixes it" root cause)
+✅ Per-room noise floor tracking (v2.7.0, controller) — measurement-only asymmetric EWMA; drives the SNR-relative 5s no-speech cutoff (wake-then-silence closes quietly again)
+✅ Mid-stream beam lock (v2.7.0) — beam_lock/beam_unlock control messages; wake turns get perimeter mic selection without a stream restart (selection quality: known-poor, see pipeline state table)
 ✅ HA-driven conversation continuation — continue_conversation flag wired; after TTS playback, re-triggers voice turn immediately if HA sets flag in INTENT_END (v2.6.4)
 ✅ Speaker audioChanDepth 32 — prevents mid-stream underrun stutter on longer TTS responses (v2.6.4)
 ✅ Dashboard offline IP display — shows last known IP with "(last seen)" annotation when offline; suppresses Docker-NAT 127.0.0.1 artefact (v2.6.4)
@@ -611,7 +615,9 @@ Ch7, Ch8 → unconnected
 
 ## Mic Array — What Actually Happens at Each Stage
 
-This describes the pipeline as it works in v2.6.5 with NS disabled and AGC enabled (current working baseline — AGC was re-enabled after the v2.6.5 echo fixes; NS stays off pending P0-3). The stages are in order from hardware to HA.
+This describes the pipeline as of v2.7.0 (2026-07-06): the wake stream is **ungated and AGC-free** — the device streams every period continuously, and all adaptation lives controller-side as measurement. NS stays off pending P0-3. The stages are in order from hardware to HA.
+
+Why the gate came out (2026-07-06 rework): the VAD gate's absolute RMS threshold is wrong in at least one room of every home, openwakeword is a streaming model that scores best on continuous audio (gated bursts spliced together measurably depress scores even with preroll), and the AGC's persistent gain state on a never-restarting stream rebaselined itself to each room's noise floor — the "wake word degrades over days, reboot fixes it" disease. Bandwidth was the reason for the gate and it doesn't survive arithmetic: 16kHz mono S16 is 32KB/s per device, 6× smaller than the TTS playback stream.
 
 ### Idle — waiting for wake word
 
@@ -619,36 +625,39 @@ This describes the pipeline as it works in v2.6.5 with NS disabled and AGC enabl
 ALSA card 0 device 24 (9ch S24_3LE 16kHz)
   → pcm_microphone.go subscriber channel (raw 13824-byte periods at ~31ms intervals)
   → beamformer.Process(raw, beamAngle)
-      — beamformingEnabled=false: always returns ch6 (centre/omni mic)
-      — smoothers still update every period regardless of flag (baseline stays warm)
+      — unlocked (idle): always returns ch6 (centre/omni mic)
+      — smoothers still update every period (baseline stays warm)
       — returns mono S16_LE 512 samples
-  → vadPeriodRMS(mono) — RMS on raw beamformed output, pre-processing
-  → if rms >= vadThreshold (0.001): VAD gate opens
+  → vadPeriodRMS(mono) — computed for the periodic diagnostic log only;
+      does NOT gate sending on this stream (v2.7.0)
   → [if NS enabled] proc.noiseSuppress() — RNNoise (currently OFF, pending P0-3)
-  → [if AGC enabled] proc.agc() — automatic gain control (currently ON;
-      gain reset to unity at every stream start via ResetAGC, v2.6.5)
-  → [if gate open] preroll ring flushed first (up to 16 periods ≈ 512ms of
-      pre-onset audio kept while the gate was closed — gives OWW acoustic
-      context and STT the true first phoneme, v2.6.5), then frame buffered
-      → sent as binary WS frame to controller /data
+  → AGC: NEVER on the wake stream (v2.7.0 — forced off regardless of config;
+      adaptive gain state on a permanent stream is a rebaselining mechanism
+      by construction). agcEnabled config now applies to lock_mic turn
+      streams only.
+  → EVERY period sent — batched into 80ms chunks, ~12.5 frames/s, 32KB/s:
       frame: [0x01][seq_hi][seq_lo][2560 bytes PCM = 80ms]
-  → [if gate closed] frame appended to preroll ring (oldest evicted past 16
-      periods) — silence is not sent upstream
+      No VAD gate, no preroll ring, no 0x04/0x05 sentinels on this stream.
 
 Controller handle_data():
   → oww_paused.is_set()? → voice_queue (during a turn)
   → else → mic_queue (during idle)
 
 wake_word_listener():
-  → pulls from mic_queue
+  → pulls from mic_queue (10s of silence now means the stream DIED —
+    hardware mute still produces zero-filled frames — so the controller
+    logs a warning and sends a defensive mic_start, skipped mid-turn)
   → accumulates into 80ms chunks
-  → OWW inference (hey_jarvis_v0.1, threshold 0.30)
-  → scores > 0.05 counted as near-misses: INFO log (rate-limited 1/2s)
-    + dashboard counter (v2.6.5, Q4); full detail still at DEBUG
+  → per-chunk RMS updates device.noise_floor (v2.7.0): asymmetric EWMA,
+    follows drops fast (α=0.3), rises slowly (α=0.008 ≈ 10s) so speech
+    can't drag it up. Measurement only — the audio is never modified.
+  → OWW inference (hey_rhasspy_v0.1, threshold 0.30)
+  → scores > 0.05 counted as near-misses: INFO log (rate-limited 1/2s,
+    now includes rms= and floor=) + dashboard counter
   → score >= threshold → wake detected
 ```
 
-**Key: the stream runs continuously. VAD gate controls what gets sent — silence is dropped (but the last ~512ms is retained in the preroll ring), speech bursts are forwarded with their pre-onset context. ch6 is always the channel during idle (beamforming off). Smoothers run every period.**
+**Key: the stream runs continuously and is completely stateless — no gate, no adaptive gain, nothing that can drift with room history. OWW always sees uninterrupted audio. ch6 omni during idle. Per-room adaptation happens controller-side as a noise-floor *measurement*, consumed by endpointing — never applied to the signal.**
 
 ### Wake word detected → command capture
 
@@ -656,6 +665,12 @@ wake_word_listener():
 wake_word_listener():
   → oww_paused.set() — routing flips: handle_data() now sends to voice_queue
   → model.reset(), buf.clear()
+  → beam_lock control message (v2.7.0) — device locks the beamformer onto
+    the perimeter mic with the best speech onset ratio, mid-stream, no
+    restart. Sent at detection because that's the freshest onset signal the
+    selector will get (though see the beamforming caveat in the table below
+    — controller-side detection latency means even this is 300–500ms after
+    the wake word started). beam_unlock is sent after the turn completes.
   → _run_voice_locked(device, trigger_label="wakeword(score)")
       → [esphome path] trigger_voice_turn()
           → TurnTrace created (t0 = now)
@@ -669,20 +684,26 @@ wake_word_listener():
                     turns pass preroll_discard=0 — they have no wake-word
                     tail, discarding real audio clipped their first word
                   → controller-side 5s no-speech timeout armed
-                  → first real frame arrives → timeout disarmed, t_first_frame logged
+                  → timeout disarms on SPEECH, not on the first frame
+                    (v2.7.0 — frames now flow continuously, silence included,
+                    so "a frame arrived" means nothing). Speech = chunk RMS ≥
+                    max(3 × device.noise_floor, 0.004), OR HA's own
+                    STT_VAD_START event (covers quiet speech in a noisy room).
+                    Wake-then-silence closes quietly at 5s again instead of
+                    sitting through HA's ~10s STT timeout + error cleanup.
                   → frames sent as VoiceAssistantAudio chunks to HA
-                  → stream ends on WHICHEVER ARRIVES FIRST (v2.6.5 C1):
+                  → stream ends on WHICHEVER ARRIVES FIRST:
                       — HA's own VAD end (_ha_vad_end, set on STT_VAD_END or
                         ERROR) — the endpointing authority; noise-robust,
-                        model-driven. Wins in noisy rooms where the device's
-                        RMS gate never closes
-                      — device VAD sentinel (0x04) — advisory; usually wins
-                        the race in a quiet room
+                        model-driven (v2.6.5 C1)
+                      — device VAD sentinel (0x04) — only exists on lock_mic
+                        (button) streams now; never arrives on wake turns
                     → VoiceAssistantAudio(end=True), t_vad_end logged
 
 NOTE: the stream never stops. No mic_stop, no mic_start_turn on OWW path.
-The device is still on ch6 omni. The only change at wake is oww_paused flag
-flipping the queue routing. Command audio flows in with zero gap.
+The only changes at wake are the oww_paused flag flipping the queue routing
+and the beam_lock switching the mic channel. Command audio flows in with
+zero gap.
 ```
 
 ### HA pipeline → response
@@ -706,16 +727,31 @@ Controller satellite:
   → stream PCM to device ALSA as 0x02 binary frames, 0x03 EOS
   → sleep for audio duration (acoustic feedback prevention)
   → EITHER (continuation, v2.6.5 C2): HA set continue_conversation →
-    mic_start (no lock_mic) → loop into next turn with preroll_discard=0
-    — the gate starts closed, but the device preroll ring preserves onset
+    mic_start (no lock_mic) → loop into next turn with preroll_discard=0.
+    The restarted stream is ungated so audio flows immediately; the
+    controller sends beam_lock again the moment the user's answer clears
+    the noise floor (the TTS mic restart reset the beam to ch6 omni)
   → OR (normal end): voice_queue drained WHILE oww_paused is still set
     (v2.6.5 regression fix — draining after the routing flip left stale
     ambient frames to arrive as preamble on the next turn)
   → oww_paused.clear() → routing returns to mic_queue
   → mic_start (no lock_mic) → stream restarts on ch6 omni
+  → beam_unlock sent (belt-and-braces — matters for no-TTS turns where the
+    stream never restarted and a beam lock would otherwise persist into
+    idle wake listening)
   → stale frames drained (belt-and-braces no-op now), OWW model reset
   → [TURN] log line emitted with full timing breakdown
 ```
+
+NOTE the stop/start pair around TTS is safe as of v2.7.0: streamMic's exit
+path has an ownership check (d.micStopCh == stopCh) so a draining old
+goroutine can't clear micActive over its replacement. Before the fix, that
+race let a mic_start spawn a second concurrent stream that no mic_stop could
+reach — leaked gated streams were silent while idle but duplicated every
+utterance 2× (STT saw "turn on on the on the office…") and their 0x04
+sentinels cleared the OWW buffer, progressively killing wake detection until
+the process restarted. This was almost certainly the historical
+"wake word degrades over days, reboot fixes it" bug.
 
 ### Button-triggered turn (differs from OWW path)
 
@@ -731,20 +767,26 @@ Button press (clickType=138):
   → _run_voice_locked(device, trigger_label="button")
   → [same HA pipeline as above]
   → mic_stop → mic_start (no lock_mic) → back to ch6 omni
+    (explicit stop first, v2.7.0: on no-TTS outcomes — cancel, error,
+    no-speech — the lock_mic stream is still running and a bare mic_start
+    would no-op against it, leaving the GATED, beam-locked turn stream as
+    the permanent wake stream)
 
 Button path retains stop/start because: (a) no dead zone cost — button is
-pressed before speech starts, (b) directional lock is appropriate — user
-just deliberately pressed a button, their direction is known.
+pressed before speech starts, (b) the lock_mic stream is the only place the
+VAD gate, preroll ring, sentinels, and (config-gated) AGC still exist.
 ```
 
 ### What's currently off and why
 
 | Stage | State | Reason |
 |---|---|---|
-| RNNoise NS | OFF | Model calibrated for 48kHz, fed 16kHz — miscalibrates speech probability, degrades HF consonants. Measured improvement when disabled. Decision pending (P0-3): speexdsp preprocessor (16kHz-native) or delete. |
-| AGC | **ON** (v2.6.5) | Previously off: TTS echo drove gain to minimum / idle drift amplified noise. Fixed by (a) mic now stops before TTS playback, (b) ResetAGC() returns gain to unity at every stream start. Re-enabled 2026-07-06, 6/6 turns clean. |
-| Beamforming | OFF | At ≤1.5m typical distance, inter-mic SNR differences are below the onset ratio discrimination threshold. Wrong locks hurt more than right locks help. Re-evaluate at 2–3m. |
+| RNNoise NS | OFF | Model calibrated for 48kHz, fed 16kHz — miscalibrates speech probability, degrades HF consonants. Measured improvement when disabled. Decision pending (P0-3): speexdsp preprocessor (16kHz-native) or delete — with the wake stream now ungated, the cleaner future is NS controller-side on ASR-bound utterances only. |
+| AGC | **OFF on the wake stream, permanently** (v2.7.0 — ignores config). Config-gated on lock_mic turns only. | v2.6.5 re-enabled it after the echo fixes, but ResetAGC only runs at stream start and the wake stream never restarts — in any room with steady noise above vadThreshold, the release path walked gain up toward amplifying the noise floor (the RNNoise interlock that was meant to prevent this is dead while NS is off), then the fast attack compressed the wake word's envelope mid-utterance. Adaptive gain state on a permanent stream = rebaselining by construction. **Open item:** the fixed gain staging that should replace it — speech at 1.3m measures RMS ~0.001 vs the 0.08 the AGC used to target; wake scores dropped noticeably without it. Use the rms=/floor= values now in the OWW logs to size an adcDigitalGain/adcMicpga bump. |
+| VAD gate (wake stream) | **REMOVED** (v2.7.0) | Absolute RMS threshold can't be right in every room; OWW wants continuous audio; the gate held open by ambient noise was also what let the AGC release run continuously. Still exists on lock_mic (button) streams for endpointing. |
+| Beamforming | ON in config, **known-poor selection** | Lock is now commanded at wake detection (v2.7.0, beam_lock mid-stream), but controller-side detection lands 300–500ms after the wake word started — the fast-EWMA onset the selector needs has largely decayed, so the chosen mic (and the direction LED) is often unrelated to the speaker. Consistent with the earlier finding that wrong locks hurt more than right locks help at ≤1.5m. Options: set beamformingEnabled=false until fixed (Lock() then no-ops, everything stays ch6), or fix selection properly — an energy-history ring so Lock() can look *back* at the wake-word window, or device-local onset arming. |
 | owwSpeexNs | OFF | Available (v2.6.5, Q1): openwakeword's speexdsp suppressor, wake path only. Off by default — flip on the lounge device and A/B wake rate with TV on before fleet-wide enable. |
+| Noise floor tracking | **ON** (v2.7.0, controller) | Per-device asymmetric EWMA over the continuous wake stream. Measurement only. Consumed by the SNR-relative no-speech timeout; logged as floor= in OWW lines. |
 
 ### VAD threshold guidance
 
@@ -758,6 +800,8 @@ Measured signal levels at 16kHz on ch6, MICPGA=40, digital gain=88:
 | Raised voice at 1.3m | 0.004–0.010 |
 
 vadThreshold 0.001 sits comfortably between ambient and speech. Raise to 0.003–0.005 in noisy rooms (TV on). Dashboard slider now goes down to 0.0001 for quiet environments.
+
+**Scope change (v2.7.0):** vadThreshold/vadSpeechMs/vadSilenceMs apply only to lock_mic (button) turn streams now — the wake stream is ungated and ignores all three. Wake-turn endpointing is HA's VAD; accidental-wake cutoff is the controller's 5s SNR-relative timeout against the measured per-room noise floor (no per-room tuning needed). This table remains useful for interpreting the rms=/floor= values in controller logs and for sizing the pending fixed-gain bump.
 
 ---
 
@@ -858,6 +902,10 @@ Server → Device:
 {"type": "mic_start"}
 {"type": "mic_start", "lock_mic": true}
 {"type": "mic_stop"}
+{"type": "beam_lock"}      // v2.7.0: lock beamformer onto best perimeter mic
+                           // mid-stream, no restart (no-op if beamforming
+                           // disabled in config or already locked)
+{"type": "beam_unlock"}    // v2.7.0: release beam lock, back to ch6 omni
 {"type": "shell_open"}
 {"type": "shell_close"}
 {"type": "ping"}
@@ -867,13 +915,13 @@ Server → Device:
 
 Device → Server (mic frames):
 ```
-[0x01][seq_hi][seq_lo][mono S16_LE PCM, 2560 bytes = 80ms]  — VAD-gated speech
-[0x01][seq_hi][seq_lo][0x04]                                 — VAD end (speech detected, then ended)
-[0x01][seq_hi][seq_lo][0x05]                                 — no-speech timeout (see below)
+[0x01][seq_hi][seq_lo][mono S16_LE PCM, 2560 bytes = 80ms]  — audio (continuous on the wake stream since v2.7.0; VAD-gated speech on lock_mic streams)
+[0x01][seq_hi][seq_lo][0x04]                                 — VAD end (lock_mic streams only since v2.7.0)
+[0x01][seq_hi][seq_lo][0x05]                                 — no-speech timeout (lock_mic streams only; see below)
 ```
 All three share the same `frameTypeMic` (`0x01`) wrapper and seq header — the VAD sentinels are single-byte *payloads*, not distinct top-level frame types. (0x02/0x03 below are genuinely distinct top-level types, speaker-direction only, no seq header — don't confuse the two framing conventions.)
 
-**No-speech timeout (0x05), added v2.6.0.** `streamMic` (device/internal/client/data.go) only arms this when `lock_mic: true` was set on the `mic_start` that began the stream — i.e. only for a bounded voice turn (post-wake-word or button press), never for the permanent `lock_mic`-absent OWW listening stream. If no speech is ever detected (RMS never crosses `VadThreshold` for `VadSpeechMs` consecutive periods) within 5s of turn start, the device gives up locally and sends `0x05` instead of waiting on the existing silence-after-speech hysteresis, which never engages if speech never started. Distinguishing 0x05 from 0x04 lets the controller skip contacting HA's Assist pipeline entirely for a turn that never had anything to transcribe — mirrors Alexa's behaviour of quietly giving up on "wake word, then silence" rather than round-tripping to the backend just to receive `stt-no-text-recognized`. **This must never be armed for `lock_mic`-absent streams** — an earlier build armed it unconditionally, which silently killed the permanent wake-word listening stream 5s after every boot/reconnect with nothing to restart it (wake word "stopped working entirely," diagnosed via device log showing repeated `no speech detected within timeout` firing exactly 5s after every idle `Mic streaming started`, with no corresponding `mic_start` to revive it). Device-side test coverage (`internal/client/streamMic_test.go`) includes a regression test asserting a `lock_mic`-absent stream survives extended silence indefinitely.
+**No-speech timeout (0x05), added v2.6.0.** `streamMic` (device/internal/client/data.go) only arms this when `lock_mic: true` was set on the `mic_start` that began the stream — i.e. only for a bounded voice turn (post-wake-word or button press), never for the permanent `lock_mic`-absent OWW listening stream. If no speech is ever detected (RMS never crosses `VadThreshold` for `VadSpeechMs` consecutive periods) within 5s of turn start, the device gives up locally and sends `0x05` instead of waiting on the existing silence-after-speech hysteresis, which never engages if speech never started. Distinguishing 0x05 from 0x04 lets the controller skip contacting HA's Assist pipeline entirely for a turn that never had anything to transcribe — mirrors Alexa's behaviour of quietly giving up on "wake word, then silence" rather than round-tripping to the backend just to receive `stt-no-text-recognized`. **This must never be armed for `lock_mic`-absent streams** — an earlier build armed it unconditionally, which silently killed the permanent wake-word listening stream 5s after every boot/reconnect with nothing to restart it (wake word "stopped working entirely," diagnosed via device log showing repeated `no speech detected within timeout` firing exactly 5s after every idle `Mic streaming started`, with no corresponding `mic_start` to revive it). Since v2.7.0 the failure mode is doubly covered: the `lock_mic`-absent stream has no VAD machinery at all, and the controller detects a dead wake stream (10s without frames) and sends a defensive `mic_start`.
 
 Server → Device (speaker frames):
 ```

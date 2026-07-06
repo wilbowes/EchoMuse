@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -48,11 +49,10 @@ const (
 
 	// prerollPeriods is how many processed 32ms periods of pre-gate audio are
 	// retained while the VAD gate is closed and flushed upstream the moment it
-	// opens (~512ms at 16). Wake-word models score a continuous stream; without
-	// preroll, every utterance arrives as a splice starting at speech onset
-	// with no acoustic context, which measurably depresses OWW scores
-	// (2026-07-06 test: real attempts scoring 0.05-0.27 against a 0.3
-	// threshold). Also gives STT the true first phoneme.
+	// opens (~512ms at 16). Only applies to lockMic (bounded turn) streams —
+	// the always-on wake stream is ungated and sends everything, so OWW
+	// always sees a continuous stream. For turns, preroll gives STT the true
+	// first phoneme instead of a hard splice at gate-open.
 	prerollPeriods = 16
 
 	// noSpeechTimeout bounds how long streamMic will wait for speech to
@@ -95,6 +95,13 @@ func vadPeriodRMS(mono []byte) float64 {
 
 // ─── DataClient ───────────────────────────────────────────────────────────────
 
+// Beam lock request states — see DataClient.beamReq.
+const (
+	beamReqNone   int32 = 0
+	beamReqLock   int32 = 1
+	beamReqUnlock int32 = 2
+)
+
 type DataClient struct {
 	deviceID string
 	mic      mic.Subscribable
@@ -105,6 +112,17 @@ type DataClient struct {
 	micMu     sync.Mutex
 	micActive bool
 	micStopCh chan struct{}
+
+	// beamReq carries a pending beam lock/unlock request from the control
+	// plane to the mic streaming goroutine. Beamformer methods are not safe
+	// to call from other goroutines (same reason beam.Unlock is deferred
+	// inside streamMic rather than called from StopMic), so the control
+	// handler only sets this flag; streamMic consumes it with Swap at the
+	// top of each period. Lets the controller lock the beamformer onto the
+	// speaker's perimeter mic mid-stream at wake detection — wake-triggered
+	// turns don't restart the stream (P0-1), so without this they ran the
+	// entire turn on ch6 omni and the mic array did nothing for them.
+	beamReq int32
 
 	conn   *websocket.Conn
 	connMu sync.Mutex
@@ -144,6 +162,20 @@ func (d *DataClient) NotifyReady(serverAddr string) {
 		}
 		d.readyCh <- serverAddr
 	}
+}
+
+// RequestBeamLock asks the running mic stream to lock the beamformer onto
+// the best perimeter mic (respecting BeamformingEnabled config). Safe to call
+// from any goroutine; consumed by streamMic on its next period. A later
+// request overwrites an unconsumed earlier one.
+func (d *DataClient) RequestBeamLock() {
+	atomic.StoreInt32(&d.beamReq, beamReqLock)
+}
+
+// RequestBeamUnlock asks the running mic stream to release the beam lock and
+// return to ch6 omni. Safe to call from any goroutine.
+func (d *DataClient) RequestBeamUnlock() {
+	atomic.StoreInt32(&d.beamReq, beamReqUnlock)
 }
 
 func (d *DataClient) StartMic(lockMic bool) {
@@ -274,8 +306,11 @@ func (d *DataClient) connect(ctx context.Context, addr string) error {
 	}
 }
 
-// streamMic subscribes to the mic, runs the processing pipeline and VAD gate,
-// streams binary frames to the controller.
+// streamMic subscribes to the mic, runs the processing pipeline, and streams
+// binary frames to the controller. The always-on wake stream (!lockMic) is
+// ungated and AGC-free: every period is sent, continuously. Bounded turn
+// streams (lockMic) keep the VAD gate, preroll ring, end-of-speech sentinels,
+// and no-speech timer.
 func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, lockMic bool) {
 	if d.mic == nil {
 		log.Println("[data] streamMic: no mic")
@@ -285,9 +320,25 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 	// Clear micActive on exit regardless of why we stopped — StopMic, stopCh
 	// signal, or ALSA stream death. Without this, a mic death leaves micActive=true
 	// and StartMic silently refuses to restart.
+	//
+	// Ownership check (2026-07-06): only clear micActive if this goroutine is
+	// still the current stream. StopMic→StartMic in quick succession (the
+	// controller sends that pair after every voice turn) spawns a replacement
+	// goroutine while this one is still draining its last few periods;
+	// without the check, this defer then stamped micActive=false over the
+	// replacement's true, and the NEXT mic_start spawned a second concurrent
+	// stream that no StopMic could ever reach (micStopCh no longer points at
+	// it). Leaked gated streams are silent while idle but transmit during
+	// speech — every utterance reached the controller twice (STT heard
+	// "turn on on the on the office…") and their VADEnd sentinels cleared
+	// the OWW chunk buffer, progressively killing wake detection until the
+	// process restarted. d.micStopCh is compared against our own stopCh as
+	// the identity token: they're equal only if no StartMic ran after us.
 	defer func() {
 		d.micMu.Lock()
-		d.micActive = false
+		if d.micStopCh == stopCh {
+			d.micActive = false
+		}
 		d.micMu.Unlock()
 		log.Println("[data] streamMic: exited")
 	}()
@@ -403,7 +454,34 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 				beamAngle = *snap.BeamAngle
 			}
 			nsEnabled := snap.NsEnabled == nil || *snap.NsEnabled
-			agcEnabled := snap.AgcEnabled == nil || *snap.AgcEnabled
+			// AGC is forced off on the always-on wake stream (!lockMic).
+			// Adaptive gain with persistent state on a stream that never
+			// restarts is a rebaselining mechanism by construction: in a
+			// room with steady background noise above vadThreshold, the
+			// RMS gate calls every noisy period "speech", the release path
+			// walks the gain up toward amplifying the noise floor, and the
+			// fast attack then compresses the wake word's envelope
+			// mid-utterance — depressing OWW scores. (The RNNoise-
+			// probability interlock that was meant to prevent this is dead
+			// while NS is disabled — see processor.go Q3.) Wake word models
+			// are trained level-diverse and don't need AGC. The config
+			// toggle still governs bounded lockMic turns, which get a fresh
+			// ResetAGC each stream.
+			agcEnabled := lockMic && (snap.AgcEnabled == nil || *snap.AgcEnabled)
+
+			// Consume any pending beam lock/unlock request from the control
+			// plane (wake detection → lock, turn end → unlock). Handled on
+			// this goroutine because Beamformer methods aren't safe to call
+			// from the control handler. Lock() no-ops if already locked or
+			// if beamforming is disabled in config.
+			switch atomic.SwapInt32(&d.beamReq, beamReqNone) {
+			case beamReqLock:
+				turnBeam := snap.BeamformingEnabled != nil && *snap.BeamformingEnabled
+				d.beam.Lock(turnBeam)
+			case beamReqUnlock:
+				d.beam.Unlock()
+			}
+
 			mono, angle := d.beam.Process(raw, beamAngle)
 
 			// ── Processing pipeline ──────────────────────────────────────
@@ -446,6 +524,28 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 				if cb != nil {
 					cb(angle)
 				}
+			}
+
+			// Ungated wake stream: the always-on (!lockMic) stream sends
+			// every processed period, batched into 80ms chunks — no VAD
+			// gate, no preroll, no end-of-speech sentinels. openwakeword
+			// is a streaming model whose internal mel-spectrogram buffer
+			// assumes continuous audio; feeding it VAD-gated bursts spliced
+			// together (even with preroll) measurably depresses scores, and
+			// an absolute RMS threshold is wrong in at least one room of
+			// every home. Bandwidth is a non-issue: 16kHz mono S16 is
+			// 32KB/s, ~12.5 frames/s at this chunk size — 6× smaller than
+			// the TTS playback stream. Turn endpointing for wake-triggered
+			// turns is owned controller-side (HA STT_VAD_END in esphome
+			// mode, plus the controller's own no-speech timeout); the RMS
+			// gate below now serves only bounded lockMic turns.
+			if !lockMic {
+				buf = append(buf, mono...)
+				for len(buf) >= vadOwwChunkBytes {
+					sendFrame(buf[:vadOwwChunkBytes])
+					buf = buf[vadOwwChunkBytes:]
+				}
+				continue
 			}
 
 			if speech {

@@ -235,6 +235,15 @@ class Device:
         # semantics generally — a fresh Device is created per connection).
         self.oww_near_misses: int = 0
 
+        # Per-room noise floor estimate (normalized RMS, 0..1), tracked from
+        # the continuous wake stream in wake_word_listener. Measurement only —
+        # never applied to the audio (see 2026-07-06 architecture discussion:
+        # adaptation as measurement, not signal modification). Consumers:
+        # em_esphome._stream_mic_audio's SNR-relative no-speech detection,
+        # and diagnostics (near-miss logs). Asymmetric tracker: follows drops
+        # quickly, rises slowly, so speech doesn't drag the floor up.
+        self.noise_floor: float = 0.0
+
     async def send_control(self, msg: dict):
         try:
             await self.control_ws.send(json.dumps(msg))
@@ -265,6 +274,15 @@ class Device:
 
     async def mic_stop(self):
         await self.send_control({"type": "mic_stop"})
+
+    async def beam_lock(self):
+        # Lock the beamformer onto the speaker's perimeter mic mid-stream —
+        # no stream restart. Device no-ops if already locked or if
+        # beamformingEnabled is false in its config.
+        await self.send_control({"type": "beam_lock"})
+
+    async def beam_unlock(self):
+        await self.send_control({"type": "beam_unlock"})
 
     async def push_config(self, **kwargs):
         await self.send_control({"type": "config", **kwargs})
@@ -887,10 +905,20 @@ async def wake_word_listener(device: Device):
                     device.mic_queue.get(), timeout=10.0
                 )
             except asyncio.TimeoutError:
-                # Normal during silence — the device VAD gate is closed, so no
-                # frames flow. DEBUG, not WARNING: at WARNING this fired every
-                # 10s per idle device and dominated the logs.
-                log.debug(f"[{device.device_id}] OWW: mic queue idle (VAD gate closed)")
+                # The wake stream is ungated and continuous (device sends
+                # every 80ms, silence included — hardware mute still produces
+                # zero-filled frames), so 10s of nothing on mic_queue means
+                # the stream died — NOT ordinary silence, as it did when the
+                # device VAD gate existed on this stream. Exception: during a
+                # voice turn frames route to voice_queue instead, so an idle
+                # mic_queue is expected while oww_paused is set.
+                if device.oww_paused.is_set():
+                    continue
+                log.warning(
+                    f"[{device.device_id}] OWW: no mic frames for 10s on the "
+                    f"continuous wake stream — sending defensive mic_start"
+                )
+                await device.mic_start()
                 continue
 
             if payload is None:
@@ -912,6 +940,20 @@ async def wake_word_listener(device: Device):
 
                 if device.speaking:
                     continue
+
+                # Per-room noise floor tracking (measurement only — the audio
+                # is never modified). Asymmetric EWMA: follows drops quickly
+                # (α=0.3) so it converges down fast, rises slowly (α=0.008 ≈
+                # 10s time constant at 12.5 chunks/s) so speech bursts don't
+                # drag it up. Feeds the SNR-relative no-speech detection in
+                # em_esphome._stream_mic_audio and the diagnostics below.
+                rms = float(np.sqrt(np.mean((samples.astype(np.float64) / 32768.0) ** 2)))
+                if device.noise_floor == 0.0:
+                    device.noise_floor = rms
+                elif rms < device.noise_floor:
+                    device.noise_floor += 0.3 * (rms - device.noise_floor)
+                else:
+                    device.noise_floor += 0.008 * (rms - device.noise_floor)
 
                 prediction = await loop.run_in_executor(
                     None, model.predict, samples
@@ -935,7 +977,8 @@ async def wake_word_listener(device: Device):
                     device.oww_near_misses += 1
                     log.debug(
                         f"[{device.device_id}] OWW score: {score:.3f} "
-                        f"(threshold={device.oww_threshold:.3f})"
+                        f"(threshold={device.oww_threshold:.3f}, "
+                        f"rms={rms:.4f}, floor={device.noise_floor:.4f})"
                     )
                     now = asyncio.get_event_loop().time()
                     if now - last_near_miss_log_ts >= 2.0:
@@ -954,7 +997,8 @@ async def wake_word_listener(device: Device):
                 if score >= device.oww_threshold:
                     log.info(
                         f"[{device.device_id}] Wake word detected "
-                        f"(score={score:.3f})"
+                        f"(score={score:.3f}, rms={rms:.4f}, "
+                        f"floor={device.noise_floor:.4f})"
                     )
                     db.log_device(
                         device.device_id, "info", "device",
@@ -980,7 +1024,19 @@ async def wake_word_listener(device: Device):
                             f"[{device.device_id}] OWW: oww_paused set, "
                             f"routing to voice_queue (no mic_stop/mic_start_turn)"
                         )
+                        # Lock the beamformer onto the speaker's perimeter mic
+                        # NOW, mid-utterance — the onset detector has the
+                        # freshest possible signal at this moment. No stream
+                        # restart; released by beam_unlock post-turn (and
+                        # implicitly by any TTS mic stop/start cycle).
+                        await device.beam_lock()
                         await _run_voice_locked(device, trigger_label=f"wakeword({score:.3f})", is_wakeword=True)
+                        # Back to ch6 omni for wake listening. Belt-and-braces
+                        # for turns that never restarted the stream (no-TTS
+                        # outcomes: error, no-speech, cancel) — a lock left
+                        # in place would point wake listening at one
+                        # perimeter mic instead of omni.
+                        await device.beam_unlock()
 
                         drained = 0
                         while not device.voice_queue.empty():
@@ -1045,7 +1101,14 @@ async def handle_button_event(device: Device, event: dict):
                 await device.mic_start_turn()
                 await _run_voice_locked(device, trigger_label="button", is_wakeword=False)
                 log.info(f"[{device.device_id}] Button turn complete — restarting mic")
-                # Post-turn: back to ch6 omni for OWW listening.
+                # Post-turn: back to ch6 omni for OWW listening. mic_stop
+                # first: if the turn had no TTS (cancel/error/no-speech), the
+                # lock_mic stream from mic_start_turn is still running and a
+                # bare mic_start would no-op against it — leaving the GATED,
+                # beam-locked turn stream as the permanent wake stream. Safe
+                # now that streamMic's exit has the ownership check (the
+                # stop/start pair can no longer leak a second stream).
+                await device.mic_stop()
                 await device.mic_start()
             # M1 fix (2026-07-05 review): keep a reference and log exceptions
             # instead of a bare fire-and-forget create_task() — previously
