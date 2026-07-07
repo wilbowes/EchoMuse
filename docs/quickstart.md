@@ -87,13 +87,23 @@ The controller makes each Dot look like an **ESPHome voice satellite** —
 something Home Assistant already knows how to talk to, with no custom
 add-ons:
 
-1. In Home Assistant: **Settings → Devices & Services**. Each EchoMuse
-   device is normally **auto-discovered** ("echomuse-…"). If not, add the
-   **ESPHome** integration manually with the controller's IP and the port
-   shown on the device's dashboard page (16001 for the first device, 16002
-   for the second, …).
+1. In Home Assistant: **Settings → Devices & Services → Add Integration →
+   ESPHome**, then enter the **controller's IP** and the device's **port**:
+   16001 for the first device, 16002 for the second, and so on (each
+   device's port is shown on its dashboard page). One integration entry per
+   device.
 2. Assign the new device to your Assist pipeline (Settings → Voice
    assistants).
+
+> **Why no auto-discovery?** The controller does advertise each device the
+> way ESPHome devices normally announce themselves, and if Home Assistant
+> runs on the **same subnet** as the controller they'll pop up
+> automatically as "echomuse-…". But that announcement travels by mDNS
+> (local multicast), which doesn't cross subnets or VLANs — so if HA lives
+> on a different network segment than the controller, it will never see
+> them and manual entry is the normal, expected path. (Routers that can
+> run an mDNS repeater/reflector can bridge this, but manual setup is a
+> one-time, 30-second job per device.)
 
 ## Step 6 — Talk to it
 
