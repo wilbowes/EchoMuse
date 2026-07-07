@@ -171,14 +171,18 @@ function Slider({ label, sub, value, min, max, step = 1, unit = '', formatValue,
 }
 
 function Toggle({ label, sub, value, onChange }) {
+  // minWidth: 0 on the flex container and label lets long label/sub text
+  // shrink and wrap instead of forcing the row (and the switch with it)
+  // wider than the grid column — which pushed the switch past the edge of
+  // the config dialog. flexShrink: 0 keeps the switch at full size.
   return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-      <div>
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, minWidth: 0, gap: 10 }}>
+      <div style={{ minWidth: 0, flex: 1 }}>
         <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: 'var(--text2)' }}>{label}</span>
         {sub && <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)', marginLeft: 8 }}>{sub}</span>}
       </div>
       <div onClick={() => onChange(!value)} style={{
-        width: 36, height: 20, borderRadius: 10, cursor: 'pointer', position: 'relative',
+        width: 36, height: 20, borderRadius: 10, cursor: 'pointer', position: 'relative', flexShrink: 0,
         background: value ? '#405878' : '#888480',
         border: value ? '1px solid #304860' : '1px solid #686460',
         transition: 'background 0.15s',
@@ -519,7 +523,10 @@ function TurnObservability({ turns, nearMisses, stateLabel, stateColor }) {
   const medianReply = replies.length ? replies[Math.floor(replies.length / 2)] : null;
   const fmtS = ms => (ms / 1000).toFixed(1) + 's';
 
-  const recent = turns.slice(-8).reverse(); // newest first
+  // All buffered turns (up to 50), newest first — rendered inside their own
+  // scrollable box so a long history never scrolls the stat tiles (or the
+  // rest of the tab) out of view.
+  const recent = turns.slice().reverse();
   const scale = Math.max(3000, ...recent.map(t => turnSegments(t).shown));
 
   return (
@@ -551,7 +558,8 @@ function TurnObservability({ turns, nearMisses, stateLabel, stateColor }) {
             ))}
           </div>
 
-          {/* One stacked bar per turn, newest first */}
+          {/* One stacked bar per turn, newest first — own scroll container */}
+          <div style={{ maxHeight: 230, overflowY: 'auto', paddingRight: 4 }}>
           {recent.map((t, i) => {
             const seg = turnSegments(t);
             const time = new Date(t.ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -576,6 +584,7 @@ function TurnObservability({ turns, nearMisses, stateLabel, stateColor }) {
               </div>
             );
           })}
+          </div>
 
           {/* Hover detail */}
           {hover != null && recent[hover] && (() => {
@@ -2898,6 +2907,107 @@ function DeviceConfigForm({ config, onChange, disabled }) {
 }
 
 
+// ─── Deploy-all modal ─────────────────────────────────────────────────────────
+// Fleet-wide OTA from the main dashboard. Uses POST /api/releases/deploy
+// (deploys the latest GitHub release to every connected, approved,
+// non-current device). Progress is read live from the `devices` prop —
+// the parent's WebSocket keeps it fresh, so each row updates as devices
+// drop for reboot and reconnect on the new version.
+
+function DeployAllModal({ release, devices, onClose }) {
+  const mono = "'DM Mono',monospace";
+  const [result, setResult]   = useState(null); // {version, started, skipped}
+  const [running, setRunning] = useState(false);
+  const [error, setError]     = useState('');
+
+  const target = result?.version || release?.version;
+  const byId = Object.fromEntries(devices.map(d => [d.device_id, d]));
+  const eligible = devices.filter(d =>
+    d.approved && d.connected && d.firmware_ver !== release?.version);
+
+  const SKIP_REASONS = {
+    not_approved:       'not approved',
+    already_current:    'already up to date',
+    update_in_progress: 'update already running',
+  };
+
+  function statusFor(id) {
+    const d = byId[id];
+    if (!d)                              return { text: 'unknown',      color: 'var(--muted)' };
+    if (d.connected && d.firmware_ver === target)
+                                         return { text: '✓ updated',    color: '#286040' };
+    if (!d.connected)                    return { text: 'rebooting…',   color: '#96660a' };
+    return { text: 'updating…', color: '#405878' };
+  }
+
+  async function deploy() {
+    setRunning(true); setError('');
+    try {
+      setResult(await API.post('/api/releases/deploy', {}));
+    } catch (e) {
+      setError(e.error || 'Deploy failed');
+    }
+    setRunning(false);
+  }
+
+  const label = d => d?.label || d?.device_id || '?';
+
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(30,28,24,0.45)', zIndex: 60, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: 'linear-gradient(170deg,#e8e4de,#d8d4cc)', border: '1px solid #b8b4ac', borderRadius: 14, padding: '28px 32px', width: 440, maxWidth: '92vw', boxShadow: '0 24px 80px rgba(0,0,0,0.3)' }}>
+        <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 16, fontWeight: 600, color: 'var(--text)', marginBottom: 4 }}>
+          Deploy to fleet
+        </div>
+        <div style={{ fontFamily: mono, fontSize: 10, color: 'var(--muted)', marginBottom: 18 }}>
+          Target: {release?.version || '—'} · devices update over WiFi and auto-roll-back on failure
+        </div>
+
+        {!result ? (
+          <>
+            <div style={{ fontFamily: mono, fontSize: 11, color: 'var(--text2)', marginBottom: 16, lineHeight: 1.8 }}>
+              {eligible.length === 0
+                ? 'Every connected device is already on this version.'
+                : <>Will update <b>{eligible.length}</b> device{eligible.length === 1 ? '' : 's'}:{' '}
+                    {eligible.map(d => `${label(d)} (${d.firmware_ver || '?'})`).join(', ')}</>}
+            </div>
+            {error && <div style={{ fontFamily: mono, fontSize: 11, color: '#c03030', marginBottom: 12 }}>{error}</div>}
+            <div style={{ display: 'flex', gap: 10 }}>
+              <Pill accent disabled={running || eligible.length === 0} onClick={deploy}>
+                {running ? 'Starting…' : `Deploy ${release?.version || ''}`}
+              </Pill>
+              <Pill onClick={onClose}>Cancel</Pill>
+            </div>
+          </>
+        ) : (
+          <>
+            {(result.started || []).map(id => {
+              const s = statusFor(id);
+              return (
+                <div key={id} style={{ display: 'flex', justifyContent: 'space-between', fontFamily: mono, fontSize: 11, padding: '5px 0', borderBottom: '1px solid rgba(0,0,0,0.06)' }}>
+                  <span style={{ color: 'var(--text2)' }}>{label(byId[id])}</span>
+                  <span style={{ color: s.color }}>{s.text} {byId[id]?.firmware_ver ? `· ${byId[id].firmware_ver}` : ''}</span>
+                </div>
+              );
+            })}
+            {(result.skipped || []).map(s => (
+              <div key={s.device_id} style={{ display: 'flex', justifyContent: 'space-between', fontFamily: mono, fontSize: 11, padding: '5px 0', borderBottom: '1px solid rgba(0,0,0,0.06)' }}>
+                <span style={{ color: 'var(--muted)' }}>{label(byId[s.device_id])}</span>
+                <span style={{ color: 'var(--muted)' }}>skipped — {SKIP_REASONS[s.reason] || s.reason}</span>
+              </div>
+            ))}
+            {(result.started || []).length === 0 && (result.skipped || []).length === 0 && (
+              <div style={{ fontFamily: mono, fontSize: 11, color: 'var(--muted)' }}>Nothing to do.</div>
+            )}
+            <div style={{ marginTop: 18 }}>
+              <Pill onClick={onClose}>Close</Pill>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── SettingsPanel ─────────────────────────────────────────────────────────────
 // Gear icon → modal with two tabs: Fleet Config and Account.
 
@@ -2913,7 +3023,11 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username }
   const [pwSaving, setPwSaving]   = useState(false);
   const [pwMsg, setPwMsg]         = useState(null); // {ok, text}
 
-  function setConf(k, v) { setConfig(c => ({ ...c, [k]: v })); setDirty(true); }
+  function setConf(k, v) { setConfig(c => ({ ...c, [k]: v })); setDirty(true); setSaveMsg(null); }
+
+  // Inline, non-blocking save feedback — was a browser alert(), which
+  // demanded a click to dismiss for what is a routine success message.
+  const [saveMsg, setSaveMsg] = useState(null); // {ok, text}
 
   async function saveGlobalConfig() {
     setSaving(true);
@@ -2922,9 +3036,11 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username }
       onGlobalConfigChange(config);
       setDirty(false);
       const n = res.pushed_to?.length ?? 0;
-      if (n > 0) alert(`Saved and pushed to ${n} device${n === 1 ? '' : 's'} on fleet config.`);
+      setSaveMsg({ ok: true, text: n > 0
+        ? `Saved — pushed live to ${n} device${n === 1 ? '' : 's'} on fleet config`
+        : 'Saved' });
     } catch(e) {
-      alert(e.error || 'Failed to save global config');
+      setSaveMsg({ ok: false, text: e.error || 'Failed to save global config' });
     }
     setSaving(false);
   }
@@ -2981,7 +3097,13 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username }
               {dirty && (
                 <div style={{ display:'flex', gap:10, marginTop:24 }}>
                   <Pill accent disabled={saving} onClick={saveGlobalConfig}>{saving ? 'Saving…' : 'Save & push to fleet'}</Pill>
-                  <Pill onClick={() => { setConfig({...globalConfig}); setDirty(false); }}>Revert</Pill>
+                  <Pill onClick={() => { setConfig({...globalConfig}); setDirty(false); setSaveMsg(null); }}>Revert</Pill>
+                </div>
+              )}
+              {saveMsg && (
+                <div style={{ marginTop: 14, fontFamily: "'DM Mono',monospace", fontSize: 11,
+                  color: saveMsg.ok ? '#286040' : '#c03030' }}>
+                  {saveMsg.ok ? '✓ ' : ''}{saveMsg.text}
                 </div>
               )}
             </>
@@ -3029,6 +3151,7 @@ function App() {
   const [status, setStatus] = useState(null);
   const [loadError, setLoadError] = useState(null);
   const [showWizard, setShowWizard] = useState(false);
+  const [showDeployAll, setShowDeployAll] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [globalConfig, setGlobalConfig] = useState(null);
   const wsRef = useRef(null);
@@ -3203,6 +3326,9 @@ function App() {
                 {checkingRelease ? 'Checking…' : 'Check for updates'}
               </Pill>
             )}
+            {isAdmin && release && (
+              <Pill small accent onClick={() => setShowDeployAll(true)}>Deploy all</Pill>
+            )}
           </div>
         )}
       </div>
@@ -3247,6 +3373,11 @@ function App() {
       {/* Provisioning wizard */}
       {showWizard && (
         <ProvisionWizard token={token} onClose={() => setShowWizard(false)} knownDevices={devices}/>
+      )}
+
+      {/* Fleet-wide OTA */}
+      {showDeployAll && (
+        <DeployAllModal release={release} devices={devices} onClose={() => setShowDeployAll(false)}/>
       )}
 
       {/* Settings panel */}
