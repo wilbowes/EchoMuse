@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/wilbowes/EchoMuse/internal/aec"
 	internalbuttons "github.com/wilbowes/EchoMuse/internal/bindings/buttons"
 	"github.com/wilbowes/EchoMuse/internal/bindings/mic"
 	"github.com/wilbowes/EchoMuse/internal/bindings/speaker"
@@ -39,7 +40,12 @@ func main() {
 		log.Fatalf("Failed to initialize Microphone: %v", err)
 	}
 
-	pcmSpeaker, err := speaker.NewPcmSpeaker()
+	// AEC canceller — far end fed by the speaker's echo tap, near end run
+	// by the data client on the mono mic stream. Starts disabled; armed by
+	// applyAecConfig from env defaults below and on every config push.
+	canceller := aec.New()
+
+	pcmSpeaker, err := speaker.NewPcmSpeaker(canceller.WriteFar)
 	if err != nil {
 		log.Fatalf("Failed to initialize PCM Speaker: %v", err)
 	}
@@ -59,7 +65,8 @@ func main() {
 
 	ctx := context.Background()
 
-	dataClient := client.NewDataClient(deviceID, microphone, pcmSpeaker)
+	dataClient := client.NewDataClient(deviceID, microphone, pcmSpeaker, canceller)
+	applyAecConfig(canceller) // arm from env defaults before any config push
 
 	// Direction callback — update LED ring to show estimated source angle
 	dataClient.OnDirectionChanged(func(angle float64) {
@@ -141,9 +148,12 @@ func main() {
 		}()
 	})
 
-	// Config applied — apply hardware changes via tinymix
+	// Config applied — apply hardware changes via tinymix, AEC params to
+	// the canceller. AEC reads the merged post-Apply snapshot rather than
+	// the (partial) message so unmentioned fields keep their values.
 	controlClient.OnConfigApplied(func(msg config.ConfigMessage) {
 		applyHardwareConfig(msg)
+		applyAecConfig(canceller)
 	})
 
 	// Beam lock/unlock — controller locks the beamformer onto the speaker's
@@ -391,6 +401,20 @@ func applyHardwareConfig(msg config.ConfigMessage) {
 	if msg.StartupVolume > 0 {
 		tinymix("61", strconv.Itoa(msg.StartupVolume), strconv.Itoa(msg.StartupVolume))
 	}
+}
+
+// applyAecConfig pushes the current effective AEC config into the canceller.
+// SetParams no-ops when nothing changed, so calling it on every config push
+// is free; when delay/tail change it rebuilds the echo state (adaptive
+// filter state is meaningless across a timing change anyway).
+func applyAecConfig(canceller *aec.Canceller) {
+	snap := config.Get().Snapshot()
+	enabled := snap.AecEnabled != nil && *snap.AecEnabled
+	delayMs := 250
+	if snap.AecDelayMs != nil {
+		delayMs = *snap.AecDelayMs
+	}
+	canceller.SetParams(enabled, delayMs, snap.AecTailMs)
 }
 
 func tinymix(ctl string, args ...string) {

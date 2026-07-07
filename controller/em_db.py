@@ -46,6 +46,16 @@ DEFAULT_DEVICE_CONFIG = {
     # vadThreshold in pre-gain units (threshold is scaled by the gain
     # internally), so this can be tuned without retuning vadThreshold.
     "micGainDb":        24,
+    # AEC (speexdsp, device-side, whole mic path incl. wake stream).
+    # Default OFF — enable per-deployment after validating echo delay.
+    # aecDelayMs models write-to-ear latency (speaker ALSA buffer ≈340ms
+    # at 4×2048/48k, minus mic-side buffering — 250 is the starting guess,
+    # tune against [aec] logs and residual echo); aecTailMs is the adaptive
+    # filter length (residual delay error + room reverb). Device clamps:
+    # delay 0–1000, tail 50–500.
+    "aecEnabled":       False,
+    "aecDelayMs":       250,
+    "aecTailMs":        300,
     "startupVolume":    85,
     # vadThreshold: 0.001 (normalised RMS pre-AGC).
     # Q2 fix (2026-07-05 review, tracked as B6): this was drifted to 0.003 in

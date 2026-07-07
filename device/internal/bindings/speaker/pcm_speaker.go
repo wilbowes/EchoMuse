@@ -39,13 +39,21 @@ type PcmSpeaker struct {
 	// by silenceLoop when audioCh drains, so a drain at natural end of
 	// stream isn't misreported as an underrun.
 	eosPending atomic.Bool
+
+	// echoTap, when non-nil, receives every period pumped to ALSA — real
+	// audio and silence alike — so an AEC reference stream advances in
+	// lockstep with the playback clock. Fixed at construction (silenceLoop
+	// starts inside New, so it can't be set later without a race). Must be
+	// fast and non-blocking: it runs on the ALSA pump goroutine.
+	echoTap func([]byte)
 }
 
-func NewPcmSpeaker() (*PcmSpeaker, error) {
+func NewPcmSpeaker(echoTap func([]byte)) (*PcmSpeaker, error) {
 	s := &PcmSpeaker{
 		audioCh: make(chan []byte, audioChanDepth),
 		stopCh:  make(chan struct{}),
 		deadCh:  make(chan struct{}),
+		echoTap: echoTap,
 	}
 	if err := s.Init(); err != nil {
 		return nil, err
@@ -101,6 +109,9 @@ func (p *PcmSpeaker) silenceLoop() {
 			return
 		case period := <-p.audioCh:
 			audioStreaming = true
+			if p.echoTap != nil {
+				p.echoTap(period)
+			}
 			if err := p.session.Pump(period); err != nil {
 				log.Printf("silenceLoop: pump error: %v", err)
 				return
@@ -114,6 +125,9 @@ func (p *PcmSpeaker) silenceLoop() {
 					log.Printf("[speaker] underrun: silence injected mid-stream (audioCh drained)")
 				}
 				audioStreaming = false
+			}
+			if p.echoTap != nil {
+				p.echoTap(silencePeriod)
 			}
 			if err := p.session.Pump(silencePeriod); err != nil {
 				log.Printf("silenceLoop: silence pump error: %v", err)

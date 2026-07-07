@@ -54,6 +54,17 @@ type Device struct {
 	NsEnabled  *bool
 	AgcEnabled *bool
 
+	// Acoustic echo cancellation (speexdsp, internal/aec). Applies to the
+	// whole mic path (wake stream included) — defaults off until validated
+	// per deployment. AecDelayMs is the bulk write-to-ear latency the
+	// reference stream is shifted by (speaker ALSA buffering ≈ 340ms at
+	// 4×2048 frames / 48kHz, minus mic-side buffering); AecTailMs is the
+	// adaptive filter length, which must cover residual delay error plus
+	// room reverb. Device clamps: delay 0–1000ms, tail 50–500ms.
+	AecEnabled *bool
+	AecDelayMs int
+	AecTailMs  int
+
 	initialised bool
 }
 
@@ -90,6 +101,10 @@ func (d *Device) loadDefaults() {
 	agcEnabled := envBool("AGC_ENABLED", true)
 	d.NsEnabled = &nsEnabled
 	d.AgcEnabled = &agcEnabled
+	aecEnabled := envBool("AEC_ENABLED", false)
+	d.AecEnabled = &aecEnabled
+	d.AecDelayMs = envInt("AEC_DELAY_MS", 250)
+	d.AecTailMs = envInt("AEC_TAIL_MS", 300)
 }
 
 // Apply updates the config from a controller-pushed config message.
@@ -143,6 +158,15 @@ func (d *Device) Apply(msg ConfigMessage) {
 	if msg.AgcEnabled != nil {
 		d.AgcEnabled = msg.AgcEnabled
 	}
+	if msg.AecEnabled != nil {
+		d.AecEnabled = msg.AecEnabled
+	}
+	if msg.AecDelayMs != nil {
+		d.AecDelayMs = *msg.AecDelayMs
+	}
+	if msg.AecTailMs > 0 {
+		d.AecTailMs = msg.AecTailMs
+	}
 }
 
 // Snapshot returns a consistent copy of all config values.
@@ -165,6 +189,11 @@ func (d *Device) Snapshot() ConfigMessage {
 		agcEnabled = *d.AgcEnabled
 	}
 	micGainDb := d.MicGainDb
+	aecEnabled := false
+	if d.AecEnabled != nil {
+		aecEnabled = *d.AecEnabled
+	}
+	aecDelayMs := d.AecDelayMs
 	return ConfigMessage{
 		VadThreshold:       d.VadThreshold,
 		VadSpeechMs:        d.VadSpeechMs,
@@ -179,6 +208,9 @@ func (d *Device) Snapshot() ConfigMessage {
 		BeamformingEnabled: &beamformingEnabled,
 		NsEnabled:          &nsEnabled,
 		AgcEnabled:         &agcEnabled,
+		AecEnabled:         &aecEnabled,
+		AecDelayMs:         &aecDelayMs,
+		AecTailMs:          d.AecTailMs,
 	}
 }
 
@@ -200,6 +232,9 @@ type ConfigMessage struct {
 	HasBeamforming     bool     `json:"hasBeamforming,omitempty"`
 	NsEnabled          *bool    `json:"nsEnabled,omitempty"`
 	AgcEnabled         *bool    `json:"agcEnabled,omitempty"`
+	AecEnabled         *bool    `json:"aecEnabled,omitempty"`
+	AecDelayMs         *int     `json:"aecDelayMs,omitempty"`
+	AecTailMs          int      `json:"aecTailMs,omitempty"`
 }
 
 // clampMicGainDb bounds the fixed mic gain to a sane range: 0dB (unity —

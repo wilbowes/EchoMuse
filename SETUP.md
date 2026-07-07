@@ -490,6 +490,7 @@ dns-sd -B _emcontroller._tcp local
 ✅ Per-room noise floor tracking (v2.7.0, controller) — measurement-only asymmetric EWMA; drives the SNR-relative 5s no-speech cutoff (wake-then-silence closes quietly again)
 ✅ Mid-stream beam lock (v2.7.0) — beam_lock/beam_unlock control messages; wake turns get perimeter mic selection without a stream restart
 ✅ Beamformer lock-back selection (v2.7.2) — Lock() scores directions over a ~2s energy-history ring covering the wake word, not the decayed present (see pipeline state table)
+✅ Acoustic echo cancellation (v2.7.3, default OFF) — speexdsp canceller on the whole mic path; reference tapped at the speaker ALSA write (same codec clock, no drift), aecDelayMs bulk-delay alignment; 42dB attenuation in the synthetic-echo unit test; enable + tune from the dashboard Microphones advanced section
 ✅ 24-bit fixed mic gain (v2.7.1) — `micGainDb` (default +24dB) applied to the full 24-bit sample during S16 extraction; recovers the low byte the old truncation discarded (speech was ~3–20 LSB in 16-bit). Validated: STT empty-transcript rate went from 6/19 turns to 0/5, detection rms 0.0003 → 0.006–0.009, clipped=0
 ✅ PTY dashboard shell (v2.7.1) — device allocates a real pseudo-terminal (mksh prompt, line editing, top/vi, resize); dashboard terminal is xterm.js; programmatic sessions (OTA) keep the raw pipe
 ✅ /tmp/server.log size cap (v2.7.1) — trim loop in start_server.sh, bounded at ~5.5MB; VAD diag slowed to ~10min with prompt clip-count reporting
@@ -1116,7 +1117,7 @@ done
 
 ---
 
-**Document version:** v2.7.2
+**Document version:** v2.7.3
 **Last updated:** 2026-07-07
 **Changelog:**
 - v1.0 — April 2026: Initial publication. Full pipeline confirmed working.
@@ -1264,5 +1265,8 @@ done
 
 - v2.7.2 — 2026-07-07: Beamformer lock-back selection.
   **Lock-back.** Controller wake detection lands 300–500ms after the wake word ends, so `Lock()`'s live onset ratio scored a decayed spike — the selected mic (and direction LED) was often unrelated to the speaker (the "known-poor selection" caveat since v2.7.0). The beamformer now records a ~2s ring of per-direction period energies (frozen while locked, like the baseline); `Lock()` scores each direction by the mean of its top-8 period energies within the window relative to its baseline, selecting on the recorded wake word rather than the present. Falls back to the live onset ratio when the ring is empty and raw energy when the baseline is cold. Unit tests added (`beamformer_test.go`, runnable in the compiler image with `GOOS=linux GOARCH=amd64 CGO_ENABLED=0` — the image cross-targets ARM by default). Known caveat: TTS echo enters the ring between turns (the baseline absorbs the same energy, damping its ratio); continuation-turn locks remain the weaker case until AEC.
+
+- v2.7.3 — 2026-07-07: Acoustic echo cancellation (default off).
+  **AEC.** speexdsp echo canceller (MDF, vendored SpeexDSP-1.2.1, float build, cgo like RNNoise) on the mono mic stream, right after beamformer+gain and before NS/AGC — the whole mic path including the wake stream. Far-end reference is tapped at the ALSA write in the speaker silence loop (every period *including silence*, so the reference clock advances in lockstep with playback), downmixed and 3:1 box-decimated 48k stereo → 16k mono, and buffered in a ring seeded with `aecDelayMs` of silence — modelling write-to-ear latency (speaker ALSA buffer ≈340ms). Both PCM devices share the codec clock, so ring occupancy cannot drift. Config: `aecEnabled` (default **false** — inert until enabled per deployment), `aecDelayMs` (default 250), `aecTailMs` (default 300); applied live on config push (echo state rebuilt on param change). Functional unit test drives the full WriteFar→ring→Process path with a synthetic aligned echo: 42dB attenuation, zero ring underruns (run with `GOOS=linux GOARCH=amd64 CGO_ENABLED=1` in the compiler image). Tuning guidance: enable on one device, speak during/after TTS playback; if residual echo persists, sweep aecDelayMs ±100ms (watch `[aec] reference underrun` — those indicate delay far too small); raise aecTailMs in reverberant rooms. Vendoring note: `_kiss_fft_guts.h` gained an include guard (kiss_fft.c + kiss_fftr.c share one cgo translation unit).
 
 *Device: Echo Dot 2nd Gen (RS03QR). Tested on macOS with ADB 35.0.2.*

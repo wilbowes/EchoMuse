@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/wilbowes/EchoMuse/internal/aec"
 	"github.com/wilbowes/EchoMuse/internal/beamformer"
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/processor"
@@ -129,11 +130,16 @@ type DataClient struct {
 
 	beam              *beamformer.Beamformer
 	proc              *processor.Processor
+	aec               *aec.Canceller
 	onDirectionChange func(angle float64)
 	directionMu       sync.Mutex
 }
 
-func NewDataClient(deviceID string, microphone mic.Subscribable, spk speaker.Speaker) *DataClient {
+// NewDataClient wires the mic/speaker pipeline. canceller is the shared AEC
+// instance — its far-end side is fed by the speaker's echo tap; this client
+// runs its near-end side on the mono mic stream. Disabled cancellers pass
+// audio through untouched.
+func NewDataClient(deviceID string, microphone mic.Subscribable, spk speaker.Speaker, canceller *aec.Canceller) *DataClient {
 	return &DataClient{
 		deviceID: deviceID,
 		mic:      microphone,
@@ -141,6 +147,7 @@ func NewDataClient(deviceID string, microphone mic.Subscribable, spk speaker.Spe
 		readyCh:  make(chan string, 1),
 		beam:     beamformer.New(),
 		proc:     processor.New(),
+		aec:      canceller,
 	}
 }
 
@@ -496,6 +503,11 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			}
 
 			mono, angle := d.beam.Process(raw, beamAngle, gainLin)
+
+			// AEC — subtract the speaker's own output (reference tapped at
+			// the ALSA write, aligned by aecDelayMs) before anything
+			// measures or gates the signal. No-op while aecEnabled=false.
+			mono = d.aec.Process(mono)
 
 			// ── Processing pipeline ──────────────────────────────────────
 			// VAD on raw beamformed output — pre-NS/AGC so threshold is
