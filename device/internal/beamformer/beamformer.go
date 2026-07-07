@@ -66,6 +66,16 @@ const (
 	// Smoothing constants
 	smoothAlpha   = 0.9    // fast smoother (~320ms time constant at 32ms/period)
 	baselineAlpha = 0.995  // slow smoother (~10s time constant) — tracks background noise
+
+	// Lock-back window. Controller-side wake detection lands 300–500ms
+	// after the wake word ends, by which time the fast smoother's onset
+	// spike has largely decayed — selecting on the *present* picks a mic
+	// unrelated to the speaker. Instead Lock() looks back over a ring of
+	// per-direction period energies covering the whole wake word plus the
+	// detection latency, and scores each direction by its energy burst
+	// within that window relative to its noise baseline.
+	historyPeriods = 64 // ~2.0s at 32ms/period
+	burstTopN      = 8  // periods averaged for a direction's burst (~256ms)
 )
 
 // micAngles defines the physical angle (degrees, clockwise from 12 o'clock)
@@ -109,6 +119,15 @@ type Beamformer struct {
 	// baselineReady counts periods until baseline is initialised (~3s warmup).
 	baselineReady int
 
+	// energyHistory is a ring of per-period, per-direction HF energies —
+	// the lock-back window (see constants above). Written every Process()
+	// period while unlocked; frozen during a locked turn so a follow-up
+	// continuation lock still sees the window around the last utterance
+	// rather than only what came after it.
+	energyHistory [historyPeriods][nDirections]float64
+	historyIdx    int
+	historyCount  int
+
 	// lockedChannel is the ALSA channel selected at gate open.
 	// -1 means unlocked (use live best-direction selection).
 	lockedChannel int
@@ -150,8 +169,24 @@ func (b *Beamformer) Lock(enabled bool) {
 
 	best := 0
 	var bestScore float64
-	if b.baselineReady >= 100 {
-		// Baseline warmed up — use onset ratio (energy spike vs noise floor)
+	switch {
+	case b.baselineReady >= 100 && b.historyCount >= burstTopN*2:
+		// Lock-back: score each direction by its energy burst within the
+		// recorded window (which contains the wake word) relative to its
+		// baseline. Immune to the detection latency that made live onset
+		// ratios pick a decayed, often unrelated direction.
+		bestScore = b.burstRatio(0)
+		for di := 1; di < nDirections; di++ {
+			r := b.burstRatio(di)
+			if r > bestScore {
+				bestScore = r
+				best = di
+			}
+		}
+		log.Printf("[beam] locked to ch%d (%.0f°) burst_ratio=%.2f (lock-back over %d periods)",
+			directionToChannel[best], candidateAngles[best], bestScore, b.historyCount)
+	case b.baselineReady >= 100:
+		// History not populated yet (fresh start) — live onset ratio.
 		bestScore = b.onsetRatio(0)
 		for di := 1; di < nDirections; di++ {
 			r := b.onsetRatio(di)
@@ -162,7 +197,7 @@ func (b *Beamformer) Lock(enabled bool) {
 		}
 		log.Printf("[beam] locked to ch%d (%.0f°) onset_ratio=%.2f",
 			directionToChannel[best], candidateAngles[best], bestScore)
-	} else {
+	default:
 		// Baseline not ready — use raw smooth energy to avoid picking a
 		// direction based on a near-zero baseline inflating the ratio
 		bestScore = b.energySmooth[0]
@@ -187,6 +222,45 @@ func (b *Beamformer) onsetRatio(di int) float64 {
 		return b.energySmooth[di]
 	}
 	return b.energySmooth[di] / baseline
+}
+
+// burstRatio returns direction di's burst energy over the lock-back window
+// divided by its noise baseline. Burst = mean of the top burstTopN period
+// energies in the ring — a peak statistic, so it finds the wake word
+// wherever it sits in the window without needing exact alignment, and a
+// single glitch period can't dominate the way a plain max would.
+func (b *Beamformer) burstRatio(di int) float64 {
+	n := b.historyCount
+	if n > historyPeriods {
+		n = historyPeriods
+	}
+	// Partial selection of the top burstTopN values — n is at most 64 and
+	// this runs once per direction per Lock(), so O(n·topN) is fine and
+	// allocation-free.
+	var top [burstTopN]float64
+	for i := 0; i < n; i++ {
+		v := b.energyHistory[i][di]
+		for j := 0; j < burstTopN; j++ {
+			if v > top[j] {
+				v, top[j] = top[j], v
+			}
+		}
+	}
+	count := burstTopN
+	if n < burstTopN {
+		count = n
+	}
+	var burst float64
+	for j := 0; j < count; j++ {
+		burst += top[j]
+	}
+	burst /= float64(count)
+
+	baseline := b.energyBaseline[di]
+	if baseline < 1e-10 {
+		return burst
+	}
+	return burst / baseline
 }
 
 // Unlock releases the locked mic selection.
@@ -238,6 +312,19 @@ func (b *Beamformer) Process(raw []byte, steerAngle float64, gain float64) (mono
 		// voice doesn't corrupt the noise floor estimate.
 		if b.lockedChannel < 0 {
 			b.energyBaseline[di] = baselineAlpha*b.energyBaseline[di] + (1-baselineAlpha)*energy
+			b.energyHistory[b.historyIdx][di] = energy
+		}
+	}
+	// Advance the lock-back ring only while unlocked — frozen during a
+	// locked turn for the same reason the baseline is. Known caveat: TTS
+	// playback happens *unlocked*, so speaker echo does enter the ring;
+	// the baseline absorbs the same energy, damping those ratios, and the
+	// continuation-turn lock is commanded at first detected speech, whose
+	// burst then has to beat the echo's ratio, not just its level.
+	if b.lockedChannel < 0 {
+		b.historyIdx = (b.historyIdx + 1) % historyPeriods
+		if b.historyCount < historyPeriods {
+			b.historyCount++
 		}
 	}
 
