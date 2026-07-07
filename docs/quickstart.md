@@ -95,15 +95,15 @@ add-ons:
 2. Assign the new device to your Assist pipeline (Settings → Voice
    assistants).
 
-> **Why no auto-discovery?** The controller does advertise each device the
-> way ESPHome devices normally announce themselves, and if Home Assistant
-> runs on the **same subnet** as the controller they'll pop up
-> automatically as "echomuse-…". But that announcement travels by mDNS
-> (local multicast), which doesn't cross subnets or VLANs — so if HA lives
-> on a different network segment than the controller, it will never see
-> them and manual entry is the normal, expected path. (Routers that can
-> run an mDNS repeater/reflector can bridge this, but manual setup is a
-> one-time, 30-second job per device.)
+> **Auto-discovery:** if Home Assistant runs on the **same subnet** as the
+> controller, devices should also pop up automatically as discovered
+> "echomuse-…" entries (fixed in v2.7.5 — earlier versions advertised
+> incompletely and HA silently ignored them, so manual entry was the only
+> way). Devices you've already added manually won't re-appear as
+> discoveries — HA knows it has them. If HA lives on a **different subnet
+> or VLAN**, discovery can't cross that boundary (it uses local-only
+> multicast) and manual entry remains the normal path — still a one-time,
+> 30-second job per device.
 
 ## Step 6 — Talk to it
 

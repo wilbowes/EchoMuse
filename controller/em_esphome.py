@@ -1461,6 +1461,14 @@ def _make_device_mdns_info(device_id: str, label: str, port: int) -> ServiceInfo
         properties={
             "version": ESPHOME_PROJECT_VERSION,
             "friendly_name": label,
+            # mac is MANDATORY for HA discovery: the ESPHome config flow's
+            # zeroconf step aborts (reason "mdns_missing_mac") when the TXT
+            # record lacks it — devices advertised without it never produce
+            # a discovery card, silently. Real ESPHome firmware advertises
+            # bare lowercase hex; HA normalises it (format_mac) and matches
+            # it against the mac the satellite reports in DeviceInfo (same
+            # _serialno_to_mac derivation, so they agree).
+            "mac": _serialno_to_mac(device_id).replace(":", "").lower(),
             "network": "ethwifi",
             "project_name": f"EchoMuse.{label}",
             "project_version": ESPHOME_PROJECT_VERSION,
