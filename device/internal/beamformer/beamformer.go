@@ -136,11 +136,25 @@ type Beamformer struct {
 	// mic gain in extractChannel. Only touched from the mic goroutine
 	// (Process and the diagnostics that read it) — no synchronisation.
 	clippedSamples uint64
+
+	// Reusable per-period analysis buffers (§3.5, 2026-07-07): decode +
+	// band-diff previously allocated ~24kB of garbage every 32ms period
+	// (~750kB/s of GC pressure on the A53) just to keep the smoothers
+	// warm. Only the analysis path reuses buffers — extractChannel still
+	// returns a fresh allocation per period because data.go's preroll
+	// ring retains those slices across periods.
+	chanBuf [nDirections][]float32
+	hfBuf   [nDirections][]float32
 }
 
 // New creates a Beamformer.
 func New() *Beamformer {
-	return &Beamformer{lockedChannel: -1}
+	b := &Beamformer{lockedChannel: -1}
+	for ci := 0; ci < nDirections; ci++ {
+		b.chanBuf[ci] = make([]float32, periodFrames)
+		b.hfBuf[ci] = make([]float32, periodFrames)
+	}
+	return b
 }
 
 // Lock selects the mic with the highest energy onset relative to its noise
@@ -301,8 +315,9 @@ func (b *Beamformer) Process(raw []byte, steerAngle float64, gain float64) (mono
 	// Always decode and update smoothers — direction estimation runs
 	// continuously regardless of BeamformingEnabled. This keeps the baseline
 	// warm so Lock() gets a good onset ratio the moment beamforming is enabled.
-	channels := decodeChannels(raw)
-	hfChannels := bandDiff(channels)
+	b.decodeChannels(raw)
+	b.bandDiff()
+	hfChannels := b.hfBuf
 
 	for di := range candidateAngles {
 		energy := hfEnergy(hfChannels, di)
@@ -374,34 +389,31 @@ func hfEnergy(hfChannels [6][]float32, di int) float64 {
 	return energy / float64(n)
 }
 
-// bandDiff returns the stride-2 difference of each channel: out[i] = (in[i] - in[i-2]) / 2.
-// Frequency response peaks at 4kHz (fs/4), zero at 0Hz and 8kHz.
-func bandDiff(channels [6][]float32) [6][]float32 {
-	var out [6][]float32
-	for ci := 0; ci < 6; ci++ {
-		out[ci] = make([]float32, len(channels[ci]))
-		for i := 2; i < len(channels[ci]); i++ {
-			out[ci][i] = (channels[ci][i] - channels[ci][i-2]) * 0.5
+// bandDiff computes the stride-2 difference of each decoded channel into
+// hfBuf: out[i] = (in[i] - in[i-2]) / 2. Frequency response peaks at 4kHz
+// (fs/4), zero at 0Hz and 8kHz. Reuses hfBuf across periods (§3.5) — the
+// first two samples are cleared explicitly since the loop never writes them.
+func (b *Beamformer) bandDiff() {
+	for ci := 0; ci < nDirections; ci++ {
+		in, out := b.chanBuf[ci], b.hfBuf[ci]
+		out[0], out[1] = 0, 0
+		for i := 2; i < len(in); i++ {
+			out[i] = (in[i] - in[i-2]) * 0.5
 		}
 	}
-	return out
 }
 
 // decodeChannels decodes all 6 perimeter channels from a raw S24_3LE period
-// into float32 arrays normalised to [-1, 1].
-func decodeChannels(raw []byte) [6][]float32 {
-	var out [6][]float32
-	for ci := 0; ci < 6; ci++ {
-		out[ci] = make([]float32, periodFrames)
-	}
+// into chanBuf as float32 normalised to [-1, 1]. Reuses chanBuf across
+// periods (§3.5) — every element is overwritten, no clearing needed.
+func (b *Beamformer) decodeChannels(raw []byte) {
 	for i := 0; i < periodFrames; i++ {
 		base := i * frameSize
-		for ci := 0; ci < 6; ci++ {
+		for ci := 0; ci < nDirections; ci++ {
 			offset := base + ci*byteSample
-			out[ci][i] = decodeS24Sample(raw[offset], raw[offset+1], raw[offset+2])
+			b.chanBuf[ci][i] = decodeS24Sample(raw[offset], raw[offset+1], raw[offset+2])
 		}
 	}
-	return out
 }
 
 // decodeS24Sample decodes 3 bytes of S24_3LE to float32 in [-1, 1].

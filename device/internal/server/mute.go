@@ -57,17 +57,35 @@ func (m *muteController) Toggle() {
 	}
 }
 
+// adcMuteCtls are the per-chip ADC mute control pairs, all four codecs
+// (A: ch0/ch1 … D: ch6 + unused). C5 hardware fix (2026-07-07): only chip
+// A (105/106) was muted before, leaving chips B–D — including ch6, the mic
+// wake word and STT actually use — physically hot; the mic stream-stop was
+// what made mute effective. Sibling controls confirmed from the full
+// `tinymix -D 0` dump in device/tools/tinymix_controls_output.txt
+// (captured 2026-07-06).
+var adcMuteCtls = []string{
+	"105", "106", // ADC_A
+	"123", "124", // ADC_B
+	"141", "142", // ADC_C
+	"159", "160", // ADC_D
+}
+
+func setAdcMute(val string) {
+	for _, ctl := range adcMuteCtls {
+		exec.Command("tinymix", "-D", "0", ctl, val).Run()
+	}
+}
+
 func (m *muteController) applyMute() {
 	log.Println("Mute: mic muted")
-	exec.Command("tinymix", "-D", "0", "105", "1").Run()
-	exec.Command("tinymix", "-D", "0", "106", "1").Run()
+	setAdcMute("1")
 	m.showMuteLEDs()
 }
 
 func (m *muteController) applyUnmute() {
 	log.Println("Mute: mic unmuted")
-	exec.Command("tinymix", "-D", "0", "105", "0").Run()
-	exec.Command("tinymix", "-D", "0", "106", "0").Run()
+	setAdcMute("0")
 	m.clearLEDs()
 }
 

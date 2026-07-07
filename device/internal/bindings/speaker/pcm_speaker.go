@@ -119,11 +119,13 @@ func (p *PcmSpeaker) silenceLoop() {
 		default:
 			if audioStreaming {
 				if p.eosPending.Swap(false) {
-					// Natural end of stream (0x03 received) — not an underrun.
+					// Natural end of stream (0x03 received).
 					log.Printf("[speaker] stream complete — returning to silence")
-				} else {
-					log.Printf("[speaker] underrun: silence injected mid-stream (audioCh drained)")
 				}
+				// Q5 (2026-07-07): the mid-stream underrun WARNING that
+				// lived here is gone — the v2.6.5 EOS disambiguation plus
+				// the deeper audioCh removed the underruns it was hunting,
+				// and it stayed clean for several sessions.
 				audioStreaming = false
 			}
 			if p.echoTap != nil {
@@ -135,21 +137,6 @@ func (p *PcmSpeaker) silenceLoop() {
 			}
 		}
 	}
-}
-
-// Pump plays a complete buffer, period by period. Used by the HTTP speaker path
-// (Phase 2: will be removed once speaker moves fully to WS streaming).
-func (p *PcmSpeaker) Pump(data []byte) error {
-	log.Printf("Pump called with %d bytes", len(data))
-	for len(data) >= periodBytes {
-		select {
-		case p.audioCh <- data[:periodBytes]:
-		case <-p.deadCh:
-			return fmt.Errorf("speaker: ALSA loop has died")
-		}
-		data = data[periodBytes:]
-	}
-	return nil
 }
 
 // PumpPeriod queues one period of audio for playback. Called by the WS client

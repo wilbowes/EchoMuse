@@ -69,6 +69,19 @@ from zeroconf import ServiceInfo
 import em_db as db
 import em_api as api
 
+# ── VAD sentinels ──────────────────────────────────────────────────────────────
+# Queue items marking end-of-speech in mic_queue/voice_queue, in place of
+# audio bytes. Strings, so they can never collide with a bytes payload.
+# Defined here (not em_controller) because the import direction is
+# em_controller → em_esphome.
+#
+# B5 fix (2026-07-07): previously a single None sentinel plus a
+# device.last_vad_was_timeout side-channel attribute — a second sentinel
+# queued before the first was consumed overwrote the flag. The type now
+# travels with the queue item itself.
+VAD_SENTINEL_END     = "vad_end"
+VAD_SENTINEL_TIMEOUT = "vad_no_speech_timeout"
+
 # ── Per-turn trace ─────────────────────────────────────────────────────────────
 # Collects timestamps and key metrics through a voice turn and emits a single
 # structured [TURN] log line at completion. Makes it possible to see at a glance
@@ -774,12 +787,12 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         both paths send end=True idempotently, so a race between them is
         harmless.
 
-        The device sentinel comes in two flavours, distinguished via
-        device.last_vad_was_timeout (set by em_controller.py's /data frame
-        parser immediately before queueing): a normal VAD end (speech was
-        detected, then ended — the ordinary case) or a no-speech timeout
-        (the device's local grace period elapsed with no speech ever
-        detected — see device/internal/client/data.go noSpeechTimeout).
+        The device sentinel comes in two flavours, carried by the queue
+        item itself (VAD_SENTINEL_END / VAD_SENTINEL_TIMEOUT, queued by
+        em_controller.py's /data frame parser): a normal VAD end (speech
+        was detected, then ended — the ordinary case) or a no-speech
+        timeout (the device's local grace period elapsed with no speech
+        ever detected — see device/internal/client/data.go noSpeechTimeout).
 
         The no-speech-timeout case sends an empty VoiceAssistantAudio(end=True)
         to close HA's pipeline cleanly (HA already has an open turn from the
@@ -919,8 +932,10 @@ class EchoMuseSatellite(SatelliteServerProtocol):
 
             payload = get_task.result()
 
-            if payload is None:
-                if device.last_vad_was_timeout:
+            # VAD sentinel — a string queue item, never audio bytes. (None
+            # accepted defensively: it was the pre-B5 sentinel encoding.)
+            if payload is None or isinstance(payload, str):
+                if payload == VAD_SENTINEL_TIMEOUT:
                     # No speech was ever detected, but VoiceAssistantRequest
                     # (start=True) was already sent before this fired — HA
                     # has an open pipeline expecting an audio stream. Close

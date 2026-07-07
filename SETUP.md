@@ -1107,17 +1107,17 @@ done
 - **Bidirectional volume control** ✅ — complete as of v2.6.1. Physical buttons, HA media player slider, and ALSA mixer all stay in sync. Survives controller and device restarts.
 - **Continue-conversation without re-waking** ✅ — complete as of v2.6.4. HA-driven: `continue_conversation` flag in `INTENT_END` re-triggers a voice turn immediately after TTS playback without requiring the wake word. User-driven follow-up window (always-on N-second listen after any response) is the next step — recommend as a dashboard toggle, default off, to avoid false triggers in noisy rooms.
 - **Rubbish transcription suppression** — wake word triggers on background noise still result in HA's "Sorry, I couldn't understand that" response. Options: audio energy gate in `_stream_mic_audio` before sending to HA (cleanest); or discard HA's stock apology in the TTS handler (tactical). Deferred pending P0-3 NS fix — noise floor situation needs to settle first.
-- **C5 hardware half — full-chip ADC mute** — add ctls 123/124, 141/142, 159/160 (chips B–D, confirmed via `device/tools/tinymix_controls_output.txt`) to `applyMute`/`applyUnmute` in `internal/server/mute.go`. Bundle with the next device rebuild.
-- **Q5 — remove speaker underrun instrumentation** — the v2.6.5 EOS disambiguation already stopped natural stream-ends being logged as underruns; drop the remaining log line from `pcm_speaker.go` once it's been clean for a few sessions.
+- **C5 hardware half — full-chip ADC mute** ✅ — complete as of v2.7.4. All four codec mute pairs (105/106, 123/124, 141/142, 159/160) toggled by `applyMute`/`applyUnmute`; the red mute ring now physically mutes every chip, including ch6.
+- **Q5 — remove speaker underrun instrumentation** ✅ — complete as of v2.7.4. Underrun WARNING removed after several clean sessions; the dead legacy `Pump()` method (HTTP speaker path) removed from the Speaker interface with it.
 - **§3.2 Wake-word barge-in** — run OWW at a raised threshold during TTS playback (currently suppressed entirely while `device.speaking`); on detection cancel playback and start a fresh turn. Controller-only. Do NOT attempt VAD barge-in without AEC.
 - **§3.3 NS decision (P0-3)** — RNNoise is 48kHz-calibrated but fed 16kHz. Cheapest path: leave device NS off and test owwSpeexNs on the wake path. If device NS proves needed: replace RNNoise with speexdsp's 16kHz-native preprocessor, then delete the vendored RNNoise.
 - **Device preroll ring (§3.4)** ✅ — complete as of v2.6.5. ~512ms of pre-gate audio flushed on VAD gate open; benefits wake onsets and continuation turns (gate starts closed after mic restart).
-- **§3.5 Beamformer buffer reuse** — `beamformer.Process()` allocates ~24kB of garbage per 32ms period (~750kB/s GC pressure on the A53) to keep smoothers warm for a disabled feature. Allocate buffers once in `New()`, reuse per period (~20-line device change).
-- **§3.6 VAD sentinel encoding (B5)** — encode the sentinel type in the queue item instead of the `last_vad_was_timeout` side-channel attribute; a second sentinel queued before the first is consumed currently overwrites the flag. Bundle with the next device rebuild touching `data.go`.
+- **§3.5 Beamformer buffer reuse** ✅ — complete as of v2.7.4. Analysis buffers allocated once in `New()`, reused per period; `extractChannel` still allocates (data.go's preroll ring retains its slices).
+- **§3.6 VAD sentinel encoding (B5)** ✅ — complete as of v2.7.4. Sentinel type travels in the queue item (`VAD_SENTINEL_END`/`VAD_SENTINEL_TIMEOUT` strings, defined in em_esphome); `last_vad_was_timeout` deleted.
 
 ---
 
-**Document version:** v2.7.3
+**Document version:** v2.7.4
 **Last updated:** 2026-07-07
 **Changelog:**
 - v1.0 — April 2026: Initial publication. Full pipeline confirmed working.
@@ -1268,5 +1268,11 @@ done
 
 - v2.7.3 — 2026-07-07: Acoustic echo cancellation (default off).
   **AEC.** speexdsp echo canceller (MDF, vendored SpeexDSP-1.2.1, float build, cgo like RNNoise) on the mono mic stream, right after beamformer+gain and before NS/AGC — the whole mic path including the wake stream. Far-end reference is tapped at the ALSA write in the speaker silence loop (every period *including silence*, so the reference clock advances in lockstep with playback), downmixed and 3:1 box-decimated 48k stereo → 16k mono, and buffered in a ring seeded with `aecDelayMs` of silence — modelling write-to-ear latency (speaker ALSA buffer ≈340ms). Both PCM devices share the codec clock, so ring occupancy cannot drift. Config: `aecEnabled` (default **false** — inert until enabled per deployment), `aecDelayMs` (default 250), `aecTailMs` (default 300); applied live on config push (echo state rebuilt on param change). Functional unit test drives the full WriteFar→ring→Process path with a synthetic aligned echo: 42dB attenuation, zero ring underruns (run with `GOOS=linux GOARCH=amd64 CGO_ENABLED=1` in the compiler image). Tuning guidance: enable on one device, speak during/after TTS playback; if residual echo persists, sweep aecDelayMs ±100ms (watch `[aec] reference underrun` — those indicate delay far too small); raise aecTailMs in reverberant rooms. Vendoring note: `_kiss_fft_guts.h` gained an include guard (kiss_fft.c + kiss_fftr.c share one cgo translation unit).
+
+- v2.7.4 — 2026-07-07: Backlog quick fix-ups (C5 mute, §3.5, §3.6/B5, Q5).
+  **Full-chip ADC mute (C5).** The mute button previously muted codec chip A only (ctls 105/106) — chips B–D, including ch6 (the mic OWW and STT actually use), stayed physically hot and the mic stream-stop was what made mute effective. All four confirmed pairs now toggle together; the red ring means hardware mute.
+  **Beamformer buffer reuse (§3.5).** decode + band-diff analysis buffers allocated once in `New()` instead of ~24kB per 32ms period (~750kB/s GC pressure gone). `extractChannel` deliberately still allocates per period — data.go's preroll ring retains those slices.
+  **VAD sentinel encoding (§3.6/B5).** The end-of-speech queue sentinel now carries its own type (`VAD_SENTINEL_END`/`VAD_SENTINEL_TIMEOUT` strings, defined in em_esphome.py; consumers accept legacy None defensively) — the old None + `device.last_vad_was_timeout` side-channel could have its flag overwritten by a second sentinel queued before the first was consumed.
+  **Q5.** Speaker mid-stream underrun WARNING removed (clean since the v2.6.5 EOS disambiguation); dead legacy `Pump()` removed from the Speaker interface and implementation.
 
 *Device: Echo Dot 2nd Gen (RS03QR). Tested on macOS with ADB 35.0.2.*

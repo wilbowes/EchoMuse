@@ -143,11 +143,12 @@ VAD_END_TYPE       = 0x04
 # Distinct from VAD_END_TYPE — device never detected speech at all within its
 # local no-speech grace period (see device/internal/client/data.go
 # noSpeechTimeout), as opposed to VAD_END_TYPE which means speech was
-# detected and then ended normally. Both still push a plain None sentinel
-# onto the queue (existing claracore/OWW consumers don't need to
-# differentiate), but esphome-mode's _stream_mic_audio checks
-# device.last_vad_was_timeout to skip straight to a quiet turn-end rather
-# than treating it as "waiting on a real pipeline response that never came."
+# detected and then ended normally. Each frame type queues its matching
+# string sentinel (esphome.VAD_SENTINEL_END / VAD_SENTINEL_TIMEOUT) so the
+# type travels with the queue item — B5 fix, 2026-07-07; the old None +
+# device.last_vad_was_timeout side-channel let a second sentinel overwrite
+# the first's flag before it was consumed. claracore/OWW consumers treat
+# both flavours identically; esphome's _stream_mic_audio differentiates.
 VAD_NO_SPEECH_TIMEOUT_TYPE = 0x05
 SPEAKER_FRAME_TYPE = 0x02
 SPEAKER_EOS_TYPE   = 0x03
@@ -185,13 +186,6 @@ class Device:
         self.mic_queue:   asyncio.Queue[bytes] = asyncio.Queue(maxsize=64)
         self.voice_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=256)
         self.oww_paused   = asyncio.Event()  # set during voice turn
-        # Set immediately before queueing the None sentinel that resulted
-        # from VAD_NO_SPEECH_TIMEOUT_TYPE, cleared immediately after —
-        # esphome-mode's _stream_mic_audio checks this right after receiving
-        # the sentinel to distinguish "never spoke" from a normal VAD end.
-        # claracore mode and the OWW loop ignore it; both already treat any
-        # None sentinel identically and don't need the distinction.
-        self.last_vad_was_timeout = False
 
         # Transient state — read by em_api._merge_device()
         self.speaking  = False
@@ -455,8 +449,9 @@ async def _run_claracore_backend(
                             )
                         except asyncio.TimeoutError:
                             continue
-                        if payload is None:
-                            # VAD end sentinel — signal voice server speech has ended
+                        if payload is None or isinstance(payload, str):
+                            # VAD sentinel (either flavour) — signal voice
+                            # server speech has ended
                             log.info(
                                 f"[{device.device_id}] VAD end — signalling voice server "
                                 f"(pcm_buf={len(pcm_buf)}b queued)"
@@ -927,7 +922,10 @@ async def wake_word_listener(device: Device):
                 await device.mic_start()
                 continue
 
-            if payload is None:
+            # VAD sentinel (string; None accepted defensively — the pre-B5
+            # encoding) — flush partial audio so OWW never scores across a
+            # stream boundary.
+            if payload is None or isinstance(payload, str):
                 buf.clear()
                 continue
 
@@ -1402,7 +1400,11 @@ async def handle_data(ws: WebSocketServerProtocol):
             if raw[0] != MIC_FRAME_TYPE:
                 continue
             if len(raw) == MIC_HEADER_LEN + 1 and raw[MIC_HEADER_LEN] in (VAD_END_TYPE, VAD_NO_SPEECH_TIMEOUT_TYPE):
-                device.last_vad_was_timeout = (raw[MIC_HEADER_LEN] == VAD_NO_SPEECH_TIMEOUT_TYPE)
+                sentinel = (
+                    esphome.VAD_SENTINEL_TIMEOUT
+                    if raw[MIC_HEADER_LEN] == VAD_NO_SPEECH_TIMEOUT_TYPE
+                    else esphome.VAD_SENTINEL_END
+                )
                 q = device.voice_queue if device.oww_paused.is_set() else device.mic_queue
                 if q.full():
                     try:
@@ -1411,7 +1413,7 @@ async def handle_data(ws: WebSocketServerProtocol):
                     except asyncio.QueueEmpty:
                         pass
                 try:
-                    q.put_nowait(None)
+                    q.put_nowait(sentinel)
                 except asyncio.QueueFull:
                     log.error(f"[{device.device_id}] VAD sentinel lost — queue still full after drain")
                 continue
