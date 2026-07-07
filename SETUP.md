@@ -1109,7 +1109,7 @@ done
 - **Rubbish transcription suppression** — wake word triggers on background noise still result in HA's "Sorry, I couldn't understand that" response. Options: audio energy gate in `_stream_mic_audio` before sending to HA (cleanest); or discard HA's stock apology in the TTS handler (tactical). Deferred pending P0-3 NS fix — noise floor situation needs to settle first.
 - **C5 hardware half — full-chip ADC mute** ✅ — complete as of v2.7.4. All four codec mute pairs (105/106, 123/124, 141/142, 159/160) toggled by `applyMute`/`applyUnmute`; the red mute ring now physically mutes every chip, including ch6.
 - **Q5 — remove speaker underrun instrumentation** ✅ — complete as of v2.7.4. Underrun WARNING removed after several clean sessions; the dead legacy `Pump()` method (HTTP speaker path) removed from the Speaker interface with it.
-- **§3.2 Wake-word barge-in** — run OWW at a raised threshold during TTS playback (currently suppressed entirely while `device.speaking`); on detection cancel playback and start a fresh turn. Controller-only. Do NOT attempt VAD barge-in without AEC.
+- **§3.2 Wake-word barge-in** ✅ — complete as of v2.7.6 (`bargeInEnabled`, default off; requires device AEC). With it on, the mic streams through TTS playback and a dedicated per-device OWW watcher scores voice_queue at max(bargeInThreshold, owwThreshold); detection sets cancel_event (aborts streaming + drain sleep), sends the new `speaker_flush` control message (device discards buffered periods; ≤~170ms ALSA in-flight still plays), and the turn loop re-enters a fresh turn with the wake-word preroll discard. VAD-based barge-in (interrupt by just talking) remains explicitly out of scope.
 - **§3.3 NS decision (P0-3)** — RNNoise is 48kHz-calibrated but fed 16kHz. Cheapest path: leave device NS off and test owwSpeexNs on the wake path. If device NS proves needed: replace RNNoise with speexdsp's 16kHz-native preprocessor, then delete the vendored RNNoise.
 - **Device preroll ring (§3.4)** ✅ — complete as of v2.6.5. ~512ms of pre-gate audio flushed on VAD gate open; benefits wake onsets and continuation turns (gate starts closed after mic restart).
 - **§3.5 Beamformer buffer reuse** ✅ — complete as of v2.7.4. Analysis buffers allocated once in `New()`, reused per period; `extractChannel` still allocates (data.go's preroll ring retains its slices).
@@ -1117,7 +1117,7 @@ done
 
 ---
 
-**Document version:** v2.7.4
+**Document version:** v2.7.6
 **Last updated:** 2026-07-07
 **Changelog:**
 - v1.0 — April 2026: Initial publication. Full pipeline confirmed working.
@@ -1274,5 +1274,8 @@ done
   **Beamformer buffer reuse (§3.5).** decode + band-diff analysis buffers allocated once in `New()` instead of ~24kB per 32ms period (~750kB/s GC pressure gone). `extractChannel` deliberately still allocates per period — data.go's preroll ring retains those slices.
   **VAD sentinel encoding (§3.6/B5).** The end-of-speech queue sentinel now carries its own type (`VAD_SENTINEL_END`/`VAD_SENTINEL_TIMEOUT` strings, defined in em_esphome.py; consumers accept legacy None defensively) — the old None + `device.last_vad_was_timeout` side-channel could have its flag overwritten by a second sentinel queued before the first was consumed.
   **Q5.** Speaker mid-stream underrun WARNING removed (clean since the v2.6.5 EOS disambiguation); dead legacy `Pump()` removed from the Speaker interface and implementation.
+
+- v2.7.6 — 2026-07-07: Wake-word barge-in (default off).
+  **Barge-in (§3.2).** Saying the wake word during TTS playback cancels the response and starts a fresh turn. Config `bargeInEnabled` (default false) + `bargeInThreshold` (default 0.6; effective threshold is max(barge, oww) so residual post-AEC echo can't self-trigger) — dashboard toggles live in the Wake word section. Mechanics: with barge-in on, `post_turn_play_esphome` skips the pre-playback `mic_stop` (the pre-AEC acoustic-feedback guard — safe now because device AEC subtracts the speaker output and AGC no longer exists on the wake stream) and runs `_barge_watcher`, which drains voice_queue (fed via oww_paused routing, otherwise unread during playback) and scores it with a dedicated per-device openwakeword instance (the main wake listener task is blocked awaiting the turn). Detection sets `barge_detected` + `cancel_event` — aborting `stream_speaker` and the drain sleep — and sends the new `speaker_flush` control message; the device discards its queued speaker periods (up to ~1.4s of buffered TTS; the ≤4 ALSA periods ≈170ms already in hardware still play). The turn loop then re-enters a fresh turn ("barge-in" trigger, wake-word preroll discard), keeping the mic running so words spoken in the same breath as the wake word survive. **Enable AEC first** — without it the watcher scores raw echo and the raised threshold is the only defence. Old device binaries log speaker_flush as unknown and let buffered audio play out (degraded, not broken). Standalone announcements (wizard/push TTS) remain non-interruptible.
 
 *Device: Echo Dot 2nd Gen (RS03QR). Tested on macOS with ADB 35.0.2.*

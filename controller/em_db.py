@@ -79,6 +79,14 @@ DEFAULT_DEVICE_CONFIG = {
     # get clipped; 600 caused the "must finish quickly" behaviour.
     "vadSilenceMs":     900,
     "owwThreshold":     0.3,
+    # Barge-in (§3.2, controller-side): wake word spoken during TTS playback
+    # cancels it and starts a fresh turn. Requires device AEC (aecEnabled)
+    # to be on and validated first — with barge-in the mic streams through
+    # playback, and AEC is what stops the device hearing itself. The
+    # watcher threshold is max(bargeInThreshold, owwThreshold): raised so
+    # residual post-AEC echo can't self-trigger.
+    "bargeInEnabled":   False,
+    "bargeInThreshold": 0.6,
     "owwModel":         "hey_jarvis_v0.1",
     # owwSpeexNs: openwakeword's built-in speexdsp noise suppressor (Q1,
     # 2026-07-05 review). 16kHz-native, applied controller-side, only to

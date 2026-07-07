@@ -66,6 +66,16 @@ score came close but didn't trigger. If you're being ignored and see
 near-misses climbing, move one step toward Eager. If it wakes up when nobody
 spoke, move toward Precise.
 
+### Barge-in
+Lets the wake word **interrupt the assistant mid-response** — say "Hey
+Rhasspy, stop" while it's reading you a paragraph and it cuts off and
+listens. Off by default. **Turn on Echo cancel (AEC) first**: barge-in
+works by leaving the microphones live while the device speaks, and AEC is
+what stops it hearing itself. The **barge threshold** is the extra
+confidence required during playback (higher than normal, so the device's
+own voice can't trigger it) — lower it if interrupting feels unreliable,
+raise it if responses ever cut themselves off.
+
 ### Speex denoise
 Runs a noise cleaner on the audio *only for wake-word scoring* (your actual
 commands are untouched). Worth trying in rooms with constant background

@@ -2838,6 +2838,8 @@ function DeviceConfigForm({ config, onChange, disabled }) {
             </div>
             <div style={{ marginTop: 16, ...inputStyle }}>
               <Toggle label="Speex denoise" sub="cleans audio before scoring — try in noisy rooms" value={config.owwSpeexNs ?? false} onChange={v => set('owwSpeexNs', v)}/>
+              <Toggle label="Barge-in" sub="wake word interrupts playback — enable AEC first" value={config.bargeInEnabled ?? false} onChange={v => set('bargeInEnabled', v)}/>
+              <Slider label="Barge threshold" sub="wake confidence needed during playback" value={config.bargeInThreshold ?? 0.6} min={0.3} max={0.9} step={0.05} onChange={v => set('bargeInThreshold', v)}/>
             </div>
           </div>
         </div>

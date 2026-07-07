@@ -64,6 +64,7 @@ type ControlClient struct {
 	configAppliedCallback ConfigAppliedCallback
 	volumeSetCallback     VolumeSetCallback
 	beamLockCallback      BeamLockCallback
+	speakerFlushCallback  StateCallback
 
 	conn         *websocket.Conn
 	connMu       sync.Mutex
@@ -99,6 +100,7 @@ func (c *ControlClient) OnPending(cb StateCallback)               { c.pendingCal
 func (c *ControlClient) OnConfigApplied(cb ConfigAppliedCallback) { c.configAppliedCallback = cb }
 func (c *ControlClient) OnVolumeSet(cb VolumeSetCallback)         { c.volumeSetCallback = cb }
 func (c *ControlClient) OnBeamLock(cb BeamLockCallback)           { c.beamLockCallback = cb }
+func (c *ControlClient) OnSpeakerFlush(cb StateCallback)          { c.speakerFlushCallback = cb }
 
 var errPending = fmt.Errorf("pending approval")
 
@@ -343,6 +345,14 @@ func (c *ControlClient) connect(ctx context.Context, addr string, data *DataClie
 				c.shellCancel = nil
 			}
 			c.shellMu.Unlock()
+
+		case "speaker_flush":
+			// Barge-in: controller detected the wake word during TTS
+			// playback and wants the buffered audio cut immediately.
+			log.Printf("[control] speaker_flush received — discarding buffered playback")
+			if c.speakerFlushCallback != nil {
+				c.speakerFlushCallback()
+			}
 
 		case "ping":
 			c.writeJSON(map[string]string{"type": "pong"})

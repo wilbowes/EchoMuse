@@ -162,6 +162,31 @@ func (p *PcmSpeaker) EndStream() {
 	p.eosPending.Store(true)
 }
 
+// Flush discards all queued-but-unplayed audio (barge-in: the controller
+// stops sending 0x02 frames and asks for an immediate cut instead of
+// letting up to ~1.4s of buffered TTS play out). Up to PeriodCount ALSA
+// periods (~170ms) already handed to the hardware still play — cutting
+// those needs a stream restart, which costs more in click/pop than it
+// saves. eosPending is set so silenceLoop reports a clean stream end.
+// Draining a channel another goroutine sends on is safe; at worst the WS
+// reader enqueues one more period after we return, and the controller has
+// already stopped producing them.
+func (p *PcmSpeaker) Flush() {
+	n := 0
+	for {
+		select {
+		case <-p.audioCh:
+			n++
+		default:
+			if n > 0 {
+				p.eosPending.Store(true)
+				log.Printf("[speaker] flushed %d buffered periods (barge-in)", n)
+			}
+			return
+		}
+	}
+}
+
 func (p *PcmSpeaker) Close() {
 	close(p.stopCh)
 	p.session.Close()

@@ -7,5 +7,7 @@ type Speaker interface {
 	// can distinguish "channel drained because playback finished" from a
 	// mid-stream underrun.
 	EndStream()
+	// Flush discards queued-but-unplayed audio immediately (barge-in).
+	Flush()
 	Close()
 }

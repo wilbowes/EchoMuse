@@ -73,8 +73,9 @@ interrupting.
 
 **Benefit:** follow-up questions work properly (the device can hear you over
 the tail of its own response), and its own speech can't trigger or confuse
-the listening logic. It's also the prerequisite for true "barge-in" —
-interrupting the assistant mid-sentence — which is on the roadmap.
+the listening logic. It's also what makes **barge-in** possible —
+interrupting the assistant mid-sentence with the wake word (see the
+configuration guide's Barge-in setting).
 
 **Caveats:** it only removes the *Dot's own* sound — it does nothing about
 the TV (that's a different problem; see Stage 8). And it needs a per-home
@@ -183,10 +184,12 @@ can subtract it.
 **Benefit:** centrally-applied EQ means every device gets consistent,
 tuned sound, adjustable live from the dashboard.
 
-**Caveat:** while the wake-word recogniser is suppressed during playback
-(so the device can't wake itself), you currently can't interrupt a response
-by voice — barge-in is the next major feature now that AEC provides its
-foundation.
+**Caveat:** interrupting a response by voice (**barge-in**) works when
+enabled — say the wake word over the top and the response cuts off — but
+it's off by default and depends on AEC being on and tuned (Stage 3): the
+mics stay live during playback, and echo cancellation is what stops the
+device waking itself. Interrupting by *just talking* (without the wake
+word) is deliberately not attempted.
 
 ---
 

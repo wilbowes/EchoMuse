@@ -156,6 +156,12 @@ func main() {
 		applyAecConfig(canceller)
 	})
 
+	// Speaker flush — barge-in: cut buffered TTS the moment the controller
+	// hears the wake word during playback.
+	controlClient.OnSpeakerFlush(func() {
+		pcmSpeaker.Flush()
+	})
+
 	// Beam lock/unlock — controller locks the beamformer onto the speaker's
 	// perimeter mic at wake detection (mid-stream, no restart) and releases
 	// it at turn end. Requests are consumed by the mic streaming goroutine.
