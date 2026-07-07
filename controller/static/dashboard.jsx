@@ -120,6 +120,40 @@ function Pill({ children, accent, danger, disabled, onClick, small }) {
   );
 }
 
+// SectionLabel — the small uppercase mono heading used throughout. One
+// definition instead of the same inline style repeated per call site.
+function SectionLabel({ children, style }) {
+  return (
+    <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 12, ...style }}>
+      {children}
+    </div>
+  );
+}
+
+// Panel — bordered card grouping related controls. Gives tab content a
+// consistent visual structure instead of floating elements.
+function Panel({ label, children, style }) {
+  return (
+    <div style={{ background: 'linear-gradient(170deg,#e4e0d8,#dad6ce)', border: '1px solid #b8b4ac', borderRadius: 10, padding: '14px 16px 16px', boxShadow: '0 1px 0 rgba(255,255,255,0.6) inset', ...style }}>
+      {label && <SectionLabel>{label}</SectionLabel>}
+      {children}
+    </div>
+  );
+}
+
+// CircleButton — the round header button (close, delete). One treatment
+// everywhere instead of per-modal variants.
+function CircleButton({ onClick, title, color, children }) {
+  return (
+    <button onClick={onClick} title={title} style={{
+      background: 'linear-gradient(180deg,#d0ccc4,#bab6ae)', border: '1px solid #a0a098',
+      borderRadius: '50%', width: 28, height: 28, display: 'flex', alignItems: 'center',
+      justifyContent: 'center', cursor: 'pointer', boxShadow: '0 1px 0 rgba(255,255,255,0.5) inset',
+      color: color || '#5a5650', fontSize: 15, fontWeight: 300, lineHeight: 1,
+    }}>{children}</button>
+  );
+}
+
 function Slider({ label, sub, value, min, max, step = 1, unit = '', formatValue, onChange }) {
   const display = formatValue ? formatValue(value) : `${value}${unit}`;
   return (
@@ -349,71 +383,213 @@ function LedRing({ state, size = 120 }) {
 
 // ─── Shell terminal ───────────────────────────────────────────────────────────
 
-function Shell({ deviceId, token }) {
-  const [lines, setLines] = useState([{ type: 'sys', text: `shell — ${deviceId}` }]);
-  const [input, setInput] = useState('');
-  const [ws, setWs] = useState(null);
-  const endRef = useRef(null);
-  const inputRef = useRef(null);
+// Real terminal (xterm.js) over the device shell WebSocket.
+//
+// Mode is decided by the controller's shell_meta message (sent before any
+// shell bytes):
+//   pty:true  — device attached sh to a pseudo-terminal. Keystrokes go
+//               raw in framed binary messages (0x00 = stdin, 0x01 =
+//               resize cols/rows u16 BE); mksh does echo, line editing,
+//               prompts, and full-screen apps (top, vi) work.
+//   pty:false — pre-PTY firmware: raw pipe, no echo, no framing. Local
+//               echo + line buffering emulate the old input box.
+function Shell({ deviceId, token, height = 320 }) {
+  const containerRef = useRef(null);
 
   useEffect(() => {
+    const term = new window.Terminal({
+      fontSize: 12,
+      fontFamily: "'DM Mono', monospace",
+      cursorBlink: true,
+      scrollback: 5000,
+      theme: {
+        background: '#1c1f18', foreground: '#c8d4b0',
+        cursor: '#9aba80', cursorAccent: '#1c1f18',
+        selectionBackground: '#3a4430',
+      },
+    });
+    const fit = new window.FitAddon.FitAddon();
+    term.loadAddon(fit);
+    term.open(containerRef.current);
+    fit.fit();
+
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const sock = new WebSocket(`${proto}://${location.host}/api/devices/${deviceId}/shell?token=${token}`);
     sock.binaryType = 'arraybuffer';
-    sock.onopen = () => setLines(l => [...l, { type: 'sys', text: 'connected' }]);
-    sock.onmessage = e => {
-      const text = typeof e.data === 'string' ? e.data : new TextDecoder().decode(e.data);
-      setLines(l => [...l, { type: 'out', text }]);
+
+    let pty = null;    // null until shell_meta arrives
+    let lineBuf = '';  // legacy-mode local line buffer
+
+    const sendResize = () => {
+      if (pty !== true || sock.readyState !== 1) return;
+      const b = new Uint8Array(5);
+      b[0] = 0x01;
+      b[1] = term.cols >> 8; b[2] = term.cols & 0xff;
+      b[3] = term.rows >> 8; b[4] = term.rows & 0xff;
+      sock.send(b);
     };
-    sock.onclose = () => setLines(l => [...l, { type: 'sys', text: 'disconnected' }]);
-    sock.onerror = () => setLines(l => [...l, { type: 'err', text: 'connection error' }]);
-    setWs(sock);
-    return () => sock.close();
+
+    sock.onopen = () => term.write(`\x1b[2mshell — ${deviceId}\x1b[0m\r\n`);
+    sock.onmessage = e => {
+      if (typeof e.data === 'string') {
+        try {
+          const m = JSON.parse(e.data);
+          if (m.type === 'shell_meta') {
+            pty = !!m.pty;
+            if (pty) sendResize();
+            else term.write('\x1b[2m[firmware has no PTY support — line mode; update the device for a full terminal]\x1b[0m\r\n');
+            return;
+          }
+        } catch {}
+        term.write(e.data);
+        return;
+      }
+      term.write(new Uint8Array(e.data));
+    };
+    sock.onclose = () => term.write('\r\n\x1b[2mdisconnected\x1b[0m\r\n');
+    sock.onerror = () => term.write('\r\n\x1b[31mconnection error\x1b[0m\r\n');
+
+    const dataSub = term.onData(d => {
+      if (sock.readyState !== 1) return;
+      if (pty === true) {
+        const enc = new TextEncoder().encode(d);
+        const b = new Uint8Array(enc.length + 1);
+        b[0] = 0x00;
+        b.set(enc, 1);
+        sock.send(b);
+      } else {
+        // Legacy pipe: sh has no TTY, so echo and line editing happen here.
+        for (const ch of d) {
+          if (ch === '\r') { term.write('\r\n'); sock.send(lineBuf + '\n'); lineBuf = ''; }
+          else if (ch === '\x7f') { if (lineBuf) { lineBuf = lineBuf.slice(0, -1); term.write('\b \b'); } }
+          else if (ch === '\x03') { sock.send('\x03'); term.write('^C\r\n'); lineBuf = ''; }
+          else if (ch >= ' ') { lineBuf += ch; term.write(ch); }
+        }
+      }
+    });
+    const resizeSub = term.onResize(() => sendResize());
+    const ro = new ResizeObserver(() => { try { fit.fit(); } catch {} });
+    ro.observe(containerRef.current);
+
+    return () => {
+      ro.disconnect();
+      dataSub.dispose();
+      resizeSub.dispose();
+      sock.close();
+      term.dispose();
+    };
   }, [deviceId]);
 
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [lines]);
+  return (
+    <div style={{ background: '#1c1f18', border: '1px solid #1a1c16', borderRadius: 6, boxShadow: 'inset 0 2px 6px rgba(0,0,0,0.6)', padding: 10, height }}>
+      <div ref={containerRef} style={{ height: '100%', width: '100%' }}/>
+    </div>
+  );
+}
 
-  const send = () => {
-    if (!input.trim() || !ws || ws.readyState !== 1) return;
-    setLines(l => [...l, { type: 'in', text: input }]);
-    ws.send(input + '\n');
-    setInput('');
-  };
+// ─── Turn observability (Status tab) ─────────────────────────────────────────
+// Stat tiles + a stage-breakdown bar per recent turn. Colors validated
+// (dataviz six-checks) against the panel surface #dfdbd3: CVD ΔE 26.3,
+// contrast ≥3:1, chroma ≥0.1. Identity is never color-alone: legend + the
+// tooltip name each stage.
+const TURN_STAGES = [
+  { key: 'listen',     label: 'Listening',  color: '#4468a8' },
+  { key: 'transcribe', label: 'Transcribe', color: '#1f8a55' },
+  { key: 'respond',    label: 'Respond',    color: '#96660a' },
+];
 
-  const handleKeyDown = (e) => {
-    if (e.key === 'Enter') {
-      send();
-    } else if (e.key === 'c' && e.ctrlKey) {
-      e.preventDefault();
-      if (ws && ws.readyState === 1) {
-        ws.send('\x03');
-        setLines(l => [...l, { type: 'in', text: '^C' }]);
-      }
-    }
-  };
+function turnSegments(t) {
+  // Stage durations from the trace timestamps; -1 = never reached.
+  const vad = t.vad_end_ms >= 0 ? t.vad_end_ms : -1;
+  const stt = t.stt_ms     >= 0 ? t.stt_ms     : -1;
+  const tts = t.tts_url_ms >= 0 ? t.tts_url_ms : -1;
+  const listen     = vad >= 0 ? vad : Math.max(t.total_ms || 0, 0);
+  const transcribe = (stt >= 0 && vad >= 0) ? Math.max(stt - vad, 0) : 0;
+  const respond    = (tts >= 0 && stt >= 0) ? Math.max(tts - stt, 0) : 0;
+  return { listen, transcribe, respond, shown: listen + transcribe + respond };
+}
 
-  const lineColor = t => ({ sys: '#2a3020', in: '#c8d4b0', out: '#8aaa70', err: '#c04040' }[t] || '#8aaa70');
+function TurnObservability({ turns, nearMisses, stateLabel, stateColor }) {
+  const [hover, setHover] = useState(null); // index into `recent`
+  const mono = "'DM Mono',monospace";
+
+  const ok = turns.filter(t => t.outcome === 'ok');
+  const successPct = turns.length ? Math.round(ok.length / turns.length * 100) : null;
+  const replies = ok.map(t => t.tts_url_ms).filter(v => v >= 0).sort((a, b) => a - b);
+  const medianReply = replies.length ? replies[Math.floor(replies.length / 2)] : null;
+  const fmtS = ms => (ms / 1000).toFixed(1) + 's';
+
+  const recent = turns.slice(-8).reverse(); // newest first
+  const scale = Math.max(3000, ...recent.map(t => turnSegments(t).shown));
 
   return (
-    <div style={{ background: 'linear-gradient(160deg,#252820,#1c1f18)', border: '1px solid #1a1c16', borderRadius: 6, boxShadow: 'inset 0 2px 6px rgba(0,0,0,0.6)', padding: 16, height: 320, display: 'flex', flexDirection: 'column', fontFamily: "'DM Mono',monospace", fontSize: 12 }}
-      onClick={() => inputRef.current?.focus()}>
-      <div style={{ flex: 1, overflowY: 'auto', paddingBottom: 8 }}>
-        {lines.map((line, i) => (
-          <div key={i} style={{ marginBottom: 2, lineHeight: 1.65 }}>
-            {line.type === 'in' && <span style={{ color: '#6a9a50' }}>% </span>}
-            <span style={{ color: lineColor(line.type), whiteSpace: 'pre-wrap' }}>{line.text}</span>
+    <div>
+      {/* Stat tiles */}
+      <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: 16 }}>
+        <Lcd label="State" value={stateLabel} color={stateColor} size={16}/>
+        <Lcd label="Turns (last 50)" value={turns.length} color="var(--lcd-green)" size={16}/>
+        <Lcd label="Success" value={successPct != null ? successPct + '%' : '—'}
+             color={successPct == null ? 'var(--lcd-dim)' : successPct >= 80 ? 'var(--lcd-green)' : 'var(--lcd-amber)'} size={16}/>
+        <Lcd label="Median reply" value={medianReply != null ? fmtS(medianReply) : '—'} color="var(--lcd-dim)" size={16}/>
+        <Lcd label="Near-misses" value={nearMisses != null ? nearMisses : '—'}
+             color={nearMisses > 0 ? 'var(--lcd-amber)' : 'var(--lcd-dim)'} size={16}/>
+      </div>
+
+      {recent.length === 0 ? (
+        <div style={{ fontFamily: mono, fontSize: 11, color: 'var(--muted)' }}>
+          No voice turns recorded yet — history starts when the device is next used.
+        </div>
+      ) : (
+        <div style={{ position: 'relative' }}>
+          {/* Legend */}
+          <div style={{ display: 'flex', gap: 14, marginBottom: 10 }}>
+            {TURN_STAGES.map(s => (
+              <span key={s.key} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontFamily: mono, fontSize: 9, color: 'var(--text2)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                <span style={{ width: 8, height: 8, borderRadius: 2, background: s.color, display: 'inline-block' }}/>
+                {s.label}
+              </span>
+            ))}
           </div>
-        ))}
-        <div ref={endRef}/>
-      </div>
-      <div style={{ display: 'flex', gap: 8, borderTop: '1px solid #1e2218', paddingTop: 10, alignItems: 'center' }}>
-        <span style={{ color: '#6a9a50' }}>%</span>
-        <input ref={inputRef} value={input} onChange={e => setInput(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder="enter command..."
-          style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', color: '#c8d4b0', fontFamily: "'DM Mono',monospace", fontSize: 12, caretColor: '#9aba80' }}
-          autoFocus/>
-      </div>
+
+          {/* One stacked bar per turn, newest first */}
+          {recent.map((t, i) => {
+            const seg = turnSegments(t);
+            const time = new Date(t.ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            const failed = t.outcome !== 'ok';
+            return (
+              <div key={i}
+                onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)}
+                style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '3px 0', cursor: 'default', background: hover === i ? 'rgba(0,0,0,0.04)' : 'transparent', borderRadius: 4 }}>
+                <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)', width: 38, flexShrink: 0, textAlign: 'right' }}>{time}</span>
+                <div style={{ flex: 1, display: 'flex', height: 14, alignItems: 'stretch' }}>
+                  {TURN_STAGES.map(s => seg[s.key] > 0 && (
+                    <div key={s.key} style={{
+                      width: `${seg[s.key] / scale * 100}%`, background: s.color,
+                      borderRadius: 3, marginRight: 2, minWidth: 3,
+                    }}/>
+                  ))}
+                </div>
+                <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--text2)', width: 34, flexShrink: 0 }}>{fmtS(seg.shown)}</span>
+                <span style={{ fontFamily: mono, fontSize: 8, textTransform: 'uppercase', letterSpacing: '0.08em', width: 62, flexShrink: 0, color: failed ? '#a04010' : '#286040' }}>
+                  {t.outcome === 'ok' ? 'ok' : (t.outcome || '?').replace(/_/g, ' ')}
+                </span>
+              </div>
+            );
+          })}
+
+          {/* Hover detail */}
+          {hover != null && recent[hover] && (() => {
+            const t = recent[hover]; const seg = turnSegments(t);
+            return (
+              <div style={{ marginTop: 10, background: 'rgba(0,0,0,0.05)', border: '1px solid rgba(0,0,0,0.1)', borderRadius: 6, padding: '8px 12px', fontFamily: mono, fontSize: 10, color: 'var(--text2)', lineHeight: 1.7 }}>
+                <span style={{ color: 'var(--muted)' }}>{t.trigger}</span>
+                {' · '}listening {fmtS(seg.listen)} · transcribe {fmtS(seg.transcribe)} · respond {fmtS(seg.respond)} · total {fmtS(Math.max(t.total_ms, 0))}
+                {t.stt_text ? <><br/>“{t.stt_text.length > 90 ? t.stt_text.slice(0, 90) + '…' : t.stt_text}”</> : null}
+              </div>
+            );
+          })()}
+        </div>
+      )}
     </div>
   );
 }
@@ -442,6 +618,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const fileInputRef = useRef(null);
+  const [turns, setTurns] = useState([]);
   const state = deviceState(device);
   const needsUpdate = device.firmware_ver && release?.version && device.firmware_ver !== release.version;
 
@@ -459,6 +636,19 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
     if (tab === 'updates') {
       API.get('/api/releases/latest').then(setRelease).catch(() => {});
     }
+  }, [tab, device.device_id]);
+
+  // Turn observability — fetch on Status tab entry, refresh every 10s while
+  // the tab is open (turn history is in-memory on the controller).
+  useEffect(() => {
+    if (tab !== 'status') return;
+    let live = true;
+    const load = () => API.get(`/api/devices/${device.device_id}/turns`)
+      .then(t => { if (live) setTurns(Array.isArray(t) ? t : []); })
+      .catch(() => {});
+    load();
+    const iv = setInterval(load, 10000);
+    return () => { live = false; clearInterval(iv); };
   }, [tab, device.device_id]);
 
   function setConf(k, v) { setConfig(c => ({ ...c, [k]: v })); setDirty(true); }
@@ -620,7 +810,10 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   return (
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(180,176,168,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100, backdropFilter: 'blur(8px)' }}
       onClick={e => e.target === e.currentTarget && onClose()}>
-      <div style={{ width: 'min(900px,95vw)', maxHeight: '90vh', background: 'linear-gradient(170deg,#e8e4de,#d8d4cc)', border: '1px solid #b8b4ac', borderRadius: 16, boxShadow: '0 24px 80px rgba(0,0,0,0.3),0 2px 0 rgba(255,255,255,0.8) inset', display: 'flex', flexDirection: 'column', overflow: 'hidden', animation: 'fadeIn 0.15s ease' }}>
+      {/* Fixed height (not maxHeight): every tab renders in an identical
+          frame — content scrolls inside, the window never resizes as you
+          move between tabs. */}
+      <div style={{ width: 'min(900px,95vw)', height: 'min(700px,90vh)', background: 'linear-gradient(170deg,#e8e4de,#d8d4cc)', border: '1px solid #b8b4ac', borderRadius: 16, boxShadow: '0 24px 80px rgba(0,0,0,0.3),0 2px 0 rgba(255,255,255,0.8) inset', display: 'flex', flexDirection: 'column', overflow: 'hidden', animation: 'fadeIn 0.15s ease' }}>
         {/* Header */}
         <div style={{ background: 'linear-gradient(180deg,#dedad2,#ccc8c0)', borderBottom: '1px solid #b0aca4', padding: '20px 24px 0', boxShadow: '0 1px 0 rgba(255,255,255,0.5) inset' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 20, marginBottom: 16 }}>
@@ -666,8 +859,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: state.dot, textShadow: `0 0 8px ${state.dot}88`, letterSpacing: '0.05em' }}>{state.label.toUpperCase()}</span>
               </div>
               {isAdmin && !confirmDelete && (
-                <button onClick={() => setConfirmDelete(true)} title="Delete device"
-                  style={{ background: 'linear-gradient(180deg,#d0ccc4,#bab6ae)', border: '1px solid #a0a098', borderRadius: '50%', width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', boxShadow: '0 1px 0 rgba(255,255,255,0.5) inset', color: '#a04848', fontSize: 13 }}>🗑</button>
+                <CircleButton onClick={() => setConfirmDelete(true)} title="Delete device" color="#a04848">🗑</CircleButton>
               )}
               {isAdmin && confirmDelete && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -676,7 +868,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                   <Pill small onClick={() => setConfirmDelete(false)} disabled={deleting}>Cancel</Pill>
                 </div>
               )}
-              <button onClick={onClose} style={{ background: 'linear-gradient(180deg,#d0ccc4,#bab6ae)', border: '1px solid #a0a098', borderRadius: '50%', width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', boxShadow: '0 1px 0 rgba(255,255,255,0.5) inset', color: '#5a5650', fontSize: 16, fontWeight: 300 }}>×</button>
+              <CircleButton onClick={onClose} title="Close">×</CircleButton>
             </div>
           </div>
           <div style={{ display: 'flex', gap: 2 }}>
@@ -715,35 +907,43 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
             const stoPct   = s?.storageTotalMb ? s.storageUsedMb/s.storageTotalMb*100 : null;
             const stoText  = s?.storageTotalMb != null
               ? `${(s.storageUsedMb/1024).toFixed(1)} / ${(s.storageTotalMb/1024).toFixed(1)} GB` : null;
+            const cfgEff = (device.use_global_config ?? true) ? (globalConfig || device.config || {}) : (device.config || {});
+            const wwLabel = (cfgEff.owwModel || '—').replace(/_v[\d.]+$/, '').replace(/_/g, ' ');
             return (
-              <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:24 }}>
-                <div>
-                  <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.15em', marginBottom:12 }}>Device</div>
-                  {row('IP', (() => {
-                    const ip = device.ip && device.ip !== '127.0.0.1' ? device.ip : null;
-                    return device.connected ? (ip || '—') : (ip ? `${ip} (last seen)` : '—');
-                  })())}
-                  {row('Firmware', device.firmware_ver || '—')}
-                  {row('Last seen', relTime(device.last_seen))}
-                  {row('Connected', device.connected ? 'Yes' : 'No', device.connected ? '#286040' : '#c0601a')}
-                  {row('OWW near-misses', device.owwNearMisses != null ? device.owwNearMisses : '—')}
-                </div>
-                <div>
-                  <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.15em', marginBottom:14 }}>Resources</div>
-                  <StatBar label="CPU"     pct={s?.cpuPct}    text={cpuText}/>
-                  <StatBar label="RAM"     pct={ramPct}        text={ramText}/>
-                  <StatBar label="Storage" pct={stoPct}        text={stoText}/>
-                  <div style={{ marginBottom:13 }}>
-                    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:5 }}>
+              <div style={{ minHeight:'100%', display:'flex', flexDirection:'column', gap:16 }}>
+                <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16 }}>
+                  <Panel label="Device">
+                    {row('IP', (() => {
+                      const ip = device.ip && device.ip !== '127.0.0.1' ? device.ip : null;
+                      return device.connected ? (ip || '—') : (ip ? `${ip} (last seen)` : '—');
+                    })())}
+                    {row('Firmware', device.firmware_ver || '—')}
+                    {row('Last seen', relTime(device.last_seen))}
+                    {row('Connected', device.connected ? 'Yes' : 'No', device.connected ? '#286040' : '#c0601a')}
+                    {row('Config', (device.use_global_config ?? true) ? 'Fleet' : 'Device override')}
+                  </Panel>
+                  <Panel label="Resources">
+                    <StatBar label="CPU"     pct={s?.cpuPct}    text={cpuText}/>
+                    <StatBar label="RAM"     pct={ramPct}        text={ramText}/>
+                    <StatBar label="Storage" pct={stoPct}        text={stoText}/>
+                    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
                       <span style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.08em' }}>WiFi</span>
                       <div style={{ display:'flex', alignItems:'center', gap:8 }}>
                         <span style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--text2)' }}>{s?.wifiRssi != null ? `${s.wifiRssi} dBm` : '—'}</span>
                         <SignalBars rssi={s?.wifiRssi ?? null}/>
                       </div>
                     </div>
-                  </div>
-                  {!s && <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', marginTop:4 }}>waiting for device stats…</div>}
+                    {!s && <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', marginTop:8 }}>waiting for device stats…</div>}
+                  </Panel>
                 </div>
+                <Panel label={`Voice activity — ${wwLabel} @ ${cfgEff.owwThreshold != null ? cfgEff.owwThreshold.toFixed(2) : '—'}`} style={{ flex:1 }}>
+                  <TurnObservability
+                    turns={turns}
+                    nearMisses={device.owwNearMisses}
+                    stateLabel={state.label.toUpperCase()}
+                    stateColor={state.dot}
+                  />
+                </Panel>
               </div>
             );
           })()}
@@ -810,82 +1010,101 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
             </div>
           )}
 
-          {/* CONSOLE */}
+          {/* CONSOLE — fills the whole tab frame */}
           {tab === 'console' && (
             device.connected
-              ? <Shell deviceId={device.device_id} token={token}/>
+              ? <div style={{ height: '100%' }}><Shell deviceId={device.device_id} token={token} height="100%"/></div>
               : <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 12, color: '#c0601a' }}>Device offline — console unavailable</div>
           )}
 
           {/* UPDATES */}
           {tab === 'updates' && (
-            <div style={{ maxWidth: 440 }}>
-              {/* Version LCDs */}
-              <div style={{ display:'flex', gap:16, marginBottom:12, alignItems:'flex-end' }}>
-                <Lcd label="On device"  value={device.firmware_ver || '—'} color={needsUpdate ? 'var(--lcd-amber)' : 'var(--lcd-green)'}/>
-                <Lcd label="Available"  value={release?.version || '—'} color="var(--lcd-dim)"/>
-                {device.firmware_previous && (
-                  <Lcd label="Rollback slot" value={device.firmware_previous} color="var(--lcd-dim)"/>
-                )}
-              </div>
-              <div style={{ marginBottom:24 }}>
-                <Pill small onClick={doCheckRelease} disabled={checkingRelease}>
-                  {checkingRelease ? 'Checking…' : 'Check now'}
-                </Pill>
-              </div>
+            <div style={{ minHeight:'100%', display:'flex', flexDirection:'column', gap:16 }}>
 
-              {/* GitHub release deploy */}
-              <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.15em', marginBottom:12 }}>GitHub Release</div>
-              <div style={{ display:'flex', gap:10, marginBottom:24 }}>
-                <Pill accent={device.connected && !pushing && needsUpdate}
-                      disabled={!device.connected || pushing || !needsUpdate}
-                      onClick={doUpdate}>
-                  {pushing && !localFile ? 'Updating…' : 'Push update'}
-                </Pill>
-                {device.firmware_previous && (
-                  <Pill disabled={!device.connected || pushing} onClick={doRollback}>
-                    Roll back
-                  </Pill>
-                )}
-              </div>
-
-              {/* Local binary deploy */}
-              <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.15em', marginBottom:12 }}>Local Build</div>
-              <input ref={fileInputRef} type="file" accept="*/*" style={{ display:'none' }}
-                onChange={e => setLocalFile(e.target.files[0] || null)}/>
-              <div style={{ display:'flex', gap:10, alignItems:'center', marginBottom:24, flexWrap:'wrap' }}>
-                <Pill small onClick={() => fileInputRef.current?.click()} disabled={pushing}>
-                  {localFile ? '⇄ Change' : 'Choose file'}
-                </Pill>
-                {localFile && (
-                  <>
-                    <span style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--text2)', flex:1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', minWidth:0 }}>
-                      {localFile.name} · {(localFile.size/1024).toFixed(0)} KB
+              {/* Firmware state */}
+              <Panel label="Firmware">
+                <div style={{ display:'flex', alignItems:'flex-end', justifyContent:'space-between', gap:16, flexWrap:'wrap' }}>
+                  <div style={{ display:'flex', gap:16, alignItems:'flex-end' }}>
+                    <Lcd label="On device"  value={device.firmware_ver || '—'} color={needsUpdate ? 'var(--lcd-amber)' : 'var(--lcd-green)'}/>
+                    <Lcd label="Available"  value={release?.version || '—'} color="var(--lcd-dim)"/>
+                    {device.firmware_previous && (
+                      <Lcd label="Rollback slot" value={device.firmware_previous} color="var(--lcd-dim)"/>
+                    )}
+                  </div>
+                  <div style={{ display:'flex', alignItems:'center', gap:12 }}>
+                    <span style={{ fontFamily:"'DM Mono',monospace", fontSize:11, color: needsUpdate ? '#806010' : '#286040' }}>
+                      {release?.version ? (needsUpdate ? `Update ${release.version} available` : 'Up to date') : 'No release info'}
                     </span>
-                    <Pill small danger onClick={() => setLocalFile(null)} disabled={pushing}>✕</Pill>
-                    <Pill small accent disabled={!device.connected || pushing} onClick={doLocalDeploy}>
-                      {uploading ? 'Uploading…' : pushing ? 'Deploying…' : 'Deploy'}
+                    <Pill small onClick={doCheckRelease} disabled={checkingRelease}>
+                      {checkingRelease ? 'Checking…' : 'Check now'}
                     </Pill>
-                  </>
-                )}
+                  </div>
+                </div>
+              </Panel>
+
+              {/* Deploy sources, side by side */}
+              <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16 }}>
+                <Panel label="GitHub Release">
+                  <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)', lineHeight:1.6, marginBottom:14 }}>
+                    Deploy the latest tagged release build to this device. A/B slots — the previous binary stays available for rollback.
+                  </div>
+                  <div style={{ display:'flex', gap:10 }}>
+                    <Pill accent={device.connected && !pushing && needsUpdate}
+                          disabled={!device.connected || pushing || !needsUpdate}
+                          onClick={doUpdate}>
+                      {pushing && !localFile ? 'Updating…' : 'Push update'}
+                    </Pill>
+                    {device.firmware_previous && (
+                      <Pill disabled={!device.connected || pushing} onClick={doRollback}>
+                        Roll back
+                      </Pill>
+                    )}
+                  </div>
+                </Panel>
+
+                <Panel label="Local Build">
+                  <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)', lineHeight:1.6, marginBottom:14 }}>
+                    Deploy a binary compiled on your machine (device/build/server from compile.sh).
+                  </div>
+                  <input ref={fileInputRef} type="file" accept="*/*" style={{ display:'none' }}
+                    onChange={e => setLocalFile(e.target.files[0] || null)}/>
+                  <div style={{ display:'flex', gap:10, alignItems:'center', flexWrap:'wrap' }}>
+                    <Pill small onClick={() => fileInputRef.current?.click()} disabled={pushing}>
+                      {localFile ? '⇄ Change' : 'Choose file'}
+                    </Pill>
+                    {localFile && (
+                      <>
+                        <span style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--text2)', flex:1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', minWidth:0 }}>
+                          {localFile.name} · {(localFile.size/1024).toFixed(0)} KB
+                        </span>
+                        <Pill small danger onClick={() => setLocalFile(null)} disabled={pushing}>✕</Pill>
+                        <Pill small accent disabled={!device.connected || pushing} onClick={doLocalDeploy}>
+                          {uploading ? 'Uploading…' : pushing ? 'Deploying…' : 'Deploy'}
+                        </Pill>
+                      </>
+                    )}
+                  </div>
+                </Panel>
               </div>
 
-              {/* Activity log */}
-              {pushLog.length > 0 && (
-                <div style={{ background:'linear-gradient(160deg,#252820,#1e2219)', border:'1px solid #1a1c18', borderRadius:6, padding:14, fontFamily:"'DM Mono',monospace", fontSize:12, boxShadow:'inset 0 2px 6px rgba(0,0,0,0.5)' }}>
-                  {pushLog.map((line, i) => (
-                    <div key={i} style={{
-                      color: line.startsWith('✓') ? '#9aba80'
-                           : line.startsWith('⚠') ? '#c09040'
-                           : line.startsWith('Error') ? '#c04040'
-                           : '#5a6a50',
-                      marginBottom:4,
-                      textShadow: line.startsWith('✓') ? '0 0 8px rgba(140,200,100,0.4)' : 'none',
-                    }}>{line}</div>
-                  ))}
-                  {pushing && <span style={{ color:'#3a4a30' }}>▌</span>}
-                </div>
-              )}
+              {/* Activity console — always present so the layout never jumps
+                  when a deploy starts */}
+              <div style={{ background:'linear-gradient(160deg,#252820,#1e2219)', border:'1px solid #1a1c18', borderRadius:8, padding:14, fontFamily:"'DM Mono',monospace", fontSize:12, boxShadow:'inset 0 2px 6px rgba(0,0,0,0.5)', minHeight:96, flex:1 }}>
+                {pushLog.length === 0 && !pushing && (
+                  <span style={{ color:'#3a4a30' }}>— no deploy activity this session —</span>
+                )}
+                {pushLog.map((line, i) => (
+                  <div key={i} style={{
+                    color: line.startsWith('✓') ? '#9aba80'
+                         : line.startsWith('⚠') ? '#c09040'
+                         : line.startsWith('Error') ? '#c04040'
+                         : '#5a6a50',
+                    marginBottom:4,
+                    textShadow: line.startsWith('✓') ? '0 0 8px rgba(140,200,100,0.4)' : 'none',
+                  }}>{line}</div>
+                ))}
+                {pushing && <span style={{ color:'#3a4a30' }}>▌</span>}
+              </div>
             </div>
           )}
 
@@ -947,51 +1166,6 @@ function Card({ device, onClick }) {
             return device.connected ? (ip || '—') : (ip ? `${ip} ↑` : '—');
           })()}</span>
         </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── Login screen ─────────────────────────────────────────────────────────────
-
-function Login({ onLogin }) {
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
-  const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
-
-  async function submit() {
-    if (!username || !password) return;
-    setLoading(true); setError('');
-    try {
-      const data = await API.post('/api/auth/login', { username, password });
-      onLogin(data.token, data.role);
-    } catch(e) {
-      setError(e.error || 'Login failed');
-    }
-    setLoading(false);
-  }
-
-  return (
-    <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-      <div style={{ background: 'linear-gradient(170deg,#e8e4de,#d8d4cc)', border: '1px solid #b8b4ac', borderRadius: 16, padding: '48px 56px', maxWidth: 360, width: '90vw', boxShadow: '0 24px 80px rgba(0,0,0,0.2),0 2px 0 rgba(255,255,255,0.7) inset', animation: 'fadeIn 0.2s ease' }}>
-        <div style={{ textAlign: 'center', marginBottom: 36 }}>
-          <LedRing state={{ key: 'idle', dot: '#aaaaaa' }} size={80}/>
-          <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 22, fontWeight: 600, color: 'var(--text)', letterSpacing: '-0.02em', marginTop: 20 }}>EchoMuse</div>
-          <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', letterSpacing: '0.15em', textTransform: 'uppercase', marginTop: 4 }}>Device Management</div>
-        </div>
-        <div style={{ marginBottom: 14 }}>
-          <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)', marginBottom: 6, letterSpacing: '0.05em' }}>Username</div>
-          <input type="text" value={username} onChange={e => setUsername(e.target.value)} onKeyDown={e => e.key === 'Enter' && submit()} autoFocus/>
-        </div>
-        <div style={{ marginBottom: 24 }}>
-          <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)', marginBottom: 6, letterSpacing: '0.05em' }}>Password</div>
-          <input type="password" value={password} onChange={e => setPassword(e.target.value)} onKeyDown={e => e.key === 'Enter' && submit()}/>
-        </div>
-        {error && <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: '#c03030', marginBottom: 16, textAlign: 'center' }}>{error}</div>}
-        <Pill accent disabled={loading || !username || !password} onClick={submit}>
-          <span style={{ display: 'block', textAlign: 'center', width: '100%' }}>{loading ? 'Signing in…' : 'Sign in'}</span>
-        </Pill>
       </div>
     </div>
   );
@@ -2082,35 +2256,41 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // CONNECT_STEPS: step is a connection step — show "Retry Connection" on error.
   const CONNECT_STEPS = new Set([0, 1, 6]);
 
-  const statusColors = { pending: '#888', running: '#8ab0d0', done: '#7ab87a', error: '#c05050' };
+  // Dashboard-palette step states — same tones the rest of the UI uses
+  // (accent slate for activity, deep green for done, rust for error).
+  const statusColors = { pending: 'var(--muted)', running: '#405878', done: '#286040', error: '#a04010' };
   const statusIcons  = { pending: '○', running: '◌', done: '●', error: '✕' };
 
   return (
+    /* Same overlay + frame treatment as the Detail and Settings modals —
+       warm blurred backdrop, fixed 900×700 frame, gradient header band,
+       circular close button. */
     <div style={{
       position: 'fixed', inset: 0, zIndex: 200,
-      background: 'rgba(20,18,14,0.82)', display: 'flex', alignItems: 'center', justifyContent: 'center',
-      backdropFilter: 'blur(4px)',
+      background: 'rgba(180,176,168,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+      backdropFilter: 'blur(8px)',
     }}>
       <div style={{
-        background: 'linear-gradient(160deg,#e8e4de,#d8d4cc)', border: '1px solid #b8b4ac',
-        borderRadius: 16, width: '92vw', maxWidth: 860, maxHeight: '90vh',
+        background: 'linear-gradient(170deg,#e8e4de,#d8d4cc)', border: '1px solid #b8b4ac',
+        borderRadius: 16, width: 'min(900px,95vw)', height: 'min(700px,90vh)',
         display: 'flex', flexDirection: 'column', overflow: 'hidden',
-        boxShadow: '0 32px 96px rgba(0,0,0,0.3)',
+        boxShadow: '0 24px 80px rgba(0,0,0,0.3),0 2px 0 rgba(255,255,255,0.8) inset',
+        animation: 'fadeIn 0.15s ease',
       }}>
 
         {/* Header */}
-        <div style={{ padding: '20px 24px 16px', borderBottom: '1px solid #c8c4bc', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ background: 'linear-gradient(180deg,#dedad2,#ccc8c0)', borderBottom: '1px solid #b0aca4', padding: '20px 24px 16px', boxShadow: '0 1px 0 rgba(255,255,255,0.5) inset', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div>
-            <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 16, fontWeight: 600, color: 'var(--text)', letterSpacing: '-0.01em' }}>Provision Echo Dot</div>
-            <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', letterSpacing: '0.12em', textTransform: 'uppercase', marginTop: 2 }}>Chrome/Edge only · USB-A cable · amonet-biscuit prerequisite</div>
+            <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 22, fontWeight: 600, color: 'var(--text)', letterSpacing: '-0.02em' }}>Provision Echo Dot</div>
+            <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', letterSpacing: '0.12em', textTransform: 'uppercase', marginTop: 4 }}>Chrome/Edge only · USB-A cable · amonet-biscuit prerequisite</div>
           </div>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 18, color: 'var(--muted)', padding: '4px 8px', lineHeight: 1 }}>✕</button>
+          <CircleButton onClick={onClose} title="Close">×</CircleButton>
         </div>
 
         <div style={{ display: 'flex', flex: 1, overflow: 'hidden', minHeight: 0 }}>
 
           {/* Step list */}
-          <div style={{ width: 176, borderRight: '1px solid #c8c4bc', padding: '12px 0', overflowY: 'auto', flexShrink: 0 }}>
+          <div style={{ width: 176, borderRight: '1px solid #b8b4ac', background: 'rgba(0,0,0,0.025)', padding: '12px 0', overflowY: 'auto', flexShrink: 0 }}>
             {_WIZARD_STEPS.map((s, i) => {
               const st = stepState[i]; const active = i === step;
               return (
@@ -2238,12 +2418,12 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
               </div>
             )}
 
-            {/* Progress bar */}
+            {/* Progress bar — accent slate, same as toggles/sliders */}
             {progress && (
               <div style={{ margin: '6px 0 10px' }}>
                 <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', marginBottom: 4 }}>{progress.label}</div>
                 <div style={{ height: 4, background: '#c8c4bc', borderRadius: 2 }}>
-                  <div style={{ height: '100%', width: `${Math.min(100, (progress.pct || 0) * 100).toFixed(0)}%`, background: '#7ab87a', borderRadius: 2, transition: 'width 0.2s' }}/>
+                  <div style={{ height: '100%', width: `${Math.min(100, (progress.pct || 0) * 100).toFixed(0)}%`, background: '#405878', borderRadius: 2, transition: 'width 0.2s' }}/>
                 </div>
               </div>
             )}
@@ -2251,7 +2431,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
             {/* Done message */}
             {isDone && (
               <div style={{ margin: '6px 0 10px', display: 'flex', flexDirection: 'column', gap: 10 }}>
-                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: '#5a9a5a', lineHeight: 1.7 }}>
+                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: '#286040', lineHeight: 1.7 }}>
                   Provisioning complete. The device has rebooted and will discover the controller via mDNS,
                   appearing in the dashboard as a pending device within ~30s.
                 </div>
@@ -2259,20 +2439,21 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
               </div>
             )}
 
-            {/* Log output */}
+            {/* Log output — same console treatment as the Updates tab */}
             <div
               ref={logRef}
               style={{
                 flex: 1, minHeight: 0, overflowY: 'auto',
-                background: 'linear-gradient(160deg,#2a2e28,#1e2219)',
-                border: '1px solid #1a1c18', borderRadius: 6,
-                padding: '10px 12px',
+                background: 'linear-gradient(160deg,#252820,#1e2219)',
+                border: '1px solid #1a1c18', borderRadius: 8,
+                boxShadow: 'inset 0 2px 6px rgba(0,0,0,0.5)',
+                padding: '10px 14px',
                 fontFamily: "'DM Mono',monospace", fontSize: 10, lineHeight: 1.7,
                 marginTop: 10,
               }}
             >
               {log.length === 0
-                ? <span style={{ color: '#556050' }}>No output yet.</span>
+                ? <span style={{ color: '#3a4a30' }}>— no output yet —</span>
                 : log.map((e, i) => (
                   <div key={i} style={{ color: e.type === 'error' ? '#c08080' : e.type === 'ok' ? '#7ab87a' : e.type === 'warn' ? '#c0a060' : '#a8c8a0' }}>
                     {e.msg}
@@ -2430,8 +2611,90 @@ function DeviceDiagramMini({ activeMics, patternType }) {
 
 
 // ─── DeviceConfigForm ─────────────────────────────────────────────────────────
-// Two-column layout: Listening (left) + Sound (right).
+// The config rendered as the actual signal path: numbered stages from the
+// microphones to the speaker, each labelled with WHERE it runs (device /
+// controller) and WHAT it affects (wake stream / button turns / playback).
+// Stage-specific advanced controls live inside their stage's disclosure, so
+// "tucked away" never means "unclear what it belongs to".
 // disabled=true = read-only (used when device is on global config).
+
+// ScopeChip — small badge saying where a stage runs / what it affects.
+function ScopeChip({ children, tone }) {
+  const colors = {
+    device:     { bg: 'rgba(40,96,64,0.12)',  border: 'rgba(40,96,64,0.35)',  text: '#286040' },
+    controller: { bg: 'rgba(64,88,120,0.12)', border: 'rgba(64,88,120,0.35)', text: '#405878' },
+    scope:      { bg: 'rgba(0,0,0,0.05)',     border: 'rgba(0,0,0,0.15)',     text: 'var(--text2)' },
+  }[tone || 'scope'];
+  return (
+    <span style={{
+      fontFamily: "'DM Mono',monospace", fontSize: 8, textTransform: 'uppercase',
+      letterSpacing: '0.1em', padding: '3px 8px', borderRadius: 4,
+      background: colors.bg, border: `1px solid ${colors.border}`, color: colors.text,
+      whiteSpace: 'nowrap',
+    }}>{children}</span>
+  );
+}
+
+// EqSliders — one vertical fader per band, ±12 dB. Live-updates eqBands so
+// the curve above redraws as you drag.
+function EqSliders({ bands, onChange, disabled }) {
+  const FREQ_LABELS = ['125', '250', '500', '1k', '2k', '3.5k', '5.5k', '8k'];
+  return (
+    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 2, ...(disabled ? { opacity: 0.45, pointerEvents: 'none' } : {}) }}>
+      {bands.map((g, i) => (
+        <div key={i} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', flex: 1, minWidth: 0 }}>
+          <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 8, color: g !== 0 ? '#405878' : 'var(--muted)', marginBottom: 2, fontWeight: g !== 0 ? 600 : 400 }}>
+            {(g > 0 ? '+' : '') + g}
+          </div>
+          {/* Native vertical slider via writing-mode — a rotate() transform
+              renders fine but breaks drag gestures (pointer capture math
+              stays in the untransformed axis, so only clicks land).
+              orient="vertical" covers older Firefox. */}
+          <input type="range" min={-12} max={12} step={1} value={g} orient="vertical"
+            onChange={e => { const nb = [...bands]; nb[i] = Number(e.target.value); onChange(nb); }}
+            style={{ writingMode: 'vertical-lr', direction: 'rtl', WebkitAppearance: 'slider-vertical', width: 20, height: 76, cursor: 'pointer' }}/>
+          <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 8, color: 'var(--muted)', marginTop: 2 }}>{FREQ_LABELS[i]}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Stage / StageAdvanced — module-scope so React preserves component
+// identity across DeviceConfigForm renders (inner definitions would remount
+// the subtree every render, breaking slider drags mid-gesture).
+const STAGE_MONO = "'DM Mono',monospace";
+
+function Stage({ n, title, chips, desc, children }) {
+  return (
+    <Panel>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 6, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
+          <span style={{ fontFamily: STAGE_MONO, fontSize: 10, color: 'var(--muted)' }}>{n}</span>
+          <span style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 14, fontWeight: 600, color: 'var(--text)' }}>{title}</span>
+        </div>
+        <div style={{ display: 'flex', gap: 6 }}>{chips}</div>
+      </div>
+      <div style={{ fontFamily: STAGE_MONO, fontSize: 10, color: 'var(--muted)', lineHeight: 1.6, marginBottom: 14 }}>{desc}</div>
+      {children}
+    </Panel>
+  );
+}
+
+function StageAdvanced({ open, onToggle, disabledStyle, children }) {
+  return (
+    <div style={{ marginTop: 14, borderTop: '1px solid rgba(0,0,0,0.08)', paddingTop: 10 }}>
+      <div onClick={onToggle} style={{
+        fontFamily: STAGE_MONO, fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase',
+        letterSpacing: '0.15em', cursor: 'pointer', userSelect: 'none',
+        display: 'flex', alignItems: 'center', gap: 6,
+      }}>
+        <span>{open ? '▾' : '▸'}</span> Advanced
+      </div>
+      {open && <div style={{ marginTop: 14, ...disabledStyle }}>{children}</div>}
+    </div>
+  );
+}
 
 function DeviceConfigForm({ config, onChange, disabled }) {
   const set = disabled ? () => {} : onChange;
@@ -2470,32 +2733,116 @@ function DeviceConfigForm({ config, onChange, disabled }) {
   const sensitivity = thresholdToSensitivity(config.owwThreshold ?? 0.5);
 
   const bands = config.eqBands ?? [0,0,0,0,0,0,0,0];
-  const fmtDb = v => (v >= 0 ? '+' : '') + Number(v).toFixed(1) + ' dB';
+  const EQ_PRESETS = [['Flat',[0,0,0,0,0,0,0,0]], ['Clarity',[0,0,0,0,0,7,4,2]], ['Warmth',[0,3,2,0,-2,0,0,0]]];
+  const activeEqPreset = (EQ_PRESETS.find(([, vals]) => JSON.stringify(vals) === JSON.stringify(bands)) || [null])[0];
 
-  const [advOpen, setAdvOpen] = useState(false);
+  const [advMics, setAdvMics] = useState(false);
 
   const inputStyle = disabled ? { opacity: 0.45, pointerEvents: 'none' } : {};
-  const sectionLabel = { fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 14 };
-  const colLabel = { ...sectionLabel, marginBottom: 16 };
+  const mono = "'DM Mono',monospace";
 
+  // Small header for subsections inside the combined Advanced stage.
+  const subHeader = (text, first) => (
+    <div style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase',
+      letterSpacing: '0.15em', marginTop: first ? 0 : 18, marginBottom: 10 }}>{text}</div>
+  );
+
+  // Ordered by how often each section gets touched: playback and wake word
+  // are everyday knobs, mic capture is set-and-forget, and the button-turn
+  // internals live in one Advanced bucket at the end. (Stages used to be
+  // ordered by signal flow with ▼ connectors — dropped when the order
+  // switched to relevance.)
   return (
-    <div>
-      {/* Two-column main layout */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 28 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
 
-        {/* ── LEFT: LISTENING ── */}
-        <div>
-          <div style={colLabel}>Listening</div>
-
-          {/* Device diagram */}
-          <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 12 }}>
-            <DeviceDiagram
-              activeMics={PRESETS[currentPreset].activeMics}
-              patternType={PRESETS[currentPreset].patternType}
-            />
+      {/* 01 PLAYBACK */}
+      <Stage n="01" title="Playback"
+        chips={<><ScopeChip tone="controller">Controller</ScopeChip><ScopeChip tone="device">Speaker</ScopeChip></>}
+        desc="Response audio: Home Assistant TTS → parametric EQ → resample → device speaker. Presets set the faders; drag any fader for a custom curve.">
+        <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 28, alignItems: 'start' }}>
+          <div>
+            <EqCurve bands={bands}/>
+            <EqSliders bands={bands} onChange={nb => set('eqBands', nb)} disabled={disabled}/>
+            <div style={{ display: 'flex', gap: 6, marginTop: 12, alignItems: 'center', ...inputStyle }}>
+              {EQ_PRESETS.map(([label, vals]) => (
+                <Pill key={label} small accent={activeEqPreset === label} onClick={() => set('eqBands', vals)}>{label}</Pill>
+              ))}
+              {!activeEqPreset && (
+                <span style={{ fontFamily: mono, fontSize: 9, color: '#405878', textTransform: 'uppercase', letterSpacing: '0.1em' }}>· Custom</span>
+              )}
+            </div>
           </div>
+          <div>
+            <div style={inputStyle}>
+              <Toggle label="Speech boost" sub="presence boost for voice" value={config.eqLoudness ?? false} onChange={v => set('eqLoudness', v)}/>
+            </div>
+            <div style={{ marginTop: 8 }}>
+              <div style={{ fontFamily: mono, fontSize: 11, color: 'var(--text2)', marginBottom: 6 }}>Startup volume</div>
+              <div style={{ fontFamily: mono, fontSize: 26, color: '#405878', textAlign: 'center', marginBottom: 6, textShadow: '0 0 12px rgba(64,88,120,0.3)', ...inputStyle }}>
+                {config.startupVolume ?? 70}%
+              </div>
+              <div style={inputStyle}>
+                <input type="range" min={0} max={100} step={1} value={config.startupVolume ?? 70}
+                  style={{ width: '100%' }}
+                  onChange={e => set('startupVolume', Number(e.target.value))}/>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
+                  <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)' }}>Silent</span>
+                  <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)' }}>Full</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </Stage>
 
-          {/* Preset cards */}
+      {/* 02 WAKE WORD */}
+      <Stage n="02" title="Wake word"
+        chips={<ScopeChip tone="controller">Controller</ScopeChip>}
+        desc="openwakeword scores the continuous mic stream on the controller. Sensitivity sets the detection threshold — attempts that score close but miss are counted as near-misses (Status tab).">
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24, alignItems: 'start' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, ...inputStyle }}>
+            {WW_MODELS.map(m => (
+              <div key={m.value} onClick={() => set('owwModel', m.value)} style={{
+                background: config.owwModel === m.value
+                  ? 'linear-gradient(160deg,#dde8f4,#ccd8ec)'
+                  : 'linear-gradient(160deg,#e4e0d8,#d4d0c8)',
+                border: `1px solid ${config.owwModel === m.value ? '#405878' : '#c0bdb6'}`,
+                borderRadius: 8, padding: '8px 10px',
+                cursor: disabled ? 'default' : 'pointer',
+                transition: 'border-color 0.15s, background 0.15s',
+              }}>
+                <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 12, fontWeight: 600, color: '#1a1c18' }}>{m.label}</div>
+                <div style={{ fontFamily: mono, fontSize: 9, color: '#888480', marginTop: 2 }}>{m.value}</div>
+              </div>
+            ))}
+          </div>
+          <div>
+            <div style={inputStyle}>
+              <div style={{ fontFamily: mono, fontSize: 11, color: 'var(--text2)', marginBottom: 6 }}>Sensitivity</div>
+              <input type="range" min={1} max={9} step={1} value={sensitivity}
+                style={{ width: '100%' }}
+                onChange={e => set('owwThreshold', sensitivityToThreshold(Number(e.target.value)))}/>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
+                <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)' }}>Precise</span>
+                <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)' }}>Eager</span>
+              </div>
+            </div>
+            <div style={{ marginTop: 16, ...inputStyle }}>
+              <Toggle label="Speex denoise" sub="cleans audio before scoring — try in noisy rooms" value={config.owwSpeexNs ?? false} onChange={v => set('owwSpeexNs', v)}/>
+            </div>
+          </div>
+        </div>
+      </Stage>
+
+      {/* 03 MICROPHONES */}
+      <Stage n="03" title="Microphones"
+        chips={<ScopeChip tone="device">Device</ScopeChip>}
+        desc="Capture from the 7-mic array. Presets steer which perimeter mic is used during voice turns — wake-word listening always uses the centre mic. Gain here is the only gain in the wake path: it sets the level everything downstream hears.">
+        <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: 20, alignItems: 'center' }}>
+          <DeviceDiagram
+            activeMics={PRESETS[currentPreset].activeMics}
+            patternType={PRESETS[currentPreset].patternType}
+          />
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6, ...inputStyle }}>
             {Object.entries(PRESETS).map(([key, p]) => (
               <div key={key} onClick={() => selectPreset(key)} style={{
@@ -2509,109 +2856,40 @@ function DeviceConfigForm({ config, onChange, disabled }) {
                 transition: 'border-color 0.15s, background 0.15s',
               }}>
                 <DeviceDiagramMini activeMics={p.activeMics} patternType={p.patternType}/>
-                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: '#3a3830' }}>
+                <div style={{ fontFamily: mono, fontSize: 10, color: '#3a3830' }}>
                   {key.charAt(0).toUpperCase() + key.slice(1)}
                 </div>
               </div>
             ))}
           </div>
-
-          {/* Wake word */}
-          <div style={{ marginTop: 22 }}>
-            <div style={sectionLabel}>Wake word</div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 14, ...inputStyle }}>
-              {WW_MODELS.map(m => (
-                <div key={m.value} onClick={() => set('owwModel', m.value)} style={{
-                  background: config.owwModel === m.value
-                    ? 'linear-gradient(160deg,#dde8f4,#ccd8ec)'
-                    : 'linear-gradient(160deg,#e4e0d8,#d4d0c8)',
-                  border: `1px solid ${config.owwModel === m.value ? '#405878' : '#c0bdb6'}`,
-                  borderRadius: 8, padding: '8px 10px',
-                  cursor: disabled ? 'default' : 'pointer',
-                  transition: 'border-color 0.15s, background 0.15s',
-                }}>
-                  <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 12, fontWeight: 600, color: '#1a1c18' }}>{m.label}</div>
-                  <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: '#888480', marginTop: 2 }}>{m.value}</div>
-                </div>
-              ))}
-            </div>
-
-            {/* Sensitivity */}
-            <div style={inputStyle}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 6 }}>
-                <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: 'var(--text2)' }}>Sensitivity</span>
-              </div>
-              <input type="range" min={1} max={9} step={1} value={sensitivity}
-                style={{ width: '100%' }}
-                onChange={e => set('owwThreshold', sensitivityToThreshold(Number(e.target.value)))}/>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
-                <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)' }}>Precise</span>
-                <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)' }}>Eager</span>
-              </div>
-            </div>
-          </div>
         </div>
+        <StageAdvanced open={advMics} onToggle={() => setAdvMics(o => !o)} disabledStyle={inputStyle}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 24px' }}>
+            <Slider label="MICPGA" sub="analog gain, before the ADC" value={config.adcMicpga ?? 40} min={0} max={59} onChange={v => set('adcMicpga', v)}/>
+            <Slider label="Digital gain" sub="ADC digital gain — affects wake + turns" value={config.adcDigitalGain ?? 88} min={0} max={100} onChange={v => set('adcDigitalGain', v)}/>
+            <Slider label="Mic gain" sub="fixed gain on the 24-bit capture, pre-16-bit stream" value={config.micGainDb ?? 24} min={0} max={42} unit="dB" onChange={v => set('micGainDb', v)}/>
+            <Slider label="Beam angle" sub="-1 = auto (onset-ratio selection)" value={config.beamAngle ?? -1} min={-1} max={359} step={1} onChange={v => set('beamAngle', v)}/>
+            <Toggle label="Beamforming" sub="perimeter mic lock during turns" value={config.beamformingEnabled ?? false} onChange={v => set('beamformingEnabled', v)}/>
+          </div>
+        </StageAdvanced>
+      </Stage>
 
-        {/* ── RIGHT: SOUND ── */}
-        <div>
-          <div style={colLabel}>Sound</div>
-
-          {/* EQ */}
-          <div style={{ marginBottom: 6 }}>
-            <EqCurve bands={bands}/>
-          </div>
-          <div style={{ display: 'flex', gap: 6, marginBottom: 14, ...inputStyle }}>
-            {[['Flat',[0,0,0,0,0,0,0,0]],['Clarity',[0,0,0,0,0,7,4,2]],['Warmth',[0,3,2,0,-2,0,0,0]]].map(([label, vals]) => (
-              <Pill key={label} small onClick={() => set('eqBands', vals)}>{label}</Pill>
-            ))}
-          </div>
-          <div style={inputStyle}>
-            <Toggle label="Speech boost" sub="presence boost for voice" value={config.eqLoudness ?? false} onChange={v => set('eqLoudness', v)}/>
-          </div>
-
-          {/* Volume */}
-          <div style={{ marginTop: 20 }}>
-            <div style={sectionLabel}>Volume</div>
-            <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 28, color: '#405878', textAlign: 'center', marginBottom: 8, textShadow: '0 0 12px rgba(64,88,120,0.3)', ...inputStyle }}>
-              {config.startupVolume ?? 70}%
-            </div>
-            <div style={inputStyle}>
-              <input type="range" min={0} max={100} step={1} value={config.startupVolume ?? 70}
-                style={{ width: '100%' }}
-                onChange={e => set('startupVolume', Number(e.target.value))}/>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
-                <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)' }}>Silent</span>
-                <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)' }}>Full</span>
-              </div>
-            </div>
-          </div>
+      {/* 04 ADVANCED — button-turn internals: processing + speech gate */}
+      <Stage n="04" title="Advanced"
+        chips={<><ScopeChip tone="device">Device</ScopeChip><ScopeChip>Button turns only</ScopeChip></>}
+        desc="Everything here affects only bounded button-press turns. Wake-word turns stream continuously — Home Assistant's VAD endpoints them, and the controller closes accidental wakes after 5s of silence relative to the room's measured noise floor — so none of these settings touch the wake path.">
+        {subHeader('Turn processing', true)}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px', ...inputStyle }}>
+          <Toggle label="Noise suppression" sub="RNNoise — keep off pending 16kHz fix" value={config.nsEnabled ?? true} onChange={v => set('nsEnabled', v)}/>
+          <Toggle label="Auto gain (AGC)" sub="levels button-turn speech; never the wake stream" value={config.agcEnabled ?? true} onChange={v => set('agcEnabled', v)}/>
         </div>
-      </div>
-
-      {/* ── ADVANCED DISCLOSURE ── */}
-      <div style={{ marginTop: 24, borderTop: '1px solid rgba(0,0,0,0.08)', paddingTop: 12 }}>
-        <div onClick={() => setAdvOpen(o => !o)} style={{
-          fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)',
-          textTransform: 'uppercase', letterSpacing: '0.15em',
-          cursor: 'pointer', userSelect: 'none', display: 'flex', alignItems: 'center', gap: 6,
-        }}>
-          <span>{advOpen ? '▾' : '▸'}</span> Advanced
+        {subHeader('Speech gate')}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '4px 20px', ...inputStyle }}>
+          <Slider label="Threshold" sub="RMS above this = speech (pre-gain units)" value={config.vadThreshold ?? 0.001} min={0.0001} max={0.02} step={0.0001} onChange={v => set('vadThreshold', v)}/>
+          <Slider label="Speech gate" sub="speech needed to open" value={config.vadSpeechMs ?? 160} min={32} max={320} step={32} unit="ms" onChange={v => set('vadSpeechMs', v)}/>
+          <Slider label="Silence gate" sub="silence needed to close" value={config.vadSilenceMs ?? 800} min={200} max={2000} step={100} unit="ms" onChange={v => set('vadSilenceMs', v)}/>
         </div>
-        {advOpen && (
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '16px 20px', marginTop: 14, ...inputStyle }}>
-            <Slider label="Digital gain"   value={config.adcDigitalGain ?? 88} min={0} max={100} onChange={v => set('adcDigitalGain', v)}/>
-            <Slider label="MICPGA"         value={config.adcMicpga ?? 40}      min={0} max={59}  onChange={v => set('adcMicpga', v)}/>
-            <Slider label="Beam angle"     value={config.beamAngle ?? -1}      min={-1} max={359} step={1} onChange={v => set('beamAngle', v)}/>
-            <Slider label="VAD threshold"  value={config.vadThreshold ?? 0.001} min={0.0001} max={0.02} step={0.0001} onChange={v => set('vadThreshold', v)}/>
-            <Slider label="Speech gate"    value={config.vadSpeechMs ?? 160}   min={32} max={320} step={32} unit="ms" onChange={v => set('vadSpeechMs', v)}/>
-            <Slider label="Silence gate"   value={config.vadSilenceMs ?? 800}  min={200} max={2000} step={100} unit="ms" onChange={v => set('vadSilenceMs', v)}/>
-            <Toggle label="Beamforming"    value={config.beamformingEnabled ?? false} onChange={v => set('beamformingEnabled', v)}/>
-            <Toggle label="Noise suppression (NS)" value={config.nsEnabled ?? true} onChange={v => set('nsEnabled', v)}/>
-            <Toggle label="Auto gain (AGC)"        value={config.agcEnabled ?? true} onChange={v => set('agcEnabled', v)}/>
-            <Toggle label="OWW speex NS"    value={config.owwSpeexNs ?? false} onChange={v => set('owwSpeexNs', v)}/>
-          </div>
-        )}
-      </div>
+      </Stage>
     </div>
   );
 }
@@ -2669,21 +2947,21 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username }
   return (
     <div style={{ position:'fixed', inset:0, background:'rgba(180,176,168,0.5)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:200, backdropFilter:'blur(8px)' }}
       onClick={e => e.target === e.currentTarget && onClose()}>
-      <div style={{ width:'min(900px,95vw)', maxHeight:'90vh', background:'linear-gradient(170deg,#e8e4de,#d8d4cc)', border:'1px solid #b8b4ac', borderRadius:16, boxShadow:'0 24px 80px rgba(0,0,0,0.3),0 2px 0 rgba(255,255,255,0.8) inset', display:'flex', flexDirection:'column', overflow:'hidden', animation:'fadeIn 0.15s ease' }}>
+      {/* Same fixed frame as the device Detail modal — consistent window
+          size across the whole dashboard. */}
+      <div style={{ width:'min(900px,95vw)', height:'min(700px,90vh)', background:'linear-gradient(170deg,#e8e4de,#d8d4cc)', border:'1px solid #b8b4ac', borderRadius:16, boxShadow:'0 24px 80px rgba(0,0,0,0.3),0 2px 0 rgba(255,255,255,0.8) inset', display:'flex', flexDirection:'column', overflow:'hidden', animation:'fadeIn 0.15s ease' }}>
 
         {/* Header */}
         <div style={{ background:'linear-gradient(180deg,#dedad2,#ccc8c0)', borderBottom:'1px solid #b0aca4', padding:'20px 24px 0', boxShadow:'0 1px 0 rgba(255,255,255,0.5) inset' }}>
           <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:16 }}>
             <div style={{ fontFamily:"'DM Sans',sans-serif", fontSize:22, color:'var(--text)', fontWeight:600, letterSpacing:'-0.02em' }}>Settings</div>
-            <button onClick={onClose} style={{ background:'none', border:'none', fontSize:20, color:'var(--muted)', cursor:'pointer', lineHeight:1, padding:'0 4px' }}>✕</button>
+            <CircleButton onClick={onClose} title="Close">×</CircleButton>
           </div>
-          <div style={{ display:'flex', gap:0 }}>
+          {/* Same raised folder-tab treatment as the device Detail modal —
+              one tab style across the dashboard. */}
+          <div style={{ display:'flex', gap:2 }}>
             {TABS.map(t => (
-              <div key={t} onClick={() => setTab(t)} style={{
-                fontFamily:"'DM Mono',monospace", fontSize:10, textTransform:'uppercase', letterSpacing:'0.12em',
-                padding:'8px 18px', cursor:'pointer', borderBottom: t === tab ? '2px solid #405878' : '2px solid transparent',
-                color: t === tab ? '#405878' : 'var(--muted)', transition:'color 0.1s',
-              }}>{TAB_LABELS[t]}</div>
+              <button key={t} onClick={() => setTab(t)} style={{ background: tab === t ? 'linear-gradient(180deg,#e8e4de,#d8d4cc)' : 'transparent', border: tab === t ? '1px solid #b0aca4' : '1px solid transparent', borderBottom: tab === t ? '1px solid #d8d4cc' : '1px solid transparent', borderRadius: '6px 6px 0 0', fontFamily: "'DM Mono',monospace", fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.1em', padding: '7px 14px', cursor: 'pointer', color: tab === t ? 'var(--text)' : 'var(--muted)', marginBottom: -1, transition: 'color 0.15s' }}>{TAB_LABELS[t]}</button>
             ))}
           </div>
         </div>
@@ -2739,8 +3017,8 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username }
 
 
 function App() {
-  const [token, setToken] = useState(() => sessionStorage.getItem('em_token'));
-  const [role, setRole] = useState(() => sessionStorage.getItem('em_role'));
+  const [token, setToken] = useState(() => localStorage.getItem('em_token'));
+  const [role, setRole] = useState(() => localStorage.getItem('em_role'));
   const [devices, setDevices] = useState([]);
   const [selected, setSelected] = useState(null);
   const [release, setRelease] = useState(null);
@@ -2754,20 +3032,13 @@ function App() {
 
   const isAdmin = role === 'admin';
 
-  function handleLogin(tok, rol) {
-    API.token = tok;
-    setToken(tok);
-    setRole(rol);
-    sessionStorage.setItem('em_token', tok);
-    sessionStorage.setItem('em_role', rol);
-  }
-
   function handleLogout() {
     API.post('/api/auth/logout', {}).catch(() => {});
     API.token = null;
-    setToken(null); setRole(null);
-    sessionStorage.removeItem('em_token');
-    sessionStorage.removeItem('em_role');
+    localStorage.removeItem('em_token');
+    localStorage.removeItem('em_role');
+    // The landing page (/) owns sign-in — green-ring login form.
+    location.replace('/');
   }
 
   // Restore token on mount
@@ -2861,7 +3132,10 @@ function App() {
 
   }, [token]);
 
-  if (!token) return <Login onLogin={handleLogin}/>;
+  // No session (direct visit, expired token, logged out) — the landing
+  // page owns auth: it validates any stored token and shows the right
+  // form (login vs first-run setup).
+  if (!token) { location.replace('/'); return null; }
 
   const online   = devices.filter(d => d.connected).length;
   const approved = devices.filter(d => d.approved);
@@ -2882,11 +3156,9 @@ function App() {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)' }}>{role}</div>
-          <button onClick={() => setShowSettings(true)} title="Settings" style={{
-            background: 'none', border: 'none', cursor: 'pointer', padding: '2px 4px',
-            color: 'var(--muted)', fontSize: 16, lineHeight: 1, opacity: 0.7,
-            transition: 'opacity 0.15s',
-          }} onMouseEnter={e => e.target.style.opacity=1} onMouseLeave={e => e.target.style.opacity=0.7}>⚙</button>
+          <Pill small onClick={() => setShowSettings(true)}>
+            <span style={{ fontSize: 14, verticalAlign: '-1px', marginRight: 6 }}>⚙</span>Settings
+          </Pill>
           <Pill small onClick={handleLogout}>Sign out</Pill>
         </div>
       </div>

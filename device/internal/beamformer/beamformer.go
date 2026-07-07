@@ -112,6 +112,11 @@ type Beamformer struct {
 	// lockedChannel is the ALSA channel selected at gate open.
 	// -1 means unlocked (use live best-direction selection).
 	lockedChannel int
+
+	// clippedSamples counts output samples clamped to int16 range by the
+	// mic gain in extractChannel. Only touched from the mic goroutine
+	// (Process and the diagnostics that read it) — no synchronisation.
+	clippedSamples uint64
 }
 
 // New creates a Beamformer.
@@ -195,6 +200,11 @@ func (b *Beamformer) Unlock() {
 
 // Process returns mono S16_LE audio and the estimated source angle.
 //
+// gain is the linear fixed mic gain (config MicGainDb converted to linear;
+// 1.0 = unity) applied to the full 24-bit samples during S16 extraction —
+// see extractChannel. Direction estimation is unaffected: it runs on
+// energy ratios, which are gain-invariant.
+//
 // The enabled flag (BeamformingEnabled) no longer gates smoother updates —
 // direction estimation always runs so the baseline stays warm regardless of
 // config state. The flag only affects Lock() behaviour (see Lock() docs).
@@ -209,9 +219,9 @@ func (b *Beamformer) Unlock() {
 //
 // angle is the estimated dominant source direction (0–360°, clockwise from
 // 12 o'clock), or -1 when unlocked.
-func (b *Beamformer) Process(raw []byte, steerAngle float64) (mono []byte, angle float64) {
+func (b *Beamformer) Process(raw []byte, steerAngle float64, gain float64) (mono []byte, angle float64) {
 	if len(raw) < periodFrames*frameSize {
-		return extractChannel(raw, centreCh), -1
+		return b.extractChannel(raw, centreCh, gain), -1
 	}
 
 	// Always decode and update smoothers — direction estimation runs
@@ -238,7 +248,7 @@ func (b *Beamformer) Process(raw []byte, steerAngle float64) (mono []byte, angle
 	// Unlocked: always ch6 (omni). Covers OWW listening and disabled-beamforming
 	// voice turns. No directional bias, no channel splices.
 	if b.lockedChannel < 0 {
-		return extractChannel(raw, centreCh), -1
+		return b.extractChannel(raw, centreCh, gain), -1
 	}
 
 	// Locked — select output channel and reported angle.
@@ -261,7 +271,7 @@ func (b *Beamformer) Process(raw []byte, steerAngle float64) (mono []byte, angle
 		angle = candidateAngles[bestDir]
 	}
 
-	return extractChannel(raw, ch), angle
+	return b.extractChannel(raw, ch, gain), angle
 }
 
 // hfEnergy returns the mean squared HF energy for direction di.
@@ -316,18 +326,49 @@ func decodeS24Sample(b0, b1, b2 byte) float32 {
 	return float32(val) / 8388608.0
 }
 
-// extractChannel extracts a single channel as S16_LE mono.
-// Takes the upper 2 bytes of each 3-byte S24_3LE sample (drops LSB).
-func extractChannel(raw []byte, ch int) []byte {
+// extractChannel extracts a single channel as S16_LE mono, applying the
+// fixed mic gain to the full 24-bit sample before quantising to 16-bit.
+//
+// This used to take the upper 2 bytes of each 3-byte S24_3LE sample,
+// discarding the low 8 bits — where nearly all of the signal lives at this
+// hardware's capture levels (measured speech RMS 0.0001–0.0006 FS, i.e.
+// ~3–20 LSB in 16-bit terms; 20h fleet logs, 2026-07-07). Applying gain
+// here, against the 24-bit data, recovers real captured resolution;
+// applying it any later would only amplify 16-bit quantisation noise.
+//
+// gain is linear (1.0 = unity). Q12 fixed point: the >>20 combines the
+// Q12 descale with the 24→16 bit reduction (>>8), so gain 1.0 reproduces
+// the old upper-2-bytes behaviour bit-exactly. Samples outside int16
+// range are clamped and counted in clippedSamples.
+func (b *Beamformer) extractChannel(raw []byte, ch int, gain float64) []byte {
 	n := len(raw) / frameSize
 	out := make([]byte, n*2)
 	offset0 := ch * byteSample
+	gainQ := int64(gain*4096.0 + 0.5)
 	for i := 0; i < n; i++ {
 		base := i*frameSize + offset0
-		out[i*2] = raw[base+1]
-		out[i*2+1] = raw[base+2]
+		val := int32(raw[base]) | int32(raw[base+1])<<8 | int32(raw[base+2])<<16
+		if val&0x800000 != 0 {
+			val |= ^int32(0xFFFFFF)
+		}
+		v := (int64(val) * gainQ) >> 20
+		if v > 32767 {
+			v = 32767
+			b.clippedSamples++
+		} else if v < -32768 {
+			v = -32768
+			b.clippedSamples++
+		}
+		out[i*2] = byte(uint16(v))
+		out[i*2+1] = byte(uint16(v) >> 8)
 	}
 	return out
+}
+
+// ClippedSamples returns the running count of samples clamped by the mic
+// gain. Read from the mic goroutine only (see field comment).
+func (b *Beamformer) ClippedSamples() uint64 {
+	return b.clippedSamples
 }
 
 // nearestDirection returns the index into candidateAngles closest to angleDeg.

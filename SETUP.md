@@ -292,46 +292,17 @@ adb shell "su -c 'cp /sdcard/server /data/local/bin/server_a && chmod 755 /data/
 
 ### Create the startup script:
 
+The canonical script is **`device/scripts/start_server.sh`** in the repo — the controller serves the same content at `/api/provision/start_script` (this is what the provisioning wizard installs). Don't hand-maintain a copy; earlier revisions of this document embedded one here and it drifted.
+
 ```bash
-cat > /tmp/start_server.sh << 'EOF'
-#!/system/bin/sh
-# Wait for echoaudio (FireOS audio service) before starting
-i=0
-while [ $i -lt 120 ]; do
-    pid=$(ps | grep echoaudio | grep -v grep)
-    if [ -n "$pid" ]; then
-        sleep 5
-        break
-    fi
-    sleep 2
-    i=$((i + 2))
-done
-ip link set p2p0 down
-# Prevent FireOS from suspending the WiFi interface
-echo "EchoMuse" > /sys/power/wake_lock
-# Speaker mixer init
-tinymix -D 0 56 On
-tinymix -D 0 64 1 1
-tinymix -D 0 88 On
-tinymix -D 0 61 100 100
-# Mic gain — equalised across all four ADCs for directional mic selection
-# Values matched to Amazon's own initialisation (confirmed from firmware analysis)
-tinymix -D 0 89 88 88
-tinymix -D 0 92 40 40
-tinymix -D 0 107 88 88
-tinymix -D 0 110 40 40
-tinymix -D 0 125 88 88
-tinymix -D 0 128 40 40
-tinymix -D 0 143 88 88
-tinymix -D 0 146 40 40
-kill $(ps | grep ledcontroller | grep -v grep)
-exec /data/local/bin/server > /tmp/server.log 2>&1
-EOF
-adb push /tmp/start_server.sh /sdcard/start_server.sh
+# From the repo root:
+adb push device/scripts/start_server.sh /sdcard/start_server.sh
 adb shell "su -c 'cp /sdcard/start_server.sh /data/local/bin/start_server.sh && chmod 755 /data/local/bin/start_server.sh && chown root:root /data/local/bin/start_server.sh'"
 ```
 
 > The script waits for `echoaudio` before starting — this ensures the audio DSP is initialised. `p2p0` is brought down to prevent mDNS interference. The WiFi wake lock prevents FireOS from suspending the wireless interface. All server output is logged to `/tmp/server.log` for debugging via `adb shell su -c 'cat /tmp/server.log'`.
+
+> **Log cap (v2.7.1):** `/tmp` is RAM-backed and the script only ever appends — a background loop in the script checks every 5 minutes and, past 5MB, keeps the newest 512KB in `/tmp/server.log.1` and truncates `server.log` in place (the server's `O_APPEND` fd continues at the new EOF). Total log footprint stays bounded at ~5.5MB. A 45MB log was observed in the wild before this existed.
 
 > The script runs the server as a subprocess (not via `exec`) so SIGTERM can be forwarded from Android init via the `trap`. If the binary exits in under 15 seconds three times in a row, the inactive A/B slot is restored via symlink and the script exits cleanly — init restarts it with the old binary. If the binary runs for ≥15s before crashing, the attempt counter resets (operational crash, not a deployment failure).
 
@@ -518,6 +489,10 @@ dns-sd -B _emcontroller._tcp local
 ✅ Mic stream leak fixed (v2.7.0) — ownership check in streamMic exit; stop/start pairs can no longer leak a concurrent duplicate stream (historical "wake degrades over days, reboot fixes it" root cause)
 ✅ Per-room noise floor tracking (v2.7.0, controller) — measurement-only asymmetric EWMA; drives the SNR-relative 5s no-speech cutoff (wake-then-silence closes quietly again)
 ✅ Mid-stream beam lock (v2.7.0) — beam_lock/beam_unlock control messages; wake turns get perimeter mic selection without a stream restart (selection quality: known-poor, see pipeline state table)
+✅ 24-bit fixed mic gain (v2.7.1) — `micGainDb` (default +24dB) applied to the full 24-bit sample during S16 extraction; recovers the low byte the old truncation discarded (speech was ~3–20 LSB in 16-bit). Validated: STT empty-transcript rate went from 6/19 turns to 0/5, detection rms 0.0003 → 0.006–0.009, clipped=0
+✅ PTY dashboard shell (v2.7.1) — device allocates a real pseudo-terminal (mksh prompt, line editing, top/vi, resize); dashboard terminal is xterm.js; programmatic sessions (OTA) keep the raw pipe
+✅ /tmp/server.log size cap (v2.7.1) — trim loop in start_server.sh, bounded at ~5.5MB; VAD diag slowed to ~10min with prompt clip-count reporting
+✅ State-aware landing page (v2.7.1) — / shows first-run setup (amber ring) or login (green ring) and redirects authenticated visitors to /dashboard; sessions in localStorage
 ✅ HA-driven conversation continuation — continue_conversation flag wired; after TTS playback, re-triggers voice turn immediately if HA sets flag in INTENT_END (v2.6.4)
 ✅ Speaker audioChanDepth 32 — prevents mid-stream underrun stutter on longer TTS responses (v2.6.4)
 ✅ Dashboard offline IP display — shows last known IP with "(last seen)" annotation when offline; suppresses Docker-NAT 127.0.0.1 artefact (v2.6.4)
@@ -615,7 +590,7 @@ Ch7, Ch8 → unconnected
 
 ## Mic Array — What Actually Happens at Each Stage
 
-This describes the pipeline as of v2.7.0 (2026-07-06): the wake stream is **ungated and AGC-free** — the device streams every period continuously, and all adaptation lives controller-side as measurement. NS stays off pending P0-3. The stages are in order from hardware to HA.
+This describes the pipeline as of v2.7.1 (2026-07-07): the wake stream is **ungated and AGC-free** — the device streams every period continuously, and all adaptation lives controller-side as measurement. The only gain in the path is the fixed 24-bit mic gain (v2.7.1). NS stays off pending P0-3. The stages are in order from hardware to HA.
 
 Why the gate came out (2026-07-06 rework): the VAD gate's absolute RMS threshold is wrong in at least one room of every home, openwakeword is a streaming model that scores best on continuous audio (gated bursts spliced together measurably depress scores even with preroll), and the AGC's persistent gain state on a never-restarting stream rebaselined itself to each room's noise floor — the "wake word degrades over days, reboot fixes it" disease. Bandwidth was the reason for the gate and it doesn't survive arithmetic: 16kHz mono S16 is 32KB/s per device, 6× smaller than the TTS playback stream.
 
@@ -624,11 +599,18 @@ Why the gate came out (2026-07-06 rework): the VAD gate's absolute RMS threshold
 ```
 ALSA card 0 device 24 (9ch S24_3LE 16kHz)
   → pcm_microphone.go subscriber channel (raw 13824-byte periods at ~31ms intervals)
-  → beamformer.Process(raw, beamAngle)
+  → beamformer.Process(raw, beamAngle, gain)
       — unlocked (idle): always returns ch6 (centre/omni mic)
-      — smoothers still update every period (baseline stays warm)
+      — smoothers still update every period (baseline stays warm;
+        energy ratios are gain-invariant)
+      — fixed mic gain (micGainDb, default +24dB) applied to the FULL
+        24-bit sample during S16 extraction (v2.7.1) — the old path took
+        the upper 2 bytes and threw away the low byte, where nearly all
+        of the signal lives at this hardware's capture levels (speech
+        ≈ −70dBFS raw). Clipped samples are counted and reported.
       — returns mono S16_LE 512 samples
-  → vadPeriodRMS(mono) — computed for the periodic diagnostic log only;
+  → vadPeriodRMS(mono) — computed for the periodic diagnostic log only
+      (every ~10min, or within ~16s of a clipped sample — v2.7.1);
       does NOT gate sending on this stream (v2.7.0)
   → [if NS enabled] proc.noiseSuppress() — RNNoise (currently OFF, pending P0-3)
   → AGC: NEVER on the wake stream (v2.7.0 — forced off regardless of config;
@@ -790,6 +772,8 @@ VAD gate, preroll ring, sentinels, and (config-gated) AGC still exist.
 
 ### VAD threshold guidance
 
+**Units (v2.7.1):** all values below are *pre-gain* — measured before the fixed `micGainDb` stage. The device scales `vadThreshold` by the linear gain internally, so the config value keeps these units regardless of the gain setting; the `rms=`/`floor=` values in controller logs are *post-gain* (multiply this table by ~16 at the default +24dB to compare).
+
 Measured signal levels at 16kHz on ch6, MICPGA=40, digital gain=88:
 
 | Condition | Typical RMS |
@@ -801,7 +785,7 @@ Measured signal levels at 16kHz on ch6, MICPGA=40, digital gain=88:
 
 vadThreshold 0.001 sits comfortably between ambient and speech. Raise to 0.003–0.005 in noisy rooms (TV on). Dashboard slider now goes down to 0.0001 for quiet environments.
 
-**Scope change (v2.7.0):** vadThreshold/vadSpeechMs/vadSilenceMs apply only to lock_mic (button) turn streams now — the wake stream is ungated and ignores all three. Wake-turn endpointing is HA's VAD; accidental-wake cutoff is the controller's 5s SNR-relative timeout against the measured per-room noise floor (no per-room tuning needed). This table remains useful for interpreting the rms=/floor= values in controller logs and for sizing the pending fixed-gain bump.
+**Scope change (v2.7.0):** vadThreshold/vadSpeechMs/vadSilenceMs apply only to lock_mic (button) turn streams now — the wake stream is ungated and ignores all three. Wake-turn endpointing is HA's VAD; accidental-wake cutoff is the controller's 5s SNR-relative timeout against the measured per-room noise floor (no per-room tuning needed). The fixed-gain bump this table originally motivated shipped in v2.7.1 (`micGainDb`).
 
 ---
 
@@ -931,7 +915,14 @@ Server → Device (speaker frames):
 
 ### Shell plane (`ws://server:8767/shell/{device_id}`) — binary
 
-Demand-opened by the Go binary dialling **outbound** to the controller on receipt of a `shell_open` control message. Raw stdin/stdout piped from `/system/bin/sh`. Single session enforced. The controller proxies this connection to the dashboard terminal. No inbound ports on the device.
+Demand-opened by the Go binary dialling **outbound** to the controller on receipt of a `shell_open` control message. Single session enforced. The controller proxies this connection to the dashboard terminal. No inbound ports on the device.
+
+Two modes (v2.7.1):
+
+- **PTY** (`shell_open` with `pty: true` — dashboard sessions): the device attaches `/system/bin/sh` to a real pseudo-terminal (`/dev/ptmx`, `TERM=xterm-256color`, new session with controlling TTY), giving an interactive mksh with prompt, line editing, job control, and full-screen apps. The device signals the established mode by dialling `/shell/{device_id}?pty=1`; the controller relays it to the dashboard as a `shell_meta` text message before any bytes flow. Input from the dashboard is framed binary: `0x00` + stdin bytes, or `0x01` + cols/rows (uint16 BE each) for resize (`TIOCSWINSZ`). Output is raw. If PTY allocation fails, the device falls back to the pipe and omits the query flag.
+- **Pipe** (`pty` absent — programmatic sessions: OTA transfer, `_shell_run`): raw unframed stdin/stdout, no echo, no prompt — exactly what the output-parsing callers need. Unchanged from earlier versions.
+
+The controller proxies bytes verbatim in both modes; the framing is interpreted only at the endpoints.
 
 ---
 
@@ -1102,7 +1093,7 @@ done
 ## What's Next
 
 - **On-device wake word** — TFLite C binary running on-device, eliminating the continuous WiFi audio stream for OWW. OpenWakeWord has a TFLite backend; cross-compilation uses the existing echomuse-compiler Docker toolchain
-- **PTY shell** — proper terminal emulator (top, vim, nano) via creack/pty + xterm.js in dashboard
+- **PTY shell** ✅ — complete as of v2.7.1. Hand-rolled `/dev/ptmx` + `x/sys/unix` ioctls (no creack/pty dependency) + xterm.js in dashboard. Note: FireOS toolbox `top` is a dumb scroller by design — install a static busybox on `/data` for a redrawing `top`, `vi`, `less`, etc.
 - **Acoustic echo cancellation** — relevant once barge-in is implemented (speaker playing while mic active). Hardware AEC via MT8163 DSP is possible but complex; software AEC via speex or similar more practical.
 - **Media player integration** — pause room audio on wake word, resume after response (Home Assistant `media_player` service call)
 - **Bermuda BT proxy** — room-level presence detection via Bluetooth, once fleet of 5–6 Echo Dots is deployed
@@ -1124,8 +1115,8 @@ done
 
 ---
 
-**Document version:** v2.6.5
-**Last updated:** 2026-07-06
+**Document version:** v2.7.1
+**Last updated:** 2026-07-07
 **Changelog:**
 - v1.0 — April 2026: Initial publication. Full pipeline confirmed working.
 - v1.1 — 2026-04-26: Fixed ambiguous init.csm.project.rc editing instruction; fixed `server &` → `exec` inconsistency.
@@ -1259,5 +1250,15 @@ done
   **Q4: OWW near-miss visibility** — scores > 0.05 now log at INFO (rate-limited 1/2s per device) and increment a controller-owned counter shown on the dashboard status tab (kept out of `device.stats`, which the device's 30s hardware report overwrites).
   **M1** — button voice-turn task keeps a reference and logs exceptions via a done-callback instead of vanishing silently.
   **Misc controller** — `handle_data` queue-full now drops the oldest frame, not the newest (keeps the audio tail contiguous with real time); `_fetch_tts_audio` retries once (0.5s backoff) on intermittent tts_proxy fetch failures; idle OWW mic-queue timeout log demoted WARNING→DEBUG (fired every 10s per idle device); dashboard "omni" beam preset now sets `beamformingEnabled: false` (was `true`, which is AUTO perimeter-mic selection — not what the label promised).
+- v2.7.0 — 2026-07-06: Ungated wake stream, mic-stream leak fix, noise-floor endpointing, mid-stream beam lock.
+  **Ungated, AGC-free wake stream.** The always-on (!lock_mic) stream sends every 32ms period continuously (batched into 80ms frames) — no VAD gate, no preroll, no sentinels, AGC forced off regardless of config. OWW scores uninterrupted audio; no adaptive gain state can rebaseline against room noise (the root cause of the lounge device's wake death). VAD gate/AGC/preroll remain for bounded lock_mic (button) streams only.
+  **Mic-stream leak fixed.** StopMic→StartMic pairs (sent after every turn) could spawn a replacement stream while the old goroutine drained; the old goroutine's defer then cleared micActive over the new stream, and the next mic_start spawned an unstoppable duplicate. Leaked gated streams duplicated all speech 2× and their VADEnd sentinels cleared the OWW buffer — the historical "wake degrades over days, reboot fixes it" root cause. Fixed by ownership check (`d.micStopCh == stopCh`) in the defer.
+  **Controller-side noise floor + SNR endpointing.** Per-device asymmetric-EWMA noise floor (measurement only); esphome no-speech timeout restored to 5s, disarming only on SNR-relative speech or HA STT_VAD_START. beam_lock/beam_unlock control messages lock the beamformer at wake detection without a stream restart. Button path does mic_stop+mic_start post-turn so a gated turn stream can't persist as the wake stream.
+- v2.7.1 — 2026-07-07: 24-bit fixed mic gain, PTY dashboard shell, log cap, state-aware landing page.
+  **Fixed mic gain (`micGainDb`, default +24dB).** 20h of v2.7.0 fleet logs showed speech RMS at wake detection of 0.0001–0.0006 FS (~3–20 LSB in 16-bit) and a 6/19 empty-transcript rate: the S24→S16 extraction took the upper 2 bytes and discarded the low byte, where nearly all the signal lives at this hardware's capture levels. Gain is now applied to the full 24-bit sample (Q12 fixed-point, clamp to int16, clip counter) before quantisation — recovering real resolution rather than amplifying 16-bit quantisation noise. `vadThreshold` stays in pre-gain units (the device scales it by the linear gain internally), so stored configs never need retuning in lockstep. Validated on hardware: detection rms 0.0003 → 0.006–0.009, 5/5 clean transcripts, clipped=0. This is the "fixed gain" stage of the dumb-transducer target architecture.
+  **PTY dashboard shell.** `shell_open` accepts `pty: true` (dashboard sessions only) — the device attaches sh to a real PTY (`/dev/ptmx` + `x/sys/unix` ioctls, `TERM=xterm-256color`); input is framed (0x00 stdin / 0x01 resize), output raw, controller proxies verbatim and announces the established mode via `shell_meta`. Dashboard terminal is vendored xterm.js 5.5.0 with a local-echo line-mode fallback for pre-PTY firmware. Programmatic sessions (OTA, `_shell_run`) keep the raw pipe.
+  **/tmp/server.log cap.** Background trim loop in start_server.sh (5MB cap, newest 512KB kept in server.log.1; truncate-in-place is safe against the O_APPEND fd). A 45MB log was found on a device — /tmp is RAM-backed. Device VAD diag slowed from ~16s to ~10min cadence, with a prompt line whenever the clip counter moves.
+  **State-aware landing page.** `/` now checks a stored session (→ /dashboard), then `GET /api/system/setup-state` (public, boolean only): first-run setup form with amber pulsing LED ring, or login form with green ring. `/setup` redirects to `/`. Sessions moved from sessionStorage to localStorage. The dashboard's internal Login component deleted — the landing page owns auth; logout and unauthenticated /dashboard visits redirect to `/`. SVG favicon (mini Echo ring) on both pages.
+  **Config tab reorder.** Global + per-device config now run Playback → Wake word → Microphones → Advanced (turn processing + speech gate combined, "button turns only"); flow connectors dropped since order is by relevance, not signal path. All controls audited post-pipeline-changes: none dead; VAD threshold slider relabelled with pre-gain units.
 
 *Device: Echo Dot 2nd Gen (RS03QR). Tested on macOS with ADB 35.0.2.*

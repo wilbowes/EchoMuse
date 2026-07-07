@@ -47,6 +47,7 @@ Device WebSocket protocol:
 """
 
 import asyncio
+import collections
 import json
 import logging
 import os
@@ -243,6 +244,11 @@ class Device:
         # and diagnostics (near-miss logs). Asymmetric tracker: follows drops
         # quickly, rises slowly, so speech doesn't drag the floor up.
         self.noise_floor: float = 0.0
+
+        # Recent voice-turn traces (dicts derived from TurnTrace at emit
+        # time in em_esphome) — powers the Status tab's observability panel.
+        # In-memory only; bounded.
+        self.turn_history: collections.deque = collections.deque(maxlen=50)
 
     async def send_control(self, msg: dict):
         try:
@@ -1448,13 +1454,19 @@ async def handle_data(ws: WebSocketServerProtocol):
 async def handle_shell(ws: WebSocketServerProtocol, path: str):
     import aiohttp as _aiohttp
 
-    device_id = path.removeprefix("/shell/")
+    # Path may carry a query: /shell/{device_id}?pty=1 signals that the
+    # device actually established a PTY session (it may have been requested
+    # but failed to allocate — the device falls back to a plain pipe and
+    # omits the flag). The dashboard needs the established mode, not the
+    # requested one, to pick its input framing.
+    device_id, _, query = path.removeprefix("/shell/").partition("?")
+    pty_mode = "pty=1" in query
     if not device_id:
         log.warning("[shell] Missing device_id in path")
         await ws.close()
         return
 
-    log.info(f"[shell] Device connected: {device_id}")
+    log.info(f"[shell] Device connected: {device_id} (pty={pty_mode})")
 
     done_future  = _shell_pending.get(device_id)
     dashboard_ws = _shell_dashboard.get(device_id)
@@ -1475,6 +1487,15 @@ async def handle_shell(ws: WebSocketServerProtocol, path: str):
         return
 
     log.info(f"[shell] Proxying: {device_id}")
+
+    # Tell the dashboard which mode the device established before any
+    # shell bytes flow: PTY sessions use framed input (0x00 stdin /
+    # 0x01 resize) and emit terminal escape sequences; pipe sessions
+    # (pre-PTY firmware) are raw both ways.
+    try:
+        await dashboard_ws.send_str(json.dumps({"type": "shell_meta", "pty": pty_mode}))
+    except Exception:
+        pass
 
     async def device_to_dashboard():
         try:

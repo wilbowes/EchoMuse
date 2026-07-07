@@ -104,10 +104,15 @@ async def create_app() -> web.Application:
 
     # Static / setup
     app.router.add_get("/",           _serve_spa)
-    app.router.add_get("/setup",      _serve_spa)
+    # /setup predates the state-aware landing page — / now shows the
+    # first-run form itself when setup is pending, so just send people there.
+    app.router.add_get("/setup",      _redirect_root)
     app.router.add_get("/dashboard",  _serve_dashboard)
     app.router.add_static("/static",  STATIC_DIR)
     app.router.add_post("/api/setup", _post_setup)
+    # Public (pre-auth) — the landing page needs to know which form to show.
+    # Exposes only the boolean; the bootstrap token itself stays in the logs.
+    app.router.add_get("/api/system/setup-state", _get_setup_state)
 
     # Auth
     app.router.add_post("/api/auth/login",           _post_login)
@@ -125,6 +130,7 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/devices/{id}/config",        _get_device_config)
     app.router.add_post("/api/devices/{id}/config",       _post_device_config)
     app.router.add_get("/api/devices/{id}/logs",          _get_device_logs)
+    app.router.add_get("/api/devices/{id}/turns",         _get_device_turns)
     app.router.add_post("/api/devices/{id}/update",       _post_device_update)
     app.router.add_post("/api/devices/{id}/rollback",     _post_device_rollback)
     app.router.add_post("/api/releases/upload",           _post_upload_binary)
@@ -205,6 +211,15 @@ async def _serve_dashboard(request: web.Request) -> web.Response:
     return web.FileResponse(dashboard)
 
 
+async def _redirect_root(request: web.Request) -> web.Response:
+    raise web.HTTPFound("/")
+
+
+async def _get_setup_state(request: web.Request) -> web.Response:
+    """GET /api/system/setup-state — public: is first-run setup pending?"""
+    return _ok({"needs_setup": auth.get_bootstrap_token() is not None})
+
+
 async def _post_setup(request: web.Request) -> web.Response:
     """
     POST /api/setup — first-run admin account creation.
@@ -282,6 +297,15 @@ async def _get_device(request: web.Request) -> web.Response:
     if row is None:
         return _error("device_not_found", f"No device: {device_id}", 404)
     return _ok(_merge_device(row))
+
+
+@auth.require_auth
+async def _get_device_turns(request: web.Request) -> web.Response:
+    """GET /api/devices/{id}/turns — recent voice-turn traces (in-memory,
+    newest last). Powers the Status tab's observability panel."""
+    device_id = request.match_info["id"]
+    d = _devices.get(device_id)
+    return _ok(list(d.turn_history) if d is not None else [])
 
 
 @auth.require_admin
@@ -1122,7 +1146,12 @@ async def _ws_shell(request: web.Request) -> web.WebSocketResponse:
     # bypass the programmatic shell mechanism entirely.
 
     try:
-        await live.send_control({"type": "shell_open"})
+        # pty:true — interactive terminal wants a real PTY (mksh prompt,
+        # line editing, top/vi, resize). Old firmware ignores the field and
+        # opens the legacy pipe; handle_shell reports the established mode
+        # to the dashboard via shell_meta. Programmatic sessions
+        # (_get_device_shell_ws) deliberately do not set it.
+        await live.send_control({"type": "shell_open", "pty": True})
         await done_future
     except Exception as e:
         log.warning(f"[api] Shell session error ({device_id}): {e}")
@@ -1248,8 +1277,24 @@ tinymix -D 0 146 40 40
 
 kill $(ps | grep ledcontroller | grep -v grep) 2>/dev/null
 
+LOG=/tmp/server.log
+MAX_LOG=5242880
+KEEP_LOG=524288
+(
+    while true; do
+        sleep 300
+        SIZE=$(wc -c < "$LOG" 2>/dev/null)
+        if [ -n "$SIZE" ] && [ "$SIZE" -gt $MAX_LOG ]; then
+            tail -c $KEEP_LOG "$LOG" > "${LOG}.1" 2>/dev/null
+            : > "$LOG"
+            echo "[start_server] Log trimmed: ${SIZE} bytes (tail kept in ${LOG}.1)" >> "$LOG"
+        fi
+    done
+) &
+TRIM_PID=$!
+
 SERVER_PID=0
-trap 'kill $SERVER_PID 2>/dev/null; exit 0' TERM INT
+trap 'kill $SERVER_PID $TRIM_PID 2>/dev/null; exit 0' TERM INT
 
 attempt=0
 

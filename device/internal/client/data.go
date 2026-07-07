@@ -373,6 +373,13 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 	preroll := make([][]byte, 0, prerollPeriods)
 	var seqNum uint16
 	var periodCount uint64 // periodic RMS diagnostic
+	var lastClipped uint64 // clip count at last diag line
+
+	// Memoized linear mic gain — recomputed only when the config dB value
+	// changes (config push mid-stream). Sentinel forces computation on the
+	// first period.
+	gainDb := -1
+	gainLin := 1.0
 
 	sendFrame := func(payload []byte) {
 		frame := make([]byte, 3+len(payload))
@@ -482,19 +489,40 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 				d.beam.Unlock()
 			}
 
-			mono, angle := d.beam.Process(raw, beamAngle)
+			if snap.MicGainDb != nil && *snap.MicGainDb != gainDb {
+				gainDb = *snap.MicGainDb
+				gainLin = math.Pow(10, float64(gainDb)/20.0)
+				log.Printf("[data] mic gain: %ddB (linear %.2f)", gainDb, gainLin)
+			}
+
+			mono, angle := d.beam.Process(raw, beamAngle, gainLin)
 
 			// ── Processing pipeline ──────────────────────────────────────
 			// VAD on raw beamformed output — pre-NS/AGC so threshold is
 			// consistent regardless of gain state.
+			//
+			// vadThreshold is calibrated in pre-gain (acoustic) units —
+			// the values validated in the v2.6.3 session predate the fixed
+			// mic gain and stay meaningful across gain changes. mono is
+			// post-gain, so scale the threshold up by the same factor
+			// rather than requiring every stored config to be retuned in
+			// lockstep with micGainDb.
 			rms := vadPeriodRMS(mono)
-			speech := rms >= threshold
+			speech := rms >= threshold*gainLin
 
-			// Periodic RMS diagnostic — every 100 periods (~3.2s).
-			// Remove once idle audio level is fully characterised.
-			if periodCount%100 == 0 {
-				log.Printf("[data] VAD diag: rms=%.5f threshold=%.5f gate=%v active=%v ns=%v agc=%v",
-					rms, threshold, speech, active, nsEnabled, agcEnabled)
+			// Periodic RMS diagnostic — every ~10 min, or within ~16s of
+			// the mic gain clamping a sample (clipping is the one signal
+			// that says micGainDb is too hot for the room, so it's
+			// reported promptly; the %100 bound stops sustained clipping
+			// becoming its own log flood). Was every 100 counts (~16s
+			// measured on-device) while idle capture levels were being
+			// characterised — that job is done (2026-07-07 fleet
+			// analysis) and /tmp/server.log is RAM-backed and unrotated.
+			clipped := d.beam.ClippedSamples()
+			if periodCount%3750 == 0 || (clipped != lastClipped && periodCount%100 == 0) {
+				log.Printf("[data] VAD diag: rms=%.5f threshold=%.5f gain=%ddB clipped=%d gate=%v active=%v ns=%v agc=%v",
+					rms, threshold*gainLin, gainDb, clipped, speech, active, nsEnabled, agcEnabled)
+				lastClipped = clipped
 			}
 			periodCount++
 

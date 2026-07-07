@@ -35,6 +35,17 @@ log = logging.getLogger("echomuse.db")
 DEFAULT_DEVICE_CONFIG = {
     "adcDigitalGain":   88,
     "adcMicpga":        40,
+    # micGainDb: fixed digital gain (dB) the device applies to the full
+    # 24-bit capture before quantising to the 16-bit stream. Sized from
+    # 20h fleet logs (2026-07-07): speech RMS at wake detection was
+    # 0.0001–0.0006 FS (~3–20 LSB in 16-bit — the old S24→S16 truncation
+    # discarded most of the signal), loudest observed chunk 0.0035 FS, so
+    # +24dB (×16) lifts speech into a usable range with ample clipping
+    # headroom. Device clamps to [0, 42]; clipped-sample count appears in
+    # the device's periodic VAD diag log. Note: the device interprets
+    # vadThreshold in pre-gain units (threshold is scaled by the gain
+    # internally), so this can be tuned without retuning vadThreshold.
+    "micGainDb":        24,
     "startupVolume":    85,
     # vadThreshold: 0.001 (normalised RMS pre-AGC).
     # Q2 fix (2026-07-05 review, tracked as B6): this was drifted to 0.003 in
@@ -437,10 +448,17 @@ def get_global_device_config() -> dict:
     if row is None or not row["value"]:
         return dict(DEFAULT_DEVICE_CONFIG)
     try:
-        return json.loads(row["value"]) or dict(DEFAULT_DEVICE_CONFIG)
+        stored = json.loads(row["value"])
     except (json.JSONDecodeError, TypeError):
         log.warning("[db] Invalid global_device_config JSON — using defaults")
         return dict(DEFAULT_DEVICE_CONFIG)
+    if not stored:
+        return dict(DEFAULT_DEVICE_CONFIG)
+    # Underlay defaults so keys added after the stored config was last
+    # saved (e.g. micGainDb) are still pushed with their default value
+    # instead of silently falling back to whatever the device binary's
+    # env default happens to be.
+    return {**DEFAULT_DEVICE_CONFIG, **stored}
 
 
 def set_global_device_config(config: dict) -> None:

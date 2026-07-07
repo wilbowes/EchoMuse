@@ -15,6 +15,12 @@ RUN mkdir -p /app/static/vendor/fonts && \
       https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js && \
     curl -sfL -o /app/static/vendor/react-dom.min.js \
       https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js && \
+    curl -sfL -o /app/static/vendor/xterm.js \
+      https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js && \
+    curl -sfL -o /app/static/vendor/xterm.css \
+      https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css && \
+    curl -sfL -o /app/static/vendor/addon-fit.js \
+      https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js && \
     curl -sfL -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
       -o /app/static/vendor/fonts/dm-sans.woff2 \
       "https://fonts.gstatic.com/s/dmsans/v17/rP2Yp2ywxg089UriI5-g4vlH9VoD8Cmcqbu0-K4.woff2" && \

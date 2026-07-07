@@ -67,6 +67,7 @@ from zeroconf.asyncio import AsyncZeroconf
 from zeroconf import ServiceInfo
 
 import em_db as db
+import em_api as api
 
 # ── Per-turn trace ─────────────────────────────────────────────────────────────
 # Collects timestamps and key metrics through a voice turn and emits a single
@@ -735,6 +736,30 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 if not trace.outcome:
                     trace.outcome = "ok"
                 trace.emit()
+                # Record for the dashboard's Status-tab observability panel
+                # and nudge any open dashboards to refresh.
+                turn_record = {
+                    "ts":           time.time(),
+                    "trigger":      trace.trigger,
+                    "outcome":      trace.outcome,
+                    "total_ms":     trace.t_complete_ms,
+                    "vad_end_ms":   trace.t_vad_end_ms,
+                    "stt_ms":       trace.t_stt_ms,
+                    "tts_url_ms":   trace.t_tts_url_ms,
+                    "tts_fetch_ms": trace.t_tts_fetched_ms,
+                    "playback_ms":  trace.t_playback_ms,
+                    "audio_ms":     trace.audio_frames * 80,
+                    "stt_text":     trace.stt_text,
+                }
+                device.turn_history.append(turn_record)
+                try:
+                    await api._push_event({
+                        "type":      "turn_complete",
+                        "device_id": device.device_id,
+                        "turn":      turn_record,
+                    })
+                except Exception:
+                    pass  # dashboard notification is best-effort
             log.info(f"[{self._log_name}] ESPHome voice turn complete")
 
     async def _stream_mic_audio(self, device, preroll_discard: int = VOICE_PREROLL_DISCARD) -> None:

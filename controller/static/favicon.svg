@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!--
+    EchoMuse favicon — simplified top-down Echo Dot from index.html's
+    landing graphic: dark shell, glowing LED ring, inner surface.
+    8 ring segments instead of 12 and a thicker stroke so the ring still
+    resolves at 16px. Green = the dashboard's LCD accent (#9aba80).
+    Circumference at r=24 ≈ 150.8 → 8 slots of 18.85 (segment 14, gap 4.85).
+  -->
+  <defs>
+    <radialGradient id="fav-shell" cx="38%" cy="32%" r="65%">
+      <stop offset="0%" stop-color="#505050"/>
+      <stop offset="55%" stop-color="#2c2c2c"/>
+      <stop offset="100%" stop-color="#181818"/>
+    </radialGradient>
+    <radialGradient id="fav-inner" cx="42%" cy="36%" r="58%">
+      <stop offset="0%" stop-color="#383838"/>
+      <stop offset="100%" stop-color="#202020"/>
+    </radialGradient>
+    <filter id="fav-glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="1.2" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <circle cx="32" cy="32" r="31" fill="#0d0d0d"/>
+  <circle cx="32" cy="32" r="30" fill="url(#fav-shell)"/>
+
+  <!-- LED ring groove + segments -->
+  <circle cx="32" cy="32" r="24" fill="none" stroke="#0b0b0b" stroke-width="9"/>
+  <circle cx="32" cy="32" r="24" fill="none"
+    stroke="#9aba80" stroke-width="6"
+    stroke-dasharray="14 4.85" stroke-linecap="butt"
+    transform="rotate(-90 32 32)" filter="url(#fav-glow)"/>
+
+  <!-- Inner surface -->
+  <circle cx="32" cy="32" r="17" fill="url(#fav-inner)"/>
+  <circle cx="32" cy="32" r="17" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="0.6"/>
+
+  <!-- Specular highlight -->
+  <ellipse cx="25" cy="22" rx="10" ry="6" fill="rgba(255,255,255,0.05)" transform="rotate(-25 25 22)"/>
+</svg>

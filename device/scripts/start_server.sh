@@ -49,11 +49,34 @@ tinymix -D 0 146 40 40
 
 kill $(ps | grep ledcontroller | grep -v grep) 2>/dev/null
 
+# ── Log size cap ──────────────────────────────────────────────────────────────
+# /tmp is RAM-backed and everything below only ever appends — without a cap
+# server.log grows until reboot (45MB observed, 2026-07-07). Past MAX_LOG,
+# keep the newest KEEP_LOG bytes in server.log.1 and truncate in place; the
+# server's O_APPEND fd (from >>) just continues writing at the new EOF, so
+# no restart is needed and total log footprint stays bounded at ~5.5MB.
+LOG=/tmp/server.log
+MAX_LOG=5242880    # 5MB
+KEEP_LOG=524288    # 512KB carried into server.log.1
+(
+    while true; do
+        sleep 300
+        SIZE=$(wc -c < "$LOG" 2>/dev/null)
+        if [ -n "$SIZE" ] && [ "$SIZE" -gt $MAX_LOG ]; then
+            tail -c $KEEP_LOG "$LOG" > "${LOG}.1" 2>/dev/null
+            : > "$LOG"
+            echo "[start_server] Log trimmed: ${SIZE} bytes (tail kept in ${LOG}.1)" >> "$LOG"
+        fi
+    done
+) &
+TRIM_PID=$!
+
 # ── Signal handling ───────────────────────────────────────────────────────────
 # Forward SIGTERM/SIGINT to the server subprocess so Android init can
 # cleanly stop the service (exec is no longer used, so init signals us).
+# The log-trim loop dies with us too.
 SERVER_PID=0
-trap 'kill $SERVER_PID 2>/dev/null; exit 0' TERM INT
+trap 'kill $SERVER_PID $TRIM_PID 2>/dev/null; exit 0' TERM INT
 
 # ── Retry loop with auto-rollback ─────────────────────────────────────────────
 attempt=0

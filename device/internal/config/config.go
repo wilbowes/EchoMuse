@@ -33,6 +33,16 @@ type Device struct {
 	AdcDigitalGain int
 	AdcMicpga      int
 
+	// MicGainDb is a fixed digital gain (dB) applied to the full 24-bit
+	// capture before quantising to the 16-bit stream (see beamformer
+	// extractChannel). Measured speech at normal levels sits at 0.0001–
+	// 0.0006 FS RMS — only ~3–20 LSB in 16-bit terms — so gain must be
+	// applied pre-truncation to recover real captured resolution rather
+	// than amplify 16-bit quantisation noise. Fixed by design: this is
+	// the "fixed gain" stage of the dumb-transducer architecture — all
+	// adaptation lives controller-side as measurement. 0 = unity.
+	MicGainDb int
+
 	// BeamAngle fixes the beamformer steering direction in degrees
 	// (0–360, clockwise from 12 o'clock). -1 = auto (track loudest source).
 	BeamAngle          float64
@@ -73,6 +83,7 @@ func (d *Device) loadDefaults() {
 	d.OwwModel = envStr("OWW_MODEL", "hey_jarvis_v0.1")
 	d.AdcDigitalGain = envInt("ADC_DIGITAL_GAIN", 88)
 	d.AdcMicpga = envInt("ADC_MICPGA", 40)
+	d.MicGainDb = clampMicGainDb(envInt("MIC_GAIN_DB", 24))
 	d.BeamAngle = envFloat("BEAM_ANGLE", -1)
 	d.BeamformingEnabled = envBool("BEAMFORMING_ENABLED", true)
 	nsEnabled := envBool("NS_ENABLED", true)
@@ -117,6 +128,9 @@ func (d *Device) Apply(msg ConfigMessage) {
 	if msg.AdcMicpga > 0 {
 		d.AdcMicpga = msg.AdcMicpga
 	}
+	if msg.MicGainDb != nil {
+		d.MicGainDb = clampMicGainDb(*msg.MicGainDb)
+	}
 	if msg.BeamAngle != nil {
 		d.BeamAngle = *msg.BeamAngle
 	}
@@ -150,6 +164,7 @@ func (d *Device) Snapshot() ConfigMessage {
 	if d.AgcEnabled != nil {
 		agcEnabled = *d.AgcEnabled
 	}
+	micGainDb := d.MicGainDb
 	return ConfigMessage{
 		VadThreshold:       d.VadThreshold,
 		VadSpeechMs:        d.VadSpeechMs,
@@ -159,6 +174,7 @@ func (d *Device) Snapshot() ConfigMessage {
 		StartupVolume:      d.StartupVolume,
 		AdcDigitalGain:     d.AdcDigitalGain,
 		AdcMicpga:          d.AdcMicpga,
+		MicGainDb:          &micGainDb,
 		BeamAngle:          &beamAngle,
 		BeamformingEnabled: &beamformingEnabled,
 		NsEnabled:          &nsEnabled,
@@ -172,6 +188,7 @@ type ConfigMessage struct {
 	Type               string   `json:"type,omitempty"`
 	AdcDigitalGain     int      `json:"adcDigitalGain,omitempty"`
 	AdcMicpga          int      `json:"adcMicpga,omitempty"`
+	MicGainDb          *int     `json:"micGainDb,omitempty"`
 	StartupVolume      int      `json:"startupVolume,omitempty"`
 	VadThreshold       float64  `json:"vadThreshold,omitempty"`
 	VadSpeechMs        int      `json:"vadSpeechMs,omitempty"`
@@ -183,6 +200,20 @@ type ConfigMessage struct {
 	HasBeamforming     bool     `json:"hasBeamforming,omitempty"`
 	NsEnabled          *bool    `json:"nsEnabled,omitempty"`
 	AgcEnabled         *bool    `json:"agcEnabled,omitempty"`
+}
+
+// clampMicGainDb bounds the fixed mic gain to a sane range: 0dB (unity —
+// the pre-gain behaviour, bit-exact) up to +42dB. The 24-bit capture holds
+// 8 bits (48dB) below the old 16-bit truncation point; beyond +42dB the
+// gain is amplifying the capture's own noise floor with no headroom left.
+func clampMicGainDb(db int) int {
+	if db < 0 {
+		return 0
+	}
+	if db > 42 {
+		return 42
+	}
+	return db
 }
 
 // ─── env helpers ──────────────────────────────────────────────────────────────

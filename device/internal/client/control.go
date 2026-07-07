@@ -2,14 +2,18 @@ package client
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -307,7 +311,15 @@ func (c *ControlClient) connect(ctx context.Context, addr string, data *DataClie
 		case "shell_open":
 			// Controller is requesting a shell session.
 			// Dial outbound to ws://controller/shell/{device_id} and pipe sh stdio.
-			log.Printf("[control] shell_open received — dialling controller shell endpoint")
+			// pty:true (dashboard terminal) requests an interactive PTY session;
+			// absent (programmatic sessions — OTA transfers, _shell_run) keeps
+			// the plain pipe, whose unechoed, prompt-free output those callers
+			// parse.
+			var shellMsg struct {
+				Pty bool `json:"pty"`
+			}
+			_ = json.Unmarshal(raw, &shellMsg)
+			log.Printf("[control] shell_open received (pty=%v) — dialling controller shell endpoint", shellMsg.Pty)
 			c.shellMu.Lock()
 			if c.shellCancel != nil {
 				// Close any existing session first
@@ -321,7 +333,7 @@ func (c *ControlClient) connect(ctx context.Context, addr string, data *DataClie
 			controllerAddr := c.serverAddr
 			c.serverAddrMu.RUnlock()
 
-			go c.runShellSession(shellCtx, controllerAddr)
+			go c.runShellSession(shellCtx, controllerAddr, shellMsg.Pty)
 
 		case "shell_close":
 			log.Printf("[control] shell_close received — closing shell session")
@@ -344,49 +356,108 @@ func (c *ControlClient) connect(ctx context.Context, addr string, data *DataClie
 	}
 }
 
+// Shell input frame types (PTY sessions only). The dashboard sends framed
+// binary messages; the controller proxies them verbatim. Plain-pipe
+// sessions receive raw unframed bytes, as before.
+const (
+	shellFrameStdin  = 0x00 // payload: raw stdin bytes
+	shellFrameResize = 0x01 // payload: cols uint16 BE, rows uint16 BE
+)
+
 // runShellSession dials the controller's /shell/{device_id} endpoint,
 // spawns sh, and pipes its stdio bidirectionally until ctx is cancelled
 // or the connection drops.
-func (c *ControlClient) runShellSession(ctx context.Context, controllerAddr string) {
+//
+// pty=true attaches sh to a pseudo-terminal (interactive mksh: prompt,
+// line editing, job control, SIGWINCH) and expects framed input; the
+// ?pty=1 query tells the controller which mode was actually established
+// so the dashboard can match its framing. pty=false is the legacy raw
+// pipe used by programmatic sessions. If PTY allocation fails, the
+// session falls back to the pipe so a shell is always available.
+func (c *ControlClient) runShellSession(ctx context.Context, controllerAddr string, pty bool) {
+	var master, slave *os.File
+	if pty {
+		var err error
+		master, slave, err = openPty()
+		if err != nil {
+			log.Printf("[shell] PTY allocation failed (%v) — falling back to pipe", err)
+			pty = false
+		}
+	}
+
 	shellURL := "ws://" + controllerAddr + "/shell/" + c.deviceID
+	if pty {
+		shellURL += "?pty=1"
+	}
 	log.Printf("[shell] Connecting to controller: %s", shellURL)
 
 	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
 	conn, _, err := dialer.DialContext(ctx, shellURL, http.Header{})
 	if err != nil {
 		log.Printf("[shell] Failed to connect to controller: %v", err)
+		if master != nil {
+			master.Close()
+			slave.Close()
+		}
 		return
 	}
 	defer conn.Close()
 
-	log.Println("[shell] Connected — spawning sh")
+	log.Printf("[shell] Connected — spawning sh (pty=%v)", pty)
 
 	cmd := exec.CommandContext(ctx, "/system/bin/sh")
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		log.Printf("[shell] StdinPipe: %v", err)
-		return
+
+	// output is the fd read for shell output; input the fd written for
+	// stdin — the PTY master serves as both.
+	var output io.Reader
+	var input io.WriteCloser
+
+	if pty {
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
+		cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+		// New session with the PTY slave (child fd 0) as controlling TTY —
+		// this is what gives mksh an interactive terminal.
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true}
+		output = master
+		input = master
+	} else {
+		stdin, err := cmd.StdinPipe()
+		if err != nil {
+			log.Printf("[shell] StdinPipe: %v", err)
+			return
+		}
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			log.Printf("[shell] StdoutPipe: %v", err)
+			return
+		}
+		cmd.Stderr = cmd.Stdout // merge stderr into stdout
+		output = stdout
+		input = stdin
 	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		log.Printf("[shell] StdoutPipe: %v", err)
-		return
-	}
-	cmd.Stderr = cmd.Stdout // merge stderr into stdout
 
 	if err := cmd.Start(); err != nil {
 		log.Printf("[shell] cmd.Start: %v", err)
+		if master != nil {
+			master.Close()
+			slave.Close()
+		}
 		return
+	}
+	if pty {
+		// Child holds its own slave fd now; keeping ours open would stop
+		// the master from ever reading EOF after the shell exits.
+		slave.Close()
 	}
 
 	done := make(chan struct{})
 
-	// stdout → WebSocket
+	// shell output → WebSocket
 	go func() {
 		defer close(done)
 		buf := make([]byte, 4096)
 		for {
-			n, err := stdout.Read(buf)
+			n, err := output.Read(buf)
 			if n > 0 {
 				if werr := conn.WriteMessage(websocket.BinaryMessage, buf[:n]); werr != nil {
 					log.Printf("[shell] write to WS: %v", werr)
@@ -399,18 +470,38 @@ func (c *ControlClient) runShellSession(ctx context.Context, controllerAddr stri
 		}
 	}()
 
-	// WebSocket → stdin
+	// WebSocket → shell input (framed in PTY mode, raw in pipe mode)
 	go func() {
 		for {
 			_, data, err := conn.ReadMessage()
 			if err != nil {
 				break
 			}
-			if _, err := stdin.Write(data); err != nil {
-				break
+			if !pty {
+				if _, err := input.Write(data); err != nil {
+					return
+				}
+				continue
+			}
+			if len(data) == 0 {
+				continue
+			}
+			switch data[0] {
+			case shellFrameStdin:
+				if _, err := input.Write(data[1:]); err != nil {
+					return
+				}
+			case shellFrameResize:
+				if len(data) >= 5 {
+					cols := binary.BigEndian.Uint16(data[1:3])
+					rows := binary.BigEndian.Uint16(data[3:5])
+					if err := setWinsize(master, cols, rows); err != nil {
+						log.Printf("[shell] TIOCSWINSZ: %v", err)
+					}
+				}
 			}
 		}
-		stdin.Close()
+		input.Close()
 	}()
 
 	// Wait for shell exit, ctx cancel, or connection drop
@@ -421,6 +512,9 @@ func (c *ControlClient) runShellSession(ctx context.Context, controllerAddr stri
 
 	cmd.Process.Kill()
 	cmd.Wait()
+	if master != nil {
+		master.Close()
+	}
 	log.Println("[shell] Session closed")
 }
 

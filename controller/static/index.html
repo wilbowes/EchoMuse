@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>EchoMuse Device Management</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
   <style>
     @font-face { font-family: 'DM Sans'; font-weight: 400; src: url('/static/vendor/fonts/dm-sans.woff2') format('woff2'); }
     @font-face { font-family: 'DM Sans'; font-weight: 600; src: url('/static/vendor/fonts/dm-sans.woff2') format('woff2'); }
@@ -17,6 +18,7 @@
       --border:    #b8b4ac;
       --lcd-bg:    #1e2219;
       --lcd-green: #9aba80;
+      --lcd-amber: #d4703a;
       --lcd-dim:   #3a4a30;
       --text:      #1e1c18;
       --muted:     #8a8680;
@@ -62,7 +64,7 @@
       border: 1px solid #1a1c18;
       border-radius: 8px;
       padding: 14px 20px;
-      margin-bottom: 28px;
+      margin-bottom: 24px;
       box-shadow: inset 0 2px 8px rgba(0,0,0,0.6);
     }
     .lcd-label {
@@ -98,32 +100,55 @@
       margin-bottom: 32px;
     }
 
-    .status-row {
-      display: flex;
-      gap: 10px;
-      margin-bottom: 24px;
+    form { display: none; }
+    form.active { display: block; }
+
+    .field { margin-bottom: 12px; text-align: left; }
+    .field label {
+      display: block;
+      font-family: 'DM Mono', monospace;
+      font-size: 8px;
+      color: var(--muted);
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      margin-bottom: 5px;
+      padding-left: 2px;
     }
-    .status-pill {
-      flex: 1;
-      background: linear-gradient(160deg, #2a2e28, var(--lcd-bg));
+    .field input {
+      width: 100%;
+      background: linear-gradient(160deg, #2a2e28 0%, var(--lcd-bg) 100%);
       border: 1px solid #1a1c18;
       border-radius: 6px;
-      padding: 10px 8px;
-      box-shadow: inset 0 1px 4px rgba(0,0,0,0.5);
-    }
-    .status-pill .label {
+      padding: 10px 14px;
       font-family: 'DM Mono', monospace;
-      font-size: 7px;
-      color: var(--lcd-dim);
-      text-transform: uppercase;
+      font-size: 13px;
+      color: var(--lcd-green);
+      letter-spacing: 0.05em;
+      caret-color: var(--lcd-green);
+      box-shadow: inset 0 2px 6px rgba(0,0,0,0.5);
+      outline: none;
+    }
+    .field input:focus { border-color: #4a5a40; }
+
+    button[type=submit] {
+      width: 100%;
+      margin-top: 8px;
+      background: linear-gradient(170deg, #e8e4dc 0%, var(--surface) 100%);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      font-family: 'DM Mono', monospace;
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--text);
       letter-spacing: 0.15em;
-      margin-bottom: 4px;
+      text-transform: uppercase;
+      cursor: pointer;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.12), 0 1px 0 rgba(255,255,255,0.6) inset;
     }
-    .status-pill .val {
-      font-family: 'DM Mono', monospace;
-      font-size: 18px;
-      line-height: 1;
-    }
+    button[type=submit]:hover  { background: #eceae2; }
+    button[type=submit]:active { box-shadow: inset 0 2px 4px rgba(0,0,0,0.15); }
+    button[type=submit]:disabled { opacity: 0.5; cursor: default; }
 
     .hint {
       font-family: 'DM Mono', monospace;
@@ -131,6 +156,11 @@
       color: var(--muted);
       letter-spacing: 0.05em;
       margin-top: 20px;
+      line-height: 1.6;
+    }
+    .hint code {
+      font-family: 'DM Mono', monospace;
+      color: var(--text2, #4a4844);
     }
   </style>
 </head>
@@ -196,9 +226,9 @@
             Per slot = 524.7 / 12 ≈ 43.7
             Segment = 31px  Gap = 12.7px
           -->
-          <circle class="led-ring" cx="100" cy="100" r="83.5"
+          <circle class="led-ring" id="led-ring" cx="100" cy="100" r="83.5"
             fill="none"
-            stroke="#d4703a"
+            stroke="#3a4a30"
             stroke-width="9"
             stroke-dasharray="31 12.7"
             stroke-linecap="butt"
@@ -277,81 +307,168 @@
     <div class="title">EchoMuse</div>
     <div class="subtitle">Device Management</div>
 
-    <div class="status-row">
-      <div class="status-pill">
-        <div class="label">Online</div>
-        <div class="val" id="val-online" style="color:#3a4a30">—</div>
-      </div>
-      <div class="status-pill">
-        <div class="label">Pending</div>
-        <div class="val" id="val-pending" style="color:#3a4a30">—</div>
-      </div>
-      <div class="status-pill">
-        <div class="label">Updates</div>
-        <div class="val" id="val-updates" style="color:#3a4a30">—</div>
-      </div>
-    </div>
-
     <div class="lcd">
       <div class="lcd-label">Controller</div>
       <div class="lcd-value" id="lcd-status">
-        <span style="color:#3a4a30">Connecting to API…</span>
+        <span style="color:#3a4a30">Connecting…</span>
       </div>
     </div>
 
-    <div class="hint" id="hint">Dashboard initialising</div>
+    <!-- First-run setup — shown when no admin account exists yet.
+         Amber ring, mirroring the device's own setup-mode LED state. -->
+    <form id="form-setup" autocomplete="off">
+      <div class="field">
+        <label for="su-token">Setup token</label>
+        <input id="su-token" type="text" spellcheck="false" autocomplete="off" />
+      </div>
+      <div class="field">
+        <label for="su-user">Username</label>
+        <input id="su-user" type="text" spellcheck="false" autocomplete="username" />
+      </div>
+      <div class="field">
+        <label for="su-pass">Password</label>
+        <input id="su-pass" type="password" autocomplete="new-password" />
+      </div>
+      <button type="submit" id="su-btn">Create admin account</button>
+    </form>
+
+    <!-- Login — shown when the controller is already configured.
+         Green ring: controller ready, awaiting sign-in. -->
+    <form id="form-login">
+      <div class="field">
+        <label for="li-user">Username</label>
+        <input id="li-user" type="text" spellcheck="false" autocomplete="username" />
+      </div>
+      <div class="field">
+        <label for="li-pass">Password</label>
+        <input id="li-pass" type="password" autocomplete="current-password" />
+      </div>
+      <button type="submit" id="li-btn">Sign in</button>
+    </form>
+
+    <div class="hint" id="hint"></div>
 
   </div>
 
   <script>
-    const lcd      = document.getElementById('lcd-status');
-    const hint     = document.getElementById('hint');
-    const vOnline  = document.getElementById('val-online');
-    const vPending = document.getElementById('val-pending');
-    const vUpdates = document.getElementById('val-updates');
+    const lcd   = document.getElementById('lcd-status');
+    const hint  = document.getElementById('hint');
+    const ring  = document.getElementById('led-ring');
 
     const GREEN = '#9aba80';
-    const AMBER = '#a08020';
+    const AMBER = '#d4703a';
     const DIM   = '#3a4a30';
+    const RED   = '#c04040';
 
     function setLcd(text, color) {
       lcd.innerHTML =
         `<span style="color:${color};text-shadow:0 0 10px ${color}44">${text}</span>`;
     }
 
-    async function fetchStatus() {
+    function setRing(color) { ring.setAttribute('stroke', color); }
+
+    function show(formId) {
+      document.querySelectorAll('form').forEach(f =>
+        f.classList.toggle('active', f.id === formId));
+    }
+
+    async function post(path, body) {
+      const r = await fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+      return data;
+    }
+
+    function enterDashboard(token, role) {
+      localStorage.setItem('em_token', token);
+      localStorage.setItem('em_role', role);
+      location.replace('/dashboard');
+    }
+
+    // ── Setup form ──
+    document.getElementById('form-setup').addEventListener('submit', async e => {
+      e.preventDefault();
+      const btn = document.getElementById('su-btn');
+      btn.disabled = true;
+      setLcd('Creating account…', AMBER);
       try {
-        const r = await fetch('/api/system/status', { credentials: 'include' });
-        if (r.status === 401) {
-          setLcd('Authentication required', AMBER);
-          hint.textContent = 'Visit /setup or log in to continue';
-          vOnline.textContent = vPending.textContent = vUpdates.textContent = '—';
-          return;
-        }
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const d = await post('/api/setup', {
+          token:    document.getElementById('su-token').value.trim(),
+          username: document.getElementById('su-user').value.trim(),
+          password: document.getElementById('su-pass').value,
+        });
+        setLcd('Account created', GREEN);
+        setRing(GREEN);
+        enterDashboard(d.token, d.role);
+      } catch (err) {
+        setLcd(err.message, RED);
+        btn.disabled = false;
+      }
+    });
+
+    // ── Login form ──
+    document.getElementById('form-login').addEventListener('submit', async e => {
+      e.preventDefault();
+      const btn = document.getElementById('li-btn');
+      btn.disabled = true;
+      setLcd('Signing in…', GREEN);
+      try {
+        const d = await post('/api/auth/login', {
+          username: document.getElementById('li-user').value.trim(),
+          password: document.getElementById('li-pass').value,
+        });
+        enterDashboard(d.token, d.role);
+      } catch (err) {
+        setLcd(err.message, RED);
+        btn.disabled = false;
+      }
+    });
+
+    // ── Landing state machine ──
+    // 1. Valid stored session → straight to /dashboard.
+    // 2. Setup pending → amber ring + create-admin form.
+    // 3. Configured → green ring + login form.
+    async function init() {
+      const token = localStorage.getItem('em_token');
+      if (token) {
+        try {
+          const r = await fetch('/api/auth/me',
+            { headers: { Authorization: `Bearer ${token}` } });
+          if (r.ok) { location.replace('/dashboard'); return; }
+        } catch {}
+        localStorage.removeItem('em_token');
+        localStorage.removeItem('em_role');
+      }
+
+      try {
+        const r = await fetch('/api/system/setup-state');
         const d = await r.json();
-
-        vOnline.textContent = `${d.connected}/${d.total_devices}`;
-        vOnline.style.color = d.connected === d.total_devices ? GREEN : AMBER;
-
-        vPending.textContent = d.pending;
-        vPending.style.color = d.pending > 0 ? AMBER : DIM;
-
-        vUpdates.textContent = d.updates_available;
-        vUpdates.style.color = d.updates_available > 0 ? AMBER : DIM;
-
-        const rel = d.latest_release ? `Latest: ${d.latest_release}` : 'No release data';
-        setLcd(`API ready  ·  ${rel}`, GREEN);
-        hint.textContent = `${d.approval_mode} mode  ·  dashboard loading`;
-
+        if (d.needs_setup) {
+          setRing(AMBER);
+          setLcd('First-run setup', AMBER);
+          hint.innerHTML = 'The setup token is in the controller logs:<br/>' +
+                           '<code>docker logs echomuse-controller</code>';
+          show('form-setup');
+          document.getElementById('su-token').focus();
+        } else {
+          setRing(GREEN);
+          setLcd('Ready — sign in', GREEN);
+          hint.textContent = '';
+          show('form-login');
+          document.getElementById('li-user').focus();
+        }
       } catch (e) {
+        setRing(DIM);
         setLcd('API unreachable', AMBER);
         hint.textContent = String(e);
       }
     }
 
-    fetchStatus();
-    setInterval(fetchStatus, 10_000);
+    init();
   </script>
 </body>
 </html>
