@@ -1,0 +1,33 @@
+# EchoMuse controller — deploy from the published image (no build needed).
+#
+#   mkdir echomuse && cd echomuse
+#   curl -O https://raw.githubusercontent.com/wilbowes/EchoMuse/main/controller/docker-compose.deploy.yml
+#   curl -o .env https://raw.githubusercontent.com/wilbowes/EchoMuse/main/controller/.env.example
+#   # edit .env — at minimum set SERVER_IP to this machine's LAN IP
+#   docker compose -f docker-compose.deploy.yml up -d
+#
+# Dashboard: http://<SERVER_IP>:8768
+#
+# network_mode: host is required — the controller advertises itself over
+# mDNS and opens one ESPHome TCP port per device (16001+), which doesn't
+# work behind Docker's port mapping.
+#
+# The image runs wake word inference on CPU (fine for a handful of devices).
+# For NVIDIA GPU inference, build locally instead: see docker-compose.yml.
+
+services:
+  echomuse-controller:
+    image: ghcr.io/wilbowes/echomuse-controller:latest
+    container_name: echomuse-controller
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env
+    volumes:
+      # Persist database (devices, config, users) across upgrades
+      - ./data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -38,7 +38,20 @@ configuration, even a remote terminal — happens over WiFi from the dashboard.
 
 ## Step 2 — Start the controller
 
-On your always-on computer:
+On your always-on computer, using the prebuilt image (nothing to compile):
+
+```bash
+mkdir echomuse && cd echomuse
+curl -O https://raw.githubusercontent.com/wilbowes/EchoMuse/main/controller/docker-compose.deploy.yml
+curl -o .env https://raw.githubusercontent.com/wilbowes/EchoMuse/main/controller/.env.example
+# Edit .env: set SERVER_IP to this computer's LAN IP address
+docker compose -f docker-compose.deploy.yml up -d
+```
+
+To upgrade later: `docker compose -f docker-compose.deploy.yml pull && docker compose -f docker-compose.deploy.yml up -d`. Your devices, users, and settings live in `./data` and survive upgrades.
+
+<details>
+<summary>Alternative: build from source (needed for NVIDIA GPU wake-word inference)</summary>
 
 ```bash
 git clone https://github.com/wilbowes/EchoMuse.git
@@ -47,6 +60,12 @@ cp .env.example .env
 # Edit .env: set SERVER_IP to this computer's LAN IP address
 docker compose up -d --build
 ```
+
+Note: `docker-compose.yml` requests an NVIDIA GPU (for onnxruntime-gpu).
+On a machine without one, remove the `deploy:` block and the `GPU: "1"`
+build arg — or just use the prebuilt image above, which is CPU-only.
+
+</details>
 
 That's it. The controller is now running two things:
 

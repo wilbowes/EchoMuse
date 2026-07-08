@@ -47,13 +47,19 @@ import websockets
 
 import em_db as db
 import em_auth as auth
+from version import VERSION as CONTROLLER_VERSION
 
 log = logging.getLogger("echomuse.api")
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
 STATIC_DIR = Path(__file__).parent / "static"
-GITHUB_API_URL = "https://api.github.com/repos/{repo}/releases/latest"
+# List endpoint, not /releases/latest: device firmware releases (v* tags with
+# a `server` asset) share the repo with controller releases (controller-v*
+# tags, GHCR image only). /releases/latest returns whichever was published
+# most recently — _fetch_latest_release filters the list for the newest
+# release that is actually a device firmware release.
+GITHUB_API_URL = "https://api.github.com/repos/{repo}/releases?per_page=10"
 
 # How long to cache GitHub release info in memory (seconds).
 # DB is the persistent cache; this avoids hitting the DB on every
@@ -1466,6 +1472,7 @@ async def _get_system_status(request: web.Request) -> web.Response:
     release = await _get_cached_release()
 
     return _ok({
+        "controller_version": CONTROLLER_VERSION,
         "connected":      len(_devices),
         "total_devices":  len(all_rows),
         "pending":        sum(1 for r in all_rows if not r["approved"]),
@@ -1750,15 +1757,30 @@ async def _fetch_latest_release(force: bool = False) -> Optional[dict]:
                 if resp.status != 200:
                     log.warning(f"[api] GitHub API returned {resp.status}")
                     return None
-                data = await resp.json()
+                releases = await resp.json()
 
-        tag     = data.get("tag_name", "")
-        assets  = data.get("assets", [])
-        binary  = next(
-            (a for a in assets if a.get("name") == "server"), None
-        )
-        if not binary:
-            log.warning("[api] No 'server' asset found in latest release")
+        # Newest device firmware release: plain v* tag (controller releases
+        # use controller-v* and ship no binary), published, with the compiled
+        # `server` asset attached. The list is newest-first.
+        tag = None
+        binary = None
+        for data in releases:
+            if data.get("draft") or data.get("prerelease"):
+                continue
+            candidate_tag = data.get("tag_name", "")
+            if not candidate_tag.startswith("v"):
+                continue
+            candidate_binary = next(
+                (a for a in data.get("assets", []) if a.get("name") == "server"),
+                None,
+            )
+            if candidate_binary is None:
+                continue
+            tag, binary = candidate_tag, candidate_binary
+            break
+
+        if binary is None:
+            log.warning("[api] No device firmware release with a 'server' asset found")
             return None
 
         download_url = binary["browser_download_url"]

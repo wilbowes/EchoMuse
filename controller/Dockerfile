@@ -1,10 +1,22 @@
 FROM python:3.12-slim
+# Links the GHCR package page back to the repo (and lets the package inherit
+# the repo's public visibility once connected).
+LABEL org.opencontainers.image.source="https://github.com/wilbowes/EchoMuse" \
+      org.opencontainers.image.description="EchoMuse controller — Echo Dot Gen 2 open-source voice assistant satellite"
 WORKDIR /app
 # Install curl for vendoring JS dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends curl ffmpeg && rm -rf /var/lib/apt/lists/*
 # Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# GPU=1 swaps the CPU onnxruntime from requirements.txt for the CUDA build
+# (both provide the same `onnxruntime` import, so they can't coexist).
+# Local docker-compose.yml sets it; the published GHCR image is CPU-only.
+ARG GPU=0
+RUN if [ "$GPU" = "1" ]; then \
+      pip uninstall -y onnxruntime && \
+      pip install --no-cache-dir onnxruntime-gpu==1.20.1; \
+    fi
 # Install openwakeword without deps — tflite-runtime has no Python 3.12
 # x86_64 build; onnxruntime handles inference instead
 RUN pip install --no-cache-dir --no-deps openwakeword==0.6.0 && \
@@ -30,6 +42,11 @@ RUN mkdir -p /app/static/vendor/fonts && \
     curl -sfL -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
       -o /app/static/vendor/fonts/dm-mono-500.woff2 \
       "https://fonts.gstatic.com/s/dmmono/v16/aFTU7PB1QTsUX8KYthqQBA.woff2"
+# Controller version — baked in by the controller-release workflow from the
+# controller-v* tag; "dev" for local builds (version.py falls back to git
+# describe only outside a container).
+ARG EM_CONTROLLER_VERSION=dev
+ENV EM_CONTROLLER_VERSION=$EM_CONTROLLER_VERSION
 # Controller source
 COPY em_controller.py .
 COPY em_api.py .
@@ -37,6 +54,7 @@ COPY em_db.py .
 COPY em_auth.py .
 COPY em_eq.py .
 COPY em_esphome.py .
+COPY version.py .
 # ESPHome native API subpackage (frame protocol, message registry, vendored protobuf)
 COPY esphome/ ./esphome/
 # Dashboard SPA — placeholder is index.html, full dashboard is dashboard.html

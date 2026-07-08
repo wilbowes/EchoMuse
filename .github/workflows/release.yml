@@ -1,4 +1,10 @@
-name: Build and Release
+name: Device Release (firmware binary)
+
+# Device firmware releases keep plain vX.Y.Z tags — the tag is embedded in
+# the binary via -ldflags and compared against firmware_ver by the OTA
+# system, so this scheme must not change. Controller releases use
+# controller-v* tags (see controller-release.yml), which don't match this
+# glob and create no GitHub Release, so OTA's release polling never sees them.
 
 on:
   push:

@@ -158,9 +158,12 @@ SERVER_HOST  = os.environ.get("SERVER_HOST", "0.0.0.0")
 MDNS_NAME    = os.environ.get("MDNS_NAME", "echomuse")
 
 # ESPHome controller firmware version string reported to HA.
-# Matches the EchoMuse controller version — read from the same source
-# as the rest of the controller uses.
-ESPHOME_PROJECT_VERSION = os.environ.get("ESPHOME_PROJECT_VERSION", "2.0.0")
+# Defaults to the real controller version (version.py) so HA's device page
+# shows the same thing as the dashboard header; env var kept as an override.
+from version import VERSION as _CONTROLLER_VERSION
+ESPHOME_PROJECT_VERSION = os.environ.get(
+    "ESPHOME_PROJECT_VERSION", _CONTROLLER_VERSION
+)
 
 # ─── Media player entity ─────────────────────────────────────────────────────
 

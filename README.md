@@ -20,7 +20,25 @@ The short version:
 
 ---
 
-## Building
+## Running the controller
+
+The controller (dashboard, wake word detection, Home Assistant integration) ships as a prebuilt Docker image:
+
+```bash
+mkdir echomuse && cd echomuse
+curl -O https://raw.githubusercontent.com/wilbowes/EchoMuse/main/controller/docker-compose.deploy.yml
+curl -o .env https://raw.githubusercontent.com/wilbowes/EchoMuse/main/controller/.env.example
+# Edit .env: set SERVER_IP to this machine's LAN IP
+docker compose -f docker-compose.deploy.yml up -d
+```
+
+Dashboard at `http://<SERVER_IP>:8768`. See the [quickstart](docs/quickstart.md) for the full walkthrough.
+
+Images are published to `ghcr.io/wilbowes/echomuse-controller` from `controller-v*` tags; device firmware binaries are released from plain `v*` tags (see Releases).
+
+---
+
+## Building the device binary
 
 The Echo Dot runs FireOS 5 (API 22). A custom Docker build environment is required — standard Go cross-compilation won't produce a compatible binary.
 

@@ -1,6 +1,11 @@
 services:
   echomuse-controller:
-    build: .
+    build:
+      context: .
+      args:
+        # CUDA onnxruntime for wake-word inference on this host's GPU.
+        # The published GHCR image (docker-compose.deploy.yml) is CPU-only.
+        GPU: "1"
     container_name: echomuse-controller
     restart: unless-stopped
     network_mode: host

@@ -25,9 +25,11 @@ requests
 # confirmed installable for python:3.12-slim x86_64 (manylinux_2_28 wheel,
 # no build step needed) before wiring the owwSpeexNs config toggle.
 speexdsp-ns==0.1.2
-# ONNX runtime — GPU variant for openwakeword inference
-# Swap for onnxruntime==1.20.1 if no GPU available
-onnxruntime-gpu==1.20.1
+# ONNX runtime for openwakeword inference — CPU build, plenty for wake word
+# scoring and what the published Docker image ships. For NVIDIA GPU inference
+# swap in onnxruntime-gpu==1.20.1 (the Dockerfile does this automatically
+# when built with --build-arg GPU=1).
+onnxruntime==1.20.1
 # Protobuf runtime — required by esphome/vendor/api_pb2.py (vendored from
 # aioesphomeapi==45.3.1). Not pulled in transitively since we vendor only
 # the two generated files rather than depending on the full aioesphomeapi package.

@@ -1696,6 +1696,7 @@ async def _mdns_refresh_loop(azc: AsyncZeroconf, info: ServiceInfo) -> None:
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 async def main():
+    log.info(f"EchoMuse Controller {api.CONTROLLER_VERSION}")
     db.init(DB_PATH)
     auth.maybe_generate_bootstrap_token()
 

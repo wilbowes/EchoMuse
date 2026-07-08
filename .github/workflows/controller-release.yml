@@ -1,0 +1,67 @@
+name: Controller Release (Docker image)
+
+# Controller releases are tagged controller-vX.Y.Z (device firmware keeps
+# plain vX.Y.Z — see release.yml). This builds the controller image and
+# pushes it to GHCR as:
+#   ghcr.io/<owner>/echomuse-controller:X.Y.Z
+#   ghcr.io/<owner>/echomuse-controller:latest
+#
+# Deliberately no GitHub Release is created here: the controller's OTA
+# system polls the repo's releases for device firmware (v* tags with a
+# `server` asset), and controller releases must not appear there.
+#
+# The image is CPU-only (onnxruntime). GPU users build locally with
+# --build-arg GPU=1 (see controller/docker-compose.yml).
+
+on:
+  push:
+    tags:
+      - 'controller-v*'
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/echomuse-controller
+          tags: |
+            type=match,pattern=controller-v(.*),group=1
+            type=raw,value=latest
+
+      - name: Version string from tag
+        id: version
+        # controller-v2.8.0 → v2.8.0 (what the dashboard header displays)
+        run: echo "version=${GITHUB_REF_NAME#controller-}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: controller
+          push: true
+          platforms: linux/amd64
+          build-args: |
+            EM_CONTROLLER_VERSION=${{ steps.version.outputs.version }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
