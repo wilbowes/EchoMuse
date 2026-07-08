@@ -47,14 +47,15 @@ DEFAULT_DEVICE_CONFIG = {
     # internally), so this can be tuned without retuning vadThreshold.
     "micGainDb":        24,
     # AEC (speexdsp, device-side, whole mic path incl. wake stream).
-    # Default OFF — enable per-deployment after validating echo delay.
-    # aecDelayMs models write-to-ear latency (speaker ALSA buffer ≈340ms
-    # at 4×2048/48k, minus mic-side buffering — 250 is the starting guess,
-    # tune against [aec] logs and residual echo); aecTailMs is the adaptive
-    # filter length (residual delay error + room reverb). Device clamps:
-    # delay 0–1000, tail 50–500.
+    # Default OFF — enable per-deployment and check the [aec] att= logs.
+    # aecDelayMs: 0, measured on hardware 2026-07-08 — the mic side reads
+    # 160ms ALSA batches, which eats most of the speaker's write-to-ear
+    # latency; the filter tail absorbs the remainder. (The original 250
+    # guess made the echo arrive *before* its reference — non-causal, zero
+    # cancellation.) aecTailMs is the adaptive filter length (residual
+    # delay + room reverb). Device clamps: delay 0–1000, tail 50–500.
     "aecEnabled":       False,
-    "aecDelayMs":       250,
+    "aecDelayMs":       0,
     "aecTailMs":        300,
     "startupVolume":    85,
     # vadThreshold: 0.001 (normalised RMS pre-AGC).
@@ -81,12 +82,15 @@ DEFAULT_DEVICE_CONFIG = {
     "owwThreshold":     0.3,
     # Barge-in (§3.2, controller-side): wake word spoken during TTS playback
     # cancels it and starts a fresh turn. Requires device AEC (aecEnabled)
-    # to be on and validated first — with barge-in the mic streams through
-    # playback, and AEC is what stops the device hearing itself. The
-    # watcher threshold is max(bargeInThreshold, owwThreshold): raised so
-    # residual post-AEC echo can't self-trigger.
+    # on — with barge-in the mic streams through playback, and AEC is what
+    # stops the device hearing itself. bargeInThreshold is used as-is,
+    # deliberately BELOW the normal wake threshold: the echo at the mic is
+    # ~25dB louder than the person talking over it, so speech-over-TTS wake
+    # scores are inherently depressed (~0.10–0.12 measured), while post-AEC
+    # self-echo scores only 0.004 (0.055 worst-case unconverged) — there is
+    # no self-trigger risk down to ~0.08.
     "bargeInEnabled":   False,
-    "bargeInThreshold": 0.6,
+    "bargeInThreshold": 0.10,
     "owwModel":         "hey_jarvis_v0.1",
     # owwSpeexNs: openwakeword's built-in speexdsp noise suppressor (Q1,
     # 2026-07-05 review). 16kHz-native, applied controller-side, only to

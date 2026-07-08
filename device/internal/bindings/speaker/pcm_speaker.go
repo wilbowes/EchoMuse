@@ -40,6 +40,23 @@ type PcmSpeaker struct {
 	// stream isn't misreported as an underrun.
 	eosPending atomic.Bool
 
+	// streamActive tracks whether a 0x02 stream is mid-flight (set by
+	// PumpPeriod, cleared by EndStream — both on the WS read goroutine).
+	// Read by Flush to decide whether to arm discarding.
+	streamActive atomic.Bool
+	// discarding, when set, makes PumpPeriod drop incoming periods until
+	// the stream's 0x03 EOS arrives. Armed by Flush (barge-in) when a
+	// stream is mid-flight: draining audioCh alone is not enough, because
+	// the rest of the cancelled stream is typically already in flight in
+	// the TCP buffers of both ends — the WS reader would refill the channel
+	// straight after the drain and playback would carry on after a ~1.3s
+	// skip (observed 2026-07-08: barge-in cut the LED but the TTS kept
+	// talking, and the interrupting turn transcribed the device's own
+	// voice). The controller always terminates a stream with 0x03, on the
+	// cancel path included, so discard-until-EOS consumes exactly the
+	// remainder of the cancelled stream no matter how much was buffered.
+	discarding atomic.Bool
+
 	// echoTap, when non-nil, receives every period pumped to ALSA — real
 	// audio and silence alike — so an AEC reference stream advances in
 	// lockstep with the playback clock. Fixed at construction (silenceLoop
@@ -144,6 +161,13 @@ func (p *PcmSpeaker) silenceLoop() {
 // consumed a slot (rate-limiting to ALSA speed), or returns an error if the
 // silence loop has died — preventing an infinite block on a dead consumer.
 func (p *PcmSpeaker) PumpPeriod(data []byte) error {
+	if p.discarding.Load() {
+		// Flushed stream — swallow the network-buffered remainder without
+		// queueing it (see the discarding field for why draining audioCh
+		// alone can't do this).
+		return nil
+	}
+	p.streamActive.Store(true)
 	period := make([]byte, len(data))
 	copy(period, data)
 	select {
@@ -159,28 +183,45 @@ func (p *PcmSpeaker) PumpPeriod(data []byte) error {
 // already been handed to PumpPeriod (frames are processed sequentially on
 // the read loop), so by the time silenceLoop drains audioCh the flag is set.
 func (p *PcmSpeaker) EndStream() {
+	p.streamActive.Store(false)
+	if p.discarding.Swap(false) {
+		log.Printf("[speaker] flush complete — EOS reached, discard disarmed")
+		return
+	}
 	p.eosPending.Store(true)
 }
 
-// Flush discards all queued-but-unplayed audio (barge-in: the controller
-// stops sending 0x02 frames and asks for an immediate cut instead of
-// letting up to ~1.4s of buffered TTS play out). Up to PeriodCount ALSA
-// periods (~170ms) already handed to the hardware still play — cutting
-// those needs a stream restart, which costs more in click/pop than it
-// saves. eosPending is set so silenceLoop reports a clean stream end.
-// Draining a channel another goroutine sends on is safe; at worst the WS
-// reader enqueues one more period after we return, and the controller has
-// already stopped producing them.
+// Flush cuts a playing stream immediately (barge-in). Two parts:
+//   1. Drain audioCh — kills up to ~1.3s already queued on-device.
+//   2. Arm discarding (if a stream is mid-flight) — PumpPeriod then drops
+//      every subsequent period of this stream until its 0x03 EOS arrives.
+//      Necessary because the controller writes the whole response into the
+//      WebSocket ahead of playback: at barge time the rest of the stream
+//      is already in TCP buffers and would refill audioCh right after the
+//      drain (the pre-2026-07-08 version drained only, and playback
+//      resumed after a ~1.3s skip). The controller sends 0x03 on the
+//      cancel path too, so the discard always terminates.
+//
+// Up to PeriodCount ALSA periods (~170ms) already handed to the hardware
+// still play — cutting those needs a stream restart, which costs more in
+// click/pop than it saves. The streamActive check keeps a flush that races
+// a stream's natural end (control and data travel on separate WebSockets)
+// from arming discard against the *next* stream's audio.
 func (p *PcmSpeaker) Flush() {
+	armed := false
+	if p.streamActive.Load() {
+		p.discarding.Store(true)
+		armed = true
+	}
 	n := 0
 	for {
 		select {
 		case <-p.audioCh:
 			n++
 		default:
-			if n > 0 {
+			if n > 0 || armed {
 				p.eosPending.Store(true)
-				log.Printf("[speaker] flushed %d buffered periods (barge-in)", n)
+				log.Printf("[speaker] flushed %d buffered periods (barge-in), discard-until-EOS armed=%v", n, armed)
 			}
 			return
 		}

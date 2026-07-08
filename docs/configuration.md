@@ -71,10 +71,13 @@ Lets the wake word **interrupt the assistant mid-response** — say "Hey
 Rhasspy, stop" while it's reading you a paragraph and it cuts off and
 listens. Off by default. **Turn on Echo cancel (AEC) first**: barge-in
 works by leaving the microphones live while the device speaks, and AEC is
-what stops it hearing itself. The **barge threshold** is the extra
-confidence required during playback (higher than normal, so the device's
-own voice can't trigger it) — lower it if interrupting feels unreliable,
-raise it if responses ever cut themselves off.
+what stops it hearing itself. The **barge threshold** is the wake
+confidence required during playback — and counter-intuitively it should be
+much *lower* than the normal wake threshold (≈0.10 works well): the
+speaker is far louder at the microphones than you are, so your voice
+scores lower over playback than in a quiet room, while the device's own
+(echo-cancelled) voice barely scores at all. Raise it if responses ever
+cut themselves off; lower toward 0.05 if interrupting feels unreliable.
 
 ### Speex denoise
 Runs a noise cleaner on the audio *only for wake-word scoring* (your actual
@@ -121,13 +124,16 @@ button, clockwise). The presets set both of these for you.
 
 **Echo cancel (AEC)** — teaches the mics to *subtract the Dot's own voice*
 from what they hear. Benefits: the device can hear you properly during and
-right after its own responses (follow-up questions work much better), and
-its own speech can't confuse the listening logic. Off by default; turn it on
-per device and check it behaves. Two tuning knobs:
+right after its own responses (follow-up questions work much better), its
+own speech can't confuse the listening logic, and it's what makes barge-in
+possible. Off by default; turn it on per device and check the `[aec] att=`
+lines in the device log show attenuation climbing during a response. Two
+tuning knobs:
 
-- **AEC delay** — how long sound takes to travel from "the software played
-  it" to "the mics heard it" (mostly internal buffering). Default 250ms. If
-  echo cancellation seems weak, try 300–350.
+- **AEC delay** — alignment between what was played and what the mics
+  heard. **Leave it at 0** — that's the measured correct value for this
+  hardware (the mic pipeline's own buffering absorbs the speaker latency).
+  Raising it can silently disable cancellation entirely.
 - **AEC tail** — how much room echo/reverberation the canceller models.
   Default 300ms; raise toward 500 in big empty-sounding rooms.
 

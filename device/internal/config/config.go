@@ -57,10 +57,14 @@ type Device struct {
 	// Acoustic echo cancellation (speexdsp, internal/aec). Applies to the
 	// whole mic path (wake stream included) — defaults off until validated
 	// per deployment. AecDelayMs is the bulk write-to-ear latency the
-	// reference stream is shifted by (speaker ALSA buffering ≈ 340ms at
-	// 4×2048 frames / 48kHz, minus mic-side buffering); AecTailMs is the
-	// adaptive filter length, which must cover residual delay error plus
-	// room reverb. Device clamps: delay 0–1000ms, tail 50–500ms.
+	// reference stream is shifted by; measured on hardware (2026-07-08)
+	// the right value is 0 — the mic side reads whole 160ms ALSA batches
+	// (see GetAudioStream), which eats most of the speaker's ≈340ms output
+	// buffering, and the filter tail absorbs the remainder. Values ≥100
+	// made the echo arrive before its reference (non-causal → zero
+	// cancellation). AecTailMs is the adaptive filter length, which must
+	// cover residual delay error plus room reverb. Device clamps: delay
+	// 0–1000ms, tail 50–500ms.
 	AecEnabled *bool
 	AecDelayMs int
 	AecTailMs  int
@@ -103,7 +107,7 @@ func (d *Device) loadDefaults() {
 	d.AgcEnabled = &agcEnabled
 	aecEnabled := envBool("AEC_ENABLED", false)
 	d.AecEnabled = &aecEnabled
-	d.AecDelayMs = envInt("AEC_DELAY_MS", 250)
+	d.AecDelayMs = envInt("AEC_DELAY_MS", 0)
 	d.AecTailMs = envInt("AEC_TAIL_MS", 300)
 }
 

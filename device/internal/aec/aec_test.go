@@ -95,6 +95,127 @@ func TestCancellerConvergesOnAlignedEcho(t *testing.T) {
 	}
 }
 
+// TestGovernorRecoversFromMicGap — regression for the stale-reference bug
+// (2026-07-08): WriteFar runs continuously (speaker silence loop) but
+// Process stops with the mic stream, which is restarted around every voice
+// turn. Each gap leaves unconsumed reference behind; rates are identical so
+// the backlog never drains, compounding until the ring pegs at ringCap and
+// the reference is 3s stale — beyond any tail, cancelling nothing, with no
+// underruns to give it away. The occupancy governor in Process must trim
+// the backlog on the first period after a gap and re-converge.
+func TestGovernorRecoversFromMicGap(t *testing.T) {
+	const delayMs = 100
+	const preGap, gap, postGap = 60, 31, 60 // frames; gap ≈ 1s of mic downtime
+	delaySamples := delayMs * sampleRate / 1000
+
+	c := New()
+	c.SetParams(true, delayMs, 200)
+
+	signal := synth((preGap + gap + postGap) * FrameSize)
+	mic := make([]int16, len(signal))
+	copy(mic[delaySamples:], signal[:len(signal)-delaySamples])
+
+	processFrame := func(f int) []byte {
+		micBytes := make([]byte, FrameSize*2)
+		for i := 0; i < FrameSize; i++ {
+			binary.LittleEndian.PutUint16(micBytes[i*2:], uint16(mic[f*FrameSize+i]))
+		}
+		return c.Process(micBytes)
+	}
+
+	// Phase 1: normal operation, converges.
+	for f := 0; f < preGap; f++ {
+		c.WriteFar(to48kStereo(signal[f*FrameSize : (f+1)*FrameSize]))
+		processFrame(f)
+	}
+	// Phase 2: mic stream down — speaker keeps feeding the ring.
+	for f := preGap; f < preGap+gap; f++ {
+		c.WriteFar(to48kStereo(signal[f*FrameSize : (f+1)*FrameSize]))
+	}
+	// Phase 3: mic stream back. Governor must trim, then re-converge.
+	var echoRMS, residRMS float64
+	measured := 0
+	for f := preGap + gap; f < preGap+gap+postGap; f++ {
+		c.WriteFar(to48kStereo(signal[f*FrameSize : (f+1)*FrameSize]))
+		micBytes := make([]byte, FrameSize*2)
+		for i := 0; i < FrameSize; i++ {
+			binary.LittleEndian.PutUint16(micBytes[i*2:], uint16(mic[f*FrameSize+i]))
+		}
+		out := c.Process(micBytes)
+		if f >= preGap+gap+postGap-20 {
+			echoRMS += rms(micBytes)
+			residRMS += rms(out)
+			measured++
+		}
+	}
+	echoRMS /= float64(measured)
+	residRMS /= float64(measured)
+
+	if c.resyncs != 1 {
+		t.Fatalf("expected exactly 1 reference resync after the gap, got %d", c.resyncs)
+	}
+	if c.underruns != 0 {
+		t.Fatalf("reference ring underran %d times after resync", c.underruns)
+	}
+	t.Logf("post-gap: echo RMS %.0f → residual RMS %.0f (%.1f dB attenuation)",
+		echoRMS, residRMS, 20*math.Log10(echoRMS/residRMS))
+	if residRMS > echoRMS*0.25 { // require ≥ ~12dB of cancellation post-recovery
+		t.Fatalf("cancellation did not recover after gap: echo RMS %.0f, residual RMS %.0f", echoRMS, residRMS)
+	}
+}
+
+// TestHardwareShapedBuffers — regression for the silent-bypass bug
+// (2026-07-08): the mic ALSA reader delivers 2560-sample batches (GoTinyAlsa
+// GetAudioStream reads the whole 5-period buffer per chunk), not single
+// 512-sample frames. Process()'s old exact-size guard passed those through
+// untouched, so AEC never ran on hardware while single-frame unit tests
+// showed 42dB. This test drives Process with hardware-shaped buffers and
+// requires real cancellation.
+func TestHardwareShapedBuffers(t *testing.T) {
+	const batch = 5 * FrameSize // 2560 samples = 160ms, as delivered on hardware
+	const delayMs = 0
+	const batches = 40 // ~6.4s
+
+	c := New()
+	c.SetParams(true, delayMs, 300)
+
+	signal := synth(batches * batch)
+	// delay=0: echo aligned with the reference as written (the residual
+	// true-path delay is the filter tail's job on hardware; zero here).
+	mic := signal
+
+	var echoRMS, residRMS float64
+	measured := 0
+	for f := 0; f < batches; f++ {
+		c.WriteFar(to48kStereo(signal[f*batch : (f+1)*batch]))
+
+		micBytes := make([]byte, batch*2)
+		for i := 0; i < batch; i++ {
+			binary.LittleEndian.PutUint16(micBytes[i*2:], uint16(mic[f*batch+i]))
+		}
+		out := c.Process(micBytes)
+		if len(out) != len(micBytes) {
+			t.Fatalf("Process returned %db for %db input", len(out), len(micBytes))
+		}
+		if f >= batches-8 {
+			echoRMS += rms(micBytes)
+			residRMS += rms(out)
+			measured++
+		}
+	}
+	echoRMS /= float64(measured)
+	residRMS /= float64(measured)
+
+	if c.sizeWarned {
+		t.Fatalf("Process rejected the hardware buffer size (%d samples)", batch)
+	}
+	t.Logf("hardware-shaped: echo RMS %.0f → residual RMS %.0f (%.1f dB attenuation)",
+		echoRMS, residRMS, 20*math.Log10(echoRMS/residRMS))
+	if residRMS > echoRMS*0.25 { // require ≥ ~12dB of cancellation
+		t.Fatalf("insufficient cancellation on hardware-shaped buffers: echo %.0f, residual %.0f", echoRMS, residRMS)
+	}
+}
+
 // TestDisabledPassthrough — a disabled canceller must return the input
 // untouched (same backing content) and never touch the C state.
 func TestDisabledPassthrough(t *testing.T) {

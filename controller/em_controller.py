@@ -316,9 +316,19 @@ class Device:
                     chunk = chunk + bytes(SPEAKER_BYTES - len(chunk))
                 await self.send_data(bytes([SPEAKER_FRAME_TYPE]) + chunk)
                 offset += SPEAKER_BYTES
-            await self.send_data(bytes([SPEAKER_EOS_TYPE]))
         finally:
             self.speaking = False
+            # EOS must go out on EVERY exit, including task cancellation
+            # (barge-in cancels this task mid-send): the device's barge-in
+            # flush discards 0x02 frames until it sees this stream's 0x03 —
+            # a stream that ends without one would leave the discard armed
+            # and swallow the next turn's audio. shield() lets the send
+            # complete even though this task is mid-cancellation; the
+            # original CancelledError still propagates after the finally.
+            try:
+                await asyncio.shield(self.send_data(bytes([SPEAKER_EOS_TYPE])))
+            except BaseException:
+                pass  # WS gone / re-cancelled — device flush self-heals on reconnect
 
 
 # The live device registry — keyed by device_id (ro.serialno).
@@ -580,33 +590,73 @@ async def _barge_watcher(device: Device):
         except asyncio.QueueEmpty:
             break
 
-    threshold = max(device.barge_threshold, device.oww_threshold)
+    # bargeInThreshold is used as-is — deliberately NOT floored at the wake
+    # threshold anymore. The max() clamp guarded against residual echo waking
+    # the device before AEC worked; measured with working AEC (2026-07-08),
+    # self-echo peaks at 0.004 converged / 0.055 worst-case-unconverged,
+    # while real speech over TTS scores 0.118+ — the echo is 25dB louder
+    # than the speaker at the mic, so speech-over-TTS scores are inherently
+    # depressed and a sub-wake threshold (~0.10) is both safe and necessary.
+    threshold = device.barge_threshold
     buf = bytearray()
-    while True:
-        payload = await device.voice_queue.get()
-        if payload is None or isinstance(payload, str):
-            buf.clear()
-            continue
-        buf.extend(payload)
-        while len(buf) >= CHUNK_BYTES:
-            frame = bytes(buf[:CHUNK_BYTES])
-            del buf[:CHUNK_BYTES]
-            samples = np.frombuffer(frame, dtype=np.int16)
-            prediction = await loop.run_in_executor(None, model.predict, samples)
-            score = prediction.get(device._barge_model_key, 0.0)
-            if score >= threshold:
-                log.info(
-                    f"[{device.device_id}] Barge-in: wake word during playback "
-                    f"(score={score:.3f} >= {threshold:.2f}) — cancelling TTS"
-                )
-                db.log_device(
-                    device.device_id, "info", "device",
-                    f"Barge-in (score={score:.3f})"
-                )
-                device.barge_detected = True
-                device.cancel_event.set()
-                await device.send_control({"type": "speaker_flush"})
-                return
+    # Observability: the watcher used to log only on detection, which made a
+    # failed barge-in attempt indistinguishable from "no frames arrived at
+    # all" (mic not streaming) or "frames arrived but scored ~0" (AEC residual
+    # burying the speech). Track both and always report on exit.
+    peak   = 0.0
+    frames = 0
+    # Frame RMS (0.0–1.0) discriminates the failure modes peak alone can't:
+    # rms >> noise floor means echo is reaching the watcher raw (AEC off or
+    # ineffective — delay mismatch / clipped-nonlinear echo); rms ≈ floor
+    # with a low peak means AEC is eating the user's speech along with the
+    # echo (over-suppression / divergence during double-talk).
+    rms_sum = 0.0
+    rms_max = 0.0
+    try:
+        while True:
+            payload = await device.voice_queue.get()
+            if payload is None or isinstance(payload, str):
+                buf.clear()
+                continue
+            buf.extend(payload)
+            while len(buf) >= CHUNK_BYTES:
+                frame = bytes(buf[:CHUNK_BYTES])
+                del buf[:CHUNK_BYTES]
+                samples = np.frombuffer(frame, dtype=np.int16)
+                rms = float(np.sqrt(np.mean((samples.astype(np.float64) / 32768.0) ** 2)))
+                rms_sum += rms
+                rms_max  = max(rms_max, rms)
+                prediction = await loop.run_in_executor(None, model.predict, samples)
+                score = prediction.get(device._barge_model_key, 0.0)
+                frames += 1
+                if score > peak:
+                    peak = score
+                    if score >= 0.1:
+                        log.info(
+                            f"[{device.device_id}] Barge watcher: score {score:.3f} "
+                            f"(threshold {threshold:.2f})"
+                        )
+                if score >= threshold:
+                    log.info(
+                        f"[{device.device_id}] Barge-in: wake word during playback "
+                        f"(score={score:.3f} >= {threshold:.2f}) — cancelling TTS"
+                    )
+                    db.log_device(
+                        device.device_id, "info", "device",
+                        f"Barge-in (score={score:.3f})"
+                    )
+                    device.barge_detected = True
+                    device.cancel_event.set()
+                    await device.send_control({"type": "speaker_flush"})
+                    return
+    finally:
+        rms_mean = rms_sum / frames if frames else 0.0
+        log.info(
+            f"[{device.device_id}] Barge watcher done: {frames} frames "
+            f"({frames * 80}ms) scored, peak={peak:.3f}, threshold={threshold:.2f}, "
+            f"rms mean={rms_mean:.4f} max={rms_max:.4f} "
+            f"(device noise floor {getattr(device, 'noise_floor', 0.0):.4f})"
+        )
 
 
 async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None:
@@ -891,8 +941,21 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                         device.cancel_event.clear()
                         log.info(f"[{device.device_id}] Barge-in: starting interrupting turn")
                         await device.mic_start()  # defensive no-op if running
+                        # Re-arm listening state — cleanup_esphome() in the
+                        # finally just turned the ring off, which left the
+                        # device dark while it was actually listening for the
+                        # interrupting command (looked dead — user report
+                        # 2026-07-08). Same re-arm as the continuation branch;
+                        # no voice_queue drain here though, the follow-up
+                        # words spoken after "hey rhasspy" are already in it.
+                        device.listening = True
+                        await leds_listening(device)
+                        await _push_device_state(device)
                         turn_label      = "barge-in"
                         preroll_discard = esphome.VOICE_PREROLL_DISCARD
+                        # Reset spinner state for the next turn's thinking animation.
+                        stop_spin.clear()
+                        spin_task = None
                         continue
 
                     if should_continue and not device.cancel_event.is_set():
