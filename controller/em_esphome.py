@@ -1153,13 +1153,26 @@ class DeviceESPhomeServer:
         log.info(f"[esphome.{self.device_id[-8:]}] Listening on {host}:{self.port}")
 
     async def stop(self) -> None:
-        if self._server:
-            self._server.close()
-            await self._server.wait_closed()
-            self._server = None
+        # Detach state up front so a device reconnect during the await below
+        # sees _server is None and starts a fresh listener, instead of
+        # trusting a listener that close() has already shut down.
+        server, self._server = self._server, None
         # Clear active satellite so get_satellite() never returns a dead
-        # connection's object after a device bounce (B3).
-        self._active_satellite = None
+        # connection's object after a device bounce (B3) — and close its
+        # connection: on Python 3.12+ Server.wait_closed() blocks until all
+        # accepted connections finish, not just the listener. With HA still
+        # connected, stop() otherwise parks here indefinitely with the port
+        # already closed — then when HA finally disconnects (e.g. a restart)
+        # there is no listener for it to come back to until the controller
+        # itself is restarted. Closing the satellite also makes HA mark the
+        # device unavailable immediately, which is the intent of tearing the
+        # port down on device disconnect in the first place.
+        satellite, self._active_satellite = self._active_satellite, None
+        if satellite is not None:
+            satellite.close()
+        if server:
+            server.close()
+            await server.wait_closed()
         log.info(f"[esphome.{self.device_id[-8:]}] Server stopped")
 
     def set_mdns_info(self, info: ServiceInfo) -> None:
