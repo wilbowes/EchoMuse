@@ -76,8 +76,9 @@ confidence required during playback — and counter-intuitively it should be
 much *lower* than the normal wake threshold (≈0.10 works well): the
 speaker is far louder at the microphones than you are, so your voice
 scores lower over playback than in a quiet room, while the device's own
-(echo-cancelled) voice barely scores at all. Raise it if responses ever
-cut themselves off; lower toward 0.05 if interrupting feels unreliable.
+(echo-cancelled) voice barely scores at all (0.002–0.003 measured since
+v2.7.8). **0.05 is a good default** — you shouldn't need to raise your
+voice much. Raise it if responses ever cut themselves off.
 
 ### Speex denoise
 Runs a noise cleaner on the audio *only for wake-word scoring* (your actual

@@ -78,10 +78,10 @@ interrupting the assistant mid-sentence with the wake word (see the
 configuration guide's Barge-in setting).
 
 **Caveats:** it only removes the *Dot's own* sound — it does nothing about
-the TV (that's a different problem; see Stage 8). And it needs a per-home
-tune of one number (the delay between "played" and "heard" — see the
-configuration guide). It ships disabled until you've turned it on and
-sanity-checked it.
+the TV (that's a different problem; see Stage 8). It ships disabled until
+you've turned it on and sanity-checked it. (Since v2.7.8 the canceller
+stays "warmed up" between responses instead of relearning each time —
+if barge-in used to need a raised voice, it shouldn't anymore.)
 
 ## Stage 4 — Microphone selection ("beamforming" + "lock-back")
 

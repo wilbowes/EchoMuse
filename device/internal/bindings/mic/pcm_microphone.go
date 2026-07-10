@@ -8,6 +8,7 @@ import (
 	"log"
 	"os/exec"
 	"sync"
+	"time"
 
 	pkgmic "github.com/wilbowes/EchoMuse/pkg/mic"
 	"github.com/Binozo/GoTinyAlsa/pkg/pcm"
@@ -59,6 +60,16 @@ func (p *PcmMicrophone) Init() error {
 // period out to all current subscribers. Runs for the lifetime of the process.
 // When the stream ends (ALSA error), all subscriber channels are closed so
 // callers unblock and can detect the death rather than hanging on empty channels.
+//
+// Capture-loss telemetry (2026-07-10): the ALSA ring is only PeriodSize ×
+// PeriodCount = 160ms deep, so any stall of this chain longer than that
+// loses whole batches at the hardware with no error surfaced anywhere —
+// discovered via the AEC reference governor tripping every ~20s on backlogs
+// of exactly N×2560 samples. Two measurements below: per-batch arrival gaps
+// (a gap ≫ the batch duration is an overrun in progress) and a ~1/min
+// audio-vs-wall-clock ledger (steady deficit growth = chronic loss; it also
+// distinguishes overruns from a clock-rate mismatch, which would grow the
+// deficit smoothly rather than in stall-sized steps).
 func (p *PcmMicrophone) readLoop() {
 	stream := make(chan []byte, 16)
 
@@ -68,7 +79,39 @@ func (p *PcmMicrophone) readLoop() {
 		}
 	}()
 
+	rate := int64(p.device.DeviceConfig.SampleRate)
+	bytesPerFrame := p.device.DeviceConfig.Channels * 3 // S24_3LE
+	var (
+		firstArrival time.Time
+		lastArrival  time.Time
+		lastReport   time.Time
+		framesTotal  int64
+		stalls       uint64
+		subDrops     uint64
+	)
+
 	for audio := range stream {
+		now := time.Now()
+		frames := int64(len(audio) / bytesPerFrame)
+		batchDur := time.Duration(frames) * time.Second / time.Duration(rate)
+		if firstArrival.IsZero() {
+			firstArrival, lastReport = now, now
+		} else if gap := now.Sub(lastArrival); gap > 2*batchDur {
+			stalls++
+			log.Printf("[mic] capture stall: %dms between %dms batches — ~%dms lost to ALSA overrun (stalls=%d)",
+				gap.Milliseconds(), batchDur.Milliseconds(),
+				(gap - batchDur).Milliseconds(), stalls)
+		}
+		lastArrival = now
+		framesTotal += frames
+		if now.Sub(lastReport) >= time.Minute {
+			wall := now.Sub(firstArrival)
+			audioDur := time.Duration(framesTotal) * time.Second / time.Duration(rate)
+			log.Printf("[mic] clock: %.1fs audio over %.1fs wall (deficit %+dms, stalls=%d, sub_drops=%d)",
+				audioDur.Seconds(), wall.Seconds(), (wall - audioDur).Milliseconds(), stalls, subDrops)
+			lastReport = now
+		}
+
 		// Copy so each subscriber gets its own slice
 		buf := make([]byte, len(audio))
 		copy(buf, audio)
@@ -79,6 +122,10 @@ func (p *PcmMicrophone) readLoop() {
 			case ch <- buf:
 			default:
 				// Subscriber too slow — drop this period rather than block
+				subDrops++
+				if subDrops == 1 || subDrops%64 == 0 {
+					log.Printf("[mic] subscriber channel full — batch dropped (sub_drops=%d)", subDrops)
+				}
 			}
 		}
 		p.mu.Unlock()

@@ -11,8 +11,10 @@
 // buffered in a ring the mic goroutine drains one period at a time.
 //
 // Alignment: both PCM devices sit on the same codec clock, so the streams
-// cannot drift — ring occupancy is set once by the configured bulk delay
-// and stays put. The delay models write-to-ear latency (ALSA output
+// cannot drift — but mic capture overruns (the mic ALSA ring is only 160ms
+// deep; any longer stall of the reader loses whole batches) leave the ring
+// with excess reference, which the occupancy governor in Process trims
+// back to the nominal delay. The delay models write-to-ear latency (ALSA output
 // buffering ~340ms at 4×2048 frames / 48kHz, minus input-side buffering);
 // the echo filter tail only has to absorb the residual mismatch plus room
 // reverb, not the whole pipeline latency.
@@ -316,17 +318,21 @@ func (c *Canceller) Process(mono []byte) []byte {
 	// bursty 160ms batches, so occupancy measured before consuming swings
 	// by a whole batch and would need slack so wide it re-opens the stale
 	// window. Slack of 4 speex frames (128ms) clears producer/consumer
-	// phase jitter (~±1 speaker period ≈ 43ms). The filter state is reset
-	// on trim: alignment just jumped, so the learned path is garbage anyway
-	// and speexdsp re-converges from clean state in a second or two.
+	// phase jitter (~±1 speaker period ≈ 43ms). The filter state is KEPT
+	// across the trim: trimming restores the nominal delaySamples alignment
+	// — the same alignment the filter converged against — and the physical
+	// echo path hasn't changed, so the learned filter is still valid.
+	// (2026-07-10: the reset that used to live here was the barge-in
+	// killer — mic capture overruns trip this governor every ~20s in
+	// steady state, incl. mid-playback, and each reset threw away a
+	// converged filter for a ≤43ms alignment shift speexdsp tracks fine.)
 	delaySamples := c.delayMs * sampleRate / 1000
 	if c.count > delaySamples+4*FrameSize {
 		drop := c.count - delaySamples
 		c.tail = (c.tail + drop) % ringCap
 		c.count = delaySamples
-		C.speex_echo_state_reset(c.st)
 		c.resyncs++
-		log.Printf("[aec] reference resync: dropped %d stale samples (resyncs=%d)", drop, c.resyncs)
+		log.Printf("[aec] reference resync: dropped %d stale samples, filter kept (resyncs=%d)", drop, c.resyncs)
 	}
 
 	return out

@@ -71,6 +71,15 @@ func NewServer(buttonController buttons.Controller, microphone mic.Microphone, s
 		return server.mute.IsMuted()
 	}
 
+	// When the volume arc's display window ends, hand the ring back to the
+	// last controller-set state (listening/thinking/playing mid-turn, all
+	// off when idle). SetLEDs keeps recording frames into baseLEDs during
+	// the window — it just doesn't paint them — so this repaint lands on
+	// the current animation frame, not a stale one.
+	server.volume.onDisplayExpire = func() {
+		server.paintBaseLEDs()
+	}
+
 	go func() {
 		uptime, err := getUptime()
 		// Reduced from 90 seconds as server is started at the end of the boot cycle anyway.
@@ -191,6 +200,11 @@ func (s *Server) SetDirectionLEDs(angleDeg float64) {
 	if angleDeg < 0 {
 		return
 	}
+	// Same paint suppressions as SetLEDs: the volume arc owns the ring for
+	// its display window, and the mute ring is device-sovereign.
+	if s.volume.DisplayActive() || s.mute.IsMuted() {
+		return
+	}
 
 	s.baseLEDsMu.Lock()
 	listening := s.listeningLEDs
@@ -245,6 +259,16 @@ func clampAdd(v uint8, delta int) uint8 {
 }
 
 // SetLEDs applies LED state directly — called by the controller client.
+//
+// Two conditions suppress the hardware paint (state is still recorded in
+// baseLEDs so the ring can be restored later):
+//   - volume display window: the turn animations repaint continuously, so
+//     without this the volume arc survives ~one frame and reads as a
+//     glitch. The window's expiry repaints baseLEDs (see onDisplayExpire).
+//   - muted: the red ring is device-sovereign. Turns could not previously
+//     overlap mute (mic stopped), but mute-terminates-turn (2026-07-10)
+//     means the cancelled turn's LED cleanup arrives after the red ring
+//     is up — it must not clear it. Unmute clears the ring explicitly.
 func (s *Server) SetLEDs(leds []led.Led) {
 	s.LEDModeSystem()
 	listeningRing := len(leds) == 12
@@ -264,11 +288,27 @@ func (s *Server) SetLEDs(leds []led.Led) {
 	}
 	s.listeningLEDs = listeningRing
 	s.baseLEDsMu.Unlock()
+	if s.volume.DisplayActive() || s.mute.IsMuted() {
+		return
+	}
+	s.paintBaseLEDs()
+}
+
+// paintBaseLEDs paints the ring from the stored controller state.
+func (s *Server) paintBaseLEDs() {
 	s.ledMu.Lock()
 	lc := s.ledController
 	s.ledMu.Unlock()
 	if lc == nil {
 		return
+	}
+	s.baseLEDsMu.Lock()
+	base := s.baseLEDs
+	s.baseLEDsMu.Unlock()
+	leds := make([]led.Led, len(base))
+	for i := range base {
+		leds[i] = base[i]
+		leds[i].ID = i
 	}
 	if err := lc.SetLEDs(leds...); err != nil {
 		log.Printf("SetLEDs error: %v", err)

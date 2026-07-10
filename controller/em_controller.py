@@ -700,8 +700,23 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
                 f"(total={audio_duration:.1f}s)"
             )
             if remaining > 0:
-                await asyncio.sleep(remaining)
-            log.info(f"[{device.device_id}] Playback complete")
+                # The drain sleep must race cancel_event too: the WS write
+                # finishes well ahead of real-time playback, so a barge-in
+                # usually lands HERE, not mid-stream. An uncancellable sleep
+                # left the turn hanging for the rest of the response length
+                # after the device had already flushed — no listening LEDs,
+                # and the user's follow-up words piling into voice_queue
+                # (observed 5.7s dead window, 2026-07-10).
+                sleep_task = asyncio.create_task(asyncio.sleep(remaining))
+                await asyncio.wait(
+                    [sleep_task, cancel_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                sleep_task.cancel()
+            if device.cancel_event.is_set():
+                log.info(f"[{device.device_id}] Cancelled during buffer drain")
+            else:
+                log.info(f"[{device.device_id}] Playback complete")
 
     cancel_task.cancel()
 
@@ -1459,6 +1474,23 @@ async def handle_control(ws: WebSocketServerProtocol):
 
                 elif msg_type == "mute_state":
                     device.muted = msg.get("muted", False)
+                    if device.muted and device.voice_lock.locked():
+                        # Mute during an active turn terminates it — same
+                        # cancel as the dot button, plus speaker_flush so
+                        # any in-flight TTS goes silent immediately (the
+                        # device shows the red ring the moment the button
+                        # is pressed; audio carrying on would contradict
+                        # it). The device guards its LED ring while muted,
+                        # so the cancelled turn's LED cleanup can't clear
+                        # the red ring.
+                        log.info(
+                            f"[{device_id}] Muted during active turn — "
+                            f"cancelling"
+                        )
+                        device.cancel_event.set()
+                        if VOICE_MODE == "esphome":
+                            esphome.cancel_voice_turn(device_id)
+                        await device.send_control({"type": "speaker_flush"})
                     await api._push_event({
                         "type":      "device_update",
                         "device_id": device_id,

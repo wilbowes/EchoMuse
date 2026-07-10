@@ -22,8 +22,26 @@ type volumeController struct {
 	level          int
 	ledCtrl        func() led.Controller // getter so we handle nil during boot
 	timer          *time.Timer
+	displayActive  bool        // volume arc currently on the ring — see DisplayActive
 	isMuted        func() bool // set after construction to avoid circular dependency
 	onVolumeChange func(int)   // set after construction; called after every Set()
+	// onDisplayExpire, when set, replaces the default clear-to-black at the
+	// end of the display window: the server wires it to repaint the ring
+	// from its stored controller state, so a volume press mid-turn hands
+	// back to the listening/thinking/playing animation instead of going
+	// dark. The muted → red-ring case stays here either way.
+	onDisplayExpire func()
+}
+
+// DisplayActive reports whether the volume arc is currently on the ring.
+// The server checks this to suppress controller LED paints (and the
+// direction overlay) for the display window — without it, the turn
+// animations repaint within one frame (~100ms) and the arc appears as a
+// glitch rather than a reading.
+func (vc *volumeController) DisplayActive() bool {
+	vc.mu.Lock()
+	defer vc.mu.Unlock()
+	return vc.displayActive
 }
 
 // SetOnVolumeChange wires a callback invoked after every Set() call.
@@ -135,10 +153,15 @@ func (vc *volumeController) showLEDs(level int) {
 
 	// Cancel any existing clear timer and start a new one
 	vc.mu.Lock()
+	vc.displayActive = true
 	if vc.timer != nil {
 		vc.timer.Stop()
 	}
 	vc.timer = time.AfterFunc(volumeLEDSecs*time.Second, func() {
+		vc.mu.Lock()
+		vc.displayActive = false
+		expire := vc.onDisplayExpire
+		vc.mu.Unlock()
 		if vc.isMuted != nil && vc.isMuted() {
 			// Restore mute indicator — red ring
 			leds := make([]led.Led, numLEDs)
@@ -146,6 +169,10 @@ func (vc *volumeController) showLEDs(level int) {
 				leds[i] = led.Led{ID: i, R: 180, G: 0, B: 0}
 			}
 			lc.SetLEDs(leds...)
+		} else if expire != nil {
+			// Hand back to whatever the controller last painted —
+			// listening/thinking/playing ring mid-turn, all-off when idle.
+			expire()
 		} else {
 			clearLeds(lc)
 		}
