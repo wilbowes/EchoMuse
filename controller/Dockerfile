@@ -58,6 +58,8 @@ COPY em_esphome.py .
 COPY version.py .
 # ESPHome native API subpackage (frame protocol, message registry, vendored protobuf)
 COPY esphome/ ./esphome/
+# Device payloads (start_server.sh etc.) — canonical copies served to devices
+COPY device_payloads/ ./device_payloads/
 # Dashboard SPA — placeholder is index.html, full dashboard is dashboard.html
 COPY static/ ./static/
 # Compile JSX dashboard with esbuild

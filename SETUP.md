@@ -292,7 +292,7 @@ adb shell "su -c 'cp /sdcard/server /data/local/bin/server_a && chmod 755 /data/
 
 ### Create the startup script:
 
-The canonical script is **`device/scripts/start_server.sh`** in the repo — the controller serves the same content at `/api/provision/start_script` (this is what the provisioning wizard installs). Don't hand-maintain a copy; earlier revisions of this document embedded one here and it drifted.
+The canonical script is **`controller/device_payloads/start_server.sh`** in the repo (`device/scripts/start_server.sh` is a symlink to it) — the controller serves that exact file at `/api/provision/start_script` (this is what the provisioning wizard installs), read from disk per request. Don't hand-maintain a copy; earlier revisions of this document and of `em_api.py` embedded copies and they drifted.
 
 ```bash
 # From the repo root:

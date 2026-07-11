@@ -1261,125 +1261,27 @@ async def _post_deploy_all(request: web.Request) -> web.Response:
 
 # ─── Provisioning ─────────────────────────────────────────────────────────────
 
-_START_SCRIPT = r"""#!/system/bin/sh
-MAX_ATTEMPTS=3
-MIN_RUNTIME=15
+# Device payloads — files the controller distributes to devices (provisioning
+# wizard today; script/component OTA tomorrow). One canonical copy on disk,
+# read per-request so edits ship without a restart. device/scripts/
+# start_server.sh is a symlink into this directory.
+PAYLOADS_DIR = Path(__file__).parent / "device_payloads"
 
-i=0
-while [ $i -lt 120 ]; do
-    pid=$(ps | grep echoaudio | grep -v grep)
-    if [ -n "$pid" ]; then
-        sleep 5
-        break
-    fi
-    sleep 2
-    i=$((i + 2))
-done
 
-ip link set p2p0 down
-echo "EchoMuse" > /sys/power/wake_lock
-
-tinymix -D 0 56 On
-tinymix -D 0 64 1 1
-tinymix -D 0 88 On
-tinymix -D 0 61 100 100
-
-tinymix -D 0 89 88 88
-tinymix -D 0 92 40 40
-tinymix -D 0 107 88 88
-tinymix -D 0 110 40 40
-tinymix -D 0 125 88 88
-tinymix -D 0 128 40 40
-tinymix -D 0 143 88 88
-tinymix -D 0 146 40 40
-
-kill $(ps | grep ledcontroller | grep -v grep) 2>/dev/null
-
-LOG=/tmp/server.log
-MAX_LOG=5242880
-KEEP_LOG=524288
-(
-    while true; do
-        sleep 300
-        SIZE=$(wc -c < "$LOG" 2>/dev/null)
-        if [ -n "$SIZE" ] && [ "$SIZE" -gt $MAX_LOG ]; then
-            tail -c $KEEP_LOG "$LOG" > "${LOG}.1" 2>/dev/null
-            : > "$LOG"
-            echo "[start_server] Log trimmed: ${SIZE} bytes (tail kept in ${LOG}.1)" >> "$LOG"
-        fi
-    done
-) &
-TRIM_PID=$!
-
-# Mute + amp off whenever the server is not running — the server does this
-# itself on SIGTERM, but SIGKILL/panic paths skip it, and an enabled amp on
-# an idle DAC hisses for as long as the server is down.
-amp_off() {
-    tinymix -D 0 61 0 0 2>/dev/null
-    tinymix -D 0 5 Off 2>/dev/null
-}
-
-SERVER_PID=0
-trap 'kill $SERVER_PID $TRIM_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null; amp_off; exit 0' TERM INT
-
-attempt=0
-
-while true; do
-    START_TIME=$(date +%s)
-
-    /data/local/bin/server >> /tmp/server.log 2>&1 &
-    SERVER_PID=$!
-    wait $SERVER_PID
-    EXIT_CODE=$?
-
-    amp_off
-
-    END_TIME=$(date +%s)
-    RUNTIME=$(( END_TIME - START_TIME ))
-
-    if [ $RUNTIME -ge $MIN_RUNTIME ]; then
-        attempt=0
-        echo "[start_server] Server ran ${RUNTIME}s before exit (code $EXIT_CODE) — restarting" >> /tmp/server.log
-        sleep 2
-        continue
-    fi
-
-    attempt=$(( attempt + 1 ))
-    echo "[start_server] Fast exit ${attempt}/${MAX_ATTEMPTS}: runtime=${RUNTIME}s exit=$EXIT_CODE" >> /tmp/server.log
-
-    if [ $attempt -lt $MAX_ATTEMPTS ]; then
-        sleep 3
-        continue
-    fi
-
-    CURRENT=$(readlink /data/local/bin/server 2>/dev/null)
-    case "$CURRENT" in
-        server_a) FALLBACK=server_b ;;
-        server_b) FALLBACK=server_a ;;
-        *)
-            echo "[start_server] Unknown slot '$CURRENT' — cannot auto-rollback, giving up" >> /tmp/server.log
-            exit 1
-            ;;
-    esac
-
-    if [ ! -x "/data/local/bin/$FALLBACK" ]; then
-        echo "[start_server] Fallback slot $FALLBACK missing or not executable — cannot auto-rollback" >> /tmp/server.log
-        exit 1
-    fi
-
-    echo "[start_server] Auto-rollback: $CURRENT → $FALLBACK after $MAX_ATTEMPTS failed starts" >> /tmp/server.log
-    ln -sf "$FALLBACK" /data/local/bin/server
-
-    exit 0
-done
-"""
+def _read_payload(name: str) -> str:
+    path = PAYLOADS_DIR / name
+    if not path.is_file():
+        raise web.HTTPInternalServerError(
+            text=f"Payload {name} missing from {PAYLOADS_DIR} — broken install/image"
+        )
+    return path.read_text()
 
 
 @auth.require_admin
 async def _get_provision_start_script(request: web.Request) -> web.Response:
     """GET /api/provision/start_script — serves the EchoMuse startup script."""
     return web.Response(
-        text=_START_SCRIPT,
+        text=_read_payload("start_server.sh"),
         content_type='text/plain',
         headers={'Content-Disposition': 'attachment; filename="start_server.sh"'},
     )
