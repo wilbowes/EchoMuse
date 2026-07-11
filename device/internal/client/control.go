@@ -63,7 +63,6 @@ type WifiChangeCallback func(ssid, psk string)
 
 type ControlClient struct {
 	deviceID string
-	ip       string
 
 	ledCallback           LEDCallback
 	micStartCallback      MicStartCallback
@@ -100,7 +99,6 @@ func NewControlClient(
 ) *ControlClient {
 	return &ControlClient{
 		deviceID:         deviceID,
-		ip:               getLocalIP(),
 		ledCallback:      ledCallback,
 		micStartCallback: micStartCallback,
 		micStopCallback:  micStopCallback,
@@ -207,13 +205,21 @@ func (c *ControlClient) connect(ctx context.Context, addr string, data *DataClie
 	c.serverAddr = addr
 	c.serverAddrMu.Unlock()
 
-	regBytes, _ := json.Marshal(map[string]interface{}{
+	reg := map[string]interface{}{
 		"type":         "register",
 		"device_id":    c.deviceID,
-		"ip":           c.ip,
 		"version":      Version,
 		"capabilities": []string{"mic", "speaker", "leds", "buttons"},
-	})
+	}
+	// Resolved fresh per registration: a cached-at-startup value goes stale
+	// after a WiFi change, and if the process started while the network was
+	// down (e.g. wifi.RecoverIfPending bouncing WiFi) it cached 127.0.0.1
+	// forever. Omitted on failure so the controller falls back to the WS
+	// peer address.
+	if ip := getLocalIP(); ip != "127.0.0.1" {
+		reg["ip"] = ip
+	}
+	regBytes, _ := json.Marshal(reg)
 	// Send register BEFORE publishing conn — prevents concurrent SendButton /
 	// SendMuteState from racing this write on the same gorilla conn.
 	if err := conn.WriteMessage(websocket.TextMessage, regBytes); err != nil {
