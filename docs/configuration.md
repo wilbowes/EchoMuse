@@ -12,8 +12,9 @@ language.
   until you flip it back.
 
 Changes apply **immediately** — no restarts, no rebuilds. The config page is
-organised into four sections, in order of how often you'll realistically
-touch them: **Playback**, **Wake word**, **Microphones**, **Advanced**.
+organised into five sections, in order of how often you'll realistically
+touch them: **Playback**, **Wake word**, **Microphones**, **Ring**,
+**Advanced**.
 
 ---
 
@@ -140,7 +141,26 @@ tuning knobs:
 
 ---
 
-## 04 — Advanced
+## 04 — Ring
+
+The colours the LED ring uses during conversations. Scenes are rendered on
+the controller — the device just paints the frames — so they apply
+instantly, need no firmware update, and can differ per device.
+
+- **Standard** — the classic green.
+- **Airy** — a pale, calm sky blue.
+- **Malevolent** — deep crimson listening ring with an ember spinner.
+- **Pride** — a rotating rainbow.
+- **Custom** — pick your own **Listening** (solid ring while recording) and
+  **Thinking** (spinner while processing) colours.
+
+Two things never change, in every scene: the **red mute ring** (red always
+means the microphones are off — it's a privacy indicator, not decoration)
+and the cyan volume arc. The directional "which mic is listening" highlight
+also adapts automatically: it brightens the scene's ring colour rather than
+painting green.
+
+## 05 — Advanced
 
 Everything in this section affects **only button-press conversations**
 (holding the action button to talk without a wake word). Wake-word

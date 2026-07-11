@@ -53,6 +53,7 @@ COPY em_api.py .
 COPY em_db.py .
 COPY em_auth.py .
 COPY em_eq.py .
+COPY em_scenes.py .
 COPY em_esphome.py .
 COPY version.py .
 # ESPHome native API subpackage (frame protocol, message registry, vendored protobuf)

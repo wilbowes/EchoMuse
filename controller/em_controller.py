@@ -66,6 +66,7 @@ import em_db as db
 import em_auth as auth
 import em_api as api
 import em_eq
+import em_scenes
 import em_esphome as esphome
 
 logging.basicConfig(
@@ -218,6 +219,9 @@ class Device:
         self.oww_speex_ns:  bool  = False
         self.eq_bands:      list  = [0.0] * 8
         self.eq_loudness:   bool  = False
+        # LED ring scene — render-ready palette/spinner from em_scenes,
+        # refreshed on connect and on any config push carrying led* keys.
+        self.led_scene:     dict  = em_scenes.resolve({})
         self.stats:         dict | None = None
         # Q4 fix (2026-07-05 review): dashboard-visible near-miss counter —
         # incremented in wake_word_listener whenever a score exceeds 0.05
@@ -272,8 +276,17 @@ class Device:
         except Exception as e:
             log.warning(f"[{self.device_id}] Data send failed: {e}")
 
-    async def set_leds(self, leds: list):
-        await self.send_control({"type": "leds", "leds": leds})
+    async def set_leds(self, leds: list, listening: bool | None = None):
+        # The optional listening flag tells the device explicitly that this
+        # frame is the listening ring (enables its direction overlay).
+        # Pre-scene firmware inferred it from the ring being all-green —
+        # that heuristic breaks for every non-green scene, so newer
+        # firmware trusts this flag when present and old firmware just
+        # ignores the extra key.
+        msg = {"type": "leds", "leds": leds}
+        if listening is not None:
+            msg["listening"] = listening
+        await self.send_control(msg)
 
     async def ping(self):
         await self.send_control({"type": "ping"})
@@ -373,22 +386,17 @@ async def leds_off(device: Device):
 
 
 async def leds_listening(device: Device):
-    await device.set_leds(_make_leds(0, 180, 0))
+    await device.set_leds(device.led_scene["listening"], listening=True)
 
 
 async def leds_spin_green(device: Device, stop_event: asyncio.Event):
+    # Name is historical — the spinner renders whatever the device's scene
+    # says (head+trail dot for solid scenes, rotating palette for pride).
+    spin_frame = device.led_scene["spin_frame"]
     pos = 0
     try:
         while not stop_event.is_set():
-            leds = []
-            for i in range(NUM_LEDS):
-                if i == pos:
-                    leds.append({"id": i, "r": 0, "g": 200, "b": 0})
-                elif i == (pos - 1) % NUM_LEDS:
-                    leds.append({"id": i, "r": 0, "g": 60, "b": 0})
-                else:
-                    leds.append({"id": i, "r": 0, "g": 0, "b": 0})
-            await device.set_leds(leds)
+            await device.set_leds(spin_frame(pos))
             pos = (pos + 1) % NUM_LEDS
             await asyncio.sleep(0.08)
     except asyncio.CancelledError:
@@ -1420,6 +1428,7 @@ async def handle_control(ws: WebSocketServerProtocol):
         device.barge_threshold  = float(config.get("bargeInThreshold", 0.6))
         device.eq_bands      = config.get("eqBands", [0.0] * 8)
         device.eq_loudness   = bool(config.get("eqLoudness", False))
+        device.led_scene     = em_scenes.resolve(config)
         # Initialise volume from stored config — device will report its real
         # value via volume_state on connect, but this seeds a sane default
         # in the window before that first message arrives.

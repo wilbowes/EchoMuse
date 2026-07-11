@@ -240,9 +240,20 @@ func (s *Server) SetDirectionLEDs(angleDeg float64) {
 		leds[i].ID = i
 	}
 
-	leds[primary] = led.Led{ID: primary, R: 0, G: 255, B: 80}
-	leds[secondary] = led.Led{ID: secondary, R: 0, G: clampAdd(base[secondary].G, 60), B: 0}
-	leds[tertiary] = led.Led{ID: tertiary, R: 0, G: clampAdd(base[tertiary].G, 60), B: 0}
+	// Scene-agnostic highlight: brighten the base ring colour toward white
+	// rather than painting hardcoded green — the listening ring can be any
+	// colour now (LED scenes), and a green marker on e.g. a crimson ring
+	// read as a glitch. Primary gets a strong lift, neighbours a soft one.
+	brighten := func(l led.Led, add int) led.Led {
+		l.R = clampAdd(l.R, add)
+		l.G = clampAdd(l.G, add)
+		l.B = clampAdd(l.B, add)
+		return l
+	}
+	leds[primary] = brighten(base[primary], 150)
+	leds[secondary] = brighten(base[secondary], 60)
+	leds[tertiary] = brighten(base[tertiary], 60)
+	leds[primary].ID, leds[secondary].ID, leds[tertiary].ID = primary, secondary, tertiary
 
 	if err := lc.SetLEDs(leds...); err != nil {
 		log.Printf("SetDirectionLEDs error: %v", err)
@@ -269,14 +280,23 @@ func clampAdd(v uint8, delta int) uint8 {
 //     overlap mute (mic stopped), but mute-terminates-turn (2026-07-10)
 //     means the cancelled turn's LED cleanup arrives after the red ring
 //     is up — it must not clear it. Unmute clears the ring explicitly.
-func (s *Server) SetLEDs(leds []led.Led) {
+// listeningHint is the controller's explicit "this frame is the listening
+// ring" flag (nil from pre-scene controllers). When absent, fall back to
+// the historical heuristic — a 12-LED all-green frame — which only works
+// for the standard scene.
+func (s *Server) SetLEDs(leds []led.Led, listeningHint *bool) {
 	s.LEDModeSystem()
-	listeningRing := len(leds) == 12
-	if listeningRing {
-		for _, l := range leds {
-			if l.R != 0 || l.B != 0 || l.G == 0 {
-				listeningRing = false
-				break
+	var listeningRing bool
+	if listeningHint != nil {
+		listeningRing = *listeningHint
+	} else {
+		listeningRing = len(leds) == 12
+		if listeningRing {
+			for _, l := range leds {
+				if l.R != 0 || l.B != 0 || l.G == 0 {
+					listeningRing = false
+					break
+				}
 			}
 		}
 	}

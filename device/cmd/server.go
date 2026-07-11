@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strconv"
 	"strings"
 	"syscall"
@@ -74,7 +75,7 @@ func main() {
 	})
 	controlClient := client.NewControlClient(
 		deviceID,
-		func(leds []led.Led) { s.SetLEDs(leds) },
+		func(leds []led.Led, listening *bool) { s.SetLEDs(leds, listening) },
 		func(lockMic bool) {
 			if s.IsMuted() {
 				// Mute is device-sovereign — the physical button cannot be
@@ -137,7 +138,7 @@ func main() {
 			// Orange pulse overwrote the red ring — restore it.
 			s.RestoreMuteRing()
 		} else {
-			s.SetLEDs(allLEDs(0, 0, 0))
+			s.SetLEDs(allLEDs(0, 0, 0), nil)
 			s.LEDModeDirection()
 		}
 		// Send an immediate stats snapshot so the dashboard populates on
@@ -233,7 +234,20 @@ func main() {
 		}
 	}()
 
-	select {}
+	// Graceful shutdown on SIGTERM/SIGINT — both the OTA restart
+	// (`kill $PPID` from the deploy shell) and start_server.sh's trap send
+	// SIGTERM, so this runs on every normal stop. The speaker Close mutes
+	// and disables the amp before the PCM stream tears down: without it,
+	// every stop/restart/OTA clicked (amp cut mid-stream) and the amp was
+	// left driving an idle DAC while the server was down (audible hiss
+	// between OTA slots). Nothing else needs orderly teardown — mic/LED/
+	// WS state all reset cleanly on the next start.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	sig := <-sigCh
+	log.Printf("Received %v — shutting down (muting output, amp off)", sig)
+	pcmSpeaker.Close()
+	os.Exit(0)
 }
 
 // ─── Hardware stats collection ────────────────────────────────────────────────
@@ -459,7 +473,7 @@ func pulseOrange(ctx context.Context, s *server.Server) {
 		case <-ticker.C:
 			t := float64(step) / float64(periodMs/stepMs)
 			br := minBr + (maxBr-minBr)*(0.5+0.5*math.Sin(2*math.Pi*t))
-			s.SetLEDs(allLEDs(uint8(255*br), uint8(40*br), 0))
+			s.SetLEDs(allLEDs(uint8(255*br), uint8(40*br), 0), nil)
 			step = (step + 1) % (periodMs / stepMs)
 		}
 	}
@@ -485,7 +499,7 @@ func pulseWhite(ctx context.Context, s *server.Server) {
 			t := float64(step) / float64(periodMs/stepMs)
 			br := minBr + (maxBr-minBr)*(0.5+0.5*math.Sin(2*math.Pi*t))
 			v := uint8(255 * br)
-			s.SetLEDs(allLEDs(v, v, v))
+			s.SetLEDs(allLEDs(v, v, v), nil)
 			step = (step + 1) % (periodMs / stepMs)
 		}
 	}

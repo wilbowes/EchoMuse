@@ -508,7 +508,8 @@ dns-sd -B _emcontroller._tcp local
 ✅ VAD threshold default 0.001 — matches measured conversational speech range at 1.3m (v2.6.5; was 0.003, which sat above soft speech)
 ✅ Mute button — toggles mic mute, red LED ring, blocks action button
 ✅ Volume buttons — local interception, cyan LED ring feedback
-✅ Amp boot click suppressed — mute/unmute around amp enable in pcm_speaker.go
+✅ Amp boot click suppressed — mute → clock DAC with silence → amp on → unmute ordering in pcm_speaker.go Init (fixed order 2026-07-10)
+✅ Amp idle hiss eliminated — graceful SIGTERM shutdown mutes + disables amp (PcmSpeaker.Close); start_server.sh repeats amp-off after every server exit as SIGKILL/panic backstop
 ✅ LED thinking spinner — triggered by THINKING signal from voice server
 ✅ Preroll discard — first frames of mic stream discarded to avoid wake word bleed-through
 ✅ Speech threshold — quiet recordings discarded without hitting Whisper
@@ -528,6 +529,7 @@ dns-sd -B _emcontroller._tcp local
 ✅ mDNS via grandcat/zeroconf — RFC 6762/6763 compliant, reliable discovery
 ✅ WebSocket protocol keepalives — dead connections detected within 30s
 ✅ Controller management dashboard — React SPA, vendored assets, no CDN dependency
+✅ LED ring scenes (controller-rendered) — Standard/Airy/Malevolent/Pride/Custom palettes for the listening ring and thinking spinner (em_scenes.py); mute ring stays red and volume arc stays cyan in every scene; frames carry an explicit `listening` flag so the device's direction overlay works on any colour (falls back to the all-green heuristic for old controllers), and the overlay brightens the scene colour instead of painting green
 ✅ Dashboard live state — mute/listen/speak/offline via WebSocket events + 5s poll
 ✅ Dashboard shell terminal — browser-based root shell, Ctrl+C support
 ✅ ESPHome native API satellite integration (VOICE_MODE=esphome)
@@ -1052,7 +1054,7 @@ done
 
 **The dummy mixer service is required.** EchoMuse's speaker Init() calls `stop mixer` as its first step. Without a `mixer` service in init.rc, this call fails. Adding a dummy service allows `stop mixer` to succeed.
 
-**Amp boot click suppression.** EchoMuse's `pcm_speaker.go` Init() mutes the output (tinymix ctl 61 → 0), enables the amp (ctl 5 On), waits 50ms for it to settle, then unmutes. This eliminates the click when the TPA3118D2 powers up.
+**Amp click/hiss suppression.** Order matters (found on hardware, 2026-07-10): `pcm_speaker.go` Init() mutes the output (tinymix ctl 61 → 0), opens the PCM stream and lets the silence loop clock the DAC for ~100ms, *then* enables the amp (ctl 5 On), waits 50ms for it to settle, and unmutes last. Enabling the amp onto a floating (unclocked) DAC and unmuting before stream-open was the source of the click on every service start. Shutdown is the mirror image: on SIGTERM the server's `PcmSpeaker.Close()` mutes → amp off → closes the stream, and `start_server.sh` repeats mute + amp-off after every server exit (covering SIGKILL/panic) — an enabled amp on an idle DAC audibly hisses for as long as the server is down (worst case: between OTA slots).
 
 **Mute implementation.** The mute button (KEY_MUTE, evdev code 113) arrives on `/dev/input/event1`. Mute is implemented by setting ADC_A Left/Right Mute (tinymix ctls 105 and 106). The mute controller intercepts the button locally, applies the tinymix change, updates the LED ring (red = muted), and signals the server to block dot button events. As of v2.6.5, mute also stops a running mic stream (and unmute restores the OWW listening stream) — audio stops leaving the device over the network regardless of controller state, not just future `mic_start` calls being refused.
 

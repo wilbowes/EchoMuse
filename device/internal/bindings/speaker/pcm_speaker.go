@@ -79,11 +79,13 @@ func NewPcmSpeaker(echoTap func([]byte)) (*PcmSpeaker, error) {
 }
 
 func (p *PcmSpeaker) Init() error {
+	// Startup order matters for the audible click (2026-07-10): the amp
+	// must come up onto a DAC that is already clocking silence, and the
+	// unmute must come last. The old order (amp on → unmute → open PCM)
+	// unmuted a floating DAC and then hit it with the stream-open
+	// transient — the "click" on every service start.
 	exec.Command("stop", "mixer").Run()
-	exec.Command("tinymix", "-D", "0", "61", "0", "0").Run()    // mute before amp enable
-	exec.Command("tinymix", "-D", "0", "5", "On").Run()          // enable amp
-	time.Sleep(50 * time.Millisecond)                             // let amp settle
-	exec.Command("tinymix", "-D", "0", "61", "100", "100").Run() // unmute
+	exec.Command("tinymix", "-D", "0", "61", "0", "0").Run() // mute before touching amp or stream
 
 	device := tinyalsa.NewDevice(cardNr, deviceNr, pcm.Config{
 		Channels:         2,
@@ -103,6 +105,11 @@ func (p *PcmSpeaker) Init() error {
 	p.session = &session
 
 	go p.silenceLoop()
+
+	time.Sleep(100 * time.Millisecond)                            // silence reaches the DAC (~2 periods)
+	exec.Command("tinymix", "-D", "0", "5", "On").Run()           // enable amp onto a clocked, silent DAC
+	time.Sleep(50 * time.Millisecond)                             // let amp settle
+	exec.Command("tinymix", "-D", "0", "61", "100", "100").Run()  // unmute
 
 	log.Println("PcmSpeaker initialised — silence stream running")
 	return nil
@@ -228,7 +235,17 @@ func (p *PcmSpeaker) Flush() {
 	}
 }
 
+// Close shuts the speaker down in the reverse of Init's bring-up: mute,
+// amp off, then tear the stream down. Muting first makes the PCM-close
+// transient inaudible, and leaving the amp off means an idle DAC can't
+// hiss while the server isn't running (OTA gaps, crashes, service stop —
+// the "speaker noise between OTAs"). start_server.sh repeats the mute +
+// amp-off after every server exit as a belt-and-braces for paths where
+// this never runs (SIGKILL, panic).
 func (p *PcmSpeaker) Close() {
+	exec.Command("tinymix", "-D", "0", "61", "0", "0").Run() // mute
+	exec.Command("tinymix", "-D", "0", "5", "Off").Run()     // amp off
 	close(p.stopCh)
 	p.session.Close()
+	log.Println("PcmSpeaker closed — output muted, amp off")
 }

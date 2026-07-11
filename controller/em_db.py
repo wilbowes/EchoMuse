@@ -111,6 +111,11 @@ DEFAULT_DEVICE_CONFIG = {
     "beamAngle":        -1,
     "eqBands":          [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     "eqLoudness":       False,
+    # LED ring scene (controller-side rendering — see em_scenes.py).
+    # ledListenColor/ledThinkColor only apply when ledScene is "custom".
+    "ledScene":         "standard",
+    "ledListenColor":   "#00b400",
+    "ledThinkColor":    "#00c800",
     # Pipeline toggles — both default on. Disable via dashboard for A/B testing.
     # nsEnabled: RNNoise noise suppression. Running at 16kHz (wrong rate for
     # the model — see P0-3). Disable to A/B test whether it's helping or hurting.

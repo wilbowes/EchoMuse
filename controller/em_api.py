@@ -47,6 +47,7 @@ import websockets
 
 import em_db as db
 import em_auth as auth
+import em_scenes
 from version import VERSION as CONTROLLER_VERSION
 
 log = logging.getLogger("echomuse.api")
@@ -449,6 +450,13 @@ async def _post_device_config(request: web.Request) -> web.Response:
             live.eq_bands = config["eqBands"]
         if "eqLoudness" in config:
             live.eq_loudness = bool(config["eqLoudness"])
+        if any(k in config for k in ("ledScene", "ledListenColor", "ledThinkColor")):
+            # Scene resolution needs the full config (custom colours may not
+            # be in a partial body) — re-read the effective config.
+            eff = await loop.run_in_executor(
+                None, db.get_effective_device_config, device_id
+            )
+            live.led_scene = em_scenes.resolve(eff)
         log.info(f"[api] Config pushed to live device: {device_id}")
         pushed = True
 
@@ -1303,8 +1311,16 @@ KEEP_LOG=524288
 ) &
 TRIM_PID=$!
 
+# Mute + amp off whenever the server is not running — the server does this
+# itself on SIGTERM, but SIGKILL/panic paths skip it, and an enabled amp on
+# an idle DAC hisses for as long as the server is down.
+amp_off() {
+    tinymix -D 0 61 0 0 2>/dev/null
+    tinymix -D 0 5 Off 2>/dev/null
+}
+
 SERVER_PID=0
-trap 'kill $SERVER_PID $TRIM_PID 2>/dev/null; exit 0' TERM INT
+trap 'kill $SERVER_PID $TRIM_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null; amp_off; exit 0' TERM INT
 
 attempt=0
 
@@ -1315,6 +1331,8 @@ while true; do
     SERVER_PID=$!
     wait $SERVER_PID
     EXIT_CODE=$?
+
+    amp_off
 
     END_TIME=$(date +%s)
     RUNTIME=$(( END_TIME - START_TIME ))
@@ -1575,6 +1593,7 @@ async def _post_global_config(request: web.Request) -> web.Response:
             live.eq_bands = config["eqBands"]
         if "eqLoudness" in config:
             live.eq_loudness = bool(config["eqLoudness"])
+        live.led_scene = em_scenes.resolve(config)
         pushed.append(device_id)
 
     if pushed:

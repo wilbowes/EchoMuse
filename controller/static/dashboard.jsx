@@ -2742,6 +2742,13 @@ function DeviceConfigForm({ config, onChange, disabled }) {
   const sensitivity = thresholdToSensitivity(config.owwThreshold ?? 0.5);
 
   const bands = config.eqBands ?? [0,0,0,0,0,0,0,0];
+  const RING_SCENES = [
+    { value: 'standard',   label: 'Standard',   swatches: ['#00b400'] },
+    { value: 'airy',       label: 'Airy',       swatches: ['#5096c8', '#96cdff'] },
+    { value: 'malevolent', label: 'Malevolent', swatches: ['#6e002d', '#d22d00'] },
+    { value: 'pride',      label: 'Pride',      swatches: ['#bf0000', '#bf7700', '#a9bf00', '#00bf2c', '#0055bf', '#8b00bf'] },
+    { value: 'custom',     label: 'Custom',     swatches: null },
+  ];
   const EQ_PRESETS = [['Flat',[0,0,0,0,0,0,0,0]], ['Clarity',[0,0,0,0,0,7,4,2]], ['Warmth',[0,3,2,0,-2,0,0,0]]];
   const activeEqPreset = (EQ_PRESETS.find(([, vals]) => JSON.stringify(vals) === JSON.stringify(bands)) || [null])[0];
 
@@ -2888,8 +2895,62 @@ function DeviceConfigForm({ config, onChange, disabled }) {
         </StageAdvanced>
       </Stage>
 
-      {/* 04 ADVANCED — button-turn internals: processing + speech gate */}
-      <Stage n="04" title="Advanced"
+      {/* 04 RING */}
+      <Stage n="04" title="Ring"
+        chips={<ScopeChip tone="controller">Controller</ScopeChip>}
+        desc="Colours for the LED ring during conversations — the solid listening ring and the thinking spinner. The red mute ring and cyan volume arc never change; red always means the mics are off.">
+        <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 24, alignItems: 'start' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, ...inputStyle }}>
+            {RING_SCENES.map(sc => (
+              <div key={sc.value} onClick={() => set('ledScene', sc.value)} style={{
+                background: (config.ledScene ?? 'standard') === sc.value
+                  ? 'linear-gradient(160deg,#dde8f4,#ccd8ec)'
+                  : 'linear-gradient(160deg,#e4e0d8,#d4d0c8)',
+                border: `1px solid ${(config.ledScene ?? 'standard') === sc.value ? '#405878' : '#c0bdb6'}`,
+                borderRadius: 8, padding: '8px 10px',
+                cursor: disabled ? 'default' : 'pointer',
+                transition: 'border-color 0.15s, background 0.15s',
+              }}>
+                <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 12, fontWeight: 600, color: '#1a1c18' }}>{sc.label}</div>
+                <div style={{ display: 'flex', gap: 3, marginTop: 4 }}>
+                  {(sc.value === 'custom'
+                    ? [config.ledListenColor ?? '#00b400', config.ledThinkColor ?? '#00c800']
+                    : sc.swatches
+                  ).map((c, i) => (
+                    <span key={i} style={{ width: 10, height: 10, borderRadius: '50%', background: c, border: '1px solid rgba(0,0,0,0.15)' }}/>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+          {(config.ledScene ?? 'standard') === 'custom' && (
+            <div style={inputStyle}>
+              <div style={{ fontFamily: mono, fontSize: 11, color: 'var(--text2)', marginBottom: 8 }}>Custom colours</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+                <input type="color" value={config.ledListenColor ?? '#00b400'} disabled={disabled}
+                  onChange={e => set('ledListenColor', e.target.value)}
+                  style={{ width: 36, height: 28, padding: 0, border: '1px solid #b8b4ac', borderRadius: 6, background: 'none', cursor: 'pointer' }}/>
+                <div>
+                  <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 12, fontWeight: 600 }}>Listening</div>
+                  <div style={{ fontFamily: mono, fontSize: 9, color: '#888480' }}>solid ring while recording</div>
+                </div>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <input type="color" value={config.ledThinkColor ?? '#00c800'} disabled={disabled}
+                  onChange={e => set('ledThinkColor', e.target.value)}
+                  style={{ width: 36, height: 28, padding: 0, border: '1px solid #b8b4ac', borderRadius: 6, background: 'none', cursor: 'pointer' }}/>
+                <div>
+                  <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 12, fontWeight: 600 }}>Thinking</div>
+                  <div style={{ fontFamily: mono, fontSize: 9, color: '#888480' }}>spinner while processing</div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </Stage>
+
+      {/* 05 ADVANCED — button-turn internals: processing + speech gate */}
+      <Stage n="05" title="Advanced"
         chips={<><ScopeChip tone="device">Device</ScopeChip><ScopeChip>Button turns only</ScopeChip></>}
         desc="Everything here affects only bounded button-press turns. Wake-word turns stream continuously — Home Assistant's VAD endpoints them, and the controller closes accidental wakes after 5s of silence relative to the room's measured noise floor — so none of these settings touch the wake path.">
         {subHeader('Turn processing', true)}

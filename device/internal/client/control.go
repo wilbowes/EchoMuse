@@ -41,7 +41,12 @@ type controlMessage struct {
 
 // ─── Callbacks ────────────────────────────────────────────────────────────────
 
-type LEDCallback func(leds []led.Led)
+// LEDCallback receives a ring frame plus the controller's optional
+// listening hint: non-nil when the message carried "listening", telling
+// the server explicitly whether this frame is the listening ring (which
+// enables the direction overlay). Nil on frames from older controllers —
+// the server falls back to its all-green heuristic.
+type LEDCallback func(leds []led.Led, listening *bool)
 type MicStartCallback func(lockMic bool)
 type MicStopCallback func()
 type StateCallback func()
@@ -253,12 +258,13 @@ func (c *ControlClient) connect(ctx context.Context, addr string, data *DataClie
 		switch peek.Type {
 		case "leds":
 			var msg struct {
-				LEDs json.RawMessage `json:"leds"`
+				LEDs      json.RawMessage `json:"leds"`
+				Listening *bool           `json:"listening"`
 			}
 			if err := json.Unmarshal(raw, &msg); err == nil && c.ledCallback != nil {
 				var leds []led.Led
 				if err := json.Unmarshal(msg.LEDs, &leds); err == nil {
-					c.ledCallback(leds)
+					c.ledCallback(leds, msg.Listening)
 				}
 			}
 
