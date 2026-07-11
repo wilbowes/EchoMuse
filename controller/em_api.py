@@ -81,6 +81,41 @@ _updates_in_progress: set[str] = set()
 # Pending local binary uploads — keyed by UUID token, expire after 10 minutes.
 _pending_uploads: dict[str, bytes] = {}
 
+# WiFi change state per device_id — {"pending": {...}|None, "last_result":
+# {...}|None}. Deliberately NOT on the live Device object: the connection
+# (and with it the Device) dies when the network switches, and the outcome
+# arrives on the replacement connection. In-memory only — a controller
+# restart mid-change just means the result event is lost, not the change
+# itself (the device self-manages commit/rollback).
+_wifi_states: dict[str, dict] = {}
+
+# A change whose result never arrived (device bricked its network AND
+# rollback failed, or controller restarted) must not block retries forever.
+_WIFI_PENDING_TTL = 240  # device gates total ≤ ~135s + margin
+
+
+def wifi_state(device_id: str) -> dict:
+    """Current wifi change state for a device, with stale pending expiry."""
+    st = _wifi_states.setdefault(device_id, {"pending": None, "last_result": None})
+    pending = st.get("pending")
+    if pending and time.time() - pending["started_at"] > _WIFI_PENDING_TTL:
+        st["pending"] = None
+        st["last_result"] = {
+            "ok": False, "ssid": pending["ssid"],
+            "error": "no result from device — change timed out (device may "
+                     "be offline, or its rollback failed)",
+            "at": time.time(),
+        }
+    return st
+
+
+def wifi_record_result(device_id: str, ok: bool, ssid: str, error: str) -> dict:
+    """Store a wifi_result reported by the device; returns the new state."""
+    st = wifi_state(device_id)
+    st["pending"] = None
+    st["last_result"] = {"ok": ok, "ssid": ssid, "error": error, "at": time.time()}
+    return st
+
 # ─── Initialisation ───────────────────────────────────────────────────────────
 
 _shell_pending:   dict = {}
@@ -138,6 +173,8 @@ async def create_app() -> web.Application:
     app.router.add_post("/api/devices/{id}/config",       _post_device_config)
     app.router.add_get("/api/devices/{id}/logs",          _get_device_logs)
     app.router.add_get("/api/devices/{id}/turns",         _get_device_turns)
+    app.router.add_post("/api/devices/{id}/wifi",         _post_device_wifi)
+    app.router.add_post("/api/devices/{id}/wifi/scan",    _post_device_wifi_scan)
     app.router.add_post("/api/devices/{id}/update",       _post_device_update)
     app.router.add_post("/api/devices/{id}/rollback",     _post_device_rollback)
     app.router.add_post("/api/releases/upload",           _post_upload_binary)
@@ -465,6 +502,87 @@ async def _post_device_config(request: web.Request) -> web.Response:
                        "state": {"config": config, "use_global_config": effective_use_global}})
     return _ok({"device_id": device_id, "config": config,
                 "use_global_config": effective_use_global, "pushed": pushed})
+
+
+@auth.require_admin
+async def _post_device_wifi(request: web.Request) -> web.Response:
+    """
+    POST /api/devices/{id}/wifi — switch the device to a new WiFi network.
+
+    Body: {"ssid": "...", "psk": "..."} (empty/absent psk = open network).
+
+    Returns 202 immediately: the device owns the whole switch (associate →
+    DHCP → reconnect gates, auto-rollback on any failure — see the device's
+    internal/wifi package). The outcome arrives asynchronously as a
+    wifi_result control message and is surfaced via the device_update
+    event / the "wifi" field on the device object.
+    """
+    device_id = request.match_info["id"]
+    body = await _json_body(request)
+    ssid = _require_str(body, "ssid")
+    psk  = str(body.get("psk") or "")
+
+    # Mirror the device's own validation so obvious mistakes fail fast
+    # with a readable message instead of a full switch/rollback cycle.
+    if any(ch in ssid or ch in psk for ch in ('"', "\\")):
+        return _error("invalid_credentials",
+                      "SSID/passphrase cannot contain double-quote or "
+                      "backslash characters (wpa_supplicant.conf cannot "
+                      "represent them safely)", 400)
+    if psk and not 8 <= len(psk) <= 63:
+        return _error("invalid_credentials",
+                      f"WPA passphrase must be 8–63 characters (got {len(psk)})", 400)
+
+    live = _devices.get(device_id)
+    if live is None:
+        return _error("device_offline", "Device is not connected", 409)
+
+    st = wifi_state(device_id)
+    if st["pending"]:
+        return _error("wifi_change_in_progress",
+                      f"A change to \"{st['pending']['ssid']}\" is already "
+                      f"in progress", 409)
+
+    st["pending"] = {"ssid": ssid, "started_at": time.time()}
+    st["last_result"] = None
+    await live.send_control({"type": "wifi_change", "ssid": ssid, "psk": psk})
+    db.log_device(device_id, "info", "controller", f'WiFi change to "{ssid}" requested')
+    await _push_event({"type": "device_update", "device_id": device_id,
+                       "state": {"wifi": st}})
+    return _ok({"device_id": device_id, "ssid": ssid, "status": "switching"},
+               status=202)
+
+
+@auth.require_admin
+async def _post_device_wifi_scan(request: web.Request) -> web.Response:
+    """
+    POST /api/devices/{id}/wifi/scan — ask the device for visible networks.
+
+    Synchronous from the dashboard's point of view: sends wifi_scan and
+    awaits the wifi_scan_result control message (the device's scan itself
+    takes ~5s).
+    """
+    device_id = request.match_info["id"]
+    live = _devices.get(device_id)
+    if live is None:
+        return _error("device_offline", "Device is not connected", 409)
+    if getattr(live, "wifi_scan_future", None) is not None:
+        return _error("scan_in_progress", "A scan is already running", 409)
+
+    fut = asyncio.get_event_loop().create_future()
+    live.wifi_scan_future = fut
+    try:
+        await live.send_control({"type": "wifi_scan"})
+        msg = await asyncio.wait_for(fut, timeout=20)
+    except asyncio.TimeoutError:
+        return _error("scan_timeout",
+                      "Device did not return scan results within 20s "
+                      "(old firmware without WiFi support?)", 504)
+    finally:
+        live.wifi_scan_future = None
+    if msg.get("error"):
+        return _error("scan_failed", msg["error"], 502)
+    return _ok({"networks": msg.get("networks") or []})
 
 
 @auth.require_auth
@@ -1902,6 +2020,8 @@ def _merge_device(row) -> dict:
         # the rest of this "Live" section (resets on reconnect, since it
         # lives on the per-connection Device object, not the DB row).
         "owwNearMisses":    getattr(live, "oww_near_misses", 0) if live else 0,
+        # WiFi change state (survives the reconnect a change causes)
+        "wifi":             wifi_state(device_id),
         # Update state
         "update_in_progress": device_id in _updates_in_progress,
     }

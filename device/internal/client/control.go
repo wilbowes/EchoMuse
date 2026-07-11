@@ -54,6 +54,11 @@ type ConfigAppliedCallback func(msg config.ConfigMessage)
 type VolumeSetCallback func(level int)
 type BeamLockCallback func(lock bool)
 
+// WifiChangeCallback receives a wifi_change request. It must return
+// quickly (the executor runs in its own goroutine) — the control
+// connection is about to drop when the network switches.
+type WifiChangeCallback func(ssid, psk string)
+
 // ─── ControlClient ────────────────────────────────────────────────────────────
 
 type ControlClient struct {
@@ -70,6 +75,9 @@ type ControlClient struct {
 	volumeSetCallback     VolumeSetCallback
 	beamLockCallback      BeamLockCallback
 	speakerFlushCallback  StateCallback
+	wifiChangeCallback    WifiChangeCallback
+	wifiCommitCallback    StateCallback
+	wifiScanCallback      StateCallback
 
 	conn         *websocket.Conn
 	connMu       sync.Mutex
@@ -106,6 +114,17 @@ func (c *ControlClient) OnConfigApplied(cb ConfigAppliedCallback) { c.configAppl
 func (c *ControlClient) OnVolumeSet(cb VolumeSetCallback)         { c.volumeSetCallback = cb }
 func (c *ControlClient) OnBeamLock(cb BeamLockCallback)           { c.beamLockCallback = cb }
 func (c *ControlClient) OnSpeakerFlush(cb StateCallback)          { c.speakerFlushCallback = cb }
+func (c *ControlClient) OnWifiChange(cb WifiChangeCallback)       { c.wifiChangeCallback = cb }
+func (c *ControlClient) OnWifiCommit(cb StateCallback)            { c.wifiCommitCallback = cb }
+func (c *ControlClient) OnWifiScan(cb StateCallback)              { c.wifiScanCallback = cb }
+
+// IsConnected reports whether the control WebSocket is registered and
+// live — the wifi change executor's "controller reachable" gate.
+func (c *ControlClient) IsConnected() bool {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	return c.conn != nil
+}
 
 var errPending = fmt.Errorf("pending approval")
 
@@ -120,9 +139,20 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 			c.disconnectedCallback()
 		}
 
-		server, err := discovery.FindServer(ctx)
-		if err != nil {
-			return err
+		// Fast path: try the last-known controller address before mDNS.
+		// Speeds up ordinary reconnects, and after a WiFi network change
+		// it's what makes a controller on a different subnet reachable at
+		// all (multicast rarely crosses subnets, so mDNS alone would fail
+		// the change's reconnect gate and revert a working network).
+		addr := c.lastKnownAddr()
+		if addr != "" && probeTCP(addr, 3*time.Second) {
+			log.Printf("[control] Last-known controller %s reachable — skipping mDNS", addr)
+		} else {
+			server, err := discovery.FindServer(ctx)
+			if err != nil {
+				return err
+			}
+			addr = server.Addr
 		}
 
 		dataCtx, cancelData := context.WithCancel(ctx)
@@ -132,8 +162,8 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 			}
 		}()
 
-		log.Printf("[control] Connecting to %s", server.Addr)
-		err = c.connect(ctx, server.Addr, data)
+		log.Printf("[control] Connecting to %s", addr)
+		err := c.connect(ctx, addr, data)
 
 		cancelData()
 
@@ -351,6 +381,30 @@ func (c *ControlClient) connect(ctx context.Context, addr string, data *DataClie
 				c.shellCancel = nil
 			}
 			c.shellMu.Unlock()
+
+		case "wifi_change":
+			// Safe network switch (see internal/wifi). The executor owns
+			// the whole sequence device-side — this connection is about to
+			// die when the network flips.
+			var msg struct {
+				SSID string `json:"ssid"`
+				PSK  string `json:"psk"`
+			}
+			if err := json.Unmarshal(raw, &msg); err == nil && c.wifiChangeCallback != nil {
+				log.Printf("[control] wifi_change received (ssid=%q)", msg.SSID)
+				c.wifiChangeCallback(msg.SSID, msg.PSK)
+			}
+
+		case "wifi_commit":
+			// Controller acknowledged a successful change — finalise it.
+			if c.wifiCommitCallback != nil {
+				c.wifiCommitCallback()
+			}
+
+		case "wifi_scan":
+			if c.wifiScanCallback != nil {
+				c.wifiScanCallback()
+			}
 
 		case "speaker_flush":
 			// Barge-in: controller detected the wake word during TTS
@@ -578,6 +632,27 @@ func (c *ControlClient) SendLog(level, message string) {
 	})
 }
 
+// SendWifiResult reports the outcome of a wifi_change attempt.
+// Safe for concurrent use — silently drops if not connected.
+func (c *ControlClient) SendWifiResult(ok bool, ssid, errMsg string) {
+	_ = c.writeJSON(map[string]interface{}{
+		"type":  "wifi_result",
+		"ok":    ok,
+		"ssid":  ssid,
+		"error": errMsg,
+	})
+}
+
+// SendWifiScanResult reports scan results (or a scan error) upstream.
+// networks is marshalled as-is; pass nil with errMsg on failure.
+func (c *ControlClient) SendWifiScanResult(networks interface{}, errMsg string) {
+	_ = c.writeJSON(map[string]interface{}{
+		"type":     "wifi_scan_result",
+		"networks": networks,
+		"error":    errMsg,
+	})
+}
+
 func (c *ControlClient) writeJSON(v interface{}) error {
 	c.connMu.Lock()
 	defer c.connMu.Unlock()
@@ -585,6 +660,23 @@ func (c *ControlClient) writeJSON(v interface{}) error {
 		return nil
 	}
 	return c.conn.WriteJSON(v)
+}
+
+func (c *ControlClient) lastKnownAddr() string {
+	c.serverAddrMu.RLock()
+	defer c.serverAddrMu.RUnlock()
+	return c.serverAddr
+}
+
+// probeTCP reports whether addr (host:port) accepts a TCP connection
+// within timeout.
+func probeTCP(addr string, timeout time.Duration) bool {
+	conn, err := net.DialTimeout("tcp", addr, timeout)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
 }
 
 // GetSerialNo reads ro.serialno — stable device identifier matching adb devices output.

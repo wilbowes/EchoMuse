@@ -529,6 +529,7 @@ dns-sd -B _emcontroller._tcp local
 ✅ mDNS via grandcat/zeroconf — RFC 6762/6763 compliant, reliable discovery
 ✅ WebSocket protocol keepalives — dead connections detected within 30s
 ✅ Controller management dashboard — React SPA, vendored assets, no CDN dependency
+✅ Safe per-device WiFi change (dashboard WiFi tab) — device-side executor with auto-rollback: full wpa_supplicant.conf replacement + `svc wifi` bounce (the provisioning-proven reload path), gated on associate ≤20s → IP ≤20s → controller reconnect ≤90s; any failure restores the backed-up config; uncommitted changes roll back on boot (pending-marker recovery, same philosophy as the A/B binary slots); last-known-controller-address fast path makes cross-subnet controllers reachable without mDNS
 ✅ LED ring scenes (controller-rendered) — Standard/Airy/Malevolent/Pride/Custom palettes for the listening ring and thinking spinner (em_scenes.py); mute ring stays red and volume arc stays cyan in every scene; frames carry an explicit `listening` flag so the device's direction overlay works on any colour (falls back to the all-green heuristic for old controllers), and the overlay brightens the scene colour instead of painting green
 ✅ Dashboard live state — mute/listen/speak/offline via WebSocket events + 5s poll
 ✅ Dashboard shell terminal — browser-based root shell, Ctrl+C support

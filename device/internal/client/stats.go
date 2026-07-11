@@ -11,6 +11,7 @@ type DeviceStats struct {
 	StorageUsedMb  int     `json:"storageUsedMb"`
 	StorageTotalMb int     `json:"storageTotalMb"`
 	WifiRssi       *int    `json:"wifiRssi"`
+	WifiSsid       string  `json:"wifiSsid"`
 }
 
 // SendStats sends a stats message to the controller.
@@ -24,5 +25,6 @@ func (c *ControlClient) SendStats(s DeviceStats) {
 		"storageUsedMb":  s.StorageUsedMb,
 		"storageTotalMb": s.StorageTotalMb,
 		"wifiRssi":       s.WifiRssi,
+		"wifiSsid":       s.WifiSsid,
 	})
 }

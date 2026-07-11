@@ -223,6 +223,10 @@ class Device:
         # refreshed on connect and on any config push carrying led* keys.
         self.led_scene:     dict  = em_scenes.resolve({})
         self.stats:         dict | None = None
+        # In-flight wifi_scan awaiter (set by the API handler). Change
+        # pending/result state lives in api._wifi_states instead — this
+        # Device object dies with the connection when the network switches.
+        self.wifi_scan_future: asyncio.Future | None = None
         # Q4 fix (2026-07-05 review): dashboard-visible near-miss counter —
         # incremented in wake_word_listener whenever a score exceeds 0.05
         # but doesn't clear device.oww_threshold. Separate field from
@@ -1536,12 +1540,44 @@ async def handle_control(ws: WebSocketServerProtocol):
                         "storageUsedMb": msg.get("storageUsedMb"),
                         "storageTotalMb":msg.get("storageTotalMb"),
                         "wifiRssi":      msg.get("wifiRssi"),
+                        "wifiSsid":      msg.get("wifiSsid"),
                     }
                     await api._push_event({
                         "type":      "device_update",
                         "device_id": device_id,
                         "state":     {"stats": device.stats},
                     })
+
+                elif msg_type == "wifi_result":
+                    # Outcome of a wifi_change — arrives on the connection
+                    # the device re-established after switching (success) or
+                    # reverting (failure). On success, acknowledge with
+                    # wifi_commit so the device finalises the change
+                    # (deletes its rollback backup + pending marker).
+                    ok    = bool(msg.get("ok"))
+                    ssid  = msg.get("ssid", "")
+                    error = msg.get("error") or ""
+                    st = api.wifi_record_result(device_id, ok, ssid, error)
+                    if ok:
+                        await device.send_control({"type": "wifi_commit"})
+                        log.info(f"[{device_id}] WiFi changed to \"{ssid}\" — committed")
+                        db.log_device(device_id, "info", "device",
+                                      f'WiFi changed to "{ssid}"')
+                    else:
+                        log.warning(f"[{device_id}] WiFi change to \"{ssid}\" "
+                                    f"failed: {error}")
+                        db.log_device(device_id, "warning", "device",
+                                      f'WiFi change to "{ssid}" failed: {error}')
+                    await api._push_event({
+                        "type":      "device_update",
+                        "device_id": device_id,
+                        "state":     {"wifi": st},
+                    })
+
+                elif msg_type == "wifi_scan_result":
+                    fut = device.wifi_scan_future
+                    if fut is not None and not fut.done():
+                        fut.set_result(msg)
 
                 elif msg_type == "log":
                     level   = msg.get("level", "info")

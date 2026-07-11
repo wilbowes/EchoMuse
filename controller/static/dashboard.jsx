@@ -603,6 +603,170 @@ function TurnObservability({ turns, nearMisses, stateLabel, stateColor }) {
   );
 }
 
+// ─── Connectivity tab ─────────────────────────────────────────────────────────
+// Per-device WiFi: shows the current connection and drives the safe network
+// switch (device-side executor with auto-rollback — see internal/wifi in the
+// firmware). The change is fire-and-forget from here: POST returns 202, the
+// device drops off while it switches, and the outcome arrives as a
+// device_update event carrying device.wifi.{pending,last_result}.
+
+function ConnectivityTab({ device, row }) {
+  const [networks, setNetworks]   = useState(null);   // null = never scanned
+  const [scanning, setScanning]   = useState(false);
+  const [scanError, setScanError] = useState('');
+  const [ssid, setSsid]           = useState('');
+  const [psk, setPsk]             = useState('');
+  const [showPsk, setShowPsk]     = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [submitError, setSubmitError] = useState('');
+
+  const s       = device.stats || null;
+  const wifi    = device.wifi || {};
+  const pending = wifi.pending || null;
+  const result  = wifi.last_result || null;
+  const currentSsid = s?.wifiSsid || null;
+
+  async function doScan() {
+    setScanning(true); setScanError('');
+    try {
+      const r = await API.post(`/api/devices/${device.device_id}/wifi/scan`, {});
+      setNetworks(r.networks || []);
+    } catch (e) {
+      setScanError(e.error || e.message || 'Scan failed');
+    }
+    setScanning(false);
+  }
+
+  async function doSwitch() {
+    setConfirming(false); setSubmitError('');
+    try {
+      await API.post(`/api/devices/${device.device_id}/wifi`, { ssid, psk });
+      // Pending state arrives via the device_update push event.
+    } catch (e) {
+      setSubmitError(e.error || e.message || 'Request failed');
+    }
+  }
+
+  const mono  = "'DM Mono',monospace";
+  const busy  = !!pending;
+  const valid = ssid && (!psk || (psk.length >= 8 && psk.length <= 63)) &&
+                !/["\\]/.test(ssid) && !/["\\]/.test(psk);
+
+  return (
+    <div style={{ minHeight:'100%', display:'flex', flexDirection:'column', gap:16 }}>
+
+      {/* Outcome banners — pending wins over last result */}
+      {pending && (
+        <div style={{ background:'rgba(64,88,120,0.10)', border:'1px solid rgba(64,88,120,0.25)', borderRadius:8, padding:'12px 16px' }}>
+          <div style={{ fontFamily:mono, fontSize:11, color:'#405878' }}>
+            Switching to “{pending.ssid}” — the device will drop offline while it changes network.
+          </div>
+          <div style={{ fontFamily:mono, fontSize:10, color:'var(--muted)', marginTop:4 }}>
+            If it can't associate, get an IP, or reach this controller, it rolls back to the previous
+            network automatically and reports the failure here (allow ~2 minutes).
+          </div>
+        </div>
+      )}
+      {!pending && result && (
+        <div style={{ background: result.ok ? 'rgba(40,96,64,0.08)' : 'rgba(192,96,26,0.08)', border:`1px solid ${result.ok ? 'rgba(40,96,64,0.25)' : 'rgba(192,96,26,0.3)'}`, borderRadius:8, padding:'12px 16px' }}>
+          <div style={{ fontFamily:mono, fontSize:11, color: result.ok ? '#286040' : '#c0601a' }}>
+            {result.ok
+              ? `Switched to “${result.ssid}” successfully.`
+              : `Change to “${result.ssid}” failed — previous network restored.`}
+          </div>
+          {!result.ok && result.error && (
+            <div style={{ fontFamily:mono, fontSize:10, color:'var(--muted)', marginTop:4 }}>{result.error}</div>
+          )}
+        </div>
+      )}
+
+      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16, alignItems:'start' }}>
+        <Panel label="Current connection">
+          {row('Network', currentSsid || '—')}
+          {row('IP', device.ip && device.ip !== '127.0.0.1' ? device.ip : '—')}
+          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+            <span style={{ fontFamily:mono, fontSize:10, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.08em' }}>Signal</span>
+            <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+              <span style={{ fontFamily:mono, fontSize:10, color:'var(--text2)' }}>{s?.wifiRssi != null ? `${s.wifiRssi} dBm` : '—'}</span>
+              <SignalBars rssi={s?.wifiRssi ?? null}/>
+            </div>
+          </div>
+          {!s && <div style={{ fontFamily:mono, fontSize:9, color:'var(--muted)', marginTop:8 }}>waiting for device stats…</div>}
+        </Panel>
+
+        <Panel label="Visible networks">
+          <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:8 }}>
+            <Pill small disabled={scanning || !device.connected || busy} onClick={doScan}>
+              {scanning ? 'Scanning…' : networks ? 'Rescan' : 'Scan'}
+            </Pill>
+            {scanError && <span style={{ fontFamily:mono, fontSize:10, color:'#c0601a' }}>{scanError}</span>}
+          </div>
+          {networks && networks.length === 0 && (
+            <div style={{ fontFamily:mono, fontSize:10, color:'var(--muted)' }}>No networks found.</div>
+          )}
+          {networks && networks.length > 0 && (
+            <div style={{ maxHeight:170, overflowY:'auto' }}>
+              {networks.map(n => (
+                <div key={n.ssid} onClick={() => !busy && setSsid(n.ssid)}
+                  style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'5px 8px', borderRadius:6, cursor: busy ? 'default' : 'pointer', background: ssid === n.ssid ? 'rgba(64,88,120,0.12)' : 'transparent' }}>
+                  <span style={{ fontFamily:mono, fontSize:11, color: ssid === n.ssid ? '#405878' : 'var(--text)' }}>
+                    {n.ssid}{n.ssid === currentSsid ? '  ← current' : ''}
+                  </span>
+                  <span style={{ fontFamily:mono, fontSize:10, color:'var(--muted)' }}>{n.signal} dBm</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </Panel>
+      </div>
+
+      <Panel label="Change network">
+        <div style={{ fontFamily:mono, fontSize:10, color:'var(--muted)', marginBottom:12 }}>
+          The device applies the change itself and rolls back automatically if the new network doesn't
+          work out — including when it connects but can't reach this controller (wrong VLAN, isolated
+          guest network). The previous network is only discarded once the device reports back here.
+        </div>
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr auto', gap:12, alignItems:'end' }}>
+          <div>
+            <div style={{ fontFamily:mono, fontSize:9, color:'var(--text2)', letterSpacing:'0.08em', marginBottom:4 }}>SSID</div>
+            <input type="text" value={ssid} disabled={busy} onChange={e => setSsid(e.target.value)}
+              placeholder="Network name" style={{ width:'100%', boxSizing:'border-box' }}/>
+          </div>
+          <div>
+            <div style={{ fontFamily:mono, fontSize:9, color:'var(--text2)', letterSpacing:'0.08em', marginBottom:4 }}>Passphrase</div>
+            <div style={{ display:'flex', gap:6 }}>
+              <input type={showPsk ? 'text' : 'password'} value={psk} disabled={busy} onChange={e => setPsk(e.target.value)}
+                placeholder="WPA passphrase (blank = open)" style={{ flex:1, boxSizing:'border-box' }}/>
+              <Pill small onClick={() => setShowPsk(v => !v)}>{showPsk ? 'Hide' : 'Show'}</Pill>
+            </div>
+          </div>
+          {!confirming ? (
+            <Pill accent disabled={!valid || busy || !device.connected} onClick={() => setConfirming(true)}>Switch…</Pill>
+          ) : (
+            <div style={{ display:'flex', gap:8 }}>
+              <Pill danger onClick={doSwitch}>Confirm switch</Pill>
+              <Pill small onClick={() => setConfirming(false)}>Cancel</Pill>
+            </div>
+          )}
+        </div>
+        {ssid && !valid && (
+          <div style={{ fontFamily:mono, fontSize:10, color:'#c0601a', marginTop:8 }}>
+            {/["\\]/.test(ssid + psk)
+              ? 'SSID/passphrase cannot contain " or \\ characters.'
+              : 'WPA passphrase must be 8–63 characters (leave blank for an open network).'}
+          </div>
+        )}
+        {submitError && (
+          <div style={{ fontFamily:mono, fontSize:10, color:'#c0601a', marginTop:8 }}>{submitError}</div>
+        )}
+        {!device.connected && (
+          <div style={{ fontFamily:mono, fontSize:10, color:'#c0601a', marginTop:8 }}>Device offline — connect it before changing networks.</div>
+        )}
+      </Panel>
+    </div>
+  );
+}
+
 // ─── Device detail modal ──────────────────────────────────────────────────────
 
 function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDeviceConfigChange }) {
@@ -632,7 +796,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   const needsUpdate = device.firmware_ver && release?.version && device.firmware_ver !== release.version;
 
   const TABS = device.approved
-    ? (isAdmin ? ['status', 'config', 'console', 'updates', 'logs'] : ['status', 'config', 'logs'])
+    ? (isAdmin ? ['status', 'config', 'wifi', 'console', 'updates', 'logs'] : ['status', 'config', 'logs'])
     : ['approve'];
 
   useEffect(() => {
@@ -1018,6 +1182,9 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
               )}
             </div>
           )}
+
+          {/* WIFI — per-device connectivity */}
+          {tab === 'wifi' && <ConnectivityTab device={device} row={row}/>}
 
           {/* CONSOLE — fills the whole tab frame */}
           {tab === 'console' && (

@@ -196,6 +196,23 @@ Decides when a button-press utterance starts and stops:
 
 ---
 
+## WiFi (device page → WiFi tab)
+
+Move a device to a different WiFi network without touching ADB. The tab
+shows the current network, signal, and IP, lets you scan for visible
+networks, and switches with a confirmation step.
+
+The switch is designed to be **unbrickable**: the device applies the change
+itself and must pass three checks — join the network, get an IP, and
+**reconnect to this controller** — before the change is kept. Fail any of
+them (wrong passphrase, DHCP trouble, or a network that works but can't
+reach the controller, like an isolated guest VLAN) and it automatically
+restores the previous network and tells you why. Even a power cut
+mid-switch recovers: an unconfirmed change is rolled back on boot. Allow
+about two minutes for the device to drop off and come back.
+
+---
+
 ## Controller settings (the `.env` file)
 
 These are set once, on the server, and need a controller restart to change:

@@ -20,6 +20,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/client"
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/server"
+	"github.com/wilbowes/EchoMuse/internal/wifi"
 	pkgbuttons "github.com/wilbowes/EchoMuse/pkg/buttons"
 	"github.com/wilbowes/EchoMuse/pkg/led"
 )
@@ -30,6 +31,11 @@ func main() {
 
 	deviceID := client.GetSerialNo()
 	log.Printf("Device ID: %s", deviceID)
+
+	// A WiFi change that never got committed (crash/power cycle mid-switch)
+	// is rolled back before anything tries to use the network — same
+	// self-healing philosophy as the A/B binary slots.
+	wifi.RecoverIfPending()
 
 	buttonController, err := internalbuttons.NewButtonController()
 	if err != nil {
@@ -147,6 +153,12 @@ func main() {
 			st := collectStats()
 			controlClient.SendStats(st)
 		}()
+		// Deliver any WiFi change outcome that couldn't be sent while the
+		// network was switching/reverting (including the "restarted before
+		// commit" result RecoverIfPending leaves behind).
+		if r := wifi.TakeResult(); r != nil {
+			controlClient.SendWifiResult(r.OK, r.SSID, r.Error)
+		}
 	})
 
 	// Config applied — apply hardware changes via tinymix, AEC params to
@@ -161,6 +173,36 @@ func main() {
 	// hears the wake word during playback.
 	controlClient.OnSpeakerFlush(func() {
 		pcmSpeaker.Flush()
+	})
+
+	// WiFi change — the executor owns the whole switch/rollback sequence
+	// (internal/wifi); the reconnect gate polls IsConnected. The outcome is
+	// sent as wifi_result on whichever connection can carry it: right here
+	// if the gate passed (we're connected), otherwise the OnConnected drain
+	// below picks it up after the revert brings the old network back.
+	controlClient.OnWifiChange(func(ssid, psk string) {
+		go func() {
+			wifi.Change(ssid, psk, controlClient.IsConnected)
+			// Only drain while connected — a failure result taken while
+			// the link is still down would be silently dropped by the
+			// send; leaving it queued lets the OnConnected drain carry it.
+			if controlClient.IsConnected() {
+				if r := wifi.TakeResult(); r != nil {
+					controlClient.SendWifiResult(r.OK, r.SSID, r.Error)
+				}
+			}
+		}()
+	})
+	controlClient.OnWifiCommit(wifi.Commit)
+	controlClient.OnWifiScan(func() {
+		go func() {
+			nets, err := wifi.Scan()
+			if err != nil {
+				controlClient.SendWifiScanResult(nil, err.Error())
+				return
+			}
+			controlClient.SendWifiScanResult(nets, "")
+		}()
 	})
 
 	// Beam lock/unlock — controller locks the beamformer onto the speaker's
@@ -264,6 +306,7 @@ func collectStats() client.DeviceStats {
 		StorageUsedMb:  stoUsed,
 		StorageTotalMb: stoTotal,
 		WifiRssi:       rssi,
+		WifiSsid:       wifi.CurrentSSID(),
 	}
 }
 

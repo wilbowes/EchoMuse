@@ -134,6 +134,7 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
 | `internal/server/` | Local state machine: mute, volume, LED mode priority |
 | `internal/config/config.go` | Global runtime config; env var defaults, overridden by controller push |
 | `internal/bindings/` | Hardware drivers: mic PCM, speaker PCM, LED I2C, button evdev |
+| `internal/wifi/` | Safe WiFi network change with auto-rollback (wifi_change/wifi_commit/wifi_scan control messages; pending-marker recovery at startup). Reload path is `svc wifi disable/enable` ONLY — see package comment for the hardware-proven constraints |
 | `pkg/led/`, `pkg/mic/`, `pkg/speaker/`, `pkg/buttons/` | Hardware abstractions (interfaces) |
 
 ### Key Python modules
