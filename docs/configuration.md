@@ -68,9 +68,9 @@ near-misses climbing, move one step toward Eager. If it wakes up when nobody
 spoke, move toward Precise.
 
 ### Barge-in
-Lets the wake word **interrupt the assistant mid-response** — say "Hey
-Rhasspy, stop" while it's reading you a paragraph and it cuts off and
-listens. Off by default. **Turn on Echo cancel (AEC) first**: barge-in
+Lets the wake word **interrupt the assistant mid-turn** — say "Hey
+Rhasspy, stop" while it's reading you a paragraph (or still thinking
+about your last question) and it cuts off and listens. Off by default. **Turn on Echo cancel (AEC) first**: barge-in
 works by leaving the microphones live while the device speaks, and AEC is
 what stops it hearing itself. The **barge threshold** is the wake
 confidence required during playback — and counter-intuitively it should be
@@ -79,7 +79,9 @@ speaker is far louder at the microphones than you are, so your voice
 scores lower over playback than in a quiet room, while the device's own
 (echo-cancelled) voice barely scores at all (0.002–0.003 measured since
 v2.7.8). **0.05 is a good default** — you shouldn't need to raise your
-voice much. Raise it if responses ever cut themselves off.
+voice much. Raise it if responses ever cut themselves off. (During the
+silent *thinking* pause the normal wake sensitivity applies instead —
+nothing is playing, so the low barge threshold isn't needed there.)
 
 ### Speex denoise
 Runs a noise cleaner on the audio *only for wake-word scoring* (your actual

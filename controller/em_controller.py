@@ -247,13 +247,16 @@ class Device:
         # quickly, rises slowly, so speech doesn't drag the floor up.
         self.noise_floor: float = 0.0
 
-        # Barge-in (§3.2): wake word interrupts TTS playback. Controller-
-        # side feature — with it enabled the mic keeps streaming through
-        # playback (device AEC subtracts the speaker output) and
-        # _barge_watcher scores the stream at barge_threshold; on detection
-        # it sets barge_detected + cancel_event and the turn loop re-enters
-        # a fresh turn. _barge_model is a dedicated OWW instance (the main
-        # wake listener task is blocked awaiting the turn during playback).
+        # Barge-in (§3.2): wake word interrupts the thinking phase or TTS
+        # playback. Controller-side feature — with it enabled the mic keeps
+        # streaming through the turn (device AEC subtracts the speaker
+        # output during playback) and _barge_watcher scores the stream from
+        # STT_VAD_END onward (barge_threshold during playback, the normal
+        # wake threshold during thinking); on detection it sets
+        # barge_detected + cancel_event (plus speaker_flush or HA pipeline
+        # cancel, phase-dependent) and the turn loop re-enters a fresh
+        # turn. _barge_model is a dedicated OWW instance (the main wake
+        # listener task is blocked awaiting the turn).
         self.barge_in_enabled = False
         self.barge_threshold  = 0.6
         self.barge_detected   = False
@@ -565,23 +568,31 @@ async def _run_claracore_backend(
     return voice_response
 
 
-async def _barge_watcher(device: Device):
+async def _barge_watcher(device: Device, playback_started: asyncio.Event):
     """
-    Wake-word watcher that runs only while TTS is playing (barge-in, §3.2).
+    Wake-word watcher spanning the thinking AND playback phases (barge-in,
+    §3.2). Started at STT_VAD_END (on_thinking); before that the user's own
+    command is streaming and a wake word in it is just speech.
 
-    With barge-in enabled the mic keeps streaming through playback (the
-    device's AEC subtracts its own speaker output) and oww_paused routes
-    frames to voice_queue — which nothing else reads during the playback
-    phase, so this watcher drains and scores it with a dedicated
+    With barge-in enabled the mic keeps streaming through the whole turn
+    (the device's AEC subtracts its own speaker output during playback) and
+    oww_paused routes frames to voice_queue — which nothing else reads
+    after STT ends, so this watcher drains and scores it with a dedicated
     openwakeword instance (the main wake listener task is blocked awaiting
-    the turn). Detection threshold is the *higher* of barge_threshold and
-    the normal wake threshold: residual echo after AEC must not let the
-    device wake itself.
+    the turn).
 
-    On detection: set barge_detected + cancel_event (aborts stream_speaker
-    and the drain sleep in _run_post_turn_playback) and tell the device to
-    flush its buffered speaker audio so the interruption is audible
-    immediately, not after up to ~1.4s of queued TTS.
+    The threshold is phase-dependent because the acoustics are: during
+    playback the speaker is ~25dB louder than the person at the mic, so
+    speech-over-TTS scores are depressed and barge_threshold sits well
+    below the wake threshold (~0.05–0.10). During thinking nothing is
+    playing — scores are normal, and using the low barge threshold there
+    would fire on random speech — so the normal wake threshold applies.
+
+    On detection: set barge_detected + cancel_event. During playback that
+    aborts stream_speaker and the drain sleep, plus a device speaker_flush
+    so the interruption is audible immediately (not after ~1.4s of queued
+    TTS). During thinking there's no audio to flush — instead the in-flight
+    HA pipeline is cancelled (local-only; any late HA result is discarded).
     """
     loop = asyncio.get_event_loop()
     if device._barge_model is None or device._barge_model_key != device.oww_model:
@@ -594,22 +605,24 @@ async def _barge_watcher(device: Device):
     model = device._barge_model
     model.reset()
 
-    # Drop anything queued before playback started (command tail, silence) —
-    # only fresh audio should be scored.
+    # Drop anything queued before the watcher started (command tail,
+    # silence) — only fresh audio should be scored.
     while not device.voice_queue.empty():
         try:
             device.voice_queue.get_nowait()
         except asyncio.QueueEmpty:
             break
 
-    # bargeInThreshold is used as-is — deliberately NOT floored at the wake
-    # threshold anymore. The max() clamp guarded against residual echo waking
-    # the device before AEC worked; measured with working AEC (2026-07-08),
-    # self-echo peaks at 0.004 converged / 0.055 worst-case-unconverged,
-    # while real speech over TTS scores 0.118+ — the echo is 25dB louder
-    # than the speaker at the mic, so speech-over-TTS scores are inherently
-    # depressed and a sub-wake threshold (~0.10) is both safe and necessary.
-    threshold = device.barge_threshold
+    # Playback phase: bargeInThreshold is used as-is — deliberately NOT
+    # floored at the wake threshold. The max() clamp guarded against
+    # residual echo waking the device before AEC worked; measured with
+    # working AEC (2026-07-08), self-echo peaks at 0.004 converged / 0.055
+    # worst-case-unconverged, while real speech over TTS scores 0.118+ —
+    # the echo is 25dB louder than the speaker at the mic, so
+    # speech-over-TTS scores are inherently depressed and a sub-wake
+    # threshold (~0.10) is both safe and necessary. Thinking phase uses the
+    # normal wake threshold (see docstring).
+    threshold = device.barge_threshold  # refined per-frame by phase below
     buf = bytearray()
     # Observability: the watcher used to log only on detection, which made a
     # failed barge-in attempt indistinguishable from "no frames arrived at
@@ -641,6 +654,9 @@ async def _barge_watcher(device: Device):
                 prediction = await loop.run_in_executor(None, model.predict, samples)
                 score = prediction.get(device._barge_model_key, 0.0)
                 frames += 1
+                in_playback = playback_started.is_set()
+                threshold = (device.barge_threshold if in_playback
+                             else device.oww_threshold)
                 if score > peak:
                     peak = score
                     if score >= 0.1:
@@ -649,17 +665,24 @@ async def _barge_watcher(device: Device):
                             f"(threshold {threshold:.2f})"
                         )
                 if score >= threshold:
+                    phase = "playback" if in_playback else "thinking"
                     log.info(
-                        f"[{device.device_id}] Barge-in: wake word during playback "
-                        f"(score={score:.3f} >= {threshold:.2f}) — cancelling TTS"
+                        f"[{device.device_id}] Barge-in: wake word during {phase} "
+                        f"(score={score:.3f} >= {threshold:.2f}) — cancelling turn"
                     )
                     db.log_device(
                         device.device_id, "info", "device",
-                        f"Barge-in (score={score:.3f})"
+                        f"Barge-in during {phase} (score={score:.3f})"
                     )
                     device.barge_detected = True
                     device.cancel_event.set()
-                    await device.send_control({"type": "speaker_flush"})
+                    if in_playback:
+                        await device.send_control({"type": "speaker_flush"})
+                    else:
+                        # Nothing is playing — abort the in-flight HA
+                        # pipeline instead (local-only; a late HA result is
+                        # discarded on arrival).
+                        esphome.cancel_voice_turn(device.device_id)
                     return
     finally:
         rms_mean = rms_sum / frames if frames else 0.0
@@ -836,6 +859,22 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
 
                 stop_spin = asyncio.Event()
                 spin_task = None
+                # Barge-in watcher state — reset per turn iteration below.
+                watcher          = None
+                playback_started = asyncio.Event()
+
+                async def stop_watcher():
+                    nonlocal watcher
+                    if watcher is None:
+                        return
+                    watcher.cancel()
+                    try:
+                        await watcher
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as e:
+                        log.warning(f"[{device.device_id}] Barge watcher error: {e}")
+                    watcher = None
 
                 async def cleanup_esphome():
                     device.thinking  = False
@@ -851,7 +890,7 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                     await leds_off(device)
 
                 async def on_thinking_esphome():
-                    nonlocal spin_task
+                    nonlocal spin_task, watcher
                     if stop_spin.is_set():
                         return  # cleanup already ran; turn is over
                     device.thinking  = True
@@ -864,9 +903,19 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                         spin_task = asyncio.create_task(
                             leds_spin_green(device, stop_spin)
                         )
+                    # Barge-in watcher starts here, not at playback: STT has
+                    # ended (VAD_END), so anything on the mic from now on is
+                    # a potential interruption. Spans thinking → playback;
+                    # cancelled in the turn loop's finally.
+                    if device.barge_in_enabled and (
+                        watcher is None or watcher.done()
+                    ):
+                        watcher = asyncio.create_task(
+                            _barge_watcher(device, playback_started)
+                        )
 
                 async def post_turn_play_esphome(voice_response: bytes):
-                    nonlocal spin_task
+                    nonlocal spin_task, watcher
                     if spin_task is None or spin_task.done():
                         spin_task = asyncio.create_task(
                             leds_spin_green(device, stop_spin)
@@ -881,17 +930,17 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                         # guarded against are gone: AGC no longer exists on
                         # the wake stream (v2.7.0) and echo content is
                         # cancelled at the source (v2.7.3).
-                        watcher = asyncio.create_task(_barge_watcher(device))
-                        try:
-                            await _run_post_turn_playback(device, voice_response)
-                        finally:
-                            watcher.cancel()
-                            try:
-                                await watcher
-                            except asyncio.CancelledError:
-                                pass
-                            except Exception as e:
-                                log.warning(f"[{device.device_id}] Barge watcher error: {e}")
+                        #
+                        # The watcher normally exists already (started at
+                        # thinking onset); the phase flag switches it to the
+                        # playback threshold. Defensive create for turns
+                        # that reach TTS without an STT_VAD_END.
+                        playback_started.set()
+                        if watcher is None or watcher.done():
+                            watcher = asyncio.create_task(
+                                _barge_watcher(device, playback_started)
+                            )
+                        await _run_post_turn_playback(device, voice_response)
                         return
                     # Acoustic-feedback guard (barge-in off): stop the mic
                     # BEFORE playback, not just in the post-turn finally.
@@ -949,6 +998,10 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                             preroll_discard=preroll_discard,
                         )
                     finally:
+                        # Watcher spans thinking→playback and is owned here:
+                        # every exit path (normal, barge, error, cancel)
+                        # must stop it before the next iteration re-arms.
+                        await stop_watcher()
                         # On barge the mic stays up: the user's follow-up
                         # command is already flowing into voice_queue and a
                         # mic_stop/start cycle here would drop the words
@@ -983,6 +1036,8 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                         # Reset spinner state for the next turn's thinking animation.
                         stop_spin.clear()
                         spin_task = None
+                        # Fresh phase flag for the next turn's watcher.
+                        playback_started = asyncio.Event()
                         continue
 
                     if should_continue and not device.cancel_event.is_set():
@@ -1018,6 +1073,8 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                         # Reset spinner state for the next turn's thinking animation.
                         stop_spin.clear()
                         spin_task = None
+                        # Fresh phase flag for the next turn's watcher.
+                        playback_started = asyncio.Event()
                     else:
                         break
 
@@ -1462,6 +1519,11 @@ async def handle_control(ws: WebSocketServerProtocol):
                 standalone_play=_standalone_play,
                 send_volume_set=_send_volume_set,
             )
+            # The ESPHome server object caches the OWW model from server
+            # creation — refresh it from the config we just loaded so HA's
+            # wake-word dropdown tracks dashboard changes across controller
+            # restarts too.
+            esphome.update_oww_model(device_id, device.oww_model)
 
         # ── Main message loop ─────────────────────────────────────────────
 

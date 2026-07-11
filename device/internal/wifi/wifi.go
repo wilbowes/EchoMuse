@@ -182,6 +182,11 @@ func Scan() ([]Network, error) {
 		if ssid == "" || ssid == "SSID" {
 			continue
 		}
+		// Hidden networks: wpa_cli prints the zeroed SSID bytes as literal
+		// \xNN escapes (e.g. \x00\x00…). Unjoinable by name — drop them.
+		if hiddenSSID.MatchString(ssid) {
+			continue
+		}
 		sig, err := strconv.Atoi(strings.TrimSpace(parts[2]))
 		if err != nil {
 			continue
@@ -199,6 +204,10 @@ func Scan() ([]Network, error) {
 }
 
 // ─── Change with rollback ─────────────────────────────────────────────────────
+
+// hiddenSSID matches scan_results entries that are entirely \xNN escape
+// sequences — wpa_cli's rendering of hidden/zeroed SSIDs.
+var hiddenSSID = regexp.MustCompile(`^(\\x[0-9a-fA-F]{2})+$`)
 
 // validCred matches wpaConfEscape in the provisioning wizard: a literal
 // " or \ can't be represented safely in a wpa_supplicant.conf quoted

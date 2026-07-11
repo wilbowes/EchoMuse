@@ -490,6 +490,10 @@ async def _post_device_config(request: web.Request) -> web.Response:
             live.oww_threshold = float(config["owwThreshold"])
         if "owwModel" in config:
             live.oww_model = config["owwModel"]
+            # Refresh HA's wake-word dropdown (lazy import — em_esphome
+            # imports em_api at module level).
+            import em_esphome
+            em_esphome.update_oww_model(device_id, config["owwModel"])
         if "owwSpeexNs" in config:
             live.oww_speex_ns = bool(config["owwSpeexNs"])
         if "bargeInEnabled" in config:
@@ -1675,6 +1679,10 @@ async def _post_global_config(request: web.Request) -> web.Response:
             live.oww_threshold = float(config["owwThreshold"])
         if "owwModel" in config:
             live.oww_model = config["owwModel"]
+            # Refresh HA's wake-word dropdown (lazy import — em_esphome
+            # imports em_api at module level).
+            import em_esphome
+            em_esphome.update_oww_model(device_id, config["owwModel"])
         if "owwSpeexNs" in config:
             live.oww_speex_ns = bool(config["owwSpeexNs"])
         if "bargeInEnabled" in config:

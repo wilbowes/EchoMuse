@@ -999,6 +999,15 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 del pcm_buf[:AUDIO_CHUNK]
                 self._send_one(api_pb2.VoiceAssistantAudio(data=chunk))
 
+    def disconnect(self) -> None:
+        """
+        Close this HA connection. HA's reconnect logic redials within
+        seconds and re-runs the full handshake — used to force a re-read
+        of VoiceAssistantConfiguration after a wake-word model change.
+        """
+        if self._transport and not self._transport.is_closing():
+            self._transport.close()
+
     def cancel_turn(self) -> None:
         """
         Cancel an in-flight voice turn — local only, no upstream signal.
@@ -1377,6 +1386,28 @@ def cancel_voice_turn(device_id: str) -> None:
     if satellite is None:
         return
     satellite.cancel_turn()
+
+
+def update_oww_model(device_id: str, model_id: str) -> None:
+    """
+    Keep HA's wake-word dropdown honest.
+
+    The satellite advertises the device's OWW model in
+    VoiceAssistantConfigurationResponse, which HA requests only at connect
+    time — so a wake-word change in the dashboard left HA showing the old
+    model until a controller restart. On a change: store the new id (used
+    by the next satellite instance) and bounce the active HA connection so
+    HA redials (within seconds) and re-requests the configuration.
+    """
+    server = get_server(device_id)
+    if server is None or server.oww_model_id == model_id:
+        return
+    server.oww_model_id = model_id
+    satellite = server.get_satellite()
+    if satellite is not None:
+        log.info(f"[{device_id}] OWW model → {model_id} — bouncing HA "
+                 f"connection to refresh the wake word configuration")
+        satellite.disconnect()
 
 
 
