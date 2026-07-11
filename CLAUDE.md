@@ -158,7 +158,7 @@ The device runs an A/B slot binary system:
 
 OTA is triggered from the dashboard — the controller pushes the new binary via the `/shell` WebSocket.
 
-Device-side payloads the controller distributes (currently `start_server.sh`, used by the provisioning wizard via `/api/provision/start_script`) live canonically in `controller/device_payloads/` and are read from disk per request — never embed copies in `em_api.py` or `dashboard.jsx`. `device/scripts/start_server.sh` is a symlink into that directory.
+Device-side payloads the controller distributes (currently `start_server.sh`, used by the provisioning wizard via `/api/provision/start_script`) live canonically in `controller/device_payloads/` and are read from disk per request — never embed copies in `em_api.py` or `dashboard.jsx`. `device/scripts/start_server.sh` is a symlink into that directory. Every firmware OTA also syncs the device's `/data/local/bin/start_server.sh` against the canonical payload (`_sync_start_script` — md5 compare, heredoc push, rename into place; takes effect on next device reboot), so script drift heals fleet-wide without a separate update path.
 
 ## Device config push
 

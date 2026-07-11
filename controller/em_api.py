@@ -32,6 +32,7 @@ state with persisted DB state without coupling to a global.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -857,6 +858,10 @@ async def _run_update(device_id: str, release: dict,
             await _push_log_event(device_id, "info", "controller",
                                   "A/B migration complete — active slot: server_a")
 
+        # Sync the startup script while we're here — OTA is the only update
+        # path existing devices have for it (see _sync_start_script).
+        await _sync_start_script(live, device_id)
+
         inactive_slot = "server_b" if active_slot == "server_a" else "server_a"
         await _push_log_event(device_id, "info", "controller",
                               f"Deploying to slot {inactive_slot} (active: {active_slot})")
@@ -1129,8 +1134,13 @@ async def _shell_run(live, cmd: str, timeout: float = 30.0) -> str:
 
 
 async def _stream_binary_to_slot(live, binary: bytes, slot: str) -> bool:
+    """Transfer a firmware binary to /data/local/bin/{slot}."""
+    return await _stream_file_to_device(live, binary, f"/data/local/bin/{slot}")
+
+
+async def _stream_file_to_device(live, data: bytes, dest: str) -> bool:
     """
-    Transfer a binary to /data/local/bin/{slot} on the device via shell heredoc.
+    Transfer a file to `dest` on the device via shell heredoc (mode 755).
 
     Detects available base64 decoder (busybox base64, python3, python) before
     transferring, since 'base64' is not always in PATH on Android/FireOS.
@@ -1140,7 +1150,6 @@ async def _stream_binary_to_slot(live, binary: bytes, slot: str) -> bool:
     import base64 as _b64
 
     device_id     = live.device_id
-    dest          = f"/data/local/bin/{slot}"
     DELIM         = "__END_B64_42__"
     DETECT_MARKER = "__DETECT_DONE__"
 
@@ -1191,8 +1200,8 @@ async def _stream_binary_to_slot(live, binary: bytes, slot: str) -> bool:
         log.info(f"[api] Decoder: {decode_cmd.split()[0]} {decode_cmd.split()[1]}")
 
         # ── Heredoc transfer ─────────────────────────────────────────────────
-        lines = _b64.encodebytes(binary).decode("ascii").splitlines(keepends=True)
-        log.info(f"[api] Transferring {len(binary):,} bytes to {slot} "
+        lines = _b64.encodebytes(data).decode("ascii").splitlines(keepends=True)
+        log.info(f"[api] Transferring {len(data):,} bytes to {dest} "
                  f"({len(lines)} base64 lines via heredoc)")
 
         # Single shell command: decode heredoc → dest, set permissions, confirm
@@ -1217,22 +1226,73 @@ async def _stream_binary_to_slot(live, binary: bytes, slot: str) -> bool:
                 msg  = await asyncio.wait_for(ws.recv(), timeout=5)
                 text = msg.decode("utf-8", errors="replace") if isinstance(msg, bytes) else msg
                 if "TRANSFER_OK" in text:
-                    log.info(f"[api] Transfer to {slot} confirmed")
+                    log.info(f"[api] Transfer to {dest} confirmed")
                     return True
                 if text.strip():
                     log.debug(f"[api] Shell output during transfer: {text!r}")
             except asyncio.TimeoutError:
                 continue
 
-        log.error(f"[api] Transfer to {slot} timed out waiting for TRANSFER_OK")
+        log.error(f"[api] Transfer to {dest} timed out waiting for TRANSFER_OK")
         return False
 
     except Exception as e:
-        log.error(f"[api] Binary transfer to {slot} failed: {e}")
+        log.error(f"[api] File transfer to {dest} failed: {e}")
         return False
     finally:
         await _release_shell_ws(device_id, live)
 
+
+
+async def _sync_start_script(live, device_id: str) -> None:
+    """
+    OTA-time payload sync: heal /data/local/bin/start_server.sh drift.
+
+    The startup script is installed at provisioning and — unlike the server
+    binary — had no other update path, so fleet drift accumulates (found
+    2026-07-11: Lounge was a script revision behind Office). Every OTA now
+    compares the device's script against the canonical payload
+    (controller/device_payloads/) and pushes it when they differ.
+
+    Replacement is rename-based on purpose: the running script's shell keeps
+    reading the OLD inode, so the update only takes effect at the next
+    device reboot — safe to do while the script sits in its `wait` loop.
+    Best-effort: a sync failure logs but never blocks the firmware update.
+    """
+    path = "/data/local/bin/start_server.sh"
+    try:
+        script = (PAYLOADS_DIR / "start_server.sh").read_bytes()
+    except OSError as e:
+        log.error(f"[api] start_server.sh payload unreadable — skipping sync: {e}")
+        return
+    want = hashlib.md5(script).hexdigest()
+
+    out = await _shell_run(live, f"busybox md5sum {path} 2>/dev/null")
+    if want in out:
+        return  # in sync — the common case
+    await asyncio.sleep(1.0)  # let the md5 shell session close cleanly
+
+    await _push_log_event(device_id, "info", "controller",
+                          "start_server.sh out of date — syncing canonical version")
+    tmp = path + ".new"
+    if not await _stream_file_to_device(live, script, tmp):
+        await _push_log_event(device_id, "warn", "controller",
+                              "start_server.sh sync failed (transfer) — continuing OTA")
+        return
+    await asyncio.sleep(1.0)
+
+    res = await _shell_run(live,
+        f'NEW=$(busybox md5sum {tmp} | busybox cut -d" " -f1); '
+        f'if [ "$NEW" = "{want}" ]; then '
+        f'mv {tmp} {path} && chmod 755 {path} && echo SCRIPT_SYNCED; '
+        f'else rm -f {tmp}; echo SCRIPT_MD5_MISMATCH:$NEW; fi')
+    if "SCRIPT_SYNCED" in res:
+        await _push_log_event(device_id, "info", "controller",
+                              "start_server.sh synced — takes effect on next device reboot")
+    else:
+        await _push_log_event(device_id, "warn", "controller",
+                              f"start_server.sh sync failed ({res.strip() or 'no output'}) — continuing OTA")
+    await asyncio.sleep(1.0)
 
 
 async def _exec_shell(live, cmd: str) -> None:
