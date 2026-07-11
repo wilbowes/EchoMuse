@@ -262,13 +262,36 @@ func writeConf(content string) error {
 	return os.Chmod(confPath, 0o660)
 }
 
-func bounceWifi() {
+// svcWifi toggles the framework WiFi service. /system/bin/svc is a
+// shebang-less shell script — execve returns ENOEXEC on it, so it must be
+// run through sh explicitly (exec.Command("svc", ...) silently no-ops).
+func svcWifi(state string) error {
+	out, err := exec.Command("/system/bin/sh", "/system/bin/svc", "wifi", state).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("svc wifi %s: %v (%s)", state, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func bounceWifi() error {
 	log.Println("[wifi] svc wifi disable")
-	_ = exec.Command("svc", "wifi", "disable").Run()
-	time.Sleep(2 * time.Second)
+	if err := svcWifi("disable"); err != nil {
+		return err
+	}
+	// Verify the disable took effect. A no-op bounce leaves wpa_supplicant
+	// running against its old in-memory config, and every downstream gate
+	// then passes vacuously against the old network — a false success that
+	// commits the new conf without ever trying it.
+	if !waitFor("disassociation after disable", 10*time.Second, func() bool { return !associated() }) {
+		_ = svcWifi("enable")
+		return fmt.Errorf("wifi did not go down after 'svc wifi disable'")
+	}
 	log.Println("[wifi] svc wifi enable")
-	_ = exec.Command("svc", "wifi", "enable").Run()
+	if err := svcWifi("enable"); err != nil {
+		return err
+	}
 	time.Sleep(3 * time.Second)
+	return nil
 }
 
 func waitFor(what string, timeout time.Duration, cond func() bool) bool {
@@ -286,6 +309,13 @@ func waitFor(what string, timeout time.Duration, cond func() bool) bool {
 func associated() bool {
 	out, _ := wpaCli("status")
 	return strings.Contains(out, "wpa_state=COMPLETED")
+}
+
+// associatedTo reports association specifically to the named network —
+// bare wpa_state=COMPLETED is satisfied by the *old* network if the
+// supplicant never actually restarted.
+func associatedTo(ssid string) bool {
+	return CurrentSSID() == ssid
 }
 
 func setResult(r Result) {
@@ -371,14 +401,19 @@ func Change(ssid, psk string, connected func() bool) {
 			_ = os.Remove(markerPath)
 			_ = os.Remove(backupPath)
 		}
-		bounceWifi()
+		if err := bounceWifi(); err != nil {
+			log.Printf("[wifi] revert bounce failed: %v", err)
+		}
 		waitFor("re-association after revert", associateTimeout, associated)
 		setResult(Result{OK: false, SSID: ssid, Error: reason})
 	}
 
-	bounceWifi()
+	if err := bounceWifi(); err != nil {
+		revert(err.Error())
+		return
+	}
 
-	if !waitFor("association", associateTimeout, associated) {
+	if !waitFor("association", associateTimeout, func() bool { return associatedTo(ssid) }) {
 		revert(fmt.Sprintf("did not associate to %q within %s (wrong passphrase or AP out of range?)", ssid, associateTimeout))
 		return
 	}
@@ -429,6 +464,8 @@ func RecoverIfPending() {
 	}
 	_ = os.Remove(markerPath)
 	_ = os.Remove(backupPath)
-	bounceWifi()
+	if err := bounceWifi(); err != nil {
+		log.Printf("[wifi] startup restore bounce failed: %v", err)
+	}
 	setResult(Result{OK: false, SSID: m.NewSSID, Error: "device restarted before the change was confirmed — previous network restored"})
 }
