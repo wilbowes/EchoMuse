@@ -1549,30 +1549,34 @@ async def handle_control(ws: WebSocketServerProtocol):
                     })
 
                 elif msg_type == "wifi_result":
-                    # Outcome of a wifi_change — arrives on the connection
-                    # the device re-established after switching (success) or
-                    # reverting (failure). On success, acknowledge with
-                    # wifi_commit so the device finalises the change
-                    # (deletes its rollback backup + pending marker).
+                    # Outcome of a wifi_change. The device re-sends this
+                    # until it sees a wifi_commit ack (a single send can
+                    # vanish into a half-open TCP connection killed by the
+                    # network switch), so: ALWAYS ack — on success the ack
+                    # also finalises the change (deletes rollback backup +
+                    # pending marker; a failed change already removed both,
+                    # so the ack is a no-op there) — and log/record only
+                    # the first arrival.
                     ok    = bool(msg.get("ok"))
                     ssid  = msg.get("ssid", "")
                     error = msg.get("error") or ""
-                    st = api.wifi_record_result(device_id, ok, ssid, error)
-                    if ok:
-                        await device.send_control({"type": "wifi_commit"})
-                        log.info(f"[{device_id}] WiFi changed to \"{ssid}\" — committed")
-                        db.log_device(device_id, "info", "device",
-                                      f'WiFi changed to "{ssid}"')
-                    else:
-                        log.warning(f"[{device_id}] WiFi change to \"{ssid}\" "
-                                    f"failed: {error}")
-                        db.log_device(device_id, "warning", "device",
-                                      f'WiFi change to "{ssid}" failed: {error}')
-                    await api._push_event({
-                        "type":      "device_update",
-                        "device_id": device_id,
-                        "state":     {"wifi": st},
-                    })
+                    st, duplicate = api.wifi_record_result(device_id, ok, ssid, error)
+                    await device.send_control({"type": "wifi_commit"})
+                    if not duplicate:
+                        if ok:
+                            log.info(f"[{device_id}] WiFi changed to \"{ssid}\" — committed")
+                            db.log_device(device_id, "info", "device",
+                                          f'WiFi changed to "{ssid}"')
+                        else:
+                            log.warning(f"[{device_id}] WiFi change to \"{ssid}\" "
+                                        f"failed: {error}")
+                            db.log_device(device_id, "warning", "device",
+                                          f'WiFi change to "{ssid}" failed: {error}')
+                        await api._push_event({
+                            "type":      "device_update",
+                            "device_id": device_id,
+                            "state":     {"wifi": st},
+                        })
 
                 elif msg_type == "wifi_scan_result":
                     fut = device.wifi_scan_future

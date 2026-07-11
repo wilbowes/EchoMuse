@@ -153,10 +153,11 @@ func main() {
 			st := collectStats()
 			controlClient.SendStats(st)
 		}()
-		// Deliver any WiFi change outcome that couldn't be sent while the
-		// network was switching/reverting (including the "restarted before
-		// commit" result RecoverIfPending leaves behind).
-		if r := wifi.TakeResult(); r != nil {
+		// Deliver any unacknowledged WiFi change outcome (including the
+		// "restarted before commit" result RecoverIfPending leaves
+		// behind). Not cleared here — the controller's wifi_commit ack
+		// does that (wifi.Commit), so a result lost in transit re-sends.
+		if r := wifi.PendingResult(); r != nil {
 			controlClient.SendWifiResult(r.OK, r.SSID, r.Error)
 		}
 	})
@@ -176,20 +177,25 @@ func main() {
 	})
 
 	// WiFi change — the executor owns the whole switch/rollback sequence
-	// (internal/wifi); the reconnect gate polls IsConnected. The outcome is
-	// sent as wifi_result on whichever connection can carry it: right here
-	// if the gate passed (we're connected), otherwise the OnConnected drain
-	// below picks it up after the revert brings the old network back.
+	// (internal/wifi); the reconnect gate polls IsConnected. The outcome
+	// is sent as wifi_result with at-least-once delivery: retried on a
+	// ticker (and by the OnConnected drain above) until the controller's
+	// wifi_commit ack clears it. IsConnected can report true against a
+	// half-open TCP connection the interface bounce killed, so a single
+	// send is not enough — the very first hardware success vanished that
+	// way while the WS looked connected the whole time.
 	controlClient.OnWifiChange(func(ssid, psk string) {
 		go func() {
 			wifi.Change(ssid, psk, controlClient.IsConnected)
-			// Only drain while connected — a failure result taken while
-			// the link is still down would be silently dropped by the
-			// send; leaving it queued lets the OnConnected drain carry it.
-			if controlClient.IsConnected() {
-				if r := wifi.TakeResult(); r != nil {
+			for i := 0; i < 30; i++ { // ~5 min, then give up (dashboard TTL is 4)
+				r := wifi.PendingResult()
+				if r == nil {
+					return
+				}
+				if controlClient.IsConnected() {
 					controlClient.SendWifiResult(r.OK, r.SSID, r.Error)
 				}
+				time.Sleep(10 * time.Second)
 			}
 		}()
 	})

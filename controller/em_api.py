@@ -109,12 +109,24 @@ def wifi_state(device_id: str) -> dict:
     return st
 
 
-def wifi_record_result(device_id: str, ok: bool, ssid: str, error: str) -> dict:
-    """Store a wifi_result reported by the device; returns the new state."""
+def wifi_record_result(device_id: str, ok: bool, ssid: str, error: str
+                       ) -> tuple[dict, bool]:
+    """
+    Store a wifi_result reported by the device.
+
+    Returns (state, duplicate). The device re-sends its result until the
+    wifi_commit ack lands, so re-arrivals of the same outcome are flagged
+    (duplicate=True) and don't refresh the timestamp — callers ack every
+    arrival but log/record only the first.
+    """
     st = wifi_state(device_id)
+    last = st.get("last_result")
+    if (last and last.get("ok") == ok and last.get("ssid") == ssid
+            and last.get("error") == error and st.get("pending") is None):
+        return st, True
     st["pending"] = None
     st["last_result"] = {"ok": ok, "ssid": ssid, "error": error, "at": time.time()}
-    return st
+    return st, False
 
 # ─── Initialisation ───────────────────────────────────────────────────────────
 

@@ -15,6 +15,19 @@
 //   - wpa_cli needs BOTH -p /data/misc/wifi/sockets (non-default socket
 //     dir) and -i wlan0.
 //
+// Two further lessons found on hardware 2026-07-11, AFTER the wizard:
+//
+//   - /system/bin/svc is a shebang-less shell script: execve (and hence
+//     Go's exec.Command("svc", ...)) fails ENOEXEC. It must be run via
+//     /system/bin/sh, and the disable must be VERIFIED to have dropped
+//     association — a silent no-op bounce makes every gate below pass
+//     against the old network and falsely commits the new conf.
+//   - The conf must be written while WiFi is DOWN: on `svc wifi disable`,
+//     WifiStateMachine saves its in-memory network list back over
+//     wpa_supplicant.conf, clobbering anything written beforehand (the
+//     wizard got away with write-then-bounce only because a factory
+//     device has no framework-known networks to save). See reloadConf.
+//
 // Unlike the wizard (ADB shell), this package runs inside the root Go
 // binary, so file writes use plain os.WriteFile — none of the mksh
 // redirect quirks apply. Ownership must still be restored to wifi:wifi
@@ -24,10 +37,11 @@
 // device owns the whole sequence):
 //
 //  1. Back up the current conf and drop a pending marker file.
-//  2. Write the new conf, bounce wifi via svc.
-//  3. Gates: associate ≤20s → IPv4 on wlan0 ≤20s → control WebSocket
-//     re-registered ≤90s. Any failure → restore the backup, bounce again,
-//     and report the failure once the connection returns.
+//  2. Disable wifi (verified), write the new conf, enable wifi.
+//  3. Gates: associate to the TARGET SSID ≤45s → IPv4 on wlan0 ≤20s →
+//     control WebSocket re-registered ≤90s. Any failure → restore the
+//     backup the same way and report the failure once the connection
+//     returns.
 //  4. On success the controller sends wifi_commit, which deletes the
 //     marker + backup. Until then the change is provisional.
 //  5. Crash safety: if the marker exists at process start, a previous
@@ -63,7 +77,11 @@ const (
 	// as this user.
 	aidWifi = 1010
 
-	associateTimeout = 20 * time.Second
+	// 20s (the provisioning wizard's window) proved too tight on hardware
+	// for a network the framework hasn't joined before — autojoin's scan
+	// cycle alone can eat most of it. Reverts re-associate to a known
+	// network well inside 20s, so only first-join pays the longer wait.
+	associateTimeout = 45 * time.Second
 	ipTimeout        = 20 * time.Second
 	// The reconnect gate covers mDNS rediscovery plus the control client's
 	// 5s retry cadence; generous because a false negative reverts a
@@ -273,25 +291,47 @@ func svcWifi(state string) error {
 	return nil
 }
 
-func bounceWifi() error {
+// disableWifi brings the framework WiFi down and verifies it actually
+// dropped. A no-op disable leaves wpa_supplicant running against its old
+// in-memory config, and every downstream gate then passes vacuously
+// against the old network — a false success that commits an untried conf.
+func disableWifi() error {
 	log.Println("[wifi] svc wifi disable")
 	if err := svcWifi("disable"); err != nil {
 		return err
 	}
-	// Verify the disable took effect. A no-op bounce leaves wpa_supplicant
-	// running against its old in-memory config, and every downstream gate
-	// then passes vacuously against the old network — a false success that
-	// commits the new conf without ever trying it.
 	if !waitFor("disassociation after disable", 10*time.Second, func() bool { return !associated() }) {
 		_ = svcWifi("enable")
 		return fmt.Errorf("wifi did not go down after 'svc wifi disable'")
 	}
+	return nil
+}
+
+func enableWifi() error {
 	log.Println("[wifi] svc wifi enable")
 	if err := svcWifi("enable"); err != nil {
 		return err
 	}
 	time.Sleep(3 * time.Second)
 	return nil
+}
+
+// reloadConf swaps in a new wpa_supplicant.conf with WiFi DOWN. Order is
+// load-bearing: on disable, WifiStateMachine saves its in-memory network
+// list back to wpa_supplicant.conf — a conf written while WiFi is up gets
+// clobbered by that save, and the device silently rejoins the old network
+// (found on hardware 2026-07-11; provisioning never hit it because a
+// factory device has no framework-known networks to save).
+func reloadConf(content string) error {
+	if err := disableWifi(); err != nil {
+		return err
+	}
+	if err := writeConf(content); err != nil {
+		// Leave WiFi usable rather than down next to a bad conf.
+		_ = enableWifi()
+		return err
+	}
+	return enableWifi()
 }
 
 func waitFor(what string, timeout time.Duration, cond func() bool) bool {
@@ -318,29 +358,68 @@ func associatedTo(ssid string) bool {
 	return CurrentSSID() == ssid
 }
 
+// waitForAssociation polls for association to ssid, logging the raw
+// supplicant state every 5s so a timeout in the field says what the
+// framework was doing (SCANNING vs 4WAY_HANDSHAKE vs INTERFACE_DISABLED).
+func waitForAssociation(ssid string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	lastDiag := time.Now()
+	for time.Now().Before(deadline) {
+		if associatedTo(ssid) {
+			return true
+		}
+		if time.Since(lastDiag) >= 5*time.Second {
+			out, _ := wpaCli("status")
+			state := "?"
+			for _, line := range strings.Split(out, "\n") {
+				if v, ok := strings.CutPrefix(strings.TrimSpace(line), "wpa_state="); ok {
+					state = v
+					break
+				}
+			}
+			log.Printf("[wifi] waiting for association to %q — wpa_state=%s", ssid, state)
+			lastDiag = time.Now()
+		}
+		time.Sleep(time.Second)
+	}
+	log.Printf("[wifi] timed out waiting for association to %q (%s)", ssid, timeout)
+	return false
+}
+
 func setResult(r Result) {
 	mu.Lock()
 	pending = &r
 	mu.Unlock()
 }
 
-// TakeResult returns and clears the unreported change outcome, if any.
-// Called from the control client's OnConnected path so the result rides
-// the first connection able to carry it.
-func TakeResult() *Result {
+// PendingResult returns the unacknowledged change outcome, if any,
+// WITHOUT clearing it. Delivery is at-least-once: the result stays
+// pending (and is re-sent on reconnect and on a retry ticker) until the
+// controller acks with wifi_commit — a fire-and-forget send can vanish
+// into a half-open TCP connection that the interface bounce killed but
+// that still looks connected to the writer (seen on hardware 2026-07-11).
+func PendingResult() *Result {
 	mu.Lock()
 	defer mu.Unlock()
-	r := pending
-	pending = nil
-	return r
+	if pending == nil {
+		return nil
+	}
+	r := *pending
+	return &r
 }
 
-// Commit finalises a successful change: the provisional state (marker +
-// backup) is deleted, so a future crash/restart keeps the new network.
+// Commit handles the controller's wifi_commit ack: the provisional state
+// (marker + backup) is deleted so a future crash/restart keeps the new
+// network, and the pending result stops being re-sent. The controller
+// acks failure results too — the revert already removed marker/backup,
+// so the removes are harmless no-ops there.
 func Commit() {
 	_ = os.Remove(markerPath)
 	_ = os.Remove(backupPath)
-	log.Println("[wifi] change committed — backup and pending marker removed")
+	mu.Lock()
+	pending = nil
+	mu.Unlock()
+	log.Println("[wifi] result acknowledged — backup and pending marker removed")
 }
 
 // Change switches to a new network with automatic rollback. Runs
@@ -385,35 +464,28 @@ func Change(ssid, psk string, connected func() bool) {
 		return
 	}
 
-	if err := writeConf(composeConf(ssid, psk)); err != nil {
-		_ = os.Remove(markerPath)
-		setResult(Result{OK: false, SSID: ssid, Error: err.Error()})
-		return
-	}
-
 	revert := func(reason string) {
 		log.Printf("[wifi] change to %q failed (%s) — reverting", ssid, reason)
-		if err := writeConf(string(old)); err != nil {
-			// Conf unwritable is beyond self-healing; leave the marker so
-			// RecoverIfPending retries the restore on next start.
-			log.Printf("[wifi] REVERT WRITE FAILED: %v — marker left for recovery on restart", err)
+		// Restore with WiFi down (see reloadConf) — but if the restore
+		// write fails, conf is beyond self-healing: leave the marker so
+		// RecoverIfPending retries on next start.
+		restoreErr := reloadConf(string(old))
+		if restoreErr != nil {
+			log.Printf("[wifi] REVERT FAILED: %v — marker left for recovery on restart", restoreErr)
 		} else {
 			_ = os.Remove(markerPath)
 			_ = os.Remove(backupPath)
-		}
-		if err := bounceWifi(); err != nil {
-			log.Printf("[wifi] revert bounce failed: %v", err)
 		}
 		waitFor("re-association after revert", associateTimeout, associated)
 		setResult(Result{OK: false, SSID: ssid, Error: reason})
 	}
 
-	if err := bounceWifi(); err != nil {
+	if err := reloadConf(composeConf(ssid, psk)); err != nil {
 		revert(err.Error())
 		return
 	}
 
-	if !waitFor("association", associateTimeout, func() bool { return associatedTo(ssid) }) {
+	if !waitForAssociation(ssid, associateTimeout) {
 		revert(fmt.Sprintf("did not associate to %q within %s (wrong passphrase or AP out of range?)", ssid, associateTimeout))
 		return
 	}
@@ -458,14 +530,11 @@ func RecoverIfPending() {
 		_ = os.Remove(markerPath)
 		return
 	}
-	if err := writeConf(string(backup)); err != nil {
+	if err := reloadConf(string(backup)); err != nil {
 		log.Printf("[wifi] startup restore failed: %v — leaving marker for next start", err)
 		return
 	}
 	_ = os.Remove(markerPath)
 	_ = os.Remove(backupPath)
-	if err := bounceWifi(); err != nil {
-		log.Printf("[wifi] startup restore bounce failed: %v", err)
-	}
 	setResult(Result{OK: false, SSID: m.NewSSID, Error: "device restarted before the change was confirmed — previous network restored"})
 }
