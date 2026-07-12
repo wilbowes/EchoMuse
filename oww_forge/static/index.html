@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OWW Forge</title>
+<style>
+  :root {
+    --bg: #0e1217; --card: #161d26; --card2: #1c2530; --line: #26313f;
+    --text: #d8dee7; --dim: #8b97a6; --accent: #4da3ff; --ok: #46c98d;
+    --warn: #e6b455; --err: #e06c6c;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, sans-serif; }
+  header { display: flex; align-items: baseline; gap: 14px; padding: 18px 26px;
+           border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 19px; letter-spacing: .4px; }
+  header .sub { color: var(--dim); font-size: 12.5px; }
+  .badge { margin-left: auto; font-size: 12px; padding: 3px 10px; border-radius: 12px;
+           border: 1px solid var(--line); color: var(--dim); }
+  .badge.gpu { color: var(--ok); border-color: #2d5b46; }
+  main { display: grid; grid-template-columns: 340px 1fr; gap: 18px; padding: 20px 26px;
+         max-width: 1280px; margin: 0 auto; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+          padding: 16px 18px; margin-bottom: 18px; }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 1px;
+             color: var(--dim); margin-bottom: 12px; }
+  button { background: var(--card2); color: var(--text); border: 1px solid var(--line);
+           border-radius: 7px; padding: 6px 13px; font: inherit; font-size: 13px;
+           cursor: pointer; }
+  button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  button.primary { background: #1d3a5f; border-color: #2c5688; }
+  button:disabled { opacity: .45; cursor: default; }
+  input, select { background: var(--bg); color: var(--text); border: 1px solid var(--line);
+          border-radius: 7px; padding: 7px 10px; font: inherit; width: 100%; }
+  label { font-size: 12px; color: var(--dim); display: block; margin: 10px 0 4px; }
+  .asset { display: flex; align-items: center; gap: 9px; padding: 6px 0;
+           border-bottom: 1px solid var(--line); font-size: 13px; }
+  .asset:last-child { border-bottom: 0; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--err); flex: none; }
+  .dot.on { background: var(--ok); }
+  .asset .detail { margin-left: auto; color: var(--dim); font-size: 12px; }
+  .ww { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+        padding: 16px 18px; margin-bottom: 14px; }
+  .ww .top { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .ww h3 { font-size: 16px; }
+  .ww .phrase { color: var(--dim); font-style: italic; }
+  .chips { display: flex; gap: 8px; margin: 10px 0 12px; flex-wrap: wrap; }
+  .chip { font-size: 11.5px; padding: 2px 9px; border-radius: 10px;
+          border: 1px solid var(--line); color: var(--dim); }
+  .chip.on { color: var(--ok); border-color: #2d5b46; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  #console { position: sticky; bottom: 0; margin: 0 26px 20px; max-width: 1228px; }
+  #console pre { background: #0a0e12; border: 1px solid var(--line); border-radius: 8px;
+                 padding: 10px 12px; height: 220px; overflow-y: auto; font-size: 12px;
+                 color: #b7c2cf; white-space: pre-wrap; }
+  #console .bar { display: flex; gap: 10px; align-items: center; padding: 6px 2px; }
+  .status { font-size: 12.5px; }
+  .status.running { color: var(--warn); } .status.ok { color: var(--ok); }
+  .status.fail { color: var(--err); }
+  .muted { color: var(--dim); font-size: 12px; }
+  details summary { cursor: pointer; color: var(--dim); font-size: 12.5px; margin-top: 8px; }
+  .testout { background: #0a0e12; border-radius: 6px; padding: 8px 10px; font-size: 12px;
+             margin-top: 8px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<header>
+  <h1>⚒ OWW Forge</h1>
+  <span class="sub">custom wake words for EchoMuse</span>
+  <span class="badge" id="gpuBadge">…</span>
+</header>
+
+<main>
+  <section>
+    <div class="card">
+      <h2>Training assets</h2>
+      <div id="assets"></div>
+      <div class="row" style="margin-top:12px">
+        <button id="dlAll">Download missing</button>
+        <span class="muted">~25 GB total, one-time</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>New wake word</h2>
+      <label>Phrase</label>
+      <input id="newPhrase" placeholder='e.g. "hey biscuit" — 3-4 syllables works best'>
+      <details>
+        <summary>advanced</summary>
+        <label>Model name (default: phrase slug)</label>
+        <input id="newName" placeholder="hey_biscuit">
+        <label>Synthetic positives</label>
+        <input id="newSamples" type="number" value="30000">
+        <label>Max training steps</label>
+        <input id="newSteps" type="number" value="50000">
+      </details>
+      <div class="row" style="margin-top:12px">
+        <button class="primary" id="createBtn">Create</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="wakewords"></section>
+</main>
+
+<div id="console" style="display:none">
+  <div class="bar">
+    <strong id="jobLabel"></strong>
+    <span class="status" id="jobStatus"></span>
+  </div>
+  <pre id="logPre"></pre>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let state = null, logOffset = 0, lastJobKey = null;
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) { alert(await r.text()); throw new Error(path); }
+  return r.json();
+}
+
+function fmtAgo(ts) {
+  const d = new Date(ts * 1000);
+  return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+}
+
+function render() {
+  const g = state.gpu || {};
+  const badge = $('gpuBadge');
+  badge.textContent = g.available ? `GPU · ${g.device}` : 'CPU only';
+  badge.className = 'badge' + (g.available ? ' gpu' : '');
+
+  $('assets').innerHTML = state.assets.map(a => `
+    <div class="asset">
+      <span class="dot ${a.present ? 'on' : ''}"></span>
+      <span>${a.label}</span>
+      <span class="detail">${a.present ? a.detail : 'missing'}</span>
+    </div>`).join('');
+  const missing = state.assets.filter(a => !a.present);
+  $('dlAll').disabled = busy() || missing.length === 0;
+  $('dlAll').textContent = missing.length ? 'Download missing' : 'All present ✓';
+
+  $('wakewords').innerHTML = state.wakewords.length ? state.wakewords.map(w => {
+    const clipTarget = w.n_samples + 2000;
+    const stages = [
+      ['config', true],
+      [`clips ${w.clips_train + w.clips_test}`, w.clips_train > 0],
+      ['features', w.features_built],
+      [w.model_built ? `model · ${w.model_size_kb} kB` : 'model', w.model_built],
+    ];
+    return `
+    <div class="ww" data-name="${w.name}">
+      <div class="top">
+        <h3>${w.name}</h3>
+        <span class="phrase">“${w.phrases.join('” / “')}”</span>
+        ${w.model_built ? `<span class="muted" style="margin-left:auto">built ${fmtAgo(w.model_mtime)}</span>` : ''}
+      </div>
+      <div class="chips">
+        ${stages.map(([t, on]) => `<span class="chip ${on ? 'on' : ''}">${on ? '✓ ' : ''}${t}</span>`).join('')}
+      </div>
+      <div class="row">
+        <button class="primary" data-act="build" ${busy() ? 'disabled' : ''}>
+          ${w.model_built ? 'Rebuild' : w.clips_train ? 'Resume build' : 'Build'}</button>
+        <button data-act="gtts" ${busy() ? 'disabled' : ''}>+ Google TTS</button>
+        <button data-act="test" ${w.model_built ? '' : 'disabled'}>Test wav…</button>
+        ${w.model_built ? `<a href="/api/models/${w.name}.onnx"><button>Download .onnx</button></a>` : ''}
+        <button data-act="del" style="margin-left:auto">Delete</button>
+        <input type="file" accept=".wav" multiple style="display:none">
+      </div>
+      <div class="testout" style="display:none"></div>
+    </div>`;
+  }).join('') : '<div class="card muted">No wake words yet — create one on the left.</div>';
+}
+
+function busy() { return state.job && state.job.running; }
+
+function renderJob() {
+  const j = state.job;
+  $('console').style.display = j ? '' : 'none';
+  if (!j) return;
+  const key = j.kind + j.started;
+  if (key !== lastJobKey) { lastJobKey = key; logOffset = 0; $('logPre').textContent = ''; }
+  $('jobLabel').textContent = j.label;
+  const s = $('jobStatus');
+  if (j.running) { s.textContent = '● running'; s.className = 'status running'; }
+  else if (j.rc === 0) { s.textContent = '✓ done'; s.className = 'status ok'; }
+  else { s.textContent = `✗ failed (exit ${j.rc})`; s.className = 'status fail'; }
+}
+
+async function pollLog() {
+  if (!state || !state.job) return;
+  const r = await (await fetch(`/api/log?offset=${logOffset}`)).json();
+  if (r.data) {
+    logOffset = r.offset;
+    const pre = $('logPre');
+    const stick = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
+    pre.textContent = (pre.textContent + r.data).slice(-100000);
+    if (stick) pre.scrollTop = pre.scrollHeight;
+  }
+}
+
+async function refresh() {
+  try { state = await api('/api/state'); } catch { return; }
+  render(); renderJob();
+}
+
+$('dlAll').onclick = async () => {
+  await api('/api/assets/download', {method: 'POST',
+    headers: {'Content-Type': 'application/json'}, body: '{}'});
+  refresh();
+};
+
+$('createBtn').onclick = async () => {
+  const phrase = $('newPhrase').value.trim();
+  if (!phrase) return alert('enter a phrase');
+  await api('/api/wakewords', {method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({phrase, name: $('newName').value,
+      samples: $('newSamples').value, steps: $('newSteps').value})});
+  $('newPhrase').value = ''; $('newName').value = '';
+  refresh();
+};
+
+$('wakewords').addEventListener('click', async e => {
+  const btn = e.target.closest('button[data-act]');
+  if (!btn) return;
+  const card = btn.closest('.ww'), name = card.dataset.name;
+  const act = btn.dataset.act;
+  if (act === 'build') {
+    await api(`/api/wakewords/${name}/build`, {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: '{}'});
+  } else if (act === 'gtts') {
+    const n = prompt('How many Google TTS clips? (needs GOOGLE_APPLICATION_CREDENTIALS;\nrough cost ≈ $0.25 per 1000 clips)', '2000');
+    if (!n) return;
+    await api(`/api/wakewords/${name}/google-tts`, {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({samples: +n})});
+  } else if (act === 'test') {
+    const input = card.querySelector('input[type=file]');
+    input.onchange = async () => {
+      const fd = new FormData();
+      for (const f of input.files) fd.append('wav', f);
+      const out = card.querySelector('.testout');
+      out.style.display = ''; out.textContent = 'scoring…';
+      const r = await api(`/api/wakewords/${name}/test`, {method: 'POST', body: fd});
+      out.textContent = r.output;
+    };
+    input.click();
+    return;
+  } else if (act === 'del') {
+    if (!confirm(`Delete '${name}' — its config, generated clips, and model?`)) return;
+    await api(`/api/wakewords/${name}`, {method: 'DELETE'});
+  }
+  refresh();
+});
+
+refresh();
+setInterval(refresh, 2500);
+setInterval(pollLog, 1000);
+</script>
+</body>
+</html>

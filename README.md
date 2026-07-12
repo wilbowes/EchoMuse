@@ -96,6 +96,15 @@ Tunable via environment variables on the device (overridden by controller config
 
 ---
 
+## Custom wake words
+
+`oww_forge/` trains custom openWakeWord models ("hey biscuit", …) from
+synthetic TTS speech — no voice recordings needed. It's a standalone Docker
+batch job, separate from the controller; the output is a small `.onnx` the
+controller loads by file path. See [`oww_forge/README.md`](oww_forge/README.md).
+
+---
+
 ## Acknowledgements
 
 - [EchoGo](https://github.com/Binozo/EchoGo) — Binozo
