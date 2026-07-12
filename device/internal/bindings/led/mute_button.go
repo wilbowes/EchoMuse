@@ -7,9 +7,12 @@ import (
 
 // Mute-button LED — the discrete red LED under the mic-off button, separate
 // from the 12-LED ring. Stock FireOS drives it through GPIO 445 via sysfs
-// (libled_controller.so: IssiLedDevice::exportMuteButtonGPIO /
-// setMuteButtonBrightness — same node, confirmed by toggling it live
-// 2026-07-12). It's a plain on/off GPIO, not a PWM channel, so "brightness"
+// (libled_hal.so: IssiLedDevice::exportMuteButtonGPIO / k_muteButtonGPIOAddress
+// = 0x1BD = 445, read straight out of the ELF 2026-07-12). The line is
+// ACTIVE-LOW: disassembly of setMuteButtonBrightness shows it streaming 0
+// to the value file for brightness > 47 (LED on) and 1 for brightness ≤ 36
+// (LED off) — get this backwards and the button glows whenever the device
+// is unmuted. It's a plain on/off GPIO, not a PWM channel, so "brightness"
 // is binary. The stock ledcontroller service exports it at boot before
 // EchoMuse stops that service, but export is re-done here defensively in
 // case boot ordering ever changes.
@@ -36,10 +39,11 @@ func InitMuteButtonLED() error {
 }
 
 // SetMuteButtonLED switches the red LED under the mic-off button.
+// Active-low (see package comment): 0 = on, 1 = off.
 func SetMuteButtonLED(on bool) error {
-	v := []byte("0")
+	v := []byte("1")
 	if on {
-		v = []byte("1")
+		v = []byte("0")
 	}
 	if err := os.WriteFile(muteButtonValuePath, v, 0644); err != nil {
 		return fmt.Errorf("mute button LED: write value: %w", err)
