@@ -240,8 +240,10 @@ $('wakewords').addEventListener('click', async e => {
   } else if (act === 'gtts') {
     const n = prompt('How many Google TTS clips? (needs GOOGLE_APPLICATION_CREDENTIALS;\nrough cost ≈ $0.25 per 1000 clips)', '2000');
     if (!n) return;
+    const langs = prompt('Voice languages (comma-separated)?\ne.g. en-GB,en-AU for UK/Australian accents only', 'en-US,en-GB,en-AU');
+    if (!langs) return;
     await api(`/api/wakewords/${name}/google-tts`, {method: 'POST',
-      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({samples: +n})});
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({samples: +n, languages: langs})});
   } else if (act === 'test') {
     const input = card.querySelector('input[type=file]');
     input.onchange = async () => {

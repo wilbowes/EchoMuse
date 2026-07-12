@@ -277,8 +277,9 @@ async def api_google_tts(request):
     _require_wakeword(name)
     body = await request.json() if request.can_read_body else {}
     samples = int(body.get("samples") or 2000)
-    _start_job("google-tts", f"Google TTS × {samples} for '{name}'",
-               ["google-tts", name, "--samples", str(samples), "--yes"])
+    langs = (body.get("languages") or "en-US,en-GB,en-AU").strip()
+    _start_job("google-tts", f"Google TTS × {samples} ({langs}) for '{name}'",
+               ["google-tts", name, "--samples", str(samples), "--languages", langs, "--yes"])
     return web.json_response({"ok": True})
 
 
