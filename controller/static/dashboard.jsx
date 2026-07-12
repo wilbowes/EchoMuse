@@ -3194,13 +3194,20 @@ function DeviceConfigForm({ config, onChange, disabled }) {
 // the parent's WebSocket keeps it fresh, so each row updates as devices
 // drop for reboot and reconnect on the new version.
 
-function DeployAllModal({ release, devices, onClose }) {
+function DeployAllModal({ release, devices, deployState, onStarted, onDismiss, onClose }) {
   const mono = "'DM Mono',monospace";
-  const [result, setResult]   = useState(null); // {version, started, skipped}
   const [running, setRunning] = useState(false);
   const [error, setError]     = useState('');
+  // Guard against setState after the modal is closed mid-request — the deploy
+  // POST returns fast (server backgrounds the work), but closing during that
+  // window otherwise logs a React unmounted-update error.
+  const mounted = useRef(true);
+  useEffect(() => () => { mounted.current = false; }, []);
 
-  const target = result?.version || release?.version;
+  // The view is driven by the persisted deployState (survives close/reopen),
+  // not local state. Present → show progress; absent → show the confirm screen.
+  const view = deployState;
+  const target = view?.version || release?.version;
   const byId = Object.fromEntries(devices.map(d => [d.device_id, d]));
   const eligible = devices.filter(d =>
     d.approved && d.connected && d.firmware_ver !== release?.version);
@@ -3220,14 +3227,19 @@ function DeployAllModal({ release, devices, onClose }) {
     return { text: 'updating…', color: '#405878' };
   }
 
+  const started = view?.started || [];
+  const allDone = started.length > 0 &&
+    started.every(id => { const d = byId[id]; return d && d.connected && d.firmware_ver === target; });
+
   async function deploy() {
     setRunning(true); setError('');
     try {
-      setResult(await API.post('/api/releases/deploy', {}));
+      const res = await API.post('/api/releases/deploy', {});
+      onStarted(res); // lift to App so it persists across close/reopen
     } catch (e) {
-      setError(e.error || 'Deploy failed');
+      if (mounted.current) setError(e.error || 'Deploy failed');
     }
-    setRunning(false);
+    if (mounted.current) setRunning(false);
   }
 
   const label = d => d?.label || d?.device_id || '?';
@@ -3242,7 +3254,7 @@ function DeployAllModal({ release, devices, onClose }) {
           Target: {release?.version || '—'} · devices update over WiFi and auto-roll-back on failure
         </div>
 
-        {!result ? (
+        {!view ? (
           <>
             <div style={{ fontFamily: mono, fontSize: 11, color: 'var(--text2)', marginBottom: 16, lineHeight: 1.8 }}>
               {eligible.length === 0
@@ -3260,7 +3272,7 @@ function DeployAllModal({ release, devices, onClose }) {
           </>
         ) : (
           <>
-            {(result.started || []).map(id => {
+            {(view.started || []).map(id => {
               const s = statusFor(id);
               return (
                 <div key={id} style={{ display: 'flex', justifyContent: 'space-between', fontFamily: mono, fontSize: 11, padding: '5px 0', borderBottom: '1px solid rgba(0,0,0,0.06)' }}>
@@ -3269,17 +3281,24 @@ function DeployAllModal({ release, devices, onClose }) {
                 </div>
               );
             })}
-            {(result.skipped || []).map(s => (
+            {(view.skipped || []).map(s => (
               <div key={s.device_id} style={{ display: 'flex', justifyContent: 'space-between', fontFamily: mono, fontSize: 11, padding: '5px 0', borderBottom: '1px solid rgba(0,0,0,0.06)' }}>
                 <span style={{ color: 'var(--muted)' }}>{label(byId[s.device_id])}</span>
                 <span style={{ color: 'var(--muted)' }}>skipped — {SKIP_REASONS[s.reason] || s.reason}</span>
               </div>
             ))}
-            {(result.started || []).length === 0 && (result.skipped || []).length === 0 && (
+            {(view.started || []).length === 0 && (view.skipped || []).length === 0 && (
               <div style={{ fontFamily: mono, fontSize: 11, color: 'var(--muted)' }}>Nothing to do.</div>
             )}
-            <div style={{ marginTop: 18 }}>
-              <Pill onClick={onClose}>Close</Pill>
+            <div style={{ fontFamily: mono, fontSize: 10, color: 'var(--muted)', marginTop: 14 }}>
+              {allDone
+                ? 'All devices updated.'
+                : 'Updates run in the background — you can close this and reopen it from the header to check progress.'}
+            </div>
+            <div style={{ marginTop: 14, display: 'flex', gap: 10 }}>
+              {allDone
+                ? <Pill accent onClick={() => { onDismiss(); onClose(); }}>Done</Pill>
+                : <Pill onClick={onClose}>Close (keeps running)</Pill>}
             </div>
           </>
         )}
@@ -3432,6 +3451,12 @@ function App() {
   const [loadError, setLoadError] = useState(null);
   const [showWizard, setShowWizard] = useState(false);
   const [showDeployAll, setShowDeployAll] = useState(false);
+  // Fleet deploy runs entirely server-side (per-device background tasks), so
+  // it outlives the modal. deployState persists {version, started, skipped}
+  // at the App level so you can close the modal and reopen it (via the header
+  // pill) to see live progress — the per-device rows read from `devices`,
+  // which the events WebSocket keeps fresh. null = no deploy tracked.
+  const [deployState, setDeployState] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
   const [globalConfig, setGlobalConfig] = useState(null);
   const wsRef = useRef(null);
@@ -3612,6 +3637,22 @@ function App() {
             {isAdmin && release && (
               <Pill small accent onClick={() => setShowDeployAll(true)}>Deploy all</Pill>
             )}
+            {isAdmin && deployState && (() => {
+              const byId = Object.fromEntries(devices.map(d => [d.device_id, d]));
+              const started = deployState.started || [];
+              const done = started.filter(id => {
+                const d = byId[id];
+                return d && d.connected && d.firmware_ver === deployState.version;
+              }).length;
+              const complete = started.length > 0 && done === started.length;
+              return (
+                <Pill small onClick={() => setShowDeployAll(true)}>
+                  {complete
+                    ? `✓ Fleet on ${deployState.version}`
+                    : `Deploying ${deployState.version} — ${done}/${started.length}`}
+                </Pill>
+              );
+            })()}
           </div>
         )}
       </div>
@@ -3658,9 +3699,17 @@ function App() {
         <ProvisionWizard token={token} onClose={() => setShowWizard(false)} knownDevices={devices}/>
       )}
 
-      {/* Fleet-wide OTA */}
+      {/* Fleet-wide OTA — the deploy itself is server-side; this modal is
+          just the view, backed by App-level deployState so it survives close. */}
       {showDeployAll && (
-        <DeployAllModal release={release} devices={devices} onClose={() => setShowDeployAll(false)}/>
+        <DeployAllModal
+          release={release}
+          devices={devices}
+          deployState={deployState}
+          onStarted={setDeployState}
+          onDismiss={() => setDeployState(null)}
+          onClose={() => setShowDeployAll(false)}
+        />
       )}
 
       {/* Settings panel */}

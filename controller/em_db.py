@@ -252,11 +252,16 @@ MIGRATIONS: list[str] = [
 _db_path: str = ""
 _conn: Optional[sqlite3.Connection] = None
 
-# SQLite WAL mode allows concurrent readers, but writes must be serialised.
-# run_in_executor dispatches db calls across multiple threads sharing the same
-# connection; without a lock, concurrent _tx sequences can interleave — thread B's
-# commit landing mid-transaction-A, or a rollback eating another thread's writes.
-_write_lock = threading.Lock()
+# We share ONE sqlite3.Connection across the run_in_executor thread pool
+# (check_same_thread=False). WAL allows concurrent readers only across
+# *separate* connections — on a single shared connection object, ANY two
+# concurrent operations (read-vs-write or write-vs-write) are a use-from-two-
+# threads misuse that SQLite rejects with SQLITE_MISUSE ("bad parameter or
+# other API misuse"). So every access — reads (_q/_q1) AND write transactions
+# (_tx) — must serialise through this one lock. (Guarding only writes was a
+# latent bug: a read racing a write-commit crashed concurrent OTAs during a
+# fleet deploy-all — 2026-07-12.)
+_db_lock = threading.Lock()
 
 
 def init(path: str = "echomuse.db") -> None:
@@ -285,12 +290,11 @@ def _tx():
     Context manager for a write transaction.
 
     Commits on clean exit, rolls back on any exception and re-raises.
-    Acquires _write_lock to serialise concurrent executor-thread writes on the
-    shared connection — SQLite WAL allows concurrent reads but not concurrent
-    write transactions from the same connection object.
+    Holds _db_lock for the whole transaction so no read or other write can
+    touch the shared connection mid-transaction (see _db_lock).
     """
     assert _conn is not None, "db.init() has not been called"
-    with _write_lock:
+    with _db_lock:
         try:
             yield _conn
             _conn.commit()
@@ -302,13 +306,15 @@ def _tx():
 def _q(sql: str, params: tuple = ()) -> list[sqlite3.Row]:
     """Execute a read query and return all rows."""
     assert _conn is not None, "db.init() has not been called"
-    return _conn.execute(sql, params).fetchall()
+    with _db_lock:
+        return _conn.execute(sql, params).fetchall()
 
 
 def _q1(sql: str, params: tuple = ()) -> Optional[sqlite3.Row]:
     """Execute a read query and return at most one row."""
     assert _conn is not None, "db.init() has not been called"
-    return _conn.execute(sql, params).fetchone()
+    with _db_lock:
+        return _conn.execute(sql, params).fetchone()
 
 
 # ─── Migrations ───────────────────────────────────────────────────────────────

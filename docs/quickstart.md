@@ -147,6 +147,9 @@ The LED ring tells you what's happening:
 - **Updates**: when a new EchoMuse release is out, the dashboard shows an
   update badge — one click updates the device over WiFi. If an update ever
   goes wrong, the device automatically rolls back to its previous version.
+  **Deploy all** updates the whole fleet at once; it runs in the background,
+  so you can close the dialog and reopen it from the header pill to check
+  progress.
 - **Settings**: everything tunable lives in the dashboard, either fleet-wide
   (the gear icon) or per device. See [configuration.md](configuration.md).
 - **Terminal**: each device page has a full remote terminal (for the
