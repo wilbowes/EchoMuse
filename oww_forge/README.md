@@ -153,9 +153,10 @@ you get a mixed-family training set at no extra training cost. Piper remains
 the volume source; Google adds acoustic character a single TTS family can't.
 
 Setup: create a GCP service account with the Text-to-Speech API enabled, save
-the JSON key as `./data/google-credentials.json`. Cost is trivial (~$0.50 for
-the default 2,000 clips); the command prints an estimate and asks before
-spending.
+the JSON key as `./data/google-credentials.json`. **Usually free**: the API's
+always-free tier covers ~1M premium-voice characters/month and a 2,000-clip
+wake-word run is ~25k characters (~2% of it). Past the free tier it's ~$16/1M
+chars; the command prints an estimate and asks before running.
 
 ## Installing a model into EchoMuse
 

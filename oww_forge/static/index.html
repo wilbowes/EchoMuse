@@ -238,7 +238,7 @@ $('wakewords').addEventListener('click', async e => {
     await api(`/api/wakewords/${name}/build`, {method: 'POST',
       headers: {'Content-Type': 'application/json'}, body: '{}'});
   } else if (act === 'gtts') {
-    const n = prompt('How many Google TTS clips? (needs GOOGLE_APPLICATION_CREDENTIALS;\nrough cost ≈ $0.25 per 1000 clips)', '2000');
+    const n = prompt('How many Google TTS clips? (needs GOOGLE_APPLICATION_CREDENTIALS)\nUsually free: a 2000-clip run is ~2% of the monthly free premium-voice quota (1M chars)', '2000');
     if (!n) return;
     const langs = prompt('Voice languages (comma-separated)?\ne.g. en-GB,en-AU for UK/Australian accents only', 'en-US,en-GB,en-AU');
     if (!langs) return;
