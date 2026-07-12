@@ -17,6 +17,8 @@ deep-phonemizer==0.0.19
 # piper-sample-generator (v2.0.0) runtime deps
 piper-phonemize==1.1.0
 webrtcvad==2.0.10
+# torch.onnx.export needs the onnx package at model-save time
+onnx==1.17.0
 # asset downloads + audio IO
 huggingface_hub>=0.19
 soundfile

@@ -5,9 +5,11 @@
 model_name: "@NAME@"
 
 # Phrase(s) the model activates on. Multiple entries still train ONE binary
-# model that fires on any of them.
+# model that fires on any of them — use alternate phonetic spellings to cover
+# how the phrase is actually pronounced in your house ("hey clara" is read
+# with an American vowel; add "hey clarra" for a British reading).
 target_phrase:
-  - "@PHRASE@"
+@PHRASES@
 
 # Phrases the model must NOT activate on (beyond the automatic phoneme-overlap
 # adversarial negatives). Add problem words you observe in practice.

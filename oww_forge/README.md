@@ -115,6 +115,34 @@ badge).
 - Choose a **3-4 syllable phrase**; short words make weak wake words no
   matter how much data you throw at them.
 
+### Pronunciation & accents
+
+The synthetic positives come from an **American** TTS corpus (LibriTTS-R),
+and phrases are phonemized with US readings — "hey clara" trains on the
+US vowel, not a British "clar-ra". Three levers, in increasing strength:
+
+1. **Phonetic spelling variants** — `target_phrase` accepts multiple
+   entries that train *one* model firing on any of them. Comma-separate them
+   at creation time (`forge.py new "hey clara, hey clarra"` or in the UI's
+   phrase field) and cover how your household actually says it.
+2. **Google TTS mix-in** — defaults to `en-US,en-GB,en-AU` voices, so a
+   `google-tts` pass before build adds genuinely British/Australian
+   synthetic speakers (`--languages en-GB,en-AU` to skip the US ones).
+3. **Real recordings** (best) — the UI's "+ Recordings…" button (or dropping
+   16kHz wavs into `positive_train/`) adds actual samples of you and the
+   kids to the training set; any phone recording format works (ffmpeg
+   converts). Even 20–50 real clips measurably pull the model toward the
+   voices that matter. They're augmented with reverb/noise like everything
+   else, and displace synthetic clips rather than growing the set.
+
+### Testing a built model
+
+Three ways: the UI's **🎤 Record test** (browser mic → score; needs
+HTTPS or localhost for mic permission), **Test file…** (upload any audio
+file), or `forge.py test <name> --wav <files-or-dir>`. Scores near 1.0 on
+your voice and near 0.0 on ordinary speech are what you want; the
+controller's default threshold is ~0.5.
+
 ### Google TTS positives (optional)
 
 `forge.py google-tts <name>` synthesizes the phrase across all premium Google

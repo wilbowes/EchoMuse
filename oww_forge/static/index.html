@@ -85,8 +85,10 @@
 
     <div class="card">
       <h2>New wake word</h2>
-      <label>Phrase</label>
-      <input id="newPhrase" placeholder='e.g. "hey biscuit" — 3-4 syllables works best'>
+      <label>Phrase — comma-separate pronunciation variants; one model fires on any</label>
+      <input id="newPhrase" placeholder='e.g. "hey clara, hey clarra" — 3-4 syllables works best'>
+      <div class="muted" style="margin-top:6px">The TTS reads spellings with an American accent —
+        add a phonetic spelling of how <em>you</em> say it ("clarra" for a British "clara").</div>
       <details>
         <summary>advanced</summary>
         <label>Model name (default: phrase slug)</label>
@@ -166,10 +168,12 @@ function render() {
         <button class="primary" data-act="build" ${busy() ? 'disabled' : ''}>
           ${w.model_built ? 'Rebuild' : w.clips_train ? 'Resume build' : 'Build'}</button>
         <button data-act="gtts" ${busy() ? 'disabled' : ''}>+ Google TTS</button>
-        <button data-act="test" ${w.model_built ? '' : 'disabled'}>Test wav…</button>
+        <button data-act="addrec" ${busy() ? 'disabled' : ''} title="Add real recordings of your household saying the phrase — best accent fix there is">+ Recordings…</button>
+        <button data-act="test" ${w.model_built ? '' : 'disabled'}>Test file…</button>
+        <button data-act="mic" ${w.model_built ? '' : 'disabled'}>🎤 Record test</button>
         ${w.model_built ? `<a href="/api/models/${w.name}.onnx"><button>Download .onnx</button></a>` : ''}
         <button data-act="del" style="margin-left:auto">Delete</button>
-        <input type="file" accept=".wav" multiple style="display:none">
+        <input type="file" accept="audio/*" multiple style="display:none">
       </div>
       <div class="testout" style="display:none"></div>
     </div>`;
@@ -249,6 +253,51 @@ $('wakewords').addEventListener('click', async e => {
       out.textContent = r.output;
     };
     input.click();
+    return;
+  } else if (act === 'addrec') {
+    const input = card.querySelector('input[type=file]');
+    input.onchange = async () => {
+      const fd = new FormData();
+      for (const f of input.files) fd.append('audio', f);
+      const out = card.querySelector('.testout');
+      out.style.display = ''; out.textContent = 'adding recordings…';
+      const r = await api(`/api/wakewords/${name}/samples`, {method: 'POST', body: fd});
+      out.textContent = `added ${r.added} recording(s) to the positive set` +
+        (r.errors.length ? `\nfailed: ${r.errors.join(', ')}` : '') +
+        `\n(rebuild to include them in the model)`;
+      refresh();
+    };
+    input.click();
+    return;
+  } else if (act === 'mic') {
+    const out = card.querySelector('.testout');
+    if (btn.dataset.rec) {  // second click = stop
+      btn.dataset.rec = ''; btn.textContent = '🎤 Record test';
+      window.__rec?.stop();
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({audio: true});
+      const rec = new MediaRecorder(stream);
+      const chunks = [];
+      rec.ondataavailable = e => chunks.push(e.data);
+      rec.onstop = async () => {
+        stream.getTracks().forEach(t => t.stop());
+        out.style.display = ''; out.textContent = 'scoring…';
+        const fd = new FormData();
+        fd.append('wav', new Blob(chunks, {type: rec.mimeType}), 'mic.webm');
+        const r = await api(`/api/wakewords/${name}/test`, {method: 'POST', body: fd});
+        out.textContent = r.output;
+      };
+      window.__rec = rec;
+      rec.start();
+      btn.dataset.rec = '1'; btn.textContent = '⏹ Stop';
+      out.style.display = ''; out.textContent = 'recording… say the wake word, then press Stop';
+      setTimeout(() => { if (btn.dataset.rec) { btn.dataset.rec = ''; btn.textContent = '🎤 Record test'; rec.stop(); } }, 5000);
+    } catch (e) {
+      out.style.display = ''; out.textContent = 'microphone unavailable: ' + e +
+        '\n(browsers require HTTPS or localhost for mic access — use "Test file…" with a phone recording instead)';
+    }
     return;
   } else if (act === 'del') {
     if (!confirm(`Delete '${name}' — its config, generated clips, and model?`)) return;

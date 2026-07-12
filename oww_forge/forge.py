@@ -253,7 +253,12 @@ def missing_assets() -> list:
 # ---------------------------------------------------------------- new
 
 def cmd_new(args) -> None:
-    name = args.name or slugify(args.phrase)
+    # comma-separated variants train ONE model that fires on any of them —
+    # the lever for pronunciation/accent coverage
+    phrases = [p.strip().lower() for p in args.phrase.split(",") if p.strip()]
+    if not phrases:
+        sys.exit("empty phrase")
+    name = args.name or slugify(phrases[0])
     ww_dir = WAKEWORDS / name
     cfg_path = ww_dir / "config.yml"
     if cfg_path.exists() and not args.force:
@@ -262,7 +267,7 @@ def cmd_new(args) -> None:
     template = (FORGE_DIR / "config.template.yml").read_text()
     cfg = (
         template.replace("@NAME@", name)
-        .replace("@PHRASE@", args.phrase.lower())
+        .replace("@PHRASES@", "\n".join(f'  - "{p}"' for p in phrases))
         .replace("@N_SAMPLES@", str(args.samples))
         .replace("@N_SAMPLES_VAL@", str(args.samples_val))
         .replace("@STEPS@", str(args.steps))
@@ -270,7 +275,7 @@ def cmd_new(args) -> None:
     )
     cfg_path.write_text(cfg)
     log(f"created {cfg_path}")
-    log(f"phrase: {args.phrase!r}  positives: {args.samples}  steps: {args.steps}")
+    log(f"phrases: {phrases}  positives: {args.samples}  steps: {args.steps}")
     log(f"next: forge.py build {name}   (optionally forge.py google-tts {name} first)")
 
 
@@ -403,7 +408,8 @@ def main() -> None:
     p.set_defaults(func=cmd_assets)
 
     p = sub.add_parser("new", help="create a wake-word training config")
-    p.add_argument("phrase", help='the wake phrase, e.g. "hey biscuit"')
+    p.add_argument("phrase", help='wake phrase; comma-separate pronunciation variants '
+                                  '(e.g. "hey clara, hey clarra") — one model fires on any')
     p.add_argument("--name", help="model name (default: slug of the phrase)")
     p.add_argument("--samples", type=int, default=30000, help="synthetic positives (default 30000)")
     p.add_argument("--samples-val", type=int, default=2000)

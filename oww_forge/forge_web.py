@@ -201,6 +201,63 @@ def _require_wakeword(name: str) -> None:
         raise web.HTTPNotFound(text=f"unknown wake word: {name}")
 
 
+def _to_wav16k(src: Path, dest: Path) -> None:
+    """Any browser/phone audio (webm/opus, m4a, mp3, wav…) → 16kHz mono wav."""
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-i", str(src),
+         "-ar", "16000", "-ac", "1", "-sample_fmt", "s16", str(dest)],
+        check=True, timeout=60,
+    )
+
+
+async def _save_uploads(request, field_name: str) -> list:
+    TMP.mkdir(parents=True, exist_ok=True)
+    reader = await request.multipart()
+    paths = []
+    async for field in reader:
+        if field.name != field_name:
+            continue
+        suffix = Path(field.filename or "clip.webm").suffix or ".webm"
+        dest = TMP / f"up_{int(time.time() * 1000)}_{len(paths)}{suffix}"
+        with open(dest, "wb") as f:
+            while chunk := await field.read_chunk():
+                f.write(chunk)
+        paths.append(dest)
+    return paths
+
+
+async def api_add_samples(request):
+    """Real recordings (you, the kids) → the positive training set. The
+    generate step counts existing clips toward n_samples, so these displace
+    synthetic ones rather than growing the set."""
+    name = request.match_info["name"]
+    _require_wakeword(name)
+    import yaml as _yaml
+
+    cfg = _yaml.safe_load((forge.WAKEWORDS / name / "config.yml").read_text())
+    base = Path(cfg["output_dir"]) / cfg["model_name"]
+    train_dir, test_dir = base / "positive_train", base / "positive_test"
+    train_dir.mkdir(parents=True, exist_ok=True)
+    test_dir.mkdir(parents=True, exist_ok=True)
+    uploads = await _save_uploads(request, "audio")
+    if not uploads:
+        raise web.HTTPBadRequest(text="no audio uploaded")
+    n_ok, errors = 0, []
+    try:
+        for i, src in enumerate(uploads):
+            out_dir = test_dir if (i + 1) % 10 == 0 else train_dir
+            dest = out_dir / f"real_{int(time.time())}_{i}.wav"
+            try:
+                _to_wav16k(src, dest)
+                n_ok += 1
+            except Exception as e:
+                errors.append(f"{src.name}: {e}")
+    finally:
+        for p in uploads:
+            p.unlink(missing_ok=True)
+    return web.json_response({"ok": not errors, "added": n_ok, "errors": errors})
+
+
 async def api_build(request):
     name = request.match_info["name"]
     _require_wakeword(name)
@@ -229,28 +286,26 @@ async def api_test(request):
     name = request.match_info["name"]
     if not (forge.MODELS / f"{name}.onnx").exists():
         raise web.HTTPNotFound(text="model not built yet")
-    TMP.mkdir(parents=True, exist_ok=True)
-    reader = await request.multipart()
-    paths = []
-    async for field in reader:
-        if field.name != "wav":
-            continue
-        dest = TMP / f"test_{int(time.time() * 1000)}_{len(paths)}.wav"
-        with open(dest, "wb") as f:
-            while chunk := await field.read_chunk():
-                f.write(chunk)
-        paths.append(dest)
-    if not paths:
-        raise web.HTTPBadRequest(text="no wav uploaded")
+    uploads = await _save_uploads(request, "wav")
+    if not uploads:
+        raise web.HTTPBadRequest(text="no audio uploaded")
+    wavs = []
     try:
+        for src in uploads:
+            wav = src.with_suffix(".conv.wav")
+            try:
+                _to_wav16k(src, wav)
+            except Exception as e:
+                return web.json_response({"ok": False, "output": f"could not decode audio: {e}"})
+            wavs.append(wav)
         out = subprocess.run(
-            [sys.executable, FORGE_PY, "test", name, "--wav", *map(str, paths)],
+            [sys.executable, FORGE_PY, "test", name, "--wav", *map(str, wavs)],
             capture_output=True, text=True, timeout=300,
         )
         return web.json_response({"ok": out.returncode == 0,
                                   "output": out.stdout + out.stderr})
     finally:
-        for p in paths:
+        for p in uploads + wavs:
             p.unlink(missing_ok=True)
 
 
@@ -287,6 +342,7 @@ def make_app() -> web.Application:
     app.router.add_post("/api/wakewords/{name}/build", api_build)
     app.router.add_post("/api/wakewords/{name}/google-tts", api_google_tts)
     app.router.add_post("/api/wakewords/{name}/test", api_test)
+    app.router.add_post("/api/wakewords/{name}/samples", api_add_samples)
     app.router.add_delete("/api/wakewords/{name}", api_delete)
     app.router.add_get("/api/models/{name}.onnx", api_model_download)
     return app
