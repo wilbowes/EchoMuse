@@ -222,7 +222,6 @@ These are set once, on the server, and need a controller restart to change:
 | Setting | What it is |
 |---|---|
 | `SERVER_IP` | The controller computer's LAN IP — what devices connect to. |
-| `VOICE_MODE` | `esphome` (Home Assistant, the supported mode) or `claracore` (legacy custom backend, being retired). |
 | `OWW_MODEL` / `OWW_THRESHOLD` | Startup defaults for wake word/sensitivity — the dashboard values override these. |
 | `DEVICE_APPROVAL` | `strict` (you approve every new device — recommended) or `auto`. |
 

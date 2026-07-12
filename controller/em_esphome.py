@@ -3,14 +3,13 @@ em_esphome.py — ESPHome native API integration
 ================================================
 
 Implements the controller's outward-facing ESPHome satellite interface
-(ESPHOME_SPEC.md §2). When VOICE_MODE=esphome:
+(ESPHOME_SPEC.md §2) — the controller's only voice backend:
 
   - One asyncio TCP listener per device, on ports starting at 16001
     (persisted in the device registry, never reused after deprovisioning).
   - Home Assistant's built-in ESPHome integration dials in to each port
     and drives voice turns through Assist exactly as it would for real
     ESPHome-flashed hardware.
-  - ClaraCore is not involved. run_voice_turn() is not called.
 
 Architecture:
 
@@ -29,9 +28,9 @@ Architecture:
                         triggers.
 
   start_esphome_servers() / stop_esphome_servers() — lifecycle, called from
-                        em_controller.main() when VOICE_MODE=esphome.
+                        em_controller.main().
 
-Voice turn flow (esphome mode):
+Voice turn flow:
   1. OWW fires (or button press) → em_controller calls
      trigger_voice_turn(device) in this module
   2. trigger_voice_turn() finds the active EchoMuseSatellite for that device
@@ -606,10 +605,10 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         already held. Streams mic audio to HA, waits for TTS response, and
         hands PCM to post_turn_play() for device-side playback.
 
-        on_thinking() is called when STT_VAD_END arrives — same LED/state
-        transition point as the ClaraCore "THINKING" sentinel.
-        post_turn_play(pcm_bytes) mirrors _run_post_turn_playback() from the
-        claracore path — EQ, resample, stream_speaker, acoustic-feedback drain.
+        on_thinking() is called when STT_VAD_END arrives — the LED/state
+        transition point into the thinking phase.
+        post_turn_play(pcm_bytes) wraps _run_post_turn_playback() —
+        EQ, resample, stream_speaker, acoustic-feedback drain.
 
         preroll_discard: number of ~80ms voice_queue frames to drop before
         streaming to HA. Wake-word turns pass VOICE_PREROLL_DISCARD (removes
@@ -991,8 +990,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             pcm_buf.extend(payload)
 
             # Send in 320-byte chunks (20ms at 16kHz mono S16_LE) —
-            # same granularity as the ClaraCore backend's CHUNK_BYTES
-            # but split further for smoother ESPHome API streaming.
+            # split small for smoother ESPHome API streaming.
             AUDIO_CHUNK = 320
             while len(pcm_buf) >= AUDIO_CHUNK:
                 chunk = bytes(pcm_buf[:AUDIO_CHUNK])
@@ -1015,8 +1013,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         Per ESPHOME_SPEC.md §7.4: the ESPHome protocol has no server-side
         abort mechanism. cancel_turn() stops local state only; any in-flight
         HA pipeline generation is left to complete and its result discarded
-        on arrival. This is a real, documented behavioural difference from
-        claracore mode (where cancel_event reaches into the live WS exchange).
+        on arrival — the cancel is local-only; nothing reaches into HA's
+        in-flight pipeline.
         """
         if self._turn_active:
             log.info(f"[{self._log_name}] Turn cancelled (local only)")
@@ -1229,7 +1227,7 @@ async def start_esphome_servers(
     Allocates a port from the DB if not already assigned. Registers each
     device via mDNS (_esphomelib._tcp) for HA auto-discovery.
 
-    Called from em_controller.main() when VOICE_MODE=esphome.
+    Called from em_controller.main().
     """
     global _azc
 
@@ -1324,9 +1322,9 @@ async def trigger_voice_turn(
     """
     Entry point for OWW/button-triggered voice turns in esphome mode.
 
-    Called from em_controller._run_voice_locked() instead of run_voice_turn()
-    when VOICE_MODE=esphome. Finds the active HA connection for this device
-    and delegates to EchoMuseSatellite.run_esphome_voice_turn().
+    Called from em_controller._run_voice_locked(). Finds the active HA
+    connection for this device and delegates to
+    EchoMuseSatellite.run_esphome_voice_turn().
 
     preroll_discard: forwarded to run_esphome_voice_turn/_stream_mic_audio.
     Callers should pass VOICE_PREROLL_DISCARD for wake-word turns and 0 for
@@ -1340,8 +1338,7 @@ async def trigger_voice_turn(
     rather than returning to OWW idle. Returns False in all other cases including
     no active HA connection.
 
-    If no active HA connection exists, logs and returns False — same behaviour as
-    the claracore path when voice_server.py is unreachable.
+    If no active HA connection exists, logs and returns False.
     """
     server = get_server(device.device_id)
     if server is None:
@@ -1424,7 +1421,7 @@ async def device_connected(
 
     Brings the ESPHome API TCP listener up for this device so HA can connect
     and the setup wizard can run against a device that's actually present.
-    No-op if VOICE_MODE != esphome or the device has no registered server.
+    No-op if the device has no registered server.
 
     standalone_play: async callable(pcm_bytes) — routed to the device's
     speaker pipeline for standalone announces (setup wizard audio test,

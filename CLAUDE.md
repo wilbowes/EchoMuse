@@ -60,7 +60,7 @@ The controller's own version is resolved by `controller/version.py` (env `EM_CON
 **Bare metal (Python 3.12):**
 ```bash
 cd controller
-cp .env.example .env   # fill in SERVER_IP and VOICE_WS_URI
+cp .env.example .env   # fill in SERVER_IP
 pip install -r requirements.txt
 python em_controller.py
 ```
@@ -75,15 +75,12 @@ Dashboard available at `http://<SERVER_IP>:8768`. WebSocket devices connect to p
 
 Key env vars in `.env` (see `.env.example` for the full list):
 - `SERVER_IP` — LAN IP advertised via mDNS (devices connect here)
-- `VOICE_MODE` — `claracore` (default) or `esphome`; changing it requires a controller restart
-- `VOICE_WS_URI` — WebSocket URI of the downstream voice server (claracore mode only)
 - `OWW_MODEL` / `OWW_THRESHOLD` — OpenWakeWord model name and detection threshold
 - `DEVICE_APPROVAL` — `strict` (admin must approve new devices) or `auto`
 
-### Voice backend modes
+### Voice backend
 
-- **claracore** — controller streams the voice turn to `VOICE_WS_URI` over WebSocket and plays back the PCM response (`run_voice_turn()`).
-- **esphome** — controller impersonates ESPHome voice satellites: one asyncio TCP listener per device on ports 16001+ (persisted in the device registry, never reused). Home Assistant's built-in ESPHome integration dials in and drives voice turns via Assist. Implemented in `em_esphome.py` on top of the protocol layer in `controller/esphome/` (`frame_protocol.py`, `satellite_server.py`, vendored aioesphomeapi protobufs in `esphome/vendor/`).
+The controller impersonates ESPHome voice satellites: one asyncio TCP listener per device on ports 16001+ (persisted in the device registry, never reused). Home Assistant's built-in ESPHome integration dials in and drives voice turns via Assist. Implemented in `em_esphome.py` on top of the protocol layer in `controller/esphome/` (`frame_protocol.py`, `satellite_server.py`, vendored aioesphomeapi protobufs in `esphome/vendor/`). (A legacy `claracore` WebSocket backend was removed 2026-07-12 — ESPHome/HA is the only voice path.)
 
 ## Architecture
 
@@ -121,7 +118,7 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
 ### Controller audio pipeline
 
 1. **Wake word** — openwakeword (ONNX) runs in a thread executor per device on `mic_queue`
-2. **Voice turn** — on wake or dot-button: drain stale frames → acquire `voice_lock` → stream mic to the voice backend (ClaraCore WebSocket or ESPHome/HA, per `VOICE_MODE`) → receive PCM response → EQ (`em_eq.py`) → resample to 48kHz stereo → stream back as 0x02 frames
+2. **Voice turn** — on wake or dot-button: drain stale frames → acquire `voice_lock` → stream mic to HA via the ESPHome satellite → receive PCM response → EQ (`em_eq.py`) → resample to 48kHz stereo → stream back as 0x02 frames
 3. **Speaker** — `resample_to_stereo_48k()` uses numpy linear interpolation (not pure Python)
 
 ### Key Go packages

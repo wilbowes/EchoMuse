@@ -102,13 +102,8 @@ SERVER_HOST  = os.environ.get("SERVER_HOST", "0.0.0.0")
 SERVER_PORT  = int(os.environ.get("SERVER_PORT", "8767"))
 API_PORT     = int(os.environ.get("API_PORT", "8768"))
 SERVER_IP    = os.environ.get("SERVER_IP", "10.10.1.236")
-VOICE_WS_URI = os.environ.get("VOICE_WS_URI", "ws://clara-voice:8765")
 MDNS_NAME    = os.environ.get("MDNS_NAME", "echomuse")
 DB_PATH      = os.environ.get("DB_PATH", "echomuse.db")
-
-# Voice mode — 'claracore' (default) or 'esphome'.
-# See ESPHOME_SPEC.md §1.2. Changing requires a controller restart.
-VOICE_MODE   = os.environ.get("VOICE_MODE", "claracore")
 
 # Device approval mode — overridden by system_config after db.init()
 DEVICE_APPROVAL = os.environ.get("DEVICE_APPROVAL", "strict")
@@ -148,7 +143,7 @@ VAD_END_TYPE       = 0x04
 # string sentinel (esphome.VAD_SENTINEL_END / VAD_SENTINEL_TIMEOUT) so the
 # type travels with the queue item — B5 fix, 2026-07-07; the old None +
 # device.last_vad_was_timeout side-channel let a second sentinel overwrite
-# the first's flag before it was consumed. claracore/OWW consumers treat
+# the first's flag before it was consumed. OWW/barge-watcher consumers treat
 # both flavours identically; esphome's _stream_mic_audio differentiates.
 VAD_NO_SPEECH_TIMEOUT_TYPE = 0x05
 SPEAKER_FRAME_TYPE = 0x02
@@ -446,127 +441,6 @@ def resample_to_stereo_48k(pcm: bytes, from_rate: int) -> bytes:
 
 # ─── Voice pipeline ───────────────────────────────────────────────────────────
 
-async def _run_claracore_backend(
-    device: Device,
-    on_thinking,
-) -> bytes:
-    """
-    Wire-protocol concern: bespoke ClaraCore WebSocket exchange.
-
-    Connects to VOICE_WS_URI, streams mic audio from device.voice_queue,
-    signals END on VAD sentinel, and returns the raw TTS PCM bytes when
-    they arrive.
-
-    Calls on_thinking() (async callable, no args) once when the "THINKING"
-    sentinel is received from the voice server — device mechanics layer
-    uses this to update LED/state without this function knowing about any
-    of that.
-
-    Returns b"" if cancelled, timed out, or the server sent no audio.
-    Returns the raw PCM bytes on success.
-    """
-    voice_response: bytes = b""
-
-    try:
-        async with websockets.connect(
-            VOICE_WS_URI, max_size=10 * 1024 * 1024
-        ) as ws:
-            log.info(f"[{device.device_id}] Connected to voice server")
-            await ws.send("START")
-
-            pcm_buf = bytearray()
-
-            async def stream_mic():
-                try:
-                    while True:
-                        if device.cancel_event.is_set():
-                            return
-                        try:
-                            payload = await asyncio.wait_for(
-                                device.voice_queue.get(), timeout=2.0
-                            )
-                        except asyncio.TimeoutError:
-                            continue
-                        if payload is None or isinstance(payload, str):
-                            # VAD sentinel (either flavour) — signal voice
-                            # server speech has ended
-                            log.info(
-                                f"[{device.device_id}] VAD end — signalling voice server "
-                                f"(pcm_buf={len(pcm_buf)}b queued)"
-                            )
-                            await ws.send("END")
-                            return
-                        log.debug(
-                            f"[{device.device_id}] stream_mic: chunk "
-                            f"{len(payload)}b (buf={len(pcm_buf)}b)"
-                        )
-                        pcm_buf.extend(payload)
-                        while len(pcm_buf) >= CHUNK_BYTES:
-                            chunk = bytes(pcm_buf[:CHUNK_BYTES])
-                            del pcm_buf[:CHUNK_BYTES]
-                            await ws.send(chunk)
-                            log.debug(
-                                f"[{device.device_id}] stream_mic: sent "
-                                f"{len(chunk)}b to voice server"
-                            )
-                except asyncio.CancelledError:
-                    pass
-                except Exception as e:
-                    log.error(f"[{device.device_id}] Mic stream error: {e}")
-
-            async def receive_response():
-                nonlocal voice_response
-                try:
-                    async for message in ws:
-                        if isinstance(message, str) and message == "THINKING":
-                            log.info(f"[{device.device_id}] Thinking signal from voice server")
-                            await on_thinking()
-                        elif isinstance(message, bytes) and message:
-                            voice_response = message
-                            log.info(
-                                f"[{device.device_id}] Received "
-                                f"{len(voice_response)} bytes audio"
-                            )
-                            return
-                except Exception as e:
-                    log.error(f"[{device.device_id}] WS receive error: {e}")
-
-            mic_task     = asyncio.create_task(stream_mic())
-            receive_task = asyncio.create_task(receive_response())
-            cancel_task  = asyncio.create_task(device.cancel_event.wait())
-
-            done, pending = await asyncio.wait(
-                [receive_task, cancel_task],
-                return_when=asyncio.FIRST_COMPLETED,
-                timeout=45.0,
-            )
-
-            if not done:
-                log.warning(f"[{device.device_id}] Voice turn: voice server timeout — no response in 45s")
-                for task in pending:
-                    task.cancel()
-                mic_task.cancel()
-                return b""
-
-            mic_task.cancel()
-
-            if cancel_task in done:
-                log.info(f"[{device.device_id}] Voice turn cancelled during backend exchange")
-                receive_task.cancel()
-                return b""
-
-            cancel_task.cancel()
-            try:
-                await mic_task
-            except asyncio.CancelledError:
-                pass
-
-    except Exception as e:
-        log.error(f"[{device.device_id}] Voice turn WS failed: {e}")
-        return b""
-
-    return voice_response
-
 
 async def _barge_watcher(device: Device, playback_started: asyncio.Event):
     """
@@ -787,75 +661,6 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
     cancel_task.cancel()
 
 
-async def run_voice_turn(device: Device):
-    """
-    Device mechanics concern: coordinates a single voice turn end-to-end.
-    """
-    log.info(f"[{device.device_id}] Voice turn starting")
-    device.listening = True
-    await leds_listening(device)
-    await _push_device_state(device)
-
-    stop_spin  = asyncio.Event()
-    spin_task  = None
-
-    async def cleanup():
-        device.thinking  = False
-        device.listening = False
-        await _push_device_state(device)
-        stop_spin.set()
-        if spin_task and not spin_task.done():
-            spin_task.cancel()
-            try:
-                await spin_task
-            except asyncio.CancelledError:
-                pass
-        await leds_off(device)
-
-    async def on_thinking():
-        nonlocal spin_task
-        device.thinking  = True
-        device.listening = False
-        await _push_device_state(device)
-        log.info(f"[{device.device_id}] Thinking — starting spinner")
-        if not device.cancel_event.is_set() and (spin_task is None or spin_task.done()):
-            spin_task = asyncio.create_task(leds_spin_green(device, stop_spin))
-
-    # P0-1: no mic_start_turn(). Stream already running; oww_paused routes
-    # frames to voice_queue. mic_stop after response remains for TTS feedback.
-    try:
-        voice_response = await _run_claracore_backend(device, on_thinking)
-    except Exception as e:
-        log.error(f"[{device.device_id}] Backend error: {e}")
-        await device.mic_stop()
-        await cleanup()
-        return
-
-    await device.mic_stop()
-
-    if not voice_response:
-        log.warning(f"[{device.device_id}] No audio response — ignoring")
-        await cleanup()
-        return
-
-    if device.cancel_event.is_set():
-        log.info(f"[{device.device_id}] Cancelled before playback")
-        await cleanup()
-        return
-
-    if spin_task is None or spin_task.done():
-        spin_task = asyncio.create_task(leds_spin_green(device, stop_spin))
-
-    try:
-        await _run_post_turn_playback(device, voice_response)
-    except Exception as e:
-        log.error(f"[{device.device_id}] Speaker failed: {e}")
-    finally:
-        await cleanup()
-
-    log.info(f"[{device.device_id}] Voice turn complete")
-
-
 async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_wakeword: bool = False):
     """
     is_wakeword: explicit flag for whether this turn was triggered by wake-
@@ -882,235 +687,232 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
         log.info(f"[{device.device_id}] Voice turn: drained {drained} stale frames")
     try:
         async with device.voice_lock:
-            if VOICE_MODE == "esphome":
-                log.info(f"[{device.device_id}] Voice turn starting (esphome mode)")
-                device.listening = True
-                await leds_listening(device)
+            log.info(f"[{device.device_id}] Voice turn starting (esphome mode)")
+            device.listening = True
+            await leds_listening(device)
+            await _push_device_state(device)
+
+            stop_spin = asyncio.Event()
+            spin_task = None
+            # Barge-in watcher state — reset per turn iteration below.
+            watcher          = None
+            playback_started = asyncio.Event()
+
+            async def stop_watcher():
+                nonlocal watcher
+                if watcher is None:
+                    return
+                watcher.cancel()
+                try:
+                    await watcher
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    log.warning(f"[{device.device_id}] Barge watcher error: {e}")
+                watcher = None
+
+            async def cleanup_esphome():
+                device.thinking  = False
+                device.listening = False
                 await _push_device_state(device)
-
-                stop_spin = asyncio.Event()
-                spin_task = None
-                # Barge-in watcher state — reset per turn iteration below.
-                watcher          = None
-                playback_started = asyncio.Event()
-
-                async def stop_watcher():
-                    nonlocal watcher
-                    if watcher is None:
-                        return
-                    watcher.cancel()
+                stop_spin.set()
+                if spin_task and not spin_task.done():
+                    spin_task.cancel()
                     try:
-                        await watcher
+                        await spin_task
                     except asyncio.CancelledError:
                         pass
-                    except Exception as e:
-                        log.warning(f"[{device.device_id}] Barge watcher error: {e}")
-                    watcher = None
+                await leds_off(device)
 
-                async def cleanup_esphome():
-                    device.thinking  = False
-                    device.listening = False
-                    await _push_device_state(device)
-                    stop_spin.set()
-                    if spin_task and not spin_task.done():
-                        spin_task.cancel()
-                        try:
-                            await spin_task
-                        except asyncio.CancelledError:
-                            pass
-                    await leds_off(device)
+            async def on_thinking_esphome():
+                nonlocal spin_task, watcher
+                if stop_spin.is_set():
+                    return  # cleanup already ran; turn is over
+                device.thinking  = True
+                device.listening = False
+                await _push_device_state(device)
+                log.info(f"[{device.device_id}] Thinking (esphome)")
+                if not device.cancel_event.is_set() and (
+                    spin_task is None or spin_task.done()
+                ):
+                    spin_task = asyncio.create_task(
+                        leds_spin_green(device, stop_spin)
+                    )
+                # Barge-in watcher starts here, not at playback: STT has
+                # ended (VAD_END), so anything on the mic from now on is
+                # a potential interruption. Spans thinking → playback;
+                # cancelled in the turn loop's finally.
+                if device.barge_in_enabled and (
+                    watcher is None or watcher.done()
+                ):
+                    watcher = asyncio.create_task(
+                        _barge_watcher(device, playback_started)
+                    )
 
-                async def on_thinking_esphome():
-                    nonlocal spin_task, watcher
-                    if stop_spin.is_set():
-                        return  # cleanup already ran; turn is over
-                    device.thinking  = True
-                    device.listening = False
-                    await _push_device_state(device)
-                    log.info(f"[{device.device_id}] Thinking (esphome)")
-                    if not device.cancel_event.is_set() and (
-                        spin_task is None or spin_task.done()
-                    ):
-                        spin_task = asyncio.create_task(
-                            leds_spin_green(device, stop_spin)
-                        )
-                    # Barge-in watcher starts here, not at playback: STT has
-                    # ended (VAD_END), so anything on the mic from now on is
-                    # a potential interruption. Spans thinking → playback;
-                    # cancelled in the turn loop's finally.
-                    if device.barge_in_enabled and (
-                        watcher is None or watcher.done()
-                    ):
+            async def post_turn_play_esphome(voice_response: bytes):
+                nonlocal spin_task, watcher
+                if spin_task is None or spin_task.done():
+                    spin_task = asyncio.create_task(
+                        leds_spin_green(device, stop_spin)
+                    )
+                if device.barge_in_enabled:
+                    # Barge-in (§3.2): keep the mic running through
+                    # playback — the device's AEC subtracts the speaker
+                    # output, which is what makes this safe (enable AEC
+                    # before enabling barge-in; without it the watcher
+                    # scores raw echo and the raised threshold is the
+                    # only defence). The pre-AEC problems the mic_stop
+                    # guarded against are gone: AGC no longer exists on
+                    # the wake stream (v2.7.0) and echo content is
+                    # cancelled at the source (v2.7.3).
+                    #
+                    # The watcher normally exists already (started at
+                    # thinking onset); the phase flag switches it to the
+                    # playback threshold. Defensive create for turns
+                    # that reach TTS without an STT_VAD_END.
+                    playback_started.set()
+                    if watcher is None or watcher.done():
                         watcher = asyncio.create_task(
                             _barge_watcher(device, playback_started)
                         )
-
-                async def post_turn_play_esphome(voice_response: bytes):
-                    nonlocal spin_task, watcher
-                    if spin_task is None or spin_task.done():
-                        spin_task = asyncio.create_task(
-                            leds_spin_green(device, stop_spin)
-                        )
-                    if device.barge_in_enabled:
-                        # Barge-in (§3.2): keep the mic running through
-                        # playback — the device's AEC subtracts the speaker
-                        # output, which is what makes this safe (enable AEC
-                        # before enabling barge-in; without it the watcher
-                        # scores raw echo and the raised threshold is the
-                        # only defence). The pre-AEC problems the mic_stop
-                        # guarded against are gone: AGC no longer exists on
-                        # the wake stream (v2.7.0) and echo content is
-                        # cancelled at the source (v2.7.3).
-                        #
-                        # The watcher normally exists already (started at
-                        # thinking onset); the phase flag switches it to the
-                        # playback threshold. Defensive create for turns
-                        # that reach TTS without an STT_VAD_END.
-                        playback_started.set()
-                        if watcher is None or watcher.done():
-                            watcher = asyncio.create_task(
-                                _barge_watcher(device, playback_started)
-                            )
-                        await _run_post_turn_playback(device, voice_response)
-                        return
-                    # Acoustic-feedback guard (barge-in off): stop the mic
-                    # BEFORE playback, not just in the post-turn finally.
-                    # With the mic running through TTS pre-AEC, the device
-                    # processed its own speaker echo (63-65 junk frames per
-                    # turn measured 2026-07-06) and sent it upstream on the
-                    # same Wi-Fi radio receiving the TTS frames (speaker
-                    # underruns → audible stutter). The finally's mic_stop
-                    # stays as a safety net (StopMic no-ops when already
-                    # stopped); restart is owned by the continuation branch /
-                    # wake listener / button handler as before.
-                    await device.mic_stop()
                     await _run_post_turn_playback(device, voice_response)
+                    return
+                # Acoustic-feedback guard (barge-in off): stop the mic
+                # BEFORE playback, not just in the post-turn finally.
+                # With the mic running through TTS pre-AEC, the device
+                # processed its own speaker echo (63-65 junk frames per
+                # turn measured 2026-07-06) and sent it upstream on the
+                # same Wi-Fi radio receiving the TTS frames (speaker
+                # underruns → audible stutter). The finally's mic_stop
+                # stays as a safety net (StopMic no-ops when already
+                # stopped); restart is owned by the continuation branch /
+                # wake listener / button handler as before.
+                await device.mic_stop()
+                await _run_post_turn_playback(device, voice_response)
 
-                # P0-1: no mic_start_turn() here on the initial (wake/button)
-                # entry — for a wake turn the stream is already running on
-                # ch6 and oww_paused routes frames to voice_queue. The
-                # acoustic-feedback guard is mic_stop in
-                # post_turn_play_esphome, sent immediately before TTS
-                # playback; the finally below is only the safety net.
-                #
-                # Continuation loop: if HA sets continue_conversation on
-                # INTENT_END, re-trigger immediately after TTS+drain rather
-                # than returning to OWW idle. The reference implementation
-                # (linux-voice-assistant) uses a 0.5s settle delay after TTS
-                # before opening the mic — that's already covered by
-                # _run_post_turn_playback's buffer drain sleep, so no
-                # additional delay is needed here.
-                #
-                # C2 fix (2026-07-05 review): the `finally` below runs
-                # device.mic_stop() on every iteration, including the one
-                # that decides to continue — previously nothing ever put the
-                # stream back before looping into the next trigger_voice_turn,
-                # so a continuation turn streamed from a stopped mic and
-                # silently timed out as no_speech every time. Fixed by
-                # calling device.mic_start() (no lock_mic — same ch6 stream
-                # as the wake path; no-ops if somehow already running) in the
-                # continuation branch, before looping.
-                #
-                # C3 fix: preroll_discard is 0 for button/continuation turns
-                # (no wake-word tail to remove — discarding real audio here
-                # just clips the first word/words, the exact bug P0-1 fixed
-                # on the wake path) and VOICE_PREROLL_DISCARD only for the
-                # initial wakeword-triggered turn.
-                turn_label      = trigger_label
-                preroll_discard = esphome.VOICE_PREROLL_DISCARD if is_wakeword else 0
-                while True:
-                    should_continue = False
-                    try:
-                        should_continue = await esphome.trigger_voice_turn(
-                            device=device,
-                            on_thinking=on_thinking_esphome,
-                            post_turn_play=post_turn_play_esphome,
-                            trigger_label=turn_label,
-                            preroll_discard=preroll_discard,
-                        )
-                    finally:
-                        # Watcher spans thinking→playback and is owned here:
-                        # every exit path (normal, barge, error, cancel)
-                        # must stop it before the next iteration re-arms.
-                        await stop_watcher()
-                        # On barge the mic stays up: the user's follow-up
-                        # command is already flowing into voice_queue and a
-                        # mic_stop/start cycle here would drop the words
-                        # spoken in the same breath as the wake word.
-                        if not device.barge_detected:
-                            await device.mic_stop()
-                        await cleanup_esphome()
-                        log.info(f"[{device.device_id}] Voice turn complete (esphome mode)")
+            # P0-1: no mic_start_turn() here on the initial (wake/button)
+            # entry — for a wake turn the stream is already running on
+            # ch6 and oww_paused routes frames to voice_queue. The
+            # acoustic-feedback guard is mic_stop in
+            # post_turn_play_esphome, sent immediately before TTS
+            # playback; the finally below is only the safety net.
+            #
+            # Continuation loop: if HA sets continue_conversation on
+            # INTENT_END, re-trigger immediately after TTS+drain rather
+            # than returning to OWW idle. The reference implementation
+            # (linux-voice-assistant) uses a 0.5s settle delay after TTS
+            # before opening the mic — that's already covered by
+            # _run_post_turn_playback's buffer drain sleep, so no
+            # additional delay is needed here.
+            #
+            # C2 fix (2026-07-05 review): the `finally` below runs
+            # device.mic_stop() on every iteration, including the one
+            # that decides to continue — previously nothing ever put the
+            # stream back before looping into the next trigger_voice_turn,
+            # so a continuation turn streamed from a stopped mic and
+            # silently timed out as no_speech every time. Fixed by
+            # calling device.mic_start() (no lock_mic — same ch6 stream
+            # as the wake path; no-ops if somehow already running) in the
+            # continuation branch, before looping.
+            #
+            # C3 fix: preroll_discard is 0 for button/continuation turns
+            # (no wake-word tail to remove — discarding real audio here
+            # just clips the first word/words, the exact bug P0-1 fixed
+            # on the wake path) and VOICE_PREROLL_DISCARD only for the
+            # initial wakeword-triggered turn.
+            turn_label      = trigger_label
+            preroll_discard = esphome.VOICE_PREROLL_DISCARD if is_wakeword else 0
+            while True:
+                should_continue = False
+                try:
+                    should_continue = await esphome.trigger_voice_turn(
+                        device=device,
+                        on_thinking=on_thinking_esphome,
+                        post_turn_play=post_turn_play_esphome,
+                        trigger_label=turn_label,
+                        preroll_discard=preroll_discard,
+                    )
+                finally:
+                    # Watcher spans thinking→playback and is owned here:
+                    # every exit path (normal, barge, error, cancel)
+                    # must stop it before the next iteration re-arms.
+                    await stop_watcher()
+                    # On barge the mic stays up: the user's follow-up
+                    # command is already flowing into voice_queue and a
+                    # mic_stop/start cycle here would drop the words
+                    # spoken in the same breath as the wake word.
+                    if not device.barge_detected:
+                        await device.mic_stop()
+                    await cleanup_esphome()
+                    log.info(f"[{device.device_id}] Voice turn complete (esphome mode)")
 
-                    if device.barge_detected:
-                        # Barge-in: the watcher cancelled playback because
-                        # the wake word was spoken over it. Re-enter a fresh
-                        # turn immediately — same shape as continuation, but
-                        # with the wake-word preroll discard (there IS a
-                        # "…rhasspy" tail to drop this time).
-                        device.barge_detected = False
-                        device.cancel_event.clear()
-                        log.info(f"[{device.device_id}] Barge-in: starting interrupting turn")
-                        await device.mic_start()  # defensive no-op if running
-                        # Re-arm listening state — cleanup_esphome() in the
-                        # finally just turned the ring off, which left the
-                        # device dark while it was actually listening for the
-                        # interrupting command (looked dead — user report
-                        # 2026-07-08). Same re-arm as the continuation branch;
-                        # no voice_queue drain here though, the follow-up
-                        # words spoken after "hey rhasspy" are already in it.
-                        device.listening = True
-                        await leds_listening(device)
-                        await _push_device_state(device)
-                        turn_label      = "barge-in"
-                        preroll_discard = esphome.VOICE_PREROLL_DISCARD
-                        # Reset spinner state for the next turn's thinking animation.
-                        stop_spin.clear()
-                        spin_task = None
-                        # Fresh phase flag for the next turn's watcher.
-                        playback_started = asyncio.Event()
-                        continue
+                if device.barge_detected:
+                    # Barge-in: the watcher cancelled playback because
+                    # the wake word was spoken over it. Re-enter a fresh
+                    # turn immediately — same shape as continuation, but
+                    # with the wake-word preroll discard (there IS a
+                    # "…rhasspy" tail to drop this time).
+                    device.barge_detected = False
+                    device.cancel_event.clear()
+                    log.info(f"[{device.device_id}] Barge-in: starting interrupting turn")
+                    await device.mic_start()  # defensive no-op if running
+                    # Re-arm listening state — cleanup_esphome() in the
+                    # finally just turned the ring off, which left the
+                    # device dark while it was actually listening for the
+                    # interrupting command (looked dead — user report
+                    # 2026-07-08). Same re-arm as the continuation branch;
+                    # no voice_queue drain here though, the follow-up
+                    # words spoken after "hey rhasspy" are already in it.
+                    device.listening = True
+                    await leds_listening(device)
+                    await _push_device_state(device)
+                    turn_label      = "barge-in"
+                    preroll_discard = esphome.VOICE_PREROLL_DISCARD
+                    # Reset spinner state for the next turn's thinking animation.
+                    stop_spin.clear()
+                    spin_task = None
+                    # Fresh phase flag for the next turn's watcher.
+                    playback_started = asyncio.Event()
+                    continue
 
-                    if should_continue and not device.cancel_event.is_set():
-                        log.info(f"[{device.device_id}] Continuing conversation (HA requested)")
-                        # C2 fix: put the mic stream back before looping —
-                        # the finally above just stopped it, and the next
-                        # trigger_voice_turn will read from voice_queue,
-                        # which is fed only while the device stream is
-                        # running. No lock_mic — same ch6 stream as wake.
-                        await device.mic_start()
-                        # Fresh stream starts with the VAD gate closed — the
-                        # user must speak again from zero, same onset cost
-                        # as any post-mic_stop restart. Acceptable for v1 of
-                        # continuation (see review C2 wrinkle note); §3.4's
-                        # device preroll ring will fix this properly later.
-                        # Drain stale frames accumulated during TTS playback
-                        # before the next turn begins — same as post-wake drain.
-                        drained = 0
-                        while not device.voice_queue.empty():
-                            try:
-                                device.voice_queue.get_nowait()
-                                drained += 1
-                            except asyncio.QueueEmpty:
-                                break
-                        if drained:
-                            log.debug(f"[{device.device_id}] Continuation: drained {drained} stale frames")
-                        # Re-arm listening state for the follow-up turn.
-                        device.listening = True
-                        await leds_listening(device)
-                        await _push_device_state(device)
-                        turn_label      = "continuation"
-                        preroll_discard = 0
-                        # Reset spinner state for the next turn's thinking animation.
-                        stop_spin.clear()
-                        spin_task = None
-                        # Fresh phase flag for the next turn's watcher.
-                        playback_started = asyncio.Event()
-                    else:
-                        break
+                if should_continue and not device.cancel_event.is_set():
+                    log.info(f"[{device.device_id}] Continuing conversation (HA requested)")
+                    # C2 fix: put the mic stream back before looping —
+                    # the finally above just stopped it, and the next
+                    # trigger_voice_turn will read from voice_queue,
+                    # which is fed only while the device stream is
+                    # running. No lock_mic — same ch6 stream as wake.
+                    await device.mic_start()
+                    # Fresh stream starts with the VAD gate closed — the
+                    # user must speak again from zero, same onset cost
+                    # as any post-mic_stop restart. Acceptable for v1 of
+                    # continuation (see review C2 wrinkle note); §3.4's
+                    # device preroll ring will fix this properly later.
+                    # Drain stale frames accumulated during TTS playback
+                    # before the next turn begins — same as post-wake drain.
+                    drained = 0
+                    while not device.voice_queue.empty():
+                        try:
+                            device.voice_queue.get_nowait()
+                            drained += 1
+                        except asyncio.QueueEmpty:
+                            break
+                    if drained:
+                        log.debug(f"[{device.device_id}] Continuation: drained {drained} stale frames")
+                    # Re-arm listening state for the follow-up turn.
+                    device.listening = True
+                    await leds_listening(device)
+                    await _push_device_state(device)
+                    turn_label      = "continuation"
+                    preroll_discard = 0
+                    # Reset spinner state for the next turn's thinking animation.
+                    stop_spin.clear()
+                    spin_task = None
+                    # Fresh phase flag for the next turn's watcher.
+                    playback_started = asyncio.Event()
+                else:
+                    break
 
-            else:
-                await run_voice_turn(device)
     finally:
         # Drain voice_queue BEFORE clearing oww_paused. If we clear first,
         # handle_data immediately starts routing new frames to mic_queue —
@@ -1313,8 +1115,7 @@ async def wake_word_listener(device: Device):
                         # how OWW got the wake-word audio — so command audio
                         # flows in with zero re-trigger delay and zero RTT gap.
                         # Wake-word tail bleed ("…Jarvis") is handled by the
-                        # preroll discard in _stream_mic_audio (esphome path)
-                        # and the claracore stream_mic equivalent.
+                        # preroll discard in _stream_mic_audio.
                         # TTS mic_stop/mic_start remains untouched — that
                         # acoustic-feedback guard is load-bearing.
                         model.reset()
@@ -1385,8 +1186,7 @@ async def handle_button_event(device: Device, event: dict):
         if device.voice_lock.locked():
             log.info(f"[{device.device_id}] Dot button — cancelling voice turn")
             device.cancel_event.set()
-            if VOICE_MODE == "esphome":
-                esphome.cancel_voice_turn(device.device_id)
+            esphome.cancel_voice_turn(device.device_id)
         else:
             log.info(f"[{device.device_id}] Dot button → voice turn")
             device.cancel_event.clear()
@@ -1531,30 +1331,29 @@ async def handle_control(ws: WebSocketServerProtocol):
 
         await leds_off(device)
         await api.notify_device_connected(device_id)
-        if VOICE_MODE == "esphome":
-            _device_ref = device
-            async def _standalone_play(pcm_bytes: bytes, _d=_device_ref) -> None:
-                # Same acoustic-feedback guard as voice turns: announcements
-                # play outside a turn, so the always-on OWW stream is live —
-                # stop it for the duration and put it back after.
-                await _d.mic_stop()
-                try:
-                    await _run_post_turn_playback(_d, pcm_bytes)
-                finally:
-                    await _d.mic_start()
-            async def _send_volume_set(level: int, _d=_device_ref) -> None:
-                await _d.send_control({"type": "volume_set", "level": level})
-            await esphome.device_connected(
-                device_id,
-                SERVER_HOST,
-                standalone_play=_standalone_play,
-                send_volume_set=_send_volume_set,
-            )
-            # The ESPHome server object caches the OWW model from server
-            # creation — refresh it from the config we just loaded so HA's
-            # wake-word dropdown tracks dashboard changes across controller
-            # restarts too.
-            esphome.update_oww_model(device_id, device.oww_model)
+        _device_ref = device
+        async def _standalone_play(pcm_bytes: bytes, _d=_device_ref) -> None:
+            # Same acoustic-feedback guard as voice turns: announcements
+            # play outside a turn, so the always-on OWW stream is live —
+            # stop it for the duration and put it back after.
+            await _d.mic_stop()
+            try:
+                await _run_post_turn_playback(_d, pcm_bytes)
+            finally:
+                await _d.mic_start()
+        async def _send_volume_set(level: int, _d=_device_ref) -> None:
+            await _d.send_control({"type": "volume_set", "level": level})
+        await esphome.device_connected(
+            device_id,
+            SERVER_HOST,
+            standalone_play=_standalone_play,
+            send_volume_set=_send_volume_set,
+        )
+        # The ESPHome server object caches the OWW model from server
+        # creation — refresh it from the config we just loaded so HA's
+        # wake-word dropdown tracks dashboard changes across controller
+        # restarts too.
+        esphome.update_oww_model(device_id, device.oww_model)
 
         # ── Main message loop ─────────────────────────────────────────────
 
@@ -1594,8 +1393,7 @@ async def handle_control(ws: WebSocketServerProtocol):
                             f"cancelling"
                         )
                         device.cancel_event.set()
-                        if VOICE_MODE == "esphome":
-                            esphome.cancel_voice_turn(device_id)
+                        esphome.cancel_voice_turn(device_id)
                         await device.send_control({"type": "speaker_flush"})
                     await api._push_event({
                         "type":      "device_update",
@@ -1622,8 +1420,7 @@ async def handle_control(ws: WebSocketServerProtocol):
                         None, db.set_device_config, device_id, stored_config
                     )
                     # Notify ESPHome satellite so HA's media player entity updates
-                    if VOICE_MODE == "esphome":
-                        esphome.update_device_volume(device_id, device.volume)
+                    esphome.update_device_volume(device_id, device.volume)
 
                 elif msg_type == "stats":
                     device.stats = {
@@ -1712,8 +1509,7 @@ async def handle_control(ws: WebSocketServerProtocol):
             if _devices.get(device.device_id) is device:
                 _devices.pop(device.device_id, None)
             await api.notify_device_disconnected(device.device_id)
-            if VOICE_MODE == "esphome":
-                await esphome.device_disconnected(device.device_id)
+            await esphome.device_disconnected(device.device_id)
 
 
 # ─── Data plane handler ───────────────────────────────────────────────────────
@@ -1956,9 +1752,6 @@ async def main():
     mdns_task = asyncio.create_task(_mdns_refresh_loop(azc, info))
 
     log.info(f"WebSocket server starting on {SERVER_HOST}:{SERVER_PORT}")
-    log.info(f"Voice mode: {VOICE_MODE}")
-    if VOICE_MODE != "esphome":
-        log.info(f"Voice server: {VOICE_WS_URI}")
 
     try:
         async with websockets.serve(
@@ -1969,15 +1762,13 @@ async def main():
             ping_timeout=10,
             max_size=10 * 1024 * 1024,
         ):
-            if VOICE_MODE == "esphome":
-                await esphome.start_esphome_servers(_devices, SERVER_HOST)
+            await esphome.start_esphome_servers(_devices, SERVER_HOST)
 
             log.info("EchoMuse Controller ready — waiting for devices")
             await asyncio.Future()
 
     finally:
-        if VOICE_MODE == "esphome":
-            await esphome.stop_esphome_servers()
+        await esphome.stop_esphome_servers()
         release_task.cancel()
         session_prune_task.cancel()
         mdns_task.cancel()
