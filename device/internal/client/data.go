@@ -467,7 +467,6 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			if snap.BeamAngle != nil {
 				beamAngle = *snap.BeamAngle
 			}
-			nsEnabled := snap.NsEnabled == nil || *snap.NsEnabled
 			// AGC is forced off on the always-on wake stream (!lockMic).
 			// Adaptive gain with persistent state on a stream that never
 			// restarts is a rebaselining mechanism by construction: in a
@@ -475,9 +474,7 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			// RMS gate calls every noisy period "speech", the release path
 			// walks the gain up toward amplifying the noise floor, and the
 			// fast attack then compresses the wake word's envelope
-			// mid-utterance — depressing OWW scores. (The RNNoise-
-			// probability interlock that was meant to prevent this is dead
-			// while NS is disabled — see processor.go Q3.) Wake word models
+			// mid-utterance — depressing OWW scores. Wake word models
 			// are trained level-diverse and don't need AGC. The config
 			// toggle still governs bounded lockMic turns, which get a fresh
 			// ResetAGC each stream.
@@ -532,27 +529,19 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			// analysis) and /tmp/server.log is RAM-backed and unrotated.
 			clipped := d.beam.ClippedSamples()
 			if periodCount%3750 == 0 || (clipped != lastClipped && periodCount%100 == 0) {
-				log.Printf("[data] VAD diag: rms=%.5f threshold=%.5f gain=%ddB clipped=%d gate=%v active=%v ns=%v agc=%v",
-					rms, threshold*gainLin, gainDb, clipped, speech, active, nsEnabled, agcEnabled)
+				log.Printf("[data] VAD diag: rms=%.5f threshold=%.5f gain=%ddB clipped=%d gate=%v active=%v agc=%v",
+					rms, threshold*gainLin, gainDb, clipped, speech, active, agcEnabled)
 				lastClipped = clipped
 			}
 			periodCount++
 
-			// NS + AGC — both independently toggleable from dashboard.
-			// NS: RNNoise noise suppression (hardcoded true previously).
-			// AGC: automatic gain control. Pass speech flag so AGC release
-			// freezes during silence, preventing noise floor amplification.
-			// Q3 fix (2026-07-05 review): this comment previously claimed
-			// "AGC is always computed but gain held when !agcEnabled" —
-			// that's wrong. processor.Process actually skips the agc() call
-			// entirely when agcEnabled is false (see the `if agcEnabled`
-			// guard around p.agc() in processor.go) — gain state is frozen
-			// at whatever it last was (or its zero value if AGC has never
-			// run), not recomputed and discarded. The distinction matters:
-			// re-enabling AGC after a period disabled resumes from stale
-			// state, it doesn't pick up where a live-but-ignored computation
-			// left off.
-			mono = d.proc.Process(mono, nsEnabled, agcEnabled, speech)
+			// AGC — lockMic turn streams only (see agcEnabled above). Pass
+			// the speech flag so AGC release freezes during silence,
+			// preventing noise floor amplification. When agcEnabled is
+			// false Process passes mono through untouched and gain state is
+			// frozen at whatever it last was. (RNNoise NS removed
+			// 2026-07-12 — see internal/processor package comment.)
+			mono = d.proc.Process(mono, agcEnabled, speech)
 			// ─────────────────────────────────────────────────────────────
 
 			// Notify direction listener — non-blocking, keep it fast.

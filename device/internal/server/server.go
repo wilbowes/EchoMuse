@@ -101,6 +101,13 @@ func NewServer(buttonController buttons.Controller, microphone mic.Microphone, s
 		server.ledController = ledController
 		server.ledMu.Unlock()
 		clearLeds(ledController)
+
+		// Discrete red LED under the mic-off button (GPIO, separate from
+		// the ring) — export + off. Non-fatal: an unmuted boot without a
+		// button LED is cosmetic, everything else still works.
+		if err := internalLed.InitMuteButtonLED(); err != nil {
+			log.Printf("Mute button LED init failed: %v", err)
+		}
 	}()
 
 	return server

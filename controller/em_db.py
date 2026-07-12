@@ -95,8 +95,7 @@ DEFAULT_DEVICE_CONFIG = {
     # owwSpeexNs: openwakeword's built-in speexdsp noise suppressor (Q1,
     # 2026-07-05 review). 16kHz-native, applied controller-side, only to
     # the wake-word detection path — cannot affect STT audio since STT
-    # never sees it. Distinct from nsEnabled/RNNoise below, which run
-    # device-side on the whole pipeline. Defaults False: needs the
+    # never sees it. Defaults False: needs the
     # speexdsp-ns pip package confirmed installable in the Docker build
     # (see review Q1 fix sequence) before enabling fleet-wide; flip on and
     # A/B test wake rate in a noisy room once confirmed.
@@ -125,11 +124,11 @@ DEFAULT_DEVICE_CONFIG = {
     "ledScene":         "standard",
     "ledListenColor":   "#00b400",
     "ledThinkColor":    "#00c800",
-    # Pipeline toggles — both default on. Disable via dashboard for A/B testing.
-    # nsEnabled: RNNoise noise suppression. Running at 16kHz (wrong rate for
-    # the model — see P0-3). Disable to A/B test whether it's helping or hurting.
-    # agcEnabled: automatic gain control. Disable to hear raw mic levels.
-    "nsEnabled":        True,
+    # agcEnabled: automatic gain control (lockMic/button turn streams only).
+    # Disable to hear raw mic levels. (nsEnabled/RNNoise removed 2026-07-12
+    # with the device-side RNNoise code — a stale nsEnabled key in stored
+    # configs is harmless: new firmware ignores unknown fields, and old
+    # firmware keeps honouring the stored False until it's OTA'd.)
     "agcEnabled":       True,
 }
 

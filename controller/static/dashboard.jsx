@@ -3123,7 +3123,6 @@ function DeviceConfigForm({ config, onChange, disabled }) {
         desc="Everything here affects only bounded button-press turns. Wake-word turns stream continuously — Home Assistant's VAD endpoints them, and the controller closes accidental wakes after 5s of silence relative to the room's measured noise floor — so none of these settings touch the wake path.">
         {subHeader('Turn processing', true)}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px', ...inputStyle }}>
-          <Toggle label="Noise suppression" sub="RNNoise — keep off pending 16kHz fix" value={config.nsEnabled ?? true} onChange={v => set('nsEnabled', v)}/>
           <Toggle label="Auto gain (AGC)" sub="levels button-turn speech; never the wake stream" value={config.agcEnabled ?? true} onChange={v => set('agcEnabled', v)}/>
         </div>
         {subHeader('Speech gate')}

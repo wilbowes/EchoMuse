@@ -48,10 +48,10 @@ type Device struct {
 	BeamAngle          float64
 	BeamformingEnabled bool
 
-	// Pipeline toggles — pointer typed so false is expressible over the wire.
-	// Both default true. Set false via dashboard to A/B test pipeline stages
-	// without a rebuild. NsEnabled gates RNNoise; AgcEnabled gates AGC.
-	NsEnabled  *bool
+	// AGC toggle — pointer typed so false is expressible over the wire.
+	// Defaults true; applies to bounded lockMic turn streams only (forced
+	// off on the always-on wake stream). RNNoise NS was removed 2026-07-12 —
+	// noise suppression lives controller-side (em_ns.py) on the ASR path.
 	AgcEnabled *bool
 
 	// Acoustic echo cancellation (speexdsp, internal/aec). Applies to the
@@ -101,9 +101,7 @@ func (d *Device) loadDefaults() {
 	d.MicGainDb = clampMicGainDb(envInt("MIC_GAIN_DB", 24))
 	d.BeamAngle = envFloat("BEAM_ANGLE", -1)
 	d.BeamformingEnabled = envBool("BEAMFORMING_ENABLED", true)
-	nsEnabled := envBool("NS_ENABLED", true)
 	agcEnabled := envBool("AGC_ENABLED", true)
-	d.NsEnabled = &nsEnabled
 	d.AgcEnabled = &agcEnabled
 	aecEnabled := envBool("AEC_ENABLED", false)
 	d.AecEnabled = &aecEnabled
@@ -156,9 +154,6 @@ func (d *Device) Apply(msg ConfigMessage) {
 	if msg.BeamformingEnabled != nil {
 		d.BeamformingEnabled = *msg.BeamformingEnabled
 	}
-	if msg.NsEnabled != nil {
-		d.NsEnabled = msg.NsEnabled
-	}
 	if msg.AgcEnabled != nil {
 		d.AgcEnabled = msg.AgcEnabled
 	}
@@ -182,12 +177,8 @@ func (d *Device) Snapshot() ConfigMessage {
 	// pointer into the live mutex-guarded struct — the caller (streamMic,
 	// every period) dereferences it after RUnlock, racing with Apply()
 	// writing the same bool on a config push. Copy to a local like
-	// beamAngle/nsEnabled/agcEnabled above.
+	// beamAngle/agcEnabled above.
 	beamformingEnabled := d.BeamformingEnabled
-	nsEnabled := true
-	if d.NsEnabled != nil {
-		nsEnabled = *d.NsEnabled
-	}
 	agcEnabled := true
 	if d.AgcEnabled != nil {
 		agcEnabled = *d.AgcEnabled
@@ -210,7 +201,6 @@ func (d *Device) Snapshot() ConfigMessage {
 		MicGainDb:          &micGainDb,
 		BeamAngle:          &beamAngle,
 		BeamformingEnabled: &beamformingEnabled,
-		NsEnabled:          &nsEnabled,
 		AgcEnabled:         &agcEnabled,
 		AecEnabled:         &aecEnabled,
 		AecDelayMs:         &aecDelayMs,
@@ -234,7 +224,6 @@ type ConfigMessage struct {
 	BeamAngle          *float64 `json:"beamAngle,omitempty"`
 	BeamformingEnabled *bool    `json:"beamformingEnabled,omitempty"`
 	HasBeamforming     bool     `json:"hasBeamforming,omitempty"`
-	NsEnabled          *bool    `json:"nsEnabled,omitempty"`
 	AgcEnabled         *bool    `json:"agcEnabled,omitempty"`
 	AecEnabled         *bool    `json:"aecEnabled,omitempty"`
 	AecDelayMs         *int     `json:"aecDelayMs,omitempty"`

@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"sync"
 
+	internalLed "github.com/wilbowes/EchoMuse/internal/bindings/led"
 	"github.com/wilbowes/EchoMuse/pkg/led"
 )
 
@@ -81,12 +82,26 @@ func (m *muteController) applyMute() {
 	log.Println("Mute: mic muted")
 	setAdcMute("1")
 	m.showMuteLEDs()
+	setMuteButtonLED(true)
 }
 
 func (m *muteController) applyUnmute() {
 	log.Println("Mute: mic unmuted")
 	setAdcMute("0")
 	m.clearLEDs()
+	setMuteButtonLED(false)
+}
+
+// setMuteButtonLED drives the discrete red LED under the mic-off button —
+// stock-Alexa parity: the button itself shows muted, not just the ring.
+// GPIO-backed and independent of the ring driver, so it needs no repaint
+// protection (ring repaints can't stomp it) and survives every LED-mode
+// transition for free. Direct binding call, same precedent as setAdcMute's
+// tinymix exec above.
+func setMuteButtonLED(on bool) {
+	if err := internalLed.SetMuteButtonLED(on); err != nil {
+		log.Printf("Mute button LED: %v", err)
+	}
 }
 
 func (m *muteController) showMuteLEDs() {

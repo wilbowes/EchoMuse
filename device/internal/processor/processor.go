@@ -1,56 +1,35 @@
 // Package processor implements the per-period audio processing pipeline
 // for the EchoMuse mic stream.
 //
-// Pipeline (each stage independently bypassable):
+// Pipeline:
 //
-//	mono S16_LE → NS (RNNoise) → AGC → mono S16_LE
+//	mono S16_LE → AGC → mono S16_LE
 //
-// RNNoise processes 480-sample frames; our periods are 512 samples.
-// A ring buffer handles the size mismatch transparently.
-//
-// RNNoise returns a speech probability (0–1) on each frame. This is used
-// to refine AGC gating: if RNNoise says "not speech" even when RMS is above
-// threshold (e.g. loud TV or HVAC), AGC release is frozen rather than
-// amplifying the background noise. The stream VAD gate remains RMS-only.
+// RNNoise NS was removed 2026-07-12: it never ran correctly on-device
+// (48kHz-native model fed 16kHz audio — P0-3) and noise suppression now
+// lives controller-side (em_ns.py, DTLN) on the ASR-bound stream only,
+// per the dumb-transducer architecture. With it went the speech-probability
+// interlock that refined AGC release — that interlock was dead code
+// whenever NS was disabled (the shipped state since v2.6.x), so AGC
+// behaviour is unchanged in practice: release is gated on the stream's
+// RMS speech flag alone.
 package processor
 
 import (
 	"math"
-
-	"github.com/wilbowes/EchoMuse/internal/rnnoise"
 )
 
 const (
-	sampleRate = 16000
-	periodSize = 512
-
 	// AGC parameters
 	agcTargetRMS = 0.08 // target RMS (~-22dBFS)
 	agcMaxGain   = 20.0
 	agcMinGain   = 0.5
 	agcAttack    = 0.05  // fast attack — prevents clipping
 	agcRelease   = 0.005 // slow release — avoids pumping
-
-	// RNNoise VAD probability threshold for AGC gating.
-	// When RNNoise confidence is below this, AGC release is frozen even if
-	// RMS is above the stream VAD threshold. Tunable if needed.
-	vadProbThreshold = float32(0.5)
 )
 
 // Processor holds inter-period state for the audio pipeline.
 type Processor struct {
-	// NS state
-	ns    *rnnoise.State
-	nsBuf []float32 // ring buffer for 480-sample frame alignment
-	nsOut []float32 // output ring buffer
-
-	// RNNoise VAD probability from the most recently completed frame.
-	// Used to gate AGC release independently of the stream VAD.
-	// vadHasData is false until at least one RNNoise frame has been processed
-	// — during startup latency the probability is meaningless (0.0).
-	vadProb    float32
-	vadHasData bool
-
 	// AGC state
 	agcGain float64
 }
@@ -58,9 +37,6 @@ type Processor struct {
 // New returns a Processor with sensible initial state.
 func New() *Processor {
 	return &Processor{
-		ns:      rnnoise.New(),
-		nsBuf:   make([]float32, 0, rnnoise.FrameSize*2),
-		nsOut:   make([]float32, 0, rnnoise.FrameSize*2),
 		agcGain: 1.0,
 	}
 }
@@ -74,22 +50,17 @@ func (p *Processor) ResetAGC() {
 	p.agcGain = 1.0
 }
 
-// Destroy frees resources held by the Processor. Call when done.
-func (p *Processor) Destroy() {
-	if p.ns != nil {
-		p.ns.Destroy()
-		p.ns = nil
-	}
-}
+// Destroy frees resources held by the Processor. Retained as a no-op so the
+// lifecycle contract survives the RNNoise removal.
+func (p *Processor) Destroy() {}
 
 // Process applies the audio pipeline to one period of mono S16_LE audio.
-// nsEnabled gates RNNoise noise suppression.
 // agcEnabled gates automatic gain control — when false, audio passes through
 // at unity gain (agcGain state is preserved so re-enabling is smooth).
 // speech should be true when VAD has detected speech — AGC release is
 // frozen during silence to prevent noise floor amplification.
-func (p *Processor) Process(mono []byte, nsEnabled bool, agcEnabled bool, speech bool) []byte {
-	if len(mono) == 0 {
+func (p *Processor) Process(mono []byte, agcEnabled bool, speech bool) []byte {
+	if len(mono) == 0 || !agcEnabled {
 		return mono
 	}
 
@@ -100,33 +71,7 @@ func (p *Processor) Process(mono []byte, nsEnabled bool, agcEnabled bool, speech
 		samples[i] = float32(s) / 32768.0
 	}
 
-	if nsEnabled {
-		samples = p.noiseSuppress(samples)
-	}
-
-	// AGC gating: stream VAD (RMS) is the primary gate for what gets sent
-	// to the controller. RNNoise probability refines AGC release only —
-	// if RNNoise has warmed up and says "not speech", freeze AGC release
-	// even if RMS is above threshold. Prevents gain pumping on loud
-	// non-speech sources (TV, HVAC) that fool the RMS threshold.
-	//
-	// Q3 fix (2026-07-05 review): p.vadProb is only ever set inside
-	// noiseSuppress() above, which only runs when nsEnabled is true. Under
-	// the current shipped default (nsEnabled=false, agcEnabled=false — see
-	// SETUP.md "known working state"), p.vadHasData never becomes true, so
-	// this whole interlock is dead code: agcSpeech always just equals
-	// speech (the RMS gate), unmodified. Don't trust p.vadProb for
-	// anything while NS is disabled — it's stale (zero-value), not a live
-	// "no speech detected" signal. This only does real work when NS is
-	// re-enabled, which the P0-3 fix (resample or 16kHz-native suppressor)
-	// may eventually make the default again.
-	if agcEnabled {
-		agcSpeech := speech
-		if nsEnabled && p.vadHasData && p.vadProb < vadProbThreshold {
-			agcSpeech = false
-		}
-		samples = p.agc(samples, agcSpeech)
-	}
+	samples = p.agc(samples, speech)
 
 	out := make([]byte, len(mono))
 	for i, s := range samples {
@@ -138,51 +83,6 @@ func (p *Processor) Process(mono []byte, nsEnabled bool, agcEnabled bool, speech
 		v := int16(s * 32767)
 		out[i*2] = byte(v)
 		out[i*2+1] = byte(v >> 8)
-	}
-	return out
-}
-
-// noiseSuppress runs RNNoise on the samples.
-// Handles the 512→480 sample size mismatch via a ring buffer.
-// RNNoise operates on float32 in the range [-32768, 32767] (not [-1, 1]).
-func (p *Processor) noiseSuppress(samples []float32) []float32 {
-	// RNNoise expects samples scaled to int16 range
-	scaled := make([]float32, len(samples))
-	for i, s := range samples {
-		scaled[i] = s * 32768.0
-	}
-
-	p.nsBuf = append(p.nsBuf, scaled...)
-
-	frameIn := make([]float32, rnnoise.FrameSize)
-	frameOut := make([]float32, rnnoise.FrameSize)
-
-	for len(p.nsBuf) >= rnnoise.FrameSize {
-		copy(frameIn, p.nsBuf[:rnnoise.FrameSize])
-		p.nsBuf = p.nsBuf[rnnoise.FrameSize:]
-		// ProcessFrame returns speech probability 0–1. Previously discarded;
-		// now stored for AGC gating. Only the most recent frame's probability
-		// is kept — for our 512-sample period, usually one frame completes,
-		// occasionally two. The latest is always the most relevant.
-		p.vadProb = p.ns.ProcessFrame(frameOut, frameIn)
-		p.vadHasData = true
-		p.nsOut = append(p.nsOut, frameOut...)
-	}
-
-	// Drain output buffer — return as many samples as we have,
-	// pad with zeros if we don't have enough yet (startup latency)
-	out := make([]float32, len(samples))
-	if len(p.nsOut) >= len(samples) {
-		copy(out, p.nsOut[:len(samples)])
-		p.nsOut = p.nsOut[len(samples):]
-	} else {
-		copy(out, p.nsOut)
-		p.nsOut = p.nsOut[:0]
-	}
-
-	// Scale back to [-1, 1]
-	for i, s := range out {
-		out[i] = s / 32768.0
 	}
 	return out
 }
