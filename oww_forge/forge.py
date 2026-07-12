@@ -23,7 +23,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tarfile
 import urllib.request
 from pathlib import Path
 
@@ -45,9 +44,13 @@ NEGATIVE_FEATURES = "openwakeword_features_ACAV100M_2000_hrs_16bit.npy"
 VALIDATION_FEATURES = "validation_set_features.npy"
 RIR_DIR = ASSETS / "mit_rirs"
 AUDIOSET_DIR = ASSETS / "audioset_16k"
-AUDIOSET_TAR_URL = (
-    "https://huggingface.co/datasets/agkphysics/AudioSet/resolve/main/data/bal_train09.tar"
-)
+# agkphysics/AudioSet stores bal_train as ~40 parquet shards (the old
+# bal_trainNN.tar files the openWakeWord notebook used are gone). A handful
+# of shards yields the ~2k clips the notebook worked with.
+AUDIOSET_PARQUET_URLS = [
+    f"https://huggingface.co/datasets/agkphysics/AudioSet/resolve/main/data/bal_train/{i:02d}.parquet"
+    for i in range(0, 4)
+]
 FMA_DIR = ASSETS / "fma_16k"
 
 ASSET_PARTS = ["piper", "features", "rirs", "audioset", "fma"]
@@ -112,7 +115,7 @@ def fetch_features() -> None:
         if (FEATURES_DIR / fname).exists():
             log(f"features present: {fname}")
             continue
-        log(f"downloading {fname} (the negative set is ~17GB — resumable, rerun on interrupt)")
+        log(f"downloading {fname} (resumable — rerun on interrupt; the negative set is ~17GB)")
         hf_hub_download(
             repo_id=HF_FEATURES_REPO,
             filename=fname,
@@ -144,33 +147,44 @@ def fetch_rirs() -> None:
     log(f"  → {n} RIR wavs in {RIR_DIR}")
 
 
-def fetch_audioset() -> None:
+def fetch_audioset(max_clips: int) -> None:
     if dir_has_files(AUDIOSET_DIR, "*.wav"):
         log(f"AudioSet clips present: {AUDIOSET_DIR}")
         return
+    # Read the parquet shards with pyarrow directly: the shards carry
+    # huggingface feature metadata written by a newer `datasets` than our
+    # pinned 2.14 can parse, so load_dataset() chokes on them.
+    import io
+
+    import pyarrow.parquet as pq
     import soundfile as sf
 
-    tar_path = ASSETS / "audioset_bal_train09.tar"
-    if not tar_path.exists():
-        download(AUDIOSET_TAR_URL, tar_path)  # ~2.4GB
-    raw_dir = ASSETS / "audioset_raw"
-    log("extracting + resampling AudioSet to 16kHz (this takes a while)")
-    with tarfile.open(tar_path) as tar:
-        tar.extractall(raw_dir, filter="data")
+    log(f"downloading AudioSet background clips (up to {max_clips})")
     AUDIOSET_DIR.mkdir(parents=True, exist_ok=True)
     n = 0
-    for flac in sorted(raw_dir.rglob("*.flac")):
+    for url in AUDIOSET_PARQUET_URLS:
+        shard = ASSETS / "audioset_shard.parquet"
+        download(url, shard)
         try:
-            audio, sr = sf.read(flac)
-        except Exception as e:
-            log(f"  skipping {flac.name}: {e}")
-            continue
-        write_wav_16k(AUDIOSET_DIR / (flac.stem + ".wav"), audio, sr)
-        n += 1
-        if n % 500 == 0:
-            log(f"  …{n} clips")
-    shutil.rmtree(raw_dir)
-    tar_path.unlink()
+            pf = pq.ParquetFile(shard)
+            for batch in pf.iter_batches(columns=["audio"], batch_size=32):
+                for rec in batch.column(0):
+                    try:
+                        data, sr = sf.read(io.BytesIO(rec["bytes"].as_py()))
+                        write_wav_16k(AUDIOSET_DIR / f"audioset_{n:05d}.wav", data, sr)
+                        n += 1
+                    except Exception as e:
+                        log(f"  skipping clip {n}: {e}")
+                    if n % 250 == 0:
+                        log(f"  …{n}/{max_clips}")
+                    if n >= max_clips:
+                        break
+                if n >= max_clips:
+                    break
+        finally:
+            shard.unlink(missing_ok=True)
+        if n >= max_clips:
+            break
     log(f"  → {n} background clips in {AUDIOSET_DIR}")
 
 
@@ -207,7 +221,7 @@ def cmd_assets(args) -> None:
     if "rirs" in parts:
         fetch_rirs()
     if "audioset" in parts:
-        fetch_audioset()
+        fetch_audioset(args.audioset_clips)
     if "fma" in parts:
         fetch_fma(args.fma_clips)
     log("assets done")
@@ -375,6 +389,8 @@ def main() -> None:
     p.add_argument("--only", help=f"comma-separated subset of: {','.join(ASSET_PARTS)}")
     p.add_argument("--fma-clips", type=int, default=1000,
                    help="number of 30s FMA music clips to fetch (default 1000 ≈ 1GB)")
+    p.add_argument("--audioset-clips", type=int, default=2000,
+                   help="number of 10s AudioSet noise clips to fetch (default 2000)")
     p.set_defaults(func=cmd_assets)
 
     p = sub.add_parser("new", help="create a wake-word training config")

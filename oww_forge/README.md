@@ -97,7 +97,7 @@ badge).
 |---|---|---|
 | ACAV100M negative features | ~17GB | 2,000h of precomputed non-wake-word features |
 | validation features | ~0.5GB | false-positive validation (11h speech/noise/music) |
-| AudioSet `bal_train09` | ~2.4GB download | background noise for augmentation |
+| AudioSet (2,000 clips, streamed) | ~2GB | background noise for augmentation |
 | FMA small (1,000 clips) | ~1GB | background music for augmentation |
 | MIT RIRs | ~50MB | room reverb simulation |
 | piper LibriTTS-R checkpoint | ~430MB | positive sample synthesis |
