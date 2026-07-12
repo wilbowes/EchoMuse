@@ -38,6 +38,12 @@ PIPER_CKPT_URL = (
     "https://github.com/rhasspy/piper-sample-generator/releases/download/"
     "v2.0.0/en_US-libritts_r-medium.pt"
 )
+# voice config expected at <ckpt>.json; lives in the repo (which the
+# Dockerfile replaces with the /data symlink), not in the release assets
+PIPER_CKPT_JSON_URL = (
+    "https://raw.githubusercontent.com/rhasspy/piper-sample-generator/"
+    "195e3bd967d54589c2137c9de2b22ad526ba6b6f/models/en_US-libritts_r-medium.pt.json"
+)
 FEATURES_DIR = ASSETS / "features"
 HF_FEATURES_REPO = "davidscripka/openwakeword_features"
 NEGATIVE_FEATURES = "openwakeword_features_ACAV100M_2000_hrs_16bit.npy"
@@ -103,8 +109,11 @@ def dir_has_files(path: Path, pattern: str = "*") -> bool:
 def fetch_piper() -> None:
     if PIPER_CKPT.exists():
         log(f"piper checkpoint present: {PIPER_CKPT}")
-        return
-    download(PIPER_CKPT_URL, PIPER_CKPT)
+    else:
+        download(PIPER_CKPT_URL, PIPER_CKPT)
+    ckpt_json = PIPER_CKPT.with_suffix(".pt.json")
+    if not ckpt_json.exists():
+        download(PIPER_CKPT_JSON_URL, ckpt_json)
 
 
 def fetch_features() -> None:
@@ -229,8 +238,8 @@ def cmd_assets(args) -> None:
 
 def missing_assets() -> list:
     missing = []
-    if not PIPER_CKPT.exists():
-        missing.append("piper checkpoint (forge.py assets --only piper)")
+    if not (PIPER_CKPT.exists() and PIPER_CKPT.with_suffix(".pt.json").exists()):
+        missing.append("piper checkpoint + voice config (forge.py assets --only piper)")
     for fname in (NEGATIVE_FEATURES, VALIDATION_FEATURES):
         if not (FEATURES_DIR / fname).exists():
             missing.append(f"{fname} (forge.py assets --only features)")
