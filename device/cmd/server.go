@@ -15,6 +15,7 @@ import (
 
 	"github.com/wilbowes/EchoMuse/internal/aec"
 	internalbuttons "github.com/wilbowes/EchoMuse/internal/bindings/buttons"
+	"github.com/wilbowes/EchoMuse/internal/bluetooth"
 	"github.com/wilbowes/EchoMuse/internal/bindings/mic"
 	"github.com/wilbowes/EchoMuse/internal/bindings/speaker"
 	"github.com/wilbowes/EchoMuse/internal/client"
@@ -94,6 +95,14 @@ func main() {
 		func() { dataClient.StopMic() },
 	)
 
+	// BLE proxy scanner — passive scan over /dev/stpbt, batches forwarded
+	// to the controller on the control plane. Armed from env defaults here
+	// and toggled live on config push (bleProxyEnabled, applyBleConfig).
+	bleScanner := bluetooth.NewScanner(func(batch []bluetooth.Advert) {
+		controlClient.SendBleAdverts(batch)
+	})
+	applyBleConfig(bleScanner)
+
 	// Button events — forward to controller via control plane
 	_, err = buttonController.SubscribeToButton(func(event pkgbuttons.ButtonClickEvent) {
 		log.Printf("Button event: clickType=%d down=%v", event.ClickType, event.Down)
@@ -151,6 +160,7 @@ func main() {
 		// (re)connect rather than waiting up to 30s for the first tick.
 		go func() {
 			st := collectStats()
+			st.Ble = bleScanner.Stats()
 			controlClient.SendStats(st)
 		}()
 		// Deliver any unacknowledged WiFi change outcome (including the
@@ -163,11 +173,12 @@ func main() {
 	})
 
 	// Config applied — apply hardware changes via tinymix, AEC params to
-	// the canceller. AEC reads the merged post-Apply snapshot rather than
+	// the canceller. AEC/BLE read the merged post-Apply snapshot rather than
 	// the (partial) message so unmentioned fields keep their values.
 	controlClient.OnConfigApplied(func(msg config.ConfigMessage) {
 		applyHardwareConfig(msg)
 		applyAecConfig(canceller)
+		applyBleConfig(bleScanner)
 	})
 
 	// Speaker flush — barge-in: cut buffered TTS the moment the controller
@@ -278,6 +289,7 @@ func main() {
 		defer ticker.Stop()
 		for range ticker.C {
 			st := collectStats()
+			st.Ble = bleScanner.Stats()
 			controlClient.SendStats(st)
 		}
 	}()
@@ -294,6 +306,7 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	sig := <-sigCh
 	log.Printf("Received %v — shutting down (muting output, amp off)", sig)
+	bleScanner.SetEnabled(false) // scan off + /dev/stpbt closed so the chip idles
 	pcmSpeaker.Close()
 	os.Exit(0)
 }
@@ -484,6 +497,14 @@ func applyAecConfig(canceller *aec.Canceller) {
 		delayMs = *snap.AecDelayMs
 	}
 	canceller.SetParams(enabled, delayMs, snap.AecTailMs)
+}
+
+// applyBleConfig starts/stops the BLE proxy scanner from the current
+// effective config. SetEnabled is idempotent, so calling it on every config
+// push is free.
+func applyBleConfig(scanner *bluetooth.Scanner) {
+	snap := config.Get().Snapshot()
+	scanner.SetEnabled(snap.BleProxyEnabled != nil && *snap.BleProxyEnabled)
 }
 
 func tinymix(ctl string, args ...string) {

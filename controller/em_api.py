@@ -48,6 +48,7 @@ import websockets
 
 import em_db as db
 import em_auth as auth
+import em_ble_proxy
 import em_scenes
 from version import VERSION as CONTROLLER_VERSION
 
@@ -393,6 +394,8 @@ async def _delete_device(request: web.Request) -> web.Response:
         return _error("device_not_found", f"No device: {device_id}", 404)
 
     await loop.run_in_executor(None, db.delete_device, device_id)
+    # Row gone → reconcile tears down any BT proxy listener/mDNS for it.
+    await em_ble_proxy.reconcile(device_id)
     await _push_event({"type": "device_deleted", "device_id": device_id})
     return _ok({})
 
@@ -515,6 +518,11 @@ async def _post_device_config(request: web.Request) -> web.Response:
             live.led_scene = em_scenes.resolve(eff)
         log.info(f"[api] Config pushed to live device: {device_id}")
         pushed = True
+
+    # BT proxy lifecycle follows bleProxyEnabled in the *effective* config —
+    # reconcile unconditionally (idempotent): a revert-to-global changes the
+    # effective value without the key appearing in the body.
+    await em_ble_proxy.reconcile(device_id)
 
     effective_use_global = use_global if use_global is not None else bool(row["use_global_config"])
     await _push_event({"type": "device_update", "device_id": device_id,
@@ -1703,6 +1711,14 @@ async def _post_global_config(request: web.Request) -> web.Response:
     if pushed:
         log.info(f"[api] Global config pushed to {len(pushed)} device(s): {pushed}")
 
+    # Reconcile BT proxies for every approved on-global device — offline
+    # ones included (proxy mDNS/port lifecycle is independent of the
+    # device connection, unlike the config push above).
+    all_rows = await loop.run_in_executor(None, db.get_all_devices)
+    for row in all_rows:
+        if row["approved"] and row["use_global_config"]:
+            await em_ble_proxy.reconcile(row["device_id"])
+
     return _ok({"config": config, "pushed_to": pushed})
 
 
@@ -2093,6 +2109,8 @@ def _merge_device(row) -> dict:
         "last_seen":          row["last_seen"],
         "config":             json.loads(row["config"] or "{}"),
         "use_global_config":  bool(row["use_global_config"]),
+        "esphome_port":       row["esphome_api_port"],
+        "ble_proxy_port":     row["ble_proxy_port"],
         # Live — defaults when device is not connected
         "connected":        live is not None,
         "speaking":         live.speaking  if live else False,
@@ -2100,6 +2118,9 @@ def _merge_device(row) -> dict:
         "listening":        getattr(live, "listening", False) if live else False,
         "thinking":         getattr(live, "thinking",  False) if live else False,
         "stats":            live.stats if live else None,
+        # Controller-side BT proxy state — non-None only while the device's
+        # bleProxyEnabled config has a proxy server instantiated.
+        "bleProxy":         em_ble_proxy.get_status(device_id),
         # Q4 fix (2026-07-05 review): near-miss counter — same lifecycle as
         # the rest of this "Live" section (resets on reconnect, since it
         # lives on the per-connection Device object, not the DB row).

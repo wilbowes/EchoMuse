@@ -796,7 +796,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   const needsUpdate = device.firmware_ver && release?.version && device.firmware_ver !== release.version;
 
   const TABS = device.approved
-    ? (isAdmin ? ['status', 'config', 'wifi', 'console', 'updates', 'logs'] : ['status', 'config', 'logs'])
+    ? (isAdmin ? ['status', 'activity', 'config', 'console', 'updates', 'logs'] : ['status', 'activity', 'config', 'logs'])
     : ['approve'];
 
   useEffect(() => {
@@ -811,10 +811,10 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
     }
   }, [tab, device.device_id]);
 
-  // Turn observability — fetch on Status tab entry, refresh every 10s while
+  // Turn observability — fetch on Activity tab entry, refresh every 10s while
   // the tab is open (turn history is in-memory on the controller).
   useEffect(() => {
-    if (tab !== 'status') return;
+    if (tab !== 'activity') return;
     let live = true;
     const load = () => API.get(`/api/devices/${device.device_id}/turns`)
       .then(t => { if (live) setTurns(Array.isArray(t) ? t : []); })
@@ -1091,6 +1091,8 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                       return device.connected ? (ip || '—') : (ip ? `${ip} (last seen)` : '—');
                     })())}
                     {row('Firmware', device.firmware_ver || '—')}
+                    {row('WiFi network', s?.wifiSsid || '—')}
+                    {row('ESPHome port', device.esphome_port != null ? String(device.esphome_port) : '—')}
                     {row('Last seen', relTime(device.last_seen))}
                     {row('Connected', device.connected ? 'Yes' : 'No', device.connected ? '#286040' : '#c0601a')}
                     {row('Config', (device.use_global_config ?? true) ? 'Fleet' : 'Device override')}
@@ -1109,6 +1111,42 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     {!s && <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', marginTop:8 }}>waiting for device stats…</div>}
                   </Panel>
                 </div>
+                {device.bleProxy && (() => {
+                  const b  = s?.ble || null;          // device-side scanner stats
+                  const bp = device.bleProxy;         // controller-side proxy state
+                  const haState = bp.haSubscribed ? 'Streaming to HA'
+                    : bp.haConnected ? 'HA connected (not subscribed)'
+                    : bp.listening ? 'Waiting for HA' : 'Port down (device offline)';
+                  return (
+                    <Panel label="Bluetooth proxy">
+                      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'0 24px' }}>
+                        <div>
+                          {row('Scanner', b ? (b.scanning ? 'Scanning' : 'Stopped') : '—', b?.scanning ? '#286040' : undefined)}
+                          {row('Adverts seen', b ? String(b.advertsSeen ?? 0) : '—')}
+                          {row('Nearby devices (5 min)', b ? String(b.uniqueAddrs ?? 0) : '—')}
+                          {row('BT address', b?.bdAddr || '—')}
+                        </div>
+                        <div>
+                          {row('Home Assistant', haState, bp.haSubscribed ? '#286040' : undefined)}
+                          {row('Forwarded to HA', String(bp.advertsForwarded ?? 0))}
+                          {row('ESPHome port', String(bp.port))}
+                          {row('HCI errors / restarts', b ? `${b.hciErrors ?? 0} / ${b.restarts ?? 0}` : '—')}
+                        </div>
+                      </div>
+                    </Panel>
+                  );
+                })()}
+              </div>
+            );
+          })()}
+
+          {/* ACTIVITY — voice-turn observability; its own tab (genuinely
+              useful, was cramped at the bottom of Status). */}
+          {tab === 'activity' && (() => {
+            const cfgEff = (device.use_global_config ?? true) ? (globalConfig || device.config || {}) : (device.config || {});
+            const wwLabel = (cfgEff.owwModel || '—').replace(/_v[\d.]+$/, '').replace(/_/g, ' ');
+            return (
+              <div style={{ minHeight:'100%', display:'flex', flexDirection:'column' }}>
                 <Panel label={`Voice activity — ${wwLabel} @ ${cfgEff.owwThreshold != null ? cfgEff.owwThreshold.toFixed(2) : '—'}`} style={{ flex:1 }}>
                   <TurnObservability
                     turns={turns}
@@ -1124,6 +1162,12 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
           {/* CONFIG */}
           {tab === 'config' && (
             <div>
+              {/* Network (WiFi) — always per-device, kept above and visually
+                  separate from the fleet-inheritable config below. */}
+              <div style={{ paddingBottom: 24, marginBottom: 24, borderBottom: '1px solid var(--line, rgba(0,0,0,0.12))' }}>
+                <ConnectivityTab device={device} row={row}/>
+              </div>
+
               {/* Global override toggle */}
               {isAdmin && globalConfig && (
                 <div style={{
@@ -1182,9 +1226,6 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
               )}
             </div>
           )}
-
-          {/* WIFI — per-device connectivity */}
-          {tab === 'wifi' && <ConnectivityTab device={device} row={row}/>}
 
           {/* CONSOLE — fills the whole tab frame */}
           {tab === 'console' && (
@@ -3130,6 +3171,15 @@ function DeviceConfigForm({ config, onChange, disabled }) {
           <Slider label="Threshold" sub="RMS above this = speech (pre-gain units)" value={config.vadThreshold ?? 0.001} min={0.0001} max={0.02} step={0.0001} onChange={v => set('vadThreshold', v)}/>
           <Slider label="Speech gate" sub="speech needed to open" value={config.vadSpeechMs ?? 160} min={32} max={320} step={32} unit="ms" onChange={v => set('vadSpeechMs', v)}/>
           <Slider label="Silence gate" sub="silence needed to close" value={config.vadSilenceMs ?? 800} min={200} max={2000} step={100} unit="ms" onChange={v => set('vadSilenceMs', v)}/>
+        </div>
+      </Stage>
+
+      {/* 06 BLUETOOTH */}
+      <Stage n="06" title="Bluetooth"
+        chips={<><ScopeChip tone="device">Device</ScopeChip><ScopeChip tone="controller">Controller</ScopeChip></>}
+        desc="Turns the device into a Home Assistant Bluetooth proxy: it passively listens for BLE advertisements (presence beacons, temperature sensors) and forwards them to HA as a separate ESPHome device — independent of the voice assistant. Enabling permanently switches the Dot's Bluetooth chip away from Android's stack (Bluetooth speaker pairing, never used by EchoMuse, stops being possible).">
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px', ...inputStyle }}>
+          <Toggle label="Bluetooth proxy" sub="passive BLE scan → HA (Bermuda, BLE sensors)" value={config.bleProxyEnabled ?? false} onChange={v => set('bleProxyEnabled', v)}/>
         </div>
       </Stage>
     </div>

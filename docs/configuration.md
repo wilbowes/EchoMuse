@@ -11,10 +11,17 @@ language.
   and that device gets its own copy of the settings, ignoring fleet changes
   until you flip it back.
 
-Changes apply **immediately** — no restarts, no rebuilds. The config page is
-organised into five sections, in order of how often you'll realistically
-touch them: **Playback**, **Wake word**, **Microphones**, **Ring**,
-**Advanced**.
+Changes apply **immediately** — no restarts, no rebuilds. The Config tab
+opens with the device's **network (WiFi)** settings at the top — always
+per-device, never inherited from the fleet — followed by the
+fleet-inheritable sections, in order of how often you'll realistically touch
+them: **Playback**, **Wake word**, **Microphones**, **Ring**, **Advanced**,
+**Bluetooth**.
+
+Two other device tabs worth knowing: **Status** (IP, firmware, WiFi network,
+ESPHome port, resource meters, and the Bluetooth-proxy diagnostics panel when
+enabled) and **Activity** (live voice-turn history — what was heard, how it
+was transcribed, wake-word near-misses).
 
 ---
 
@@ -206,11 +213,40 @@ Decides when a button-press utterance starts and stops:
 
 ---
 
-## WiFi (device page → WiFi tab)
+## 06 — Bluetooth
 
-Move a device to a different WiFi network without touching ADB. The tab
-shows the current network, signal, and IP, lets you scan for visible
-networks, and switches with a confirmation step.
+**Bluetooth proxy** — turns the Dot into a Home Assistant Bluetooth proxy.
+The device passively listens for Bluetooth Low Energy advertisements
+(presence beacons, BLE temperature/humidity sensors, phones and watches for
+room-presence systems like Bermuda) and forwards them to Home Assistant.
+
+In Home Assistant the proxy appears as a **separate ESPHome device** (named
+`<label> BT Proxy`), independent of the voice assistant — you can add,
+remove, or ignore it without touching the voice satellite. Once added, its
+scanner feeds HA's Bluetooth integration exactly like an ESP32 Bluetooth
+proxy would, and a diagnostic sensor counts received advertisements.
+
+Two things to know before enabling:
+
+- Enabling **permanently switches the Dot's Bluetooth chip away from
+  Android's stack** (it survives reboots). Nothing EchoMuse uses needs
+  Android Bluetooth — but stock-style Bluetooth speaker pairing stops being
+  possible on that device.
+- The proxy is **receive-only** (passive scanning). Devices that need an
+  active connection to read data (some smart locks, older BLE devices)
+  aren't supported — advert-based sensors and presence tracking are.
+
+Diagnostics live on the device's **Status tab** (Bluetooth proxy panel):
+scanner state, advertisements seen, nearby device count, and whether Home
+Assistant is connected and receiving.
+
+---
+
+## WiFi (device page → Config tab, top section)
+
+Move a device to a different WiFi network without touching ADB. The section
+at the top of the Config tab shows the current network, signal, and IP, lets
+you scan for visible networks, and switches with a confirmation step.
 
 The switch is designed to be **unbrickable**: the device applies the change
 itself and must pass three checks — join the network, get an IP, and

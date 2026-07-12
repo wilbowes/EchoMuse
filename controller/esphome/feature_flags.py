@@ -30,6 +30,26 @@ class VoiceAssistantFeature(enum.IntFlag):
     MULTI_CHANNEL_AUDIO = 1 << 6
 
 
+class BluetoothProxyFeature(enum.IntFlag):
+    """
+    Source: aioesphomeapi/model.py, class BluetoothProxyFeature(enum.IntFlag).
+    Advertised via DeviceInfoResponse.bluetooth_proxy_feature_flags.
+
+    EchoMuse advertises PASSIVE_SCAN | RAW_ADVERTISEMENTS only — passive
+    advertisement forwarding (Bermuda, advert-based sensors). Active GATT
+    connections are a future lift (the raw HCI transport supports it, the
+    Go side doesn't).
+    """
+
+    PASSIVE_SCAN = 1 << 0
+    ACTIVE_CONNECTIONS = 1 << 1
+    REMOTE_CACHING = 1 << 2
+    PAIRING = 1 << 3
+    CACHE_CLEARING = 1 << 4
+    RAW_ADVERTISEMENTS = 1 << 5
+    FEATURE_STATE_AND_MODE = 1 << 6
+
+
 class MediaPlayerEntityFeature(enum.IntFlag):
     """
     Source: aioesphomeapi/model.py, class MediaPlayerEntityFeature(enum.IntFlag).

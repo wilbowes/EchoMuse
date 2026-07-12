@@ -12,6 +12,9 @@ type DeviceStats struct {
 	StorageTotalMb int     `json:"storageTotalMb"`
 	WifiRssi       *int    `json:"wifiRssi"`
 	WifiSsid       string  `json:"wifiSsid"`
+	// Ble carries the BLE scanner diagnostics snapshot (bluetooth.Stats),
+	// nil when the proxy has never been enabled this boot.
+	Ble interface{} `json:"ble,omitempty"`
 }
 
 // SendStats sends a stats message to the controller.
@@ -26,5 +29,6 @@ func (c *ControlClient) SendStats(s DeviceStats) {
 		"storageTotalMb": s.StorageTotalMb,
 		"wifiRssi":       s.WifiRssi,
 		"wifiSsid":       s.WifiSsid,
+		"ble":            s.Ble,
 	})
 }

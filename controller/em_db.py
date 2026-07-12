@@ -109,6 +109,12 @@ DEFAULT_DEVICE_CONFIG = {
     # files are missing (bare-metal without NS_MODEL_DIR) the flag
     # degrades to raw streaming with a warning.
     "nsAsr":            False,
+    # bleProxyEnabled: BLE proxy (device-side passive scan over the raw HCI
+    # transport, forwarded to HA as a separate ESPHome bluetooth_proxy
+    # device — em_ble_proxy.py). Default off: enabling durably disables the
+    # Android Bluetooth stack on the device (required — /dev/stpbt is
+    # single-owner) and brings up a second ESPHome listener + mDNS entry.
+    "bleProxyEnabled":  False,
     # beamformingEnabled: False — ch6 (centre/omni) for all audio.
     # beamforming=True was routing OWW audio through a perimeter mic selected
     # every 32ms frame, injecting channel-splice discontinuities. The SNR
@@ -226,6 +232,18 @@ MIGRATIONS: list[str] = [
     INSERT OR IGNORE INTO system_config VALUES ('global_device_config', '{json.dumps(DEFAULT_DEVICE_CONFIG)}');
 
     UPDATE system_config SET value = '3' WHERE key = 'schema_version';
+    """,
+
+    # ── v4 — BLE proxy (second ESPHome device per Echo) ──────────────────────
+    #
+    # ble_proxy_port: TCP port of the device's bluetooth_proxy ESPHome
+    # listener. Allocated lazily on first enable from the same
+    # next_esphome_port counter as the voice satellite (same never-reuse
+    # invariant), so voice and BT ports share one sparse range.
+    """
+    ALTER TABLE devices ADD COLUMN ble_proxy_port INTEGER;
+
+    UPDATE system_config SET value = '4' WHERE key = 'schema_version';
     """,
 ]
 
@@ -671,6 +689,57 @@ def free_esphome_port(device_id: str) -> None:
             (device_id,),
         )
     log.info(f"[db] ESPHome port freed: {device_id}")
+
+
+# ─── BLE proxy port allocation ────────────────────────────────────────────────
+
+# BLE proxy ports are aligned to the voice satellite port, not drawn from a
+# separate pool: ble_proxy_port = esphome_api_port + BLE_PORT_OFFSET. This
+# keeps the two ports for one device visibly paired (16001 voice / 17001 BT)
+# and needs no allocator. The offset comfortably exceeds any realistic device
+# count, so the voice range (16001+) and BT range (17001+) never overlap.
+BLE_PORT_OFFSET = 1000
+
+
+def get_ble_proxy_port(device_id: str) -> Optional[int]:
+    """Return the BLE proxy port for this device, or None if unassigned."""
+    row = _q1("SELECT ble_proxy_port FROM devices WHERE device_id = ?", (device_id,))
+    if row is None:
+        return None
+    return row["ble_proxy_port"]  # may be None (unassigned)
+
+
+def ensure_ble_proxy_port(device_id: str) -> Optional[int]:
+    """
+    Return this device's BLE proxy port (esphome_api_port + BLE_PORT_OFFSET),
+    persisting it on first call. Returns None if the device has no voice port
+    yet (BLE proxy can't exist without the voice satellite it's paired to).
+    """
+    with _tx() as conn:
+        row = conn.execute(
+            "SELECT esphome_api_port, ble_proxy_port FROM devices WHERE device_id = ?",
+            (device_id,),
+        ).fetchone()
+        if row is None or row["esphome_api_port"] is None:
+            return None
+        port = int(row["esphome_api_port"]) + BLE_PORT_OFFSET
+        if row["ble_proxy_port"] != port:
+            conn.execute(
+                "UPDATE devices SET ble_proxy_port = ? WHERE device_id = ?",
+                (port, device_id),
+            )
+            log.info(f"[db] BLE proxy port set: {device_id} → {port}")
+    return port
+
+
+def free_ble_proxy_port(device_id: str) -> None:
+    """Clear the BLE proxy port assignment (deprovisioning)."""
+    with _tx() as conn:
+        conn.execute(
+            "UPDATE devices SET ble_proxy_port = NULL WHERE device_id = ?",
+            (device_id,),
+        )
+    log.info(f"[db] BLE proxy port freed: {device_id}")
 
 
 # ─── Device logs ──────────────────────────────────────────────────────────────

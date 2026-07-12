@@ -68,6 +68,7 @@ import em_api as api
 import em_eq
 import em_scenes
 import em_esphome as esphome
+import em_ble_proxy
 
 logging.basicConfig(
     level=logging.DEBUG if os.environ.get("DEBUG") else logging.INFO,
@@ -1358,6 +1359,11 @@ async def handle_control(ws: WebSocketServerProtocol):
         # wake-word dropdown tracks dashboard changes across controller
         # restarts too.
         esphome.update_oww_model(device_id, device.oww_model)
+        # BT proxy: mark the device online (brings its proxy listener up if
+        # enabled) and reconcile against current config — covers devices
+        # approved or toggled while they were offline.
+        await em_ble_proxy.device_connected(device_id)
+        await em_ble_proxy.reconcile(device_id)
 
         # ── Main message loop ─────────────────────────────────────────────
 
@@ -1435,11 +1441,20 @@ async def handle_control(ws: WebSocketServerProtocol):
                         "storageTotalMb":msg.get("storageTotalMb"),
                         "wifiRssi":      msg.get("wifiRssi"),
                         "wifiSsid":      msg.get("wifiSsid"),
+                        "ble":           msg.get("ble"),
                     }
+                    if msg.get("ble"):
+                        em_ble_proxy.update_stats(device_id, msg["ble"])
                     await api._push_event({
                         "type":      "device_update",
                         "device_id": device_id,
-                        "state":     {"stats": device.stats},
+                        "state":     {
+                            "stats": device.stats,
+                            # Controller-side proxy view rides along so the
+                            # dashboard's Bluetooth panel stays live without
+                            # a full device refresh.
+                            "bleProxy": em_ble_proxy.get_status(device_id),
+                        },
                     })
 
                 elif msg_type == "wifi_result":
@@ -1471,6 +1486,13 @@ async def handle_control(ws: WebSocketServerProtocol):
                             "device_id": device_id,
                             "state":     {"wifi": st},
                         })
+
+                elif msg_type == "ble_adverts":
+                    # BLE proxy data path — batched adverts from the
+                    # device's passive scanner, forwarded to HA.
+                    em_ble_proxy.forward_adverts(
+                        device_id, msg.get("adverts") or []
+                    )
 
                 elif msg_type == "wifi_scan_result":
                     fut = device.wifi_scan_future
@@ -1514,6 +1536,7 @@ async def handle_control(ws: WebSocketServerProtocol):
                 _devices.pop(device.device_id, None)
             await api.notify_device_disconnected(device.device_id)
             await esphome.device_disconnected(device.device_id)
+            await em_ble_proxy.device_disconnected(device.device_id)
 
 
 # ─── Data plane handler ───────────────────────────────────────────────────────
@@ -1767,11 +1790,14 @@ async def main():
             max_size=10 * 1024 * 1024,
         ):
             await esphome.start_esphome_servers(_devices, SERVER_HOST)
+            # After the voice satellites — BT proxies reuse their zeroconf.
+            await em_ble_proxy.start_ble_proxy_servers(SERVER_HOST)
 
             log.info("EchoMuse Controller ready — waiting for devices")
             await asyncio.Future()
 
     finally:
+        await em_ble_proxy.stop_ble_proxy_servers()
         await esphome.stop_esphome_servers()
         release_task.cancel()
         session_prune_task.cancel()

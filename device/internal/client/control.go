@@ -649,6 +649,17 @@ func (c *ControlClient) SendWifiResult(ok bool, ssid, errMsg string) {
 	})
 }
 
+// SendBleAdverts forwards a batch of BLE advertisements to the controller
+// (bluetooth_proxy path). adverts is marshalled as-is — []bluetooth.Advert,
+// whose Data field JSON-encodes as base64. Safe for concurrent use —
+// silently drops if not connected (adverts are ephemeral by nature).
+func (c *ControlClient) SendBleAdverts(adverts interface{}) {
+	_ = c.writeJSON(map[string]interface{}{
+		"type":    "ble_adverts",
+		"adverts": adverts,
+	})
+}
+
 // SendWifiScanResult reports scan results (or a scan error) upstream.
 // networks is marshalled as-is; pass nil with errMsg on failure.
 func (c *ControlClient) SendWifiScanResult(networks interface{}, errMsg string) {

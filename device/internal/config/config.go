@@ -69,6 +69,10 @@ type Device struct {
 	AecDelayMs int
 	AecTailMs  int
 
+	// BLE proxy (passive scan over /dev/stpbt, internal/bluetooth) —
+	// pointer typed so false is expressible over the wire. Default off.
+	BleProxyEnabled *bool
+
 	initialised bool
 }
 
@@ -107,6 +111,8 @@ func (d *Device) loadDefaults() {
 	d.AecEnabled = &aecEnabled
 	d.AecDelayMs = envInt("AEC_DELAY_MS", 0)
 	d.AecTailMs = envInt("AEC_TAIL_MS", 300)
+	bleProxyEnabled := envBool("BLE_PROXY_ENABLED", false)
+	d.BleProxyEnabled = &bleProxyEnabled
 }
 
 // Apply updates the config from a controller-pushed config message.
@@ -166,6 +172,9 @@ func (d *Device) Apply(msg ConfigMessage) {
 	if msg.AecTailMs > 0 {
 		d.AecTailMs = msg.AecTailMs
 	}
+	if msg.BleProxyEnabled != nil {
+		d.BleProxyEnabled = msg.BleProxyEnabled
+	}
 }
 
 // Snapshot returns a consistent copy of all config values.
@@ -189,6 +198,10 @@ func (d *Device) Snapshot() ConfigMessage {
 		aecEnabled = *d.AecEnabled
 	}
 	aecDelayMs := d.AecDelayMs
+	bleProxyEnabled := false
+	if d.BleProxyEnabled != nil {
+		bleProxyEnabled = *d.BleProxyEnabled
+	}
 	return ConfigMessage{
 		VadThreshold:       d.VadThreshold,
 		VadSpeechMs:        d.VadSpeechMs,
@@ -205,6 +218,7 @@ func (d *Device) Snapshot() ConfigMessage {
 		AecEnabled:         &aecEnabled,
 		AecDelayMs:         &aecDelayMs,
 		AecTailMs:          d.AecTailMs,
+		BleProxyEnabled:    &bleProxyEnabled,
 	}
 }
 
@@ -228,6 +242,7 @@ type ConfigMessage struct {
 	AecEnabled         *bool    `json:"aecEnabled,omitempty"`
 	AecDelayMs         *int     `json:"aecDelayMs,omitempty"`
 	AecTailMs          int      `json:"aecTailMs,omitempty"`
+	BleProxyEnabled    *bool    `json:"bleProxyEnabled,omitempty"`
 }
 
 // clampMicGainDb bounds the fixed mic gain to a sane range: 0dB (unity —

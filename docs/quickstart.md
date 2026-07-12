@@ -156,11 +156,17 @@ The LED ring tells you what's happening:
 - **Interrupting**: with barge-in enabled, say the wake word while it's
   talking and it stops and listens. The mute button also cuts it off
   instantly (and mutes).
+- **Bluetooth proxy** (optional): each Dot can double as a Home Assistant
+  Bluetooth proxy — passively picking up BLE advertisements (presence
+  beacons, BLE sensors) and feeding them to HA as a *separate* ESPHome
+  device, independent of the voice assistant. Enable it per device in the
+  Config tab (Bluetooth section); it appears in HA as "<name> BT Proxy". See
+  [configuration.md](configuration.md).
 
 ## When something doesn't work
 
 1. Is the device **online** in the dashboard?
-2. Does the wake word register? The Status tab shows recent wake detections
+2. Does the wake word register? The Activity tab shows recent wake detections
    and "near-misses" (times it almost triggered) — if you're getting
    near-misses, nudge the sensitivity up a step (see configuration.md).
 3. Bad transcriptions? See the microphone section of
