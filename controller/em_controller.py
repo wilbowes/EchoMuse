@@ -586,7 +586,15 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
     speech-over-TTS scores are depressed and barge_threshold sits well
     below the wake threshold (~0.05–0.10). During thinking nothing is
     playing — scores are normal, and using the low barge threshold there
-    would fire on random speech — so the normal wake threshold applies.
+    would fire on random speech — so detection is two-tier: a single frame
+    at the normal wake threshold fires immediately, and two CONSECUTIVE
+    frames at a low tier (0.4× wake threshold, floored at 0.2) also fire.
+    The low tier exists because a genuine barge attempt over the watcher's
+    cold-started model can plateau below the wake threshold (observed
+    2026-07-12: 0.240/0.242 on consecutive frames vs threshold 0.50 —
+    missed, and the unwanted answer played in full), while random speech
+    near-misses are isolated single frames — two elevated frames in a row
+    is wake-word-shaped evidence.
 
     On detection: set barge_detected + cancel_event. During playback that
     aborts stream_speaker and the drain sleep, plus a device speaker_flush
@@ -623,6 +631,7 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
     # threshold (~0.10) is both safe and necessary. Thinking phase uses the
     # normal wake threshold (see docstring).
     threshold = device.barge_threshold  # refined per-frame by phase below
+    prev_score = 0.0  # previous frame's score — two-frame low tier (thinking)
     buf = bytearray()
     # Observability: the watcher used to log only on detection, which made a
     # failed barge-in attempt indistinguishable from "no frames arrived at
@@ -642,6 +651,8 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
             payload = await device.voice_queue.get()
             if payload is None or isinstance(payload, str):
                 buf.clear()
+                prev_score = 0.0  # sentinel = stream discontinuity; frames
+                # across it aren't consecutive for the two-frame low tier
                 continue
             buf.extend(payload)
             while len(buf) >= CHUNK_BYTES:
@@ -655,8 +666,28 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                 score = prediction.get(device._barge_model_key, 0.0)
                 frames += 1
                 in_playback = playback_started.is_set()
-                threshold = (device.barge_threshold if in_playback
-                             else device.oww_threshold)
+                if in_playback:
+                    threshold = device.barge_threshold
+                    fired     = score >= threshold
+                    fire_note = f"score={score:.3f} >= {threshold:.2f}"
+                else:
+                    # Two-tier thinking detection (see docstring): full wake
+                    # threshold on a single frame, OR two consecutive frames
+                    # at the low tier.
+                    threshold = device.oww_threshold
+                    low_tier  = max(0.2, 0.4 * device.oww_threshold)
+                    if score >= threshold:
+                        fired     = True
+                        fire_note = f"score={score:.3f} >= {threshold:.2f}"
+                    elif score >= low_tier and prev_score >= low_tier:
+                        fired     = True
+                        fire_note = (
+                            f"scores {prev_score:.3f}/{score:.3f} — two "
+                            f"consecutive frames >= low tier {low_tier:.2f}"
+                        )
+                    else:
+                        fired = False
+                prev_score = score
                 if score > peak:
                     peak = score
                     if score >= 0.1:
@@ -664,11 +695,11 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                             f"[{device.device_id}] Barge watcher: score {score:.3f} "
                             f"(threshold {threshold:.2f})"
                         )
-                if score >= threshold:
+                if fired:
                     phase = "playback" if in_playback else "thinking"
                     log.info(
                         f"[{device.device_id}] Barge-in: wake word during {phase} "
-                        f"(score={score:.3f} >= {threshold:.2f}) — cancelling turn"
+                        f"({fire_note}) — cancelling turn"
                     )
                     db.log_device(
                         device.device_id, "info", "device",
