@@ -21,6 +21,9 @@ x-forge-base: &forge-base
     context: .
     args:
       GPU: "1"
+  # torch DataLoader workers pass tensors via /dev/shm; Docker's 64MB
+  # default kills them with bus errors during the training step
+  shm_size: "8gb"
   volumes:
     # Assets (~25GB), per-wake-word workdirs, and finished models.
     # Point this at a disk with room.
