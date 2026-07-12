@@ -212,6 +212,9 @@ class Device:
         # the speexdsp-ns pip package confirmed installable in the Docker
         # build before enabling fleet-wide; see review Q1 fix sequence).
         self.oww_speex_ns:  bool  = False
+        # nsAsr: controller-side DTLN noise suppression on the ASR-bound
+        # turn stream only (em_ns.py; wake stream stays raw).
+        self.ns_asr:        bool  = False
         self.eq_bands:      list  = [0.0] * 8
         self.eq_loudness:   bool  = False
         # LED ring scene — render-ready palette/spinner from em_scenes,
@@ -1316,6 +1319,7 @@ async def handle_control(ws: WebSocketServerProtocol):
         device.oww_threshold = float(config.get("owwThreshold", OWW_THRESHOLD))
         device.oww_model     = config.get("owwModel", f"{OWW_MODEL}_v0.1")
         device.oww_speex_ns  = bool(config.get("owwSpeexNs", False))
+        device.ns_asr        = bool(config.get("nsAsr", False))
         device.barge_in_enabled = bool(config.get("bargeInEnabled", False))
         device.barge_threshold  = float(config.get("bargeInThreshold", 0.6))
         device.eq_bands      = config.get("eqBands", [0.0] * 8)

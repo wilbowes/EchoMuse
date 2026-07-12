@@ -126,6 +126,14 @@ Beam angle `-1` means "choose automatically at each wake"; any other number
 fixes the pickup direction in degrees (0 = the side with the volume-up
 button, clockwise). The presets set both of these for you.
 
+**Noise suppression** — cleans the audio sent to speech-to-text (and only
+that — wake-word listening is untouched). It uses a small neural denoiser
+(DTLN) running on the controller, so there's no load on the Dot. Helps most
+with *steady* noise — fans, air-con, appliance hum — in rooms where
+transcripts come back garbled. It does not remove other people talking or
+the TV; pointing the beamformer away from them is the tool for that. Off by
+default — turn it on per device and compare transcripts.
+
 **Echo cancel (AEC)** — teaches the mics to *subtract the Dot's own voice*
 from what they hear. Benefits: the device can hear you properly during and
 right after its own responses (follow-up questions work much better), its

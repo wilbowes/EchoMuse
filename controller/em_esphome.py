@@ -67,6 +67,7 @@ from zeroconf import ServiceInfo
 
 import em_db as db
 import em_api as api
+import em_ns
 
 # ── VAD sentinels ──────────────────────────────────────────────────────────────
 # Queue items marking end-of-speech in mic_queue/voice_queue, in place of
@@ -822,6 +823,27 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         """
         pcm_buf = bytearray()
 
+        # NS (nsAsr): DTLN denoiser on the ASR-bound stream only — created
+        # per turn (LSTM state must start clean), sessions shared. The wake
+        # stream and the noise-floor measurement below stay raw by design.
+        # Fail-open: missing models or a mid-turn error fall back to raw
+        # audio with a warning, never a dead turn.
+        denoiser = None
+        if getattr(device, "ns_asr", False):
+            if em_ns.available():
+                try:
+                    denoiser = em_ns.StreamingDenoiser()
+                    log.info(f"[{self._log_name}] NS: DTLN active on ASR stream")
+                except Exception as e:
+                    log.warning(f"[{self._log_name}] NS init failed ({e}) — streaming raw audio")
+            else:
+                log.warning(
+                    f"[{self._log_name}] nsAsr enabled but DTLN models missing "
+                    f"({em_ns.MODEL_DIR}) — streaming raw audio"
+                )
+        ns_debug_raw = bytearray()
+        ns_debug_out = bytearray()
+
         # Preroll discard — drop wake-word tail from voice_queue before
         # streaming to HA. Wake turns pass VOICE_PREROLL_DISCARD; button and
         # continuation turns pass 0 (see C3 — they have no wake-word tail to
@@ -860,142 +882,165 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             floor = getattr(device, "noise_floor", 0.0)
             return rms >= max(3.0 * floor, 0.004)
 
-        while True:
-            if device.cancel_event.is_set():
-                self._turn_cancelled = True
-                return
+        try:
+            while True:
+                if device.cancel_event.is_set():
+                    self._turn_cancelled = True
+                    return
 
-            if self._ha_vad_end.is_set():
-                # HA has already ended its side of the turn (STT_VAD_END or
-                # ERROR) — nothing further sent here can matter. Send end=True
-                # defensively in case the device sentinel never arrives (the
-                # noisy-room case this fix targets); if the device sentinel
-                # already sent it, a second end=True is harmless.
-                log.info(
-                    f"[{self._log_name}] HA VAD end — stopping mic streaming "
-                    f"(device's own RMS gate may still be open; noise-robust "
-                    f"HA endpointing wins the race)"
-                )
-                if self._trace and self._trace.t_vad_end_ms == -1:
-                    self._trace.t_vad_end_ms = self._trace.elapsed_ms()
-                if self._transport and not self._transport.is_closing():
-                    self._send_one(api_pb2.VoiceAssistantAudio(data=b"", end=True))
-                return
+                if self._ha_vad_end.is_set():
+                    # HA has already ended its side of the turn (STT_VAD_END or
+                    # ERROR) — nothing further sent here can matter. Send end=True
+                    # defensively in case the device sentinel never arrives (the
+                    # noisy-room case this fix targets); if the device sentinel
+                    # already sent it, a second end=True is harmless.
+                    log.info(
+                        f"[{self._log_name}] HA VAD end — stopping mic streaming "
+                        f"(device's own RMS gate may still be open; noise-robust "
+                        f"HA endpointing wins the race)"
+                    )
+                    if self._trace and self._trace.t_vad_end_ms == -1:
+                        self._trace.t_vad_end_ms = self._trace.elapsed_ms()
+                    if self._transport and not self._transport.is_closing():
+                        self._send_one(api_pb2.VoiceAssistantAudio(data=b"", end=True))
+                    return
 
-            # No-speech timeout: if nothing above the room's noise floor has
-            # arrived within NO_SPEECH_TIMEOUT seconds, treat as accidental
-            # wake and close quietly. Once speech is detected, HA's VAD owns
-            # end-of-turn.
-            # HA's VAD hearing speech also disarms the timeout — covers quiet
-            # speech in a noisy room that misses the 3×-floor check below.
-            if not speech_seen and self._ha_vad_start.is_set():
-                speech_seen = True
-                log.debug(f"[{self._log_name}] Speech detected (HA VAD start) — no-speech timeout disarmed")
+                # No-speech timeout: if nothing above the room's noise floor has
+                # arrived within NO_SPEECH_TIMEOUT seconds, treat as accidental
+                # wake and close quietly. Once speech is detected, HA's VAD owns
+                # end-of-turn.
+                # HA's VAD hearing speech also disarms the timeout — covers quiet
+                # speech in a noisy room that misses the 3×-floor check below.
+                if not speech_seen and self._ha_vad_start.is_set():
+                    speech_seen = True
+                    log.debug(f"[{self._log_name}] Speech detected (HA VAD start) — no-speech timeout disarmed")
 
-            if not speech_seen and (time.monotonic() - turn_start) > NO_SPEECH_TIMEOUT:
-                log.info(
-                    f"[{self._log_name}] No speech within {NO_SPEECH_TIMEOUT}s — "
-                    f"closing HA pipeline quietly (controller-side no-speech timeout)"
-                )
-                self._send_one(api_pb2.VoiceAssistantAudio(data=b"", end=True))
-                self._no_speech_timeout = True
-                return
-
-            # Race the queue-get against _ha_vad_end directly rather than a
-            # flat 1s poll timeout — this notices HA's VAD end within
-            # milliseconds instead of up to 1s late, without a busy loop.
-            get_task = asyncio.ensure_future(device.voice_queue.get())
-            vad_task = asyncio.ensure_future(self._ha_vad_end.wait())
-            try:
-                done, pending = await asyncio.wait(
-                    [get_task, vad_task],
-                    timeout=1.0,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-            finally:
-                # Belt-and-braces: if this coroutine itself gets cancelled
-                # while parked in the wait above (e.g. the 20s hard-cap
-                # asyncio.wait_for in run_esphome_voice_turn firing), the
-                # CancelledError propagates straight through asyncio.wait()
-                # without touching get_task/vad_task — they're independent
-                # tasks, not sub-awaits, so nothing cancels them for us.
-                # Cancelling both unconditionally here (a no-op if already
-                # done) prevents that from leaking a Queue.get() waiter and
-                # an Event.wait() waiter on every turn that hits the cap.
-                get_task.cancel()
-                vad_task.cancel()
-
-            if get_task not in done:
-                # Either _ha_vad_end fired (handled at the top of the loop
-                # on the next iteration) or the 1s poll elapsed with nothing
-                # — loop back to the top where cancel_event/_ha_vad_end/
-                # no-speech-timeout are all checked explicitly.
-                continue
-
-            payload = get_task.result()
-
-            # VAD sentinel — a string queue item, never audio bytes. (None
-            # accepted defensively: it was the pre-B5 sentinel encoding.)
-            if payload is None or isinstance(payload, str):
-                if payload == VAD_SENTINEL_TIMEOUT:
-                    # No speech was ever detected, but VoiceAssistantRequest
-                    # (start=True) was already sent before this fired — HA
-                    # has an open pipeline expecting an audio stream. Close
-                    # it cleanly with an empty end=True (a real, valid
-                    # protocol message — same call used below for a normal
-                    # VAD end, just with nothing buffered) rather than
-                    # abandoning the stream and leaving HA to notice via its
-                    # own inactivity timeout. run_esphome_voice_turn still
-                    # skips the TTS wait afterward — see _no_speech_timeout.
-                    log.info(f"[{self._log_name}] No speech detected — closing HA pipeline with empty end=True, not waiting for a response")
+                if not speech_seen and (time.monotonic() - turn_start) > NO_SPEECH_TIMEOUT:
+                    log.info(
+                        f"[{self._log_name}] No speech within {NO_SPEECH_TIMEOUT}s — "
+                        f"closing HA pipeline quietly (controller-side no-speech timeout)"
+                    )
                     self._send_one(api_pb2.VoiceAssistantAudio(data=b"", end=True))
                     self._no_speech_timeout = True
                     return
-                # Normal VAD end (device sentinel) — signal HA that speech
-                # has finished. If self._ha_vad_end is already set, this is
-                # just the device catching up on the same conclusion HA
-                # already reached; sending end=True twice is harmless.
-                log.info(f"[{self._log_name}] VAD end (device sentinel) — sending audio end to HA")
-                if self._trace and self._trace.t_vad_end_ms == -1:
-                    self._trace.t_vad_end_ms = self._trace.elapsed_ms()
-                self._send_one(api_pb2.VoiceAssistantAudio(data=b"", end=True))
-                return
 
-            if preroll_remaining > 0:
-                preroll_remaining -= 1
-                log.debug(f"[{self._log_name}] Preroll discard: skipped frame ({preroll_remaining} remaining)")
-                continue
+                # Race the queue-get against _ha_vad_end directly rather than a
+                # flat 1s poll timeout — this notices HA's VAD end within
+                # milliseconds instead of up to 1s late, without a busy loop.
+                get_task = asyncio.ensure_future(device.voice_queue.get())
+                vad_task = asyncio.ensure_future(self._ha_vad_end.wait())
+                try:
+                    done, pending = await asyncio.wait(
+                        [get_task, vad_task],
+                        timeout=1.0,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    # Belt-and-braces: if this coroutine itself gets cancelled
+                    # while parked in the wait above (e.g. the 20s hard-cap
+                    # asyncio.wait_for in run_esphome_voice_turn firing), the
+                    # CancelledError propagates straight through asyncio.wait()
+                    # without touching get_task/vad_task — they're independent
+                    # tasks, not sub-awaits, so nothing cancels them for us.
+                    # Cancelling both unconditionally here (a no-op if already
+                    # done) prevents that from leaking a Queue.get() waiter and
+                    # an Event.wait() waiter on every turn that hits the cap.
+                    get_task.cancel()
+                    vad_task.cancel()
 
-            if not first_real_frame_seen:
-                first_real_frame_seen = True
-                log.debug(f"[{self._log_name}] First real audio frame received")
+                if get_task not in done:
+                    # Either _ha_vad_end fired (handled at the top of the loop
+                    # on the next iteration) or the 1s poll elapsed with nothing
+                    # — loop back to the top where cancel_event/_ha_vad_end/
+                    # no-speech-timeout are all checked explicitly.
+                    continue
+
+                payload = get_task.result()
+
+                # VAD sentinel — a string queue item, never audio bytes. (None
+                # accepted defensively: it was the pre-B5 sentinel encoding.)
+                if payload is None or isinstance(payload, str):
+                    if payload == VAD_SENTINEL_TIMEOUT:
+                        # No speech was ever detected, but VoiceAssistantRequest
+                        # (start=True) was already sent before this fired — HA
+                        # has an open pipeline expecting an audio stream. Close
+                        # it cleanly with an empty end=True (a real, valid
+                        # protocol message — same call used below for a normal
+                        # VAD end, just with nothing buffered) rather than
+                        # abandoning the stream and leaving HA to notice via its
+                        # own inactivity timeout. run_esphome_voice_turn still
+                        # skips the TTS wait afterward — see _no_speech_timeout.
+                        log.info(f"[{self._log_name}] No speech detected — closing HA pipeline with empty end=True, not waiting for a response")
+                        self._send_one(api_pb2.VoiceAssistantAudio(data=b"", end=True))
+                        self._no_speech_timeout = True
+                        return
+                    # Normal VAD end (device sentinel) — signal HA that speech
+                    # has finished. If self._ha_vad_end is already set, this is
+                    # just the device catching up on the same conclusion HA
+                    # already reached; sending end=True twice is harmless.
+                    log.info(f"[{self._log_name}] VAD end (device sentinel) — sending audio end to HA")
+                    if self._trace and self._trace.t_vad_end_ms == -1:
+                        self._trace.t_vad_end_ms = self._trace.elapsed_ms()
+                    self._send_one(api_pb2.VoiceAssistantAudio(data=b"", end=True))
+                    return
+
+                if preroll_remaining > 0:
+                    preroll_remaining -= 1
+                    log.debug(f"[{self._log_name}] Preroll discard: skipped frame ({preroll_remaining} remaining)")
+                    continue
+
+                if not first_real_frame_seen:
+                    first_real_frame_seen = True
+                    log.debug(f"[{self._log_name}] First real audio frame received")
+                    if self._trace:
+                        self._trace.t_first_frame_ms = self._trace.elapsed_ms()
+
+                if not speech_seen and _is_speech(payload):
+                    speech_seen = True
+                    log.debug(
+                        f"[{self._log_name}] Speech detected (above noise floor "
+                        f"{getattr(device, 'noise_floor', 0.0):.4f}) — no-speech timeout disarmed"
+                    )
+                    # Lock the beamformer onto the speaker now that they're
+                    # audibly talking. Matters for continuation turns (the wake
+                    # turn already locked at detection — the device no-ops a
+                    # second lock) and after any TTS mic restart, which resets
+                    # the beam to ch6 omni.
+                    asyncio.ensure_future(device.beam_lock())
+
+                if denoiser is not None:
+                    raw_payload = payload
+                    try:
+                        payload = await asyncio.get_running_loop().run_in_executor(
+                            None, denoiser.process, payload
+                        )
+                    except Exception as e:
+                        log.warning(
+                            f"[{self._log_name}] NS failed mid-turn ({e}) — "
+                            f"raw audio for the rest of this turn"
+                        )
+                        denoiser = None
+                        payload = raw_payload
+                    else:
+                        if em_ns.DEBUG_DIR:
+                            ns_debug_raw.extend(raw_payload)
+                            ns_debug_out.extend(payload)
+
                 if self._trace:
-                    self._trace.t_first_frame_ms = self._trace.elapsed_ms()
+                    self._trace.audio_frames += 1
+                pcm_buf.extend(payload)
 
-            if not speech_seen and _is_speech(payload):
-                speech_seen = True
-                log.debug(
-                    f"[{self._log_name}] Speech detected (above noise floor "
-                    f"{getattr(device, 'noise_floor', 0.0):.4f}) — no-speech timeout disarmed"
-                )
-                # Lock the beamformer onto the speaker now that they're
-                # audibly talking. Matters for continuation turns (the wake
-                # turn already locked at detection — the device no-ops a
-                # second lock) and after any TTS mic restart, which resets
-                # the beam to ch6 omni.
-                asyncio.ensure_future(device.beam_lock())
-
-            if self._trace:
-                self._trace.audio_frames += 1
-            pcm_buf.extend(payload)
-
-            # Send in 320-byte chunks (20ms at 16kHz mono S16_LE) —
-            # split small for smoother ESPHome API streaming.
-            AUDIO_CHUNK = 320
-            while len(pcm_buf) >= AUDIO_CHUNK:
-                chunk = bytes(pcm_buf[:AUDIO_CHUNK])
-                del pcm_buf[:AUDIO_CHUNK]
-                self._send_one(api_pb2.VoiceAssistantAudio(data=chunk))
+                # Send in 320-byte chunks (20ms at 16kHz mono S16_LE) —
+                # split small for smoother ESPHome API streaming.
+                AUDIO_CHUNK = 320
+                while len(pcm_buf) >= AUDIO_CHUNK:
+                    chunk = bytes(pcm_buf[:AUDIO_CHUNK])
+                    del pcm_buf[:AUDIO_CHUNK]
+                    self._send_one(api_pb2.VoiceAssistantAudio(data=chunk))
+        finally:
+            # Validation tooling: when NS_DEBUG_DIR is set, persist what
+            # STT actually received next to what the mic actually sent.
+            em_ns.dump_debug_pair(self._log_name, bytes(ns_debug_raw), bytes(ns_debug_out))
 
     def disconnect(self) -> None:
         """

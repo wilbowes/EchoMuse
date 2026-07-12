@@ -496,6 +496,8 @@ async def _post_device_config(request: web.Request) -> web.Response:
             em_esphome.update_oww_model(device_id, config["owwModel"])
         if "owwSpeexNs" in config:
             live.oww_speex_ns = bool(config["owwSpeexNs"])
+        if "nsAsr" in config:
+            live.ns_asr = bool(config["nsAsr"])
         if "bargeInEnabled" in config:
             live.barge_in_enabled = bool(config["bargeInEnabled"])
         if "bargeInThreshold" in config:
@@ -1685,6 +1687,8 @@ async def _post_global_config(request: web.Request) -> web.Response:
             em_esphome.update_oww_model(device_id, config["owwModel"])
         if "owwSpeexNs" in config:
             live.oww_speex_ns = bool(config["owwSpeexNs"])
+        if "nsAsr" in config:
+            live.ns_asr = bool(config["nsAsr"])
         if "bargeInEnabled" in config:
             live.barge_in_enabled = bool(config["bargeInEnabled"])
         if "bargeInThreshold" in config:

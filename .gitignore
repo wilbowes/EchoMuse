@@ -7,3 +7,7 @@ controller/static/vendor/
 controller/static/dashboard.js
 .claude/
 scratchpad/
+
+# DTLN NS models (vendored into the Docker image at build time; bare-metal
+# dev drops them here or points NS_MODEL_DIR elsewhere)
+controller/models/

@@ -101,6 +101,15 @@ DEFAULT_DEVICE_CONFIG = {
     # (see review Q1 fix sequence) before enabling fleet-wide; flip on and
     # A/B test wake rate in a noisy room once confirmed.
     "owwSpeexNs":       False,
+    # nsAsr: DTLN noise suppression (em_ns.py), controller-side, applied
+    # ONLY to the turn audio streamed to HA's STT — the wake stream and
+    # all noise-floor measurement stay raw. Helps steady noise (fan, AC,
+    # hum) at marginal SNR; does little against competing speech (TV) —
+    # that's the beamformer's job. Default off pending A/B validation
+    # (2026-07-12); models are vendored into the Docker image, so if the
+    # files are missing (bare-metal without NS_MODEL_DIR) the flag
+    # degrades to raw streaming with a warning.
+    "nsAsr":            False,
     # beamformingEnabled: False — ch6 (centre/omni) for all audio.
     # beamforming=True was routing OWW audio through a perimeter mic selected
     # every 32ms frame, injecting channel-splice discontinuities. The SNR

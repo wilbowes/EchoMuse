@@ -54,12 +54,21 @@ COPY em_db.py .
 COPY em_auth.py .
 COPY em_eq.py .
 COPY em_scenes.py .
+COPY em_ns.py .
 COPY em_esphome.py .
 COPY version.py .
 # ESPHome native API subpackage (frame protocol, message registry, vendored protobuf)
 COPY esphome/ ./esphome/
 # Device payloads (start_server.sh etc.) — canonical copies served to devices
 COPY device_payloads/ ./device_payloads/
+
+# DTLN noise-suppression models (em_ns.py) — vendored at build time like the
+# JS deps above; pinned to a commit so builds are reproducible. MIT licensed.
+RUN mkdir -p /app/models/dtln && \
+    curl -sfL -o /app/models/dtln/model_1.onnx \
+      https://raw.githubusercontent.com/breizhn/DTLN/1de1f15a8b5b7e1c44905618ff2ef70ca8277fbc/pretrained_model/model_1.onnx && \
+    curl -sfL -o /app/models/dtln/model_2.onnx \
+      https://raw.githubusercontent.com/breizhn/DTLN/1de1f15a8b5b7e1c44905618ff2ef70ca8277fbc/pretrained_model/model_2.onnx
 # Dashboard SPA — placeholder is index.html, full dashboard is dashboard.html
 COPY static/ ./static/
 # Compile JSX dashboard with esbuild
