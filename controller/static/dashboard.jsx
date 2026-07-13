@@ -3634,24 +3634,31 @@ function App() {
                 {checkingRelease ? 'Checking…' : 'Check for updates'}
               </Pill>
             )}
-            {isAdmin && release && (
-              <Pill small accent onClick={() => setShowDeployAll(true)}>Deploy all</Pill>
-            )}
-            {isAdmin && deployState && (() => {
+            {isAdmin && (() => {
               const byId = Object.fromEntries(devices.map(d => [d.device_id, d]));
-              const started = deployState.started || [];
+              const started = deployState ? (deployState.started || []) : [];
               const done = started.filter(id => {
                 const d = byId[id];
                 return d && d.connected && d.firmware_ver === deployState.version;
               }).length;
               const complete = started.length > 0 && done === started.length;
-              return (
-                <Pill small onClick={() => setShowDeployAll(true)}>
-                  {complete
-                    ? `✓ Fleet on ${deployState.version}`
-                    : `Deploying ${deployState.version} — ${done}/${started.length}`}
-                </Pill>
-              );
+              // While a deploy is in flight the progress pill replaces the
+              // Deploy all button — both open the same modal, and offering a
+              // second deploy mid-run reads as a broken control. The button
+              // returns once the fleet is done (next release needs it).
+              const inFlight = deployState && !complete;
+              return (<>
+                {release && !inFlight && (
+                  <Pill small accent onClick={() => setShowDeployAll(true)}>Deploy all</Pill>
+                )}
+                {deployState && (
+                  <Pill small onClick={() => setShowDeployAll(true)}>
+                    {complete
+                      ? `✓ Fleet on ${deployState.version}`
+                      : `Deploying ${deployState.version} — ${done}/${started.length}`}
+                  </Pill>
+                )}
+              </>);
             })()}
           </div>
         )}
