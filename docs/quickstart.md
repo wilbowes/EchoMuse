@@ -149,7 +149,7 @@ The LED ring tells you what's happening:
   goes wrong, the device automatically rolls back to its previous version.
   **Deploy all** updates the whole fleet at once; it runs in the background,
   so you can close the dialog and reopen it from the header pill to check
-  progress.
+  progress (the button itself steps aside until the fleet is done).
 - **Settings**: everything tunable lives in the dashboard, either fleet-wide
   (the gear icon) or per device. See [configuration.md](configuration.md).
 - **Terminal**: each device page has a full remote terminal (for the
