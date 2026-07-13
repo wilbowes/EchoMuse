@@ -1,0 +1,31 @@
+# Pins follow openWakeWord's automatic_model_training notebook (minus
+# tensorflow/onnx_tf — we only export ONNX; the controller runs onnxruntime).
+# numpy must stay <2 for this dependency generation.
+numpy==1.26.4
+scipy==1.11.4
+mutagen==1.47.0
+torchinfo==1.8.0
+torchmetrics==1.2.0
+speechbrain==0.5.14
+audiomentations==0.33.0
+torch-audiomentations==0.11.0
+acoustics==0.2.6
+pronouncing==0.2.0
+datasets==2.14.6
+pyarrow==13.0.0  # datasets 2.14 uses pa.PyExtensionType, removed in newer pyarrow
+deep-phonemizer==0.0.19
+# piper-sample-generator (v2.0.0) runtime deps
+piper-phonemize==1.1.0
+webrtcvad==2.0.10
+# torch.onnx.export needs the onnx package at model-save time
+onnx==1.17.0
+# asset downloads + audio IO
+huggingface_hub>=0.19
+soundfile
+librosa==0.10.1
+pyyaml
+tqdm
+# optional high-quality TTS positives (forge.py google-tts)
+google-cloud-texttospeech>=2.16,<3
+# web UI (forge.py ui)
+aiohttp>=3.9

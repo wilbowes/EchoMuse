@@ -8,6 +8,7 @@ EchoMuse repurposes Amazon Echo Dot Gen 2 (FireOS 5 / Android 5.1, codename "bis
 
 - **`device/`** — Go binary that runs directly on the rooted Echo Dot
 - **`controller/`** — Python asyncio WebSocket server that manages devices, runs wake word detection, and proxies to a voice pipeline
+- **`oww_forge/`** — standalone Docker batch trainer for custom openWakeWord models (synthetic TTS positives → augmentation → classifier head → `.onnx`). Not part of the controller; see `oww_forge/README.md`. Upstream pins in its Dockerfile are load-bearing (piper-sample-generator v2.0.0 flat layout; openWakeWord SHA with a `--convert_to_tflite` argparse patch). The controller consumes the output as-is: `owwModel` accepts a file path to a custom `.onnx` in addition to stock model names
 
 ## Building the device binary
 

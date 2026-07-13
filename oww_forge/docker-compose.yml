@@ -1,0 +1,63 @@
+## oww_forge — two ways to drive it:
+##
+##   docker compose up -d forge-ui        # web UI on http://<host>:8769
+##
+##   docker compose run --rm forge assets            # or the CLI directly
+##   docker compose run --rm forge new "hey biscuit"
+##   docker compose run --rm forge build hey_biscuit
+##
+## GPU: the image builds with CUDA 12.8 torch (Blackwell/RTX 50xx supported)
+## and falls back to CPU at runtime if no GPU is visible. The `forge` and
+## `forge-ui` services reserve the GPU via the nvidia container runtime; on a
+## host WITHOUT that runtime use `forge-cpu` (same image, no reservation) or
+## build with GPU:"0" for a much smaller CPU-only image.
+##
+## Deliberately separate from the EchoMuse controller: training is a heavy,
+## occasional batch job, not a service.
+
+x-forge-base: &forge-base
+  image: oww-forge
+  build:
+    context: .
+    args:
+      GPU: "1"
+  # torch DataLoader workers pass tensors via /dev/shm; Docker's 64MB
+  # default kills them with bus errors during the training step
+  shm_size: "8gb"
+  volumes:
+    # Assets (~25GB), per-wake-word workdirs, and finished models.
+    # Point this at a disk with room.
+    - ./data:/data
+  environment:
+    # Only needed for Google TTS positives — put a service-account JSON at
+    # ./data/google-credentials.json (gitignored) or drop this mapping.
+    - GOOGLE_APPLICATION_CREDENTIALS=/data/google-credentials.json
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+
+services:
+  # web frontend (long-running); training jobs spawn inside this container
+  forge-ui:
+    <<: [*forge-base, *gpu]
+    container_name: oww-forge-ui
+    command: ["ui"]
+    ports:
+      - "8769:8769"
+    restart: unless-stopped
+
+  # one-shot CLI with GPU
+  forge:
+    <<: [*forge-base, *gpu]
+    profiles: ["cli"]
+
+  # one-shot CLI without a GPU reservation (hosts lacking the nvidia runtime)
+  forge-cpu:
+    <<: *forge-base
+    profiles: ["cli"]

@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EchoMuse — Wake Word Forge</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  /* EchoMuse dashboard design language: warm greige appliance chassis,
+     gradient key-cap buttons, DM Sans/Mono, LCD console panels. */
+  :root {
+    --bg:        #ccc8c0;
+    --surface:   #d8d4cc;
+    --card:      #e0dcd4;
+    --border:    #b8b4ac;
+    --lcd-bg:    #1e2219;
+    --lcd-green: #9aba80;
+    --lcd-text:  #c8d4b0;
+    --lcd-dim:   #7a9a68;
+    --text:      #1e1c18;
+    --text2:     #4a4844;
+    --muted:     #8a8680;
+    --ok:        #286040;
+    --warn:      #c0601a;
+    --err:       #b03030;
+    --accent:    #405878;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { min-height: 100%; }
+  body {
+    background: linear-gradient(160deg, var(--bg) 0%, #b8b4ac 100%);
+    color: var(--text); font: 400 14px/1.5 'DM Sans', sans-serif;
+  }
+  .mono { font-family: 'DM Mono', monospace; }
+  .microlabel {
+    font-family: 'DM Mono', monospace; font-size: 9px; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.15em; margin-bottom: 10px;
+  }
+  header {
+    display: flex; align-items: center; gap: 14px; padding: 16px 28px;
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, #d8d4cc, #ccc8c0);
+  }
+  header h1 { font-size: 17px; font-weight: 600; letter-spacing: 0.02em; }
+  header .sub { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--muted);
+                text-transform: uppercase; letter-spacing: 0.12em; margin-top: 2px; }
+  .pill {
+    margin-left: auto; display: inline-flex; align-items: center; gap: 7px;
+    font-family: 'DM Mono', monospace; font-size: 10px; letter-spacing: 0.06em;
+    color: var(--text2); padding: 5px 12px; border-radius: 14px;
+    border: 1px solid var(--border); background: linear-gradient(180deg,#e4e0d8,#d4d0c8);
+  }
+  .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+  .pill.on .dot { background: #40906a; box-shadow: 0 0 5px #40906a; }
+
+  main { max-width: 1180px; margin: 0 auto; padding: 22px 28px 120px;
+         display: grid; grid-template-columns: 330px 1fr; gap: 20px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+
+  .card {
+    background: linear-gradient(170deg,#e4e0d8,#dad6ce);
+    border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px 18px; margin-bottom: 18px;
+    box-shadow: 0 1px 0 rgba(255,255,255,0.6) inset, 0 2px 6px rgba(0,0,0,0.08);
+  }
+
+  button {
+    background: linear-gradient(180deg,#d8d4cc,#c0bdb6); color: #2a2822;
+    border: 1px solid #a8a49c; border-radius: 20px;
+    font: 500 12px 'DM Sans', sans-serif; padding: 7px 18px; cursor: pointer;
+    box-shadow: 0 1px 0 rgba(255,255,255,0.15) inset, 0 2px 4px rgba(0,0,0,0.2);
+    transition: all 0.1s; white-space: nowrap;
+  }
+  button:active:not(:disabled) { transform: translateY(1px); box-shadow: 0 1px 2px rgba(0,0,0,0.2); }
+  button:disabled { background: linear-gradient(180deg,#d0ccc4,#bab6ae); color: #8a8680;
+                    border-color: #aca8a0; box-shadow: none; cursor: not-allowed; }
+  button.accent { background: linear-gradient(180deg,#6080a8,#405878); color: #dde8f0;
+                  border-color: #304860; }
+  button.danger { background: none; border: none; box-shadow: none; color: var(--err);
+                  font-size: 11px; padding: 5px 8px; }
+  button.small { font-size: 11px; padding: 5px 14px; }
+
+  input {
+    background: #f0ece4; color: var(--text); border: 1px solid var(--border);
+    border-radius: 7px; padding: 8px 11px; font: 400 13px 'DM Sans', sans-serif;
+    width: 100%; box-shadow: inset 0 1px 3px rgba(0,0,0,0.08);
+  }
+  label { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--text2);
+          text-transform: uppercase; letter-spacing: 0.08em; display: block; margin: 12px 0 5px; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 6px; line-height: 1.45; }
+  details summary { cursor: pointer; font-family: 'DM Mono', monospace; font-size: 10px;
+                    color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em;
+                    margin-top: 12px; }
+
+  /* asset checklist */
+  .asset { display: flex; align-items: center; gap: 10px; padding: 7px 0;
+           border-bottom: 1px solid rgba(0,0,0,0.07); font-size: 13px; }
+  .asset:last-child { border-bottom: 0; }
+  .asset .detail { margin-left: auto; font-family: 'DM Mono', monospace; font-size: 10px;
+                   color: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #c0601a; flex: none; }
+  .dot.on { background: #40906a; }
+
+  /* wake word cards */
+  .ww .top { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .ww h3 { font-size: 16px; font-weight: 600; }
+  .ww .phrase { color: var(--text2); font-style: italic; font-size: 13px; }
+  .ww .built { margin-left: auto; font-family: 'DM Mono', monospace; font-size: 10px; color: var(--muted); }
+
+  /* pipeline stepper */
+  .stepper { display: flex; align-items: center; margin: 14px 2px 16px; }
+  .step { display: flex; flex-direction: column; align-items: center; gap: 5px; flex: none; width: 92px; }
+  .step .bub { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--border);
+               background: #d4d0c8; }
+  .step.done .bub { background: #40906a; border-color: #286040; }
+  .step.active .bub { background: #c8a040; border-color: #806010; animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 50% { box-shadow: 0 0 0 4px rgba(200,160,64,0.25); } }
+  .step span { font-family: 'DM Mono', monospace; font-size: 8.5px; text-transform: uppercase;
+               letter-spacing: 0.08em; color: var(--muted); text-align: center; }
+  .step.done span, .step.active span { color: var(--text2); }
+  .conn { flex: 1; height: 2px; background: var(--border); margin: 0 2px 18px; min-width: 8px; }
+  .conn.done { background: #40906a; }
+
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .actiongroup { margin-top: 10px; }
+
+  /* results / verdicts */
+  .verdict { display: flex; align-items: center; gap: 9px; margin-top: 12px; padding: 10px 13px;
+             border-radius: 8px; font-weight: 500; font-size: 13px; }
+  .verdict.ok { background: rgba(40,96,64,0.12); color: var(--ok); border: 1px solid rgba(40,96,64,0.3); }
+  .verdict.no { background: rgba(176,48,48,0.09); color: var(--err); border: 1px solid rgba(176,48,48,0.25); }
+  .verdict.info { background: rgba(64,88,120,0.1); color: var(--accent); border: 1px solid rgba(64,88,120,0.25); }
+  .rawout { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--muted);
+            margin-top: 7px; white-space: pre-wrap; }
+
+  /* LCD console */
+  #console { position: fixed; left: 0; right: 0; bottom: 0; padding: 10px 28px 14px;
+             background: linear-gradient(180deg, rgba(204,200,192,0), #bab6ae 30%); }
+  #console .inner { max-width: 1124px; margin: 0 auto; }
+  #console .bar { display: flex; gap: 12px; align-items: center; padding: 5px 4px; }
+  #console .bar strong { font-size: 12.5px; font-weight: 600; }
+  #console pre {
+    background: var(--lcd-bg); color: var(--lcd-text); border: 1px solid #1a1c16;
+    border-radius: 6px; box-shadow: inset 0 2px 6px rgba(0,0,0,0.6);
+    padding: 10px 13px; height: 150px; overflow-y: auto;
+    font: 400 11px/1.6 'DM Mono', monospace; white-space: pre-wrap;
+  }
+  #console.min pre { display: none; }
+  .status { font-family: 'DM Mono', monospace; font-size: 10.5px; letter-spacing: 0.04em; }
+  .status.running { color: #806010; } .status.ok { color: var(--ok); } .status.fail { color: var(--err); }
+  #toggleLog { margin-left: auto; }
+  .empty { color: var(--muted); font-size: 13px; line-height: 1.6; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Wake Word Forge</h1>
+    <div class="sub">EchoMuse &middot; custom wake words</div>
+  </div>
+  <span class="pill" id="gpuBadge"><span class="dot"></span><span id="gpuText">connecting…</span></span>
+</header>
+
+<main>
+  <section>
+    <div class="card">
+      <div class="microlabel">Step 1 &middot; Voice data</div>
+      <div id="assetSummary" class="hint" style="margin:0 0 10px"></div>
+      <div id="assets" style="display:none"></div>
+      <div class="row" style="margin-top:12px">
+        <button id="dlAll" class="accent">Download voice data</button>
+        <button id="assetDetail" class="small">details</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="microlabel">Step 2 &middot; Create a wake word</div>
+      <label>Wake phrase</label>
+      <input id="newPhrase" placeholder='e.g. "hey clara, hey clarra"'>
+      <div class="hint">Pick a short phrase of 3&ndash;4 syllables. The training voices are American
+        &mdash; add a comma-separated spelling of how <em>your family</em> says it
+        (&ldquo;clarra&rdquo; for a British &ldquo;clara&rdquo;). One wake word listens for all spellings.</div>
+      <details>
+        <summary>advanced</summary>
+        <label>Model name</label>
+        <input id="newName" placeholder="auto from phrase">
+        <label>Synthetic voice samples</label>
+        <input id="newSamples" type="number" value="30000">
+        <label>Max training steps</label>
+        <input id="newSteps" type="number" value="50000">
+      </details>
+      <div class="row" style="margin-top:14px">
+        <button class="accent" id="createBtn">Create</button>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="microlabel" style="margin-left:2px">Your wake words</div>
+    <div id="wakewords"></div>
+  </section>
+</main>
+
+<div id="console" class="min" style="display:none">
+  <div class="inner">
+    <div class="bar">
+      <strong id="jobLabel"></strong>
+      <span class="status" id="jobStatus"></span>
+      <button id="toggleLog" class="small">show log</button>
+    </div>
+    <pre id="logPre"></pre>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let state = null, logOffset = 0, lastJobKey = null;
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) { alert(await r.text()); throw new Error(path); }
+  return r.json();
+}
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function fmtAgo(ts) {
+  const d = new Date(ts * 1000);
+  return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+}
+function busy() { return state && state.job && state.job.running; }
+
+/* Friendly names for the job the console shows */
+function friendlyJob(label) {
+  return label
+    .replace(/^downloading assets.*/, 'Downloading voice data')
+    .replace(/^building '(.+)'$/, 'Training “$1”')
+    .replace(/^Google TTS × (\d+) \((.+)\) for '(.+)'$/, 'Adding $1 Google voices ($2) to “$3”');
+}
+
+function render() {
+  const g = state.gpu || {};
+  $('gpuText').textContent = g.available ? `GPU · ${g.device}` : 'CPU (slower training)';
+  $('gpuBadge').className = 'pill' + (g.available ? ' on' : '');
+
+  // assets
+  const missing = state.assets.filter(a => !a.present);
+  $('assetSummary').textContent = missing.length
+    ? `A one-time ~25 GB download of training voices and background sounds is needed before training. (${state.assets.length - missing.length}/${state.assets.length} parts done)`
+    : 'All voice data downloaded — ready to train.';
+  $('assets').innerHTML = state.assets.map(a => `
+    <div class="asset">
+      <span class="dot ${a.present ? 'on' : ''}"></span>
+      <span>${esc(a.label)}</span>
+      <span class="detail">${a.present ? esc(a.detail) : 'missing'}</span>
+    </div>`).join('');
+  $('dlAll').disabled = busy() || missing.length === 0;
+  $('dlAll').textContent = missing.length ? 'Download voice data' : '✓ Downloaded';
+  $('dlAll').className = missing.length ? 'accent' : '';
+
+  // wake words
+  $('wakewords').innerHTML = state.wakewords.length ? state.wakewords.map(w => {
+    const stages = [
+      ['Created', true],
+      ['Voices', w.clips_train > 0],
+      ['Mixing', w.features_built],
+      ['Ready', w.model_built],
+    ];
+    const activeIdx = stages.findIndex(s => !s[1]);
+    const isTraining = busy() && state.job.label.includes(`'${w.name}'`);
+    const stepper = stages.map(([t, done], i) => {
+      const cls = done ? 'done' : (isTraining && i === activeIdx ? 'active' : '');
+      return `<div class="step ${cls}"><div class="bub"></div><span>${t}</span></div>` +
+             (i < stages.length - 1 ? `<div class="conn ${stages[i+1][1] ? 'done' : ''}"></div>` : '');
+    }).join('');
+    return `
+    <div class="card ww" data-name="${esc(w.name)}">
+      <div class="top">
+        <h3>${esc(w.name)}</h3>
+        <span class="phrase">“${esc(w.phrases.join('” / “'))}”</span>
+        ${w.model_built ? `<span class="built">trained ${fmtAgo(w.model_mtime)}</span>` : ''}
+      </div>
+      <div class="stepper">${stepper}</div>
+      <div class="row">
+        <button class="accent" data-act="build" ${busy() ? 'disabled' : ''}>
+          ${w.model_built ? 'Retrain' : w.clips_train ? 'Continue training' : 'Train'}</button>
+        ${w.model_built ? `
+          <button data-act="mic">🎤 Try it</button>
+          <button data-act="test">Test a recording…</button>
+          <a href="/api/models/${esc(w.name)}.onnx"><button>Download model</button></a>` : ''}
+        <button class="danger" data-act="del" style="margin-left:auto">remove</button>
+        <input type="file" accept="audio/*" multiple style="display:none">
+      </div>
+      <div class="actiongroup">
+        <div class="microlabel" style="margin-bottom:6px">Improve accuracy</div>
+        <div class="row">
+          <button class="small" data-act="addrec" ${busy() ? 'disabled' : ''}
+            title="The strongest accuracy boost: real recordings of your household saying the phrase">
+            + Family recordings…</button>
+          <button class="small" data-act="gtts" ${busy() ? 'disabled' : ''}
+            title="Adds British/Australian/US synthetic voices (usually free)">+ Google voices…</button>
+          <span class="hint" style="margin:0">then retrain to apply</span>
+        </div>
+      </div>
+      <div class="verdict" style="display:none"></div>
+      <div class="rawout" style="display:none"></div>
+    </div>`;
+  }).join('') : `<div class="card empty">No wake words yet.<br>
+      Download the voice data (step 1), then create your first wake word on the left —
+      after training you can try it with the microphone right here.</div>`;
+}
+
+function renderJob() {
+  const j = state.job;
+  $('console').style.display = j ? '' : 'none';
+  if (!j) return;
+  const key = j.kind + j.started;
+  if (key !== lastJobKey) {
+    lastJobKey = key; logOffset = 0; $('logPre').textContent = '';
+    $('console').classList.add('min');
+    $('toggleLog').textContent = 'show log';
+  }
+  $('jobLabel').textContent = friendlyJob(j.label);
+  const s = $('jobStatus');
+  if (j.running) { s.textContent = '● working — you can leave this page, it keeps going'; s.className = 'status running'; }
+  else if (j.rc === 0) { s.textContent = '✓ finished'; s.className = 'status ok'; }
+  else { s.textContent = `✗ something went wrong (see log)`; s.className = 'status fail'; }
+}
+
+async function pollLog() {
+  if (!state || !state.job) return;
+  const r = await (await fetch(`/api/log?offset=${logOffset}`)).json();
+  if (r.data) {
+    logOffset = r.offset;
+    const pre = $('logPre');
+    const stick = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
+    pre.textContent = (pre.textContent + r.data).slice(-100000);
+    if (stick) pre.scrollTop = pre.scrollHeight;
+  }
+}
+
+async function refresh() {
+  try { state = await api('/api/state'); } catch { return; }
+  render(); renderJob();
+}
+
+/* Turn `forge.py test` output into a plain-language verdict */
+function showVerdict(card, output) {
+  const v = card.querySelector('.verdict'), raw = card.querySelector('.rawout');
+  const scores = [...output.matchAll(/peak score ([\d.]+)/g)].map(m => +m[1]);
+  raw.textContent = output.trim(); raw.style.display = '';
+  v.style.display = '';
+  if (!scores.length) { v.className = 'verdict no'; v.textContent = '✗ Could not score that audio'; return; }
+  const best = Math.max(...scores);
+  if (best >= 0.5) { v.className = 'verdict ok'; v.textContent = `✓ Heard it! (score ${best.toFixed(2)} — the device would wake)`; }
+  else if (best >= 0.2) { v.className = 'verdict info'; v.textContent = `~ Close but under the wake threshold (score ${best.toFixed(2)} of 0.5 needed) — try again closer to the mic, or add family recordings and retrain`; }
+  else { v.className = 'verdict no'; v.textContent = `✗ Not recognised (score ${best.toFixed(2)}) — add family recordings or a spelling variant, then retrain`; }
+}
+
+$('assetDetail').onclick = () => {
+  const el = $('assets');
+  el.style.display = el.style.display === 'none' ? '' : 'none';
+};
+
+$('dlAll').onclick = async () => {
+  await api('/api/assets/download', {method: 'POST',
+    headers: {'Content-Type': 'application/json'}, body: '{}'});
+  refresh();
+};
+
+$('createBtn').onclick = async () => {
+  const phrase = $('newPhrase').value.trim();
+  if (!phrase) return alert('Type the wake phrase first, e.g. "hey clara"');
+  await api('/api/wakewords', {method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({phrase, name: $('newName').value,
+      samples: $('newSamples').value, steps: $('newSteps').value})});
+  $('newPhrase').value = ''; $('newName').value = '';
+  refresh();
+};
+
+$('toggleLog').onclick = () => {
+  const c = $('console');
+  c.classList.toggle('min');
+  $('toggleLog').textContent = c.classList.contains('min') ? 'show log' : 'hide log';
+};
+
+$('wakewords').addEventListener('click', async e => {
+  const btn = e.target.closest('button[data-act]');
+  if (!btn) return;
+  const card = btn.closest('.ww'), name = card.dataset.name;
+  const act = btn.dataset.act;
+  if (act === 'build') {
+    await api(`/api/wakewords/${name}/build`, {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: '{}'});
+  } else if (act === 'gtts') {
+    const n = prompt('How many Google voice clips to add?\n(Usually free — a run this size is ~2% of Google\'s monthly free allowance. Needs the Google credentials file, see README.)', '2000');
+    if (!n) return;
+    const langs = prompt('Which accents?\n  en-GB,en-AU = British + Australian only\n  en-US,en-GB,en-AU = all three', 'en-GB,en-AU');
+    if (!langs) return;
+    await api(`/api/wakewords/${name}/google-tts`, {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({samples: +n, languages: langs})});
+  } else if (act === 'test' || act === 'addrec') {
+    const input = card.querySelector('input[type=file]');
+    input.onchange = async () => {
+      const fd = new FormData();
+      for (const f of input.files) fd.append(act === 'test' ? 'wav' : 'audio', f);
+      const v = card.querySelector('.verdict');
+      v.style.display = ''; v.className = 'verdict info';
+      v.textContent = act === 'test' ? 'Scoring…' : 'Adding recordings…';
+      if (act === 'test') {
+        const r = await api(`/api/wakewords/${name}/test`, {method: 'POST', body: fd});
+        showVerdict(card, r.output);
+      } else {
+        const r = await api(`/api/wakewords/${name}/samples`, {method: 'POST', body: fd});
+        v.className = r.errors.length ? 'verdict no' : 'verdict ok';
+        v.textContent = `✓ Added ${r.added} recording(s) — press Retrain to teach the model with them` +
+          (r.errors.length ? ` (${r.errors.length} failed)` : '');
+        refresh();
+      }
+    };
+    input.click();
+    return;
+  } else if (act === 'mic') {
+    const v = card.querySelector('.verdict');
+    if (btn.dataset.rec) {
+      btn.dataset.rec = ''; btn.textContent = '🎤 Try it';
+      window.__rec?.stop();
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({audio: true});
+      const rec = new MediaRecorder(stream);
+      const chunks = [];
+      rec.ondataavailable = e => chunks.push(e.data);
+      rec.onstop = async () => {
+        stream.getTracks().forEach(t => t.stop());
+        v.style.display = ''; v.className = 'verdict info'; v.textContent = 'Scoring…';
+        const fd = new FormData();
+        fd.append('wav', new Blob(chunks, {type: rec.mimeType}), 'mic.webm');
+        const r = await api(`/api/wakewords/${name}/test`, {method: 'POST', body: fd});
+        showVerdict(card, r.output);
+      };
+      window.__rec = rec;
+      rec.start();
+      btn.dataset.rec = '1'; btn.textContent = '⏹ Done';
+      v.style.display = ''; v.className = 'verdict info';
+      v.textContent = 'Recording — say the wake word, then press Done';
+      setTimeout(() => { if (btn.dataset.rec) { btn.dataset.rec = ''; btn.textContent = '🎤 Try it'; rec.stop(); } }, 5000);
+    } catch (err) {
+      v.style.display = ''; v.className = 'verdict no';
+      v.textContent = 'Microphone not available in this browser (needs HTTPS or localhost) — use "Test a recording…" with a phone recording instead';
+    }
+    return;
+  } else if (act === 'del') {
+    if (!confirm(`Remove '${name}'? This deletes its training data and model.`)) return;
+    await api(`/api/wakewords/${name}`, {method: 'DELETE'});
+  }
+  refresh();
+});
+
+refresh();
+setInterval(refresh, 2500);
+setInterval(pollLog, 1000);
+</script>
+</body>
+</html>
