@@ -615,8 +615,15 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
         f"[{device.device_id}] EQ: bands={device.eq_bands} "
         f"loudness={device.eq_loudness}"
     )
-    eq_pcm      = em_eq.apply(voice_response, PIPER_RATE, device.eq_bands, device.eq_loudness)
-    speaker_pcm = resample_to_stereo_48k(eq_pcm, PIPER_RATE)
+    # EQ + resample are a solid numpy crunch (hundreds of ms for a long
+    # response) — run them off the event loop, which otherwise freezes every
+    # device's LED frames, shell proxying, and WS handling right as playback
+    # starts (observed as spinner stutter and console typing judder).
+    def _prepare_pcm() -> bytes:
+        eq_pcm = em_eq.apply(voice_response, PIPER_RATE, device.eq_bands, device.eq_loudness)
+        return resample_to_stereo_48k(eq_pcm, PIPER_RATE)
+
+    speaker_pcm = await asyncio.get_event_loop().run_in_executor(None, _prepare_pcm)
     log.info(
         f"[{device.device_id}] Streaming {len(speaker_pcm)} bytes "
         f"({len(speaker_pcm)//SPEAKER_BYTES} periods)"
