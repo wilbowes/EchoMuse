@@ -66,6 +66,13 @@ RUN OWW_RES=/opt/openwakeword/openwakeword/resources/models \
            https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/$f; \
        done
 
+# deep-phonemizer's checkpoint load also predates torch 2.6's weights_only
+# flip; it's only reached for out-of-dictionary words (e.g. phonetic spelling
+# variants like "clarra"), so it survives dictionary-word test runs.
+RUN sed -i 's/torch.load(checkpoint_path, map_location=device)/torch.load(checkpoint_path, map_location=device, weights_only=False)/' \
+      /usr/local/lib/python3.11/site-packages/dp/model/model.py \
+    && grep -q "weights_only=False" /usr/local/lib/python3.11/site-packages/dp/model/model.py
+
 COPY forge.py google_tts.py forge_web.py config.template.yml /opt/forge/
 COPY static/ /opt/forge/static/
 
