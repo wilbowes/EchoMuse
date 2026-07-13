@@ -124,7 +124,13 @@ US vowel, not a British "clar-ra". Three levers, in increasing strength:
 1. **Phonetic spelling variants** — `target_phrase` accepts multiple
    entries that train *one* model firing on any of them. Comma-separate them
    at creation time (`forge.py new "hey clara, hey clarra"` or in the UI's
-   phrase field) and cover how your household actually says it.
+   phrase field) and cover how your household actually says it. Trade-off
+   observed in practice: covering two pronunciation clusters with the same
+   small classifier makes the auto-trainer more conservative (the two-spelling
+   `hey_clarra` trained to *zero* false positives/hour but lower recall than
+   single-spelling `hey_clara`, 0.43 vs 0.52 on the augmented test set) —
+   if a variant model feels deaf, add real recordings and retrain, or lower
+   the device's `owwThreshold` a notch.
 2. **Google TTS mix-in** — defaults to `en-US,en-GB,en-AU` voices, so a
    `google-tts` pass before build adds genuinely British/Australian
    synthetic speakers (`--languages en-GB,en-AU` to skip the US ones).
