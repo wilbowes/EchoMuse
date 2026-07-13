@@ -305,6 +305,20 @@ def cmd_build(args) -> None:
     steps = BUILD_STEPS[BUILD_STEPS.index(args.from_step):]
     if args.only_step:
         steps = [args.only_step]
+
+    # Heal an interrupted augment: train.py's "features already exist" check
+    # only looks at the first of the four .npy files, so a run killed midway
+    # (container restart) would skip augment and then crash in training on
+    # the missing ones. Partial set → recompute all four.
+    if "augment" in steps:
+        feat_dir = WAKEWORDS / name / name
+        feats = ["positive_features_train.npy", "positive_features_test.npy",
+                 "negative_features_train.npy", "negative_features_test.npy"]
+        have = [f for f in feats if (feat_dir / f).exists()]
+        if have and len(have) < len(feats):
+            log(f"found {len(have)}/4 feature files from an interrupted augment — recomputing all")
+            args.overwrite = True
+
     for step in steps:
         log(f"=== step: {step} ===")
         cmd = [sys.executable, TRAIN_PY, "--training_config", str(cfg_path), STEP_FLAGS[step]]
