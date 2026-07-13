@@ -38,6 +38,15 @@ func main() {
 	// self-healing philosophy as the A/B binary slots.
 	wifi.RecoverIfPending()
 
+	// Amazon's WiFi Simple Setup daemon (BLE+WiFi provisioning of
+	// neighbouring Amazon devices) is useless on a repurposed device and
+	// was caught busy-looping at ~50% CPU / 40% sys on one unit (Office,
+	// 2026-07-13 — likely retrying the Bluetooth transport the BLE proxy
+	// takes over). Same stock-service takeover as `stop mixer` /
+	// `stop acebutton` / `stop ledcontroller` in the hardware bindings.
+	// Idempotent: a no-op on boots where init never starts it (Lounge).
+	exec.Command("stop", "smarthomewifid").Run()
+
 	buttonController, err := internalbuttons.NewButtonController()
 	if err != nil {
 		log.Fatalf("Failed to initialize Button controller: %v", err)
