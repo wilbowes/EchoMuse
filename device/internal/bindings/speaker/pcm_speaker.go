@@ -127,6 +127,7 @@ func (p *PcmSpeaker) Init() error {
 func (p *PcmSpeaker) silenceLoop() {
 	defer close(p.deadCh)
 	audioStreaming := false
+	var underruns uint64 // loop-local: only this goroutine drains audioCh
 	for {
 		select {
 		case <-p.stopCh:
@@ -143,13 +144,21 @@ func (p *PcmSpeaker) silenceLoop() {
 		default:
 			if audioStreaming {
 				if p.eosPending.Swap(false) {
-					// Natural end of stream (0x03 received).
+					// Natural end of stream (0x03 received), or a barge-in
+					// flush (Flush sets eosPending so its drain isn't
+					// miscounted as an underrun).
 					log.Printf("[speaker] stream complete — returning to silence")
+				} else {
+					// Mid-stream drain: the WS sender fell behind real-time
+					// playback and a silence gap is being injected — the
+					// audible stutter on weak WiFi links. One count per
+					// drain event (not per silence period); rate-limited so
+					// a chronically starved link can't flood the log.
+					underruns++
+					if underruns == 1 || underruns%16 == 0 {
+						log.Printf("[speaker] UNDERRUN: audio channel drained mid-stream — injecting silence (underruns=%d)", underruns)
+					}
 				}
-				// Q5 (2026-07-07): the mid-stream underrun WARNING that
-				// lived here is gone — the v2.6.5 EOS disambiguation plus
-				// the deeper audioCh removed the underruns it was hunting,
-				// and it stayed clean for several sessions.
 				audioStreaming = false
 			}
 			if p.echoTap != nil {
