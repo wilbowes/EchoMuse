@@ -45,6 +45,10 @@ func (m *muteController) Toggle() {
 	m.mu.Lock()
 	m.muted = !m.muted
 	muted := m.muted
+	// Copy under the lock — SetOnMuteChange writes this field under mu from
+	// the main goroutine, and button events can fire before that wiring
+	// completes (SubscribeToButton starts the evdev goroutines first).
+	cb := m.onMuteChange
 	m.mu.Unlock()
 
 	if muted {
@@ -53,8 +57,8 @@ func (m *muteController) Toggle() {
 		m.applyUnmute()
 	}
 
-	if m.onMuteChange != nil {
-		m.onMuteChange(muted)
+	if cb != nil {
+		cb(muted)
 	}
 }
 

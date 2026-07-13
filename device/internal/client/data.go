@@ -133,6 +133,17 @@ type DataClient struct {
 	aec               *aec.Canceller
 	onDirectionChange func(angle float64)
 	directionMu       sync.Mutex
+
+	// pipeMu serialises access to beam and proc, which hold unsynchronised
+	// per-period state (reused analysis buffers, EWMA smoothers, AGC gain).
+	// Both are normally touched by a single streamMic goroutine, but a
+	// StopMic→StartMic pair (sent after every voice turn) spawns the
+	// replacement while the old goroutine may still be draining a period or
+	// two — the select on a closed stopCh vs a ready mic channel picks
+	// randomly, so the old goroutine can run Process() concurrently with
+	// the new one's Lock()/Process(). Uncontended outside that brief
+	// overlap, so the cost is a no-op lock per 160ms batch.
+	pipeMu sync.Mutex
 }
 
 // NewDataClient wires the mic/speaker pipeline. canceller is the shared AEC
@@ -261,6 +272,21 @@ func (d *DataClient) connect(ctx context.Context, addr string) error {
 	}
 	defer conn.Close()
 
+	identifyBytes, _ := json.Marshal(map[string]string{
+		"type":      "identify",
+		"device_id": d.deviceID,
+	})
+	// Send identify BEFORE publishing conn — same ordering fix as the control
+	// client's register message. StartMic can fire independently of controller
+	// timing (unmute calls StartMic(false) from the button goroutine); once
+	// d.conn is visible, streamMic's sendFrame writes under connMu, and this
+	// unlocked write racing it would be a concurrent write on the same
+	// gorilla conn (panics).
+	if err := conn.WriteMessage(websocket.TextMessage, identifyBytes); err != nil {
+		return err
+	}
+	log.Printf("[data] Identified as %s", d.deviceID)
+
 	d.connMu.Lock()
 	d.conn = conn
 	d.connMu.Unlock()
@@ -277,15 +303,6 @@ func (d *DataClient) connect(ctx context.Context, addr string) error {
 		d.conn = nil
 		d.connMu.Unlock()
 	}()
-
-	identifyBytes, _ := json.Marshal(map[string]string{
-		"type":      "identify",
-		"device_id": d.deviceID,
-	})
-	if err := conn.WriteMessage(websocket.TextMessage, identifyBytes); err != nil {
-		return err
-	}
-	log.Printf("[data] Identified as %s", d.deviceID)
 
 	for {
 		msgType, data, err := conn.ReadMessage()
@@ -343,25 +360,42 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 	// the identity token: they're equal only if no StartMic ran after us.
 	defer func() {
 		d.micMu.Lock()
-		if d.micStopCh == stopCh {
+		owner := d.micStopCh == stopCh
+		if owner {
 			d.micActive = false
 		}
 		d.micMu.Unlock()
+		// Unlock the beam only while still the current stream: if a
+		// replacement stream has already started (StopMic→StartMic pair),
+		// the beam belongs to it — this goroutine's late Unlock would
+		// otherwise land after the replacement's Lock() and silently drop
+		// the new turn onto ch6 omni. The replacement's own exit unlocks
+		// instead (Unlock on an unlocked beam is a no-op, so the wake
+		// stream's unconditional unlock stays harmless).
+		if owner {
+			d.pipeMu.Lock()
+			d.beam.Unlock()
+			d.pipeMu.Unlock()
+		}
 		log.Println("[data] streamMic: exited")
 	}()
 
+	// Claim a clean beam: a superseded stream skips its unlock (see the
+	// exit defer), so a lock left behind by the previous turn is released
+	// here — otherwise a lockMic turn replaced by the wake stream would
+	// leave the wake stream on the old turn's perimeter mic with the
+	// baseline frozen. Fresh stream = fresh gain, same reasoning
+	// (Processor.ResetAGC — without it, a gain crushed by TTS echo
+	// persists into the next listening stream).
+	d.pipeMu.Lock()
+	d.beam.Unlock()
 	if lockMic {
 		lockSnap := config.Get().Snapshot()
 		turnBeamEnabled := lockSnap.BeamformingEnabled != nil && *lockSnap.BeamformingEnabled
 		d.beam.Lock(turnBeamEnabled)
 	}
-	// Always unlock from this goroutine — prevents data race with Process()
-	// that would occur if StopMic called Unlock from the control goroutine.
-	defer d.beam.Unlock()
-
-	// Fresh stream = fresh gain. See Processor.ResetAGC — without this, a
-	// gain crushed by TTS echo persists into the next listening stream.
 	d.proc.ResetAGC()
+	d.pipeMu.Unlock()
 
 	ch := d.mic.Subscribe()
 	defer d.mic.Unsubscribe(ch)
@@ -451,6 +485,15 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			if !ok {
 				return
 			}
+			// Stop has priority: select picks randomly among ready cases,
+			// so without this a closed stopCh racing a ready mic channel
+			// keeps this goroutine draining periods alongside its
+			// replacement stream.
+			select {
+			case <-stopCh:
+				return
+			default:
+			}
 
 			snap := cfg.Snapshot()
 			threshold := snap.VadThreshold
@@ -480,6 +523,13 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			// ResetAGC each stream.
 			agcEnabled := lockMic && (snap.AgcEnabled == nil || *snap.AgcEnabled)
 
+			if snap.MicGainDb != nil && *snap.MicGainDb != gainDb {
+				gainDb = *snap.MicGainDb
+				gainLin = math.Pow(10, float64(gainDb)/20.0)
+				log.Printf("[data] mic gain: %ddB (linear %.2f)", gainDb, gainLin)
+			}
+
+			d.pipeMu.Lock()
 			// Consume any pending beam lock/unlock request from the control
 			// plane (wake detection → lock, turn end → unlock). Handled on
 			// this goroutine because Beamformer methods aren't safe to call
@@ -493,17 +543,14 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 				d.beam.Unlock()
 			}
 
-			if snap.MicGainDb != nil && *snap.MicGainDb != gainDb {
-				gainDb = *snap.MicGainDb
-				gainLin = math.Pow(10, float64(gainDb)/20.0)
-				log.Printf("[data] mic gain: %ddB (linear %.2f)", gainDb, gainLin)
-			}
-
 			mono, angle := d.beam.Process(raw, beamAngle, gainLin)
+			clipped := d.beam.ClippedSamples()
 
 			// AEC — subtract the speaker's own output (reference tapped at
 			// the ALSA write, aligned by aecDelayMs) before anything
 			// measures or gates the signal. No-op while aecEnabled=false.
+			// (Has its own mutex — inside pipeMu only for lock ordering
+			// simplicity; aec.mu is a leaf lock, no inversion possible.)
 			mono = d.aec.Process(mono)
 
 			// ── Processing pipeline ──────────────────────────────────────
@@ -527,7 +574,6 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			// measured on-device) while idle capture levels were being
 			// characterised — that job is done (2026-07-07 fleet
 			// analysis) and /tmp/server.log is RAM-backed and unrotated.
-			clipped := d.beam.ClippedSamples()
 			if periodCount%3750 == 0 || (clipped != lastClipped && periodCount%100 == 0) {
 				log.Printf("[data] VAD diag: rms=%.5f threshold=%.5f gain=%ddB clipped=%d gate=%v active=%v agc=%v",
 					rms, threshold*gainLin, gainDb, clipped, speech, active, agcEnabled)
@@ -542,6 +588,7 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			// frozen at whatever it last was. (RNNoise NS removed
 			// 2026-07-12 — see internal/processor package comment.)
 			mono = d.proc.Process(mono, agcEnabled, speech)
+			d.pipeMu.Unlock()
 			// ─────────────────────────────────────────────────────────────
 
 			// Notify direction listener — non-blocking, keep it fast.

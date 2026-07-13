@@ -92,6 +92,11 @@ func (vc *volumeController) Set(level int) {
 
 	vc.mu.Lock()
 	vc.level = level
+	// Copy under the lock — SetOnVolumeChange writes this field under mu
+	// from the main goroutine, and button events can fire before that
+	// wiring completes (SubscribeToButton starts the evdev goroutines
+	// first).
+	cb := vc.onVolumeChange
 	vc.mu.Unlock()
 
 	// Apply to ALSA
@@ -102,8 +107,8 @@ func (vc *volumeController) Set(level int) {
 
 	log.Printf("Volume set to %d/%d", level, volumeMax)
 	vc.showLEDs(level)
-	if vc.onVolumeChange != nil {
-		vc.onVolumeChange(level)
+	if cb != nil {
+		cb(level)
 	}
 }
 

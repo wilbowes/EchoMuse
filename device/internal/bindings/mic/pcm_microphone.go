@@ -133,8 +133,8 @@ func (p *PcmMicrophone) readLoop() {
 
 	// Stream ended — close all subscriber channels so callers see EOF rather
 	// than blocking on a channel that will never receive again.
-	log.Printf("mic: ALSA stream closed — notifying %d subscribers", len(p.subs))
 	p.mu.Lock()
+	log.Printf("mic: ALSA stream closed — notifying %d subscribers", len(p.subs))
 	for _, ch := range p.subs {
 		close(ch)
 	}

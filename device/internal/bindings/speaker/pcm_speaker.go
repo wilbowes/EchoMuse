@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -40,10 +41,19 @@ type PcmSpeaker struct {
 	// stream isn't misreported as an underrun.
 	eosPending atomic.Bool
 
+	// stateMu guards streamActive and discarding as one unit. They used to
+	// be independent atomics, but Flush's check-streamActive-then-arm and
+	// EndStream's clear-both are compound transitions: a barge-in Flush
+	// racing a stream's natural EndStream (control and data ride separate
+	// WebSockets) could observe streamActive just before EndStream cleared
+	// it and then arm discarding just after EndStream consumed it — leaving
+	// discard armed with no EOS ever coming, silently swallowing the whole
+	// NEXT response up to its EOS.
+	stateMu sync.Mutex
 	// streamActive tracks whether a 0x02 stream is mid-flight (set by
 	// PumpPeriod, cleared by EndStream — both on the WS read goroutine).
 	// Read by Flush to decide whether to arm discarding.
-	streamActive atomic.Bool
+	streamActive bool
 	// discarding, when set, makes PumpPeriod drop incoming periods until
 	// the stream's 0x03 EOS arrives. Armed by Flush (barge-in) when a
 	// stream is mid-flight: draining audioCh alone is not enough, because
@@ -55,7 +65,7 @@ type PcmSpeaker struct {
 	// voice). The controller always terminates a stream with 0x03, on the
 	// cancel path included, so discard-until-EOS consumes exactly the
 	// remainder of the cancelled stream no matter how much was buffered.
-	discarding atomic.Bool
+	discarding bool
 
 	// echoTap, when non-nil, receives every period pumped to ALSA — real
 	// audio and silence alike — so an AEC reference stream advances in
@@ -177,13 +187,16 @@ func (p *PcmSpeaker) silenceLoop() {
 // consumed a slot (rate-limiting to ALSA speed), or returns an error if the
 // silence loop has died — preventing an infinite block on a dead consumer.
 func (p *PcmSpeaker) PumpPeriod(data []byte) error {
-	if p.discarding.Load() {
+	p.stateMu.Lock()
+	if p.discarding {
 		// Flushed stream — swallow the network-buffered remainder without
 		// queueing it (see the discarding field for why draining audioCh
 		// alone can't do this).
+		p.stateMu.Unlock()
 		return nil
 	}
-	p.streamActive.Store(true)
+	p.streamActive = true
+	p.stateMu.Unlock()
 	period := make([]byte, len(data))
 	copy(period, data)
 	select {
@@ -199,8 +212,12 @@ func (p *PcmSpeaker) PumpPeriod(data []byte) error {
 // already been handed to PumpPeriod (frames are processed sequentially on
 // the read loop), so by the time silenceLoop drains audioCh the flag is set.
 func (p *PcmSpeaker) EndStream() {
-	p.streamActive.Store(false)
-	if p.discarding.Swap(false) {
+	p.stateMu.Lock()
+	p.streamActive = false
+	wasDiscarding := p.discarding
+	p.discarding = false
+	p.stateMu.Unlock()
+	if wasDiscarding {
 		log.Printf("[speaker] flush complete — EOS reached, discard disarmed")
 		return
 	}
@@ -224,11 +241,12 @@ func (p *PcmSpeaker) EndStream() {
 // a stream's natural end (control and data travel on separate WebSockets)
 // from arming discard against the *next* stream's audio.
 func (p *PcmSpeaker) Flush() {
-	armed := false
-	if p.streamActive.Load() {
-		p.discarding.Store(true)
-		armed = true
+	p.stateMu.Lock()
+	armed := p.streamActive
+	if armed {
+		p.discarding = true
 	}
+	p.stateMu.Unlock()
 	n := 0
 	for {
 		select {

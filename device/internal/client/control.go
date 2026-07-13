@@ -345,8 +345,9 @@ func (c *ControlClient) connect(ctx context.Context, addr string, data *DataClie
 			if err := json.Unmarshal(raw, &msg); err == nil {
 				cfg := config.Get()
 				cfg.Apply(msg)
+				snap := cfg.Snapshot() // read back under the config lock
 				log.Printf("[control] Config applied: vad_threshold=%.4f oww_threshold=%.2f",
-					cfg.VadThreshold, cfg.OwwThreshold)
+					snap.VadThreshold, snap.OwwThreshold)
 				if c.configAppliedCallback != nil {
 					c.configAppliedCallback(msg)
 				}
