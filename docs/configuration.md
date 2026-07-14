@@ -20,8 +20,12 @@ them: **Playback**, **Wake word**, **Microphones**, **Ring**, **Advanced**,
 
 Two other device tabs worth knowing: **Status** (IP, firmware, WiFi network,
 ESPHome port, resource meters, and the Bluetooth-proxy diagnostics panel when
-enabled) and **Activity** (live voice-turn history — what was heard, how it
-was transcribed, wake-word near-misses).
+enabled) and **Activity** (voice-turn history — what was heard, how it was
+transcribed, wake-word scores, playback underruns, near-misses). Activity
+history is stored in the controller's database, so it survives controller
+and device restarts; hourly hardware trends (CPU, memory, WiFi signal) are
+kept for 180 days and available via the API
+(`/api/devices/{id}/activity?days=N`).
 
 ---
 
