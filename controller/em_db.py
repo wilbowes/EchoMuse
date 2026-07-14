@@ -3,7 +3,8 @@ db.py — EchoMuse Controller persistence layer
 ==============================================
 
 SQLite-backed storage for device registry, per-device config, logs,
-users, sessions, and system configuration.
+users, sessions, system configuration, and activity stats (voice turns,
+hourly wake/near-miss counters, hourly hardware metrics).
 
 All public functions are synchronous — they are intended to be called
 from asyncio handlers via loop.run_in_executor() when called on the
@@ -141,6 +142,13 @@ DEFAULT_DEVICE_CONFIG = {
 # Maximum log rows retained per device. Older rows are pruned on insert.
 LOG_RETENTION = 10_000
 
+# Maximum voice-turn rows retained per device (pruned on insert). At even
+# 100 turns/day this is many months of history.
+TURN_RETENTION = 20_000
+
+# Hourly wake_counters rows older than this are pruned on upsert.
+WAKE_COUNTER_RETENTION_DAYS = 180
+
 # ─── Migrations ───────────────────────────────────────────────────────────────
 #
 # Rules:
@@ -244,6 +252,81 @@ MIGRATIONS: list[str] = [
     ALTER TABLE devices ADD COLUMN ble_proxy_port INTEGER;
 
     UPDATE system_config SET value = '4' WHERE key = 'schema_version';
+    """,
+
+    # ── v5 — persistent activity stats ────────────────────────────────────────
+    #
+    # turns: one row per voice turn (wake/button/barge-in/continuation),
+    # written at turn completion from the TurnTrace in em_esphome. Survives
+    # controller and device restarts — the in-memory Device.turn_history is
+    # hydrated from here on connect. trigger_type not "trigger": TRIGGER is
+    # an SQLite keyword. underruns/playback_periods arrive asynchronously
+    # (device playback_stats message, firmware >= v2.9) and are NULL until
+    # then — NULL means "not reported", 0 means "clean playback".
+    #
+    # wake_counters: hourly per-device rollups for signals too frequent to
+    # store per-event — near-misses (wake score > 0.05 but below threshold)
+    # and underruns from non-turn playback (announcements). One UPSERT at
+    # most every ~2s per device (piggybacks the existing rate-limited
+    # near-miss log path), so the instrumentation cost is negligible.
+    #
+    # device_metrics: hourly rollup of the device's ~30s hardware stats
+    # report (CPU, RAM, storage, WiFi RSSI) for historic trend review.
+    # Sums + extremes are upserted in place per report (averages computed
+    # at read time), so an hour is one row however many samples land in it.
+    # cpu_max keeps short spikes visible through the hourly average;
+    # rssi_min keeps marginal-WiFi dips visible the same way.
+    """
+    CREATE TABLE IF NOT EXISTS turns (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        device_id        TEXT    NOT NULL,
+        ts               REAL    NOT NULL,
+        trigger_type     TEXT,
+        wake_model       TEXT,
+        wake_score       REAL,
+        wake_threshold   REAL,
+        noise_floor      REAL,
+        outcome          TEXT,
+        stt_text         TEXT,
+        total_ms         INTEGER,
+        vad_end_ms       INTEGER,
+        stt_ms           INTEGER,
+        tts_url_ms       INTEGER,
+        tts_fetch_ms     INTEGER,
+        playback_ms      INTEGER,
+        audio_ms         INTEGER,
+        tts_bytes        INTEGER,
+        underruns        INTEGER,
+        playback_periods INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_turns_device_ts ON turns(device_id, ts DESC);
+
+    CREATE TABLE IF NOT EXISTS wake_counters (
+        device_id     TEXT    NOT NULL,
+        hour_ts       INTEGER NOT NULL,
+        near_misses   INTEGER NOT NULL DEFAULT 0,
+        near_miss_max REAL    NOT NULL DEFAULT 0,
+        underruns     INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (device_id, hour_ts)
+    );
+
+    CREATE TABLE IF NOT EXISTS device_metrics (
+        device_id        TEXT    NOT NULL,
+        hour_ts          INTEGER NOT NULL,
+        samples          INTEGER NOT NULL DEFAULT 0,
+        cpu_sum          REAL    NOT NULL DEFAULT 0,
+        cpu_max          REAL    NOT NULL DEFAULT 0,
+        mem_used_sum     REAL    NOT NULL DEFAULT 0,
+        mem_total_mb     REAL,
+        storage_used_mb  REAL,
+        storage_total_mb REAL,
+        rssi_sum         REAL    NOT NULL DEFAULT 0,
+        rssi_samples     INTEGER NOT NULL DEFAULT 0,
+        rssi_min         REAL,
+        PRIMARY KEY (device_id, hour_ts)
+    );
+
+    UPDATE system_config SET value = '5' WHERE key = 'schema_version';
     """,
 ]
 
@@ -823,6 +906,221 @@ def get_device_logs(
         """,
         (device_id, limit),
     )
+
+
+# ─── Activity stats ───────────────────────────────────────────────────────────
+#
+# Persistent per-turn records + hourly rollups (near-misses, hardware
+# metrics). Written from the voice pipeline via run_in_executor; read by the
+# /api/devices/{id}/turns and /api/devices/{id}/activity endpoints.
+
+# Turn dict keys ↔ column names. "trigger" is the dict key used everywhere
+# in the pipeline and API (matches the pre-persistence turn_record shape);
+# the column is trigger_type because TRIGGER is an SQLite keyword.
+_TURN_COLUMNS = {
+    "trigger":          "trigger_type",
+    "wake_model":       "wake_model",
+    "wake_score":       "wake_score",
+    "wake_threshold":   "wake_threshold",
+    "noise_floor":      "noise_floor",
+    "outcome":          "outcome",
+    "stt_text":         "stt_text",
+    "total_ms":         "total_ms",
+    "vad_end_ms":       "vad_end_ms",
+    "stt_ms":           "stt_ms",
+    "tts_url_ms":       "tts_url_ms",
+    "tts_fetch_ms":     "tts_fetch_ms",
+    "playback_ms":      "playback_ms",
+    "audio_ms":         "audio_ms",
+    "tts_bytes":        "tts_bytes",
+    "underruns":        "underruns",
+    "playback_periods": "playback_periods",
+}
+
+
+def insert_turn(device_id: str, rec: dict) -> int:
+    """
+    Persist one completed voice turn. rec is the turn_record dict built in
+    em_esphome (missing keys stored as NULL). Returns the new rowid so a
+    late playback_stats report can attach to this turn. Prunes to
+    TURN_RETENTION rows per device.
+    """
+    cols   = ["device_id", "ts"] + list(_TURN_COLUMNS.values())
+    values = [device_id, rec.get("ts", time.time())] + [
+        rec.get(k) for k in _TURN_COLUMNS
+    ]
+    with _tx() as conn:
+        cur = conn.execute(
+            f"INSERT INTO turns ({', '.join(cols)}) "
+            f"VALUES ({', '.join('?' * len(cols))})",
+            values,
+        )
+        conn.execute(
+            """
+            DELETE FROM turns
+            WHERE device_id = ?
+              AND id NOT IN (
+                  SELECT id FROM turns
+                  WHERE device_id = ?
+                  ORDER BY ts DESC
+                  LIMIT ?
+              )
+            """,
+            (device_id, device_id, TURN_RETENTION),
+        )
+        return cur.lastrowid
+
+
+def set_turn_playback(turn_id: int, periods: int, underruns: int) -> None:
+    """Attach the device's playback_stats report to a persisted turn."""
+    with _tx() as conn:
+        conn.execute(
+            "UPDATE turns SET playback_periods = ?, underruns = ? WHERE id = ?",
+            (periods, underruns, turn_id),
+        )
+
+
+def get_turns(
+    device_id: str,
+    limit: int = 50,
+    since: Optional[float] = None,
+) -> list[dict]:
+    """
+    Recent turns for a device as turn_record-shaped dicts (plus turn_id),
+    oldest first (newest last — the order turn_history and the API use).
+    since: optional epoch-seconds lower bound.
+    """
+    if since is not None:
+        rows = _q(
+            "SELECT * FROM turns WHERE device_id = ? AND ts >= ? "
+            "ORDER BY ts DESC LIMIT ?",
+            (device_id, since, limit),
+        )
+    else:
+        rows = _q(
+            "SELECT * FROM turns WHERE device_id = ? ORDER BY ts DESC LIMIT ?",
+            (device_id, limit),
+        )
+    out = []
+    for row in reversed(rows):
+        rec = {"turn_id": row["id"], "ts": row["ts"]}
+        for key, col in _TURN_COLUMNS.items():
+            rec[key] = row[col]
+        out.append(rec)
+    return out
+
+
+def bump_wake_counters(
+    device_id: str,
+    near_misses: int = 0,
+    near_miss_max: float = 0.0,
+    underruns: int = 0,
+) -> None:
+    """Accumulate into the current hour's wake_counters row (upsert)."""
+    hour_ts = int(time.time()) // 3600 * 3600
+    with _tx() as conn:
+        conn.execute(
+            """
+            INSERT INTO wake_counters (device_id, hour_ts, near_misses, near_miss_max, underruns)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT (device_id, hour_ts) DO UPDATE SET
+                near_misses   = near_misses + excluded.near_misses,
+                near_miss_max = MAX(near_miss_max, excluded.near_miss_max),
+                underruns     = underruns + excluded.underruns
+            """,
+            (device_id, hour_ts, near_misses, near_miss_max, underruns),
+        )
+        conn.execute(
+            "DELETE FROM wake_counters WHERE hour_ts < ?",
+            (hour_ts - WAKE_COUNTER_RETENTION_DAYS * 86400,),
+        )
+
+
+def get_wake_counters(device_id: str, since: float) -> list[sqlite3.Row]:
+    """Hourly wake counters for a device from `since` (epoch s), oldest first."""
+    return _q(
+        "SELECT * FROM wake_counters WHERE device_id = ? AND hour_ts >= ? "
+        "ORDER BY hour_ts",
+        (device_id, since),
+    )
+
+
+def record_device_stats(device_id: str, stats: dict) -> None:
+    """
+    Fold one ~30s hardware stats report into the current hour's
+    device_metrics rollup. Missing/None fields are skipped. Averages are
+    computed at read time from the sums; gauges (storage, mem total) keep
+    the latest value. Prunes rows older than WAKE_COUNTER_RETENTION_DAYS.
+    """
+    hour_ts = int(time.time()) // 3600 * 3600
+    cpu     = stats.get("cpuPct")
+    mem     = stats.get("memUsedMb")
+    rssi    = stats.get("wifiRssi")
+    with _tx() as conn:
+        conn.execute(
+            """
+            INSERT INTO device_metrics (
+                device_id, hour_ts, samples, cpu_sum, cpu_max, mem_used_sum,
+                mem_total_mb, storage_used_mb, storage_total_mb,
+                rssi_sum, rssi_samples, rssi_min
+            ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (device_id, hour_ts) DO UPDATE SET
+                samples          = samples + 1,
+                cpu_sum          = cpu_sum + excluded.cpu_sum,
+                cpu_max          = MAX(cpu_max, excluded.cpu_max),
+                mem_used_sum     = mem_used_sum + excluded.mem_used_sum,
+                mem_total_mb     = COALESCE(excluded.mem_total_mb, mem_total_mb),
+                storage_used_mb  = COALESCE(excluded.storage_used_mb, storage_used_mb),
+                storage_total_mb = COALESCE(excluded.storage_total_mb, storage_total_mb),
+                rssi_sum         = rssi_sum + excluded.rssi_sum,
+                rssi_samples     = rssi_samples + excluded.rssi_samples,
+                rssi_min         = CASE
+                    WHEN excluded.rssi_min IS NULL THEN rssi_min
+                    ELSE MIN(COALESCE(rssi_min, excluded.rssi_min), excluded.rssi_min)
+                END
+            """,
+            (
+                device_id, hour_ts,
+                float(cpu or 0.0), float(cpu or 0.0), float(mem or 0.0),
+                stats.get("memTotalMb"),
+                stats.get("storageUsedMb"), stats.get("storageTotalMb"),
+                float(rssi) if rssi is not None else 0.0,
+                1 if rssi is not None else 0,
+                float(rssi) if rssi is not None else None,
+            ),
+        )
+        conn.execute(
+            "DELETE FROM device_metrics WHERE hour_ts < ?",
+            (hour_ts - WAKE_COUNTER_RETENTION_DAYS * 86400,),
+        )
+
+
+def get_device_metrics(device_id: str, since: float) -> list[dict]:
+    """
+    Hourly hardware metrics for a device from `since` (epoch s), oldest
+    first, with averages resolved from the stored sums.
+    """
+    rows = _q(
+        "SELECT * FROM device_metrics WHERE device_id = ? AND hour_ts >= ? "
+        "ORDER BY hour_ts",
+        (device_id, since),
+    )
+    out = []
+    for r in rows:
+        n = r["samples"] or 1
+        out.append({
+            "hour_ts":          r["hour_ts"],
+            "samples":          r["samples"],
+            "cpu_avg":          round(r["cpu_sum"] / n, 1),
+            "cpu_max":          r["cpu_max"],
+            "mem_used_avg":     round(r["mem_used_sum"] / n, 1),
+            "mem_total_mb":     r["mem_total_mb"],
+            "storage_used_mb":  r["storage_used_mb"],
+            "storage_total_mb": r["storage_total_mb"],
+            "rssi_avg":         round(r["rssi_sum"] / r["rssi_samples"], 1) if r["rssi_samples"] else None,
+            "rssi_min":         r["rssi_min"],
+        })
+    return out
 
 
 # ─── Users ────────────────────────────────────────────────────────────────────

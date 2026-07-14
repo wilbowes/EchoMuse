@@ -196,6 +196,12 @@ func main() {
 		pcmSpeaker.Flush()
 	})
 
+	// Per-stream playback stats — underrun/period counts reported upstream
+	// once per completed TTS stream, persisted against the voice turn.
+	pcmSpeaker.OnStreamStats(func(periods, underruns uint64) {
+		controlClient.SendPlaybackStats(periods, underruns)
+	})
+
 	// WiFi change — the executor owns the whole switch/rollback sequence
 	// (internal/wifi); the reconnect gate polls IsConnected. The outcome
 	// is sent as wifi_result with at-least-once delivery: retried on a
