@@ -39,6 +39,30 @@ const (
 	frameTypeNoSpeechTimeout = byte(0x05)
 )
 
+// ─── WebSocket keepalive (data + control) ─────────────────────────────────────
+//
+// Neither long-lived socket had transport-level liveness before v2.8.4. The
+// data client blocked in ReadMessage with no read deadline and sent no pings,
+// so a silently dropped TCP connection (WiFi blip / AP roam — no FIN or RST
+// ever delivered) left it half-open forever: connect() never returned, Run()'s
+// redial loop never started, and the device kept a zombie data channel — deaf
+// and mute — while the control socket kept it looking healthy. Observed
+// 2026-07-14: Office wedged this way for 7h; the controller's defensive
+// mic_start fired every 10s against a stream writing into the dead socket.
+// The control client's app-level pong ticker had the write-side half of the
+// same bug: on write error it returned without closing the conn, leaving its
+// read loop wedged identically.
+//
+// Pings prove the full round trip (device → controller → device); the pong
+// handler refreshes the read deadline, so a dead path errors the read loop
+// out within wsPongWait and the redial loop takes over. Write deadlines bound
+// every write so a full kernel send buffer can't hold connMu forever.
+const (
+	wsPingInterval = 20 * time.Second // WS ping cadence
+	wsPongWait     = 45 * time.Second // read deadline; > 2× ping interval
+	wsWriteWait    = 10 * time.Second // per-write deadline (frames, identify, pings)
+)
+
 // ─── VAD constants ────────────────────────────────────────────────────────────
 
 const (
@@ -282,6 +306,7 @@ func (d *DataClient) connect(ctx context.Context, addr string) error {
 	// d.conn is visible, streamMic's sendFrame writes under connMu, and this
 	// unlocked write racing it would be a concurrent write on the same
 	// gorilla conn (panics).
+	conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
 	if err := conn.WriteMessage(websocket.TextMessage, identifyBytes); err != nil {
 		return err
 	}
@@ -304,11 +329,44 @@ func (d *DataClient) connect(ctx context.Context, addr string) error {
 		d.connMu.Unlock()
 	}()
 
+	// Keepalive — see the wsPingInterval block comment. Deadline refreshes
+	// all happen on this (the read) goroutine: the pong handler runs inside
+	// ReadMessage, and the per-message refresh below covers connections busy
+	// with speaker traffic.
+	conn.SetReadDeadline(time.Now().Add(wsPongWait))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(wsPongWait))
+		return nil
+	})
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		ticker := time.NewTicker(wsPingInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				// WriteControl is safe concurrently with WriteMessage
+				// (gorilla's documented exception), so no connMu here — a
+				// mic-frame write wedged on a full send buffer can't block
+				// the ping that would detect the dead path.
+				if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(wsWriteWait)); err != nil {
+					log.Printf("[data] keepalive ping failed: %v — closing connection", err)
+					conn.Close() // unblock the read loop now, not at the read deadline
+					return
+				}
+			}
+		}
+	}()
+
 	for {
 		msgType, data, err := conn.ReadMessage()
 		if err != nil {
 			return err
 		}
+		conn.SetReadDeadline(time.Now().Add(wsPongWait))
 		if msgType != websocket.BinaryMessage || len(data) == 0 {
 			continue
 		}
@@ -429,10 +487,15 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 		seqNum++
 		copy(frame[3:], payload)
 		d.connMu.Lock()
+		conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
 		err := conn.WriteMessage(websocket.BinaryMessage, frame)
 		d.connMu.Unlock()
 		if err != nil {
 			log.Printf("[data] streamMic: send error: %v", err)
+			// Any write error leaves a gorilla conn permanently broken —
+			// close it so connect()'s read loop unblocks and Run() redials
+			// immediately instead of waiting out the read deadline.
+			conn.Close()
 		}
 	}
 

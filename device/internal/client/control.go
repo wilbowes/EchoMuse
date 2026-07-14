@@ -263,8 +263,19 @@ func (c *ControlClient) connect(ctx context.Context, addr string, data *DataClie
 	}
 	data.NotifyReady(addr)
 
+	// Keepalive — same mechanism as the data client (see wsPingInterval in
+	// data.go). The app-level "pong" keeps the controller's last_seen fresh;
+	// the WS ping/pong + read deadline is what detects a half-open socket.
+	// Both error paths close the conn: a returning ticker goroutine that left
+	// the conn open left the read loop wedged forever on a dead TCP path.
+	conn.SetReadDeadline(time.Now().Add(wsPongWait))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(wsPongWait))
+		return nil
+	})
+
 	go func() {
-		ticker := time.NewTicker(30 * time.Second)
+		ticker := time.NewTicker(wsPingInterval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -272,6 +283,13 @@ func (c *ControlClient) connect(ctx context.Context, addr string, data *DataClie
 				return
 			case <-ticker.C:
 				if err := c.writeJSON(map[string]string{"type": "pong"}); err != nil {
+					log.Printf("[control] keepalive pong failed: %v — closing connection", err)
+					conn.Close()
+					return
+				}
+				if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(wsWriteWait)); err != nil {
+					log.Printf("[control] keepalive ping failed: %v — closing connection", err)
+					conn.Close()
 					return
 				}
 			}
@@ -283,6 +301,7 @@ func (c *ControlClient) connect(ctx context.Context, addr string, data *DataClie
 		if err := conn.ReadJSON(&raw); err != nil {
 			return err
 		}
+		conn.SetReadDeadline(time.Now().Add(wsPongWait))
 
 		var peek struct {
 			Type string `json:"type"`
@@ -677,6 +696,7 @@ func (c *ControlClient) writeJSON(v interface{}) error {
 	if c.conn == nil {
 		return nil
 	}
+	c.conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
 	return c.conn.WriteJSON(v)
 }
 
