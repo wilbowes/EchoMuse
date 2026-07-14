@@ -107,6 +107,10 @@ class TurnTrace:
     t_playback_ms:    int   = -1      # ms from t0 to playback started
     t_complete_ms:    int   = -1      # ms from t0 to turn complete
     outcome:          str   = ""      # "ok", "no_speech", "cancelled", "tts_error", "timeout"
+    # Wake detection detail (model, score, threshold, noise_floor) popped
+    # from device.last_wake at turn start — None for button/continuation
+    # turns. Persisted with the turn for threshold tuning and model A/Bs.
+    wake_info:        Optional[dict] = None
 
     def elapsed_ms(self) -> int:
         return int((time.monotonic() - self.t0) * 1000)
@@ -754,19 +758,26 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 trace.emit()
                 # Record for the dashboard's Status-tab observability panel
                 # and nudge any open dashboards to refresh.
+                wi = trace.wake_info or {}
                 turn_record = {
-                    "ts":           time.time(),
-                    "trigger":      trace.trigger,
-                    "outcome":      trace.outcome,
-                    "total_ms":     trace.t_complete_ms,
-                    "vad_end_ms":   trace.t_vad_end_ms,
-                    "stt_ms":       trace.t_stt_ms,
-                    "tts_url_ms":   trace.t_tts_url_ms,
-                    "tts_fetch_ms": trace.t_tts_fetched_ms,
-                    "playback_ms":  trace.t_playback_ms,
-                    "audio_ms":     trace.audio_frames * 80,
-                    "stt_text":     trace.stt_text,
+                    "ts":             time.time(),
+                    "trigger":        trace.trigger,
+                    "wake_model":     wi.get("model"),
+                    "wake_score":     wi.get("score"),
+                    "wake_threshold": wi.get("threshold"),
+                    "noise_floor":    wi.get("noise_floor"),
+                    "outcome":        trace.outcome,
+                    "total_ms":       trace.t_complete_ms,
+                    "vad_end_ms":     trace.t_vad_end_ms,
+                    "stt_ms":         trace.t_stt_ms,
+                    "tts_url_ms":     trace.t_tts_url_ms,
+                    "tts_fetch_ms":   trace.t_tts_fetched_ms,
+                    "playback_ms":    trace.t_playback_ms,
+                    "audio_ms":       trace.audio_frames * 80,
+                    "tts_bytes":      trace.tts_bytes,
+                    "stt_text":       trace.stt_text,
                 }
+                await _persist_turn(device, turn_record)
                 device.turn_history.append(turn_record)
                 try:
                     await api._push_event({
@@ -1357,6 +1368,71 @@ def get_server(device_id: str) -> Optional[DeviceESPhomeServer]:
 
 # ─── Voice turn trigger ───────────────────────────────────────────────────────
 
+async def _record_dropped_turn(device, trigger_label: str, wake_info) -> None:
+    """
+    Persist a stub record for a turn that never started (no ESPHome server /
+    no HA connection). Without this, wakes during an HA outage would vanish
+    from the activity history — exactly the "device woke but nothing
+    happened" events worth seeing in a trend review.
+    """
+    wi = wake_info or {}
+    turn_record = {
+        "ts":             time.time(),
+        "trigger":        trigger_label,
+        "wake_model":     wi.get("model"),
+        "wake_score":     wi.get("score"),
+        "wake_threshold": wi.get("threshold"),
+        "noise_floor":    wi.get("noise_floor"),
+        "outcome":        "no_ha",
+        "total_ms":       0,
+    }
+    await _persist_turn(device, turn_record)
+    device.turn_history.append(turn_record)
+
+
+async def _persist_turn(device, turn_record: dict) -> None:
+    """
+    Write a completed turn to SQLite (survives controller restarts) and
+    remember the rowid on the device so the firmware's asynchronous
+    playback_stats report — which lands after the turn has already been
+    recorded — can attach its underrun count to this turn. Best-effort:
+    a DB hiccup must never take down the voice pipeline.
+    """
+    loop        = asyncio.get_running_loop()
+    played      = (turn_record.get("playback_ms") or -1) >= 0
+    pending     = device.pending_playback_stats
+    device.pending_playback_stats = None
+    if played and pending is not None and loop.time() - pending[0] < 30.0:
+        # Device reported this playback's stats before the turn row existed
+        # (its buffer drained ahead of our overestimated drain sleep).
+        turn_record["playback_periods"] = pending[1]
+        turn_record["underruns"]        = pending[2]
+        pending = None
+    try:
+        turn_id = await loop.run_in_executor(
+            None, db.insert_turn, device.device_id, turn_record
+        )
+        turn_record["turn_id"] = turn_id
+        if played and "underruns" not in turn_record:
+            # Playback happened but its stats haven't arrived — leave the
+            # rendezvous open for handle_control's playback_stats branch.
+            device.last_turn_id = turn_id
+    except Exception as e:
+        log.warning(f"[{device.device_id}] Failed to persist turn: {e}")
+    if pending is not None and pending[2]:
+        # Stale/unmatched stash (announcement playback) — keep its underruns
+        # in the hourly counters rather than dropping them.
+        try:
+            await loop.run_in_executor(
+                None,
+                lambda: db.bump_wake_counters(
+                    device.device_id, underruns=pending[2]
+                ),
+            )
+        except Exception:
+            pass
+
+
 async def trigger_voice_turn(
     device,           # em_controller.Device
     on_thinking,      # async callable() — LED/state transition
@@ -1385,12 +1461,19 @@ async def trigger_voice_turn(
 
     If no active HA connection exists, logs and returns False.
     """
+    # Pop the wake detection detail set by wake_word_listener/_barge_watcher
+    # — pop, not read, so continuation turns (which loop back here with no
+    # new detection) don't inherit the original wake's score.
+    wake_info        = device.last_wake
+    device.last_wake = None
+
     server = get_server(device.device_id)
     if server is None:
         log.warning(
             f"[{device.device_id}] esphome: no server registered for this device "
             f"— was start_esphome_servers() called?"
         )
+        await _record_dropped_turn(device, trigger_label, wake_info)
         return False
 
     satellite = server.get_satellite()
@@ -1399,9 +1482,12 @@ async def trigger_voice_turn(
             f"[{device.device_id}] esphome: no active HA connection — "
             f"cannot start voice turn (HA not connected to this device's port)"
         )
+        await _record_dropped_turn(device, trigger_label, wake_info)
         return False
 
-    trace = TurnTrace(trigger=trigger_label, t0=time.monotonic())
+    trace = TurnTrace(
+        trigger=trigger_label, t0=time.monotonic(), wake_info=wake_info
+    )
 
     await satellite.run_esphome_voice_turn(
         device=device,

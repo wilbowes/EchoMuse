@@ -187,6 +187,7 @@ async def create_app() -> web.Application:
     app.router.add_post("/api/devices/{id}/config",       _post_device_config)
     app.router.add_get("/api/devices/{id}/logs",          _get_device_logs)
     app.router.add_get("/api/devices/{id}/turns",         _get_device_turns)
+    app.router.add_get("/api/devices/{id}/activity",      _get_device_activity)
     app.router.add_post("/api/devices/{id}/wifi",         _post_device_wifi)
     app.router.add_post("/api/devices/{id}/wifi/scan",    _post_device_wifi_scan)
     app.router.add_post("/api/devices/{id}/update",       _post_device_update)
@@ -359,11 +360,112 @@ async def _get_device(request: web.Request) -> web.Response:
 
 @auth.require_auth
 async def _get_device_turns(request: web.Request) -> web.Response:
-    """GET /api/devices/{id}/turns — recent voice-turn traces (in-memory,
-    newest last). Powers the Status tab's observability panel."""
+    """GET /api/devices/{id}/turns — recent voice-turn traces, newest last.
+    Served from the persistent turns table (survives controller and device
+    restarts). Powers the Activity tab's observability panel.
+
+    Query params: limit (default 50, max 1000), since (epoch seconds)."""
     device_id = request.match_info["id"]
-    d = _devices.get(device_id)
-    return _ok(list(d.turn_history) if d is not None else [])
+    try:
+        limit = min(int(request.query.get("limit", 50)), 1000)
+        since = request.query.get("since")
+        since = float(since) if since is not None else None
+    except ValueError:
+        return _error("bad_request", "limit/since must be numeric", 400)
+    loop  = asyncio.get_event_loop()
+    turns = await loop.run_in_executor(
+        None, lambda: db.get_turns(device_id, limit, since)
+    )
+    return _ok(turns)
+
+
+@auth.require_auth
+async def _get_device_activity(request: web.Request) -> web.Response:
+    """GET /api/devices/{id}/activity?days=7 — aggregated activity stats
+    for trend review: per-day turn buckets (counts, outcomes, latency
+    percentiles, wake scores, underruns), per-wake-model rollups, hourly
+    near-miss counters, and hourly hardware metrics (CPU/RAM/storage/RSSI)."""
+    device_id = request.match_info["id"]
+    try:
+        days = min(int(request.query.get("days", 7)), 180)
+    except ValueError:
+        return _error("bad_request", "days must be an integer", 400)
+    since = time.time() - days * 86400
+
+    loop     = asyncio.get_event_loop()
+    turns    = await loop.run_in_executor(
+        None, lambda: db.get_turns(device_id, 50_000, since)
+    )
+    counters = await loop.run_in_executor(
+        None, lambda: db.get_wake_counters(device_id, since)
+    )
+    metrics  = await loop.run_in_executor(
+        None, lambda: db.get_device_metrics(device_id, since)
+    )
+
+    def pct(sorted_vals, p):
+        if not sorted_vals:
+            return None
+        return sorted_vals[min(len(sorted_vals) - 1, int(len(sorted_vals) * p))]
+
+    # Per-day buckets (local time), oldest first.
+    day_buckets: dict[str, list[dict]] = {}
+    for t in turns:
+        day = time.strftime("%Y-%m-%d", time.localtime(t["ts"]))
+        day_buckets.setdefault(day, []).append(t)
+
+    days_out = []
+    for day in sorted(day_buckets):
+        ts_list   = day_buckets[day]
+        ok        = [t for t in ts_list if t["outcome"] == "ok"]
+        totals    = sorted(t["total_ms"] for t in ok if (t["total_ms"] or 0) > 0)
+        scores    = [t["wake_score"] for t in ts_list if t["wake_score"] is not None]
+        underruns = sum(t["underruns"] or 0 for t in ts_list)
+        outcomes: dict[str, int] = {}
+        for t in ts_list:
+            outcomes[t["outcome"] or "?"] = outcomes.get(t["outcome"] or "?", 0) + 1
+        days_out.append({
+            "date":           day,
+            "turns":          len(ts_list),
+            "ok":             len(ok),
+            "outcomes":       outcomes,
+            "total_ms_p50":   pct(totals, 0.50),
+            "total_ms_p95":   pct(totals, 0.95),
+            "wake_score_avg": round(sum(scores) / len(scores), 3) if scores else None,
+            "wake_score_min": round(min(scores), 3) if scores else None,
+            "underruns":      underruns,
+        })
+
+    # Per-wake-model rollup — supports A/B-ing custom OWW models.
+    models: dict[str, dict] = {}
+    for t in turns:
+        if not t["wake_model"]:
+            continue
+        m = models.setdefault(
+            t["wake_model"], {"turns": 0, "score_sum": 0.0, "score_min": None}
+        )
+        m["turns"] += 1
+        if t["wake_score"] is not None:
+            m["score_sum"] += t["wake_score"]
+            m["score_min"] = (
+                t["wake_score"] if m["score_min"] is None
+                else min(m["score_min"], t["wake_score"])
+            )
+    models_out = {
+        name: {
+            "turns":     m["turns"],
+            "score_avg": round(m["score_sum"] / m["turns"], 3) if m["turns"] else None,
+            "score_min": m["score_min"],
+        }
+        for name, m in models.items()
+    }
+
+    return _ok({
+        "days":          days_out,
+        "wake_models":   models_out,
+        "wake_counters": [dict(r) for r in counters],
+        "metrics":       metrics,
+    })
 
 
 @auth.require_admin

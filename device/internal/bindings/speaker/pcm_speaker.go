@@ -89,6 +89,23 @@ type PcmSpeaker struct {
 	// starts inside New, so it can't be set later without a race). Must be
 	// fast and non-blocking: it runs on the ALSA pump goroutine.
 	echoTap func([]byte)
+
+	// statsCb, when set, receives (periods, underruns) once per completed
+	// stream — at EOS consume in silenceLoop, flush included. Unlike echoTap
+	// it fires at most once per response, so a setter (OnStreamStats) is
+	// fine: silenceLoop reads it under statsMu only on that cold path.
+	statsMu sync.Mutex
+	statsCb func(periods, underruns uint64)
+}
+
+// OnStreamStats registers a per-stream stats callback: (periods played,
+// underruns injected) reported once when a stream reaches its EOS. Invoked
+// on its own goroutine so a slow consumer (network send) can never stall
+// the ALSA pump. Safe to call any time after New.
+func (p *PcmSpeaker) OnStreamStats(cb func(periods, underruns uint64)) {
+	p.statsMu.Lock()
+	p.statsCb = cb
+	p.statsMu.Unlock()
 }
 
 func NewPcmSpeaker(echoTap func([]byte)) (*PcmSpeaker, error) {
@@ -154,6 +171,10 @@ func (p *PcmSpeaker) silenceLoop() {
 	defer close(p.deadCh)
 	audioStreaming := false
 	var underruns uint64 // loop-local: only this goroutine drains audioCh
+	// Per-stream accounting for the stats callback: accumulates across
+	// mid-stream drains (a drain flips audioStreaming but the stream isn't
+	// over until its EOS), reported and reset at EOS consume.
+	var streamPeriods, streamUnderruns uint64
 	for {
 		// Prime gate: while idle, hold on silence until the buffer has
 		// primePeriods queued or the stream's EOS is already in (short
@@ -176,6 +197,7 @@ func (p *PcmSpeaker) silenceLoop() {
 			return
 		case period := <-audioSrc:
 			audioStreaming = true
+			streamPeriods++
 			if p.echoTap != nil {
 				p.echoTap(period)
 			}
@@ -189,7 +211,14 @@ func (p *PcmSpeaker) silenceLoop() {
 					// Natural end of stream (0x03 received), or a barge-in
 					// flush (Flush sets eosPending so its drain isn't
 					// miscounted as an underrun).
-					log.Printf("[speaker] stream complete — returning to silence")
+					log.Printf("[speaker] stream complete — returning to silence (periods=%d underruns=%d)", streamPeriods, streamUnderruns)
+					p.statsMu.Lock()
+					cb := p.statsCb
+					p.statsMu.Unlock()
+					if cb != nil && streamPeriods > 0 {
+						go cb(streamPeriods, streamUnderruns)
+					}
+					streamPeriods, streamUnderruns = 0, 0
 				} else {
 					// Mid-stream drain: the WS sender fell behind real-time
 					// playback and a silence gap is being injected — the
@@ -197,6 +226,7 @@ func (p *PcmSpeaker) silenceLoop() {
 					// drain event (not per silence period); rate-limited so
 					// a chronically starved link can't flood the log.
 					underruns++
+					streamUnderruns++
 					if underruns == 1 || underruns%16 == 0 {
 						log.Printf("[speaker] UNDERRUN: audio channel drained mid-stream — injecting silence (underruns=%d)", underruns)
 					}

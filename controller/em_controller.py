@@ -22,6 +22,7 @@ Device WebSocket protocol:
      "version": "v2.0.1", "capabilities": [...]}
     {"type": "button", "clickType": 138, "down": false}
     {"type": "log", "level": "info", "message": "..."}
+    {"type": "playback_stats", "periods": 123, "underruns": 0}
     {"type": "pong"}
 
   /control — Server → Device:
@@ -272,8 +273,28 @@ class Device:
 
         # Recent voice-turn traces (dicts derived from TurnTrace at emit
         # time in em_esphome) — powers the Status tab's observability panel.
-        # In-memory only; bounded.
+        # Hydrated from the persistent turns table on connect (handle_control),
+        # appended live; bounded.
         self.turn_history: collections.deque = collections.deque(maxlen=50)
+
+        # Wake detection detail for the turn about to start — set by
+        # wake_word_listener / _barge_watcher at detection, popped by
+        # em_esphome.trigger_voice_turn into the turn's trace. None for
+        # button/continuation turns.
+        self.last_wake: dict | None = None
+
+        # Playback stats rendezvous. The device reports playback_stats when
+        # its buffer drains, the controller persists the turn when its
+        # (deliberately overestimated) drain sleep ends — either can happen
+        # first. last_turn_id covers stats-after-persist: set at persist for
+        # turns that played audio, consumed by handle_control (cleared on
+        # use so an announcement's report can't overwrite a turn's stats).
+        # pending_playback_stats covers stats-before-persist: (ts, periods,
+        # underruns) stashed by handle_control, folded into the record by
+        # em_esphome._persist_turn if fresh (staleness window keeps a
+        # long-ago announcement's stats out of an unrelated later turn).
+        self.last_turn_id: int | None = None
+        self.pending_playback_stats: tuple[float, int, int] | None = None
 
     async def send_control(self, msg: dict):
         try:
@@ -591,6 +612,15 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                         f"Barge-in during {phase} (score={score:.3f})"
                     )
                     device.barge_detected = True
+                    # Wake detail for the interrupting turn's persistent
+                    # record — popped when the turn loop re-enters
+                    # trigger_voice_turn with trigger "barge-in".
+                    device.last_wake = {
+                        "model":       device._barge_model_key,
+                        "score":       round(score, 4),
+                        "threshold":   threshold,
+                        "noise_floor": round(device.noise_floor, 5),
+                    }
                     device.cancel_event.set()
                     if in_playback:
                         await device.send_control({"type": "speaker_flush"})
@@ -990,6 +1020,8 @@ async def wake_word_listener(device: Device):
 
     buf = bytearray()
     last_near_miss_log_ts = 0.0  # Q4: rate-limit near-miss INFO logging to 1/2s
+    nm_pending = 0    # near-misses buffered since the last hourly-rollup flush
+    nm_max     = 0.0  # highest buffered near-miss score
     try:
         while True:
             if device.oww_model != current_model_name or device.oww_speex_ns != current_speex_ns:
@@ -1102,6 +1134,8 @@ async def wake_word_listener(device: Device):
                 # logs at all.
                 if score > 0.05:
                     device.oww_near_misses += 1
+                    nm_pending += 1
+                    nm_max = max(nm_max, score)
                     log.debug(
                         f"[{device.device_id}] OWW score: {score:.3f} "
                         f"(threshold={device.oww_threshold:.3f}, "
@@ -1120,6 +1154,19 @@ async def wake_word_listener(device: Device):
                             "device_id": device.device_id,
                             "state":     {"owwNearMisses": device.oww_near_misses},
                         })
+                        # Flush the buffered near-miss counts into the hourly
+                        # persistent rollup. Riding this rate-limited branch
+                        # caps the DB cost at one upsert per 2s per device,
+                        # however noisy the room.
+                        _nm, _mx = nm_pending, nm_max
+                        nm_pending, nm_max = 0, 0.0
+                        await loop.run_in_executor(
+                            None,
+                            lambda: db.bump_wake_counters(
+                                device.device_id,
+                                near_misses=_nm, near_miss_max=_mx,
+                            ),
+                        )
 
                 if score >= device.oww_threshold:
                     log.info(
@@ -1145,6 +1192,14 @@ async def wake_word_listener(device: Device):
                         model.reset()
                         buf.clear()
                         device.cancel_event.clear()
+                        # Wake detail for the turn's persistent record —
+                        # popped by esphome.trigger_voice_turn.
+                        device.last_wake = {
+                            "model":       model_key,
+                            "score":       round(score, 4),
+                            "threshold":   device.oww_threshold,
+                            "noise_floor": round(device.noise_floor, 5),
+                        }
                         device.oww_paused.set()
                         log.debug(
                             f"[{device.device_id}] OWW: oww_paused set, "
@@ -1320,6 +1375,15 @@ async def handle_control(ws: WebSocketServerProtocol):
         )
 
         device = Device(device_id, ip, capabilities, ws)
+        # Hydrate the observability panel's turn history from the persistent
+        # turns table so it survives controller and device restarts.
+        try:
+            past_turns = await loop.run_in_executor(
+                None, db.get_turns, device_id, device.turn_history.maxlen
+            )
+            device.turn_history.extend(past_turns)
+        except Exception as e:
+            log.warning(f"[{device_id}] Turn history hydration failed: {e}")
         _devices[device_id] = device
 
         log.info(
@@ -1465,6 +1529,11 @@ async def handle_control(ws: WebSocketServerProtocol):
                     }
                     if msg.get("ble"):
                         em_ble_proxy.update_stats(device_id, msg["ble"])
+                    # Fold into the persistent hourly rollup (CPU/RAM/storage/
+                    # RSSI trends) — one cheap upsert per ~30s report.
+                    await loop.run_in_executor(
+                        None, db.record_device_stats, device_id, device.stats
+                    )
                     await api._push_event({
                         "type":      "device_update",
                         "device_id": device_id,
@@ -1506,6 +1575,52 @@ async def handle_control(ws: WebSocketServerProtocol):
                             "device_id": device_id,
                             "state":     {"wifi": st},
                         })
+
+                elif msg_type == "playback_stats":
+                    # One report per completed speaker stream (firmware
+                    # >= v2.9): periods played + mid-stream underruns.
+                    # Attach to the turn persisted just before playback;
+                    # consume last_turn_id so a later announcement's report
+                    # can't overwrite a turn's stats. Reports with no
+                    # pending turn (HA announcements, TTS after a controller
+                    # restart) roll into the hourly counters instead.
+                    periods   = int(msg.get("periods", 0))
+                    underruns = int(msg.get("underruns", 0))
+                    turn_id   = device.last_turn_id
+                    device.last_turn_id = None
+                    if turn_id is not None:
+                        await loop.run_in_executor(
+                            None, db.set_turn_playback,
+                            turn_id, periods, underruns,
+                        )
+                        for rec in reversed(device.turn_history):
+                            if rec.get("turn_id") == turn_id:
+                                rec["playback_periods"] = periods
+                                rec["underruns"]        = underruns
+                                break
+                    else:
+                        # The turn row may not exist yet (device buffers
+                        # usually drain before the controller's drain sleep
+                        # ends) — stash for _persist_turn to fold in. A
+                        # displaced earlier stash was an announcement's:
+                        # keep its underruns in the hourly counters.
+                        prev = device.pending_playback_stats
+                        device.pending_playback_stats = (
+                            asyncio.get_event_loop().time(), periods, underruns
+                        )
+                        if prev and prev[2]:
+                            await loop.run_in_executor(
+                                None,
+                                lambda: db.bump_wake_counters(
+                                    device_id, underruns=prev[2]
+                                ),
+                            )
+                    if underruns:
+                        log.warning(
+                            f"[{device_id}] Playback underruns: {underruns} "
+                            f"in {periods} periods"
+                            f"{f' (turn {turn_id})' if turn_id else ''}"
+                        )
 
                 elif msg_type == "ble_adverts":
                     # BLE proxy data path — batched adverts from the

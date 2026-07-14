@@ -669,6 +669,19 @@ func (c *ControlClient) SendWifiResult(ok bool, ssid, errMsg string) {
 	})
 }
 
+// SendPlaybackStats reports one completed speaker stream: how many periods
+// played and how many mid-stream underruns (silence injections) occurred.
+// Sent once per TTS response/announcement; the controller attaches it to
+// the voice turn it just persisted. Safe for concurrent use — silently
+// drops if not connected (the stat is diagnostic, not state).
+func (c *ControlClient) SendPlaybackStats(periods, underruns uint64) {
+	_ = c.writeJSON(map[string]interface{}{
+		"type":      "playback_stats",
+		"periods":   periods,
+		"underruns": underruns,
+	})
+}
+
 // SendBleAdverts forwards a batch of BLE advertisements to the controller
 // (bluetooth_proxy path). adverts is marshalled as-is — []bluetooth.Advert,
 // whose Data field JSON-encodes as base64. Safe for concurrent use —
