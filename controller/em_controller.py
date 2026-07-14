@@ -617,8 +617,8 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                     # trigger_voice_turn with trigger "barge-in".
                     device.last_wake = {
                         "model":       device._barge_model_key,
-                        "score":       round(score, 4),
-                        "threshold":   threshold,
+                        "score":       round(float(score), 4),
+                        "threshold":   float(threshold),
                         "noise_floor": round(device.noise_floor, 5),
                     }
                     device.cancel_event.set()
@@ -1135,7 +1135,7 @@ async def wake_word_listener(device: Device):
                 if score > 0.05:
                     device.oww_near_misses += 1
                     nm_pending += 1
-                    nm_max = max(nm_max, score)
+                    nm_max = max(nm_max, float(score))
                     log.debug(
                         f"[{device.device_id}] OWW score: {score:.3f} "
                         f"(threshold={device.oww_threshold:.3f}, "
@@ -1194,9 +1194,12 @@ async def wake_word_listener(device: Device):
                         device.cancel_event.clear()
                         # Wake detail for the turn's persistent record —
                         # popped by esphome.trigger_voice_turn.
+                        # float(): OWW scores are numpy float32 — sqlite3
+                        # stores those as a 4-byte BLOB, which then breaks
+                        # JSON serialisation of the row (2026-07-14).
                         device.last_wake = {
                             "model":       model_key,
-                            "score":       round(score, 4),
+                            "score":       round(float(score), 4),
                             "threshold":   device.oww_threshold,
                             "noise_floor": round(device.noise_floor, 5),
                         }

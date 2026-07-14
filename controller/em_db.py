@@ -938,6 +938,16 @@ _TURN_COLUMNS = {
 }
 
 
+def _py(v):
+    """
+    Coerce numpy scalars to Python natives. The voice pipeline handles
+    numpy float32 scores; sqlite3 silently stores those as a 4-byte BLOB,
+    which poisons the row for JSON serialisation and SQL MAX() comparisons
+    (bit us 2026-07-14). Anything with .item() is a numpy scalar.
+    """
+    return v.item() if hasattr(v, "item") else v
+
+
 def insert_turn(device_id: str, rec: dict) -> int:
     """
     Persist one completed voice turn. rec is the turn_record dict built in
@@ -946,8 +956,8 @@ def insert_turn(device_id: str, rec: dict) -> int:
     TURN_RETENTION rows per device.
     """
     cols   = ["device_id", "ts"] + list(_TURN_COLUMNS.values())
-    values = [device_id, rec.get("ts", time.time())] + [
-        rec.get(k) for k in _TURN_COLUMNS
+    values = [device_id, _py(rec.get("ts", time.time()))] + [
+        _py(rec.get(k)) for k in _TURN_COLUMNS
     ]
     with _tx() as conn:
         cur = conn.execute(
@@ -1028,7 +1038,7 @@ def bump_wake_counters(
                 near_miss_max = MAX(near_miss_max, excluded.near_miss_max),
                 underruns     = underruns + excluded.underruns
             """,
-            (device_id, hour_ts, near_misses, near_miss_max, underruns),
+            (device_id, hour_ts, _py(near_misses), _py(near_miss_max), _py(underruns)),
         )
         conn.execute(
             "DELETE FROM wake_counters WHERE hour_ts < ?",
