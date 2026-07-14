@@ -1076,7 +1076,7 @@ async def _fetch_tts_audio(url: str) -> bytes:
     Uses ffmpeg subprocess — handles MP3, WAV, FLAC, OGG transparently
     regardless of which TTS provider HA is configured with. Output is raw
     PCM at Piper rate (22050Hz mono S16_LE), matching what the existing
-    _run_post_turn_playback() / resample_to_stereo_48k() pipeline expects.
+    _run_post_turn_playback() / resample_to_48k() pipeline expects.
 
     Requires ffmpeg in PATH (installed via Dockerfile apt-get).
     """

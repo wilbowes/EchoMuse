@@ -118,8 +118,8 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
 ### Controller audio pipeline
 
 1. **Wake word** — openwakeword (ONNX) runs in a thread executor per device on `mic_queue`
-2. **Voice turn** — on wake or dot-button: drain stale frames → acquire `voice_lock` → stream mic to HA via the ESPHome satellite → receive PCM response → EQ (`em_eq.py`) → resample to 48kHz stereo → stream back as 0x02 frames
-3. **Speaker** — `resample_to_stereo_48k()` uses numpy linear interpolation (not pure Python)
+2. **Voice turn** — on wake or dot-button: drain stale frames → acquire `voice_lock` → stream mic to HA via the ESPHome satellite → receive TTS URL → fetch + ffmpeg-decode → EQ (`em_eq.py`) → resample to 48kHz mono → stream back as 0x02 frames
+3. **Speaker** — the wire carries **mono** 48kHz (`resample_to_48k()`, numpy linear interpolation); the device duplicates L=R at the ALSA write (stereo ALSA config is an I2S/codec constraint, not a wire one). Device buffers ~5.5s (`audioChanDepth`) and holds playback until ~1s is queued or EOS arrives (`primePeriods`) — WiFi-stall protection for marginal links
 
 ### Key Go packages
 

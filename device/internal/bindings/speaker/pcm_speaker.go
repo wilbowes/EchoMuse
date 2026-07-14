@@ -19,13 +19,29 @@ const deviceNr    = 23
 const periodSize  = 2048
 const periodBytes = periodSize * 2 * 2 // 2 channels * 2 bytes = 8192
 
-// audioCh depth — deep enough that the WS sender stays well ahead of the
-// silence loop on any realistic LAN jitter. At 4 the channel drained
-// momentarily mid-stream, causing the default silence case to fire and
-// inject a 42ms silence gap (audible stutter). 32 periods = ~1.3s of
-// headroom; the WS reader would need to stall for over a second before
-// the channel empties mid-stream.
-const audioChanDepth = 32
+// The wire carries MONO 48kHz — PumpPeriod duplicates L=R before queueing.
+// The stereo ALSA config is an I2S/codec-path constraint, not a wire
+// requirement, and shipping two identical channels to a mono speaker
+// doubled TTS bandwidth (~1.5Mbps → ~770kbps saved) for nothing — which
+// matters on marginal 2.4GHz links (Lounge stutter).
+const monoPeriodBytes = periodSize * 2 // 4096
+
+// audioCh depth — the WS sender delivers at ~2× realtime, so its lead over
+// playback grows ~1s per second played until it hits this cap. At 32
+// (~1.3s) any WiFi stall longer than the accumulated lead drained the
+// channel mid-stream (audible stutter on the far-AP device). 128 periods
+// ≈ 5.5s (~1MB queued as stereo): most responses land on-device entirely
+// within the first half of playback.
+const audioChanDepth = 128
+
+// primePeriods — playback holds on silence until this many periods are
+// queued (or the stream's EOS has arrived, for clips shorter than the
+// prime). Protects the opening seconds of playback, when the sender's
+// lead is still ~zero and a single WiFi stall used to stutter. 24 periods
+// ≈ 1s of audio ≈ ~0.5s added start latency at 2× realtime delivery
+// (accepted trade, 2026-07-14). The controller's post-playback drain
+// sleep allows for the delayed start (SPEAKER_PRIME_SECONDS).
+const primePeriods = 24
 
 var silencePeriod = make([]byte, periodBytes)
 
@@ -139,10 +155,26 @@ func (p *PcmSpeaker) silenceLoop() {
 	audioStreaming := false
 	var underruns uint64 // loop-local: only this goroutine drains audioCh
 	for {
+		// Prime gate: while idle, hold on silence until the buffer has
+		// primePeriods queued or the stream's EOS is already in (short
+		// clip — everything it will ever have is queued). A nil channel
+		// disables the receive case; the silence default then paces the
+		// wait at ALSA rate while the sender fills the buffer. Once
+		// audioStreaming, the gate stays out of the way — mid-stream
+		// drains keep their underrun accounting below. (A stale
+		// eosPending from a barge-in flush can skip one prime — harmless:
+		// the follow-up response just starts eagerly, pre-2026-07-14
+		// behaviour.)
+		audioSrc := p.audioCh
+		if !audioStreaming {
+			if n := len(p.audioCh); n > 0 && n < primePeriods && !p.eosPending.Load() {
+				audioSrc = nil
+			}
+		}
 		select {
 		case <-p.stopCh:
 			return
-		case period := <-p.audioCh:
+		case period := <-audioSrc:
 			audioStreaming = true
 			if p.echoTap != nil {
 				p.echoTap(period)
@@ -183,9 +215,11 @@ func (p *PcmSpeaker) silenceLoop() {
 }
 
 // PumpPeriod queues one period of audio for playback. Called by the WS client
-// for each incoming 0x02 binary frame. Blocks until the silence loop has
-// consumed a slot (rate-limiting to ALSA speed), or returns an error if the
-// silence loop has died — preventing an infinite block on a dead consumer.
+// for each incoming 0x02 binary frame — MONO S16 on the wire, duplicated to
+// the stereo frames the ALSA device requires here. Blocks until the silence
+// loop has consumed a slot (rate-limiting to ALSA speed), or returns an error
+// if the silence loop has died — preventing an infinite block on a dead
+// consumer.
 func (p *PcmSpeaker) PumpPeriod(data []byte) error {
 	p.stateMu.Lock()
 	if p.discarding {
@@ -197,8 +231,13 @@ func (p *PcmSpeaker) PumpPeriod(data []byte) error {
 	}
 	p.streamActive = true
 	p.stateMu.Unlock()
-	period := make([]byte, len(data))
-	copy(period, data)
+	n := len(data) / 2 // mono S16 samples
+	period := make([]byte, n*4)
+	for i := 0; i < n; i++ {
+		lo, hi := data[i*2], data[i*2+1]
+		period[i*4+0], period[i*4+1] = lo, hi // L
+		period[i*4+2], period[i*4+3] = lo, hi // R
+	}
 	select {
 	case p.audioCh <- period:
 		return nil
@@ -225,7 +264,7 @@ func (p *PcmSpeaker) EndStream() {
 }
 
 // Flush cuts a playing stream immediately (barge-in). Two parts:
-//   1. Drain audioCh — kills up to ~1.3s already queued on-device.
+//   1. Drain audioCh — kills up to ~5.5s already queued on-device.
 //   2. Arm discarding (if a stream is mid-flight) — PumpPeriod then drops
 //      every subsequent period of this stream until its 0x03 EOS arrives.
 //      Necessary because the controller writes the whole response into the

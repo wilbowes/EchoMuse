@@ -37,7 +37,7 @@ Device WebSocket protocol:
     <binary> [0x01][seq_hi][seq_lo][PCM mono S16_LE 2560 bytes]
 
   /data — Server → Device:
-    <binary> [0x02][PCM stereo S16_LE 48kHz — 8192 bytes per period]
+    <binary> [0x02][PCM mono S16_LE 48kHz — 4096 bytes per period]
     <binary> [0x03] end of audio stream
 
   /shell — bidirectional raw binary (demand-opened by device on
@@ -118,11 +118,19 @@ CHUNK_BYTES          = 1280 * 2   # 2560 bytes = 80ms at 16kHz S16_LE mono
 # v2.6.3 changelog — resist the temptation to reintroduce it).
 
 
-# Speaker — must match PcmSpeaker constants in Go
+# Speaker — must match PcmSpeaker constants in Go. The wire carries MONO
+# 48kHz (the device duplicates to stereo at the ALSA write — shipping two
+# identical channels to a mono speaker doubled TTS bandwidth for nothing,
+# and halving it matters on marginal 2.4GHz links).
 SPEAKER_RATE   = 48000
 SPEAKER_PERIOD = 2048
-SPEAKER_BYTES  = SPEAKER_PERIOD * 2 * 2   # 8192 bytes/period
+SPEAKER_BYTES  = SPEAKER_PERIOD * 2       # 4096 bytes/period (mono S16)
 PIPER_RATE     = 22050
+
+# The device holds playback until ~this much audio is buffered (or EOS
+# arrives) — primePeriods in pcm_speaker.go. The post-playback drain sleep
+# must allow for the delayed start.
+SPEAKER_PRIME_SECONDS = 1.1
 
 # LEDs
 NUM_LEDS = 12
@@ -320,7 +328,7 @@ class Device:
         await self.send_control({"type": "config", **kwargs})
 
     async def stream_speaker(self, pcm: bytes):
-        """Stream resampled stereo 48kHz PCM as 0x02 frames, then 0x03 EOS."""
+        """Stream resampled mono 48kHz PCM as 0x02 frames, then 0x03 EOS."""
         self.speaking = True
         try:
             offset = 0
@@ -413,13 +421,17 @@ async def leds_spin_green(device: Device, stop_event: asyncio.Event):
 
 # ─── Audio conversion ─────────────────────────────────────────────────────────
 
-def resample_to_stereo_48k(pcm: bytes, from_rate: int) -> bytes:
+def resample_to_48k(pcm: bytes, from_rate: int) -> bytes:
     """
-    Resample mono S16_LE PCM from from_rate to 48kHz stereo S16_LE.
+    Resample mono S16_LE PCM from from_rate to 48kHz mono S16_LE.
 
     Uses linear interpolation via numpy. For a 10s Piper response (~220k samples)
     the old pure-Python loop took ~1-2s of wall time in the asyncio event loop;
     numpy completes it in <5ms, keeping the perceived latency budget intact.
+
+    Output stays mono — the wire format is mono 48k, and the device
+    duplicates to stereo at the ALSA write (the stereo ALSA config is a
+    hardware constraint of the I2S/codec path, not a wire requirement).
     """
     if len(pcm) < 2:
         return b""
@@ -435,12 +447,7 @@ def resample_to_stereo_48k(pcm: bytes, from_rate: int) -> bytes:
 
     resampled = samples[lo] * (1.0 - frac) + samples[hi] * frac
     resampled = np.clip(resampled, -32768, 32767).astype(np.int16)
-
-    # Duplicate mono → stereo (L = R)
-    stereo = np.empty(n_out * 2, dtype=np.int16)
-    stereo[0::2] = resampled
-    stereo[1::2] = resampled
-    return stereo.tobytes()
+    return resampled.tobytes()
 
 
 # ─── Voice pipeline ───────────────────────────────────────────────────────────
@@ -621,7 +628,7 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
     # starts (observed as spinner stutter and console typing judder).
     def _prepare_pcm() -> bytes:
         eq_pcm = em_eq.apply(voice_response, PIPER_RATE, device.eq_bands, device.eq_loudness)
-        return resample_to_stereo_48k(eq_pcm, PIPER_RATE)
+        return resample_to_48k(eq_pcm, PIPER_RATE)
 
     speaker_pcm = await asyncio.get_event_loop().run_in_executor(None, _prepare_pcm)
     log.info(
@@ -642,7 +649,13 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
         stream_task.cancel()
     else:
         if not device.cancel_event.is_set():
-            audio_duration = len(speaker_pcm) / (SPEAKER_RATE * 4)  # stereo S16LE
+            # Mono S16LE, plus the device's prime hold: playback doesn't
+            # start until ~1s of audio is buffered (or EOS for short clips),
+            # so the buffer finishes draining up to that much later than
+            # audio_duration alone suggests. Overestimating slightly is fine
+            # — this sleep races cancel_event, and barge-in keeps the mic
+            # running regardless.
+            audio_duration = len(speaker_pcm) / (SPEAKER_RATE * 2) + SPEAKER_PRIME_SECONDS
             elapsed        = asyncio.get_event_loop().time() - t_stream_start
             remaining      = max(0.0, audio_duration - elapsed)
             log.info(
