@@ -164,9 +164,15 @@ tuning knobs:
 
 ## 04 — Ring
 
-The colours the LED ring uses during conversations. Scenes are rendered on
-the controller — the device just paints the frames — so they apply
-instantly, need no firmware update, and can differ per device.
+The colours the LED ring uses during conversations. Scenes apply
+instantly and can differ per device. On current firmware (v2.9+) the
+device animates the ring itself — the controller sends one "play this
+animation" instruction per state change, so the spinner stays perfectly
+smooth regardless of WiFi or controller load, and while a response is
+speaking the ring **throbs in time with the audio** (brightness follows
+the actual level coming out of the speaker). If the controller ever
+vanishes mid-conversation the ring times itself out rather than spinning
+forever. Older firmware falls back to controller-rendered frames.
 
 - **Standard** — the classic green.
 - **Airy** — a pale, calm sky blue.
