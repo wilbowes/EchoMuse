@@ -1671,15 +1671,28 @@ async def handle_control(ws: WebSocketServerProtocol):
 
     finally:
         if device:
-            log.info(f"[control] Device disconnected: {device.device_id}")
-            db.log_device(
-                device.device_id, "info", "controller", "Disconnected"
-            )
-            if _devices.get(device.device_id) is device:
+            if _devices.get(device.device_id) is not device:
+                # A replacement connection has already registered for this
+                # device_id — this socket is stale. Tearing down shared
+                # per-device services here would rip them out from under the
+                # live connection: on 2026-07-14 a stale close 4s after a
+                # reconnect stopped Lounge's ESPHome listener, so HA's
+                # redials hit connection-refused and every turn failed
+                # no_ha for 11 hours until the next device bounce.
+                log.info(
+                    f"[control] Stale connection closed for "
+                    f"{device.device_id} — replacement is active, keeping "
+                    f"services up"
+                )
+            else:
+                log.info(f"[control] Device disconnected: {device.device_id}")
+                db.log_device(
+                    device.device_id, "info", "controller", "Disconnected"
+                )
                 _devices.pop(device.device_id, None)
-            await api.notify_device_disconnected(device.device_id)
-            await esphome.device_disconnected(device.device_id)
-            await em_ble_proxy.device_disconnected(device.device_id)
+                await api.notify_device_disconnected(device.device_id)
+                await esphome.device_disconnected(device.device_id)
+                await em_ble_proxy.device_disconnected(device.device_id)
 
 
 # ─── Data plane handler ───────────────────────────────────────────────────────
