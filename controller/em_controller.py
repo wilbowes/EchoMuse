@@ -1132,7 +1132,12 @@ async def wake_word_listener(device: Device):
                 # persistent near_misses counter is exposed to the dashboard
                 # via device_update so the count is visible without tailing
                 # logs at all.
-                if score > 0.05:
+                # Below-threshold only (2026-07-15 fix): scores at or above
+                # the wake threshold are detections, not near-misses — the
+                # old `score > 0.05` gate counted every successful wake as a
+                # near-miss too, inflating both the dashboard counter and
+                # the wake_counters rollup (near_miss_max = the wake score).
+                if 0.05 < score < device.oww_threshold:
                     device.oww_near_misses += 1
                     nm_pending += 1
                     nm_max = max(nm_max, float(score))
