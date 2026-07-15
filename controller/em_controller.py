@@ -323,6 +323,21 @@ class Device:
             msg["listening"] = listening
         await self.send_control(msg)
 
+    @property
+    def led_anim_capable(self) -> bool:
+        return "led_anim" in (self.capabilities or [])
+
+    async def send_led_anim(self, anim: dict):
+        """
+        Hand the ring to the device's local animation engine (led_anim
+        capability, v2.9+ firmware). The device renders frames on its own
+        ticker until a newer led_anim/leds message replaces the spec or
+        its ttlSec dead-man expires — so a controller stall or WiFi jitter
+        can no longer make the spinner judder, and a dead controller can't
+        leave the ring lit.
+        """
+        await self.send_control({"type": "led_anim", "anim": anim})
+
     async def ping(self):
         await self.send_control({"type": "ping"})
 
@@ -417,16 +432,36 @@ def _make_leds(r, g, b):
 
 
 async def leds_off(device: Device):
-    await device.set_leds(_make_leds(0, 0, 0))
+    if device.led_anim_capable:
+        await device.send_led_anim({"pattern": "off"})
+    else:
+        await device.set_leds(_make_leds(0, 0, 0))
 
 
 async def leds_listening(device: Device):
-    await device.set_leds(device.led_scene["listening"], listening=True)
+    if device.led_anim_capable:
+        await device.send_led_anim(device.led_scene["listening_anim"])
+    else:
+        await device.set_leds(device.led_scene["listening"], listening=True)
 
 
 async def leds_spin_green(device: Device, stop_event: asyncio.Event):
     # Name is historical — the spinner renders whatever the device's scene
     # says (head+trail dot for solid scenes, rotating palette for pride).
+    #
+    # led_anim firmware animates locally: one message starts the spinner,
+    # the device runs it on its own ticker (controller event-loop stalls
+    # and WiFi jitter can't judder it), and this task just waits to send
+    # the stop. Legacy firmware falls back to controller-rendered frames.
+    if device.led_anim_capable:
+        try:
+            await device.send_led_anim(device.led_scene["spin_anim"])
+            await stop_event.wait()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await leds_off(device)
+        return
     spin_frame = device.led_scene["spin_frame"]
     pos = 0
     try:
@@ -809,6 +844,13 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                     spin_task = asyncio.create_task(
                         leds_spin_green(device, stop_spin)
                     )
+                if device.led_anim_capable:
+                    # Playback ring: throb with the response's live audio
+                    # level (device-side "meter" pattern, RMS measured at
+                    # the ALSA write). Replaces the thinking spinner on
+                    # the device; spin_task keeps waiting on stop_event
+                    # and its finally still clears the ring at turn end.
+                    await device.send_led_anim(device.led_scene["meter_anim"])
                 if device.barge_in_enabled:
                     # Barge-in (§3.2): keep the mic running through
                     # playback — the device's AEC subtracts the speaker

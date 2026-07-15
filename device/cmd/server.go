@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
+	"sync/atomic"
 	"log"
 	"math"
 	"os"
@@ -62,12 +64,21 @@ func main() {
 	// applyAecConfig from env defaults below and on every config push.
 	canceller := aec.New()
 
-	pcmSpeaker, err := speaker.NewPcmSpeaker(canceller.WriteFar)
+	// The level tap drives the energy-reactive LED ring ("meter" pattern).
+	// The Server doesn't exist yet when the speaker starts its pump loop,
+	// so the tap goes through an atomic pointer armed just below.
+	var srvPtr atomic.Pointer[server.Server]
+	pcmSpeaker, err := speaker.NewPcmSpeaker(canceller.WriteFar, func(rms float64) {
+		if srv := srvPtr.Load(); srv != nil {
+			srv.SetAudioLevel(rms)
+		}
+	})
 	if err != nil {
 		log.Fatalf("Failed to initialize PCM Speaker: %v", err)
 	}
 
 	s := server.NewServer(buttonController, microphone, pcmSpeaker)
+	srvPtr.Store(s)
 
 	buttonController.SetVolumeCallback(func(direction string) {
 		if direction == "up" {
@@ -91,7 +102,13 @@ func main() {
 	})
 	controlClient := client.NewControlClient(
 		deviceID,
-		func(leds []led.Led, listening *bool) { s.SetLEDs(leds, listening) },
+		func(leds []led.Led, listening *bool) {
+			// A raw frame from the controller supersedes any running
+			// device-local animation — stop it so its next tick can't
+			// paint over this frame.
+			s.StopAnim()
+			s.SetLEDs(leds, listening)
+		},
 		func(lockMic bool) {
 			if s.IsMuted() {
 				// Mute is device-sovereign — the physical button cannot be
@@ -103,6 +120,17 @@ func main() {
 		},
 		func() { dataClient.StopMic() },
 	)
+
+	// Device-rendered ring animations (led_anim) — the animation engine
+	// runs on the device's own ticker, immune to controller/WiFi jitter.
+	controlClient.OnLEDAnim(func(raw json.RawMessage) {
+		var spec server.AnimSpec
+		if err := json.Unmarshal(raw, &spec); err != nil {
+			log.Printf("[cmd] bad led_anim spec: %v", err)
+			return
+		}
+		s.StartAnim(spec)
+	})
 
 	// BLE proxy scanner — passive scan over /dev/stpbt, batches forwarded
 	// to the controller on the control plane. Armed from env defaults here
@@ -128,6 +156,9 @@ func main() {
 	// Disconnected — orange pulse
 	var pulseCancel context.CancelFunc
 	controlClient.OnDisconnected(func() {
+		// Stop any device-local animation: the controller that owned it is
+		// gone, and the pulse below would otherwise fight its ticker.
+		s.StopAnim()
 		if pulseCancel != nil {
 			pulseCancel()
 		}
@@ -158,6 +189,7 @@ func main() {
 		muted := s.IsMuted()
 		controlClient.SendMuteState(muted)
 		controlClient.SendVolumeState(s.VolumeLevel())
+		s.StopAnim() // fresh controller session owns the ring from here
 		if muted {
 			// Orange pulse overwrote the red ring — restore it.
 			s.RestoreMuteRing()

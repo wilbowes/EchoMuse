@@ -4,6 +4,7 @@ import (
 	"log"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	internalLed "github.com/wilbowes/EchoMuse/internal/bindings/led"
@@ -43,6 +44,13 @@ type Server struct {
 	// listeningLEDs is true when the controller has set the solid green
 	// listening ring — the only state where direction overlay is shown.
 	listeningLEDs bool
+
+	// anim owns the device-rendered ring animation (led_anim messages).
+	anim animator
+
+	// audioLevel holds the live speaker RMS as float64 bits — written by
+	// the speaker's ALSA pump via SetAudioLevel, read by the meter anim.
+	audioLevel atomic.Uint64
 }
 
 func NewServer(buttonController buttons.Controller, microphone mic.Microphone, speaker speaker.Speaker) *Server {
