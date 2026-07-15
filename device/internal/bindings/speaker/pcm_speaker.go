@@ -5,6 +5,7 @@ package speaker
 import (
 	"fmt"
 	"log"
+	"math"
 	"os/exec"
 	"sync"
 	"sync/atomic"
@@ -90,6 +91,16 @@ type PcmSpeaker struct {
 	// fast and non-blocking: it runs on the ALSA pump goroutine.
 	echoTap func([]byte)
 
+	// levelTap, when non-nil, receives the RMS level (0..1, normalized
+	// int16 full-scale) of every period as it is pumped to ALSA — real
+	// audio carries its measured level, silence reports 0. Drives the
+	// energy-reactive LED ring ("meter" led_anim pattern): tapping at the
+	// ALSA write means the throb tracks what is audible right now, not
+	// what PumpPeriod queued ~5.5s of buffer ago. Fixed at construction
+	// like echoTap (silenceLoop races any later setter) and must be fast
+	// and non-blocking: it runs on the ALSA pump goroutine.
+	levelTap func(rms float64)
+
 	// statsCb, when set, receives (periods, underruns) once per completed
 	// stream — at EOS consume in silenceLoop, flush included. Unlike echoTap
 	// it fires at most once per response, so a setter (OnStreamStats) is
@@ -108,12 +119,13 @@ func (p *PcmSpeaker) OnStreamStats(cb func(periods, underruns uint64)) {
 	p.statsMu.Unlock()
 }
 
-func NewPcmSpeaker(echoTap func([]byte)) (*PcmSpeaker, error) {
+func NewPcmSpeaker(echoTap func([]byte), levelTap func(rms float64)) (*PcmSpeaker, error) {
 	s := &PcmSpeaker{
-		audioCh: make(chan []byte, audioChanDepth),
-		stopCh:  make(chan struct{}),
-		deadCh:  make(chan struct{}),
-		echoTap: echoTap,
+		audioCh:  make(chan []byte, audioChanDepth),
+		stopCh:   make(chan struct{}),
+		deadCh:   make(chan struct{}),
+		echoTap:  echoTap,
+		levelTap: levelTap,
 	}
 	if err := s.Init(); err != nil {
 		return nil, err
@@ -201,6 +213,9 @@ func (p *PcmSpeaker) silenceLoop() {
 			if p.echoTap != nil {
 				p.echoTap(period)
 			}
+			if p.levelTap != nil {
+				p.levelTap(periodRMS(period))
+			}
 			if err := p.session.Pump(period); err != nil {
 				log.Printf("silenceLoop: pump error: %v", err)
 				return
@@ -235,6 +250,9 @@ func (p *PcmSpeaker) silenceLoop() {
 			}
 			if p.echoTap != nil {
 				p.echoTap(silencePeriod)
+			}
+			if p.levelTap != nil {
+				p.levelTap(0)
 			}
 			if err := p.session.Pump(silencePeriod); err != nil {
 				log.Printf("silenceLoop: silence pump error: %v", err)
@@ -344,4 +362,27 @@ func (p *PcmSpeaker) Close() {
 	close(p.stopCh)
 	p.session.Close()
 	log.Println("PcmSpeaker closed — output muted, amp off")
+}
+
+// periodRMS computes the RMS level of a stereo S16LE period, normalized to
+// 0..1 of int16 full-scale. Left channel only, every 4th frame — the wire
+// is mono duplicated L=R and the LED meter needs ~2 significant digits at
+// ~23Hz, so 512 of 2048 frames is plenty at a quarter of the cost. Runs on
+// the ALSA pump goroutine: no allocation, integer accumulate.
+func periodRMS(period []byte) float64 {
+	if len(period) < 4 {
+		return 0
+	}
+	var sum uint64
+	n := 0
+	// Stereo frame = 4 bytes (L16+R16); step 4 frames = 16 bytes.
+	for i := 0; i+1 < len(period); i += 16 {
+		s := int64(int16(uint16(period[i]) | uint16(period[i+1])<<8))
+		sum += uint64(s * s)
+		n++
+	}
+	if n == 0 {
+		return 0
+	}
+	return math.Sqrt(float64(sum)/float64(n)) / 32768.0
 }

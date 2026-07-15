@@ -47,6 +47,10 @@ type controlMessage struct {
 // enables the direction overlay). Nil on frames from older controllers —
 // the server falls back to its all-green heuristic.
 type LEDCallback func(leds []led.Led, listening *bool)
+
+// LEDAnimCallback receives the raw led_anim spec JSON (the "anim" object);
+// the server package unmarshals it into its own AnimSpec type.
+type LEDAnimCallback func(spec json.RawMessage)
 type MicStartCallback func(lockMic bool)
 type MicStopCallback func()
 type StateCallback func()
@@ -65,6 +69,7 @@ type ControlClient struct {
 	deviceID string
 
 	ledCallback           LEDCallback
+	ledAnimCallback       LEDAnimCallback
 	micStartCallback      MicStartCallback
 	micStopCallback       MicStopCallback
 	disconnectedCallback  StateCallback
@@ -105,6 +110,7 @@ func NewControlClient(
 	}
 }
 
+func (c *ControlClient) OnLEDAnim(cb LEDAnimCallback)             { c.ledAnimCallback = cb }
 func (c *ControlClient) OnDisconnected(cb StateCallback)           { c.disconnectedCallback = cb }
 func (c *ControlClient) OnConnected(cb StateCallback)             { c.connectedCallback = cb }
 func (c *ControlClient) OnPending(cb StateCallback)               { c.pendingCallback = cb }
@@ -209,7 +215,7 @@ func (c *ControlClient) connect(ctx context.Context, addr string, data *DataClie
 		"type":         "register",
 		"device_id":    c.deviceID,
 		"version":      Version,
-		"capabilities": []string{"mic", "speaker", "leds", "buttons"},
+		"capabilities": []string{"mic", "speaker", "leds", "led_anim", "buttons"},
 	}
 	// Resolved fresh per registration: a cached-at-startup value goes stale
 	// after a WiFi change, and if the process started while the network was
@@ -321,6 +327,18 @@ func (c *ControlClient) connect(ctx context.Context, addr string, data *DataClie
 				if err := json.Unmarshal(msg.LEDs, &leds); err == nil {
 					c.ledCallback(leds, msg.Listening)
 				}
+			}
+
+		case "led_anim":
+			// Device-rendered ring animation — the device animates locally
+			// until a newer led_anim/leds message replaces it (or its TTL
+			// dead-man expires). The raw anim object is forwarded opaquely;
+			// the server package owns the schema.
+			var msg struct {
+				Anim json.RawMessage `json:"anim"`
+			}
+			if err := json.Unmarshal(raw, &msg); err == nil && c.ledAnimCallback != nil {
+				c.ledAnimCallback(msg.Anim)
 			}
 
 		case "mic_start":

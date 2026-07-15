@@ -118,4 +118,47 @@ def resolve(config: dict) -> dict:
             frame[(pos - 1) % NUM_LEDS] = trail
             return _leds(frame)
 
-    return {"name": name, "listening": listening_leds, "spin_frame": spin_frame}
+    # Wire-ready led_anim specs for firmware that animates locally
+    # (capability "led_anim"). The device renders these on its own ticker,
+    # so spinner smoothness stops depending on controller/WiFi jitter.
+    # ttlSec is a dead-man switch: if the controller dies mid-turn the
+    # ring self-clears instead of spinning forever.
+    if preset["rotate"]:
+        spin_anim = {
+            "pattern":  "rotate",
+            "colors":   [list(c) for c in preset["listening"]],
+            "periodMs": 80,
+            "ttlSec":   180,
+        }
+    else:
+        spin_anim = {
+            "pattern":  "spin",
+            "colors":   [list(preset["spin_head"]), list(preset["spin_trail"])],
+            "periodMs": 80,
+            "ttlSec":   180,
+        }
+    listening_anim = {
+        "pattern":   "solid",
+        "colors":    [list(c) for c in preset["listening"]],
+        "listening": True,
+        "ttlSec":    180,
+    }
+    # Playback: the ring throbs with the live speaker level (device-side
+    # RMS at the ALSA write). Solid scenes throb the spinner head colour;
+    # pride throbs the whole rainbow.
+    meter_palette = (preset["listening"] if preset["rotate"]
+                     else [preset["spin_head"]])
+    meter_anim = {
+        "pattern": "meter",
+        "colors":  [list(c) for c in meter_palette],
+        "ttlSec":  180,
+    }
+
+    return {
+        "name":           name,
+        "listening":      listening_leds,
+        "spin_frame":     spin_frame,
+        "listening_anim": listening_anim,
+        "spin_anim":      spin_anim,
+        "meter_anim":     meter_anim,
+    }
