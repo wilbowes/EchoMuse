@@ -1064,6 +1064,7 @@ async def wake_word_listener(device: Device):
     last_near_miss_log_ts = 0.0  # Q4: rate-limit near-miss INFO logging to 1/2s
     nm_pending = 0    # near-misses buffered since the last hourly-rollup flush
     nm_max     = 0.0  # highest buffered near-miss score
+    dead_streak = 0   # consecutive 10s mic_queue timeouts (resets on any frame)
     try:
         while True:
             if device.oww_model != current_model_name or device.oww_speex_ns != current_speex_ns:
@@ -1112,12 +1113,43 @@ async def wake_word_listener(device: Device):
                 # mic_queue is expected while oww_paused is set.
                 if device.oww_paused.is_set():
                     continue
-                log.warning(
-                    f"[{device.device_id}] OWW: no mic frames for 10s on the "
-                    f"continuous wake stream — sending defensive mic_start"
-                )
-                await device.mic_start()
+                if device.muted:
+                    # Hardware mute is device-sovereign: the device rejects
+                    # every mic_start while muted, so a silent stream is the
+                    # expected state — retrying just spams both logs every
+                    # 10s. The device restarts its own wake stream on unmute
+                    # (and device.muted clears with the mute_state message),
+                    # so the watchdog resumes naturally if that ever fails.
+                    dead_streak = 0
+                    continue
+                dead_streak += 1
+                if dead_streak < 3:
+                    log.warning(
+                        f"[{device.device_id}] OWW: no mic frames for 10s on the "
+                        f"continuous wake stream — sending defensive mic_start"
+                    )
+                    await device.mic_start()
+                else:
+                    # Bare mic_start hasn't worked — the classic cause is a
+                    # zombie stream device-side still holding micActive
+                    # against a superseded data connection (Office,
+                    # 2026-07-16: deaf 4.7h while every bare mic_start was
+                    # refused "already active"). mic_stop releases whatever
+                    # stream exists, wherever it points; the fresh mic_start
+                    # then lands on the live connection. Safe at this point
+                    # by construction: 30s+ of zero frames with no turn in
+                    # flight (oww_paused checked above) means there is no
+                    # healthy stream to interrupt.
+                    log.warning(
+                        f"[{device.device_id}] OWW: no mic frames for "
+                        f"{dead_streak * 10}s and defensive mic_start isn't "
+                        f"helping — escalating to mic_stop + mic_start"
+                    )
+                    await device.mic_stop()
+                    await device.mic_start()
                 continue
+
+            dead_streak = 0
 
             # VAD sentinel (string; None accepted defensively — the pre-B5
             # encoding) — flush partial audio so OWW never scores across a

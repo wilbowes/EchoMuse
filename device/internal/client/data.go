@@ -137,6 +137,10 @@ type DataClient struct {
 	micMu     sync.Mutex
 	micActive bool
 	micStopCh chan struct{}
+	// micConn is the connection the active stream writes to — connect()'s
+	// exit cleanup only stops the mic if the stream is its own (see the
+	// defer in connect for the zombie-stream incident this guards against).
+	micConn *websocket.Conn
 
 	// beamReq carries a pending beam lock/unlock request from the control
 	// plane to the mic streaming goroutine. Beamformer methods are not safe
@@ -236,6 +240,7 @@ func (d *DataClient) StartMic(lockMic bool) {
 	}
 	d.micActive = true
 	d.micStopCh = make(chan struct{})
+	d.micConn = conn
 	go d.streamMic(conn, d.micStopCh, lockMic)
 	log.Println("[data] Mic streaming started")
 }
@@ -316,16 +321,26 @@ func (d *DataClient) connect(ctx context.Context, addr string) error {
 	d.conn = conn
 	d.connMu.Unlock()
 
+	// Exit cleanup is ownership-guarded (2026-07-16): the control client
+	// cancels this connection's context and spawns a replacement data.Run on
+	// every control reconnect, so by the time this defer runs a replacement
+	// connection may already be live with its own mic stream — an unguarded
+	// close(micStopCh)/conn=nil here would kill the *new* stream / unpublish
+	// the *new* conn. (Observed as the Office zombie-stream incident: the
+	// unguarded half of this bug was the reverse case — see the ctx watcher
+	// below.)
 	defer func() {
 		d.micMu.Lock()
-		if d.micActive {
+		if d.micActive && d.micConn == conn {
 			close(d.micStopCh)
 			d.micActive = false
 		}
 		d.micMu.Unlock()
 
 		d.connMu.Lock()
-		d.conn = nil
+		if d.conn == conn {
+			d.conn = nil
+		}
 		d.connMu.Unlock()
 	}()
 
@@ -340,6 +355,26 @@ func (d *DataClient) connect(ctx context.Context, addr string) error {
 	})
 	done := make(chan struct{})
 	defer close(done)
+
+	// Context watcher — cancellation must tear down an ESTABLISHED
+	// connection, not just abort a dial. The control client cancels this
+	// context on every control-WS reconnect; before this watcher existed,
+	// a control-only drop (data TCP path still healthy) left this
+	// connection — and its mic stream — alive as a zombie: the stream held
+	// micActive against a socket the controller had already superseded, so
+	// every subsequent mic_start was refused with "already active" and the
+	// device was deaf to wake words until something sent mic_stop (Office,
+	// 2026-07-16, 4.7h). Closing conn errors the read loop out; the exit
+	// defer then releases the mic stream for the replacement connection.
+	go func() {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			log.Println("[data] context cancelled — closing connection")
+			conn.Close()
+		}
+	}()
+
 	go func() {
 		ticker := time.NewTicker(wsPingInterval)
 		defer ticker.Stop()

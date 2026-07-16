@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -136,5 +137,95 @@ func TestStreamRestartOverlapIsRaceFree(t *testing.T) {
 	d.StopMic()
 	// Give lingering goroutines time to exit so their deferred cleanup runs
 	// (and the race detector observes it) before the test tears down.
+	time.Sleep(100 * time.Millisecond)
+}
+
+// TestContextCancelReleasesMicStream reproduces the Office zombie-stream
+// incident (2026-07-16): the control client cancels the data context on a
+// control-WS reconnect while the data TCP path is still healthy. Before the
+// ctx watcher in connect(), cancellation did nothing to an established
+// connection — the old streamMic kept micActive forever and every
+// mic_start on the replacement connection was refused ("already active"),
+// leaving the device deaf to wake words. The fix must (a) close the
+// connection so connect() returns promptly, and (b) release the mic stream
+// so a StartMic against a new connection succeeds.
+func TestContextCancelReleasesMicStream(t *testing.T) {
+	mic := newFanoutMic()
+	defer mic.close()
+
+	up := websocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		for {
+			if _, _, err := c.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	d := NewDataClient("zombie-test", mic, nil, aec.New())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	connectDone := make(chan error, 1)
+	go func() { connectDone <- d.connect(ctx, addr) }()
+
+	// Wait for connect to publish the conn, then start the wake stream on it.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		d.connMu.Lock()
+		ready := d.conn != nil
+		d.connMu.Unlock()
+		if ready {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("connect never published conn")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	d.StartMic(false)
+
+	// The control reconnect path: cancel the data context. connect() must
+	// return promptly (not wait out a read deadline) and release the stream.
+	cancel()
+	select {
+	case <-connectDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("connect did not return after context cancellation — established conn not torn down")
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		d.micMu.Lock()
+		active := d.micActive
+		d.micMu.Unlock()
+		if !active {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("mic stream still active after cancelled connection exited — zombie stream holds micActive")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// A replacement connection's StartMic must now succeed.
+	conn2, cleanup2 := dialTestWS(t)
+	defer cleanup2()
+	d.connMu.Lock()
+	d.conn = conn2
+	d.connMu.Unlock()
+	d.StartMic(false)
+	d.micMu.Lock()
+	restarted := d.micActive
+	d.micMu.Unlock()
+	if !restarted {
+		t.Fatal("StartMic on replacement connection refused")
+	}
+	d.StopMic()
 	time.Sleep(100 * time.Millisecond)
 }
