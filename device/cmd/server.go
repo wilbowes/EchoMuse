@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -331,13 +332,29 @@ func main() {
 
 	// Periodic stats reporter — every 30s. SendStats silently drops when
 	// the device is not connected, so this goroutine runs unconditionally.
+	// Every 10th tick (~5min) a [mem] line goes to the local log: the
+	// process RSS is growing ~1.2MB/h (measured 2026-07-16) and the Go
+	// runtime's own accounting is what distinguishes heap growth (leak —
+	// HeapAlloc climbs), fragmentation/retained-but-free memory (HeapAlloc
+	// flat, HeapSys/RSS climb), and goroutine leaks (goroutines climb).
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
+		tick := 0
 		for range ticker.C {
 			st := collectStats()
 			st.Ble = bleScanner.Stats()
 			controlClient.SendStats(st)
+			if tick%10 == 0 {
+				var ms runtime.MemStats
+				runtime.ReadMemStats(&ms)
+				log.Printf("[mem] goroutines=%d heap_alloc=%dKB heap_sys=%dKB heap_idle=%dKB released=%dKB stack=%dKB rss=%dKB num_gc=%d pause_total=%dms",
+					runtime.NumGoroutine(),
+					ms.HeapAlloc/1024, ms.HeapSys/1024, ms.HeapIdle/1024,
+					ms.HeapReleased/1024, ms.StackSys/1024, selfRSSKb(),
+					ms.NumGC, ms.PauseTotalNs/1e6)
+			}
+			tick++
 		}
 	}()
 
@@ -464,6 +481,26 @@ func storageStats() (usedMb, totalMb int) {
 	used := total - free
 	const mb = 1024 * 1024
 	return int(used / mb), int(total / mb)
+}
+
+// selfRSSKb reads the process's resident set size from /proc/self/status —
+// the OS's ground truth, against which the Go runtime numbers in the [mem]
+// log line are compared. 0 if unreadable.
+func selfRSSKb() int {
+	f, err := os.Open("/proc/self/status")
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) >= 2 && fields[0] == "VmRSS:" {
+			kb, _ := strconv.Atoi(fields[1])
+			return kb
+		}
+	}
+	return 0
 }
 
 // wifiRSSI reads /proc/net/wireless and returns the signal level in dBm,
