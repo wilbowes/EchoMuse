@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/grandcat/zeroconf"
@@ -16,6 +18,10 @@ type ServerInfo struct {
 	Host string
 	Port int
 	Addr string // host:port
+	// TLSPort is the controller's device-link wss listener, from the
+	// tls_port TXT property. 0 = controller does not offer TLS (pre-TLS
+	// controller or listener disabled).
+	TLSPort int
 }
 
 func FindServer(ctx context.Context) (*ServerInfo, error) {
@@ -46,6 +52,13 @@ func FindServer(ctx context.Context) (*ServerInfo, error) {
 			backoff = maxBackoff
 		}
 	}
+}
+
+// FindServerOnce is a single browse round with no retry loop — for
+// callers that want fresher TXT data (e.g. a tls_port that appeared after
+// the endpoint was cached) but have a working fallback if mDNS fails.
+func FindServerOnce(ctx context.Context) (*ServerInfo, error) {
+	return browse(ctx)
 }
 
 func browse(ctx context.Context) (*ServerInfo, error) {
@@ -100,15 +113,29 @@ func browse(ctx context.Context) (*ServerInfo, error) {
 			}
 
 			return &ServerInfo{
-				Host: host,
-				Port: entry.Port,
-				Addr: addr,
+				Host:    host,
+				Port:    entry.Port,
+				Addr:    addr,
+				TLSPort: parseTLSPort(entry.Text),
 			}, nil
 
 		case <-browseCtx.Done():
 			return nil, fmt.Errorf("browse timeout")
 		}
 	}
+}
+
+// parseTLSPort extracts the tls_port key from mDNS TXT records
+// ("key=value" strings). Returns 0 when absent or malformed.
+func parseTLSPort(txt []string) int {
+	for _, t := range txt {
+		if v, ok := strings.CutPrefix(t, "tls_port="); ok {
+			if p, err := strconv.Atoi(v); err == nil && p > 0 && p < 65536 {
+				return p
+			}
+		}
+	}
+	return 0
 }
 
 func verifyServer(addr string) bool {

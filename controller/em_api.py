@@ -49,6 +49,7 @@ import websockets
 import em_db as db
 import em_auth as auth
 import em_ble_proxy
+import em_pki
 import em_scenes
 from version import VERSION as CONTROLLER_VERSION
 
@@ -73,6 +74,16 @@ RELEASE_CACHE_TTL = 60  # seconds
 
 # Reference to the live devices dict from em_controller — set by init().
 _devices: dict = {}
+
+# Device-link TLS material directory — set by em_controller.main() once
+# em_pki.ensure_pki() succeeds. None = TLS listener not running (no
+# cryptography package / setup failure); credential endpoints then 503.
+_tls_dir: str | None = None
+
+
+def set_tls_dir(tls_dir: str) -> None:
+    global _tls_dir
+    _tls_dir = tls_dir
 
 # Set of connected /api/events WebSocket clients.
 _event_clients: set[web.WebSocketResponse] = set()
@@ -215,6 +226,8 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/provision/debloat_packages", _get_provision_debloat_packages)
     app.router.add_get("/api/provision/magisk_db",    _get_provision_magisk_db)
     app.router.add_get("/api/provision/latest_binary", _get_provision_latest_binary)
+    app.router.add_post("/api/provision/tls_credentials", _post_provision_tls_credentials)
+    app.router.add_post("/api/devices/{id}/secure_link",  _post_secure_link)
 
     # Live events WebSocket
     app.router.add_get("/api/events", _ws_events)
@@ -1256,9 +1269,10 @@ async def _stream_binary_to_slot(live, binary: bytes, slot: str) -> bool:
     return await _stream_file_to_device(live, binary, f"/data/local/bin/{slot}")
 
 
-async def _stream_file_to_device(live, data: bytes, dest: str) -> bool:
+async def _stream_file_to_device(live, data: bytes, dest: str,
+                                 mode: str = "755") -> bool:
     """
-    Transfer a file to `dest` on the device via shell heredoc (mode 755).
+    Transfer a file to `dest` on the device via shell heredoc (default mode 755).
 
     Detects available base64 decoder (busybox base64, python3, python) before
     transferring, since 'base64' is not always in PATH on Android/FireOS.
@@ -1325,7 +1339,7 @@ async def _stream_file_to_device(live, data: bytes, dest: str) -> bool:
         # Single shell command: decode heredoc → dest, set permissions, confirm
         await ws.send(
             f"{decode_cmd} << '{DELIM}' > {dest} && "
-            f"chmod 755 {dest} && "
+            f"chmod {mode} {dest} && "
             f"echo TRANSFER_OK\n"
         )
 
@@ -1715,6 +1729,111 @@ async def _get_provision_magisk_db(request: web.Request) -> web.Response:
         content_type='application/octet-stream',
         headers={'Content-Disposition': 'attachment; filename="magisk.db"'},
     )
+
+
+# ─── Device-link TLS credentials ──────────────────────────────────────────────
+
+# Canonical on-device credential paths — coupled with
+# device/internal/client/tlscreds.go. The Go client re-reads them on every
+# dial attempt, so pushed credentials take effect on the next reconnect
+# without a firmware restart.
+DEVICE_TLS_DIR = "/data/local/etc/echomuse"
+
+
+@auth.require_admin
+async def _post_provision_tls_credentials(request: web.Request) -> web.Response:
+    """
+    POST /api/provision/tls_credentials  {device_id}
+
+    Provisioning-wizard path: returns the CA cert plus the device's link
+    token (minting one — and a pending device row — if needed) so the
+    wizard can install them over adb before the device's first contact.
+    """
+    if _tls_dir is None:
+        return _error("tls_unavailable",
+                      "Device-link TLS is not active on this controller", 503)
+    body      = await _json_body(request)
+    device_id = _require_str(body, "device_id")
+
+    loop  = asyncio.get_event_loop()
+    token = await loop.run_in_executor(None, db.ensure_device_token, device_id)
+    return _ok({
+        "ca_pem": em_pki.ca_pem(_tls_dir),
+        "token":  token,
+        "dir":    DEVICE_TLS_DIR,
+    })
+
+
+@auth.require_admin
+async def _post_secure_link(request: web.Request) -> web.Response:
+    """
+    POST /api/devices/{id}/secure_link
+
+    Fleet path for already-provisioned devices: pushes ca.pem + token to
+    the device over the (still-plain) shell plane, then bounces the
+    control connection so the device redials — over wss, now that the CA
+    file exists. Requires the device to be connected.
+    """
+    if _tls_dir is None:
+        return _error("tls_unavailable",
+                      "Device-link TLS is not active on this controller", 503)
+    device_id = request.match_info["id"]
+    live = _devices.get(device_id)
+    if live is None:
+        return _error("device_offline", f"Device not connected: {device_id}", 409)
+
+    task = asyncio.create_task(_run_secure_link(device_id))
+    task.add_done_callback(_log_task_exception_api)
+    return _ok({"started": True})
+
+
+def _log_task_exception_api(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.error(f"[api] Unhandled exception in background task: {exc}", exc_info=exc)
+
+
+async def _run_secure_link(device_id: str) -> None:
+    """Background task: install TLS credentials on a live device."""
+    loop = asyncio.get_event_loop()
+    live = _devices.get(device_id)
+    if live is None:
+        return
+    try:
+        await _push_log_event(device_id, "info", "controller",
+                              "Secure link: pushing TLS credentials")
+        token = await loop.run_in_executor(None, db.ensure_device_token, device_id)
+        ca    = em_pki.ca_pem(_tls_dir)
+
+        await _shell_run(live, f"mkdir -p {DEVICE_TLS_DIR}")
+        await asyncio.sleep(1.0)  # let the shell session close cleanly
+
+        ok = await _stream_file_to_device(
+            live, ca.encode("ascii"), f"{DEVICE_TLS_DIR}/ca.pem", mode="644")
+        if ok:
+            await asyncio.sleep(1.0)
+            ok = await _stream_file_to_device(
+                live, token.encode("ascii"), f"{DEVICE_TLS_DIR}/token", mode="600")
+        if not ok:
+            await _push_log_event(device_id, "error", "controller",
+                                  "Secure link: credential transfer failed")
+            return
+
+        await _push_log_event(
+            device_id, "info", "controller",
+            "Secure link: credentials installed — bouncing connection to switch to wss")
+        # The Go client reloads credentials on every dial, so a reconnect
+        # is enough to move to the TLS listener.
+        try:
+            await live.control_ws.close()
+        except Exception:
+            pass
+    except Exception as e:
+        log.exception(f"[api] Secure link failed for {device_id}: {e}")
+        await _push_log_event(device_id, "error", "controller",
+                              f"Secure link failed: {e}")
 
 
 # ─── System ───────────────────────────────────────────────────────────────────
@@ -2252,6 +2371,10 @@ def _merge_device(row) -> dict:
         # Controller-side BT proxy state — non-None only while the device's
         # bleProxyEnabled config has a proxy server instantiated.
         "bleProxy":         em_ble_proxy.get_status(device_id),
+        # Device-link security: token issued (persistent) + whether the
+        # current control connection came in over the TLS listener (live).
+        "linkTokenIssued":  bool(row["token"]) if "token" in row.keys() else False,
+        "linkTls":          getattr(live, "secure", False) if live else False,
         # Q4 fix (2026-07-05 review): near-miss counter — same lifecycle as
         # the rest of this "Live" section (resets on reconnect, since it
         # lives on the per-connection Device object, not the DB row).

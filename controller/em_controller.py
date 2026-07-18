@@ -49,6 +49,7 @@ Device WebSocket protocol:
 
 import asyncio
 import collections
+import contextlib
 import json
 import logging
 import os
@@ -66,6 +67,7 @@ from websockets.asyncio.server import ServerConnection as WebSocketServerProtoco
 import em_db as db
 import em_auth as auth
 import em_api as api
+import em_pki
 import em_eq
 import em_scenes
 import em_esphome as esphome
@@ -102,6 +104,16 @@ def _log_task_exception(task: asyncio.Task) -> None:
 
 SERVER_HOST  = os.environ.get("SERVER_HOST", "0.0.0.0")
 SERVER_PORT  = int(os.environ.get("SERVER_PORT", "8767"))
+# Device-link TLS listener (wss) — same three WS planes as SERVER_PORT,
+# wrapped in TLS with the em_pki-generated cert. 0 disables. Devices pick
+# it up from the tls_port mDNS TXT property and dial wss iff they hold the
+# pushed CA file (see device/internal/client/tlscreds.go).
+SERVER_TLS_PORT = int(os.environ.get("SERVER_TLS_PORT", "8770"))
+# Enforcing posture: reject device connections that are not TLS + a valid
+# per-device token. Leave 0 until the whole fleet shows tls=true —
+# a plain, tokenless connection is the legacy default and must keep
+# working during the rollout.
+REQUIRE_DEVICE_TLS = os.environ.get("REQUIRE_DEVICE_TLS", "0") == "1"
 API_PORT     = int(os.environ.get("API_PORT", "8768"))
 SERVER_IP    = os.environ.get("SERVER_IP", "10.10.1.236")
 MDNS_NAME    = os.environ.get("MDNS_NAME", "echomuse")
@@ -1382,7 +1394,48 @@ async def handle_button_event(device: Device, event: dict):
 
 # ─── Control plane handler ────────────────────────────────────────────────────
 
-async def handle_control(ws: WebSocketServerProtocol):
+async def _link_auth_ok(
+    ws: WebSocketServerProtocol, device_id: str, secure: bool, plane: str
+) -> bool:
+    """
+    Device-link auth gate, applied to all three WS planes once the
+    device_id is known.
+
+    Rules (rollout-safe by construction):
+      - a presented token that MISMATCHES the stored one always rejects;
+      - a stored token with NO token presented is allowed unless
+        REQUIRE_DEVICE_TLS — the DB row is minted before the files land
+        on the device, and rejecting in that window would cut off the
+        shell plane that the credential push itself rides on;
+      - REQUIRE_DEVICE_TLS=1 requires TLS + a matching token, full stop.
+    """
+    import hmac as _hmac
+
+    presented = None
+    try:
+        presented = ws.request.headers.get("X-EM-Token")
+    except AttributeError:
+        pass
+
+    loop = asyncio.get_event_loop()
+    expected = await loop.run_in_executor(None, db.get_device_token, device_id)
+
+    if presented and expected and not _hmac.compare_digest(presented, expected):
+        log.warning(f"[{plane}] {device_id}: token mismatch — rejecting")
+        return False
+    if presented and not expected:
+        log.warning(f"[{plane}] {device_id}: token presented but none on record — rejecting")
+        return False
+    if REQUIRE_DEVICE_TLS and not (secure and presented and expected):
+        log.warning(
+            f"[{plane}] {device_id}: REQUIRE_DEVICE_TLS is set and connection "
+            f"is {'plain' if not secure else 'missing a valid token'} — rejecting"
+        )
+        return False
+    return True
+
+
+async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
     """
     Handle a /control WebSocket connection from a device.
     """
@@ -1401,6 +1454,10 @@ async def handle_control(ws: WebSocketServerProtocol):
             return
 
         device_id    = msg["device_id"]
+
+        if not await _link_auth_ok(ws, device_id, secure, "control"):
+            await ws.close()
+            return
         ip           = msg.get("ip", str(remote[0]))
         version      = msg.get("version")
         capabilities = msg.get("capabilities", [])
@@ -1457,6 +1514,9 @@ async def handle_control(ws: WebSocketServerProtocol):
         )
 
         device = Device(device_id, ip, capabilities, ws)
+        # Link-security telemetry for the dashboard: True when this control
+        # connection arrived over the TLS listener.
+        device.secure = secure
         # Hydrate the observability panel's turn history from the persistent
         # turns table so it survives controller and device restarts.
         try:
@@ -1771,7 +1831,7 @@ async def handle_control(ws: WebSocketServerProtocol):
 
 # ─── Data plane handler ───────────────────────────────────────────────────────
 
-async def handle_data(ws: WebSocketServerProtocol):
+async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
     device = None
     remote = ws.remote_address
 
@@ -1787,6 +1847,10 @@ async def handle_data(ws: WebSocketServerProtocol):
             return
 
         device_id = msg["device_id"]
+
+        if not await _link_auth_ok(ws, device_id, secure, "data"):
+            await ws.close()
+            return
 
         for _ in range(20):
             device = _devices.get(device_id)
@@ -1864,7 +1928,7 @@ async def handle_data(ws: WebSocketServerProtocol):
 
 # ─── Shell plane handler ──────────────────────────────────────────────────────
 
-async def handle_shell(ws: WebSocketServerProtocol, path: str):
+async def handle_shell(ws: WebSocketServerProtocol, path: str, secure: bool = False):
     import aiohttp as _aiohttp
 
     # Path may carry a query: /shell/{device_id}?pty=1 signals that the
@@ -1876,6 +1940,10 @@ async def handle_shell(ws: WebSocketServerProtocol, path: str):
     pty_mode = "pty=1" in query
     if not device_id:
         log.warning("[shell] Missing device_id in path")
+        await ws.close()
+        return
+
+    if not await _link_auth_ok(ws, device_id, secure, "shell"):
         await ws.close()
         return
 
@@ -1946,29 +2014,42 @@ async def handle_shell(ws: WebSocketServerProtocol, path: str):
         if not done_future.done():
             done_future.set_result(None)
 
-async def router(ws: WebSocketServerProtocol):
+async def _route(ws: WebSocketServerProtocol, secure: bool):
     path = ws.request.path if hasattr(ws, "request") else getattr(ws, "path", "/")
 
     if path == "/control":
-        await handle_control(ws)
+        await handle_control(ws, secure)
     elif path == "/data":
-        await handle_data(ws)
+        await handle_data(ws, secure)
     elif path.startswith("/shell/"):
-        await handle_shell(ws, path)
+        await handle_shell(ws, path, secure)
     else:
         log.warning(f"Unknown WebSocket path: {path} from {ws.remote_address}")
         await ws.close()
 
 
+async def router(ws: WebSocketServerProtocol):
+    await _route(ws, secure=False)
+
+
+async def router_tls(ws: WebSocketServerProtocol):
+    await _route(ws, secure=True)
+
+
 # ─── mDNS ─────────────────────────────────────────────────────────────────────
 
-def _make_mdns_info() -> ServiceInfo:
+def _make_mdns_info(tls_active: bool) -> ServiceInfo:
+    props = {"version": "1", "server": MDNS_NAME}
+    if tls_active:
+        # Devices holding the pushed CA dial wss://<addr>:<tls_port> instead
+        # of the plain port. Absent property = pre-TLS controller → plain ws.
+        props["tls_port"] = str(SERVER_TLS_PORT)
     return ServiceInfo(
         "_emcontroller._tcp.local.",
         f"{MDNS_NAME}._emcontroller._tcp.local.",
         addresses=[socket.inet_aton(SERVER_IP)],
         port=SERVER_PORT,
-        properties={"version": "1", "server": MDNS_NAME},
+        properties=props,
         server=f"{MDNS_NAME}.local.",
     )
 
@@ -1999,26 +2080,56 @@ async def main():
     release_task       = asyncio.create_task(api.release_poll_loop())
     session_prune_task = asyncio.create_task(api.session_prune_loop())
 
+    # Device-link TLS: generate/load the CA + server cert. Failure to set
+    # up TLS (missing cryptography package, unwritable dir) must never take
+    # the plain listener down with it — the fleet lives on that during
+    # rollout.
+    tls_ctx = None
+    if SERVER_TLS_PORT:
+        try:
+            tls_dir = em_pki.ensure_pki(DB_PATH)
+            if tls_dir:
+                tls_ctx = em_pki.server_ssl_context(tls_dir)
+                api.set_tls_dir(tls_dir)
+        except Exception as e:
+            log.error(f"Device-link TLS setup failed — wss listener disabled: {e}")
+
     azc  = AsyncZeroconf()
-    info = _make_mdns_info()
+    info = _make_mdns_info(tls_active=tls_ctx is not None)
     await azc.async_register_service(info, allow_name_change=True)
     log.info(
         f"mDNS advertising {MDNS_NAME}._emcontroller._tcp.local "
         f"→ {SERVER_IP}:{SERVER_PORT}"
+        + (f" (tls_port={SERVER_TLS_PORT})" if tls_ctx else "")
     )
     mdns_task = asyncio.create_task(_mdns_refresh_loop(azc, info))
 
     log.info(f"WebSocket server starting on {SERVER_HOST}:{SERVER_PORT}")
 
     try:
-        async with websockets.serve(
-            router,
-            SERVER_HOST,
-            SERVER_PORT,
-            ping_interval=20,
-            ping_timeout=10,
-            max_size=10 * 1024 * 1024,
-        ):
+        async with contextlib.AsyncExitStack() as stack:
+            await stack.enter_async_context(websockets.serve(
+                router,
+                SERVER_HOST,
+                SERVER_PORT,
+                ping_interval=20,
+                ping_timeout=10,
+                max_size=10 * 1024 * 1024,
+            ))
+            if tls_ctx is not None:
+                await stack.enter_async_context(websockets.serve(
+                    router_tls,
+                    SERVER_HOST,
+                    SERVER_TLS_PORT,
+                    ssl=tls_ctx,
+                    ping_interval=20,
+                    ping_timeout=10,
+                    max_size=10 * 1024 * 1024,
+                ))
+                log.info(f"Device-link TLS (wss) listening on {SERVER_HOST}:{SERVER_TLS_PORT}")
+            if REQUIRE_DEVICE_TLS:
+                log.info("REQUIRE_DEVICE_TLS=1 — plain/tokenless device connections will be rejected")
+
             await esphome.start_esphome_servers(_devices, SERVER_HOST)
             # After the voice satellites — BT proxies reuse their zeroconf.
             await em_ble_proxy.start_ble_proxy_servers(SERVER_HOST)

@@ -794,6 +794,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   const [renameSaving, setRenameSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [securing, setSecuring] = useState(false);
   const fileInputRef = useRef(null);
   const [turns, setTurns] = useState([]);
   const state = deviceState(device);
@@ -863,6 +864,18 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
       }
     } catch(e) { alert(e.error || 'Failed to push config'); }
     setSaving(false);
+  }
+
+  async function doSecureLink() {
+    // Pushes CA + link token over the shell plane, then the controller
+    // bounces the connection; the device redials over wss. The "Link" row
+    // flips to wss (TLS) on the next device-list refresh after reconnect.
+    setSecuring(true);
+    try {
+      await API.post(`/api/devices/${device.device_id}/secure_link`, {});
+    } catch(e) { alert(e.error || 'Secure link failed'); }
+    // Leave the button disabled briefly — transfer + reconnect takes ~10s.
+    setTimeout(() => setSecuring(false), 15000);
   }
 
   async function doUpdate() {
@@ -1099,7 +1112,16 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     {row('ESPHome port', device.esphome_port != null ? String(device.esphome_port) : '—')}
                     {row('Last seen', relTime(device.last_seen))}
                     {row('Connected', device.connected ? 'Yes' : 'No', device.connected ? '#286040' : '#c0601a')}
+                    {row('Link', device.connected ? (device.linkTls ? 'wss (TLS)' : 'plain ws') : '—',
+                         device.connected ? (device.linkTls ? '#286040' : '#806010') : undefined)}
                     {row('Config', (device.use_global_config ?? true) ? 'Fleet' : 'Device override')}
+                    {isAdmin && device.connected && !device.linkTls && (
+                      <div style={{ marginTop: 8 }}>
+                        <Pill small accent disabled={securing} onClick={doSecureLink}>
+                          {securing ? 'Securing…' : 'Secure link'}
+                        </Pill>
+                      </div>
+                    )}
                   </Panel>
                   <Panel label="Resources">
                     <StatBar label="CPU"     pct={s?.cpuPct}    text={cpuText}/>
@@ -2465,6 +2487,40 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     await c.push('/sdcard/start_server.sh', new TextEncoder().encode(script));
     await c.shell("su -c 'cp /sdcard/start_server.sh /data/local/bin/start_server.sh && chmod 755 /data/local/bin/start_server.sh'");
     addLog('EchoMuse installed.', 'ok');
+
+    // Device-link TLS credentials — pushed pre-first-contact so the very
+    // first connection this device ever makes to the controller is wss +
+    // token-authenticated. The controller mints the token against the
+    // serial (a pending device row is created if needed; approval flow is
+    // unchanged). A 503 means this controller has no TLS listener
+    // (cryptography package missing) — provision proceeds plain, and the
+    // dashboard "Secure link" action can retrofit credentials later.
+    addLog('Fetching device-link TLS credentials…');
+    const serial = (await c.shell('getprop ro.serialno')).trim();
+    if (!serial) {
+      addLog('Could not read device serial — skipping TLS credential install.', 'warn');
+    } else {
+      const tlsResp = await fetch('/api/provision/tls_credentials', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ device_id: serial }),
+      });
+      if (tlsResp.status === 503) {
+        addLog('Controller has no TLS listener — device will connect over plain ws.', 'warn');
+      } else if (!tlsResp.ok) {
+        throw new Error(`Controller returned ${tlsResp.status} fetching TLS credentials.`);
+      } else {
+        const creds = await tlsResp.json();
+        await c.push('/sdcard/em-ca.pem', new TextEncoder().encode(creds.ca_pem));
+        await c.push('/sdcard/em-token', new TextEncoder().encode(creds.token));
+        await c.shell(`su -c 'mkdir -p ${creds.dir} && cp /sdcard/em-ca.pem ${creds.dir}/ca.pem && cp /sdcard/em-token ${creds.dir}/token && chmod 644 ${creds.dir}/ca.pem && chmod 600 ${creds.dir}/token && rm -f /sdcard/em-ca.pem /sdcard/em-token'`);
+        const tlsListing = (await c.shell(`su -c 'ls ${creds.dir}' 2>&1`)).trim();
+        if (!tlsListing.includes('ca.pem') || !tlsListing.includes('token')) {
+          throw new Error(`TLS credential install verification failed — ${creds.dir} contains: "${tlsListing}".`);
+        }
+        addLog('TLS credentials installed — device will connect over wss.', 'ok');
+      }
+    }
     addLog('Rebooting device to finish provisioning…');
     try { await c.shell('su -c reboot'); } catch {}
     await c.close();

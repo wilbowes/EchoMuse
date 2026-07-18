@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"log"
 	"math"
-	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -293,9 +292,13 @@ func (d *DataClient) Run(ctx context.Context) error {
 	}
 }
 
-func (d *DataClient) connect(ctx context.Context, addr string) error {
-	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
-	conn, _, err := dialer.DialContext(ctx, "ws://"+addr+"/data", http.Header{})
+// connect dials baseURL+"/data" — baseURL ("ws://…" or "wss://…") comes
+// from the control client via NotifyReady, so both planes always ride the
+// same listener. Credentials are re-read per dial (see tlscreds.go).
+func (d *DataClient) connect(ctx context.Context, baseURL string) error {
+	creds := loadLinkCreds()
+	dialer := creds.dialer()
+	conn, _, err := dialer.DialContext(ctx, baseURL+"/data", creds.header())
 	if err != nil {
 		return err
 	}
