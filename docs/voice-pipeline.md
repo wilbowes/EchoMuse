@@ -176,10 +176,12 @@ cleaner audio help; they can't fully substitute for a good STT model.
 ## Stage 9 — The response
 
 The reply audio comes back through the controller, which shapes the sound
-(the EQ from the configuration guide — the raw speaker is boomy),
-resamples it to what the hardware wants, and streams it to the Dot, which
-plays it while a copy is fed to the echo canceller (Stage 3) so the mics
-can subtract it.
+(the EQ from the configuration guide — the raw speaker is boomy) and
+streams it to the Dot, which plays it while a copy is fed to the echo
+canceller (Stage 3) so the mics can subtract it. The audio arrives at the
+hardware's native rate: the satellite tells Home Assistant what format the
+speaker wants (48kHz mono), so recent HA versions transcode at source, and
+ffmpeg covers anything else during decode.
 
 **Benefit:** centrally-applied EQ means every device gets consistent,
 tuned sound, adjustable live from the dashboard.

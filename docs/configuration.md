@@ -48,9 +48,17 @@ An extra presence bump for spoken responses. Try it if responses sound
 muffled from across the room.
 
 ### Startup volume
-The volume the device wakes up with after a reboot or power cut — so a
-midnight power blip doesn't come back at full blast. Day-to-day volume is
-whatever you set with the buttons/HA; this is just the reset point.
+The volume the device comes back with after a reboot or power cut. Since
+v2.9.4 this **tracks the volume you actually use**: every change you make —
+buttons, Home Assistant slider, wherever — is remembered by the controller
+and restored when the device reconnects after a restart. Set it low in the
+evening and a midnight power blip brings it back low. The slider here is
+the stored restore point; it updates itself as you change volume, so you
+rarely need to touch it.
+
+Mute is remembered too, but by the device itself: a muted Dot stays muted
+through reboots, power cuts, and firmware updates — red ring and all —
+whether or not the controller is reachable.
 
 ---
 
@@ -220,6 +228,13 @@ Decides when a button-press utterance starts and stops:
 - **Silence gate (ms)** — how much silence ends your turn. Higher = you can
   pause mid-sentence without being cut off; lower = snappier responses. 900ms
   default; raise to ~1200 if you get cut off mid-thought.
+
+Note (v2.9.4): these two timings now behave exactly as configured. Older
+firmware quietly applied them ~5× longer than the number said (a counting
+bug against the mic's real batch size), so button-press turns used to hang
+on for a few seconds of silence before ending — if turns feel snappier
+after updating, that's why, and if a slow talker now gets clipped, raise
+the silence gate.
 
 ---
 
