@@ -55,6 +55,7 @@ COPY em_auth.py .
 COPY em_eq.py .
 COPY em_scenes.py .
 COPY em_ns.py .
+COPY em_pki.py .
 COPY em_esphome.py .
 COPY em_ble_proxy.py .
 COPY version.py .
