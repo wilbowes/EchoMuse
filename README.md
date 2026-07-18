@@ -34,6 +34,8 @@ docker compose -f docker-compose.deploy.yml up -d
 
 Dashboard at `http://<SERVER_IP>:8768`. See the [quickstart](docs/quickstart.md) for the full walkthrough.
 
+The device link is encrypted and authenticated (TLS with a controller-generated CA + per-device tokens): the provisioning wizard installs credentials automatically, and existing devices upgrade with the **Secure link** button on their Status tab — see [configuration](docs/configuration.md#encrypted-device-link).
+
 Images are published to `ghcr.io/wilbowes/echomuse-controller` from `controller-v*` tags; device firmware binaries are released from plain `v*` tags (see Releases).
 
 ---

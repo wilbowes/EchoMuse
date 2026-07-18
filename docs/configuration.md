@@ -278,5 +278,19 @@ These are set once, on the server, and need a controller restart to change:
 | `SERVER_IP` | The controller computer's LAN IP — what devices connect to. |
 | `OWW_MODEL` / `OWW_THRESHOLD` | Startup defaults for wake word/sensitivity — the dashboard values override these. |
 | `DEVICE_APPROVAL` | `strict` (you approve every new device — recommended) or `auto`. |
+| `SERVER_TLS_PORT` | Encrypted device link (wss) port — default 8770, `0` disables. Devices switch to it automatically once they hold pushed credentials (wizard install, or the **Secure link** button on the device Status tab). |
+| `REQUIRE_DEVICE_TLS` | Set to `1` **only after every device shows "wss (TLS)"** on its Status tab — from then on the controller rejects unencrypted or tokenless device connections. |
 
 See `.env.example` for the complete list with comments.
+
+### Encrypted device link
+
+The controller generates its own certificate authority on first start
+(stored in `tls/` next to the database) and listens for encrypted device
+connections alongside the plain ones. Each device gets two credentials —
+the CA certificate and a private token — installed automatically by the
+provisioning wizard, or pushed to an existing device with the **Secure
+link** button on its Status tab. A device with credentials connects
+encrypted from its next reconnect; the Status tab's **Link** row shows
+which mode each device is using. Once the whole fleet shows `wss (TLS)`,
+set `REQUIRE_DEVICE_TLS=1` to lock out unencrypted connections entirely.
