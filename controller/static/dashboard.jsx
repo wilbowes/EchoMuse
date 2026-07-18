@@ -1625,8 +1625,9 @@ async function _sha256Hex(buf) {
 //  6  reconnect        — reconnect ADB after Android boots                 [button]
 //  7  verify_root      — confirm su works                                  [auto]
 //  8  disable_alexa    — pm disable x9 BEFORE wifi — stops phoning home    [auto]
-//  9  wifi             — configure WiFi network                            [inputs]
-// 10  install_em       — push binary + startup script                      [file]
+//  9  debloat          — pm hide bloat pkgs + service.d daemon-stop script [auto]
+// 10  wifi             — configure WiFi network                            [inputs]
+// 11  install_em       — push binary + startup script                      [file]
 const _WIZARD_STEPS = [
   { id: 'connect_android', label: 'Connect Device',     desc: 'Connect the Echo Dot via USB. Device should be on and booted into Android. Appears as "AEOBC" in the USB picker.' },
   { id: 'connect_twrp',    label: 'Connect to TWRP',   desc: 'Wait for TWRP recovery to appear, then reconnect. Appears as "Echo" in the USB picker.' },
@@ -1637,6 +1638,7 @@ const _WIZARD_STEPS = [
   { id: 'reconnect',       label: 'Reconnect',         desc: 'Re-connect ADB after Android finishes booting. Appears as "AEOBC" in the USB picker.' },
   { id: 'verify_root',     label: 'Verify Root',       desc: 'Confirm Magisk root is working.' },
   { id: 'disable_alexa',   label: 'Disable Alexa',     desc: 'Disable all 9 Alexa voice pipeline packages before connecting to WiFi.' },
+  { id: 'debloat',         label: 'Debloat',           desc: 'Hide non-essential Amazon packages and stop background daemons (~130MB RAM freed).' },
   { id: 'wifi',            label: 'Configure WiFi',    desc: 'Connect the device to your local WiFi network.' },
   { id: 'install_em',      label: 'Install EchoMuse',  desc: 'Push server binary and startup script to device.' },
 ];
@@ -2307,6 +2309,49 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     addLog('Alexa stack disabled.', 'ok');
   }
 
+  async function runDebloat(c) {
+    // Two halves, mirroring the recipe proven on the Lounge device
+    // (2026-07-15, −130MB RAM / cpu_avg −2-3pp, no voice regressions):
+    //  1. `pm hide` the non-essential Amazon packages. Hide, NOT disable —
+    //     FireOS 5 ignores `pm disable` for PERSISTENT system apps and
+    //     starts them at boot anyway; hide sticks across reboots.
+    //  2. Install a Magisk service.d boot script that re-stops the
+    //     init-launched native daemons every boot (`stop` doesn't persist,
+    //     and they aren't packages so pm can't touch them). It takes effect
+    //     from the next boot — the wizard's final step reboots the device,
+    //     so a fresh provision comes up fully debloated.
+    // Both payloads come from the controller (device_payloads/) so the
+    // package list and daemon set can be tuned without touching this code.
+    const pkgResp = await fetch('/api/provision/debloat_packages', { headers: { Authorization: `Bearer ${token}` } });
+    if (!pkgResp.ok) throw new Error(`Controller returned ${pkgResp.status} fetching debloat package list.`);
+    const { packages } = await pkgResp.json();
+
+    addLog(`Hiding ${packages.length} packages…`);
+    for (const pkg of packages) {
+      const out = (await c.shell(`su -c 'pm hide ${pkg}' 2>&1`)).trim();
+      // pm hide prints "Package <pkg> new hidden state: true" on success;
+      // a package absent from this SKU errors — log it and move on, the
+      // list spans SKU variants by design.
+      const ok = out.includes('hidden state: true');
+      addLog(`  ${pkg} → ${ok ? 'hidden' : (out || 'no output')}`, ok ? undefined : 'warn');
+    }
+
+    addLog('Installing boot-time daemon-stop script (Magisk service.d)…');
+    const scrResp = await fetch('/api/provision/debloat_script', { headers: { Authorization: `Bearer ${token}` } });
+    if (!scrResp.ok) throw new Error(`Controller returned ${scrResp.status} fetching debloat script.`);
+    const script = await scrResp.text();
+    // Same push-then-cp pattern as start_server.sh: nothing executes the
+    // script this boot, so push() is safe (no "Text file busy" risk).
+    const svcDir = '/sbin/.core/img/.core/service.d';
+    await c.push('/sdcard/echomuse-debloat.sh', new TextEncoder().encode(script));
+    await c.shell(`su -c 'mkdir -p ${svcDir} && cp /sdcard/echomuse-debloat.sh ${svcDir}/echomuse-debloat.sh && chmod 755 ${svcDir}/echomuse-debloat.sh'`);
+    const listing = (await c.shell(`su -c 'ls ${svcDir}' 2>&1`)).trim();
+    if (!listing.includes('echomuse-debloat.sh')) {
+      throw new Error(`Debloat script install verification failed — ${svcDir} contains: "${listing}". Is Magisk mounted (/sbin/.core present)?`);
+    }
+    addLog('Debloat applied — daemon stops take effect on the post-install reboot.', 'ok');
+  }
+
   async function runInstallEchoMuse(c, file, useLatest) {
     let buf;
     if (useLatest) {
@@ -2443,8 +2488,9 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         case  6: c = await runReconnect(); break;
         case  7: await runVerifyRoot(c); break;
         case  8: await runDisableAlexa(c); break;
-        case  9: await runConfigWifi(c, wifiSsid, wifiPsk); break;
-        case 10: await runInstallEchoMuse(c, binaryFile, useLatest); break;
+        case  9: await runDebloat(c); break;
+        case 10: await runConfigWifi(c, wifiSsid, wifiPsk); break;
+        case 11: await runInstallEchoMuse(c, binaryFile, useLatest); break;
       }
       markStep(stepIdx, 'done');
       if (stepIdx < _WIZARD_STEPS.length - 1) setStep(stepIdx + 1);
@@ -2456,15 +2502,16 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       // before retry rather than silently re-flashing whatever was picked
       // last time (which, on a hash-mismatch failure, is the wrong file).
       if (stepIdx === 3) setMagiskFile(null);
-      if (stepIdx === 10) setBinaryFile(null);
+      if (stepIdx === 11) setBinaryFile(null);
     }
     setRunning(false);
   }
 
   // Auto-advance steps that need no user input once adb is connected.
   // Step 8 (disable_alexa) is now before WiFi so Alexa can't phone home.
+  // Step 9 (debloat) rides the same connected-and-rooted state.
   useEffect(() => {
-    const autoSteps = new Set([2, 4, 7, 8]);
+    const autoSteps = new Set([2, 4, 7, 8, 9]);
     if (autoSteps.has(step) && !running && stepState[step] === 'pending' && adb) {
       runStep(step);
     }
@@ -2572,13 +2619,13 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
               </div>
             )}
 
-            {/* Step 10: EchoMuse binary — custom upload or latest from controller.
+            {/* Step 11: EchoMuse binary — custom upload or latest from controller.
                 Stays visible through error so a different file/source can be
                 tried instead of being stuck retrying whatever failed. */}
-            {step === 10 && stepState[10] !== 'done' && !running && (
+            {step === 11 && stepState[11] !== 'done' && !running && (
               <div style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                  <Pill accent onClick={() => runStep(10, true)}>Install latest from GitHub</Pill>
+                  <Pill accent onClick={() => runStep(11, true)}>Install latest from GitHub</Pill>
                   <Pill small onClick={doCheckRelease} disabled={checkingRelease}>
                     {checkingRelease ? 'Checking…' : 'Check for newer release'}
                   </Pill>
@@ -2590,38 +2637,38 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                 </div>
                 <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', letterSpacing: '0.04em' }}>— or —</div>
                 <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--text2)', letterSpacing: '0.08em' }}>
-                  {stepState[10] === 'error' ? 'SELECT A DIFFERENT BUILD (ARMv7)' : 'CUSTOM ECHOMUSE SERVER BINARY (ARMv7)'}
+                  {stepState[11] === 'error' ? 'SELECT A DIFFERENT BUILD (ARMv7)' : 'CUSTOM ECHOMUSE SERVER BINARY (ARMv7)'}
                 </div>
                 <input
                   type="file"
                   onChange={e => setBinaryFile(e.target.files[0])}
                   style={{ fontFamily: "'DM Mono',monospace", fontSize: 11 }}
                 />
-                {!!binaryFile && <Pill onClick={() => runStep(10, false)}>Install Custom Build</Pill>}
+                {!!binaryFile && <Pill onClick={() => runStep(11, false)}>Install Custom Build</Pill>}
               </div>
             )}
 
-            {/* Step 9: WiFi configuration */}
-            {step === 9 && stepState[9] !== 'done' && !running && (
+            {/* Step 10: WiFi configuration */}
+            {step === 10 && stepState[10] !== 'done' && !running && (
               <WifiPanel
                 adb={adb}
                 wifiSsid={wifiSsid} setWifiSsid={setWifiSsid}
                 wifiPsk={wifiPsk}   setWifiPsk={setWifiPsk}
                 onScan={() => scanWifi(adb).then(nets => setWifiNetworks(nets)).catch(e => addLog(`Scan failed: ${e.message}`, 'error'))}
                 networks={wifiNetworks}
-                onConnect={() => { if (wifiSsid) runStep(9); }}
-                onSkip={() => { markStep(9, 'done'); setStep(10); }}
-                onAbort={() => { markStep(9, 'error'); addLog('WiFi skipped — provision incomplete.', 'warn'); }}
+                onConnect={() => { if (wifiSsid) runStep(10); }}
+                onSkip={() => { markStep(10, 'done'); setStep(11); }}
+                onAbort={() => { markStep(10, 'error'); addLog('WiFi skipped — provision incomplete.', 'warn'); }}
               />
             )}
 
             {/* Retry button — re-runs the step directly (runStep marks it running).
                 Excludes steps with their own dedicated retry UI above (file
-                pickers for 3/10, WifiPanel for 9) — those already give a
+                pickers for 3/11, WifiPanel for 10) — those already give a
                 complete retry path with fresh input, so a second generic
                 "Retry" here would just compete with it and, for the file
                 steps, retry with no file selected (since failure clears it). */}
-            {!running && stepState[step] === 'error' && ![3, 9, 10].includes(step) && (
+            {!running && stepState[step] === 'error' && ![3, 10, 11].includes(step) && (
               <div style={{ marginBottom: 10, display: 'flex', gap: 8 }}>
                 <Pill onClick={() => runStep(step)}>Retry</Pill>
                 {step === 0 && duplicateDeviceId && (

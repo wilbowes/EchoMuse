@@ -211,6 +211,8 @@ async def create_app() -> web.Application:
 
     # Provisioning
     app.router.add_get("/api/provision/start_script", _get_provision_start_script)
+    app.router.add_get("/api/provision/debloat_script",   _get_provision_debloat_script)
+    app.router.add_get("/api/provision/debloat_packages", _get_provision_debloat_packages)
     app.router.add_get("/api/provision/magisk_db",    _get_provision_magisk_db)
     app.router.add_get("/api/provision/latest_binary", _get_provision_latest_binary)
 
@@ -1591,6 +1593,33 @@ async def _get_provision_start_script(request: web.Request) -> web.Response:
         content_type='text/plain',
         headers={'Content-Disposition': 'attachment; filename="start_server.sh"'},
     )
+
+
+@auth.require_admin
+async def _get_provision_debloat_script(request: web.Request) -> web.Response:
+    """GET /api/provision/debloat_script — the Magisk service.d boot script
+    that re-stops init-launched daemons each boot (Debloat wizard step)."""
+    return web.Response(
+        text=_read_payload("echomuse-debloat.sh"),
+        content_type='text/plain',
+        headers={'Content-Disposition': 'attachment; filename="echomuse-debloat.sh"'},
+    )
+
+
+@auth.require_admin
+async def _get_provision_debloat_packages(request: web.Request) -> web.Response:
+    """GET /api/provision/debloat_packages — the pm-hide package list as JSON.
+
+    Parsed server-side (comments/blank lines stripped) so the wizard never
+    has to understand the file format and list edits ship without a
+    dashboard rebuild.
+    """
+    packages = [
+        line.strip()
+        for line in _read_payload("debloat_packages.txt").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    return _ok({"packages": packages})
 
 
 @auth.require_admin

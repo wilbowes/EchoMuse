@@ -1,0 +1,25 @@
+# EchoMuse debloat — packages hidden at provisioning (Debloat wizard step).
+#
+# `pm hide` is the mechanism, NOT `pm disable`: FireOS 5 ignores disable for
+# PERSISTENT system apps and starts them at boot anyway; hide survives reboots
+# (proven on Lounge 2026-07-15). Undo on a device with `pm unhide <pkg>`.
+#
+# One package per line; lines starting with # are ignored.
+#
+# !! PLACEHOLDER — verify against Lounge before first use: the canonical
+# !! ~26-package list is the live hidden set on G090LF1180130NJG
+# !! (diff `pm list packages` against `pm list packages -u`). The entries
+# !! below are the confidently-known subset reconstructed from the
+# !! 2026-07-15 session; sync this file with the device before relying on it.
+com.amazon.comms.tachyon
+com.amazon.alexa.beaconbroadcaster
+com.amazon.whisperjoin.middleware
+com.amazon.whisperjoin.wss.wifiprovisioner
+com.amazon.device.smarthome.dshs.services
+com.amazon.device.smarthome.adapters.wifi
+com.amazon.device.crashmanager
+com.amazon.device.logmanager
+com.amazon.device.csmbluetooth.service
+com.amazon.mediaplayeragent
+com.amazon.kindleautomatictimezone
+amazon.speech.sim
