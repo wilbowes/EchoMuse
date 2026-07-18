@@ -924,6 +924,12 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
         if (d?.connected && d?.firmware_ver === targetVersion) {
           setPushLog(l => [...l, `✓ Running ${targetVersion}`, '✓ Update complete']);
           clearInterval(poll); setPushing(false); setLocalFile(null);
+        } else if (d?.update_error && !d?.update_in_progress) {
+          // Controller recorded a terminal failure (transfer failed, slot
+          // detect failed, exception…) — report it now instead of letting
+          // the poll run out its 2-minute timeout.
+          setPushLog(l => [...l, `✗ ${d.update_error}`]);
+          clearInterval(poll); setPushing(false);
         } else if (wasDisconnected && d?.connected && d?.firmware_ver && d.firmware_ver !== targetVersion) {
           setPushLog(l => [...l, `⚠ Device reconnected on ${d.firmware_ver} — auto-rolled back`]);
           clearInterval(poll); setPushing(false);
@@ -3330,13 +3336,23 @@ function DeployAllModal({ release, devices, deployState, onStarted, onDismiss, o
     if (!d)                              return { text: 'unknown',      color: 'var(--muted)' };
     if (d.connected && d.firmware_ver === target)
                                          return { text: '✓ updated',    color: '#286040' };
+    // A recorded failure is terminal — without this the row (and the header
+    // progress pill) sat at "updating…" forever after an aborted update.
+    if (d.update_error)                  return { text: `✗ ${d.update_error}`, color: '#c03030' };
     if (!d.connected)                    return { text: 'rebooting…',   color: '#96660a' };
     return { text: 'updating…', color: '#405878' };
   }
 
   const started = view?.started || [];
-  const allDone = started.length > 0 &&
-    started.every(id => { const d = byId[id]; return d && d.connected && d.firmware_ver === target; });
+  // Failed counts as done — the deploy reached a terminal state for that
+  // device, it just wasn't success.
+  const terminal = id => {
+    const d = byId[id];
+    return d && ((d.connected && d.firmware_ver === target) || d.update_error);
+  };
+  const failedCount = started.filter(id => byId[id]?.update_error &&
+    !(byId[id].connected && byId[id].firmware_ver === target)).length;
+  const allDone = started.length > 0 && started.every(terminal);
 
   async function deploy() {
     setRunning(true); setError('');
@@ -3399,7 +3415,9 @@ function DeployAllModal({ release, devices, deployState, onStarted, onDismiss, o
             )}
             <div style={{ fontFamily: mono, fontSize: 10, color: 'var(--muted)', marginTop: 14 }}>
               {allDone
-                ? 'All devices updated.'
+                ? (failedCount > 0
+                    ? `Finished — ${failedCount} device${failedCount === 1 ? '' : 's'} failed (see device logs).`
+                    : 'All devices updated.')
                 : 'Updates run in the background — you can close this and reopen it from the header to check progress.'}
             </div>
             <div style={{ marginTop: 14, display: 'flex', gap: 10 }}>
@@ -3748,7 +3766,14 @@ function App() {
                 const d = byId[id];
                 return d && d.connected && d.firmware_ver === deployState.version;
               }).length;
-              const complete = started.length > 0 && done === started.length;
+              // Failures are terminal too — otherwise one aborted update
+              // pinned the pill at "Deploying…" until the page was reloaded.
+              const failed = started.filter(id => {
+                const d = byId[id];
+                return d && d.update_error &&
+                  !(d.connected && d.firmware_ver === deployState.version);
+              }).length;
+              const complete = started.length > 0 && done + failed === started.length;
               // While a deploy is in flight the progress pill replaces the
               // Deploy all button — both open the same modal, and offering a
               // second deploy mid-run reads as a broken control. The button
@@ -3761,7 +3786,9 @@ function App() {
                 {deployState && (
                   <Pill small onClick={() => setShowDeployAll(true)}>
                     {complete
-                      ? `✓ Fleet on ${deployState.version}`
+                      ? (failed > 0
+                          ? `⚠ ${deployState.version}: ${done} ok, ${failed} failed`
+                          : `✓ Fleet on ${deployState.version}`)
                       : `Deploying ${deployState.version} — ${done}/${started.length}`}
                   </Pill>
                 )}
