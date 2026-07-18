@@ -138,7 +138,6 @@ CHUNK_BYTES          = 1280 * 2   # 2560 bytes = 80ms at 16kHz S16_LE mono
 SPEAKER_RATE   = 48000
 SPEAKER_PERIOD = 2048
 SPEAKER_BYTES  = SPEAKER_PERIOD * 2       # 4096 bytes/period (mono S16)
-PIPER_RATE     = 22050
 
 # The device holds playback until ~this much audio is buffered (or EOS
 # arrives) — primePeriods in pcm_speaker.go. The post-playback drain sleep
@@ -489,33 +488,10 @@ async def leds_spin_green(device: Device, stop_event: asyncio.Event):
 
 # ─── Audio conversion ─────────────────────────────────────────────────────────
 
-def resample_to_48k(pcm: bytes, from_rate: int) -> bytes:
-    """
-    Resample mono S16_LE PCM from from_rate to 48kHz mono S16_LE.
-
-    Uses linear interpolation via numpy. For a 10s Piper response (~220k samples)
-    the old pure-Python loop took ~1-2s of wall time in the asyncio event loop;
-    numpy completes it in <5ms, keeping the perceived latency budget intact.
-
-    Output stays mono — the wire format is mono 48k, and the device
-    duplicates to stereo at the ALSA write (the stereo ALSA config is a
-    hardware constraint of the I2S/codec path, not a wire requirement).
-    """
-    if len(pcm) < 2:
-        return b""
-    samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
-    n_in  = len(samples)
-    n_out = int(n_in * SPEAKER_RATE / from_rate)
-
-    # Source indices for each output sample — fractional positions in input
-    src  = np.arange(n_out, dtype=np.float64) * from_rate / SPEAKER_RATE
-    lo   = src.astype(np.int32)
-    hi   = np.minimum(lo + 1, n_in - 1)
-    frac = (src - lo).astype(np.float32)
-
-    resampled = samples[lo] * (1.0 - frac) + samples[hi] * frac
-    resampled = np.clip(resampled, -32768, 32767).astype(np.int16)
-    return resampled.tobytes()
+# (The numpy linear-interpolation resample_to_48k that used to live here is
+# gone: _fetch_tts_audio now decodes at SPEAKER_RATE directly, with ffmpeg
+# doing any rate conversion — and HA transcodes to 48kHz at source when it
+# honours the media player's declared supported_formats.)
 
 
 # ─── Voice pipeline ───────────────────────────────────────────────────────────
@@ -689,23 +665,23 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
 
 async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None:
     """
-    Post-turn timing concern: EQ, resample, stream to device, acoustic-feedback wait.
+    Post-turn timing concern: EQ, stream to device, acoustic-feedback wait.
 
-    voice_response is raw Piper-rate mono S16_LE PCM. Returns once the
-    device audio buffer has drained (or cancel_event fires), so the caller
-    can safely restart the mic without acoustic feedback into the next turn.
+    voice_response is 48kHz mono S16_LE PCM (_fetch_tts_audio decodes at the
+    wire rate now — no controller-side resample). Returns once the device
+    audio buffer has drained (or cancel_event fires), so the caller can
+    safely restart the mic without acoustic feedback into the next turn.
     """
     log.info(
         f"[{device.device_id}] EQ: bands={device.eq_bands} "
         f"loudness={device.eq_loudness}"
     )
-    # EQ + resample are a solid numpy crunch (hundreds of ms for a long
-    # response) — run them off the event loop, which otherwise freezes every
-    # device's LED frames, shell proxying, and WS handling right as playback
-    # starts (observed as spinner stutter and console typing judder).
+    # EQ is a solid numpy crunch (hundreds of ms for a long response) — run
+    # it off the event loop, which otherwise freezes every device's LED
+    # frames, shell proxying, and WS handling right as playback starts
+    # (observed as spinner stutter and console typing judder).
     def _prepare_pcm() -> bytes:
-        eq_pcm = em_eq.apply(voice_response, PIPER_RATE, device.eq_bands, device.eq_loudness)
-        return resample_to_48k(eq_pcm, PIPER_RATE)
+        return em_eq.apply(voice_response, SPEAKER_RATE, device.eq_bands, device.eq_loudness)
 
     speaker_pcm = await asyncio.get_event_loop().run_in_executor(None, _prepare_pcm)
     log.info(

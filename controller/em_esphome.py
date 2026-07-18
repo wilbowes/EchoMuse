@@ -325,12 +325,28 @@ class EchoMuseSatellite(SatelliteServerProtocol):
 
         if isinstance(msg, api_pb2.ListEntitiesRequest):
             log.debug(f"[{self._log_name}] ListEntitiesRequest from {self.peer}")
+            # supported_formats (Voice-PE-style): tells HA to run TTS and
+            # announcement audio through its ffmpeg proxy and hand us a URL
+            # already transcoded to 48kHz mono FLAC — the device's native
+            # wire rate — instead of whatever the TTS provider produced.
+            # _fetch_tts_audio then decodes without resampling. Harmless on
+            # HA versions that ignore it: ffmpeg decodes any format/rate.
+            _fmt = dict(format="flac", sample_rate=48000,
+                        num_channels=1, sample_bytes=2)
             yield api_pb2.ListEntitiesMediaPlayerResponse(
                 object_id="media_player",
                 key=MEDIA_PLAYER_KEY,
                 name=self.label,
                 supports_pause=True,
                 feature_flags=MEDIA_PLAYER_FEATURES,
+                supported_formats=[
+                    api_pb2.MediaPlayerSupportedFormat(
+                        purpose=api_pb2.MEDIA_PLAYER_FORMAT_PURPOSE_DEFAULT,
+                        **_fmt),
+                    api_pb2.MediaPlayerSupportedFormat(
+                        purpose=api_pb2.MEDIA_PLAYER_FORMAT_PURPOSE_ANNOUNCEMENT,
+                        **_fmt),
+                ],
             )
             yield api_pb2.ListEntitiesDoneResponse()
             return
@@ -1082,12 +1098,15 @@ class EchoMuseSatellite(SatelliteServerProtocol):
 
 async def _fetch_tts_audio(url: str) -> bytes:
     """
-    Fetch TTS audio from HA and decode to 22050Hz mono S16_LE PCM.
+    Fetch TTS audio from HA and decode to 48kHz mono S16_LE PCM — the
+    device wire rate, so downstream (EQ → stream) never resamples.
 
     Uses ffmpeg subprocess — handles MP3, WAV, FLAC, OGG transparently
-    regardless of which TTS provider HA is configured with. Output is raw
-    PCM at Piper rate (22050Hz mono S16_LE), matching what the existing
-    _run_post_turn_playback() / resample_to_48k() pipeline expects.
+    regardless of which TTS provider HA is configured with. When HA honours
+    our declared supported_formats the URL already serves 48kHz mono FLAC
+    and the -ar here is a no-op; otherwise ffmpeg's proper resampler does
+    the conversion (better than the numpy linear interpolation this
+    replaced, which cost ~2dB above 8kHz).
 
     Requires ffmpeg in PATH (installed via Dockerfile apt-get).
     """
@@ -1117,7 +1136,7 @@ async def _fetch_tts_audio(url: str) -> bytes:
     proc = await asyncio.create_subprocess_exec(
         "ffmpeg", "-hide_banner", "-loglevel", "error",
         "-i", "pipe:0",
-        "-f", "s16le", "-ar", "22050", "-ac", "1",
+        "-f", "s16le", "-ar", "48000", "-ac", "1",
         "pipe:1",
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
@@ -1138,7 +1157,7 @@ async def _fetch_tts_audio(url: str) -> bytes:
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg decode failed: {err.decode()[:200]}")
 
-    log.debug(f"_fetch_tts_audio: decoded to {len(pcm)}b PCM (22050Hz mono S16_LE)")
+    log.debug(f"_fetch_tts_audio: decoded to {len(pcm)}b PCM (48kHz mono S16_LE)")
     return pcm
 
 
