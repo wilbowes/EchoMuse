@@ -91,6 +91,15 @@ _event_clients: set[web.WebSocketResponse] = set()
 # Track in-progress OTA updates per device_id to enforce one-at-a-time.
 _updates_in_progress: set[str] = set()
 
+# Last OTA failure per device, surfaced as `update_error` in /api/devices so
+# the dashboard (fleet deploy modal + per-device update log) can show *why* a
+# tile stopped progressing instead of sitting at "updating…" forever. Set by
+# _update_failed on every _run_update/_run_rollback failure path; cleared when
+# a new update starts and on confirmed success. In-memory by design — a
+# controller restart clears stale errors along with the update tasks
+# themselves.
+_update_errors: dict[str, str] = {}
+
 # Pending local binary uploads — keyed by UUID token, expire after 10 minutes.
 _pending_uploads: dict[str, bytes] = {}
 
@@ -908,6 +917,23 @@ def _extract_binary_version(binary: bytes) -> str | None:
     return match.group(0).decode("ascii") if match else None
 
 
+async def _update_failed(device_id: str, reason: str) -> None:
+    """
+    Record and broadcast an OTA failure: device log line, in-memory
+    update_error (read back via /api/devices), and a device_update_failed
+    event for the dashboard WS. Every abort path in _run_update/_run_rollback
+    must come through here — a log-only failure leaves the dashboard tile at
+    "updating…" indefinitely.
+    """
+    _update_errors[device_id] = reason
+    await _push_log_event(device_id, "error", "controller", reason)
+    await _push_event({
+        "type":      "device_update_failed",
+        "device_id": device_id,
+        "error":     reason,
+    })
+
+
 async def _run_update(device_id: str, release: dict,
                       binary_override: bytes | None = None) -> None:
     """
@@ -921,6 +947,7 @@ async def _run_update(device_id: str, release: dict,
     6. Detect auto-rollback (start_server.sh retry exhausted).
     """
     _updates_in_progress.add(device_id)
+    _update_errors.pop(device_id, None)  # fresh attempt clears the last failure
     loop = asyncio.get_event_loop()
     version = release["version"]
 
@@ -936,8 +963,8 @@ async def _run_update(device_id: str, release: dict,
         else:
             binary = await _fetch_binary(release["url"])
             if binary is None:
-                await _push_log_event(device_id, "error", "controller",
-                                      "Failed to fetch binary from GitHub")
+                await _update_failed(device_id,
+                                     "Failed to fetch binary from GitHub")
                 return
 
         # Record current version as previous before anything changes
@@ -947,8 +974,8 @@ async def _run_update(device_id: str, release: dict,
 
         live = _devices.get(device_id)
         if live is None:
-            await _push_log_event(device_id, "error", "controller",
-                                  "Device disconnected before update could start")
+            await _update_failed(device_id,
+                                 "Device disconnected before update could start")
             return
 
         # Detect active slot and migrate legacy layout if needed — single shell
@@ -968,8 +995,8 @@ async def _run_update(device_id: str, release: dict,
         log.info(f"[api] Slot detect result for {device_id}: {detect_result!r}")
 
         if "MIGRATE_FAILED" in detect_result:
-            await _push_log_event(device_id, "error", "controller",
-                                  "A/B migration failed — aborting update")
+            await _update_failed(device_id,
+                                 "A/B migration failed — aborting update")
             return
 
         active_slot = None
@@ -981,8 +1008,8 @@ async def _run_update(device_id: str, release: dict,
                     break
 
         if active_slot is None:
-            await _push_log_event(device_id, "error", "controller",
-                                  f"Could not determine active slot — output: {detect_result!r}")
+            await _update_failed(device_id,
+                                 f"Could not determine active slot — output: {detect_result!r}")
             return
 
         if "MIGRATED" in detect_result:
@@ -1000,8 +1027,8 @@ async def _run_update(device_id: str, release: dict,
         # Stream binary to inactive slot
         ok = await _stream_binary_to_slot(live, binary, inactive_slot)
         if not ok:
-            await _push_log_event(device_id, "error", "controller",
-                                  f"Binary transfer to {inactive_slot} failed")
+            await _update_failed(device_id,
+                                 f"Binary transfer to {inactive_slot} failed")
             return
 
         # Brief pause so device can cleanly close the transfer shell before
@@ -1022,6 +1049,7 @@ async def _run_update(device_id: str, release: dict,
         confirmed = await _monitor_reconnect(device_id, version, previous_version=current_ver, timeout=90)
 
         if confirmed:
+            _update_errors.pop(device_id, None)
             await _push_log_event(device_id, "info", "controller",
                                   f"✓ Update confirmed: {version}")
             await _push_event({
@@ -1038,6 +1066,9 @@ async def _run_update(device_id: str, release: dict,
                 await loop.run_in_executor(
                     None, db.set_firmware_previous, device_id, None
                 )
+                _update_errors[device_id] = (
+                    f"auto-rolled back to {running} — new binary failed to start"
+                )
                 await _push_log_event(device_id, "warn", "controller",
                     f"Device auto-rolled back to {running} "
                     f"— new binary failed {3} start attempts")
@@ -1047,18 +1078,21 @@ async def _run_update(device_id: str, release: dict,
                     "version":   running,
                 })
             else:
+                _update_errors[device_id] = (
+                    f"timed out — device running {running}"
+                )
                 await _push_log_event(device_id, "warn", "controller",
                     f"Update timed out — device running: {running}")
                 await _push_event({
                     "type":      "device_update_failed",
                     "device_id": device_id,
+                    "error":     _update_errors[device_id],
                     "running":   running,
                 })
 
     except Exception as e:
         log.exception(f"[api] OTA update error for {device_id}: {e}")
-        await _push_log_event(device_id, "error", "controller",
-                              f"OTA exception: {e}")
+        await _update_failed(device_id, f"OTA exception: {e}")
     finally:
         _updates_in_progress.discard(device_id)
 
@@ -1070,14 +1104,15 @@ async def _run_rollback(device_id: str, target_version: str) -> None:
     No binary transfer needed — the old binary is already in the inactive slot.
     """
     _updates_in_progress.add(device_id)
+    _update_errors.pop(device_id, None)  # fresh attempt clears the last failure
     try:
         await _push_log_event(device_id, "info", "controller",
                               f"Rolling back to {target_version}")
 
         live = _devices.get(device_id)
         if live is None:
-            await _push_log_event(device_id, "error", "controller",
-                                  "Device disconnected before rollback")
+            await _update_failed(device_id,
+                                 "Device disconnected before rollback")
             return
 
         active_slot = None
@@ -1095,8 +1130,8 @@ async def _run_rollback(device_id: str, target_version: str) -> None:
                     break
 
         if active_slot is None:
-            await _push_log_event(device_id, "error", "controller",
-                                  "Cannot determine active slot — is A/B set up?")
+            await _update_failed(device_id,
+                                 "Cannot determine active slot — is A/B set up?")
             return
 
         inactive_slot = "server_b" if active_slot == "server_a" else "server_a"
@@ -1119,6 +1154,7 @@ async def _run_rollback(device_id: str, target_version: str) -> None:
         )
 
         if confirmed:
+            _update_errors.pop(device_id, None)
             await loop.run_in_executor(
                 None, db.set_firmware_previous, device_id, None
             )
@@ -1130,11 +1166,12 @@ async def _run_rollback(device_id: str, target_version: str) -> None:
                 "version":   target_version,
             })
         else:
-            await _push_log_event(device_id, "warn", "controller",
-                                  "Rollback did not reconnect within 90s")
+            await _update_failed(device_id,
+                                 "Rollback did not reconnect within 90s")
 
     except Exception as e:
         log.exception(f"[api] Rollback error for {device_id}: {e}")
+        await _update_failed(device_id, f"Rollback exception: {e}")
     finally:
         _updates_in_progress.discard(device_id)
 
@@ -2383,4 +2420,8 @@ def _merge_device(row) -> dict:
         "wifi":             wifi_state(device_id),
         # Update state
         "update_in_progress": device_id in _updates_in_progress,
+        # Last OTA/rollback failure (None when the last attempt succeeded or
+        # none was made) — lets the dashboard show a terminal ✗ state instead
+        # of "updating…" forever when an update aborts.
+        "update_error":       _update_errors.get(device_id),
     }

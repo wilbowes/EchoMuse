@@ -18,16 +18,12 @@ Band centre frequencies and types:
   6: 5500 Hz  — peaking, Q=1.4
   7: 8000 Hz  — high shelf
 
-Note: the linear interpolation resampler (22050→48kHz) introduces ~2dB
-sinc² rolloff at 8kHz, so band 7 will have slightly less effect than the
-gain value implies. Bands 0–6 are unaffected.
-
 All filter design uses the Audio EQ Cookbook by Robert Bristow-Johnson.
 High-pass uses scipy.signal.butter (already a dependency via openwakeword).
 
 Usage:
     import em_eq
-    eq_pcm = em_eq.apply(voice_response, PIPER_RATE, bands=[0]*8, loudness=False)
+    eq_pcm = em_eq.apply(voice_response, SPEAKER_RATE, bands=[0]*8, loudness=False)
 """
 
 import math
@@ -125,8 +121,9 @@ def apply(
     Apply EQ to mono S16_LE PCM. Returns mono S16_LE PCM at the same rate.
 
     Args:
-        pcm:         Raw mono S16_LE PCM bytes (Piper TTS output).
-        sample_rate: Sample rate of pcm (typically PIPER_RATE = 22050).
+        pcm:         Raw mono S16_LE PCM bytes (decoded TTS audio).
+        sample_rate: Sample rate of pcm (SPEAKER_RATE = 48000 in the
+                     playback pipeline since the 48k decode change).
         bands:       List of NUM_BANDS (8) gain values in dB. None = flat.
         loudness:    Add a +5dB speech-range presence boost if True.
 

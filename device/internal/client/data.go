@@ -65,19 +65,19 @@ const (
 // ─── VAD constants ────────────────────────────────────────────────────────────
 
 const (
-	vadMicChannels   = 9
-	vadByteSample    = 3
-	vadFramePeriod   = 512
-	vadBytePeriod    = vadFramePeriod * vadMicChannels * vadByteSample // 13824
-	vadOwwChunkBytes = 1280 * 2                                        // 2560 bytes = 80ms
+	vadOwwChunkBytes = 1280 * 2 // 2560 bytes = 80ms
 
-	// prerollPeriods is how many processed 32ms periods of pre-gate audio are
-	// retained while the VAD gate is closed and flushed upstream the moment it
-	// opens (~512ms at 16). Only applies to lockMic (bounded turn) streams —
-	// the always-on wake stream is ungated and sends everything, so OWW
-	// always sees a continuous stream. For turns, preroll gives STT the true
-	// first phoneme instead of a hard splice at gate-open.
-	prerollPeriods = 16
+	// prerollBudgetMs is how much pre-gate audio is retained while the VAD
+	// gate is closed and flushed upstream the moment it opens. The ring is
+	// sized in wall-clock terms because the mic delivers whole ALSA-buffer
+	// batches (160ms), not 32ms periods — a fixed batch count would drift
+	// with the batch size (the old prerollPeriods=16 was meant as ~512ms of
+	// periods but actually held 2.5s of batches). Only applies to lockMic
+	// (bounded turn) streams — the always-on wake stream is ungated and
+	// sends everything, so OWW always sees a continuous stream. For turns,
+	// preroll gives STT the true first phoneme instead of a hard splice at
+	// gate-open.
+	prerollBudgetMs = 512
 
 	// noSpeechTimeout bounds how long streamMic will wait for speech to
 	// ever be detected after a turn starts. If active never becomes true
@@ -507,7 +507,7 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 	// closed, oldest first. Flushed into buf at gate open, cleared while
 	// active. Slices are retained (not copied): Process() returns a fresh
 	// allocation each period, so nothing aliases them.
-	preroll := make([][]byte, 0, prerollPeriods)
+	preroll := make([][]byte, 0, prerollBudgetMs/160+1) // capacity hint at the real batch cadence
 	var seqNum uint16
 	var periodCount uint64 // periodic RMS diagnostic
 	var lastClipped uint64 // clip count at last diag line
@@ -598,14 +598,6 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 
 			snap := cfg.Snapshot()
 			threshold := snap.VadThreshold
-			speechNeeded := snap.VadSpeechMs / 32
-			silenceMax := snap.VadSilenceMs / 32
-			if speechNeeded < 1 {
-				speechNeeded = 1
-			}
-			if silenceMax < 1 {
-				silenceMax = 1
-			}
 
 			beamAngle := float64(-1)
 			if snap.BeamAngle != nil {
@@ -666,6 +658,26 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			// lockstep with micGainDb.
 			rms := vadPeriodRMS(mono)
 			speech := rms >= threshold*gainLin
+
+			// Gate windows in units of actual iterations: the mic delivers
+			// whole ALSA-buffer batches (160ms/2560 samples — see the
+			// pipeline note in CLAUDE.md), so divide the configured ms by
+			// the real batch duration. The old /32 assumed 32ms periods and
+			// silently made both windows 5× longer than configured (80ms
+			// speech-to-open was really 320ms; 600ms silence-to-close was
+			// really 2.9s).
+			batchMs := len(mono) / 32 // S16 mono @16kHz: 32 bytes per ms
+			if batchMs < 1 {
+				batchMs = 1
+			}
+			speechNeeded := (snap.VadSpeechMs + batchMs - 1) / batchMs
+			if speechNeeded < 1 {
+				speechNeeded = 1
+			}
+			silenceMax := (snap.VadSilenceMs + batchMs - 1) / batchMs
+			if silenceMax < 1 {
+				silenceMax = 1
+			}
 
 			// Periodic RMS diagnostic — every ~10 min, or within ~16s of
 			// the mic gain clamping a sample (clipping is the one signal
@@ -787,11 +799,15 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 					buf = buf[vadOwwChunkBytes:]
 				}
 			} else {
-				// Gate closed — keep the most recent periods for the next
-				// gate open.
-				if len(preroll) >= prerollPeriods {
+				// Gate closed — keep the most recent batches for the next
+				// gate open, capped by duration rather than count.
+				prerollMax := prerollBudgetMs / batchMs
+				if prerollMax < 1 {
+					prerollMax = 1
+				}
+				for len(preroll) >= prerollMax {
 					copy(preroll, preroll[1:])
-					preroll = preroll[:prerollPeriods-1]
+					preroll = preroll[:len(preroll)-1]
 				}
 				preroll = append(preroll, mono)
 			}
