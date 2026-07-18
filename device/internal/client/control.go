@@ -8,9 +8,9 @@ import (
 	"io"
 	"log"
 	"net"
-	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -86,10 +86,14 @@ type ControlClient struct {
 	conn         *websocket.Conn
 	connMu       sync.Mutex
 
-	// serverAddr is the controller address (host:port), set on successful connect.
-	// Used by the shell dialler to connect back to the controller.
-	serverAddr   string
-	serverAddrMu sync.RWMutex
+	// serverBaseURL is the WebSocket base URL actually in use
+	// ("ws://host:port" or "wss://host:tlsport"), set on successful
+	// connect. Used by the shell dialler to connect back to the
+	// controller on the same plane. lastServer keeps the discovered
+	// controller info (incl. TLS port) for the mDNS-skipping fast path.
+	serverBaseURL string
+	lastServer    *discovery.ServerInfo
+	serverAddrMu  sync.RWMutex
 
 	// shellCancel cancels a running shell session when shell_close is received.
 	shellCancel context.CancelFunc
@@ -148,15 +152,28 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 		// it's what makes a controller on a different subnet reachable at
 		// all (multicast rarely crosses subnets, so mDNS alone would fail
 		// the change's reconnect gate and revert a working network).
-		addr := c.lastKnownAddr()
-		if addr != "" && probeTCP(addr, 3*time.Second) {
-			log.Printf("[control] Last-known controller %s reachable — skipping mDNS", addr)
+		// The probe targets the plain port — it's a reachability check,
+		// not a plane choice; connect() re-decides ws vs wss every dial.
+		server := c.lastKnownServer()
+		if server != nil && server.TLSPort == 0 && loadLinkCreds().tlsConf != nil {
+			// CA installed but the cached endpoint predates the
+			// controller's TLS listener (e.g. controller upgraded, or a
+			// Secure-link push just landed, mid-run). One fresh browse so
+			// the tls_port TXT is picked up; keep the cached endpoint if
+			// mDNS fails — after a WiFi change the controller can sit on
+			// another subnet where multicast doesn't reach.
+			if found, err := discovery.FindServerOnce(ctx); err == nil && found != nil {
+				server = found
+			}
+		}
+		if server != nil && probeTCP(server.Addr, 3*time.Second) {
+			log.Printf("[control] Last-known controller %s reachable — skipping mDNS", server.Addr)
 		} else {
-			server, err := discovery.FindServer(ctx)
+			found, err := discovery.FindServer(ctx)
 			if err != nil {
 				return err
 			}
-			addr = server.Addr
+			server = found
 		}
 
 		dataCtx, cancelData := context.WithCancel(ctx)
@@ -166,8 +183,7 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 			}
 		}()
 
-		log.Printf("[control] Connecting to %s", addr)
-		err := c.connect(ctx, addr, data)
+		err := c.connect(ctx, server, data)
 
 		cancelData()
 
@@ -198,17 +214,37 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 	}
 }
 
-func (c *ControlClient) connect(ctx context.Context, addr string, data *DataClient) error {
-	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
-	conn, _, err := dialer.DialContext(ctx, "ws://"+addr+"/control", http.Header{})
+func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInfo, data *DataClient) error {
+	// Credentials are re-read on every dial: a "Secure link" push from the
+	// controller lands mid-run, and the very next reconnect should pick it
+	// up without a restart.
+	creds := loadLinkCreds()
+	baseURL := "ws://" + server.Addr
+	if creds.tlsConf != nil {
+		if server.TLSPort > 0 {
+			baseURL = "wss://" + net.JoinHostPort(server.Host, strconv.Itoa(server.TLSPort))
+		} else {
+			// CA on disk but controller has no TLS listener (or a pre-TLS
+			// controller). Deliberate fallback during rollout — flipping
+			// REQUIRE_DEVICE_TLS controller-side is what eventually closes
+			// this downgrade path.
+			log.Printf("[control] CA installed but controller advertises no tls_port — dialling plain ws")
+		}
+	}
+
+	log.Printf("[control] Connecting to %s", baseURL)
+	dialer := creds.dialer()
+	conn, _, err := dialer.DialContext(ctx, baseURL+"/control", creds.header())
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
 
-	// Store controller address for outbound shell connections
+	// Store base URL for outbound shell connections + the discovered
+	// server for the reconnect fast path.
 	c.serverAddrMu.Lock()
-	c.serverAddr = addr
+	c.serverBaseURL = baseURL
+	c.lastServer = server
 	c.serverAddrMu.Unlock()
 
 	reg := map[string]interface{}{
@@ -267,7 +303,7 @@ func (c *ControlClient) connect(ctx context.Context, addr string, data *DataClie
 	if c.connectedCallback != nil {
 		c.connectedCallback()
 	}
-	data.NotifyReady(addr)
+	data.NotifyReady(baseURL)
 
 	// Keepalive — same mechanism as the data client (see wsPingInterval in
 	// data.go). The app-level "pong" keeps the controller's last_seen fresh;
@@ -412,10 +448,10 @@ func (c *ControlClient) connect(ctx context.Context, addr string, data *DataClie
 			c.shellMu.Unlock()
 
 			c.serverAddrMu.RLock()
-			controllerAddr := c.serverAddr
+			baseURL := c.serverBaseURL
 			c.serverAddrMu.RUnlock()
 
-			go c.runShellSession(shellCtx, controllerAddr, shellMsg.Pty)
+			go c.runShellSession(shellCtx, baseURL, shellMsg.Pty)
 
 		case "shell_close":
 			log.Printf("[control] shell_close received — closing shell session")
@@ -488,7 +524,7 @@ const (
 // so the dashboard can match its framing. pty=false is the legacy raw
 // pipe used by programmatic sessions. If PTY allocation fails, the
 // session falls back to the pipe so a shell is always available.
-func (c *ControlClient) runShellSession(ctx context.Context, controllerAddr string, pty bool) {
+func (c *ControlClient) runShellSession(ctx context.Context, baseURL string, pty bool) {
 	var master, slave *os.File
 	if pty {
 		var err error
@@ -499,14 +535,15 @@ func (c *ControlClient) runShellSession(ctx context.Context, controllerAddr stri
 		}
 	}
 
-	shellURL := "ws://" + controllerAddr + "/shell/" + c.deviceID
+	shellURL := baseURL + "/shell/" + c.deviceID
 	if pty {
 		shellURL += "?pty=1"
 	}
 	log.Printf("[shell] Connecting to controller: %s", shellURL)
 
-	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
-	conn, _, err := dialer.DialContext(ctx, shellURL, http.Header{})
+	creds := loadLinkCreds()
+	dialer := creds.dialer()
+	conn, _, err := dialer.DialContext(ctx, shellURL, creds.header())
 	if err != nil {
 		log.Printf("[shell] Failed to connect to controller: %v", err)
 		if master != nil {
@@ -731,10 +768,10 @@ func (c *ControlClient) writeJSON(v interface{}) error {
 	return c.conn.WriteJSON(v)
 }
 
-func (c *ControlClient) lastKnownAddr() string {
+func (c *ControlClient) lastKnownServer() *discovery.ServerInfo {
 	c.serverAddrMu.RLock()
 	defer c.serverAddrMu.RUnlock()
-	return c.serverAddr
+	return c.lastServer
 }
 
 // probeTCP reports whether addr (host:port) accepts a TCP connection

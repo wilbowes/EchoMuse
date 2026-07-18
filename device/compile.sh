@@ -20,9 +20,14 @@ SUPPRESS="-Wno-deprecated-declarations -Wno-null-dereference"
 # Previously we relied on the base image entrypoint to use $VERSION, which
 # is opaque. This embeds the version string into the binary at compile time
 # so the device reports the correct version to the controller on connect.
+# BuildUnix floors the TLS verification clock — an Echo can boot with a
+# bogus date before NTP syncs, and cert NotBefore checks would otherwise
+# strand it (see internal/client/tlscreds.go).
+BUILD_UNIX=$(date +%s)
 BUILD_CMD="cd /sdk && mkdir -p build && go build \
     -tags server \
-    -ldflags \"-X github.com/wilbowes/EchoMuse/internal/client.Version=${VERSION}\" \
+    -ldflags \"-X github.com/wilbowes/EchoMuse/internal/client.Version=${VERSION} \
+               -X github.com/wilbowes/EchoMuse/internal/client.BuildUnix=${BUILD_UNIX}\" \
     -o build/server ./cmd/"
 
 if docker run --rm \

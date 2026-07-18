@@ -37,7 +37,8 @@ jobs:
             echomuse-compiler \
             -c "cd /sdk && mkdir -p build && go build \
               -tags server \
-              -ldflags \"-X github.com/wilbowes/EchoMuse/internal/client.Version=${{ github.ref_name }}\" \
+              -ldflags \"-X github.com/wilbowes/EchoMuse/internal/client.Version=${{ github.ref_name }} \
+                         -X github.com/wilbowes/EchoMuse/internal/client.BuildUnix=$(date +%s)\" \
               -o build/server \
               ./cmd/"
 

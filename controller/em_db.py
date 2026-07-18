@@ -328,6 +328,21 @@ MIGRATIONS: list[str] = [
 
     UPDATE system_config SET value = '5' WHERE key = 'schema_version';
     """,
+
+    # ── v6 — device-link auth token (TLS rollout) ─────────────────────────────
+    #
+    # token: shared secret the device presents in the X-EM-Token header on
+    # all three WebSocket planes (/control, /data, /shell). Minted by
+    # ensure_device_token() when credentials are first pushed (provisioning
+    # wizard or the dashboard "Secure link" action) and stored on the device
+    # at /data/local/etc/echomuse/token. NULL = no credentials issued yet —
+    # such devices connect unauthenticated (legacy posture) until
+    # REQUIRE_DEVICE_TLS=1 flips the controller to enforcing.
+    """
+    ALTER TABLE devices ADD COLUMN token TEXT;
+
+    UPDATE system_config SET value = '6' WHERE key = 'schema_version';
+    """,
 ]
 
 # ─── Connection management ────────────────────────────────────────────────────
@@ -536,6 +551,54 @@ def upsert_device_seen(
             WHERE device_id = ?
             """,
             (ip, version, _now(), device_id),
+        )
+
+
+def get_device_token(device_id: str) -> Optional[str]:
+    """Return the device's link-auth token, or None if never issued."""
+    row = _q1("SELECT token FROM devices WHERE device_id = ?", (device_id,))
+    return row["token"] if row and row["token"] else None
+
+
+def ensure_device_token(device_id: str) -> str:
+    """
+    Return the device's link-auth token, minting one if absent.
+
+    Creates a pending device row first if the device has never connected —
+    the provisioning wizard pushes credentials before first contact, so the
+    row may not exist yet. Approval state is untouched either way.
+    """
+    import secrets
+
+    existing = get_device_token(device_id)
+    if existing:
+        return existing
+
+    token = secrets.token_urlsafe(32)
+    now = _now()
+    with _tx() as conn:
+        conn.execute(
+            """
+            INSERT INTO devices
+                (device_id, label, approved, ip, firmware_ver, first_seen, last_seen, config)
+            VALUES (?, NULL, 0, NULL, NULL, ?, ?, ?)
+            ON CONFLICT(device_id) DO NOTHING
+            """,
+            (device_id, now, now, json.dumps(DEFAULT_DEVICE_CONFIG)),
+        )
+        conn.execute(
+            "UPDATE devices SET token = ? WHERE device_id = ?",
+            (token, device_id),
+        )
+    log.info(f"[db] Link token minted for {device_id}")
+    return token
+
+
+def clear_device_token(device_id: str) -> None:
+    """Revoke a device's link token (next credential push mints a new one)."""
+    with _tx() as conn:
+        conn.execute(
+            "UPDATE devices SET token = NULL WHERE device_id = ?", (device_id,)
         )
 
 

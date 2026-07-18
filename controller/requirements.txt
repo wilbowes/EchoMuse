@@ -10,6 +10,10 @@ websockets==16.0
 aiohttp==3.13.5
 # Password hashing
 bcrypt==5.0.0
+# Device-link TLS: CA + server cert generation (em_pki.py). The controller
+# runs fine without it (plain ws only, wss listener disabled) but the
+# published image always ships it.
+cryptography==44.0.1
 # mDNS advertisement (_emcontroller._tcp.local)
 zeroconf==0.148.0
 # Wake word inference — openwakeword deps installed manually to avoid
