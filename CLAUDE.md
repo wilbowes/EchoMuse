@@ -16,7 +16,9 @@ The Echo Dot runs FireOS 5 (API 22). Standard Go cross-compilation won't work �
 
 **One-time setup:**
 ```bash
-# GoTinyAlsa is a git submodule at the repo root
+# GoTinyAlsa is a git submodule at the repo root — the wilbowes/GoTinyAlsa
+# fork, NOT upstream Binozo: it carries the GetAudioStream defer-in-loop
+# leak fix (v2.9.2). Don't repoint it upstream until that fix is merged there.
 git submodule update --init
 
 # Build the compiler Docker image (from device/)
@@ -160,7 +162,7 @@ The device runs an A/B slot binary system:
 
 OTA is triggered from the dashboard — the controller pushes the new binary via the `/shell` WebSocket.
 
-Device-side payloads the controller distributes (currently `start_server.sh`, used by the provisioning wizard via `/api/provision/start_script`) live canonically in `controller/device_payloads/` and are read from disk per request — never embed copies in `em_api.py` or `dashboard.jsx`. `device/scripts/start_server.sh` is a symlink into that directory. Every firmware OTA also syncs the device's `/data/local/bin/start_server.sh` against the canonical payload (`_sync_start_script` — md5 compare, heredoc push, rename into place; takes effect on next device reboot), so script drift heals fleet-wide without a separate update path.
+Device-side payloads the controller distributes (`start_server.sh` via `/api/provision/start_script`; the debloat pair `debloat_packages.txt`/`echomuse-debloat.sh` via `/api/provision/debloat_packages`+`debloat_script`, applied by the wizard's Debloat step — pm hide list + Magisk service.d daemon stops) live canonically in `controller/device_payloads/` and are read from disk per request — never embed copies in `em_api.py` or `dashboard.jsx`. `device/scripts/start_server.sh` is a symlink into that directory. Every firmware OTA also syncs the device's `/data/local/bin/start_server.sh` against the canonical payload (`_sync_start_script` — md5 compare, heredoc push, rename into place; takes effect on next device reboot), so script drift heals fleet-wide without a separate update path.
 
 ## Device config push
 

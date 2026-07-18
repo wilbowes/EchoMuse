@@ -45,20 +45,25 @@ The Echo Dot runs FireOS 5 (API 22). A custom Docker build environment is requir
 **Prerequisites:**
 - Docker
 - Go 1.24+
-- [GoTinyAlsa](https://github.com/Binozo/GoTinyAlsa) cloned to `~/GoTinyAlsa`
+
+GoTinyAlsa is a git submodule at the repo root (the
+[wilbowes fork](https://github.com/wilbowes/GoTinyAlsa), which carries a
+memory-leak fix not yet upstream):
+
+```bash
+git submodule update --init
+```
 
 **Build the compiler image:**
 ```bash
+cd device
 docker build -t echomuse-compiler compiler/
 ```
 
 **Compile:**
 ```bash
-docker run --rm \
-  -e CGO_LDFLAGS="-Wl,--hash-style=both" \
-  -v "$(pwd)":/sdk \
-  -v ~/GoTinyAlsa:/GoTinyAlsa \
-  echomuse-compiler
+cd device
+./compile.sh
 ```
 
 Output: `build/server`
@@ -67,7 +72,7 @@ Output: `build/server`
 
 ## Audio processing pipeline
 
-Each 32ms period of microphone audio passes through a processing chain before VAD gating and transmission:
+Each microphone buffer (a 160ms batch of 32ms periods — the ALSA reader delivers whole buffers) passes through a processing chain before VAD gating and transmission:
 
 ```
 raw 9ch S24_3LE → beamformer (mic selection) → RNNoise NS → AGC → mono S16_LE → VAD gate
