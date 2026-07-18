@@ -15,6 +15,11 @@ type muteController struct {
 	ledCtrl func() led.Controller
 	// dotMuted is set externally to block dot button events while muted
 	onMuteChange func(muted bool)
+	// persist, when set, is called after every Toggle() so the mute state
+	// survives reboots and OTA restarts (state.json). Separate from
+	// onMuteChange: that one is the controller-notification hook wired by
+	// cmd, this one is internal.
+	persist func()
 }
 
 func newMuteController(ledGetter func() led.Controller, onMuteChange func(muted bool)) *muteController {
@@ -49,12 +54,16 @@ func (m *muteController) Toggle() {
 	// the main goroutine, and button events can fire before that wiring
 	// completes (SubscribeToButton starts the evdev goroutines first).
 	cb := m.onMuteChange
+	persist := m.persist
 	m.mu.Unlock()
 
 	if muted {
 		m.applyMute()
 	} else {
 		m.applyUnmute()
+	}
+	if persist != nil {
+		persist()
 	}
 
 	if cb != nil {
@@ -80,6 +89,18 @@ func setAdcMute(val string) {
 	for _, ctl := range adcMuteCtls {
 		exec.Command("tinymix", "-D", "0", ctl, val).Run()
 	}
+}
+
+// RestoreMuted re-applies a persisted muted state at boot: flag + ADC mute
+// only. The LED hardware isn't up yet when this runs (NewServer, before the
+// LED-init goroutine finishes), so the red ring and button LED are painted
+// by that goroutine once the controllers exist.
+func (m *muteController) RestoreMuted() {
+	m.mu.Lock()
+	m.muted = true
+	m.mu.Unlock()
+	log.Println("Mute: restoring persisted muted state")
+	setAdcMute("1")
 }
 
 func (m *muteController) applyMute() {

@@ -51,6 +51,14 @@ type Server struct {
 	// audioLevel holds the live speaker RMS as float64 bits — written by
 	// the speaker's ALSA pump via SetAudioLevel, read by the meter anim.
 	audioLevel atomic.Uint64
+
+	// volumeSeeded is true once the device has an authoritative volume this
+	// run: seeded from the controller's stored startupVolume on the first
+	// config push (SeedVolume), or set by any button press / volume_set
+	// before that. While false, the device must not report volume_state —
+	// the controller persists every report into startupVolume, and a boot-
+	// default report would clobber the saved value (the reboot-reset bug).
+	volumeSeeded atomic.Bool
 }
 
 func NewServer(buttonController buttons.Controller, microphone mic.Microphone, speaker speaker.Speaker) *Server {
@@ -88,6 +96,16 @@ func NewServer(buttonController buttons.Controller, microphone mic.Microphone, s
 		server.paintBaseLEDs()
 	}
 
+	// Restore persisted mute state before the persist hook is wired, so the
+	// restore itself doesn't rewrite the file. Mute is device-sovereign —
+	// it must come back with or without a controller.
+	if st, ok := loadDeviceState(statePath); ok && st.Muted {
+		server.mute.RestoreMuted() // ADC only; LEDs painted after init below
+	}
+	server.mute.persist = func() {
+		saveDeviceState(statePath, deviceState{Muted: server.mute.IsMuted()})
+	}
+
 	go func() {
 		uptime, err := getUptime()
 		// Reduced from 90 seconds as server is started at the end of the boot cycle anyway.
@@ -116,24 +134,59 @@ func NewServer(buttonController buttons.Controller, microphone mic.Microphone, s
 		if err := internalLed.InitMuteButtonLED(); err != nil {
 			log.Printf("Mute button LED init failed: %v", err)
 		}
+
+		// A muted state restored from state.json was applied to the ADC
+		// before the LED hardware was ready — paint the red ring and
+		// button LED now.
+		if server.mute.IsMuted() {
+			server.mute.showMuteLEDs()
+			setMuteButtonLED(true)
+		}
 	}()
 
 	return server
 }
 
 // VolumeStepUp increases volume one step — called by button handler.
+// A button press makes the device's level authoritative (see volumeSeeded):
+// its change report updates the controller's stored value, and a config
+// push arriving later this run must not override it.
 func (s *Server) VolumeStepUp() {
+	s.volumeSeeded.Store(true)
 	s.volume.StepUp()
 }
 
 // VolumeStepDown decreases volume one step — called by button handler.
 func (s *Server) VolumeStepDown() {
+	s.volumeSeeded.Store(true)
 	s.volume.StepDown()
 }
 
 // SetVolume sets volume to an explicit level (0–175) — called by controller command.
 func (s *Server) SetVolume(level int) {
+	s.volumeSeeded.Store(true)
 	s.volume.Set(level)
+}
+
+// SeedVolume restores the controller's stored startupVolume — the source of
+// truth for volume, kept current by the volume_state echo — on the first
+// config push of each run. Applying it on *every* push would race a live
+// volume change against a stale config snapshot, and going through Set()
+// (rather than the raw tinymix write this replaced) keeps the recorded
+// level, HA entity, and hardware in agreement.
+func (s *Server) SeedVolume(level int) {
+	if s.volumeSeeded.Swap(true) {
+		return
+	}
+	log.Printf("Seeding volume from controller startupVolume=%d", level)
+	s.volume.Set(level)
+}
+
+// VolumeSeeded reports whether the device has an authoritative volume this
+// run. Until it does, the connect-time volume_state report is suppressed —
+// see the volumeSeeded field comment.
+func (s *Server) VolumeSeeded() bool {
+	return s.volumeSeeded.Load()
 }
 
 // VolumeLevel returns the current volume level (0–175).

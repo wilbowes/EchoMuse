@@ -187,11 +187,19 @@ func main() {
 			pulseCancel()
 			pulseCancel = nil
 		}
-		// Always report mute and volume state on (re)connect — the controller
-		// may have restarted and lost its record of our state.
+		// Always report mute state on (re)connect — the controller may have
+		// restarted and lost its record of our state. Volume is only
+		// reported once the device holds an authoritative level (seeded
+		// from config or set locally): the controller persists every
+		// volume_state into startupVolume, so reporting the boot-default
+		// level here is what used to clobber the saved volume on reboot.
+		// On a fresh boot the config push seeds the volume, and Set()'s
+		// change callback sends the report instead.
 		muted := s.IsMuted()
 		controlClient.SendMuteState(muted)
-		controlClient.SendVolumeState(s.VolumeLevel())
+		if s.VolumeSeeded() {
+			controlClient.SendVolumeState(s.VolumeLevel())
+		}
 		s.StopAnim() // fresh controller session owns the ring from here
 		if muted {
 			// Orange pulse overwrote the red ring — restore it.
@@ -221,6 +229,14 @@ func main() {
 	// the (partial) message so unmentioned fields keep their values.
 	controlClient.OnConfigApplied(func(msg config.ConfigMessage) {
 		applyHardwareConfig(msg)
+		// startupVolume is the controller's persisted record of this
+		// device's volume (updated on every volume_state report) — restore
+		// it through the Server, not a raw tinymix write: SeedVolume keeps
+		// the recorded level in sync and only honours the first push per
+		// run, so a reconnect's config can't stomp a live volume change.
+		if msg.StartupVolume > 0 {
+			s.SeedVolume(msg.StartupVolume)
+		}
 		applyAecConfig(canceller)
 		applyBleConfig(bleScanner)
 	})
@@ -594,9 +610,6 @@ func applyHardwareConfig(msg config.ConfigMessage) {
 		tinymix("110", strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
 		tinymix("128", strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
 		tinymix("146", strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
-	}
-	if msg.StartupVolume > 0 {
-		tinymix("61", strconv.Itoa(msg.StartupVolume), strconv.Itoa(msg.StartupVolume))
 	}
 }
 
