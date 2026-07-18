@@ -379,11 +379,18 @@ func main() {
 			if tick%10 == 0 {
 				var ms runtime.MemStats
 				runtime.ReadMemStats(&ms)
-				log.Printf("[mem] goroutines=%d heap_alloc=%dKB heap_sys=%dKB heap_idle=%dKB released=%dKB stack=%dKB rss=%dKB num_gc=%d pause_total=%dms",
+				memLine := fmt.Sprintf("[mem] goroutines=%d heap_alloc=%dKB heap_sys=%dKB heap_idle=%dKB released=%dKB stack=%dKB rss=%dKB num_gc=%d pause_total=%dms",
 					runtime.NumGoroutine(),
 					ms.HeapAlloc/1024, ms.HeapSys/1024, ms.HeapIdle/1024,
 					ms.HeapReleased/1024, ms.StackSys/1024, selfRSSKb(),
 					ms.NumGC, ms.PauseTotalNs/1e6)
+				log.Print(memLine)
+				// Forward to the controller's device_logs too — the local
+				// /tmp/server.log is RAM-backed and dies with every reboot,
+				// and the 2026-07 leak hunt needed these lines pulled over
+				// the shell proxy by hand. One message per ~5min; SendLog
+				// silently drops while disconnected, same as SendStats.
+				controlClient.SendLog("info", memLine)
 			}
 			tick++
 		}
