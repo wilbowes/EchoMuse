@@ -7,10 +7,12 @@ import (
 	"sync/atomic"
 	"log"
 	"math"
+	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"syscall"
@@ -320,6 +322,35 @@ func main() {
 	controlClient.OnVolumeSet(func(level int) {
 		s.SetVolume(level)
 	})
+
+	// Heap-profile dump on SIGUSR1 — the ~1MB/h leak hunt (2026-07-17).
+	// The device accepts no inbound connections, so instead of an HTTP pprof
+	// endpoint the profile is written to /tmp and pulled over the shell
+	// proxy: `kill -USR1 $(pidof server)` then base64 the file out. A GC
+	// runs first so the profile reflects live objects, not garbage awaiting
+	// collection. Fixed filenames (2 slots, alternating) so repeated dumps
+	// for before/after diffing can't fill /tmp.
+	usrCh := make(chan os.Signal, 1)
+	signal.Notify(usrCh, syscall.SIGUSR1)
+	go func() {
+		slot := 0
+		for range usrCh {
+			runtime.GC()
+			path := fmt.Sprintf("/tmp/heap-%d.pprof", slot)
+			f, err := os.Create(path)
+			if err != nil {
+				log.Printf("[pprof] create %s: %v", path, err)
+				continue
+			}
+			if err := pprof.WriteHeapProfile(f); err != nil {
+				log.Printf("[pprof] write %s: %v", path, err)
+			} else {
+				log.Printf("[pprof] heap profile written to %s", path)
+			}
+			f.Close()
+			slot = 1 - slot
+		}
+	}()
 
 	log.Println("Ready")
 	time.Sleep(2 * time.Second)
