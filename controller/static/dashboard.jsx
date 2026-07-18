@@ -684,7 +684,7 @@ function ConnectivityTab({ device, row }) {
         </div>
       )}
 
-      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16, alignItems:'start' }}>
+      <div className="em-grid2" style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16, alignItems:'start' }}>
         <Panel label="Current connection">
           {row('Network', currentSsid || '—')}
           {row('IP', device.ip && device.ip !== '127.0.0.1' ? device.ip : '—')}
@@ -730,7 +730,7 @@ function ConnectivityTab({ device, row }) {
           work out — including when it connects but can't reach this controller (wrong VLAN, isolated
           guest network). The previous network is only discarded once the device reports back here.
         </div>
-        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr auto', gap:12, alignItems:'end' }}>
+        <div className="em-grid2" style={{ display:'grid', gridTemplateColumns:'1fr 1fr auto', gap:12, alignItems:'end' }}>
           <div>
             <div style={{ fontFamily:mono, fontSize:9, color:'var(--text2)', letterSpacing:'0.08em', marginBottom:4 }}>SSID</div>
             <input type="text" value={ssid} disabled={busy} onChange={e => setSsid(e.target.value)}
@@ -1009,10 +1009,10 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
       {/* Fixed height (not maxHeight): every tab renders in an identical
           frame — content scrolls inside, the window never resizes as you
           move between tabs. */}
-      <div style={{ width: 'min(900px,95vw)', height: 'min(700px,90vh)', background: 'linear-gradient(170deg,#e8e4de,#d8d4cc)', border: '1px solid #b8b4ac', borderRadius: 16, boxShadow: '0 24px 80px rgba(0,0,0,0.3),0 2px 0 rgba(255,255,255,0.8) inset', display: 'flex', flexDirection: 'column', overflow: 'hidden', animation: 'fadeIn 0.15s ease' }}>
+      <div className="em-modal" style={{ width: 'min(900px,95vw)', height: 'min(700px,90vh)', background: 'linear-gradient(170deg,#e8e4de,#d8d4cc)', border: '1px solid #b8b4ac', borderRadius: 16, boxShadow: '0 24px 80px rgba(0,0,0,0.3),0 2px 0 rgba(255,255,255,0.8) inset', display: 'flex', flexDirection: 'column', overflow: 'hidden', animation: 'fadeIn 0.15s ease' }}>
         {/* Header */}
-        <div style={{ background: 'linear-gradient(180deg,#dedad2,#ccc8c0)', borderBottom: '1px solid #b0aca4', padding: '20px 24px 0', boxShadow: '0 1px 0 rgba(255,255,255,0.5) inset' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 20, marginBottom: 16 }}>
+        <div className="em-modal-head" style={{ background: 'linear-gradient(180deg,#dedad2,#ccc8c0)', borderBottom: '1px solid #b0aca4', padding: '20px 24px 0', boxShadow: '0 1px 0 rgba(255,255,255,0.5) inset' }}>
+          <div className="em-modal-headrow" style={{ display: 'flex', alignItems: 'center', gap: 20, marginBottom: 16 }}>
             <LedRing state={state} size={72}/>
             <div style={{ flex: 1, minWidth: 0 }}>
               {renaming ? (
@@ -1067,7 +1067,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
               <CircleButton onClick={onClose} title="Close">×</CircleButton>
             </div>
           </div>
-          <div style={{ display: 'flex', gap: 2 }}>
+          <div className="em-tabs" style={{ display: 'flex', gap: 2 }}>
             {TABS.map(t => (
               <button key={t} onClick={() => setTab(t)} style={{ background: tab === t ? 'linear-gradient(180deg,#e8e4de,#d8d4cc)' : 'transparent', border: tab === t ? '1px solid #b0aca4' : '1px solid transparent', borderBottom: tab === t ? '1px solid #d8d4cc' : '1px solid transparent', borderRadius: '6px 6px 0 0', fontFamily: "'DM Mono',monospace", fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.1em', padding: '7px 14px', cursor: 'pointer', color: tab === t ? 'var(--text)' : 'var(--muted)', marginBottom: -1, transition: 'color 0.15s' }}>{t}</button>
             ))}
@@ -1075,7 +1075,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
         </div>
 
         {/* Body */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: 24 }}>
+        <div className="em-modal-body" style={{ flex: 1, overflowY: 'auto', padding: 24 }}>
 
           {/* APPROVE */}
           {tab === 'approve' && (
@@ -1107,7 +1107,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
             const wwLabel = (cfgEff.owwModel || '—').replace(/_v[\d.]+$/, '').replace(/_/g, ' ');
             return (
               <div style={{ minHeight:'100%', display:'flex', flexDirection:'column', gap:16 }}>
-                <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16 }}>
+                <div className="em-grid2" style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16 }}>
                   <Panel label="Device">
                     {row('IP', (() => {
                       const ip = device.ip && device.ip !== '127.0.0.1' ? device.ip : null;
@@ -1151,7 +1151,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     : bp.listening ? 'Waiting for HA' : 'Port down (device offline)';
                   return (
                     <Panel label="Bluetooth proxy">
-                      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'0 24px' }}>
+                      <div className="em-grid2" style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'0 24px' }}>
                         <div>
                           {row('Scanner', b ? (b.scanning ? 'Scanning' : 'Stopped') : '—', b?.scanning ? '#286040' : undefined)}
                           {row('Adverts seen', b ? String(b.advertsSeen ?? 0) : '—')}
@@ -1292,7 +1292,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
               </Panel>
 
               {/* Deploy sources, side by side */}
-              <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16 }}>
+              <div className="em-grid2" style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16 }}>
                 <Panel label="GitHub Release">
                   <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)', lineHeight:1.6, marginBottom:14 }}>
                     Deploy the latest tagged release build to this device. A/B slots — the previous binary stays available for rollback.
@@ -3096,7 +3096,7 @@ function DeviceConfigForm({ config, onChange, disabled }) {
       <Stage n="01" title="Playback"
         chips={<><ScopeChip tone="controller">Controller</ScopeChip><ScopeChip tone="device">Speaker</ScopeChip></>}
         desc="Response audio: Home Assistant TTS → parametric EQ → resample → device speaker. Presets set the faders; drag any fader for a custom curve.">
-        <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 28, alignItems: 'start' }}>
+        <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 28, alignItems: 'start' }}>
           <div>
             <EqCurve bands={bands}/>
             <EqSliders bands={bands} onChange={nb => set('eqBands', nb)} disabled={disabled}/>
@@ -3136,7 +3136,7 @@ function DeviceConfigForm({ config, onChange, disabled }) {
       <Stage n="02" title="Wake word"
         chips={<ScopeChip tone="controller">Controller</ScopeChip>}
         desc="openwakeword scores the continuous mic stream on the controller. Sensitivity sets the detection threshold — attempts that score close but miss are counted as near-misses (Status tab).">
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24, alignItems: 'start' }}>
+        <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24, alignItems: 'start' }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, ...inputStyle }}>
             {WW_MODELS.map(m => (
               <div key={m.value} onClick={() => set('owwModel', m.value)} style={{
@@ -3492,17 +3492,17 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username }
       onClick={e => e.target === e.currentTarget && onClose()}>
       {/* Same fixed frame as the device Detail modal — consistent window
           size across the whole dashboard. */}
-      <div style={{ width:'min(900px,95vw)', height:'min(700px,90vh)', background:'linear-gradient(170deg,#e8e4de,#d8d4cc)', border:'1px solid #b8b4ac', borderRadius:16, boxShadow:'0 24px 80px rgba(0,0,0,0.3),0 2px 0 rgba(255,255,255,0.8) inset', display:'flex', flexDirection:'column', overflow:'hidden', animation:'fadeIn 0.15s ease' }}>
+      <div className="em-modal" style={{ width:'min(900px,95vw)', height:'min(700px,90vh)', background:'linear-gradient(170deg,#e8e4de,#d8d4cc)', border:'1px solid #b8b4ac', borderRadius:16, boxShadow:'0 24px 80px rgba(0,0,0,0.3),0 2px 0 rgba(255,255,255,0.8) inset', display:'flex', flexDirection:'column', overflow:'hidden', animation:'fadeIn 0.15s ease' }}>
 
         {/* Header */}
-        <div style={{ background:'linear-gradient(180deg,#dedad2,#ccc8c0)', borderBottom:'1px solid #b0aca4', padding:'20px 24px 0', boxShadow:'0 1px 0 rgba(255,255,255,0.5) inset' }}>
+        <div className="em-modal-head" style={{ background:'linear-gradient(180deg,#dedad2,#ccc8c0)', borderBottom:'1px solid #b0aca4', padding:'20px 24px 0', boxShadow:'0 1px 0 rgba(255,255,255,0.5) inset' }}>
           <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:16 }}>
             <div style={{ fontFamily:"'DM Sans',sans-serif", fontSize:22, color:'var(--text)', fontWeight:600, letterSpacing:'-0.02em' }}>Settings</div>
             <CircleButton onClick={onClose} title="Close">×</CircleButton>
           </div>
           {/* Same raised folder-tab treatment as the device Detail modal —
               one tab style across the dashboard. */}
-          <div style={{ display:'flex', gap:2 }}>
+          <div className="em-tabs" style={{ display:'flex', gap:2 }}>
             {TABS.map(t => (
               <button key={t} onClick={() => setTab(t)} style={{ background: tab === t ? 'linear-gradient(180deg,#e8e4de,#d8d4cc)' : 'transparent', border: tab === t ? '1px solid #b0aca4' : '1px solid transparent', borderBottom: tab === t ? '1px solid #d8d4cc' : '1px solid transparent', borderRadius: '6px 6px 0 0', fontFamily: "'DM Mono',monospace", fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.1em', padding: '7px 14px', cursor: 'pointer', color: tab === t ? 'var(--text)' : 'var(--muted)', marginBottom: -1, transition: 'color 0.15s' }}>{TAB_LABELS[t]}</button>
             ))}
@@ -3510,7 +3510,7 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username }
         </div>
 
         {/* Body */}
-        <div style={{ overflowY:'auto', padding:'24px 28px 32px', flex:1 }}>
+        <div className="em-modal-body" style={{ overflowY:'auto', padding:'24px 28px 32px', flex:1 }}>
 
           {tab === 'fleet' && (
             <>
@@ -3702,10 +3702,10 @@ function App() {
   const selectedDevice = selected ? devices.find(d => d.device_id === selected) : null;
 
   return (
-    <div style={{ minHeight: '100vh', padding: '32px 36px 60px' }}>
+    <div className="em-page" style={{ minHeight: '100vh', padding: '32px 36px 60px' }}>
 
       {/* Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: 36 }}>
+      <div className="em-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: 36 }}>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 14 }}>
           <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 28, color: 'var(--text)', fontWeight: 600, letterSpacing: '-0.02em' }}>EchoMuse</div>
           <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)', letterSpacing: '0.12em', textTransform: 'uppercase' }}>Device Management</div>
@@ -3723,7 +3723,7 @@ function App() {
       </div>
 
       {/* Summary */}
-      <div style={{ display: 'flex', gap: 10, marginBottom: 36 }}>
+      <div className="em-summary" style={{ display: 'flex', gap: 10, marginBottom: 36 }}>
         {[
           ['Online', `${online}/${approved.length}`, online === approved.length ? '#286040' : '#806010'],
           ['Active', active, active > 0 ? '#2060b0' : 'var(--muted)'],
@@ -3736,7 +3736,7 @@ function App() {
           </div>
         ))}
         {release && (
-          <div style={{ background: 'linear-gradient(160deg,#2a2e28,#1e2219)', border: '1px solid #1a1c18', borderRadius: 8, padding: '12px 18px', flex: 2, boxShadow: 'inset 0 2px 6px rgba(0,0,0,0.5)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div className="em-summary-release" style={{ background: 'linear-gradient(160deg,#2a2e28,#1e2219)', border: '1px solid #1a1c18', borderRadius: 8, padding: '12px 18px', flex: 2, boxShadow: 'inset 0 2px 6px rgba(0,0,0,0.5)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <div>
               <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 8, color: 'var(--lcd-dim)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 6 }}>Latest Release</div>
               <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 18, color: 'var(--lcd-green)', lineHeight: 1 }}>{release.version}</div>

@@ -26,6 +26,31 @@
       --muted:     #8a8680;
     }
     html, body { height: 100%; background: #ccc8c0; }
+
+    /* Mobile layout — the dashboard is inline-styled, so phone-width
+       adjustments live here as class-targeted media overrides (the classes
+       are on the structural containers in dashboard.jsx). !important is
+       required to beat the inline styles; keep these to layout only. */
+    @media (max-width: 640px) {
+      .em-page    { padding: 16px 12px 48px !important; }
+      .em-header  { flex-wrap: wrap !important; gap: 10px !important; margin-bottom: 20px !important; }
+      .em-summary { flex-wrap: wrap !important; }
+      .em-summary > div { flex: 1 1 40% !important; }
+      .em-summary > .em-summary-release { flex: 1 1 100% !important; }
+      /* Modals go full-screen — the desktop frame is min(900px,95vw) ×
+         min(700px,90vh), which leaves useless slivers of backdrop on a
+         phone. 100dvh tracks the browser chrome collapsing on scroll. */
+      .em-modal      { width: 100vw !important; height: 100dvh !important; border-radius: 0 !important; }
+      .em-modal-head { padding: 12px 14px 0 !important; }
+      .em-modal-headrow { flex-wrap: wrap !important; gap: 10px !important; }
+      .em-modal-body { padding: 14px !important; }
+      /* Two-column content grids stack on phones. */
+      .em-grid2 { grid-template-columns: 1fr !important; }
+    }
+    /* Tab strips scroll horizontally instead of overflowing on any width. */
+    .em-tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+    .em-tabs::-webkit-scrollbar { display: none; }
+    .em-tabs > button { flex-shrink: 0; }
   </style>
 </head>
 <body>
