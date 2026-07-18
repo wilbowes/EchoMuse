@@ -6,20 +6,43 @@
 #
 # One package per line; lines starting with # are ignored.
 #
-# !! PLACEHOLDER — verify against Lounge before first use: the canonical
-# !! ~26-package list is the live hidden set on G090LF1180130NJG
-# !! (diff `pm list packages` against `pm list packages -u`). The entries
-# !! below are the confidently-known subset reconstructed from the
-# !! 2026-07-15 session; sync this file with the device before relying on it.
-com.amazon.comms.tachyon
-com.amazon.alexa.beaconbroadcaster
-com.amazon.whisperjoin.middleware
-com.amazon.whisperjoin.wss.wifiprovisioner
-com.amazon.device.smarthome.dshs.services
-com.amazon.device.smarthome.adapters.wifi
-com.amazon.device.crashmanager
-com.amazon.device.logmanager
-com.amazon.device.csmbluetooth.service
-com.amazon.mediaplayeragent
-com.amazon.kindleautomatictimezone
+# Canonical list = the live hidden set pulled from the Lounge device
+# (G090LF1180130NJG) 2026-07-18: diff of `pm list packages` against
+# `pm list packages -u` — 31 packages. Validated in service since
+# 2026-07-15: −130MB RAM, cpu_avg −2-3pp, Java apps 24→7, no voice
+# regressions. Deliberately NOT hidden (needed): zygote/system_server,
+# surfaceflinger, mediaserver, echoaudioservice, device.settings,
+# simplelauncher, NativeAccessorProxyServices, MTK connectivity.
+# whisperjoin.wss.wifiprovisioner + smarthome.adapters.wifi are handled
+# by the Disable Alexa step (pm disable works for those), not here.
 amazon.speech.sim
+com.amazon.adep
+com.amazon.alexa.beaconbroadcaster
+com.amazon.banyan.core
+com.amazon.client.metrics
+com.amazon.cmb
+com.amazon.comms.headlesstachyon
+com.amazon.device.crashmanager
+com.amazon.device.csmbluetooth.headlessUxController
+com.amazon.device.csmbluetooth.service
+com.amazon.device.gadgetscontrolmanager
+com.amazon.device.logmanager
+com.amazon.device.messaging
+com.amazon.device.networkderegistrationcontroller
+com.amazon.device.smarthome.adapters.ble
+com.amazon.device.smarthome.adapters.echo
+com.amazon.device.smarthome.dshs.endpointdetectorCA
+com.amazon.device.smarthome.dshs.headlessux
+com.amazon.device.smarthome.dshs.services
+com.amazon.device.smarthome.ota
+com.amazon.device.software.ota
+com.amazon.diode
+com.amazon.echo.csm.oobe
+com.amazon.headlessbeacon
+com.amazon.imp
+com.amazon.kindleautomatictimezone
+com.amazon.mediaplayeragent
+com.amazon.platformsettings
+com.amazon.swags
+com.amazon.tcomm
+com.amazon.whisperjoin.middleware
