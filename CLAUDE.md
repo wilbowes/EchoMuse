@@ -137,7 +137,7 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
 
 ### Controller audio pipeline
 
-1. **Wake word** — openwakeword (ONNX) runs in a thread executor per device on `mic_queue`
+1. **Wake word** — openwakeword (ONNX) runs in a thread executor per device on `mic_queue`. When 2+ devices are connected, detections are pooled by `em_arbiter.py` for `wakeArbitrationMs` (default 300, 0 = off) and only the best-placed device answers (SNR = detection RMS / that device's noise floor; score breaks ties); losers revert their capture setup and log "Wake ceded". Stragglers within 1s of a resolved round lose to its winner rather than double-answering
 2. **Voice turn** — on wake or dot-button: drain stale frames → acquire `voice_lock` → stream mic to HA via the ESPHome satellite → receive TTS URL → fetch + ffmpeg-decode straight to 48kHz mono → EQ (`em_eq.py`) → stream back as 0x02 frames
 3. **Speaker** — the wire carries **mono** 48kHz; `_fetch_tts_audio` decodes at the wire rate (the satellite declares `supported_formats` 48k/mono/FLAC so HA transcodes at source when it can; ffmpeg resamples otherwise — no numpy resample step anymore). The device duplicates L=R at the ALSA write (stereo ALSA config is an I2S/codec constraint, not a wire one). Device buffers ~5.5s (`audioChanDepth`) and holds playback until ~1s is queued or EOS arrives (`primePeriods`) — WiFi-stall protection for marginal links
 
@@ -186,7 +186,7 @@ Device-side payloads the controller distributes (`start_server.sh` via `/api/pro
 
 `config.ConfigMessage` JSON fields (camelCase) are sent from controller to device on connect and on per-device config change. Non-zero fields are applied; zero/nil fields are ignored (partial update). Changes take effect immediately — no restart required.
 
-Configurable parameters: `vadThreshold`, `vadSpeechMs`, `vadSilenceMs`, `owwThreshold`, `owwModel`, `adcDigitalGain`, `adcMicpga`, `micGainDb`, `startupVolume`, `beamAngle`, `beamformingEnabled`, `aecEnabled`, `aecDelayMs`, `aecTailMs`, `bargeInEnabled`, `bargeInThreshold`, `bleProxyEnabled`.
+Configurable parameters: `vadThreshold`, `vadSpeechMs`, `vadSilenceMs`, `owwThreshold`, `owwModel`, `adcDigitalGain`, `adcMicpga`, `micGainDb`, `startupVolume`, `beamAngle`, `beamformingEnabled`, `aecEnabled`, `aecDelayMs`, `aecTailMs`, `bargeInEnabled`, `bargeInThreshold`, `bleProxyEnabled`, `wakeArbitrationMs` (controller-consumed; device ignores it).
 
 ### Volume / mute persistence
 

@@ -637,6 +637,8 @@ async def _post_device_config(request: web.Request) -> web.Response:
             live.barge_in_enabled = bool(config["bargeInEnabled"])
         if "bargeInThreshold" in config:
             live.barge_threshold = float(config["bargeInThreshold"])
+        if "wakeArbitrationMs" in config:
+            live.wake_arb_ms = int(config["wakeArbitrationMs"])
         if "eqBands" in config:
             live.eq_bands = config["eqBands"]
         if "eqLoudness" in config:
@@ -2086,6 +2088,8 @@ async def _post_global_config(request: web.Request) -> web.Response:
             live.barge_in_enabled = bool(config["bargeInEnabled"])
         if "bargeInThreshold" in config:
             live.barge_threshold = float(config["bargeInThreshold"])
+        if "wakeArbitrationMs" in config:
+            live.wake_arb_ms = int(config["wakeArbitrationMs"])
         if "eqBands" in config:
             live.eq_bands = config["eqBands"]
         if "eqLoudness" in config:
