@@ -69,6 +69,7 @@ import em_db as db
 import em_api as api
 import em_ns
 import em_oww_models
+import em_player
 
 # ── VAD sentinels ──────────────────────────────────────────────────────────────
 # Queue items marking end-of-speech in mic_queue/voice_queue, in place of
@@ -186,10 +187,21 @@ MEDIA_PLAYER_FEATURES = int(
     MediaPlayerEntityFeature.PAUSE
     | MediaPlayerEntityFeature.STOP
     | MediaPlayerEntityFeature.PLAY
+    # PLAY_MEDIA + BROWSE_MEDIA: real playback via em_player — HA's media
+    # browser / Music Assistant / play_media service all funnel into
+    # MediaPlayerCommandRequest.media_url. Browsing itself is HA-side.
+    | MediaPlayerEntityFeature.PLAY_MEDIA
+    | MediaPlayerEntityFeature.BROWSE_MEDIA
     | MediaPlayerEntityFeature.VOLUME_SET
     | MediaPlayerEntityFeature.VOLUME_MUTE
     | MediaPlayerEntityFeature.MEDIA_ANNOUNCE
 )
+
+_MP_STATE = {
+    "idle":    MediaPlayerState.IDLE,
+    "playing": MediaPlayerState.PLAYING,
+    "paused":  MediaPlayerState.PAUSED,
+}
 
 # Voice assistant feature flags advertised to HA.
 # ANNOUNCE is required to trigger VoiceAssistantConfigurationRequest
@@ -360,12 +372,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         if isinstance(msg, (api_pb2.SubscribeStatesRequest,
                              api_pb2.SubscribeHomeAssistantStatesRequest)):
             log.debug(f"[{self._log_name}] {type(msg).__name__} from {self.peer}")
-            yield api_pb2.MediaPlayerStateResponse(
-                key=MEDIA_PLAYER_KEY,
-                state=MediaPlayerState.IDLE,
-                volume=self._current_volume,
-                muted=False,
-            )
+            yield self._media_state_msg()
             return
 
         if isinstance(msg, api_pb2.SubscribeVoiceAssistantRequest):
@@ -394,6 +401,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             return
 
         if isinstance(msg, api_pb2.MediaPlayerCommandRequest):
+            device_id = (self._owning_server.device_id
+                         if self._owning_server is not None else None)
             if msg.has_volume and self._owning_server is not None:
                 # HA set an explicit volume — convert float (0.0–1.0) to device
                 # integer (0–175) and forward to the physical device.
@@ -407,17 +416,40 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     asyncio.create_task(send_fn(level))
                 else:
                     log.warning(f"[{self._log_name}] volume set requested but device not connected")
-            elif msg.has_command:
-                log.debug(
-                    f"[{self._log_name}] MediaPlayerCommandRequest: "
-                    f"command={msg.command} (unhandled)"
+            if msg.has_media_url and device_id is not None:
+                if msg.has_announcement and msg.announcement:
+                    # play_media with announce=true — same contract as
+                    # VoiceAssistantAnnounceRequest (interrupts music via
+                    # the standalone-play wrapper, resumes after).
+                    log.info(f"[{self._log_name}] play_media announce: {msg.media_url!r}")
+                    asyncio.create_task(self._fetch_and_play_announce(msg.media_url))
+                else:
+                    log.info(f"[{self._log_name}] play_media: {msg.media_url!r}")
+                    asyncio.create_task(em_player.play(device_id, msg.media_url))
+            elif msg.has_command and device_id is not None:
+                cmd = msg.command
+                if cmd == api_pb2.MEDIA_PLAYER_COMMAND_PAUSE:
+                    asyncio.create_task(em_player.pause(device_id))
+                elif cmd == api_pb2.MEDIA_PLAYER_COMMAND_PLAY:
+                    asyncio.create_task(em_player.resume(device_id))
+                elif cmd == api_pb2.MEDIA_PLAYER_COMMAND_STOP:
+                    asyncio.create_task(em_player.stop(device_id))
+                else:
+                    log.debug(
+                        f"[{self._log_name}] MediaPlayerCommandRequest: "
+                        f"command={cmd} (unhandled)"
+                    )
+            # Optimistic for play_media (the feed pushes the authoritative
+            # state as soon as the decoder is up); current state otherwise.
+            if msg.has_media_url and not (msg.has_announcement and msg.announcement):
+                yield api_pb2.MediaPlayerStateResponse(
+                    key=MEDIA_PLAYER_KEY,
+                    state=MediaPlayerState.PLAYING,
+                    volume=self._current_volume,
+                    muted=False,
                 )
-            yield api_pb2.MediaPlayerStateResponse(
-                key=MEDIA_PLAYER_KEY,
-                state=MediaPlayerState.IDLE,
-                volume=self._current_volume,
-                muted=False,
-            )
+            else:
+                yield self._media_state_msg()
             return
 
         if isinstance(msg, api_pb2.SubscribeHomeassistantServicesRequest):
@@ -571,6 +603,21 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             self._tts_event.set()  # unblock turn waiter
 
     # ── Announcement handling ────────────────────────────────────────────
+
+    def _media_state_msg(self) -> "api_pb2.MediaPlayerStateResponse":
+        """Current media_player state as HA should see it (em_player truth)."""
+        device_id = (self._owning_server.device_id
+                     if self._owning_server is not None else None)
+        st = _MP_STATE.get(
+            em_player.state(device_id) if device_id else "idle",
+            MediaPlayerState.IDLE,
+        )
+        return api_pb2.MediaPlayerStateResponse(
+            key=MEDIA_PLAYER_KEY,
+            state=st,
+            volume=self._current_volume,
+            muted=False,
+        )
 
     async def _fetch_and_play_announce(self, media_id: str) -> None:
         """
@@ -1569,6 +1616,24 @@ def cancel_voice_turn(device_id: str) -> None:
     if satellite is None:
         return
     satellite.cancel_turn()
+
+
+async def push_media_state(device_id: str, state: str) -> None:
+    """
+    em_player → HA: proactive MediaPlayerStateResponse on session state
+    changes (play/pause/stop/finish). Best-effort — no HA connection, no
+    push; HA re-reads state on its next SubscribeStates anyway.
+    """
+    server = get_server(device_id)
+    if server is None:
+        return
+    satellite = server.get_satellite()
+    if satellite is None:
+        return
+    try:
+        satellite._send_one(satellite._media_state_msg())
+    except Exception as e:
+        log.debug(f"[{device_id}] media state push failed: {e}")
 
 
 def update_oww_model(device_id: str, model_id: str) -> None:

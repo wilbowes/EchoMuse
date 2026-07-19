@@ -149,3 +149,31 @@ def apply(
     filtered = sosfilt(sos, samples)
     filtered = np.clip(filtered, -32768, 32767).astype(np.int16)
     return filtered.tobytes()
+
+
+class StreamingEQ:
+    """
+    Chunk-by-chunk EQ with filter state carried across calls — for audio
+    that can't be processed as one buffer (music streams). apply() on
+    independent chunks would reset the biquad states at every boundary
+    and click; this is bit-identical to apply() over the concatenation.
+    """
+
+    def __init__(self, sample_rate: int, bands: list | None = None,
+                 loudness: bool = False):
+        if bands is None:
+            bands = DEFAULT_BANDS
+        if len(bands) != NUM_BANDS:
+            bands = list(bands) + [0.0] * (NUM_BANDS - len(bands))
+        if not loudness and all(b == 0.0 for b in bands):
+            self._sos = None  # flat — pure passthrough
+        else:
+            self._sos = build_sos(bands, sample_rate, loudness)
+            self._zi  = np.zeros((self._sos.shape[0], 2), dtype=np.float64)
+
+    def process(self, pcm: bytes) -> bytes:
+        if self._sos is None or len(pcm) < 2:
+            return pcm
+        samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
+        filtered, self._zi = sosfilt(self._sos, samples, zi=self._zi)
+        return np.clip(filtered, -32768, 32767).astype(np.int16).tobytes()
