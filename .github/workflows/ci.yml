@@ -33,12 +33,14 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: device/go.mod
-      # Host-side tests only exercise pure-Go logic (led, beamformer,
-      # state machine, animator, aec framing) — hardware paths are
-      # interface-mocked, and the vendored speexdsp C compiles with cgo.
+          cache-dependency-path: device/go.sum
+      # cmd/ imports the hardware bindings, which carry //go:build server
+      # (device builds pass -tags server) — listing cmd on a host platform
+      # fails package setup. Wildcards skip tag-excluded packages, so
+      # internal/... + pkg/... covers every host-testable package.
       - name: Run go test
         working-directory: device
-        run: go test ./...
+        run: go test ./internal/... ./pkg/...
 
   device-vet:
     name: Device go vet
@@ -50,6 +52,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: device/go.mod
+          cache-dependency-path: device/go.sum
       - name: Run go vet
         working-directory: device
-        run: go vet ./...
+        run: go vet ./internal/... ./pkg/...

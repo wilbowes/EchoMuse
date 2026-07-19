@@ -175,7 +175,8 @@ func TestContextCancelReleasesMicStream(t *testing.T) {
 	go func() { connectDone <- d.connect(ctx, addr) }()
 
 	// Wait for connect to publish the conn, then start the wake stream on it.
-	deadline := time.Now().Add(2 * time.Second)
+	// Generous deadline: cold CI runners have missed 2s.
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		d.connMu.Lock()
 		ready := d.conn != nil
