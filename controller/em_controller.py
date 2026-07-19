@@ -70,6 +70,7 @@ import em_api as api
 import em_pki
 import em_eq
 import em_scenes
+import em_arbiter
 import em_esphome as esphome
 import em_ble_proxy
 import em_oww_models
@@ -225,6 +226,10 @@ class Device:
         # without requiring a device reconnect.
         self.oww_threshold: float = OWW_THRESHOLD
         self.oww_model:     str   = f"{OWW_MODEL}_v0.1"
+        # Multi-device wake arbitration window (ms, 0 = off). Only
+        # consulted when 2+ devices are connected — a solo fleet never
+        # pays the latency.
+        self.wake_arb_ms:   int   = 300
         # Q1 fix (2026-07-05 review): openwakeword's built-in speexdsp noise
         # suppressor — 16kHz-native, applied controller-side, only to the
         # wake path (cannot affect STT audio since STT never sees it). Like
@@ -409,6 +414,10 @@ class Device:
 # The live device registry — keyed by device_id (ro.serialno).
 # em_api receives a reference to this dict at startup.
 _devices: dict[str, Device] = {}
+
+# One arbiter for the fleet — elects a single responder when one
+# utterance wakes several Echos (see em_arbiter.py).
+_wake_arbiter = em_arbiter.WakeArbiter()
 
 # Shell session coordination — keyed by device_id.
 #
@@ -1287,6 +1296,43 @@ async def wake_word_listener(device: Device):
                         # restart; released by beam_unlock post-turn (and
                         # implicitly by any TTS mic stop/start cycle).
                         await device.beam_lock()
+
+                        # Multi-device arbitration: if this utterance also
+                        # woke another Echo, only the best-placed one should
+                        # answer. Capture routing (oww_paused, beam lock) is
+                        # already set up above ON PURPOSE — the winner's
+                        # command audio must be flowing from the first
+                        # syllable, so we arm optimistically and revert on
+                        # loss. Solo fleets skip the window entirely.
+                        won_by = device.device_id
+                        if device.wake_arb_ms > 0 and len(_devices) > 1:
+                            snr = float(rms) / max(device.noise_floor, 1e-5)
+                            won_by = await _wake_arbiter.submit(
+                                device.device_id, snr, float(score),
+                                device.wake_arb_ms / 1000.0,
+                            )
+                        if won_by != device.device_id:
+                            device.oww_paused.clear()
+                            device.last_wake = None
+                            await device.beam_unlock()
+                            ceded = 0
+                            while not device.voice_queue.empty():
+                                try:
+                                    device.voice_queue.get_nowait()
+                                    ceded += 1
+                                except asyncio.QueueEmpty:
+                                    break
+                            log.info(
+                                f"[{device.device_id}] Wake ceded to "
+                                f"{won_by} (arbitration; score={score:.3f}, "
+                                f"discarded {ceded} frames)"
+                            )
+                            db.log_device(
+                                device.device_id, "info", "controller",
+                                f"Wake ceded to {won_by} (arbitration)"
+                            )
+                            continue
+
                         await _run_voice_locked(device, trigger_label=f"wakeword({score:.3f})", is_wakeword=True)
                         # Back to ch6 omni for wake listening. Belt-and-braces
                         # for turns that never restarted the stream (no-TTS
@@ -1527,6 +1573,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         await device.send_control({"type": "config", **config})
         device.oww_threshold = float(config.get("owwThreshold", OWW_THRESHOLD))
         device.oww_model     = config.get("owwModel", f"{OWW_MODEL}_v0.1")
+        device.wake_arb_ms   = int(config.get("wakeArbitrationMs", 300))
         device.oww_speex_ns  = bool(config.get("owwSpeexNs", False))
         device.ns_asr        = bool(config.get("nsAsr", False))
         device.barge_in_enabled = bool(config.get("bargeInEnabled", False))

@@ -3248,6 +3248,7 @@ function DeviceConfigForm({ config, onChange, disabled }) {
               <Toggle label="Speex denoise" sub="cleans audio before scoring — try in noisy rooms" value={config.owwSpeexNs ?? false} onChange={v => set('owwSpeexNs', v)}/>
               <Toggle label="Barge-in" sub="wake word interrupts playback — enable AEC first" value={config.bargeInEnabled ?? false} onChange={v => set('bargeInEnabled', v)}/>
               <Slider label="Barge threshold" sub="wake confidence needed during playback — speech-over-TTS scores low, ~0.10 is typical with AEC" value={config.bargeInThreshold ?? 0.10} min={0.05} max={0.9} step={0.05} onChange={v => set('bargeInThreshold', v)}/>
+              <Slider label="Arbitration window" sub="ms to pool wakes across Echos — closest device answers; 0 disables, solo fleets skip it" value={config.wakeArbitrationMs ?? 300} min={0} max={1000} step={50} unit="ms" onChange={v => set('wakeArbitrationMs', v)}/>
             </div>
           </div>
         </div>

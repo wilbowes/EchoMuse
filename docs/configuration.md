@@ -79,6 +79,15 @@ controller's data volume, appears as a tile next to the stock words, and
 takes effect immediately on selection. The `×` on an unselected custom tile
 deletes it.
 
+### Arbitration window
+With more than one Echo, saying the wake word in earshot of two of them
+used to start two competing conversations. Now detections landing within
+this window (default 300ms) are pooled and only the device that heard you
+best — loudest relative to its own room's background noise — answers; the
+others quietly stand down. The cost is that every wake waits out the
+window before responding, so don't crank it; 0 disables, and it never
+applies when only one device is online.
+
 ### Sensitivity (Precise ↔ Eager)
 The confidence bar the recogniser must clear.
 
