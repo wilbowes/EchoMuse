@@ -165,6 +165,11 @@ MDNS_NAME    = os.environ.get("MDNS_NAME", "echomuse")
 # Defaults to the real controller version (version.py) so HA's device page
 # shows the same thing as the dashboard header; env var kept as an override.
 from version import VERSION as _CONTROLLER_VERSION
+# HA's ESPHome integration displays the segment after the dot in
+# project_name as the device Model (overriding DeviceInfo's model field),
+# so carry the hardware model there — not the device label.
+ESPHOME_DEVICE_MODEL = "Echo Dot Gen 2 (biscuit)"
+
 ESPHOME_PROJECT_VERSION = os.environ.get(
     "ESPHOME_PROJECT_VERSION", _CONTROLLER_VERSION
 )
@@ -312,12 +317,12 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 friendly_name=f"{self.label} Voice Assistant",
                 mac_address=self.mac_address,
                 manufacturer="EchoMuse",
-                model="Echo Dot Gen 2 (biscuit)",
+                model=ESPHOME_DEVICE_MODEL,
                 # CRITICAL: dot notation required — HA's manager.py does
                 # project_name.split(".") unconditionally. No dot → IndexError
                 # → device silently never appears in Devices & Services.
                 # (session handoff finding #1)
-                project_name=f"EchoMuse.{self.label}",
+                project_name=f"EchoMuse.{ESPHOME_DEVICE_MODEL}",
                 project_version=ESPHOME_PROJECT_VERSION,
                 voice_assistant_feature_flags=VOICE_ASSISTANT_FLAGS,
             )
@@ -1685,7 +1690,7 @@ def _make_device_mdns_info(device_id: str, label: str, port: int) -> ServiceInfo
             # _serialno_to_mac derivation, so they agree).
             "mac": _serialno_to_mac(device_id).replace(":", "").lower(),
             "network": "ethwifi",
-            "project_name": f"EchoMuse.{label}",
+            "project_name": f"EchoMuse.{ESPHOME_DEVICE_MODEL}",
             "project_version": ESPHOME_PROJECT_VERSION,
         },
         server=f"{svc_name}.local.",
