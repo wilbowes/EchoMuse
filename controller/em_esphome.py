@@ -1333,7 +1333,18 @@ async def _register_device_server(device_id: str, label: str | None) -> DeviceES
     Doesn't start the TCP listener — the port comes up when the physical
     device connects to the controller (device_connected()). This prevents
     the setup wizard from running against an offline device.
+
+    Idempotent: devices reconnect while start_esphome_servers is still
+    iterating, so this can race against itself between the startup loop and
+    device_connected(). Whoever lands in _servers first wins — a duplicate
+    create would strand HA on the first server's listener while the registry
+    points at a never-started second one (observed 2026-07-19: doubled mDNS
+    registration, Retreat's satellite unreachable via get_server()).
     """
+    existing = _servers.get(device_id)
+    if existing is not None:
+        return existing
+
     loop  = asyncio.get_event_loop()
     label = label or f"EchoMuse {device_id[-8:]}"
     # Use MAC from device_id (ro.serialno) as a stable identifier.
@@ -1350,6 +1361,12 @@ async def _register_device_server(device_id: str, label: str | None) -> DeviceES
     # Get OWW model from device config
     config       = await loop.run_in_executor(None, db.get_device_config, device_id)
     oww_model_id = config.get("owwModel", "hey_jarvis_v0.1")
+
+    # Re-check after the awaits above — a concurrent caller may have
+    # created the server while we were in the executor.
+    existing = _servers.get(device_id)
+    if existing is not None:
+        return existing
 
     server = DeviceESPhomeServer(
         device_id=device_id,
