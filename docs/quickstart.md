@@ -114,6 +114,10 @@ add-ons:
 2. Assign the new device to your Assist pipeline (Settings → Voice
    assistants).
 
+The device appears in HA as **`<name> Voice Assistant`** (e.g. "Lounge
+Voice Assistant"), with Model "Echo Dot Gen 2 (biscuit)" — the Bluetooth
+proxy, if enabled, shows up separately as `<name> BT Proxy`.
+
 > **Auto-discovery:** if Home Assistant runs on the **same subnet** as the
 > controller, devices should also pop up automatically as discovered
 > "echomuse-…" entries (fixed in v2.7.5 — earlier versions advertised
