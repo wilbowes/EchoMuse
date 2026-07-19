@@ -6,18 +6,18 @@ import (
 )
 
 // Mute-button LED — the discrete red LED under the mic-off button, separate
-// from the 12-LED ring. Stock FireOS drives it through GPIO 445 via sysfs
-// (libled_hal.so: IssiLedDevice::exportMuteButtonGPIO / k_muteButtonGPIOAddress
-// = 0x1BD = 445, read straight out of the ELF 2026-07-12). The line is
-// ACTIVE-LOW: disassembly of setMuteButtonBrightness shows it streaming 0
-// to the value file for brightness > 47 (LED on) and 1 for brightness ≤ 36
-// (LED off) — get this backwards and the button glows whenever the device
-// is unmuted. It's a plain on/off GPIO, not a PWM channel, so "brightness"
-// is binary. The stock ledcontroller service exports it at boot before
-// EchoMuse stops that service, but export is re-done here defensively in
-// case boot ordering ever changes.
+// from the 12-LED ring. The line is SoC GPIO bank 5 bit 7 = pin 87 = sysfs
+// gpio444, ACTIVE-HIGH (1 = lit). Found by regmap-tracing stock FireOS on a
+// live biscuit (2026-07-19): each mute press writes pinctrl DIR-set 0x54
+// then DOUT-set 0x454 (on) / DOUT-clr 0x458 (off), bit 7, bank 5.
+//
+// Do not trust libled_hal.so here: its k_muteButtonGPIOAddress = 0x1BD (445)
+// is off by one from the kernel's sysfs numbering — pin 88's pad is muxed to
+// MSDC2_DAT1 and writes to gpio445 reach nothing (v2.9.4 and earlier drove
+// it; the button never lit). Stock itself bypasses sysfs via the /dev/mtgpio
+// ioctl, which is why the HAL constant never had to agree with gpiolib.
 const (
-	muteButtonGPIO      = "445"
+	muteButtonGPIO      = "444"
 	gpioExportPath      = "/sys/class/gpio/export"
 	muteButtonDirPath   = "/sys/class/gpio/gpio" + muteButtonGPIO + "/direction"
 	muteButtonValuePath = "/sys/class/gpio/gpio" + muteButtonGPIO + "/value"
@@ -39,11 +39,11 @@ func InitMuteButtonLED() error {
 }
 
 // SetMuteButtonLED switches the red LED under the mic-off button.
-// Active-low (see package comment): 0 = on, 1 = off.
+// Active-high (see package comment): 1 = on, 0 = off.
 func SetMuteButtonLED(on bool) error {
-	v := []byte("1")
+	v := []byte("0")
 	if on {
-		v = []byte("0")
+		v = []byte("1")
 	}
 	if err := os.WriteFile(muteButtonValuePath, v, 0644); err != nil {
 		return fmt.Errorf("mute button LED: write value: %w", err)

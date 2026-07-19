@@ -81,8 +81,12 @@ func (vc *volumeController) readFromDevice() int {
 	return l
 }
 
-// Set applies a new volume level (0–175), updates tinymix and LEDs.
-func (vc *volumeController) Set(level int) {
+// Set applies a new volume level (0–175) and updates tinymix. showRing
+// paints the cyan volume arc for the 2s display window — physical button
+// presses pass true; remote sets (controller command / HA) and the boot-time
+// SeedVolume pass false so the ring doesn't light when nobody is at the
+// device.
+func (vc *volumeController) Set(level int, showRing bool) {
 	if level < volumeMin {
 		level = volumeMin
 	}
@@ -106,7 +110,9 @@ func (vc *volumeController) Set(level int) {
 	}
 
 	log.Printf("Volume set to %d/%d", level, volumeMax)
-	vc.showLEDs(level)
+	if showRing {
+		vc.showLEDs(level)
+	}
 	if cb != nil {
 		cb(level)
 	}
@@ -124,7 +130,7 @@ func (vc *volumeController) StepUp() {
 	vc.mu.Lock()
 	level := vc.level + volumeStep
 	vc.mu.Unlock()
-	vc.Set(level)
+	vc.Set(level, true)
 }
 
 // StepDown decreases volume by one step.
@@ -132,7 +138,7 @@ func (vc *volumeController) StepDown() {
 	vc.mu.Lock()
 	level := vc.level - volumeStep
 	vc.mu.Unlock()
-	vc.Set(level)
+	vc.Set(level, true)
 }
 
 // showLEDs lights N of 12 LEDs in cyan proportional to volume, then clears after 2s.
