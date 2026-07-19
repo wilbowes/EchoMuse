@@ -74,19 +74,19 @@ Output: `build/server`
 
 ## Audio processing pipeline
 
-Each microphone buffer (a 160ms batch of 32ms periods — the ALSA reader delivers whole buffers) passes through a processing chain before VAD gating and transmission:
+Each microphone buffer (a 160ms batch of 32ms periods — the ALSA reader delivers whole buffers) passes through a processing chain:
 
 ```
-raw 9ch S24_3LE → beamformer (mic selection) → RNNoise NS → AGC → mono S16_LE → VAD gate
+raw 9ch S24_3LE → beamformer + fixed mic gain → mono S16_LE → [AEC] → [AGC] → [VAD gate] → controller
 ```
 
 **Beamformer** locks to the perimeter mic with the highest onset energy ratio at voice turn start. Onset ratio (fast/slow EWMA) is robust to continuous background noise — it picks the direction that just got louder, not the loudest direction overall.
 
-**RNNoise** (xiph/rnnoise v0.1) suppresses background noise. Vendored C source compiled via cgo — no external library or system dependency required.
+**AEC** (speexdsp, optional) subtracts the Dot's own speaker output from the mics — the basis for barge-in. Vendored C source compiled via cgo — no external library or system dependency required.
 
-**AGC** normalises level for consistent wake word and STT input. Release is frozen during silence to prevent noise floor amplification past the VAD threshold.
+**AGC** levels button-turn speech; it is deliberately never applied to the always-on wake stream. Release is frozen during silence to prevent noise floor amplification.
 
-**VAD** runs on pre-NS/AGC audio to keep threshold calibrated to mic sensitivity rather than processed level.
+**VAD gate** applies to button-turn streams only — the wake stream is sent continuously and unprocessed so the wake-word model scores uninterrupted audio. Noise suppression happens controller-side (DTLN) on the speech-to-text stream, keeping the device lean.
 
 ---
 
@@ -97,9 +97,12 @@ Tunable via environment variables on the device (overridden by controller config
 | Variable | Default | Description |
 |---|---|---|
 | `VAD_CHANNEL` | `0` | Mic channel for vad_stream endpoint (0–8) |
-| `VAD_THRESHOLD` | `0.015` | RMS threshold 0.0–1.0 (controller pushes 0.003) |
+| `VAD_THRESHOLD` | `0.004` | RMS threshold 0.0–1.0, pre-gain units (controller pushes 0.001 by default) |
 | `VAD_SPEECH_MS` | `80` | Ms of speech to open the gate |
-| `VAD_SILENCE_MS` | `600` | Ms of silence to close the gate |
+| `VAD_SILENCE_MS` | `600` | Ms of silence to close the gate (controller pushes 900 by default) |
+
+The gate applies to button-press turn streams only — the always-on wake
+stream is ungated and streams continuously.
 
 ---
 
@@ -118,7 +121,8 @@ controller loads by file path. See [`oww_forge/README.md`](oww_forge/README.md).
 - [GoTinyAlsa](https://github.com/Binozo/GoTinyAlsa) — Binozo
 - [amonet-biscuit](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/) — R0rt1z2
 - [EchoCLI](https://github.com/Dragon863/EchoCLI) — Dragon863
-- [RNNoise](https://github.com/xiph/rnnoise) — Xiph.Org Foundation (BSD-3-Clause)
+- [SpeexDSP](https://gitlab.xiph.org/xiph/speexdsp) — Xiph.Org Foundation (BSD-3-Clause) — vendored echo canceller
+- [DTLN](https://github.com/breizhn/DTLN) — Nils L. Westhausen (MIT) — controller-side noise suppression models
 
 ---
 

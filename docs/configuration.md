@@ -204,11 +204,6 @@ speech detection.
 
 ### Turn processing
 
-**Noise suppression** — an AI noise remover (RNNoise) on button-turn audio.
-Currently kept **off**: the version in the firmware expects a different
-audio format and does more harm than good until that's fixed. The toggle
-exists so the fix can be tested without a firmware update.
-
 **Auto gain (AGC)** — automatically levels your voice volume on button
 turns, so whispering and shouting come out similar. Harmless here; it's
 deliberately never applied to wake-word listening (automatic gain drifting

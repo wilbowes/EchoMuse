@@ -276,7 +276,7 @@ adb shell su -c 'ip link set p2p0 down'
 
 ## Step 8 — Install EchoMuse
 
-EchoMuse runs as a Go binary on the device. It abstracts the hardware (mic, speaker, LEDs, buttons) and connects outbound to the Clara server over two persistent WebSocket connections. There is no HTTP server on the device — no inbound ports, no iptables rules required.
+EchoMuse runs as a Go binary on the device. It abstracts the hardware (mic, speaker, LEDs, buttons) and connects outbound to the EchoMuse controller over two persistent WebSocket connections (plus a demand-opened shell plane). There is no HTTP server on the device — no inbound ports, no iptables rules required.
 
 ### Set up the binary directory (A/B slots):
 
@@ -423,11 +423,11 @@ You should hear a clean 440Hz tone.
 
 ## Step 10 — Server Setup
 
-EchoMuse connects to the Clara server via mDNS discovery. The server must be running and advertising before the device boots (or the device will retry with exponential backoff until it finds it).
+EchoMuse connects to the controller via mDNS discovery. The controller must be running and advertising before the device boots (or the device will retry with exponential backoff until it finds it).
 
 ### mDNS advertisement
 
-The Clara server advertises `_emcontroller._tcp.local` on port 8767. A dedicated `clara-mdns` container runs with `network_mode: host` to ensure multicast reaches the LAN.
+The controller advertises `_emcontroller._tcp.local` on port 8767 (with a `tls_port` TXT property pointing at the wss listener on 8770 once the PKI is up). The controller container runs with `network_mode: host` so multicast reaches the LAN.
 
 **Proxmox note:** If running in a Proxmox LXC, the bridge requires the mDNS multicast MAC to be added manually:
 
@@ -483,8 +483,8 @@ dns-sd -B _emcontroller._tcp local
 ✅ Direction estimation — onset ratio (fast/slow EWMA) robust to background noise (TV etc.)
 ✅ LED direction overlay — light green segment on listening ring during voice turn only
 ✅ LED mapping calibrated — LED 0 at 240°, confirmed from volume sweep
-✅ Audio processing pipeline — RNNoise NS (vendored v0.1 C source, cgo) + AGC per period
-✅ NS and AGC independently toggleable from dashboard — NS off (pending P0-3); AGC applies to lock_mic turns only since v2.7.0 (wake stream is permanently AGC-free)
+✅ Audio processing pipeline — speexdsp AEC (v2.7.3) + AGC; device RNNoise removed 2026-07-12, NS is controller-side DTLN on the STT stream (`nsAsr` flag)
+✅ AGC applies to lock_mic turns only since v2.7.0 (wake stream is permanently AGC-free)
 ✅ Ungated continuous wake stream (v2.7.0) — no VAD gate/AGC/preroll on the always-on stream; OWW scores uninterrupted audio; ~32KB/s per device
 ✅ Mic stream leak fixed (v2.7.0) — ownership check in streamMic exit; stop/start pairs can no longer leak a concurrent duplicate stream (historical "wake degrades over days, reboot fixes it" root cause)
 ✅ Per-room noise floor tracking (v2.7.0, controller) — measurement-only asymmetric EWMA; drives the SNR-relative 5s no-speech cutoff (wake-then-silence closes quietly again)
@@ -533,7 +533,7 @@ dns-sd -B _emcontroller._tcp local
 ✅ LED ring scenes (controller-rendered) — Standard/Airy/Malevolent/Pride/Custom palettes for the listening ring and thinking spinner (em_scenes.py); mute ring stays red and volume arc stays cyan in every scene; frames carry an explicit `listening` flag so the device's direction overlay works on any colour (falls back to the all-green heuristic for old controllers), and the overlay brightens the scene colour instead of painting green
 ✅ Dashboard live state — mute/listen/speak/offline via WebSocket events + 5s poll
 ✅ Dashboard shell terminal — browser-based root shell, Ctrl+C support
-✅ ESPHome native API satellite integration (VOICE_MODE=esphome)
+✅ ESPHome native API satellite integration (the only voice backend since 2026-07-12)
 ✅ Both devices registered in HA as voice satellites (port 16001, 16002)
 ✅ ESPHome setup wizard passes on both devices
 ✅ TTS announcements via HA Assist pipeline (MP3→PCM via ffmpeg, standalone play)
@@ -541,7 +541,7 @@ dns-sd -B _emcontroller._tcp local
 ✅ ESPHome port lifecycle — ports up/down with physical device connect/disconnect
 ✅ mDNS _esphomelib._tcp per device (device_id[-12:] suffix to avoid prefix collision)
 ✅ DB migration v2 — esphome_api_port, esphome_noise_psk columns, next_esphome_port
-✅ VOICE_MODE env var — claracore (default) or esphome, restart-to-apply
+✅ ~~VOICE_MODE env var~~ — claracore backend removed 2026-07-12; esphome is unconditional
 ✅ OWW/button-triggered voice turns in esphome mode — full wake word → STT → intent → TTS → speaker round-trip confirmed working end-to-end against real HA Core 2026.6.4
 ✅ HA-side announce (setup wizard test, push TTS) plays correctly on device — live callback lookup, not a snapshot taken at connect
 ✅ Local no-speech timeout (5s) — matches Alexa's "wake word, then silence" behaviour; scoped correctly to bounded voice turns only, never the permanent OWW listening stream
@@ -595,7 +595,7 @@ Ch7, Ch8 → unconnected
 
 ## Mic Array — What Actually Happens at Each Stage
 
-This describes the pipeline as of v2.7.1 (2026-07-07): the wake stream is **ungated and AGC-free** — the device streams every period continuously, and all adaptation lives controller-side as measurement. The only gain in the path is the fixed 24-bit mic gain (v2.7.1). NS stays off pending P0-3. The stages are in order from hardware to HA.
+This describes the pipeline as of v2.9.4 (2026-07-18; originally written for v2.7.1): the wake stream is **ungated and AGC-free** — the device streams continuously, and all adaptation lives controller-side as measurement. The only gain in the path is the fixed 24-bit mic gain (v2.7.1). Device-side NS is gone entirely (RNNoise removed 2026-07-12; noise suppression is now controller-side DTLN on the speech-to-text stream only, per-device `nsAsr` flag), and speexdsp AEC (v2.7.3+) sits in the mono path when enabled. One cadence correction to the numbers below: GoTinyAlsa delivers whole ALSA buffers, so the mic loop actually runs on **160ms batches of 2560 frames** (69120 raw bytes), not single 512-frame periods. The stages are in order from hardware to HA.
 
 Why the gate came out (2026-07-06 rework): the VAD gate's absolute RMS threshold is wrong in at least one room of every home, openwakeword is a streaming model that scores best on continuous audio (gated bursts spliced together measurably depress scores even with preroll), and the AGC's persistent gain state on a never-restarting stream rebaselined itself to each room's noise floor — the "wake word degrades over days, reboot fixes it" disease. Bandwidth was the reason for the gate and it doesn't survive arithmetic: 16kHz mono S16 is 32KB/s per device, 6× smaller than the TTS playback stream.
 
@@ -617,7 +617,8 @@ ALSA card 0 device 24 (9ch S24_3LE 16kHz)
   → vadPeriodRMS(mono) — computed for the periodic diagnostic log only
       (every ~10min, or within ~16s of a clipped sample — v2.7.1);
       does NOT gate sending on this stream (v2.7.0)
-  → [if NS enabled] proc.noiseSuppress() — RNNoise (currently OFF, pending P0-3)
+  → aec.Process(mono) — speexdsp echo cancel against the speaker's own
+      output (v2.7.3; no-op while aecEnabled=false; ~14dB when converged)
   → AGC: NEVER on the wake stream (v2.7.0 — forced off regardless of config;
       adaptive gain state on a permanent stream is a rebaselining mechanism
       by construction). agcEnabled config now applies to lock_mic turn
@@ -704,9 +705,11 @@ HA Assist:
 Controller satellite:
   → INTENT_END received → tts_event armed (prevents premature RUN_END close)
   → TTS_URL received → t_tts_url_ms logged
-  → fetch MP3 from HA TTS proxy → ffmpeg decode → 22050Hz mono S16_LE PCM
+  → fetch TTS from HA (48kHz mono FLAC when HA honours our declared
+    supported_formats) → ffmpeg decode → 48kHz mono S16_LE PCM (v2.9.4;
+    was 22050Hz + numpy resample)
   → t_tts_fetched_ms, tts_bytes logged
-  → EQ + resample 22050→48000Hz stereo
+  → EQ at 48kHz (mono end-to-end — no resample, no stereo)
   → mic_stop → device stream stops BEFORE playback starts (v2.6.5 —
     previously only in the post-turn finally, so the device processed
     63–65 frames of its own TTS echo per turn, contended the Wi-Fi radio
@@ -768,8 +771,8 @@ VAD gate, preroll ring, sentinels, and (config-gated) AGC still exist.
 
 | Stage | State | Reason |
 |---|---|---|
-| RNNoise NS | OFF | Model calibrated for 48kHz, fed 16kHz — miscalibrates speech probability, degrades HF consonants. Measured improvement when disabled. Decision pending (P0-3): speexdsp preprocessor (16kHz-native) or delete — with the wake stream now ungated, the cleaner future is NS controller-side on ASR-bound utterances only. |
-| AGC | **OFF on the wake stream, permanently** (v2.7.0 — ignores config). Config-gated on lock_mic turns only. | v2.6.5 re-enabled it after the echo fixes, but ResetAGC only runs at stream start and the wake stream never restarts — in any room with steady noise above vadThreshold, the release path walked gain up toward amplifying the noise floor (the RNNoise interlock that was meant to prevent this is dead while NS is off), then the fast attack compressed the wake word's envelope mid-utterance. Adaptive gain state on a permanent stream = rebaselining by construction. **Open item:** the fixed gain staging that should replace it — speech at 1.3m measures RMS ~0.001 vs the 0.08 the AGC used to target; wake scores dropped noticeably without it. Use the rms=/floor= values now in the OWW logs to size an adcDigitalGain/adcMicpga bump. |
+| RNNoise NS | **REMOVED** (2026-07-12) | Was calibrated for 48kHz, fed 16kHz — miscalibrated speech probability, degraded HF consonants. P0-3 resolved exactly as predicted here: deleted device-side, replaced by controller-side DTLN (`em_ns.py`, 16kHz-native) applied to the speech-to-text stream only, per-device `nsAsr` flag, default off. Wake stream stays raw. |
+| AGC | **OFF on the wake stream, permanently** (v2.7.0 — ignores config). Config-gated on lock_mic turns only. | v2.6.5 re-enabled it after the echo fixes, but ResetAGC only runs at stream start and the wake stream never restarts — in any room with steady noise above vadThreshold, the release path walked gain up toward amplifying the noise floor (the RNNoise interlock that was meant to prevent this is dead while NS is off), then the fast attack compressed the wake word's envelope mid-utterance. Adaptive gain state on a permanent stream = rebaselining by construction. The fixed gain staging that replaced it shipped in v2.7.1: `micGainDb` (+24dB default) applied to the full 24-bit sample pre-truncation. |
 | VAD gate (wake stream) | **REMOVED** (v2.7.0) | Absolute RMS threshold can't be right in every room; OWW wants continuous audio; the gate held open by ambient noise was also what let the AGC release run continuously. Still exists on lock_mic (button) streams for endpointing. |
 | Beamforming | ON in config, **lock-back selection (v2.7.2)** | Lock is commanded at wake detection (v2.7.0, beam_lock mid-stream); detection lands 300–500ms after the wake word ends, so live onset ratios had decayed and selection was known-poor. Fixed via lock-back: a ~2s ring of per-direction period energies (frozen while locked, like the baseline); Lock() scores each direction by its top-8-period burst within the window relative to its baseline, so it selects on the recorded wake word rather than the decayed present. Unit-tested (TV-vs-decayed-speaker scenario in `beamformer_test.go`). Known caveat: TTS echo enters the ring between turns — the baseline absorbs the same energy, damping its ratio, but continuation-turn locks are the weaker case until AEC. Validate direction LED against speaker position after OTA. |
 | owwSpeexNs | OFF | Available (v2.6.5, Q1): openwakeword's speexdsp suppressor, wake path only. Off by default — flip on the lounge device and A/B wake rate with TV on before fleet-wide enable. |
@@ -796,41 +799,9 @@ vadThreshold 0.001 sits comfortably between ambient and speech. Raise to 0.003�
 
 ## Voice Pipeline
 
-```
-"Hey Jarvis"
-    → on-device energy VAD (RMS ≥ 0.001, normalised, pre-AGC)
-    → binary mic frames (ch6 omni, post-RNNoise NS + AGC) → /data WebSocket → server mic_queue
-    → OpenWakeWord inference (hey_jarvis_v0.1, threshold 0.3)
-    → wake detected
-    → server: mic_stop
-    → server: LEDs solid green (listening)
-    → server: mic_start (lock_mic: true) → mic frames resume
-    → device: direction estimation → locks best perimeter mic (highest onset ratio)
-    → device: LED direction overlay on green ring (light green segment, beam-locked direction)
-    → device: audio pipeline per period:
-        raw 9ch S24_3LE → beamformer (locked mic extract) → RNNoise NS → AGC → S16_LE mono
-    → device: VAD gate open (speech periods sent), silence dropped
-    → device: speech ends → VAD gate closes → sends 0x04 (VAD end)
-    → controller: 0x04 received → sends "END" to voice server
-    → voice_server: END signal → sends THINKING → processes audio
-    → server: LEDs spin green (thinking, direction overlay stops)
-    → voice_server: Whisper large-v3 STT
-    → Clara bot → response text
-    → voice_server: Piper TTS (en_GB-alba-medium, 22050Hz)
-    → server: resample 22050→48000Hz mono→stereo
-    → server: device.speaking = True (OWW suppressed)
-    → server: 0x02 binary frames → /data WebSocket → device ALSA
-    → server: 0x03 EOS
-    → server: sleep for audio duration (prevents acoustic feedback — speaker buffers ~341ms)
-    → server: device.speaking = False
-    → server: mic_stop → device unlocks perimeter mic, direction overlay clears
-    → server: LEDs off
-    → server: stale queue drain + model reset
-    → server: mic_start (no lock_mic) → device returns to ch6 omni
-    → OWW listening resumes
-```
-
-### ESPHome mode (VOICE_MODE=esphome)
+Home Assistant's Assist pipeline (via the impersonated ESPHome satellite) is
+the only voice backend — the legacy claracore WebSocket path this section
+used to open with was removed 2026-07-12.
 
 ```
 "Hey Jarvis"
@@ -845,10 +816,13 @@ vadThreshold 0.001 sits comfortably between ambient and speech. Raise to 0.003�
         stream only if it arrives first. 20s hard cap as backstop.
     → HA: STT (Whisper) → intent → TTS
     → HA: VoiceAssistantAnnounceRequest(media_id=url, text="...")
-    → controller: mic_stop (acoustic-feedback guard, v2.6.5)
-    → controller: fetch MP3 (one retry on transient failure, ffmpeg decode
-      capped at 15s) → 22050Hz mono S16_LE PCM
-    → controller: EQ + resample 22050→48000Hz stereo → stream to device ALSA
+    → controller: mic_stop (acoustic-feedback guard, v2.6.5; skipped when
+      barge-in is enabled — AEC keeps the live mic usable during playback)
+    → controller: fetch TTS (one retry on transient failure; the satellite
+      declares supported_formats 48kHz/mono/FLAC so recent HA transcodes at
+      source) → ffmpeg decode straight to 48kHz mono S16_LE (cap 15s)
+    → controller: EQ at 48kHz (no resample step since v2.9.4) → stream to
+      device ALSA as mono 0x02 frames
     → controller: MediaPlayerState ANNOUNCING → AnnounceFinished → IDLE
     → if HA set continue_conversation: mic_start → next turn immediately
       (preroll_discard=0), no wake word needed (v2.6.5 C2)
@@ -914,7 +888,11 @@ All three share the same `frameTypeMic` (`0x01`) wrapper and seq header — the 
 
 Server → Device (speaker frames):
 ```
-[0x02][stereo S16_LE PCM, 8192 bytes = one ALSA period]
+[0x02][mono S16_LE PCM, 4096 bytes = one ALSA period]   — mono on the wire
+                                                           since v2.8.4; the
+                                                           device duplicates
+                                                           L=R at the ALSA
+                                                           write
 [0x03] end of stream
 ```
 
@@ -937,6 +915,9 @@ The controller proxies bytes verbatim in both modes; the framing is interpreted 
 Device boots
   → orange LED pulse (searching for server)
   → mDNS browse: _emcontroller._tcp.local (grandcat/zeroconf)
+  → credentials at /data/local/etc/echomuse/ + tls_port TXT property?
+      → dial wss://:8770 with pinned CA + X-EM-Token (v2.9.3)
+      → else plain ws://:8767 (rollout fallback until REQUIRE_DEVICE_TLS=1)
   → connect /control → register (device_id = ro.serialno, version)
 
   CASE: unknown device, strict mode
@@ -1057,21 +1038,19 @@ done
 
 **Amp click/hiss suppression.** Order matters (found on hardware, 2026-07-10): `pcm_speaker.go` Init() mutes the output (tinymix ctl 61 → 0), opens the PCM stream and lets the silence loop clock the DAC for ~100ms, *then* enables the amp (ctl 5 On), waits 50ms for it to settle, and unmutes last. Enabling the amp onto a floating (unclocked) DAC and unmuting before stream-open was the source of the click on every service start. Shutdown is the mirror image: on SIGTERM the server's `PcmSpeaker.Close()` mutes → amp off → closes the stream, and `start_server.sh` repeats mute + amp-off after every server exit (covering SIGKILL/panic) — an enabled amp on an idle DAC audibly hisses for as long as the server is down (worst case: between OTA slots).
 
-**Mute implementation.** The mute button (KEY_MUTE, evdev code 113) arrives on `/dev/input/event1`. Mute is implemented by setting ADC_A Left/Right Mute (tinymix ctls 105 and 106). The mute controller intercepts the button locally, applies the tinymix change, updates the LED ring (red = muted), and signals the server to block dot button events. As of v2.6.5, mute also stops a running mic stream (and unmute restores the OWW listening stream) — audio stops leaving the device over the network regardless of controller state, not just future `mic_start` calls being refused.
-
-**Mute hardware coverage — known gap.** Ctls 105/106 mute chip A only (ch0/ch1). Chips B–D — including ch6, the mic OWW and STT actually use — stay physically hot; the stream-stop above is what makes mute effective today. The full `tinymix -D 0` dump (`device/tools/tinymix_controls_output.txt`, captured 2026-07-06) confirms the sibling mute controls: ADC_B 123/124, ADC_C 141/142, ADC_D 159/160. Adding all four pairs to `applyMute`/`applyUnmute` in `internal/server/mute.go` is the next device-rebuild item.
+**Mute implementation.** The mute button (KEY_MUTE, evdev code 113) arrives on `/dev/input/event1`. Mute sets the ADC mute controls on **all four codec chips** (tinymix ctls 105/106, 123/124, 141/142, 159/160 — chip-A-only coverage was a known gap until v2.7.4; the sibling controls were confirmed from the full `tinymix -D 0` dump in `device/tools/tinymix_controls_output.txt`), so every mic including ch6 is physically muted. The mute controller intercepts the button locally, applies the tinymix change, updates the LED ring (red = muted) and the discrete button LED, and blocks dot button events. Mute also stops a running mic stream (v2.6.5) and, controller-side, terminates an active voice turn (v2.7.8). Since v2.9.4 mute is **persistent**: written to `/data/local/etc/echomuse/state.json` on toggle and restored at boot before any connection — device-sovereign, so a muted Dot comes back muted with or without a controller.
 
 **Mic gain — all four ADCs.** All four ADC pairs (A–D) are set to digital volume 88 and MICPGA 40. This matches Amazon's own initialisation values confirmed by analysing the unmodified device mixer state. Equalising all four ensures consistent sensitivity across all perimeter mics for directional selection.
 
 **WiFi wake lock.** FireOS aggressively suspends the WiFi interface during inactivity, dropping WebSocket connections. Writing `"EchoMuse"` to `/sys/power/wake_lock` prevents this.
 
-**Speaker streaming.** Audio is streamed as binary frames (8192 bytes = one ALSA period) over the data plane WebSocket. The device maintains a priority channel — the silence loop yields to real audio naturally, with backpressure at ALSA playback rate (~42ms/period). Piper TTS output (22050Hz mono) is resampled server-side to 48000Hz stereo before streaming.
+**Speaker streaming.** Audio is streamed as binary frames (4096 bytes = one mono ALSA period — mono on the wire since v2.8.4; the device duplicates L=R at the ALSA write) over the data plane WebSocket. The device maintains a priority channel — the silence loop yields to real audio naturally, with backpressure at ALSA playback rate (~42ms/period). TTS is 48kHz mono end-to-end since v2.9.4 (ffmpeg decodes at the wire rate; HA transcodes at source when it honours the declared supported_formats — no controller resample step). The device buffers ~5.5s and holds playback until ~1s is queued or EOS arrives (v2.8.4 — WiFi-stall protection for marginal links).
 
 **OWW threshold.** 0.3 works well for a London/Bristol accent — the default 0.5 is calibrated for American English.
 
 **VAD threshold.** 0.001 normalised RMS is the default (v2.6.5 — corrected from a drifted 0.003 that sat above measured conversational speech at 1.3m). Adjustable via config push from the dashboard — no rebuild required. In noisy environments (music, TV), raise to 0.003–0.005.
 
-**VAD end signal.** When the device VAD gate closes (speech followed by `vadSilenceMs` of silence, default 600ms), the device sends a `0x04` binary frame. The controller forwards this as an `"END"` string to the voice server, which immediately processes the buffered audio. The device owns VAD state and signals it explicitly rather than the server inferring it from audio gaps.
+**VAD end signal.** When the device VAD gate closes (speech followed by `vadSilenceMs` of silence, default 900ms; button/lock_mic turns only — the wake stream is ungated), the device sends a `0x04` sentinel. The controller ends the HA audio stream if it arrives before HA's own `STT_VAD_END` — HA's VAD is the endpointing authority for wake turns; the device sentinel is what actually ends button turns. Note (v2.9.4): the gate windows now run at their configured durations — a counting bug against the mic's 160ms batch size previously made both ~5× longer than set.
 
 **Directional mic locking — onset ratio.** When the controller sends `mic_start` with `lock_mic: true` (voice turn start), the device locks to the perimeter mic with the highest onset ratio: `energySmooth[di] / energyBaseline[di]`. This selects the direction with the biggest *recent energy increase* rather than highest absolute energy, making the lock robust to continuous background noise sources (TV, fan). Two parallel smoothers: fast (α=0.9, ~320ms) and slow (α=0.995, ~10s baseline). The slow baseline is frozen while locked. The lock is idempotent across VAD oscillation. Releases on `mic_stop`.
 
@@ -1081,15 +1060,15 @@ done
 
 **LED physical mapping.** 12 LEDs (IS31FL3236A), one either side of each perimeter mic. LED 0 is physically at 240° (just clockwise of MK5 at 210°). Volume sweep confirmed: starts at LED 0, sweeps clockwise. Offset formula: `LED = ((angle - 240 + 360) % 360) / 30`.
 
-**Audio processing pipeline.** Each 32ms period of raw beamformed audio passes through: (1) RNNoise noise suppression — vendored xiph/rnnoise v0.1 C source compiled via cgo into the Go binary, no external library required; 480-sample frame size handled via ring buffer against our 512-sample periods. (2) AGC — targets -22dBFS RMS with fast attack (0.05) and slow release (0.005); release frozen during silence to prevent noise floor amplification past the VAD threshold. VAD decision is made on pre-NS/AGC audio to keep threshold stable.
+**Audio processing pipeline.** Each 160ms mic batch of raw beamformed audio passes through: (1) speexdsp AEC (v2.7.3, when enabled) — subtracts the speaker's own output, whole mic path including the wake stream. (2) AGC (button/lock_mic turns only; never the wake stream) — targets -22dBFS RMS with fast attack (0.05) and slow release (0.005); release frozen during silence to prevent noise floor amplification. VAD decisions are made on pre-AGC audio to keep the threshold stable. Device-side RNNoise was removed 2026-07-12 — noise suppression is controller-side DTLN on the speech-to-text stream (`nsAsr` flag).
 
-**Acoustic feedback prevention.** `stream_speaker` completes as soon as all frames are buffered on the device (~341ms ahead of actual playback). Without compensation, the mic restarts while the speaker is still playing, causing Clara to hear herself and trigger another voice turn. Fix: controller sleeps for `len(speaker_pcm) / (SPEAKER_RATE * 4)` seconds after streaming completes before calling `cleanup()`. The spinner continues running during this wait.
+**Acoustic feedback prevention.** `stream_speaker` completes well ahead of actual playback (the WS write runs ~2× realtime and the device buffers ~5.5s). Without compensation, the mic would restart while the speaker is still playing, and the assistant would hear itself and trigger another turn. The controller sleeps for the remaining playback duration (plus the ~1s prime allowance) after streaming, racing `cancel_event` so barge-in cuts the wait instantly. With barge-in enabled the mic never stops at all — AEC is what keeps the live mic usable during playback.
 
-**Voice server turn timeout.** The controller waits a maximum of 45 seconds for the voice server to respond. Previously the controller would hang indefinitely if Whisper returned an empty transcription and the voice server closed silently. The timeout ensures the pipeline always resets cleanly.
+**Turn timeouts.** The mic-streaming phase of a turn carries a 20s hard cap, and a turn where speech never starts closes locally after 5s (controller-side SNR-relative timeout on wake turns, device `0x05` sentinel on button turns) instead of round-tripping to HA for an empty transcription.
 
-**Stale queue drain.** After each voice turn, the mic queue is drained and the OWW model is reset before mic_start is sent. This prevents the device's own speaker output (buffered during playback) from immediately triggering another wake word detection.
+**Stale queue drain.** After each voice turn, the mic queue is drained and the OWW model is reset before wake listening resumes. This prevents the device's own speaker output (buffered during playback) from immediately triggering another wake word detection.
 
-**OWW suppression during playback.** While the speaker is streaming, OWW inference is suppressed server-side (`device.speaking` flag). The mic continues streaming (barge-in via button remains possible), but audio picked up from the speaker doesn't trigger false detections.
+**OWW routing during turns.** While a turn is active (`oww_paused`), incoming mic frames route to `voice_queue` instead of the wake model. During thinking and playback the `_barge_watcher` scores that queue with its own OWW instance — a wake word spoken over the response cancels playback (barge-in, threshold deliberately below `owwThreshold` because speech-over-TTS scores are depressed ~25dB by the echo).
 
 **mDNS library.** The `hashicorp/mdns` library fails to resolve the controller IP when python-zeroconf sends PTR responses with the A record under the hostname rather than the service name. Replaced with `grandcat/zeroconf` which is RFC 6762/6763 compliant and handles this correctly.
 
