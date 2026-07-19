@@ -309,7 +309,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             yield api_pb2.DeviceInfoResponse(
                 uses_password=False,
                 name=self.server_name,
-                friendly_name=self.label,
+                friendly_name=f"{self.label} Voice Assistant",
                 mac_address=self.mac_address,
                 manufacturer="EchoMuse",
                 model="Echo Dot Gen 2 (biscuit)",
@@ -1315,49 +1315,60 @@ async def start_esphome_servers(
     log.info(f"Starting ESPHome servers for {len(approved)} approved device(s)")
 
     for row in approved:
-        device_id = row["device_id"]
-        label     = row["label"] or f"EchoMuse {device_id[-8:]}"
-        # Use MAC from device_id (ro.serialno) as a stable identifier.
-        # ro.serialno on the biscuit is a 12-char hex string — format it
-        # as a MAC-style address for ESPHome's mac_address field.
-        mac = _serialno_to_mac(device_id)
-
-        # Get or allocate ESPHome port
-        port = await loop.run_in_executor(None, db.get_esphome_port, device_id)
-        if port is None:
-            port = await loop.run_in_executor(None, db.assign_esphome_port, device_id)
-            log.info(f"[{device_id}] Allocated ESPHome port {port}")
-
-        # Get OWW model from device config
-        config       = await loop.run_in_executor(None, db.get_device_config, device_id)
-        oww_model_id = config.get("owwModel", "hey_jarvis_v0.1")
-
-        server = DeviceESPhomeServer(
-            device_id=device_id,
-            label=label,
-            mac_address=mac,
-            oww_model_id=oww_model_id,
-            port=port,
-        )
-        # Don't start the TCP listener yet — port comes up when the
-        # physical device connects to the controller (device_connected()).
-        # This prevents the setup wizard from running against an offline device.
-        _servers[device_id] = server
-
-        # mDNS registration — _esphomelib._tcp, one per device port,
-        # same pattern as the controller's own _emcontroller._tcp service.
-        mdns_info = _make_device_mdns_info(device_id, label, port)
-        try:
-            await _azc.async_register_service(mdns_info, allow_name_change=True)
-            server.set_mdns_info(mdns_info)
-            log.info(
-                f"[{device_id}] mDNS registered: "
-                f"{_mdns_service_name(device_id)}._esphomelib._tcp → {SERVER_IP}:{port}"
-            )
-        except Exception as e:
-            log.warning(f"[{device_id}] mDNS registration failed: {e}")
+        await _register_device_server(row["device_id"], row["label"])
 
     log.info(f"ESPHome servers ready ({len(_servers)} device(s))")
+
+
+async def _register_device_server(device_id: str, label: str | None) -> DeviceESPhomeServer:
+    """
+    Create the DeviceESPhomeServer for one approved device and register its
+    mDNS record. Allocates a port from the DB if not already assigned.
+
+    Doesn't start the TCP listener — the port comes up when the physical
+    device connects to the controller (device_connected()). This prevents
+    the setup wizard from running against an offline device.
+    """
+    loop  = asyncio.get_event_loop()
+    label = label or f"EchoMuse {device_id[-8:]}"
+    # Use MAC from device_id (ro.serialno) as a stable identifier.
+    # ro.serialno on the biscuit is a 12-char hex string — format it
+    # as a MAC-style address for ESPHome's mac_address field.
+    mac = _serialno_to_mac(device_id)
+
+    # Get or allocate ESPHome port
+    port = await loop.run_in_executor(None, db.get_esphome_port, device_id)
+    if port is None:
+        port = await loop.run_in_executor(None, db.assign_esphome_port, device_id)
+        log.info(f"[{device_id}] Allocated ESPHome port {port}")
+
+    # Get OWW model from device config
+    config       = await loop.run_in_executor(None, db.get_device_config, device_id)
+    oww_model_id = config.get("owwModel", "hey_jarvis_v0.1")
+
+    server = DeviceESPhomeServer(
+        device_id=device_id,
+        label=label,
+        mac_address=mac,
+        oww_model_id=oww_model_id,
+        port=port,
+    )
+    _servers[device_id] = server
+
+    # mDNS registration — _esphomelib._tcp, one per device port,
+    # same pattern as the controller's own _emcontroller._tcp service.
+    mdns_info = _make_device_mdns_info(device_id, label, port)
+    try:
+        await _azc.async_register_service(mdns_info, allow_name_change=True)
+        server.set_mdns_info(mdns_info)
+        log.info(
+            f"[{device_id}] mDNS registered: "
+            f"{_mdns_service_name(device_id)}._esphomelib._tcp → {SERVER_IP}:{port}"
+        )
+    except Exception as e:
+        log.warning(f"[{device_id}] mDNS registration failed: {e}")
+
+    return server
 
 
 async def stop_esphome_servers() -> None:
@@ -1585,7 +1596,17 @@ async def device_connected(
     """
     server = _servers.get(device_id)
     if server is None:
-        return
+        # Approved after startup (start_esphome_servers only walks the
+        # registry once at boot) — a freshly provisioned device would
+        # otherwise have no port, no mDNS record, and never appear in HA
+        # until the next controller restart.
+        if _azc is None:
+            return
+        loop = asyncio.get_event_loop()
+        row  = await loop.run_in_executor(None, db.get_device, device_id)
+        if row is None or not row["approved"]:
+            return
+        server = await _register_device_server(device_id, row["label"])
     server._standalone_play = standalone_play
     server._send_volume_set = send_volume_set
     if server._server is not None:
@@ -1654,7 +1675,7 @@ def _make_device_mdns_info(device_id: str, label: str, port: int) -> ServiceInfo
         port=port,
         properties={
             "version": ESPHOME_PROJECT_VERSION,
-            "friendly_name": label,
+            "friendly_name": f"{label} Voice Assistant",
             # mac is MANDATORY for HA discovery: the ESPHome config flow's
             # zeroconf step aborts (reason "mdns_missing_mac") when the TXT
             # record lacks it — devices advertised without it never produce
