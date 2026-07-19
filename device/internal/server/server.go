@@ -162,10 +162,12 @@ func (s *Server) VolumeStepDown() {
 	s.volume.StepDown()
 }
 
-// SetVolume sets volume to an explicit level (0–175) — called by controller command.
+// SetVolume sets volume to an explicit level (0–175) — called by controller
+// command. Remote changes don't paint the volume arc: nobody is at the
+// device, and the ring lighting up unprompted reads as a glitch.
 func (s *Server) SetVolume(level int) {
 	s.volumeSeeded.Store(true)
-	s.volume.Set(level)
+	s.volume.Set(level, false)
 }
 
 // SeedVolume restores the controller's stored startupVolume — the source of
@@ -179,7 +181,7 @@ func (s *Server) SeedVolume(level int) {
 		return
 	}
 	log.Printf("Seeding volume from controller startupVolume=%d", level)
-	s.volume.Set(level)
+	s.volume.Set(level, false)
 }
 
 // VolumeSeeded reports whether the device has an authoritative volume this
