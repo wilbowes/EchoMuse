@@ -68,6 +68,7 @@ from zeroconf import ServiceInfo
 import em_db as db
 import em_api as api
 import em_ns
+import em_oww_models
 
 # ── VAD sentinels ──────────────────────────────────────────────────────────────
 # Queue items marking end-of-speech in mic_queue/voice_queue, in place of
@@ -1360,7 +1361,9 @@ async def _register_device_server(device_id: str, label: str | None) -> DeviceES
 
     # Get OWW model from device config
     config       = await loop.run_in_executor(None, db.get_device_config, device_id)
-    oww_model_id = config.get("owwModel", "hey_jarvis_v0.1")
+    # Custom models are file paths in config; HA sees the friendly stem.
+    oww_model_id = em_oww_models.prediction_key(
+        config.get("owwModel", "hey_jarvis_v0.1"))
 
     # Re-check after the awaits above — a concurrent caller may have
     # created the server while we were in the executor.
@@ -1579,6 +1582,7 @@ def update_oww_model(device_id: str, model_id: str) -> None:
     by the next satellite instance) and bounce the active HA connection so
     HA redials (within seconds) and re-requests the configuration.
     """
+    model_id = em_oww_models.prediction_key(model_id)
     server = get_server(device_id)
     if server is None or server.oww_model_id == model_id:
         return

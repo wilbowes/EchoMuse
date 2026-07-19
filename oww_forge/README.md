@@ -166,37 +166,34 @@ chars; the command prints an estimate and asks before running.
 
 ## Installing a model into EchoMuse
 
-The controller passes `owwModel` straight to
-`OWWModel(wakeword_models=[...])`, which accepts **file paths** as well as
-built-in model names. So today, without any controller changes:
+Use the dashboard: **Config tab → Wake word → “+ Custom model”** and pick
+the `.onnx` from `data/models/`. The upload lands in the controller's
+persisted data volume (`oww_models/` beside the SQLite DB, so it survives
+image upgrades), the model appears as a tile alongside the stock ones and
+is auto-selected for the device you uploaded from. The OWW listener
+hot-reloads on config change (same path as switching stock models), and
+the ESPHome layer pushes the new wake-word name to Home Assistant
+automatically. A custom tile's `×` deletes the file (refused while any
+device or the global default still selects it).
+
+Equivalent API (`em_api.py`):
 
 ```bash
-# 1. copy the model into the controller's persisted data volume
-mkdir -p ../controller/data/oww_models
-cp data/models/hey_biscuit.onnx ../controller/data/oww_models/
-
-# 2. point a device (or the global config) at it — the dashboard's wake-word
-#    tiles are a fixed list, so set it via the API for now:
-curl -X POST http://<controller>:8768/api/devices/<device_id>/config \
-     -H "Content-Type: application/json" -b "session=<cookie>" \
-     -d '{"owwModel": "/app/data/oww_models/hey_biscuit.onnx"}'
+curl -X POST http://<controller>:8768/api/oww_models/upload \
+     -H "Authorization: Bearer <token>" \
+     -F model=@data/models/hey_biscuit.onnx
+# → {"model": {"name": "hey_biscuit", "path": "/app/data/oww_models/hey_biscuit.onnx", …}}
+# then set owwModel to that path via /api/devices/<id>/config or the global config
 ```
 
-The OWW listener hot-reloads on config change (same path as switching stock
-models), and the ESPHome layer pushes the new wake-word name to Home
-Assistant automatically.
+Dropping a file into `controller/data/oww_models/` by hand works too —
+`GET /api/oww_models` scans the directory per request, so it shows up on
+the next dashboard load.
 
-### Future controller integration (proposed, not built)
-
-Kept out of this change on purpose; likely shape when we want it:
-
-1. Controller scans `/app/data/oww_models/*.onnx` at startup/config-read and
-   merges them into the model list the dashboard offers (label = filename).
-2. Dashboard `WW_MODELS` tiles become `stock + discovered custom` instead of
-   a hardcoded const, plus an upload button (POST multipart → the same dir —
-   mirrors the existing firmware-upload endpoint pattern).
-3. Optionally `forge.py install <name> --controller http://…` doing the
-   copy+config POST in one step.
+`owwModel` stores the **file path** for custom models (stock models stay
+plain names). Note openwakeword keys its prediction dict by the filename
+*stem*, not the path — the controller maps path → stem everywhere it reads
+scores (`em_oww_models.prediction_key`), so keep filenames unique.
 
 ## Layout
 

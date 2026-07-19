@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  controller-tests:
+    name: Controller unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The tests cover pure-logic modules only — numpy/scipy for the EQ
+      # math, nothing that pulls in openwakeword/onnxruntime (which would
+      # cost minutes of install for zero coverage).
+      - name: Install test dependencies
+        run: pip install pytest numpy scipy
+      - name: Run pytest
+        working-directory: controller
+        run: python -m pytest tests/ -v
+
+  device-tests:
+    name: Device Go tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true  # GoTinyAlsa replace directive in device/go.mod
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: device/go.mod
+      # Host-side tests only exercise pure-Go logic (led, beamformer,
+      # state machine, animator, aec framing) — hardware paths are
+      # interface-mocked, and the vendored speexdsp C compiles with cgo.
+      - name: Run go test
+        working-directory: device
+        run: go test ./...
+
+  device-vet:
+    name: Device go vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: device/go.mod
+      - name: Run go vet
+        working-directory: device
+        run: go vet ./...

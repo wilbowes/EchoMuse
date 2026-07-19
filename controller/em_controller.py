@@ -72,6 +72,7 @@ import em_eq
 import em_scenes
 import em_esphome as esphome
 import em_ble_proxy
+import em_oww_models
 
 logging.basicConfig(
     level=logging.DEBUG if os.environ.get("DEBUG") else logging.INFO,
@@ -540,6 +541,9 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
         )
         device._barge_model_key = name
     model = device._barge_model
+    # _barge_model_key stays the raw owwModel value (staleness compare
+    # above); scoring needs the openwakeword prediction key (path → stem).
+    barge_pred_key = em_oww_models.prediction_key(device._barge_model_key)
     model.reset()
 
     # Drop anything queued before the watcher started (command tail,
@@ -592,7 +596,7 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                 rms_sum += rms
                 rms_max  = max(rms_max, rms)
                 prediction = await loop.run_in_executor(None, model.predict, samples)
-                score = prediction.get(device._barge_model_key, 0.0)
+                score = prediction.get(barge_pred_key, 0.0)
                 frames += 1
                 in_playback = playback_started.is_set()
                 if in_playback:
@@ -639,7 +643,7 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                     # record — popped when the turn loop re-enters
                     # trigger_voice_turn with trigger "barge-in".
                     device.last_wake = {
-                        "model":       device._barge_model_key,
+                        "model":       barge_pred_key,
                         "score":       round(float(score), 4),
                         "threshold":   float(threshold),
                         "noise_floor": round(device.noise_floor, 5),
@@ -1043,7 +1047,9 @@ async def wake_word_listener(device: Device):
             enable_speex_noise_suppression=current_speex_ns,
         ),
     )
-    model_key = current_model_name
+    # NB: for custom models owwModel is a file path but openwakeword keys
+    # the prediction dict by the filename stem — never score by the raw name.
+    model_key = em_oww_models.prediction_key(current_model_name)
 
     log.info(f"[{device.device_id}] OWW: starting (initial threshold={device.oww_threshold:.3f})")
     await device.mic_start()
@@ -1074,7 +1080,7 @@ async def wake_word_listener(device: Device):
                         ),
                     )
                     model             = new_model
-                    model_key         = new_name
+                    model_key         = em_oww_models.prediction_key(new_name)
                     current_model_name = new_name
                     current_speex_ns  = new_speex
                     buf.clear()
