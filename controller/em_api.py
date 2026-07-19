@@ -49,6 +49,7 @@ import websockets
 import em_db as db
 import em_auth as auth
 import em_ble_proxy
+import em_oww_models
 import em_pki
 import em_scenes
 from version import VERSION as CONTROLLER_VERSION
@@ -213,6 +214,11 @@ async def create_app() -> web.Application:
     app.router.add_post("/api/devices/{id}/update",       _post_device_update)
     app.router.add_post("/api/devices/{id}/rollback",     _post_device_rollback)
     app.router.add_post("/api/releases/upload",           _post_upload_binary)
+
+    # Custom wake-word models (oww_forge output → data/oww_models/)
+    app.router.add_get("/api/oww_models",             _get_oww_models)
+    app.router.add_post("/api/oww_models/upload",     _post_oww_model_upload)
+    app.router.add_delete("/api/oww_models/{file}",   _delete_oww_model)
     app.router.add_get("/api/devices/{id}/shell",         _ws_shell)
 
     # Releases
@@ -900,6 +906,98 @@ async def _post_upload_binary(request: web.Request) -> web.Response:
     except Exception as e:
         log.error(f"[api] Upload error: {e}")
         return _error("upload_failed", str(e), 500)
+
+
+# ─── Custom wake-word models ─────────────────────────────────────────────────
+
+
+@auth.require_auth
+async def _get_oww_models(request: web.Request) -> web.Response:
+    """
+    GET /api/oww_models
+
+    Custom models discovered in the data volume's oww_models/ dir.
+    `path` is the value to store in owwModel config.
+    """
+    return _ok({
+        "models": em_oww_models.scan(),
+        "dir":    str(em_oww_models.models_dir()),
+    })
+
+
+@auth.require_admin
+async def _post_oww_model_upload(request: web.Request) -> web.Response:
+    """
+    POST /api/oww_models/upload (multipart: field name "model", .onnx file)
+
+    Installs an openWakeWord model into the persisted models dir. The
+    file lands atomically (tmp + rename) so a wake-listener reload can
+    never see a half-written model.
+    """
+    try:
+        reader = await request.multipart()
+        field  = await reader.next()
+        if field is None or field.name != "model":
+            return _error("invalid_upload", "Expected multipart field 'model'", 400)
+        fname = em_oww_models.safe_model_filename(field.filename or "")
+        if fname is None:
+            return _error("invalid_filename",
+                          "Model must be a .onnx file with a simple name "
+                          "(letters, digits, _ - . only)", 400)
+        data = await field.read()
+        if not data:
+            return _error("empty_upload", "Uploaded model is empty", 400)
+        if len(data) > em_oww_models.MAX_MODEL_BYTES:
+            return _error("too_large", "Model exceeds 20 MB limit", 413)
+
+        directory = em_oww_models.models_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            os.replace(tmp_path, directory / fname)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+        log.info(f"[api] Wake model installed: {fname} ({len(data):,} bytes)")
+        entry = next((m for m in em_oww_models.scan() if m["file"] == fname), None)
+        return _ok({"model": entry}, status=201)
+    except Exception as e:
+        log.error(f"[api] Model upload error: {e}")
+        return _error("upload_failed", str(e), 500)
+
+
+@auth.require_admin
+async def _delete_oww_model(request: web.Request) -> web.Response:
+    """
+    DELETE /api/oww_models/{file}
+
+    Refuses (409) while any device config or the global default still
+    points at the model — deleting under a live listener would fail its
+    next reload.
+    """
+    fname = em_oww_models.safe_model_filename(request.match_info["file"])
+    if fname is None:
+        return _error("invalid_filename", "Bad model filename", 400)
+    path = em_oww_models.models_dir() / fname
+    if not path.is_file():
+        return _error("not_found", "No such model", 404)
+
+    configs: dict[str, dict] = {"global": db.get_global_device_config()}
+    for row in db.get_all_devices():
+        configs[row["device_id"]] = db.get_device_config(row["device_id"])
+    users = em_oww_models.in_use_by(str(path), configs)
+    if users:
+        return _error("model_in_use",
+                      f"Model is selected by: {', '.join(users)}", 409)
+
+    path.unlink()
+    log.info(f"[api] Wake model deleted: {fname}")
+    return _ok({"deleted": fname})
 
 
 # ─── OTA background tasks ─────────────────────────────────────────────────────

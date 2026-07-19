@@ -44,11 +44,11 @@ const API = {
     return data;
   },
 
-  async upload(path, file) {
+  async upload(path, file, fieldName = 'binary') {
     const h = {};
     if (this.token) h['Authorization'] = `Bearer ${this.token}`;
     const form = new FormData();
-    form.append('binary', file);
+    form.append(fieldName, file);
     const r = await fetch(path, { method: 'POST', headers: h, body: form });
     if (r.status === 401) throw { code: 'not_authenticated', status: 401 };
     const data = await r.json();
@@ -58,6 +58,14 @@ const API = {
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+// owwModel display label: stock names ("hey_jarvis_v0.1") and custom model
+// file paths ("/app/data/oww_models/hey_clara.onnx") both prettify.
+function wwModelLabel(v) {
+  if (!v) return '—';
+  if (v.endsWith('.onnx')) v = v.split('/').pop().replace(/\.onnx$/, '');
+  return v.replace(/_v[\d.]+$/, '').replace(/_/g, ' ');
+}
 
 function uptime(s) {
   if (!s) return '—';
@@ -1109,7 +1117,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
             const stoText  = s?.storageTotalMb != null
               ? `${(s.storageUsedMb/1024).toFixed(1)} / ${(s.storageTotalMb/1024).toFixed(1)} GB` : null;
             const cfgEff = (device.use_global_config ?? true) ? (globalConfig || device.config || {}) : (device.config || {});
-            const wwLabel = (cfgEff.owwModel || '—').replace(/_v[\d.]+$/, '').replace(/_/g, ' ');
+            const wwLabel = wwModelLabel(cfgEff.owwModel);
             return (
               <div style={{ minHeight:'100%', display:'flex', flexDirection:'column', gap:16 }}>
                 <div className="em-grid2" style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16 }}>
@@ -1181,7 +1189,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
               useful, was cramped at the bottom of Status). */}
           {tab === 'activity' && (() => {
             const cfgEff = (device.use_global_config ?? true) ? (globalConfig || device.config || {}) : (device.config || {});
-            const wwLabel = (cfgEff.owwModel || '—').replace(/_v[\d.]+$/, '').replace(/_/g, ' ');
+            const wwLabel = wwModelLabel(cfgEff.owwModel);
             return (
               <div style={{ minHeight:'100%', display:'flex', flexDirection:'column' }}>
                 <Panel label={`Voice activity — ${wwLabel} @ ${cfgEff.owwThreshold != null ? cfgEff.owwThreshold.toFixed(2) : '—'}`} style={{ flex:1 }}>
@@ -3062,6 +3070,41 @@ function DeviceConfigForm({ config, onChange, disabled }) {
     { value: 'hey_rhasspy_v0.1',  label: 'Hey Rhasspy'   },
   ];
 
+  // Custom models discovered in the controller's data volume (oww_forge
+  // output). Tile value = absolute file path — openwakeword accepts paths
+  // in place of stock names, so no other plumbing is needed.
+  const [customModels, setCustomModels] = useState([]);
+  const wwFileRef = useRef(null);
+  const loadCustomModels = useCallback(async () => {
+    try { setCustomModels((await API.get('/api/oww_models')).models || []); }
+    catch (e) { /* endpoint requires auth; list just stays empty */ }
+  }, []);
+  useEffect(() => { loadCustomModels(); }, [loadCustomModels]);
+
+  async function uploadWakeModel(file) {
+    if (!file) return;
+    try {
+      const resp = await API.upload('/api/oww_models/upload', file, 'model');
+      await loadCustomModels();
+      if (resp.model?.path) set('owwModel', resp.model.path);
+    } catch (e) { alert(e.error || 'Model upload failed'); }
+  }
+
+  async function deleteWakeModel(m) {
+    if (!confirm(`Delete wake model "${m.name}"?`)) return;
+    try {
+      await API.del(`/api/oww_models/${encodeURIComponent(m.file)}`);
+      await loadCustomModels();
+    } catch (e) { alert(e.error || 'Delete failed'); }
+  }
+
+  // A selected custom model that no longer exists on disk (or a bare-metal
+  // path from before a Docker move) still needs a visible, selected tile.
+  const orphanModel = (config.owwModel || '').endsWith('.onnx')
+    && !customModels.some(m => m.path === config.owwModel)
+    ? { name: wwModelLabel(config.owwModel), file: config.owwModel.split('/').pop(), path: config.owwModel, missing: true }
+    : null;
+
   // Sensitivity: map owwThreshold (0.1–0.9) to 1–9 int, inverted (low threshold = eager)
   const sensitivityToThreshold = v => Number((1.0 - (v - 1) / 8 * 0.8).toFixed(2));
   const thresholdToSensitivity = t => Math.round((1.0 - t) / 0.8 * 8) + 1;
@@ -3157,6 +3200,38 @@ function DeviceConfigForm({ config, onChange, disabled }) {
                 <div style={{ fontFamily: mono, fontSize: 9, color: '#888480', marginTop: 2 }}>{m.value}</div>
               </div>
             ))}
+            {[...customModels, ...(orphanModel ? [orphanModel] : [])].map(m => (
+              <div key={m.path} onClick={() => set('owwModel', m.path)} style={{
+                background: config.owwModel === m.path
+                  ? 'linear-gradient(160deg,#dde8f4,#ccd8ec)'
+                  : 'linear-gradient(160deg,#e4e0d8,#d4d0c8)',
+                border: `1px solid ${config.owwModel === m.path ? '#405878' : '#c0bdb6'}`,
+                borderRadius: 8, padding: '8px 10px', position: 'relative',
+                cursor: disabled ? 'default' : 'pointer',
+                transition: 'border-color 0.15s, background 0.15s',
+              }}>
+                <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 12, fontWeight: 600, color: '#1a1c18' }}>{wwModelLabel(m.path)}</div>
+                <div style={{ fontFamily: mono, fontSize: 9, color: m.missing ? '#a04030' : '#888480', marginTop: 2 }}>
+                  {m.missing ? 'missing file' : `custom · ${m.file}`}
+                </div>
+                {!disabled && !m.missing && config.owwModel !== m.path && (
+                  <div onClick={e => { e.stopPropagation(); deleteWakeModel(m); }}
+                    title="Delete model"
+                    style={{ position: 'absolute', top: 4, right: 7, fontFamily: mono, fontSize: 11,
+                      color: '#888480', cursor: 'pointer' }}>×</div>
+                )}
+              </div>
+            ))}
+            <div onClick={() => { if (!disabled) wwFileRef.current?.click(); }} style={{
+              background: 'linear-gradient(160deg,#e4e0d8,#d4d0c8)',
+              border: '1px dashed #b0ada6', borderRadius: 8, padding: '8px 10px',
+              cursor: disabled ? 'default' : 'pointer', opacity: 0.85,
+            }}>
+              <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 12, fontWeight: 600, color: '#4a4c48' }}>+ Custom model</div>
+              <div style={{ fontFamily: mono, fontSize: 9, color: '#888480', marginTop: 2 }}>upload .onnx (oww_forge)</div>
+              <input ref={wwFileRef} type="file" accept=".onnx" style={{ display: 'none' }}
+                onChange={e => { uploadWakeModel(e.target.files[0]); e.target.value = ''; }}/>
+            </div>
           </div>
           <div>
             <div style={inputStyle}>

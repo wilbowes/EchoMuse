@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  controller-tests:
+    name: Controller unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The tests cover pure-logic modules only — numpy/scipy for the EQ
+      # math, nothing that pulls in openwakeword/onnxruntime (which would
+      # cost minutes of install for zero coverage).
+      - name: Install test dependencies
+        run: pip install pytest numpy scipy
+      - name: Run pytest
+        working-directory: controller
+        run: python -m pytest tests/ -v
+
+  device-tests:
+    name: Device Go tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true  # GoTinyAlsa replace directive in device/go.mod
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: device/go.mod
+          cache-dependency-path: device/go.sum
+      # cmd/ imports the hardware bindings, which carry //go:build server
+      # (device builds pass -tags server) — listing cmd on a host platform
+      # fails package setup. Wildcards skip tag-excluded packages, so
+      # internal/... + pkg/... covers every host-testable package.
+      - name: Run go test
+        working-directory: device
+        run: go test ./internal/... ./pkg/...
+
+  device-vet:
+    name: Device go vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: device/go.mod
+          cache-dependency-path: device/go.sum
+      - name: Run go vet
+        working-directory: device
+        run: go vet ./internal/... ./pkg/...

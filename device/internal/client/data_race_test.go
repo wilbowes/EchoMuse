@@ -166,7 +166,10 @@ func TestContextCancelReleasesMicStream(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	addr := strings.TrimPrefix(srv.URL, "http://")
+	// connect expects a full base URL ("ws://host:port") — a bare host:port
+	// makes the dial fail instantly with a malformed-URL error, and this
+	// test's poll loop would eat that silently until its deadline.
+	addr := "ws://" + strings.TrimPrefix(srv.URL, "http://")
 
 	d := NewDataClient("zombie-test", mic, nil, aec.New())
 
@@ -175,13 +178,19 @@ func TestContextCancelReleasesMicStream(t *testing.T) {
 	go func() { connectDone <- d.connect(ctx, addr) }()
 
 	// Wait for connect to publish the conn, then start the wake stream on it.
-	deadline := time.Now().Add(2 * time.Second)
+	// Generous deadline: cold CI runners have missed 2s.
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		d.connMu.Lock()
 		ready := d.conn != nil
 		d.connMu.Unlock()
 		if ready {
 			break
+		}
+		select {
+		case err := <-connectDone:
+			t.Fatalf("connect returned before publishing conn: %v", err)
+		default:
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("connect never published conn")
