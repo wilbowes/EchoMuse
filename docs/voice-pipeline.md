@@ -129,6 +129,12 @@ The controller runs openwakeword, a small neural network, over each
 device's stream, scoring every moment: "how much did that sound like the
 wake word?" Cross the sensitivity bar and the conversation starts.
 
+With more than one device online, detections landing within the
+**arbitration window** (~300ms, configurable) are pooled and only the
+Echo that heard you best — loudest relative to its own room's background —
+answers; the others stand down silently. One utterance, one response,
+even in earshot of two devices.
+
 **Benefit:** because this runs on the controller rather than the Dot, you
 can change the wake word or sensitivity live from the dashboard, see every
 detection *and* every near-miss in the Status tab, and future improvements
@@ -192,6 +198,19 @@ it's off by default and depends on AEC being on and tuned (Stage 3): the
 mics stay live during playback, and echo cancellation is what stops the
 device waking itself. Interrupting by *just talking* (without the wake
 word) is deliberately not attempted.
+
+## Beyond voice — music
+
+Each Echo appears in Home Assistant as a **media player** you can
+actually play things on: `media_player.play_media`, the HA media
+browser, Music Assistant, radio streams. The controller decodes
+whatever you throw at it with ffmpeg and streams it to the speaker,
+keeping only a small buffer ahead so pause and stop respond instantly.
+Saying the wake word over music pauses it, runs your request, then
+picks the music back up where it left off — announcements do the same.
+For reliable wake-over-music, enable AEC and barge-in (Stage 3): the
+same echo cancellation that lets you interrupt the assistant's own
+voice is what lets it hear you over a song.
 
 ---
 

@@ -59,3 +59,24 @@ def test_wrong_band_count_still_returns_audio():
     pcm = _sine(1000)
     out = em_eq.apply(pcm, RATE, bands=[0.0, 0.0])  # padded internally
     assert len(out) == len(pcm)
+
+
+def test_streaming_eq_matches_batch_apply():
+    pcm = _sine(1000, seconds=0.4)
+    bands = [3.0, 0, -2.0, 0, 0, 4.0, 0, 1.0]
+    want = em_eq.apply(pcm, RATE, bands=bands)
+    eq = em_eq.StreamingEQ(RATE, bands=bands)
+    out = b""
+    for i in range(0, len(pcm), 4096):
+        out += eq.process(pcm[i:i + 4096])
+    # Filter state carries across chunks — output must match the
+    # whole-buffer path (same filters, same float32 pipeline).
+    got = np.frombuffer(out, dtype=np.int16).astype(np.int32)
+    ref = np.frombuffer(want, dtype=np.int16).astype(np.int32)
+    assert np.abs(got - ref).max() <= 1  # ±1 LSB float rounding
+
+
+def test_streaming_eq_flat_is_passthrough():
+    eq = em_eq.StreamingEQ(RATE, bands=[0.0] * 8)
+    chunk = _sine(500, seconds=0.05)
+    assert eq.process(chunk) == chunk

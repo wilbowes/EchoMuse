@@ -74,6 +74,7 @@ import em_arbiter
 import em_esphome as esphome
 import em_ble_proxy
 import em_oww_models
+import em_player
 
 logging.basicConfig(
     level=logging.DEBUG if os.environ.get("DEBUG") else logging.INFO,
@@ -775,6 +776,11 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
             break
     if drained:
         log.info(f"[{device.device_id}] Voice turn: drained {drained} stale frames")
+    # Voice preempts music: pause an active media session for the whole
+    # conversation (incl. continuations) and resume it afterwards. The
+    # matching resume_interrupted below only fires if this interrupt
+    # actually paused something.
+    await em_player.interrupt(device.device_id)
     try:
         async with device.voice_lock:
             log.info(f"[{device.device_id}] Voice turn starting (esphome mode)")
@@ -1036,6 +1042,8 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
             )
         device.oww_paused.clear()
         log.info(f"[{device.device_id}] oww_paused cleared")
+        # Conversation over — un-pause a media session this turn preempted.
+        await em_player.resume_interrupted(device.device_id)
 
 
 # ─── Wake word listener ───────────────────────────────────────────────────────
@@ -1214,7 +1222,17 @@ async def wake_word_listener(device: Device):
                 # old `score > 0.05` gate counted every successful wake as a
                 # near-miss too, inflating both the dashboard counter and
                 # the wake_counters rollup (near_miss_max = the wake score).
-                if 0.05 < score < device.oww_threshold:
+                # During music playback the mic hears the speaker ~25dB
+                # louder than the person, so wake scores are depressed —
+                # the same physics barge-in handles during TTS. Score
+                # against the (lower) barge threshold while a media
+                # session plays, but only when barge-in is enabled: that's
+                # the user's opt-in to trusting AEC not to self-trigger.
+                eff_threshold = device.oww_threshold
+                if device.barge_in_enabled and em_player.is_playing(device.device_id):
+                    eff_threshold = min(eff_threshold, device.barge_threshold)
+
+                if 0.05 < score < eff_threshold:
                     device.oww_near_misses += 1
                     nm_pending += 1
                     nm_max = max(nm_max, float(score))
@@ -1250,11 +1268,11 @@ async def wake_word_listener(device: Device):
                             ),
                         )
 
-                if score >= device.oww_threshold:
+                if score >= eff_threshold:
                     log.info(
                         f"[{device.device_id}] Wake word detected "
-                        f"(score={score:.3f}, rms={rms:.4f}, "
-                        f"floor={device.noise_floor:.4f})"
+                        f"(score={score:.3f}, threshold={eff_threshold:.3f}, "
+                        f"rms={rms:.4f}, floor={device.noise_floor:.4f})"
                     )
                     db.log_device(
                         device.device_id, "info", "device",
@@ -1595,12 +1613,15 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         async def _standalone_play(pcm_bytes: bytes, _d=_device_ref) -> None:
             # Same acoustic-feedback guard as voice turns: announcements
             # play outside a turn, so the always-on OWW stream is live —
-            # stop it for the duration and put it back after.
+            # stop it for the duration and put it back after. An active
+            # media session pauses for the announcement and resumes.
+            await em_player.interrupt(_d.device_id)
             await _d.mic_stop()
             try:
                 await _run_post_turn_playback(_d, pcm_bytes)
             finally:
                 await _d.mic_start()
+                await em_player.resume_interrupted(_d.device_id)
         async def _send_volume_set(level: int, _d=_device_ref) -> None:
             await _d.send_control({"type": "volume_set", "level": level})
         await esphome.device_connected(
@@ -1856,6 +1877,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                 await api.notify_device_disconnected(device.device_id)
                 await esphome.device_disconnected(device.device_id)
                 await em_ble_proxy.device_disconnected(device.device_id)
+                em_player.device_gone(device.device_id)
 
 
 # ─── Data plane handler ───────────────────────────────────────────────────────
@@ -2099,6 +2121,10 @@ async def main():
     log.info(f"EchoMuse Controller {api.CONTROLLER_VERSION}")
     db.init(DB_PATH)
     auth.maybe_generate_bootstrap_token()
+    em_player.init(
+        get_device=_devices.get,
+        notify_state=esphome.push_media_state,
+    )
 
     runner = await api.create_runner(_devices, _shell_pending, _shell_dashboard)
     await runner.setup()

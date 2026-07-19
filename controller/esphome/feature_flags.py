@@ -69,8 +69,10 @@ class MediaPlayerEntityFeature(enum.IntFlag):
     PAUSE = 1 << 0
     VOLUME_SET = 1 << 2
     VOLUME_MUTE = 1 << 3
+    PLAY_MEDIA = 1 << 9
     STOP = 1 << 12
     PLAY = 1 << 14
+    BROWSE_MEDIA = 1 << 17
     MEDIA_ANNOUNCE = 1 << 20
 
 
