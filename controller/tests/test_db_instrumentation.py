@@ -145,3 +145,38 @@ def test_link_speed_absent_does_not_poison_minimum(fresh_db):
     row = db._q1("SELECT * FROM device_metrics WHERE device_id = 'dev1'")
     assert row["link_speed_min"] == 150
     assert row["link_speed_last"] == 150
+
+
+def test_stats_relay_allowlist_covers_every_device_stat():
+    """
+    em_controller's stats handler copies device stats into device.stats via
+    an explicit allowlist before record_device_stats sees them. A field can
+    therefore be present on the device AND handled by the DB writer and
+    still be silently dropped in between — which is exactly what happened
+    on 2026-07-20, caught only by watching a live OTA'd device report nulls.
+
+    Guard: every key record_device_stats reads must appear in the handler's
+    allowlist. Parses the source rather than importing em_controller, which
+    pulls in openwakeword/aiohttp and has no place in this suite.
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    ctrl = (root / "em_controller.py").read_text()
+    dbsrc = (root / "em_db.py").read_text()
+
+    body = re.search(r'msg_type == "stats":(.*?)\n\s*if msg\.get\("ble"\)',
+                     ctrl, re.S)
+    assert body, "could not locate the stats handler allowlist"
+    allowlist = set(re.findall(r'"(\w+)":\s*msg\.get', body.group(1)))
+
+    record = re.search(r"def record_device_stats\(.*?\n(?=def )", dbsrc, re.S)
+    assert record, "could not locate record_device_stats"
+    consumed = set(re.findall(r'stats\.get\("(\w+)"\)', record.group(0)))
+
+    missing = sorted(consumed - allowlist)
+    assert not missing, (
+        f"record_device_stats reads {missing} but the em_controller stats "
+        f"handler never copies them — they will always be None"
+    )

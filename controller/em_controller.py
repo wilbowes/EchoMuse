@@ -1739,6 +1739,19 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                         "storageTotalMb":msg.get("storageTotalMb"),
                         "wifiRssi":      msg.get("wifiRssi"),
                         "wifiSsid":      msg.get("wifiSsid"),
+                        # v7 link telemetry (firmware >= v2.9.6). This dict
+                        # is an explicit allowlist, so any new device stat
+                        # must be added HERE as well as in DeviceStats and
+                        # record_device_stats — all three, or the field is
+                        # silently dropped in the relay (2026-07-20).
+                        "linkSpeedMbps": msg.get("linkSpeedMbps"),
+                        "wifiFreqMhz":   msg.get("wifiFreqMhz"),
+                        "wifiBssid":     msg.get("wifiBssid"),
+                        "txBytes":       msg.get("txBytes"),
+                        "rxBytes":       msg.get("rxBytes"),
+                        "txErrors":      msg.get("txErrors"),
+                        "txDropped":     msg.get("txDropped"),
+                        "rxCrcErrors":   msg.get("rxCrcErrors"),
                         "ble":           msg.get("ble"),
                     }
                     if msg.get("ble"):
