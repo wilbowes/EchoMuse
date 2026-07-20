@@ -258,8 +258,19 @@ func (p *PcmSpeaker) silenceLoop() {
 			streamPeriods++
 			// Buffer margin: occupancy remaining *after* taking this
 			// period. len() on a channel is O(1); no allocation, no log.
-			if d := len(p.audioCh); streamMinDepth < 0 || d < streamMinDepth {
-				streamMinDepth = d
+			//
+			// Sampled ONLY while the sender still has audio to send. The
+			// last periods of every stream necessarily drain the buffer to
+			// zero, so measuring across the tail made this read 0 on 100%
+			// of streams — healthy ones included — which is how it shipped
+			// in v2.9.6 and told us nothing (caught on first field data,
+			// 2026-07-20). eosPending is set by EndStream the instant the
+			// 0x03 arrives, so !eosPending means "more audio is still
+			// expected" and a low buffer *there* is a real margin warning.
+			if !p.eosPending.Load() {
+				if d := len(p.audioCh); streamMinDepth < 0 || d < streamMinDepth {
+					streamMinDepth = d
+				}
 			}
 			if firstPumpNs == 0 {
 				firstPumpNs = time.Now().UnixNano()
