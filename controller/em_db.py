@@ -725,6 +725,27 @@ def get_global_device_config() -> dict:
     return {**DEFAULT_DEVICE_CONFIG, **stored}
 
 
+def get_global_device_config_raw() -> dict:
+    """
+    The stored fleet config with defaults NOT underlaid — i.e. exactly the
+    keys an operator has persisted.
+
+    Used by the config-clobber guard (em_api._dropped_keys). The guard must
+    compare against what is really stored: if it compared against the
+    defaults-underlaid view, a controller upgrade that introduces a new
+    default key would make every save from an already-open dashboard tab
+    look like it was deleting that key, and refuse a perfectly legitimate
+    write. Returns {} when nothing has been saved yet.
+    """
+    row = _q1("SELECT value FROM system_config WHERE key = 'global_device_config'")
+    if row is None or not row["value"]:
+        return {}
+    try:
+        return json.loads(row["value"]) or {}
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
 def set_global_device_config(config: dict) -> None:
     """Persist updated fleet-wide default device config."""
     with _tx() as conn:
