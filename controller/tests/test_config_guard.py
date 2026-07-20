@@ -28,16 +28,25 @@ def _load_dropped_keys():
     """
     Extract _dropped_keys from em_api source and exec it in isolation.
     Importing em_api would drag in aiohttp/openwakeword; the function is
-    self-contained (stdlib only), so this keeps the test honest without
-    the dependency weight.
+    self-contained (stdlib only), so this keeps the test honest without the
+    dependency weight.
+
+    Uses AST rather than a regex: a regex over function boundaries broke the
+    moment a neighbouring decorator moved, and — worse — silently widened to
+    swallow decorated handlers. Decorators are deliberately NOT applied here,
+    which is exactly why the separate decorator-placement tests below exist.
     """
+    import ast
     src = (CONTROLLER / "em_api.py").read_text()
-    m = re.search(r"^def _dropped_keys\(.*?\n(?=\n\nasync def )", src,
-                  re.S | re.M)
-    assert m, "could not locate _dropped_keys in em_api.py"
-    ns: dict = {}
-    exec(m.group(0), ns)
-    return ns["_dropped_keys"]
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_dropped_keys":
+            node.decorator_list = []
+            mod = ast.Module(body=[node], type_ignores=[])
+            ns: dict = {}
+            exec(compile(ast.fix_missing_locations(mod), "<em_api>", "exec"), ns)
+            return ns["_dropped_keys"]
+    raise AssertionError("could not locate _dropped_keys in em_api.py")
 
 
 dropped_keys = _load_dropped_keys()
@@ -138,3 +147,50 @@ def test_guard_reads_raw_stored_config_not_the_underlaid_view():
     m = re.search(r"async def _post_global_config\(.*?(?=\nasync def )", src, re.S)
     assert m
     assert "get_global_device_config_raw" in m.group(0)
+
+
+# ── decorator-placement guards ────────────────────────────────────────────
+#
+# Inserting a helper immediately above an already-decorated handler silently
+# steals its decorator: on 2026-07-20 `_dropped_keys` was written directly
+# under `@auth.require_admin`, so the decorator bound to the helper instead
+# and `_post_global_config` was left with NO admin requirement — an auth
+# bypass on a config-write endpoint. It surfaced only as a 500 in live
+# testing, because the helper was then called with two args while wrapped to
+# take a request.
+#
+# The unit tests above could not catch it: they exec the extracted source
+# text, which drops decorators entirely, so they were exercising a different
+# function than production. These parse the real file instead.
+
+def _ast_tree():
+    import ast
+    return ast.parse((CONTROLLER / "em_api.py").read_text())
+
+
+def _decorators_of(name):
+    import ast
+    for n in ast.walk(_ast_tree()):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name:
+            return [getattr(d, "id", getattr(d, "attr", "?")) for d in n.decorator_list]
+    raise AssertionError(f"{name} not found in em_api.py")
+
+
+def test_dropped_keys_is_a_plain_helper_not_a_route_handler():
+    assert _decorators_of("_dropped_keys") == [], (
+        "_dropped_keys has picked up a decorator — it is a pure helper. This "
+        "means it was inserted directly beneath a decorated handler and stole "
+        "that decorator."
+    )
+
+
+@pytest.mark.parametrize("handler", [
+    "_post_global_config",
+    "_post_device_config",
+    "_post_upload_binary",
+])
+def test_mutating_handlers_still_require_admin(handler):
+    """Any config/binary write must keep its auth decorator."""
+    assert "require_admin" in _decorators_of(handler), (
+        f"{handler} lost its @auth.require_admin — anyone could call it"
+    )
