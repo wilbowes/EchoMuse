@@ -1,94 +1,112 @@
 import asyncio
 
-from em_arbiter import WakeArbiter, STRAGGLER_WINDOW_S
+from em_arbiter import WakeArbiter
 
-# The arbiter is timing-based; tests use short real windows (50ms) —
-# generous relative to loop scheduling, quick enough for CI.
-WINDOW = 0.05
+WINDOW = 0.2
 
 
 def run(coro):
     return asyncio.run(coro)
 
 
-def test_solo_contender_wins_after_window():
-    async def main():
-        arb = WakeArbiter()
-        return await arb.submit("office", snr=5.0, score=0.9, window_s=WINDOW)
-    assert run(main()) == "office"
-
-
-def test_higher_snr_wins():
-    async def main():
-        arb = WakeArbiter()
-        a = asyncio.create_task(arb.submit("office", snr=2.0, score=0.95, window_s=WINDOW))
-        await asyncio.sleep(WINDOW / 5)
-        b = asyncio.create_task(arb.submit("lounge", snr=8.0, score=0.40, window_s=WINDOW))
-        return await asyncio.gather(a, b)
-    assert run(main()) == ["lounge", "lounge"]  # SNR beats score
-
-
-def test_score_breaks_snr_tie():
-    async def main():
-        arb = WakeArbiter()
-        a = asyncio.create_task(arb.submit("office", snr=4.0, score=0.6, window_s=WINDOW))
-        b = asyncio.create_task(arb.submit("lounge", snr=4.0, score=0.9, window_s=WINDOW))
-        return await asyncio.gather(a, b)
-    assert run(main()) == ["lounge", "lounge"]
-
-
-def test_straggler_after_resolution_loses_to_winner():
-    async def main():
-        arb = WakeArbiter()
-        first = await arb.submit("office", snr=5.0, score=0.9, window_s=WINDOW)
-        # Round resolved; a late detection of the same utterance must not
-        # open a fresh round and double-answer — even with a better SNR.
-        late = await arb.submit("lounge", snr=50.0, score=0.99, window_s=WINDOW)
-        return first, late
-    first, late = run(main())
-    assert first == "office"
-    assert late == "office"
-
-
-def test_separate_wake_after_straggler_window_gets_own_round():
-    async def main():
-        arb = WakeArbiter()
-        # Simulate time passing by rewinding the recorded round start —
-        # sleeping STRAGGLER_WINDOW_S for real would slow the suite.
-        await arb.submit("office", snr=5.0, score=0.9, window_s=WINDOW)
-        arb._last.started -= STRAGGLER_WINDOW_S + 0.001
-        return await arb.submit("lounge", snr=1.0, score=0.5, window_s=WINDOW)
-    assert run(main()) == "lounge"
-
-
-def test_winner_itself_resubmitting_is_not_a_straggler_loss():
-    async def main():
-        arb = WakeArbiter()
-        await arb.submit("office", snr=5.0, score=0.9, window_s=WINDOW)
-        # Same device again straight away (its turn ended instantly, e.g.
-        # error outcome): it must be allowed to wake again, not be told it
-        # lost to itself.
-        return await arb.submit("office", snr=5.0, score=0.9, window_s=WINDOW)
-    assert run(main()) == "office"
-
-
-def test_window_is_actually_waited():
+def test_solo_device_wins_immediately():
+    """The winner must not wait. The old design awaited the full window on
+    every wake (~364ms measured in the field, on every device) — that is
+    the regression this redesign exists to remove."""
     async def main():
         arb = WakeArbiter()
         loop = asyncio.get_running_loop()
         t0 = loop.time()
-        await arb.submit("office", snr=5.0, score=0.9, window_s=WINDOW)
-        return loop.time() - t0
-    assert run(main()) >= WINDOW * 0.9
+        won = arb.claim("office", WINDOW)
+        return won, loop.time() - t0
+    won, elapsed = run(main())
+    assert won == "office"
+    assert elapsed < 0.01
 
 
-def test_three_way_round():
+def test_second_device_in_window_loses():
     async def main():
         arb = WakeArbiter()
-        tasks = [
-            asyncio.create_task(arb.submit("office",  snr=3.0, score=0.8, window_s=WINDOW)),
-            asyncio.create_task(arb.submit("lounge",  snr=6.0, score=0.7, window_s=WINDOW)),
-            asyncio.create_task(arb.submit("retreat", snr=1.0, score=0.9, window_s=WINDOW)),
-        ]
-        return await asyncio.gather(*tasks)
-    assert run(main()) == ["lounge"] * 3
+        first = arb.claim("office", WINDOW)
+        second = arb.claim("lounge", WINDOW)
+        return first, second
+    first, second = run(main())
+    assert first == "office"
+    assert second == "office"   # lounge told to stand down
+
+
+def test_three_way_only_first_answers():
+    """The 2026-07-20 field case: three devices within 184ms."""
+    async def main():
+        arb = WakeArbiter()
+        return [arb.claim(d, WINDOW) for d in ("office", "lounge", "retreat")]
+    assert run(main()) == ["office"] * 3
+
+
+def test_loser_never_waits_either():
+    async def main():
+        arb = WakeArbiter()
+        arb.claim("office", WINDOW)
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        arb.claim("lounge", WINDOW)
+        return loop.time() - t0
+    assert run(main()) < 0.01
+
+
+def test_claim_expires_after_window():
+    async def main():
+        arb = WakeArbiter()
+        arb.claim("office", 0.05)
+        await asyncio.sleep(0.08)
+        return arb.claim("lounge", 0.05)
+    assert run(main()) == "lounge"
+
+
+def test_same_device_rewaking_is_not_suppressed():
+    """A device answering twice in a row is a real second utterance in the
+    room it already serves — it must never be told it lost to itself."""
+    async def main():
+        arb = WakeArbiter()
+        arb.claim("office", WINDOW)
+        return arb.claim("office", WINDOW)
+    assert run(main()) == "office"
+
+
+def test_release_frees_the_claim_early():
+    async def main():
+        arb = WakeArbiter()
+        arb.claim("office", 10.0)   # long window
+        arb.release("office")
+        return arb.claim("lounge", 10.0)
+    assert run(main()) == "lounge"
+
+
+def test_release_by_non_holder_is_ignored():
+    async def main():
+        arb = WakeArbiter()
+        arb.claim("office", 10.0)
+        arb.release("lounge")       # not the holder — must be a no-op
+        return arb.claim("retreat", 10.0)
+    assert run(main()) == "office"
+
+
+def test_window_rearms_on_each_win():
+    """Successive utterances in the same room keep extending suppression,
+    so a distant device echoing the winner's TTS stays quiet."""
+    async def main():
+        arb = WakeArbiter()
+        arb.claim("office", 0.15)
+        await asyncio.sleep(0.10)
+        arb.claim("office", 0.15)   # re-arms from now
+        await asyncio.sleep(0.10)
+        return arb.claim("lounge", 0.15)
+    assert run(main()) == "office"
+
+
+def test_zero_window_suppresses_nothing():
+    async def main():
+        arb = WakeArbiter()
+        arb.claim("office", 0.0)
+        return arb.claim("lounge", 0.0)
+    assert run(main()) == "lounge"

@@ -93,13 +93,14 @@ DEFAULT_DEVICE_CONFIG = {
     "bargeInEnabled":   False,
     "bargeInThreshold": 0.10,
     "owwModel":         "hey_jarvis_v0.1",
-    # Multi-device wake arbitration window (ms). When one utterance wakes
-    # several Echos, detections landing within this window are pooled and
-    # only the best-placed device (highest speech-RMS-to-noise-floor at
-    # detection) answers. 0 disables. Only costs latency when 2+ devices
-    # are connected. Device batching spreads same-utterance detections by
-    # a few hundred ms, hence 300 rather than something tighter.
-    "wakeArbitrationMs": 300,
+    # Multi-device wake SUPPRESSION window (ms), not a wait. The first
+    # device to detect answers immediately; any other device detecting
+    # within this window stands down. 0 disables. Costs no latency to
+    # anyone — see em_arbiter for why first-detector beats best-SNR.
+    # 700ms: the observed spread between devices hearing one utterance is
+    # ~200ms (device mic batching is 160ms), and the window also needs to
+    # cover a device that hears the winner's TTS a moment later.
+    "wakeArbitrationMs": 700,
     # owwSpeexNs: openwakeword's built-in speexdsp noise suppressor (Q1,
     # 2026-07-05 review). 16kHz-native, applied controller-side, only to
     # the wake-word detection path — cannot affect STT audio since STT
