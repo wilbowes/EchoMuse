@@ -2077,7 +2077,6 @@ async def _get_global_config(request: web.Request) -> web.Response:
     return _ok(config)
 
 
-@auth.require_admin
 def _dropped_keys(incoming: dict, stored: dict) -> list[str]:
     """
     Keys present in the stored config that the incoming body would delete.
@@ -2094,6 +2093,7 @@ def _dropped_keys(incoming: dict, stored: dict) -> list[str]:
     return sorted(set(stored) - set(incoming))
 
 
+@auth.require_admin
 async def _post_global_config(request: web.Request) -> web.Response:
     """
     POST /api/global/config
