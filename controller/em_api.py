@@ -601,6 +601,25 @@ async def _post_device_config(request: web.Request) -> web.Response:
         return _error("device_not_found", f"No device: {device_id}", 404)
 
     use_global = body.pop("use_global_config", None)  # extract flag, not a config key
+    explicit_replace = bool(body.pop("replace", False))
+
+    # Same replace-not-merge trap as the global endpoint (see _dropped_keys).
+    # Only checked on the paths that actually persist the body; reverting to
+    # global deliberately discards it.
+    if use_global is not True:
+        stored = await loop.run_in_executor(
+            None, db.get_device_config, device_id
+        )
+        dropped = _dropped_keys(body, stored)
+        if dropped and not explicit_replace:
+            return _error(
+                "would_drop_keys",
+                f"This body would delete {len(dropped)} existing setting(s): "
+                f"{', '.join(dropped)}. Config POSTs replace rather than "
+                f"merge — send the full config (read-modify-write), or pass "
+                f"replace=true if the deletion is intended.",
+                409,
+            )
 
     if use_global is True:
         # Revert to global: reset flag + config column, ignore body
@@ -2059,6 +2078,22 @@ async def _get_global_config(request: web.Request) -> web.Response:
 
 
 @auth.require_admin
+def _dropped_keys(incoming: dict, stored: dict) -> list[str]:
+    """
+    Keys present in the stored config that the incoming body would delete.
+
+    Config POSTs REPLACE the stored dict — they do not merge. That is fine
+    for the dashboard, which always submits the complete config, and a trap
+    for anything that submits a partial one: on 2026-07-20 a POST carrying a
+    single key silently reset all 26 fleet settings to defaults, taking the
+    wake model from hey_mycroft back to hey_jarvis and dropping owwThreshold
+    0.5 -> 0.3, which surfaced as devices false-waking on ordinary
+    conversation. Callers that genuinely intend a destructive write pass
+    replace=true; everything else is refused before anything is persisted.
+    """
+    return sorted(set(stored) - set(incoming))
+
+
 async def _post_global_config(request: web.Request) -> web.Response:
     """
     POST /api/global/config
@@ -2066,9 +2101,29 @@ async def _post_global_config(request: web.Request) -> web.Response:
     Persists new fleet-wide device defaults, then pushes the updated config
     to every currently-connected device that still has use_global_config=1.
     Devices with per-device overrides are not affected.
+
+    The body REPLACES the stored config. A body that would drop existing
+    keys is refused with 409 unless it sets replace=true — see
+    _dropped_keys.
     """
     config = await _json_body(request)
     loop = asyncio.get_event_loop()
+
+    explicit_replace = bool(config.pop("replace", False))
+    # Raw (defaults NOT underlaid): see get_global_device_config_raw — a
+    # newly-added default must not look like a key this body is deleting.
+    stored = await loop.run_in_executor(None, db.get_global_device_config_raw)
+    dropped = _dropped_keys(config, stored)
+    if dropped and not explicit_replace:
+        return _error(
+            "would_drop_keys",
+            f"This body would delete {len(dropped)} existing setting(s): "
+            f"{', '.join(dropped)}. Config POSTs replace rather than merge — "
+            f"send the full config (read-modify-write), or pass replace=true "
+            f"if the deletion is intended.",
+            409,
+        )
+
     await loop.run_in_executor(None, db.set_global_device_config, config)
 
     # Push to all connected devices on global config
