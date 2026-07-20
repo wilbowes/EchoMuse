@@ -58,6 +58,22 @@ type PcmSpeaker struct {
 	// stream isn't misreported as an underrun.
 	eosPending atomic.Bool
 
+	// ── per-stream delivery instrumentation ───────────────────────────
+	// Underruns are a rare binary event; these give the *margin* on every
+	// stream, so a link that is merely close to starving is visible before
+	// it audibly breaks (2026-07-20: added after underruns appeared with
+	// no measurable cause — every metric we had timed the wrong thing).
+	//
+	// Written only by PumpPeriod, which the WS read loop calls
+	// sequentially — single writer, so a plain load/compare/store needs no
+	// lock. silenceLoop reads them once per stream at EOS. Cost on the
+	// audio hot path is one time.Now() plus an integer compare per ~42ms
+	// period (~23/s); nothing here allocates or logs.
+	recvFirstNs  atomic.Int64  // arrival of this stream's first 0x02
+	recvLastNs   atomic.Int64  // arrival of the most recent 0x02
+	recvMaxGapNs atomic.Int64  // largest inter-arrival gap this stream
+	recvBytes    atomic.Uint64 // wire bytes received this stream
+
 	// stateMu guards streamActive and discarding as one unit. They used to
 	// be independent atomics, but Flush's check-streamActive-then-arm and
 	// EndStream's clear-both are compound transitions: a barge-in Flush
@@ -101,19 +117,45 @@ type PcmSpeaker struct {
 	// and non-blocking: it runs on the ALSA pump goroutine.
 	levelTap func(rms float64)
 
-	// statsCb, when set, receives (periods, underruns) once per completed
+	// statsCb, when set, receives one StreamStats once per completed
 	// stream — at EOS consume in silenceLoop, flush included. Unlike echoTap
 	// it fires at most once per response, so a setter (OnStreamStats) is
 	// fine: silenceLoop reads it under statsMu only on that cold path.
 	statsMu sync.Mutex
-	statsCb func(periods, underruns uint64)
+	statsCb func(StreamStats)
 }
 
-// OnStreamStats registers a per-stream stats callback: (periods played,
-// underruns injected) reported once when a stream reaches its EOS. Invoked
-// on its own goroutine so a slow consumer (network send) can never stall
-// the ALSA pump. Safe to call any time after New.
-func (p *PcmSpeaker) OnStreamStats(cb func(periods, underruns uint64)) {
+// StreamStats is the per-stream delivery report, emitted once at EOS.
+//
+// Periods/Underruns answer "did it break". The rest answer "how close did
+// it come, and which side was late" — the questions we could not answer on
+// 2026-07-20 because every available metric measured something else (the
+// controller's "Streaming took 0.0s" times a socket write, not delivery).
+//
+//   - MinDepth: fewest periods left in the buffer at any point mid-stream.
+//     The headline margin number. 0 means it starved (an underrun); a
+//     stream that only ever reached 2 was one hiccup away.
+//   - PrimeWaitMs: first frame arriving → first frame played. Long means
+//     the sender could not fill the prime buffer promptly.
+//   - RecvSpanMs vs audio duration: delivery slower than realtime is the
+//     definitive "the wire could not keep up" signal.
+//   - MaxGapMs: the worst single stall in arrivals, which distinguishes a
+//     uniformly slow link from a briefly stalled one.
+type StreamStats struct {
+	Periods     uint64 `json:"periods"`
+	Underruns   uint64 `json:"underruns"`
+	MinDepth    int    `json:"minDepth"`
+	PrimeWaitMs int64  `json:"primeWaitMs"`
+	RecvSpanMs  int64  `json:"recvSpanMs"`
+	MaxGapMs    int64  `json:"maxGapMs"`
+	BytesRecv   uint64 `json:"bytesRecv"`
+}
+
+// OnStreamStats registers a per-stream stats callback, reported once when a
+// stream reaches its EOS. Invoked on its own goroutine so a slow consumer
+// (network send) can never stall the ALSA pump. Safe to call any time
+// after New.
+func (p *PcmSpeaker) OnStreamStats(cb func(StreamStats)) {
 	p.statsMu.Lock()
 	p.statsCb = cb
 	p.statsMu.Unlock()
@@ -187,6 +229,10 @@ func (p *PcmSpeaker) silenceLoop() {
 	// mid-stream drains (a drain flips audioStreaming but the stream isn't
 	// over until its EOS), reported and reset at EOS consume.
 	var streamPeriods, streamUnderruns uint64
+	// Consumption-side instrumentation (see StreamStats). Loop-local: only
+	// this goroutine drains audioCh, so no synchronisation is needed.
+	streamMinDepth := -1     // -1 = nothing consumed yet this stream
+	var firstPumpNs int64    // first period actually played this stream
 	for {
 		// Prime gate: while idle, hold on silence until the buffer has
 		// primePeriods queued or the stream's EOS is already in (short
@@ -210,6 +256,14 @@ func (p *PcmSpeaker) silenceLoop() {
 		case period := <-audioSrc:
 			audioStreaming = true
 			streamPeriods++
+			// Buffer margin: occupancy remaining *after* taking this
+			// period. len() on a channel is O(1); no allocation, no log.
+			if d := len(p.audioCh); streamMinDepth < 0 || d < streamMinDepth {
+				streamMinDepth = d
+			}
+			if firstPumpNs == 0 {
+				firstPumpNs = time.Now().UnixNano()
+			}
 			if p.echoTap != nil {
 				p.echoTap(period)
 			}
@@ -226,14 +280,33 @@ func (p *PcmSpeaker) silenceLoop() {
 					// Natural end of stream (0x03 received), or a barge-in
 					// flush (Flush sets eosPending so its drain isn't
 					// miscounted as an underrun).
-					log.Printf("[speaker] stream complete — returning to silence (periods=%d underruns=%d)", streamPeriods, streamUnderruns)
+					firstRecv := p.recvFirstNs.Load()
+					lastRecv := p.recvLastNs.Load()
+					st := StreamStats{
+						Periods:   streamPeriods,
+						Underruns: streamUnderruns,
+						MinDepth:  streamMinDepth,
+						MaxGapMs:  p.recvMaxGapNs.Load() / 1e6,
+						BytesRecv: p.recvBytes.Load(),
+					}
+					if firstRecv > 0 && lastRecv > firstRecv {
+						st.RecvSpanMs = (lastRecv - firstRecv) / 1e6
+					}
+					if firstRecv > 0 && firstPumpNs > firstRecv {
+						st.PrimeWaitMs = (firstPumpNs - firstRecv) / 1e6
+					}
+					log.Printf("[speaker] stream complete — returning to silence "+
+						"(periods=%d underruns=%d minDepth=%d primeWait=%dms recvSpan=%dms maxGap=%dms)",
+						streamPeriods, streamUnderruns, streamMinDepth,
+						st.PrimeWaitMs, st.RecvSpanMs, st.MaxGapMs)
 					p.statsMu.Lock()
 					cb := p.statsCb
 					p.statsMu.Unlock()
 					if cb != nil && streamPeriods > 0 {
-						go cb(streamPeriods, streamUnderruns)
+						go cb(st)
 					}
 					streamPeriods, streamUnderruns = 0, 0
+					streamMinDepth, firstPumpNs = -1, 0
 				} else {
 					// Mid-stream drain: the WS sender fell behind real-time
 					// playback and a silence gap is being injected — the
@@ -277,8 +350,24 @@ func (p *PcmSpeaker) PumpPeriod(data []byte) error {
 		p.stateMu.Unlock()
 		return nil
 	}
+	newStream := !p.streamActive
 	p.streamActive = true
 	p.stateMu.Unlock()
+	// Arrival-side instrumentation (see StreamStats). Single writer —
+	// the WS read loop calls this sequentially — so load/compare/store
+	// needs no lock. ~23 calls/s, no allocation, no logging.
+	now := time.Now().UnixNano()
+	if newStream {
+		p.recvFirstNs.Store(now)
+		p.recvMaxGapNs.Store(0)
+		p.recvBytes.Store(0)
+	} else if last := p.recvLastNs.Load(); last > 0 {
+		if gap := now - last; gap > p.recvMaxGapNs.Load() {
+			p.recvMaxGapNs.Store(gap)
+		}
+	}
+	p.recvLastNs.Store(now)
+	p.recvBytes.Add(uint64(len(data)))
 	n := len(data) / 2 // mono S16 samples
 	period := make([]byte, n*4)
 	for i := 0; i < n; i++ {

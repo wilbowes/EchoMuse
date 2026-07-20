@@ -249,8 +249,8 @@ func main() {
 
 	// Per-stream playback stats — underrun/period counts reported upstream
 	// once per completed TTS stream, persisted against the voice turn.
-	pcmSpeaker.OnStreamStats(func(periods, underruns uint64) {
-		controlClient.SendPlaybackStats(periods, underruns)
+	pcmSpeaker.OnStreamStats(func(st speaker.StreamStats) {
+		controlClient.SendPlaybackStats(st.Periods, st.Underruns, st)
 	})
 
 	// WiFi change — the executor owns the whole switch/rollback sequence
@@ -436,6 +436,8 @@ func collectStats() client.DeviceStats {
 	memUsed, memTotal := memStats()
 	stoUsed, stoTotal := storageStats()
 	rssi := wifiRSSI()
+	tx, rx, txErr, txDrop, rxCrc := netDeltas()
+	speed, freq, bssid := linkInfo()
 	return client.DeviceStats{
 		CPUPct:         cpuPct,
 		MemUsedMb:      memUsed,
@@ -444,7 +446,119 @@ func collectStats() client.DeviceStats {
 		StorageTotalMb: stoTotal,
 		WifiRssi:       rssi,
 		WifiSsid:       wifi.CurrentSSID(),
+		LinkSpeedMbps:  speed,
+		WifiFreqMhz:    freq,
+		WifiBssid:      bssid,
+		TxBytes:        tx,
+		RxBytes:        rx,
+		TxErrors:       txErr,
+		TxDropped:      txDrop,
+		RxCrcErrors:    rxCrc,
 	}
+}
+
+// ─── Network telemetry ────────────────────────────────────────────────────────
+
+// netCounters holds the previous sysfs read so stats can be reported as
+// per-interval deltas. Only collectStats touches it (single stats goroutine).
+var netCounters struct {
+	tx, rx, txErr, txDrop, rxCrc uint64
+	primed                       bool
+}
+
+// netDeltas returns tx/rx bytes and error counts accumulated since the
+// previous call, read from /sys/class/net/wlan0/statistics/. Plain file
+// reads — no process spawn — so this is cheap enough for every stats tick.
+// The first call primes the baseline and reports zeros.
+func netDeltas() (tx, rx, txErr, txDrop, rxCrc uint64) {
+	read := func(name string) uint64 {
+		b, err := os.ReadFile("/sys/class/net/wlan0/statistics/" + name)
+		if err != nil {
+			return 0
+		}
+		v, _ := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
+		return v
+	}
+	ctx, crx := read("tx_bytes"), read("rx_bytes")
+	cErr, cDrop, cCrc := read("tx_errors"), read("tx_dropped"), read("rx_crc_errors")
+
+	// delta guards against counter resets (interface bounce) by clamping
+	// a negative difference to 0 rather than reporting a huge number.
+	delta := func(cur, prev uint64) uint64 {
+		if cur < prev {
+			return 0
+		}
+		return cur - prev
+	}
+	if netCounters.primed {
+		tx = delta(ctx, netCounters.tx)
+		rx = delta(crx, netCounters.rx)
+		txErr = delta(cErr, netCounters.txErr)
+		txDrop = delta(cDrop, netCounters.txDrop)
+		rxCrc = delta(cCrc, netCounters.rxCrc)
+	}
+	netCounters.tx, netCounters.rx = ctx, crx
+	netCounters.txErr, netCounters.txDrop, netCounters.rxCrc = cErr, cDrop, cCrc
+	netCounters.primed = true
+	return
+}
+
+// linkInfoCache holds the last wpa_cli result and when it was taken.
+var linkInfoCache struct {
+	speed, freq int
+	bssid       string
+	at          time.Time
+}
+
+// linkInfoInterval — how often the wpa_cli subprocess is actually run.
+// Unlike everything else in collectStats this costs a process spawn, and
+// PHY rate / band / AP change on the scale of minutes, not seconds. Cached
+// values are reused between refreshes so every stats message still carries
+// the fields.
+const linkInfoInterval = 2 * time.Minute
+
+// linkInfo returns negotiated PHY rate (Mbps), frequency (MHz) and BSSID.
+//
+// Requires the -p control-socket path: plain `wpa_cli -i wlan0` answers
+// UNKNOWN COMMAND on FireOS because the default socket dir doesn't exist.
+// Returns zero values if wpa_supplicant isn't reachable — the fields are
+// omitempty, so the controller sees them absent rather than wrong.
+func linkInfo() (speed, freq int, bssid string) {
+	if time.Since(linkInfoCache.at) < linkInfoInterval {
+		return linkInfoCache.speed, linkInfoCache.freq, linkInfoCache.bssid
+	}
+	linkInfoCache.at = time.Now()
+
+	out, err := exec.Command("wpa_cli", "-p", "/data/misc/wifi/sockets",
+		"-i", "wlan0", "signal_poll").Output()
+	if err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
+			if !ok {
+				continue
+			}
+			n, convErr := strconv.Atoi(v)
+			if convErr != nil {
+				continue
+			}
+			switch k {
+			case "LINKSPEED":
+				linkInfoCache.speed = n
+			case "FREQUENCY":
+				linkInfoCache.freq = n
+			}
+		}
+	}
+	if out, err := exec.Command("wpa_cli", "-p", "/data/misc/wifi/sockets",
+		"-i", "wlan0", "status").Output(); err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			if v, ok := strings.CutPrefix(strings.TrimSpace(line), "bssid="); ok {
+				linkInfoCache.bssid = v
+				break
+			}
+		}
+	}
+	return linkInfoCache.speed, linkInfoCache.freq, linkInfoCache.bssid
 }
 
 // cpuPercent samples /proc/stat twice over 500ms and returns utilisation %.

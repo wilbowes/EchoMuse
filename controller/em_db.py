@@ -350,6 +350,57 @@ MIGRATIONS: list[str] = [
 
     UPDATE system_config SET value = '6' WHERE key = 'schema_version';
     """,
+
+    # ── v7 — delivery instrumentation (playback stall diagnosis) ─────────────
+    #
+    # Added 2026-07-20 after playback underruns appeared with no identifiable
+    # cause: every metric available at the time measured the wrong thing (the
+    # controller's "Streaming took Xs" times a socket write, which completes
+    # instantly regardless of how slowly the device is actually fed).
+    #
+    # Device-reported per stream (firmware >= v2.9.6, NULL on older):
+    #   min_depth      fewest periods left in the device buffer mid-stream.
+    #                  The margin metric — 0 means it starved, 2 means it
+    #                  nearly did. Underruns are rare and binary; this is
+    #                  continuous and shows degradation before it is audible.
+    #   prime_wait_ms  first frame arriving -> first frame played.
+    #   recv_span_ms   first -> last frame arrival. Compare against audio
+    #                  duration: longer means delivery was slower than
+    #                  realtime, i.e. the wire could not keep up.
+    #   max_gap_ms     worst single inter-arrival gap (brief stall vs
+    #                  uniformly slow link).
+    #   bytes_recv     wire bytes the device actually received.
+    #
+    # Controller-measured:
+    #   send_ms        time to write every frame into the socket. Kept for
+    #                  contrast with delivery_ms — the gap between them is
+    #                  exactly the illusion that misled the 07-20 analysis.
+    #   delivery_ms    first frame sent -> device's playback_stats arrival.
+    #                  The true end-to-end delivery window.
+    #   eq_ms          EQ compute time (executor), to rule the controller in
+    #                  or out as the source of a late start.
+    """
+    ALTER TABLE turns ADD COLUMN min_depth     INTEGER;
+    ALTER TABLE turns ADD COLUMN prime_wait_ms INTEGER;
+    ALTER TABLE turns ADD COLUMN recv_span_ms  INTEGER;
+    ALTER TABLE turns ADD COLUMN max_gap_ms    INTEGER;
+    ALTER TABLE turns ADD COLUMN bytes_recv    INTEGER;
+    ALTER TABLE turns ADD COLUMN send_ms       INTEGER;
+    ALTER TABLE turns ADD COLUMN delivery_ms   INTEGER;
+    ALTER TABLE turns ADD COLUMN eq_ms         INTEGER;
+
+    ALTER TABLE device_metrics ADD COLUMN link_speed_last  INTEGER;
+    ALTER TABLE device_metrics ADD COLUMN link_speed_min   INTEGER;
+    ALTER TABLE device_metrics ADD COLUMN wifi_freq_last   INTEGER;
+    ALTER TABLE device_metrics ADD COLUMN wifi_bssid_last  TEXT;
+    ALTER TABLE device_metrics ADD COLUMN tx_bytes_sum     INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE device_metrics ADD COLUMN rx_bytes_sum     INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE device_metrics ADD COLUMN tx_errors_sum    INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE device_metrics ADD COLUMN tx_dropped_sum   INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE device_metrics ADD COLUMN rx_crc_sum       INTEGER NOT NULL DEFAULT 0;
+
+    UPDATE system_config SET value = '7' WHERE key = 'schema_version';
+    """,
 ]
 
 # ─── Connection management ────────────────────────────────────────────────────
@@ -1005,6 +1056,17 @@ _TURN_COLUMNS = {
     "tts_bytes":        "tts_bytes",
     "underruns":        "underruns",
     "playback_periods": "playback_periods",
+    # v7 delivery instrumentation — present only when the device's
+    # playback_stats arrived before the turn row was written (the common
+    # case: its buffer drains ahead of our overestimated drain sleep).
+    "min_depth":        "min_depth",
+    "prime_wait_ms":    "prime_wait_ms",
+    "recv_span_ms":     "recv_span_ms",
+    "max_gap_ms":       "max_gap_ms",
+    "bytes_recv":       "bytes_recv",
+    "send_ms":          "send_ms",
+    "delivery_ms":      "delivery_ms",
+    "eq_ms":            "eq_ms",
 }
 
 
@@ -1051,12 +1113,45 @@ def insert_turn(device_id: str, rec: dict) -> int:
         return cur.lastrowid
 
 
-def set_turn_playback(turn_id: int, periods: int, underruns: int) -> None:
-    """Attach the device's playback_stats report to a persisted turn."""
+def set_turn_playback(turn_id: int, periods: int, underruns: int,
+                      stats: Optional[dict] = None) -> None:
+    """
+    Attach the device's playback_stats report to a persisted turn.
+
+    stats carries the v7 delivery-margin fields when the firmware sends them
+    (>= v2.9.6); older firmware reports only periods/underruns and the extra
+    columns stay NULL, which reads as "never reported" rather than zero.
+    """
+    stats = stats or {}
     with _tx() as conn:
         conn.execute(
-            "UPDATE turns SET playback_periods = ?, underruns = ? WHERE id = ?",
-            (periods, underruns, turn_id),
+            "UPDATE turns SET playback_periods = ?, underruns = ?, "
+            "min_depth = ?, prime_wait_ms = ?, recv_span_ms = ?, "
+            "max_gap_ms = ?, bytes_recv = ? WHERE id = ?",
+            (
+                periods, underruns,
+                stats.get("minDepth"), stats.get("primeWaitMs"),
+                stats.get("recvSpanMs"), stats.get("maxGapMs"),
+                stats.get("bytesRecv"),
+                turn_id,
+            ),
+        )
+
+
+def set_turn_delivery(turn_id: int, send_ms: int, delivery_ms: int,
+                      eq_ms: int) -> None:
+    """
+    Attach controller-measured playback timings to a persisted turn.
+
+    Separate from set_turn_playback because the two arrive from different
+    sides at different moments: this is known as soon as the controller has
+    finished sending, the device's report lands whenever its buffer drains.
+    """
+    with _tx() as conn:
+        conn.execute(
+            "UPDATE turns SET send_ms = ?, delivery_ms = ?, eq_ms = ? "
+            "WHERE id = ?",
+            (send_ms, delivery_ms, eq_ms, turn_id),
         )
 
 
@@ -1136,14 +1231,19 @@ def record_device_stats(device_id: str, stats: dict) -> None:
     cpu     = stats.get("cpuPct")
     mem     = stats.get("memUsedMb")
     rssi    = stats.get("wifiRssi")
+    link_speed = stats.get("linkSpeedMbps")
     with _tx() as conn:
         conn.execute(
             """
             INSERT INTO device_metrics (
                 device_id, hour_ts, samples, cpu_sum, cpu_max, mem_used_sum,
                 mem_total_mb, storage_used_mb, storage_total_mb,
-                rssi_sum, rssi_samples, rssi_min
-            ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                rssi_sum, rssi_samples, rssi_min,
+                link_speed_last, link_speed_min, wifi_freq_last,
+                wifi_bssid_last, tx_bytes_sum, rx_bytes_sum,
+                tx_errors_sum, tx_dropped_sum, rx_crc_sum
+            ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                      ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (device_id, hour_ts) DO UPDATE SET
                 samples          = samples + 1,
                 cpu_sum          = cpu_sum + excluded.cpu_sum,
@@ -1157,7 +1257,24 @@ def record_device_stats(device_id: str, stats: dict) -> None:
                 rssi_min         = CASE
                     WHEN excluded.rssi_min IS NULL THEN rssi_min
                     ELSE MIN(COALESCE(rssi_min, excluded.rssi_min), excluded.rssi_min)
-                END
+                END,
+                -- Link identity keeps the latest value (a band/AP change
+                -- mid-hour should be visible as the new one); link_speed_min
+                -- keeps the worst PHY rate seen, which is the number that
+                -- matters when hunting a throughput collapse.
+                link_speed_last  = COALESCE(excluded.link_speed_last, link_speed_last),
+                link_speed_min   = CASE
+                    WHEN excluded.link_speed_min IS NULL THEN link_speed_min
+                    ELSE MIN(COALESCE(link_speed_min, excluded.link_speed_min),
+                             excluded.link_speed_min)
+                END,
+                wifi_freq_last   = COALESCE(excluded.wifi_freq_last, wifi_freq_last),
+                wifi_bssid_last  = COALESCE(excluded.wifi_bssid_last, wifi_bssid_last),
+                tx_bytes_sum     = tx_bytes_sum   + excluded.tx_bytes_sum,
+                rx_bytes_sum     = rx_bytes_sum   + excluded.rx_bytes_sum,
+                tx_errors_sum    = tx_errors_sum  + excluded.tx_errors_sum,
+                tx_dropped_sum   = tx_dropped_sum + excluded.tx_dropped_sum,
+                rx_crc_sum       = rx_crc_sum     + excluded.rx_crc_sum
             """,
             (
                 device_id, hour_ts,
@@ -1167,6 +1284,15 @@ def record_device_stats(device_id: str, stats: dict) -> None:
                 float(rssi) if rssi is not None else 0.0,
                 1 if rssi is not None else 0,
                 float(rssi) if rssi is not None else None,
+                # linkSpeedMbps is omitempty device-side and refreshed on a
+                # slower cadence, so 0/absent means "not sampled this tick"
+                # and must not poison the running minimum.
+                link_speed or None, link_speed or None,
+                stats.get("wifiFreqMhz") or None,
+                stats.get("wifiBssid") or None,
+                int(stats.get("txBytes") or 0), int(stats.get("rxBytes") or 0),
+                int(stats.get("txErrors") or 0), int(stats.get("txDropped") or 0),
+                int(stats.get("rxCrcErrors") or 0),
             ),
         )
         conn.execute(

@@ -108,6 +108,14 @@ class TurnTrace:
     tts_bytes:        int   = 0       # decoded PCM bytes
     t_playback_ms:    int   = -1      # ms from t0 to playback started
     t_complete_ms:    int   = -1      # ms from t0 to turn complete
+    # HA-side segment timings, derived from the marks above at emit time.
+    # Broken out because "the turn felt slow" needs to point at a stage:
+    # ha_think = HA's own STT+intent time, tts_gen = how long HA took to
+    # produce the audio URL after deciding what to say, fetch = our pull
+    # of that audio. Together they separate "HA was slow" from "we were".
+    ha_think_ms:      int   = -1
+    tts_gen_ms:       int   = -1
+    fetch_ms:         int   = -1
     outcome:          str   = ""      # "ok", "no_speech", "cancelled", "tts_error", "timeout"
     # Wake detection detail (model, score, threshold, noise_floor) popped
     # from device.last_wake at turn start — None for button/continuation
@@ -121,8 +129,22 @@ class TurnTrace:
         """Record current elapsed time into the named timestamp field."""
         setattr(self, attr, self.elapsed_ms())
 
+    def derive(self) -> None:
+        """
+        Fill the HA-side segment durations from the absolute marks. Pure
+        arithmetic on values already captured — no extra timing calls.
+        """
+        if self.t_vad_end_ms >= 0 and self.t_stt_ms >= 0:
+            self.ha_think_ms = self.t_stt_ms - self.t_vad_end_ms
+        if self.t_stt_ms >= 0 and self.t_tts_url_ms >= 0:
+            self.tts_gen_ms = self.t_tts_url_ms - self.t_stt_ms
+        if self.t_tts_url_ms >= 0 and self.t_tts_fetched_ms >= 0:
+            self.fetch_ms = self.t_tts_fetched_ms - self.t_tts_url_ms
+
     def emit(self) -> None:
         """Emit a single structured [TURN] log line."""
+        self.derive()
+
         def fmt(v: int) -> str:
             return f"+{v}ms" if v >= 0 else "—"
 
@@ -135,7 +157,9 @@ class TurnTrace:
             f"stt={fmt(self.t_stt_ms)} text={self.stt_text!r} "
             f"tts_url={fmt(self.t_tts_url_ms)} "
             f"tts_fetch={fmt(self.t_tts_fetched_ms)} tts_bytes={self.tts_bytes} "
-            f"playback={fmt(self.t_playback_ms)}"
+            f"playback={fmt(self.t_playback_ms)} "
+            f"| segments: ha_think={fmt(self.ha_think_ms)} "
+            f"tts_gen={fmt(self.tts_gen_ms)} fetch={fmt(self.fetch_ms)}"
         )
 
 # Frames to discard from voice_queue at the start of each turn.
@@ -1509,6 +1533,19 @@ async def _persist_turn(device, turn_record: dict) -> None:
         # (its buffer drained ahead of our overestimated drain sleep).
         turn_record["playback_periods"] = pending[1]
         turn_record["underruns"]        = pending[2]
+        # v7 delivery detail (tuple len 5 from firmware >= v2.9.6; older
+        # stashes are 3-tuples and simply carry none of this).
+        if len(pending) >= 5:
+            pstats = pending[3] or {}
+            turn_record["min_depth"]     = pstats.get("minDepth")
+            turn_record["prime_wait_ms"] = pstats.get("primeWaitMs")
+            turn_record["recv_span_ms"]  = pstats.get("recvSpanMs")
+            turn_record["max_gap_ms"]    = pstats.get("maxGapMs")
+            turn_record["bytes_recv"]    = pstats.get("bytesRecv")
+            if pending[4] is not None and pending[4] >= 0:
+                turn_record["delivery_ms"] = pending[4]
+            turn_record["send_ms"] = device.playback_send_ms
+            turn_record["eq_ms"]   = device.playback_eq_ms
         pending = None
     try:
         turn_id = await loop.run_in_executor(
