@@ -3,27 +3,34 @@ em_arbiter.py — multi-device wake arbitration
 ==============================================
 
 When one utterance wakes more than one Echo (open-plan rooms, hallways),
-every device that scored above threshold would start its own voice turn.
-This module elects a single responder, stock-Alexa-style (their "ESP" —
-Echo Spatial Perception).
+every device that scored above threshold starts its own voice turn. The
+result is not merely duplicated answers: each device then hears the
+others' TTS through the room, transcribes it as a follow-up, and HA's
+`continue_conversation` reopens the mic — a self-feeding loop that ran
+for ~70 seconds on 2026-07-20 before a no-speech timeout broke it.
 
-Mechanics: the first detection opens a *round* with a deadline one
-arbitration window from now (`wakeArbitrationMs`, per-device config but
-sensibly set fleet-wide). Detections landing before the deadline join
-the round; at the deadline the best contender wins and every submitter's
-await resolves with the winner's device id. Detections that arrive just
-*after* a round resolved (a straggler of the same utterance — device
-batching means spreads of a few hundred ms are normal) lose to that
-round's winner instead of opening a fresh round and double-answering.
+**First detector wins.** The first device to cross threshold claims the
+utterance immediately and answers with zero added latency. Any other
+device detecting within `window_s` of that claim loses and stands down.
+No one ever waits.
 
-The ranking metric is (SNR, score): speech RMS at detection relative to
-that device's own tracked noise floor is a proximity proxy — the closer
-device hears you louder above *its* room — while raw wake score
-saturates near 1.0 for any clean detection and mostly breaks ties.
+Why not "best SNR", which this module did until 2026-07-20: it forced
+every wake to wait out the whole window (~364ms measured, on every
+device, because the gate was "2+ devices *connected*" rather than "in
+earshot"), and the field data showed the metric was wrong anyway. On the
+three-way trigger that exposed all this, SNR at detection was
+0.9 / 1.15 / 0.93 — statistically indistinguishable — and the SNR winner
+(Lounge) produced "What's the technique?" while the *first* detector
+(Office) produced the correct "What's the weather like today?". Sound
+reaches the nearer microphone sooner and louder, so it crosses threshold
+sooner; detection order is a better proximity proxy than a ratio of two
+noisy RMS estimates, and it is free.
 
-Latency cost: every wake waits out the window. Callers should skip
-arbitration entirely (don't call submit) when only one device is
-connected, and the window is configurable down to 0 (= off).
+`window_s` is now purely a suppression window, not a wait: it bounds how
+long a claim silences other devices. It should comfortably exceed the
+spread between devices hearing one utterance (~200ms observed, driven by
+the device's 160ms mic batching) without being so long that a genuinely
+separate wake in another room gets swallowed.
 
 Pure asyncio, no imports from the rest of the controller — unit-tested
 in tests/test_arbiter.py.
@@ -33,63 +40,48 @@ from __future__ import annotations
 
 import asyncio
 
-# Detections this close behind an already-resolved round are stragglers
-# of the same utterance, not a new wake. Beyond it, a detection is a
-# genuinely separate wake (someone else, another room) and gets its own
-# round even though a turn may already be running elsewhere.
-STRAGGLER_WINDOW_S = 1.0
-
-
-class _Round:
-    __slots__ = ("started", "deadline", "entries", "winner")
-
-    def __init__(self, started: float, deadline: float):
-        self.started = started
-        self.deadline = deadline
-        # device_id -> ((snr, score), future)
-        self.entries: dict[str, tuple[tuple[float, float], asyncio.Future]] = {}
-        self.winner: str | None = None
-
 
 class WakeArbiter:
+    """
+    Tracks the in-flight claim on the current utterance.
+
+    Deliberately tiny and synchronous: claim() decides with no await, so
+    the winner's turn starts on the same event-loop tick as its wake
+    detection — that is the whole point of the redesign.
+    """
+
     def __init__(self) -> None:
-        self._round: _Round | None = None
-        self._last: _Round | None = None
+        self._winner: str | None = None
+        self._claimed_at: float = 0.0
 
-    async def submit(self, device_id: str, snr: float, score: float,
-                     window_s: float) -> str:
+    def claim(self, device_id: str, window_s: float) -> str:
         """
-        Register a wake detection; returns the winning device_id once the
-        round resolves (== device_id if this device won). The window is
-        set by the round's first detection.
+        Try to claim the current utterance. Returns the winning device_id
+        — equal to device_id if this device won and should answer, or
+        another device's id if this detection is a duplicate to discard.
+
+        Returns immediately; there is no waiting on either path.
         """
-        loop = asyncio.get_running_loop()
-        now = loop.time()
+        now = asyncio.get_running_loop().time()
+        held = (
+            self._winner is not None
+            and now - self._claimed_at < window_s
+        )
+        if held and self._winner != device_id:
+            return self._winner
+        # Either nothing is claimed, the claim has expired, or this is the
+        # same device waking again (a genuinely new utterance in the room
+        # that already answered). Re-arm the window from now.
+        self._winner = device_id
+        self._claimed_at = now
+        return device_id
 
-        rnd = self._round
-        if rnd is None:
-            last = self._last
-            if (last is not None and last.winner is not None
-                    and last.winner != device_id
-                    and now - last.started < STRAGGLER_WINDOW_S):
-                return last.winner
-            rnd = _Round(now, now + window_s)
-            self._round = rnd
-            asyncio.create_task(self._resolve(rnd))
-
-        fut: asyncio.Future = loop.create_future()
-        rnd.entries[device_id] = ((snr, score), fut)
-        return await fut
-
-    async def _resolve(self, rnd: _Round) -> None:
-        loop = asyncio.get_running_loop()
-        delay = rnd.deadline - loop.time()
-        if delay > 0:
-            await asyncio.sleep(delay)
-        if self._round is rnd:
-            self._round = None
-        rnd.winner = max(rnd.entries.items(), key=lambda kv: kv[1][0])[0]
-        self._last = rnd
-        for _metric, fut in rnd.entries.values():
-            if not fut.done():
-                fut.set_result(rnd.winner)
+    def release(self, device_id: str) -> None:
+        """
+        Drop a claim once its turn is over, so an immediate follow-up from
+        another device isn't suppressed by a stale window. Ignores calls
+        from a device that doesn't hold the claim.
+        """
+        if self._winner == device_id:
+            self._winner = None
+            self._claimed_at = 0.0

@@ -1064,6 +1064,9 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
             )
         device.oww_paused.clear()
         log.info(f"[{device.device_id}] oww_paused cleared")
+        # Release the arbitration claim so another device answering a
+        # genuinely new utterance isn't suppressed by a stale window.
+        _wake_arbiter.release(device.device_id)
         # Conversation over — un-pause a media session this turn preempted.
         await em_player.resume_interrupted(device.device_id)
 
@@ -1346,9 +1349,12 @@ async def wake_word_listener(device: Device):
                         # loss. Solo fleets skip the window entirely.
                         won_by = device.device_id
                         if device.wake_arb_ms > 0 and len(_devices) > 1:
-                            snr = float(rms) / max(device.noise_floor, 1e-5)
-                            won_by = await _wake_arbiter.submit(
-                                device.device_id, snr, float(score),
+                            # Synchronous — the winner starts its turn on
+                            # this same tick. The old version awaited the
+                            # full window on EVERY wake (~364ms measured)
+                            # even when no other device was contending.
+                            won_by = _wake_arbiter.claim(
+                                device.device_id,
                                 device.wake_arb_ms / 1000.0,
                             )
                         if won_by != device.device_id:
