@@ -724,16 +724,28 @@ func (c *ControlClient) SendWifiResult(ok bool, ssid, errMsg string) {
 	})
 }
 
-// SendPlaybackStats reports one completed speaker stream: how many periods
-// played and how many mid-stream underruns (silence injections) occurred.
-// Sent once per TTS response/announcement; the controller attaches it to
-// the voice turn it just persisted. Safe for concurrent use — silently
-// drops if not connected (the stat is diagnostic, not state).
-func (c *ControlClient) SendPlaybackStats(periods, underruns uint64) {
+// SendPlaybackStats reports one completed speaker stream: periods played,
+// mid-stream underruns, and the delivery-margin fields (buffer low-water
+// mark, prime wait, arrival span and worst arrival gap) that say how close
+// the stream came to starving even when it did not.
+//
+// Sent once per TTS response/announcement — not per frame; the controller
+// attaches it to the voice turn it just persisted. stats is passed as an
+// opaque interface so the speaker package owns the field set and adding a
+// metric never has to touch this signature. Safe for concurrent use —
+// silently drops if not connected (the stat is diagnostic, not state).
+//
+// periods/underruns are ALSO sent flat at the top level, duplicating two
+// fields of stats. That is deliberate: device firmware and controller are
+// released independently, so this firmware must keep working against a
+// controller that predates the nested payload. Don't "tidy" the duplication
+// away until every controller in the fleet reads stats.
+func (c *ControlClient) SendPlaybackStats(periods, underruns uint64, stats interface{}) {
 	_ = c.writeJSON(map[string]interface{}{
 		"type":      "playback_stats",
 		"periods":   periods,
 		"underruns": underruns,
+		"stats":     stats,
 	})
 }
 

@@ -1982,8 +1982,14 @@ async def _get_system_status(request: web.Request) -> web.Response:
     all_rows = await loop.run_in_executor(None, db.get_all_devices)
     release = await _get_cached_release()
 
+    # Lazy import — em_controller imports em_api at module level.
+    import em_controller as _ctrl
+
     return _ok({
         "controller_version": CONTROLLER_VERSION,
+        # Peak asyncio event-loop stall since start (ms). Non-trivial values
+        # mean the controller itself delayed speaker frames and LED updates.
+        "loop_lag_peak_ms": round(_ctrl._loop_lag_peak_ms, 1),
         "connected":      len(_devices),
         "total_devices":  len(all_rows),
         "pending":        sum(1 for r in all_rows if not r["approved"]),

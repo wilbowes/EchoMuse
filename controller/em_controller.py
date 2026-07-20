@@ -312,7 +312,17 @@ class Device:
         # em_esphome._persist_turn if fresh (staleness window keeps a
         # long-ago announcement's stats out of an unrelated later turn).
         self.last_turn_id: int | None = None
-        self.pending_playback_stats: tuple[float, int, int] | None = None
+        self.pending_playback_stats: tuple | None = None
+
+        # Controller-side playback timing (v7 instrumentation).
+        # playback_send_t0 is set when the first 0x02 of a response goes
+        # out and consumed when the device's playback_stats lands — the
+        # difference is the true delivery window, as opposed to
+        # playback_send_ms, which only times writing into the socket and
+        # completes almost instantly however slow the link is.
+        self.playback_send_t0: float | None = None
+        self.playback_send_ms: int = -1
+        self.playback_eq_ms:   int = -1
 
     async def send_control(self, msg: dict):
         try:
@@ -415,6 +425,10 @@ class Device:
 # The live device registry — keyed by device_id (ro.serialno).
 # em_api receives a reference to this dict at startup.
 _devices: dict[str, Device] = {}
+
+# Peak event-loop lag observed since start, in ms (see
+# event_loop_lag_monitor). Read by the API for /api/system/status.
+_loop_lag_peak_ms: float = 0.0
 
 # One arbiter for the fleet — elects a single responder when one
 # utterance wakes several Echos (see em_arbiter.py).
@@ -697,7 +711,11 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
     def _prepare_pcm() -> bytes:
         return em_eq.apply(voice_response, SPEAKER_RATE, device.eq_bands, device.eq_loudness)
 
+    _t_eq0 = asyncio.get_event_loop().time()
     speaker_pcm = await asyncio.get_event_loop().run_in_executor(None, _prepare_pcm)
+    device.playback_eq_ms = int(
+        (asyncio.get_event_loop().time() - _t_eq0) * 1000
+    )
     log.info(
         f"[{device.device_id}] Streaming {len(speaker_pcm)} bytes "
         f"({len(speaker_pcm)//SPEAKER_BYTES} periods)"
@@ -705,6 +723,9 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
     cancel_task    = asyncio.create_task(device.cancel_event.wait())
     stream_task    = asyncio.create_task(device.stream_speaker(speaker_pcm))
     t_stream_start = asyncio.get_event_loop().time()
+    # Opens the delivery window measured against the device's
+    # playback_stats report (see Device.playback_send_t0).
+    device.playback_send_t0 = t_stream_start
 
     done, _ = await asyncio.wait(
         [stream_task, cancel_task],
@@ -725,10 +746,11 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
             audio_duration = len(speaker_pcm) / (SPEAKER_RATE * 2) + SPEAKER_PRIME_SECONDS
             elapsed        = asyncio.get_event_loop().time() - t_stream_start
             remaining      = max(0.0, audio_duration - elapsed)
+            device.playback_send_ms = int(elapsed * 1000)
             log.info(
-                f"[{device.device_id}] Streaming took {elapsed:.1f}s, "
-                f"sleeping {remaining:.1f}s for buffer drain "
-                f"(total={audio_duration:.1f}s)"
+                f"[{device.device_id}] Socket write took {elapsed:.1f}s "
+                f"(NOT delivery — see delivery_ms), sleeping {remaining:.1f}s "
+                f"for buffer drain (total={audio_duration:.1f}s)"
             )
             if remaining > 0:
                 # The drain sleep must race cancel_event too: the WS write
@@ -1776,15 +1798,35 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                     # can't overwrite a turn's stats. Reports with no
                     # pending turn (HA announcements, TTS after a controller
                     # restart) roll into the hourly counters instead.
+                    # periods/underruns are read from the top level, which
+                    # every firmware sends; "stats" carries the v2.9.6+
+                    # delivery-margin fields and is absent on older devices.
                     periods   = int(msg.get("periods", 0))
                     underruns = int(msg.get("underruns", 0))
+                    pstats    = msg.get("stats") or {}
+                    # Delivery window: first speaker frame sent -> this
+                    # report. The metric the 07-20 investigation lacked —
+                    # "Streaming took Xs" times the socket write and reads
+                    # ~0s however slowly the device is really being fed.
+                    delivery_ms = -1
+                    if device.playback_send_t0 is not None:
+                        delivery_ms = int(
+                            (loop.time() - device.playback_send_t0) * 1000
+                        )
+                        device.playback_send_t0 = None
                     turn_id   = device.last_turn_id
                     device.last_turn_id = None
                     if turn_id is not None:
                         await loop.run_in_executor(
                             None, db.set_turn_playback,
-                            turn_id, periods, underruns,
+                            turn_id, periods, underruns, pstats,
                         )
+                        if delivery_ms >= 0:
+                            await loop.run_in_executor(
+                                None, db.set_turn_delivery, turn_id,
+                                device.playback_send_ms,
+                                delivery_ms, device.playback_eq_ms,
+                            )
                         for rec in reversed(device.turn_history):
                             if rec.get("turn_id") == turn_id:
                                 rec["playback_periods"] = periods
@@ -1797,8 +1839,12 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                         # displaced earlier stash was an announcement's:
                         # keep its underruns in the hourly counters.
                         prev = device.pending_playback_stats
+                        # Indices 0-2 stay (ts, periods, underruns) so the
+                        # existing consumer keeps working; 3-4 carry the v7
+                        # delivery detail.
                         device.pending_playback_stats = (
-                            asyncio.get_event_loop().time(), periods, underruns
+                            asyncio.get_event_loop().time(), periods, underruns,
+                            pstats, delivery_ms,
                         )
                         if prev and prev[2]:
                             await loop.run_in_executor(
@@ -2117,6 +2163,36 @@ async def _mdns_refresh_loop(azc: AsyncZeroconf, info: ServiceInfo) -> None:
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
+async def event_loop_lag_monitor(interval: float = 1.0,
+                                 warn_ms: float = 250.0) -> None:
+    """
+    Watch for asyncio event-loop stalls.
+
+    Sleeps for a known interval and measures the overshoot: if the loop is
+    blocked by synchronous work, the wake-up is late by roughly the length
+    of that block. Anything blocking the loop also delays speaker frames
+    reaching the socket, so this is the controller-side counterpart to the
+    device's buffer-margin metric — it answers "were we the ones who were
+    late?" without needing a profiler attached.
+
+    Costs one wake-up per second and logs only when a threshold is crossed;
+    the running peak is exposed on /api/system/status.
+    """
+    global _loop_lag_peak_ms
+    loop = asyncio.get_event_loop()
+    while True:
+        t0 = loop.time()
+        await asyncio.sleep(interval)
+        lag_ms = (loop.time() - t0 - interval) * 1000
+        if lag_ms > _loop_lag_peak_ms:
+            _loop_lag_peak_ms = lag_ms
+        if lag_ms >= warn_ms:
+            log.warning(
+                f"[loop] event loop stalled {lag_ms:.0f}ms — "
+                f"speaker sends and LED frames were delayed by this much"
+            )
+
+
 async def main():
     log.info(f"EchoMuse Controller {api.CONTROLLER_VERSION}")
     db.init(DB_PATH)
@@ -2134,6 +2210,7 @@ async def main():
 
     release_task       = asyncio.create_task(api.release_poll_loop())
     session_prune_task = asyncio.create_task(api.session_prune_loop())
+    loop_lag_task      = asyncio.create_task(event_loop_lag_monitor())
 
     # Device-link TLS: generate/load the CA + server cert. Failure to set
     # up TLS (missing cryptography package, unwritable dir) must never take
@@ -2197,6 +2274,7 @@ async def main():
         await esphome.stop_esphome_servers()
         release_task.cancel()
         session_prune_task.cancel()
+        loop_lag_task.cancel()
         mdns_task.cancel()
         await azc.async_unregister_service(info)
         await azc.async_close()
