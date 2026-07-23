@@ -275,7 +275,7 @@ class Device:
 
     async def send_data(self, data: bytes):
         if self.data_ws is None:
-            for _ in range(50):
+            for _ in range(150):
                 if self.data_ws is not None:
                     break
                 await asyncio.sleep(0.1)
