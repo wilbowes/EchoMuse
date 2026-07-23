@@ -1089,7 +1089,7 @@ async def _fetch_tts_audio(url: str) -> bytes:
     for attempt in range(2):
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=60)) as resp:
                     resp.raise_for_status()
                     audio_bytes = await resp.read()
             break
