@@ -8,6 +8,8 @@ import (
 	"time"
 
 	internalLed "github.com/wilbowes/EchoMuse/internal/bindings/led"
+	"github.com/wilbowes/EchoMuse/internal/cue"
+	"github.com/wilbowes/EchoMuse/internal/profile"
 	"github.com/wilbowes/EchoMuse/pkg/buttons"
 	"github.com/wilbowes/EchoMuse/pkg/led"
 	"github.com/wilbowes/EchoMuse/pkg/mic"
@@ -48,6 +50,10 @@ type Server struct {
 	// anim owns the device-rendered ring animation (led_anim messages).
 	anim animator
 
+	// wakeCue acknowledges the start of a voice turn on devices with no LED
+	// ring. nil where the ring already does that job.
+	wakeCue *cue.Cue
+
 	// audioLevel holds the live speaker RMS as float64 bits — written by
 	// the speaker's ALSA pump via SetAudioLevel, read by the meter anim.
 	audioLevel atomic.Uint64
@@ -66,6 +72,13 @@ func NewServer(buttonController buttons.Controller, microphone mic.Microphone, s
 		buttonController: buttonController,
 		mic:              microphone,
 		speaker:          speaker,
+	}
+
+	// Wake acknowledgement, for devices whose LED ring cannot signal it. Only
+	// the profile-driven speaker offers the system-sound path the cue needs;
+	// the tinyalsa backend does not, and the devices using it have a ring.
+	if p, ok := speaker.(cue.Player); ok {
+		server.wakeCue = cue.New(profile.Detect(), p)
 	}
 
 	// Volume controller uses a getter so it handles the nil-during-boot window safely
@@ -131,8 +144,10 @@ func NewServer(buttonController buttons.Controller, microphone mic.Microphone, s
 		// Discrete red LED under the mic-off button (GPIO, separate from
 		// the ring) — export + off. Non-fatal: an unmuted boot without a
 		// button LED is cosmetic, everything else still works.
-		if err := internalLed.InitMuteButtonLED(); err != nil {
-			log.Printf("Mute button LED init failed: %v", err)
+		if profile.Detect().HasMuteButtonLED {
+			if err := internalLed.InitMuteButtonLED(); err != nil {
+				log.Printf("Mute button LED init failed: %v", err)
+			}
 		}
 
 		// A muted state restored from state.json was applied to the ADC
@@ -356,6 +371,7 @@ func clampAdd(v uint8, delta int) uint8 {
 //     overlap mute (mic stopped), but mute-terminates-turn (2026-07-10)
 //     means the cancelled turn's LED cleanup arrives after the red ring
 //     is up — it must not clear it. Unmute clears the ring explicitly.
+//
 // listeningHint is the controller's explicit "this frame is the listening
 // ring" flag (nil from pre-scene controllers). When absent, fall back to
 // the historical heuristic — a 12-LED all-green frame — which only works
@@ -382,8 +398,20 @@ func (s *Server) SetLEDs(leds []led.Led, listeningHint *bool) {
 			s.baseLEDs[l.ID] = l
 		}
 	}
+	// Edges only: the controller repaints the listening frame throughout a
+	// turn, and every repaint would otherwise re-acknowledge.
+	startedListening := listeningRing && !s.listeningLEDs
+	stoppedListening := !listeningRing && s.listeningLEDs
 	s.listeningLEDs = listeningRing
 	s.baseLEDsMu.Unlock()
+
+	// Both are no-ops when the device has an LED ring, and both return
+	// immediately.
+	if startedListening {
+		s.wakeCue.Start()
+	} else if stoppedListening {
+		s.wakeCue.Stop()
+	}
 	if s.volume.DisplayActive() || s.mute.IsMuted() {
 		return
 	}

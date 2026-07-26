@@ -3,13 +3,16 @@ package buttons
 import (
 	"context"
 	"errors"
-	"github.com/wilbowes/EchoMuse/pkg/buttons"
+	"fmt"
+	"log"
+
 	evdev "github.com/gvalkov/golang-evdev"
-	"os/exec"
+	"github.com/wilbowes/EchoMuse/internal/profile"
+	"github.com/wilbowes/EchoMuse/pkg/buttons"
 )
 
-const dotButton = "/dev/input/event1"
-const volumeButton = "/dev/input/event2"
+// Device paths come from the profile; a device without an action button
+// leaves DotDevice empty and only the volume node is opened.
 
 // VolumeCallback is called on volume button release with direction "up" or "down".
 type VolumeCallback func(direction string)
@@ -18,6 +21,7 @@ type VolumeCallback func(direction string)
 type MuteCallback func()
 
 type EvDevController struct {
+	prof           *profile.Profile
 	volumeCallback func(direction string)
 	muteCallback   func()
 }
@@ -34,11 +38,14 @@ func (e *EvDevController) SetMuteCallback(cb func()) {
 	e.muteCallback = cb
 }
 
-// Init the button listeners
-// Kills alexa's native button functions
+// Init prepares the button listeners.
+//
+// Stopping the stock button daemon is part of the profile's StopServices
+// (Fire OS calls it "acebutton"; LineageOS has no equivalent), so there is
+// nothing left to do here. It previously ran `stop acebutton` and returned
+// the error, which made startup fail outright on any OS without that service.
 func (e *EvDevController) Init() error {
-	cmd := exec.Command("stop", "acebutton")
-	return cmd.Run()
+	return nil
 }
 
 func (e *EvDevController) SubscribeToButton(callback buttons.ButtonClickCallback) (*buttons.EventSubscription, error) {
@@ -46,15 +53,26 @@ func (e *EvDevController) SubscribeToButton(callback buttons.ButtonClickCallback
 		return nil, errors.New("callback can't be nil")
 	}
 
-	dotBtn := e.GetDotButton()
-	volBtn := e.GetVolumeButton()
-	dotDevice, err := evdev.Open(dotButton)
-	if err != nil {
-		return nil, err
+	var dotDevice, volDevice *evdev.InputDevice
+	if p := e.prof.Buttons.DotDevice; p != "" {
+		d, err := evdev.Open(p)
+		if err != nil {
+			return nil, fmt.Errorf("open dot button %s: %w", p, err)
+		}
+		dotDevice = d
 	}
-	volDevice, err := evdev.Open(volumeButton)
-	if err != nil {
-		return nil, err
+	if p := e.prof.Buttons.VolumeDevice; p != "" {
+		d, err := evdev.Open(p)
+		if err != nil {
+			if dotDevice != nil {
+				dotDevice.Release()
+			}
+			return nil, fmt.Errorf("open volume button %s: %w", p, err)
+		}
+		volDevice = d
+	}
+	if dotDevice == nil && volDevice == nil {
+		log.Printf("buttons: no input devices configured for %s, so no physical controls", e.prof.Name)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -120,8 +138,12 @@ func (e *EvDevController) SubscribeToButton(callback buttons.ButtonClickCallback
 		}
 	}
 
-	go readBtn(dotBtn, dotDevice)
-	go readBtn(volBtn, volDevice)
+	if dotDevice != nil {
+		go readBtn(e.GetDotButton(), dotDevice)
+	}
+	if volDevice != nil {
+		go readBtn(e.GetVolumeButton(), volDevice)
+	}
 
 	return eventSub, nil
 }
@@ -138,8 +160,8 @@ func (e *EvDevController) GetDotButton() buttons.Button {
 	}
 }
 
-func NewButtonController() (*EvDevController, error) {
-	controller := &EvDevController{}
+func NewButtonController(prof *profile.Profile) (*EvDevController, error) {
+	controller := &EvDevController{prof: prof}
 	if err := controller.Init(); err != nil {
 		return nil, err
 	}

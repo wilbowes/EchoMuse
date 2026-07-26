@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"sync"
 
+	"github.com/wilbowes/EchoMuse/internal/profile"
 	"github.com/wilbowes/EchoMuse/pkg/led"
 	"os"
 	"os/exec"
@@ -94,7 +95,18 @@ func (i *I2CController) SetLEDs(LEDs ...led.Led) error {
     return os.WriteFile(ledFrame, targetColor.Bytes(), perm)
 }
 
+// NewDefaultController returns the LED backend this device has: the I2C ring
+// controller where there is a ring, and a null controller on devices with a
+// screen instead, whose IS31FL3236A sysfs paths do not exist.
 func NewDefaultController() (led.Controller, error) {
+	if !profile.Detect().HasLEDRing {
+		controller := NewNullController()
+		if err := controller.Init(); err != nil {
+			return nil, err
+		}
+		return controller, nil
+	}
+
 	controller := &I2CController{}
 
 	if err := controller.Init(); err != nil {

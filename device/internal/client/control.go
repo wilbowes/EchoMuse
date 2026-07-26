@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"github.com/wilbowes/EchoMuse/internal/profile"
 	"io"
 	"log"
 	"net"
@@ -83,8 +84,8 @@ type ControlClient struct {
 	wifiCommitCallback    StateCallback
 	wifiScanCallback      StateCallback
 
-	conn         *websocket.Conn
-	connMu       sync.Mutex
+	conn   *websocket.Conn
+	connMu sync.Mutex
 
 	// serverBaseURL is the WebSocket base URL actually in use
 	// ("ws://host:port" or "wss://host:tlsport"), set on successful
@@ -115,7 +116,7 @@ func NewControlClient(
 }
 
 func (c *ControlClient) OnLEDAnim(cb LEDAnimCallback)             { c.ledAnimCallback = cb }
-func (c *ControlClient) OnDisconnected(cb StateCallback)           { c.disconnectedCallback = cb }
+func (c *ControlClient) OnDisconnected(cb StateCallback)          { c.disconnectedCallback = cb }
 func (c *ControlClient) OnConnected(cb StateCallback)             { c.connectedCallback = cb }
 func (c *ControlClient) OnPending(cb StateCallback)               { c.pendingCallback = cb }
 func (c *ControlClient) OnConfigApplied(cb ConfigAppliedCallback) { c.configAppliedCallback = cb }
@@ -251,7 +252,7 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 		"type":         "register",
 		"device_id":    c.deviceID,
 		"version":      Version,
-		"capabilities": []string{"mic", "speaker", "leds", "led_anim", "buttons"},
+		"capabilities": profile.Detect().Capabilities(),
 	}
 	// Resolved fresh per registration: a cached-at-startup value goes stale
 	// after a WiFi change, and if the process started while the network was

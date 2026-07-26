@@ -1,8 +1,9 @@
 package server
 
 import (
+	"github.com/wilbowes/EchoMuse/internal/alsa"
+	"github.com/wilbowes/EchoMuse/internal/profile"
 	"log"
-	"os/exec"
 	"sync"
 
 	internalLed "github.com/wilbowes/EchoMuse/internal/bindings/led"
@@ -71,23 +72,18 @@ func (m *muteController) Toggle() {
 	}
 }
 
-// adcMuteCtls are the per-chip ADC mute control pairs, all four codecs
-// (A: ch0/ch1 … D: ch6 + unused). C5 hardware fix (2026-07-07): only chip
-// A (105/106) was muted before, leaving chips B–D — including ch6, the mic
-// wake word and STT actually use — physically hot; the mic stream-stop was
-// what made mute effective. Sibling controls confirmed from the full
-// `tinymix -D 0` dump in device/tools/tinymix_controls_output.txt
-// (captured 2026-07-06).
-var adcMuteCtls = []string{
-	"105", "106", // ADC_A
-	"123", "124", // ADC_B
-	"141", "142", // ADC_C
-	"159", "160", // ADC_D
-}
-
+// setAdcMute mutes or unmutes the capture path using the controls the active
+// profile names. Which controls those are is device-specific.
 func setAdcMute(val string) {
-	for _, ctl := range adcMuteCtls {
-		exec.Command("tinymix", "-D", "0", ctl, val).Run()
+	prof := profile.Detect()
+	ctls := make([]alsa.Control, 0, len(prof.MicMuteCtls))
+	for _, c := range prof.MicMuteCtls {
+		c.Values = []string{val}
+		c.Optional = true
+		ctls = append(ctls, c)
+	}
+	if err := alsa.Apply(prof.Mic.Card, ctls); err != nil {
+		log.Printf("mute: %v", err)
 	}
 }
 
@@ -124,6 +120,9 @@ func (m *muteController) applyUnmute() {
 // transition for free. Direct binding call, same precedent as setAdcMute's
 // tinymix exec above.
 func setMuteButtonLED(on bool) {
+	if !profile.Detect().HasMuteButtonLED {
+		return
+	}
 	if err := internalLed.SetMuteButtonLED(on); err != nil {
 		log.Printf("Mute button LED: %v", err)
 	}

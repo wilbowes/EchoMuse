@@ -30,13 +30,19 @@ BUILD_CMD="cd /sdk && mkdir -p build && go build \
                -X github.com/wilbowes/EchoMuse/internal/client.BuildUnix=${BUILD_UNIX}\" \
     -o build/server ./cmd/"
 
+# Compiler image. Defaults to the API 22 build for biscuit; checkers (Echo
+# Show 5, LineageOS 18.1) needs API 30:
+#   EM_COMPILER_IMAGE=echomuse-compiler-api30 ./compile.sh
+COMPILER_IMAGE="${EM_COMPILER_IMAGE:-echomuse-compiler}"
+echo "Compiler image: $COMPILER_IMAGE"
+
 if docker run --rm \
   --entrypoint bash \
   -e CGO_LDFLAGS="-Wl,--hash-style=both" \
   -e CGO_CFLAGS="$SUPPRESS" \
   -v "$(pwd)":/sdk \
   -v "$REPO_ROOT/GoTinyAlsa":/GoTinyAlsa \
-  echomuse-compiler \
+  "$COMPILER_IMAGE" \
   -c "$BUILD_CMD" 2>/tmp/build_err.log; then
     echo ""
     echo "✓ Build succeeded → build/server  ($VERSION)"
