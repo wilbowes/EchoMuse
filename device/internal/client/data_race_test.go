@@ -118,7 +118,7 @@ func TestStreamRestartOverlapIsRaceFree(t *testing.T) {
 	conn, cleanup := dialTestWS(t)
 	defer cleanup()
 
-	d := NewDataClient("race-test", mic, nil, aec.New())
+	d := NewDataClient("race-test", mic, nil, aec.New(), nil)
 	d.connMu.Lock()
 	d.conn = conn
 	d.connMu.Unlock()
@@ -171,7 +171,7 @@ func TestContextCancelReleasesMicStream(t *testing.T) {
 	// test's poll loop would eat that silently until its deadline.
 	addr := "ws://" + strings.TrimPrefix(srv.URL, "http://")
 
-	d := NewDataClient("zombie-test", mic, nil, aec.New())
+	d := NewDataClient("zombie-test", mic, nil, aec.New(), nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	connectDone := make(chan error, 1)

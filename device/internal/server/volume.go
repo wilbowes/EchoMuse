@@ -2,9 +2,11 @@ package server
 
 import (
 	"fmt"
+	"github.com/wilbowes/EchoMuse/internal/profile"
 	"github.com/wilbowes/EchoMuse/pkg/led"
 	"log"
 	"os/exec"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -67,14 +69,16 @@ func newVolumeController(ledGetter func() led.Controller) *volumeController {
 
 // readFromDevice reads current tinymix level. Returns volumeMax/2 on failure.
 func (vc *volumeController) readFromDevice() int {
-	out, err := exec.Command("tinymix", "-D", "0", "61").Output()
+	prof := profile.Detect()
+	vol := prof.Volume
+	out, err := exec.Command("tinymix", "-D", strconv.Itoa(prof.Mic.Card), vol.Selector).Output()
 	if err != nil {
 		log.Printf("Volume read failed: %v", err)
 		return volumeMax / 2
 	}
 	var l, r int
-	// Output: "PCM Playback Volume: 100 100 (range 0->175)"
-	if _, err := fmt.Sscanf(string(out), "PCM Playback Volume: %d %d", &l, &r); err != nil {
+	// Output: "<DisplayName>: 100 100 (range 0->175)"
+	if _, err := fmt.Sscanf(string(out), vol.DisplayName+": %d %d", &l, &r); err != nil {
 		log.Printf("Volume parse failed: %v (output: %s)", err, out)
 		return volumeMax / 2
 	}
@@ -104,7 +108,8 @@ func (vc *volumeController) Set(level int, showRing bool) {
 	vc.mu.Unlock()
 
 	// Apply to ALSA
-	if err := exec.Command("tinymix", "-D", "0", "61",
+	prof := profile.Detect()
+	if err := exec.Command("tinymix", "-D", strconv.Itoa(prof.Mic.Card), prof.Volume.Selector,
 		fmt.Sprintf("%d", level), fmt.Sprintf("%d", level)).Run(); err != nil {
 		log.Printf("tinymix set failed: %v", err)
 	}

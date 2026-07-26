@@ -4,10 +4,9 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"sync/atomic"
+	"fmt"
 	"log"
 	"math"
-	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -15,16 +14,18 @@ import (
 	"runtime/pprof"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/wilbowes/EchoMuse/internal/aec"
+	"github.com/wilbowes/EchoMuse/internal/beamformer"
 	internalbuttons "github.com/wilbowes/EchoMuse/internal/bindings/buttons"
-	"github.com/wilbowes/EchoMuse/internal/bluetooth"
-	"github.com/wilbowes/EchoMuse/internal/bindings/mic"
 	"github.com/wilbowes/EchoMuse/internal/bindings/speaker"
+	"github.com/wilbowes/EchoMuse/internal/bluetooth"
 	"github.com/wilbowes/EchoMuse/internal/client"
 	"github.com/wilbowes/EchoMuse/internal/config"
+	"github.com/wilbowes/EchoMuse/internal/profile"
 	"github.com/wilbowes/EchoMuse/internal/server"
 	"github.com/wilbowes/EchoMuse/internal/wifi"
 	pkgbuttons "github.com/wilbowes/EchoMuse/pkg/buttons"
@@ -37,6 +38,32 @@ func main() {
 
 	deviceID := client.GetSerialNo()
 	log.Printf("Device ID: %s", deviceID)
+
+	// The profile carries every value that differs between devices: PCM
+	// card/device numbers, channel layout, mixer init and which init services
+	// have to be stopped for the daemon to own the hardware. Unknown devices
+	// fall back to biscuit, so existing deployments are unaffected.
+	prof := profile.Detect()
+	// Verify issues hand-rolled ALSA ioctls whose struct layout was validated
+	// on the LineageOS kernel. Run it only where the ALSA backend is in use;
+	// on Fire OS the tinyalsa bindings own the device and there is nothing to
+	// gain from opening the PCM with untested code on every boot.
+	if prof.UseALSABackend {
+		if err := prof.Verify(); err != nil {
+			// A mismatch means the constants disagree with the driver and audio
+			// will misbehave, but it is not worth refusing to boot over: the rest of
+			// the device (WiFi recovery, control plane) should still come up so
+			// the unit stays reachable and can be fixed remotely.
+			log.Printf("WARNING: %v", err)
+		}
+	}
+	// Not fatal. On Fire OS these writes duplicate what start_server.sh has
+	// already applied and whose errors it ignored, so one flaky tinymix call
+	// must not kill the daemon: three fast exits trigger the launcher's A/B
+	// rollback and would downgrade a working device over nothing.
+	if err := prof.Prepare(); err != nil {
+		log.Printf("WARNING: audio hardware prepare: %v", err)
+	}
 
 	// A WiFi change that never got committed (crash/power cycle mid-switch)
 	// is rolled back before anything tries to use the network — same
@@ -52,12 +79,12 @@ func main() {
 	// Idempotent: a no-op on boots where init never starts it (Lounge).
 	exec.Command("stop", "smarthomewifid").Run()
 
-	buttonController, err := internalbuttons.NewButtonController()
+	buttonController, err := internalbuttons.NewButtonController(prof)
 	if err != nil {
 		log.Fatalf("Failed to initialize Button controller: %v", err)
 	}
 
-	microphone, err := mic.NewMicrophone()
+	microphone, err := newMicrophone(prof)
 	if err != nil {
 		log.Fatalf("Failed to initialize Microphone: %v", err)
 	}
@@ -71,7 +98,7 @@ func main() {
 	// The Server doesn't exist yet when the speaker starts its pump loop,
 	// so the tap goes through an atomic pointer armed just below.
 	var srvPtr atomic.Pointer[server.Server]
-	pcmSpeaker, err := speaker.NewPcmSpeaker(canceller.WriteFar, func(rms float64) {
+	pcmSpeaker, err := newSpeaker(prof, canceller.WriteFar, func(rms float64) {
 		if srv := srvPtr.Load(); srv != nil {
 			srv.SetAudioLevel(rms)
 		}
@@ -96,7 +123,16 @@ func main() {
 
 	ctx := context.Background()
 
-	dataClient := client.NewDataClient(deviceID, microphone, pcmSpeaker, canceller)
+	// Two mics fed by one stereo ADC is not an array worth steering, so a
+	// device without one gets a passthrough instead of the 7-mic beamformer.
+	var beam beamformer.Processor
+	if prof.Beamforming {
+		beam = beamformer.New()
+	} else {
+		beam = beamformer.NewBypassMix(prof.Mic.Channels, prof.Mic.MicChannels)
+	}
+
+	dataClient := client.NewDataClient(deviceID, microphone, pcmSpeaker, canceller, beam)
 	applyAecConfig(canceller) // arm from env defaults before any config push
 
 	// Direction callback — update LED ring to show estimated source angle
@@ -141,7 +177,7 @@ func main() {
 	bleScanner := bluetooth.NewScanner(func(batch []bluetooth.Advert) {
 		controlClient.SendBleAdverts(batch)
 	})
-	applyBleConfig(bleScanner)
+	applyBleConfig(bleScanner, prof)
 
 	// Button events — forward to controller via control plane
 	_, err = buttonController.SubscribeToButton(func(event pkgbuttons.ButtonClickEvent) {
@@ -236,7 +272,7 @@ func main() {
 	// the canceller. AEC/BLE read the merged post-Apply snapshot rather than
 	// the (partial) message so unmentioned fields keep their values.
 	controlClient.OnConfigApplied(func(msg config.ConfigMessage) {
-		applyHardwareConfig(msg)
+		prof.SetMicGain(msg.AdcDigitalGain, msg.AdcMicpga)
 		// startupVolume is the controller's persisted record of this
 		// device's volume (updated on every volume_state report) — restore
 		// it through the Server, not a raw tinymix write: SeedVolume keeps
@@ -246,7 +282,7 @@ func main() {
 			s.SeedVolume(msg.StartupVolume)
 		}
 		applyAecConfig(canceller)
-		applyBleConfig(bleScanner)
+		applyBleConfig(bleScanner, prof)
 	})
 
 	// Speaker flush — barge-in: cut buffered TTS the moment the controller
@@ -725,23 +761,6 @@ func wifiRSSI() *int {
 
 // ─── Hardware config ──────────────────────────────────────────────────────────
 
-// applyHardwareConfig runs tinymix commands for fields that map to hardware.
-// Called whenever the controller pushes a config message.
-func applyHardwareConfig(msg config.ConfigMessage) {
-	if msg.AdcDigitalGain > 0 {
-		tinymix("89", strconv.Itoa(msg.AdcDigitalGain), strconv.Itoa(msg.AdcDigitalGain))
-		tinymix("107", strconv.Itoa(msg.AdcDigitalGain), strconv.Itoa(msg.AdcDigitalGain))
-		tinymix("125", strconv.Itoa(msg.AdcDigitalGain), strconv.Itoa(msg.AdcDigitalGain))
-		tinymix("143", strconv.Itoa(msg.AdcDigitalGain), strconv.Itoa(msg.AdcDigitalGain))
-	}
-	if msg.AdcMicpga > 0 {
-		tinymix("92", strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
-		tinymix("110", strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
-		tinymix("128", strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
-		tinymix("146", strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
-	}
-}
-
 // applyAecConfig pushes the current effective AEC config into the canceller.
 // SetParams no-ops when nothing changed, so calling it on every config push
 // is free; when delay/tail change it rebuilds the echo state (adaptive
@@ -759,21 +778,20 @@ func applyAecConfig(canceller *aec.Canceller) {
 // applyBleConfig starts/stops the BLE proxy scanner from the current
 // effective config. SetEnabled is idempotent, so calling it on every config
 // push is free.
-func applyBleConfig(scanner *bluetooth.Scanner) {
+func applyBleConfig(scanner *bluetooth.Scanner, prof *profile.Profile) {
+	if !prof.SupportsBLEProxy {
+		// Never start the scanner on a device whose HCI transport is unproven:
+		// starting it disables the Android Bluetooth stack permanently to take
+		// /dev/stpbt, which is a bad trade if the scan then fails.
+		scanner.SetEnabled(false)
+		return
+	}
 	snap := config.Get().Snapshot()
 	scanner.SetEnabled(snap.BleProxyEnabled != nil && *snap.BleProxyEnabled)
 }
 
-func tinymix(ctl string, args ...string) {
-	cmdArgs := append([]string{"-D", "0", ctl}, args...)
-	out, err := exec.Command("tinymix", cmdArgs...).CombinedOutput()
-	if err != nil {
-		log.Printf("[tinymix] ctl %s failed: %v — %s", ctl, err, string(out))
-	}
-}
-
 func allLEDs(r, g, b uint8) []led.Led {
-	leds := make([]led.Led, 12)
+	leds := make([]led.Led, profile.Detect().LEDCount)
 	for i := range leds {
 		leds[i] = led.Led{ID: i, R: r, G: g, B: b}
 	}

@@ -155,7 +155,9 @@ type DataClient struct {
 	conn   *websocket.Conn
 	connMu sync.Mutex
 
-	beam              *beamformer.Beamformer
+	// beam is an interface so devices without a steerable array can supply a
+	// passthrough (beamformer.Bypass) instead of the 7-mic beamformer.
+	beam              beamformer.Processor
 	proc              *processor.Processor
 	aec               *aec.Canceller
 	onDirectionChange func(angle float64)
@@ -177,13 +179,21 @@ type DataClient struct {
 // instance — its far-end side is fed by the speaker's echo tap; this client
 // runs its near-end side on the mono mic stream. Disabled cancellers pass
 // audio through untouched.
-func NewDataClient(deviceID string, microphone mic.Subscribable, spk speaker.Speaker, canceller *aec.Canceller) *DataClient {
+// NewDataClient builds the data-plane client. beam selects how a raw
+// multi-channel period is reduced to the mono stream sent upstream: the
+// steering beamformer on a device with a real array, or beamformer.Bypass on
+// one without. A nil beam falls back to the 7-mic beamformer, preserving the
+// original behaviour for callers that have not been updated.
+func NewDataClient(deviceID string, microphone mic.Subscribable, spk speaker.Speaker, canceller *aec.Canceller, beam beamformer.Processor) *DataClient {
+	if beam == nil {
+		beam = beamformer.New()
+	}
 	return &DataClient{
 		deviceID: deviceID,
 		mic:      microphone,
 		spk:      spk,
 		readyCh:  make(chan string, 1),
-		beam:     beamformer.New(),
+		beam:     beam,
 		proc:     processor.New(),
 		aec:      canceller,
 	}
