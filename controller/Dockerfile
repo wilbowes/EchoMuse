@@ -97,7 +97,9 @@ RUN set -eux; \
       --jsx-factory=React.createElement \
       --jsx-fragment=React.Fragment \
       --outfile=/app/static/dashboard.js; \
-    rm /tmp/esbuild.tar.gz# Database persisted via volume mount
+    rm /tmp/esbuild.tar.gz
+
+# Database persisted via volume mount
 # docker run -v ~/EchoMuse/controller/data:/app/data ...
 # Set DB_PATH=/app/data/echomuse.db in environment
 CMD ["python", "-u", "em_controller.py"]
