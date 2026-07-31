@@ -448,7 +448,7 @@
       }
 
       try {
-        const r = await fetch('/api/system/setup-state');
+        const r = await fetch('api/system/setup-state');
         const d = await r.json();
         if (d.needs_setup) {
           setRing(AMBER);
