@@ -8,3 +8,4 @@ ingress_port: 8768
 panel_icon: mdi:circle-slice-8
 panel_title: Echo Muse
 host_network: true
+arch: [aarch64]
