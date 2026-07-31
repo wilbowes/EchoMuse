@@ -80,8 +80,24 @@ RUN mkdir -p /app/models/dtln && \
 # Dashboard SPA — placeholder is index.html, full dashboard is dashboard.html
 COPY static/ ./static/
 # Compile JSX dashboard with esbuild
-RUN curl -sfL -o /tmp/esbuild.tar.gz       https://registry.npmjs.org/@esbuild/linux-x64/-/linux-x64-0.20.2.tgz &&     tar -xz -C /tmp -f /tmp/esbuild.tar.gz &&     install -m755 /tmp/package/bin/esbuild /usr/local/bin/esbuild &&     esbuild /app/static/dashboard.jsx       --bundle=false       --jsx=transform       --jsx-factory=React.createElement       --jsx-fragment=React.Fragment       --outfile=/app/static/dashboard.js &&     rm /tmp/esbuild.tar.gz
-# Database persisted via volume mount
+ARG TARGETARCH
+
+RUN set -eux; \
+    case "$TARGETARCH" in \
+      amd64) esbuild_arch="x64" ;; \
+      arm64) esbuild_arch="arm64" ;; \
+      *) echo "Unsupported target architecture: $TARGETARCH"; exit 1 ;; \
+    esac; \
+    esbuild_url="https://registry.npmjs.org/@esbuild/linux-${esbuild_arch}/-/linux-${esbuild_arch}-0.20.2.tgz"; \
+    curl -sfL -o /tmp/esbuild.tar.gz "$esbuild_url"; \
+    tar -xz -C /tmp -f /tmp/esbuild.tar.gz; \
+    install -m755 /tmp/package/bin/esbuild /usr/local/bin/esbuild; \
+    esbuild /app/static/dashboard.jsx --bundle=false \
+      --jsx=transform \
+      --jsx-factory=React.createElement \
+      --jsx-fragment=React.Fragment \
+      --outfile=/app/static/dashboard.js; \
+    rm /tmp/esbuild.tar.gz# Database persisted via volume mount
 # docker run -v ~/EchoMuse/controller/data:/app/data ...
 # Set DB_PATH=/app/data/echomuse.db in environment
 CMD ["python", "-u", "em_controller.py"]
