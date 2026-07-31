@@ -1,9 +1,10 @@
 name: "Echo Muse"
 description: "Alexa replacement and controller for Echo Dot 2nd Generation."
 version: "1.0.0"
-slug: "echo-muse"
+slug: "controller"
 init: false
 ingress: true
 ingress_port: 8768
 panel_icon: mdi:circle-slice-8
 panel_title: Echo Muse
+host_network: true
