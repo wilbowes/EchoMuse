@@ -399,7 +399,7 @@
       btn.disabled = true;
       setLcd('Creating account…', AMBER);
       try {
-        const d = await post('/api/setup', {
+        const d = await post('api/setup', {
           token:    document.getElementById('su-token').value.trim(),
           username: document.getElementById('su-user').value.trim(),
           password: document.getElementById('su-pass').value,
@@ -420,7 +420,7 @@
       btn.disabled = true;
       setLcd('Signing in…', GREEN);
       try {
-        const d = await post('/api/auth/login', {
+        const d = await post('api/auth/login', {
           username: document.getElementById('li-user').value.trim(),
           password: document.getElementById('li-pass').value,
         });
@@ -439,7 +439,7 @@
       const token = localStorage.getItem('em_token');
       if (token) {
         try {
-          const r = await fetch('/api/auth/me',
+          const r = await fetch('api/auth/me',
             { headers: { Authorization: `Bearer ${token}` } });
           if (r.ok) { location.replace('/dashboard'); return; }
         } catch {}
