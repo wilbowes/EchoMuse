@@ -52,6 +52,30 @@ def test_dashboard_bundle_is_cache_busted():
         "cache-bust on the bundle's mtime, not on a version string"
 
 
+def test_dashboard_paths_are_ingress_safe():
+    """Ingress is mounted below a generated path, so root URLs bypass it."""
+    static = CONTROLLER / "static"
+    index = (static / "index.html").read_text()
+    dashboard = (static / "dashboard.html").read_text()
+    jsx = (static / "dashboard.jsx").read_text()
+    api = (CONTROLLER / "em_api.py").read_text()
+    config = (CONTROLLER / "config.yaml").read_text()
+
+    assert 'href="/static/' not in index
+    assert "url('/static/" not in index
+    assert 'href="/static/' not in dashboard
+    assert 'src="/static/' not in dashboard
+    assert "url('/static/" not in dashboard
+    assert "function ingressPath(path)" in jsx
+    assert "function ingressWebSocketUrl(path)" in jsx
+    assert "document.baseURI" in jsx
+    assert "fetch(ingressPath(path)" in jsx
+    assert '"static/dashboard.js"' in api
+    assert 'web.HTTPFound(".")' in api
+    assert 'request.headers.get("X-Ingress-Path", "")' in api
+    assert "ECHOMUSE_HOME_ASSISTANT_INGRESS" in config
+
+
 def test_release_notes_survive_the_whole_relay():
     """
     Release notes have to make it through four places to be useful: captured

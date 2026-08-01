@@ -2,6 +2,19 @@ const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 // ─── API ──────────────────────────────────────────────────────────────────────
 
+// Home Assistant Ingress mounts the dashboard below a generated path. Keep
+// browser requests relative to the current page so they stay inside that path,
+// while preserving the same URLs for a normal standalone deployment.
+function ingressPath(path) {
+  return path.startsWith('/') ? `.${path}` : path;
+}
+
+function ingressWebSocketUrl(path) {
+  const url = new URL(ingressPath(path), document.baseURI);
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  return url.toString();
+}
+
 const API = {
   token: null,
   role: null,
@@ -13,7 +26,7 @@ const API = {
   },
 
   async get(path) {
-    const r = await fetch(path, { headers: this.headers() });
+    const r = await fetch(ingressPath(path), { headers: this.headers() });
     if (r.status === 401) throw { code: 'not_authenticated', status: 401 };
     const data = await r.json();
     if (!r.ok) throw data;
@@ -21,7 +34,7 @@ const API = {
   },
 
   async post(path, body) {
-    const r = await fetch(path, { method: 'POST', headers: this.headers(), body: JSON.stringify(body) });
+    const r = await fetch(ingressPath(path), { method: 'POST', headers: this.headers(), body: JSON.stringify(body) });
     if (r.status === 401) throw { code: 'not_authenticated', status: 401 };
     const data = await r.json();
     if (!r.ok) throw data;
@@ -29,7 +42,7 @@ const API = {
   },
 
   async patch(path, body) {
-    const r = await fetch(path, { method: 'PATCH', headers: this.headers(), body: JSON.stringify(body) });
+    const r = await fetch(ingressPath(path), { method: 'PATCH', headers: this.headers(), body: JSON.stringify(body) });
     if (r.status === 401) throw { code: 'not_authenticated', status: 401 };
     const data = await r.json();
     if (!r.ok) throw data;
@@ -37,7 +50,7 @@ const API = {
   },
 
   async del(path) {
-    const r = await fetch(path, { method: 'DELETE', headers: this.headers() });
+    const r = await fetch(ingressPath(path), { method: 'DELETE', headers: this.headers() });
     if (r.status === 401) throw { code: 'not_authenticated', status: 401 };
     const data = await r.json();
     if (!r.ok) throw data;
@@ -51,7 +64,7 @@ const API = {
   async blob(path) {
     const h = {};
     if (this.token) h['Authorization'] = `Bearer ${this.token}`;
-    const r = await fetch(path, { headers: h });
+    const r = await fetch(ingressPath(path), { headers: h });
     if (r.status === 401) throw { code: 'not_authenticated', status: 401 };
     if (!r.ok) {
       let data = { code: 'error', status: r.status };
@@ -66,7 +79,7 @@ const API = {
     if (this.token) h['Authorization'] = `Bearer ${this.token}`;
     const form = new FormData();
     form.append(fieldName, file);
-    const r = await fetch(path, { method: 'POST', headers: h, body: form });
+    const r = await fetch(ingressPath(path), { method: 'POST', headers: h, body: form });
     if (r.status === 401) throw { code: 'not_authenticated', status: 401 };
     const data = await r.json();
     if (!r.ok) throw data;
@@ -488,8 +501,9 @@ function Shell({ deviceId, token, height = 320 }) {
     term.open(containerRef.current);
     fit.fit();
 
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const sock = new WebSocket(`${proto}://${location.host}/api/devices/${deviceId}/shell?token=${token}`);
+    const sock = new WebSocket(
+      ingressWebSocketUrl(`/api/devices/${deviceId}/shell?token=${token}`),
+    );
     sock.binaryType = 'arraybuffer';
 
     let pty = null;    // null until shell_meta arrives
@@ -2341,7 +2355,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     addLog('Cleared.', 'ok');
 
     addLog('Downloading magisk.db from controller…');
-    const resp = await fetch('/api/provision/magisk_db', { headers: { Authorization: `Bearer ${token}` } });
+    const resp = await fetch(ingressPath('/api/provision/magisk_db'), { headers: { Authorization: `Bearer ${token}` } });
     if (!resp.ok) throw new Error(`Controller returned ${resp.status}`);
     const dbBytes = new Uint8Array(await resp.arrayBuffer());
     addLog(`magisk.db: ${dbBytes.length} bytes`);
@@ -2683,7 +2697,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     //     so a fresh provision comes up fully debloated.
     // Both payloads come from the controller (device_payloads/) so the
     // package list and daemon set can be tuned without touching this code.
-    const pkgResp = await fetch('/api/provision/debloat_packages', { headers: { Authorization: `Bearer ${token}` } });
+    const pkgResp = await fetch(ingressPath('/api/provision/debloat_packages'), { headers: { Authorization: `Bearer ${token}` } });
     if (!pkgResp.ok) throw new Error(`Controller returned ${pkgResp.status} fetching debloat package list.`);
     const { packages } = await pkgResp.json();
 
@@ -2698,7 +2712,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     }
 
     addLog('Installing boot-time daemon-stop script (Magisk service.d)…');
-    const scrResp = await fetch('/api/provision/debloat_script', { headers: { Authorization: `Bearer ${token}` } });
+    const scrResp = await fetch(ingressPath('/api/provision/debloat_script'), { headers: { Authorization: `Bearer ${token}` } });
     if (!scrResp.ok) throw new Error(`Controller returned ${scrResp.status} fetching debloat script.`);
     const script = await scrResp.text();
     // Same push-then-cp pattern as start_server.sh: nothing executes the
@@ -2724,7 +2738,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       // pipeline uses — needed because a freshly-flashed device isn't in
       // _devices yet, so /api/devices/{id}/update (which requires a live
       // WebSocket session) isn't usable at this point in the wizard.
-      const resp = await fetch('/api/provision/latest_binary', { headers: { Authorization: `Bearer ${token}` } });
+      const resp = await fetch(ingressPath('/api/provision/latest_binary'), { headers: { Authorization: `Bearer ${token}` } });
       if (!resp.ok) throw new Error(`Controller returned ${resp.status} fetching latest binary.`);
       buf = await resp.arrayBuffer();
       const ver = resp.headers.get('X-Release-Version');
@@ -2817,7 +2831,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     addLog(`Verified: server → server_a (${installedBytes.length.toLocaleString()} bytes, matches pushed binary).`, 'ok');
 
     addLog('Fetching startup script from controller…');
-    const resp2 = await fetch('/api/provision/start_script', { headers: { Authorization: `Bearer ${token}` } });
+    const resp2 = await fetch(ingressPath('/api/provision/start_script'), { headers: { Authorization: `Bearer ${token}` } });
     if (!resp2.ok) throw new Error(`Controller returned ${resp2.status}`);
     const script = await resp2.text();
     // Same "Text file busy" risk as wificfg.sh — push + immediate chmod/exec
@@ -2839,7 +2853,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     if (!serial) {
       addLog('Could not read device serial — skipping TLS credential install.', 'warn');
     } else {
-      const tlsResp = await fetch('/api/provision/tls_credentials', {
+      const tlsResp = await fetch(ingressPath('/api/provision/tls_credentials'), {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ device_id: serial }),
@@ -4166,7 +4180,7 @@ function App() {
     localStorage.removeItem('em_token');
     localStorage.removeItem('em_role');
     // The landing page (/) owns sign-in — green-ring login form.
-    location.replace('/');
+    location.replace('.');
   }
 
   // Restore token on mount
@@ -4194,8 +4208,7 @@ function App() {
   // Live events WebSocket
   useEffect(() => {
     if (!token) return;
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const ws = new WebSocket(`${proto}://${location.host}/api/events?token=${token}`);
+    const ws = new WebSocket(ingressWebSocketUrl(`/api/events?token=${token}`));
     wsRef.current = ws;
 
     ws.onmessage = e => {
@@ -4263,7 +4276,7 @@ function App() {
   // No session (direct visit, expired token, logged out) — the landing
   // page owns auth: it validates any stored token and shows the right
   // form (login vs first-run setup).
-  if (!token) { location.replace('/'); return null; }
+  if (!token) { location.replace('.'); return null; }
 
   const online   = devices.filter(d => d.connected).length;
   const approved = devices.filter(d => d.approved);

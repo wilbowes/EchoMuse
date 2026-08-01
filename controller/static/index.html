@@ -4,11 +4,11 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>EchoMuse Device Management</title>
-  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+  <link rel="icon" type="image/svg+xml" href="static/favicon.svg" />
   <style>
-    @font-face { font-family: 'DM Sans'; font-weight: 400; src: url('/static/vendor/fonts/dm-sans.woff2') format('woff2'); }
-    @font-face { font-family: 'DM Sans'; font-weight: 600; src: url('/static/vendor/fonts/dm-sans.woff2') format('woff2'); }
-    @font-face { font-family: 'DM Mono'; font-weight: 400; src: url('/static/vendor/fonts/dm-mono-400.woff2') format('woff2'); }
+    @font-face { font-family: 'DM Sans'; font-weight: 400; src: url('static/vendor/fonts/dm-sans.woff2') format('woff2'); }
+    @font-face { font-family: 'DM Sans'; font-weight: 600; src: url('static/vendor/fonts/dm-sans.woff2') format('woff2'); }
+    @font-face { font-family: 'DM Mono'; font-weight: 400; src: url('static/vendor/fonts/dm-mono-400.woff2') format('woff2'); }
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     :root {
@@ -389,7 +389,7 @@
     function enterDashboard(token, role) {
       localStorage.setItem('em_token', token);
       localStorage.setItem('em_role', role);
-      location.replace('/dashboard');
+      location.replace('dashboard');
     }
 
     // ── Setup form ──
@@ -441,7 +441,7 @@
         try {
           const r = await fetch('api/auth/me',
             { headers: { Authorization: `Bearer ${token}` } });
-          if (r.ok) { location.replace('/dashboard'); return; }
+          if (r.ok) { location.replace('dashboard'); return; }
         } catch {}
         localStorage.removeItem('em_token');
         localStorage.removeItem('em_role');
