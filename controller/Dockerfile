@@ -47,24 +47,10 @@ RUN mkdir -p /app/static/vendor/fonts && \
 # describe only outside a container).
 ARG EM_CONTROLLER_VERSION=dev
 ENV EM_CONTROLLER_VERSION=$EM_CONTROLLER_VERSION
+
 # Controller source
-COPY em_controller.py .
-COPY em_api.py .
-COPY em_db.py .
-COPY em_auth.py .
-COPY em_eq.py .
-COPY em_scenes.py .
-COPY em_shadow.py .
-COPY em_ns.py .
-COPY em_pki.py .
-COPY em_esphome.py .
-COPY em_ble_proxy.py .
-COPY em_oww_models.py .
-COPY em_arbiter.py .
-COPY em_player.py .
-COPY em_config_sections.py .
-COPY em_recordings.py .
-COPY version.py .
+COPY *.py .
+
 # ESPHome native API subpackage (frame protocol, message registry, vendored protobuf)
 COPY esphome/ ./esphome/
 # Device payloads (start_server.sh etc.) — canonical copies served to devices
@@ -102,4 +88,4 @@ RUN set -eux; \
 # Database persisted via volume mount
 # docker run -v ~/EchoMuse/controller/data:/app/data ...
 # Set DB_PATH=/app/data/echomuse.db in environment
-CMD ["python", "-u", "em_controller.py"]
+CMD ["python", "-u", "em_start.py"]

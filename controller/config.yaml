@@ -1,6 +1,6 @@
 name: "Echo Muse"
 description: "Alexa replacement and controller for Echo Dot 2nd Generation."
-version: "1.1.0"
+version: "1.1.1"
 slug: "controller"
 init: false
 ingress: true
@@ -11,3 +11,73 @@ panel_icon: mdi:circle-slice-8
 panel_title: Echo Muse
 host_network: true
 arch: [aarch64]
+
+#Options and Settings
+options:
+  server_host: "0.0.0.0"
+  server_ip: null
+  mdns_name: "echomuse"
+  esphome_project_version: "2.0.0"
+  oww_model: "hey_jarvis"
+  oww_threshold: 0.3
+  require_device_tls: false
+  device_approval: strict
+  db_path: "/data/echomuse.db"
+schema:
+  server_host: str
+  server_ip: str
+  mdns_name: "match(^[a-z0-9][a-z0-9-]{0,62}$)"
+  esphome_project_version: str
+  oww_model: str
+  oww_threshold: "float(0,1)"
+  require_device_tls: bool
+  device_approval: "list(strict|auto)"
+  db_path: str
+configuration:
+  server_host:
+    name: Bind address
+    description: >-
+      Network address the controller listens on. Leave this as 0.0.0.0
+      to listen on all container interfaces.
+  server_ip:
+    name: Controller LAN IP address
+    description: >-
+      The LAN IP address of this Home Assistant host. Echo devices use this
+      address to connect to the controller, so it must be reachable from them.
+  mdns_name:
+    name: mDNS service name
+    description: >-
+      The name advertised on your local network as
+      <name>._emcontroller._tcp.local. Use lowercase letters, numbers, and hyphens.
+  esphome_project_version:
+    name: ESPHome project version
+    description: >-
+      Version reported to Home Assistant in Echo Muse ESPHome device
+      information. Normally this should match the Echo Muse release version.
+  oww_model:
+    name: Wake-word model
+    description: >-
+      OpenWakeWord model to use, without the _v0.1.onnx suffix.
+      For example: hey_jarvis.
+  oww_threshold:
+    name: Wake-word sensitivity
+    description: >-
+      Detection threshold from 0 to 1. Lower values are more sensitive and
+      may produce more false detections. A value around 0.3 is often suitable
+      for UK accents; the upstream default is 0.5.
+  require_device_tls:
+    name: Require encrypted device connections
+    description: >-
+      Reject device connections unless they use TLS and have a valid
+      per-device token. Leave disabled until every device is shown as using
+      wss (TLS) in the Echo Muse dashboard.
+  device_approval:
+    name: Device approval policy
+    description: >-
+      Strict holds new devices for administrator approval. Auto immediately
+      approves new devices with a generated name.
+  db_path:
+    name: Database path
+    description: >-
+      Location of the Echo Muse SQLite database inside the add-on. The default
+      path is in Home Assistant's persistent add-on data storage.
