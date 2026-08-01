@@ -1,6 +1,6 @@
 name: "Echo Muse"
 description: "Alexa replacement and controller for Echo Dot 2nd Generation."
-version: "1.0.0"
+version: "1.1.0"
 slug: "controller"
 init: false
 ingress: true
