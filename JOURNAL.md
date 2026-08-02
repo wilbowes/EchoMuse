@@ -679,3 +679,40 @@ are **append-only and in ascending date order** — new work goes at the end.
   fix. It was `"will be rejected"` — a substring search on a three-letter
   name. Word-boundary matching showed it absent. The wrong tool made me report
   a leak that was not there, one step after failing to report one that was.
+
+- **2026-08-02 — the number that decides whether the Echo may ever trigger itself.**
+  Asked what on-device wake word still needs, the answer came from the
+  database rather than from memory. Agreement is fine: of 141 turns both
+  detectors saw, **94% agreed** among the 116 that were actually comparable
+  (the rest are turns where the controller used the lower barge-in bar, so the
+  two were not asked the same question). The engine is cheap and stable —
+  6.9M frames, drop rates 0.004–0.028%, worst inference 94ms.
+
+  The gate is the other side. Over 155 device-hours the devices crossed their
+  threshold **26 times with no turn following** — roughly one per device every
+  six hours. On shadow that is a log line. With `owwOnDevice=on` each one is a
+  turn nobody asked for. And **"unmatched" is not "false accept"**: each is
+  either a genuine wake the *controller* missed, which argues for shipping, or
+  a crossing while the controller was not scoring, or a real false trigger,
+  which argues against. Three readings, opposite decisions, and the counters
+  cannot separate them — so the only way through is to listen, and the audio
+  is long gone by the time a counter says anything.
+
+  Building the capture nearly went wrong in the obvious way. The natural check
+  is "did the shadow tracker consume the crossing" — but correlation happens
+  at **turn-persist** time, up to thirty seconds after the wake, so that check
+  calls every genuine wake unmatched and fills the disk with recordings of
+  people using their assistant perfectly successfully. It compares against
+  `last_wake_mono`, set at detection, and waits a second longer than the match
+  window because the controller normally detects *later* than the device: it
+  scores the same frame after a network hop.
+
+  Also recorded here because it will matter when the mode is built: **the
+  arbiter's clock stops being safe**. Today every detection is stamped by the
+  controller as it scores, so network delay never enters the comparison. A
+  device-triggered wake arrives after a hop, and this fleet logs idle RTT
+  excursions of 1.1–2.6s against a 700ms arbitration window — the device that
+  genuinely heard the user first could lose because its message was late, and
+  the wrong room answers. The wake must therefore report how long *ago* it
+  fired, as shadow crossings already do. A granted claim must never be
+  revoked, and the window must be held longer than it is measured.

@@ -1036,6 +1036,96 @@ function ConnectivityTab({ device, row }) {
 
 // ─── Device detail modal ──────────────────────────────────────────────────────
 
+// ─── WakeCaptures ──────────────────────────────────────────────────────────────
+// On-device wake detections that produced no turn, with their audio.
+//
+// The counters can say a crossing matched nothing but not WHY, and the three
+// possible whys — a wake the controller missed, a crossing during a turn, a
+// genuine false accept — argue for opposite decisions about ever letting the
+// device trigger turns. So the answer is listening, and this is the place to
+// do it.
+function WakeCaptures({ deviceId, deviceLabel }) {
+  const [items, setItems] = useState(null);
+  const [playing, setPlaying] = useState(null);
+  const audioRef = useRef(null);
+  const urlsRef = useRef({});
+
+  useEffect(() => {
+    let live = true;
+    API.get(`/api/devices/${deviceId}/wake_captures`)
+      .then(d => live && setItems(d.captures || []))
+      .catch(() => live && setItems([]));
+    return () => { live = false; };
+  }, [deviceId]);
+
+  // Object URLs pin their blob until revoked; the panel unmounting is the
+  // last chance to let them go.
+  useEffect(() => () => {
+    if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
+    Object.values(urlsRef.current).forEach(URL.revokeObjectURL);
+    urlsRef.current = {};
+  }, []);
+
+  const toggle = async c => {
+    const was = playing === c.name;
+    if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
+    setPlaying(null);
+    if (was) return;
+    let url = urlsRef.current[c.name];
+    if (!url) {
+      try {
+        // API.blob, not an <a href>: sessions are Bearer-header-only.
+        url = URL.createObjectURL(await API.blob(
+          `/api/devices/${deviceId}/wake_captures/${c.name}`));
+        urlsRef.current[c.name] = url;
+      } catch { return; }
+    }
+    const el = new Audio(url);
+    el.onended = el.onerror = () => setPlaying(p => (p === c.name ? null : p));
+    audioRef.current = el;
+    setPlaying(c.name);
+    el.play().catch(() => setPlaying(p => (p === c.name ? null : p)));
+  };
+
+  if (items === null) return <div className="em-label">Loading…</div>;
+  if (!items.length) {
+    return (
+      <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: 'var(--muted)', lineHeight: 1.7 }}>
+        Nothing captured yet. Each entry here is a detection the Echo made that
+        no voice turn followed — either a wake we missed, or a false alarm.
+      </div>
+    );
+  }
+  return (
+    <div>
+      <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)', marginBottom: 12, lineHeight: 1.6 }}>
+        {items.length} kept · newest first · a false alarm here would become a
+        real turn if the Echo were allowed to trigger
+      </div>
+      {items.map(c => (
+        <div key={c.name} style={{
+          display: 'flex', alignItems: 'center', gap: 12, padding: '8px 0',
+          borderTop: '1px solid var(--track)', minWidth: 0 }}>
+          <button className="em-iconbtn" onClick={() => toggle(c)}
+            title={playing === c.name ? 'Stop' : 'Play'}>
+            {playing === c.name ? '■' : '▶'}
+          </button>
+          <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: 'var(--text2)' }}>
+            {new Date(c.ts * 1000).toLocaleString()}
+          </span>
+          <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: 'var(--muted)' }}>
+            score {c.score.toFixed(3)}
+          </span>
+          <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)', marginLeft: 'auto' }}>
+            {(c.duration_ms / 1000).toFixed(1)}s
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+
 function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDeviceConfigChange }) {
   const [tab, setTab] = useState('status');
   // Seed from the EFFECTIVE config, not the raw stored one — see
@@ -1651,6 +1741,11 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     stateColor={state.dot}
                   />
                 </Panel>
+                {cfgEff.captureWakeMisses && (
+                  <Panel label="Unmatched on-device crossings" style={{ marginTop: 16 }}>
+                    <WakeCaptures deviceId={device.device_id} deviceLabel={device.label}/>
+                  </Panel>
+                )}
               </div>
             );
           })()}
@@ -4006,7 +4101,7 @@ const STAGE_MONO = "'DM Mono',monospace";
 // be silently wrong.
 const CONFIG_SECTIONS = {
   "playback": ["eqBands", "eqLoudness"],
-  "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice"],
+  "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice", "captureWakeMisses"],
   "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "nsAsr", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
   "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs"],
@@ -4374,6 +4469,18 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                 value={(config.owwOnDevice ?? 'off') === 'shadow'}
                 onChange={shadowCapable
                   ? (v => set('owwOnDevice', v ? 'shadow' : 'off'))
+                  : (() => {})}/>
+              {/* Only meaningful while shadow scoring is on, and it records
+                  speech nobody addressed to the assistant — so it is gated on
+                  shadow being enabled AND says plainly what it keeps. */}
+              <Toggle
+                label="Keep audio of unmatched crossings"
+                sub={(config.owwOnDevice ?? 'off') === 'shadow'
+                  ? 'saves a few seconds around each on-device detection that produced no turn, so you can hear whether it was a false alarm or a wake we missed — recognisable speech, kept on this machine, newest 30 per Echo'
+                  : 'needs on-device scoring above'}
+                value={config.captureWakeMisses ?? false}
+                onChange={(config.owwOnDevice ?? 'off') === 'shadow'
+                  ? (v => set('captureWakeMisses', v))
                   : (() => {})}/>
             </div>
           </div>

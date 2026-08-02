@@ -103,6 +103,15 @@ DEFAULT_DEVICE_CONFIG = {
     # no self-trigger risk down to ~0.08.
     "bargeInEnabled":   False,
     "bargeInThreshold": 0.10,
+    # Keep the audio around an on-device wake crossing that matched no turn.
+    # Diagnostic, for one question: are those crossings false accepts, or
+    # wakes the CONTROLLER missed? The counters cannot tell them apart and
+    # the answer decides whether owwOnDevice can ever be "on".
+    #
+    # OFF by default and a higher bar than saveUtterances: this records
+    # speech nobody addressed to the assistant. Meaningless unless
+    # owwOnDevice is "shadow".
+    "captureWakeMisses": False,
     "owwModel":         "hey_jarvis_v0.1",
     # Multi-device wake SUPPRESSION window (ms), not a wait. The first
     # device to detect answers immediately; any other device detecting
@@ -1260,6 +1269,16 @@ def delete_device(device_id: str) -> None:
             log.info(f"[db] Removed {removed} recording(s) for {device_id}")
     except Exception as e:
         log.warning(f"[db] Recording cleanup failed for {device_id}: {e}")
+    # Wake captures are a second store of speech and nothing cascades to the
+    # filesystem, so they need removing explicitly too — deleting a device
+    # must not leave its audio behind.
+    try:
+        import em_wake_capture
+        removed = em_wake_capture.delete_device(device_id)
+        if removed:
+            log.info(f"[db] Removed {removed} wake capture(s) for {device_id}")
+    except Exception as e:
+        log.warning(f"[db] Wake capture cleanup failed for {device_id}: {e}")
     log.info(f"[db] Device deleted: {device_id}")
 
 

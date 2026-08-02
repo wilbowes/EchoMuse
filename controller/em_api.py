@@ -58,6 +58,7 @@ import em_oww_models
 import em_pki
 import em_player
 import em_recordings
+import em_wake_capture
 import em_scenes
 import em_support
 from version import VERSION as CONTROLLER_VERSION
@@ -273,6 +274,8 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/devices/{id}/turns",         _get_device_turns)
     app.router.add_get("/api/devices/{id}/activity",      _get_device_activity)
     app.router.add_get("/api/devices/{id}/turns/{turn}/audio", _get_turn_audio)
+    app.router.add_get("/api/devices/{id}/wake_captures",        _get_wake_captures)
+    app.router.add_get("/api/devices/{id}/wake_captures/{name}", _get_wake_capture_audio)
     app.router.add_post("/api/devices/{id}/wifi",         _post_device_wifi)
     app.router.add_post("/api/devices/{id}/wifi/scan",    _post_device_wifi_scan)
     app.router.add_post("/api/devices/{id}/update",       _post_device_update)
@@ -547,6 +550,57 @@ async def _get_turn_audio(request: web.Request) -> web.Response:
             # Recordings are immutable once written and their names are
             # unique per turn, but the retention window means a name can
             # stop resolving — so cache privately and briefly, never shared.
+            "Cache-Control":       "private, max-age=60",
+        },
+    )
+
+
+@auth.require_auth
+async def _get_wake_captures(request: web.Request) -> web.Response:
+    """
+    GET /api/devices/{id}/wake_captures — on-device wake crossings that
+    matched no turn, newest first.
+
+    These are the evidence for whether owwOnDevice can ever be "on": the
+    counters can say a crossing matched nothing, but not whether it was a
+    false accept or a wake the controller missed, and those want opposite
+    decisions. Only present while captureWakeMisses is on.
+    """
+    device_id = request.match_info["id"]
+    loop = asyncio.get_event_loop()
+    row = await loop.run_in_executor(None, db.get_device, device_id)
+    if row is None:
+        return _error("device_not_found", f"No device: {device_id}", 404)
+    items = await loop.run_in_executor(None, em_wake_capture.list_for, device_id)
+    return _ok({"captures": items})
+
+
+@auth.require_auth
+async def _get_wake_capture_audio(request: web.Request) -> web.Response:
+    """
+    GET /api/devices/{id}/wake_captures/{name} — one capture as a WAV.
+
+    resolve() re-checks that the file belongs to the device in the URL — both
+    come from the path, and one must not be usable to reach the other's
+    audio. Retention is a hard file count, so a 404 is an ordinary outcome.
+    """
+    device_id = request.match_info["id"]
+    name      = request.match_info["name"]
+    loop = asyncio.get_event_loop()
+    row = await loop.run_in_executor(None, db.get_device, device_id)
+    if row is None:
+        return _error("device_not_found", f"No device: {device_id}", 404)
+
+    path = em_wake_capture.resolve(device_id, name)
+    if path is None:
+        return _error("no_capture", "No such capture", 404)
+
+    label = _slug(row["label"] or device_id)
+    return web.FileResponse(
+        path,
+        headers={
+            "Content-Type":        "audio/wav",
+            "Content-Disposition": f'attachment; filename="{label}-{name}"',
             "Cache-Control":       "private, max-age=60",
         },
     )

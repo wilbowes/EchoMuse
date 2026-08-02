@@ -55,6 +55,7 @@ import logging
 import os
 import socket
 import struct
+import time
 
 import numpy as np
 from aiohttp import web
@@ -71,6 +72,7 @@ import em_pki
 import em_eq
 import em_scenes
 import em_shadow
+import em_wake_capture
 import em_arbiter
 import em_esphome as esphome
 import em_ble_proxy
@@ -333,6 +335,13 @@ class Device:
         # applies a refractory period, so one per utterance) and only the most
         # recent few can ever be within a match window.
         self.shadow: em_shadow.ShadowTracker = em_shadow.ShadowTracker()
+        # Rolling wake-stream buffer, allocated only when the device is
+        # capturing: an unmatched crossing is answered by LISTENING to it,
+        # and the audio is gone by the time we know the crossing matched
+        # nothing. Off by default — this records speech nobody addressed to
+        # the assistant, which is a higher bar than saveUtterances.
+        self.capture_wake_misses: bool = False
+        self.wake_ring: em_wake_capture.AudioRing | None = None
         # Monotonic instant of this controller's most recent wake detection,
         # consumed once by the turn record it belongs to.
         self.last_wake_mono = None  # float | None
@@ -2178,6 +2187,16 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         device.oww_speex_ns  = bool(config.get("owwSpeexNs", False))
         device.ns_asr        = bool(config.get("nsAsr", False))
         device.save_utterances = bool(config.get("saveUtterances", False))
+        # Arm or disarm the unmatched-crossing buffer. Allocated only while
+        # capturing, and dropped (with its audio) the moment it is turned
+        # off — leaving several seconds of speech in memory after the user
+        # revoked consent is the wrong default.
+        device.capture_wake_misses = bool(config.get("captureWakeMisses", False))
+        if device.capture_wake_misses and device.wake_ring is None:
+            device.wake_ring = em_wake_capture.AudioRing()
+        elif not device.capture_wake_misses and device.wake_ring is not None:
+            device.wake_ring.clear()
+            device.wake_ring = None
         device.barge_in_enabled = bool(config.get("bargeInEnabled", False))
         device.barge_threshold  = float(config.get("bargeInThreshold", 0.6))
         device.eq_bands      = config.get("eqBands", [0.0] * 8)
@@ -2548,6 +2567,8 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                         f"score={msg.get('score')} age={msg.get('ageMs')}ms "
                         f"(shadow — not triggering)"
                     )
+                    if device.wake_ring is not None:
+                        _schedule_wake_capture(device, msg)
 
                 elif msg_type == "ble_adverts":
                     # BLE proxy data path — batched adverts from the
@@ -2634,6 +2655,60 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                 em_player.device_gone(device.device_id)
 
 
+def _schedule_wake_capture(device, msg: dict) -> None:
+    """
+    Decide, a few seconds from now, whether this crossing matched anything —
+    and if it did not, keep the audio around it.
+
+    Deferred rather than immediate because the controller usually detects
+    slightly LATER than the device (it scores the same frame after a network
+    hop), so a crossing arriving first is not yet evidence of anything.
+
+    Deliberately NOT "did the shadow tracker consume it": consumption happens
+    at turn-persist time, which can be 30 seconds after the wake, so asking
+    early would report every genuine wake as unmatched and fill the disk with
+    recordings of people using their assistant perfectly successfully.
+    """
+    try:
+        score = float(msg.get("score") or 0.0)
+        age_s = min(max(float(msg.get("ageMs") or 0) / 1000.0, 0.0),
+                    em_shadow.MAX_AGE_S)
+    except (TypeError, ValueError):
+        return
+    cross_mono = em_shadow.now() - age_s
+    cross_wall = time.time() - age_s
+
+    async def _decide():
+        try:
+            await asyncio.sleep(em_wake_capture.DECIDE_AFTER_S)
+            if em_wake_capture.is_matched(cross_mono, device.last_wake_mono,
+                                          em_shadow.MATCH_WINDOW_S):
+                return
+            ring = device.wake_ring
+            if ring is None:
+                return
+            pcm = ring.extract(cross_mono)
+            if not pcm:
+                log.info(f"[{device.device_id}] unmatched crossing "
+                         f"(score={score:.3f}) — audio already aged out")
+                return
+            name = await asyncio.get_event_loop().run_in_executor(
+                None, em_wake_capture.save, device.device_id, pcm,
+                cross_wall, score)
+            log.info(
+                f"[{device.device_id}] unmatched on-device crossing "
+                f"(score={score:.3f}) — captured "
+                f"{em_wake_capture.duration_ms(len(pcm))}ms as {name}"
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning(f"[{device.device_id}] wake capture failed: {e}")
+
+    task = asyncio.create_task(_decide())
+    task.add_done_callback(_log_task_exception)
+
+
 # ─── Data plane handler ───────────────────────────────────────────────────────
 
 async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
@@ -2698,6 +2773,11 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
                     log.error(f"[{device.device_id}] VAD sentinel lost — queue still full after drain")
                 continue
             payload = raw[MIC_HEADER_LEN:]
+            # Rolling buffer for unmatched-crossing capture. One deque append
+            # when armed, nothing at all when not — this is the data-plane hot
+            # path (~12 frames/s per device).
+            if device.wake_ring is not None:
+                device.wake_ring.append(em_shadow.now(), payload)
             q = device.voice_queue if device.oww_paused.is_set() else device.mic_queue
             try:
                 q.put_nowait(payload)

@@ -30,6 +30,7 @@ SECTIONS: dict[str, dict] = {
         "keys": [
             "owwModel", "owwThreshold", "owwSpeexNs",
             "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs",
+            "captureWakeMisses",
             "owwOnDevice",
         ],
     },
