@@ -802,6 +802,10 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
         live.barge_in_enabled = bool(effective["bargeInEnabled"])
     if "bargeInThreshold" in effective:
         live.barge_threshold = float(effective["bargeInThreshold"])
+    if "buttonSingleTapEvent" in effective:
+        live.button_single_tap_event = bool(effective["buttonSingleTapEvent"])
+    if "buttonMultiTapMs" in effective:
+        live.button_multi_tap_ms = int(effective["buttonMultiTapMs"])
     if "wakeArbitrationMs" in effective:
         live.wake_arb_ms = int(effective["wakeArbitrationMs"])
     if "eqBands" in effective:
@@ -3905,6 +3909,8 @@ def _merge_device(row) -> dict:
         # than no toggle, because it looks like the feature is broken.
         "owwShadowCapable": getattr(live, "oww_shadow_capable", False) if live else False,
         "audioMixCapable": getattr(live, "audio_mix_capable", False) if live else False,
+        # Gates the tap-as-event toggle — see em_button.decide.
+        "buttonHoldCapable": getattr(live, "button_hold_capable", False) if live else False,
         # Whether the device found its ambient light sensor. Reported so the
         # dashboard can tell "no sensor" apart from "sensor present, no reading
         # yet" — which is the question #90 had to be answered by hand, because

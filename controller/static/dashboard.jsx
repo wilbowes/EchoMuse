@@ -1734,6 +1734,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 sections={sections}
                 shadowCapable={!device.connected || !!device.owwShadowCapable}
                 mixCapable={!device.connected || !!device.audioMixCapable}
+                holdCapable={!device.connected || !!device.buttonHoldCapable}
                 onScopeChange={(id, local) => {
                   setSections(prev => local
                     ? [...prev, id]
@@ -4725,7 +4726,7 @@ const CONFIG_SECTIONS = {
   "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice"],
   "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "nsAsr", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
-  "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs"],
+  "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs"],
   "bluetooth": ["bleProxyEnabled"]
 };
 
@@ -4839,7 +4840,8 @@ function StageAdvanced({ open, onToggle, disabledStyle, children }) {
 }
 
 function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
-                            shadowCapable = true, mixCapable = true }) {
+                            shadowCapable = true, mixCapable = true,
+                            holdCapable = true }) {
   // shadowCapable defaults TRUE because this form is also the fleet-config
   // view, where there is no single device whose capability could gate a
   // control. Referencing a `device` here is what blank-screened the Config
@@ -5236,9 +5238,20 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
       {/* 05 ADVANCED — button-turn internals: processing + speech gate */}
       <Stage n="05" title="Advanced"
         chips={<><ScopeChip tone="device">Device</ScopeChip><ScopeChip>Button turns only</ScopeChip></>}
-        desc="Everything here affects only bounded button-press turns. Wake-word turns stream continuously — Home Assistant's VAD endpoints them, and the controller closes accidental wakes after 5s of silence relative to the room's measured noise floor — so none of these settings touch the wake path."
+        desc="Everything here affects only bounded button-press turns — except the action button setting, which decides whether a tap starts one at all. Wake-word turns stream continuously — Home Assistant's VAD endpoints them, and the controller closes accidental wakes after 5s of silence relative to the room's measured noise floor — so none of these settings touch the wake path."
         scope={scopeEl('advanced')} dim={secStyle('advanced')}>
-        {subHeader('Turn processing', true)}
+        {subHeader('Action button', true)}
+        <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px', ...inputStyle }}>
+          {/* Offered only when the device says it can measure a hold. */}
+          <Toggle label="Tap sends an event"
+            sub={holdCapable
+              ? "tap fires the HA action-button event instead of starting a turn — hold still fires 'long'; the button can no longer cancel a response. A tap is easy to trigger by accident and the button is unauthenticated — bind destructive automations to 'long' instead"
+              : 'needs newer firmware on this Echo — it has no action-button event for a tap to fire'}
+            value={holdCapable && (config.buttonSingleTapEvent ?? false)}
+            onChange={holdCapable ? (v => set('buttonSingleTapEvent', v)) : (() => {})}/>
+          <Slider label="Multi-tap window" sub="0 = off. Coalesces quick taps into double/triple, at the cost of delaying every tap by this much. Needs 'Tap sends an event'" value={config.buttonMultiTapMs ?? 0} min={0} max={600} step={50} unit="ms" disabled={!(holdCapable && (config.buttonSingleTapEvent ?? false))} onChange={v => set('buttonMultiTapMs', v)}/>
+        </div>
+        {subHeader('Turn processing')}
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px', ...inputStyle }}>
           <Toggle label="Auto gain (AGC)" sub="levels button-turn speech; never the wake stream" value={config.agcEnabled ?? true} onChange={v => set('agcEnabled', v)}/>
         </div>

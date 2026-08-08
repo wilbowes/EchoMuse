@@ -30,10 +30,11 @@ from __future__ import annotations
 # A hold is forwarded to HA as the `long` event. Fires while muted: it is not
 # speech, so the mute has no opinion about it.
 HOLD = "hold"
-# A tap while muted. Does nothing at all today. This is the branch that grows
-# a tap-as-HA-event outcome (PR #107) — and that outcome belongs BEFORE the
-# mute check, not after: a tap that is an event rather than a turn is in the
-# same position as a hold, and should fire while muted for the same reason.
+# A tap forwarded to HA as an event rather than starting a turn
+# (buttonSingleTapEvent). Ordered before the mute check for the same reason a
+# hold is: it is not speech, so the mute has no opinion about it.
+TAP_EVENT = "tap_event"
+# A tap while muted. Does nothing at all.
 BLOCKED = "blocked"
 # A tap during an active turn cancels it.
 CANCEL = "cancel"
@@ -47,6 +48,7 @@ def decide(
     hold_ms: int,
     muted: bool,
     turn_active: bool,
+    tap_event: bool = False,
 ) -> str:
     """
     Classify a dot-button RELEASE.
@@ -55,9 +57,16 @@ def decide(
     on firmware predating the hold feature, and on any press) reads as a tap,
     so an unknown hold time can never be promoted to a gesture the user did
     not make.
+
+    `tap_event` is buttonSingleTapEvent ANDed with `button_hold` capability
+    by the caller: the event entity is only advertised for a hold-capable
+    device, so ungated this would classify taps as events nothing receives —
+    and make TURN and CANCEL unreachable. An inert button.
     """
     if held_ms >= hold_ms:
         return HOLD
+    if tap_event:
+        return TAP_EVENT
     if muted:
         return BLOCKED
     if turn_active:

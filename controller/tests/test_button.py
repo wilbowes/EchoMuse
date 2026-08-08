@@ -17,12 +17,13 @@ import em_button
 HOLD_MS = 750
 
 
-def decide(held_ms=0, muted=False, turn_active=False):
+def decide(held_ms=0, muted=False, turn_active=False, tap_event=False):
     return em_button.decide(
         held_ms=held_ms,
         hold_ms=HOLD_MS,
         muted=muted,
         turn_active=turn_active,
+        tap_event=tap_event,
     )
 
 
@@ -79,3 +80,31 @@ def test_absent_hold_time_reads_as_a_tap():
     """
     assert decide(held_ms=0) == em_button.TURN
     assert decide(held_ms=0, muted=True) == em_button.BLOCKED
+
+
+# ── buttonSingleTapEvent ─────────────────────────────────────────────────────
+
+def test_tap_event_replaces_the_turn():
+    assert decide(held_ms=10, tap_event=True) == em_button.TAP_EVENT
+
+
+def test_tap_event_replaces_the_cancel():
+    """The trade the setting makes: the button stops cancelling responses."""
+    assert decide(held_ms=10, turn_active=True, tap_event=True) == em_button.TAP_EVENT
+
+
+def test_tap_event_fires_while_muted():
+    """Same reason a hold does — an event is not speech."""
+    assert decide(held_ms=10, muted=True, tap_event=True) == em_button.TAP_EVENT
+
+
+def test_hold_still_wins_over_tap_event():
+    assert decide(held_ms=800, tap_event=True) == em_button.HOLD
+
+
+def test_off_by_default_is_the_old_behaviour():
+    """The caller ANDs the setting with button_hold capability, so an
+    incapable device arrives here as tap_event=False and keeps its turn —
+    rather than emitting to an entity HA was never offered."""
+    assert decide(held_ms=10, tap_event=False) == em_button.TURN
+    assert decide(held_ms=10, turn_active=True, tap_event=False) == em_button.CANCEL

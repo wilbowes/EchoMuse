@@ -74,6 +74,7 @@ import em_scenes
 import em_shadow
 import em_arbiter
 import em_button
+import em_tap_burst
 import em_esphome as esphome
 import em_ble_proxy
 import em_oww_models
@@ -359,6 +360,15 @@ class Device:
         # turn. _barge_model is a dedicated OWW instance (the main wake
         # listener task is blocked awaiting the turn).
         self.barge_in_enabled = False
+        # False until config is pushed, so a device connecting before then
+        # keeps the historical tap-starts-a-turn behaviour.
+        self.button_single_tap_event = False
+        self.button_multi_tap_ms = 0
+        self.tap_burst = em_tap_burst.TapCoalescer(
+            lambda name: esphome.send_button_event(self.device_id, name),
+            enabled=lambda: self.button_single_tap_event,
+            on_error=_log_task_exception,
+        )
         self.barge_threshold  = 0.6
         self.barge_detected   = False
         self._barge_model     = None
@@ -556,6 +566,11 @@ class Device:
         behaviour.
         """
         return "audio_mix" in (self.capabilities or [])
+
+    @property
+    def button_hold_capable(self) -> bool:
+        """Measures hold time — and so was offered the HA event entity."""
+        return "button_hold" in (self.capabilities or [])
 
     @property
     def oww_shadow_capable(self) -> bool:
@@ -1999,6 +2014,10 @@ async def handle_button_event(device: Device, event: dict):
             hold_ms=esphome.BUTTON_HOLD_MS,
             muted=muted,
             turn_active=device.voice_lock.locked(),
+            # ANDed with the capability — see em_button.decide.
+            tap_event=(
+                device.button_single_tap_event and device.button_hold_capable
+            ),
         )
 
         if action == em_button.HOLD:
@@ -2006,9 +2025,23 @@ async def handle_button_event(device: Device, event: dict):
             esphome.send_button_event(device.device_id, "long")
             return
 
+        if action == em_button.TAP_EVENT:
+            window_ms = device.button_multi_tap_ms
+            if window_ms <= 0:
+                log.info(f"[{device.device_id}] Dot button tap → HA event (single)")
+                esphome.send_button_event(device.device_id, "single")
+                return
+
+            device.tap_burst.tap(window_ms)
+            log.info(
+                f"[{device.device_id}] Dot button tap "
+                f"{device.tap_burst.count} in burst (window {window_ms}ms)"
+            )
+            return
+
         if action == em_button.BLOCKED:
-            # Only the TURN is blocked. The hold above has already been
-            # forwarded, muted or not.
+            # Only the TURN is blocked. The hold and tap-event above have
+            # already been forwarded, muted or not.
             log.info(f"[{device.device_id}] Dot button tap ignored — mic is muted")
             return
 
@@ -2241,6 +2274,10 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         device.save_utterances = bool(config.get("saveUtterances", False))
         device.barge_in_enabled = bool(config.get("bargeInEnabled", False))
         device.barge_threshold  = float(config.get("bargeInThreshold", 0.6))
+        device.button_single_tap_event = bool(
+            config.get("buttonSingleTapEvent", False)
+        )
+        device.button_multi_tap_ms = int(config.get("buttonMultiTapMs", 0))
         device.eq_bands      = config.get("eqBands", [0.0] * 8)
         device.eq_loudness   = bool(config.get("eqLoudness", False))
         device.led_scene     = em_scenes.resolve(config)
@@ -2676,6 +2713,10 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
 
     finally:
         if device:
+            # Above the stale check on purpose: per-connection state, and
+            # send_button_event resolves by device_id, so an orphaned timer
+            # would fire a phantom tap at the replacement connection.
+            device.tap_burst.cancel()
             if _devices.get(device.device_id) is not device:
                 # A replacement connection has already registered for this
                 # device_id — this socket is stale. Tearing down shared

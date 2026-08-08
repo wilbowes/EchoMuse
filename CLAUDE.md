@@ -161,9 +161,15 @@ directions.
   reported on release), never by timing the down/up messages controller-side:
   RTT excursions past 1600ms have been measured on this fleet, which would
   turn a 750ms gesture into noise. Absent `heldMs` reads as a tap, so old
-  firmware keeps its existing behaviour. Only `long` is emitted — double and
-  triple were parked deliberately, because knowing a press was *single*
-  requires delaying every single press by the multi-tap window.
+  firmware keeps its existing behaviour. A hold always fires `long`; a tap
+  fires `single` only under `buttonSingleTapEvent`, which makes the tap an HA
+  event rather than a voice turn. `double`/`triple` need `buttonMultiTapMs`
+  as well, since knowing a press was *single* means delaying it by the
+  multi-tap window — a cost worth paying only once a tap is an event and not
+  speech.
+  **`buttonSingleTapEvent` is gated on `button_hold`** — the event entity is
+  only advertised for a hold-capable device, so on older firmware the setting
+  is refused rather than leaving the button inert.
   **Mute blocks the voice TURN, not the gesture.** A hold fires `long` while
   muted; only the tap-starts-a-turn path is refused (`em_button.decide`, with
   the mute state read off the press itself — the device sends `muted` on every
@@ -178,6 +184,8 @@ directions.
   mute, not the button filter. A controller with a stale mute view can at
   worst start a turn that captures silence and ends `no_speech` — keep that
   rejection in `cmd/server.go` where it is, it is what makes this safe.
+  A tap under `buttonSingleTapEvent` fires while muted too, for the hold's
+  reason: it is an event, not speech.
   **The evdev reader must filter to `EV_KEY`**: every press is followed by an
   `EV_SYN` whose code and value are both 0, and without the filter that SYN
   read as a release microseconds after the press. The button therefore acted
@@ -789,7 +797,7 @@ house, so rows survive with the SSID replaced and the selected network marked.
 
 `config.ConfigMessage` JSON fields (camelCase) are sent from controller to device on connect and on per-device config change. Non-zero fields are applied; zero/nil fields are ignored (partial update). Changes take effect immediately — no restart required.
 
-Configurable parameters: `vadThreshold`, `vadSpeechMs`, `vadSilenceMs`, `owwThreshold`, `owwModel`, `owwSpeexNs`, `adcDigitalGain`, `adcMicpga`, `micGainDb`, `startupVolume`, `beamAngle`, `beamformingEnabled`, `aecEnabled`, `aecDelayMs`, `aecTailMs`, `agcEnabled`, `nsAsr`, `bargeInEnabled`, `bargeInThreshold`, `bleProxyEnabled`, `eqBands`, `eqLoudness`, `ledScene`, `ledListenColor`, `ledThinkColor`, `meterAttack`, `meterDecay`, `meterFloor`, `meterGamma`, `meterRef`, `meterCurve`, `wakeArbitrationMs`, `duckDb`, `owwOnDevice` and `saveUtterances` (the last two are controller-consumed for scoping purposes, though `owwOnDevice` IS acted on by the device; `saveUtterances` and `wakeArbitrationMs` are ignored by it).
+Configurable parameters: `vadThreshold`, `vadSpeechMs`, `vadSilenceMs`, `owwThreshold`, `owwModel`, `owwSpeexNs`, `adcDigitalGain`, `adcMicpga`, `micGainDb`, `startupVolume`, `beamAngle`, `beamformingEnabled`, `aecEnabled`, `aecDelayMs`, `aecTailMs`, `agcEnabled`, `nsAsr`, `bargeInEnabled`, `bargeInThreshold`, `bleProxyEnabled`, `eqBands`, `eqLoudness`, `ledScene`, `ledListenColor`, `ledThinkColor`, `meterAttack`, `meterDecay`, `meterFloor`, `meterGamma`, `meterRef`, `meterCurve`, `wakeArbitrationMs`, `duckDb`, `buttonSingleTapEvent`, `buttonMultiTapMs`, `owwOnDevice` and `saveUtterances` (the last two are controller-consumed for scoping purposes, though `owwOnDevice` IS acted on by the device; `saveUtterances`, `wakeArbitrationMs` and the two `button*` keys are ignored by it).
 
 ### Fleet vs device scoping (schema v8)
 
