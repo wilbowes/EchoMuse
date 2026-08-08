@@ -9,6 +9,8 @@ import (
 	"os/exec"
 )
 
+// Historical paths, now only the fallback when resolution by name fails.
+// See resolve.go for why the numbering cannot be trusted.
 const dotButton = "/dev/input/event1"
 const volumeButton = "/dev/input/event2"
 
@@ -49,11 +51,11 @@ func (e *EvDevController) SubscribeToButton(callback buttons.ButtonClickCallback
 
 	dotBtn := e.GetDotButton()
 	volBtn := e.GetVolumeButton()
-	dotDevice, err := evdev.Open(dotButton)
+	dotDevice, err := evdev.Open(resolveInputDevice(keypadDeviceName, dotButton))
 	if err != nil {
 		return nil, err
 	}
-	volDevice, err := evdev.Open(volumeButton)
+	volDevice, err := evdev.Open(resolveInputDevice(volumeDeviceName, volumeButton))
 	if err != nil {
 		return nil, err
 	}
