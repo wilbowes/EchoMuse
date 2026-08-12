@@ -34,13 +34,13 @@ jobs:
     name: Scan published controller image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # `latest` rather than a pinned version on purpose: this asks about the
       # image users are pulling today, which is what docker-compose.deploy.yml
       # gives them.
       - name: Scan for fixable HIGH/CRITICAL vulnerabilities
-        uses: aquasecurity/trivy-action@v0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
           image-ref: ghcr.io/${{ github.repository_owner }}/echomuse-controller:latest
@@ -54,7 +54,7 @@ jobs:
       # only the run log, where nobody goes looking.
       - name: Scan again for SARIF
         if: always()
-        uses: aquasecurity/trivy-action@v0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
           image-ref: ghcr.io/${{ github.repository_owner }}/echomuse-controller:latest
@@ -68,7 +68,7 @@ jobs:
       - name: Upload results to code scanning
         if: always()
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-results.sarif
           category: trivy-image

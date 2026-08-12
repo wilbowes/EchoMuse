@@ -19,7 +19,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           submodules: true   # fetches GoTinyAlsa submodule
 
@@ -77,7 +77,7 @@ jobs:
           cat /tmp/release-notes.md
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           name: EchoMuse ${{ github.ref_name }}
           files: device/build/server
