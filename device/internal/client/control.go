@@ -142,6 +142,14 @@ func (c *ControlClient) IsConnected() bool {
 var errPending = fmt.Errorf("pending approval")
 
 func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
+	staticServer, staticErr := discovery.ConfiguredServer()
+	if staticErr != nil {
+		log.Printf("[control] Static controller config invalid — using mDNS: %v", staticErr)
+	} else if staticServer != nil {
+		log.Printf("[control] Static controller configured: %s (tls_port=%d) — mDNS disabled",
+			staticServer.Addr, staticServer.TLSPort)
+	}
+
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -159,8 +167,17 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 		// the change's reconnect gate and revert a working network).
 		// The probe targets the plain port — it's a reachability check,
 		// not a plane choice; connect() re-decides ws vs wss every dial.
-		server := c.lastKnownServer()
-		if server != nil && server.TLSPort == 0 && loadLinkCreds().tlsConf != nil {
+		server := staticServer
+		if server != nil {
+			// The static endpoint is authoritative. Dial it even when a preliminary
+			// TCP probe would fail: a device-local overlay may still be starting,
+			// and falling into the indefinitely-retrying mDNS browser would strand
+			// the client after the overlay becomes ready.
+			log.Printf("[control] Using static controller %s", server.Addr)
+		} else {
+			server = c.lastKnownServer()
+		}
+		if staticServer == nil && server != nil && server.TLSPort == 0 && loadLinkCreds().tlsConf != nil {
 			// CA installed but the cached endpoint predates the
 			// controller's TLS listener (e.g. controller upgraded, or a
 			// Secure-link push just landed, mid-run). One fresh browse so
@@ -171,7 +188,9 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 				server = found
 			}
 		}
-		if server != nil && probeTCP(server.Addr, 3*time.Second) {
+		if staticServer != nil {
+			// Direct dial below; reconnect loop retries every five seconds.
+		} else if server != nil && probeTCP(server.Addr, 3*time.Second) {
 			log.Printf("[control] Last-known controller %s reachable — skipping mDNS", server.Addr)
 		} else {
 			found, err := discovery.FindServer(ctx)
