@@ -34,7 +34,7 @@ jobs:
     name: Scan published controller image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # `latest` rather than a pinned version on purpose: this asks about the
       # image users are pulling today, which is what docker-compose.deploy.yml
@@ -68,7 +68,7 @@ jobs:
       - name: Upload results to code scanning
         if: always()
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-results.sarif
           category: trivy-image
