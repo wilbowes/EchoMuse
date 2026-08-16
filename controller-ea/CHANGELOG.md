@@ -2,6 +2,10 @@
 
 ## 2.20.0-ea.6 — Early Access
 
+An Early Access build on top of 2.20.0. The 2.20.0 notes below are the
+release this builds on — you already have them if you were running an
+earlier Early Access build.
+
 - **Installing wake word models on a device works again.** Sending a wake
   word model to an Echo failed with an internal error, every time. If you
   changed a device's wake word to one it had not been given during setup, it
