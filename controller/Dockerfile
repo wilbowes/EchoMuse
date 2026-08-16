@@ -73,6 +73,7 @@ COPY em_esphome.py .
 COPY em_ble_proxy.py .
 COPY em_oww_assets.py  ./
 COPY em_oww_models.py .
+COPY em_oww_warmup.py .
 COPY em_arbiter.py .
 COPY em_button.py .
 COPY em_tap_burst.py .

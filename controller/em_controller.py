@@ -73,6 +73,7 @@ import em_linkauth
 import em_eq
 import em_scenes
 import em_shadow
+import em_oww_warmup
 import em_arbiter
 import em_button
 import em_tap_burst
@@ -1028,6 +1029,12 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
     # above); scoring needs the openwakeword prediction key (path → stem).
     barge_pred_key = em_oww_models.prediction_key(device._barge_model_key)
     model.reset()
+    # reset() seeds the classifier's window with embeddings of random noise,
+    # so the first FEATURE_WINDOW chunks score that noise as much as the room.
+    # This watcher is where that hurt most: it reset and scored immediately,
+    # and twice cancelled a turn the user was waiting on, at 0.867 and 0.700
+    # within 10 chunks of starting. See em_oww_warmup.
+    warmup = em_oww_warmup.WarmupGate()
 
     # Drop anything queued before the watcher started (command tail,
     # silence) — only fresh audio should be scored.
@@ -1081,6 +1088,7 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                 prediction = await loop.run_in_executor(None, model.predict, samples)
                 score = prediction.get(barge_pred_key, 0.0)
                 frames += 1
+                trusted = warmup.feed()
                 in_playback = playback_started.is_set()
                 if in_playback:
                     threshold = device.barge_threshold
@@ -1103,6 +1111,13 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                         )
                     else:
                         fired = False
+                if fired and not trusted:
+                    log.info(
+                        f"[{device.device_id}] Barge watcher: {fire_note} "
+                        f"ignored — openwakeword warm-up, "
+                        f"{warmup.progress()} chunks since reset"
+                    )
+                    fired = False
                 prev_score = score
                 if score > peak:
                     peak = score
@@ -1778,6 +1793,11 @@ async def wake_word_listener(device: Device):
     await device.mic_start()
 
     buf = bytearray()
+    # openwakeword seeds its classifier window with embeddings of random noise
+    # on construction AND on every reset(), so scores are partly scores of that
+    # noise until the window has refilled. Un-warmed at construction to match
+    # the model above; re-armed at every reset() below. See em_oww_warmup.
+    warmup = em_oww_warmup.WarmupGate()
     last_near_miss_log_ts = 0.0  # Q4: rate-limit near-miss INFO logging to 1/2s
     nm_pending = 0    # near-misses buffered since the last hourly-rollup flush
     nm_max     = 0.0  # highest buffered near-miss score
@@ -1807,6 +1827,8 @@ async def wake_word_listener(device: Device):
                     current_model_name = new_name
                     current_speex_ns  = new_speex
                     buf.clear()
+                    # A new model is noise-seeded exactly like a reset one.
+                    warmup.reset()
                     log.info(f"[{device.device_id}] OWW: model reloaded → {new_name} (speex_ns={new_speex})")
                 except Exception as e:
                     log.error(
@@ -1909,6 +1931,10 @@ async def wake_word_listener(device: Device):
                     None, model.predict, samples
                 )
                 score = prediction.get(model_key, 0.0)
+                # Exactly once per chunk the MODEL saw, whatever the score —
+                # the `device.speaking` skip above returns before predict(),
+                # so the gate and the model stay in step.
+                trusted = warmup.feed()
 
                 # Log any score above noise floor so we can see near-misses
                 # and understand whether failed wakes are "close but below
@@ -1938,7 +1964,7 @@ async def wake_word_listener(device: Device):
                 if device.barge_in_enabled and em_player.is_playing(device.device_id):
                     eff_threshold = min(eff_threshold, device.barge_threshold)
 
-                if 0.05 < score < eff_threshold:
+                if trusted and 0.05 < score < eff_threshold:
                     device.oww_near_misses += 1
                     nm_pending += 1
                     nm_max = max(nm_max, float(score))
@@ -1978,7 +2004,13 @@ async def wake_word_listener(device: Device):
                 # this controller's own crossing is demoted to a measurement —
                 # see em_shadow.decide_wake_source for why it keeps scoring at
                 # all. In every other mode this is exactly the old condition.
-                ctrl_hit = score >= eff_threshold
+                if not trusted and score >= eff_threshold:
+                    log.info(
+                        f"[{device.device_id}] Wake score {score:.3f} >= "
+                        f"{eff_threshold:.3f} ignored — openwakeword warm-up, "
+                        f"{warmup.progress()} chunks since reset"
+                    )
+                ctrl_hit = trusted and score >= eff_threshold
                 dev_wake, dev_age = device.pending_wake.take()
                 if dev_wake is None and dev_age is not None:
                     # Expired before anything could act on it. Worth a warning
@@ -2041,6 +2073,7 @@ async def wake_word_listener(device: Device):
                         # TTS mic_stop/mic_start remains untouched — that
                         # acoustic-feedback guard is load-bearing.
                         model.reset()
+                        warmup.reset()
                         buf.clear()
                         device.cancel_event.clear()
                         # Wake detail for the turn's persistent record —
@@ -2160,6 +2193,7 @@ async def wake_word_listener(device: Device):
                                 f"drained {drained} stale frames post-turn"
                             )
                         model.reset()
+                        warmup.reset()
                         buf.clear()
                         # mic_start without lock_mic — device stays on ch6 omni
                         # (beamforming=off), same stream as OWW listening.
@@ -2174,6 +2208,7 @@ async def wake_word_listener(device: Device):
                             f"ignoring wake"
                         )
                         model.reset()
+                        warmup.reset()
 
     except asyncio.CancelledError:
         await device.mic_stop()
