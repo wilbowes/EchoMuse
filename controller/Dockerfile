@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.14-slim
 # Links the GHCR package page back to the repo (and lets the package inherit
 # the repo's public visibility once connected).
 LABEL org.opencontainers.image.source="https://github.com/wilbowes/EchoMuse" \
