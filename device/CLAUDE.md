@@ -321,10 +321,13 @@ old and the incoming mode are consulted, or a save that enables on-device
 scoring while changing the wake word slips through on the old mode.
 
 `em_shadow.effective_mode` also takes `model_ready` alongside
-`trigger_capable`, as a **backstop** with no current writer: install-before-
-switch removed the case that set it, and its intended writer is the
-reconcile-on-connect pass designed in #191 — the first thing that will actually
-know what a device has. A known-missing model degrades to **`off`, not `shadow`** —
+`trigger_capable`. Its writer is **`em_api.reconcile_oww_assets`**, run as a
+background task from the connect handler: install-before-switch covers every
+path where the device is connected, and this covers the one where it was not.
+A device whose wake word changed while it was offline is told to use the new
+model by the ordinary connect-time config push, with nothing checking it has
+the classifier — so the check happens straight after, and the mode drops to
+`off` if it does not. A known-missing model degrades to **`off`, not `shadow`** —
 shadow cannot score either, so degrading to it would be the wrong answer
 dressed as a fallback; only `off` puts the controller back in charge of
 triggering, which is the one arrangement that still answers the user. It
@@ -360,10 +363,28 @@ so under the old rule installing them would have silently deleted every custom
 model on the device — including ones a user trained and cannot re-download.
 Stock models are required by definition and never evictable.
 
-The rest of #191 — custom slots, reconcile-on-connect and a per-device Repair
-action — is designed on the issue and not yet built. A **custom** model
-selected on a device that never received it still reproduces the silent
-failure.
+**Reconcile-on-connect** (`em_api.reconcile_oww_assets`) closes the offline
+case, and three rules keep it from doing harm:
+
+- **Failure to LOOK is not evidence of absence.** Any error reading the
+  device's inventory leaves `model_ready` alone — the shell plane is very
+  likely not up yet moments after connect, and standing a device down because
+  the controller could not ask would be worse than the bug. Only a successful
+  listing that lacks the model counts.
+- **Degrade first, then repair** — the mode drops to `off` the moment the
+  model is known missing, so the controller triggers throughout the install
+  rather than only after it. Deliberately the opposite ordering to
+  `_install_then_switch`, where the device is on a wake word it can still hear
+  and must not be disturbed; here it is already deaf.
+- **Quiet when there is nothing to do.** Devices reconnect often on this
+  fleet, so the ordinary path is one shell round trip and no log line.
+
+Presence is judged by **md5, not filename**: a re-trained custom model keeps
+its name, and counting that as installed leaves the device scoring against a
+classifier that silently disagrees with the controller.
+
+The rest of #191 — custom slots and a per-device Repair action — is designed
+on the issue and not yet built.
 
 ### Asset distribution (`em_oww_assets.py`)
 
