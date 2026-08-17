@@ -328,6 +328,33 @@ def plan_sync(desired: list[Asset],
     return p
 
 
+def missing_selected_classifier(desired: list[Asset],
+                                actual: dict[str, tuple[str, int]]) -> str | None:
+    """
+    The selected classifier's filename if the device cannot score with it.
+
+    "Selected" is the first classifier in `desired` — the model the device is
+    configured to use, the same one plan_sync pins against eviction. Returns
+    None when it is present with a matching md5, or when there is no
+    classifier to check at all.
+
+    md5 rather than mere presence, for the reason the whole module uses md5:
+    a file of the right name and the wrong content fails at load with an
+    error that names nothing, and a re-trained custom model reuses its name.
+
+    Note an EMPTY `actual` is indistinguishable here from a device whose
+    inventory could not be read — so callers must not treat "missing" as
+    established unless the listing itself succeeded. Standing a device down on
+    a failed shell round trip would be the wrong answer, and absence of
+    evidence is not evidence of absence (see em_shadow.effective_mode).
+    """
+    sel = next((a for a in desired if a.kind == "classifier"), None)
+    if sel is None:
+        return None
+    have = actual.get(sel.name)
+    return None if (have is not None and have[0] == sel.md5) else sel.name
+
+
 def parse_free_mb(df_line: str) -> int | None:
     """
     Free megabytes from a `busybox df -m` data line.

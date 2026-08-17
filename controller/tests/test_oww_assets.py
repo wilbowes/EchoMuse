@@ -324,3 +324,48 @@ def test_leftover_custom_models_are_still_evicted_beyond_the_budget():
     assert len(plan.prune) == 2, plan.prune
     assert plan.prune == [f"c{A.CLASSIFIER_SLOTS}.onnx", f"c{A.CLASSIFIER_SLOTS + 1}.onnx"], \
         "eviction must still be oldest-first"
+
+
+# ── Reconcile-on-connect: does the device have the model it was told to use ──
+
+def test_the_selected_classifier_is_recognised_when_installed():
+    desired = _base() + [_asset("selected.onnx", "c1", "classifier")]
+    actual = {a.name: (a.md5, NOW) for a in desired}
+    assert A.missing_selected_classifier(desired, actual) is None
+
+
+def test_a_classifier_absent_from_the_device_is_named():
+    desired = _base() + [_asset("selected.onnx", "c1", "classifier")]
+    actual = {a.name: (a.md5, NOW) for a in _base()}
+    assert A.missing_selected_classifier(desired, actual) == "selected.onnx"
+
+
+def test_the_right_name_with_the_wrong_bytes_counts_as_missing():
+    """
+    A re-trained custom model keeps its filename. Presence alone would call
+    that installed and leave the device scoring against the old classifier,
+    which disagrees with the controller silently.
+    """
+    desired = _base() + [_asset("selected.onnx", "c-new", "classifier")]
+    actual = {**{a.name: (a.md5, NOW) for a in _base()},
+              "selected.onnx": ("c-old", NOW)}
+    assert A.missing_selected_classifier(desired, actual) == "selected.onnx"
+
+
+def test_only_the_SELECTED_classifier_gates_readiness():
+    """
+    The stock set rides along on every sync, but a device is only deaf if it
+    lacks the one it was told to use — a missing spare must not stand it down.
+    """
+    desired = _base() + [
+        _asset("selected.onnx", "c1", "classifier"),
+        _asset("spare.onnx", "c2", "classifier"),
+    ]
+    actual = {**{a.name: (a.md5, NOW) for a in _base()},
+              "selected.onnx": ("c1", NOW)}
+    assert A.missing_selected_classifier(desired, actual) is None
+
+
+def test_no_classifier_to_check_is_not_a_missing_one():
+    """Nothing configured is not the same as configured-and-absent."""
+    assert A.missing_selected_classifier(_base(), {}) is None

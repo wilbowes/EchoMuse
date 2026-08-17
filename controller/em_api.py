@@ -3604,6 +3604,117 @@ async def _install_then_switch(device_id: str, model: str) -> None:
     log.info(f"[api] [{device_id}] wake word switched to {model} after install")
 
 
+async def reconcile_oww_assets(device_id: str, live) -> None:
+    """
+    On connect: make sure a locally-scoring device HAS the model it was told
+    to use, and put the controller back in charge if it does not.
+
+    Every other install path runs while the device is connected — the wizard
+    over ADB, `_install_then_switch` on a config save, the Updates tab by hand.
+    A device that was OFFLINE when its wake word changed has none of them: the
+    connect handler pushes the effective config directly, so it is told to use
+    a classifier it may never have received. Under `owwOnDevice=on` that is a
+    device with no wake word at all — it cannot score, and the controller has
+    stood down and no longer triggers on its behalf (#191). Changing the wake
+    word, or re-scoping the wakeword section, while a device is unplugged is
+    enough to produce it.
+
+    This is `oww_model_ready`'s intended writer. Three rules:
+
+    - **Failure to LOOK is not evidence of absence.** Any error reading the
+      device's inventory leaves `oww_model_ready` alone, so a shell plane that
+      is not up yet — likely, moments after connect — costs nothing. Only a
+      successful listing that does not contain the model stands the device
+      down. Absence of evidence, per em_shadow.effective_mode's own docstring.
+    - **Degrade first, then repair.** The mode is dropped to off the moment the
+      model is known missing, which puts the CONTROLLER back to triggering, so
+      the device answers throughout the install rather than only after it. That
+      ordering is the opposite of `_install_then_switch`, deliberately: there
+      the device is already on a wake word it can hear and must not be
+      disturbed, here it is already deaf.
+    - **Quiet when there is nothing to do.** Devices on this fleet reconnect
+      often, so the ordinary path is one shell round trip and no log line.
+
+    Runs as a background task: it is a shell round trip and possibly a
+    multi-megabyte push over a link measured at 5-7% packet loss, and nothing
+    about the connect handshake should wait on it.
+    """
+    loop = asyncio.get_event_loop()
+    effective = await loop.run_in_executor(
+        None, db.get_effective_device_config, device_id
+    )
+    # With owwOnDevice=off the controller does the scoring and what is on the
+    # device is irrelevant — the common case, and it costs nothing here.
+    if em_shadow.normalise_mode(effective.get("owwOnDevice")) == em_shadow.MODE_OFF:
+        return
+    if not live.oww_shadow_capable:
+        return
+
+    desired, _ = em_oww_assets.desired_assets(_oww_wanted_models(device_id))
+    try:
+        state = await _oww_device_state(live)
+    except Exception as e:
+        log.info(f"[api] [{device_id}] oww reconcile: could not read the device "
+                 f"({e}) — leaving it as configured")
+        return
+
+    missing = em_oww_assets.missing_selected_classifier(desired, state["installed"])
+    if missing is None:
+        live.oww_model_ready = True
+        live.oww_on_device = em_shadow.effective_mode(
+            effective.get("owwOnDevice"), live.oww_trigger_capable,
+            model_ready=True,
+        )
+        return
+
+    live.oww_model_ready = False
+    live.oww_on_device = em_shadow.effective_mode(
+        effective.get("owwOnDevice"), live.oww_trigger_capable,
+        model_ready=False,
+    )
+    log.warning(f"[api] [{device_id}] oww reconcile: {missing} is not installed "
+                f"— controller-side scoring until it is")
+    await _push_log_event(
+        device_id, "warn", "controller",
+        f"Wake word model {missing} is missing — scoring on the controller "
+        f"while it installs"
+    )
+
+    try:
+        result = await _sync_oww_assets(live, device_id)
+    except Exception as e:
+        result = {"ok": False, "error": str(e)}
+
+    live = _devices.get(device_id)
+    if live is None:
+        return
+
+    if not result.get("ok"):
+        await _push_log_event(
+            device_id, "error", "controller",
+            f"Could not install {missing} ({result.get('error')}) — this "
+            f"device is scoring on the controller, not locally"
+        )
+        log.error(f"[api] [{device_id}] oww reconcile: install failed "
+                  f"({result.get('error')}) — left on controller-side scoring")
+        return
+
+    live.oww_model_ready = True
+    live.oww_on_device = em_shadow.effective_mode(
+        effective.get("owwOnDevice"), live.oww_trigger_capable,
+        model_ready=True,
+    )
+    # The device builds its scorer from the config push, so it needs telling
+    # the model is now there — same mechanism _install_then_switch relies on.
+    await live.send_control({"type": "config", **effective})
+    await _push_log_event(
+        device_id, "info", "controller",
+        f"Wake word model {missing} installed — scoring locally again"
+    )
+    log.info(f"[api] [{device_id}] oww reconcile: {missing} installed, "
+             f"mode restored to {live.oww_on_device}")
+
+
 async def _sync_oww_assets(live, device_id: str, progress=None) -> dict:
     """
     Make a device's asset directory match what it needs. Idempotent.
