@@ -340,9 +340,30 @@ blocking the config save on a multi-megabyte shell-plane push would time out
 the request without making anything safer, and nothing is degraded while it
 runs.
 
-The rest of #191 — installing all four stock classifiers, custom slots,
-reconcile-on-connect and a per-device Repair action — is designed on the issue
-and not yet built.
+**Every device carries all four stock classifiers**, not just the one selected
+when it was provisioned (`em_oww_assets.STOCK_MODELS`, 3.04MB for the set).
+That removes the whole class of "you selected a wake word this device has never
+had" for stock models — which under `owwOnDevice=on` is a device with no wake
+word at all. The set is what `dashboard.jsx`'s `WW_MODELS` offers, pinned by
+test in both directions: a wake word offered but not installed is #191, and one
+installed but not offered is dead weight. openwakeword's `timer` and `weather`
+are NOT included — they are intent models, not wake words, and are offered
+nowhere.
+
+Both transports share `desired_assets` (`include_stock` defaults True), so a
+device provisioned today and one synced today carry the same files.
+
+**`CLASSIFIER_SLOTS` budgets LEFTOVER CUSTOM classifiers, not every classifier
+on the device.** It used to be a budget for all of them, which was right while
+only the selected model was ever desired; the four stock models fill it exactly,
+so under the old rule installing them would have silently deleted every custom
+model on the device — including ones a user trained and cannot re-download.
+Stock models are required by definition and never evictable.
+
+The rest of #191 — custom slots, reconcile-on-connect and a per-device Repair
+action — is designed on the issue and not yet built. A **custom** model
+selected on a device that never received it still reproduces the silent
+failure.
 
 ### Asset distribution (`em_oww_assets.py`)
 

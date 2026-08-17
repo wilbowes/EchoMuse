@@ -55,12 +55,33 @@ SHARED_NAMES = ("melspectrogram.onnx", "embedding_model.onnx")
 # Where the vendored ARM runtime lands in the image (see Dockerfile).
 RUNTIME_DIR = "/app/models/oww_runtime"
 
-# Classifier slots kept on a device, any mix of stock and custom.
+# The stock wake words a user can actually select, and therefore the set every
+# device carries. Must match dashboard.jsx's WW_MODELS — there is a test.
 #
-# Four rather than "just the selected one" so switching models back and forth
-# — which is exactly what A/B-ing two wake words involves — does not re-push
-# ~0.9MB each time. Four is ~18MB worst case including the runtime, against
-# 346-374MB free on these devices.
+# openwakeword also ships `timer` and `weather`, which are NOT wake words (they
+# are intent models) and are not offered anywhere in the UI. Pushing them would
+# spend 2.76MB per device on files nothing can ever select.
+#
+# All four together are 3.04MB. Installing the lot removes the entire class of
+# "you selected a wake word this device has never had", which under
+# `owwOnDevice=on` is a device with no wake word at all: it cannot score
+# without the classifier and the controller has stood down (#191). The cost of
+# avoiding that is about 2MB on devices measured at 221-374MB free.
+STOCK_MODELS = (
+    "hey_jarvis_v0.1",
+    "alexa_v0.1",
+    "hey_mycroft_v0.1",
+    "hey_rhasspy_v0.1",
+)
+
+# Leftover CUSTOM classifiers kept on a device — ones it has been given but is
+# no longer configured to use.
+#
+# Stock models no longer count against this: they are a fixed, small, fully
+# enumerable set and are always resident, so the LRU has nothing to decide
+# about them. Custom models are unbounded in number and genuinely need a
+# policy, which is the one this budget is now for. Keeping four leftovers is
+# ~3.6MB, so that A/B-ing two custom wake words does not re-push each time.
 CLASSIFIER_SLOTS = 4
 
 # Refuse to push if the device would be left below this. Devices have been
@@ -167,7 +188,8 @@ class Plan:
 def desired_assets(models: list[str],
                    runtime_dir: str | Path = RUNTIME_DIR,
                    resources: Path | None = None,
-                   models_dir: Path | None = None) -> tuple[list[Asset], list[str]]:
+                   models_dir: Path | None = None,
+                   include_stock: bool = True) -> tuple[list[Asset], list[str]]:
     """
     Build the asset list for a device that should be able to score `models`.
 
@@ -177,7 +199,17 @@ def desired_assets(models: list[str],
     whole feature exists to remove.
 
     `models` is ordered most-important-first; the first entry is the one the
-    device is currently configured to use.
+    device is currently configured to use, and is the one plan_sync pins
+    against eviction.
+
+    `include_stock` appends every STOCK_MODELS entry the caller did not
+    already name, so a device ends up able to score any wake word the UI can
+    offer rather than only the one selected at the moment it was provisioned.
+    Defaults True so the two transports — the provisioning wizard over ADB and
+    the shell-plane sync for fielded devices — cannot drift into installing
+    different sets; a device set up today and one synced today should carry
+    the same files. Order still puts the caller's models first, so the pin and
+    the "most important" ordering are unaffected.
     """
     if resources is None:
         resources = openwakeword_resources()
@@ -208,7 +240,10 @@ def desired_assets(models: list[str],
         assets.append(Asset(name, p, md5_file(p), p.stat().st_size, "shared"))
 
     seen: set[str] = set()
-    for model in models:
+    wanted = list(models)
+    if include_stock:
+        wanted += [m for m in STOCK_MODELS if m not in wanted]
+    for model in wanted:
         stem = em_oww_models.prediction_key(model)
         if not stem or stem in seen:
             continue
@@ -236,9 +271,11 @@ def plan_sync(desired: list[Asset],
     controller-side bookkeeping and survives a controller restart or a
     database wipe.
 
-    Eviction only ever applies to CLASSIFIERS. The runtime and the shared
-    feature models are required by definition; pruning either would be
-    deleting something we are about to push back.
+    Eviction only ever applies to CLASSIFIERS the device is not meant to have
+    — in practice, custom models it was given and is no longer configured for.
+    The runtime, the shared feature models and every desired classifier
+    (including the whole stock set) are required by definition; pruning any of
+    them would be deleting something we are about to push back.
 
     The first desired classifier is pinned: it is the model the device is
     configured to use, so evicting it is the one outcome that would visibly
@@ -276,10 +313,17 @@ def plan_sync(desired: list[Asset],
         reverse=True,
     )
 
-    desired_classifiers = [a.name for a in desired if a.kind == "classifier"]
-    room = max(0, slots - len(desired_classifiers))
-    p.keep.extend(extras[:room])
-    p.prune.extend(extras[room:])
+    # `slots` budgets the LEFTOVERS, not every classifier on the device.
+    #
+    # It used to be a budget for all of them (`slots - len(desired)`), which
+    # was right while only the selected model was ever desired. Now that the
+    # four stock models are always desired they would fill it exactly, leaving
+    # room=0 — so installing the stock set would silently delete every custom
+    # model a user had been given. Stock models are required by definition and
+    # already excluded from `extras` via `required`; what is left to decide is
+    # purely how many previously-used CUSTOM classifiers to keep.
+    p.keep.extend(extras[:slots])
+    p.prune.extend(extras[slots:])
 
     return p
 

@@ -87,8 +87,9 @@ def test_extra_classifiers_are_evicted_oldest_first():
     actual["oldest.onnx"] = ("c", NOW - 90_000)
     actual["ancient.onnx"] = ("d", NOW - 900_000)
 
-    p = A.plan_sync(desired, actual, slots=4)
-    # 1 desired + 3 extras fills four slots; the oldest falls off.
+    p = A.plan_sync(desired, actual, slots=3)
+    # `slots` budgets the LEFTOVERS only (the desired model does not consume
+    # one) — three kept, the oldest falls off.
     assert sorted(p.prune) == ["ancient.onnx"]
     assert "newest.onnx" in p.keep and "middle.onnx" in p.keep
 
@@ -240,3 +241,86 @@ def test_unknown_free_space_does_not_block():
     desired = _base()
     p = A.plan_sync(desired, {}, free_mb=A.parse_free_mb("garbage"))
     assert p.blocked is None and p.push
+
+
+# ── The stock set every device carries ────────────────────────────────────
+
+def test_stock_models_match_what_the_dashboard_offers():
+    """
+    STOCK_MODELS is what we install; WW_MODELS is what a user can select.
+    Drift either way is silent and lands on the user, not on CI: a wake word
+    offered but not installed is the #191 failure (selectable, unscoreable,
+    and under owwOnDevice=on a device with no wake word at all), and one
+    installed but not offered is dead weight nobody can ever reach.
+    """
+    import re
+    from pathlib import Path
+    jsx = (Path(__file__).resolve().parents[1]
+           / "static" / "dashboard.jsx").read_text()
+    block = re.search(r"const WW_MODELS = \[(.*?)\];", jsx, re.S)
+    assert block, "dashboard.jsx must still define WW_MODELS"
+    offered = set(re.findall(r"value:\s*'([^']+)'", block.group(1)))
+    assert offered == set(A.STOCK_MODELS), (
+        f"dashboard offers {sorted(offered)}, "
+        f"em_oww_assets installs {sorted(A.STOCK_MODELS)}"
+    )
+
+
+def test_the_stock_set_is_installed_alongside_the_selected_model():
+    """
+    A device provisioned for one wake word must still be able to score any
+    other stock one, or changing the wake word later needs a manual trip to
+    Updates -> Update assets (#191).
+    """
+    from pathlib import Path
+    res = Path(A.openwakeword_resources() or "")
+    if not res.is_dir():
+        pytest.skip("openwakeword not installed in this environment")
+    assets, problems = A.desired_assets(["alexa_v0.1"], resources=res)
+    names = [a.name for a in assets if a.kind == "classifier"]
+    assert names[0] == "alexa_v0.1.onnx", "the selected model must stay first (it is pinned)"
+    assert set(names) == {f"{m}.onnx" for m in A.STOCK_MODELS}
+    assert not [p for p in problems if "wake model" in p]
+
+
+def test_include_stock_false_installs_only_what_was_asked_for():
+    from pathlib import Path
+    res = Path(A.openwakeword_resources() or "")
+    if not res.is_dir():
+        pytest.skip("openwakeword not installed in this environment")
+    assets, _ = A.desired_assets(["alexa_v0.1"], resources=res, include_stock=False)
+    assert [a.name for a in assets if a.kind == "classifier"] == ["alexa_v0.1.onnx"]
+
+
+def test_installing_the_stock_set_does_not_evict_custom_models():
+    """
+    The four stock models exactly fill CLASSIFIER_SLOTS. Under the old rule
+    (slots minus every desired classifier) that left no room at all, so
+    installing them would have deleted every custom model on the device —
+    including ones a user trained themselves and cannot re-download.
+    """
+    desired = _base() + [
+        _asset("my_custom.onnx", "c1", "classifier"),
+    ] + [_asset(f"{m}.onnx", m, "classifier") for m in A.STOCK_MODELS]
+    actual = {
+        A.RUNTIME_NAME: ("rt1", NOW), "melspectrogram.onnx": ("mel1", NOW),
+        "embedding_model.onnx": ("emb1", NOW), "my_custom.onnx": ("c1", NOW),
+        "older_custom.onnx": ("o1", NOW - 100),
+    }
+    plan = A.plan_sync(desired, actual)
+    assert plan.prune == [], f"unexpectedly pruning {plan.prune}"
+    assert "older_custom.onnx" in plan.keep
+
+
+def test_leftover_custom_models_are_still_evicted_beyond_the_budget():
+    """The budget still applies — it now governs leftovers only, not everything."""
+    desired = _base() + [_asset(f"{m}.onnx", m, "classifier") for m in A.STOCK_MODELS]
+    actual = {
+        A.RUNTIME_NAME: ("rt1", NOW), "melspectrogram.onnx": ("mel1", NOW),
+        "embedding_model.onnx": ("emb1", NOW),
+        **{f"c{i}.onnx": (f"c{i}", NOW - i) for i in range(A.CLASSIFIER_SLOTS + 2)},
+    }
+    plan = A.plan_sync(desired, actual)
+    assert len(plan.prune) == 2, plan.prune
+    assert plan.prune == [f"c{A.CLASSIFIER_SLOTS}.onnx", f"c{A.CLASSIFIER_SLOTS + 1}.onnx"], \
+        "eviction must still be oldest-first"
