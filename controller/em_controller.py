@@ -52,6 +52,7 @@ import collections
 import contextlib
 import json
 import logging
+import math
 import os
 import socket
 import struct
@@ -169,6 +170,43 @@ SPEAKER_BYTES  = SPEAKER_PERIOD * 2       # 4096 bytes/period (mono S16)
 # arrives) — primePeriods in pcm_speaker.go. The post-playback drain sleep
 # must allow for the delayed start.
 SPEAKER_PRIME_SECONDS = 1.1
+
+# How long a follow-up listening window (opened after every answer that
+# actually said something — see the turn loop in _run_voice_locked) waits
+# for the user to start a next sentence before giving up quietly and
+# returning to wake-word idle. User-tuned: long enough for a real
+# back-and-forth reply, short enough that the mic doesn't sit hot picking up
+# unrelated room chatter for too long.
+FOLLOWUP_NO_SPEECH_TIMEOUT = 9.0
+
+
+def _synth_tone(freq_hz: float, duration_s: float, amplitude: float = 0.22,
+                 fade_s: float = 0.015) -> bytes:
+    """Raw S16LE mono PCM at SPEAKER_RATE — same format stream_speaker() sends
+    to the device directly, no ffmpeg/EQ chain involved. fade_s ramps the
+    edges in/out to avoid a click at the tone's start/end."""
+    n = int(SPEAKER_RATE * duration_s)
+    fade_n = max(1, int(SPEAKER_RATE * fade_s))
+    out = bytearray()
+    for i in range(n):
+        env = 1.0
+        if i < fade_n:
+            env = i / fade_n
+        elif i > n - fade_n:
+            env = (n - i) / fade_n
+        val = amplitude * env * math.sin(2 * math.pi * freq_hz * i / SPEAKER_RATE)
+        out += struct.pack("<h", int(val * 32767))
+    return bytes(out)
+
+
+# "Still listening" earcon played before a follow-up window opens — two
+# short ascending tones, synthesized once at import time since it never
+# changes. Deliberately quiet/short: it's a cue, not an announcement.
+FOLLOWUP_CHIME_PCM = (
+    _synth_tone(660.0, 0.09)
+    + bytes(int(SPEAKER_RATE * 0.03) * 2)   # 30ms of silence between tones
+    + _synth_tone(880.0, 0.12)
+)
 
 # Control-plane RTT probing. 5s rather than the old 30s keepalive cadence:
 # characterising jitter needs samples, and one tiny JSON message per device
@@ -1217,6 +1255,23 @@ async def _meter_at_playback_start(pcm_chunks, on_start):
         await on_start()
 
 
+async def _play_followup_chime(device: Device) -> None:
+    """
+    Earcon signalling a follow-up listening window is open — played on the
+    already-stopped mic (turn's own mic_stop already ran) before the
+    follow-up branch in _run_voice_locked reopens it. Best-effort: a chime
+    failure shouldn't block the follow-up window itself.
+    """
+    try:
+        await device.stream_speaker(FOLLOWUP_CHIME_PCM)
+        # Same margin the streamed-TTS path relies on (SPEAKER_PRIME_SECONDS
+        # docstring above) — stream_speaker() returns once bytes are sent,
+        # not once the device has actually finished playing them.
+        await asyncio.sleep(SPEAKER_PRIME_SECONDS)
+    except Exception as e:
+        log.warning(f"[{device.device_id}] Follow-up chime failed: {e}")
+
+
 async def _run_streaming_post_turn_playback(device: Device, pcm_chunks) -> int:
     """
     Play decoded HA TTS while the HTTP response is still arriving.
@@ -1543,15 +1598,27 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
             # initial wakeword-triggered turn.
             turn_label      = trigger_label
             preroll_discard = esphome.VOICE_PREROLL_DISCARD if is_wakeword else 0
+            # None on the first (wake/button) turn — mints a fresh id there.
+            # Carried forward across continuation/follow-up turns below so
+            # HA's conversation agent keeps short-term context.
+            conversation_id = None
             while True:
-                should_continue = False
+                should_continue       = False
+                no_speech_timeout_hit = False
                 try:
-                    should_continue = await esphome.trigger_voice_turn(
+                    should_continue, no_speech_timeout_hit, conversation_id = await esphome.trigger_voice_turn(
                         device=device,
                         on_thinking=on_thinking_esphome,
                         post_turn_play=post_turn_play_esphome,
                         trigger_label=turn_label,
                         preroll_discard=preroll_discard,
+                        conversation_id=conversation_id,
+                        # Only follow-up turns get the longer, user-tuned
+                        # grace period — the original wake/button/barge/
+                        # HA-continuation turns keep em_turnclock's default.
+                        no_speech_timeout=(
+                            FOLLOWUP_NO_SPEECH_TIMEOUT if turn_label == "followup" else None
+                        ),
                     )
                 finally:
                     # Watcher spans thinking→playback and is owned here:
@@ -1576,6 +1643,9 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                     device.barge_detected = False
                     device.cancel_event.clear()
                     log.info(f"[{device.device_id}] Barge-in: starting interrupting turn")
+                    # Fresh conversation — an interrupting command is a new
+                    # utterance, not a reply to what was just cut off.
+                    conversation_id = None
                     await device.mic_start()  # defensive no-op if running
                     # Re-arm listening state — cleanup_esphome() in the
                     # finally just turned the ring off, which left the
@@ -1630,6 +1700,40 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                     stop_spin.clear()
                     spin_task = None
                     # Fresh phase flag for the next turn's watcher.
+                    playback_started = asyncio.Event()
+                elif not no_speech_timeout_hit and not device.cancel_event.is_set():
+                    # Turn produced a real spoken answer (wake/button/barge/
+                    # continuation all land here — no_speech_timeout_hit is
+                    # False for all of them) and HA didn't itself ask a
+                    # follow-up question. Open a short follow-up listening
+                    # window instead of dropping straight back to wake-word
+                    # idle, so the next sentence doesn't need "Hey Jarvis"
+                    # again. Chains: if the user speaks and gets another real
+                    # answer, this branch fires again on the next iteration
+                    # and opens another window. Ends quietly, one iteration
+                    # later, when a "followup" turn comes back with
+                    # no_speech_timeout_hit=True (see the final `else`) —
+                    # same closing behaviour as an accidental wake, just via
+                    # the longer FOLLOWUP_NO_SPEECH_TIMEOUT grace period.
+                    log.info(f"[{device.device_id}] Opening follow-up listening window ({FOLLOWUP_NO_SPEECH_TIMEOUT}s)")
+                    await _play_followup_chime(device)
+                    await device.mic_start()
+                    drained = 0
+                    while not device.voice_queue.empty():
+                        try:
+                            device.voice_queue.get_nowait()
+                            drained += 1
+                        except asyncio.QueueEmpty:
+                            break
+                    if drained:
+                        log.debug(f"[{device.device_id}] Follow-up window: drained {drained} stale frames")
+                    device.listening = True
+                    await leds_listening(device)
+                    await _push_device_state(device)
+                    turn_label      = "followup"
+                    preroll_discard = 0
+                    stop_spin.clear()
+                    spin_task = None
                     playback_started = asyncio.Event()
                 else:
                     break

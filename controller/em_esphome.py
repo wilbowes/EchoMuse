@@ -841,6 +841,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         trace: "TurnTrace | None" = None,
         preroll_discard: int = VOICE_PREROLL_DISCARD,
         wake_word_phrase: str = "",
+        conversation_id: str | None = None,
+        no_speech_timeout: float | None = None,
     ) -> None:
         """
         Execute one voice turn over the live HA connection.
@@ -862,6 +864,17 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         (see review C3). Returns nothing; the caller reads
         self._continue_conversation after this returns to decide whether to
         re-trigger — see trigger_voice_turn().
+
+        conversation_id: reuse an existing conversation rather than starting
+        one — pass the previous turn's id for a continuation/follow-up turn
+        so HA's conversation agent keeps short-term context ("turn off the
+        lights" → "make it warmer" without re-stating the room). None (the
+        wake/button/barge case) mints a fresh id, same as before this param
+        existed.
+
+        no_speech_timeout: forwarded to _stream_mic_audio's no-speech grace
+        period; None uses em_turnclock's normal default. Follow-up windows
+        pass a longer value here — see em_controller.py.
         """
         if not self._transport or self._transport.is_closing():
             log.warning(f"[{self._log_name}] No active HA connection — cannot start voice turn")
@@ -883,7 +896,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._on_announce    = None   # set below after announcement path is confirmed
         self._trace          = trace  # may be None — all trace.x calls guard against this
 
-        self._conversation_id = str(uuid.uuid4())
+        self._conversation_id = conversation_id or str(uuid.uuid4())
 
         log.info(
             f"[{self._log_name}] Starting ESPHome voice turn "
@@ -1087,7 +1100,12 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     pass  # dashboard notification is best-effort
             log.info(f"[{self._log_name}] ESPHome voice turn complete")
 
-    async def _stream_mic_audio(self, device, preroll_discard: int = VOICE_PREROLL_DISCARD) -> None:
+    async def _stream_mic_audio(
+        self,
+        device,
+        preroll_discard: int = VOICE_PREROLL_DISCARD,
+        no_speech_timeout: float | None = None,
+    ) -> None:
         """
         Pull PCM frames from device.voice_queue and send them to HA as
         VoiceAssistantAudio messages.
@@ -1193,6 +1211,14 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         speech_seen = False
         listening_since = None      # monotonic; set when the first real frame lands
         turn_start = time.monotonic()
+        # Follow-up listening windows (em_controller.py's post-answer re-open,
+        # no wake word required) pass a longer grace period here — the caller
+        # decides how patient to be; this method just applies it. None means
+        # "not a follow-up turn", so em_turnclock's own default applies.
+        effective_no_speech_timeout = (
+            no_speech_timeout if no_speech_timeout is not None
+            else em_turnclock.NO_SPEECH_TIMEOUT
+        )
 
         def _is_speech(chunk: bytes) -> bool:
             samples = np.frombuffer(chunk, dtype=np.int16)
@@ -1238,6 +1264,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 give_up, why = em_turnclock.no_speech_verdict(
                     now=time.monotonic(), turn_start=turn_start,
                     listening_since=listening_since, speech_seen=speech_seen,
+                    no_speech_timeout=effective_no_speech_timeout,
                 )
                 if give_up:
                     log.info(
@@ -2047,7 +2074,9 @@ async def trigger_voice_turn(
     post_turn_play,   # async callable(pcm_chunks) -> decoded byte count
     trigger_label: str = "unknown",  # "wakeword(0.522)" or "button" for trace
     preroll_discard: int = VOICE_PREROLL_DISCARD,
-) -> bool:
+    conversation_id: str | None = None,
+    no_speech_timeout: float | None = None,
+) -> tuple[bool, bool, str]:
     """
     Entry point for OWW/button-triggered voice turns in esphome mode.
 
@@ -2062,12 +2091,26 @@ async def trigger_voice_turn(
     doesn't specify it, but em_controller.py's call sites should always pass
     it explicitly so the choice is visible at the call site.
 
-    Returns True if HA requested conversation continuation (continue_conversation
-    flag set in INTENT_END) — the controller uses this to re-trigger immediately
-    rather than returning to OWW idle. Returns False in all other cases including
-    no active HA connection.
+    conversation_id, no_speech_timeout: forwarded to
+    run_esphome_voice_turn() — see there. Both None for a fresh wake/button/
+    barge turn.
 
-    If no active HA connection exists, logs and returns False.
+    Returns (should_continue, no_speech_timeout_hit, conversation_id):
+      - should_continue: True if HA requested conversation continuation
+        (continue_conversation flag set in INTENT_END) — the controller
+        re-triggers immediately with the SAME conversation_id rather than
+        returning to OWW idle.
+      - no_speech_timeout_hit: True if this turn ended with nothing said
+        (accidental wake, or a follow-up window that timed out). The
+        controller uses this to tell "produced a real answer" apart from
+        "gave up quietly" when deciding whether to open a follow-up window.
+      - conversation_id: the id actually used for this turn (freshly minted
+        if the caller passed None) — pass it back in on the next call to
+        keep HA's short-term context across a continuation/follow-up chain.
+
+    All three are (False, True, conversation_id or "") if no active HA
+    connection exists — treated the same as "nothing said" so the caller
+    doesn't try to open a follow-up window against a dead connection.
     """
     # Pop the wake detection detail set by wake_word_listener/_barge_watcher
     # — pop, not read, so continuation turns (which loop back here with no
@@ -2082,7 +2125,7 @@ async def trigger_voice_turn(
             f"— was start_esphome_servers() called?"
         )
         await _record_dropped_turn(device, trigger_label, wake_info)
-        return False
+        return False, True, conversation_id or ""
 
     satellite = server.get_satellite()
     if satellite is None:
@@ -2091,7 +2134,7 @@ async def trigger_voice_turn(
             f"cannot start voice turn (HA not connected to this device's port)"
         )
         await _record_dropped_turn(device, trigger_label, wake_info)
-        return False
+        return False, True, conversation_id or ""
 
     trace = TurnTrace(
         trigger=trigger_label, t0=time.monotonic(), wake_info=wake_info
@@ -2114,9 +2157,15 @@ async def trigger_voice_turn(
         post_turn_play=post_turn_play,
         trace=trace,
         wake_word_phrase=wake_word_phrase,
+        conversation_id=conversation_id,
+        no_speech_timeout=no_speech_timeout,
     )
 
-    return satellite._continue_conversation
+    return (
+        satellite._continue_conversation,
+        satellite._no_speech_timeout,
+        satellite._conversation_id,
+    )
 
 
 def cancel_voice_turn(device_id: str) -> None:
