@@ -2558,13 +2558,15 @@ def _serialno_to_mac(device_id: str) -> str:
     """
     Derive a stable MAC-format string from a device's ro.serialno.
 
-    ro.serialno on the biscuit is a 12-char uppercase hex string
-    (e.g. G0K0XXXXXXXX). We take the last 12 hex chars (or pad/truncate)
-    to build a MAC-style address for ESPHome's mac_address field.
-    This is cosmetic only — ESPHome's protocol uses it as a stable
-    device identifier in HA's device registry.
+    Amazon Device Serial Numbers (DSNs) are alphanumeric. Devices from the 
+    same batch often differ only in non-hexadecimal characters at the end 
+    (e.g., ...FRK vs ...FRR). Stripping non-hex characters destroys entropy 
+    and causes ESPHome MAC collisions in Home Assistant.
+    
+    Instead, we hash the entire device_id to generate a stable, pseudo-random 
+    MAC address to guarantee uniqueness per device.
     """
-    # Extract hex chars only, take last 12, pad with zeros if short
-    hex_chars = "".join(c for c in device_id if c in "0123456789ABCDEFabcdef")
-    hex_chars = hex_chars[-12:].upper().zfill(12)
+    import hashlib
+    hashed = hashlib.md5(device_id.encode('utf-8')).hexdigest()
+    hex_chars = hashed[:12].upper()
     return ":".join(hex_chars[i:i+2] for i in range(0, 12, 2))
