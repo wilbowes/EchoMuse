@@ -180,7 +180,7 @@ jobs:
     name: Controller image builds
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0  # the diff below needs the base commit
       # Plain git rather than a paths-filter action: this decides whether a
@@ -207,7 +207,7 @@ jobs:
           fi
       - name: Set up Docker Buildx
         if: steps.changed.outputs.build == 'true'
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
       # Why this job exists: NOTHING else builds this image on a PR.
       # controller-build.yml runs on push to main only, and the test jobs
       # above pin themselves to python-version 3.12 regardless of what the
@@ -237,7 +237,7 @@ jobs:
       # state a branch protection rule cannot tell apart from "not finished".
       - name: Build the controller image
         if: steps.changed.outputs.build == 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: controller
           push: false
