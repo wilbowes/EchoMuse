@@ -30,16 +30,26 @@ updates:
     groups:
       python-dependencies:
         patterns: ["*"]
-    # Major bumps of these two are not routine maintenance and should not
-    # arrive as a weekly PR: numpy majors have broken openwakeword's array
-    # handling before, and an onnxruntime major changes inference behaviour
-    # on every device at once. Both want a deliberate upgrade with a wake
-    # word test behind it.
+    # Bumps of these two are not routine maintenance and should not arrive as
+    # a weekly PR: numpy majors have broken openwakeword's array handling
+    # before, and an onnxruntime bump changes inference behaviour on every
+    # device at once. Both want a deliberate upgrade with a wake word test
+    # behind it.
+    #
+    # onnxruntime is ignored on MINOR too, and that is the whole point rather
+    # than caution: it has never bumped major and shows no sign of doing so,
+    # so a major-only rule can never fire and protects nothing. #129 proposed
+    # 1.20.1 -> 1.28.0 — eight minor versions, exactly the change described
+    # above — as an ordinary weekly PR, alongside bumps that genuinely were
+    # routine. Nothing in CI can catch an inference regression, so the guard
+    # has to be here or it does not exist.
     ignore:
       - dependency-name: numpy
         update-types: ["version-update:semver-major"]
       - dependency-name: onnxruntime
-        update-types: ["version-update:semver-major"]
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
 
   # ── Controller base image ───────────────────────────────────────────────
   # python:3.12-slim is where ffmpeg, curl and the whole Debian layer come
