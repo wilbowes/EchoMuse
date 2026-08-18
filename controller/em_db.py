@@ -222,6 +222,10 @@ DEFAULT_DEVICE_CONFIG = {
     # protects nobody. Threshold/release are config rather than constants
     # because limiter character wants tuning by ear in a real room — the same
     # reasoning as duckDb and the LED meter curve.
+    # Dynamic bass guard. Removes low-frequency content the driver cannot
+    # deliver, which is what makes the midrange clean — see em_mbc.
+    "bassGuardEnabled": True,
+    "bassGuardDb":      -20.0,
     "limiterEnabled":   True,
     "limiterThreshold": -1.0,
     "limiterRelease":   150,

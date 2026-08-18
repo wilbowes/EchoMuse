@@ -48,6 +48,7 @@ import logging
 
 import em_eq
 import em_limiter
+import em_mbc
 
 log = logging.getLogger("player")
 
@@ -532,7 +533,10 @@ class MediaSession:
                                limiter=em_limiter.for_stream(
                                    SPEAKER_RATE, device.limiter_enabled,
                                    device.limiter_threshold,
-                                   device.limiter_release))
+                                   device.limiter_release),
+                               guard=em_mbc.for_stream(
+                                   SPEAKER_RATE, device.bass_guard_enabled,
+                                   device.bass_guard_db))
         start_pos = self._pos
         proc = None
         seg_start = loop.time()

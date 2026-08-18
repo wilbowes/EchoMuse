@@ -4818,7 +4818,7 @@ const STAGE_MONO = "'DM Mono',monospace";
 // control sitting under a toggle that does not govern it would look fine and
 // be silently wrong.
 const CONFIG_SECTIONS = {
-  "playback": ["eqBands", "eqLoudness", "duckDb", "limiterEnabled", "limiterThreshold", "limiterRelease"],
+  "playback": ["eqBands", "eqLoudness", "duckDb", "limiterEnabled", "limiterThreshold", "limiterRelease", "bassGuardEnabled", "bassGuardDb"],
   "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice"],
   "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "nsAsr", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
@@ -5095,6 +5095,16 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
           <div>
             <div style={inputStyle}>
               <Toggle label="Speech boost" sub="presence boost for voice" value={config.eqLoudness ?? false} onChange={v => set('eqLoudness', v)}/>
+            </div>
+            <div style={inputStyle}>
+              <Toggle label="Bass guard" sub="drops bass the speaker can't produce — clears the midrange"
+                value={config.bassGuardEnabled ?? true} onChange={v => set('bassGuardEnabled', v)}/>
+            </div>
+            <div style={inputStyle}>
+              <Slider label="Bass guard depth" disabled={!(config.bassGuardEnabled ?? true)}
+                sub="how far below 115 Hz is pulled down when it's loud"
+                value={config.bassGuardDb ?? -20} min={-40} max={0} step={1} unit="dB"
+                onChange={v => set('bassGuardDb', v)}/>
             </div>
             <div style={inputStyle}>
               <Toggle label="Limiter" sub="stops EQ boost from clipping — leave on"

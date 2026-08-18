@@ -32,6 +32,7 @@ import numpy as np
 from scipy.signal import sosfilt
 
 import em_limiter
+import em_mbc  # noqa: F401  (type reference in signatures)
 
 log = logging.getLogger("echomuse.eq")
 
@@ -119,6 +120,7 @@ def apply(
     bands: list | None = None,
     loudness: bool = False,
     limiter: "em_limiter.Limiter | None" = None,
+    guard: "em_mbc.BassGuard | None" = None,
 ) -> bytes:
     """
     Apply EQ to mono S16_LE PCM. Returns mono S16_LE PCM at the same rate.
@@ -148,12 +150,18 @@ def apply(
         bands = list(bands) + [0.0] * (NUM_BANDS - len(bands))
 
     flat = not loudness and all(b == 0.0 for b in bands)
-    if flat and limiter is None:
+    if flat and limiter is None and guard is None:
         return pcm
 
     samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float64)
     if not flat:
         samples = sosfilt(build_sos(bands, sample_rate, loudness), samples)
+    # Order matters: the guard removes excursion the driver cannot deliver,
+    # THEN the limiter catches what is left. Limiting first would spend gain
+    # reduction on bass that is about to be thrown away, pulling down the
+    # midrange for no reason.
+    if guard is not None:
+        samples = guard.process(samples)
     if limiter is not None:
         samples = np.concatenate([limiter.process(samples), limiter.flush()])
     # Backstop only. With a limiter attached this must never engage; without
@@ -172,8 +180,10 @@ class StreamingEQ:
 
     def __init__(self, sample_rate: int, bands: list | None = None,
                  loudness: bool = False,
-                 limiter: "em_limiter.Limiter | None" = None):
+                 limiter: "em_limiter.Limiter | None" = None,
+                 guard: "em_mbc.BassGuard | None" = None):
         self._limiter = limiter
+        self._guard = guard
         if bands is None:
             bands = DEFAULT_BANDS
         if len(bands) != NUM_BANDS:
@@ -185,11 +195,14 @@ class StreamingEQ:
             self._zi  = np.zeros((self._sos.shape[0], 2), dtype=np.float64)
 
     def process(self, pcm: bytes) -> bytes:
-        if len(pcm) < 2 or (self._sos is None and self._limiter is None):
+        if len(pcm) < 2 or (self._sos is None and self._limiter is None
+                            and self._guard is None):
             return pcm
         samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float64)
         if self._sos is not None:
             samples, self._zi = sosfilt(self._sos, samples, zi=self._zi)
+        if self._guard is not None:
+            samples = self._guard.process(samples)
         if self._limiter is not None:
             samples = self._limiter.process(samples)
         return np.clip(samples, -32768, 32767).astype(np.int16).tobytes()

@@ -72,6 +72,7 @@ import em_hostip
 import em_linkauth
 import em_eq
 import em_limiter
+import em_mbc
 import em_scenes
 import em_shadow
 import em_oww_warmup
@@ -318,6 +319,8 @@ class Device:
         self.last_utterance_pcm: bytes | None = None
         self.eq_bands:      list  = [0.0] * 8
         self.eq_loudness:   bool  = False
+        self.bass_guard_enabled: bool  = True
+        self.bass_guard_db:      float = em_mbc.DEFAULT_BASS_GUARD_DB
         self.limiter_enabled:   bool  = True
         self.limiter_threshold: float = em_limiter.DEFAULT_THRESHOLD_DB
         self.limiter_release:   float = em_limiter.DEFAULT_RELEASE_MS
@@ -884,6 +887,15 @@ def _limiter_for(device):
     )
 
 
+def _guard_for(device):
+    """Adapter: a Device's bass-guard config -> em_mbc.for_stream."""
+    return em_mbc.for_stream(
+        SPEAKER_RATE,
+        device.bass_guard_enabled,
+        device.bass_guard_db,
+    )
+
+
 async def _push_device_state(device: Device) -> None:
     """Push current transient device state to dashboard clients."""
     await api._push_event({
@@ -1218,7 +1230,8 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
     # (observed as spinner stutter and console typing judder).
     def _prepare_pcm() -> bytes:
         return em_eq.apply(voice_response, SPEAKER_RATE, device.eq_bands,
-                           device.eq_loudness, limiter=_limiter_for(device))
+                           device.eq_loudness, limiter=_limiter_for(device),
+                           guard=_guard_for(device))
 
     _t_eq0 = asyncio.get_event_loop().time()
     speaker_pcm = await asyncio.get_event_loop().run_in_executor(None, _prepare_pcm)
@@ -1357,6 +1370,7 @@ async def _run_streaming_post_turn_playback(device: Device, pcm_chunks) -> int:
         device.eq_bands,
         device.eq_loudness,
         limiter=_limiter_for(device),
+        guard=_guard_for(device),
     )
     # Cleared BEFORE streaming starts: the device sets it when its audio
     # channel drains after EOS, and a stale set from the previous response
@@ -2551,6 +2565,9 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         )
         device.eq_bands      = config.get("eqBands", [0.0] * 8)
         device.eq_loudness   = bool(config.get("eqLoudness", False))
+        device.bass_guard_enabled = bool(config.get("bassGuardEnabled", True))
+        device.bass_guard_db      = float(config.get(
+            "bassGuardDb", em_mbc.DEFAULT_BASS_GUARD_DB))
         device.limiter_enabled   = bool(config.get("limiterEnabled", True))
         device.limiter_threshold = float(config.get(
             "limiterThreshold", em_limiter.DEFAULT_THRESHOLD_DB))

@@ -62,6 +62,7 @@ COPY em_db.py .
 COPY em_auth.py .
 COPY em_eq.py .
 COPY em_limiter.py .
+COPY em_mbc.py .
 COPY em_scenes.py .
 COPY em_support.py .
 COPY em_shadow.py .
