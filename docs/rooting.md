@@ -20,7 +20,7 @@ risk.
 
 For the unlock itself (R0rt1z2's thread has the authoritative list):
 
-- Linux or macOS machine with ADB and fastboot installed
+- **Linux machine** with ADB and fastboot installed — see the note below on macOS
 - Python 3 (for boot image patching and Magisk DB creation)
 - The following files downloaded and ready:
   - `amonet-biscuit-v1.1.0.zip` — from R0rt1z2's XDA thread
@@ -44,7 +44,14 @@ For the unlock itself (R0rt1z2's thread has the authoritative list):
 
 > **Why Magisk 17.3?** Newer versions dropped support for Android 5.1 (API 22). 25.x installs but the daemon silently fails. 17.3 is the last version that works reliably on this device.
 
-> **Linux ADB stability:** Linux aggressively power-manages USB devices by default, causing ADB disconnects. Disable autosuspend before starting: `echo -1 | sudo tee /sys/bus/usb/devices/*/power/autosuspend`. macOS doesn't have this problem.
+> **Use Linux for the unlock.** `brick.sh` has been reported failing on
+> macOS, and the project's own devices were unlocked from a Linux install on
+> a Mac rather than from macOS itself. A live USB is enough — the unlock is
+> the only step that needs it. The unlock is R0rt1z2's work, so questions
+> about it belong on the XDA thread; this is only a note about what has been
+> observed to work.
+>
+> **Linux ADB stability:** Linux aggressively power-manages USB devices by default, causing ADB disconnects. Disable autosuspend before starting: `echo -1 | sudo tee /sys/bus/usb/devices/*/power/autosuspend`.
 
 For the EchoMuse half, the provisioning wizard needs only a **Chromium-based
 browser** (Chrome or Edge — it talks to the device over WebUSB) and a running
@@ -194,7 +201,7 @@ adb shell 'dd if=/dev/block/other-boot of=/tmp/work/boot.img bs=1048576'
 adb pull /tmp/work/boot.img boot_fresh.img
 ```
 
-### Patch the cmdline on your Mac/Linux machine:
+### Patch the cmdline on your host machine:
 
 ```python
 python3 - <<'EOF'
@@ -263,7 +270,7 @@ Do **not** try `adb shell su -c id` yet — it will hang. The grant prompt requi
 
 Magisk's `su` hangs on a screenless device because it's waiting for the user to tap "Grant" on a dialog that never appears. The fix is to create the policy database ourselves and push it before booting.
 
-### On your Mac/Linux machine:
+### On your host machine:
 
 ```python
 python3 - <<'EOF'
