@@ -176,6 +176,75 @@ jobs:
         working-directory: device
         run: govulncheck ./internal/... ./pkg/... || true
 
+  controller-image:
+    name: Controller image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # the diff below needs the base commit
+      # Plain git rather than a paths-filter action: this decides whether a
+      # build runs, so it is not worth a third-party action holding repo
+      # credentials. On push to main there is nothing to diff against and
+      # controller-build.yml builds anyway, so this only ever runs on a PR.
+      - name: Did the image inputs change?
+        id: changed
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "not a pull request — controller-build.yml covers main"
+            exit 0
+          fi
+          base="${{ github.event.pull_request.base.sha }}"
+          files=$(git diff --name-only "$base"...HEAD -- \
+                    controller/Dockerfile controller/requirements.txt)
+          if [ -n "$files" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "$files"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "Dockerfile and requirements.txt unchanged"
+          fi
+      - name: Set up Docker Buildx
+        if: steps.changed.outputs.build == 'true'
+        uses: docker/setup-buildx-action@v3
+      # Why this job exists: NOTHING else builds this image on a PR.
+      # controller-build.yml runs on push to main only, and the test jobs
+      # above pin themselves to python-version 3.12 regardless of what the
+      # Dockerfile says — so a base-image or dependency bump arrives with
+      # seven green checks and no evidence behind any of them.
+      #
+      # That is not hypothetical. Dependabot #127 (python:3.12-slim ->
+      # 3.14-slim) was green on every check while speexdsp-ns==0.1.2 has no
+      # wheel past cp312 and onnxruntime==1.20.1 none past cp313, so the
+      # image could not have built at all. The first failure would have been
+      # on main, in the job that publishes.
+      #
+      # Deliberately narrow, because a full image build is minutes:
+      #   - Only when the Dockerfile or requirements.txt actually changed.
+      #     Application code cannot break the build in a way the other jobs
+      #     miss; a missing wheel is exactly what they cannot see.
+      #   - amd64 only. The break this catches is a missing wheel or an apt
+      #     package that moved, both of which show up on either architecture,
+      #     and arm64 under QEMU costs far more than it adds. The release
+      #     path still builds both.
+      #   - No push, no registry login, no GHCR credentials. This answers
+      #     "does it build", nothing more.
+      #
+      # It is a JOB rather than a separate workflow so that it always reports
+      # a result, including when it skips. A workflow-level `paths:` filter
+      # would leave the check simply absent on most PRs, which is the one
+      # state a branch protection rule cannot tell apart from "not finished".
+      - name: Build the controller image
+        if: steps.changed.outputs.build == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: controller
+          push: false
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   device-vet:
     name: Device go vet
     runs-on: ubuntu-latest

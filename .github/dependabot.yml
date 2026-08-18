@@ -44,12 +44,41 @@ updates:
   # ── Controller base image ───────────────────────────────────────────────
   # python:3.12-slim is where ffmpeg, curl and the whole Debian layer come
   # from — the majority of what any image scan reports.
+  #
+  # The Python version is NOT ours to choose: it is the highest one every
+  # pinned wheel publishes for, and today that is 3.12. Measured on PyPI
+  # 2026-08-18, for the versions requirements.txt actually pins:
+  #
+  #   speexdsp-ns 0.1.2  cp37 … cp312     <- the binding constraint
+  #   onnxruntime 1.20.1 cp310 … cp313
+  #   numpy       2.4.4  cp311 … cp314
+  #
+  # Neither builds from source in this image, so a bump past the lowest of
+  # those does not degrade — it fails to build. #127 proposed 3.14 and
+  # carried seven green checks, because until ci.yml gained the
+  # controller-image job nothing built the image on a PR at all.
+  #
+  # So majors and minors are ignored and moving Python is a deliberate
+  # upgrade: check the wheels first, then bump this and requirements.txt
+  # together.
+  #
+  # That leaves this ecosystem quiet, which is correct and worth stating so
+  # nobody reads the silence as coverage: `python:3.12-slim` is a FLOATING
+  # tag, so Debian security fixes arrive by rebuilding, not by a PR here.
+  # security-scan.yml is what watches for them — it scans the published
+  # image on a schedule precisely because the digest can go stale while the
+  # tag stands still.
   - package-ecosystem: docker
     directory: /controller
     schedule:
       interval: weekly
       day: monday
     open-pull-requests-limit: 2
+    ignore:
+      - dependency-name: python
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
 
   # ── Device Go modules ───────────────────────────────────────────────────
   # The GoTinyAlsa replace directive points at a submodule path, which
