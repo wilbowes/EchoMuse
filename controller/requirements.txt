@@ -51,5 +51,3 @@ onnxruntime==1.20.1
 # aioesphomeapi==45.3.1). Not pulled in transitively since we vendor only
 # the two generated files rather than depending on the full aioesphomeapi package.
 protobuf>=4.21.0
-
-# (temporary line to exercise the new controller-image job — reverted next commit)
