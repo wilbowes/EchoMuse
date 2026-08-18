@@ -183,7 +183,9 @@ Controller satellite:
     supported_formats) → ffmpeg decode → 48kHz mono S16_LE PCM (v2.9.4;
     was 22050Hz + numpy resample)
   → t_tts_fetched_ms, tts_bytes logged
-  → EQ at 48kHz (mono end-to-end — no resample, no stereo)
+  → EQ → bass guard → limiter at 48kHz (mono end-to-end — no resample,
+    no stereo). Guard before limiter: limiting first spends reduction
+    on bass about to be discarded. See CLAUDE.md, "The output chain"
   → mic_stop → device stream stops BEFORE playback starts (v2.6.5 —
     previously only in the post-turn finally, so the device processed
     63–65 frames of its own TTS echo per turn, contended the Wi-Fi radio
@@ -295,8 +297,8 @@ used to open with was removed 2026-07-12.
     → controller: fetch TTS (one retry on transient failure; the satellite
       declares supported_formats 48kHz/mono/FLAC so recent HA transcodes at
       source) → ffmpeg decode straight to 48kHz mono S16_LE (cap 15s)
-    → controller: EQ at 48kHz (no resample step since v2.9.4) → stream to
-      device ALSA as mono 0x02 frames
+    → controller: EQ → bass guard → limiter at 48kHz (no resample step
+      since v2.9.4) → stream to device ALSA as mono 0x02 frames
     → controller: MediaPlayerState ANNOUNCING → AnnounceFinished → IDLE
     → if HA set continue_conversation: mic_start → next turn immediately
       (preroll_discard=0), no wake word needed (v2.6.5 C2)

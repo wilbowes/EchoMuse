@@ -197,8 +197,7 @@ cleaner audio help; they can't fully substitute for a good STT model.
 ## Stage 9 — The response
 
 The reply audio comes back through the controller, which shapes the sound
-(the EQ from the configuration guide — the raw speaker is boomy) and
-streams it to the Dot, which plays it while a copy is fed to the echo
+and streams it to the Dot, which plays it while a copy is fed to the echo
 canceller (Stage 3) so the mics can subtract it. The audio arrives at the
 hardware's native rate: the satellite tells Home Assistant what format the
 speaker wants (48kHz mono), so recent HA versions transcode at source, and
@@ -210,15 +209,25 @@ controller estimates it should have. The old estimate could clear the ring
 several seconds before the speaker stopped on a slow WiFi link — the device
 is the only party that knows when its own buffer runs dry.
 
-**Benefit:** centrally-applied EQ means every device gets consistent,
-tuned sound, adjustable live from the dashboard.
+Shaping is three stages, in order: the **equalizer**, then the **bass
+guard**, then the **limiter** — all from the configuration guide. The order
+matters. The guard drops low frequencies the little speaker cannot actually
+produce, which is what makes the middle sound clear rather than boxy; doing
+that before the limiter means the limiter is not holding the whole response
+down to fit bass peaks nobody was going to hear. Measured, the midrange comes
+out slightly *louder* with the guard on than with it off.
+
+**Benefit:** centrally-applied processing means every device gets consistent,
+tuned sound, adjustable live from the dashboard — and none of it costs the Dot
+any CPU, which matters on hardware already running a mic pipeline and possibly
+a wake word model.
 
 The reply is **streamed while Home Assistant is still generating it**: the
 response is piped through ffmpeg and out to the Dot as it arrives, rather
 than being fetched and decoded in full first. A long answer starts speaking
 at roughly the same moment a short one would, instead of making you wait for
-the last word to be synthesised before hearing the first. The EQ carries its
-filter state across chunks, so there's no click at the joins.
+the last word to be synthesised before hearing the first. All three stages
+carry their state across chunks, so there's no click at the joins.
 
 **Caveat:** interrupting a response by voice (**barge-in**) works when
 enabled — say the wake word over the top and the response cuts off — but

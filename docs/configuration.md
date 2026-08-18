@@ -82,6 +82,44 @@ little speaker is boomy and dull by default.
 An extra presence bump for spoken responses. Try it if responses sound
 muffled from across the room.
 
+### Bass guard
+Drops bass the speaker physically cannot produce.
+
+It sounds backwards, and it is the biggest single improvement available for a
+speaker this small. Frequencies below about 115Hz still move the cone even
+though you cannot hear them, and that movement muddies everything above it —
+which is what people usually describe as sounding thin, boxy or "tin-can".
+Taking them away makes the middle clearer, and slightly *louder*, because the
+limiter no longer has to hold everything down to fit bass peaks you were never
+going to hear.
+
+Quiet passages keep their low end. Only loud content is affected, which is why
+this is a guard rather than a filter.
+
+**Depth** sets how far it pulls down, default **−20dB**. Worth setting by ear:
+play something with real low end and move it from 0 to −40. Expect it to sound
+thinner at first and then clearer, and expect the best setting to be deeper
+than feels right. Turn the whole thing off if you would rather — nothing else
+depends on it.
+
+The frequency and the shape of the curve come from measurements of Amazon's
+own firmware on this same speaker, so they are not guesses. The default depth
+is gentler than Amazon's, because they pair theirs with an equalizer curve we
+have not measured.
+
+### Limiter
+Stops the equalizer distorting what it boosts, and should be left on.
+
+Turning any EQ band up can push the audio past the maximum the hardware can
+represent. Without a limiter that gets clipped — measured at nearly 5% of
+samples on an ordinary response with a modest bass boost — which is audible as
+harshness or crackle, and it only ever happened to people who had touched the
+EQ to make things sound better.
+
+**Ceiling** is the peak level the output is held below, default −1dB. **Release**
+is how quickly it recovers, default 150ms: shorter sounds louder, longer sounds
+smoother. Neither needs changing unless you want to.
+
 ### Duck depth
 How far music drops while the assistant is talking over it. Music **keeps
 playing** through a voice turn — it isn't paused — so the answer arrives

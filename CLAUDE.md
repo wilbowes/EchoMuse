@@ -104,7 +104,7 @@ cd controller
 python -m pytest tests/        # needs: pytest numpy scipy pyyaml — not the full requirements.txt
 ```
 
-Controller tests cover the pure-logic modules only (`em_eq`, `em_scenes`, `em_oww_models`, `version`, `em_hostip`, `em_ingressauth`) — keep it that way unless you're prepared to pull openwakeword/aiohttp into the test environment. Both suites (plus `go vet`) run in CI on every push/PR (`.github/workflows/ci.yml`).
+Controller tests cover the pure-logic modules only (`em_eq`, `em_limiter`, `em_mbc`, `em_scenes`, `em_oww_models`, `em_oww_warmup`, `version`, `em_hostip`, `em_ingressauth`, and the decision modules — `em_linkauth`, `em_button`, `em_shadow`, `em_turnclock`, `em_runbarrier`, `em_announce`) — keep it that way unless you're prepared to pull openwakeword/aiohttp into the test environment. Both suites (plus `go vet`) run in CI on every push/PR (`.github/workflows/ci.yml`).
 
 **Release:** pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds the binary in the compiler image and attaches it to a GitHub release. **Tag with `git tag -a --cleanup=verbatim`** — the annotation message becomes the release body (`body_path` from `git tag -l --format='%(contents)'`), which is what the dashboard shows next to an available update. Write it for the person deciding whether to push firmware to a device they depend on: what changed, what to expect, anything required of them. GitHub's generated commit list is still appended below it. A lightweight tag yields an empty body and falls back to that list, which is a worse experience, not a broken one.
 
@@ -604,7 +604,73 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
 ### Controller audio pipeline
 
 1. **Wake word** — openwakeword (ONNX) runs in a thread executor per device on `mic_queue`. When 2+ devices are connected, `em_arbiter.py` applies **first-detector-wins** suppression: the first device to cross threshold answers *immediately* (no added latency, the claim is synchronous) and any other device detecting within `wakeArbitrationMs` (default 700, 0 = off) stands down and logs "Wake ceded". The claim is released at turn end. Do NOT reinstate the original best-SNR-after-a-wait design: it taxed every wake ~364ms (it gated on devices *connected*, not in earshot) and field data showed SNR at detection was indistinguishable across devices (0.9/1.15/0.93) while the SNR winner produced a worse transcript than the first detector.
-2. **Voice turn** — on wake or dot-button: drain stale frames → acquire `voice_lock` → stream mic to HA via the ESPHome satellite → receive TTS URL → **incrementally** fetch + ffmpeg-decode straight to 48kHz mono → EQ (`em_eq.py`) → stream back as 0x02 frames. `_stream_tts_audio` pipes the HTTP response into one long-lived ffmpeg and yields PCM as it decodes, so playback starts while HA is still generating — neither the encoded response nor the decoded speech is accumulated. **A retry is only safe before the first PCM has been emitted**; `_fetch_tts_audio` remains for callers that genuinely need the whole buffer
+2. **Voice turn** — on wake or dot-button: drain stale frames → acquire `voice_lock` → stream mic to HA via the ESPHome satellite → receive TTS URL → **incrementally** fetch + ffmpeg-decode straight to 48kHz mono → **EQ → bass guard → limiter** (`em_eq.py`, `em_mbc.py`, `em_limiter.py` — see "The output chain" below for why that order) → stream back as 0x02 frames. `_stream_tts_audio` pipes the HTTP response into one long-lived ffmpeg and yields PCM as it decodes, so playback starts while HA is still generating — neither the encoded response nor the decoded speech is accumulated. **A retry is only safe before the first PCM has been emitted**; `_fetch_tts_audio` remains for callers that genuinely need the whole buffer
+### The output chain: EQ → bass guard → limiter
+
+Everything the speaker plays runs through three stages in `em_eq.apply` /
+`StreamingEQ.process`, in this order, all in float so nothing is quantised
+twice. **The order is load-bearing.**
+
+- **EQ** (`em_eq`) — eight bands, static, per device.
+- **Bass guard** (`em_mbc`) — a dynamic law below 115Hz. Not a high-pass: it
+  removes low frequencies only when they are loud enough to cost real
+  excursion, so quiet content keeps its low end.
+- **Limiter** (`em_limiter`) — look-ahead peak limiter.
+
+**Guard before limiter.** Limiting first spends gain reduction on bass that is
+about to be discarded, pulling the midrange down for no reason. Measured on a
+50Hz + 1kHz mix: with the guard on, the 50Hz component drops 17.2dB and the
+1kHz component gets **0.5dB louder**, because the limiter no longer has to
+hold the whole signal down to contain bass peaks nobody was going to hear.
+
+**The EQ used to hard-clip** (#231). `np.clip` ended both paths with no
+headroom management, and the dashboard offers ±12dB faders plus a presence
+boost that stacks on top — measured at 4.74% of samples clipped at −1dBFS with
+a modest bass boost, 17.95% at the top of the sliders. A flat EQ short-circuits
+and returns the input untouched, which is why it went unnoticed: it hit exactly
+the people who reached for the controls to improve their sound. A gain trim is
+the obvious fix and the wrong one, since it costs the full boost in level.
+
+**The bass guard's parameters are measured, not chosen.** Stock's
+`/system/vendor/etc/audio-algorithms/MBCL.cfg` on this speaker: crossover
+115Hz, ratio 20:1, threshold −50dB, floor −40dB, release 200ms. Stock's bands
+2–4 are deliberately not implemented — one gentle 2:1 law at −10dB repeated
+three times, which is broadband compression for loudness rather than
+protection. Our default depth is **−20dB rather than stock's −40dB**, because
+stock's sits in front of stock's own EQ curve, which we have neither nor have
+measured; copying the depth without the curve it was tuned against is not the
+same setting. It is a starting point for a listening test, the status `duckDb`
+had before it was tuned by ear.
+
+**The crossover is Linkwitz-Riley, and the first attempt was not.** LR4's
+lowpass and highpass sum flat (measured: 0.0000dB deviation across 4096
+points), so the guard cannot colour a stream it is not compressing. The first
+implementation split subtractively (`rest = x - lowpass`), which reconstructs
+exactly by construction and looks obviously right — and does not work: at 60Hz
+the lowpass passes 0.998 of the signal and the residual is **1.279**, larger
+than the input, because subtracting a phase-shifted copy is not removing a
+band. 20dB of in-band reduction produced 0.4dB at the output. A test pins that
+measurement so nobody simplifies back to it.
+
+**Both processors carry state and must be one instance per stream.** Sharing
+one would let a voice response duck the music underneath it. Both are also
+bit-identical between the chunked and one-shot paths, since TTS arrives as one
+buffer and music as many; `em_limiter`'s chunk seed must be `_gain_db + _slew`,
+not `_gain_db`, or the two drift apart.
+
+**Both are gain-staged the same way and use the same maths**: instant attack,
+slew-limited release, written as a running extremum in a sheared coordinate
+system so it is exact and vectorised rather than a sequential recursion. The
+limiter's threshold is taken against 32767, not 32768 — int16 is asymmetric, so
+a 0dBFS threshold against 32768 produces a sample that WRAPS to full-scale
+negative on the cast.
+
+What stock does that we do not, and why (#229): its six `EQ_*.cfg` files are
+**one filter at six gains** (`EQ_100` is `EQ_50` × 5.334838 exactly, +14.54dB),
+so tone is constant across volume and there is no volume-banded EQ to copy. A
+measured driver response is the remaining unknown, and the item that needs
+hardware.
+
 ### Ducking: music and voice are separate planes on the device
 
 **A voice turn DUCKS music; it does not pause it** — on firmware announcing
@@ -693,7 +759,9 @@ with no way for the user to tell which they had.
 | `em_api.py` | aiohttp HTTP API + dashboard SPA, OTA, shell proxy |
 | `em_db.py` | SQLite persistence (devices, config, logs, users) |
 | `em_auth.py` | Session auth with bcrypt |
-| `em_eq.py` | Parametric EQ applied to TTS audio before playback |
+| `em_eq.py` | Parametric EQ applied to TTS and music before playback; also hosts the chain, calling the guard and limiter in order |
+| `em_mbc.py` | Dynamic bass guard — drops low frequencies the driver cannot deliver. Pure, unit-tested; parameters measured off stock |
+| `em_limiter.py` | Look-ahead peak limiter — stops the EQ clipping what it boosts. Pure, unit-tested |
 | `em_oww_assets.py` | On-device wake word asset distribution — plans what a device needs (runtime + shared models + classifiers), what to push and what to evict. Pure logic; the two transports live in `em_api.py` |
 | `em_shadow.py` | On-device wake word shadow mode — correlates device-reported threshold crossings with the controller's own detections (clock domains, match window, consume-on-match) |
 | `em_scenes.py` | LED ring scenes — resolves `ledScene`/`ledListenColor`/`ledThinkColor` config into render-ready listening/spinner frames |
@@ -1550,7 +1618,7 @@ house, so rows survive with the SSID replaced and the selected network marked.
 
 `config.ConfigMessage` JSON fields (camelCase) are sent from controller to device on connect and on per-device config change. Non-zero fields are applied; zero/nil fields are ignored (partial update). Changes take effect immediately — no restart required.
 
-Configurable parameters: `vadThreshold`, `vadSpeechMs`, `vadSilenceMs`, `owwThreshold`, `owwModel`, `owwSpeexNs`, `adcDigitalGain`, `adcMicpga`, `micGainDb`, `startupVolume`, `beamAngle`, `beamformingEnabled`, `aecEnabled`, `aecDelayMs`, `aecTailMs`, `agcEnabled`, `nsAsr`, `bargeInEnabled`, `bargeInThreshold`, `bleProxyEnabled`, `eqBands`, `eqLoudness`, `ledScene`, `ledListenColor`, `ledThinkColor`, `meterAttack`, `meterDecay`, `meterFloor`, `meterGamma`, `meterRef`, `meterCurve`, `wakeArbitrationMs`, `duckDb`, `buttonSingleTapEvent`, `buttonMultiTapMs`, `owwOnDevice` and `saveUtterances` (the last two are controller-consumed for scoping purposes, though `owwOnDevice` IS acted on by the device; `saveUtterances`, `wakeArbitrationMs` and the two `button*` keys are ignored by it).
+Configurable parameters: `vadThreshold`, `vadSpeechMs`, `vadSilenceMs`, `owwThreshold`, `owwModel`, `owwSpeexNs`, `adcDigitalGain`, `adcMicpga`, `micGainDb`, `startupVolume`, `beamAngle`, `beamformingEnabled`, `aecEnabled`, `aecDelayMs`, `aecTailMs`, `agcEnabled`, `nsAsr`, `bargeInEnabled`, `bargeInThreshold`, `bleProxyEnabled`, `eqBands`, `eqLoudness`, `limiterEnabled`, `limiterThreshold`, `limiterRelease`, `bassGuardEnabled`, `bassGuardDb`, `ledScene`, `ledListenColor`, `ledThinkColor`, `meterAttack`, `meterDecay`, `meterFloor`, `meterGamma`, `meterRef`, `meterCurve`, `wakeArbitrationMs`, `duckDb`, `buttonSingleTapEvent`, `buttonMultiTapMs`, `owwOnDevice` and `saveUtterances` (the last two are controller-consumed for scoping purposes, though `owwOnDevice` IS acted on by the device; `saveUtterances`, `wakeArbitrationMs`, the two `button*` keys and the five output-chain keys — `limiter*` and `bassGuard*` — are ignored by it, because that processing all happens controller-side before the audio reaches the wire).
 
 ### Fleet vs device scoping (schema v8)
 
