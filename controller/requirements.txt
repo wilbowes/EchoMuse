@@ -33,7 +33,7 @@ zeroconf==0.150.0
 # Wake word inference — openwakeword deps installed manually to avoid
 # tflite-runtime which has no Python 3.12 x86_64 build.
 # openwakeword itself is installed via --no-deps in the Dockerfile.
-numpy==2.4.4
+numpy==2.5.2
 scipy
 tqdm
 scikit-learn
