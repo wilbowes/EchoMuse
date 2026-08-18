@@ -31,6 +31,8 @@ import logging
 import numpy as np
 from scipy.signal import sosfilt
 
+import em_limiter
+
 log = logging.getLogger("echomuse.eq")
 
 EQ_FREQUENCIES = [125, 250, 500, 1000, 2000, 3500, 5500, 8000]
@@ -116,6 +118,7 @@ def apply(
     sample_rate: int,
     bands: list | None = None,
     loudness: bool = False,
+    limiter: "em_limiter.Limiter | None" = None,
 ) -> bytes:
     """
     Apply EQ to mono S16_LE PCM. Returns mono S16_LE PCM at the same rate.
@@ -126,6 +129,10 @@ def apply(
                      playback pipeline since the 48k decode change).
         bands:       List of NUM_BANDS (8) gain values in dB. None = flat.
         loudness:    Add a +5dB speech-range presence boost if True.
+        limiter:     Optional peak limiter applied AFTER the EQ, in float, so
+                     nothing is quantised twice. Without one this function
+                     hard-clips whatever the EQ boosted past full scale, which
+                     is #231.
 
     Returns:
         EQ-processed mono S16_LE PCM bytes, same length as input.
@@ -140,15 +147,19 @@ def apply(
         log.warning(f"[eq] Expected {NUM_BANDS} bands, got {len(bands)} — padding with zeros")
         bands = list(bands) + [0.0] * (NUM_BANDS - len(bands))
 
-    # Short-circuit if everything is flat and loudness is off
-    if not loudness and all(b == 0.0 for b in bands):
+    flat = not loudness and all(b == 0.0 for b in bands)
+    if flat and limiter is None:
         return pcm
 
-    samples  = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
-    sos      = build_sos(bands, sample_rate, loudness)
-    filtered = sosfilt(sos, samples)
-    filtered = np.clip(filtered, -32768, 32767).astype(np.int16)
-    return filtered.tobytes()
+    samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float64)
+    if not flat:
+        samples = sosfilt(build_sos(bands, sample_rate, loudness), samples)
+    if limiter is not None:
+        samples = np.concatenate([limiter.process(samples), limiter.flush()])
+    # Backstop only. With a limiter attached this must never engage; without
+    # one it is the historical behaviour, preserved so a caller that passes no
+    # limiter is no worse off than before.
+    return np.clip(samples, -32768, 32767).astype(np.int16).tobytes()
 
 
 class StreamingEQ:
@@ -160,7 +171,9 @@ class StreamingEQ:
     """
 
     def __init__(self, sample_rate: int, bands: list | None = None,
-                 loudness: bool = False):
+                 loudness: bool = False,
+                 limiter: "em_limiter.Limiter | None" = None):
+        self._limiter = limiter
         if bands is None:
             bands = DEFAULT_BANDS
         if len(bands) != NUM_BANDS:
@@ -172,8 +185,26 @@ class StreamingEQ:
             self._zi  = np.zeros((self._sos.shape[0], 2), dtype=np.float64)
 
     def process(self, pcm: bytes) -> bytes:
-        if self._sos is None or len(pcm) < 2:
+        if len(pcm) < 2 or (self._sos is None and self._limiter is None):
             return pcm
-        samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
-        filtered, self._zi = sosfilt(self._sos, samples, zi=self._zi)
-        return np.clip(filtered, -32768, 32767).astype(np.int16).tobytes()
+        samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float64)
+        if self._sos is not None:
+            samples, self._zi = sosfilt(self._sos, samples, zi=self._zi)
+        if self._limiter is not None:
+            samples = self._limiter.process(samples)
+        return np.clip(samples, -32768, 32767).astype(np.int16).tobytes()
+
+    def flush(self) -> bytes:
+        """
+        Emit the limiter's held look-ahead tail at end of stream.
+
+        Returns empty when there is no limiter, so callers can call it
+        unconditionally. Without it the last few ms of every music stream are
+        dropped — inaudible on a track, obvious on a short announcement.
+        """
+        if self._limiter is None:
+            return b""
+        tail = self._limiter.flush()
+        if not tail.size:
+            return b""
+        return np.clip(tail, -32768, 32767).astype(np.int16).tobytes()

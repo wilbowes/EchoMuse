@@ -71,6 +71,7 @@ import em_pki
 import em_hostip
 import em_linkauth
 import em_eq
+import em_limiter
 import em_scenes
 import em_shadow
 import em_oww_warmup
@@ -317,6 +318,9 @@ class Device:
         self.last_utterance_pcm: bytes | None = None
         self.eq_bands:      list  = [0.0] * 8
         self.eq_loudness:   bool  = False
+        self.limiter_enabled:   bool  = True
+        self.limiter_threshold: float = em_limiter.DEFAULT_THRESHOLD_DB
+        self.limiter_release:   float = em_limiter.DEFAULT_RELEASE_MS
         # LED ring scene — render-ready palette/spinner from em_scenes,
         # refreshed on connect and on any config push carrying led* keys.
         self.led_scene:     dict  = em_scenes.resolve({})
@@ -809,6 +813,13 @@ class Device:
                     await self.send_data(bytes([SPEAKER_FRAME_TYPE]) + chunk)
                     send_seconds += asyncio.get_event_loop().time() - _t_send
 
+            # The limiter holds a look-ahead tail; without this the last few
+            # ms of every response are dropped. Inaudible on a long track and
+            # obvious on a short announcement, which is the kind of thing that
+            # goes unnoticed for months.
+            if not self.cancel_event.is_set():
+                pending.extend(stream_eq.flush())
+
             if pending and not self.cancel_event.is_set():
                 chunk = bytes(pending)
                 chunk += bytes(SPEAKER_BYTES - len(chunk))
@@ -857,6 +868,20 @@ _shell_dashboard:  dict[str, object]         = {}
 
 def get_device(device_id: str) -> Device | None:
     return _devices.get(device_id)
+
+
+
+
+
+
+def _limiter_for(device):
+    """Adapter: a Device's limiter config -> em_limiter.for_stream."""
+    return em_limiter.for_stream(
+        SPEAKER_RATE,
+        device.limiter_enabled,
+        device.limiter_threshold,
+        device.limiter_release,
+    )
 
 
 async def _push_device_state(device: Device) -> None:
@@ -1185,14 +1210,15 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
     """
     log.info(
         f"[{device.device_id}] EQ: bands={device.eq_bands} "
-        f"loudness={device.eq_loudness}"
+        f"loudness={device.eq_loudness} limiter={device.limiter_enabled}"
     )
     # EQ is a solid numpy crunch (hundreds of ms for a long response) — run
     # it off the event loop, which otherwise freezes every device's LED
     # frames, shell proxying, and WS handling right as playback starts
     # (observed as spinner stutter and console typing judder).
     def _prepare_pcm() -> bytes:
-        return em_eq.apply(voice_response, SPEAKER_RATE, device.eq_bands, device.eq_loudness)
+        return em_eq.apply(voice_response, SPEAKER_RATE, device.eq_bands,
+                           device.eq_loudness, limiter=_limiter_for(device))
 
     _t_eq0 = asyncio.get_event_loop().time()
     speaker_pcm = await asyncio.get_event_loop().run_in_executor(None, _prepare_pcm)
@@ -1330,6 +1356,7 @@ async def _run_streaming_post_turn_playback(device: Device, pcm_chunks) -> int:
         SPEAKER_RATE,
         device.eq_bands,
         device.eq_loudness,
+        limiter=_limiter_for(device),
     )
     # Cleared BEFORE streaming starts: the device sets it when its audio
     # channel drains after EOS, and a stale set from the previous response
@@ -2524,6 +2551,11 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         )
         device.eq_bands      = config.get("eqBands", [0.0] * 8)
         device.eq_loudness   = bool(config.get("eqLoudness", False))
+        device.limiter_enabled   = bool(config.get("limiterEnabled", True))
+        device.limiter_threshold = float(config.get(
+            "limiterThreshold", em_limiter.DEFAULT_THRESHOLD_DB))
+        device.limiter_release   = float(config.get(
+            "limiterRelease", em_limiter.DEFAULT_RELEASE_MS))
         device.led_scene     = em_scenes.resolve(config)
         # Initialise volume from stored config — device will report its real
         # value via volume_state on connect, but this seeds a sane default

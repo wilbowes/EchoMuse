@@ -9,6 +9,9 @@ class FakeDevice:
         self.device_id = device_id
         self.eq_bands = [0.0] * 8
         self.eq_loudness = False
+        self.limiter_enabled = True
+        self.limiter_threshold = -1.0
+        self.limiter_release = 150.0
         self.data_frames: list[bytes] = []
         self.control_msgs: list[dict] = []
 

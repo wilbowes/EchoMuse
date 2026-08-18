@@ -217,6 +217,14 @@ DEFAULT_DEVICE_CONFIG = {
     "beamAngle":        -1,
     "eqBands":          [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     "eqLoudness":       False,
+    # Output limiter. On by default: the EQ chain hard-clipped anything it
+    # boosted past full scale (#231), and a default that leaves that in place
+    # protects nobody. Threshold/release are config rather than constants
+    # because limiter character wants tuning by ear in a real room — the same
+    # reasoning as duckDb and the LED meter curve.
+    "limiterEnabled":   True,
+    "limiterThreshold": -1.0,
+    "limiterRelease":   150,
     # LED ring scene (controller-side rendering — see em_scenes.py).
     # ledListenColor/ledThinkColor only apply when ledScene is "custom".
     "ledScene":         "standard",

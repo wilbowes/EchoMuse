@@ -4818,7 +4818,7 @@ const STAGE_MONO = "'DM Mono',monospace";
 // control sitting under a toggle that does not govern it would look fine and
 // be silently wrong.
 const CONFIG_SECTIONS = {
-  "playback": ["eqBands", "eqLoudness", "duckDb"],
+  "playback": ["eqBands", "eqLoudness", "duckDb", "limiterEnabled", "limiterThreshold", "limiterRelease"],
   "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice"],
   "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "nsAsr", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
@@ -5095,6 +5095,22 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
           <div>
             <div style={inputStyle}>
               <Toggle label="Speech boost" sub="presence boost for voice" value={config.eqLoudness ?? false} onChange={v => set('eqLoudness', v)}/>
+            </div>
+            <div style={inputStyle}>
+              <Toggle label="Limiter" sub="stops EQ boost from clipping — leave on"
+                value={config.limiterEnabled ?? true} onChange={v => set('limiterEnabled', v)}/>
+            </div>
+            <div style={inputStyle}>
+              <Slider label="Limiter ceiling" disabled={!(config.limiterEnabled ?? true)}
+                sub="peak level the output is held below"
+                value={config.limiterThreshold ?? -1} min={-12} max={0} step={0.5} unit="dB"
+                onChange={v => set('limiterThreshold', v)}/>
+            </div>
+            <div style={inputStyle}>
+              <Slider label="Limiter release" disabled={!(config.limiterEnabled ?? true)}
+                sub="time to recover 10 dB — shorter is louder, longer is smoother"
+                value={config.limiterRelease ?? 150} min={20} max={1000} step={10} unit="ms"
+                onChange={v => set('limiterRelease', v)}/>
             </div>
             <div style={inputStyle}>
               <Slider label="Duck depth" disabled={!mixCapable}

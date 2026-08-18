@@ -47,6 +47,7 @@ import asyncio
 import logging
 
 import em_eq
+import em_limiter
 
 log = logging.getLogger("player")
 
@@ -527,7 +528,11 @@ class MediaSession:
         # gain or lose the capability mid-stream, and this runs ~23×/s.
         frame_type, eos_type = _frame_types(device)
 
-        eq = em_eq.StreamingEQ(SPEAKER_RATE, device.eq_bands, device.eq_loudness)
+        eq = em_eq.StreamingEQ(SPEAKER_RATE, device.eq_bands, device.eq_loudness,
+                               limiter=em_limiter.for_stream(
+                                   SPEAKER_RATE, device.limiter_enabled,
+                                   device.limiter_threshold,
+                                   device.limiter_release))
         start_pos = self._pos
         proc = None
         seg_start = loop.time()
