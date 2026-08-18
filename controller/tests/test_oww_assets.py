@@ -272,9 +272,10 @@ def test_the_stock_set_is_installed_alongside_the_selected_model():
     other stock one, or changing the wake word later needs a manual trip to
     Updates -> Update assets (#191).
     """
-    from pathlib import Path
-    res = Path(A.openwakeword_resources() or "")
-    if not res.is_dir():
+    # Not `Path(... or "")`: Path("") is Path("."), which IS a directory, so
+    # the skip never fired and the test ran against the CWD, finding no models.
+    res = A.openwakeword_resources()
+    if res is None:
         pytest.skip("openwakeword not installed in this environment")
     assets, problems = A.desired_assets(["alexa_v0.1"], resources=res)
     names = [a.name for a in assets if a.kind == "classifier"]
@@ -284,9 +285,8 @@ def test_the_stock_set_is_installed_alongside_the_selected_model():
 
 
 def test_include_stock_false_installs_only_what_was_asked_for():
-    from pathlib import Path
-    res = Path(A.openwakeword_resources() or "")
-    if not res.is_dir():
+    res = A.openwakeword_resources()
+    if res is None:
         pytest.skip("openwakeword not installed in this environment")
     assets, _ = A.desired_assets(["alexa_v0.1"], resources=res, include_stock=False)
     assert [a.name for a in assets if a.kind == "classifier"] == ["alexa_v0.1.onnx"]
