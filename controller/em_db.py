@@ -2090,10 +2090,7 @@ def create_user(username: str, password_hash: str, role: str = "readonly") -> in
 
 def get_user_by_ha_id(ha_user_id: str) -> Optional[sqlite3.Row]:
     """Return the user linked to a Home Assistant user id, or None."""
-    with _conn() as conn:
-        return conn.execute(
-            "SELECT * FROM users WHERE ha_user_id = ?", (ha_user_id,)
-        ).fetchone()
+    return _q1("SELECT * FROM users WHERE ha_user_id = ?", (ha_user_id,))
 
 
 def create_ha_user(ha_user_id: str, username: str, role: str) -> int:
