@@ -1,13 +1,13 @@
 module github.com/wilbowes/EchoMuse
 
-go 1.24.0
+go 1.25.0
 
 require (
 	github.com/Binozo/GoTinyAlsa v1.0.3
 	github.com/gorilla/websocket v1.5.3
 	github.com/grandcat/zeroconf v1.0.0
 	github.com/gvalkov/golang-evdev v0.0.0-20220815104727-7e27d6ce89b6
-	golang.org/x/sys v0.32.0
+	golang.org/x/sys v0.47.0
 )
 
 require (
