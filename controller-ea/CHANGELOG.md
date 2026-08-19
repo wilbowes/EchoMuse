@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.20.2-ea.3 (Early Access)
+
+One fix, and it is the one that makes the previous release's headline feature
+actually work.
+
+### Speaker settings now take effect when you save them
+
+Saving a limiter or bass guard setting updated the stored configuration but
+never reached the running controller — those settings are applied by the
+controller rather than by the Echo, and only a device reconnect picked them
+up. So they appeared to do nothing, and would then quietly start working after
+a restart, which is the point at which most people would stop investigating.
+
+If you tried tuning the speaker and heard no difference, that was correct: the
+settings were not reaching the audio. Together with the live updating added in
+2.20.2-ea.2, moving the bass guard depth or the limiter ceiling is now audible
+immediately, on the track you are already playing.
+
+Worth re-doing any tuning you did before this release — you were listening to
+unchanged sound.
+
 ## 2.20.2-ea.2 (Early Access)
 
 Two changes, both about being able to tell what your system is doing. No new
