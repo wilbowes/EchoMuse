@@ -667,6 +667,42 @@ twice. **The order is load-bearing.**
   excursion, so quiet content keeps its low end.
 - **Limiter** (`em_limiter`) — look-ahead peak limiter.
 
+**The chain updates in place while a stream is playing, and is never
+rebuilt.** `em_player._feed` used to construct it once per feed, so a setting
+only took effect on the next track — which defeats tuning by ear, since a
+track skip is far longer than anyone can hold two versions of a sound in their
+head. `StreamingEQ.update()` now re-applies the settings per chunk, comparing
+first, so the steady-state cost is one tuple comparison ~23×/s. Three things
+are load-bearing:
+
+- **Instances persist.** Both processors carry filter and gain state; a new
+  instance mid-track restarts the crossover and snaps the limiter's gain back
+  to unity.
+- **Enable/disable is a FLAG, not a `None` instance.** A bypassed limiter
+  still holds its tail, so the stream keeps its 5ms latency rather than
+  jumping forward on the toggle. A bypassed guard still runs the crossover and
+  sums it — and LR4's halves sum magnitude-flat but the sum is an **allpass**,
+  so that branch is deliberately not `return x`; a test pins the difference.
+- **Crossover frequency and look-ahead are NOT settable.** Both own carried
+  state, and both are measured values rather than taste ones.
+
+**A change is heard `LEAD_S` (4s) later, and that is not a fault.** The feed is
+paced that far ahead of realtime, so processing happens when the audio is
+generated and the listener hears it a lead-time afterwards. Anyone A/B-ing must
+wait ~5s before judging; quick toggling reads as "nothing happened" because the
+old audio is still in the device buffer. Moving the chain onto the device is
+the only real fix and is filed as #243 — the same argument that forced ducking
+device-side.
+
+**`bassGuardDb` barely moves the output, and the default hardly matters.**
+Measured 2026-08-19 on a 50Hz + 1kHz mix at ordinary level: across the whole
+range the depth changes 50Hz by ~9dB and the OVERALL level by **0.14dB**, with
+1kHz unchanged. What is audible is the guard being **on at all** — −17.7dB at
+50Hz and −5.0dB overall, and on loud material where the limiter is working the
+midrange comes up **+2.6dB**. So tune with `bassGuardEnabled`, not with the
+depth; an A/B between −20 and −40 is below audibility and will read as a broken
+feature.
+
 **Guard before limiter.** Limiting first spends gain reduction on bass that is
 about to be discarded, pulling the midrange down for no reason. Measured on a
 50Hz + 1kHz mix: with the guard on, the 50Hz component drops 17.2dB and the
@@ -1680,6 +1716,36 @@ Three invariants, each guarded by `tests/test_config_sections.py`:
 - **`STATE_KEYS` (`startupVolume`) are never section-scoped** — persisted device state, always taken from the device, never fleet-inherited.
 
 Reverting a section **discards** its stored values (`set_device_config_sections` prunes), so no shadow values resurrect on a later re-override. Both config write paths push the **effective** config via the shared `_apply_live_config`, never the request body — with per-section scoping a body is partial by design, and the fleet endpoint now pushes every connected device rather than only fully-inheriting ones.
+
+**A fleet edit to a section a device overrides silently does nothing to that
+device, and the dashboard reports success.** It is the merge working as
+designed — `em_config_sections.merge` layers the device's stored values over
+the fleet's for its overridden sections — but from the front it is a control
+that saves, says "pushed", and changes nothing. It cost an hour of a listening
+test on 2026-08-19: fleet `eqBands` was set to −12dB across all eight bands, an
+18dB drop that is impossible to miss, and nothing happened, because the device
+being listened to overrode `playback` and kept its own curve. Note the failure
+is **per key, not per push** — the same save can apply half its values and
+discard the other half, depending on which sections each key belongs to.
+Absent keys DO fall through to fleet (`if key in device_cfg`), which is why a
+device overriding `playback` before the output-chain keys existed still
+receives them from the fleet.
+
+The rule this project already holds elsewhere applies: a control that cannot
+act must say so rather than appear to work.
+
+**Every controller-consumed key needs mirroring in BOTH places, and a test
+enforces it.** Config reaches the running controller as attributes on `Device`,
+set in `em_controller.handle_control` when a device registers AND in
+`em_api._apply_live_config` when someone saves. A key in the first but not the
+second reads as working: the database is written, the device is sent a value it
+discards, and the setting takes effect at the next reconnect — which is exactly
+what someone does before investigating further. That happened to all five
+output-chain keys, which have no device-side consumer at all, so the mirror was
+the only thing that could have carried them.
+`tests/test_config_mirrors.py` diffs the two sites; `startupVolume` is the one
+deliberate exemption, because it is device state and a later push must not
+stomp a volume changed by hand.
 
 ### Volume / mute persistence
 

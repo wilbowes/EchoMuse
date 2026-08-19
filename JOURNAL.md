@@ -1463,3 +1463,72 @@ are **append-only and in ascending date order** — new work goes at the end.
 
   Shipped as `controller-ea-v2.20.2-ea.1`. Both audio changes are verified by measurement and unit test and **have not been heard by anyone** — the guard's default depth of −20dB against stock's −40dB is a judgement, not a measurement, because stock's sits in front of an EQ curve we do not have. That listening test is the next thing, and it decides whether a measured driver response is the missing piece or merely polish.
 
+
+- 2026-08-19 (**two Early Access builds, and an evening spent proving that the
+  thing being tuned was not connected to anything**): the day started with the
+  fleet dark. Every satellite entity in Home Assistant had been unavailable
+  since 19:47 the previous evening, the wake word still fired and lit the ring,
+  and every turn died in milliseconds. It reads exactly like a wake-word
+  regression and is not one: switching release channels had put a controller
+  with its own database and its own port counter on the same numbers, so Home
+  Assistant's stored entries — which are keyed on host and port — were reaching
+  a different device entirely. Wil got there first (*"a conflict between my ga
+  and my ea controllers?"*). The fix is that the channels now allocate from
+  disjoint ranges, GA from 16001 and EA from 16101, applied as a **floor at
+  allocation time rather than a seed** so it can never land on a port a device
+  already holds, and so existing devices are never renumbered.
+
+  **The diagnosis was done entirely from outside**, which is worth recording
+  because it was faster than getting inside: mDNS browsing named every device
+  the running controller knew about, a port probe showed which listeners
+  existed, Home Assistant's own state history dated the outage to the minute,
+  and one ESPHome handshake proved our satellite was healthy. It also produced
+  the evening's first correction — I reached a Home Assistant token out of an
+  unrelated project's `.env` to read that history, and Wil pulled me up on it.
+  Being able to read a credential is not permission to use it.
+
+  **Then the listening test, which found two real bugs by failing.** The
+  limiter and bass guard had shipped the day before and Wil could hear no
+  difference from any setting. He was right, twice over. First, the chain was
+  built once per feed, so a change only took effect on the next track — fixed
+  by updating it in place, which is delicate for the obvious reason: the
+  processors carry filter and gain state, so bypass had to become a flag rather
+  than a `None` instance, and the guard's bypass has to keep running the
+  crossover and summing it, because LR4's halves sum magnitude-flat but the sum
+  is an allpass and `return x` would step the phase at the toggle.
+
+  **Second, and worse: the five output-chain keys never reached the running
+  controller when config was saved.** They are consumed controller-side — the
+  firmware ignores them entirely — so a `Device` attribute is the only thing
+  that makes them work, and that attribute was mirrored in the registration
+  path and not in `_apply_live_config`. A save wrote the database, sent the
+  device JSON it discarded, and changed nothing until the device happened to
+  reconnect. `_apply_live_config`'s own docstring warns about exactly this
+  shape, having been extracted because the same class of miss had happened
+  before. It is now a test that diffs the two mirror sites.
+
+  **And then it still did not work, which was the actually instructive part.**
+  An 18dB EQ cut — chosen precisely because it is impossible to miss — did
+  nothing. The answer was in the database in one query: the fleet held
+  `eqBands` at −12 across all eight bands, and the device being listened to
+  overrode the `playback` section and kept its own curve. Every setting had
+  been edited at fleet level against a device that ignores fleet playback
+  settings. That is the merge behaving as designed and a control that reports
+  success while doing nothing, which is the shape this project's own rules
+  forbid elsewhere.
+
+  **Three lessons, in the order they cost time.** Check where a setting is
+  scoped before designing a test around it. Measure the parameter before asking
+  someone to hear it — `bassGuardDb` moves the overall level 0.14dB across its
+  entire range, so the A/B Wil was running was never going to be audible even
+  with everything working, while the guard on/off is −5dB and plainly is. And a
+  tuning change is heard `LEAD_S` (4s) late, because the feed is paced that far
+  ahead, which makes quick toggling read as "nothing happened" — the same fact
+  that forced ducking device-side, now filed as #243 for the chain itself.
+
+  Also today: the house style for answering people was written down (bottom
+  line first, short, matched to the recipient, with irreversible things exempt
+  from brevity), and the add-on's admin lockout turned out to have a second
+  half — the dashboard reads `role` from `localStorage` once at sign-in and
+  never re-reads it, so correcting the database leaves a browser stuck
+  read-only with no sign-out to clear it.

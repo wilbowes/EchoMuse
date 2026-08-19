@@ -68,6 +68,19 @@ kept for 180 days and available via the API
 
 How responses sound.
 
+**Two things to know before you tune anything here.**
+
+**Changes take about four seconds to be heard.** Audio is sent to the device
+several seconds ahead of when you hear it, so what is playing right now was
+processed before you moved the control. Wait five seconds before judging, and
+do not flip a setting back and forth quickly — you will be listening to the
+old audio and conclude nothing happened.
+
+**Change the settings on the device you are listening to.** If a device has
+its own Playback settings (the Fleet/Device switch on that section), editing
+the fleet defaults will not affect it. The save succeeds either way, so the
+symptom is a control that appears to do nothing at all.
+
 ### Equalizer (8 faders + presets)
 Shapes the tone of the voice responses, like the EQ on a stereo. The Dot's
 little speaker is boomy and dull by default.
@@ -96,11 +109,16 @@ going to hear.
 Quiet passages keep their low end. Only loud content is affected, which is why
 this is a guard rather than a filter.
 
-**Depth** sets how far it pulls down, default **−20dB**. Worth setting by ear:
-play something with real low end and move it from 0 to −40. Expect it to sound
-thinner at first and then clearer, and expect the best setting to be deeper
-than feels right. Turn the whole thing off if you would rather — nothing else
-depends on it.
+**Depth** sets how far it pulls down, default **−20dB**.
+
+**Judge this by turning it off and on, not by moving the depth.** Almost all
+of the audible change happens in the first few dB: switching it on takes about
+5dB off the overall level and lifts the midrange, while going from −20 to −40
+changes the overall level by **0.14dB** — below what anyone can hear. If you
+A/B two depths and cannot tell them apart, nothing is broken; there is
+genuinely almost nothing there to hear.
+
+Turn the whole thing off if you would rather — nothing else depends on it.
 
 The frequency and the shape of the curve come from measurements of Amazon's
 own firmware on this same speaker, so they are not guesses. The default depth
