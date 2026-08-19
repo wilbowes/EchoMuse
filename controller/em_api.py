@@ -1009,6 +1009,23 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
         live.eq_bands = effective["eqBands"]
     if "eqLoudness" in effective:
         live.eq_loudness = bool(effective["eqLoudness"])
+    # The output chain is consumed HERE, not on the device — it ignores these
+    # five keys entirely — so this mirror is the only thing that carries them.
+    # Missing it meant a push wrote the database, sent JSON the device threw
+    # away, and changed nothing audible until the device happened to
+    # reconnect. Exactly the shape this function's docstring warns about, and
+    # it cost a whole listening test on 2026-08-19: every setting appeared to
+    # do nothing, because every setting WAS doing nothing.
+    if "limiterEnabled" in effective:
+        live.limiter_enabled = bool(effective["limiterEnabled"])
+    if "limiterThreshold" in effective:
+        live.limiter_threshold = float(effective["limiterThreshold"])
+    if "limiterRelease" in effective:
+        live.limiter_release = float(effective["limiterRelease"])
+    if "bassGuardEnabled" in effective:
+        live.bass_guard_enabled = bool(effective["bassGuardEnabled"])
+    if "bassGuardDb" in effective:
+        live.bass_guard_db = float(effective["bassGuardDb"])
     live.led_scene = em_scenes.resolve(effective)
 
 
