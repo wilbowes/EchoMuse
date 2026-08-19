@@ -1,5 +1,42 @@
 # Changelog
 
+## 2.20.2-ea.2 (Early Access)
+
+Two changes, both about being able to tell what your system is doing. No new
+database migration, no firmware requirement.
+
+### Speaker settings now change while the music is playing
+
+The limiter and bass guard settings only took effect when the next track
+started, so changing one while listening appeared to do nothing at all. That
+made them very hard to judge: by the time a new track began, the sound you
+were comparing against was gone.
+
+They now apply immediately, mid-track. Turning the bass guard on or off, or
+moving its depth, is audible straight away and does not click or interrupt
+playback. The equaliser behaves the same way.
+
+If you have been trying to tune the speaker and concluded the settings made no
+difference, this is why — it is worth another listen.
+
+### Early Access uses its own ports
+
+The Early Access and stable add-ons keep completely separate data, including
+their own list of devices — but both handed out the same port numbers to the
+Home Assistant satellites they create. Switching between them could therefore
+leave Home Assistant talking to the wrong device, which showed up as devices
+sitting unavailable, wake words lighting the ring, and every request ending
+immediately with no answer.
+
+Early Access now uses a separate range, so a leftover Home Assistant entry
+from the other channel simply shows as unavailable instead of reaching
+something unexpected. Existing devices keep the ports they already have;
+nothing is renumbered.
+
+**Switching channels is still a migration.** Each add-on has its own database
+and its own certificate authority, so your devices will not connect to the
+other channel until you copy `/data` across — see the Documentation tab.
+
 ## 2.20.2-ea.1 (Early Access)
 
 Two fixes that stop the controller doing something wrong, and the first two
