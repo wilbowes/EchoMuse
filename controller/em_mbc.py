@@ -151,8 +151,12 @@ class BassGuard:
 
     def __init__(self, sample_rate: int,
                  bass_guard_db: float = DEFAULT_BASS_GUARD_DB,
-                 crossover_hz: float = CROSSOVER_HZ):
+                 crossover_hz: float = CROSSOVER_HZ,
+                 enabled: bool = True):
         self.sample_rate = int(sample_rate)
+        # Bypassed rather than absent, so a stream can be toggled without
+        # dropping the instance — see set_params.
+        self.enabled = bool(enabled)
         self.bass_guard_db = min(0.0, float(bass_guard_db))
         self.crossover_hz = float(crossover_hz)
 
@@ -171,6 +175,28 @@ class BassGuard:
         anything, and for whether it is doing too much."""
         return round(self._bass.max_reduction_db, 2)
 
+    def set_params(self,
+                   bass_guard_db: float | None = None,
+                   enabled: bool | None = None) -> None:
+        """
+        Change the guard mid-stream, without touching carried state.
+
+        Depth is the parameter that wants tuning by ear in a real room, and
+        the chain used to be built once per stream — so hearing a change meant
+        skipping the track, which makes an A/B nearly impossible to judge.
+
+        The crossover is deliberately NOT settable: it owns the filter state,
+        so moving it mid-stream would mean rebuilding the biquads and either
+        carrying incompatible state or zeroing it, which is an audible thump
+        at exactly the moment someone is listening for a difference. It is a
+        measured value off the hardware, not a taste one.
+        """
+        if bass_guard_db is not None:
+            self.bass_guard_db = min(0.0, float(bass_guard_db))
+            self._bass.floor_db = self.bass_guard_db
+        if enabled is not None:
+            self.enabled = bool(enabled)
+
     def process(self, samples: np.ndarray) -> np.ndarray:
         """Compress one chunk. Returns exactly as many samples as given."""
         if samples.size == 0:
@@ -178,6 +204,17 @@ class BassGuard:
         x = np.asarray(samples, dtype=np.float64)
         low, self._zl = sosfilt(self._lp, x, zi=self._zl)
         high, self._zh = sosfilt(self._hp, x, zi=self._zh)
+        if not self.enabled:
+            # Bypassed, but still filtered. LR4's two halves sum MAGNITUDE-
+            # flat (crossover_flatness_db measures 0.0000dB); the sum is an
+            # allpass, not the identity, so this is not `return x` and must
+            # not be simplified into one. That is the point: the signal takes
+            # the same path in both states, so toggling changes only the gain
+            # law and cannot click. Returning x instead would step the phase
+            # at the toggle, and skipping the filters would leave them cold to
+            # ring on re-enable — both audible as a thump at exactly the
+            # moment someone is listening for the difference.
+            return low + high
         return low * (10.0 ** (self._bass.gains_db(low) / 20.0)) + high
 
 

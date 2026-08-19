@@ -529,14 +529,28 @@ class MediaSession:
         # gain or lose the capability mid-stream, and this runs ~23×/s.
         frame_type, eos_type = _frame_types(device)
 
+        # Built once for the whole feed and then UPDATED in place, never
+        # rebuilt: both processors carry filter and gain state, so a new
+        # instance mid-track restarts the crossover and clicks. Constructed
+        # even when disabled — a bypassed instance keeps its state warm, which
+        # is what makes toggling one mid-song silent.
+        #
+        # In place because these are taste parameters tuned by ear in a real
+        # room. Reading them once per stream meant every A/B cost a track
+        # skip, which is long enough that nobody can hold the two in their
+        # head (measured against a listening test on 2026-08-19: no audible
+        # difference reported, because none of the changes were reaching the
+        # audio at all).
         eq = em_eq.StreamingEQ(SPEAKER_RATE, device.eq_bands, device.eq_loudness,
-                               limiter=em_limiter.for_stream(
-                                   SPEAKER_RATE, device.limiter_enabled,
-                                   device.limiter_threshold,
-                                   device.limiter_release),
-                               guard=em_mbc.for_stream(
-                                   SPEAKER_RATE, device.bass_guard_enabled,
-                                   device.bass_guard_db))
+                               limiter=em_limiter.Limiter(
+                                   SPEAKER_RATE,
+                                   threshold_db=device.limiter_threshold,
+                                   release_ms=device.limiter_release,
+                                   enabled=device.limiter_enabled),
+                               guard=em_mbc.BassGuard(
+                                   SPEAKER_RATE,
+                                   bass_guard_db=device.bass_guard_db,
+                                   enabled=device.bass_guard_enabled))
         start_pos = self._pos
         proc = None
         seg_start = loop.time()
@@ -600,6 +614,17 @@ class MediaSession:
             await self._push_state()
 
             while True:
+                # Config is pushed live (_apply_live_config), so re-read it
+                # per chunk. update() compares before it touches anything, so
+                # the steady-state cost is a tuple comparison ~23×/s.
+                eq.update(bands=device.eq_bands,
+                          loudness=device.eq_loudness,
+                          limiter_enabled=device.limiter_enabled,
+                          limiter_threshold=device.limiter_threshold,
+                          limiter_release=device.limiter_release,
+                          guard_enabled=device.bass_guard_enabled,
+                          guard_db=device.bass_guard_db)
+
                 try:
                     if pending is not None:
                         chunk, pending = pending, None

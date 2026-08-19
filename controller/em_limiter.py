@@ -110,17 +110,18 @@ class Limiter:
                  sample_rate: int,
                  threshold_db: float = DEFAULT_THRESHOLD_DB,
                  lookahead_ms: float = DEFAULT_LOOKAHEAD_MS,
-                 release_ms: float = DEFAULT_RELEASE_MS):
+                 release_ms: float = DEFAULT_RELEASE_MS,
+                 enabled: bool = True):
         self.sample_rate = int(sample_rate)
-        # Threshold above 0dBFS would ask the limiter to permit clipping,
-        # which is the one thing it exists to prevent.
-        self.threshold_db = float(min(threshold_db, 0.0))
-        self._thresh = _CEILING * (10.0 ** (self.threshold_db / 20.0))
+        # Bypassed rather than absent, so a stream can be toggled without
+        # dropping the instance — see set_params.
+        self.enabled = bool(enabled)
+        self.threshold_db = 0.0
+        self._thresh = _CEILING
 
         self.lookahead = max(1, int(self.sample_rate * lookahead_ms / 1000.0))
-        release_ms = max(1.0, float(release_ms))
-        # dB per sample the gain may rise.
-        self._slew = RELEASE_REFERENCE_DB / (release_ms / 1000.0) / self.sample_rate
+        self._slew = 0.0
+        self.set_params(threshold_db=threshold_db, release_ms=release_ms)
 
         # Carried state.
         #
@@ -139,6 +140,37 @@ class Limiter:
         self.max_reduction_db = 0.0
         self.clipped = 0
 
+    def set_params(self,
+                   threshold_db: float | None = None,
+                   release_ms: float | None = None,
+                   enabled: bool | None = None) -> None:
+        """
+        Change the limiter mid-stream, without touching carried state.
+
+        These are taste parameters tuned by ear in a real room, and the chain
+        used to be built once per stream — so hearing a change meant skipping
+        the track, which makes an A/B nearly impossible to judge. Only scalars
+        move here: `lookahead` is deliberately not settable, because it sizes
+        the held tail and changing it mid-stream would drop or duplicate the
+        samples sitting in it.
+
+        Bypass is a flag rather than a None instance for the same reason. The
+        gain state, the tail and the 5ms of latency all persist while
+        disabled, so toggling costs no click and no realignment.
+        """
+        if threshold_db is not None:
+            # Above 0dBFS would ask the limiter to permit clipping, which is
+            # the one thing it exists to prevent.
+            self.threshold_db = float(min(threshold_db, 0.0))
+            self._thresh = _CEILING * (10.0 ** (self.threshold_db / 20.0))
+        if release_ms is not None:
+            # dB per sample the gain may rise.
+            self._slew = (RELEASE_REFERENCE_DB
+                          / (max(1.0, float(release_ms)) / 1000.0)
+                          / self.sample_rate)
+        if enabled is not None:
+            self.enabled = bool(enabled)
+
     def process(self, samples: np.ndarray) -> np.ndarray:
         """
         Limit one chunk. Returns the same number of samples it was given.
@@ -155,6 +187,14 @@ class Limiter:
         # Prepend whatever the previous call held back, so the look-ahead
         # window spans the boundary.
         buf = np.concatenate([self._tail, x]) if self._tail.size else x
+
+        if not self.enabled:
+            # Bypassed: unity gain, but the tail bookkeeping below runs
+            # unchanged so the stream keeps its latency and its sample
+            # alignment. Dropping the delay instead would shift the audio by
+            # 5ms at the moment of the toggle, which is a click.
+            gain_db = np.zeros(buf.size, dtype=np.float64)
+            return self._emit(buf, gain_db)
 
         # 1. Look-ahead envelope.
         env = _running_max(np.abs(buf), self.lookahead)
@@ -181,6 +221,15 @@ class Limiter:
         gain_db = self._slew * n + np.minimum.accumulate(sheared)
         gain_db = np.minimum(gain_db, 0.0)
 
+        return self._emit(buf, gain_db)
+
+    def _emit(self, buf: np.ndarray, gain_db: np.ndarray) -> np.ndarray:
+        """
+        Apply the gain, hold back the look-ahead, and carry the state.
+
+        Shared by the limiting and bypassed paths so a toggle cannot change
+        the stream's framing or latency — only whether the gain is unity.
+        """
         out = buf * (10.0 ** (gain_db / 20.0))
 
         # 3. Emit everything except the final `lookahead` samples, which have

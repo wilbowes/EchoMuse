@@ -184,6 +184,10 @@ class StreamingEQ:
                  guard: "em_mbc.BassGuard | None" = None):
         self._limiter = limiter
         self._guard = guard
+        self._sample_rate = int(sample_rate)   # set_bands rebuilds against it
+        # Last values update() applied; None until it is first called, so the
+        # first call always lands rather than matching a coincidental default.
+        self._applied = None
         if bands is None:
             bands = DEFAULT_BANDS
         if len(bands) != NUM_BANDS:
@@ -193,6 +197,79 @@ class StreamingEQ:
         else:
             self._sos = build_sos(bands, sample_rate, loudness)
             self._zi  = np.zeros((self._sos.shape[0], 2), dtype=np.float64)
+
+    def update(self, *,
+               bands: list | None = None,
+               loudness: bool = False,
+               limiter_enabled: bool | None = None,
+               limiter_threshold: float | None = None,
+               limiter_release: float | None = None,
+               guard_enabled: bool | None = None,
+               guard_db: float | None = None) -> bool:
+        """
+        Re-apply the whole chain's settings mid-stream. Returns True if
+        anything moved.
+
+        Called per chunk by the music feed, so it compares before it acts:
+        the steady-state cost is one tuple comparison, and the processors are
+        only touched when a value actually changed. That matters because the
+        setters are cheap but rebuilding the EQ coefficients is not, and doing
+        it 23 times a second for no reason would be silly.
+
+        Everything here updates state IN PLACE. Nothing is reconstructed, so
+        there is no discontinuity in the filter states, the limiter's held
+        tail or the stream's latency — see the setters for why each of those
+        would otherwise be audible.
+        """
+        wanted = (tuple(bands) if bands is not None else None, loudness,
+                  limiter_enabled, limiter_threshold, limiter_release,
+                  guard_enabled, guard_db)
+        if wanted == self._applied:
+            return False
+
+        prev = self._applied
+        self._applied = wanted
+
+        # EQ only when the curve itself moved — the expensive branch.
+        if prev is None or (prev[0], prev[1]) != (wanted[0], wanted[1]):
+            self.set_bands(bands, loudness)
+
+        if self._limiter is not None:
+            self._limiter.set_params(threshold_db=limiter_threshold,
+                                     release_ms=limiter_release,
+                                     enabled=limiter_enabled)
+        if self._guard is not None:
+            self._guard.set_params(bass_guard_db=guard_db,
+                                   enabled=guard_enabled)
+        return True
+
+    def set_bands(self, bands: list | None, loudness: bool = False) -> None:
+        """
+        Change the EQ curve mid-stream, keeping the filter state.
+
+        The biquad state is carried across the coefficient change rather than
+        zeroed: the section count is fixed by NUM_BANDS, so the state array
+        still fits, and holding it means the filter continues from where the
+        audio actually is. Zeroing would produce a transient at the moment of
+        the change — precisely when someone is listening for the difference
+        the change made.
+
+        Going from flat to shaped allocates fresh (zero) state, which is
+        correct: there was no filter running to carry.
+        """
+        if bands is None:
+            bands = DEFAULT_BANDS
+        if len(bands) != NUM_BANDS:
+            bands = list(bands) + [0.0] * (NUM_BANDS - len(bands))
+
+        if not loudness and all(b == 0.0 for b in bands):
+            self._sos = None
+            return
+
+        sos = build_sos(bands, self._sample_rate, loudness)
+        if self._sos is None or self._zi.shape[0] != sos.shape[0]:
+            self._zi = np.zeros((sos.shape[0], 2), dtype=np.float64)
+        self._sos = sos
 
     def process(self, pcm: bytes) -> bytes:
         if len(pcm) < 2 or (self._sos is None and self._limiter is None
