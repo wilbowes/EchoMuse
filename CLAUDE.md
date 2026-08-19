@@ -50,6 +50,37 @@ keep `pkg/led`, `pkg/mic`, `pkg/speaker` and `pkg/buttons` honest as
 interfaces, and treat each Android call site as something to isolate. Nothing
 here commits the project to shipping a distro.
 
+## Writing to people: bottom line first
+
+Anything a **person** reads leads with the answer and stays short — PR
+comments, issue replies, review feedback, release notes. These go out on the
+project's behalf to someone who did not sit through the reasoning, and Wil
+sends many of them without following the internals: a reply he has to decode
+before he can send it has failed, however accurate it is.
+
+- **The first line answers it** — the verdict, the decision, or the ask.
+  Everything after is support the reader is free to skip.
+- **Three points, maximum.** Evidence is the *number*, not the derivation:
+  "4.6–7.1% packet loss" rather than a paragraph on how it was measured.
+- **Match the recipient.** A contributor who sent working code gets
+  specifics; a user with a dead device gets what to do next; a passing
+  question gets one line.
+- **Cut** process narration, restating the person's own issue back at them,
+  and hedging.
+- **Offer detail rather than pre-empting it.** One line does that.
+
+**The exception is anything irreversible**, or anything asking someone to act
+on their own hardware — an OTA, rooting, a schema migration, a partition
+write. A truncated warning is how somebody bricks a device, so the caveat
+stays whatever it costs in length.
+
+**None of this applies to commit messages, this file, or code comments.**
+Those are the record rather than correspondence, and their density is
+load-bearing — the "why" written down here is what keeps a fixed bug fixed,
+and most of this file exists because something was learned the expensive way.
+Short where a person is being addressed; complete where something is being
+recorded.
+
 ## Building the device binary
 
 The Echo Dot runs FireOS 5 (API 22). Standard Go cross-compilation won't work — a custom Docker build environment is required.
