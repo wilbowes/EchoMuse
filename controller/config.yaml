@@ -55,6 +55,10 @@ options:
   server_ip: ""
   mdns_name: "echomuse"
   esphome_project_version: "2.0.0"
+  # Base for the per-device ESPHome satellite ports. Differs per release
+  # channel so the two add-ons hand out disjoint ranges — see em_db's
+  # ESPHOME_PORT_BASE and sync_channels.py, which rewrites this line.
+  esphome_port_base: 16001
   oww_model: "hey_jarvis"
   # Keep in step with em_db.DEFAULT_DEVICE_CONFIG["owwThreshold"] — a fresh
   # add-on install is precisely the case that default exists for, and
@@ -68,6 +72,7 @@ schema:
   server_ip: "str"
   mdns_name: "match(^[a-z0-9][a-z0-9-]{0,62}$)"
   esphome_project_version: "str"
+  esphome_port_base: "int(1024,60000)"
   oww_model: "str"
   oww_threshold: "float(0,1)"
   require_device_tls: "bool"

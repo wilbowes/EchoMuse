@@ -333,6 +333,25 @@ the other channel. Isolation is deliberate: `MIGRATIONS` is append-only and
 forward-only, so a shared database would let EA upgrade the schema out from
 under GA, permanently.
 
+**Because they share no storage, they must not share satellite PORT ranges
+either.** Each channel has its own port counter, so both would allocate from
+16001 and hand the same numbers to different devices — and Home Assistant keys
+an ESPHome config entry on host and port, so after a switch its stored entries
+reach whichever device now holds that number. Measured 2026-08-19: every
+satellite entity unavailable for a day, the wake word still firing and the ring
+still lighting, every turn dying in milliseconds because no HA pipeline was
+behind it. It reads as a wake-word regression, and it is not one.
+`EM_ESPHOME_PORT_BASE` (add-on option `esphome_port_base`) separates them — GA
+16001, EA 16101, BLE proxies derived at +`BLE_PORT_OFFSET` so 17001/17101
+follow with no second setting. It is applied as a **floor at allocation time,
+never a seed**: the counter only moves forwards, so a base can never land on a
+port a device already holds, a fresh database starts at the base, and an
+established one jumps at its next allocation leaving every fielded device
+alone. `sync_channels.py` owns EA's value as channel identity, and
+`test_channels.py` fails if the two ever collide or come within 100 ports.
+This bounds the damage of a switch; it does **not** make channels
+interchangeable — the CA and database still have to be copied.
+
 **`version.parse` does not order prereleases** — `2.20.0-ea.1` parses equal to
 `2.20.0`, so the dashboard's update notice cannot tell an EA build from the GA
 release of the same version. Advisory-only and Supervisor drives real updates,

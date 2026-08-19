@@ -57,13 +57,18 @@ PRESENTATION = ("translations/en.yaml", "icon.png", "logo.png",
 
 class Channel:
     def __init__(self, dirname: str, slug: str, name: str, panel_title: str,
-                 blurb: str, docs_banner: str):
+                 blurb: str, docs_banner: str, esphome_port_base: int):
         self.dirname = dirname
         self.slug = slug
         self.name = name
         self.panel_title = panel_title
         self.blurb = blurb
         self.docs_banner = docs_banner
+        # Part of the channel's identity, not a setting that drifted: the
+        # two channels must hand out satellite ports from disjoint ranges,
+        # or a Home Assistant config entry left over from one reaches a
+        # device belonging to the other. See em_db.ESPHOME_PORT_BASE.
+        self.esphome_port_base = esphome_port_base
 
     @property
     def path(self) -> Path:
@@ -84,6 +89,7 @@ EA = Channel(
         "devices will not connect until the stable add-on's /data is copied "
         "across."
     ),
+    esphome_port_base=16101,
     docs_banner=(
         "# EchoMuse — Early Access\n"
         "\n"
@@ -102,6 +108,15 @@ EA = Channel(
         "rather than from `require_device_tls` — so they will fail\n"
         "verification and will not connect at all until you copy the stable\n"
         "add-on's `/data` across, including all four files in `tls/`.\n"
+        "\n"
+        "**Satellite ports differ by channel**, and that is deliberate. The\n"
+        "stable add-on hands out 16001 upward for voice satellites and 17001\n"
+        "upward for Bluetooth proxies; this one uses 16101 and 17101. Home\n"
+        "Assistant keys an ESPHome device on its host and port, so shared\n"
+        "ranges would let an entry left over from the other channel connect\n"
+        "to a different device entirely — the wake word fires, the ring\n"
+        "lights, and the turn dies with no pipeline behind it. With the\n"
+        "ranges apart, a stale entry simply shows as unavailable.\n"
         "\n"
         "Report anything you find against the EchoMuse repository, saying\n"
         "which channel you are on.\n"
@@ -133,6 +148,13 @@ def _render(ga_config: str, ch: Channel, version: str) -> str:
         "# it only pulls the tag named by `version:`.\n"
         "#\n"
     )
+
+    # Matches the integer default in options:, never the quoted type in
+    # schema: — the two lines share a key name and only one of them is a
+    # channel's own value.
+    out = re.sub(r'^(\s*)esphome_port_base:\s*\d+\s*$',
+                 rf'\1esphome_port_base: {ch.esphome_port_base}',
+                 out, count=1, flags=re.M)
 
     out = re.sub(r'^name:.*$',        f'name: "{ch.name}"',        out, count=1, flags=re.M)
     out = re.sub(r'^slug:.*$',        f'slug: "{ch.slug}"',        out, count=1, flags=re.M)

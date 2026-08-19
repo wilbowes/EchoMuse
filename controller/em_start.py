@@ -31,6 +31,7 @@ OPTION_ENV_VARS = {
     "server_ip": "SERVER_IP",
     "mdns_name": "MDNS_NAME",
     "esphome_project_version": "ESPHOME_PROJECT_VERSION",
+    "esphome_port_base": "EM_ESPHOME_PORT_BASE",
     "oww_model": "OWW_MODEL",
     "oww_threshold": "OWW_THRESHOLD",
     "require_device_tls": "REQUIRE_DEVICE_TLS",

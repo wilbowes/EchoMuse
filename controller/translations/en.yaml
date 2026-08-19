@@ -24,6 +24,15 @@ configuration:
     description: >-
       Version reported to Home Assistant in the device's ESPHome info.
       Normally leave this at the default.
+  esphome_port_base:
+    name: ESPHome satellite base port
+    description: >-
+      First port used for the per-device Home Assistant satellites; Bluetooth
+      proxies use this plus 1000. The stable and Early Access add-ons default
+      to different bases so that a Home Assistant configuration entry left
+      over from one can never reach a device belonging to the other. Changing
+      this affects only devices added from now on — existing devices keep the
+      port they were given.
   oww_model:
     name: Wake word model
     description: >-

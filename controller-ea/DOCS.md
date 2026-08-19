@@ -16,6 +16,15 @@ rather than from `require_device_tls` — so they will fail
 verification and will not connect at all until you copy the stable
 add-on's `/data` across, including all four files in `tls/`.
 
+**Satellite ports differ by channel**, and that is deliberate. The
+stable add-on hands out 16001 upward for voice satellites and 17001
+upward for Bluetooth proxies; this one uses 16101 and 17101. Home
+Assistant keys an ESPHome device on its host and port, so shared
+ranges would let an entry left over from the other channel connect
+to a different device entirely — the wake word fires, the ring
+lights, and the turn dies with no pipeline behind it. With the
+ranges apart, a stale entry simply shows as unavailable.
+
 Report anything you find against the EchoMuse repository, saying
 which channel you are on.
 

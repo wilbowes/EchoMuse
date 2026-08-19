@@ -1403,13 +1403,72 @@ def get_esphome_port(device_id: str) -> Optional[int]:
     return row["esphome_api_port"]  # may be None (unassigned)
 
 
+# Ports are floored to this base at allocation time, so two controllers on one
+# network hand out satellite ports from disjoint ranges. In practice that means
+# the GA and Early Access add-ons: channels share no storage, so each has its
+# own database and its own counter, and both would otherwise start at 16001.
+#
+# Home Assistant keys an ESPHome config entry on host and port, so after a
+# channel switch its stored entries point into the other channel's range and it
+# reaches whichever device now holds that number. Measured 2026-08-19: every
+# satellite entity unavailable for a day, wake words still firing and turns
+# dying in milliseconds because no HA pipeline was behind them. Disjoint ranges
+# turn that into entries that visibly fail to connect — the same outcome the
+# never-reuse rule below already chooses for a deprovisioned device.
+#
+# A FLOOR rather than a seed, deliberately: the counter only ever moves
+# forwards, so a base can never land on a port already assigned. A fresh
+# database allocates its first port at the base; an established one jumps to it
+# at the next allocation and leaves every fielded device exactly where it is.
+#
+# BLE proxy ports follow at +BLE_PORT_OFFSET, so a base of 16101 gives 17101
+# without a second setting. The 100-port spacing between the channel defaults
+# is what bounds this: a channel would need 100 devices to reach the next one's
+# range.
+ESPHOME_PORT_BASE_DEFAULT = 16001
+
+
+def _esphome_port_base() -> int:
+    """
+    EM_ESPHOME_PORT_BASE, validated, falling back to the default on anything
+    unusable — a controller that refused to start over a stray port number
+    would be a worse outcome than one that allocates where it always did, and
+    the warning names it either way.
+    """
+    raw = os.environ.get("EM_ESPHOME_PORT_BASE", "").strip()
+    if not raw:
+        return ESPHOME_PORT_BASE_DEFAULT
+    try:
+        base = int(raw)
+    except ValueError:
+        log.warning(
+            f"[db] EM_ESPHOME_PORT_BASE={raw!r} is not a number — "
+            f"using {ESPHOME_PORT_BASE_DEFAULT}"
+        )
+        return ESPHOME_PORT_BASE_DEFAULT
+    # Room below for the privileged range and above for the BLE range plus a
+    # fleet's worth of climbing.
+    if not 1024 <= base <= 60000:
+        log.warning(
+            f"[db] EM_ESPHOME_PORT_BASE={base} is outside 1024-60000 — "
+            f"using {ESPHOME_PORT_BASE_DEFAULT}"
+        )
+        return ESPHOME_PORT_BASE_DEFAULT
+    return base
+
+
+# Read once at import, matching DEBUG: the value is consulted per allocation,
+# so re-reading it live would let an edit renumber a fleet mid-run.
+ESPHOME_PORT_BASE = _esphome_port_base()
+
+
 def assign_esphome_port(device_id: str) -> int:
     """
     Allocate and persist an ESPHome API port for this device.
 
     Takes the next available port from next_esphome_port in system_config,
-    increments the counter, persists both atomically, and returns the
-    allocated port.
+    floored to ESPHOME_PORT_BASE, increments the counter, persists both
+    atomically, and returns the allocated port.
 
     Port allocation is monotonically increasing and never reuses freed ports
     (see ESPHOME_SPEC.md §2.2 for the rationale — sparse range is intentional
@@ -1435,7 +1494,16 @@ def assign_esphome_port(device_id: str) -> int:
         next_row = conn.execute(
             "SELECT value FROM system_config WHERE key = 'next_esphome_port'"
         ).fetchone()
-        port = int(next_row["value"])
+        stored = int(next_row["value"])
+        port = max(stored, ESPHOME_PORT_BASE)
+        if port != stored:
+            # Says the base did something. An option that silently has no
+            # effect on an established install is the shape this project
+            # keeps paying for.
+            log.info(
+                f"[db] ESPHome port counter raised {stored} → {port} "
+                f"(EM_ESPHOME_PORT_BASE)"
+            )
 
         conn.execute(
             "UPDATE devices SET esphome_api_port = ? WHERE device_id = ?",
