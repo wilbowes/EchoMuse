@@ -1636,3 +1636,78 @@ def test_the_speaking_push_cannot_fail_a_speaker_stream():
         "a bare `except Exception` does not catch the CancelledError this sees "
         "during barge-in"
     )
+
+
+# ── The wake listener must not be able to die quietly ─────────────────────────
+#
+# Source-shape tests, because the suite cannot import em_controller — which is
+# precisely why this had no coverage. On 2026-08-20 a device went deaf with no
+# error line and stayed that way until the add-on was restarted: the listener
+# is started with create_task and catches only CancelledError, so any other
+# exception ends it, and the connection handler holding a reference means
+# asyncio never even logs "Task exception was never retrieved". The device
+# meanwhile scores wake words and reports them into a dead loop, so it looks
+# healthy from every side.
+
+def test_the_wake_listener_is_started_through_its_supervisor():
+    """
+    A bare create_task(wake_word_listener(...)) is the bug. The whole guard is
+    that the call site goes through the supervisor, and nothing else enforces
+    that.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    # The supervisor's OWN create_task is the one legitimate use, so check
+    # everywhere else. Splitting on the def keeps this honest if the helper
+    # moves.
+    start = src.index("def _supervise_wake_listener")
+    end = src.index("async def wake_word_listener")
+    outside = src[:start] + src[end:]
+    assert "create_task(wake_word_listener(" not in outside, (
+        "wake_word_listener started with a bare create_task outside its "
+        "supervisor — an exception would end it silently and nothing would "
+        "restart it. Use _supervise_wake_listener()."
+    )
+    assert "_supervise_wake_listener(device)" in outside
+
+
+def test_the_supervisor_attaches_a_done_callback():
+    """Without one the task ends and no code ever learns that it did."""
+    src = (CONTROLLER / "em_controller.py").read_text()
+    body = src[src.index("def _supervise_wake_listener"):]
+    body = body[:body.index("async def wake_word_listener")]
+    assert "add_done_callback" in body
+    # A restart that ignores cancellation would fight ordinary teardown.
+    assert "cancelled()" in body
+    # It must say so — silent recovery hides a recurring fault.
+    assert "log.error" in body
+
+
+def test_teardown_cancels_the_live_listener_not_a_stale_handle():
+    """
+    A supervised restart replaces the task object, so cancelling the variable
+    captured at connect time would leave the live listener running against a
+    closed connection.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    assert "(device.oww_task or oww_task).cancel()" in src
+
+
+def test_a_stuck_pause_can_be_recovered():
+    """
+    The other silent-deafness path. While oww_paused is set the wake loop
+    routes every frame away and the no-frames watchdog stands down, so a flag
+    that is never cleared is deafness with nothing to end it.
+
+    Recovery is gated on voice_lock being free as well as time, because a long
+    turn is legitimate — the spinner TTL alone runs to 135s — and only the
+    combination is impossible.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    assert "OWW_PAUSE_STUCK_S" in src
+    assert "oww_paused_since" in src
+    stuck = src[src.index("oww_paused stuck for") - 2000:
+                src.index("oww_paused stuck for") + 500]
+    assert "voice_lock.locked()" in stuck, (
+        "the stuck-pause recovery must check that no turn holds the lock — "
+        "time alone would cut a long but healthy turn"
+    )

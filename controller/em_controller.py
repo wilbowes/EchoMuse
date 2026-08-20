@@ -180,6 +180,12 @@ SPEAKER_PRIME_SECONDS = 1.1
 # per 5s is negligible next to the 256 kbps continuous mic upload each
 # device already holds open. Samples are aggregated in memory and flushed on
 # the existing ~30s stats report, so the DB cost is unchanged.
+# How long oww_paused may be set with NO turn holding voice_lock before
+# the wake loop treats it as stuck and clears it. Generous: a genuine
+# turn can run to the spinner's 135s TTL, and this only ever fires when
+# the lock is ALSO free, which no running turn allows.
+OWW_PAUSE_STUCK_S = 180.0
+
 PING_INTERVAL_SEC = 5.0
 # A sample at or above this counts as an excursion. 200ms is well clear of a
 # healthy hop (Office measures 264ms median for a whole audio round trip
@@ -272,6 +278,15 @@ class Device:
         self.mic_queue:   asyncio.Queue[bytes] = asyncio.Queue(maxsize=64)
         self.voice_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=256)
         self.oww_paused   = asyncio.Event()  # set during voice turn
+        # Monotonic instant oww_paused was set, or None. Only used to
+        # recognise a state that cannot be legitimate: paused, with no turn
+        # holding voice_lock, for longer than any turn can run. While paused
+        # the wake loop routes every frame to voice_queue and the no-frames
+        # watchdog deliberately stands down, so a stuck flag is SILENT
+        # deafness with nothing to end it.
+        self.oww_paused_since: float | None = None
+        # The live wake listener, replaced when supervision restarts it.
+        self.oww_task: asyncio.Task | None = None
 
         # Transient state — read by em_api._merge_device()
         self.speaking  = False
@@ -1797,6 +1812,7 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                 f"{_drained} stale frames cleared before routing flip"
             )
         device.oww_paused.clear()
+        device.oww_paused_since = None
         log.info(f"[{device.device_id}] oww_paused cleared")
         # Release the arbitration claim so another device answering a
         # genuinely new utterance isn't suppressed by a stale window.
@@ -1806,6 +1822,62 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
 
 
 # ─── Wake word listener ───────────────────────────────────────────────────────
+
+def _supervise_wake_listener(device: "Device") -> asyncio.Task:
+    """
+    Run wake_word_listener, and put it back if it ever falls over.
+
+    A bare create_task was the whole failure mode. wake_word_listener catches
+    only CancelledError, so ANY other exception ended the task — and because
+    the connection handler holds a reference, asyncio never garbage-collects
+    it and never logs "Task exception was never retrieved". The device then
+    scores wake words, reports them, and nothing consumes them: `pending_wake`
+    is read inside the dead loop. From the outside the device looks healthy
+    and simply stops answering, with not one line to say so. Only a device
+    reconnect or a controller restart brought it back.
+
+    This is the second time this shape has bitten. A NameError in this module
+    once killed wake listening fleet-wide, and the response was to fix the
+    NameError — which leaves the fragility. The most important loop in the
+    controller should not be able to die quietly.
+
+    Restarts are logged at ERROR and are NOT rate-limited into silence: a loop
+    that keeps dying is worth a noisy log, because the alternative is a device
+    that is deaf and says nothing. Cancellation is the ordinary teardown path
+    and is left alone.
+    """
+    def _restart(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return                      # ordinary teardown
+        exc = task.exception()
+        if exc is None:
+            # Returned normally, which the loop never does — it is `while
+            # True`. Still a death, so treat it as one.
+            log.error(
+                f"[{device.device_id}] wake word listener returned "
+                f"unexpectedly — restarting. The device was deaf until now."
+            )
+        else:
+            log.error(
+                f"[{device.device_id}] wake word listener crashed — "
+                f"restarting. The device was deaf until now.",
+                exc_info=exc,
+            )
+        if _devices.get(device.device_id) is not device:
+            # Gone, or replaced by a newer connection that has its own
+            # listener. Restarting here would leave an orphan scoring frames
+            # for a device this object no longer represents.
+            log.warning(
+                f"[{device.device_id}] not restarting the wake listener — "
+                f"the device is no longer connected"
+            )
+            return
+        device.oww_task = _supervise_wake_listener(device)
+
+    t = asyncio.create_task(wake_word_listener(device))
+    t.add_done_callback(_restart)
+    return t
+
 
 async def wake_word_listener(device: Device):
     loop = asyncio.get_event_loop()
@@ -1889,6 +1961,38 @@ async def wake_word_listener(device: Device):
                 # voice turn frames route to voice_queue instead, so an idle
                 # mic_queue is expected while oww_paused is set.
                 if device.oww_paused.is_set():
+                    # Normally correct: during a turn the frames go to
+                    # voice_queue, so an idle mic_queue means nothing.
+                    #
+                    # But this branch is also why a stuck flag is INVISIBLE.
+                    # While it is set the wake loop drops every frame and this
+                    # watchdog stands down, so the device is deaf with nothing
+                    # to notice or end it — no error, no warning, and the
+                    # device itself keeps scoring happily and reporting wakes
+                    # that nothing consumes (`pending_wake` is read further
+                    # down this same loop). Seen on 2026-08-20; only an add-on
+                    # restart brought it back.
+                    #
+                    # Paused with NO turn holding voice_lock is a state that
+                    # cannot be legitimate, so it is safe to end. The lock is
+                    # the discriminator rather than the elapsed time alone: a
+                    # long turn is fine, and the spinner TTL alone runs to
+                    # 135s. Only the combination is broken.
+                    stuck_for = (
+                        loop.time() - device.oww_paused_since
+                        if device.oww_paused_since is not None else 0.0
+                    )
+                    if (not device.voice_lock.locked()
+                            and stuck_for > OWW_PAUSE_STUCK_S):
+                        log.error(
+                            f"[{device.device_id}] oww_paused stuck for "
+                            f"{stuck_for:.0f}s with no voice turn holding the "
+                            f"lock — clearing. The device was deaf for that "
+                            f"long; this is a bug, please report it with the "
+                            f"lines above."
+                        )
+                        device.oww_paused.clear()
+                        device.oww_paused_since = None
                     continue
                 if device.muted:
                     # Hardware mute is device-sovereign: the device rejects
@@ -2154,6 +2258,7 @@ async def wake_word_listener(device: Device):
                             "noise_floor": round(device.noise_floor, 5),
                         }
                         device.oww_paused.set()
+                        device.oww_paused_since = asyncio.get_event_loop().time()
                         log.debug(
                             f"[{device.device_id}] OWW: oww_paused set, "
                             f"routing to voice_queue (no mic_stop/mic_start_turn)"
@@ -2184,6 +2289,7 @@ async def wake_word_listener(device: Device):
                             )
                         if won_by != device.device_id:
                             device.oww_paused.clear()
+                            device.oww_paused_since = None
                             device.last_wake = None
                             await device.beam_unlock()
                             ceded = 0
@@ -2331,6 +2437,7 @@ async def handle_button_event(device: Device, event: dict):
             log.info(f"[{device.device_id}] Dot button → voice turn")
             device.cancel_event.clear()
             device.oww_paused.set()
+            device.oww_paused_since = asyncio.get_event_loop().time()
             async def _button_voice_turn():
                 # Button is a deliberate act with no dead zone cost — nothing
                 # is being said at the moment of press, so stop/start RTT is
@@ -2657,7 +2764,8 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                 await device.send_control({"type": "ping", "id": seq})
 
         ping_task = asyncio.create_task(ping_loop())
-        oww_task  = asyncio.create_task(wake_word_listener(device))
+        oww_task  = _supervise_wake_listener(device)
+        device.oww_task = oww_task
 
         try:
             async for raw in ws:
@@ -3045,7 +3153,10 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
 
         finally:
             ping_task.cancel()
-            oww_task.cancel()
+            # device.oww_task, not the local: a supervised restart replaces
+            # the task object, and cancelling the stale one would leave the
+            # live listener running against a closed connection.
+            (device.oww_task or oww_task).cancel()
 
     except asyncio.TimeoutError:
         log.warning(f"[control] Registration timeout from {remote}")
