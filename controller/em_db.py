@@ -20,6 +20,7 @@ Usage:
     db.log_device(device_id, "info", "device", "Connected")
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -764,6 +765,37 @@ MIGRATIONS: list[str] = [
 
     UPDATE system_config SET value = '18' WHERE key = 'schema_version';
     """,
+
+    # ── v19 — the ESPHome identity becomes a stored fact ────────────────────
+    #
+    # Home Assistant keys its device registry on the mac_address an ESPHome
+    # device reports, so this value IS the device's identity in HA — nothing
+    # routes to it and no packet carries it. It was DERIVED from the serial
+    # on every use, which made identity a function, with two consequences.
+    #
+    # The derivation stripped non-hex characters from an alphanumeric serial,
+    # so devices from one batch differing only in the trailing characters
+    # collapsed to the same address and Home Assistant treated two Echoes as
+    # one, overwriting the first (#212, found by @lennart24 in #217):
+    #
+    #     G090LF1180440C9K -> 090F1180440C9 -> 90:F1:18:04:40:C9
+    #     G090LF1180440C9R -> 090F1180440C9 -> 90:F1:18:04:40:C9
+    #
+    # And because it was a function, changing it to fix that would have
+    # changed EVERY device's identity, orphaning every HA device row and the
+    # automations referencing their entities. Storing it is what separates
+    # the two: the fix reaches the devices that need it and nobody else.
+    #
+    # The seeding rule is the whole point of the fixup below. A device whose
+    # current address is unique keeps it, so nothing that works today moves.
+    # Within a colliding group the oldest keeps it — it is the one HA
+    # actually has registered — and the others take the new derivation, since
+    # they are the ones being overwritten right now and cannot get worse.
+    """
+    ALTER TABLE devices ADD COLUMN esphome_mac TEXT;
+
+    UPDATE system_config SET value = '19' WHERE key = 'schema_version';
+    """,
 ]
 
 # Post-migration fixups that need Python rather than SQL. Keyed by the schema
@@ -789,7 +821,45 @@ def _fixup_v11(conn) -> None:
             )
 
 
-_MIGRATION_FIXUPS = {11: _fixup_v11}
+def _fixup_v19(conn) -> None:
+    """
+    Seed devices.esphome_mac so no working device changes identity.
+
+    Preserving the CURRENT address wherever it is unique is the entire
+    reason this is a fixup rather than a plain DEFAULT: Home Assistant has
+    already registered these devices under those values, and a new one
+    orphans the device row along with every automation referencing its
+    entities.
+
+    Ordering inside a colliding group is by first_seen then device_id —
+    deterministic, so a re-run after a failed migration reaches the same
+    answer rather than reshuffling which device keeps its identity.
+    """
+    rows = conn.execute(
+        "SELECT device_id, first_seen FROM devices ORDER BY first_seen, device_id"
+    ).fetchall()
+
+    by_legacy: dict[str, list[str]] = {}
+    for row in rows:
+        by_legacy.setdefault(_legacy_serialno_to_mac(row["device_id"]), []).append(
+            row["device_id"])
+
+    for legacy, ids in by_legacy.items():
+        # First in the group keeps what HA already knows; the rest were being
+        # overwritten by it, so they take the new derivation.
+        conn.execute("UPDATE devices SET esphome_mac = ? WHERE device_id = ?",
+                     (legacy, ids[0]))
+        for device_id in ids[1:]:
+            conn.execute("UPDATE devices SET esphome_mac = ? WHERE device_id = ?",
+                         (esphome_mac_for(device_id), device_id))
+            log.warning(
+                f"[db] {device_id} shared an ESPHome identity with {ids[0]} "
+                f"({legacy}) — assigned {esphome_mac_for(device_id)}. Home "
+                f"Assistant will discover it as a new device; the other keeps "
+                f"its entities."
+            )
+
+_MIGRATION_FIXUPS = {11: _fixup_v11, 19: _fixup_v19}
 
 # ─── Connection management ────────────────────────────────────────────────────
 
@@ -967,6 +1037,81 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
     new_version = current + len(pending)
     log.info(f"Schema migrated to v{new_version}")
+
+
+# ─── ESPHome identity ─────────────────────────────────────────────────────────
+#
+# Home Assistant keys its device registry on the mac_address an ESPHome device
+# reports, so this value IS a device's identity in HA. It is not a network
+# address in any functional sense: nothing routes to it and no packet carries
+# it. We supply one because the protocol requires it — HA's config flow aborts
+# its zeroconf step with "mdns_missing_mac" when the TXT record lacks it, and
+# never produces a discovery card at all.
+#
+# The prefix is fixed and the rest is a hash of the serial.
+#
+# 0x02 in the first octet is the LOCALLY ADMINISTERED bit — the MAC equivalent
+# of a private address range, declaring "not from an IEEE OUI, do not expect
+# global uniqueness". Bit 0 is a different flag entirely (unicast vs
+# multicast) and must stay clear; a raw hash sets it half the time, producing
+# an address that is not a valid unicast MAC. Choosing a fixed prefix that
+# satisfies both by CONSTRUCTION is why this is not a mask applied to a hash:
+# there is no bit for a later change to forget. Docker (02:42) and QEMU
+# (52:54:00) do the same thing for the same reason.
+#
+# 32 bits of hash rather than 48 is the cost, and it is affordable because
+# uniqueness is only ever needed within ONE Home Assistant registry — a
+# household fleet. At 100 devices the collision probability is 1.15e-6.
+ESPHOME_MAC_PREFIX = (0x02, 0xEC)
+
+
+def esphome_mac_for(device_id: str) -> str:
+    """The address a device WOULD be given. Deterministic; see the note above."""
+    digest = hashlib.md5(device_id.encode("utf-8")).digest()
+    octets = list(ESPHOME_MAC_PREFIX) + list(digest[:4])
+    return ":".join(f"{b:02X}" for b in octets)
+
+
+def _legacy_serialno_to_mac(device_id: str) -> str:
+    """
+    The pre-v19 derivation, kept ONLY so the migration can recognise the
+    identity Home Assistant already holds for a device.
+
+    It stripped non-hex characters from an alphanumeric serial, which is the
+    bug: devices differing only in the discarded characters collide. Never
+    call this for a new device.
+    """
+    hex_chars = "".join(c for c in device_id if c in "0123456789ABCDEFabcdef")
+    hex_chars = hex_chars[-12:].upper().zfill(12)
+    return ":".join(hex_chars[i:i + 2] for i in range(0, 12, 2))
+
+
+def get_esphome_mac(device_id: str) -> str:
+    """
+    The stored ESPHome identity for a device, assigning one if it has none.
+
+    Assign-once, like get_esphome_port/assign_esphome_port beside it, and for
+    the same reason: Home Assistant keys its registry on the value, so it must
+    never change under a device that is already registered. A device row that
+    predates v19 was seeded by that migration; one created afterwards is
+    assigned here on first use.
+    """
+    row = _q1("SELECT esphome_mac FROM devices WHERE device_id = ?", (device_id,))
+    if row is not None and row["esphome_mac"]:
+        return row["esphome_mac"]
+    mac = esphome_mac_for(device_id)
+    with _tx() as conn:
+        # Only where it is still unset: a concurrent caller may have won, and
+        # the first answer must stand.
+        conn.execute(
+            "UPDATE devices SET esphome_mac = ? "
+            "WHERE device_id = ? AND (esphome_mac IS NULL OR esphome_mac = '')",
+            (mac, device_id),
+        )
+    row = _q1("SELECT esphome_mac FROM devices WHERE device_id = ?", (device_id,))
+    # No device row yet (servers can be built before registration) — the value
+    # is still correct and will be stored the first time there is a row.
+    return (row["esphome_mac"] if row and row["esphome_mac"] else mac)
 
 
 # ─── Device registry ──────────────────────────────────────────────────────────

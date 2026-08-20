@@ -1958,7 +1958,7 @@ async def _register_device_server(device_id: str, label: str | None) -> DeviceES
 
     # mDNS registration — _esphomelib._tcp, one per device port,
     # same pattern as the controller's own _emcontroller._tcp service.
-    mdns_info = _make_device_mdns_info(device_id, label, port)
+    mdns_info = _make_device_mdns_info(device_id, label, port, mac)
     try:
         await _azc.async_register_service(mdns_info, allow_name_change=True)
         server.set_mdns_info(mdns_info)
@@ -2528,7 +2528,8 @@ def _mdns_service_name(device_id: str) -> str:
     return f"echomuse-{device_id[-12:].lower()}"
 
 
-def _make_device_mdns_info(device_id: str, label: str, port: int) -> ServiceInfo:
+def _make_device_mdns_info(device_id: str, label: str, port: int,
+                           mac: str) -> ServiceInfo:
     svc_name = _mdns_service_name(device_id)
     return ServiceInfo(
         "_esphomelib._tcp.local.",
@@ -2543,9 +2544,10 @@ def _make_device_mdns_info(device_id: str, label: str, port: int) -> ServiceInfo
             # record lacks it — devices advertised without it never produce
             # a discovery card, silently. Real ESPHome firmware advertises
             # bare lowercase hex; HA normalises it (format_mac) and matches
-            # it against the mac the satellite reports in DeviceInfo (same
-            # _serialno_to_mac derivation, so they agree).
-            "mac": _serialno_to_mac(device_id).replace(":", "").lower(),
+            # it against the mac the satellite reports in DeviceInfo. Passed
+            # in rather than re-derived so the two cannot drift — they are
+            # required to agree, and nothing reports it if they stop.
+            "mac": mac.replace(":", "").lower(),
             "network": "ethwifi",
             "project_name": f"EchoMuse.{ESPHOME_DEVICE_MODEL}",
             "project_version": ESPHOME_PROJECT_VERSION,
@@ -2556,15 +2558,13 @@ def _make_device_mdns_info(device_id: str, label: str, port: int) -> ServiceInfo
 
 def _serialno_to_mac(device_id: str) -> str:
     """
-    Derive a stable MAC-format string from a device's ro.serialno.
+    The device's ESPHome identity — a stored fact now, not a derivation.
 
-    ro.serialno on the biscuit is a 12-char uppercase hex string
-    (e.g. G0K0XXXXXXXX). We take the last 12 hex chars (or pad/truncate)
-    to build a MAC-style address for ESPHome's mac_address field.
-    This is cosmetic only — ESPHome's protocol uses it as a stable
-    device identifier in HA's device registry.
+    Home Assistant keys its device registry on this value, so it must never
+    change under a device it has already registered. It used to be computed
+    from the serial on every call, which made identity a FUNCTION: fixing the
+    derivation would have moved every device at once. em_db.get_esphome_mac
+    assigns once and stores; see the note there for the prefix and why it is
+    fixed rather than masked.
     """
-    # Extract hex chars only, take last 12, pad with zeros if short
-    hex_chars = "".join(c for c in device_id if c in "0123456789ABCDEFabcdef")
-    hex_chars = hex_chars[-12:].upper().zfill(12)
-    return ":".join(hex_chars[i:i+2] for i in range(0, 12, 2))
+    return db.get_esphome_mac(device_id)

@@ -221,6 +221,38 @@ record; they appear as pending and are approved onto fresh config.
 
 The controller impersonates ESPHome voice satellites: one asyncio TCP listener per device on ports 16001+ (persisted in the device registry, never reused). Home Assistant's built-in ESPHome integration dials in and drives voice turns via Assist. Implemented in `em_esphome.py` on top of the protocol layer in `controller/esphome/` (`frame_protocol.py`, `satellite_server.py`, vendored aioesphomeapi protobufs in `esphome/vendor/`). Servers are created at startup for every approved device **and on demand** when a device approved after boot first connects (`_register_device_server` — idempotent on purpose: the startup loop and `device_connected()` race, first creation wins). HA naming: friendly name is `<label> Voice Assistant` (BT proxy: `<label> BT Proxy`); `project_name` carries `ESPHOME_DEVICE_MODEL` after the dot because HA displays that segment as the device Model, overriding DeviceInfo's `model` field. (A legacy `claracore` WebSocket backend was removed 2026-07-12 — ESPHome/HA is the only voice path.)
 
+**The ESPHome `mac_address` is a stored IDENTITY, not a derivation and not a
+network address.** Nothing routes to it and no packet carries it; HA keys its
+device registry on it, and its config flow aborts the zeroconf step with
+`mdns_missing_mac` when the TXT record lacks one — so a device advertised
+without it never produces a discovery card, silently. The mDNS TXT value and
+the `DeviceInfoResponse` value must agree, so the mac is resolved once and
+**passed** to `_make_device_mdns_info` rather than derived twice.
+
+It used to be computed from the serial on every call, and that was two bugs in
+one. The derivation stripped non-hex characters from an alphanumeric serial, so
+devices from one batch differing only in the trailing letters collapsed onto
+one address and HA treated two Echoes as one, overwriting the first (#212,
+found by @lennart24 in #217). And because identity was a *function*, fixing the
+derivation would have moved EVERY device, orphaning every HA device row and the
+automations referencing their entities.
+
+`db.get_esphome_mac` assigns once and stores (schema v19), the same
+assign-once discipline `get_esphome_port` already uses. The v19 fixup seeds
+existing rows with their **current** address wherever it is unique, so nothing
+that works today moves; within a colliding group the oldest keeps it and the
+rest take the new derivation, since they are the ones being overwritten now.
+
+The new derivation is a **fixed prefix** `02:EC` plus 4 bytes of md5, not a
+masked hash. `0x02` is the locally-administered bit — the private-address
+equivalent for MACs — and bit 0 is a *different* flag (unicast vs multicast)
+that must stay clear; a raw hash sets it half the time and produces something
+that is not a valid unicast address. A fixed prefix satisfies both by
+construction, so there is no bit for a later change to forget, which is what
+Docker (`02:42`) and QEMU (`52:54:00`) do. The cost is 32 bits of hash rather
+than 48, affordable because uniqueness is only ever needed within ONE HA
+registry — 1.15e-6 at 100 devices.
+
 **Entity names must NOT repeat the device label.** HA sets
 `_attr_has_entity_name = True` for every esphome entity and composes
 `<device name> <entity name>` itself, and our device name is already
