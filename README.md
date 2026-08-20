@@ -221,6 +221,21 @@ producing them.
 
 ---
 
+## Contributing
+
+Bug reports, fixes and hardware findings are all welcome — see
+[CONTRIBUTING.md](CONTRIBUTING.md). The most useful thing you can send is an
+issue with a support bundle attached (Dashboard → Support → Download bundle);
+it carries the logs, versions and metrics needed to diagnose something
+remotely, with transcripts, recordings and network names excluded.
+
+---
+
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
+
+EchoMuse vendors and links several third-party components, each keeping its own
+licence. They are inventoried in [NOTICE.md](NOTICE.md); note that the device
+binary links two BSD-3-Clause components, whose copyright notices that file
+carries on the binary's behalf.
