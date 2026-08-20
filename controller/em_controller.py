@@ -1216,9 +1216,15 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
     audio buffer has drained (or cancel_event fires), so the caller can
     safely restart the mic without acoustic feedback into the next turn.
     """
+    # Built here rather than inside _prepare_pcm so the stages survive the
+    # call and can be asked what they actually did — see em_eq.describe_*.
+    # One response is one buffer, so these are per-response instances and
+    # carry no state between turns.
+    _limiter = _limiter_for(device)
+    _guard   = _guard_for(device)
     log.info(
-        f"[{device.device_id}] EQ: bands={device.eq_bands} "
-        f"loudness={device.eq_loudness} limiter={device.limiter_enabled}"
+        f"[{device.device_id}] Output chain: "
+        f"{em_eq.describe_chain(device.eq_bands, device.eq_loudness, _limiter, _guard)}"
     )
     # EQ is a solid numpy crunch (hundreds of ms for a long response) — run
     # it off the event loop, which otherwise freezes every device's LED
@@ -1226,8 +1232,8 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
     # (observed as spinner stutter and console typing judder).
     def _prepare_pcm() -> bytes:
         return em_eq.apply(voice_response, SPEAKER_RATE, device.eq_bands,
-                           device.eq_loudness, limiter=_limiter_for(device),
-                           guard=_guard_for(device))
+                           device.eq_loudness, limiter=_limiter,
+                           guard=_guard)
 
     _t_eq0 = asyncio.get_event_loop().time()
     speaker_pcm = await asyncio.get_event_loop().run_in_executor(None, _prepare_pcm)
@@ -1236,7 +1242,8 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
     )
     log.info(
         f"[{device.device_id}] Streaming {len(speaker_pcm)} bytes "
-        f"({len(speaker_pcm)//SPEAKER_BYTES} periods)"
+        f"({len(speaker_pcm)//SPEAKER_BYTES} periods) — "
+        f"{em_eq.describe_activity(_limiter, _guard)}"
     )
     cancel_task    = asyncio.create_task(device.cancel_event.wait())
     device.playback_done.clear()

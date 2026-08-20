@@ -198,6 +198,16 @@ class StreamingEQ:
             self._sos = build_sos(bands, sample_rate, loudness)
             self._zi  = np.zeros((self._sos.shape[0], 2), dtype=np.float64)
 
+    @property
+    def limiter(self):
+        """The chain's limiter, for instrumentation. May be None."""
+        return self._limiter
+
+    @property
+    def guard(self):
+        """The chain's bass guard, for instrumentation. May be None."""
+        return self._guard
+
     def update(self, *,
                bands: list | None = None,
                loudness: bool = False,
@@ -298,3 +308,76 @@ class StreamingEQ:
         if not tail.size:
             return b""
         return np.clip(tail, -32768, 32767).astype(np.int16).tobytes()
+
+
+# ─── Chain instrumentation ────────────────────────────────────────────────
+#
+# Whether the output chain is doing anything has been unanswerable from
+# outside it, and that has now cost four listening tests. The stages
+# interact hard enough that "I hear no difference" is NOT evidence either
+# way: the bass guard is worth ~7.7dB of overall level at a modest EQ and
+# ~0dB under a heavy boost, because the limiter gives back exactly what the
+# guard takes away (measured 2026-08-20 — guard on/off at +12dB on all
+# eight bands is -0.17dB overall, and the whole difference moves into the
+# midrange instead). A listener judging by loudness is then judging the one
+# cue that has been cancelled out.
+#
+# So the settings and the WORK DONE are reported separately. Settings say
+# what reached the audio path, which is the config question; max reduction
+# says whether the law ever engaged, which is the audio question. A guard
+# that is enabled and reports 0.00dB of reduction is being fed content with
+# no bass in it — a different fault from one that never got the setting.
+#
+# Cost is two log lines per stream plus one per live change, so nothing runs
+# per frame. `max_reduction_db` is already maintained by both processors;
+# this only surfaces it.
+
+
+def _stage_state(stage, off="off") -> bool:
+    """
+    Whether a chain stage will actually process.
+
+    Both shapes mean disabled and both occur: the one-shot path (em_eq.apply)
+    takes None from for_stream(), while StreamingEQ always holds an instance
+    and carries an `enabled` flag so a stream can be toggled without dropping
+    filter state.
+    """
+    return stage is not None and getattr(stage, "enabled", True)
+
+
+def describe_chain(bands, loudness, limiter=None, guard=None) -> str:
+    """
+    One line naming what this stream's chain is SET to.
+
+    Emitted when a stream starts and again whenever a live update changes
+    something, so the log shows both the starting point and the fact that a
+    dashboard change reached the audio — which is the half that could not be
+    seen before.
+    """
+    shaped = bands and any(float(b) != 0.0 for b in bands)
+    eq = ("flat" if not shaped
+          else "/".join(f"{float(b):+g}" if float(b) else "0" for b in bands))
+    parts = [f"eq={eq}", f"speech_boost={'on' if loudness else 'off'}"]
+    parts.append(
+        f"guard={f'{guard.bass_guard_db:g}dB' if _stage_state(guard) else 'off'}"
+    )
+    parts.append(
+        f"limiter={f'{limiter.threshold_db:g}dB/{limiter.release_ms:g}ms'}"
+        if _stage_state(limiter) else "limiter=off"
+    )
+    return " ".join(parts)
+
+
+def describe_activity(limiter=None, guard=None) -> str:
+    """
+    One line naming what the chain actually DID, in dB of gain reduction.
+
+    `n/a` distinguishes a stage that was off from one that was on and never
+    engaged — the two look identical from a listening seat and want opposite
+    investigations.
+    """
+    def red(stage):
+        if not _stage_state(stage):
+            return "n/a"
+        return f"{stage.max_reduction_db:.2f}dB"
+    return f"guard_reduction={red(guard)} limiter_reduction={red(limiter)}"

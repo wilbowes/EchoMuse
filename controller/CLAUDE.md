@@ -499,6 +499,31 @@ midrange comes up **+2.6dB**. So tune with `bassGuardEnabled`, not with the
 depth; an A/B between −20 and −40 is below audibility and will read as a broken
 feature.
 
+**The guard and the limiter cancel each other's most obvious cue, so "I hear
+no difference" is not evidence.** The guard's effect on OVERALL LEVEL depends
+entirely on whether the limiter is working. Measured 2026-08-20, guard on
+versus off on the same bass-heavy signal:
+
+| EQ            | overall | sub (30–80Hz) | 1kHz  |
+|---------------|---------|---------------|-------|
+| flat          | 7.68dB  | 24.4dB        | 0.0dB |
+| +12 all bands | 0.17dB  | 20.4dB        | 4.2dB |
+
+Under a heavy boost the limiter gives back exactly what the guard takes, so
+the level difference goes to nothing and the whole change moves into the
+midrange. An A/B run at that operating point tests almost nothing, and reads
+as a dead control on a chain that is working perfectly — which is how an
+entire morning went on 2026-08-20, after three earlier listening tests had
+already failed for three unrelated real bugs. **A/B the guard at FLAT EQ**, or
+not at all.
+
+That is also why `em_eq.describe_chain` / `describe_activity` exist and are
+logged per stream. Settings answer "did the config reach the audio"; max
+reduction answers "did the law engage". `n/a` means bypassed and `0.00dB`
+means running but idle — identical from a listening seat, opposite
+investigations. `em_limiter` keeps `release_ms` purely so it can be reported;
+the gain law uses the derived slew.
+
 **Guard before limiter.** Limiting first spends gain reduction on bass that is
 about to be discarded, pulling the midrange down for no reason. Measured on a
 50Hz + 1kHz mix: with the guard on, the 50Hz component drops 17.2dB and the

@@ -118,6 +118,10 @@ class Limiter:
         self.enabled = bool(enabled)
         self.threshold_db = 0.0
         self._thresh = _CEILING
+        # Kept only so the setting can be reported. The gain law uses _slew;
+        # this is the number a user set, which the slew cannot be read back
+        # to without knowing the sample rate and the reference.
+        self.release_ms = float(release_ms)
 
         self.lookahead = max(1, int(self.sample_rate * lookahead_ms / 1000.0))
         self._slew = 0.0
@@ -164,6 +168,7 @@ class Limiter:
             self.threshold_db = float(min(threshold_db, 0.0))
             self._thresh = _CEILING * (10.0 ** (self.threshold_db / 20.0))
         if release_ms is not None:
+            self.release_ms = float(release_ms)
             # dB per sample the gain may rise.
             self._slew = (RELEASE_REFERENCE_DB
                           / (max(1.0, float(release_ms)) / 1000.0)

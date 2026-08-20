@@ -118,6 +118,13 @@ changes the overall level by **0.14dB** — below what anyone can hear. If you
 A/B two depths and cannot tell them apart, nothing is broken; there is
 genuinely almost nothing there to hear.
 
+**Set the equalizer flat before you compare.** With the bands boosted hard the
+limiter is already pulling the level down, so removing bass just lets it pull
+down less — the loudness ends up the same and the guard sounds like it is
+doing nothing. Measured: at a flat EQ, turning the guard on is a 7.7dB change
+in overall level; with every band at +12dB it is 0.2dB, and the difference
+shows up as 4dB more midrange instead. Both are the guard working.
+
 Turn the whole thing off if you would rather — nothing else depends on it.
 
 The frequency and the shape of the curve come from measurements of Amazon's
