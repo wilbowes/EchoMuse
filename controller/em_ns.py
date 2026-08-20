@@ -36,6 +36,29 @@ BLOCK_LEN   = 512   # FFT window (samples at 16kHz)
 BLOCK_SHIFT = 128   # hop
 STATE_SHAPE = (1, 2, 128, 2)
 
+# Overlap-add latency: the block written out at step i is the OLDEST hop of
+# the accumulator, so it corresponds to input samples BLOCK_LEN - BLOCK_SHIFT
+# earlier. Anything mixed against the output has to be delayed by this or it
+# comb-filters — which is worse than the artefact being fixed here.
+OLA_DELAY = BLOCK_LEN - BLOCK_SHIFT   # 384 samples, 24ms
+
+# Suppression floor. DTLN is free to output digital silence, and on this
+# fleet it did: 8-15% of samples at EXACT zero at a healthy signal level,
+# against 0.3% with NS off (#154), heard as speech chopping in and out (#137).
+# That is the gate cutting into speech rather than shaving noise, and it
+# costs more transcription accuracy than the residual noise ever did.
+#
+# The output is therefore a convex blend of the model's estimate and the
+# (delayed) input, so suppression stops at NS_FLOOR_DB instead of infinity.
+# Convex, not additive: where the model passes speech through untouched
+# (enhanced == x) the blend is also x, so speech level is unchanged and only
+# the fully-suppressed regions move. ASR gains flatten well before 20dB of
+# noise reduction, so the ceiling this imposes is not a cost worth paying
+# attention to; the holes were.
+NS_FLOOR_DB = -20.0
+_DRY = float(10.0 ** (NS_FLOOR_DB / 20.0))   # 0.1
+_WET = 1.0 - _DRY
+
 MODEL_DIR = os.environ.get(
     "NS_MODEL_DIR",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "dtln"),
@@ -117,8 +140,11 @@ class StreamingDenoiser:
     so in practice output length == input length).
     """
 
-    def __init__(self):
-        sessions = _get_sessions()
+    def __init__(self, sessions=None):
+        # sessions is injectable so the frame maths — the OLA alignment in
+        # particular — is testable without onnxruntime or the model files,
+        # neither of which exists outside the built image.
+        sessions = sessions if sessions is not None else _get_sessions()
         if sessions is None:
             raise RuntimeError(f"DTLN models not loadable from {MODEL_DIR}")
         self._m1, self._m2 = sessions
@@ -127,6 +153,16 @@ class StreamingDenoiser:
         self._in_buf   = np.zeros(BLOCK_LEN, dtype=np.float32)
         self._out_buf  = np.zeros(BLOCK_LEN, dtype=np.float32)
         self._pending  = b""
+        # Input history for the floor blend, delayed to match OLA_DELAY.
+        self._dry_buf  = np.zeros(OLA_DELAY, dtype=np.float32)
+        # How much of the output the gate took to exact zero, and how much of
+        # the INPUT was already there. Both, because one without the other
+        # cannot separate "the denoiser chewed the speech" from "the room was
+        # silent" — which is the whole question #137 asks, and neither number
+        # was recorded anywhere when it was asked.
+        self.out_zeros = 0
+        self.in_zeros  = 0
+        self.samples   = 0
 
     def process(self, payload: bytes) -> bytes:
         data = self._pending + payload
@@ -161,9 +197,34 @@ class StreamingDenoiser:
             self._out_buf = np.roll(self._out_buf, -BLOCK_SHIFT)
             self._out_buf[-BLOCK_SHIFT:] = 0.0
             self._out_buf += enhanced.reshape(-1)
-            out[i:i + BLOCK_SHIFT] = self._out_buf[:BLOCK_SHIFT]
 
-        return (np.clip(out, -1.0, 0.999969) * 32768.0).astype(np.int16).tobytes()
+            # Blend against the input as it stood OLA_DELAY samples ago —
+            # the sample the model's output actually corresponds to.
+            dry = self._dry_buf[:BLOCK_SHIFT]
+            self._dry_buf = np.concatenate(
+                (self._dry_buf[BLOCK_SHIFT:], x[i:i + BLOCK_SHIFT])
+            )
+            out[i:i + BLOCK_SHIFT] = _WET * self._out_buf[:BLOCK_SHIFT] + _DRY * dry
+
+        pcm = (np.clip(out, -1.0, 0.999969) * 32768.0).astype(np.int16)
+        self.samples   += pcm.size
+        self.out_zeros += int(np.count_nonzero(pcm == 0))
+        self.in_zeros  += int(np.count_nonzero(
+            (x * 32768.0).astype(np.int16) == 0
+        ))
+        return pcm.tobytes()
+
+    def zero_report(self) -> str:
+        """
+        One line for the turn log: what fraction of the stream the gate took
+        to digital silence, against what arrived that way. Cheap enough to
+        run every turn — two counts per 80ms frame.
+        """
+        if not self.samples:
+            return "no samples"
+        return (f"zeros out={100.0 * self.out_zeros / self.samples:.1f}% "
+                f"in={100.0 * self.in_zeros / self.samples:.1f}% "
+                f"floor={NS_FLOOR_DB:.0f}dB")
 
 
 def dump_debug_pair(tag: str, raw: bytes, denoised: bytes) -> None:

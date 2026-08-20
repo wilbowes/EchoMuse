@@ -1241,6 +1241,9 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     f"[{self._log_name}] nsAsr enabled but DTLN models missing "
                     f"({em_ns.MODEL_DIR}) — streaming raw audio"
                 )
+        # Survives `denoiser` being dropped on a mid-turn failure, so the
+        # turn still reports what the gate did before it gave up.
+        ns_reporter = denoiser
         ns_debug_raw = bytearray()
         ns_debug_out = bytearray()
 
@@ -1436,6 +1439,9 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                             f"[{self._log_name}] NS failed mid-turn ({e}) — "
                             f"raw audio for the rest of this turn"
                         )
+                        # Dropped from the loop, but the counters it collected
+                        # up to the failure still describe this turn.
+                        ns_reporter = denoiser
                         denoiser = None
                         payload = raw_payload
                     else:
@@ -1466,6 +1472,14 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     del pcm_buf[:AUDIO_CHUNK]
                     self._send_one(api_pb2.VoiceAssistantAudio(data=chunk))
         finally:
+            # What the gate actually did to this turn. Logged unconditionally
+            # when NS ran, because until now a denoiser chewing speech and a
+            # quiet room were indistinguishable from any log, on either side
+            # — which is why #137 spent nine days on two theories that a
+            # single number would have settled.
+            ns_reporter = denoiser if denoiser is not None else ns_reporter
+            if ns_reporter is not None:
+                log.info(f"[{self._log_name}] NS: {ns_reporter.zero_report()}")
             # Validation tooling: when NS_DEBUG_DIR is set, persist what
             # STT actually received next to what the mic actually sent.
             em_ns.dump_debug_pair(self._log_name, bytes(ns_debug_raw), bytes(ns_debug_out))
