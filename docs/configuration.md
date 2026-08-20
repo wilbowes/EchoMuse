@@ -95,55 +95,45 @@ little speaker is boomy and dull by default.
 An extra presence bump for spoken responses. Try it if responses sound
 muffled from across the room.
 
-### Bass guard
-Drops bass the speaker physically cannot produce.
+### Speaker protection
+Keeps bass the driver cannot deliver from muddying everything above it. Leave
+it on.
 
-It sounds backwards, and it is the biggest single improvement available for a
-speaker this small. Frequencies below about 115Hz still move the cone even
-though you cannot hear them, and that movement muddies everything above it —
-which is what people usually describe as sounding thin, boxy or "tin-can".
-Taking them away makes the middle clearer, and slightly *louder*, because the
-limiter no longer has to hold everything down to fit bass peaks you were never
-going to hear.
+It sounds backwards, and it is the right answer for a speaker this small.
+Frequencies below about 115Hz still move the cone even though you cannot hear
+them, and that movement smears the midrange — which is what people usually
+describe as thin, boxy or "tin-can". Removing them makes the middle clearer,
+and on loud material slightly *louder*, because the limiter no longer has to
+hold everything down to contain bass peaks you were never going to hear.
 
 Quiet passages keep their low end. Only loud content is affected, which is why
-this is a guard rather than a filter.
+it is a guard rather than a filter.
 
-**Depth** sets how far it pulls down, default **−30dB**.
+This one switch covers two stages: the bass guard described above, and a
+limiter that stops the equalizer distorting what it boosts. Turning any EQ
+band up can push the audio past the maximum the hardware can represent, and
+without a limiter that gets clipped — measured at nearly 5% of samples on an
+ordinary response with a modest bass boost, audible as harshness or crackle,
+and it only ever happened to people who touched the EQ to improve their sound.
 
-**Judge this by turning it off and on, not by moving the depth.** Almost all
-of the audible change happens in the first few dB: switching it on takes about
-5dB off the overall level and lifts the midrange, while going from −20 to −40
-changes the overall level by **0.14dB** — below what anyone can hear. If you
-A/B two depths and cannot tell them apart, nothing is broken; there is
-genuinely almost nothing there to hear.
+**It used to be five controls and now it is one, deliberately.** None of the
+five could be judged by ear. The two stages cancel out each other's most
+obvious effect — at a flat EQ, switching the guard on is a 7.7dB change in
+overall level, and with every band at +12dB it is 0.2dB, because the limiter
+simply gives back what the guard takes. The depth slider moved the overall
+level by 0.14dB across its entire range. Controls whose effect ranges from
+"large" to "nothing" depending on where the others sit are not a tuning
+surface; they are a way to conclude the feature is broken, which is what kept
+happening.
 
-**Set the equalizer flat before you compare.** With the bands boosted hard the
-limiter is already pulling the level down, so removing bass just lets it pull
-down less — the loudness ends up the same and the guard sounds like it is
-doing nothing. Measured: at a flat EQ, turning the guard on is a 7.7dB change
-in overall level; with every band at +12dB it is 0.2dB, and the difference
-shows up as 4dB more midrange instead. Both are the guard working.
+The individual values still exist and still apply — if you had tuned the
+ceiling, release or depth, your settings are unchanged. They are reachable
+through the API for anyone who wants them, just not on the dashboard.
 
-Turn the whole thing off if you would rather — nothing else depends on it.
-
-The frequency and the shape of the curve come from measurements of Amazon's
-own firmware on this same speaker, so they are not guesses. The default depth
-is gentler than Amazon's, because they pair theirs with an equalizer curve we
-have not measured.
-
-### Limiter
-Stops the equalizer distorting what it boosts, and should be left on.
-
-Turning any EQ band up can push the audio past the maximum the hardware can
-represent. Without a limiter that gets clipped — measured at nearly 5% of
-samples on an ordinary response with a modest bass boost — which is audible as
-harshness or crackle, and it only ever happened to people who had touched the
-EQ to make things sound better.
-
-**Ceiling** is the peak level the output is held below, default −1dB. **Release**
-is how quickly it recovers, default 150ms: shorter sounds louder, longer sounds
-smoother. Neither needs changing unless you want to.
+The crossover frequency and the shape of the curve come from measurements of
+Amazon's own firmware on this same speaker, so they are not guesses. Our
+default depth is gentler than Amazon's, because theirs sits in front of an
+equalizer curve we have not yet measured — see issue #247.
 
 ### Duck depth
 How far music drops while the assistant is talking over it. Music **keeps
@@ -293,20 +283,31 @@ near-misses climbing, move one step toward Eager. If it wakes up when nobody
 spoke, move toward Precise.
 
 ### Barge-in
-Lets the wake word **interrupt the assistant mid-turn** — say "Hey
-Rhasspy, stop" while it's reading you a paragraph (or still thinking
-about your last question) and it cuts off and listens. Off by default. **Turn on Echo cancel (AEC) first**: barge-in
-works by leaving the microphones live while the device speaks, and AEC is
-what stops it hearing itself. The **barge threshold** is the wake
-confidence required during playback — and counter-intuitively it should be
-much *lower* than the normal wake threshold (≈0.10 works well): the
-speaker is far louder at the microphones than you are, so your voice
-scores lower over playback than in a quiet room, while the device's own
-(echo-cancelled) voice barely scores at all (0.002–0.003 measured since
-v2.7.8). **0.05 is a good default** — you shouldn't need to raise your
-voice much. Raise it if responses ever cut themselves off. (During the
-silent *thinking* pause the normal wake sensitivity applies instead —
-nothing is playing, so the low barge threshold isn't needed there.)
+Lets the wake word **interrupt the assistant mid-turn** — say the wake word
+while it is reading you a paragraph (or still thinking about your last
+question) and it stops and listens. **Turn on Echo cancel (AEC) first**:
+barge-in works by leaving the microphones live while the device speaks, and
+AEC is what stops it hearing itself.
+
+The **barge threshold** is the wake confidence required during playback, and
+counter-intuitively it sits *lower* than the normal wake threshold. The
+speaker is far louder at the microphones than you are, so your voice scores
+lower over playback than it would in a quiet room — around 0.3 to 0.5
+measured, against 0.5 for an ordinary wake.
+
+**The default is 0.25, raised from 0.05.** The old value was chosen against
+short replies and it did not survive long ones: asking for a story, the
+assistant's own narration scored up to 0.18 and interrupted itself
+mid-sentence. Continuous speech simply offers more chances to briefly sound
+like a wake word. Two consecutive detections are now required as well, which
+is what makes a single stray frame harmless.
+
+If a response ever cuts itself off, raise this. If interrupting stops working,
+lower it — but check whether AEC is on first, since that is the more common
+cause.
+
+(During the silent *thinking* pause the normal wake sensitivity applies
+instead — nothing is playing, so the low threshold is not needed there.)
 
 **What happens after you interrupt.** The device stops talking and listens
 straight away — say the wake word and your new command in one breath and it
@@ -677,6 +678,7 @@ These are set once, on the server, and need a controller restart to change:
 | `DEVICE_APPROVAL` | `strict` (you approve every new device — recommended) or `auto`. |
 | `SERVER_TLS_PORT` | Encrypted device link (wss) port — default 8770, `0` disables. Devices switch to it automatically once they hold pushed credentials (wizard install, or the **Secure link** button on the device Status tab). |
 | `REQUIRE_DEVICE_TLS` | Set to `1` **only after every device shows "wss (TLS)"** on its Status tab — from then on the controller rejects unencrypted or tokenless device connections. |
+| `EM_EXTRA_CA_CERT` | Path to a PEM CA certificate to trust — only needed if Home Assistant is served over HTTPS with your own internal certificate authority. See below. |
 
 See `.env.example` for the complete list with comments.
 
@@ -691,6 +693,48 @@ link** button on its Status tab. A device with credentials connects
 encrypted from its next reconnect; the Status tab's **Link** row shows
 which mode each device is using. Once the whole fleet shows `wss (TLS)`,
 set `REQUIRE_DEVICE_TLS=1` to lock out unencrypted connections entirely.
+
+### Home Assistant behind a private certificate authority
+
+If Home Assistant is served over HTTPS with a certificate from your own
+internal CA, EchoMuse cannot fetch the spoken response and **every turn ends
+silently** — the controller starts normally, the Echo wakes, and no audio
+arrives. Nothing on screen explains it; the failure is a certificate
+verification error in the log.
+
+**Try this first, because it needs no certificate.** If Home Assistant itself
+still listens on plain HTTP and something in front of it (a reverse proxy,
+Nginx Proxy Manager, Cloudflare) handles TLS, set Home Assistant's **internal
+URL** to `http://<its-address>:8123`. Home Assistant builds the audio URL from
+that setting, so it becomes a plain local fetch and the problem disappears.
+EchoMuse is on your own network and the hop is local, so nothing is lost.
+
+**If Home Assistant itself is configured with `ssl_certificate`**, give
+EchoMuse the CA:
+
+- **Add-on** — put the CA certificate (PEM format) in Home Assistant's `ssl`
+  folder, then set the **Private CA certificate** option to
+  `/ssl/<filename>`. The add-on reads that folder read-only.
+- **Container** — mount the certificate and set `EM_EXTRA_CA_CERT` to its path
+  *inside* the container:
+
+  ```yaml
+  volumes:
+    - /path/to/internal-ca.crt:/certs/internal-ca.crt:ro
+  environment:
+    - EM_EXTRA_CA_CERT=/certs/internal-ca.crt
+  ```
+
+It must be a **PEM** file — the `-----BEGIN CERTIFICATE-----` kind. If yours is
+DER, convert it first:
+
+```bash
+openssl x509 -inform der -in ca.der -out ca.crt
+```
+
+If the file is missing, unreadable or not PEM, the controller **refuses to
+start and says which**, rather than starting and failing on every voice turn
+afterwards with an error nothing connects back to this setting.
 
 ## What leaves your network
 
