@@ -185,7 +185,8 @@ Controller satellite:
   → t_tts_fetched_ms, tts_bytes logged
   → EQ → bass guard → limiter at 48kHz (mono end-to-end — no resample,
     no stereo). Guard before limiter: limiting first spends reduction
-    on bass about to be discarded. See CLAUDE.md, "The output chain"
+    on bass about to be discarded. See controller/CLAUDE.md, "The output
+    chain"
   → mic_stop → device stream stops BEFORE playback starts (v2.6.5 —
     previously only in the post-turn finally, so the device processed
     63–65 frames of its own TTS echo per turn, contended the Wi-Fi radio
