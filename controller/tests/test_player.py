@@ -10,7 +10,7 @@ class FakeDevice:
         self.eq_bands = [0.0] * 8
         self.eq_loudness = False
         self.bass_guard_enabled = True
-        self.bass_guard_db = -20.0
+        self.bass_guard_db = -30.0
         self.limiter_enabled = True
         self.limiter_threshold = -1.0
         self.limiter_release = 150.0

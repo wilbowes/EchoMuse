@@ -109,7 +109,7 @@ going to hear.
 Quiet passages keep their low end. Only loud content is affected, which is why
 this is a guard rather than a filter.
 
-**Depth** sets how far it pulls down, default **−20dB**.
+**Depth** sets how far it pulls down, default **−30dB**.
 
 **Judge this by turning it off and on, not by moving the depth.** Almost all
 of the audible change happens in the first few dB: switching it on takes about

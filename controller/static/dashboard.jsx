@@ -5103,7 +5103,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             <div style={inputStyle}>
               <Slider label="Bass guard depth" disabled={!(config.bassGuardEnabled ?? true)}
                 sub="how far below 115 Hz is pulled down when it's loud"
-                value={config.bassGuardDb ?? -20} min={-40} max={0} step={1} unit="dB"
+                value={config.bassGuardDb ?? -30} min={-40} max={0} step={1} unit="dB"
                 onChange={v => set('bassGuardDb', v)}/>
             </div>
             <div style={inputStyle}>

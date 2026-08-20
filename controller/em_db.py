@@ -225,7 +225,7 @@ DEFAULT_DEVICE_CONFIG = {
     # Dynamic bass guard. Removes low-frequency content the driver cannot
     # deliver, which is what makes the midrange clean — see em_mbc.
     "bassGuardEnabled": True,
-    "bassGuardDb":      -20.0,
+    "bassGuardDb":      -30.0,
     "limiterEnabled":   True,
     "limiterThreshold": -1.0,
     "limiterRelease":   150,

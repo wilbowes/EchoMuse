@@ -66,10 +66,16 @@ BASS_RELEASE_MS   = 200.0
 #
 # We default SHALLOWER, deliberately: stock's -40 sits in front of stock's own
 # EQ, which we do not have and have not measured, so copying the depth without
-# the curve it was tuned against is not the same setting. A starting point for
-# a listening test, not a measurement — the status duckDb had before it was
-# tuned by ear in a real room.
-DEFAULT_BASS_GUARD_DB = -20.0
+# the curve it was tuned against is not the same setting.
+#
+# -30 rather than -20 after the first listening test (2026-08-20, drum and
+# bass on Test Device 01): it sits mid-range, so there is room to move in
+# BOTH directions without hitting an end stop. Note the choice is nearly
+# free either way — across the entire -40..0 range this moves the OVERALL
+# level 0.14dB, so no one will hear the default change. What is audible is
+# the guard being on at all (-5.0dB overall, -17.7dB at 50Hz), which is
+# `bassGuardEnabled`, not this. Tune with the toggle; this is headroom.
+DEFAULT_BASS_GUARD_DB = -30.0
 
 _FULL_SCALE = 32768.0
 _EPS = 1e-9

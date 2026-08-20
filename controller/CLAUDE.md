@@ -518,11 +518,13 @@ the obvious fix and the wrong one, since it costs the full boost in level.
 115Hz, ratio 20:1, threshold −50dB, floor −40dB, release 200ms. Stock's bands
 2–4 are deliberately not implemented — one gentle 2:1 law at −10dB repeated
 three times, which is broadband compression for loudness rather than
-protection. Our default depth is **−20dB rather than stock's −40dB**, because
+protection. Our default depth is **−30dB rather than stock's −40dB**, because
 stock's sits in front of stock's own EQ curve, which we have neither nor have
 measured; copying the depth without the curve it was tuned against is not the
-same setting. It is a starting point for a listening test, the status `duckDb`
-had before it was tuned by ear.
+same setting. It shipped at −20 and moved to −30 after the first listening
+test that heard the chain working (2026-08-20), on the grounds that mid-range
+leaves room to go either way — the depth is very nearly a free choice, since
+the whole range moves the overall level 0.14dB.
 
 **The crossover is Linkwitz-Riley, and the first attempt was not.** LR4's
 lowpass and highpass sum flat (measured: 0.0000dB deviation across 4096
