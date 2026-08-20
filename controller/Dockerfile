@@ -126,6 +126,7 @@ RUN EARCH="$(dpkg --print-architecture)" && case "$EARCH" in amd64) EPKG=linux-x
 # Database persisted via volume mount
 # docker run -v ~/EchoMuse/controller/data:/app/data ...
 # Set DB_PATH=/app/data/echomuse.db in environment
+COPY em_cacerts.py .
 COPY em_start.py .
 # em_start.py bridges /data/options.json (Home Assistant add-on config) into
 # the env vars em_controller.py already reads, then execs into it — a no-op

@@ -15,7 +15,10 @@ missing.
 
 import json
 import os
+import sys
 from pathlib import Path
+
+import em_cacerts
 
 OPTIONS_PATH = Path("/data/options.json")
 
@@ -37,6 +40,7 @@ OPTION_ENV_VARS = {
     "require_device_tls": "REQUIRE_DEVICE_TLS",
     "device_approval": "DEVICE_APPROVAL",
     "debug": "DEBUG",
+    "extra_ca_cert": "EM_EXTRA_CA_CERT",
 }
 
 if OPTIONS_PATH.is_file():
@@ -64,5 +68,23 @@ if OPTIONS_PATH.is_file():
         else:
             env_value = str(value)
         os.environ.setdefault(env_key, env_value)
+
+# Trust a private CA before starting, so BOTH TLS stacks see it — Python for
+# the TTS fetch and GnuTLS-linked ffmpeg for media URLs. Done here rather than
+# in em_controller because it is a property of the container, has to happen
+# before anything opens a connection, and needs the root privileges this
+# process still has.
+#
+# Failing hard is deliberate. The alternative is a controller that starts
+# cleanly and then dies on every voice turn with a certificate error nobody
+# connects back to this setting — the user set an option and it silently did
+# not take.
+_ca = os.environ.get("EM_EXTRA_CA_CERT", "").strip()
+if _ca:
+    try:
+        print(f"em_start: {em_cacerts.install(_ca)}", flush=True)
+    except em_cacerts.CATrustError as err:
+        print(f"em_start: EM_EXTRA_CA_CERT — {err}", flush=True)
+        sys.exit(1)
 
 os.execvp("python3", ["python3", "-u", "em_controller.py"])

@@ -50,6 +50,12 @@ environment:
   # Supervisor — fixed rather than a user option so the database can't be
   # pointed somewhere that doesn't survive a restart.
   DB_PATH: "/data/echomuse.db"
+# Read-only access to Home Assistant's /ssl folder, so a private CA
+# certificate can be pointed at with extra_ca_cert. Read-only by default,
+# which is all this needs — we copy the file, never write it.
+map:
+  - type: ssl
+
 options:
   server_host: "0.0.0.0"
   server_ip: ""
@@ -67,6 +73,10 @@ options:
   require_device_tls: false
   device_approval: "strict"
   debug: false
+  # Path to a PEM CA certificate to trust, for a Home Assistant served
+  # over HTTPS with a private CA. Put the file in Home Assistant's /ssl
+  # folder and give the path as /ssl/<filename>.
+  extra_ca_cert: ""
 schema:
   server_host: "str"
   server_ip: "str"
@@ -78,3 +88,4 @@ schema:
   require_device_tls: "bool"
   device_approval: "list(strict|auto)"
   debug: "bool"
+  extra_ca_cert: "str?"

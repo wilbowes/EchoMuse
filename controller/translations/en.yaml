@@ -60,3 +60,11 @@ configuration:
       Log protocol-level detail for devices and the Home Assistant
       connection. Verbose — turn it on to diagnose something, then off
       again.
+  extra_ca_cert:
+    name: Private CA certificate
+    description: >-
+      Only needed if Home Assistant is served over HTTPS using your own
+      internal certificate authority. Put the CA certificate (PEM format)
+      in Home Assistant's ssl folder and enter /ssl/<filename> here.
+      Without it, fetching the spoken response fails certificate
+      verification and turns end with no audio.
