@@ -53,6 +53,31 @@ _VAR_USE = re.compile(r"var\((--[a-z0-9-]+)\)")
 _VAR_DEF = re.compile(r"^\s*(--[a-z0-9-]+)\s*:", re.M)
 
 
+# Comments are stripped before tallying, because a GitHub issue reference is
+# not a colour: `#235` matches the 3-digit hex form exactly, so citing an
+# issue beside a component pushed its tally up and failed the ratchet. Left
+# alone that trains people out of citing issues in this file, which is the
+# opposite of what the project wants.
+#
+# Filtering by CONTENT does not work — the obvious "require a letter" rule
+# lets `#286040` through, a real colour that happens to be all digits, and a
+# ratchet with a false negative is worse than one with a false positive.
+# Context is the reliable discriminator: colours live in code, issue numbers
+# live in prose.
+#
+# Line comments are matched only when `//` is not preceded by a colon, so a
+# URL inside a string is not mistaken for the start of a comment.
+_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
+_LINE_COMMENT = re.compile(r"(?<!:)//[^\n]*")
+
+
+def _strip_comments(text: str) -> str:
+    """Blank out comments, preserving line numbering so owners still resolve."""
+    def blank(m):
+        return "".join(c if c == "\n" else " " for c in m.group(0))
+    return _LINE_COMMENT.sub(blank, _BLOCK_COMMENT.sub(blank, text))
+
+
 def _owner_map(text: str):
     comps = [
         (i, m.group(1))
@@ -77,7 +102,7 @@ def scan() -> dict[str, int]:
     text = JSX.read_text()
     owner = _owner_map(text)
     tally: Counter = Counter()
-    for i, line in enumerate(text.split("\n"), 1):
+    for i, line in enumerate(_strip_comments(text).split("\n"), 1):
         who = owner(i)
         if who in EXEMPT:
             continue

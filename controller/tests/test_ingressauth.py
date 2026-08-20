@@ -111,37 +111,63 @@ def test_whitespace_is_stripped_from_identity_fields():
 def test_first_home_assistant_user_becomes_admin():
     # Mirrors the standalone container, where whoever holds the bootstrap
     # token becomes the owner. This is what removes the bootstrap step.
-    assert ia.role_for(existing_users=0, configured_default=None) == "admin"
+    assert ia.role_for(existing_ha_admins=0, configured_default=None) == "admin"
 
 
 def test_first_user_is_admin_regardless_of_the_configured_default():
-    assert ia.role_for(existing_users=0, configured_default="readonly") == "admin"
+    assert ia.role_for(
+        existing_ha_admins=0, configured_default="readonly") == "admin"
 
 
 def test_later_users_are_readonly():
     # HA's ingress view does not gate on admin (requires_auth=False;
     # panel_admin only hides the sidebar entry), so reaching the dashboard is
     # not evidence of being trusted with a root shell to every device.
-    assert ia.role_for(existing_users=1, configured_default=None) == "readonly"
+    assert ia.role_for(
+        existing_ha_admins=1, configured_default=None) == "readonly"
 
 
+def test_a_local_admin_does_not_deny_admin_to_the_first_ha_user():
+    """
+    #235, and the whole reason this counts HA admins rather than user rows.
+
+    Local password accounts cannot be signed into under ingress at all, so a
+    local admin is an admin nobody can use. Counting it made every Home
+    Assistant user read-only forever, reachable by the ordinary documented
+    act of copying a container's /data across when moving to the add-on.
+
+    The caller passes ha_admin_count(), so a database full of local users
+    still presents zero here.
+    """
+    assert ia.role_for(existing_ha_admins=0, configured_default=None) == "admin"
+    assert ia.role_for(
+        existing_ha_admins=0, configured_default="readonly") == "admin"
 
 
-
+def test_a_controller_with_no_reachable_admin_can_recover():
+    """
+    If every HA admin is demoted or deleted, the next new HA user becomes
+    admin. That is the recovery path working, not a hole: a controller nobody
+    can administer is the broken state this exists to escape, and it grants
+    exactly what a fresh install already grants the first person through.
+    """
+    assert ia.role_for(existing_ha_admins=0, configured_default=None) == "admin"
 
 
 def test_an_operator_can_opt_into_auto_admin():
-    assert ia.role_for(existing_users=3, configured_default="admin") == "admin"
+    assert ia.role_for(
+        existing_ha_admins=3, configured_default="admin") == "admin"
 
 
 def test_an_unrecognised_configured_role_falls_back_to_readonly():
     # A typo in a config row must never be the thing that grants admin.
     for bad in ("Admin", "administrator", "root", "", "   ", "None"):
-        assert ia.role_for(existing_users=1, configured_default=bad) == "readonly"
+        assert ia.role_for(
+            existing_ha_admins=1, configured_default=bad) == "readonly"
 
 
 def test_role_for_only_ever_returns_a_known_role():
     for n in (0, 1, 99):
         for d in (None, "admin", "readonly", "nonsense"):
             assert ia.role_for(
-                existing_users=n, configured_default=d) in ia.VALID_ROLES
+                existing_ha_admins=n, configured_default=d) in ia.VALID_ROLES

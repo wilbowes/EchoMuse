@@ -5813,6 +5813,32 @@ function App() {
   // Restore token on mount
   useEffect(() => { if (token) API.token = token; }, []);
 
+  // Reconcile the cached role against the server's.
+  //
+  // `role` seeds from localStorage, written once at sign-in, and nothing used
+  // to re-read it — so a role that changed server-side never reached the UI.
+  // That is not an edge case: it is what every PATCH /api/users/{id}
+  // promotion looks like to the promoted person, who stays read-only until
+  // they happen to sign out. Under ingress there is deliberately no Sign out
+  // at all, so the stale value had nothing to clear it and correcting the
+  // database by hand still left the panel read-only (#235).
+  //
+  // The symptom is precise and confusing: the SERVER accepts the writes, so
+  // saving config works, while the UI hides every admin-only control. It
+  // reads as half-broken rather than as stale state.
+  //
+  // /api/auth/me is the authority and it is already there. A failure is
+  // deliberately ignored — the periodic loads below surface a dead session,
+  // and a transient blip must not silently demote a working dashboard.
+  useEffect(() => {
+    if (!token) return;
+    API.get('/api/auth/me').then(me => {
+      if (!me || !me.role || me.role === role) return;
+      setRole(me.role);
+      localStorage.setItem('em_role', me.role);
+    }).catch(() => {});
+  }, [token]);
+
   // Load initial data
   useEffect(() => {
     if (!token) return;

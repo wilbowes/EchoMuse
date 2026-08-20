@@ -166,9 +166,12 @@ async def login_via_ingress(identity) -> tuple[str, str]:
         None, db.get_user_by_ha_id, identity.user_id)
 
     if user is None:
-        existing = await loop.run_in_executor(None, db.user_count)
+        # Reachable admins, not rows: a local password account cannot be
+        # signed into under ingress, so counting it denied admin to every
+        # Home Assistant user with no way back (#235).
+        existing = await loop.run_in_executor(None, db.ha_admin_count)
         role = em_ingressauth.role_for(
-            existing_users=existing,
+            existing_ha_admins=existing,
             configured_default=db.get_config("ingress_default_role", "readonly"),
         )
         user_id = await loop.run_in_executor(

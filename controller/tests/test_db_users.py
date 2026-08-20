@@ -42,3 +42,61 @@ def test_ha_user_found_by_ha_id(fresh_db):
 
 def test_unknown_ha_id_returns_none(fresh_db):
     assert db.get_user_by_ha_id("no-such-id") is None
+
+
+# ── Reachable admins (#235) ───────────────────────────────────────────────────
+#
+# The bug that stranded a live add-on was a COUNT of the wrong thing: user
+# rows rather than admins who can actually sign in through ingress. These run
+# against a real database because the distinction is a SQL predicate, and the
+# pure-function tests in test_ingressauth.py cannot see it.
+
+
+def test_a_local_admin_is_not_a_reachable_admin(fresh_db):
+    """
+    The exact #235 shape. A local password admin cannot be signed into under
+    ingress — the landing page authenticates through ingress before rendering
+    any form — so it must not count, or the first Home Assistant user is
+    created read-only and there is no way back.
+    """
+    db.create_user("admin", "$2b$dummy", "admin")
+    assert db.user_count() == 1
+    assert db.ha_admin_count() == 0
+
+
+def test_an_ha_admin_counts(fresh_db):
+    db.create_ha_user("ha-abc123", "Wil", "admin")
+    assert db.ha_admin_count() == 1
+
+
+def test_a_readonly_ha_user_is_not_an_admin(fresh_db):
+    """Reachable is not enough — they have to be able to administer."""
+    db.create_ha_user("ha-readonly", "Guest", "readonly")
+    assert db.ha_admin_count() == 0
+
+
+def test_the_migrator_case_end_to_end(fresh_db):
+    """
+    Carrying a container's /data across is what docs/migrate-to-addon.md
+    tells people to do so their devices keep working, and it is what made
+    every Home Assistant user read-only forever.
+    """
+    db.create_user("admin", "$2b$dummy", "admin")       # from the container
+    db.create_user("family", "$2b$dummy", "readonly")
+    assert db.user_count() == 2
+    assert db.ha_admin_count() == 0                      # nobody can get in
+
+    import em_ingressauth
+    assert em_ingressauth.role_for(
+        existing_ha_admins=db.ha_admin_count(),
+        configured_default="readonly",
+    ) == "admin"
+
+    # ...and the SECOND Home Assistant user is still read-only, which is the
+    # property the fix must not trade away.
+    db.create_ha_user("ha-first", "Wil", "admin")
+    assert db.ha_admin_count() == 1
+    assert em_ingressauth.role_for(
+        existing_ha_admins=db.ha_admin_count(),
+        configured_default=None,
+    ) == "readonly"

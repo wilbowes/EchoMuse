@@ -46,19 +46,37 @@ class IngressIdentity(NamedTuple):
 VALID_ROLES = ("admin", "readonly")
 
 
-def role_for(*, existing_users: int, configured_default: Optional[str]) -> str:
+def role_for(*, existing_ha_admins: int, configured_default: Optional[str]) -> str:
     """
     The role a newly-seen Home Assistant user is given.
 
-    The first user through the door is admin. That mirrors the standalone
-    container, where whoever holds the bootstrap token becomes the owner, and
-    it is what removes the bootstrap step under the add-on.
+    Admin when nobody can already administer this controller THROUGH INGRESS;
+    read-only otherwise.
 
-    Everyone after that is read-only. Home Assistant's ingress view sets
-    requires_auth=False and `panel_admin` only hides the sidebar entry, so
-    reaching this dashboard is NOT evidence of being trusted with a root
-    shell to every device. Promotion is recoverable (PATCH /api/users/{id});
-    the reverse mistake is not recoverable by the person who suffers it.
+    The question this asks is "is there already someone who can administer
+    this?", and until 2026-08-20 it asked "are there any user rows?" instead.
+    Those differ in exactly one case, and it is a case our own migration guide
+    walks people into (#235): local password accounts are UNREACHABLE under
+    the add-on — the landing page authenticates through ingress before it
+    renders any form, and there is deliberately no Sign out — so a local
+    admin counted as a user while being an admin nobody could use. Copy a
+    container's /data across, as docs/migrate-to-addon.md tells you to so
+    your devices keep working, and every Home Assistant user was read-only
+    forever, recoverable only by hand-editing the database.
+
+    So this is a corrected count, NOT a loosened rule. The property worth
+    protecting is unchanged: the second person through the door is read-only,
+    because Home Assistant's ingress view sets requires_auth=False and
+    `panel_admin` only hides the sidebar entry, so reaching this dashboard is
+    NOT evidence of being trusted with a root shell to every device.
+    Promotion is recoverable (PATCH /api/users/{id}); the reverse mistake is
+    not recoverable by the person who suffers it.
+
+    A consequence worth stating: if every HA admin is demoted or deleted, the
+    next new HA user becomes admin. That is the recovery path working rather
+    than a hole — a controller with no reachable admin is the broken state
+    this exists to escape, and it is exactly what a fresh install already
+    grants the first person through.
 
     Roles are deliberately NOT mirrored from Home Assistant. Supervisor
     forwards no admin flag, so asking would mean taking `auth_api` — which
@@ -68,7 +86,7 @@ def role_for(*, existing_users: int, configured_default: Optional[str]) -> str:
     An unrecognised configured value falls back to read-only — a typo in a
     config row must never be the thing that grants admin.
     """
-    if existing_users == 0:
+    if existing_ha_admins == 0:
         return "admin"
     value = (configured_default or "").strip()
     return value if value in VALID_ROLES else "readonly"

@@ -2257,6 +2257,28 @@ def user_count() -> int:
     return row["n"] if row else 0
 
 
+def ha_admin_count() -> int:
+    """
+    Admins who can actually sign in through Home Assistant ingress.
+
+    Local password accounts are UNREACHABLE under the add-on — the landing
+    page authenticates through ingress before rendering any form, and there
+    is deliberately no Sign out — so a local admin is an admin nobody can
+    use. Counting rows instead of reachable admins is what stranded #235:
+    a local admin created first made every Home Assistant user read-only,
+    permanently, with hand-editing the database as the only way back.
+
+    Keyed on ha_user_id rather than on the password sentinel, because the
+    sentinel is a detail of how HA rows are stored and this is a question
+    about how someone gets in.
+    """
+    row = _q1(
+        "SELECT COUNT(*) AS n FROM users "
+        "WHERE ha_user_id IS NOT NULL AND role = 'admin'"
+    )
+    return row["n"] if row else 0
+
+
 # ─── Sessions ─────────────────────────────────────────────────────────────────
 
 def create_session(token: str, user_id: int, expiry_days: int = 30) -> None:
