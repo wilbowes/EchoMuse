@@ -186,6 +186,20 @@ SPEAKER_PRIME_SECONDS = 1.1
 # the lock is ALSO free, which no running turn allows.
 OWW_PAUSE_STUCK_S = 180.0
 
+# Restarting the wake listener must never become a hot loop. A listener that
+# raises IMMEDIATELY on start would otherwise be recreated from its own done
+# callback as fast as the event loop can run it, which starves everything
+# else: control-plane pings stop, and the device drops the connection on its
+# own 10s ping timeout. Measured on 2026-08-20 as a device that disconnected
+# and reconnected on every barge-in — the supervision turned a silent death
+# into a visible one, and then into an outage.
+WAKE_RESTART_BACKOFF_S     = 1.0    # first retry
+WAKE_RESTART_MAX_BACKOFF_S = 60.0   # ceiling; never gives up entirely
+# Ran at least this long before dying = a fresh incident, not a loop. Without
+# it an occasional fault would inherit the backoff of an unrelated one from
+# hours earlier and take a minute to recover from something momentary.
+WAKE_RESTART_HEALTHY_S     = 60.0
+
 PING_INTERVAL_SEC = 5.0
 # A sample at or above this counts as an excursion. 200ms is well clear of a
 # healthy hop (Office measures 264ms median for a whole audio round trip
@@ -474,6 +488,16 @@ class Device:
         # playback_send_ms, which only times writing into the socket and
         # completes almost instantly however slow the link is.
         self.playback_send_t0: float | None = None
+        # Set on a COMPLETED playback and read when the device's
+        # playback_stats arrives. They lived after drain_rtt()'s `return` for
+        # months, so they were never initialised and only existed once a
+        # successful playback had assigned them. A barge-in cancel skips that
+        # assignment, so the next playback_stats raised AttributeError in the
+        # control handler and took the whole connection down with it —
+        # measured 2026-08-20 as a device disconnecting on every barge-in.
+        # -1 reads as "not measured", which is what the DB layer expects.
+        self.playback_send_ms: int = -1
+        self.playback_eq_ms:   int = -1
         # Set when the device reports playback_stats for the stream being
         # played. This is the authoritative "the audio has finished" signal
         # — the device emits it once its audio channel has drained after
@@ -556,8 +580,6 @@ class Device:
         self.rtt_excursions = self.rtt_excursions_idle = 0
         self.rtt_samples_idle = 0
         return out
-        self.playback_send_ms: int = -1
-        self.playback_eq_ms:   int = -1
 
     async def send_control(self, msg: dict):
         try:
@@ -1823,7 +1845,7 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
 
 # ─── Wake word listener ───────────────────────────────────────────────────────
 
-def _supervise_wake_listener(device: "Device") -> asyncio.Task:
+def _supervise_wake_listener(device: "Device", failures: int = 0) -> asyncio.Task:
     """
     Run wake_word_listener, and put it back if it ever falls over.
 
@@ -1849,18 +1871,20 @@ def _supervise_wake_listener(device: "Device") -> asyncio.Task:
     def _restart(task: asyncio.Task) -> None:
         if task.cancelled():
             return                      # ordinary teardown
+        ran_for = asyncio.get_event_loop().time() - started
         exc = task.exception()
         if exc is None:
             # Returned normally, which the loop never does — it is `while
             # True`. Still a death, so treat it as one.
             log.error(
                 f"[{device.device_id}] wake word listener returned "
-                f"unexpectedly — restarting. The device was deaf until now."
+                f"unexpectedly after {ran_for:.0f}s — restarting. The device "
+                f"was deaf until now."
             )
         else:
             log.error(
-                f"[{device.device_id}] wake word listener crashed — "
-                f"restarting. The device was deaf until now.",
+                f"[{device.device_id}] wake word listener crashed after "
+                f"{ran_for:.0f}s — restarting. The device was deaf until now.",
                 exc_info=exc,
             )
         if _devices.get(device.device_id) is not device:
@@ -1872,8 +1896,29 @@ def _supervise_wake_listener(device: "Device") -> asyncio.Task:
                 f"the device is no longer connected"
             )
             return
-        device.oww_task = _supervise_wake_listener(device)
 
+        # A listener that ran a while and then fell over is a fresh incident;
+        # one that dies instantly, every time, is a loop. Only the second
+        # needs slowing down, and conflating them would make an occasional
+        # fault take progressively longer to recover from.
+        n = 1 if ran_for >= WAKE_RESTART_HEALTHY_S else failures + 1
+        delay = min(WAKE_RESTART_BACKOFF_S * (2 ** (n - 1)),
+                    WAKE_RESTART_MAX_BACKOFF_S)
+
+        async def _later() -> None:
+            await asyncio.sleep(delay)
+            if _devices.get(device.device_id) is not device:
+                return
+            device.oww_task = _supervise_wake_listener(device, failures=n)
+
+        if n > 1:
+            log.error(
+                f"[{device.device_id}] wake word listener has now failed "
+                f"{n} times in a row — retrying in {delay:.0f}s"
+            )
+        asyncio.get_event_loop().create_task(_later())
+
+    started = asyncio.get_event_loop().time()
     t = asyncio.create_task(wake_word_listener(device))
     t.add_done_callback(_restart)
     return t
