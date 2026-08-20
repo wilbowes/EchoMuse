@@ -76,6 +76,7 @@ import em_mbc
 import em_scenes
 import em_shadow
 import em_oww_warmup
+import em_barge
 import em_arbiter
 import em_button
 import em_tap_burst
@@ -1087,7 +1088,7 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
     # threshold (~0.10) is both safe and necessary. Thinking phase uses the
     # normal wake threshold (see docstring).
     threshold = device.barge_threshold  # refined per-frame by phase below
-    prev_score = 0.0  # previous frame's score — two-frame low tier (thinking)
+    prev_score = 0.0  # previous frame's score — both phases need two
     buf = bytearray()
     # Observability: the watcher used to log only on detection, which made a
     # failed barge-in attempt indistinguishable from "no frames arrived at
@@ -1108,7 +1109,7 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
             if payload is None or isinstance(payload, str):
                 buf.clear()
                 prev_score = 0.0  # sentinel = stream discontinuity; frames
-                # across it aren't consecutive for the two-frame low tier
+                # across it are not consecutive for either two-frame rule
                 continue
             buf.extend(payload)
             while len(buf) >= CHUNK_BYTES:
@@ -1123,27 +1124,20 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                 frames += 1
                 trusted = warmup.feed()
                 in_playback = playback_started.is_set()
-                if in_playback:
-                    threshold = device.barge_threshold
-                    fired     = score >= threshold
-                    fire_note = f"score={score:.3f} >= {threshold:.2f}"
-                else:
-                    # Two-tier thinking detection (see docstring): full wake
-                    # threshold on a single frame, OR two consecutive frames
-                    # at the low tier.
-                    threshold = device.oww_threshold
-                    low_tier  = max(0.2, 0.4 * device.oww_threshold)
-                    if score >= threshold:
-                        fired     = True
-                        fire_note = f"score={score:.3f} >= {threshold:.2f}"
-                    elif score >= low_tier and prev_score >= low_tier:
-                        fired     = True
-                        fire_note = (
-                            f"scores {prev_score:.3f}/{score:.3f} — two "
-                            f"consecutive frames >= low tier {low_tier:.2f}"
-                        )
-                    else:
-                        fired = False
+                # em_barge owns both phases. Extracted because this shipped
+                # untested and wrong: the playback branch fired on ONE frame
+                # at a bar ten times lower than the wake threshold, while
+                # scoring the device's own speech, and cut long responses off
+                # mid-sentence (measured 2026-08-20).
+                threshold = (device.barge_threshold if in_playback
+                             else device.oww_threshold)
+                fired, fire_note = em_barge.decide(
+                    score=score,
+                    prev_score=prev_score,
+                    in_playback=in_playback,
+                    barge_threshold=device.barge_threshold,
+                    wake_threshold=device.oww_threshold,
+                )
                 if fired and not trusted:
                     log.info(
                         f"[{device.device_id}] Barge watcher: {fire_note} "

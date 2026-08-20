@@ -5221,7 +5221,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             <div style={{ marginTop: 16, ...inputStyle }}>
               <Toggle label="Speex denoise" sub="cleans audio before scoring — try in noisy rooms" value={config.owwSpeexNs ?? false} onChange={v => set('owwSpeexNs', v)}/>
               <Toggle label="Barge-in" sub="wake word interrupts playback — enable AEC first" value={config.bargeInEnabled ?? false} onChange={v => set('bargeInEnabled', v)}/>
-              <Slider label="Barge threshold" sub="wake confidence needed during playback — raise it if a response cuts itself short" value={config.bargeInThreshold ?? 0.05} min={0.05} max={0.9} step={0.05} onChange={v => set('bargeInThreshold', v)}/>
+              <Slider label="Barge threshold" sub="wake confidence needed during playback — raise it if a response cuts itself short" value={config.bargeInThreshold ?? 0.25} min={0.05} max={0.9} step={0.05} onChange={v => set('bargeInThreshold', v)}/>
               <Slider label="Arbitration window" sub="ms that the first Echo to hear you silences the others — no added delay; 0 disables" value={config.wakeArbitrationMs ?? 700} min={0} max={2000} step={50} unit="ms" onChange={v => set('wakeArbitrationMs', v)}/>
               {/* Three modes, so a select rather than a toggle. Each option is
                   offered only when the device says it can do it — capability,

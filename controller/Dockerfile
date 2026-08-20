@@ -66,6 +66,7 @@ COPY em_mbc.py .
 COPY em_scenes.py .
 COPY em_support.py .
 COPY em_shadow.py .
+COPY em_barge.py .
 COPY em_ns.py .
 COPY em_pki.py .
 COPY em_hostip.py .

@@ -118,30 +118,31 @@ DEFAULT_DEVICE_CONFIG = {
     # cancels it and starts a fresh turn. Requires device AEC (aecEnabled)
     # on — with barge-in the mic streams through playback, and AEC is what
     # stops the device hearing itself — so aecEnabled above defaults on with
-    # it, and the two move together. bargeInThreshold is used as-is,
-    # deliberately BELOW the normal wake threshold: the echo at the mic is
-    # ~25dB louder than the person talking over it, so speech-over-TTS wake
-    # scores are inherently depressed (~0.10–0.12 measured), while post-AEC
-    # self-echo scores only 0.004 (0.055 worst-case unconverged) — there is
-    # no self-trigger risk down to ~0.08.
+    # it, and the two move together.
     #
-    # That 0.004 is STALE and the margin is wider than it says: v2.7.8 made
-    # the filter hold convergence across turns, so self-echo measures
-    # 0.002–0.003. 0.10 sat awkwardly close to real speech-over-TTS scores,
-    # which is the wrong way to be wrong — barge-in that never fires is
-    # undiagnosable from the outside ("it just ignores me"), while barge-in
-    # that fires too eagerly is self-evident and adjustable. 0.05 is the
-    # dashboard slider floor, so the only way to tune from here is UP, which
-    # is the direction the visible failure asks for.
+    # 0.25, raised from 0.05 on 2026-08-20 after the device interrupted
+    # ITSELF. The old value was chosen against short responses, where the
+    # watcher's peak score over a whole turn measured 0.029, and against a
+    # post-AEC self-echo figure of 0.002–0.003. Long-form speech breaks both
+    # premises: a story peaked at 0.091 and 0.184 on the same hardware, and
+    # was cut off mid-sentence twice in a row. Continuous synthetic narration
+    # offers far more phoneme sequences resembling a wake word than a short
+    # factual reply, and hundreds more frames to find one in.
     #
-    # Watch one interaction: the beamformer locks a different mic per turn
-    # and each has its own echo path, so AEC re-converges per turn (per-
-    # channel filter states are the unbuilt fix) — and the one measured
-    # self-echo figure above 0.05 is that unconverged case at 0.055. The
-    # symptom would be a device cutting its own response short. This fleet
-    # runs 0.05 with beamforming and AEC both on and does not do that.
+    # The comment this replaces predicted exactly that symptom — "a device
+    # cutting its own response short" — and asserted the fleet did not do it.
+    # It does; the measurement had simply never included a long answer.
+    #
+    # 0.25 sits below real speech-over-TTS scores (0.3–0.5 observed, depressed
+    # because the echo at the mic is ~25dB louder than the person) so genuine
+    # barge-in still fires, and above the 0.184 that was self-triggering. The
+    # margin at the top is thinner than it was: if barge-in starts being
+    # missed, that is this trade, and the answer is a per-channel AEC filter
+    # state rather than creeping back down. em_barge's two-consecutive-frame
+    # rule is the other half — it is what makes a low bar survivable at all,
+    # and the two are meant to move together.
     "bargeInEnabled":   True,
-    "bargeInThreshold": 0.05,
+    "bargeInThreshold": 0.25,
     # How far music is attenuated while a voice turn plays OVER it, on
     # firmware that can mix the two planes (the "audio_mix" capability).
     # Ducking replaces pausing there: the music feed runs 4s ahead of

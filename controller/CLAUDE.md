@@ -295,6 +295,39 @@ halves, both required:
   swallowed; eating it would leave `_run_started` False and re-arm the same bug
   for the turn's own terminal `RUN_END`.
 
+**A low barge threshold needs TWO consecutive frames, and the reason it went
+unnoticed is that responses used to be short.** The watcher scores 80ms frames
+of the device's own microphone during playback, at a bar ~10x below the wake
+threshold (speech over TTS is depressed ~25dB by the echo). It fired on ONE
+frame. Measured 2026-08-20 on a conversational agent asked for a story:
+
+| turn | frames scored | peak | outcome |
+|---|---|---|---|
+| short reply | 353 | 0.029 | fine, under the bar |
+| story | 336 | 0.091 | **false barge at 8s** |
+| story | 604 | 0.184 | **false barge at 24s** |
+
+Long-form narration scores higher — continuous speech offers far more
+phoneme sequences resembling a wake word — and gets hundreds more chances.
+Note the shape of the old code: the careful two-consecutive-frame rule
+guarded the **thinking** phase, where the threshold is the full wake bar and
+nothing is playing, while the phase with the low bar scoring the assistant's
+own voice had no debounce at all.
+
+`em_barge.decide` now owns both phases, pure and tested — the suite cannot
+import `em_controller`, which is why this shipped untested. `bargeInThreshold`
+also moved 0.05 → 0.25, measured against real speech-over-TTS scores of
+0.3–0.5. **The two are meant to move together**: the frame rule is what makes
+a low bar survivable, and the threshold is what buys margin when it is not.
+The old default's comment predicted this exact symptom ("a device cutting its
+own response short") and asserted the fleet did not do it — the measurement
+had simply never included a long answer.
+
+**The user-visible damage is bigger than the interruption**, because a false
+barge starts a phantom turn that hears nothing and runs 20–46s, and
+`oww_paused` covers the whole turn — so the device is deaf throughout. It
+reads as "it stopped talking and then ignored me". Bounding that is #195.
+
 **Announcements: HA has TWO paths and only one waits for a reply.**
 `VoiceAssistantAnnounceRequest` blocks —
 `assist_satellite.entity.async_internal_announce` holds `_is_announcing` and
