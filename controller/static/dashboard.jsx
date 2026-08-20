@@ -5056,6 +5056,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
 
   const [advMics, setAdvMics] = useState(false);
   const [advRing, setAdvRing] = useState(false);
+  const [advPlay, setAdvPlay] = useState(false);
 
   const inputStyle = disabled ? { opacity: 0.45, pointerEvents: 'none' } : {};
   const mono = "'DM Mono',monospace";
@@ -5096,32 +5097,25 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             <div style={inputStyle}>
               <Toggle label="Speech boost" sub="presence boost for voice" value={config.eqLoudness ?? false} onChange={v => set('eqLoudness', v)}/>
             </div>
-            <div style={inputStyle}>
-              <Toggle label="Bass guard" sub="drops bass the speaker can't produce — clears the midrange"
-                value={config.bassGuardEnabled ?? true} onChange={v => set('bassGuardEnabled', v)}/>
-            </div>
-            <div style={inputStyle}>
-              <Slider label="Bass guard depth" disabled={!(config.bassGuardEnabled ?? true)}
-                sub="how far below 115 Hz is pulled down when it's loud"
-                value={config.bassGuardDb ?? -30} min={-40} max={0} step={1} unit="dB"
-                onChange={v => set('bassGuardDb', v)}/>
-            </div>
-            <div style={inputStyle}>
-              <Toggle label="Limiter" sub="stops EQ boost from clipping — leave on"
-                value={config.limiterEnabled ?? true} onChange={v => set('limiterEnabled', v)}/>
-            </div>
-            <div style={inputStyle}>
-              <Slider label="Limiter ceiling" disabled={!(config.limiterEnabled ?? true)}
-                sub="peak level the output is held below"
-                value={config.limiterThreshold ?? -1} min={-12} max={0} step={0.5} unit="dB"
-                onChange={v => set('limiterThreshold', v)}/>
-            </div>
-            <div style={inputStyle}>
-              <Slider label="Limiter release" disabled={!(config.limiterEnabled ?? true)}
-                sub="time to recover 10 dB — shorter is louder, longer is smoother"
-                value={config.limiterRelease ?? 150} min={20} max={1000} step={10} unit="ms"
-                onChange={v => set('limiterRelease', v)}/>
-            </div>
+            {/* Speaker protection: ONE toggle for the bass guard, and the
+                limiter is not offered at all.
+
+                These were four controls until 2026-08-20, and none of them
+                can be judged by ear. The guard and the limiter cancel each
+                other's most obvious cue — guard on/off is 7.7dB of overall
+                level at a flat EQ and 0.2dB with the bands boosted, because
+                the limiter gives back exactly what the guard takes. The depth
+                moves the overall level 0.14dB across its ENTIRE range. And
+                the guard mostly removes content this driver cannot radiate,
+                so what remains is a second-order cleanliness gain.
+
+                Four controls whose individual effects range from "large" to
+                "nothing" depending on where the other three sit is not a
+                tuning surface; it is a way to conclude the feature is broken,
+                which is what happened. The limiter in particular must stay on
+                — it is what stops the EQ hard-clipping what it boosts (#231),
+                and that is not a preference. Every key still exists and is
+                settable through the API. */}
             <div style={inputStyle}>
               <Slider label="Duck depth" disabled={!mixCapable}
                 sub={mixCapable
@@ -5144,6 +5138,19 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             </div>
           </div>
         </div>
+        <StageAdvanced open={advPlay} onToggle={() => setAdvPlay(o => !o)} disabledStyle={inputStyle}>
+          <div style={inputStyle}>
+            <Toggle label="Speaker protection"
+              sub="keeps bass the driver can't deliver from muddying the midrange — leave on"
+              value={config.bassGuardEnabled ?? true} onChange={v => set('bassGuardEnabled', v)}/>
+          </div>
+          <div style={{ marginTop: 8, fontFamily: mono, fontSize: 10, color: 'var(--muted)', lineHeight: 1.6 }}>
+            The speaker cannot reproduce the lowest frequencies, and feeding
+            them to it costs cone movement that muddies everything above.
+            Removing them is what keeps the midrange clean. The change is
+            subtle by design and there is no reason to turn it off.
+          </div>
+        </StageAdvanced>
       </Stage>
 
       {/* 02 WAKE WORD */}
