@@ -873,10 +873,6 @@ def get_device(device_id: str) -> Device | None:
     return _devices.get(device_id)
 
 
-
-
-
-
 def _limiter_for(device):
     """Adapter: a Device's limiter config -> em_limiter.for_stream."""
     return em_limiter.for_stream(
