@@ -88,11 +88,15 @@ COPY em_firmware.py .
 COPY em_announce.py .
 COPY em_runbarrier.py .
 COPY em_volume.py .
+COPY em_timers.py .
 COPY version.py .
 # ESPHome native API subpackage (frame protocol, message registry, vendored protobuf)
 COPY esphome/ ./esphome/
 # Device payloads (start_server.sh etc.) — canonical copies served to devices
 COPY device_payloads/ ./device_payloads/
+# Timer alarm sound (HA Voice PE, CC BY 4.0 — attribution in sounds/LICENSE.md,
+# which ships with the audio rather than only in the repo).
+COPY sounds/ ./sounds/
 
 # DTLN noise-suppression models (em_ns.py) — vendored at build time like the
 # JS deps above; pinned to a commit so builds are reproducible. MIT licensed.

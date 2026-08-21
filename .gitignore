@@ -2,6 +2,7 @@
 __pycache__
 /device/build/
 controller/.env
+controller/.venv/
 controller/data/
 controller/static/vendor/
 controller/static/dashboard.js
