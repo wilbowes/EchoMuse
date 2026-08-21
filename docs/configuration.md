@@ -675,6 +675,24 @@ restores the previous network and tells you why. Even a power cut
 mid-switch recovers: an unconfirmed change is rolled back on boot. Allow
 about two minutes for the device to drop off and come back.
 
+### Static controller endpoint
+
+Devices normally find the controller with link-local mDNS. If a device
+reaches the controller through a routed tunnel or an isolated VLAN where
+mDNS cannot cross, create `/data/local/etc/echomuse/controller.json` on the
+device:
+
+```json
+{"host":"10.20.40.110","port":8767,"tls_port":8770}
+```
+
+When this file is present and valid, the device skips mDNS and keeps dialing
+the configured endpoint. It dials even while the endpoint is initially
+unreachable, so a device-local tunnel can finish starting without leaving
+EchoMuse stranded in the mDNS retry loop. `tls_port` may be `0` when the
+controller's encrypted device listener is disabled. Remove the file and
+restart EchoMuse to restore automatic mDNS discovery.
+
 ---
 
 ## Controller settings (the `.env` file)
