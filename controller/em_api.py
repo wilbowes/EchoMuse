@@ -3162,6 +3162,26 @@ async def _push_log_event(
 
 # ─── GitHub release fetching ──────────────────────────────────────────────────
 
+def _update_check_interval() -> int:
+    """
+    The parsed update_check_interval; <= 0 means DISABLED (#159).
+
+    db.get_config returns a STRING, so a stored "0" is truthy and survived
+    the old `or 3600` fallback into asyncio.sleep(0) — turning the obvious
+    way to stop the controller contacting GitHub (#158 documents this poll
+    as its only outbound connection) into a busy loop against api.github.com
+    until it rate-limits. The worst available outcome for exactly the reader
+    who set it carefully. A non-numeric value used to raise out of the poll
+    loop and kill the task outright; it now falls back to the default with
+    a line in the log.
+    """
+    raw = (db.get_config("update_check_interval", "3600") or "3600").strip()
+    try:
+        return int(raw)
+    except ValueError:
+        log.warning(f"[api] update_check_interval {raw!r} is not a number — using 3600")
+        return 3600
+
 async def _get_cached_release() -> Optional[dict]:
     """
     Return the latest release info, using the in-memory cache if fresh.
@@ -3204,8 +3224,14 @@ async def _get_cached_release() -> Optional[dict]:
         # interval lapses — release_poll_loop normally refreshes ahead of any
         # caller. A failed refresh falls through to the stale cache, which is
         # better than no answer.
-        interval = int(db.get_config("update_check_interval", "3600") or 3600)
-        if not last_check or (time.time() - float(last_check)) > interval:
+        # 0 (any non-positive value) means updates are DISABLED (#159):
+        # serve the cache whatever its age and make no outbound call. The
+        # poll loop reads this the same way, so the knob does what the
+        # privacy section implies it does.
+        interval = _update_check_interval()
+        if (interval > 0
+                and (not last_check
+                     or (time.time() - float(last_check)) > interval)):
             fresh = await _fetch_latest_release()
             if fresh:
                 return fresh
@@ -4211,6 +4237,14 @@ async def release_poll_loop() -> None:
     await asyncio.sleep(30)
 
     while True:
+        interval = _update_check_interval()
+        if interval <= 0:
+            # Disabled (#159): no fetch, no outbound connection. Re-read
+            # after a fixed park so re-enabling from the dashboard takes
+            # effect without a restart.
+            await asyncio.sleep(60)
+            continue
+
         try:
             await _fetch_latest_release()
         except Exception as e:
@@ -4223,8 +4257,9 @@ async def release_poll_loop() -> None:
         except Exception as e:
             log.error(f"[api] Controller release poll error: {e}")
 
-        interval = int(db.get_config("update_check_interval", "3600") or 3600)
-        await asyncio.sleep(interval)
+        # Floor of 1s so even an absurd tiny positive interval cannot spin
+        # the loop faster than the event loop allows.
+        await asyncio.sleep(max(interval, 1))
 
 
 async def session_prune_loop() -> None:
