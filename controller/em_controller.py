@@ -959,8 +959,8 @@ async def leds_off(device: Device):
 
 
 # Turn outcomes that get a distinguishing ring cue at turn end. Everything
-# else ("ok", "cancelled") ends silently: the user either heard a reply or
-# pressed the button themselves, so a cue would be noise.
+# else ("ok", "cancelled", "barged") ends silently: the user either heard a
+# reply or cut it off themselves, so a cue would be noise.
 #
 # Rhythm carries the meaning, not colour — a new colour would collide with
 # red (mute), orange (link down) or cyan (volume), and the point of the

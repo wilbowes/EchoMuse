@@ -134,7 +134,7 @@ class TurnTrace:
     ha_think_ms:      int   = -1
     tts_gen_ms:       int   = -1
     fetch_ms:         int   = -1
-    outcome:          str   = ""      # "ok", "no_speech", "cancelled", "tts_error", "timeout"
+    outcome:          str   = ""      # "ok", "no_speech", "cancelled", "barged", "tts_error", "timeout"
     # Wake detection detail (model, score, threshold, noise_floor) popped
     # from device.last_wake at turn start — None for button/continuation
     # turns. Persisted with the turn for threshold tuning and model A/Bs.
@@ -1106,8 +1106,22 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 if trace:
                     trace.tts_bytes = pcm_bytes or 0
 
-                if pcm_bytes and not self._turn_cancelled:
-                    if trace: trace.outcome = "ok"
+                if self._turn_cancelled:
+                    # #251: cut off mid-response. This used to fall through to
+                    # the finally-default "ok", so a turn cancelled during
+                    # playback was indistinguishable from an answered one —
+                    # which is how #250 (the device barging on its own
+                    # narration) hid from the activity stats for two days.
+                    # "barged" is deliberately distinct from the earlier
+                    # "cancelled" outcomes: there, nothing had been said yet.
+                    # Signature for self-interruption: a "barged" turn
+                    # immediately followed by a turn whose trigger is
+                    # "barge-in" — the interrupting wake is recorded as that
+                    # turn's trigger.
+                    log.info(f"[{self._log_name}] Turn cancelled during playback")
+                    trace.outcome = "barged"
+                elif pcm_bytes:
+                    trace.outcome = "ok"
             else:
                 log.info(f"[{self._log_name}] No TTS audio URL received — turn ended without response")
                 if trace: trace.outcome = "no_tts"
