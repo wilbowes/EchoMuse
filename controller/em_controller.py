@@ -2732,6 +2732,16 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         device.limiter_release   = float(config.get(
             "limiterRelease", em_limiter.DEFAULT_RELEASE_MS))
         device.led_scene     = em_scenes.resolve(config)
+        # #263: hand the device its current listening animation so a wake it
+        # detected ITSELF can light the ring immediately, instead of waiting
+        # for leds_listening to make the round trip (measured +522ms before
+        # the ring moved; control-plane tail reaches 2s, #139). The
+        # controller's frame still lands within an RTT and takes over — the
+        # device just stops being two hops behind its own event.
+        if device.led_anim_capable and device.led_scene.get("listening_anim"):
+            await device.send_control(
+                {"type": "config",
+                 "listeningAnim": device.led_scene["listening_anim"]})
         # Initialise volume from stored config — device will report its real
         # value via volume_state on connect, but this seeds a sane default
         # in the window before that first message arrives.

@@ -1027,6 +1027,16 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
     if "bassGuardDb" in effective:
         live.bass_guard_db = float(effective["bassGuardDb"])
     live.led_scene = em_scenes.resolve(effective)
+    # #263: keep the device's cached listening animation in step when the
+    # scene changes live, same push as at registration. Without it the ring
+    # lit locally in the OLD scene's colours until the next reconnect.
+    if live.led_anim_capable and live.led_scene.get("listening_anim"):
+        try:
+            await live.send_control(
+                {"type": "config",
+                 "listeningAnim": live.led_scene["listening_anim"]})
+        except Exception:
+            pass  # device offline — next connect re-sends it
 
 
 @auth.require_auth

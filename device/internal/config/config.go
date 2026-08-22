@@ -6,6 +6,7 @@
 package config
 
 import (
+	"encoding/json"
 	"log"
 	"os"
 	"strconv"
@@ -104,6 +105,14 @@ type Device struct {
 	// BLE proxy (passive scan over /dev/stpbt, internal/bluetooth) —
 	// pointer typed so false is expressible over the wire. Default off.
 	BleProxyEnabled *bool
+
+	// ListeningAnim carries the controller's current listening-ring
+	// animation spec, raw JSON in the led_anim shape, so the device can
+	// light it locally at its OWN wake crossing (#263) instead of waiting
+	// a controller round trip for the authoritative frame. Nil until the
+	// controller sends one; a device that has never received it simply
+	// keeps the old behaviour.
+	ListeningAnim json.RawMessage
 
 	initialised bool
 }
@@ -228,6 +237,9 @@ func (d *Device) Apply(msg ConfigMessage) {
 	if msg.BleProxyEnabled != nil {
 		d.BleProxyEnabled = msg.BleProxyEnabled
 	}
+	if msg.ListeningAnim != nil {
+		d.ListeningAnim = msg.ListeningAnim
+	}
 }
 
 // Snapshot returns a consistent copy of all config values.
@@ -278,6 +290,7 @@ func (d *Device) Snapshot() ConfigMessage {
 		AecDelayMs:         &aecDelayMs,
 		AecTailMs:          d.AecTailMs,
 		BleProxyEnabled:    &bleProxyEnabled,
+		ListeningAnim:      d.ListeningAnim,
 	}
 }
 
@@ -306,6 +319,11 @@ type ConfigMessage struct {
 	AecDelayMs         *int     `json:"aecDelayMs,omitempty"`
 	AecTailMs          int      `json:"aecTailMs,omitempty"`
 	BleProxyEnabled    *bool    `json:"bleProxyEnabled,omitempty"`
+
+	// ListeningAnim: raw led_anim spec for the listening ring (#263).
+	// Carried as raw JSON so this package does not depend on the
+	// animation renderer's types.
+	ListeningAnim json.RawMessage `json:"listeningAnim,omitempty"`
 }
 
 // clampMicGainDb bounds the fixed mic gain to a sane range: 0dB (unity —

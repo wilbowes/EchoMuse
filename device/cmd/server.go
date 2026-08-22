@@ -976,6 +976,25 @@ func onWakeCrossing(cc *client.ControlClient, srv *server.Server,
 		log.Printf("[shadow] wake %.3f suppressed — muted", score)
 		return
 	}
+	// #263: light the listening ring NOW, from the one place that already
+	// knows the wake happened. The crossing used to travel to the controller
+	// and wait for leds_listening to come back — measured at +522ms before
+	// the animation moved, on a link whose control-plane tail reaches 2s
+	// (#139). The controller's own frame lands within an RTT and takes over
+	// via StartAnim's generation counter; same pattern as the volume arc,
+	// where the device draws immediately and the authoritative state follows.
+	// No new arbitration: the LED priority system already handles a newer
+	// frame superseding a local one. Only devices that have received a
+	// listening spec (config push) can do this; everyone else keeps the old
+	// behaviour exactly.
+	if srv != nil {
+		if raw := config.Get().Snapshot().ListeningAnim; len(raw) > 0 {
+			var spec server.AnimSpec
+			if err := json.Unmarshal(raw, &spec); err == nil && spec.Pattern != "" {
+				srv.StartAnim(spec)
+			}
+		}
+	}
 	cc.SendOwwWake(score, crossed, ageMs)
 }
 
