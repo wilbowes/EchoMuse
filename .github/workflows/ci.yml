@@ -245,6 +245,57 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  device-firmware-build:
+    name: Device firmware builds in pinned compiler
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true  # GoTinyAlsa replace directive in device/go.mod
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      # Why this job exists: #276. Dependabot #128 raised device/go.mod to
+      # Go 1.25 while the pinned compiler image carries 1.24, and NOTHING
+      # noticed for weeks -- every other device job (tests, vet, vulncheck)
+      # runs on the host toolchain, which resolves a newer Go silently.
+      # The pinned image is exercised by compile.sh (local, manual) and
+      # release.yml (tags only, a handful of times a month), so the first
+      # symptom of a broken pin was a release tag failing at the build step.
+      # A module graph that needs a newer Go than the image ships is caught
+      # here, on the PR that causes it, minutes rather than at tag time.
+      #
+      # No path filter, unlike the controller-image job below: that one is
+      # covered on main by controller-build.yml, but the firmware has NO
+      # build between "merged to main" and "release tag", so this job is
+      # also the only continuous check on direct pushes to main. It runs
+      # unconditionally; the GHA cache keeps the compiler image layers warm,
+      # so the steady-state cost is the go build itself.
+      - name: Build the pinned compiler image
+        uses: docker/build-push-action@v7
+        with:
+          context: device/compiler
+          push: false
+          load: true
+          tags: echomuse-compiler:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      # Same invocation as release.yml, minus the version ldflags: a CI run
+      # has no v* ref_name to embed, and BuildUnix is only meaningful for a
+      # binary a device will boot. Everything else must stay identical --
+      # this job exists to fail exactly where the release would.
+      - name: Compile the firmware
+        run: |
+          mkdir -p device/build
+          docker run --rm \
+            --entrypoint bash \
+            -e CGO_LDFLAGS="-Wl,--hash-style=both" \
+            -v "${{ github.workspace }}/device":/sdk \
+            -v "${{ github.workspace }}/GoTinyAlsa":/GoTinyAlsa \
+            echomuse-compiler:ci \
+            -c "cd /sdk && mkdir -p build && go build \
+              -tags server \
+              -o build/server ./cmd/"
+
   device-vet:
     name: Device go vet
     runs-on: ubuntu-latest
