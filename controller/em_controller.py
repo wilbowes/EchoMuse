@@ -2830,381 +2830,401 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
 
                 msg_type = msg.get("type")
 
-                if msg_type == "button":
-                    await handle_button_event(device, msg)
+                # One bad message must not cost the connection (#255):
+                # the LEAST important message in the protocol used to be
+                # able to disconnect the device - a missing attribute while
+                # handling a playback_stats telemetry report took the
+                # ESPHome satellite, the BLE proxy and the data plane down
+                # with it, and reconnected on every barge-in. A handler
+                # failure now logs message type + traceback and moves on.
+                # Deliberate exceptions:
+                #   - CancelledError propagates: teardown is not a message
+                #     fault.
+                #   - register runs BEFORE this loop and stays fatal -
+                #     arriving into an unknown state is different from
+                #     failing to record a statistic.
+                try:
+                    if msg_type == "button":
+                        await handle_button_event(device, msg)
 
-                elif msg_type == "ambient_light":
-                    # A step change in room light, sent by the device the
-                    # moment it happens rather than waiting up to 30s for the
-                    # stats tick — the timing IS the signal ("someone turned
-                    # a light on"). The steady-state value still rides stats.
-                    _lux = msg.get("lux")
-                    if isinstance(_lux, int):
-                        device.stats["ambientLux"] = _lux
-                        esphome.update_ambient_lux(device_id, _lux)
-                        log.info(f"[{device_id}] Ambient light → {_lux} lux")
+                    elif msg_type == "ambient_light":
+                        # A step change in room light, sent by the device the
+                        # moment it happens rather than waiting up to 30s for the
+                        # stats tick — the timing IS the signal ("someone turned
+                        # a light on"). The steady-state value still rides stats.
+                        _lux = msg.get("lux")
+                        if isinstance(_lux, int):
+                            device.stats["ambientLux"] = _lux
+                            esphome.update_ambient_lux(device_id, _lux)
+                            log.info(f"[{device_id}] Ambient light → {_lux} lux")
 
-                elif msg_type == "mute_state":
-                    device.muted = msg.get("muted", False)
-                    if device.muted and device.voice_lock.locked():
-                        # Mute during an active turn terminates it — same
-                        # cancel as the dot button, plus speaker_flush so
-                        # any in-flight TTS goes silent immediately (the
-                        # device shows the red ring the moment the button
-                        # is pressed; audio carrying on would contradict
-                        # it). The device guards its LED ring while muted,
-                        # so the cancelled turn's LED cleanup can't clear
-                        # the red ring.
-                        log.info(
-                            f"[{device_id}] Muted during active turn — "
-                            f"cancelling"
-                        )
-                        device.cancel_event.set()
-                        esphome.cancel_voice_turn(device_id)
-                        await device.send_control({"type": "speaker_flush"})
-                    await api._push_event({
-                        "type":      "device_update",
-                        "device_id": device_id,
-                        "state":     {"muted": device.muted},
-                    })
-
-                elif msg_type == "volume_state":
-                    # Device reports its current volume level (raw tinymix index).
-                    # Convert to HA float, update in-memory state, persist to
-                    # config so the value survives controller and device restarts.
-                    raw_level = int(msg.get("level", 85))
-                    device.volume = _device_level_to_ha(raw_level)
-                    log.debug(
-                        f"[{device_id}] volume_state: level={raw_level} "
-                        f"→ {device.volume:.3f}"
-                    )
-                    # Persist — read-modify-write to avoid stomping other fields
-                    stored_config = await loop.run_in_executor(
-                        None, db.get_device_config, device_id
-                    )
-                    stored_config["startupVolume"] = raw_level
-                    await loop.run_in_executor(
-                        None, db.set_device_config, device_id, stored_config
-                    )
-                    # Notify ESPHome satellite so HA's media player entity updates
-                    esphome.update_device_volume(device_id, device.volume)
-
-                elif msg_type == "stats":
-                    device.stats = {
-                        "cpuPct":        msg.get("cpuPct"),
-                        "memUsedMb":     msg.get("memUsedMb"),
-                        "memTotalMb":    msg.get("memTotalMb"),
-                        "storageUsedMb": msg.get("storageUsedMb"),
-                        "storageTotalMb":msg.get("storageTotalMb"),
-                        "wifiRssi":      msg.get("wifiRssi"),
-                        "wifiSsid":      msg.get("wifiSsid"),
-                        # v7 link telemetry (firmware >= v2.9.6). This dict
-                        # is an explicit allowlist, so any new device stat
-                        # must be added HERE as well as in DeviceStats and
-                        # record_device_stats — all three, or the field is
-                        # silently dropped in the relay (2026-07-20).
-                        "linkSpeedMbps": msg.get("linkSpeedMbps"),
-                        "wifiFreqMhz":   msg.get("wifiFreqMhz"),
-                        "wifiBssid":     msg.get("wifiBssid"),
-                        "txBytes":       msg.get("txBytes"),
-                        "rxBytes":       msg.get("rxBytes"),
-                        "txErrors":      msg.get("txErrors"),
-                        "txDropped":     msg.get("txDropped"),
-                        "rxCrcErrors":   msg.get("rxCrcErrors"),
-                        "ble":           msg.get("ble"),
-                        # Thermals + CPU topology. coresOnline is not optional
-                        # context: cpuPct is a share of ONLINE capacity, so the
-                        # same work halves its percentage when hotplug adds a
-                        # core. thermalCoreLimit < coresTotal means the thermal
-                        # governor is capping capacity.
-                        "cpuTempC":         msg.get("cpuTempC"),
-                        "maxTempC":         msg.get("maxTempC"),
-                        "coresOnline":      msg.get("coresOnline"),
-                        "coresTotal":       msg.get("coresTotal"),
-                        "thermalCoreLimit": msg.get("thermalCoreLimit"),
-                        # Ambient light (TSL2540). None on a device without
-                        # the sensor — 0 lux is a real reading (covered), so
-                        # the two must not collapse into each other.
-                        "ambientLux":       msg.get("ambientLux"),
-                        # v13 on-device shadow window summary, absent when the
-                        # device is not scoring (see the allowlist note above:
-                        # DeviceStats, here, and the consumer below).
-                        "owwShadow":     msg.get("owwShadow"),
-                    }
-                    # Shadow summary → hourly rollup. Present only while the
-                    # device is scoring, so its presence is also the "was it
-                    # looking" flag that stops a missing per-turn score from
-                    # reading as a miss.
-                    _sh = msg.get("owwShadow") or {}
-                    device.shadow.active = bool(_sh)
-                    if _sh and _sh.get("threshold"):
-                        try:
-                            device.shadow.threshold = float(_sh["threshold"])
-                        except (TypeError, ValueError):
-                            pass
-                    if _sh:
-                        if _sh.get("drops") or _sh.get("errors"):
-                            log.warning(
-                                f"[{device_id}] on-device wake word fell behind: "
-                                f"{_sh.get('drops')} frames dropped, "
-                                f"{_sh.get('errors')} errors ({_sh.get('lastErr') or '-'}) "
-                                f"— comparison is running on a subset of the audio"
+                    elif msg_type == "mute_state":
+                        device.muted = msg.get("muted", False)
+                        if device.muted and device.voice_lock.locked():
+                            # Mute during an active turn terminates it — same
+                            # cancel as the dot button, plus speaker_flush so
+                            # any in-flight TTS goes silent immediately (the
+                            # device shows the red ring the moment the button
+                            # is pressed; audio carrying on would contradict
+                            # it). The device guards its LED ring while muted,
+                            # so the cancelled turn's LED cleanup can't clear
+                            # the red ring.
+                            log.info(
+                                f"[{device_id}] Muted during active turn — "
+                                f"cancelling"
                             )
-                    if msg.get("ble"):
-                        em_ble_proxy.update_stats(device_id, msg["ble"])
-                    # Ambient light straight through to HA's sensor entity.
-                    # Rides the existing ~30s stats tick — light does not
-                    # change fast enough to justify a channel of its own, and
-                    # nothing per-frame is the standing rule here.
-                    if "ambientLux" in msg:
-                        esphome.update_ambient_lux(device_id, msg.get("ambientLux"))
-                    # Fold into the persistent hourly rollup (CPU/RAM/storage/
-                    # RSSI trends) — one cheap upsert per ~30s report. The
-                    # last_seen refresh rides the same executor hop: a stats
-                    # report IS proof of life, and without it last_seen only
-                    # ever recorded the last *connect*.
-                    # RTT is controller-measured, not relayed from the
-                    # device message, so it is merged in here rather than
-                    # coming through the allowlist above. drain_rtt() takes
-                    # and resets the window accumulated since the last
-                    # report, so no sample is counted twice.
-                    _metrics = {**device.stats, **device.drain_rtt()}
-                    def _persist_stats(_id=device_id, _s=_metrics, _shadow=_sh):
-                        db.record_device_stats(_id, _s)
-                        db.touch_device_seen(_id)
-                        # Shadow counters ride the SAME executor hop rather
-                        # than adding one: the whole point of summarising on
-                        # the device is that on-device scoring costs the DB
-                        # one upsert per 30s, not one per frame.
-                        if _shadow:
-                            db.bump_wake_counters(
-                                _id,
-                                dev_frames=int(_shadow.get("frames") or 0),
-                                dev_drops=int(_shadow.get("drops") or 0),
-                                dev_crossings=int(_shadow.get("crossings") or 0),
-                                dev_max_score=float(_shadow.get("maxScore") or 0.0),
-                                # v16: what a drop actually was — slowest
-                                # inference vs longest frame gap.
-                                dev_max_infer_ms=int(_shadow.get("maxInferMs") or 0),
-                                dev_max_gap_ms=int(_shadow.get("maxGapMs") or 0),
-                            )
-                    await loop.run_in_executor(None, _persist_stats)
-                    await api._push_event({
-                        "type":      "device_update",
-                        "device_id": device_id,
-                        "state":     {
-                            "stats": device.stats,
-                            # Controller-side proxy view rides along so the
-                            # dashboard's Bluetooth panel stays live without
-                            # a full device refresh.
-                            "bleProxy": em_ble_proxy.get_status(device_id),
-                        },
-                    })
-
-                elif msg_type == "wifi_result":
-                    # Outcome of a wifi_change. The device re-sends this
-                    # until it sees a wifi_commit ack (a single send can
-                    # vanish into a half-open TCP connection killed by the
-                    # network switch), so: ALWAYS ack — on success the ack
-                    # also finalises the change (deletes rollback backup +
-                    # pending marker; a failed change already removed both,
-                    # so the ack is a no-op there) — and log/record only
-                    # the first arrival.
-                    ok    = bool(msg.get("ok"))
-                    ssid  = msg.get("ssid", "")
-                    error = msg.get("error") or ""
-                    st, duplicate = api.wifi_record_result(device_id, ok, ssid, error)
-                    await device.send_control({"type": "wifi_commit"})
-                    if not duplicate:
-                        if ok:
-                            log.info(f"[{device_id}] WiFi changed to \"{ssid}\" — committed")
-                            db.log_device(device_id, "info", "device",
-                                          f'WiFi changed to "{ssid}"')
-                        else:
-                            log.warning(f"[{device_id}] WiFi change to \"{ssid}\" "
-                                        f"failed: {error}")
-                            db.log_device(device_id, "warning", "device",
-                                          f'WiFi change to "{ssid}" failed: {error}')
+                            device.cancel_event.set()
+                            esphome.cancel_voice_turn(device_id)
+                            await device.send_control({"type": "speaker_flush"})
                         await api._push_event({
                             "type":      "device_update",
                             "device_id": device_id,
-                            "state":     {"wifi": st},
+                            "state":     {"muted": device.muted},
                         })
 
-                elif msg_type == "playback_stats":
-                    # One report per completed speaker stream (firmware
-                    # >= v2.9): periods played + mid-stream underruns.
-                    # Attach to the turn persisted just before playback;
-                    # consume last_turn_id so a later announcement's report
-                    # can't overwrite a turn's stats. Reports with no
-                    # pending turn (HA announcements, TTS after a controller
-                    # restart) roll into the hourly counters instead.
-                    # periods/underruns are read from the top level, which
-                    # every firmware sends; "stats" carries the v2.9.6+
-                    # delivery-margin fields and is absent on older devices.
-                    periods   = int(msg.get("periods", 0))
-                    underruns = int(msg.get("underruns", 0))
-                    pstats    = msg.get("stats") or {}
-                    # Release _run_post_turn_playback: this report IS the
-                    # end of audio, and the ring clears on it rather than
-                    # on a wall-clock guess.
-                    device.playback_done.set()
-                    # Delivery window: first speaker frame sent -> this
-                    # report. The metric the 07-20 investigation lacked —
-                    # "Streaming took Xs" times the socket write and reads
-                    # ~0s however slowly the device is really being fed.
-                    delivery_ms = -1
-                    if device.playback_send_t0 is not None:
-                        delivery_ms = int(
-                            (loop.time() - device.playback_send_t0) * 1000
+                    elif msg_type == "volume_state":
+                        # Device reports its current volume level (raw tinymix index).
+                        # Convert to HA float, update in-memory state, persist to
+                        # config so the value survives controller and device restarts.
+                        raw_level = int(msg.get("level", 85))
+                        device.volume = _device_level_to_ha(raw_level)
+                        log.debug(
+                            f"[{device_id}] volume_state: level={raw_level} "
+                            f"→ {device.volume:.3f}"
                         )
-                        device.playback_send_t0 = None
-                    turn_id   = device.last_turn_id
-                    device.last_turn_id = None
-                    if turn_id is not None:
+                        # Persist — read-modify-write to avoid stomping other fields
+                        stored_config = await loop.run_in_executor(
+                            None, db.get_device_config, device_id
+                        )
+                        stored_config["startupVolume"] = raw_level
                         await loop.run_in_executor(
-                            None, db.set_turn_playback,
-                            turn_id, periods, underruns, pstats,
+                            None, db.set_device_config, device_id, stored_config
                         )
-                        if delivery_ms >= 0:
-                            await loop.run_in_executor(
-                                None, db.set_turn_delivery, turn_id,
-                                device.playback_send_ms,
-                                delivery_ms, device.playback_eq_ms,
-                            )
-                        for rec in reversed(device.turn_history):
-                            if rec.get("turn_id") == turn_id:
-                                rec["playback_periods"] = periods
-                                rec["underruns"]        = underruns
-                                break
-                    else:
-                        # The turn row may not exist yet (device buffers
-                        # usually drain before the controller's drain sleep
-                        # ends) — stash for _persist_turn to fold in. A
-                        # displaced earlier stash was an announcement's:
-                        # keep its underruns in the hourly counters.
-                        prev = device.pending_playback_stats
-                        # Indices 0-2 stay (ts, periods, underruns) so the
-                        # existing consumer keeps working; 3-4 carry the v7
-                        # delivery detail.
-                        device.pending_playback_stats = (
-                            asyncio.get_event_loop().time(), periods, underruns,
-                            pstats, delivery_ms,
-                        )
-                        if prev and prev[2]:
-                            await loop.run_in_executor(
-                                None,
-                                lambda: db.bump_wake_counters(
-                                    device_id, underruns=prev[2]
-                                ),
-                            )
-                    if underruns:
-                        log.warning(
-                            f"[{device_id}] Playback underruns: {underruns} "
-                            f"in {periods} periods"
-                            f"{f' (turn {turn_id})' if turn_id else ''}"
-                        )
+                        # Notify ESPHome satellite so HA's media player entity updates
+                        esphome.update_device_volume(device_id, device.volume)
 
-                elif msg_type == "oww_shadow_cross":
-                    # On-device scoring reached the wake threshold. Recorded
-                    # for comparison ONLY — nothing here starts a turn, and
-                    # that is the entire point of shadow mode.
-                    device.shadow.record_cross(msg.get("score"), msg.get("ageMs"))
-                    log.info(
-                        f"[{device_id}] on-device wake crossing: "
-                        f"score={msg.get('score')} age={msg.get('ageMs')}ms "
-                        f"(shadow — not triggering)"
-                    )
-
-                elif msg_type == "oww_wake":
-                    # On-device scoring crossed the bar AND owwOnDevice is
-                    # "on", so the device is asking for a turn rather than
-                    # reporting a measurement. Parked here; the wake listener
-                    # picks it up on its next frame (~80ms) because that is
-                    # where the turn setup lives — capture routing, beam lock
-                    # and arbitration all have to happen together, and doing
-                    # them from the control plane would be a second copy of
-                    # the most delicate sequence in the controller.
-                    #
-                    # Also recorded as a crossing, so a device-triggered turn
-                    # carries the same dev_* comparison fields as a
-                    # controller-triggered one and the Activity tab does not
-                    # have to special-case which side fired.
-                    device.shadow.record_cross(msg.get("score"), msg.get("ageMs"))
-                    if device.oww_on_device != em_shadow.MODE_ON:
-                        # Firmware triggering while the controller thinks it
-                        # should not: a config push in flight, or a rollback
-                        # to a mode this device no longer has. Logged rather
-                        # than obeyed — the controller's view of the mode is
-                        # the one the dashboard shows.
-                        log.warning(
-                            f"[{device_id}] oww_wake ignored — mode is "
-                            f"{device.oww_on_device!r}, not 'on'"
-                        )
-                    elif device.pending_wake.offer(
-                        msg.get("score"), msg.get("threshold"), msg.get("ageMs")
-                    ):
-                        log.info(
-                            f"[{device_id}] on-device wake: "
-                            f"score={msg.get('score')} age={msg.get('ageMs')}ms "
-                            f"(device triggered)"
-                        )
-                    else:
-                        log.warning(
-                            f"[{device_id}] malformed oww_wake dropped: {msg!r}"
-                        )
-
-                elif msg_type == "ble_adverts":
-                    # BLE proxy data path — batched adverts from the
-                    # device's passive scanner, forwarded to HA.
-                    em_ble_proxy.forward_adverts(
-                        device_id, msg.get("adverts") or []
-                    )
-
-                elif msg_type == "wifi_scan_result":
-                    fut = device.wifi_scan_future
-                    if fut is not None and not fut.done():
-                        fut.set_result(msg)
-
-                elif msg_type == "log":
-                    level   = msg.get("level", "info")
-                    message = msg.get("message", "")
-                    # _push_log_event PERSISTS as well as pushing, so this must
-                    # not also call db.log_device — doing both wrote every
-                    # device log line twice, ~6ms apart, which is how half the
-                    # device_logs table came to be duplicates. It also matters
-                    # for the support bundle: thin_noise keeps the newest three
-                    # [mem] lines per device, so duplication halved the readings
-                    # a leak hunt actually gets.
-                    #
-                    # The removed call was a synchronous DB write on the event
-                    # loop; _push_log_event does it in an executor.
-                    await api._push_log_event(device_id, level, "device", message)
-
-                elif msg_type == "pong":
-                    # Solicited pong (carries our sequence id) -> an RTT
-                    # sample. Unsolicited keepalive pongs have no id and are
-                    # ignored here; pairing one with whatever ping happened
-                    # to be outstanding would invent a measurement.
-                    _seq = msg.get("id")
-                    if _seq is not None:
-                        _sent = device.ping_sent.pop(_seq, None)
-                        _busy = device.ping_busy.pop(_seq, False)
-                        if _sent is not None:
-                            _rtt = int((loop.time() - _sent) * 1000)
-                            device.record_rtt(_rtt, _busy)
-                            if _rtt >= RTT_EXCURSION_MS:
-                                log.info(
-                                    f"[{device_id}] RTT excursion: {_rtt}ms "
-                                    f"({'busy' if _busy else 'idle'})"
+                    elif msg_type == "stats":
+                        device.stats = {
+                            "cpuPct":        msg.get("cpuPct"),
+                            "memUsedMb":     msg.get("memUsedMb"),
+                            "memTotalMb":    msg.get("memTotalMb"),
+                            "storageUsedMb": msg.get("storageUsedMb"),
+                            "storageTotalMb":msg.get("storageTotalMb"),
+                            "wifiRssi":      msg.get("wifiRssi"),
+                            "wifiSsid":      msg.get("wifiSsid"),
+                            # v7 link telemetry (firmware >= v2.9.6). This dict
+                            # is an explicit allowlist, so any new device stat
+                            # must be added HERE as well as in DeviceStats and
+                            # record_device_stats — all three, or the field is
+                            # silently dropped in the relay (2026-07-20).
+                            "linkSpeedMbps": msg.get("linkSpeedMbps"),
+                            "wifiFreqMhz":   msg.get("wifiFreqMhz"),
+                            "wifiBssid":     msg.get("wifiBssid"),
+                            "txBytes":       msg.get("txBytes"),
+                            "rxBytes":       msg.get("rxBytes"),
+                            "txErrors":      msg.get("txErrors"),
+                            "txDropped":     msg.get("txDropped"),
+                            "rxCrcErrors":   msg.get("rxCrcErrors"),
+                            "ble":           msg.get("ble"),
+                            # Thermals + CPU topology. coresOnline is not optional
+                            # context: cpuPct is a share of ONLINE capacity, so the
+                            # same work halves its percentage when hotplug adds a
+                            # core. thermalCoreLimit < coresTotal means the thermal
+                            # governor is capping capacity.
+                            "cpuTempC":         msg.get("cpuTempC"),
+                            "maxTempC":         msg.get("maxTempC"),
+                            "coresOnline":      msg.get("coresOnline"),
+                            "coresTotal":       msg.get("coresTotal"),
+                            "thermalCoreLimit": msg.get("thermalCoreLimit"),
+                            # Ambient light (TSL2540). None on a device without
+                            # the sensor — 0 lux is a real reading (covered), so
+                            # the two must not collapse into each other.
+                            "ambientLux":       msg.get("ambientLux"),
+                            # v13 on-device shadow window summary, absent when the
+                            # device is not scoring (see the allowlist note above:
+                            # DeviceStats, here, and the consumer below).
+                            "owwShadow":     msg.get("owwShadow"),
+                        }
+                        # Shadow summary → hourly rollup. Present only while the
+                        # device is scoring, so its presence is also the "was it
+                        # looking" flag that stops a missing per-turn score from
+                        # reading as a miss.
+                        _sh = msg.get("owwShadow") or {}
+                        device.shadow.active = bool(_sh)
+                        if _sh and _sh.get("threshold"):
+                            try:
+                                device.shadow.threshold = float(_sh["threshold"])
+                            except (TypeError, ValueError):
+                                pass
+                        if _sh:
+                            if _sh.get("drops") or _sh.get("errors"):
+                                log.warning(
+                                    f"[{device_id}] on-device wake word fell behind: "
+                                    f"{_sh.get('drops')} frames dropped, "
+                                    f"{_sh.get('errors')} errors ({_sh.get('lastErr') or '-'}) "
+                                    f"— comparison is running on a subset of the audio"
                                 )
-                    pass
+                        if msg.get("ble"):
+                            em_ble_proxy.update_stats(device_id, msg["ble"])
+                        # Ambient light straight through to HA's sensor entity.
+                        # Rides the existing ~30s stats tick — light does not
+                        # change fast enough to justify a channel of its own, and
+                        # nothing per-frame is the standing rule here.
+                        if "ambientLux" in msg:
+                            esphome.update_ambient_lux(device_id, msg.get("ambientLux"))
+                        # Fold into the persistent hourly rollup (CPU/RAM/storage/
+                        # RSSI trends) — one cheap upsert per ~30s report. The
+                        # last_seen refresh rides the same executor hop: a stats
+                        # report IS proof of life, and without it last_seen only
+                        # ever recorded the last *connect*.
+                        # RTT is controller-measured, not relayed from the
+                        # device message, so it is merged in here rather than
+                        # coming through the allowlist above. drain_rtt() takes
+                        # and resets the window accumulated since the last
+                        # report, so no sample is counted twice.
+                        _metrics = {**device.stats, **device.drain_rtt()}
+                        def _persist_stats(_id=device_id, _s=_metrics, _shadow=_sh):
+                            db.record_device_stats(_id, _s)
+                            db.touch_device_seen(_id)
+                            # Shadow counters ride the SAME executor hop rather
+                            # than adding one: the whole point of summarising on
+                            # the device is that on-device scoring costs the DB
+                            # one upsert per 30s, not one per frame.
+                            if _shadow:
+                                db.bump_wake_counters(
+                                    _id,
+                                    dev_frames=int(_shadow.get("frames") or 0),
+                                    dev_drops=int(_shadow.get("drops") or 0),
+                                    dev_crossings=int(_shadow.get("crossings") or 0),
+                                    dev_max_score=float(_shadow.get("maxScore") or 0.0),
+                                    # v16: what a drop actually was — slowest
+                                    # inference vs longest frame gap.
+                                    dev_max_infer_ms=int(_shadow.get("maxInferMs") or 0),
+                                    dev_max_gap_ms=int(_shadow.get("maxGapMs") or 0),
+                                )
+                        await loop.run_in_executor(None, _persist_stats)
+                        await api._push_event({
+                            "type":      "device_update",
+                            "device_id": device_id,
+                            "state":     {
+                                "stats": device.stats,
+                                # Controller-side proxy view rides along so the
+                                # dashboard's Bluetooth panel stays live without
+                                # a full device refresh.
+                                "bleProxy": em_ble_proxy.get_status(device_id),
+                            },
+                        })
 
-                else:
-                    log.debug(
-                        f"[{device_id}] Unknown control message: {msg_type}"
-                    )
+                    elif msg_type == "wifi_result":
+                        # Outcome of a wifi_change. The device re-sends this
+                        # until it sees a wifi_commit ack (a single send can
+                        # vanish into a half-open TCP connection killed by the
+                        # network switch), so: ALWAYS ack — on success the ack
+                        # also finalises the change (deletes rollback backup +
+                        # pending marker; a failed change already removed both,
+                        # so the ack is a no-op there) — and log/record only
+                        # the first arrival.
+                        ok    = bool(msg.get("ok"))
+                        ssid  = msg.get("ssid", "")
+                        error = msg.get("error") or ""
+                        st, duplicate = api.wifi_record_result(device_id, ok, ssid, error)
+                        await device.send_control({"type": "wifi_commit"})
+                        if not duplicate:
+                            if ok:
+                                log.info(f"[{device_id}] WiFi changed to \"{ssid}\" — committed")
+                                db.log_device(device_id, "info", "device",
+                                              f'WiFi changed to "{ssid}"')
+                            else:
+                                log.warning(f"[{device_id}] WiFi change to \"{ssid}\" "
+                                            f"failed: {error}")
+                                db.log_device(device_id, "warning", "device",
+                                              f'WiFi change to "{ssid}" failed: {error}')
+                            await api._push_event({
+                                "type":      "device_update",
+                                "device_id": device_id,
+                                "state":     {"wifi": st},
+                            })
 
+                    elif msg_type == "playback_stats":
+                        # One report per completed speaker stream (firmware
+                        # >= v2.9): periods played + mid-stream underruns.
+                        # Attach to the turn persisted just before playback;
+                        # consume last_turn_id so a later announcement's report
+                        # can't overwrite a turn's stats. Reports with no
+                        # pending turn (HA announcements, TTS after a controller
+                        # restart) roll into the hourly counters instead.
+                        # periods/underruns are read from the top level, which
+                        # every firmware sends; "stats" carries the v2.9.6+
+                        # delivery-margin fields and is absent on older devices.
+                        periods   = int(msg.get("periods", 0))
+                        underruns = int(msg.get("underruns", 0))
+                        pstats    = msg.get("stats") or {}
+                        # Release _run_post_turn_playback: this report IS the
+                        # end of audio, and the ring clears on it rather than
+                        # on a wall-clock guess.
+                        device.playback_done.set()
+                        # Delivery window: first speaker frame sent -> this
+                        # report. The metric the 07-20 investigation lacked —
+                        # "Streaming took Xs" times the socket write and reads
+                        # ~0s however slowly the device is really being fed.
+                        delivery_ms = -1
+                        if device.playback_send_t0 is not None:
+                            delivery_ms = int(
+                                (loop.time() - device.playback_send_t0) * 1000
+                            )
+                            device.playback_send_t0 = None
+                        turn_id   = device.last_turn_id
+                        device.last_turn_id = None
+                        if turn_id is not None:
+                            await loop.run_in_executor(
+                                None, db.set_turn_playback,
+                                turn_id, periods, underruns, pstats,
+                            )
+                            if delivery_ms >= 0:
+                                await loop.run_in_executor(
+                                    None, db.set_turn_delivery, turn_id,
+                                    device.playback_send_ms,
+                                    delivery_ms, device.playback_eq_ms,
+                                )
+                            for rec in reversed(device.turn_history):
+                                if rec.get("turn_id") == turn_id:
+                                    rec["playback_periods"] = periods
+                                    rec["underruns"]        = underruns
+                                    break
+                        else:
+                            # The turn row may not exist yet (device buffers
+                            # usually drain before the controller's drain sleep
+                            # ends) — stash for _persist_turn to fold in. A
+                            # displaced earlier stash was an announcement's:
+                            # keep its underruns in the hourly counters.
+                            prev = device.pending_playback_stats
+                            # Indices 0-2 stay (ts, periods, underruns) so the
+                            # existing consumer keeps working; 3-4 carry the v7
+                            # delivery detail.
+                            device.pending_playback_stats = (
+                                asyncio.get_event_loop().time(), periods, underruns,
+                                pstats, delivery_ms,
+                            )
+                            if prev and prev[2]:
+                                await loop.run_in_executor(
+                                    None,
+                                    lambda: db.bump_wake_counters(
+                                        device_id, underruns=prev[2]
+                                    ),
+                                )
+                        if underruns:
+                            log.warning(
+                                f"[{device_id}] Playback underruns: {underruns} "
+                                f"in {periods} periods"
+                                f"{f' (turn {turn_id})' if turn_id else ''}"
+                            )
+
+                    elif msg_type == "oww_shadow_cross":
+                        # On-device scoring reached the wake threshold. Recorded
+                        # for comparison ONLY — nothing here starts a turn, and
+                        # that is the entire point of shadow mode.
+                        device.shadow.record_cross(msg.get("score"), msg.get("ageMs"))
+                        log.info(
+                            f"[{device_id}] on-device wake crossing: "
+                            f"score={msg.get('score')} age={msg.get('ageMs')}ms "
+                            f"(shadow — not triggering)"
+                        )
+
+                    elif msg_type == "oww_wake":
+                        # On-device scoring crossed the bar AND owwOnDevice is
+                        # "on", so the device is asking for a turn rather than
+                        # reporting a measurement. Parked here; the wake listener
+                        # picks it up on its next frame (~80ms) because that is
+                        # where the turn setup lives — capture routing, beam lock
+                        # and arbitration all have to happen together, and doing
+                        # them from the control plane would be a second copy of
+                        # the most delicate sequence in the controller.
+                        #
+                        # Also recorded as a crossing, so a device-triggered turn
+                        # carries the same dev_* comparison fields as a
+                        # controller-triggered one and the Activity tab does not
+                        # have to special-case which side fired.
+                        device.shadow.record_cross(msg.get("score"), msg.get("ageMs"))
+                        if device.oww_on_device != em_shadow.MODE_ON:
+                            # Firmware triggering while the controller thinks it
+                            # should not: a config push in flight, or a rollback
+                            # to a mode this device no longer has. Logged rather
+                            # than obeyed — the controller's view of the mode is
+                            # the one the dashboard shows.
+                            log.warning(
+                                f"[{device_id}] oww_wake ignored — mode is "
+                                f"{device.oww_on_device!r}, not 'on'"
+                            )
+                        elif device.pending_wake.offer(
+                            msg.get("score"), msg.get("threshold"), msg.get("ageMs")
+                        ):
+                            log.info(
+                                f"[{device_id}] on-device wake: "
+                                f"score={msg.get('score')} age={msg.get('ageMs')}ms "
+                                f"(device triggered)"
+                            )
+                        else:
+                            log.warning(
+                                f"[{device_id}] malformed oww_wake dropped: {msg!r}"
+                            )
+
+                    elif msg_type == "ble_adverts":
+                        # BLE proxy data path — batched adverts from the
+                        # device's passive scanner, forwarded to HA.
+                        em_ble_proxy.forward_adverts(
+                            device_id, msg.get("adverts") or []
+                        )
+
+                    elif msg_type == "wifi_scan_result":
+                        fut = device.wifi_scan_future
+                        if fut is not None and not fut.done():
+                            fut.set_result(msg)
+
+                    elif msg_type == "log":
+                        level   = msg.get("level", "info")
+                        message = msg.get("message", "")
+                        # _push_log_event PERSISTS as well as pushing, so this must
+                        # not also call db.log_device — doing both wrote every
+                        # device log line twice, ~6ms apart, which is how half the
+                        # device_logs table came to be duplicates. It also matters
+                        # for the support bundle: thin_noise keeps the newest three
+                        # [mem] lines per device, so duplication halved the readings
+                        # a leak hunt actually gets.
+                        #
+                        # The removed call was a synchronous DB write on the event
+                        # loop; _push_log_event does it in an executor.
+                        await api._push_log_event(device_id, level, "device", message)
+
+                    elif msg_type == "pong":
+                        # Solicited pong (carries our sequence id) -> an RTT
+                        # sample. Unsolicited keepalive pongs have no id and are
+                        # ignored here; pairing one with whatever ping happened
+                        # to be outstanding would invent a measurement.
+                        _seq = msg.get("id")
+                        if _seq is not None:
+                            _sent = device.ping_sent.pop(_seq, None)
+                            _busy = device.ping_busy.pop(_seq, False)
+                            if _sent is not None:
+                                _rtt = int((loop.time() - _sent) * 1000)
+                                device.record_rtt(_rtt, _busy)
+                                if _rtt >= RTT_EXCURSION_MS:
+                                    log.info(
+                                        f"[{device_id}] RTT excursion: {_rtt}ms "
+                                        f"({'busy' if _busy else 'idle'})"
+                                    )
+                        pass
+
+                    else:
+                        log.debug(
+                            f"[{device_id}] Unknown control message: {msg_type}"
+                        )
+
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception(
+                        f"[{device_id}] Control handler failed for "
+                        f"{msg_type!r} - message dropped, connection kept")
         finally:
             ping_task.cancel()
             # device.oww_task, not the local: a supervised restart replaces
@@ -3293,46 +3313,68 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
         device.data_ready.set()
         log.info(f"[data] Data connection established: {device_id}")
 
+        # One bad frame must not close the data connection (#255), same
+        # reading as the control plane. This loop runs per frame though
+        # (~23/s), so a persistent fault would flood the log at frame
+        # rate: one traceback per 5s window, suppressed count reported
+        # when the next window opens.
+        _frame_err_last: float = float("-inf")
+        _frame_err_suppressed = 0
         async for raw in ws:
-            if not isinstance(raw, bytes):
-                continue
-            if len(raw) <= MIC_HEADER_LEN:
-                continue
-            if raw[0] != MIC_FRAME_TYPE:
-                continue
-            if len(raw) == MIC_HEADER_LEN + 1 and raw[MIC_HEADER_LEN] in (VAD_END_TYPE, VAD_NO_SPEECH_TIMEOUT_TYPE):
-                sentinel = (
-                    esphome.VAD_SENTINEL_TIMEOUT
-                    if raw[MIC_HEADER_LEN] == VAD_NO_SPEECH_TIMEOUT_TYPE
-                    else esphome.VAD_SENTINEL_END
-                )
+            try:
+                if not isinstance(raw, bytes):
+                    continue
+                if len(raw) <= MIC_HEADER_LEN:
+                    continue
+                if raw[0] != MIC_FRAME_TYPE:
+                    continue
+                if len(raw) == MIC_HEADER_LEN + 1 and raw[MIC_HEADER_LEN] in (VAD_END_TYPE, VAD_NO_SPEECH_TIMEOUT_TYPE):
+                    sentinel = (
+                        esphome.VAD_SENTINEL_TIMEOUT
+                        if raw[MIC_HEADER_LEN] == VAD_NO_SPEECH_TIMEOUT_TYPE
+                        else esphome.VAD_SENTINEL_END
+                    )
+                    q = device.voice_queue if device.oww_paused.is_set() else device.mic_queue
+                    if q.full():
+                        try:
+                            q.get_nowait()
+                            log.warning(f"[{device.device_id}] queue full — dropped one frame to deliver VAD sentinel")
+                        except asyncio.QueueEmpty:
+                            pass
+                    try:
+                        q.put_nowait(sentinel)
+                    except asyncio.QueueFull:
+                        log.error(f"[{device.device_id}] VAD sentinel lost — queue still full after drain")
+                    continue
+                payload = raw[MIC_HEADER_LEN:]
                 q = device.voice_queue if device.oww_paused.is_set() else device.mic_queue
-                if q.full():
+                try:
+                    q.put_nowait(payload)
+                except asyncio.QueueFull:
+                    # Drop the OLDEST frame, not the newest — keeps the tail of
+                    # the audio contiguous with real time, which is what OWW and
+                    # STT care about. Dropping the newest froze the queue at a
+                    # stale snapshot while fresh speech was discarded.
                     try:
                         q.get_nowait()
-                        log.warning(f"[{device.device_id}] queue full — dropped one frame to deliver VAD sentinel")
-                    except asyncio.QueueEmpty:
+                        q.put_nowait(payload)
+                    except (asyncio.QueueEmpty, asyncio.QueueFull):
                         pass
-                try:
-                    q.put_nowait(sentinel)
-                except asyncio.QueueFull:
-                    log.error(f"[{device.device_id}] VAD sentinel lost — queue still full after drain")
-                continue
-            payload = raw[MIC_HEADER_LEN:]
-            q = device.voice_queue if device.oww_paused.is_set() else device.mic_queue
-            try:
-                q.put_nowait(payload)
-            except asyncio.QueueFull:
-                # Drop the OLDEST frame, not the newest — keeps the tail of
-                # the audio contiguous with real time, which is what OWW and
-                # STT care about. Dropping the newest froze the queue at a
-                # stale snapshot while fresh speech was discarded.
-                try:
-                    q.get_nowait()
-                    q.put_nowait(payload)
-                except (asyncio.QueueEmpty, asyncio.QueueFull):
-                    pass
 
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _now = asyncio.get_running_loop().time()
+                if _now - _frame_err_last >= 5.0:
+                    if _frame_err_suppressed:
+                        log.error(
+                            f"[{device.device_id}] {_frame_err_suppressed} data-frame errors suppressed")
+                    log.exception(
+                        f"[{device.device_id}] Data handler failed - frame dropped, connection kept")
+                    _frame_err_last = _now
+                    _frame_err_suppressed = 0
+                else:
+                    _frame_err_suppressed += 1
     except asyncio.TimeoutError:
         log.warning(f"[data] Identify timeout from {remote}")
 
