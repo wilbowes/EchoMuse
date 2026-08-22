@@ -38,14 +38,46 @@ log = logging.getLogger("echomuse.db")
 # ─── Default device config ────────────────────────────────────────────────────
 
 DEFAULT_DEVICE_CONFIG = {
-    # owwOnDevice: on-device wake word scoring. "off" or "shadow".
-    # Shadow scores the wake stream on the device and reports what it WOULD
-    # have detected, without acting on it, so the two can be compared on the
-    # same audio. Default off and it should stay that way: it costs ~38% of one
-    # core permanently on top of the ~18-20% mic-pipeline baseline, and it
-    # needs ONNX Runtime plus the models installed on the device out of band
-    # (they are not in the firmware). Enable on ONE device at a time.
-    "owwOnDevice":      "off",
+    # owwOnDevice: on-device wake word scoring. "off", "shadow" or "on".
+    #
+    # DEFAULT "on" SINCE 3.0.0 (Wil, 2026-08-22) — this was the stated meaning
+    # of that release from 2026-07-30 and is the last piece of it. The device
+    # scores the wake stream itself and triggers the turn; the controller keeps
+    # scoring in parallel and records whether it agreed
+    # (turns.ctrl_wake_score), which is what stops the comparison ending the
+    # day the default flips.
+    #
+    # It is safe to default because nothing here takes it on trust:
+    # em_shadow.effective_mode degrades to "shadow" without the oww_trigger
+    # capability and to "off" when the classifier is known missing, and
+    # em_api.reconcile_oww_assets checks on every connect. A device that
+    # cannot score locally therefore falls back to the controller triggering
+    # for it, which is the old behaviour rather than a wrong answer.
+    #
+    # WHAT DID NOT CHANGE IS THE COST: ~38% of one core permanently, on top of
+    # the ~18-20% mic-pipeline baseline. "Enable on ONE device at a time" was
+    # the advice while this was opt-in, and as a default it becomes something
+    # to watch on the FIRST device of a new deployment rather than a
+    # per-device ritual — the number to look at is cpuPct next to
+    # coresOnline, since a share of online capacity halves when a second core
+    # comes up.
+    #
+    # Changing this moves only devices that INHERIT the wakeword section. Both
+    # devices on the fleet it was changed against already overrode it to "on",
+    # so the flip changed nothing for them — the usual shape, and the reason
+    # the live DB gets read before a default moves.
+    "owwOnDevice":      "on",
+    # wakeSound: a short rising two-tone when the wake word is recognised
+    # (#120, @tvories). Off by default — it interrupts the flow of
+    # "<wakeword>, do this thing for me", which is why it is a setting and
+    # not behaviour.
+    #
+    # It is an ACCESSIBILITY option before it is a convenience: the LED ring
+    # is currently the only indication that the device is listening, which is
+    # no use from the next room and no use at all to a blind or low-vision
+    # user. Generated on the device, so it lands with the wake rather than an
+    # RTT later.
+    "wakeSound":        False,
     "adcDigitalGain":   88,
     "adcMicpga":        40,
     # micGainDb: fixed digital gain (dB) the device applies to the full

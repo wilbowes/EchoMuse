@@ -114,12 +114,15 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
 | `internal/bindings/als/` | Ambient light (ams **TSL2540** on i2c). Android does not expose it AT ALL — `dumpsys sensorservice` reports an empty list, nothing under `/sys/class/sensors`, no input device; it is visible only on the raw i2c bus, the same shape as the mute LED being on a different GPIO than the vendor HAL believed. Resolved **by name, not address** (`0-0039` is an enumeration accident). **The bus listing is not a hardware inventory**: both ALS names are registered by Amazon's board file, so a `tsl2540` at 0x39 and a `tsl2584tsv` at 0x29 appear on every unit whatever is soldered on (`modalias` is static kernel data). Which one answers differs by batch — ours have the 2540 and nothing at 0x29 (`taos_probe() err = -6`, ENXIO), the `G090LF096` batch has the 2584 instead, reachable only through IIO at `/sys/bus/iio/devices/iio:device0` (#90). A second-sourced part, not a driver fault, so the answer is to read the IIO sensor too, never to loosen the match to a `tsl` prefix. The **boot log is the real inventory** — both drivers probe on every unit and log what replied — but `dmesg` rolls, so it needs reading soon after a reboot. Never `unbind` the driver to experiment: it succeeds, leaves the `als_*` attributes in place, and the next read hangs the device until a power cycle. `Lux()` returns **nil, never 0** — a covered sensor reads a genuine 0. `Watch` reports a step change immediately (25% relative, 10-lux floor, measured noise ±1.5%); the steady value rides the ~30s stats tick. `Report()` says **why** there is no sensor (`ok`/`no_chip`/`no_attribute`/`unknown`, plus every i2c name it saw) and rides the register message as `ambient_light_status` — absence used to be logged only to the device's own stdout, which support bundles do not collect, so two users could not be told apart without a shell session (#90). The whole bus is enumerated **before** matching: returning at the match truncated the list on working devices, which is exactly the side you compare against |
 | `internal/bindings/jack/` | Headphone jack detect (`/sys/class/switch/h2w`, mediatek accdet). Polled, not evented — the ACCDET input node reports no keys on this hardware. Exists for ONE job: accdet mutes `Ext_Speaker_Amp_Switch` on insert (correctly) and **nothing turns it back on**, so the speaker stayed dead until the next boot (#80). Output routing itself is done by the jack's own switch contacts — a response was heard in headphones while the mixer still read `Headphone_Speaker_Mux=Speaker`, so those controls do NOT describe where audio goes and nothing should drive them |
 | `internal/wifi/` | Safe WiFi network change with auto-rollback (wifi_change/wifi_commit/wifi_scan control messages; pending-marker recovery at startup). Reload path is `svc wifi disable/enable` ONLY — see package comment for the hardware-proven constraints |
+| `internal/outchain/` | The output chain — EQ, bass guard, limiter — applied POST-MIX at the ALSA write (3.0.0, #243). A port of the controller's `em_eq`/`em_mbc`/`em_limiter`, and correctness means **agreement with them**: `internal/outchain/fixture` replays golden captures and all fifteen cases match bit for bit. No build tag, deliberately — it is arithmetic and belongs in the host suite. `Chain` adds the one thing the reference does not have: parameter changes that do not click, by crossfading between two complete chains rather than interpolating coefficients (which can pass through unstable states). Keep the STAGES faithful and put every divergence in `Chain`, or the fixture stops being evidence |
+| `internal/cue/` | Device-generated audible cues — today the wake confirmation (#120). Synthesised rather than shipped as an asset: no distribution path, no md5 dance, no OTA payload. Pure Go and host-tested; the speaker binding mixes what it returns, BEFORE the output chain so it is limited with everything else |
 | `pkg/led/`, `pkg/mic/`, `pkg/speaker/`, `pkg/buttons/` | Hardware abstractions (interfaces) |
 
 ## On-device wake word (shadow mode)
 
-The Echo can run the wake model itself. `owwOnDevice` = `off` (default),
-`shadow` or `on`; an unknown value normalises to `off` at BOTH ends rather than
+The Echo can run the wake model itself. `owwOnDevice` = `off`, `shadow` or
+`on` — **`on` since 3.0.0**, which was the stated meaning of that release from
+2026-07-30; an unknown value normalises to `off` at BOTH ends rather than
 being guessed at — the two plausible guesses are "score silently" and "start
 triggering", and one of those is a live behaviour change on a device that
 cannot honour it. Neither end may assume the other is the careful one.
@@ -249,8 +252,11 @@ Requirements and cost: ONNX Runtime plus the three models must be installed at
 and both A/B slots. Absence is an ordinary condition, logged once, and the
 device carries on with controller-side wake word. `device/tools/oww_probe`
 verifies a device reproduces Python and reports the real CPU cost. It costs
-~38% of one core permanently on top of the ~18-20% mic-pipeline baseline, so
-**enable it on one device at a time**.
+~38% of one core permanently on top of the ~18-20% mic-pipeline baseline. That
+cost did not change when it became the default in 3.0.0 — what changed is where
+you watch for it: on the FIRST device of a new deployment rather than as a
+per-device ritual, and **read `cpuPct` next to `coresOnline`**, since a share
+of online capacity halves the moment a second core comes up.
 
 **The scorer pointer must be re-read PER FRAME, never cached for a stream.**
 A config push replaces the scorer and **closes** the old one, so a mic stream
@@ -520,7 +526,14 @@ Two traps for whoever picks this up:
 already opened with two channels and `PumpPeriod` duplicates L=R; the mono
 downmix happens at the controller, in three ffmpeg calls (`-ac 1`). That was
 right when a mono internal speaker was the only output. With a jack it throws
-information away — see the stereo issue rather than reinventing the analysis.
+information away — see **#273** rather than reinventing the analysis. (That
+pointer said "the stereo issue" and named no number until 2026-08-22, when it
+turned out no such issue had ever been filed.) Note Sendspin does not inherit
+this problem: the client asks for what it wants via `stream/request-format`,
+so the device requests `channels: 1` normally and `channels: 2` when a plug is
+in, and the downmix happens server-side. **#274** turns the same mechanism
+into a stereo PAIR — two devices each playing one channel of the identical
+group stream, which the protocol already keeps sample-accurate.
 
 **`tinymix` IS on these devices** (`/system/bin/tinymix`), and the codec
 regmap is readable at `/sys/kernel/debug/regmap/2-0018/registers`

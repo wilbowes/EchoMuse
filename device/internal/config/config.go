@@ -45,6 +45,34 @@ type Device struct {
 	// reasoning as the LED meter response curve — not something to discover
 	// via a firmware OTA per attempt.
 	DuckDb float64
+
+	// ─── Output chain ────────────────────────────────────────────────────
+	//
+	// EQ, bass guard and limiter, applied to the MIXED audio on the way to
+	// the speaker (internal/outchain). These seven keys have ridden the
+	// config push since the chain existed controller-side and were ignored
+	// by the device until 3.0.0 — see docs/audio-states.md section 8 for why
+	// the processing moved here, and note the controller stands down only
+	// for a device announcing the `output_chain` capability, so a mismatch
+	// double-processes rather than silently dropping the shaping.
+	EqBands          []float64
+	EqLoudness       bool
+	LimiterEnabled   bool
+	LimiterThreshold float64
+	LimiterRelease   float64
+	BassGuardEnabled bool
+	BassGuardDb      float64
+
+	// WakeSound plays a short rising two-tone when the wake word is
+	// recognised (#120). Off by default: it interrupts the flow of
+	// "<wakeword>, do this thing for me", which is why it is a setting
+	// rather than behaviour.
+	//
+	// It is an ACCESSIBILITY option before it is a convenience. The LED ring
+	// is currently the only indication that the device is listening — no use
+	// from the next room, and no use at all to a blind or low-vision user.
+	WakeSound bool
+
 	// OwwOnDevice selects on-device wake word scoring: "off", "shadow" or
 	// "on".
 	//
@@ -135,6 +163,17 @@ func (d *Device) loadDefaults() {
 	d.OwwOnDevice = normaliseOnDevice(envStr("OWW_ON_DEVICE", OnDeviceOff))
 	d.BargeInThreshold = envFloat("BARGE_IN_THRESHOLD", 0.05)
 	d.DuckDb = envFloat("DUCK_DB", -18)
+	// Mirrors the controller's DEFAULT_DEVICE_CONFIG. A device that has
+	// announced `output_chain` is shaping its own audio from the first
+	// period, before any config arrives, so these defaults are what plays
+	// during that window and must not be silence-adjacent guesses.
+	d.WakeSound = envBool("WAKE_SOUND", false)
+	d.EqBands = make([]float64, 8)
+	d.LimiterEnabled = envBool("LIMITER_ENABLED", true)
+	d.LimiterThreshold = envFloat("LIMITER_THRESHOLD", -1)
+	d.LimiterRelease = envFloat("LIMITER_RELEASE", 150)
+	d.BassGuardEnabled = envBool("BASS_GUARD_ENABLED", true)
+	d.BassGuardDb = envFloat("BASS_GUARD_DB", -30)
 	d.AdcDigitalGain = envInt("ADC_DIGITAL_GAIN", 88)
 	d.AdcMicpga = envInt("ADC_MICPGA", 40)
 	d.MicGainDb = clampMicGainDb(envInt("MIC_GAIN_DB", 24))
@@ -195,6 +234,33 @@ func (d *Device) Apply(msg ConfigMessage) {
 	if msg.DuckDb != nil {
 		d.DuckDb = *msg.DuckDb
 	}
+	// Output chain. eqBands arrives as a whole array or not at all — a
+	// partial curve is not a meaningful thing to merge, and the controller
+	// always sends the full eight.
+	if msg.WakeSound != nil {
+		d.WakeSound = *msg.WakeSound
+	}
+	if msg.EqBands != nil {
+		d.EqBands = append([]float64(nil), msg.EqBands...)
+	}
+	if msg.EqLoudness != nil {
+		d.EqLoudness = *msg.EqLoudness
+	}
+	if msg.LimiterEnabled != nil {
+		d.LimiterEnabled = *msg.LimiterEnabled
+	}
+	if msg.LimiterThreshold != nil {
+		d.LimiterThreshold = *msg.LimiterThreshold
+	}
+	if msg.LimiterRelease != nil {
+		d.LimiterRelease = *msg.LimiterRelease
+	}
+	if msg.BassGuardEnabled != nil {
+		d.BassGuardEnabled = *msg.BassGuardEnabled
+	}
+	if msg.BassGuardDb != nil {
+		d.BassGuardDb = *msg.BassGuardDb
+	}
 	if msg.StartupVolume > 0 {
 		d.StartupVolume = msg.StartupVolume
 	}
@@ -231,6 +297,56 @@ func (d *Device) Apply(msg ConfigMessage) {
 }
 
 // Snapshot returns a consistent copy of all config values.
+// WakeSoundEnabled reports whether the audible wake confirmation is on.
+//
+// Its own accessor rather than a read off Snapshot(), which does not carry it
+// — and deliberately should not grow every field, since ConfigMessage exists
+// to describe a PARTIAL push and a snapshot of it cannot distinguish "false"
+// from "not mentioned".
+func (d *Device) WakeSoundEnabled() bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.WakeSound
+}
+
+// OutputChainConfig is the output chain's settings as plain values.
+//
+// A dedicated accessor rather than reading them off Snapshot(), because
+// ConfigMessage's fields are POINTERS — they have to be, since 0.0 and false
+// are legitimate settings for every one of these keys and must be
+// distinguishable from absent on the wire. Plain values are what the consumer
+// wants, and unwrapping seven pointers at the call site is where a nil deref
+// waits.
+type OutputChainConfig struct {
+	EqBands          []float64
+	EqLoudness       bool
+	LimiterEnabled   bool
+	LimiterThreshold float64
+	LimiterRelease   float64
+	BassGuardEnabled bool
+	BassGuardDb      float64
+}
+
+// OutputChain returns the current output-chain settings.
+//
+// EqBands is COPIED, never returned by reference: the caller reads it outside
+// the lock while Apply() may be writing the same slice. That is the C4 bug
+// noted on Snapshot below, and a slice makes it easier to reintroduce than a
+// bool did.
+func (d *Device) OutputChain() OutputChainConfig {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return OutputChainConfig{
+		EqBands:          append([]float64(nil), d.EqBands...),
+		EqLoudness:       d.EqLoudness,
+		LimiterEnabled:   d.LimiterEnabled,
+		LimiterThreshold: d.LimiterThreshold,
+		LimiterRelease:   d.LimiterRelease,
+		BassGuardEnabled: d.BassGuardEnabled,
+		BassGuardDb:      d.BassGuardDb,
+	}
+}
+
 func (d *Device) Snapshot() ConfigMessage {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -284,28 +400,40 @@ func (d *Device) Snapshot() ConfigMessage {
 // ConfigMessage mirrors the JSON shape of the config control message
 // sent by the controller. JSON tags must match em_controller.py exactly.
 type ConfigMessage struct {
-	Type               string   `json:"type,omitempty"`
-	AdcDigitalGain     int      `json:"adcDigitalGain,omitempty"`
-	AdcMicpga          int      `json:"adcMicpga,omitempty"`
-	MicGainDb          *int     `json:"micGainDb,omitempty"`
-	StartupVolume      int      `json:"startupVolume,omitempty"`
-	VadThreshold       float64  `json:"vadThreshold,omitempty"`
-	VadSpeechMs        int      `json:"vadSpeechMs,omitempty"`
-	VadSilenceMs       int      `json:"vadSilenceMs,omitempty"`
-	OwwThreshold       float64  `json:"owwThreshold,omitempty"`
-	OwwModel           string   `json:"owwModel,omitempty"`
-	OwwOnDevice        string   `json:"owwOnDevice,omitempty"`
-	BargeInEnabled     *bool    `json:"bargeInEnabled,omitempty"`
-	BargeInThreshold   float64  `json:"bargeInThreshold,omitempty"`
-	DuckDb             *float64 `json:"duckDb,omitempty"`
-	BeamAngle          *float64 `json:"beamAngle,omitempty"`
-	BeamformingEnabled *bool    `json:"beamformingEnabled,omitempty"`
-	HasBeamforming     bool     `json:"hasBeamforming,omitempty"`
-	AgcEnabled         *bool    `json:"agcEnabled,omitempty"`
-	AecEnabled         *bool    `json:"aecEnabled,omitempty"`
-	AecDelayMs         *int     `json:"aecDelayMs,omitempty"`
-	AecTailMs          int      `json:"aecTailMs,omitempty"`
-	BleProxyEnabled    *bool    `json:"bleProxyEnabled,omitempty"`
+	Type             string   `json:"type,omitempty"`
+	AdcDigitalGain   int      `json:"adcDigitalGain,omitempty"`
+	AdcMicpga        int      `json:"adcMicpga,omitempty"`
+	MicGainDb        *int     `json:"micGainDb,omitempty"`
+	StartupVolume    int      `json:"startupVolume,omitempty"`
+	VadThreshold     float64  `json:"vadThreshold,omitempty"`
+	VadSpeechMs      int      `json:"vadSpeechMs,omitempty"`
+	VadSilenceMs     int      `json:"vadSilenceMs,omitempty"`
+	OwwThreshold     float64  `json:"owwThreshold,omitempty"`
+	OwwModel         string   `json:"owwModel,omitempty"`
+	OwwOnDevice      string   `json:"owwOnDevice,omitempty"`
+	BargeInEnabled   *bool    `json:"bargeInEnabled,omitempty"`
+	BargeInThreshold float64  `json:"bargeInThreshold,omitempty"`
+	DuckDb           *float64 `json:"duckDb,omitempty"`
+	// Output chain. Every one is a POINTER: 0.0 is a legitimate value for
+	// every band and for the limiter threshold, and false is legitimate
+	// for both toggles, so the usual "non-zero means set" rule cannot
+	// distinguish "set to zero" from "absent" for any of them.
+	WakeSound          *bool    `json:"wakeSound,omitempty"`
+	EqBands            []float64 `json:"eqBands,omitempty"`
+	EqLoudness         *bool     `json:"eqLoudness,omitempty"`
+	LimiterEnabled     *bool     `json:"limiterEnabled,omitempty"`
+	LimiterThreshold   *float64  `json:"limiterThreshold,omitempty"`
+	LimiterRelease     *float64  `json:"limiterRelease,omitempty"`
+	BassGuardEnabled   *bool     `json:"bassGuardEnabled,omitempty"`
+	BassGuardDb        *float64  `json:"bassGuardDb,omitempty"`
+	BeamAngle          *float64  `json:"beamAngle,omitempty"`
+	BeamformingEnabled *bool     `json:"beamformingEnabled,omitempty"`
+	HasBeamforming     bool      `json:"hasBeamforming,omitempty"`
+	AgcEnabled         *bool     `json:"agcEnabled,omitempty"`
+	AecEnabled         *bool     `json:"aecEnabled,omitempty"`
+	AecDelayMs         *int      `json:"aecDelayMs,omitempty"`
+	AecTailMs          int       `json:"aecTailMs,omitempty"`
+	BleProxyEnabled    *bool     `json:"bleProxyEnabled,omitempty"`
 }
 
 // clampMicGainDb bounds the fixed mic gain to a sane range: 0dB (unity —

@@ -18,7 +18,11 @@ import (
 
 // cardNr/deviceNr live in pcmstatus.go so the host test can pin them against
 // the status path — this file is ARM-only (build tag `server`).
-const periodSize  = 2048
+// sampleRate is the speaker path's rate everywhere — the wire, the ALSA
+// config and the output chain's filter design all assume it.
+const sampleRate = 48000
+
+const periodSize = 2048
 const periodBytes = periodSize * 2 * 2 // 2 channels * 2 bytes = 8192
 
 // The wire carries MONO 48kHz — PumpPeriod duplicates L=R before queueing.
@@ -101,6 +105,14 @@ type PcmSpeaker struct {
 	// fine: silenceLoop reads it under statsMu only on that cold path.
 	statsMu sync.Mutex
 	statsCb func(StreamStats)
+
+	// oc is the output chain — EQ, bass guard and limiter applied to the
+	// MIXED period on its way to ALSA. See outputchain.go.
+	oc chainState
+
+	// cue holds any one-shot the device is playing itself — today just the
+	// wake confirmation (#120). See cue.go.
+	cue cueState
 }
 
 // OnStreamStats registers a per-stream stats callback, reported once when a
@@ -150,7 +162,7 @@ func (p *PcmSpeaker) Init() error {
 
 	device := tinyalsa.NewDevice(cardNr, deviceNr, pcm.Config{
 		Channels:         2,
-		SampleRate:       48000,
+		SampleRate:       sampleRate,
 		PeriodSize:       periodSize,
 		PeriodCount:      4,
 		Format:           tinyalsa.PCM_FORMAT_S16_LE,
@@ -167,10 +179,10 @@ func (p *PcmSpeaker) Init() error {
 
 	go p.silenceLoop()
 
-	time.Sleep(100 * time.Millisecond)                            // silence reaches the DAC (~2 periods)
-	exec.Command("tinymix", "-D", "0", "5", "On").Run()           // enable amp onto a clocked, silent DAC
-	time.Sleep(50 * time.Millisecond)                             // let amp settle
-	exec.Command("tinymix", "-D", "0", "61", "100", "100").Run()  // unmute
+	time.Sleep(100 * time.Millisecond)                           // silence reaches the DAC (~2 periods)
+	exec.Command("tinymix", "-D", "0", "5", "On").Run()          // enable amp onto a clocked, silent DAC
+	time.Sleep(50 * time.Millisecond)                            // let amp settle
+	exec.Command("tinymix", "-D", "0", "61", "100", "100").Run() // unmute
 
 	log.Println("PcmSpeaker initialised — silence stream running")
 	return nil
@@ -278,6 +290,25 @@ func (p *PcmSpeaker) silenceLoop() {
 		if out == nil {
 			out = silencePeriod
 		}
+
+		// A device-generated cue sums in BEFORE the chain, so it is shaped
+		// and limited with everything else and can never push the sum into
+		// clipping when it lands on top of loud music.
+		out = p.mixCue(out)
+
+		// ─── Output chain: EQ, bass guard, limiter ───────────────────────
+		//
+		// POST-MIX, and that is the whole point (docs/audio-states.md §8).
+		// Controller-side there are two independent chains — one for voice,
+		// one for music — so neither limiter ever sees the two summed, and
+		// only the mixer's saturation stands behind a loud response over
+		// loud music. Here there is one chain and it sees what the speaker
+		// actually emits.
+		//
+		// It runs BEFORE the taps for the same reason the taps were moved
+		// after the mix: the AEC far-end reference has to be what the
+		// speaker emits, and after this stage that is no longer the mix.
+		out = p.applyOutputChain(out)
 
 		// Taps see the MIXED output, which is what the speaker actually
 		// emits. That matters for AEC: the far-end reference is what needs
@@ -395,15 +426,15 @@ func (p *PcmSpeaker) EndStream() { p.voice.endStream() }
 func (p *PcmSpeaker) EndMusicStream() { p.music.endStream() }
 
 // Flush cuts a playing VOICE stream immediately (barge-in). Two parts:
-//   1. Drain the buffer — kills up to ~5.5s already queued on-device.
-//   2. Arm discarding (if a stream is mid-flight) — subsequent periods of
-//      this stream are dropped until its EOS arrives. Necessary because the
-//      controller writes the whole response into the WebSocket ahead of
-//      playback: at barge time the rest of the stream is already in TCP
-//      buffers and would refill the channel right after the drain (the
-//      pre-2026-07-08 version drained only, and playback resumed after a
-//      ~1.3s skip). The controller sends the EOS on the cancel path too, so
-//      the discard always terminates.
+//  1. Drain the buffer — kills up to ~5.5s already queued on-device.
+//  2. Arm discarding (if a stream is mid-flight) — subsequent periods of
+//     this stream are dropped until its EOS arrives. Necessary because the
+//     controller writes the whole response into the WebSocket ahead of
+//     playback: at barge time the rest of the stream is already in TCP
+//     buffers and would refill the channel right after the drain (the
+//     pre-2026-07-08 version drained only, and playback resumed after a
+//     ~1.3s skip). The controller sends the EOS on the cancel path too, so
+//     the discard always terminates.
 //
 // Up to PeriodCount ALSA periods (~170ms) already handed to the hardware
 // still play — cutting those needs a stream restart, which costs more in

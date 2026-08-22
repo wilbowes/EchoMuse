@@ -45,6 +45,7 @@ build_module_tool() {
 
 build_tool capture_mics
 build_tool bf_capture
+build_tool sendspin_bench
 build_module_tool oww_probe
 
 echo ""

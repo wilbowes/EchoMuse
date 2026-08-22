@@ -1812,6 +1812,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 sections={sections}
                 shadowCapable={!device.connected || !!device.owwShadowCapable}
                 triggerCapable={!device.connected || !!device.owwTriggerCapable}
+                wakeCueCapable={!device.connected || !!device.wakeCueCapable}
                 mixCapable={!device.connected || !!device.audioMixCapable}
                 holdCapable={!device.connected || !!device.buttonHoldCapable}
                 onScopeChange={(id, local) => {
@@ -4819,7 +4820,7 @@ const STAGE_MONO = "'DM Mono',monospace";
 // be silently wrong.
 const CONFIG_SECTIONS = {
   "playback": ["eqBands", "eqLoudness", "duckDb", "limiterEnabled", "limiterThreshold", "limiterRelease", "bassGuardEnabled", "bassGuardDb"],
-  "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice"],
+  "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice", "wakeSound"],
   "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "nsAsr", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
   "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs"],
@@ -4945,7 +4946,8 @@ function onDeviceMode(config) {
 
 function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                             shadowCapable = true, mixCapable = true,
-                            holdCapable = true, triggerCapable = true }) {
+                            holdCapable = true, triggerCapable = true,
+                            wakeCueCapable = true }) {
   // shadowCapable defaults TRUE because this form is also the fleet-config
   // view, where there is no single device whose capability could gate a
   // control. Referencing a `device` here is what blank-screened the Config
@@ -5249,6 +5251,20 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                   { value: 'on',     label: 'On device',      disabled: !triggerCapable },
                 ]}
                 onChange={v => set('owwOnDevice', v)}/>
+              {/* Accessibility before convenience: the ring is the only sign
+                  the device is listening, which is no use from the next room
+                  and no use at all to someone who cannot see it. Disabled
+                  with the reason rather than hidden when the firmware cannot
+                  make a sound — a silent no-op fails exactly the person this
+                  setting exists for. */}
+              <Toggle
+                label="Wake sound"
+                sub={wakeCueCapable
+                  ? 'a short rising tone when the Echo hears the wake word — plays on the device, so it lands as it hears you'
+                  : 'needs newer firmware on this Echo'}
+                disabled={!wakeCueCapable}
+                value={config.wakeSound ?? false}
+                onChange={v => set('wakeSound', v)}/>
               {(config.owwOnDevice ?? 'off') !== 'off' && shadowCapable && (
                 <div className="em-label" style={{ marginTop: 6, color: 'var(--muted)' }}>
                   Needs the wake word runtime installed on this Echo (Updates tab) — costs ~0.4 of a core while it runs.

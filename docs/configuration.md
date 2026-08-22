@@ -333,15 +333,17 @@ it's a "try it and compare" option.
 ### Wake word detection
 Who decides you said the wake word. Three settings:
 
-- **Controller** (default) — the Dot streams audio and the controller
-  listens. What EchoMuse has always done.
+- **Controller** — the Dot streams audio and the controller listens. What
+  EchoMuse did before 3.0.0.
 - **Both (compare)** — the Echo *also* runs the same model over the same
   audio and reports what it would have detected, without acting on it. It
   never triggers a turn. This is the one to use first: it tells you whether
   on-device detection is trustworthy on your hardware, in your room, before
   anything depends on it.
-- **On device** — the Echo decides, and the controller starts the turn on
-  its word.
+- **On device** (default since 3.0.0) — the Echo decides, and the controller
+  starts the turn on its word. No network hop before it hears you, and it
+  keeps working through a controller restart. The controller still scores
+  alongside it, so the Activity tab shows whether they agreed.
 
 **Why you might want "On device".** The wake decision stops crossing your
 network, so it is not delayed by a bad moment on the link. On a marginal
@@ -398,6 +400,28 @@ Three things to know before leaving Controller:
   vintages: scoring shipped before triggering did. Each option is disabled
   and says so on an Echo whose firmware cannot do it, rather than appearing
   to work.
+
+### Wake sound
+Off by default. Plays a short rising two-tone on the Echo when it hears the
+wake word — a low note then a higher one, about a quarter of a second.
+
+This is an **accessibility** setting first. The LED ring is otherwise the only
+sign that the Echo is listening, which is no use from the next room and no use
+at all if you cannot see it.
+
+Two things worth knowing:
+
+- **It interrupts you slightly.** You will usually be part-way through
+  "*wake word*, turn off the kitchen light" when it plays. That is why it is
+  off by default rather than standard behaviour — try it and see whether the
+  confirmation is worth the interruption to you.
+- **It is quickest with Wake word detection set to "On device"** (the
+  default), because the Echo makes the sound itself the instant it hears you.
+  With "Controller" the sound is requested over the network, so it arrives a
+  fraction later.
+
+Needs recent firmware; the toggle is disabled and says so on an Echo that
+cannot make its own sounds.
 
 ---
 

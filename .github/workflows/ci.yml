@@ -245,6 +245,48 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+
+  device-firmware-build:
+    name: Device firmware builds (pinned compiler)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true  # GoTinyAlsa replace directive in device/go.mod
+      # THE ONLY JOB THAT EXERCISES THE COMPILER THE FIRMWARE ACTUALLY SHIPS
+      # FROM. Every other Go job here runs on amd64 with GitHub's toolchain,
+      # which device/CLAUDE.md already notes proves nothing about this image:
+      # it carries the Go version and NDK pinned by digest against a 2015
+      # platform we cannot upgrade.
+      #
+      # Added after #276, where a Dependabot bump raised go.mod's `go`
+      # directive past the pinned toolchain's version and left the firmware
+      # unbuildable for four days. Nothing failed, because the image is
+      # otherwise exercised only by compile.sh and release.yml — so the next
+      # thing to notice would have been a release tag failing at the build
+      # step, which is the worst moment to find out.
+      #
+      # It builds only; it does not verify the binary runs. Moving the
+      # compiler pin still needs a real device in the loop.
+      - name: Build compiler image
+        run: docker build -t echomuse-compiler device/compiler/
+      - name: Build firmware
+        run: |
+          docker run --rm --entrypoint bash \
+            -e CGO_LDFLAGS="-Wl,--hash-style=both" \
+            -e CGO_CFLAGS="-Wno-deprecated-declarations -Wno-null-dereference" \
+            -v "$PWD/device":/sdk \
+            -v "$PWD/GoTinyAlsa":/GoTinyAlsa \
+            echomuse-compiler \
+            -c "cd /sdk && go build -tags server -o build/server ./cmd/"
+      - name: Check it is an ARM binary
+        # A build that silently produced a host binary would pass the step
+        # above and ship something the hardware cannot run.
+        run: |
+          file device/build/server
+          file device/build/server | grep -q "ARM" || {
+            echo "::error::firmware is not an ARM binary"; exit 1; }
+
   device-vet:
     name: Device go vet
     runs-on: ubuntu-latest

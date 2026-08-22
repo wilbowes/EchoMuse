@@ -518,6 +518,23 @@ Two guards sit in front of that, both tested by reintroducing the bug:
 
 ## The output chain: EQ → bass guard → limiter
 
+**As of 3.0.0 this runs ON THE DEVICE for firmware announcing `output_chain`,
+and the controller stands down for those devices** (#243 — see
+`docs/audio-states.md` §8 and `device/internal/outchain`). Everything below
+still describes the controller-side chain, which remains the implementation
+for older firmware, the reference the device port is verified against, and the
+place the parameters are still explained. Two consequences worth holding
+alongside the rest of this section:
+
+- **Never shape twice.** A controller that keeps processing for a device that
+  also shapes puts two limiters in series, which is audibly wrong rather than
+  subtly wrong. The capability gate is the only thing preventing it.
+- **The device-side chain fixes two things this one structurally cannot.** It
+  applies POST-MIX, so one limiter finally sees voice and music summed —
+  controller-side there are two independent chains and neither ever does. And
+  a parameter change is heard in ~43ms rather than the ~4s `LEAD_S` imposes
+  here, which is what makes tuning by ear possible at all.
+
 Everything the speaker plays runs through three stages in `em_eq.apply` /
 `StreamingEQ.process`, in this order, all in float so nothing is quantised
 twice. **The order is load-bearing.**
@@ -547,7 +564,9 @@ are load-bearing:
 - **Crossover frequency and look-ahead are NOT settable.** Both own carried
   state, and both are measured values rather than taste ones.
 
-**A change is heard `LEAD_S` (4s) later, and that is not a fault.** The feed is
+**A change is heard `LEAD_S` (4s) later, and that is not a fault** — on this
+path. The device-side chain (3.0.0) does not have this property; the text
+below is why it was worth moving. The feed is
 paced that far ahead of realtime, so processing happens when the audio is
 generated and the listener hears it a lead-time afterwards. Anyone A/B-ing must
 wait ~5s before judging; quick toggling reads as "nothing happened" because the

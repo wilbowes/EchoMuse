@@ -40,7 +40,22 @@ def _registration_keys() -> set[str]:
     src = (CONTROLLER / "em_controller.py").read_text()
     block = src.split('await device.send_control({"type": "config", **config})')
     assert len(block) > 1, "registration config push not found — has it moved?"
-    return set(re.findall(r'config\.get\(\s*["\']([A-Za-z]+)["\']', block[1][:2500]))
+
+    # Bounded by the END OF THE ENCLOSING METHOD, not by a byte count.
+    #
+    # This used to take a fixed 2500-character window, which is a slow leak
+    # dressed as a parser: every comment added inside handle_control pushes
+    # the last mirror closer to the edge, and the key that falls off the end
+    # silently LEAVES this set. `missing = reg - live` then shrinks, the test
+    # goes greener, and the coverage is gone with nothing saying so — which
+    # is the exact shape this file exists to catch, turned on the file
+    # itself. Found 2026-08-22 when four added lines pushed limiterRelease
+    # over the boundary; that direction failed loudly, the other would not
+    # have.
+    tail = block[1]
+    end = re.search(r"\n {0,4}(async )?def ", tail)
+    body = tail[:end.start()] if end else tail
+    return set(re.findall(r'config\.get\(\s*["\']([A-Za-z]+)["\']', body))
 
 
 def _live_push_keys() -> set[str]:

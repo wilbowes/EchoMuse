@@ -23,13 +23,15 @@ import (
 
 	"github.com/wilbowes/EchoMuse/internal/aec"
 	"github.com/wilbowes/EchoMuse/internal/bindings/als"
-	"github.com/wilbowes/EchoMuse/internal/bindings/jack"
 	internalbuttons "github.com/wilbowes/EchoMuse/internal/bindings/buttons"
+	"github.com/wilbowes/EchoMuse/internal/bindings/jack"
 	"github.com/wilbowes/EchoMuse/internal/bindings/mic"
 	"github.com/wilbowes/EchoMuse/internal/bindings/speaker"
 	"github.com/wilbowes/EchoMuse/internal/bluetooth"
+	"github.com/wilbowes/EchoMuse/internal/cue"
 	"github.com/wilbowes/EchoMuse/internal/client"
 	"github.com/wilbowes/EchoMuse/internal/config"
+	"github.com/wilbowes/EchoMuse/internal/outchain"
 	"github.com/wilbowes/EchoMuse/internal/server"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/shadow"
 	"github.com/wilbowes/EchoMuse/internal/wifi"
@@ -90,6 +92,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize PCM Speaker: %v", err)
 	}
+
+	// Install the output chain before anything can play. A device announcing
+	// `output_chain` has told the controller to stop shaping, so from that
+	// moment the device is the only thing that can — including for the
+	// window between boot and the first config push, which is why the
+	// defaults in internal/config mirror the controller's.
+	applyOutputChainConfig(pcmSpeaker)
 
 	s := server.NewServer(buttonController, microphone, pcmSpeaker)
 	srvPtr.Store(s)
@@ -291,7 +300,22 @@ func main() {
 		}
 		applyAecConfig(canceller)
 		applyBleConfig(bleScanner)
+		applyOutputChainConfig(pcmSpeaker)
 		applyShadowConfig(dataClient, controlClient, pcmSpeaker, s)
+	})
+
+	// Audible cue on request (#120). Only the controller-detected wake path
+	// uses this; a device that hears its own wake word plays it from
+	// onWakeCrossing without a round trip.
+	controlClient.OnPlayCue(func(name string) {
+		if name != "wake" {
+			log.Printf("[cue] unknown cue %q — ignored", name)
+			return
+		}
+		if !config.Get().WakeSoundEnabled() {
+			return
+		}
+		pcmSpeaker.PlayCue(wakeCue)
 	})
 
 	// Speaker flush — barge-in: cut buffered TTS the moment the controller
@@ -845,6 +869,31 @@ func applyHardwareConfig(msg config.ConfigMessage) {
 // SetParams no-ops when nothing changed, so calling it on every config push
 // is free; when delay/tail change it rebuilds the echo state (adaptive
 // filter state is meaningless across a timing change anyway).
+// applyOutputChainConfig pushes the current output-chain settings into the
+// speaker. Reads the SNAPSHOT rather than the message, so a partial push
+// leaves the other six keys where they are instead of resetting them —
+// ConfigMessage is partial by design and per-section scoping makes that the
+// normal case, not the exception.
+//
+// Called on every config apply, including the connect-time one, and the chain
+// itself ignores a set that has not changed — which is most of them, since the
+// controller re-sends the whole config on every reconnect.
+func applyOutputChainConfig(pcmSpeaker *speaker.PcmSpeaker) {
+	if pcmSpeaker == nil {
+		return
+	}
+	c := config.Get().OutputChain()
+	pcmSpeaker.SetOutputChain(outchain.Params{
+		Bands:              c.EqBands,
+		Loudness:           c.EqLoudness,
+		LimiterEnabled:     c.LimiterEnabled,
+		LimiterThresholdDB: c.LimiterThreshold,
+		LimiterReleaseMS:   c.LimiterRelease,
+		GuardEnabled:       c.BassGuardEnabled,
+		GuardDB:            c.BassGuardDb,
+	})
+}
+
 func applyAecConfig(canceller *aec.Canceller) {
 	snap := config.Get().Snapshot()
 	enabled := snap.AecEnabled != nil && *snap.AecEnabled
@@ -913,7 +962,7 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 	// both and rebuilding it would reload a 12MB runtime and open a fresh
 	// ~1.28s not-ready window every time someone changed their mind.
 	sc, err := shadow.Open(model, threshold, func(score, crossed float32, at time.Time) {
-		onWakeCrossing(cc, srv, score, crossed, at)
+		onWakeCrossing(cc, srv, spk, score, crossed, at)
 	})
 	if err != nil {
 		if msg := err.Error(); msg != shadowState.lastErr {
@@ -961,8 +1010,19 @@ func actsOnCrossings(mode string) string {
 // during playback. The controller records it against the turn, and recording
 // the nominal threshold instead is what once made every barge-in look like a
 // wake that had fired below its own bar.
+// wakeCue is rendered once and reused. It is a couple of hundred milliseconds
+// of float64 — cheap to keep, and rendering it on the wake path would put
+// ~12k sin() calls between hearing the wake word and confirming it, which is
+// the one moment on this device where latency is the whole feature.
+var wakeCue = cue.WakeCue(speakerRate)
+
+// speakerRate mirrors the speaker binding's rate. Declared here rather than
+// exported from a //go:build server package so this file still compiles on a
+// host, where the binding does not.
+const speakerRate = 48000
+
 func onWakeCrossing(cc *client.ControlClient, srv *server.Server,
-	score, crossed float32, at time.Time) {
+	pcmSpeaker *speaker.PcmSpeaker, score, crossed float32, at time.Time) {
 	ageMs := time.Since(at).Milliseconds()
 	if config.Get().Snapshot().OwwOnDevice != config.OnDeviceOn {
 		cc.SendOwwShadowCross(score, ageMs)
@@ -975,6 +1035,15 @@ func onWakeCrossing(cc *client.ControlClient, srv *server.Server,
 		cc.SendOwwShadowCross(score, ageMs)
 		log.Printf("[shadow] wake %.3f suppressed — muted", score)
 		return
+	}
+	// The cue plays BEFORE the wake is reported, not after the controller
+	// acknowledges it. The whole point is immediacy — this fleet measures
+	// 22-26% of control-plane probes over 200ms (#139), and a confirmation
+	// that lands after the user has started speaking is worse than none.
+	// The device detected this itself, so it does not need anyone's
+	// permission to say so.
+	if pcmSpeaker != nil && config.Get().WakeSoundEnabled() {
+		pcmSpeaker.PlayCue(wakeCue)
 	}
 	cc.SendOwwWake(score, crossed, ageMs)
 }
