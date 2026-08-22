@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import deque
 
 import em_eq
 import em_limiter
@@ -136,6 +137,15 @@ SEEK_STALL_S    = 5.0
 # 500ms is well inside the ~4s lead, so a stall this size is not yet audible —
 # which is the point of catching it here.
 SOURCE_STALL_MS = 500.0
+
+# How many ffmpeg stderr lines to keep for the failure log. -loglevel error
+# means anything that IS on stderr is meaningful; five lines covers every
+# ffmpeg diagnostic this player has needed to explain a dead decoder.
+STDERR_TAIL_LINES = 5
+# On an abnormal decoder exit, how long the finally block waits for the
+# stderr drain to deliver the last lines before logging without them. Only
+# failure paths pay this; pause/stop and natural end cancel immediately.
+DRAIN_GRACE_S = 0.5
 
 
 IDLE, PLAYING, PAUSED = "idle", "playing", "paused"
@@ -381,6 +391,25 @@ class MediaSession:
     # ── decoder (stubbed in tests) ────────────────────────────────────────
 
     @staticmethod
+    async def _drain_stderr(proc, tail: deque) -> None:
+        """Keep the last ffmpeg stderr lines; never raises.
+
+        Runs for the lifetime of the decoder so its stderr pipe cannot fill
+        and block it, and so an abnormal exit can be explained afterwards.
+        A stubbed proc (tests) has no stderr — iterating None raises and is
+        swallowed here, which is exactly the behaviour the feed wants.
+        """
+        try:
+            async for raw in proc.stderr:
+                line = raw.decode("utf-8", "replace").strip()
+                if line:
+                    tail.append(line)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+
+    @staticmethod
     async def _kill_decoder(proc) -> None:
         if proc is None or proc.returncode is not None:
             return
@@ -393,6 +422,19 @@ class MediaSession:
     async def _spawn_decoder(self, url: str, position_s: float):
         """ffmpeg → s16le/48k/mono on stdout. Returns the process."""
         args = ["ffmpeg", "-nostdin", "-loglevel", "error"]
+        # #258: ffmpeg's TLS protocol defaults -tls_verify to 0, so every
+        # https media URL was fetched accepting ANY certificate — true by
+        # accident of an ffmpeg build default, not a property anyone would
+        # choose. Verify deliberately. Setups serving media over HTTPS with
+        # a private CA keep working via EM_EXTRA_CA_CERT (#259), which
+        # em_start installs into the system store this ffmpeg's GnuTLS
+        # reads. This lands deliberately AFTER that option existed, because
+        # verification can only break setups that were working by accident.
+        # Input-scoped like -ss, and only for https — other protocols would
+        # silently ignore it, and carrying it anyway would misstate what
+        # the flag protects.
+        if url.lower().startswith("https:"):
+            args += ["-tls_verify", "1"]
         if position_s > 0.5:
             args += ["-ss", f"{position_s:.2f}"]
         args += ["-i", url, "-f", "s16le", "-acodec", "pcm_s16le",
@@ -400,7 +442,11 @@ class MediaSession:
         return await asyncio.create_subprocess_exec(
             *args,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
+            # Captured rather than DEVNULL so a decoder that dies has a
+            # voice: _drain_stderr keeps the last lines and the feed's
+            # finally block logs them on an abnormal exit. Without this a
+            # refused connection was indistinguishable from silence.
+            stderr=asyncio.subprocess.PIPE,
         )
 
     # ── controls ──────────────────────────────────────────────────────────
@@ -558,6 +604,8 @@ class MediaSession:
         eos_sent = False
         src_max_ms = 0.0
         src_stalls = 0
+        stderr_tail = deque(maxlen=STDERR_TAIL_LINES)
+        stderr_drain = None
 
         # Arm the data-plane reconnect grace for this feed: a Wi-Fi blip
         # mid-song should cost a pause, not the rest of the track.
@@ -581,6 +629,8 @@ class MediaSession:
         try:
             proc = await self._spawn_decoder(self.url, start_pos)
             self._proc = proc
+            stderr_drain = asyncio.create_task(
+                self._drain_stderr(proc, stderr_tail))
             t_spawned = loop.time()
 
             # A seek we cannot actually perform produces no audio at all
@@ -604,8 +654,15 @@ class MediaSession:
                     await self._kill_decoder(proc)
                     self._seekable = False
                     start_pos = self._pos = 0.0
+                    # The old drain ends when its pipe closes, but cancel
+                    # explicitly so exactly one drain owns the new decoder.
+                    if stderr_drain is not None:
+                        stderr_drain.cancel()
+                        stderr_drain = None
                     proc = await self._spawn_decoder(self.url, 0.0)
                     self._proc = proc
+                    stderr_drain = asyncio.create_task(
+                        self._drain_stderr(proc, stderr_tail))
                 except asyncio.IncompleteReadError as e:
                     pending = (e.partial + bytes(SPEAKER_BYTES - len(e.partial))
                                ) if e.partial else None
@@ -739,4 +796,40 @@ class MediaSession:
                     proc.kill()
                 except ProcessLookupError:
                     pass
+            # An abnormal decoder exit used to be invisible: stderr went to
+            # DEVNULL, and an https URL ffmpeg refused looked identical to
+            # a stream that simply ended. Expected teardowns stay quiet —
+            # pause/stop kills (-9), natural end exits 0 — everything else
+            # gets its last words logged. The certificate case gets an
+            # explicit pointer because -tls_verify (#258) turned a working
+            # setup's silent accident into a deliberate guarantee.
+            rc = proc.returncode if proc is not None else None
+            abnormal = rc is not None and rc != 0 and rc != -9
+            if stderr_drain is not None:
+                if abnormal:
+                    # The drain may not have been scheduled yet; give it one
+                    # grace window to collect the pipe before logging without
+                    # it. Shielded so the timeout does not kill the task
+                    # mid-read — the explicit cancel below owns teardown.
+                    # Outer cancellation (pause/stop racing this path) must
+                    # propagate, not be eaten as if it were the drain's.
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(stderr_drain),
+                            DRAIN_GRACE_S)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        pass
+                stderr_drain.cancel()
+            if abnormal:
+                detail = " | ".join(stderr_tail) or "(no stderr output)"
+                log.error(f"[{self.device_id}] ffmpeg exited {rc} "
+                          f"after {sent // SPEAKER_BYTES} periods: {detail}")
+                if any("certificate" in l.lower() for l in stderr_tail):
+                    log.error(
+                        f"[{self.device_id}] Media URL failed certificate "
+                        f"verification — media over HTTPS is verified since "
+                        f"#258. For a private CA, point EM_EXTRA_CA_CERT at "
+                        f"the CA file (see docs/configuration.md).")
             self._proc = None

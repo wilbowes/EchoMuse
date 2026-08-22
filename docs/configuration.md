@@ -746,6 +746,14 @@ If the file is missing, unreadable or not PEM, the controller **refuses to
 start and says which**, rather than starting and failing on every voice turn
 afterwards with an error nothing connects back to this setting.
 
+**Media playback verifies too.** The media player fetches its streams —
+Music Assistant, radio, anything handed to `play_media` — through ffmpeg,
+which used to accept *any* certificate on HTTPS URLs (an ffmpeg build
+default nobody would have chosen). Media URLs are now verified like every
+other fetch. A stream served over HTTPS with a private CA needs the same
+setting as above; when a stream is refused, the log says so and points
+here.
+
 ## What leaves your network
 
 EchoMuse has **no telemetry**. There is no usage reporting, no analytics, no

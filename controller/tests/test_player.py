@@ -887,3 +887,111 @@ def test_a_pausing_device_does_not_change_its_lead():
         await s.stop()
         return during
     assert asyncio.run(main()) == em_player.LEAD_S
+
+
+# ── #258: media over HTTPS is verified, and a refused decoder explains itself ──
+
+
+def test_https_media_is_fetched_with_certificate_verification(monkeypatch):
+    """
+    ffmpeg's TLS protocol defaults -tls_verify to 0, so every https media URL
+    was fetched accepting ANY certificate — true by accident of an ffmpeg
+    build default rather than a property anyone would choose (#258). The
+    player passes the flag explicitly: input-scoped (before -i), and only for
+    https — other protocols would silently ignore it, and carrying it anyway
+    would misstate what the flag protects.
+    """
+    captured = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["args"] = list(args)
+
+        class P:
+            stdout = None
+            stderr = None
+            returncode = 0
+        return P()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    asyncio.run(MediaSession._spawn_decoder(
+        None, "https://radio.example/stream", 0.0))
+    args = captured["args"]
+    assert "-tls_verify" in args[:args.index("-i")], \
+        "the verify flag must be input-scoped (before -i)"
+    assert args[args.index("-tls_verify") + 1] == "1"
+
+    asyncio.run(MediaSession._spawn_decoder(
+        None, "http://radio.example/stream", 0.0))
+    assert "-tls_verify" not in captured["args"], \
+        "plain http must not carry an option it would silently ignore"
+
+
+class RefusedProc(FakeProc):
+    """A decoder ffmpeg refused outright: no audio, non-zero exit, and its
+    last words on stderr — the shape of a -tls_verify failure."""
+
+    def __init__(self, stderr_lines):
+        super().__init__(periods=0)
+        self.returncode = 1
+        self.stderr = asyncio.StreamReader()
+        for line in stderr_lines:
+            self.stderr.feed_data((line + "\n").encode())
+        self.stderr.feed_eof()
+
+
+def test_a_refused_decoder_explains_itself_in_the_log(caplog):
+    """
+    stderr went to DEVNULL, so an https URL ffmpeg refused looked identical
+    to a stream that simply ended — silence with nothing on the log. An
+    abnormal exit now logs the decoder's last lines, and a certificate
+    failure points at EM_EXTRA_CA_CERT, because -tls_verify turned a
+    working setup's silent accident into a deliberate guarantee.
+    """
+    import logging
+
+    async def main():
+        device = FakeDevice()
+        _wire(device)
+        s = StubSession("office", periods=0)
+
+        async def refused(url, position_s):
+            return RefusedProc([
+                "https protocol error",
+                "Certificate verification failed",
+            ])
+        s._spawn_decoder = refused
+
+        with caplog.at_level(logging.ERROR, logger="player"):
+            await s.play("https://radio.example/stream")
+            await asyncio.wait_for(s._task, 5)
+
+        text = "\n".join(r.message for r in caplog.records)
+        assert "ffmpeg exited 1" in text, \
+            "an abnormal decoder exit must reach the log"
+        assert "Certificate verification failed" in text, \
+            "the decoder's own diagnostic must be preserved"
+        assert "EM_EXTRA_CA_CERT" in text, \
+            "a certificate failure must point at the recovery path"
+    asyncio.run(main())
+
+
+def test_expected_teardowns_stay_quiet(caplog):
+    """
+    pause()/stop() kill the decoder (-9) and a natural end exits 0; neither
+    is a failure, and logging them would bury the abnormal case.
+    """
+    import logging
+
+    async def main():
+        device = FakeDevice()
+        _wire(device)
+        s = StubSession("office", periods=2, endless=True)
+        with caplog.at_level(logging.ERROR, logger="player"):
+            await s.play("http://radio/stream")
+            await asyncio.sleep(0.05)
+            await s.pause()
+            await s.stop()
+        assert not any("ffmpeg exited" in r.message for r in caplog.records), \
+            "a deliberate kill is teardown, not a decoder failure"
+    asyncio.run(main())
