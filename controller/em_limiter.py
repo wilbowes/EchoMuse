@@ -46,8 +46,13 @@ per-sample Python loop is not available to us.
    across a long stream.
 
 3. **A final clip that must never engage.** Kept as a backstop, and it is
-   counted: if `clipped` is ever non-zero the limiter has a bug, and a
-   silent backstop is how the original problem survived.
+   counted: if `clipped` is ever non-zero while the limiter is LIMITING,
+   the limiter has a bug, and a silent backstop is how the original
+   problem survived. While the limiter is BYPASSED the same backstop
+   legitimately catches a boosted EQ's output — that goes to
+   `clipped_bypassed`, so the two readings cannot be confused (#275):
+   identical counts in both states would send someone hunting a bug in a
+   limiter that is behaving correctly.
 
 STATE
 -----
@@ -140,9 +145,11 @@ class Limiter:
         self._tail = np.zeros(max(0, self.lookahead - 1), dtype=np.float64)
         self._gain_db = 0.0                          # last gain, dB (≤ 0)
 
-        # Instrumentation. `clipped` must stay zero; see the module docstring.
+        # Instrumentation. `clipped` must stay zero while limiting; see the
+        # module docstring for the bypassed sibling.
         self.max_reduction_db = 0.0
         self.clipped = 0
+        self.clipped_bypassed = 0
 
     def set_params(self,
                    threshold_db: float | None = None,
@@ -250,7 +257,14 @@ class Limiter:
         if emit.size:
             self.max_reduction_db = max(self.max_reduction_db,
                                         float(-gain_db[:emit.size].min()))
-            self.clipped += int(np.count_nonzero(np.abs(emit) > _CEILING))
+            # #275: one number, two states, opposite investigations. While
+            # limiting, a backstop clip is a bug; while bypassed it is the
+            # backstop doing exactly its job on a boosted EQ's output.
+            n_clipped = int(np.count_nonzero(np.abs(emit) > _CEILING))
+            if self.enabled:
+                self.clipped += n_clipped
+            else:
+                self.clipped_bypassed += n_clipped
 
         # The first call emits `lookahead-1` fewer samples than it was given
         # (they are in the tail) and every later call emits that many more.
@@ -273,7 +287,11 @@ class Limiter:
         # No further look-ahead is possible, so hold the last gain rather than
         # springing back to unity, which would be an audible step.
         out = tail * (10.0 ** (self._gain_db / 20.0))
-        self.clipped += int(np.count_nonzero(np.abs(out) > _CEILING))
+        n_clipped = int(np.count_nonzero(np.abs(out) > _CEILING))
+        if self.enabled:
+            self.clipped += n_clipped
+        else:
+            self.clipped_bypassed += n_clipped
         return out
 
 
