@@ -4,7 +4,22 @@ import aiohttp
 
 DEVICE = sys.argv[1]
 BINARY = "/tmp/server-new"
-DB = "/app/data/echomuse.db"
+def _resolve_db() -> str:
+    # #270: the container keeps its database at /app/data, the HA add-on at
+    # /data. EM_DB overrides both. Inlined rather than shared: these tools
+    # are docker-cp'd into the container one file at a time and must stay
+    # standalone.
+    import os
+    env = os.environ.get("EM_DB", "").strip()
+    if env:
+        return env
+    for c in ("/data/echomuse.db", "/app/data/echomuse.db"):
+        if os.path.exists(c):
+            return c
+    return "/app/data/echomuse.db"
+
+
+DB = _resolve_db()
 
 def make_token():
     tok = secrets.token_hex(32)

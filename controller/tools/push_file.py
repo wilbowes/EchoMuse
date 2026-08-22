@@ -44,7 +44,22 @@ Success is md5 agreement, not "no errors". Exit status is non-zero otherwise.
 import asyncio, base64, hashlib, os, secrets, sqlite3, sys, time
 import websockets
 
-DB = "/app/data/echomuse.db"
+def _resolve_db() -> str:
+    # #270: the container keeps its database at /app/data, the HA add-on at
+    # /data. EM_DB overrides both. Inlined rather than shared: these tools
+    # are docker-cp'd into the container one file at a time and must stay
+    # standalone.
+    import os
+    env = os.environ.get("EM_DB", "").strip()
+    if env:
+        return env
+    for c in ("/data/echomuse.db", "/app/data/echomuse.db"):
+        if os.path.exists(c):
+            return c
+    return "/app/data/echomuse.db"
+
+
+DB = _resolve_db()
 
 # Bytes per heredoc block. A multiple of 3 so each block's base64 is padding
 # free — padding in the middle of the file would decode to garbage. Sized as a
