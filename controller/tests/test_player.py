@@ -887,3 +887,105 @@ def test_a_pausing_device_does_not_change_its_lead():
         await s.stop()
         return during
     assert asyncio.run(main()) == em_player.LEAD_S
+
+
+# ── #150: a source that stops producing ends the stream and reports idle ────
+
+
+class DeadSourceProc(FakeProc):
+    """Delivers a few periods, then hangs forever: no EOF (the decoder is
+    still alive, parked on a dead upstream), no audio. The shape of a
+    starving Music Assistant flow."""
+
+    def __init__(self, periods):
+        super().__init__(periods, endless=True)
+        real_readexactly = self.stdout.readexactly
+
+        served = {"n": 0}
+        total = periods
+
+        async def hang_eventually(n):
+            if served["n"] >= total:
+                await asyncio.sleep(3600)     # never returns
+            served["n"] += 1
+            return await real_readexactly(n)
+
+        self.stdout.readexactly = hang_eventually
+
+
+def test_a_dead_source_ends_the_stream_and_reports_idle(caplog, monkeypatch):
+    """
+    #150: the read had no deadline, so a source that stopped producing left
+    the feed parked forever - player log silent, HA showing `playing`
+    indefinitely, decoder held. A source that produces nothing for
+    SOURCE_DEAD_S must end the stream, send EOS so the device settles, and
+    let HA report idle.
+    """
+    import logging
+    monkeypatch.setattr(em_player, "SOURCE_DEAD_S", 0.2)
+
+    async def main():
+        device = FakeDevice()
+        _wire(device)
+        s = StubSession("office", periods=2)
+        s._spawn_decoder = lambda url, pos: _spawn(url, pos, s)
+
+        async def _spawn(url, pos, s):
+            proc = DeadSourceProc(2)
+            s.procs.append(proc)
+            return proc
+
+        with caplog.at_level(logging.ERROR, logger="player"):
+            await s.play("http://ma/flow/stream")
+            await asyncio.wait_for(s._task, 10)
+        return device, s
+
+    device, s = asyncio.run(main())
+    assert s.state == IDLE, "a dead source must not leave the session playing"
+    assert device.data_frames[-1][0] == 0x03, \
+        "EOS must reach the device so its ring and buffer settle"
+    text = "\n".join(r.message for r in caplog.records)
+    assert "produced nothing" in text, \
+        "the log must say the source died, not that the media finished"
+
+
+def test_a_slow_but_recovering_source_is_not_killed(monkeypatch):
+    """
+    The deadline exists for DEAD sources. One that stalls past the stall
+    warning but returns inside the deadline keeps streaming.
+    """
+    monkeypatch.setattr(em_player, "SOURCE_DEAD_S", 0.5)
+
+    async def main():
+        device = FakeDevice()
+        _wire(device)
+        s = StubSession("office", periods=3)
+
+        class SlowThenFineProc(FakeProc):
+            def __init__(self):
+                super().__init__(3, endless=False)
+                real = self.stdout.readexactly
+                calls = {"n": 0}
+
+                async def slow(n):
+                    calls["n"] += 1
+                    if calls["n"] == 2:
+                        await asyncio.sleep(0.2)   # over SOURCE_STALL_MS,
+                    return await real(n)           # under SOURCE_DEAD_S
+                self.stdout.readexactly = slow
+
+        async def spawn(url, pos):
+            p = SlowThenFineProc()
+            s.procs.append(p)
+            return p
+        s._spawn_decoder = spawn
+
+        await s.play("http://ma/flow/stream")
+        await asyncio.wait_for(s._task, 10)
+        return device, s
+
+    device, s = asyncio.run(main())
+    assert s.state == IDLE
+    types = [f[0] for f in device.data_frames]
+    assert types.count(0x02) == 3 and types[-1] == 0x03, \
+        "every period must have made it out before EOS"
