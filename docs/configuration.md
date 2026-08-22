@@ -296,6 +296,20 @@ whichever device heard you *best*. That was dropped: it taxed every wake by
 signal-to-noise winner produced a *worse* transcript than the device that
 simply heard you first.
 
+### Wake sound
+Plays a short rising tone when the Echo hears the wake word. Off by
+default, because it adds a beat between the wake word and the request. It's
+there first as an accessibility option: without it the ring is the only sign
+the Echo is listening, which is no help from the next room or to someone who
+cannot see it.
+
+The Echo generates the tone itself. With **Wake word detection** set to *On
+this Echo* it plays the moment the wake word is heard; *On the controller*
+it plays about one network round trip later. Every Echo that hears you
+plays it, including one that then stands down for another (see
+**Arbitration window**). Needs firmware that announces `wake_cue`; on older
+firmware the toggle is disabled and says so.
+
 ### Sensitivity (Precise ↔ Eager)
 The confidence bar the recogniser must clear.
 

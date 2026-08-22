@@ -980,6 +980,15 @@ class Device:
         return "oww_shadow" in (self.capabilities or [])
 
     @property
+    def wake_cue_capable(self) -> bool:
+        """
+        Whether this firmware can play its own wake sound (#120). The
+        toggle is disabled without it: a switch that saves and stays silent
+        fails the person this accessibility setting exists for.
+        """
+        return "wake_cue" in (self.capabilities or [])
+
+    @property
     def oww_trigger_capable(self) -> bool:
         """
         Whether this firmware can ACT on its own wake detection.
@@ -1125,6 +1134,13 @@ class Device:
 
     async def beam_unlock(self):
         await self.send_control({"type": "beam_unlock"})
+
+    async def play_cue(self, name: str):
+        """
+        Ask the device to play a cue it generates itself: one small JSON
+        message, never delayed by the prime gate or dropped by a flush.
+        """
+        await self.send_control({"type": "play_cue", "cue": name})
 
     async def push_config(self, **kwargs):
         await self.send_control({"type": "config", **kwargs})
@@ -3668,6 +3684,13 @@ async def _stream_listen(device: Device):
                         # this distinguishes the two sources in the Activity
                         # tab and in queries without any of them changing.
                         label = "wakeword-dev" if source == "device" else "wakeword"
+                        # Wake sound (#120) on the controller-detected path.
+                        # An Echo that detected its own wake already played it
+                        # from onWakeCrossing; this one lands an RTT late, which
+                        # beats a toggle that does nothing on owwOnDevice="off".
+                        if source != "device" and getattr(device, "wake_sound", False) \
+                                and device.wake_cue_capable:
+                            await device.play_cue("wake")
                         await _run_voice_locked(device, trigger_label=f"{label}({score:.3f})", is_wakeword=True)
                         # Back to ch6 omni for wake listening. Belt-and-braces
                         # for turns that never restarted the stream (no-TTS
@@ -4074,6 +4097,10 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             config.get("buttonSingleTapEvent", False)
         )
         device.button_multi_tap_ms = int(config.get("buttonMultiTapMs", 0))
+        # See _apply_live_config: consumed only on the controller-detected
+        # wake path, mirrored in both places because that is the rule
+        # test_config_mirrors.py enforces and the reason it exists.
+        device.wake_sound = bool(config.get("wakeSound", False))
         # Resolved against the capability — see em_shadow.effective_mode for
         # why "on" against firmware that cannot trigger must become shadow
         # rather than being honoured.

@@ -113,6 +113,7 @@ type ControlClient struct {
 	connectedCallback     StateCallback
 	pendingCallback       StateCallback
 	configAppliedCallback ConfigAppliedCallback
+	playCueCallback       func(string)
 	volumeSetCallback     VolumeSetCallback
 	beamLockCallback      BeamLockCallback
 	speakerFlushCallback  StateCallback
@@ -175,6 +176,7 @@ func (c *ControlClient) OnDisconnected(cb StateCallback)          { c.disconnect
 func (c *ControlClient) OnConnected(cb StateCallback)             { c.connectedCallback = cb }
 func (c *ControlClient) OnPending(cb StateCallback)               { c.pendingCallback = cb }
 func (c *ControlClient) OnConfigApplied(cb ConfigAppliedCallback) { c.configAppliedCallback = cb }
+func (c *ControlClient) OnPlayCue(cb func(string))                { c.playCueCallback = cb }
 func (c *ControlClient) OnVolumeSet(cb VolumeSetCallback)         { c.volumeSetCallback = cb }
 func (c *ControlClient) OnBeamLock(cb BeamLockCallback)           { c.beamLockCallback = cb }
 func (c *ControlClient) OnSpeakerFlush(cb StateCallback)          { c.speakerFlushCallback = cb }
@@ -861,6 +863,17 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 				c.listenCallback(peek.Type, msg.Session)
 			}
 
+		case "play_cue":
+			// A cue requested by the controller (#120). Only the
+			// controller-detected wake path uses it; a device that hears its
+			// own wake plays the cue from onWakeCrossing.
+			var cueMsg struct {
+				Cue string `json:"cue"`
+			}
+			if err := json.Unmarshal(raw, &cueMsg); err == nil && c.playCueCallback != nil {
+				c.playCueCallback(cueMsg.Cue)
+			}
+
 		case "speaker_flush":
 			// Barge-in: controller detected the wake word during TTS
 			// playback and wants the buffered audio cut immediately.
@@ -1131,9 +1144,13 @@ func capabilities() []string {
 	// the controller's ack carries the same feature, which is the controller
 	// saying it has stopped: either half alone keeps the old path, and both
 	// together must never process the same audio twice.
+	//
+	// "wake_cue": this firmware can play its own wake confirmation (#120).
+	// Without it the dashboard shows the toggle disabled, since a switch that
+	// saves and makes no sound fails the person it exists for.
 	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons",
 		"oww_shadow", "oww_trigger", "button_hold", "audio_mix",
-		"aec_hw_ref", "oww_local_only", "output_chain"}
+		"aec_hw_ref", "oww_local_only", "output_chain", "wake_cue"}
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}

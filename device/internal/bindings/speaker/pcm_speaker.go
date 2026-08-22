@@ -133,6 +133,10 @@ type PcmSpeaker struct {
 	// fine: silenceLoop reads it under statsMu only on that cold path.
 	statsMu sync.Mutex
 	statsCb func(StreamStats)
+
+	// cue is a one-shot the device plays itself — the wake confirmation
+	// (#120). See cue.go.
+	cue cueState
 }
 
 // OnStreamStats registers a per-stream stats callback, reported once when a
@@ -408,6 +412,11 @@ func (p *PcmSpeaker) silenceLoop() {
 				copy(p.chainBuf, silencePeriod)
 				out, process = p.chainBuf, true
 			}
+		}
+		// The cue sums in before the chain, so it is shaped and limited with
+		// everything else.
+		if cued := p.mixCue(out); cued != nil {
+			out, process = cued, true
 		}
 		if process {
 			if applied := p.chain.Process(out); applied != nil {

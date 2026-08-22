@@ -1162,6 +1162,12 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
         live.button_multi_tap_ms = int(effective["buttonMultiTapMs"])
     if "wakeArbitrationMs" in effective:
         live.wake_arb_ms = int(effective["wakeArbitrationMs"])
+    # Consumed controller-side ONLY on the controller-detected wake path
+    # (#120): a device that detects its own wake plays the cue itself and
+    # never consults this. Mirrored anyway, because the path that does need
+    # it is the one where the setting would otherwise silently do nothing.
+    if "wakeSound" in effective:
+        live.wake_sound = bool(effective["wakeSound"])
     if "owwOnDevice" in effective:
         # Resolved against the CAPABILITY, not taken at face value: "on"
         # against firmware that cannot trigger would stop this controller
@@ -5833,6 +5839,7 @@ def _merge_device(row) -> dict:
         # do on reconnect is its own report to make.
         "owwLocalCapable": getattr(live, "oww_local_capable", False) if live else False,
         "listen":          _listen_json(live) if live else None,
+        "wakeCueCapable": getattr(live, "wake_cue_capable", False) if live else False,
         "audioMixCapable": getattr(live, "audio_mix_capable", False) if live else False,
         # Gates the AEC delay slider, which only means anything on the
         # software tap. Paired with aecRef because the capability says the

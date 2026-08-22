@@ -31,6 +31,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/bluetooth"
 	"github.com/wilbowes/EchoMuse/internal/client"
 	"github.com/wilbowes/EchoMuse/internal/config"
+	"github.com/wilbowes/EchoMuse/internal/cue"
 	"github.com/wilbowes/EchoMuse/internal/listen"
 	"github.com/wilbowes/EchoMuse/internal/platform"
 	"github.com/wilbowes/EchoMuse/internal/server"
@@ -496,6 +497,20 @@ func main() {
 		applyBleConfig(bleScanner)
 		applyShadowConfig(dataClient, controlClient, pcmSpeaker, s)
 		syncListenState(dataClient, controlClient, false)
+	})
+
+	// Audible cue on request (#120). Only the controller-detected wake path
+	// uses this; a device that hears its own wake word plays it from
+	// onWakeCrossing without a round trip.
+	controlClient.OnPlayCue(func(name string) {
+		if name != "wake" {
+			log.Printf("[cue] unknown cue %q — ignored", name)
+			return
+		}
+		if !config.Get().WakeSoundEnabled() {
+			return
+		}
+		pcmSpeaker.PlayCue(wakeCue)
 	})
 
 	// Speaker flush — barge-in: cut buffered TTS the moment the controller
@@ -1227,6 +1242,14 @@ func actsOnCrossings(mode string) string {
 	return "reporting only, not triggering"
 }
 
+// wakeCue is rendered once: rendering on the wake path would put ~12k sin()
+// calls between hearing the wake word and confirming it.
+var wakeCue = cue.WakeCue(speakerRate)
+
+// speakerRate mirrors the speaker binding's rate, declared here so this file
+// still builds on a host, where the //go:build server binding does not.
+const speakerRate = 48000
+
 // onWakeCrossing is what a threshold crossing does, decided fresh each time
 // from the current config rather than at scorer-construction time.
 //
@@ -1275,6 +1298,13 @@ func onWakeCrossing(cc *client.ControlClient, dc *client.DataClient,
 			return
 		}
 		log.Printf("[listen] wake %.3f opened session %d", score, session)
+	}
+	// The cue plays before the wake is reported: a confirmation that lands
+	// an RTT later, after the user has started speaking, is worse than none
+	// (#139). A crossing inside an open session returned above, so words
+	// in a session never chime.
+	if spk != nil && config.Get().WakeSoundEnabled() {
+		spk.PlayCue(wakeCue)
 	}
 	// #263: light the listening ring NOW, from the one place that already
 	// knows the wake happened. The crossing used to travel to the controller

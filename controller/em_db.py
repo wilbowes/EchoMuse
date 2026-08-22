@@ -48,6 +48,10 @@ DEFAULT_DEVICE_CONFIG = {
     # UNDER stored config and changing this line alone would silently switch
     # every existing fleet.
     "owwOnDevice":      "on",
+    # wakeSound: a rising two-tone on the wake word (#120). Off by default,
+    # since it interrupts "<wakeword>, do this"; an accessibility option
+    # first, because the ring is the only other sign the Echo is listening.
+    "wakeSound":        False,
     "adcDigitalGain":   88,
     "adcMicpga":        40,
     # micGainDb: fixed digital gain (dB) the device applies to the full

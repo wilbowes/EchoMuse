@@ -96,6 +96,7 @@ plus one conditional (`capabilities()` in `control.go`):
 | `oww_local_only` | always | Can listen **privately**: score its own wake word and send nothing until it fires. Whether it is doing so is `listen_state` — see [listening.md](listening.md) |
 | `aec_hw_ref` | always | Can take the AEC far-end reference from a playback loopback in the mic capture itself, and falls back to the software tap at the ALSA write when the board has none |
 | `output_chain` | always | Can run the speaker output chain (EQ → bass guard → limiter) itself, at the ALSA write, from the config keys `eqBands`, `eqLoudness`, `limiter*`, `bassGuard*`. Runs it only when the controller's `ack` carries `output_chain` too, which is the controller saying it has stopped processing: either half alone keeps the old path, so audio is never shaped twice |
+| `wake_cue` | always | Can generate its own wake sound: plays it on its own wake when `wakeSound` is on, and on `play_cue` |
 | `ambient_light` | only if the sensor is actually readable (`als.Present()`) | Reports light readings |
 
 **`aec_hw_ref` is a capability with a runtime companion, and both are needed.**
@@ -177,6 +178,7 @@ absent optional fields take prior/default behaviour.
 | `wifi_scan` | — | Scan for networks; answered with `wifi_scan_result` |
 | `wifi_change` / `wifi_commit` | `ssid`, `ssid_hex?`, `psk` / — | Switch WiFi with auto-rollback; commit finalises |
 | `shell_open` / `shell_close` | `pty?` | Ask the device to dial `/shell` (`pty:true` = interactive) / close it |
+| `play_cue` | `cue` | Play a cue the device generates itself. Only `"wake"` today, sent on a controller-detected wake when `wakeSound` is on; unknown names are ignored |
 | `music_flush` / `speaker_flush` | — | Flush the music / voice buffer (barge-in uses `speaker_flush`) |
 
 **An SSID is 0–32 arbitrary bytes**, so a name alone cannot always address
@@ -287,7 +289,8 @@ ledScene, ledListenColor, ledThinkColor,
 meterAttack, meterDecay, meterFloor, meterGamma, meterRef, meterCurve,
 wakeArbitrationMs, duckDb,
 buttonSingleTapEvent, buttonMultiTapMs,
-owwOnDevice, saveUtterances, streamReply
+owwOnDevice, saveUtterances, streamReply,
+wakeSound
 ```
 
 Not every field is acted on by the device. The output-chain keys (`limiter*`,
