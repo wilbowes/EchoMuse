@@ -239,3 +239,53 @@ def test_reduction_is_reported():
     lim = L.Limiter(FS)
     _run(lim, _sine(amp=2.0))
     assert lim.max_reduction_db == pytest.approx(6.0 + 1.0, abs=0.3)
+
+
+# ─── #275: bypassed clipping is the backstop working, not a bug ──────────────
+
+def test_bypassed_limiter_counts_its_clips_separately():
+    """
+    While limiterEnabled is off, a boosted EQ ahead legitimately pushes
+    samples past the ceiling for the backstop np.clip to catch — measured
+    in #275: 86 clipped samples across the sweep_params fixture. Counting
+    those into `clipped` made "non-zero means the limiter has a bug" send
+    someone hunting a bug in a limiter that was behaving correctly. The
+    two states want opposite investigations, so they get two counters.
+    """
+    lim = L.Limiter(FS, enabled=False)
+    hot = _sine(amp=4.0)                     # far past the ceiling
+    out = _run(lim, hot)
+    assert lim.clipped == 0, \
+        "a bypassed limiter must not read as a buggy limiting one"
+    assert lim.clipped_bypassed > 0, \
+        "over-ceiling samples while bypassed must be counted - visibly"
+    # And they pass through hot: nobody is limiting this signal.
+    assert np.abs(out).max() > L._CEILING
+
+
+def test_enabling_moves_the_count_back_to_clipped():
+    """
+    The same material through an ENABLED limiter must land in `clipped`
+    if the backstop ever engages - and never in clipped_bypassed.
+    """
+    lim = L.Limiter(FS)
+    _run(lim, _sine(amp=3.0))
+    assert lim.clipped_bypassed == 0
+
+
+def test_toggle_midstream_splits_the_two_counters():
+    """
+    set_params(enabled=False) mid-stream is supported (the music path
+    re-reads config per chunk). Clips after the toggle belong to the
+    bypassed counter alone; the enabled half never leaks into it.
+    """
+    lim = L.Limiter(FS)
+    x = _sine(amp=3.0)
+    lim.process(x[: len(x) // 2])            # enabled: limited, nothing clipped
+    lim.set_params(enabled=False)
+    lim.process(x[len(x) // 2:])
+    lim.flush()
+    assert lim.clipped_bypassed > 0, \
+        "hot material after the toggle must be visible as bypassed clipping"
+    assert lim.clipped == 0, \
+        "post-toggle clips must not read as a buggy limiting limiter"
