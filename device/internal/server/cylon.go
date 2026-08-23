@@ -16,29 +16,33 @@ import "github.com/wilbowes/EchoMuse/pkg/led"
 // lives in cmd/server.go beside the two link-state pulses (layer 3 of the
 // ring ladder, docs/led-ring-states.md).
 func CylonFrame(pos, dir int) []led.Led {
+	// One blue-violet hue, dimmed as a whole. Scaling blue alone would leave
+	// the fixed red and green dominating the dimmer trail pixels, swinging
+	// their hue toward the states this pattern has to stay clear of.
 	const (
-		head      = uint8(140)
-		trailByte = uint8(50)
-		r         = uint8(30)
-		g         = uint8(55)
+		head  = uint8(140)
+		trail = uint8(50)
+		r     = uint8(30)
+		g     = uint8(55)
 	)
 	frame := make([]led.Led, 12)
 	dot := func(i int, b uint8) {
 		i = ((i % 12) + 12) % 12
-		frame[i] = led.Led{ID: i, R: r, G: g, B: b}
+		dim := func(c uint8) uint8 { return uint8(uint16(c) * uint16(b) / uint16(head)) }
+		frame[i] = led.Led{ID: i, R: dim(r), G: dim(g), B: b}
 	}
-	trail := pos - dir
-	if trail < 0 || trail > 6 {
-		trail = pos + dir // fold at the turning point
+	trailPos := pos - dir
+	if trailPos < 0 || trailPos > 6 {
+		trailPos = pos + dir // fold at the turning point
 	}
 	for _, p := range []int{pos, (12 - pos) % 12} {
 		dot(p, head)
 	}
-	for _, p := range []int{trail, (12 - trail) % 12} {
+	for _, p := range []int{trailPos, (12 - trailPos) % 12} {
 		if p == (12-pos)%12 || p == pos {
 			continue // converging: head already covers the mirror dot
 		}
-		dot(p, trailByte)
+		dot(p, trail)
 	}
 	return frame
 }
