@@ -13,6 +13,7 @@ helper's source is extracted and executed in a stub namespace instead,
 testing the code that actually ships.
 """
 
+import re
 import sys
 import types
 from pathlib import Path
@@ -24,7 +25,8 @@ def _load_helper(monkeypatched_sys):
     src = (CONTROLLER / "em_api.py").read_text()
     start = src.index("def _running_controller_module")
     ends = [i for i in (src.find("\ndef ", start + 10),
-                        src.find("\nasync def ", start + 10)) if i != -1]
+                        src.find("\nasync def ", start + 10),
+                        src.find("\n@", start + 10)) if i != -1]
     ns = {"sys": monkeypatched_sys}
     exec(src[start:min(ends)], ns)
     return ns["_running_controller_module"]
@@ -68,3 +70,19 @@ def test_both_reader_sites_use_the_helper():
         "importing by name loads a second, uninitialised module copy"
     assert src.count("_running_controller_module()") >= 2, \
         "status endpoint AND support bundle must resolve via the helper"
+
+
+def test_the_helper_is_not_sandwiched_into_a_decorator():
+    """
+    #309 review: the helper originally landed BETWEEN @auth.require_auth
+    and _get_system_status — stealing the decorator, leaving the status
+    endpoint unauthenticated and raising on call. A decorator must be
+    immediately followed by the function it decorates.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+    for m in re.finditer(r"@auth\.require_auth\n(\w+)", src):
+        assert not m.group(1).startswith("_running_controller_module"), \
+            "the helper must never steal a decorator"
+    # And the status endpoint keeps its decorator:
+    pair = re.search(r"@auth\.require_auth\nasync def _get_system_status", src)
+    assert pair, "_get_system_status must remain decorated"
