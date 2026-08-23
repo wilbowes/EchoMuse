@@ -180,6 +180,13 @@ _update_errors: dict[str, str] = {}
 # Pending local binary uploads — keyed by UUID token, expire after 10 minutes.
 _pending_uploads: dict[str, bytes] = {}
 
+# Largest firmware binary /api/releases/upload will accept. Roughly 5x the
+# current ~10.7 MB build, so it bounds memory (the upload is held in RAM until
+# deployed or expired) without needing revision every release. The aiohttp
+# transport limit is set ABOVE this in create_app so this is the ceiling a
+# user actually meets, with a message that names it.
+UPLOAD_MAX_BYTES = 50 * 1024 * 1024
+
 # WiFi change state per device_id — {"pending": {...}|None, "last_result":
 # {...}|None}. Deliberately NOT on the live Device object: the connection
 # (and with it the Device) dies when the network switches, and the outcome
@@ -253,7 +260,33 @@ async def create_app() -> web.Application:
     Routes are registered here. The app is not started — the caller
     creates an AppRunner and TCPSite.
     """
-    app = web.Application(middlewares=[_ingress_only_middleware, _error_middleware])
+    # client_max_size defaults to 1 MB in aiohttp and the firmware is ~10.7 MB,
+    # so /api/releases/upload rejects every real binary without this. Both
+    # callers post there: the dashboard's Local Build panel and
+    # controller/tools/ota.py.
+    #
+    # THIS IS A REGRESSION FROM AN AIOHTTP BUMP, NOT AN OLD BUG, and the
+    # difference matters for what else to distrust. Measured across the two
+    # pinned versions with a 3 MB multipart POST at a default Application:
+    #
+    #   aiohttp 3.13.5  -> 200   (streaming multipart bypassed the limit)
+    #   aiohttp 3.14.3  -> 413   HTTPRequestEntityTooLarge
+    #
+    # 3.13.5 held from May until 2026-08-18, when #129's routine half moved to
+    # 3.14.3 and broke local deploys silently — no CI job posts a real-sized
+    # body at this endpoint, and the ordinary release path never touches it
+    # (em_firmware fetches controller-side and pushes from there), so only a
+    # developer deploying a local build ever met it.
+    #
+    # Set ABOVE the handler's limit on purpose: the handler's 413 names the
+    # actual ceiling ("Binary exceeds 50 MB limit"), and it can only be the
+    # error a user sees if the transport lets the body through first. A
+    # transport limit equal to the application limit means the useful message
+    # is unreachable by construction.
+    app = web.Application(
+        middlewares=[_ingress_only_middleware, _error_middleware],
+        client_max_size=UPLOAD_MAX_BYTES + 8 * 1024 * 1024,
+    )
 
     # Static / setup
     app.router.add_get("/",           _serve_spa)
@@ -1398,8 +1431,13 @@ async def _post_upload_binary(request: web.Request) -> web.Response:
         binary = await field.read()
         if not binary:
             return _error("empty_upload", "Uploaded binary is empty", 400)
-        if len(binary) > 50 * 1024 * 1024:
-            return _error("too_large", "Binary exceeds 50 MB limit", 413)
+        if len(binary) > UPLOAD_MAX_BYTES:
+            return _error(
+                "too_large",
+                f"Binary is {len(binary) / 1024 / 1024:.1f} MB, over the "
+                f"{UPLOAD_MAX_BYTES // 1024 // 1024} MB limit",
+                413,
+            )
 
         token = str(_uuid.uuid4())
         _pending_uploads[token] = binary
@@ -1411,6 +1449,13 @@ async def _post_upload_binary(request: web.Request) -> web.Response:
         asyncio.create_task(_expire())
 
         return _ok({"upload_token": token, "size": len(binary)})
+    except web.HTTPException:
+        # aiohttp's own — HTTPRequestEntityTooLarge above all, raised by the
+        # transport before this handler sees a byte. Swallowing it into a 500
+        # is how a 1 MB transport limit presented as "an internal error
+        # occurred" instead of naming a size, and the middleware already
+        # re-raises these deliberately.
+        raise
     except Exception as e:
         log.error(f"[api] Upload error: {e}")
         return _error("upload_failed", str(e), 500)
