@@ -285,12 +285,28 @@ jobs:
       # the compiled bundle — the controller would still boot and serve a
       # dashboard that 404s its own JavaScript, which is a worse check than
       # no check. Overlaying only *.py keeps everything the build produced.
+      # PINNED BY DIGEST, for the reason the compiler image is (device/CLAUDE.md):
+      # a floating tag means this job's baseline can move without a PR, so a
+      # red check stops being evidence about the PR that is red. :latest only
+      # advances on a GA release — EA deliberately never moves it — so the
+      # drift is infrequent and therefore easy to miss when it happens.
+      #
+      # Currently 2.20.2. BUMP IT when a GA release changes dependencies:
+      # the symptom is this job failing on an import of something newly added
+      # to requirements.txt, which is a true signal about a stale pin rather
+      # than about the PR. Get the digest with:
+      #
+      #   docker buildx imagetools inspect ghcr.io/wilbowes/echomuse-controller:latest
+      #
+      # Note pinning does NOT reduce the package's pull count — GHCR counts
+      # fetches by digest the same as by tag. This is about reproducibility
+      # only; do not re-litigate it as a stats change.
       - name: Layer this PR's controller source onto the published image
+        env:
+          BASE: ghcr.io/wilbowes/echomuse-controller@sha256:3df932996b3c9ac6fc583eaf40aba904b9a86bf5e531169515ce49dd0c5216af
         run: |
-          docker pull ghcr.io/wilbowes/echomuse-controller:latest
-          printf '%s\n' \
-            'FROM ghcr.io/wilbowes/echomuse-controller:latest' \
-            'COPY controller/*.py /app/' \
+          docker pull "$BASE"
+          printf 'FROM %s\nCOPY controller/*.py /app/\n' "$BASE" \
             > /tmp/ci-overlay.Dockerfile
           docker build -f /tmp/ci-overlay.Dockerfile -t echomuse-controller:ci .
       # Every module, not a hand-picked list: a new file added to the
