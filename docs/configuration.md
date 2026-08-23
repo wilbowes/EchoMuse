@@ -781,8 +781,19 @@ in a browser.
 
 Set `update_check_interval` (seconds, default `3600`) in the system config to
 change how often it runs. A long interval, say `86400`, reduces it to once a
-day. Note that `0` does **not** disable checking — it currently makes the
-poll loop spin without pausing, which is worse than leaving it alone.
+day, and `0` turns it off entirely — the controller then makes no outbound
+connection at all, and the dashboard shows whatever it last knew about
+releases rather than nothing.
+
+Re-enabling takes effect without a restart. Turning it off does not disable
+the **Check now** button on the Updates tab: that is a deliberate request, so
+it still asks GitHub when you press it.
+
+> **Before controller 2.21.0, `0` did the opposite** — it removed the pause
+> between checks instead of stopping them, so the controller polled
+> continuously until GitHub rate-limited it. If you set it to `0` on an
+> earlier version and left it there, updating fixes it; there is nothing to
+> undo.
 
 ### What never leaves
 

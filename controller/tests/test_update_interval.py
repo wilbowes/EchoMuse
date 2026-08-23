@@ -135,3 +135,43 @@ def test_on_demand_refresh_is_gated_when_disabled():
         "the freshness check must use the shared parser, not raw int()"
     assert "interval > 0" in fn, \
         "a disabled interval must serve the cache without fetching"
+
+
+def test_the_uncached_path_is_gated_too():
+    """
+    #159 follow-up: gating only the REFRESH leaves the no-cache branch open.
+
+    _get_cached_release has two exits that can reach GitHub. The first
+    guards a controller that has polled successfully at least once. The
+    second — "no cache at all — fetch synchronously" — is the branch a
+    FRESH INSTALL takes, and that is precisely the install belonging to
+    someone who set the interval to 0 before the first poll ever ran.
+
+    Leaving it ungated meant an outbound call on every dashboard visit that
+    reads releases, permanently: a disabled poll loop never populates the
+    cache whose presence would have taken the other branch.
+
+    Both exits must therefore be behind the same reading. Asserted on the
+    shipped source, like the test above, since em_api is deliberately not
+    importable here.
+    """
+    fn = _extract("_get_cached_release")
+
+    # The final fetch is the last statement in the function; everything
+    # after the cached-branch `return _release_cache` is the no-cache path.
+    tail = fn.rsplit("return _release_cache", 1)[-1]
+
+    # COMMENTS STRIPPED before the ordering check. The prose above the fix
+    # names _fetch_latest_release while explaining what "Check now" does, so
+    # matching raw source finds it before the code and the ordering assert
+    # fails on a correct implementation. A source-shape test has to look at
+    # the code, or it is testing the documentation.
+    code = "\n".join(l for l in tail.splitlines()
+                     if not l.lstrip().startswith("#"))
+
+    assert "_update_check_interval()" in code, \
+        "the no-cache path must consult the interval before fetching"
+    assert code.index("_update_check_interval()") < code.index("_fetch_latest_release"), \
+        "the disabled check must come BEFORE the fetch, not after it"
+    assert "return None" in code, \
+        "disabled with no cache must answer None, not fetch anyway"

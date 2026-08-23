@@ -3248,7 +3248,24 @@ async def _get_cached_release() -> Optional[dict]:
 
         return _release_cache
 
-    # No cache at all — fetch synchronously
+    # No cache at all. The disabled check has to be repeated HERE and not
+    # only on the branch above (#159): that one guards a controller which
+    # has successfully polled at least once, and this is the branch a fresh
+    # install takes — which is exactly the install belonging to someone who
+    # set the interval to 0 before the first poll ever ran. Gating only the
+    # refresh left them an outbound call on every dashboard visit that reads
+    # releases, forever, because a disabled poll loop never populates the
+    # cache that would have stopped it.
+    #
+    # None is the honest answer, and callers already handle it — this
+    # function returns None on any fetch failure. The dashboard shows no
+    # release information, which is what "I turned update checks off" should
+    # look like. "Check now" is unaffected: it calls _fetch_latest_release
+    # directly, and a button press is a deliberate request rather than
+    # background traffic.
+    if _update_check_interval() <= 0:
+        return None
+
     return await _fetch_latest_release()
 
 
