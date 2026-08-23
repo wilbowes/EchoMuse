@@ -5663,8 +5663,9 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
       setUsers(prev => prev.map(u => u.id === id ? { ...u, role } : u));
       setUsersMsg({ ok: true, text: 'Role updated.' });
     } catch (e) {
-      // The server refuses the last-admin demotion and explains ha_linked
-      // refusals; pass its reason through rather than a generic failure.
+      // The server's only refusal here is the last-admin demotion
+      // (ha_linked is display-only — it never causes a refusal); pass its
+      // reason through rather than a generic failure.
       setUsersMsg({ ok: false, text: e.error || 'Refused.' });
     }
   }
