@@ -42,9 +42,10 @@ def test_users_screen_calls_both_existing_endpoints():
 
 def test_server_reason_reaches_the_user():
     """
-    The server refuses demoting the last admin and explains ha_linked
-    accounts; a generic 'failed' would send users hunting a bug that
-    isn't there. The error field must be surfaced verbatim.
+    The server's only refusal here is demoting the last admin; pass its
+    reason through rather than a generic 'failed' that would send users
+    hunting a bug that isn't there. The error field must be surfaced
+    verbatim.
     """
     src = _settings_src()
     fn = src[src.index("async function setUserRole"):]
