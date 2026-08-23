@@ -47,7 +47,7 @@ expiry.
 |---|---|---|---|---|---|
 | 1 | **Volume arc** | Cyan, N of 12 proportional | 2s window (`volumeLEDSecs`) | Device-local; physical presses only | `volume.go:145` |
 | 2 | **Mute ring** | Solid red `(180,0,0)` + button LED (gpio444, active-high) | Until unmuted; survives reboot + OTA | **Device-sovereign**, persisted to `/data/local/etc/echomuse/state.json` | `mute.go:132` |
-| 3 | **Link state** | Orange sine pulse (disconnected) / white slow pulse (pending approval) | Until link resolves | Device-local | `cmd/server.go:161,174` |
+| 3 | **Link state** | Blue cylon sweep (connecting — hunting for a controller, #316) / orange sine pulse (disconnected — a full endpoint cycle failed) / white slow pulse (pending approval) | Until link resolves | Device-local | `cmd/server.go` `cylonSweep`/`pulseOrange`/`pulseWhite` (currently :1025/:1050) |
 | 4 | **Turn / media animation** | `solid` · `spin` · `rotate` · `pulse` · `meter` · `off`, scene-coloured | Until replaced or `ttlSec` expires (30s listening / 135s spinner / per-response for the meter) | Controller-specified, device-rendered | `animator.go:53` |
 | 5 | **Direction overlay** | Base ring colour brightened toward white at the beam angle | While listening ring is up | Device-local, requires `listeningLEDs` | `server.go:269` |
 | 6 | **Idle** | All off | — | — | — |

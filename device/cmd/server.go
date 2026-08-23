@@ -209,6 +209,19 @@ func main() {
 		}
 	})
 
+	// #316: hunting — actively working through the endpoint list. Cylon
+	// sweep; the orange give-up pulse takes over only after a full cycle
+	// over all endpoints has failed (see control.go's failedCycles).
+	controlClient.OnConnecting(func() {
+		s.StopAnim()
+		if pulseCancel != nil {
+			pulseCancel()
+		}
+		pulseCtx, cancel := context.WithCancel(ctx)
+		pulseCancel = cancel
+		go cylonSweep(pulseCtx, s)
+	})
+
 	controlClient.OnDisconnected(func() {
 		// Stop any device-local animation: the controller that owned it is
 		// gone, and the pulse below would otherwise fight its ticker.
@@ -1020,6 +1033,31 @@ func allLEDs(r, g, b uint8) []led.Led {
 }
 
 // ─── LED animations ───────────────────────────────────────────────────────────
+
+// cylonSweep — mirrored blue sweep while actively hunting for a controller
+// (#316). Two comets converge at the bottom of the ring and reunite at the
+// top; the reversal distinguishes it from the controller-driven spin
+// pattern. Layer 3 of the ring ladder, same shape as the two pulses: a
+// context-cancelled goroutine on a ticker, cancelled by OnConnected. The
+// frame math lives in server.CylonFrame so it stays unit-testable.
+func cylonSweep(ctx context.Context, s *server.Server) {
+	const stepMs = 70
+	pos, dir := 0, 1
+	ticker := time.NewTicker(stepMs * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.SetLEDs(server.CylonFrame(pos, dir), nil)
+			pos += dir
+			if pos == 6 || pos == 0 {
+				dir = -dir
+			}
+		}
+	}
+}
 
 // pulseOrange — sine-wave orange pulse while disconnected from server.
 func pulseOrange(ctx context.Context, s *server.Server) {

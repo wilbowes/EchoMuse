@@ -73,6 +73,8 @@ type ControlClient struct {
 	ledAnimCallback       LEDAnimCallback
 	micStartCallback      MicStartCallback
 	micStopCallback       MicStopCallback
+	connectingCallback StateCallback
+	failedCycles       int
 	disconnectedCallback  StateCallback
 	connectedCallback     StateCallback
 	pendingCallback       StateCallback
@@ -119,6 +121,7 @@ func NewControlClient(
 
 func (c *ControlClient) OnLEDAnim(cb LEDAnimCallback)             { c.ledAnimCallback = cb }
 func (c *ControlClient) OnDisconnected(cb StateCallback)           { c.disconnectedCallback = cb }
+func (c *ControlClient) OnConnecting(cb StateCallback)             { c.connectingCallback = cb }
 func (c *ControlClient) OnConnected(cb StateCallback)             { c.connectedCallback = cb }
 func (c *ControlClient) OnPending(cb StateCallback)               { c.pendingCallback = cb }
 func (c *ControlClient) OnConfigApplied(cb ConfigAppliedCallback) { c.configAppliedCallback = cb }
@@ -142,13 +145,21 @@ func (c *ControlClient) IsConnected() bool {
 var errPending = fmt.Errorf("pending approval")
 
 func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
+	// #316: two link states, not one. The first pass over the endpoint list
+	// is "connecting" (cylon sweep); once a full cycle has failed, the state
+	// becomes "disconnected" (orange pulse) — still trying vs given up for
+	// now are different facts, and the split stops a cylon running all night
+	// at a controller that is not coming back.
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 
-		// Show orange pulse while searching for server
-		if c.disconnectedCallback != nil {
+		if c.failedCycles == 0 {
+			if c.connectingCallback != nil {
+				c.connectingCallback()
+			}
+		} else if c.disconnectedCallback != nil {
 			c.disconnectedCallback()
 		}
 
@@ -206,9 +217,9 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 		default:
 			if err != nil {
 				log.Printf("[control] Connection lost: %v — reconnecting in 5s", err)
-			}
-			if c.disconnectedCallback != nil {
-				c.disconnectedCallback()
+				// #316: a full cycle failed — hand the ring from the cylon
+				// sweep to the orange give-up pulse (top of next iteration).
+				c.failedCycles++
 			}
 			select {
 			case <-ctx.Done():
@@ -324,6 +335,7 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 
 	if c.connectedCallback != nil {
 		c.connectedCallback()
+		c.failedCycles = 0 // #316: next drop starts hunting again with the sweep
 	}
 	data.NotifyReady(baseURL)
 
