@@ -5644,6 +5644,31 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
   const [bundle, setBundle]       = useState(null);  // {url, name, bytes}
   const [bundleErr, setBundleErr] = useState(null);
 
+  // #197: accounts and roles. The endpoints exist and are admin-only;
+  // what was missing was any screen calling them, which left "the wrong
+  // person opened the sidebar first" without an in-household recovery.
+  const [users, setUsers]         = useState(null);
+  const [usersMsg, setUsersMsg]   = useState(null);
+
+  function loadUsers() {
+    API.get('/api/users').then(setUsers)
+       .catch(e => setUsersMsg({ ok: false, text: e.error || 'Failed to load users' }));
+  }
+  useEffect(() => { if (tab === 'users') loadUsers(); }, [tab]);
+
+  async function setUserRole(id, role) {
+    setUsersMsg(null);
+    try {
+      await API.patch(`/api/users/${id}`, { role });
+      setUsers(prev => prev.map(u => u.id === id ? { ...u, role } : u));
+      setUsersMsg({ ok: true, text: 'Role updated.' });
+    } catch (e) {
+      // The server refuses the last-admin demotion and explains ha_linked
+      // refusals; pass its reason through rather than a generic failure.
+      setUsersMsg({ ok: false, text: e.error || 'Refused.' });
+    }
+  }
+
   // Object URLs pin their blob in memory until revoked; the panel closing is
   // the last moment we can still reach this one.
   useEffect(() => () => { if (bundle) URL.revokeObjectURL(bundle.url); }, [bundle]);
@@ -5706,8 +5731,8 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
 
   // Support is admin-only because the endpoint is: the bundle spans the whole
   // fleet, so a tab a non-admin can only be refused by is worse than no tab.
-  const TABS = isAdmin ? ['fleet', 'account', 'support'] : ['fleet', 'account'];
-  const TAB_LABELS = { fleet: 'Config', account: 'Account', support: 'Support' };
+  const TABS = isAdmin ? ['fleet', 'users', 'account', 'support'] : ['fleet', 'account'];
+  const TAB_LABELS = { fleet: 'Config', users: 'Users', account: 'Account', support: 'Support' };
 
   return (
     <div style={{ position:'fixed', inset:0, background:'rgba(180,176,168,0.5)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:200, backdropFilter:'blur(8px)' }}
@@ -5753,6 +5778,38 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
                 </div>
               )}
             </>
+          )}
+
+          {tab === 'users' && (
+            <div style={{ maxWidth: 640 }}>
+              <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)', marginBottom:20, lineHeight:1.6 }}>
+                Admins approve devices, change config and can open a root shell to any device.
+                Read-only accounts see status only. An account with an HA badge gets its sign-in
+                from Home Assistant; its ROLE is still set here and never overwritten by a login.
+                The last admin cannot be demoted.
+              </div>
+              {(users || []).map(u => (
+                <div key={u.id} style={{ display:'flex', alignItems:'center', gap:12,
+                     padding:'10px 0', borderBottom:'1px solid var(--border)' }}>
+                  <div style={{ flex:1 }}>
+                    <div style={{ fontFamily:"'DM Sans',sans-serif", fontSize:14 }}>{u.username}</div>
+                    <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)' }}>
+                      {u.role}{u.ha_linked ? ' · HA-linked' : ''}
+                    </div>
+                  </div>
+                  {u.role === 'admin'
+                    ? <Pill onClick={() => setUserRole(u.id, 'readonly')}>Demote to read-only</Pill>
+                    : <Pill accent onClick={() => setUserRole(u.id, 'admin')}>Promote to admin</Pill>}
+                </div>
+              ))}
+              {!users && !usersMsg && <div className="help">Loading…</div>}
+              {usersMsg && (
+                <div style={{ marginTop: 14, fontFamily: "'DM Mono',monospace", fontSize: 11,
+                  color: usersMsg.ok ? 'var(--ok)' : 'var(--error)' }}>
+                  {usersMsg.ok ? '✓ ' : ''}{usersMsg.text}
+                </div>
+              )}
+            </div>
           )}
 
           {tab === 'account' && (
