@@ -27,7 +27,7 @@ das nicht gelöst.
 ## HOST (Raspberry Pi 4)
 
 - SSH: christian@192.168.178.76 (Port 22, Key-Auth eingerichtet:
-  ~/.ssh/id_ed25519_pi auf dem Mac; Passwort falls nötig: 2203801826)
+  ~/.ssh/id_ed25519_pi auf dem Mac; Passwort falls nötig: <Pi-Sudo-Passwort — siehe Passwort-Manager/Vaultwarden>)
 - Hostname: casaos-pi, Debian 12 (bookworm), ARM64 (aarch64), Kernel 6.12
 - fastboot: /usr/bin/fastboot, Version **34.0.5-debian**
   ⚠️ Der Guide fordert fastboot **v36.0.0** (platform-tools)!
