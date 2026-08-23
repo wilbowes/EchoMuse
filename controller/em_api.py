@@ -2902,6 +2902,16 @@ async def _get_system_status(request: web.Request) -> web.Response:
         "total_devices":  len(all_rows),
         "pending":        sum(1 for r in all_rows if not r["approved"]),
         "approval_mode":  db.get_config("device_approval", "strict"),
+        # Whether the BACKGROUND poll runs (#159). With it off, "No release
+        # info" and a GitHub outage are indistinguishable from the Updates
+        # tab, and the tab is where someone goes to find out — so the reason
+        # for the blank has to be visible there or it reads as a fault and
+        # sends them debugging their network.
+        #
+        # Deliberately not "are updates available": "Check now" still works
+        # when this is False, because a button press is a request rather than
+        # background traffic. The flag says the poll is off, nothing more.
+        "update_checks_enabled": _update_check_interval() > 0,
         "latest_release": release["version"] if release else None,
         # Controller update, surfaced alongside the firmware one so the header
         # can badge it without a second round trip. Read-only by design: the

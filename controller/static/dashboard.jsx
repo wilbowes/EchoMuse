@@ -1151,6 +1151,11 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   const [pushing, setPushing] = useState(false);
   const [release, setRelease] = useState(null);
   const [checkingRelease, setCheckingRelease] = useState(false);
+  // Whether the background release poll runs (#159). Defaults TRUE so a
+  // failed status fetch shows nothing rather than claiming checks are off —
+  // a wrong "disabled" notice sends someone to change a setting that is
+  // already correct.
+  const [autoChecks, setAutoChecks] = useState(true);
   const [approveLabel, setApproveLabel] = useState(device.label || '');
   const [approving, setApproving] = useState(false);
   const [localFile, setLocalFile] = useState(null);
@@ -1189,6 +1194,11 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
     }
     if (tab === 'updates') {
       API.get('/api/releases/latest').then(setRelease).catch(() => {});
+      // Same tab-entry pattern as the asset state below: this changes only
+      // when someone edits system config, so polling it would be waste.
+      API.get('/api/system/status')
+        .then(s => setAutoChecks(s.update_checks_enabled !== false))
+        .catch(() => {});
       // Asset state costs a device shell round trip, so it is fetched on tab
       // entry rather than polled — unlike a release, it only changes when
       // someone acts on it here.
@@ -1862,6 +1872,23 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     <span style={{ fontFamily:"'DM Mono',monospace", fontSize:11, color: needsUpdate ? 'var(--warn)' : 'var(--ok)' }}>
                       {release?.version ? (needsUpdate ? `Update ${release.version} available` : 'Up to date') : 'No release info'}
                     </span>
+                    {/* #159: with the background poll off, "No release info"
+                        and a GitHub outage look identical from here — and
+                        this tab is where someone comes to find out, so the
+                        blank has to name its own cause or it reads as a
+                        fault. Shown whatever the release state, because the
+                        stale-by-design case ("Up to date", last checked in
+                        March) is the one that misleads hardest. Inline
+                        rather than a site-wide banner: it is a setting
+                        somebody chose on purpose, and a persistent warning
+                        for a deliberate choice trains people to ignore
+                        warnings. */}
+                    {!autoChecks && (
+                      <span style={{ fontFamily:"'DM Mono',monospace", fontSize:11, color:'var(--lcd-dim)' }}
+                            title="update_check_interval is 0 — the controller makes no background connection to GitHub. Check now still works.">
+                        Auto-checks off
+                      </span>
+                    )}
                     <Pill small onClick={doCheckRelease} disabled={checkingRelease}>
                       {checkingRelease ? 'Checking…' : 'Check now'}
                     </Pill>
