@@ -326,6 +326,13 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         # controller; only one turn active at a time.
         self._turn_active       = False
         self._turn_cancelled    = False
+        # A barge during PLAYBACK, which deliberately does NOT set
+        # _turn_cancelled — see abort_ha_run. Kept separate because that flag
+        # gates control flow (on_thinking, on_stt_end, the intent-ended
+        # check) and marking a delivered response cancelled would change what
+        # the turn DOES, not just what it is recorded as. This one is read by
+        # the outcome logic and nothing else.
+        self._turn_barged       = False
         self._tts_audio_url:    Optional[str] = None
         self._tts_audio_data:   Optional[bytes] = None
         self._tts_event         = asyncio.Event()
@@ -955,6 +962,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
 
         self._turn_active           = True
         self._turn_cancelled        = False
+        self._turn_barged           = False
         self._tts_event.clear()
         self._tts_audio_url         = None
         self._tts_audio_data        = None
@@ -1106,7 +1114,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 if trace:
                     trace.tts_bytes = pcm_bytes or 0
 
-                if self._turn_cancelled:
+                if self._turn_cancelled or self._turn_barged:
                     # #251: cut off mid-response. This used to fall through to
                     # the finally-default "ok", so a turn cancelled during
                     # playback was indistinguishable from an answered one —
@@ -1118,7 +1126,19 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     # immediately followed by a turn whose trigger is
                     # "barge-in" — the interrupting wake is recorded as that
                     # turn's trigger.
-                    log.info(f"[{self._log_name}] Turn cancelled during playback")
+                    #
+                    # BOTH FLAGS, because the two barge paths set different
+                    # ones and the first fix read only the first. A barge
+                    # during THINKING goes through cancel_voice_turn and sets
+                    # _turn_cancelled; a barge during PLAYBACK goes through
+                    # abort_ha_run, which deliberately does not — marking a
+                    # delivered response cancelled would change control flow,
+                    # not just the record. So the fix for #251 covered the
+                    # case where nothing had been said and missed the one it
+                    # was written for. Measured 2026-08-23: "Sing a song."
+                    # cut off mid-song, logged `Cancelled during streamed
+                    # buffer drain`, and persisted outcome=ok.
+                    log.info(f"[{self._log_name}] Turn cut off mid-response")
                     if trace: trace.outcome = "barged"
                 elif pcm_bytes:
                     if trace: trace.outcome = "ok"
@@ -1558,6 +1578,15 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         cancels a completed task (a no-op) and queues a sentinel into a queue
         that handle_pipeline_start drains before the next run.
         """
+        # #251 follow-up: record that this turn was cut off, WITHOUT marking
+        # it cancelled. The two are different questions and only the second
+        # changes behaviour. A playback barge reaching the outcome logic with
+        # neither flag set is what made "Sing a song." record `ok` after
+        # being cut off mid-song (measured 2026-08-23) — the fix for #251
+        # keyed on _turn_cancelled, which this path deliberately never sets,
+        # so it covered the thinking barge and missed the playback one it was
+        # actually written for.
+        self._turn_barged = True
         if self._transport and not self._transport.is_closing():
             self._send_one(api_pb2.VoiceAssistantRequest(start=False))
         # Armed even if the transport is gone: the barrier is cheap, and a
