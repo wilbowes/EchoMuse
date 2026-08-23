@@ -103,6 +103,35 @@ updates:
     groups:
       go-dependencies:
         patterns: ["*"]
+    # golang.org/x/sys is pinned BELOW its latest on purpose, and the reason
+    # is the compiler rather than the library. The device image carries Go
+    # 1.24 with GOTOOLCHAIN=local baked in — deliberately, since that pin is
+    # what stops a third party's floating tag changing the compiler under
+    # us — and x/sys v0.42.0 declares `go 1.25.0` in its own go.mod, so the
+    # toolchain refuses it whatever directive device/go.mod carries.
+    #
+    # Verified against the module proxy 2026-08-23 rather than asserted:
+    #   v0.40.0 -> go 1.24.0
+    #   v0.41.0 -> go 1.24.0   <- the newest usable version, currently pinned
+    #   v0.42.0 -> go 1.25.0
+    #
+    # #128 raised the module graph past that line and the FIRMWARE WAS
+    # UNBUILDABLE FOR FOUR DAYS with every check green, because at the time
+    # nothing in CI used the pinned image — the other Go jobs run on
+    # GitHub's own toolchain, which silently resolves a newer Go. The
+    # device-firmware-build job in ci.yml now catches it, so this ignore is
+    # not what makes it safe; it is what stops a PR arriving every week that
+    # can only ever be closed.
+    #
+    # LIFT THIS WHEN THE COMPILER PIN MOVES, not before, and note that
+    # moving the compiler needs hardware in the loop: the failure mode is a
+    # binary the Dot refuses to run, which is the one thing not recoverable
+    # from the dashboard.
+    ignore:
+      - dependency-name: golang.org/x/sys
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
 
   # ── GitHub Actions ──────────────────────────────────────────────────────
   # Workflow actions run with repository credentials, so a stale pinned

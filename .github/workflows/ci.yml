@@ -246,6 +246,125 @@ jobs:
           cache-to: type=gha,mode=max
 
 
+  controller-imports:
+    name: Controller modules import and the controller boots
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # WHY THIS EXISTS: the two largest files in the controller have no
+      # test that so much as imports them. controller/CLAUDE.md records the
+      # constraint honestly — the suite cannot import em_controller or
+      # em_esphome, which is why em_linkauth, em_runbarrier, em_barge and
+      # em_turnclock were split out as pure modules with real coverage.
+      # That split is right and should continue. What it leaves behind is a
+      # blind spot: em_controller.py is ~4000 lines that nothing in CI ever
+      # parses beyond `pyflakes`, and em_api.py is not far behind.
+      #
+      # PR #280 walked straight into it — the control-plane dispatch chain
+      # re-indented inside a try/except, +498/-389, in exactly that file.
+      # A misplaced `except` would have been syntactically valid Python
+      # with the wrong control flow, every test still green, and the first
+      # symptom a device dropping its connection in the field. It was
+      # smoke-tested by hand instead, which is not a control.
+      #
+      # NO BUILD. The published image already carries aiohttp, onnxruntime,
+      # numpy and the rest, so the PR's source is mounted OVER it and the
+      # imports run against real dependencies. A pull is seconds where a
+      # build is minutes, and this has to run on every PR to be worth
+      # anything — application code is precisely what it catches.
+      #
+      # The tradeoff, stated so a later failure is not mysterious: a PR that
+      # ADDS a dependency fails here until the image is rebuilt, because
+      # :latest predates it. That is a true signal (a new dependency IS a
+      # deployment change) and the controller-image job above is what
+      # actually verifies such a PR builds. If it becomes noisy, gate this
+      # on requirements.txt being unchanged rather than deleting the job.
+      # The PR's Python is layered ONTO the published image rather than
+      # bind-mounted over /app. static/dashboard.js is gitignored and built
+      # during the image build, so mounting the source tree over /app hides
+      # the compiled bundle — the controller would still boot and serve a
+      # dashboard that 404s its own JavaScript, which is a worse check than
+      # no check. Overlaying only *.py keeps everything the build produced.
+      - name: Layer this PR's controller source onto the published image
+        run: |
+          docker pull ghcr.io/wilbowes/echomuse-controller:latest
+          printf '%s\n' \
+            'FROM ghcr.io/wilbowes/echomuse-controller:latest' \
+            'COPY controller/*.py /app/' \
+            > /tmp/ci-overlay.Dockerfile
+          docker build -f /tmp/ci-overlay.Dockerfile -t echomuse-controller:ci .
+      # Every module, not a hand-picked list: a new file added to the
+      # controller must import cleanly on the day it lands, and naming them
+      # individually means the next em_*.py is silently exempt.
+      #
+      # em_start is excluded because it is the add-on entrypoint — it reads
+      # /data/options.json and execs the controller, so importing it does
+      # not mean what importing the others means.
+      - name: Import every controller module
+        run: |
+          docker run --rm -w /app --entrypoint python3 \
+            echomuse-controller:ci -c '
+          import importlib, pathlib, sys, traceback
+          mods = sorted(p.stem for p in pathlib.Path(".").glob("*.py"))
+          mods = [m for m in mods if m not in ("em_start",)]
+          print(f"importing {len(mods)} modules")
+          failed = []
+          for m in mods:
+              try:
+                  importlib.import_module(m)
+              except BaseException:
+                  failed.append(m)
+                  print(f"--- {m} ---", file=sys.stderr)
+                  traceback.print_exc()
+          if failed:
+              print("\nFAILED: " + ", ".join(failed), file=sys.stderr)
+              sys.exit(1)
+          print("all modules imported")
+          '
+      # Importing proves the file parses and its module-level code runs.
+      # It does NOT prove the thing starts: the asyncio setup, the mDNS
+      # advertisement, the PKI generation and the ESPHome listeners all
+      # happen after that. Booting to "ready" covers the rest of the path a
+      # user meets first, and a controller that cannot start is the one
+      # failure nobody can work around.
+      - name: Boot the controller and wait for ready
+        run: |
+          mkdir -p /tmp/em-ci-data
+          docker run -d --name em-ci \
+            -e SERVER_IP=127.0.0.1 \
+            -e DB_PATH=/app/data/echomuse.db \
+            -e DEVICE_APPROVAL=strict \
+            -v /tmp/em-ci-data:/app/data \
+            echomuse-controller:ci
+          # 90s: a first start generates the CA and runs every migration on
+          # an empty database, which is the slowest legitimate boot there is.
+          for i in $(seq 1 90); do
+            if docker logs em-ci 2>&1 | grep -q "Controller ready"; then
+              echo "booted in ${i}s"
+              docker logs em-ci
+              # A traceback ANYWHERE in a clean first boot is a fault, even
+              # one something caught — nothing should be recovering from an
+              # error on an empty database with no devices attached.
+              if docker logs em-ci 2>&1 | grep -q "Traceback"; then
+                echo "::error::traceback during a clean first boot"
+                exit 1
+              fi
+              exit 0
+            fi
+            if [ "$(docker inspect -f '{{.State.Status}}' em-ci)" != "running" ]; then
+              echo "::error::controller exited before becoming ready"
+              docker logs em-ci
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "::error::controller did not report ready within 90s"
+          docker logs em-ci
+          exit 1
+      - name: Stop the controller
+        if: always()
+        run: docker rm -f em-ci 2>/dev/null || true
+
   device-firmware-build:
     name: Device firmware builds (pinned compiler)
     runs-on: ubuntu-latest

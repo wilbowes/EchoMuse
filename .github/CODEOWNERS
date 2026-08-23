@@ -1,0 +1,67 @@
+# Who must review what.
+#
+# This repo takes contributions from people who cannot test on the hardware
+# and cannot see the fleet, which is most of its contributors and is fine —
+# the code below is not harder than the rest, it is the code where a mistake
+# is EXPENSIVE OR UNRECOVERABLE rather than merely wrong. Everything here
+# either writes to a user's device, decides who is allowed in, or produces an
+# artifact that a stranger's Supervisor will pull and install unattended.
+#
+# The default is deliberately broad. A single maintainer reviewing everything
+# is the current reality; this file is what makes the review REQUIRED on the
+# paths where "the tests were green" is not sufficient evidence.
+
+*                                   @wilbowes
+
+# ── Anything that writes to somebody's device ───────────────────────────────
+# The OTA path, the shell proxy and the provisioning wizard are the three
+# places the controller can brick hardware it does not own. `patch_boot` is
+# the only partition write in the project, and a rule written against the
+# wrong by-name map is inverted rather than merely broken (see
+# controller/CLAUDE.md on TWRP vs Android).
+/controller/em_firmware.py          @wilbowes
+/controller/device_payloads/        @wilbowes
+/device/scripts/                    @wilbowes
+
+# ── Schema migrations: append-only and unrecoverable ────────────────────────
+# `em_db.MIGRATIONS` is indexed by the stored schema_version, so editing a
+# deployed entry corrupts every database that already ran it. This has
+# happened once and it disconnect-looped the fleet. There is no fix-forward
+# for a user whose database ran the edited version.
+/controller/em_db.py                @wilbowes
+
+# ── Who is allowed in ───────────────────────────────────────────────────────
+# Three pure decision modules plus the PKI. em_linkauth was security logic
+# with NO coverage until it orphaned a device; em_ingressauth honours a
+# header that is proof under the add-on and attacker-supplied on the
+# standalone container, and getting that condition wrong is an
+# unauthenticated admin session on a dashboard that proxies a root shell.
+/controller/em_auth.py              @wilbowes
+/controller/em_linkauth.py          @wilbowes
+/controller/em_ingressauth.py       @wilbowes
+/controller/em_pki.py               @wilbowes
+
+# ── What leaves the building ────────────────────────────────────────────────
+# Support bundles are attached to PUBLIC issues. em_support is an allowlist
+# and must stay one: the failure mode of a denylist is recognisable speech
+# or a geolocatable SSID in a stranger's browser, and it is unrecoverable
+# once posted.
+/controller/em_support.py           @wilbowes
+
+# ── Anything a stranger's machine installs unattended ───────────────────────
+# The release workflows publish images that Supervisor pulls on its own, and
+# config.yaml's `version:` pins which one. A wrong pin here shipped a
+# controller with no ingress support at all. controller-ea/ is GENERATED —
+# a hand-edit is reverted by the next sync and fails CI in between.
+/.github/workflows/                 @wilbowes
+/controller/config.yaml             @wilbowes
+/controller-ea/                     @wilbowes
+/repository.yaml                    @wilbowes
+
+# ── The reasoning, which is the thing that keeps fixes fixed ────────────────
+# These files are the record. Most of what is in them was learned the
+# expensive way, and a change that quietly drops a "why" costs the next
+# person the same debugging session.
+/CLAUDE.md                          @wilbowes
+/controller/CLAUDE.md               @wilbowes
+/device/CLAUDE.md                   @wilbowes
