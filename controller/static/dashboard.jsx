@@ -1370,7 +1370,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
     try {
       const res = await API.post(`/api/devices/${device.device_id}/update`, {});
       setPushLog(l => [...l, `Deploying ${res.version} — waiting for reconnect…`]);
-      _pollReconnect(res.version);
+      _pollReconnect(res.version, device.firmware_ver);
     } catch(e) {
       setPushLog([`Error: ${e.error || 'Update failed'}`]);
       setPushing(false);
@@ -1387,7 +1387,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
       setPushLog(l => [...l, '✓ Upload complete — deploying…']);
       const res = await API.post(`/api/devices/${device.device_id}/update`, { upload_token: up.upload_token });
       setPushLog(l => [...l, `Deploying ${res.version} — waiting for reconnect…`]);
-      _pollReconnect(res.version);
+      _pollReconnect(res.version, device.firmware_ver);
     } catch(e) {
       setUploading(false);
       setPushLog(l => [...l, `Error: ${e.error || 'Deploy failed'}`]);
@@ -1395,7 +1395,23 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
     }
   }
 
-  function _pollReconnect(targetVersion) {
+  // priorVersion is what the device was running BEFORE this push, and it is
+  // what makes "rolled back" a claim rather than a guess. The old code
+  // inferred a rollback from `firmware_ver !== targetVersion` alone, which is
+  // only sound when the target is known to be exactly what the device will
+  // report — true for a release, false for a local build.
+  //
+  // It was false in the way that matters: _extract_binary_version knew only
+  // the old date-based scheme, so a clean-tree local build got a synthetic
+  // `local-<timestamp>` label that the device could never report back. Every
+  // such deploy therefore succeeded and announced "auto-rolled back", which
+  // is worse than announcing nothing — the natural response to being told a
+  // deploy reverted is to stop using the feature.
+  //
+  // With the prior version in hand the three outcomes are distinguishable:
+  // back on the target is success, back on what it had before is a genuine
+  // rollback, anything else is unexpected and says so rather than guessing.
+  function _pollReconnect(targetVersion, priorVersion) {
     let attempts = 0;
     let wasDisconnected = false;
     const poll = setInterval(async () => {
@@ -1418,7 +1434,24 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
           setPushLog(l => [...l, `✗ ${d.update_error}`]);
           clearInterval(poll); setPushing(false);
         } else if (wasDisconnected && d?.connected && d?.firmware_ver && d.firmware_ver !== targetVersion) {
-          setPushLog(l => [...l, `⚠ Device reconnected on ${d.firmware_ver} — auto-rolled back`]);
+          // Back on what it was running before = the supervisor flipped the
+          // symlink after three fast exits. That is the only case that
+          // earns the word "rolled back".
+          const rolledBack = priorVersion && d.firmware_ver === priorVersion;
+          setPushLog(l => [...l, rolledBack
+            ? `⚠ Device reconnected on ${d.firmware_ver} — auto-rolled back`
+            // Not the target and not the old one either. Most often the
+            // deploy WORKED and the label was wrong: a binary whose version
+            // the controller could not read is labelled local-<timestamp>,
+            // which the device will never report. Say what was seen and what
+            // was expected, and let the reader judge — asserting a rollback
+            // here is what made a successful deploy look like a failure.
+            : `Device reconnected on ${d.firmware_ver} (expected ${targetVersion})`
+              + (String(targetVersion).startsWith('local-')
+                  ? ' — the label was generated because the binary carried no'
+                    + ' readable version; if the version above is the build you'
+                    + ' pushed, this succeeded'
+                  : '')]);
           clearInterval(poll); setPushing(false);
         } else if (attempts > 40) {
           setPushLog(l => [...l, 'Timed out — check device logs']);
@@ -1432,7 +1465,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
     setPushing(true); setPushLog([`Rolling back to ${device.firmware_previous}…`]);
     try {
       await API.post(`/api/devices/${device.device_id}/rollback`, {});
-      _pollReconnect(device.firmware_previous);
+      _pollReconnect(device.firmware_previous, device.firmware_ver);
     } catch(e) {
       setPushLog([`Error: ${e.error || 'Rollback failed'}`]);
       setPushing(false);

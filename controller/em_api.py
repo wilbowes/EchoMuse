@@ -1559,13 +1559,50 @@ async def _delete_oww_model(request: web.Request) -> web.Response:
 def _extract_binary_version(binary: bytes) -> str | None:
     """
     Scan a compiled Go binary for its embedded EchoMuse version string.
-    The version is compiled in via -ldflags "-X ...Version=YYYYMMDD-HHMM-suffix".
-    Pattern matches e.g. 20260614-1152-dev, 20260614-0513-release, etc.
-    Falls back to None if not found, caller generates a local-YYYYMMDD-HHMM label.
+
+    Two schemes, because compile.sh changed and this did not:
+
+      v2.12.0-63-g99628d3   `git describe --tags --match 'v*'` — CURRENT
+      20260614-1152-dev     date+suffix — used when the tree is DIRTY, and
+                            the only scheme this function knew until now
+
+    Matching only the second is why a clean-tree local build extracted
+    nothing, fell back to a `local-<timestamp>` label, and then never matched
+    the version the device reported on reboot — so a completely successful
+    deploy was announced as "auto-rolled back". A message that says the
+    opposite of what happened is worse than a plain failure, because the
+    natural response is to distrust the feature.
+
+    BARE `vX.Y.Z` IS DELIBERATELY NOT MATCHED, and that is the whole
+    subtlety. A Go binary embeds its dependencies' module versions, so the
+    shape is far from unique — measured on the v2.12.0-63-g99628d3 build:
+    102 occurrences, 9 distinct, including v0.41.0 (x/sys), v1.5.3
+    (gorilla/websocket), v1.0.3 (GoTinyAlsa) and v1.1.41 (miekg/dns). Our own
+    version happened to appear first in file order on that build, which is
+    luck and not a property to rely on: a dependency string landing earlier
+    would silently extract the wrong version and label the deploy with it.
+
+    The `-N-gSHA` suffix makes it unique — exactly one match on the same
+    binary — so only the suffixed form is accepted. A build made exactly ON a
+    tag has no suffix and extracts nothing, which is correct: that binary
+    belongs on the release path, and returning None gets an honest
+    `local-<timestamp>` label rather than a confident wrong one.
+
+    Returns None when nothing matches; the caller labels it
+    `local-YYYYMMDD-HHMM` and the reconnect check compares against the
+    version the device had BEFORE the push rather than against this.
     """
     import re as _re
-    match = _re.search(rb'20\d{6}-\d{4}-[a-z][a-z0-9]*', binary)
-    return match.group(0).decode("ascii") if match else None
+    for pattern in (
+        # git describe, suffixed form only — see above
+        rb'v\d+\.\d+\.\d+-\d+-g[0-9a-f]{7,40}',
+        # dirty-tree builds, and every binary predating the compile.sh change
+        rb'20\d{6}-\d{4}-[a-z][a-z0-9]*',
+    ):
+        match = _re.search(pattern, binary)
+        if match:
+            return match.group(0).decode("ascii")
+    return None
 
 
 async def _update_failed(device_id: str, reason: str) -> None:
