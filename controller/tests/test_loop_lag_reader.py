@@ -79,10 +79,16 @@ def test_the_helper_is_not_sandwiched_into_a_decorator():
     endpoint unauthenticated and raising on call. A decorator must be
     immediately followed by the function it decorates.
     """
+    # #309 review: pin the general invariant instead of one route - every
+    # @auth.require_* must be immediately followed by an async def whose
+    # first parameter is 'request' (optionally after more decorators).
     src = (CONTROLLER / "em_api.py").read_text()
-    for m in re.finditer(r"@auth\.require_auth\n(\w+)", src):
-        assert not m.group(1).startswith("_running_controller_module"), \
-            "the helper must never steal a decorator"
-    # And the status endpoint keeps its decorator:
-    pair = re.search(r"@auth\.require_auth\nasync def _get_system_status", src)
-    assert pair, "_get_system_status must remain decorated"
+    import re
+    DECOR = re.compile(r"^[ \t]*@auth\.require_\w+[ \t]*$", re.M)
+    FOLLOWS = re.compile(r"@auth\.require_\w+[ \t]*\n(?:[ \t]*@[\w.]+[^\n]*\n)*"
+                         r"[ \t]*(async[ \t]+)?def[ \t]+(\w+)[ \t]*\([ \t]*(\w*)")
+    for m in DECOR.finditer(src):
+        g = FOLLOWS.match(src, m.start())
+        assert g, f"no function follows {m.group(0).strip()}"
+        assert g.group(1) and g.group(3) == "request", \
+            f"{g.group(2)} is decorated but is not a request handler"
