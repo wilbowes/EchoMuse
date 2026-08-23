@@ -326,13 +326,18 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         # controller; only one turn active at a time.
         self._turn_active       = False
         self._turn_cancelled    = False
-        # A barge during PLAYBACK, which deliberately does NOT set
-        # _turn_cancelled — see abort_ha_run. Kept separate because that flag
-        # gates control flow (on_thinking, on_stt_end, the intent-ended
-        # check) and marking a delivered response cancelled would change what
-        # the turn DOES, not just what it is recorded as. This one is read by
-        # the outcome logic and nothing else.
-        self._turn_barged       = False
+        # WHY a turn ended early, as an outcome string. Separate from
+        # _turn_cancelled because that flag gates control flow (on_thinking,
+        # on_stt_end, the intent-ended check) while this only decides what is
+        # recorded — and because a barge during PLAYBACK deliberately does
+        # not set it at all (see abort_ha_run).
+        #
+        # The outcome is the CAUSE, not the phase. A dot button stops the
+        # response dead; a mute stops it dead and turns the microphone off;
+        # a wake word stops it in favour of another turn. Those are three
+        # different things to find in the stats, and recording all of them
+        # as "cancelled" loses the distinction the field is read for.
+        self._turn_end_reason: Optional[str] = None
         self._tts_audio_url:    Optional[str] = None
         self._tts_audio_data:   Optional[bytes] = None
         self._tts_event         = asyncio.Event()
@@ -962,7 +967,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
 
         self._turn_active           = True
         self._turn_cancelled        = False
-        self._turn_barged           = False
+        self._turn_end_reason       = None
         self._tts_event.clear()
         self._tts_audio_url         = None
         self._tts_audio_data        = None
@@ -1036,8 +1041,13 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 if trace: trace.outcome = "stream_timeout"
 
             if self._turn_cancelled:
-                log.info(f"[{self._log_name}] Turn cancelled during mic streaming")
-                if trace: trace.outcome = "cancelled"
+                # The outcome is the CAUSE, not the phase — see
+                # _turn_end_reason. A user talking over the assistant is a
+                # barge whether or not a response had started; a button is
+                # not, and a mute is its own thing.
+                why = self._turn_end_reason or "cancelled"
+                log.info(f"[{self._log_name}] Turn {why} during mic streaming")
+                if trace: trace.outcome = why
                 return
 
             if self._ha_never_started:
@@ -1074,8 +1084,11 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 return
 
             if self._turn_cancelled:
-                log.info(f"[{self._log_name}] Turn cancelled while waiting for TTS")
-                if trace: trace.outcome = "cancelled"
+                # The thinking-phase barge lands here: HA is mid-pipeline and
+                # nothing has been said yet, but the user has spoken over it.
+                why = self._turn_end_reason or "cancelled"
+                log.info(f"[{self._log_name}] Turn {why} while waiting for TTS")
+                if trace: trace.outcome = why
                 return
 
             if self._tts_audio_url:
@@ -1114,7 +1127,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 if trace:
                     trace.tts_bytes = pcm_bytes or 0
 
-                if self._turn_cancelled or self._turn_barged:
+                if self._turn_cancelled or self._turn_end_reason:
                     # #251: cut off mid-response. This used to fall through to
                     # the finally-default "ok", so a turn cancelled during
                     # playback was indistinguishable from an answered one —
@@ -1138,8 +1151,9 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     # was written for. Measured 2026-08-23: "Sing a song."
                     # cut off mid-song, logged `Cancelled during streamed
                     # buffer drain`, and persisted outcome=ok.
-                    log.info(f"[{self._log_name}] Turn cut off mid-response")
-                    if trace: trace.outcome = "barged"
+                    why = self._turn_end_reason or "cancelled"
+                    log.info(f"[{self._log_name}] Turn {why} mid-response")
+                    if trace: trace.outcome = why
                 elif pcm_bytes:
                     if trace: trace.outcome = "ok"
             else:
@@ -1533,7 +1547,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         if self._transport and not self._transport.is_closing():
             self._transport.close()
 
-    def cancel_turn(self, abort_ha: bool = False) -> None:
+    def cancel_turn(self, abort_ha: bool = False,
+                    reason: str = "cancelled") -> None:
         """
         Cancel an in-flight voice turn.
 
@@ -1560,6 +1575,19 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         else:
             log.info(f"[{self._log_name}] Turn cancelled (local only)")
         self._turn_cancelled = True
+        # WHY it was cancelled, which the outcome needs and the flag alone
+        # cannot say. _turn_cancelled is set by the dot button, by a mute and
+        # by a barge during thinking, and recording all three as "cancelled"
+        # makes a user talking over the assistant indistinguishable from a
+        # button press. #251 left this split out as "needs threading a reason
+        # through three call sites"; the reason it is now worth threading is
+        # that #250's detection signature — a barged turn followed by a turn
+        # triggered by barge-in — could only ever find a PLAYBACK barge, so a
+        # device false-triggering during thinking was invisible to the one
+        # query built to find it.
+        # First reason wins: a mute that follows a barge does not relabel it.
+        if self._turn_end_reason is None:
+            self._turn_end_reason = reason
         self._tts_event.set()  # unblock any waiting coroutine
 
     def abort_ha_run(self) -> None:
@@ -1586,7 +1614,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         # keyed on _turn_cancelled, which this path deliberately never sets,
         # so it covered the thinking barge and missed the playback one it was
         # actually written for.
-        self._turn_barged = True
+        if self._turn_end_reason is None:
+            self._turn_end_reason = "barged"
         if self._transport and not self._transport.is_closing():
             self._send_one(api_pb2.VoiceAssistantRequest(start=False))
         # Armed even if the transport is gone: the barrier is cheap, and a
@@ -2303,7 +2332,8 @@ async def trigger_voice_turn(
     return satellite._continue_conversation
 
 
-def cancel_voice_turn(device_id: str, abort_ha: bool = False) -> None:
+def cancel_voice_turn(device_id: str, abort_ha: bool = False,
+                      reason: str = "cancelled") -> None:
     """
     Cancel an in-flight ESPHome voice turn for a device.
 
@@ -2320,7 +2350,7 @@ def cancel_voice_turn(device_id: str, abort_ha: bool = False) -> None:
     satellite = server.get_satellite()
     if satellite is None:
         return
-    satellite.cancel_turn(abort_ha=abort_ha)
+    satellite.cancel_turn(abort_ha=abort_ha, reason=reason)
 
 
 def abort_ha_run(device_id: str) -> None:

@@ -13,6 +13,7 @@ importable here (see conftest), so these are shape guards on the shipped
 source.
 """
 
+import re
 from pathlib import Path
 
 CONTROLLER = Path(__file__).resolve().parents[1]
@@ -22,31 +23,6 @@ def _turn_src() -> str:
     src = (CONTROLLER / "em_esphome.py").read_text()
     start = src.index("if self._tts_audio_url:")
     return src[start:start + 6000]
-
-
-def test_a_cancel_during_playback_records_barged_not_ok():
-    src = _turn_src()
-    assert 'trace.outcome = "barged"' in src, \
-        "a turn cut off mid-response must be distinguishable from an answer"
-    assert "_turn_cancelled" in src.split('trace.outcome = "barged"')[0], \
-        "the barged outcome must be gated on the cancel flag"
-    # The finally-block default must not be able to overwrite it back to ok:
-    # the barged branch has to sit BEFORE the unconditional default runs.
-    default = src.index("if not trace.outcome:")
-    assert src.index('"barged"') < default
-
-
-def test_barged_is_distinct_from_the_pre_playback_cancel():
-    """
-    "cancelled" already covers cuts during mic streaming and the TTS wait -
-    nothing had been said yet. "barged" means a response had begun. Both
-    must exist; collapsing them would blur 'user pressed the button early'
-    into 'something interrupted the answer'.
-    """
-    src = (CONTROLLER / "em_esphome.py").read_text()
-    assert src.count('trace.outcome = "cancelled"') >= 2, \
-        "the pre-playback cancel outcomes must stay"
-    assert 'trace.outcome = "barged"' in src
 
 
 def test_self_interruption_is_detectable_from_the_persisted_fields():
@@ -65,59 +41,82 @@ def test_self_interruption_is_detectable_from_the_persisted_fields():
 
 # ─── Both barge paths, because covering one is what caused the bug ───────────
 
-def test_the_playback_barge_path_also_marks_the_outcome():
+def test_each_cause_of_an_early_end_records_its_own_outcome():
     """
-    #251's fix keyed on `_turn_cancelled` and therefore covered the barge it
-    was NOT written for.
+    Three different things stop a turn and they are three different things to
+    find in the stats:
 
-    There are two paths and they set different flags:
+        dot button   -> "cancelled"   stops the response dead
+        mute         -> "muted"       stops it dead AND deafens the device
+        wake word    -> "barged"      stops it in favour of another turn
 
-        barge during THINKING  -> cancel_voice_turn()  -> _turn_cancelled
-        barge during PLAYBACK  -> abort_ha_run()       -> (nothing, by design)
+    Recording all three as "cancelled" is what made a user talking over the
+    assistant indistinguishable from a button press. It also blunted #250's
+    detection signature — a barged turn followed by a turn triggered by
+    barge-in — which could only ever find a PLAYBACK barge while a thinking
+    barge recorded "cancelled".
+    """
+    ctrl = (CONTROLLER / "em_controller.py").read_text()
+    calls = re.findall(r"cancel_voice_turn\(([^)]*)\)", ctrl, re.S)
+    assert len(calls) == 3, f"expected 3 call sites, got {len(calls)}"
 
-    abort_ha_run deliberately does not mark the turn cancelled — that flag
-    gates on_thinking, on_stt_end and the intent-ended check, so marking a
-    delivered response cancelled would change what the turn DOES. Its
-    docstring says so.
+    reasons = sorted(
+        re.search(r'reason="(\w+)"', c).group(1)
+        for c in calls if re.search(r'reason="(\w+)"', c)
+    )
+    assert reasons == ["barged", "cancelled", "muted"], (
+        f"each cancel path must name its own cause; got {reasons}"
+    )
 
-    The consequence, measured on hardware 2026-08-23: "Sing a song." was cut
-    off mid-song by a real barge, logged `Cancelled during streamed buffer
-    drain`, and persisted `outcome=ok`. The exact reading #251 existed to
-    prevent, on the exact case its description describes.
 
-    So abort_ha_run must record something, and the outcome must read both.
+def test_the_outcome_is_the_reason_at_every_phase():
+    """
+    A turn can end early during mic streaming, while waiting for TTS, or
+    mid-response. The PHASE used to decide the wording, which is how #251
+    fixed the barge it was not written for. All three now record the reason.
     """
     src = (CONTROLLER / "em_esphome.py").read_text()
+    reads = [l.strip() for l in src.splitlines()
+             if l.strip() == 'why = self._turn_end_reason or "cancelled"']
+    assert len(reads) == 3, (
+        f"all three early-end sites must record the reason; found {len(reads)}"
+    )
+    assert 'trace.outcome = why' in src
 
+
+def test_the_reason_survives_the_module_level_forwarder():
+    """
+    cancel_voice_turn forwards to the satellite. A parameter added to the
+    signature and dropped in the body is a silent no-op: the call compiles,
+    the reason never arrives, and every outcome quietly reads "cancelled".
+    """
+    src = (CONTROLLER / "em_esphome.py").read_text()
+    fwd = src[src.index("def cancel_voice_turn("):]
+    fwd = fwd[:fwd.index("\ndef ")]
+    assert "reason=reason" in fwd, \
+        "the forwarder must pass the reason through to cancel_turn"
+
+
+def test_the_playback_barge_still_records_without_a_cancel():
+    """
+    abort_ha_run is the PLAYBACK barge path and deliberately does not mark
+    the turn cancelled — that flag gates control flow. It must still record
+    the reason, or the case #251 was written for goes back to reading "ok".
+    """
+    src = (CONTROLLER / "em_esphome.py").read_text()
     abort = src[src.index("def abort_ha_run"):]
     abort = abort[:abort.index("\n\n\n")] if "\n\n\n" in abort else abort[:2000]
-    assert "_turn_barged" in abort, (
-        "abort_ha_run is the PLAYBACK barge path and must record that the "
-        "turn was cut off, even though it must not mark it cancelled"
-    )
-    assert "_turn_cancelled = True" not in abort, (
-        "abort_ha_run must NOT set _turn_cancelled — that flag changes "
-        "control flow, and its docstring explains why this path avoids it"
-    )
-
-    branch = src[src.index("# #251: cut off mid-response") - 200:]
-    branch = branch[:branch.index('trace.outcome = "barged"')]
-    assert "_turn_barged" in branch and "_turn_cancelled" in branch, (
-        "the outcome must read BOTH flags — one per barge path"
-    )
+    assert '"barged"' in abort and "_turn_end_reason" in abort
+    assert "_turn_cancelled = True" not in abort, \
+        "abort_ha_run must not mark the turn cancelled — see its docstring"
 
 
-def test_the_barged_flag_is_reset_per_turn():
+def test_the_reason_is_cleared_per_turn():
     """
-    A sticky flag would mark every later turn on the same satellite as
-    barged, which is the same class of wrong answer in the other direction.
-    Reset alongside _turn_cancelled at turn start, not only at construction.
+    A sticky reason would label every later turn on the same satellite,
+    which is the same wrong answer in the other direction.
     """
     src = (CONTROLLER / "em_esphome.py").read_text()
     start = src.index("self._turn_active           = True")
-    window = src[start:start + 400]
-    assert "_turn_barged" in window, (
-        "_turn_barged must be cleared where _turn_cancelled is, at turn "
-        "start — clearing it only in __init__ leaves it set for the life "
-        "of the connection"
-    )
+    assert "_turn_end_reason" in src[start:start + 400], \
+        "_turn_end_reason must be cleared at turn start, not only in __init__"

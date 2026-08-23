@@ -1226,7 +1226,8 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                         # old run MUST be aborted upstream first or its tail
                         # events land on the new turn and kill it
                         # (pipeline_refused, 5 of 5 attempts, 2026-08-17).
-                        esphome.cancel_voice_turn(device.device_id, abort_ha=True)
+                        esphome.cancel_voice_turn(
+                            device.device_id, abort_ha=True, reason="barged")
                     return
     finally:
         rms_mean = rms_sum / frames if frames else 0.0
@@ -2467,7 +2468,7 @@ async def handle_button_event(device: Device, event: dict):
         if action == em_button.CANCEL:
             log.info(f"[{device.device_id}] Dot button — cancelling voice turn")
             device.cancel_event.set()
-            esphome.cancel_voice_turn(device.device_id)
+            esphome.cancel_voice_turn(device.device_id, reason="cancelled")
             # Flush the device's speaker too, or cancelling DURING the spoken
             # response only stops the controller feeding it: the ring clears
             # while up to ~5.5s already in audioChanDepth plays out, and the
@@ -2884,7 +2885,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                                 f"cancelling"
                             )
                             device.cancel_event.set()
-                            esphome.cancel_voice_turn(device_id)
+                            esphome.cancel_voice_turn(device_id, reason="muted")
                             await device.send_control({"type": "speaker_flush"})
                         await api._push_event({
                             "type":      "device_update",
