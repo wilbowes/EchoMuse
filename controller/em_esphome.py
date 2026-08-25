@@ -350,6 +350,10 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         # see _handle_voice_event's RUN_END branch).
         self._intent_ended      = False
         self._run_started       = False
+        # Whether HA has told us this run is over. A run we started
+        # that has not finished is still emitting onto this socket,
+        # and its tail belongs to no turn but this one.
+        self._run_finished      = False
         self._ha_never_started  = False
         # Barge-in run serialisation — the protocol has no run id, so the
         # satellite is what keeps two runs from overlapping on one connection.
@@ -798,6 +802,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 # Unblocking both waiters mirrors the ERROR path below, which
                 # is the established shape for "HA is done, stop feeding it".
                 self._ha_never_started = True
+                self._run_finished = True
                 self._ha_vad_end.set()
                 self._tts_event.set()
                 return
@@ -813,6 +818,10 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # through INTENT_END first, so this doesn't add a 30s stall for
             # that case — only a premature RUN_END before INTENT_END is held.
             if self._intent_ended or self._turn_cancelled:
+                # The genuine terminal RUN_END. Nothing more is coming for
+                # this run, so teardown has nothing left to serialise
+                # against — the overwhelmingly common case.
+                self._run_finished = True
                 self._tts_event.set()
             else:
                 log.debug(
@@ -973,6 +982,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._tts_audio_data        = None
         self._intent_ended          = False
         self._run_started           = False
+        self._run_finished          = False
         self._ha_never_started      = False
         # Takes ownership of an abort armed during the PREVIOUS turn (at the
         # barge). Deliberately not a plain reset: the arm has to survive this
@@ -1081,21 +1091,9 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             except asyncio.TimeoutError:
                 log.warning(f"[{self._log_name}] Timeout waiting for TTS response from HA")
                 if trace: trace.outcome = "timeout"
-                # A timeout orphans HA's run exactly as an abort does — we
-                # walk away while the pipeline is still live — so it needs
-                # the same serialisation. Without this the stale run's
-                # RUN_END lands on the NEXT turn, which has not seen its own
-                # RUN_START yet, and _ha_never_started reads it as terminal:
-                # the turn dies pipeline_refused in ~3ms with zero audio.
-                # Measured on the 2026-08-25 soak, 4 of 4 — every refusal in
-                # 15 hours followed a timeout, none followed a good turn, and
-                # the user re-asking twice got refused twice.
-                #
-                # The reason is set FIRST because abort_ha_run defaults it to
-                # "barged": a timeout is not a barge, nobody spoke over
-                # anything, and _turn_end_reason is meant to be the cause.
-                self._turn_end_reason = "timeout"
-                self.abort_ha_run()
+                # HA's run is still live here — that is what a timeout MEANS
+                # — but it is serialised at teardown along with every other
+                # abandoned turn, not on this path. See the note there.
                 return
 
             if self._turn_cancelled:
@@ -1198,6 +1196,25 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 # the feed is actually up.
                 self._send_one(self._media_state_msg())
             self._turn_active    = False
+            # A run we started that HA never told us finished is STILL LIVE,
+            # and its RUN_END will land on whichever turn is running when it
+            # arrives — which reads there as "HA ended a run it never
+            # started" and kills that turn in milliseconds.
+            #
+            # This is here rather than on each early return because the
+            # returns are the wrong place to hold the invariant: `timeout`
+            # was fixed on its own path (#329) while `no_speech` — the same
+            # fault, reached whenever a wake fires and nobody speaks — sat
+            # one branch away, its comment asserting there was no in-flight
+            # pipeline three lines after saying HA was listening. Teardown
+            # is the one place every abandoned turn passes through, so a
+            # return added later is covered without anyone remembering.
+            if self._run_started and not self._run_finished:
+                log.debug(
+                    f"[{self._log_name}] Turn ended with HA's run still live "
+                    f"— aborting it so its tail cannot reach the next turn"
+                )
+                self.end_ha_run()
             self._barrier.end_turn()
             self._on_thinking    = None
             self._on_announce    = None
@@ -1631,6 +1648,28 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         # actually written for.
         if self._turn_end_reason is None:
             self._turn_end_reason = "barged"
+        self.end_ha_run()
+
+    def end_ha_run(self) -> None:
+        """
+        Stop HA's pipeline and arm the run barrier. Touches no turn state.
+
+        This is the serialisation on its own, separated from `abort_ha_run`
+        so the turn teardown can use it. Teardown is not a barge: nobody
+        spoke over anything, and letting `abort_ha_run` default
+        `_turn_end_reason` to "barged" there would invent a cause on every
+        turn that simply stopped waiting.
+
+        Idempotent via `_run_finished`, which matters because a barge calls
+        this and then teardown would call it again — a second `start=False`
+        at that point races the interrupting turn's own pipeline, which is
+        the failure this whole mechanism exists to prevent.
+        """
+        if self._run_finished:
+            return
+        # From here on we are done with this run whatever HA does next, and
+        # that is exactly what makes a later event stale.
+        self._run_finished = True
         if self._transport and not self._transport.is_closing():
             self._send_one(api_pb2.VoiceAssistantRequest(start=False))
         # Armed even if the transport is gone: the barrier is cheap, and a

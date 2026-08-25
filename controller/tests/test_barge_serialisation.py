@@ -230,27 +230,117 @@ def test_the_unarmed_run_end_path_is_still_there():
     assert "self._ha_never_started = True" in ESPHOME_SRC
 
 
-def test_a_timeout_serialises_the_same_way_a_barge_does():
+def _turn_body() -> str:
     """
-    A timeout orphans HA's run exactly as an abort does — we stop waiting
-    while the pipeline is still live — so it needs the same barrier.
+    run_esphome_voice_turn with comments stripped.
 
-    Without it the stale run's RUN_END lands on the NEXT turn, which has not
-    seen its own RUN_START, and _ha_never_started reads it as terminal.
-    Measured on the 2026-08-25 soak: all four pipeline_refused turns in 15
-    hours immediately followed a timeout and none followed a good turn, so
-    the user re-asking after a slow intent was refused in ~3ms, twice.
+    The comments in the teardown necessarily name the calls they explain, so
+    a source search including them matches the explanation and not the code.
     """
-    # Anchored on the message, not on `except asyncio.TimeoutError:` — there
-    # are two, and the earlier one is the mic-streaming hard cap, which
-    # deliberately falls through to this wait rather than abandoning the run.
-    body = ESPHOME_SRC[ESPHOME_SRC.index("Timeout waiting for TTS response from HA"):]
-    body = body[:body.index("\n            if self._turn_cancelled:")]
-    assert "abort_ha_run()" in body, \
-        "a timed-out turn must abort HA's run and arm the barrier"
-    # abort_ha_run defaults the reason to "barged". Nobody spoke over
-    # anything here, and _turn_end_reason is the CAUSE.
-    assert '_turn_end_reason = "timeout"' in body, \
-        "the reason must be set before abort_ha_run defaults it to barged"
-    assert body.index('_turn_end_reason = "timeout"') < body.index("abort_ha_run()"), \
-        "setting it after the call is too late — the default has already won"
+    start = ESPHOME_SRC.index("async def run_esphome_voice_turn")
+    body = ESPHOME_SRC[start:]
+    body = body[:re.search(r"\n    async def ", body[1:]).start() + 1]
+    return "\n".join(
+        l for l in body.splitlines() if not l.lstrip().startswith("#")
+    )
+
+
+def test_every_abandoned_turn_serialises_at_teardown():
+    """
+    #329, generalised. A run we started that HA never finished is still
+    emitting onto this connection, and its RUN_END lands on whatever turn is
+    running when it arrives — which reads there as "HA ended a run it never
+    started" and kills that turn in milliseconds.
+
+    Measured on the 2026-08-25 soak: all four pipeline_refused turns in 15
+    hours immediately followed a timeout, none followed a good turn.
+
+    The guard belongs at teardown, not on each early return. Fixing the
+    `timeout` path alone left `no_speech` — the same fault, reached whenever
+    a wake fires and nobody speaks — one branch away, with a comment
+    asserting there was no in-flight pipeline three lines after saying HA
+    was listening.
+    """
+    body = _turn_body()
+    assert "if self._run_started and not self._run_finished:" in body, \
+        "teardown must serialise a run HA never told us finished"
+    guard = body.index("if self._run_started and not self._run_finished:")
+    end_turn = body.index("self._barrier.end_turn()")
+    assert guard < end_turn, \
+        "the abort must arm the barrier before the turn drops it"
+
+
+def test_teardown_is_reached_by_every_return():
+    """
+    The guard above is only an invariant because every path runs it. If the
+    teardown ever stops being a `finally`, a return added later silently
+    opts out and the fault comes back on that path alone — which is exactly
+    how it survived the first time.
+    """
+    lines = _turn_body().splitlines()
+    tear = next(i for i, l in enumerate(lines) if "self._turn_active    = False" in l)
+    enclosing = next(
+        lines[i].strip() for i in range(tear, 0, -1)
+        if lines[i].strip() in ("try:", "finally:")
+    )
+    assert enclosing == "finally:", \
+        f"teardown sits under {enclosing!r}; an early return would skip it"
+
+
+def test_the_serialisation_lives_in_exactly_one_place():
+    """
+    Two call sites: the barge (via abort_ha_run) and teardown. A third would
+    mean a path deciding for itself, which is the shape that produced the
+    bug.
+    """
+    calls = ESPHOME_SRC.count("self.end_ha_run()")
+    assert calls == 2, (
+        f"end_ha_run has {calls} call sites; it should be abort_ha_run and "
+        "teardown only — a per-path abort is what left no_speech uncovered"
+    )
+
+
+def test_ending_the_run_is_idempotent():
+    """
+    A barge ends the run and then teardown runs anyway. A second
+    `start=False` at that moment races the INTERRUPTING turn's own pipeline
+    — the precise failure this whole mechanism exists to prevent — so the
+    flag must be set before anything is sent, not after.
+    """
+    fn = ESPHOME_SRC[ESPHOME_SRC.index("def end_ha_run"):][:4000]
+    # Past the docstring: it quotes `start=False` while explaining why the
+    # ordering matters, and matching that instead of the send is how the
+    # first version of this test failed. Third time today.
+    code = fn[fn.index('"""', fn.index('"""') + 3) + 3:]
+    code = "\n".join(l for l in code.splitlines() if not l.lstrip().startswith("#"))
+    early_out = code.index("return")
+    set_flag = code.index("self._run_finished = True")
+    send = code.index("start=False")
+    assert early_out < set_flag < send, \
+        "end_ha_run must bail on an already-finished run, and claim the run "\
+        "before it sends anything"
+
+
+def test_a_genuinely_finished_run_is_not_aborted():
+    """
+    The common case. Both branches where HA really ends a run must say so,
+    or every ordinary turn ends by aborting a pipeline that already
+    completed and arming a barrier the next turn does not need.
+    """
+    assert ESPHOME_SRC.count("self._run_finished = True") >= 3, (
+        "expected the flag set by end_ha_run plus both terminal RUN_END "
+        "branches"
+    )
+    never_started = ESPHOME_SRC[ESPHOME_SRC.index("self._ha_never_started = True"):][:200]
+    assert "self._run_finished = True" in never_started, \
+        "a run HA ended without starting is finished, not live"
+
+
+def test_the_flag_resets_per_turn():
+    """
+    Left set, it disables the serialisation for the life of the connection —
+    silently, and only for the multi-run case that is hard to reproduce.
+    """
+    body = _turn_body()
+    assert "self._run_finished          = False" in body, \
+        "the flag must be cleared at turn start beside _run_started"
