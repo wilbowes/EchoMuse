@@ -141,12 +141,21 @@ func (c *ControlClient) IsConnected() bool {
 
 var errPending = fmt.Errorf("pending approval")
 
+// maxStaticAttempts is how many consecutive dial failures a static endpoint
+// gets before Run falls through to the next one. 1 would tour the whole
+// list on a single transient blip — a brief drop on the endpoint actually
+// in front of the device costing a lap through every backup before trying
+// it again, which is slower than just retrying it.
+const maxStaticAttempts = 2
+
 func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 	// Rotates through a configured static endpoint list on failure — a
 	// stale entry must fall through to the next one rather than being
-	// retried forever. Position is in-memory only: losing it across a
-	// restart is harmless since the file is re-read every cycle anyway.
+	// retried forever. Both counters are in-memory only: losing them
+	// across a restart is harmless since the file is re-read every cycle
+	// anyway.
 	staticIdx := 0
+	staticFails := 0
 
 	for {
 		if ctx.Err() != nil {
@@ -226,6 +235,13 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 		switch err {
 		case errPending:
 			log.Printf("[control] Device pending approval — retrying in 30s")
+			if len(staticEndpoints) > 0 {
+				// Reaching pending-approval means the endpoint is reachable —
+				// TCP, the WebSocket handshake and registration all worked.
+				// Don't let an earlier failure on it count against a later,
+				// unrelated one.
+				staticFails = 0
+			}
 			if c.pendingCallback != nil {
 				c.pendingCallback()
 			}
@@ -238,10 +254,20 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 			if err != nil {
 				log.Printf("[control] Connection lost: %v — reconnecting in 5s", err)
 				if len(staticEndpoints) > 0 {
-					// This endpoint just failed — fall through to the next
-					// configured one instead of pinning to a stale address.
-					staticIdx++
+					staticFails++
+					if staticFails >= maxStaticAttempts {
+						// This endpoint has now failed maxStaticAttempts times
+						// in a row — fall through to the next configured one
+						// instead of pinning to a stale address.
+						staticFails = 0
+						staticIdx++
+					}
 				}
+			} else if len(staticEndpoints) > 0 {
+				// A clean end to a connection that did establish proves the
+				// endpoint works; don't let it inherit a fail streak from
+				// before it connected.
+				staticFails = 0
 			}
 			if c.disconnectedCallback != nil {
 				c.disconnectedCallback()
