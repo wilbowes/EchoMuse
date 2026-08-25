@@ -73,11 +73,34 @@ def decide(*,
 
     * **playback** — the response is audible, so the microphone is dominated
       by the device's own speech. Low bar, two consecutive frames.
-    * **thinking** — nothing is playing yet, so the bar is the normal wake
-      threshold. One frame clears it outright; two consecutive frames at a
-      low tier also count, because a person repeating themselves into a
-      silent device is a strong signal and the cost of missing it is a turn
-      that ignores them.
+    * **thinking** — nothing is playing yet, so there is no echo to talk
+      over and no reason to lower the bar. One frame at the normal wake
+      threshold, and nothing else.
+
+      There used to be a second, lower tier here: two consecutive frames at
+      `max(0.2, 0.4 * wake_threshold)`. Removed in #337, and the reason it
+      existed is the reason it had to go.
+
+      It was added for one observation (2026-07-12): a GENUINE barge
+      plateauing at 0.240/0.242 against a threshold of 0.50, missed, and the
+      unwanted answer played in full. But that reading was depressed by the
+      watcher scoring a COLD model — it resets per turn, and the first
+      FEATURE_WINDOW chunks score reset noise as much as the room. That
+      cause was fixed separately by `em_oww_warmup`, which gates the
+      watcher until its window is clean. The compensation was never removed.
+
+      What was left is a bar sitting in the warm-noise band. Measured across
+      505 near-misses and 30 real detections on a live fleet: **no genuine
+      wake word scored below 0.502, and noise reached 0.462.** On 2026-08-25
+      two trusted, warm frames at 0.206/0.238 cancelled a real request. A
+      person actually repeating themselves says the wake word, scores like
+      it, and is caught by the branch above.
+
+      The cost of getting this wrong is not a missed barge. A false barge
+      while thinking discards the request before speech recognition has run
+      (`outcome=barged`, `text=''`), reopens the microphone at someone who
+      did not ask for it, and starts a phantom turn that keeps the device
+      deaf for its whole length.
     """
     if in_playback:
         if score >= barge_threshold and prev_score >= barge_threshold:
@@ -90,23 +113,5 @@ def decide(*,
 
     if score >= wake_threshold:
         return BargeDecision(True, f"score={score:.3f} >= {wake_threshold:.2f}")
-
-    low_tier = low_tier_for(wake_threshold)
-    if score >= low_tier and prev_score >= low_tier:
-        return BargeDecision(
-            True,
-            f"scores {prev_score:.3f}/{score:.3f} — two consecutive frames "
-            f">= low tier {low_tier:.2f}",
-        )
     return BargeDecision(False, "")
 
-
-def low_tier_for(wake_threshold: float) -> float:
-    """
-    The lower bar used during thinking, when two frames agree.
-
-    Floored at 0.2 so that lowering the wake threshold cannot drag this down
-    to somewhere noise reaches — the floor is what stops a sensitivity
-    setting quietly becoming a self-trigger setting.
-    """
-    return max(0.2, 0.4 * wake_threshold)

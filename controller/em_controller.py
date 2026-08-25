@@ -1080,15 +1080,15 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
     speech-over-TTS scores are depressed and barge_threshold sits well
     below the wake threshold (~0.05–0.10). During thinking nothing is
     playing — scores are normal, and using the low barge threshold there
-    would fire on random speech — so detection is two-tier: a single frame
-    at the normal wake threshold fires immediately, and two CONSECUTIVE
-    frames at a low tier (0.4× wake threshold, floored at 0.2) also fire.
-    The low tier exists because a genuine barge attempt over the watcher's
-    cold-started model can plateau below the wake threshold (observed
-    2026-07-12: 0.240/0.242 on consecutive frames vs threshold 0.50 —
-    missed, and the unwanted answer played in full), while random speech
-    near-misses are isolated single frames — two elevated frames in a row
-    is wake-word-shaped evidence.
+    would fire on random speech — so a single frame at the normal wake
+    threshold fires, and nothing below it does.
+
+    There was a second, lower tier until #337, added for a genuine barge
+    that plateaued at 0.240/0.242 against a threshold of 0.50 (2026-07-12)
+    and was missed. That reading came off a COLD model, which is the fault
+    `em_oww_warmup` was later written to fix; the compensation outlived its
+    cause and became pure false-positive surface, cancelling a real request
+    at 0.206/0.238 on 2026-08-25. See em_barge.decide.
 
     On detection: set barge_detected + cancel_event. During playback that
     aborts stream_speaker and the drain sleep, plus a device speaker_flush

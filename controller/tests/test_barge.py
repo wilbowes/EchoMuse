@@ -81,27 +81,32 @@ def test_one_frame_at_the_full_wake_threshold_fires_while_thinking():
     assert "two consecutive" not in d.note
 
 
-def test_two_low_tier_frames_fire_while_thinking():
-    d = thinking(0.25, prev=0.25)
-    assert d.fired is True
-    assert "low tier" in d.note
-
-
-def test_one_low_tier_frame_does_not_fire_while_thinking():
-    assert thinking(0.25, prev=0.0).fired is False
-
-
-def test_the_low_tier_has_a_floor():
+def test_noise_does_not_fire_while_thinking_however_often_it_repeats():
     """
-    A sensitivity setting must not quietly become a self-trigger setting:
-    0.4 x a low wake threshold would otherwise reach down into noise.
+    #337. There used to be a second tier here — two consecutive frames at
+    max(0.2, 0.4 * wake_threshold) — on the reasoning that someone repeating
+    themselves into a silent device is a strong signal.
+
+    Measured on a live fleet across 505 near-misses and 30 real detections:
+    no genuine wake word scored below 0.502, and noise reached 0.462. The
+    tier's floor of 0.2 was inside the noise band, so it could only ever
+    fire on noise. It cost a real turn on 2026-08-25 — the request was
+    discarded before speech recognition ran and the microphone reopened at
+    the user, who asked the Echo why it was listening.
     """
-    assert em_barge.low_tier_for(0.1) == 0.2
-    assert em_barge.low_tier_for(0.5) == 0.2
-    assert em_barge.low_tier_for(0.9) == pytest.approx(0.36)
+    for score in (0.206, 0.238, 0.25, 0.36, 0.462):
+        assert thinking(score, prev=score).fired is False, \
+            f"{score} is a noise-band score and must not barge"
 
 
-# ── Shape ─────────────────────────────────────────────────────────────────────
+def test_a_person_repeating_themselves_is_still_caught():
+    """
+    The case the low tier existed for. Someone saying the wake word again
+    scores like someone saying the wake word — the branch above catches it,
+    which is why removing the tier costs nothing.
+    """
+    assert thinking(0.502).fired is True
+    assert thinking(WAKE).fired is True
 
 def test_a_decision_that_did_not_fire_carries_no_reason():
     """So a caller cannot log a justification for something that never fired."""
