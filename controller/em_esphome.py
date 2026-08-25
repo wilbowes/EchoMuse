@@ -1081,6 +1081,21 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             except asyncio.TimeoutError:
                 log.warning(f"[{self._log_name}] Timeout waiting for TTS response from HA")
                 if trace: trace.outcome = "timeout"
+                # A timeout orphans HA's run exactly as an abort does — we
+                # walk away while the pipeline is still live — so it needs
+                # the same serialisation. Without this the stale run's
+                # RUN_END lands on the NEXT turn, which has not seen its own
+                # RUN_START yet, and _ha_never_started reads it as terminal:
+                # the turn dies pipeline_refused in ~3ms with zero audio.
+                # Measured on the 2026-08-25 soak, 4 of 4 — every refusal in
+                # 15 hours followed a timeout, none followed a good turn, and
+                # the user re-asking twice got refused twice.
+                #
+                # The reason is set FIRST because abort_ha_run defaults it to
+                # "barged": a timeout is not a barge, nobody spoke over
+                # anything, and _turn_end_reason is meant to be the cause.
+                self._turn_end_reason = "timeout"
+                self.abort_ha_run()
                 return
 
             if self._turn_cancelled:

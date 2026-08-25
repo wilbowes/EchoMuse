@@ -228,3 +228,29 @@ def test_the_unarmed_run_end_path_is_still_there():
         "the RUN_END-without-RUN_START discriminator is gone"
     )
     assert "self._ha_never_started = True" in ESPHOME_SRC
+
+
+def test_a_timeout_serialises_the_same_way_a_barge_does():
+    """
+    A timeout orphans HA's run exactly as an abort does — we stop waiting
+    while the pipeline is still live — so it needs the same barrier.
+
+    Without it the stale run's RUN_END lands on the NEXT turn, which has not
+    seen its own RUN_START, and _ha_never_started reads it as terminal.
+    Measured on the 2026-08-25 soak: all four pipeline_refused turns in 15
+    hours immediately followed a timeout and none followed a good turn, so
+    the user re-asking after a slow intent was refused in ~3ms, twice.
+    """
+    # Anchored on the message, not on `except asyncio.TimeoutError:` — there
+    # are two, and the earlier one is the mic-streaming hard cap, which
+    # deliberately falls through to this wait rather than abandoning the run.
+    body = ESPHOME_SRC[ESPHOME_SRC.index("Timeout waiting for TTS response from HA"):]
+    body = body[:body.index("\n            if self._turn_cancelled:")]
+    assert "abort_ha_run()" in body, \
+        "a timed-out turn must abort HA's run and arm the barrier"
+    # abort_ha_run defaults the reason to "barged". Nobody spoke over
+    # anything here, and _turn_end_reason is the CAUSE.
+    assert '_turn_end_reason = "timeout"' in body, \
+        "the reason must be set before abort_ha_run defaults it to barged"
+    assert body.index('_turn_end_reason = "timeout"') < body.index("abort_ha_run()"), \
+        "setting it after the call is too late — the default has already won"
