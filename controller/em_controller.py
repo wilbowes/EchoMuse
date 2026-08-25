@@ -828,6 +828,30 @@ class Device:
         # an investigation on 2026-07-20.
         send_seconds = 0.0
         first_send_time = None
+
+        async def send_period(chunk: bytes) -> None:
+            """Send one whole device period, stamping the first one."""
+            nonlocal first_send_time, send_seconds
+            if first_send_time is None:
+                first_send_time = asyncio.get_event_loop().time()
+                self.playback_send_t0 = first_send_time
+                await self._set_speaking(True)
+                log.info(
+                    f"[{self.device_id}] First streamed PCM period "
+                    "sent to device"
+                )
+            _t_send = asyncio.get_event_loop().time()
+            await self.send_data(bytes([SPEAKER_FRAME_TYPE]) + chunk)
+            send_seconds += asyncio.get_event_loop().time() - _t_send
+
+        async def drain_whole_periods() -> None:
+            while len(pending) >= SPEAKER_BYTES:
+                if self.cancel_event.is_set():
+                    break
+                chunk = bytes(pending[:SPEAKER_BYTES])
+                del pending[:SPEAKER_BYTES]
+                await send_period(chunk)
+
         try:
             async for pcm in pcm_chunks:
                 if self.cancel_event.is_set():
@@ -837,22 +861,7 @@ class Device:
                 pending.extend(stream_eq.process(pcm))
                 eq_seconds += asyncio.get_event_loop().time() - eq_started
 
-                while len(pending) >= SPEAKER_BYTES:
-                    if self.cancel_event.is_set():
-                        break
-                    chunk = bytes(pending[:SPEAKER_BYTES])
-                    del pending[:SPEAKER_BYTES]
-                    if first_send_time is None:
-                        first_send_time = asyncio.get_event_loop().time()
-                        self.playback_send_t0 = first_send_time
-                        await self._set_speaking(True)
-                        log.info(
-                            f"[{self.device_id}] First streamed PCM period "
-                            "sent to device"
-                        )
-                    _t_send = asyncio.get_event_loop().time()
-                    await self.send_data(bytes([SPEAKER_FRAME_TYPE]) + chunk)
-                    send_seconds += asyncio.get_event_loop().time() - _t_send
+                await drain_whole_periods()
 
             # The limiter holds a look-ahead tail; without this the last few
             # ms of every response are dropped. Inaudible on a long track and
@@ -861,20 +870,20 @@ class Device:
             if not self.cancel_event.is_set():
                 pending.extend(stream_eq.flush())
 
+            # The flush can push `pending` back over a period, so it has to be
+            # drained again before the remainder is padded. It used to pad
+            # straight from here, and `bytes(SPEAKER_BYTES - len(chunk))` is a
+            # ValueError once that goes negative: the drain loop above leaves
+            # 0-4095 bytes and the tail adds 478, so any remainder over 3618
+            # killed the response — 11.7% of them, measured as `negative
+            # count` on the 2026-08-25 soak (#331). The invariant is that a
+            # period is drained after the flush, not that the tail is small
+            # enough to fit.
+            await drain_whole_periods()
+
             if pending and not self.cancel_event.is_set():
-                chunk = bytes(pending)
-                chunk += bytes(SPEAKER_BYTES - len(chunk))
-                if first_send_time is None:
-                    first_send_time = asyncio.get_event_loop().time()
-                    self.playback_send_t0 = first_send_time
-                    await self._set_speaking(True)
-                    log.info(
-                        f"[{self.device_id}] First streamed PCM period "
-                        "sent to device"
-                    )
-                _t_send = asyncio.get_event_loop().time()
-                await self.send_data(bytes([SPEAKER_FRAME_TYPE]) + chunk)
-                send_seconds += asyncio.get_event_loop().time() - _t_send
+                chunk = bytes(pending) + bytes(SPEAKER_BYTES - len(pending))
+                await send_period(chunk)
         finally:
             # NOT where speaking clears — see the note in stream_speaker.
             # One EOS terminates the complete response. Sending EOS per HTTP
