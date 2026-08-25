@@ -59,3 +59,24 @@ def test_the_go_config_message_carries_the_field():
     src = (ROOT / "device" / "internal" / "config" / "config.go").read_text()
     assert re.search(r'ListeningAnim\s+json\.RawMessage\s+`json:"listeningAnim,omitempty"`', src), \
         "the wire field must exist with the exact tag the controller sends"
+
+
+def test_the_arbitration_loser_gets_its_ring_turned_off():
+    """
+    #326: the flip side of drawing locally. The device lights the ring at
+    its own crossing, before arbitration has happened, so a device that
+    loses is lit with nothing on its path to darken it — leds_off and
+    _leds_turn_end are both on the turn path a ceding device never reaches.
+    It used to burn until listening_anim's 30s TTL expired.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    cede = src[src.index("if won_by != device.device_id:"):]
+    cede = cede[:cede.index("continue")]
+    # Comments on this path necessarily discuss the call they exclude.
+    code = "\n".join(
+        line for line in cede.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "leds_off(device)" in code, \
+        "a ceding device must be told to darken its ring"
+    assert "_leds_turn_end" not in code, \
+        "the loser had no turn, so it gets plain off, not an outcome cue"

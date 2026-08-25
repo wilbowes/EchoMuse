@@ -2338,6 +2338,17 @@ async def wake_word_listener(device: Device):
                             device.oww_paused_since = None
                             device.last_wake = None
                             await device.beam_unlock()
+                            # The loser is lit: since #263 the device draws
+                            # the listening ring at its own crossing, before
+                            # it can possibly know it will lose. Nothing else
+                            # on this path darkens it — leds_off and
+                            # _leds_turn_end both live on the turn path a
+                            # ceding device never reaches — so without this
+                            # the ring burns until listening_anim's 30s TTL
+                            # retires it. Plain off, not _leds_turn_end:
+                            # there was no turn, so an outcome cue would be
+                            # inventing one.
+                            await leds_off(device)
                             ceded = 0
                             while not device.voice_queue.empty():
                                 try:
