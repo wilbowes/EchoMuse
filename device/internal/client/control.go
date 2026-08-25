@@ -142,13 +142,11 @@ func (c *ControlClient) IsConnected() bool {
 var errPending = fmt.Errorf("pending approval")
 
 func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
-	staticServer, staticErr := discovery.ConfiguredServer()
-	if staticErr != nil {
-		log.Printf("[control] Static controller config invalid — using mDNS: %v", staticErr)
-	} else if staticServer != nil {
-		log.Printf("[control] Static controller configured: %s (tls_port=%d) — mDNS disabled",
-			staticServer.Addr, staticServer.TLSPort)
-	}
+	// Rotates through a configured static endpoint list on failure — a
+	// stale entry must fall through to the next one rather than being
+	// retried forever. Position is in-memory only: losing it across a
+	// restart is harmless since the file is re-read every cycle anyway.
+	staticIdx := 0
 
 	for {
 		if ctx.Err() != nil {
@@ -160,44 +158,58 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 			c.disconnectedCallback()
 		}
 
-		// Fast path: try the last-known controller address before mDNS.
-		// Speeds up ordinary reconnects, and after a WiFi network change
-		// it's what makes a controller on a different subnet reachable at
-		// all (multicast rarely crosses subnets, so mDNS alone would fail
-		// the change's reconnect gate and revert a working network).
-		// The probe targets the plain port — it's a reachability check,
-		// not a plane choice; connect() re-decides ws vs wss every dial.
-		server := staticServer
-		if server != nil {
-			// The static endpoint is authoritative. Dial it even when a preliminary
-			// TCP probe would fail: a device-local overlay may still be starting,
-			// and falling into the indefinitely-retrying mDNS browser would strand
-			// the client after the overlay becomes ready.
-			log.Printf("[control] Using static controller %s", server.Addr)
-		} else {
-			server = c.lastKnownServer()
+		// Re-read every cycle, the same contract loadLinkCreds follows for
+		// the TLS credential files: a device stuck on a dead endpoint is
+		// exactly the one an operator cannot easily restart, so editing the
+		// file has to take effect on the very next reconnect, not at
+		// process start.
+		staticEndpoints, staticErr := discovery.ConfiguredEndpoints()
+		if staticErr != nil {
+			log.Printf("[control] Static controller config invalid — using mDNS: %v", staticErr)
 		}
-		if staticServer == nil && server != nil && server.TLSPort == 0 && loadLinkCreds().tlsConf != nil {
-			// CA installed but the cached endpoint predates the
-			// controller's TLS listener (e.g. controller upgraded, or a
-			// Secure-link push just landed, mid-run). One fresh browse so
-			// the tls_port TXT is picked up; keep the cached endpoint if
-			// mDNS fails — after a WiFi change the controller can sit on
-			// another subnet where multicast doesn't reach.
-			if found, err := discovery.FindServerOnce(ctx); err == nil && found != nil {
+
+		var server *discovery.ServerInfo
+		if len(staticEndpoints) > 0 {
+			// A configured endpoint list is authoritative and bypasses mDNS
+			// entirely — the feature exists for controllers reachable only
+			// across a boundary mDNS can't cross. Dial the current entry
+			// even when a preliminary TCP probe would fail: a device-local
+			// tunnel may still be starting, and falling into the
+			// indefinitely-retrying mDNS browser would strand the client
+			// once the tunnel comes up.
+			idx := staticIdx % len(staticEndpoints)
+			server = staticEndpoints[idx]
+			log.Printf("[control] Using static controller endpoint %d/%d: %s",
+				idx+1, len(staticEndpoints), server.Addr)
+		} else {
+			// Fast path: try the last-known controller address before mDNS.
+			// Speeds up ordinary reconnects, and after a WiFi network change
+			// it's what makes a controller on a different subnet reachable at
+			// all (multicast rarely crosses subnets, so mDNS alone would fail
+			// the change's reconnect gate and revert a working network).
+			// The probe targets the plain port — it's a reachability check,
+			// not a plane choice; connect() re-decides ws vs wss every dial.
+			server = c.lastKnownServer()
+			if server != nil && server.TLSPort == 0 && loadLinkCreds().tlsConf != nil {
+				// CA installed but the cached endpoint predates the
+				// controller's TLS listener (e.g. controller upgraded, or a
+				// Secure-link push just landed, mid-run). One fresh browse so
+				// the tls_port TXT is picked up; keep the cached endpoint if
+				// mDNS fails — after a WiFi change the controller can sit on
+				// another subnet where multicast doesn't reach.
+				if found, err := discovery.FindServerOnce(ctx); err == nil && found != nil {
+					server = found
+				}
+			}
+			if server != nil && probeTCP(server.Addr, 3*time.Second) {
+				log.Printf("[control] Last-known controller %s reachable — skipping mDNS", server.Addr)
+			} else {
+				found, err := discovery.FindServer(ctx)
+				if err != nil {
+					return err
+				}
 				server = found
 			}
-		}
-		if staticServer != nil {
-			// Direct dial below; reconnect loop retries every five seconds.
-		} else if server != nil && probeTCP(server.Addr, 3*time.Second) {
-			log.Printf("[control] Last-known controller %s reachable — skipping mDNS", server.Addr)
-		} else {
-			found, err := discovery.FindServer(ctx)
-			if err != nil {
-				return err
-			}
-			server = found
 		}
 
 		dataCtx, cancelData := context.WithCancel(ctx)
@@ -225,6 +237,11 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 		default:
 			if err != nil {
 				log.Printf("[control] Connection lost: %v — reconnecting in 5s", err)
+				if len(staticEndpoints) > 0 {
+					// This endpoint just failed — fall through to the next
+					// configured one instead of pinning to a stale address.
+					staticIdx++
+				}
 			}
 			if c.disconnectedCallback != nil {
 				c.disconnectedCallback()
