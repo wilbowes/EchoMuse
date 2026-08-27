@@ -27,6 +27,24 @@ type staticControllerConfig struct {
 	// ordered array rather than distinguishing them by key. A stale entry
 	// falls through to the next one instead of being retried forever.
 	Endpoints []staticEndpoint `json:"endpoints"`
+
+	// MDNS controls whether the list is followed by one bounded mDNS
+	// attempt once every entry has failed. A *bool so "absent" (→ true)
+	// is distinguishable from an explicit false: mDNS is the safety net
+	// that keeps a device from being permanently stranded by a stale
+	// list, so it defaults ON. false is the deliberate opt-out for a
+	// pinned test fleet that must never reach a different controller by
+	// accident (device-side only, per #106 — a controller-side switch
+	// would also silently kill Home Assistant's mDNS discovery of the
+	// fleet's ESPHome/BLE-proxy services, which share the same stack).
+	MDNS *bool `json:"mdns"`
+}
+
+// StaticConfig is the parsed, validated contents of the optional static
+// controller config file.
+type StaticConfig struct {
+	Endpoints []*ServerInfo
+	MDNS      bool
 }
 
 // ConfiguredEndpoints reads the optional persistent controller endpoint
@@ -41,11 +59,11 @@ type staticControllerConfig struct {
 // An absent file is the normal pre-configuration state, not an error, and
 // returns (nil, nil). An invalid file is reported rather than silently
 // ignored, so a typo doesn't read as "no static config."
-func ConfiguredEndpoints() ([]*ServerInfo, error) {
+func ConfiguredEndpoints() (*StaticConfig, error) {
 	return configuredEndpointsFromPath(StaticControllerPath)
 }
 
-func configuredEndpointsFromPath(path string) ([]*ServerInfo, error) {
+func configuredEndpointsFromPath(path string) (*StaticConfig, error) {
 	raw, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return nil, nil
@@ -74,6 +92,10 @@ func configuredEndpointsFromPath(path string) ([]*ServerInfo, error) {
 		if ep.TLSPort < 0 || ep.TLSPort > 65535 {
 			return nil, fmt.Errorf("%s: endpoints[%d]: tls_port must be 0 or between 1 and 65535", path, i)
 		}
+		// No type field: host is parsed as an IP and resolved as a DNS name
+		// if that fails — resolution happens implicitly at dial time, so a
+		// static address, a backup address and a DNS name genuinely need no
+		// distinguishing here.
 		servers = append(servers, &ServerInfo{
 			Host:    host,
 			Port:    ep.Port,
@@ -81,5 +103,10 @@ func configuredEndpointsFromPath(path string) ([]*ServerInfo, error) {
 			TLSPort: ep.TLSPort,
 		})
 	}
-	return servers, nil
+
+	mdns := true
+	if cfg.MDNS != nil {
+		mdns = *cfg.MDNS
+	}
+	return &StaticConfig{Endpoints: servers, MDNS: mdns}, nil
 }

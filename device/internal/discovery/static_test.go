@@ -10,14 +10,17 @@ func TestConfiguredEndpointsParsing(t *testing.T) {
 	tests := []struct {
 		name    string
 		json    string
-		want    []*ServerInfo
+		want    *StaticConfig
 		wantErr bool
 	}{
 		{
-			name: "single endpoint with TLS",
+			name: "single endpoint with TLS, mdns defaults true",
 			json: `{"endpoints":[{"host":"10.20.40.110","port":8767,"tls_port":8770}]}`,
-			want: []*ServerInfo{
-				{Host: "10.20.40.110", Port: 8767, Addr: "10.20.40.110:8767", TLSPort: 8770},
+			want: &StaticConfig{
+				Endpoints: []*ServerInfo{
+					{Host: "10.20.40.110", Port: 8767, Addr: "10.20.40.110:8767", TLSPort: 8770},
+				},
+				MDNS: true,
 			},
 		},
 		{
@@ -27,17 +30,43 @@ func TestConfiguredEndpointsParsing(t *testing.T) {
 				{"host":"10.20.40.111","port":8767,"tls_port":8770},
 				{"host":"controller.example.internal","port":8767,"tls_port":8770}
 			]}`,
-			want: []*ServerInfo{
-				{Host: "10.20.40.110", Port: 8767, Addr: "10.20.40.110:8767", TLSPort: 8770},
-				{Host: "10.20.40.111", Port: 8767, Addr: "10.20.40.111:8767", TLSPort: 8770},
-				{Host: "controller.example.internal", Port: 8767, Addr: "controller.example.internal:8767", TLSPort: 8770},
+			want: &StaticConfig{
+				Endpoints: []*ServerInfo{
+					{Host: "10.20.40.110", Port: 8767, Addr: "10.20.40.110:8767", TLSPort: 8770},
+					{Host: "10.20.40.111", Port: 8767, Addr: "10.20.40.111:8767", TLSPort: 8770},
+					{Host: "controller.example.internal", Port: 8767, Addr: "controller.example.internal:8767", TLSPort: 8770},
+				},
+				MDNS: true,
 			},
 		},
 		{
 			name: "ipv6, no TLS",
 			json: `{"endpoints":[{"host":"fd00::110","port":8767,"tls_port":0}]}`,
-			want: []*ServerInfo{
-				{Host: "fd00::110", Port: 8767, Addr: "[fd00::110]:8767", TLSPort: 0},
+			want: &StaticConfig{
+				Endpoints: []*ServerInfo{
+					{Host: "fd00::110", Port: 8767, Addr: "[fd00::110]:8767", TLSPort: 0},
+				},
+				MDNS: true,
+			},
+		},
+		{
+			name: "mdns explicitly true",
+			json: `{"endpoints":[{"host":"controller","port":8767}],"mdns":true}`,
+			want: &StaticConfig{
+				Endpoints: []*ServerInfo{
+					{Host: "controller", Port: 8767, Addr: "controller:8767", TLSPort: 0},
+				},
+				MDNS: true,
+			},
+		},
+		{
+			name: "mdns explicitly false — pinned test fleet",
+			json: `{"endpoints":[{"host":"controller","port":8767}],"mdns":false}`,
+			want: &StaticConfig{
+				Endpoints: []*ServerInfo{
+					{Host: "controller", Port: 8767, Addr: "controller:8767", TLSPort: 0},
+				},
+				MDNS: false,
 			},
 		},
 		{name: "missing endpoints key", json: `{}`, wantErr: true},
@@ -66,12 +95,15 @@ func TestConfiguredEndpointsParsing(t *testing.T) {
 			if tt.wantErr {
 				return
 			}
-			if len(got) != len(tt.want) {
-				t.Fatalf("configuredEndpointsFromPath() = %#v, want %#v", got, tt.want)
+			if got.MDNS != tt.want.MDNS {
+				t.Fatalf("MDNS = %v, want %v", got.MDNS, tt.want.MDNS)
 			}
-			for i := range got {
-				if *got[i] != *tt.want[i] {
-					t.Fatalf("endpoint[%d] = %#v, want %#v", i, got[i], tt.want[i])
+			if len(got.Endpoints) != len(tt.want.Endpoints) {
+				t.Fatalf("Endpoints = %#v, want %#v", got.Endpoints, tt.want.Endpoints)
+			}
+			for i := range got.Endpoints {
+				if *got.Endpoints[i] != *tt.want.Endpoints[i] {
+					t.Fatalf("endpoint[%d] = %#v, want %#v", i, got.Endpoints[i], tt.want.Endpoints[i])
 				}
 			}
 		})

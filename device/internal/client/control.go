@@ -141,56 +141,116 @@ func (c *ControlClient) IsConnected() bool {
 
 var errPending = fmt.Errorf("pending approval")
 
-// maxStaticAttempts is how many consecutive dial failures a static endpoint
-// gets before Run falls through to the next one. 1 would tour the whole
-// list on a single transient blip — a brief drop on the endpoint actually
-// in front of the device costing a lap through every backup before trying
-// it again, which is slower than just retrying it.
+// maxStaticAttempts is how many consecutive dial failures one target in a
+// static pass gets before Run moves to the next one. 1 would tour the whole
+// list on a single transient blip — a brief drop on the endpoint actually in
+// front of the device costing a lap through every backup before trying it
+// again, which is slower than just retrying it.
 const maxStaticAttempts = 2
 
+// staticBackoff is the per-attempt wait after a failed static pass, indexed
+// by how many full passes (every configured endpoint, then one bounded mDNS
+// try) have failed in a row. Modelled on how VoIP phones hunt for DHCP
+// options and a config server (settled design, #106): two fast passes so a
+// genuinely brief blip resolves quickly, then a widening backoff so a
+// controller that is really gone isn't hammered. Holds at the last value.
+var staticBackoff = []time.Duration{
+	5 * time.Second,
+	5 * time.Second,
+	10 * time.Second,
+	20 * time.Second,
+	60 * time.Second,
+}
+
+func staticRetryDelay(passNum int) time.Duration {
+	if passNum >= len(staticBackoff) {
+		return staticBackoff[len(staticBackoff)-1]
+	}
+	return staticBackoff[passNum]
+}
+
 func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
-	// Rotates through a configured static endpoint list on failure — a
-	// stale entry must fall through to the next one rather than being
-	// retried forever. Both counters are in-memory only: losing them
-	// across a restart is harmless since the file is re-read every cycle
-	// anyway.
-	staticIdx := 0
-	staticFails := 0
+	// Position within a configured static pass — a pass being every
+	// endpoint in order plus one bounded mDNS attempt, computed as passLen
+	// below. All three are in-memory only: losing them across a restart is
+	// harmless since the file is re-read every attempt anyway, and a fresh
+	// process restarting the pass from the top is the documented
+	// behaviour, not a bug.
+	targetIdx := 0
+	targetAttempts := 0
+	passNum := 0
 
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 
-		// Show orange pulse while searching for server
-		if c.disconnectedCallback != nil {
-			c.disconnectedCallback()
-		}
-
-		// Re-read every cycle, the same contract loadLinkCreds follows for
+		// Re-read every attempt, the same contract loadLinkCreds follows for
 		// the TLS credential files: a device stuck on a dead endpoint is
 		// exactly the one an operator cannot easily restart, so editing the
 		// file has to take effect on the very next reconnect, not at
 		// process start.
-		staticEndpoints, staticErr := discovery.ConfiguredEndpoints()
+		static, staticErr := discovery.ConfiguredEndpoints()
 		if staticErr != nil {
 			log.Printf("[control] Static controller config invalid — using mDNS: %v", staticErr)
 		}
+		usingStatic := static != nil && len(static.Endpoints) > 0
+
+		// A pass is every configured endpoint in order, plus one bounded
+		// mDNS attempt at the end unless the config opts out — the settled
+		// resolution order from #106 is "configured list → mDNS, unless
+		// mdns:false", collapsed here since the persisted last-known tier
+		// is a separate, not-yet-built piece. Meaningless (0) when not
+		// usingStatic.
+		var passLen int
+		if usingStatic {
+			passLen = len(static.Endpoints)
+			if static.MDNS {
+				passLen++
+			}
+		}
 
 		var server *discovery.ServerInfo
-		if len(staticEndpoints) > 0 {
-			// A configured endpoint list is authoritative and bypasses mDNS
-			// entirely — the feature exists for controllers reachable only
-			// across a boundary mDNS can't cross. Dial the current entry
-			// even when a preliminary TCP probe would fail: a device-local
-			// tunnel may still be starting, and falling into the
-			// indefinitely-retrying mDNS browser would strand the client
-			// once the tunnel comes up.
-			idx := staticIdx % len(staticEndpoints)
-			server = staticEndpoints[idx]
-			log.Printf("[control] Using static controller endpoint %d/%d: %s",
-				idx+1, len(staticEndpoints), server.Addr)
+		var dialErr error
+
+		if usingStatic {
+			if targetIdx >= passLen {
+				// A config edit mid-pass can shrink the list out from under
+				// an in-flight index — restart the pass rather than index
+				// out of range.
+				targetIdx, targetAttempts = 0, 0
+			}
+
+			if targetIdx == 0 && targetAttempts == 0 && c.disconnectedCallback != nil {
+				// Once per full pass, not once per target: otherwise the
+				// ring goes orange during every routine controller restart,
+				// which is one endpoint failing, not an outage.
+				c.disconnectedCallback()
+			}
+
+			if targetIdx < len(static.Endpoints) {
+				server = static.Endpoints[targetIdx]
+				log.Printf("[control] Static endpoint %d/%d (attempt %d/%d): %s",
+					targetIdx+1, passLen, targetAttempts+1, maxStaticAttempts, server.Addr)
+			} else {
+				// The list is exhausted for this pass: one bounded mDNS
+				// browse, never the indefinitely-retrying FindServer — that
+				// would park the device there and defeat the point of
+				// having somewhere to fall through TO.
+				log.Printf("[control] Static list exhausted — one mDNS attempt (%d/%d)",
+					targetAttempts+1, maxStaticAttempts)
+				found, err := discovery.FindServerOnce(ctx)
+				if err != nil || found == nil {
+					dialErr = fmt.Errorf("mDNS: no controller found this round")
+				} else {
+					server = found
+				}
+			}
 		} else {
+			if c.disconnectedCallback != nil {
+				c.disconnectedCallback()
+			}
+
 			// Fast path: try the last-known controller address before mDNS.
 			// Speeds up ordinary reconnects, and after a WiFi network change
 			// it's what makes a controller on a different subnet reachable at
@@ -221,26 +281,34 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 			}
 		}
 
-		dataCtx, cancelData := context.WithCancel(ctx)
-		go func() {
-			if err := data.Run(dataCtx); err != nil && err != context.Canceled {
-				log.Printf("[data] stopped: %v", err)
-			}
-		}()
+		var err error
+		if server != nil {
+			dataCtx, cancelData := context.WithCancel(ctx)
+			go func() {
+				if err := data.Run(dataCtx); err != nil && err != context.Canceled {
+					log.Printf("[data] stopped: %v", err)
+				}
+			}()
 
-		err := c.connect(ctx, server, data)
+			err = c.connect(ctx, server, data)
 
-		cancelData()
+			cancelData()
+		} else {
+			// The bounded mDNS slot came up empty this round — no server to
+			// dial, so treat it exactly like any other failed target rather
+			// than special-casing "nothing to try."
+			err = dialErr
+		}
 
 		switch err {
 		case errPending:
 			log.Printf("[control] Device pending approval — retrying in 30s")
-			if len(staticEndpoints) > 0 {
-				// Reaching pending-approval means the endpoint is reachable —
-				// TCP, the WebSocket handshake and registration all worked.
-				// Don't let an earlier failure on it count against a later,
-				// unrelated one.
-				staticFails = 0
+			if usingStatic {
+				// The endpoint answered, and registration itself worked —
+				// pending-approval is success for discovery purposes.
+				// Falling through here would send a device waiting for its
+				// own approval off hunting for a different controller.
+				targetAttempts, passNum = 0, 0
 			}
 			if c.pendingCallback != nil {
 				c.pendingCallback()
@@ -251,31 +319,45 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 			case <-time.After(30 * time.Second):
 			}
 		default:
-			if err != nil {
-				log.Printf("[control] Connection lost: %v — reconnecting in 5s", err)
-				if len(staticEndpoints) > 0 {
-					staticFails++
-					if staticFails >= maxStaticAttempts {
-						// This endpoint has now failed maxStaticAttempts times
-						// in a row — fall through to the next configured one
-						// instead of pinning to a stale address.
-						staticFails = 0
-						staticIdx++
+			if usingStatic {
+				if err != nil {
+					targetAttempts++
+					if targetAttempts >= maxStaticAttempts {
+						targetAttempts = 0
+						targetIdx++
+						if targetIdx >= passLen {
+							targetIdx = 0
+							passNum++
+						}
 					}
+				} else {
+					// A clean end to a connection that did establish is not
+					// a discovery event — always restart at the top of the
+					// list on the next attempt, or the device could drift
+					// down the hierarchy and never climb back to its
+					// preferred endpoint.
+					targetIdx, targetAttempts, passNum = 0, 0, 0
 				}
-			} else if len(staticEndpoints) > 0 {
-				// A clean end to a connection that did establish proves the
-				// endpoint works; don't let it inherit a fail streak from
-				// before it connected.
-				staticFails = 0
 			}
-			if c.disconnectedCallback != nil {
+
+			wait := 5 * time.Second
+			if usingStatic {
+				wait = staticRetryDelay(passNum)
+			}
+			if err != nil {
+				log.Printf("[control] Connection lost: %v — reconnecting in %s", err, wait)
+			}
+			if !usingStatic && c.disconnectedCallback != nil {
+				// The static path already showed this once at the top of
+				// the pass; re-showing it here on every single target would
+				// reintroduce the per-endpoint flashing the pass-level check
+				// above exists to avoid.
 				c.disconnectedCallback()
 			}
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(5 * time.Second):
+			case <-time.After(wait):
 			}
 		}
 	}
