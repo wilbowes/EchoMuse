@@ -118,6 +118,12 @@ api.install_log_ring(_LOG_FORMAT)
 # em_wsclose renders that ourselves, so the reason survives the silence.
 logging.getLogger("websockets.server").setLevel(logging.CRITICAL)
 
+# aiohttp's per-request access log is the dashboard polling itself — 65% of
+# measured log volume (em_support.py) — and drowns out actual events at INFO.
+# Respect DEBUG rather than silencing unconditionally, same as the rest of
+# this module's log level.
+logging.getLogger("aiohttp.access").setLevel(logging.INFO if DEBUG else logging.WARNING)
+
 
 def _log_task_exception(task: asyncio.Task) -> None:
     """
