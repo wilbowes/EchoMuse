@@ -19,15 +19,38 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-CONTROL_GO = ROOT / "device" / "internal" / "client" / "control.go"
+# capabilities() moved out of control.go and into a per-board file
+# (2026-08-26, crown support): capabilities_default.go for every build that
+# isn't explicitly another board (`!crown` — same fallback-to-biscuit
+# philosophy as internal/bindings/led), capabilities_crown.go for `-tags
+# crown`. capabilities_default.go (biscuit) remains the ground truth for the
+# device<->controller typo-guard below, since every string it checks against
+# `em_controller.py`/`em_esphome.py` is one biscuit sends.
+#
+# crown is NOT a strict subset, though: it sends "display" (a screen-icon
+# hint, checked by dashboard.jsx, not by the two Python idioms this file
+# scans), which biscuit never sends at all. That string used to be invisible
+# to this whole test file — found 2026-08-27, one PR review after it shipped
+# — so `crown_capabilities()`/the display-specific test below exist
+# specifically to pin it, the same way every other capability is pinned in
+# both directions.
+CONTROL_GO = ROOT / "device" / "internal" / "client" / "capabilities_default.go"
+CONTROL_GO_CROWN = ROOT / "device" / "internal" / "client" / "capabilities_crown.go"
 CONTROLLER = ROOT / "controller" / "em_controller.py"
 API = ROOT / "controller" / "em_api.py"
 ESPHOME = ROOT / "controller" / "em_esphome.py"
 
 
+def _read_capabilities(path: Path) -> list[str]:
+    src = path.read_text()
+    m = re.search(r'func capabilities\(\) \[\]string \{(.*?)\n\}', src, re.S)
+    assert m, f"could not find func capabilities() in {path.name}"
+    return re.findall(r'"([a-z_]+)"', m.group(1))
+
+
 def device_capabilities() -> list[str]:
     """
-    Every capability the firmware can announce.
+    Every capability biscuit's firmware can announce.
 
     Read from the whole capabilities() function rather than a single literal:
     the list is no longer fixed — "ambient_light" is appended only when the
@@ -36,10 +59,14 @@ def device_capabilities() -> list[str]:
     would silently stop covering the conditional ones, which is the direction
     that hides a typo rather than surfacing it.
     """
-    src = CONTROL_GO.read_text()
-    m = re.search(r'func capabilities\(\) \[\]string \{(.*?)\n\}', src, re.S)
-    assert m, "could not find func capabilities() in control.go"
-    return re.findall(r'"([a-z_]+)"', m.group(1))
+    return _read_capabilities(CONTROL_GO)
+
+
+def crown_capabilities() -> list[str]:
+    """Every capability crown's firmware can announce. See the module
+    comment above — this exists because crown is not a subset of biscuit's
+    list and nothing was reading this file before."""
+    return _read_capabilities(CONTROL_GO_CROWN)
 
 
 def test_device_announces_expected_capabilities():
@@ -70,6 +97,26 @@ def test_every_capability_the_controller_checks_is_one_the_device_sends():
         f"controller checks capabilities the firmware never announces: {sorted(unknown)}. "
         f"Device sends: {sorted(caps)}"
     )
+
+
+def test_crown_display_capability_is_pinned_both_directions():
+    """
+    "display" is crown-only (biscuit has no screen) and is checked by
+    dashboard.jsx directly — `(device.capabilities || []).includes('display')`
+    — not by either of the two Python idioms
+    `test_every_capability_the_controller_checks_is_one_the_device_sends`
+    scans for. That test therefore cannot see this capability at all in
+    either direction, and neither can `device_capabilities()`, which only
+    reads biscuit's file. A typo on either side — the Go string, or the JS
+    literal — would silently leave the screen-bodied device icon dark
+    forever, exactly the failure class every other capability is pinned
+    against.
+    """
+    caps = crown_capabilities()
+    assert "display" in caps, "crown firmware no longer announces display"
+    jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
+    assert re.search(r"capabilities\s*\|\|\s*\[\]\)\.includes\('display'\)", jsx), \
+        "dashboard.jsx must still gate the screen-bodied device icon on the display capability"
 
 
 def test_shadow_capability_is_surfaced_to_the_dashboard():

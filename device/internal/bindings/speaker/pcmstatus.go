@@ -2,15 +2,12 @@ package speaker
 
 import (
 	"fmt"
+	"log"
+	"os"
 	"strconv"
 	"strings"
+	"time"
 )
-
-// The speaker is card 0 device 23; the mic is device 24. Here rather than in
-// pcm_speaker.go because that file is ARM-only (build tag `server`) and the
-// status-path test needs to pin these on the host.
-const cardNr = 0
-const deviceNr = 23
 
 // The playback substream's status file, which is how we find out whether
 // anyone else holds the speaker BEFORE trying to open it.
@@ -66,4 +63,46 @@ func pcmOwner(status string) int {
 		}
 	}
 	return 0
+}
+
+// pcmFreeTimeout bounds the wait for another process to release the speaker.
+//
+// Generous, because the wait is the good outcome: releasing takes Android well
+// under a second once `stop media` lands, and a device that waits ten seconds
+// and then works is enormously better than one that gives up early. It is a
+// backstop against a holder that never lets go, not a tuning parameter.
+const pcmFreeTimeout = 10 * time.Second
+
+// waitForFreePcm blocks until the playback substream is released, or the
+// timeout expires.
+//
+// On timeout it RETURNS ANYWAY and lets the open proceed. That open may then
+// block forever, which is the pre-existing behaviour — this function's job is
+// to make the common case work and to leave a log line naming the holder when
+// it does not. Refusing to open would be a bigger behaviour change than the
+// bug warrants, and the proper fix for a permanently-held device is to stop
+// gating the rest of main() on the speaker at all.
+//
+// Untagged: pure procfs polling, no ALSA client involved, shared by every
+// board's binding.
+func waitForFreePcm(card, device int, timeout time.Duration) {
+	path := statusPath(card, device)
+	b, err := os.ReadFile(path)
+	if err != nil || pcmFree(string(b)) {
+		return // free, or no status file to consult — open immediately
+	}
+
+	log.Printf("[speaker] %s held by pid %d — waiting up to %s", path, pcmOwner(string(b)), timeout)
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(200 * time.Millisecond)
+		b, err := os.ReadFile(path)
+		if err != nil || pcmFree(string(b)) {
+			log.Printf("[speaker] speaker released after %s", time.Since(deadline.Add(-timeout)).Round(time.Millisecond))
+			return
+		}
+	}
+	b, _ = os.ReadFile(path)
+	log.Printf("[speaker] speaker STILL held by pid %d after %s — opening anyway, this may block",
+		pcmOwner(string(b)), timeout)
 }

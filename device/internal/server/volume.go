@@ -110,17 +110,17 @@ func newVolumeController(ledGetter func() led.Controller) *volumeController {
 // which is quiet enough to read as broken.
 func (vc *volumeController) readFromDevice() int {
 	fallback := (volumeButtonFloor + volumeMax) / 2
-	out, err := exec.Command("tinymix", "-D", "0", "61").Output()
+	out, err := exec.Command("tinymix", "-D", "0", volumeSelector).Output()
 	if err != nil {
 		log.Printf("Volume read failed: %v", err)
 		return fallback
 	}
 	var l, r int
-	// Output: "PCM Playback Volume: 100 100 (range 0->175)". The control's
+	// Output: "<volumeDisplayName>: 100 100 (range 0->175)". The control's
 	// own range is 0->175; volumeMax caps us at 127 (unity) — see the
 	// constant. A device that was left above the cap reads back high here
 	// and the next Set() clamps it.
-	if _, err := fmt.Sscanf(string(out), "PCM Playback Volume: %d %d", &l, &r); err != nil {
+	if _, err := fmt.Sscanf(string(out), volumeDisplayName+": %d %d", &l, &r); err != nil {
 		log.Printf("Volume parse failed: %v (output: %s)", err, out)
 		return fallback
 	}
@@ -153,7 +153,7 @@ func (vc *volumeController) Set(level int, showRing bool) {
 	vc.mu.Unlock()
 
 	// Apply to ALSA
-	if err := exec.Command("tinymix", "-D", "0", "61",
+	if err := exec.Command("tinymix", "-D", "0", volumeSelector,
 		fmt.Sprintf("%d", level), fmt.Sprintf("%d", level)).Run(); err != nil {
 		log.Printf("tinymix set failed: %v", err)
 	}

@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Minimal APK launcher for crown (Echo Show 8, Android 11 / API 30).
+
+  Exists only because raw init.rc can't exec /data/local/bin/server on a
+  non-Magisk device — see docs/echo-show-8-hardware-map.md and the commit
+  "docs: crown can't autostart via raw init.rc — needs an APK launcher"
+  (2026-08-26). Ordinary app execution from /data has none of that
+  restriction, so this app's only job is: on boot, exec the real binary as
+  a foreground service and get out of the way. No resources (no res/,
+  everything programmatic) — StatusOverlay is the one bit of UI, a thin
+  status strip drawn over whatever else is on screen.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.echomuse.crownlauncher"
+    android:versionCode="1"
+    android:versionName="1.0">
+
+    <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="30" />
+
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!--
+      Without this, the app's uid never joins gid "inet" (AID_INET, 3003) and
+      Android's netfilter owner-match rules block ALL socket() calls for that
+      uid — not just from the app itself but from the server binary exec'd as
+      its child, since it inherits the same uid. Silent failure, not a clean
+      EACCES: mDNS queries just never leave the interface (confirmed via
+      tcpdump — zero outbound packets from the device's IP on port 5353 over
+      a full browse cycle) and a WebSocket dial would have failed the same
+      way. Found 2026-08-26 chasing "mDNS never finds the controller" after
+      the /dev/snd and /dev/input node-permission fixes were already in.
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!--
+      For StatusOverlay's TYPE_APPLICATION_OVERLAY strip — the crown answer
+      to biscuit's LED ring. This is a special permission Android will not
+      grant via a runtime prompt at all pre-API23-style; it needs either the
+      user visiting Settings, or `adb shell appops set <pkg>
+      SYSTEM_ALERT_WINDOW allow` from a shell that already has it (ours does
+      — the same root/shell access provision_crown.sh already uses for
+      everything else). provision_crown.sh grants it right after install so
+      there is no manual step.
+    -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <!-- StatusOverlay wakes the screen for the duration of a turn, so a
+         wake word actually shows the status bar rather than lighting up
+         nothing behind a locked/sleeping screen. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <application android:label="EchoMuse Crown Launcher" android:allowBackup="false">
+
+        <receiver android:name=".BootReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <service android:name=".ServerService" android:exported="false" />
+
+    </application>
+</manifest>

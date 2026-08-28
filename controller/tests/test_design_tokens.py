@@ -32,9 +32,17 @@ BUDGET = Path(__file__).resolve().parent / "design_budget.json"
 # Components whose colours are DATA, not styling, with the reason each is
 # exempt. These must keep literal hexes — theming them would be a bug.
 #
-#   LedRing, DeviceDiagram, DeviceDiagramMini
-#       render the physical Echo Dot: its black plastic, its actual LED
+#   LedRing, ScreenRing, DeviceDiagram, DeviceDiagramMini
+#       render the physical device: its black plastic, its actual LED
 #       colours. A device drawn in "dark mode" would be a different device.
+#       ScreenRing is crown's (Echo Show 8) equivalent of LedRing's puck —
+#       same reasoning, same exemption.
+#   DeviceIcon
+#       picks LedRing vs ScreenRing by device.model and renders whichever;
+#       it holds no colours of its own, but both branches it dispatches to
+#       are exempt, so it would fail the "no literal hexes" scan through no
+#       fault of its own body — exempted alongside them rather than made to
+#       look like a violation for delegating.
 #   Shell
 #       an xterm.js theme. Terminal palettes are a 16-colour contract that
 #       programs address by index; they are not ours to restyle.
@@ -45,7 +53,8 @@ BUDGET = Path(__file__).resolve().parent / "design_budget.json"
 #       `dot` is the simulated LED colour and stays literal; `color` beside
 #       it is chrome and is tokenised. Hence module scope is budgeted, not
 #       exempt — the split has to hold.
-EXEMPT = {"LedRing", "DeviceDiagram", "DeviceDiagramMini", "Shell", "DeviceConfigForm"}
+EXEMPT = {"LedRing", "ScreenRing", "DeviceIcon", "DeviceDiagram", "DeviceDiagramMini",
+          "Shell", "DeviceConfigForm"}
 
 _HEX = re.compile(r"#[0-9a-fA-F]{3,8}\b")
 _COMPONENT = re.compile(r"^function ([A-Z]\w*)")

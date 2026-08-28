@@ -266,6 +266,13 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 		// device shows "needs newer firmware" rather than a toggle that
 		// silently does nothing.
 		"capabilities": capabilities(),
+		// Decorative only — nothing on either side ever branches on
+		// this string, it exists so a human looking at Home Assistant's device
+		// page can tell which physical board answered. Absent on older
+		// firmware; the controller falls back to its own default rather than
+		// showing a blank model, per "degrade to old behaviour, never a wrong
+		// answer" (repo CLAUDE.md).
+		"model": modelName(),
 		// Why the ambient light sensor is or is not available. A capability
 		// list says WHAT a device has; when the answer is "nothing", nobody
 		// can tell an absent chip from an unbound driver without a shell
@@ -729,32 +736,11 @@ func (c *ControlClient) runShellSession(ctx context.Context, baseURL string, pty
 	log.Println("[shell] Session closed")
 }
 
-// capabilities is what this firmware implements, negotiated by capability
-// rather than by version so the controller needs no knowledge of our release
-// history (see CLAUDE.md). "ambient_light" is conditional on the hardware
-// actually having a readable sensor — the controller advertises an HA entity
-// off the back of it, and an entity that can never produce a reading is worse
-// than no entity at all.
-func capabilities() []string {
-	// "audio_mix": this firmware holds music on its own plane and mixes it
-	// with voice at the ALSA write, so the controller can duck instead of
-	// pausing. Without it the controller must keep the pause/resume path —
-	// a device that cannot mix would simply never play the 0x04 stream.
-	//
-	// "oww_trigger": this firmware can act on its own wake detection, not
-	// just report it. It is separate from "oww_shadow" on purpose — shadow
-	// shipped first and there are devices in the field announcing it that
-	// cannot trigger, so offering them owwOnDevice="on" would produce a
-	// device that scores, stays silent, and looks broken. Announcing a
-	// capability the firmware has, rather than inferring one from a version
-	// string, is the rule the whole registration follows.
-	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons",
-		"oww_shadow", "oww_trigger", "button_hold", "audio_mix"}
-	if als.Present() {
-		caps = append(caps, "ambient_light")
-	}
-	return caps
-}
+// capabilities is per-board: see capabilities_server.go (biscuit) and
+// capabilities_crown.go. Negotiated by capability rather than by version so
+// the controller needs no knowledge of release history (see CLAUDE.md) or of
+// which board this is — every board's list is a fresh, honest statement of
+// what its own bindings implement, not a subset carved out of biscuit's.
 
 func (c *ControlClient) SendButton(event buttons.ButtonClickEvent) {
 	log.Printf("[control] SendButton: clickType=%d down=%v heldMs=%d muted=%v", event.ClickType, event.Down, event.HeldMs, event.Muted)

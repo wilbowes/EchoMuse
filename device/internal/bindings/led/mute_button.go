@@ -1,3 +1,5 @@
+//go:build !crown
+
 package led
 
 import (

@@ -12,7 +12,6 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/wilbowes/EchoMuse/internal/aec"
-	"github.com/wilbowes/EchoMuse/internal/beamformer"
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/processor"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/shadow"
@@ -162,7 +161,7 @@ type DataClient struct {
 	conn   *websocket.Conn
 	connMu sync.Mutex
 
-	beam              *beamformer.Beamformer
+	beam              beamEngine
 	proc              *processor.Processor
 	aec               *aec.Canceller
 	onDirectionChange func(angle float64)
@@ -197,7 +196,7 @@ func NewDataClient(deviceID string, microphone mic.Subscribable, spk speaker.Spe
 		mic:      microphone,
 		spk:      spk,
 		readyCh:  make(chan string, 1),
-		beam:     beamformer.New(),
+		beam:     newBeam(),
 		proc:     processor.New(),
 		aec:      canceller,
 	}

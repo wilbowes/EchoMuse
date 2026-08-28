@@ -511,6 +511,26 @@ _PROVISION_PROBES = (
     "boot_target",    # what /dev/block/other-boot resolves to (TWRP steps)
 )
 
+# crown (Echo Show 8) has none of biscuit's TWRP/Magisk/Alexa/WiFi-step
+# surface, so it gets its own, much shorter, allowlist rather than inheriting
+# probes that would only ever read empty on it. `launcher_log` and
+# `device_nodes` exist because they answer the two failure modes this
+# hardware has already produced live and neither one is covered by anything
+# above: the appops-after-reinstall trap (status-bar handoff) and the
+# ueventd /dev/snd+/dev/input permission patch not surviving a reflash
+# (device/crown_launcher/ueventd.rc.crown-orig).
+_CROWN_PROVISION_PROBES = (
+    "props",          # getprop, filtered to _PROVISION_PROPS (same allowlist)
+    "root",           # id (already root — no su broker on crown)
+    "selinux",        # getenforce
+    "pm_ready",       # pm path android
+    "storage",        # df /data
+    "overlay_perm",   # appops get com.echomuse.crownlauncher SYSTEM_ALERT_WINDOW
+    "device_nodes",   # ls -l on the ueventd-patched /dev/snd + /dev/input nodes
+    "processes",      # crownlauncher / server process presence
+    "launcher_log",   # tail of /data/local/tmp/echomuse.log — the daemon's own log
+)
+
 _INIT_SVC = re.compile(r"^\[init\.svc\.[a-z0-9_.-]+\]:\s*\[[a-z]+\]$", re.I)
 
 
@@ -602,6 +622,7 @@ def build_provision_diagnostics(
     transcript: list[str] | None = None,
     selected_ssid: str | None = None,
     controller_version: str = "unknown",
+    platform: str = "biscuit",
 ) -> dict:
     """
     One file the reporter can attach to a public issue after a failed step.
@@ -619,19 +640,27 @@ def build_provision_diagnostics(
 
     The transcript is scrubbed line by line and is where a device's own words
     reach the file, so it gets the same treatment as everything else.
+
+    `platform` selects the allowlist — "biscuit" (default, back-compat with
+    every existing caller) or "crown". crown has none of biscuit's TWRP/
+    Magisk/Alexa/WiFi-step surface, so it would otherwise report every one of
+    those probes as missing, which reads as "the wizard failed to ask" rather
+    than "this device has no such thing to ask about".
     """
+    allowlist = _CROWN_PROVISION_PROBES if platform == "crown" else _PROVISION_PROBES
     out = {
         "format": 1,
         "kind": "provision_diagnostics",
         "generated": time.time(),
         "controller_version": controller_version,
+        "platform": platform,
         "step": " ".join(_scrub(str(step))) or "unknown",
         "error": _scrub(str(error)),
         "probes": {},
     }
 
     raw = probes if isinstance(probes, dict) else {}
-    for name in _PROVISION_PROBES:
+    for name in allowlist:
         if name not in raw:
             continue
         text = raw.get(name)
@@ -651,7 +680,7 @@ def build_provision_diagnostics(
 
     # Named so a reader can tell "the wizard did not ask" from "the device had
     # nothing to say", which need opposite next questions.
-    out["probes_missing"] = [n for n in _PROVISION_PROBES if n not in out["probes"]]
+    out["probes_missing"] = [n for n in allowlist if n not in out["probes"]]
 
     if transcript:
         out["transcript"] = [ln for t in transcript for ln in _scrub(str(t))]

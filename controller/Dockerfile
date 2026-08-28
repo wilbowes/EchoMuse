@@ -82,6 +82,7 @@ COPY em_arbiter.py .
 COPY em_button.py .
 COPY em_tap_burst.py .
 COPY em_player.py .
+COPY em_decoder.py .
 COPY em_config_sections.py .
 COPY em_recordings.py .
 COPY em_turnclock.py .

@@ -796,6 +796,22 @@ MIGRATIONS: list[str] = [
 
     UPDATE system_config SET value = '19' WHERE key = 'schema_version';
     """,
+
+    # ── v20 — the board model is a stored fact, same reasoning as v19 ───────
+    #
+    # The device's human-readable model label ("Echo Show 8 Gen 1 (crown)" /
+    # "Echo Dot Gen 2 (biscuit)") was live-only (register message ->
+    # device.model, never persisted) — decorative for HA's DeviceInfoResponse
+    # and never branched on, so that was fine there. The dashboard needs it too, to
+    # pick the right device icon (a screen for crown, a ring for biscuit),
+    # and a live-only value goes missing for every OFFLINE device — exactly
+    # the devices a fleet page most wants to render correctly. Persisted here
+    # the same way firmware_ver already is, via upsert_device_seen.
+    """
+    ALTER TABLE devices ADD COLUMN model TEXT;
+
+    UPDATE system_config SET value = '20' WHERE key = 'schema_version';
+    """,
 ]
 
 # Post-migration fixups that need Python rather than SQL. Keyed by the schema
@@ -1199,9 +1215,19 @@ def upsert_device_seen(
     device_id: str,
     ip: str,
     version: Optional[str],
+    model: Optional[str] = None,
 ) -> None:
     """
-    Update ip, firmware_ver, and last_seen for a known device on each connection.
+    Update ip, firmware_ver, model, and last_seen for a known device on each
+    connection.
+
+    model uses COALESCE(?, model) rather than a plain overwrite: older
+    firmware never sends the field at all, and a plain overwrite would wipe
+    a previously-reported model back to NULL on every reconnect of an
+    up-to-date device that just happened to omit it (it can't — the field
+    is unconditional on firmware that sends it at all — but the same
+    absent-is-not-a-fact rule applies here as everywhere else this project
+    persists a live-reported value).
 
     Does not touch approval status, label, or config.
     """
@@ -1211,10 +1237,11 @@ def upsert_device_seen(
             UPDATE devices
             SET ip           = ?,
                 firmware_ver = ?,
+                model         = COALESCE(?, model),
                 last_seen    = ?
             WHERE device_id = ?
             """,
-            (ip, version, _now(), device_id),
+            (ip, version, model, _now(), device_id),
         )
 
 

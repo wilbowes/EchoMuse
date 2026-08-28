@@ -678,6 +678,115 @@ function LedRing({ state, size = 120 }) {
   );
 }
 
+// A screen-bodied device (crown / Echo Show 8) in place of LedRing's puck.
+// Same call signature and bounding box (size x size) so it drops into
+// either call site unchanged — state -> colour works identically, but
+// crown has no LED ring to animate an arc around, and no physical
+// indicator of any kind (device/internal/bindings/led/led_crown.go is a
+// deliberate no-op — "leds" stays an advertised capability only because
+// the controller's wake-cue hint needs *a* target, not because anything
+// lights up). This ribbon is purely a dashboard-side status readout, same
+// job as any other status chrome, not a stand-in for hardware that exists.
+// A real on-screen status surface is deferred past MVP.
+function ScreenRing({ state, size = 120 }) {
+  const stateKey = state?.key || 'idle';
+  const stateColor = state?.dot || '#aaaaaa';
+  const isPending = stateKey === 'pending';
+  const isOffline = stateKey === 'offline';
+
+  const ledColor = isPending ? '#c8c8c8'
+                 : isOffline ? '#d4703a'
+                 : stateKey === 'muted' ? '#c04040'
+                 : stateKey === 'speaking' ? '#4080d0'
+                 : stateKey === 'listening' ? '#40906a'
+                 : stateKey === 'thinking' ? '#a08020'
+                 : '#3a4a30';
+  const shouldPulse = isPending || isOffline;
+
+  // Body fills the square footprint with a little margin, screen-aspect
+  // (16:10, close to the real 8" panel) rather than square — landscape,
+  // same orientation the device sits in.
+  const m = size * 0.06;
+  const bodyW = size - m * 2, bodyH = bodyW * 0.64;
+  const bodyX = m, bodyY = (size - bodyH) / 2;
+  const bezel = size * 0.045;
+  const screenX = bodyX + bezel, screenY = bodyY + bezel;
+  const screenW = bodyW - bezel * 2, screenH = bodyH - bezel * 2 - size * 0.09;
+  const ribbonH = size * 0.06;
+  const ribbonX = screenX, ribbonY = screenY + screenH + bezel * 0.5;
+  const ribbonW = screenW;
+  const rBody = size * 0.055, rScreen = size * 0.02, rRibbon = ribbonH / 2;
+
+  return (
+    <svg width={size} height={size} style={{ display: 'block', flexShrink: 0 }}>
+      <defs>
+        <radialGradient id={`shell-scr-${size}`} cx="38%" cy="28%" r="80%">
+          <stop offset="0%" stopColor="#505050"/>
+          <stop offset="55%" stopColor="#2c2c2c"/>
+          <stop offset="100%" stopColor="#181818"/>
+        </radialGradient>
+        <radialGradient id={`inner-scr-${size}`} cx="42%" cy="30%" r="75%">
+          <stop offset="0%" stopColor="#383838"/>
+          <stop offset="100%" stopColor="#1a1a1a"/>
+        </radialGradient>
+        <filter id={`glow-scr-${size}`} x="-60%" y="-60%" width="220%" height="220%">
+          <feGaussianBlur stdDeviation="2.5" result="blur"/>
+          <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+      </defs>
+      {/* body / bezel */}
+      <rect x={bodyX} y={bodyY} width={bodyW} height={bodyH} rx={rBody}
+        fill={`url(#shell-scr-${size})`}/>
+      <rect x={bodyX} y={bodyY} width={bodyW} height={bodyH} rx={rBody}
+        fill="none" stroke="rgba(255,255,255,0.07)" strokeWidth="1.2"/>
+      {/* screen face */}
+      <rect x={screenX} y={screenY} width={screenW} height={screenH} rx={rScreen}
+        fill={`url(#inner-scr-${size})`}/>
+      <rect x={screenX} y={screenY} width={screenW} height={screenH} rx={rScreen}
+        fill="none" stroke="rgba(255,255,255,0.04)" strokeWidth="0.8"/>
+      <rect x={screenX + screenW*0.06} y={screenY + screenH*0.08}
+        width={screenW*0.5} height={screenH*0.28} rx={rScreen*0.8}
+        fill="rgba(255,255,255,0.05)"/>
+      {/* colour ribbon — the state indicator, in place of the ring's arc */}
+      <rect x={ribbonX} y={ribbonY} width={ribbonW} height={ribbonH} rx={rRibbon}
+        fill="#0b0b0b"/>
+      <rect x={ribbonX} y={ribbonY} width={ribbonW} height={ribbonH} rx={rRibbon}
+        fill={ledColor}
+        filter={stateKey !== 'idle' ? `url(#glow-scr-${size})` : undefined}
+        style={{
+          transition: 'fill 0.4s',
+          ...(shouldPulse ? { animation: 'ledpulse 1.8s ease-in-out infinite' } : {}),
+        }}/>
+      <circle cx={ribbonX + ribbonH/2} cy={ribbonY + ribbonH/2} r={ribbonH*0.22}
+        fill={stateColor} style={{ transition: 'fill 0.4s' }}/>
+    </svg>
+  );
+}
+
+// Picks the device-shaped icon by reported board model — a screen body for
+// crown (Echo Show 8), the puck ring for everything else (biscuit and any
+// future board that doesn't say otherwise). device.model is live-reported
+// and persisted (em_db v20) so an offline device still gets the right
+// shape; an unknown/never-connected device falls back to the ring, same as
+// today.
+function DeviceIcon({ device, state, size }) {
+  // Capability-driven when the device is actually connected — the model
+  // string is decorative throughout this codebase and nothing should branch
+  // on it, and this used to (a straight `/echo show/i` regex against
+  // `device.model`, found in review 2026-08-27). The model string is kept
+  // as a fallback ONLY for a device that isn't currently live: `capabilities`
+  // comes back as an empty array whenever `connected` is false (em_api.py's
+  // serialization), so there's nothing capability-shaped to check for an
+  // offline device, and the whole reason `model` is persisted (em_db v20)
+  // is so an offline device still gets the right icon shape.
+  const isScreen = device?.connected
+    ? (device.capabilities || []).includes('display')
+    : /echo show/i.test(device?.model || '');
+  return isScreen
+    ? <ScreenRing state={state} size={size}/>
+    : <LedRing state={state} size={size}/>;
+}
+
 // ─── Shell terminal ───────────────────────────────────────────────────────────
 
 // Real terminal (xterm.js) over the device shell WebSocket.
@@ -1554,7 +1663,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
         {/* Header */}
         <div className="em-modal-head" style={{ background: 'linear-gradient(180deg,var(--card),var(--bg))', borderBottom: '1px solid var(--border-hard)', padding: '20px 24px 0', boxShadow: '0 1px 0 var(--sheen) inset' }}>
           <div className="em-modal-headrow" style={{ display: 'flex', alignItems: 'center', gap: 20, marginBottom: 16 }}>
-            <LedRing state={state} size={72}/>
+            <DeviceIcon device={device} state={state} size={72}/>
             <div style={{ flex: 1, minWidth: 0 }}>
               {renaming ? (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -2304,7 +2413,7 @@ function Card({ device, onClick }) {
         </div>
       </div>
       <div style={{ display: 'flex', justifyContent: 'center', padding: '20px 0 12px' }}>
-        <LedRing state={state} size={120}/>
+        <DeviceIcon device={device} state={state} size={120}/>
       </div>
       <div style={{ padding: '0 16px 16px' }}>
         <div className="em-inset" style={{ '--em-inset-radius':'6px', '--em-inset-pad':'7px 12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -2431,6 +2540,25 @@ const _ADB = (() => {
       try { await this._transport.close(); } catch {}
     }
 
+    // Restart adbd as root — the crown wizard's equivalent of `adb root`.
+    // Real ADB protocol: open a socket to the "root:" service; the daemon
+    // reads that as a request to restart itself running as root, and the
+    // CURRENT transport dies the moment it does (same shape as a reboot —
+    // the socket that requested it doesn't survive to read a reply). crown
+    // has no Magisk (userdebug `adb root`, not su-per-call like biscuit's
+    // Magisk broker), so this is the only way to get a root shell at all.
+    // Caller must reconnect afterwards — see Client.reconnectSilent below.
+    async root() {
+      try {
+        await this._adb.createSocketAndWait('root:');
+      } catch {
+        // Expected: the daemon bounces before the socket can be read cleanly
+        // in every case observed on hardware. A response IS sometimes
+        // readable ("restarting adbd as root") but treating its absence as
+        // failure would refuse a root request that actually worked.
+      }
+    }
+
     // ── Static factory ──────────────────────────────────────────────────────
 
     // Open the browser USB picker, load the library, authenticate, return a
@@ -2470,32 +2598,112 @@ const _ADB = (() => {
         _lastUsbDevice = null;
       }
 
-      logFn('Requesting USB device — select the Echo Dot from the picker…');
+      logFn('Requesting USB device — select the device from the picker…');
       const usbDevice = await manager.BROWSER.requestDevice();
       if (!usbDevice) throw new Error('No device selected.');
       logFn(`Device selected: ${usbDevice.name ?? usbDevice.serial ?? 'unknown'}`);
       _lastUsbDevice = usbDevice;
 
-      logFn('Opening USB connection…');
-      const connection = await usbDevice.connect();
+      return await _authenticate(usbDevice, logFn);
+    }
 
-      logFn('Authenticating ADB…');
-      const transport = await Transport.authenticate({
-        serial:         usbDevice.serial ?? 'echomuse',
-        connection,
-        authenticators: defaultAuths,
-      });
-      logFn('ADB authenticated.');
-
-      const adb = new Adb(transport);
-      const banner = adb.banner?.product ?? '(unknown)';
-      logFn(`Connected. Banner: ${banner}`);
-
-      return new Client(adb, transport, banner, usbDevice.serial ?? null);
+    // Reconnect to an ALREADY-PERMITTED device with no picker UI, retrying
+    // for a bounded window. This exists for `adb root`'s bounce: the
+    // daemon restarts and the transport dies mid-request, but the USB
+    // device itself never disappears (unlike a real reboot) and the
+    // browser origin already holds permission for it, so
+    // `USBDeviceManager.getDevices()` finds it with no operator action —
+    // exactly what real `adb root` does silently on the CLI. Matches
+    // `provision_crown.sh`'s `adb root; sleep 1; adb wait-for-device`, just
+    // without a real `adb` binary underneath to do the waiting for us.
+    static async reconnectSilent(serial, logFn = () => {}, timeoutMs = 15000) {
+      const { manager } = await _load(logFn);
+      const started = Date.now();
+      let lastErr = null;
+      while (Date.now() - started < timeoutMs) {
+        const candidates = await manager.BROWSER.getDevices();
+        const usbDevice = candidates.find(d => d.serial === serial) ?? candidates[0];
+        if (usbDevice) {
+          try {
+            _lastUsbDevice = usbDevice;
+            return await _authenticate(usbDevice, logFn);
+          } catch (e) {
+            lastErr = e;
+          }
+        }
+        await new Promise(r => setTimeout(r, 500));
+      }
+      throw new Error(`Device did not come back after adb root within ${Math.round(timeoutMs/1000)}s`
+        + (lastErr ? ` (last error: ${lastErr.message})` : '') + '.');
     }
   }
 
-  return { Client };
+  // ADB's RSA keypair store — `Transport.authenticate` needs one and throws
+  // deep inside authentication ("Cannot read properties of undefined
+  // (reading 'iterateKeys')") if none is given. Found live on the first real
+  // run of this wizard against hardware: nothing in this module had ever
+  // supplied one, on either wizard, so authentication could never have
+  // succeeded here before now. @yume-chan/adb@2.1.0's contract (confirmed
+  // against its published source, not guessed at) is exactly two methods —
+  // `iterateKeys()` yields `{buffer, name}` (a PKCS#8 DER private key), and
+  // `generateKey()` makes one the first time there isn't one. localStorage is
+  // deliberately used over IndexedDB: the key only needs to survive across
+  // reconnects and page reloads in ONE browser, and this is the same
+  // trust-once model real `adb` gives every host via `~/.android/adbkey` —
+  // authorize the RSA fingerprint on the device's own screen once, then never
+  // again from that browser.
+  class _WebCredentialStore {
+    constructor(storageKey) { this._key = storageKey; }
+    async generateKey() {
+      const { privateKey } = await crypto.subtle.generateKey(
+        { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048,
+          publicExponent: new Uint8Array([0x01, 0x00, 0x01]), hash: 'SHA-1' },
+        true, ['sign']);
+      const buffer = new Uint8Array(await crypto.subtle.exportKey('pkcs8', privateKey));
+      let bin = '';
+      for (const b of buffer) bin += String.fromCharCode(b);
+      localStorage.setItem(this._key, btoa(bin));
+      return { buffer, name: 'echomuse-dashboard' };
+    }
+    async *iterateKeys() {
+      const stored = localStorage.getItem(this._key);
+      if (!stored) return;
+      const bin = atob(stored);
+      const buffer = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) buffer[i] = bin.charCodeAt(i);
+      yield { buffer, name: 'echomuse-dashboard' };
+    }
+    clear() { localStorage.removeItem(this._key); }
+  }
+  // One store for the whole browser session (module scope, not per-Client) —
+  // requestDevice and reconnectSilent both authenticate against the SAME key,
+  // which is the entire point: generate it once, reuse it for every device
+  // and every reconnect from here on.
+  const _credentialStore = new _WebCredentialStore('echomuse-wizard-adbkey');
+
+  // Shared by requestDevice (picker-obtained device) and reconnectSilent
+  // (already-permitted device found by serial) — both need the same
+  // open+authenticate+wrap sequence. _load caches after the first call, so
+  // this costs nothing extra on the reconnectSilent path.
+  async function _authenticate(usbDevice, logFn) {
+    const { Transport, Adb, defaultAuths } = await _load(logFn);
+    logFn('Opening USB connection…');
+    const connection = await usbDevice.connect();
+    logFn('Authenticating ADB…');
+    const transport = await Transport.authenticate({
+      serial:         usbDevice.serial ?? 'echomuse',
+      connection,
+      authenticators: defaultAuths,
+      credentialStore: _credentialStore,
+    });
+    logFn('ADB authenticated.');
+    const adb = new Adb(transport);
+    const banner = adb.banner?.product ?? '(unknown)';
+    logFn(`Connected. Banner: ${banner}`);
+    return new Client(adb, transport, banner, usbDevice.serial ?? null);
+  }
+
+  return { Client, clearStoredKey: () => _credentialStore.clear() };
 })();
 
 // ── AddDeviceTile ──
@@ -2639,7 +2847,7 @@ async function _sha256Hex(buf) {
 // 10  wifi             — configure WiFi network                            [inputs]
 // 11  install_em       — push binary + startup script                      [file]
 const _WIZARD_STEPS = [
-  { id: 'connect_android', label: 'Connect Device',     desc: 'Connect the Echo Dot via USB. Device should be on and booted into Android. Appears as "AEOBC" in the USB picker.' },
+  { id: 'connect_android', label: 'Connect Device',     desc: 'Connect the Echo Dot via USB. Device should be on and booted into Android. Appears as "AEOBC" in the USB picker. WebUSB needs a secure context: if the controller is on this same machine, open the dashboard at http://localhost:8768 rather than its LAN IP.' },
   { id: 'connect_twrp',    label: 'Connect to TWRP',   desc: 'Wait for TWRP recovery to appear, then reconnect. Appears as "Echo" in the USB picker.' },
   { id: 'patch_boot',      label: 'Patch Boot Image',  desc: 'Apply SELinux permissive patch and add init.rc service entries.' },
   { id: 'install_magisk',  label: 'Install Magisk',    desc: 'Flash Magisk 17.3 for persistent root access.' },
@@ -2658,6 +2866,30 @@ const _WIZARD_STEPS = [
   // also much better suited to 15MB than the shell plane.
   { id: 'install_oww',     label: 'Wake Word Assets',  desc: 'Push the ONNX runtime and wake models (~15MB) used for on-device wake word detection.' },
 ];
+
+// crown (Echo Show 8) is a real Android 11/LineageOS tablet, already rooted
+// (userdebug `adb root`) — none of biscuit's steps apply. No OOBE to race, no
+// Alexa stack, no bootloader unlock, no TWRP, no Magisk, no debloat. This
+// mirrors `device/scripts/provision_crown.sh` exactly (that script's header
+// comment names this as the intended future caller) — six steps, all in one
+// continuous Android ADB session, no reboot required.
+//
+// Steps:
+//  0  connect         — USB connect, verify Android, adb root, reconnect  [auto]
+//  1  install_server   — push crown server binary                         [file]
+//  2  tls_creds        — device-link TLS credentials (optional, same as biscuit's) [auto]
+//  3  install_apk      — install crown_launcher.apk                       [file]
+//  4  grant_overlay    — appops set SYSTEM_ALERT_WINDOW allow             [auto]
+//  5  start_launcher   — clear stopped-state, start ServerService now     [auto]
+const _CROWN_WIZARD_STEPS = [
+  { id: 'connect',         label: 'Connect Device',    desc: 'Connect the Echo Show 8 via USB, in Android — crown has no recovery-mode step and never leaves Android. WebUSB needs a secure context: if the controller is on this same machine, open the dashboard at http://localhost:8768 rather than its LAN IP — plain HTTP over an IP address will refuse to open the USB picker at all.' },
+  { id: 'install_server',  label: 'Install Server',    desc: 'Push the crown-tagged server binary to /data/local/bin/server.' },
+  { id: 'tls_creds',       label: 'TLS Credentials',   desc: 'Install device-link TLS credentials so the first connection is wss + token-authenticated (optional — skips to plain ws:// if the controller has no TLS listener).' },
+  { id: 'install_apk',     label: 'Install Launcher',  desc: 'Install crown_launcher.apk — the BOOT_COMPLETED → foreground-service autostart path this device needs (raw init cannot exec /data binaries here).' },
+  { id: 'grant_overlay',   label: 'Grant Overlay',     desc: 'Grant SYSTEM_ALERT_WINDOW so the on-screen status bar can draw. Re-run every time the APK is (re)installed — the grant does not survive a reinstall.' },
+  { id: 'start_launcher',  label: 'Start & Finish',    desc: 'Clear the app’s Android "stopped" state and start it now — this is what actually fixes autostart, not the APK by itself.' },
+];
+const CROWN_CONNECT_STEPS = new Set([0]);
 
 // ── WifiPanel ──
 
@@ -4732,6 +4964,534 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   );
 }
 
+// ── CrownProvisionWizard ──
+//
+// A separate component from ProvisionWizard rather than a device-type branch
+// woven through it. biscuit's wizard threads step-index checks throughout its
+// render (`step === 3`, `[3, 10, 11].includes(step)`, `_STEP_MODE`, TWRP
+// banner detection…) for a 13-step TWRP/Magisk/debloat flow crown has no part
+// of — retrofitting that into a generic per-step render table was a bigger,
+// riskier diff than duplicating the much shorter shell, and risked
+// regressing a wizard that already works. Same principle root CLAUDE.md
+// already states for Android call sites: isolate a platform difference
+// rather than spread it through shared code. Worth unifying later once this
+// has real field use, not before.
+function CrownProvisionWizard({ token, onClose, knownDevices }) {
+  const [step, setStep]           = useState(0);
+  const [stepState, setStepState] = useState(_CROWN_WIZARD_STEPS.map(() => 'pending'));
+  const [log, setLog]             = useState([]);
+  const [running, setRunning]     = useState(false);
+  const [adb, setAdb]             = useState(null);
+  const [serverFile, setServerFile] = useState(null);
+  const [apkFile, setApkFile]       = useState(null);
+  const [duplicateDeviceId, setDuplicateDeviceId] = useState(null);
+  const [progress, setProgress]   = useState(null);
+  const [diagnostics, setDiagnostics] = useState(null);
+  const logRef = useRef(null);
+  const stepEpoch = useRef(0);
+  const expectDisconnect = useRef(false);
+
+  const _isDisconnectError = (e) =>
+    /disconnect|transferOut|transferIn|NetworkError|device was lost/i.test(e?.message || '');
+
+  // Read-only probes run automatically on a step failure — this is the
+  // first live run of this wizard against real hardware, and without this
+  // a failure leaves nothing but the transcript panel. Own allowlist, not
+  // biscuit's: crown has no TWRP/Magisk/Alexa/WiFi-step surface, and no su
+  // broker to prefix commands with (already root from step 0's `adb root`).
+  // Names must match `_CROWN_PROVISION_PROBES` in em_support.py —
+  // tests/test_support.py pins the two lists against each other, the same
+  // way it already does for biscuit's.
+  const _CROWN_PROVISION_PROBES = {
+    props:         'getprop',
+    root:          'id 2>&1',
+    selinux:       'getenforce 2>&1',
+    pm_ready:      'pm path android 2>&1',
+    storage:       'df /data 2>&1',
+    overlay_perm:  'appops get com.echomuse.crownlauncher SYSTEM_ALERT_WINDOW 2>&1',
+    // Confirms the manual /system/etc/ueventd.rc patch (0666 on these two
+    // nodes) is actually in place — the one fix in this whole chain that
+    // does not survive a vendor/ROM reflash, per the freeze handoff.
+    device_nodes:  'ls -l /dev/snd/pcmC0D23p /dev/input/event0 /dev/input/event1 /dev/input/event2 2>&1',
+    processes:     "ps -A 2>&1 | grep -E 'crownlauncher|bin/server' | grep -v grep",
+    // The daemon's own log — the single most useful thing to have if a step
+    // downstream of install_apk fails, since it's what actually says why the
+    // exec'd process died, not just that it isn't running.
+    launcher_log:  'tail -n 60 /data/local/tmp/echomuse.log 2>&1',
+  };
+
+  async function collectProvisionDiagnostics(c, stepIdx, err) {
+    const probes = {};
+    for (const [name, cmd] of Object.entries(_CROWN_PROVISION_PROBES)) {
+      try {
+        probes[name] = await Promise.race([
+          c.shell(cmd),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 8000)),
+        ]);
+      } catch (e) {
+        probes[name] = `<probe failed: ${e.message}>`;
+      }
+    }
+    return API.post('/api/provision/diagnostics', {
+      step:  _CROWN_WIZARD_STEPS[stepIdx]?.id || String(stepIdx),
+      error: err?.message || '',
+      probes,
+      transcript: log.map(l => l.msg),
+      platform: 'crown',
+    });
+  }
+
+  async function captureDiagnostics(stepIdx, err) {
+    if (!adb) {
+      addLog('No ADB connection, so device state could not be captured.', 'warn');
+      return;
+    }
+    addLog('Capturing device state for diagnostics…');
+    try {
+      setDiagnostics(await collectProvisionDiagnostics(adb, stepIdx, err));
+      addLog('Device state captured — "Download diagnostics" below.', 'ok');
+    } catch (e) {
+      addLog(`Could not capture device state: ${e.error || e.message}`, 'warn');
+    }
+  }
+
+  function downloadDiagnostics() {
+    const blob = new Blob([JSON.stringify(diagnostics, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `echomuse-provision-crown-${new Date().toISOString().slice(0,19).replace(/[:T]/g,'')}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function addLog(msg, type = 'info') {
+    setLog(l => [...l, { msg, type }].slice(-5000));
+    setTimeout(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, 30);
+  }
+  function markStep(i, st) { setStepState(s => { const n = [...s]; n[i] = st; return n; }); }
+
+  function abandonStep(reason, idx = step) {
+    stepEpoch.current++;
+    setRunning(false);
+    markStep(idx, 'error');
+    addLog(reason, 'error');
+  }
+
+  // Same disconnect handling as ProvisionWizard, same reasons — see there
+  // for the full explanation. crown has no TWRP/reboot phase mid-run, so
+  // there is only ever one expected-disconnect moment: none, in the normal
+  // path — every step here stays on the same ADB session start to finish.
+  useEffect(() => {
+    if (!navigator.usb) return;
+    const onDisconnect = (e) => {
+      if (expectDisconnect.current) { expectDisconnect.current = false; return; }
+      if (!adb && !running) return;
+      const theirs = adb?.serial && e.device?.serialNumber && e.device.serialNumber !== adb.serial;
+      if (theirs) return;
+      setAdb(null);
+      if (running) abandonStep('Device disconnected. The step was abandoned — reconnect and retry.');
+      else addLog('Device disconnected.', 'warn');
+    };
+    navigator.usb.addEventListener('disconnect', onDisconnect);
+    return () => navigator.usb.removeEventListener('disconnect', onDisconnect);
+  }, [adb, running, step]);
+
+  async function reconnectAdb() {
+    setRunning(true);
+    try {
+      if (adb) { try { await adb.close(); } catch {} setAdb(null); }
+      addLog('Reconnecting to the device…');
+      const c = await _ADB.Client.requestDevice(addLog);
+      c._log = msg => addLog(`  adb: ${msg}`);
+      setAdb(c);
+      addLog('ADB connected.', 'ok');
+    } catch (e) {
+      addLog(`Reconnect failed: ${e.message}`, 'error');
+    }
+    setRunning(false);
+  }
+
+  // Step 0 — connect, verify, root, reconnect silently.
+  async function runConnect() {
+    const c0 = await _ADB.Client.requestDevice(addLog);
+    c0._log = msg => addLog(`  adb: ${msg}`);
+    setAdb(c0);
+    const release = await c0.shell('getprop ro.build.version.release');
+    const model   = await c0.shell('getprop ro.product.model');
+    const serial  = (await c0.shell('getprop ro.serialno')).trim() || (await c0.shell('getprop ro.boot.serialno')).trim();
+    addLog(`Model: ${model || '(unknown)'}  Android ${release}  Serial: ${serial || '(unknown)'}`);
+    // crown ships LineageOS/API 30 (Android 11) — not a hard version gate the
+    // way biscuit's "must be FireOS 5" one is (there's no separate flash-a-ROM
+    // step here to have gotten wrong), just a sanity check against picking the
+    // wrong device in the USB picker.
+    if (release && parseInt(release, 10) < 8) {
+      addLog(`Expected Android 8+ (crown ships LineageOS 11) — got Android ${release}. Wrong device?`, 'warn');
+    }
+    if (serial && knownDevices && knownDevices.length) {
+      const match = knownDevices.find(d => d.device_id && d.device_id.includes(serial));
+      if (match) {
+        expectDisconnect.current = true;
+        await c0.close();
+        setAdb(null);
+        const err = new Error(
+          `This device (serial ${serial}) appears to already be registered with the controller ` +
+          `as "${match.label || match.device_id}". Delete it from the controller first ` +
+          `if you want to re-provision, then retry.`);
+        err.matchedDeviceId = match.device_id;
+        throw err;
+      }
+    }
+
+    addLog('Requesting root (adb root)…');
+    await c0.root();
+    // The daemon bounce tears down this transport; close explicitly so a
+    // stale handle isn't left believing it's open (mirrors runConnectAndroid's
+    // reboot handling in the biscuit wizard).
+    expectDisconnect.current = true;
+    try { await c0.close(); } catch {}
+    setAdb(null);
+    addLog('adbd restarting as root — reconnecting (no picker, same device)…');
+    const c = await _ADB.Client.reconnectSilent(serial || c0.serial, addLog);
+    c._log = msg => addLog(`  adb: ${msg}`);
+    expectDisconnect.current = false;
+    setAdb(c);
+    const id = await c.shell('id');
+    if (!id.includes('uid=0')) {
+      throw new Error(`adb root did not grant a root shell — "id" returned "${id}". `
+        + `crown needs userdebug adb root; this build may be a user build without it.`);
+    }
+    addLog('Root confirmed.', 'ok');
+    return c;
+  }
+
+  // Step 1 — push the server binary. File-only: unlike biscuit, there is no
+  // GitHub release tag for crown yet (nothing on this branch has shipped a
+  // release — see docs/echo-show-8-journal.md), so "latest from GitHub"
+  // has nothing to fetch. Mirrors provision_crown.sh's push→tmp→mv sequence
+  // exactly, including the reason: a service could be actively exec'ing the
+  // old file mid-push otherwise.
+  async function runInstallServer(c, file) {
+    addLog(`Pushing ${file.name} to /data/local/tmp/server.new…`);
+    const buf = await file.arrayBuffer();
+    await c.push('/data/local/tmp/server.new', new Uint8Array(buf),
+      pct => setProgress({ label: 'Uploading binary', pct }));
+    setProgress(null);
+    await c.shell('mkdir -p /data/local/bin');
+    await c.shell('mv -f /data/local/tmp/server.new /data/local/bin/server && chmod 755 /data/local/bin/server');
+    const linkCheck = (await c.shell('ls -l /data/local/bin/server')).trim();
+    addLog(`Installed: ${linkCheck || '(no output)'}`, 'ok');
+  }
+
+  // Step 2 — TLS credentials. Identical contract to biscuit's: a 503 means
+  // no TLS listener on this controller, and the device links plain ws://
+  // (a real, documented rollout fallback, not a failure) — the dashboard's
+  // "Secure link" action can retrofit this later.
+  async function runTlsCreds(c) {
+    const serial = (await c.shell('getprop ro.serialno')).trim();
+    if (!serial) { addLog('Could not read device serial — skipping TLS credential install.', 'warn'); return; }
+    addLog('Fetching device-link TLS credentials…');
+    const tlsResp = await fetch(ingressPath('/api/provision/tls_credentials'), {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ device_id: serial }),
+    });
+    if (tlsResp.status === 503) {
+      addLog('Controller has no TLS listener — device will connect over plain ws.', 'warn');
+      return;
+    }
+    if (!tlsResp.ok) throw new Error(`Controller returned ${tlsResp.status} fetching TLS credentials.`);
+    const creds = await tlsResp.json();
+    await c.push('/data/local/tmp/em-ca.pem', new TextEncoder().encode(creds.ca_pem));
+    await c.push('/data/local/tmp/em-token', new TextEncoder().encode(creds.token));
+    await c.shell(`mkdir -p ${creds.dir} && cp /data/local/tmp/em-ca.pem ${creds.dir}/ca.pem `
+      + `&& cp /data/local/tmp/em-token ${creds.dir}/token `
+      + `&& chmod 644 ${creds.dir}/ca.pem && chmod 600 ${creds.dir}/token `
+      + `&& rm -f /data/local/tmp/em-ca.pem /data/local/tmp/em-token`);
+    const listing = (await c.shell(`ls ${creds.dir}`)).trim();
+    if (!listing.includes('ca.pem') || !listing.includes('token')) {
+      throw new Error(`TLS credential install verification failed — ${creds.dir} contains: "${listing}".`);
+    }
+    addLog('TLS credentials installed — device will connect over wss.', 'ok');
+  }
+
+  // Step 3 — install crown_launcher.apk. `pm install` over a pushed file:
+  // there is no ADB "install" wire feature here (the browser-side ADB
+  // reimplementation only exposes push/pull/shell), which is exactly what
+  // the real `adb install` CLI command does under the hood anyway.
+  async function runInstallApk(c, file) {
+    addLog(`Pushing ${file.name}…`);
+    const buf = await file.arrayBuffer();
+    await c.push('/data/local/tmp/crown_launcher.apk', new Uint8Array(buf),
+      pct => setProgress({ label: 'Uploading APK', pct }));
+    setProgress(null);
+    addLog('Installing (pm install -r -g)…');
+    const out = await c.shell('pm install -r -g /data/local/tmp/crown_launcher.apk');
+    if (!out.includes('Success')) {
+      throw new Error(`pm install did not report success: "${out}"`);
+    }
+    addLog(out, 'ok');
+  }
+
+  // Step 4 — grant SYSTEM_ALERT_WINDOW. Deliberately unconditional every
+  // run, never "if not already granted" — provision_crown.sh's own comment
+  // on this exact point: the grant does NOT survive a reinstall (confirmed
+  // live, docs/echo-show-8-journal.md, 2026-08-26 status-indicator entry),
+  // only an ordinary reboot, so re-running this after every install_apk is
+  // what keeps it correct rather than silently stale.
+  async function runGrantOverlay(c) {
+    await c.shell('appops set com.echomuse.crownlauncher SYSTEM_ALERT_WINDOW allow');
+    const check = (await c.shell('appops get com.echomuse.crownlauncher SYSTEM_ALERT_WINDOW')).trim();
+    addLog(`Overlay permission: ${check || '(no output)'}`, check.toLowerCase().includes('allow') ? 'ok' : 'warn');
+  }
+
+  // Step 5 — clear Android's "stopped" package state and start now. This one
+  // line, not the APK by itself, is what fixes autostart on a fresh install
+  // (see provision_crown.sh's own comment and the 2026-08-26 journal entry).
+  // No reboot: unlike biscuit's last step, nothing here needs one, and there
+  // is no A/B slot story yet to make one meaningful.
+  async function runStartLauncher(c) {
+    // Found live on the first real wizard run against a factory-reset unit:
+    // ServerService execs the daemon as the app's OWN sandboxed uid, never
+    // root, and on a fresh device /data/local/tmp is drwxrwx--x — the app has
+    // EXECUTE on the directory (enough to open an existing file) but not
+    // WRITE (not enough to CREATE one). ProcessBuilder.start()'s log
+    // redirect then throws, caught silently — no crash, no log line, the
+    // launcher app itself stays alive (its playback/overlay sockets still
+    // come up) so nothing visible says the daemon never started. Creating
+    // the file here first sidesteps it: opening an EXISTING file for write
+    // needs only directory search/execute, which the app already has. See
+    // docs/echo-show-8-journal.md's 2026-08-27 entry for the full story.
+    await c.shell('touch /data/local/tmp/echomuse.log && chmod 666 /data/local/tmp/echomuse.log');
+    await c.shell('am start-foreground-service -n com.echomuse.crownlauncher/.ServerService');
+    addLog('Launcher started — clears the "stopped" state permanently, so a real reboot will '
+         + 'autostart from here on.', 'ok');
+    addLog('Provisioning complete. Tail /data/local/tmp/echomuse.log on-device to confirm the '
+         + 'daemon connects, or watch for it appearing as a pending device within ~30s.');
+  }
+
+  async function runStep(stepIdx) {
+    const epoch = stepEpoch.current;
+    const abandoned = () => epoch !== stepEpoch.current;
+    setRunning(true);
+    markStep(stepIdx, 'running');
+    addLog(`── ${stepIdx + 1}/${_CROWN_WIZARD_STEPS.length}  ${_CROWN_WIZARD_STEPS[stepIdx].label.toUpperCase()} ──`, 'head');
+    let c = adb;
+    try {
+      if (!CROWN_CONNECT_STEPS.has(stepIdx) && !c) {
+        throw new Error('There is no ADB connection. Click Reconnect, pick the device from the USB picker, then Retry this step.');
+      }
+      switch (stepIdx) {
+        case 0: c = await runConnect(); break;
+        case 1: await runInstallServer(c, serverFile); break;
+        case 2: await runTlsCreds(c); break;
+        case 3: await runInstallApk(c, apkFile); break;
+        case 4: await runGrantOverlay(c); break;
+        case 5: await runStartLauncher(c); break;
+      }
+      if (abandoned()) return;
+      markStep(stepIdx, 'done');
+      if (stepIdx < _CROWN_WIZARD_STEPS.length - 1) setStep(stepIdx + 1);
+    } catch (e) {
+      if (abandoned()) return;
+      if (_isDisconnectError(e)) {
+        abandonStep('Device disconnected. The step was abandoned — reconnect and retry.', stepIdx);
+        setAdb(null);
+        return;
+      }
+      addLog(`Error: ${e.message}`, 'error');
+      markStep(stepIdx, 'error');
+      if (e.matchedDeviceId) setDuplicateDeviceId(e.matchedDeviceId);
+      // A duplicate-device stop is our own bookkeeping, nothing to ask the
+      // device about — same exception biscuit's wizard makes.
+      if (!e.matchedDeviceId) await captureDiagnostics(stepIdx, e);
+      if (stepIdx === 1) setServerFile(null);
+      if (stepIdx === 3) setApkFile(null);
+    }
+    if (!abandoned()) setRunning(false);
+  }
+
+  // Auto steps: everything but the two file-picker steps.
+  useEffect(() => {
+    const autoSteps = new Set([2, 4, 5]);
+    if (!autoSteps.has(step) || running || stepState[step] !== 'pending') return;
+    if (adb) { runStep(step); return; }
+    addLog(`"${_CROWN_WIZARD_STEPS[step].label}" needs an ADB connection and there isn't one. Reconnect and click Retry.`, 'error');
+    markStep(step, 'error');
+  }, [step, running, adb]);
+
+  const cur    = _CROWN_WIZARD_STEPS[step];
+  const isDone = step === _CROWN_WIZARD_STEPS.length - 1 && stepState[step] === 'done';
+  const statusColors = { pending: 'var(--muted)', running: 'var(--accent)', done: 'var(--ok)', error: 'var(--warn)' };
+  const statusIcons  = { pending: '○', running: '◌', done: '●', error: '✕' };
+
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 200,
+      background: 'rgba(180,176,168,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+      backdropFilter: 'blur(8px)',
+    }}>
+      <div style={{
+        background: 'linear-gradient(170deg,var(--raised),var(--surface))', border: '1px solid var(--border)',
+        borderRadius: 16, width: 'min(900px,95vw)', height: 'min(700px,90vh)',
+        display: 'flex', flexDirection: 'column', overflow: 'hidden',
+        boxShadow: '0 24px 80px rgba(0,0,0,0.3),0 2px 0 var(--sheen) inset',
+        animation: 'fadeIn 0.15s ease',
+      }}>
+        <div style={{ background: 'linear-gradient(180deg,var(--card),var(--bg))', borderBottom: '1px solid var(--border-hard)', padding: '20px 24px 16px', boxShadow: '0 1px 0 var(--sheen) inset', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 22, fontWeight: 600, color: 'var(--text)', letterSpacing: '-0.02em' }}>Provision Echo Show 8</div>
+            <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', letterSpacing: '0.12em', textTransform: 'uppercase', marginTop: 4 }}>Chrome/Edge only · USB-C cable · already-rooted (userdebug) prerequisite</div>
+          </div>
+          <CircleButton onClick={onClose} title="Close">×</CircleButton>
+        </div>
+
+        <div style={{ display: 'flex', flex: 1, overflow: 'hidden', minHeight: 0 }}>
+          <div style={{ width: 176, borderRight: '1px solid var(--border)', background: 'var(--hairline)', padding: '12px 0', overflowY: 'auto', flexShrink: 0 }}>
+            {_CROWN_WIZARD_STEPS.map((s, i) => {
+              const st = stepState[i]; const active = i === step;
+              return (
+                <div key={s.id} style={{
+                  padding: '6px 14px', display: 'flex', alignItems: 'center', gap: 7,
+                  background: active ? 'var(--hairline)' : 'transparent',
+                  cursor: 'default', opacity: running && !active ? 0.5 : 1,
+                }}>
+                  <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: statusColors[st], flexShrink: 0 }}>{statusIcons[st]}</span>
+                  <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: active ? 'var(--text)' : 'var(--muted)', letterSpacing: '0.04em', lineHeight: 1.4 }}>{s.label}</span>
+                </div>
+              );
+            })}
+          </div>
+
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', padding: '18px 22px 14px' }}>
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 14, fontWeight: 600, color: 'var(--text)', marginBottom: 4 }}>{cur.label}</div>
+              <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)' }}>{cur.desc}</div>
+            </div>
+
+            {CROWN_CONNECT_STEPS.has(step) && stepState[step] === 'pending' && !running && (
+              <div style={{ marginBottom: 10 }}><Pill onClick={() => runStep(step)}>Connect Device</Pill></div>
+            )}
+
+            {step === 1 && stepState[1] !== 'done' && !running && (
+              <div style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--text2)', letterSpacing: '0.08em' }}>
+                  {stepState[1] === 'error' ? 'SELECT A DIFFERENT BUILD' : 'CROWN SERVER BINARY (device/build/crown, from ./compile.sh crown)'}
+                </div>
+                <input type="file" onChange={e => setServerFile(e.target.files[0])} style={{ fontFamily: "'DM Mono',monospace", fontSize: 11 }}/>
+                {!!serverFile && <Pill onClick={() => runStep(1)}>Install Server</Pill>}
+              </div>
+            )}
+
+            {step === 3 && stepState[3] !== 'done' && !running && (
+              <div style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--text2)', letterSpacing: '0.08em' }}>
+                  {stepState[3] === 'error' ? 'SELECT A DIFFERENT APK' : 'CROWN_LAUNCHER.APK (device/crown_launcher/build.sh output)'}
+                </div>
+                <input type="file" accept=".apk" onChange={e => setApkFile(e.target.files[0])} style={{ fontFamily: "'DM Mono',monospace", fontSize: 11 }}/>
+                {!!apkFile && <Pill onClick={() => runStep(3)}>Install Launcher</Pill>}
+              </div>
+            )}
+
+            {running && (
+              <div style={{ marginBottom: 10, display: 'flex', gap: 8 }}>
+                <Pill danger onClick={() => abandonStep('Step cancelled.')}>Cancel step</Pill>
+              </div>
+            )}
+
+            {!running && stepState[step] === 'error' && ![1, 3].includes(step) && (
+              <div style={{ marginBottom: 10, display: 'flex', gap: 8 }}>
+                <Pill onClick={() => runStep(step)}>Retry</Pill>
+                {!CROWN_CONNECT_STEPS.has(step) && (
+                  <Pill onClick={reconnectAdb}>{adb ? 'Reconnect' : 'Reconnect device'}</Pill>
+                )}
+                {step === 0 && duplicateDeviceId && (
+                  <Pill danger onClick={async () => {
+                    try {
+                      await API.del(`/api/devices/${duplicateDeviceId}`);
+                      addLog(`Deleted "${duplicateDeviceId}" from controller. You can retry now.`, 'ok');
+                      setDuplicateDeviceId(null);
+                      markStep(0, 'pending');
+                    } catch (e) {
+                      addLog(`Delete failed: ${e.error || e.message || 'unknown error'}.`, 'error');
+                    }
+                  }}>Delete "{duplicateDeviceId}" from controller</Pill>
+                )}
+                {diagnostics && (
+                  <Pill onClick={downloadDiagnostics}>Download diagnostics</Pill>
+                )}
+              </div>
+            )}
+
+            {!running && stepState[step] === 'error' && [1, 3].includes(step) && (
+              <div style={{ marginBottom: 10, display: 'flex', gap: 8 }}>
+                <Pill onClick={reconnectAdb}>{adb ? 'Reconnect' : 'Reconnect device'}</Pill>
+                {diagnostics && (
+                  <Pill onClick={downloadDiagnostics}>Download diagnostics</Pill>
+                )}
+              </div>
+            )}
+
+            {progress && (
+              <div style={{ margin: '6px 0 10px' }}>
+                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', marginBottom: 4 }}>{progress.label}</div>
+                <div style={{ height: 4, background: 'var(--sunken)', borderRadius: 2 }}>
+                  <div style={{ height: '100%', width: `${Math.min(100, (progress.pct || 0) * 100).toFixed(0)}%`, background: 'var(--accent)', borderRadius: 2, transition: 'width 0.2s' }}/>
+                </div>
+              </div>
+            )}
+
+            {isDone && (
+              <div style={{ margin: '6px 0 10px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: 'var(--ok)', lineHeight: 1.7 }}>
+                  Provisioning complete. No reboot needed — the daemon is already running and will
+                  discover the controller via mDNS, appearing in the dashboard as a pending device
+                  within ~30s.
+                </div>
+                <div><Pill accent onClick={onClose}>Done</Pill></div>
+              </div>
+            )}
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginTop: 10 }}>
+              <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em' }}>
+                Output{log.length > 0 ? ` — ${log.length} lines` : ''}
+              </span>
+              {log.length > 0 && (
+                <Pill small onClick={() => {
+                  const text = log.map(e => e.msg).join('\n');
+                  navigator.clipboard.writeText(text)
+                    .then(() => addLog('(transcript copied to clipboard)'))
+                    .catch(() => addLog('Clipboard blocked by the browser — select the text manually.', 'warn'));
+                }}>Copy log</Pill>
+              )}
+            </div>
+            <div ref={logRef} style={{
+                flex: 1, minHeight: 0, overflowY: 'auto',
+                background: 'linear-gradient(160deg,var(--lcd-face),var(--lcd-bg))',
+                border: '1px solid var(--lcd-line)', borderRadius: 8,
+                boxShadow: 'inset 0 2px 6px rgba(0,0,0,0.5)',
+                padding: '10px 14px',
+                fontFamily: "'DM Mono',monospace", fontSize: 10, lineHeight: 1.7,
+                marginTop: 10,
+              }}>
+              {log.length === 0
+                ? <span style={{ color: 'var(--lcd-faint)' }}>— no output yet —</span>
+                : log.map((e, i) => (
+                  <div key={i} style={e.type === 'head'
+                    ? { color: 'var(--accent-lit)', letterSpacing: '0.12em', marginTop: i === 0 ? 0 : 10, paddingTop: 6, borderTop: i === 0 ? 'none' : '1px solid var(--lcd-faint)' }
+                    : { color: e.type === 'error' ? 'var(--error)' : e.type === 'ok' ? 'var(--ok)' : e.type === 'warn' ? 'var(--warn)' : 'var(--lcd-green)' }}>
+                    {e.msg}
+                  </div>
+                ))
+              }
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 // ─── DeviceConfigForm ─────────────────────────────────────────────────────────
@@ -5965,6 +6725,8 @@ function App() {
   const [status, setStatus] = useState(null);
   const [loadError, setLoadError] = useState(null);
   const [showWizard, setShowWizard] = useState(false);
+  const [showCrownWizard, setShowCrownWizard] = useState(false);
+  const [showDevicePicker, setShowDevicePicker] = useState(false);
   const [showDeployAll, setShowDeployAll] = useState(false);
   // Fleet deploy runs entirely server-side (per-device background tasks), so
   // it outlives the modal. deployState persists {version, started, skipped}
@@ -6345,7 +7107,7 @@ function App() {
               can gain a row without this drifting. */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(190px,1fr))', gridAutoRows: '1fr', gap: 12, marginBottom: 48 }}>
             {approved.map(d => <Card key={d.device_id} device={d} onClick={() => setSelected(d.device_id)}/>)}
-            {isAdmin && <AddDeviceTile onClick={() => setShowWizard(true)}/>}
+            {isAdmin && <AddDeviceTile onClick={() => setShowDevicePicker(true)}/>}
           </div>
         </>
       )}
@@ -6360,9 +7122,37 @@ function App() {
         <div style={{ textAlign: 'center', padding: '60px 0', fontFamily: "'DM Mono',monospace", fontSize: 12, color: 'var(--error)' }}>{loadError}</div>
       )}
 
+      {/* Device-type picker — the two wizards need different USB flows from
+          the first click (biscuit reboots to TWRP; crown never leaves
+          Android), and nothing in what's visible over WebUSB before that
+          first command distinguishes them, so this has to be asked rather
+          than detected. */}
+      {showDevicePicker && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 200,
+          background: 'rgba(180,176,168,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+          backdropFilter: 'blur(8px)',
+        }}>
+          <div style={{
+            background: 'linear-gradient(170deg,var(--raised),var(--surface))', border: '1px solid var(--border)',
+            borderRadius: 16, width: 'min(420px,90vw)', padding: 24,
+            display: 'flex', flexDirection: 'column', gap: 14,
+            boxShadow: '0 24px 80px rgba(0,0,0,0.3),0 2px 0 var(--sheen) inset',
+          }}>
+            <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 18, fontWeight: 600, color: 'var(--text)' }}>Which device?</div>
+            <Pill accent onClick={() => { setShowDevicePicker(false); setShowWizard(true); }}>Echo Dot (2nd gen)</Pill>
+            <Pill accent onClick={() => { setShowDevicePicker(false); setShowCrownWizard(true); }}>Echo Show 8</Pill>
+            <Pill small onClick={() => setShowDevicePicker(false)}>Cancel</Pill>
+          </div>
+        </div>
+      )}
+
       {/* Provisioning wizard */}
       {showWizard && (
         <ProvisionWizard token={token} onClose={() => setShowWizard(false)} knownDevices={devices}/>
+      )}
+      {showCrownWizard && (
+        <CrownProvisionWizard token={token} onClose={() => setShowCrownWizard(false)} knownDevices={devices}/>
       )}
 
       {/* Fleet-wide OTA — the deploy itself is server-side; this modal is

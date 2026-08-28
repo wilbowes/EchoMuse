@@ -68,11 +68,14 @@ func TestPcmOwner(t *testing.T) {
 }
 
 func TestStatusPathMatchesTheDeviceWeOpen(t *testing.T) {
-	// Pins the path against the card/device constants. The speaker is device
-	// 23 and the mic is 24; checking pcm0p (Android's own) reads "closed" and
-	// proves nothing, which cost a wrong conclusion during the #80 hunt.
+	// Pins the path against biscuit's card/device numbers (0/23; the mic is
+	// 24 — checking pcm0p, Android's own device, reads "closed" and proves
+	// nothing, which cost a wrong conclusion during the #80 hunt). Board
+	// numbers now live in each tagged binding file (pcm_speaker.go for
+	// `server`), so this test pins the literal values directly rather than
+	// importing a per-board constant.
 	want := "/proc/asound/card0/pcm23p/sub0/status"
-	if got := statusPath(cardNr, deviceNr); got != want {
+	if got := statusPath(0, 23); got != want {
 		t.Fatalf("statusPath = %q, want %q", got, want)
 	}
 }

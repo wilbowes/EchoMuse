@@ -55,6 +55,7 @@ import em_db as db
 import em_auth as auth
 import em_ble_proxy
 import em_config_sections as sections_mod
+import em_decoder
 import em_firmware
 import em_ingressauth
 import em_oww_assets
@@ -2183,13 +2184,18 @@ async def _stream_file_to_device(live, data: bytes, dest: str,
         # arrives by `mv` over whatever was there.
 
         # ── Detect available base64 decoder ──────────────────────────────────
-        # Try busybox first (Magisk provides it), then python3/python.
-        # We run a round-trip sanity test so we know the decode flag works.
-        # The md5 tool is detected in the SAME round trip, not a second one.
-        # busybox first for the same reason as the decoder (Magisk provides
-        # it); bare md5sum as a fallback since some SKUs have it in PATH.
+        # Try busybox first (Magisk provides it), then plain base64 in PATH
+        # (toybox on stock/LineageOS userland — crown has this and NO
+        # busybox, found 2026-08-26: every secure_link/provisioning transfer
+        # to it failed "no base64 decoder" despite /system/bin/base64
+        # existing, because this used to check only busybox then python3/
+        # python and never the device's own base64), then python3/python as
+        # a last resort. We run a round-trip sanity test so we know the
+        # decode flag works. The md5 tool is detected in the SAME round
+        # trip, not a second one.
         await ws.send(
             "if echo dGVzdA== | busybox base64 -d >/dev/null 2>&1; then echo DECODER:busybox; "
+            "elif echo dGVzdA== | base64 -d >/dev/null 2>&1; then echo DECODER:plain; "
             "elif python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' </dev/null >/dev/null 2>&1; then echo DECODER:python3; "
             "elif python  -c 'import base64,sys; sys.stdout.write(base64.b64decode(sys.stdin.read()))' </dev/null >/dev/null 2>&1; then echo DECODER:python; "
             "else echo DECODER:none; fi; "
@@ -2210,42 +2216,23 @@ async def _stream_file_to_device(live, data: bytes, dest: str,
             except asyncio.TimeoutError:
                 continue
 
-        if "DECODER:busybox" in detect_buf:
-            decode_cmd = "busybox base64 -d"
-        elif "DECODER:python3" in detect_buf:
-            decode_cmd = ("python3 -c "
-                          "'import sys,base64; "
-                          "sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))'")
-        elif "DECODER:python" in detect_buf:
-            decode_cmd = ("python -c "
-                          "'import sys,base64; "
-                          "sys.stdout.write(base64.b64decode(sys.stdin.read()))'")
-        else:
-            # Two very different things reach here. DETECT_MARKER present means
-            # the device answered and genuinely has no decoder — a property of
-            # that device, which retrying will not change. Absent means the
-            # round trip produced nothing in 15s, i.e. the shell plane is not
-            # carrying output, which is a link problem and IS worth retrying.
-            # Reporting both as "no base64 decoder" sent #121 looking at the
-            # wrong half.
-            if DETECT_MARKER not in detect_buf:
-                log.error(f"[api] Shell produced no output in 15s while probing "
-                          f"{device_id} for a decoder — link problem, not a "
-                          f"missing tool. Output so far: {detect_buf!r}")
-                return _transfer_failed(
-                    "shell", "device shell produced no output within 15s")
+        decision = em_decoder.decide_decoder(detect_buf, DETECT_MARKER)
+        if decision.failure == "link":
+            log.error(f"[api] Shell produced no output in 15s while probing "
+                      f"{device_id} for a decoder — link problem, not a "
+                      f"missing tool. Output so far: {decision.detail!r}")
+            return _transfer_failed(
+                "shell", "device shell produced no output within 15s")
+        if decision.failure == "decoder":
             log.error(f"[api] No base64 decoder found on device. "
-                      f"Detection output: {detect_buf!r}")
+                      f"Detection output: {decision.detail!r}")
             return _transfer_failed("decoder")
+        decode_cmd = decision.decode_cmd
 
         log.info(f"[api] Decoder: {decode_cmd.split()[0]} {decode_cmd.split()[1]}")
 
-        if "MD5:busybox" in detect_buf:
-            md5_cmd = "busybox md5sum"
-        elif "MD5:plain" in detect_buf:
-            md5_cmd = "md5sum"
-        else:
-            md5_cmd = None
+        md5_cmd = em_decoder.decide_md5(detect_buf)
+        if md5_cmd is None:
             if require_verify:
                 log.error(f"[api] No md5 tool on device — refusing to transfer "
                           f"{dest} unverified. Detection output: {detect_buf!r}")
@@ -4265,6 +4252,7 @@ async def _post_provision_diagnostics(request: web.Request) -> web.Response:
         # WPA3" is the whole answer on a #82-shaped failure.
         selected_ssid=body.get("selected_ssid") or None,
         controller_version=CONTROLLER_VERSION,
+        platform=body.get("platform") or "biscuit",
     )
     stamp = time.strftime("%Y%m%d-%H%M%S")
     return web.Response(
@@ -4670,6 +4658,12 @@ def _merge_device(row) -> dict:
         "ip":                 row["ip"],
         "firmware_ver":       row["firmware_ver"],
         "firmware_previous":  row["firmware_previous"],
+        # Human-readable board label ("Echo Show 8 Gen 1 (crown)" etc, see
+        # em_db's v20 migration) — live value while connected (freshest),
+        # falling back to the persisted one so an offline device still
+        # renders the right icon shape instead of the default.
+        "model":              ((getattr(live, "model", None) if live else None) or row["model"])
+                              if "model" in row.keys() else None,
         "first_seen":         row["first_seen"],
         "last_seen":          row["last_seen"],
         "config":             json.loads(row["config"] or "{}"),

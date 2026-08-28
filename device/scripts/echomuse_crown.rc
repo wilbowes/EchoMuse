@@ -1,0 +1,24 @@
+# Minimal crown (Echo Show 8) autostart service.
+#
+# No A/B slots, no log rotation, no supervisor log — biscuit's
+# start_server.sh carries all three because it survives a fielded OTA
+# pipeline. crown has none of that yet (manual adb bring-up, one dev unit),
+# so this is deliberately just "exec the binary, let init restart it if it
+# dies" (decided 2026-08-26 rather than porting start_server.sh's full
+# shape ahead of there being a fleet to need it for).
+#
+# No `oneshot`: that flag means the OPPOSITE of what it sounds like for this
+# purpose — it tells init NOT to restart the service when it exits. Default
+# (unset) is what gives crash-restart.
+#
+# Install: adb push to /vendor/etc/init/echomuse.rc (needs `adb remount`
+# first — see docs/echo-show-8-hardware-map.md "Auto-start"). Runs
+# provision_crown.sh, not by hand.
+service echomuse /data/local/bin/server
+    class late_start
+    user root
+    group root
+    seclabel u:r:su:s0
+
+on property:sys.boot_completed=1
+    start echomuse

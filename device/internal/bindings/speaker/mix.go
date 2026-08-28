@@ -180,3 +180,42 @@ func mixInto(dst, src []byte) {
 		dst[i+1] = byte(uint16(s) >> 8)
 	}
 }
+
+// toStereo converts a mono S16 wire period into the stereo frames the ALSA
+// device requires. The stereo config is an I2S/codec-path constraint, not a
+// wire one — shipping two identical channels would double bandwidth for
+// nothing on links that are already marginal. Untagged: pure byte
+// arithmetic, shared by every board's binding.
+func toStereo(data []byte) []byte {
+	n := len(data) / 2
+	period := make([]byte, n*4)
+	for i := 0; i < n; i++ {
+		lo, hi := data[i*2], data[i*2+1]
+		period[i*4+0], period[i*4+1] = lo, hi // L
+		period[i*4+2], period[i*4+3] = lo, hi // R
+	}
+	return period
+}
+
+// periodRMS computes the RMS level of a stereo S16LE period, normalized to
+// 0..1 of int16 full-scale. Left channel only, every 4th frame — the wire
+// is mono duplicated L=R and the LED meter needs ~2 significant digits at
+// ~23Hz, so 512 of 2048 frames is plenty at a quarter of the cost. Runs on
+// the ALSA pump goroutine: no allocation, integer accumulate.
+func periodRMS(period []byte) float64 {
+	if len(period) < 4 {
+		return 0
+	}
+	var sum uint64
+	n := 0
+	// Stereo frame = 4 bytes (L16+R16); step 4 frames = 16 bytes.
+	for i := 0; i+1 < len(period); i += 16 {
+		s := int64(int16(uint16(period[i]) | uint16(period[i+1])<<8))
+		sum += uint64(s * s)
+		n++
+	}
+	if n == 0 {
+		return 0
+	}
+	return math.Sqrt(float64(sum)/float64(n)) / 32768.0
+}

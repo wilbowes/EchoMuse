@@ -1,3 +1,10 @@
+//go:build server || crown
+
+// Shared evdev reading logic. dotButton/volumeButton and Init() are
+// per-board (evdev_controller_server.go / evdev_controller_crown.go) —
+// tagged the same as this file so the package has no buildable files at all
+// for an unrecognised/absent board tag, same as internal/bindings/mic and
+// internal/bindings/speaker's ALSA glue.
 package buttons
 
 import (
@@ -6,11 +13,7 @@ import (
 	"time"
 	"github.com/wilbowes/EchoMuse/pkg/buttons"
 	evdev "github.com/gvalkov/golang-evdev"
-	"os/exec"
 )
-
-const dotButton = "/dev/input/event1"
-const volumeButton = "/dev/input/event2"
 
 // VolumeCallback is called on volume button release with direction "up" or "down".
 type VolumeCallback func(direction string)
@@ -33,13 +36,6 @@ func (e *EvDevController) SetVolumeCallback(cb func(direction string)) {
 // Must be called before SubscribeToButton.
 func (e *EvDevController) SetMuteCallback(cb func()) {
 	e.muteCallback = cb
-}
-
-// Init the button listeners
-// Kills alexa's native button functions
-func (e *EvDevController) Init() error {
-	cmd := exec.Command("stop", "acebutton")
-	return cmd.Run()
 }
 
 func (e *EvDevController) SubscribeToButton(callback buttons.ButtonClickCallback) (*buttons.EventSubscription, error) {
@@ -168,6 +164,9 @@ func (e *EvDevController) GetDotButton() buttons.Button {
 	}
 }
 
+// NewButtonController constructs the controller and runs its board-specific
+// Init (dotButton/volumeButton paths and Init() itself are per-tag — see
+// evdev_controller_server.go / evdev_controller_crown.go).
 func NewButtonController() (*EvDevController, error) {
 	controller := &EvDevController{}
 	if err := controller.Init(); err != nil {

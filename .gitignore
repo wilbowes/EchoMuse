@@ -22,6 +22,12 @@ controller/models/
 *.db-wal
 *.db-shm
 
+# device/.android-sdk/ — downloaded cmdline-tools + platform + build-tools
+# for crown_launcher/build.sh (~150MB+), not source. See device/CLAUDE.md.
+device/.android-sdk/
+device/crown_launcher/build/
+device/crown_launcher/debug.keystore
+
 # The device-link PKI. em_pki.py writes tls/ NEXT TO THE DATABASE, so the
 # rule above about DB_PATH defaulting into controller/ applies here in exactly
 # the same way and for the same reason — a bare-metal dev run leaves a private

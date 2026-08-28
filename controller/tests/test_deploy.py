@@ -945,7 +945,12 @@ def test_a_failed_transfer_says_which_stage_it_failed_at():
             f"the {stage} failure must be distinguishable from the others"
         )
 
-    assert "if DETECT_MARKER not in detect_buf" in fn, (
+    # The link-vs-decoder distinction moved into em_decoder.py (2026-08-27,
+    # split out so it's testable without aiohttp — see test_decoder.py for
+    # the actual pinning of this behaviour) — check it there now, not in
+    # em_api.py's source text.
+    decoder_src = (CONTROLLER / "em_decoder.py").read_text()
+    assert "if detect_marker not in detect_buf" in decoder_src, (
         "a silent shell must report as a link problem, not a missing decoder"
     )
 

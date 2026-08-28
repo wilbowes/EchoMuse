@@ -656,6 +656,27 @@ def test_the_wizard_probe_list_matches_the_allowlist():
         f"collects")
 
 
+def test_the_crown_wizard_probe_list_matches_the_allowlist():
+    """
+    Same contract as test_the_wizard_probe_list_matches_the_allowlist, for
+    crown's separate, shorter allowlist — see _CROWN_PROVISION_PROBES's
+    comment for why it isn't just biscuit's list.
+    """
+    jsx = (Path(__file__).resolve().parent.parent
+           / "static" / "dashboard.jsx").read_text()
+    block = re.search(r"const _CROWN_PROVISION_PROBES = \{(.*?)\n  \};", jsx, re.S)
+    assert block, "dashboard.jsx no longer defines _CROWN_PROVISION_PROBES"
+    in_jsx = set(re.findall(r"^\s*([a-z_]+):", block.group(1), re.M))
+    in_py = set(S._CROWN_PROVISION_PROBES)
+
+    assert not (in_jsx - in_py), (
+        f"the crown wizard collects {sorted(in_jsx - in_py)}, which em_support "
+        f"drops on arrival — add them to _CROWN_PROVISION_PROBES")
+    assert not (in_py - in_jsx), (
+        f"em_support allows {sorted(in_py - in_jsx)}, which the crown wizard "
+        f"never collects")
+
+
 def test_home_assistant_display_names_are_redacted():
     """
     Ingress login provisions accounts from Home Assistant's user record, so

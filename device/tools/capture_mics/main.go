@@ -1,14 +1,18 @@
 //go:build server
 
-// capture_mics: captures raw 9-channel audio from the biscuit mic array
-// and writes it to /data/local/tmp/capture.raw for offline analysis.
+// capture_mics: captures raw mic array audio from a device's ALSA card and
+// writes it to /data/local/tmp/capture.raw for offline analysis.
 //
 // Usage:
-//   capture_mics [seconds]   default: 5
+//   capture_mics [seconds] [-card N] [-device N] [-channels N]
+//   defaults: 5s, card 0, device 24, 9 channels — the biscuit (Echo Dot) mic
 //
-// Output format: raw interleaved S24_3LE, 9 channels, 16kHz
-// Each frame: 9 samples × 3 bytes = 27 bytes
-// Each period (512 frames): 13,824 bytes
+// For crown (Echo Show 8): -device 22 -channels 6
+//   (card0,device22, 2x TLV320AIC3101, per docs/echo-show-8-hardware-map.md)
+//
+// Output format: raw interleaved S24_3LE at 16kHz, N channels
+// Each frame: N samples × 3 bytes
+// Each period (512 frames): N * 512 * 3 bytes
 //
 // Build inside echomuse-compiler Docker container:
 //   go build -tags server -o capture_mics .
@@ -16,6 +20,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -27,21 +32,23 @@ import (
 )
 
 const (
-	cardNr    = 0
-	deviceNr  = 24
-	channels  = 9
-	sampleRate = 16000
-	periodSize = 512
+	sampleRate  = 16000
+	periodSize  = 512
 	periodCount = 5
-	outputPath = "/data/local/tmp/capture.raw"
+	outputPath  = "/data/local/tmp/capture.raw"
 )
 
 func main() {
+	cardNr := flag.Int("card", 0, "ALSA card number")
+	deviceNr := flag.Int("device", 24, "ALSA device number (24=biscuit mic, 22=crown mic)")
+	channels := flag.Int("channels", 9, "channel count (9=biscuit, 6=crown)")
+	flag.Parse()
+
 	durationSecs := 5
-	if len(os.Args) > 1 {
-		n, err := strconv.Atoi(os.Args[1])
+	if flag.NArg() > 0 {
+		n, err := strconv.Atoi(flag.Arg(0))
 		if err != nil || n < 1 || n > 60 {
-			log.Fatalf("usage: capture_mics [seconds 1-60]")
+			log.Fatalf("usage: capture_mics [seconds 1-60] [-card N] [-device N] [-channels N]")
 		}
 		durationSecs = n
 	}
@@ -53,10 +60,10 @@ func main() {
 	stopMixer()
 
 	fmt.Printf("Opening ALSA card %d device %d: %d channels, %dHz, S24_3LE\n",
-		cardNr, deviceNr, channels, sampleRate)
+		*cardNr, *deviceNr, *channels, sampleRate)
 
-	device := tinyalsa.NewDevice(cardNr, deviceNr, pcm.Config{
-		Channels:    channels,
+	device := tinyalsa.NewDevice(*cardNr, *deviceNr, pcm.Config{
+		Channels:    *channels,
 		SampleRate:  sampleRate,
 		PeriodSize:  periodSize,
 		PeriodCount: periodCount,
@@ -109,7 +116,7 @@ func main() {
 		}
 	}
 
-	framesWritten := bytesWritten / (channels * 3) // 3 bytes per S24_3LE sample
+	framesWritten := bytesWritten / (*channels * 3) // 3 bytes per S24_3LE sample
 	durationMs := framesWritten * 1000 / sampleRate
 
 	fmt.Printf("Done.\n")

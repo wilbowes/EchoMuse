@@ -4,8 +4,6 @@ package speaker
 
 import (
 	"log"
-	"math"
-	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -16,8 +14,10 @@ import (
 	"github.com/Binozo/GoTinyAlsa/pkg/tinyalsa"
 )
 
-// cardNr/deviceNr live in pcmstatus.go so the host test can pin them against
-// the status path — this file is ARM-only (build tag `server`).
+// biscuit: speaker is card 0 device 23, mic is device 24.
+const cardNr = 0
+const deviceNr = 23
+
 const periodSize  = 2048
 const periodBytes = periodSize * 2 * 2 // 2 channels * 2 bytes = 8192
 
@@ -176,44 +176,9 @@ func (p *PcmSpeaker) Init() error {
 	return nil
 }
 
-// pcmFreeTimeout bounds the wait for another process to release the speaker.
-//
-// Generous, because the wait is the good outcome: releasing takes Android well
-// under a second once `stop media` lands, and a device that waits ten seconds
-// and then works is enormously better than one that gives up early. It is a
-// backstop against a holder that never lets go, not a tuning parameter.
-const pcmFreeTimeout = 10 * time.Second
-
-// waitForFreePcm blocks until the playback substream is released, or the
-// timeout expires.
-//
-// On timeout it RETURNS ANYWAY and lets the open proceed. That open may then
-// block forever, which is the pre-existing behaviour — this function's job is
-// to make the common case work and to leave a log line naming the holder when
-// it does not. Refusing to open would be a bigger behaviour change than the
-// bug warrants, and the proper fix for a permanently-held device is to stop
-// gating the rest of main() on the speaker at all.
-func waitForFreePcm(card, device int, timeout time.Duration) {
-	path := statusPath(card, device)
-	b, err := os.ReadFile(path)
-	if err != nil || pcmFree(string(b)) {
-		return // free, or no status file to consult — open immediately
-	}
-
-	log.Printf("[speaker] %s held by pid %d — waiting up to %s", path, pcmOwner(string(b)), timeout)
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		time.Sleep(200 * time.Millisecond)
-		b, err := os.ReadFile(path)
-		if err != nil || pcmFree(string(b)) {
-			log.Printf("[speaker] speaker released after %s", time.Since(deadline.Add(-timeout)).Round(time.Millisecond))
-			return
-		}
-	}
-	b, _ = os.ReadFile(path)
-	log.Printf("[speaker] speaker STILL held by pid %d after %s — opening anyway, this may block",
-		pcmOwner(string(b)), timeout)
-}
+// pcmFreeTimeout / waitForFreePcm now live in pcmstatus.go (untagged): both
+// boards' Init wait on the same procfs status file before opening, and
+// pcmstatus.go is already where the host test pins that path.
 
 // EnableSpeakerAmp switches the internal speaker amplifier back on.
 //
@@ -326,20 +291,8 @@ func (p *PcmSpeaker) report(st *StreamStats, plane string) {
 	}
 }
 
-// toStereo converts a mono S16 wire period into the stereo frames the ALSA
-// device requires. The stereo config is an I2S/codec-path constraint, not a
-// wire one — shipping two identical channels would double bandwidth for
-// nothing on links that are already marginal.
-func toStereo(data []byte) []byte {
-	n := len(data) / 2
-	period := make([]byte, n*4)
-	for i := 0; i < n; i++ {
-		lo, hi := data[i*2], data[i*2+1]
-		period[i*4+0], period[i*4+1] = lo, hi // L
-		period[i*4+2], period[i*4+3] = lo, hi // R
-	}
-	return period
-}
+// toStereo now lives in mix.go (untagged): it's pure byte arithmetic, no
+// ALSA/tinyalsa involved, and both boards' bindings call it.
 
 // PumpPeriod queues one period of VOICE audio (TTS, announcements). Called by
 // the WS client for each incoming 0x02 frame. Blocks until the ALSA loop has
@@ -432,25 +385,4 @@ func (p *PcmSpeaker) Close() {
 	log.Println("PcmSpeaker closed — output muted, amp off")
 }
 
-// periodRMS computes the RMS level of a stereo S16LE period, normalized to
-// 0..1 of int16 full-scale. Left channel only, every 4th frame — the wire
-// is mono duplicated L=R and the LED meter needs ~2 significant digits at
-// ~23Hz, so 512 of 2048 frames is plenty at a quarter of the cost. Runs on
-// the ALSA pump goroutine: no allocation, integer accumulate.
-func periodRMS(period []byte) float64 {
-	if len(period) < 4 {
-		return 0
-	}
-	var sum uint64
-	n := 0
-	// Stereo frame = 4 bytes (L16+R16); step 4 frames = 16 bytes.
-	for i := 0; i+1 < len(period); i += 16 {
-		s := int64(int16(uint16(period[i]) | uint16(period[i+1])<<8))
-		sum += uint64(s * s)
-		n++
-	}
-	if n == 0 {
-		return 0
-	}
-	return math.Sqrt(float64(sum)/float64(n)) / 32768.0
-}
+// periodRMS now lives in mix.go (untagged): same reasoning as toStereo.

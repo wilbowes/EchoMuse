@@ -7,11 +7,26 @@ specification rather than by reading the Dot's source. The controller is
 already board-agnostic; a new board is almost entirely a fresh set of hardware
 **Bindings** behind this same wire protocol.
 
-Terms in **bold** are defined in [CONTEXT.md](../CONTEXT.md). The authoritative
+Terms in **bold** are used in their ordinary sense here (device, controller,
+capability, plane); no external glossary is required. The authoritative
 source for every message and field is the code cited inline; where this
 document and the code disagree, the code wins and this document is the bug.
 
-## The two rules everything else serves
+**Stability.** Each section below is marked STABLE or EXPECTED TO CHANGE.
+STABLE means implement against it now. EXPECTED TO CHANGE means the shape
+described is real and current, but a specific, already-decided change is
+coming and a new implementer should not treat it as the permanent target —
+follow the note in that section for what changes and what doesn't.
+
+**Negotiation is one-directional, and that's a known limit, not an
+omission.** The device announces what it implements; the controller reads
+that and replies with `pending` or silence (`em_controller.py:2906`) — it
+announces nothing back. That's sufficient while both halves ship from this
+repo. It stops being sufficient the moment a third-party device wants to use
+something conditionally on what a *specific controller version* supports,
+and nothing in this document solves that yet.
+
+## The two rules everything else serves (STABLE)
 
 Both are guarded by `controller/tests/test_capabilities.py`. A board that
 honours them can pair with any controller version, and vice versa.
@@ -27,11 +42,17 @@ honours them can pair with any controller version, and vice versa.
   measurement, absence stores as **NULL, not 0** — a device that cannot report
   a thing must not read as having reported zero.
 
-## The three planes
+## The three planes (STABLE, discovery EXPECTED TO CHANGE)
 
 Each device opens **three** WebSocket connections to the controller. The
 controller is discovered by mDNS (`_emcontroller._tcp.local`); the device dials
 out on all three.
+
+**mDNS won't stay the only discovery path.** Static IP and DNS-based discovery
+land alongside it (#106, #166) for routed and tunneled setups where mDNS
+doesn't reach. mDNS stays as one option among several, not the sole mechanism
+— a board implementer should treat "how do I find the controller" as
+configurable, not hardcoded to `_emcontroller._tcp.local`.
 
 | Path | Payload | Direction | Purpose |
 |------|---------|-----------|---------|
@@ -43,7 +64,17 @@ All three exist in plain (`ws://`) and TLS (`wss://`) form; see
 [Link auth & TLS](#link-auth--tls). The `/shell` plane is not dialled until the
 controller asks for it.
 
-## Registration and capabilities
+## Registration and capabilities (STABLE)
+
+**No namespace convention exists yet for capability strings.** All current
+strings (`mic`, `speaker`, `leds`, ...) are short, unprefixed, and minted by
+this repo. Nothing stops a third-party device from minting a new string that
+later collides with one this project mints for something else — both sides
+would silently ignore the mismatch, per the degrade rule above, and neither
+side gets an error. Until a registry or vendor-prefix scheme exists, a
+third-party capability should pick a name unlikely to collide (e.g. a
+project-specific prefix) and expect it to be renamed later if this project
+claims the same string for something else.
 
 Immediately after the `/control` socket opens, the device sends one `register`
 message (`device/internal/client/control.go`):
@@ -126,12 +157,26 @@ absent optional fields take prior/default behaviour.
 | `shell_open` / `shell_close` | `pty?` | Ask the device to dial `/shell` (`pty:true` = interactive) / close it |
 | `music_flush` / `speaker_flush` | — | Flush the music / voice buffer (barge-in uses `speaker_flush`) |
 
-## `/data` — binary frames
+## `/data` — binary frames (playback path EXPECTED TO CHANGE)
 
 First byte is the frame type; the rest is the payload. **The type codes are
 namespaced by direction** — `0x04`/`0x05` mean different things depending on who
 sent them, and this is deliberate (`device/internal/client/data.go:25`). A
 board implementer must not read a single global table.
+
+**`0x01`–`0x05` are taken, in both directions. No range is reserved yet for a
+third-party frame type.** Don't mint a new code above `0x05` and assume it's
+free — treat this as unallocated space until a reservation scheme exists,
+and check back here rather than guessing.
+
+**The controller→device playback frames (`0x02`–`0x05`) are the fallback
+path, not the target.** #334 moves the device to fetching its own audio from
+the controller rather than having PCM pushed at it. Push isn't going away —
+it stays permanently as the capability-gated fallback for a device that
+doesn't implement fetch, no flag day — but new device work should target the
+fetch model once it lands, not build further on push. Implement against
+`0x02`/`0x03` today if that's what's specified for your board's MVP, but
+don't treat them as the permanent playback contract.
 
 **Controller → Device (playback)**
 
@@ -164,7 +209,7 @@ Mic stream shapes (`device/CLAUDE.md`, Device audio pipeline):
   ends with a `0x04` sentinel when the gate closes after speech, and ends with
   `0x05` if no speech arrived within the timeout.
 
-## Config push — `ConfigMessage`
+## Config push — `ConfigMessage` (fields STABLE, output-chain ownership EXPECTED TO CHANGE)
 
 The controller sends `config` on connect and on any per-device config change.
 Fields are camelCase (`device/internal/config/config.go`). **Partial update:
@@ -189,16 +234,25 @@ ledScene, ledListenColor, ledThinkColor,
 meterAttack, meterDecay, meterFloor, meterGamma, meterRef, meterCurve,
 wakeArbitrationMs, duckDb,
 buttonSingleTapEvent, buttonMultiTapMs,
-owwOnDevice, saveUtterances
+saveUtterances
 ```
 
-Not every field is acted on by the device. The output-chain keys (`limiter*`,
-`bassGuard*`), `eq*`, `saveUtterances`, `wakeArbitrationMs`, and the `button*`
-timing keys are **controller-side** — that processing happens before the audio
-reaches the wire, or is used only for config scoping. `owwOnDevice` is both
-controller-consumed (scoping) and device-acted. A new board only needs to
-implement the keys relevant to hardware it actually has; unknown keys are
-ignored, which is the correct degrade.
+Not every field is acted on by the device. `saveUtterances`,
+`wakeArbitrationMs`, and the `button*` timing keys are **controller-side
+only** — used for config scoping, never applied on-device. `owwOnDevice` is
+both controller-consumed (scoping) and device-acted where `oww_shadow` /
+`oww_trigger` are announced.
+
+**The output-chain keys (`eq*`, `limiter*`, `bassGuard*`) are
+capability-dependent, not unconditionally controller-side.** That's true
+today because output processing happens entirely controller-side before
+audio reaches the wire — but 3.0.0 moves the output chain onto the device
+(#243, #272) for boards that implement it. Read it as: controller-side for a
+device *without* the relevant capability, device-acted for one *with* it.
+Don't hardcode "these keys are never applied on-device" into a board binding
+— check the capability instead. A new board only needs to implement the keys
+relevant to hardware it actually has; unknown keys are ignored, which is the
+correct degrade.
 
 ## Link auth & TLS
 
@@ -242,25 +296,28 @@ to do its own job (see the direction note in the repo-root `CLAUDE.md`).
 
 ## Board profile — `crown` (Echo Show 8, 1st gen)
 
-The `crown` bindings are built behind a Go build tag mirroring `server`
-(ADR-0001). The hardware inventory — ALSA cards/devices, formats, input-device
+The `crown` bindings are built behind a Go build tag mirroring `server` — one
+binary per board, chosen at compile time, no runtime "which board am I"
+detection. The hardware inventory — ALSA cards/devices, formats, input-device
 paths, autostart — lives in
 [echo-show-8-hardware-map.md](echo-show-8-hardware-map.md); this section records
 only what the *interface* commits to for MVP.
 
-**Capabilities for MVP** (subset of the Dot's):
+**Capabilities for MVP** (mostly a subset of the Dot's — `display` is crown-only, the Dot has no screen):
 
 | Capability | crown MVP | Note |
 |------------|-----------|------|
 | `speaker` | yes | `card0,device0` → RT5616 (issue #5). Streams clean, but `Ext_Speaker_Amp_Switch` is inverted (`On`=silent, `Off`=audible) — same trap as checkers, confirmed by ear 2026-08-26. Must be driven `Off` in the binding's init; the boot default is `On` |
 | `mic` | **proven** | `card0,device22`, 6ch/16kHz/`S24_3LE`, confirmed by capture on real hardware 2026-08-26 — real signal, not digital zeros. HW_REFINE matches checkers' driver constants exactly. Open: quiet-room/across-room SNR, not raw capture — see below |
 | `buttons` | yes | Resolved by name (`gpio-keys` vol, action button, camera shutter) |
-| `leds` / `led_anim` | **no** | No LED ring; a "voice turn" status overlay on the display is deferred past MVP and even then stays out of the user's way |
-| `audio_mix` | later | Not required for the MVP voice loop |
+| `leds` | **yes** | No physical ring, but the string stays on: `StatusOverlay` (in `crown_launcher`) renders the listening-ring hint as a status strip along the screen's top edge, so the wake cue still has something to paint with |
+| `led_anim` | no | No ring for a local animation engine to spin frames for |
+| `display` | **yes** | Tells the controller this device has a screen so the dashboard can draw a screen-bodied device icon (`dashboard.jsx`'s `DeviceIcon`) — never inferred from the decorative model string |
+| `audio_mix` | **yes** (2026-08-27) | Announced now that it's confirmed implemented — `pcm_speaker_crown.go` carries the same two-plane mixer as biscuit, just wasn't advertised; music ducks under a voice turn on real hardware, verified live |
 | `ambient_light` | tbd | Only if a readable sensor is found |
 | `oww_shadow` / `oww_trigger` | no (MVP) | MVP uses **controller-side** wake word |
 
-**Audio ownership** (ADR-0002): `crown` seizes the mic and speaker exclusively
+**Audio ownership**: `crown` seizes the mic and speaker exclusively
 while EchoMuse runs, exactly like the Dot. The mic is **held continuously** —
 MVP wake word is controller-side, so the device streams mic PCM the whole time
 or it goes deaf to the next wake word. The **speaker** is grabbed for a turn
@@ -273,8 +330,8 @@ format the Dot already captures (`device/internal/bindings/mic/pcm_microphone.go
 9ch/16000 Hz/`tinyalsa.PCM_FORMAT_S24_3LE`), just fewer channels, same
 `Channels * 3` stride, same `DeviceConfig`-driven path downstream. Proven on
 real hardware 2026-08-26 with `device/tools/capture_mics`: opens clean, real
-signal on all 4 mic channels, no digital zeros. `device/tools/hw_refine_probe`
-confirms the driver's own range matches checkers' constants exactly. Full
+signal on all 4 mic channels, no digital zeros. The driver's own HW_REFINE
+range was confirmed to match checkers' constants exactly. Full
 history (why "digital zeros" was the original wrong read, the gain-fix
 investigation, the actual capture data) is in
 [echo-show-8-hardware-map.md](echo-show-8-hardware-map.md#on-hardware-capture-2026-08-26--the-gono-go-measurement-done).

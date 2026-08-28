@@ -826,18 +826,19 @@ func wifiRSSI() *int {
 
 // applyHardwareConfig runs tinymix commands for fields that map to hardware.
 // Called whenever the controller pushes a config message.
+//
+// adcDigitalGainCtls/adcMicpgaCtls are per-board (server_hwconfig.go /
+// crown_hwconfig.go) — biscuit has four ADCs to keep in step, crown two.
 func applyHardwareConfig(msg config.ConfigMessage) {
 	if msg.AdcDigitalGain > 0 {
-		tinymix("89", strconv.Itoa(msg.AdcDigitalGain), strconv.Itoa(msg.AdcDigitalGain))
-		tinymix("107", strconv.Itoa(msg.AdcDigitalGain), strconv.Itoa(msg.AdcDigitalGain))
-		tinymix("125", strconv.Itoa(msg.AdcDigitalGain), strconv.Itoa(msg.AdcDigitalGain))
-		tinymix("143", strconv.Itoa(msg.AdcDigitalGain), strconv.Itoa(msg.AdcDigitalGain))
+		for _, ctl := range adcDigitalGainCtls {
+			tinymix(ctl, strconv.Itoa(msg.AdcDigitalGain), strconv.Itoa(msg.AdcDigitalGain))
+		}
 	}
 	if msg.AdcMicpga > 0 {
-		tinymix("92", strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
-		tinymix("110", strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
-		tinymix("128", strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
-		tinymix("146", strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
+		for _, ctl := range adcMicpgaCtls {
+			tinymix(ctl, strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
+		}
 	}
 }
 

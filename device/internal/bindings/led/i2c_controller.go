@@ -1,3 +1,11 @@
+//go:build !crown
+
+// Biscuit's 12-LED i2c ring controller. Tagged "not crown" rather than
+// "server": internal/server imports this package unconditionally and is
+// host-tested with no board tag at all (ci.yml never passes one to
+// `go test ./internal/...`), so biscuit has to stay the default for every
+// build that isn't explicitly another board — same fallback-to-biscuit
+// philosophy as the rest of this codebase.
 package led
 
 import (

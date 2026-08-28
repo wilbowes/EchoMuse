@@ -436,3 +436,84 @@ jobs:
       - name: Run go vet
         working-directory: device
         run: go vet ./internal/... ./pkg/...
+
+  device-firmware-build-crown:
+    name: Device firmware build (crown, pinned compiler)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true  # GoTinyAlsa replace directive in device/go.mod —
+          # crown never imports it, but the module graph still needs it
+          # present to resolve, same as compile.sh's own unconditional mount.
+      # Every *_crown.go file (mic/speaker/led/buttons/capabilities bindings,
+      # internal/alsa, crown_launcher's counterpart PlaybackServer socket)
+      # was, until this job existed, invisible to CI entirely — none of the
+      # jobs above pass `-tags crown`, so a build-breaking typo or interface
+      # drift in this whole board's worth of code would only surface on
+      # someone's next manual `./compile.sh crown` or a real hardware flash.
+      # Found in review 2026-08-27. Mirrors device-firmware-build exactly,
+      # `-tags crown` instead of `-tags server`.
+      - name: Build compiler image
+        run: docker build -t echomuse-compiler device/compiler/
+      - name: Build firmware (crown)
+        run: |
+          docker run --rm --entrypoint bash \
+            -e CGO_LDFLAGS="-Wl,--hash-style=both" \
+            -e CGO_CFLAGS="-Wno-deprecated-declarations -Wno-null-dereference" \
+            -v "$PWD/device":/sdk \
+            -v "$PWD/GoTinyAlsa":/GoTinyAlsa \
+            echomuse-compiler \
+            -c "cd /sdk && go build -tags crown -o build/crown ./cmd/"
+      - name: Check it is an ARM binary
+        run: |
+          file device/build/crown
+          file device/build/crown | grep -q "ARM" || {
+            echo "::error::crown firmware is not an ARM binary"; exit 1; }
+      - name: go vet (crown)
+        # Same compiler image, same cross-toolchain — vet needs to resolve
+        # the cgo boundary (internal/aec is unconditional either way)
+        # against the pinned NDK, the same reason the build itself has to
+        # run in this image rather than on the host's amd64 toolchain.
+        run: |
+          docker run --rm --entrypoint bash \
+            -e CGO_LDFLAGS="-Wl,--hash-style=both" \
+            -e CGO_CFLAGS="-Wno-deprecated-declarations -Wno-null-dereference" \
+            -v "$PWD/device":/sdk \
+            -v "$PWD/GoTinyAlsa":/GoTinyAlsa \
+            echomuse-compiler \
+            -c "cd /sdk && go vet -tags crown ./internal/... ./pkg/... ./cmd/..."
+
+  crown-launcher-build:
+    name: crown_launcher build (Java, no gradle)
+    runs-on: ubuntu-latest
+    # device/crown_launcher/ (PlaybackServer, ServerService, StatusOverlay,
+    # BootReceiver — the socket_pcm_crown.go's counterpart on the Android
+    # side) had zero CI coverage at all until this job: build.sh was
+    # hand-invoked only, referenced by no workflow. Found in review
+    # 2026-08-27. This proves the APK still compiles against the manifest
+    # and platform API; it does not run it — that still needs a device.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: android-actions/setup-android@v3
+      - name: Install SDK components build.sh needs
+        run: sdkmanager "platforms;android-30" "build-tools;30.0.3"
+      - name: Build APK
+        working-directory: device/crown_launcher
+        run: |
+          export ANDROID_HOME="$ANDROID_SDK_ROOT"
+          ./build.sh
+      - name: Check the APK exists and is a real zip
+        run: |
+          f=device/crown_launcher/build/crown_launcher.apk
+          test -f "$f" || { echo "::error::$f was not produced"; exit 1; }
+          # Not `file "$f" | grep "Zip archive"` — modern libmagic recognises
+          # the APK signature specifically and reports "Android application
+          # package (APK)" instead, which doesn't contain that string and
+          # failed this check on a build.sh output that was actually fine
+          # (found in CI, 2026-08-28). unzip -l on the two files that make it
+          # an APK and not just any zip is what's actually being asked here.
+          unzip -l "$f" | grep -q "AndroidManifest.xml" || {
+            echo "::error::$f has no AndroidManifest.xml — not a valid APK"; exit 1; }
+          unzip -l "$f" | grep -q "classes.dex" || {
+            echo "::error::$f has no classes.dex — not a valid APK"; exit 1; }
