@@ -113,6 +113,20 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
   rather than a user preference, and it exists so the two paths can be A/B'd on
   one device without a controller round trip.
 
+  **The reference is scaled by the device's own volume, and this is what made
+  it work.** The tap is pre-volume, so left alone every volume change is a step
+  in the echo path gain that the filter can only find by re-converging. First
+  hardware run, 2026-08-29: cancellation collapsed to **−1.7dB** immediately
+  after a change and took 3–4s to recover, over and over, while `ref` sat at
+  4000–8000 through a `mic` swing of 1263→16766. We are not obliged to guess
+  the scalar — the device SETS that volume — so `SetPlaybackLevel` feeds it
+  from the existing volume-change callback and the reference is multiplied by
+  `10^((level−127)/40)`, the control's own 0.5dB-per-step law. Worth **32.7dB**
+  of residual in the frames after a change, in the test that reproduces it.
+  Software-tap frames are deliberately NOT scaled: that ring holds audio
+  written before the change, so the correction would land on the wrong
+  samples, and leaving it alone preserves the baseline being compared against.
+
   **Unity gain on the extraction, non-negotiably.** Mic channels get
   `micGainDb` (+24dB default) applied pre-truncation because speech sits at
   ~−70dBFS; the reference is playback at −7.3dBFS, and the same gain on it is

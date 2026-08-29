@@ -425,6 +425,13 @@ func main() {
 	// Fires on every Set() call: physical button press or future volume_set command.
 	s.SetVolumeChangeCallback(func(level int) {
 		controlClient.SendVolumeState(level)
+		// The hardware echo reference is tapped upstream of the DAC volume
+		// control, so it holds full scale whatever the user sets. Tell the
+		// canceller the scalar it cannot see, or every volume change is an
+		// echo-path gain step the adaptive filter can only find by
+		// re-converging — measured on 2026-08-29 as cancellation dropping to
+		// -1.7dB after a change and taking 3-4s to recover, repeatedly.
+		canceller.SetPlaybackLevel(level)
 	})
 
 	// Volume set from controller (HA MediaPlayerCommandRequest forwarded down).

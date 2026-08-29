@@ -377,3 +377,87 @@ func TestSwitchingSourcesDropsStaleRing(t *testing.T) {
 		t.Fatalf("stale ring survived the switch: %d samples", c.count)
 	}
 }
+
+// TestReferenceScalingSurvivesAVolumeChange is the regression for what the
+// field log showed on 2026-08-29: the hardware reference is tapped upstream
+// of the DAC volume control, so a volume change is a step in the echo path
+// gain that the filter can only discover by re-converging — cancellation
+// dropped to -1.7dB immediately after a change and took 3-4 seconds to climb
+// back, over and over.
+//
+// The device SETS that volume, so it need not be guessed. Two identical runs,
+// one told about the change and one not, and the told one must be better in
+// exactly the frames after it.
+func TestReferenceScalingSurvivesAVolumeChange(t *testing.T) {
+	const frames = 160
+	const changeAt = 100
+	const echoDelay = 33
+	// 87 is 40 steps below unity at 0.5dB each: exactly -20dB, so the echo
+	// drops by a clean factor of 10.
+	const newLevel = 87
+	const newGain = 0.1
+
+	run := func(tellIt bool) float64 {
+		c := New()
+		c.SetParams(true, 0, 200)
+		c.SetHardwareRef(true)
+		c.SetPlaybackLevel(127) // unity to begin with
+
+		signal := synth(frames * FrameSize)
+		var residual float64
+		measured := 0
+		for f := 0; f < frames; f++ {
+			lo, hi := f*FrameSize, (f+1)*FrameSize
+			gain := 1.0
+			if f >= changeAt {
+				gain = newGain
+			}
+			if f == changeAt && tellIt {
+				c.SetPlaybackLevel(newLevel)
+			}
+			mic := make([]int16, FrameSize)
+			for i := 0; i < FrameSize; i++ {
+				src := lo + i - echoDelay
+				if src >= 0 {
+					mic[i] = int16(-float64(signal[src]) * gain)
+				}
+			}
+			out := c.ProcessWithRef(toBytes(mic), toBytes(signal[lo:hi]))
+			// The transient is what is being measured: the frames right
+			// after the change, before any filter would have re-converged.
+			if f >= changeAt && f < changeAt+15 {
+				residual += rms(out)
+				measured++
+			}
+		}
+		return residual / float64(measured)
+	}
+
+	told, untold := run(true), run(false)
+	t.Logf("post-change residual RMS: told %.1f, untold %.1f (%.1fdB better)",
+		told, untold, 20*math.Log10(untold/math.Max(told, 1e-9)))
+	if told >= untold {
+		t.Fatalf("scaling the reference did not help across a volume change: "+
+			"told %.1f, untold %.1f", told, untold)
+	}
+}
+
+func TestPlaybackLevelScaleIsTheCodecLaw(t *testing.T) {
+	c := New()
+	// 0.5dB per step, unity at 127 — the control's own law, see Volume in
+	// device/CLAUDE.md. Getting this wrong scales the reference to something
+	// the speaker never played, which is worse than not scaling at all.
+	for _, tc := range []struct {
+		level int
+		want  float64
+	}{
+		{127, 1.0},      // unity
+		{87, 0.1},       // -20dB
+		{47, 0.01},      // -40dB, the button floor
+	} {
+		c.SetPlaybackLevel(tc.level)
+		if math.Abs(c.refScale-tc.want) > tc.want*0.001 {
+			t.Errorf("level %d → scale %.6f, want %.6f", tc.level, c.refScale, tc.want)
+		}
+	}
+}
