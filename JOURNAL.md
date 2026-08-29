@@ -1812,6 +1812,69 @@ with its own leakage, so a weaker 440Hz component would not have shown. It
 does not affect production — the wire is mono and the device duplicates L=R —
 but it decides which channel is the correct reference if that ever changes.
 
+## 2026-08-29 (evening) — the reference was right, the volume was the problem
+
+Built the hardware reference into the mic path (#385) and ran it on Test Echo
+1. Two rounds, and the first one is the instructive half.
+
+**Round one: it worked mechanically and cancelled worse than what it
+replaced.** The detector fired correctly — ch8 is bit-exact silent at idle even
+with our own silence loop running, so the thing most likely to sink it did not
+— and every frame went through `src=hw(ch8)`. Attenuation was **5.9dB mean
+against the software tap's ~14dB, with one frame at −1.7dB**, i.e. the AEC
+making the signal worse.
+
+**The cause was in the timestamps rather than the DSP.** Cancellation collapsed
+immediately after every volume change and took 3–4 seconds to climb back, over
+and over. The reference confirmed it directly: `ref` sat at 4000–8000 through a
+`mic` swing of 1263→16766. The tap is upstream of the DAC volume control, so a
+volume change is a step in echo path gain the filter can only find by
+re-converging. That limitation was *documented* when the reference was
+discovered — measured as unchanged across a commanded 33.5dB cut — and still
+read as a footnote until it was the whole result.
+
+**The fix is a scalar the device already knows.** It SETS that volume, so
+`SetPlaybackLevel` takes it off the existing volume-change callback and scales
+the reference by `10^((level−127)/40)`, the control's own 0.5dB-per-step law.
+Round two: **14.2dB mean, median 14.2, range 11.1–16.7** — against 5.9dB mean
+and a 14dB-wide spread before.
+
+**And that is parity, not victory.** 14.2dB against a documented ~14dB is the
+same number. The case for this change is that it reaches it with the ring, the
+decimator, `aecDelayMs` and the occupancy governor deleted, and that it holds
+across volume changes where the software path structurally cannot (its ring
+holds pre-change audio, so the correction would land on the wrong samples). A
+like-for-like A/B in one session is still owed before claiming even parity,
+since ~14dB comes from different conditions.
+
+**A wake-word outage during the test was not ours, and one line proved it.**
+`[mic] clock: 180.6s audio over 180.2s wall (deficit −443ms, stalls=0,
+sub_drops=0)` — the capture path was perfectly healthy throughout. What
+happened was a 9.2-second gap in frame delivery (`maxGap=9168ms`,
+`minDepth=0`), the controller killing the data plane on a keepalive timeout,
+and the device then sitting deaf for **34 seconds** because nothing restarted
+the mic stream until the controller's zombie ladder did. Network-scale, not
+scheduling-scale, and the ~1KB per 160ms batch this change adds cannot produce
+it. Worth noting separately: a data-plane reconnect that does not restart the
+mic stream is a real deaf window the ladder bounds rather than prevents.
+
+**EQ presets rebuilt from the measurement** (#386). The old `Clarity` put +7dB
+on band 5 (3500Hz) — exactly where the driver peaks +8.9dB — landing around
++16dB at 3150 relative to 1kHz. It was making a harsh speaker harsher, and
+nobody could have known without the sweep. `Warmth` had the right shape at a
+fraction of the size, which is a good ear arriving at the same answer without
+the numbers. Now Flat / Speech / Music, with 125 left at zero because it is a
+shelf that would push everything below it into the bass guard, and 5500/8000
+left at zero because they moved up to 13.8dB between placements.
+
+**On band count**, asked and answered: eight octave-spaced bands at Q≈1.4 is
+the right resolution for a *taste* control and matches convention. It cannot do
+driver correction and neither could eighty, because that needs +26dB at 150Hz
+against our ±12dB range. Stock does not ship a user EQ at all — it applies a
+1024-tap FIR invisibly. The answer to #247 is a fixed measured correction
+stage with the eight-band EQ on top, which is what that issue already said.
+Note `eqBands` stores bare gains with no frequency metadata, so changing band
+centres silently reinterprets every saved curve.
 ## 2026-08-30 — the long-response cutout, root-caused; and why the AEC is stuck at ~10dB
 
 Two answers today, both of which had been mistaken for other things.

@@ -4,7 +4,9 @@
 // # Mic geometry (confirmed empirically, 2026-05)
 //
 // 6 perimeter mics at r=36mm, 60° intervals, 30° offset from 12 o'clock.
-// 1 centre mic. Ch7 and Ch8 are unconnected.
+// 1 centre mic. Ch7 and Ch8 are NOT mics: they are a stereo loopback of the
+// device's own playback — the hardware echo reference (see echoRefCh below
+// and SETUP.md's Mic Array section, measured 2026-08-29).
 //
 //	Ch0 → MK1 → 330°  (11 o'clock)  confirmed empirically 2026-05
 //	Ch1 → MK2 →  30°  ( 1 o'clock)
@@ -13,6 +15,8 @@
 //	Ch4 → MK5 → 210°  ( 7 o'clock)
 //	Ch5 → MK6 → 270°  ( 9 o'clock)
 //	Ch6 → MK7 → centre (omnidirectional)
+//	Ch7 → playback echo reference, LEFT  (the driver never plays this side)
+//	Ch8 → playback echo reference, RIGHT (what the driver actually emits)
 //
 // # Algorithm
 //
