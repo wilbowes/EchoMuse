@@ -63,6 +63,15 @@ const (
 	// Centre mic channel — used for wake word detection (omnidirectional)
 	centreCh = 6
 
+	// Hardware echo reference — NOT a microphone. Ch7 and Ch8 are a stereo
+	// loopback of the device's own playback, arriving in the same TDM frame
+	// as the mic samples, and the internal driver plays the RIGHT channel
+	// only (measured 2026-08-29: left silent gives 55dB less at the mic; see
+	// SETUP.md's Mic Array section). So ch8 is the reference and ch7 carries
+	// a signal the speaker never emits — using ch7 would be cancelling
+	// against audio nobody heard.
+	echoRefCh = 8
+
 	// Smoothing constants
 	smoothAlpha   = 0.9    // fast smoother (~320ms time constant at 32ms/period)
 	baselineAlpha = 0.995  // slow smoother (~10s time constant) — tracks background noise
@@ -462,6 +471,29 @@ func (b *Beamformer) extractChannel(raw []byte, ch int, gain float64) []byte {
 		out[i*2+1] = byte(uint16(v) >> 8)
 	}
 	return out
+}
+
+// EchoRef extracts the hardware echo reference (ch8) from the same raw
+// period the mic channels come from, as 16kHz mono S16 — the AEC's far-end
+// input, sample-aligned with the near-end by construction because both
+// arrive in one TDM frame off one ADC clock.
+//
+// UNITY GAIN, deliberately and not negotiably. Every mic extraction applies
+// micGainDb (+24dB by default) pre-truncation to recover resolution from
+// speech sitting at ~-70dBFS. The reference is not speech at -70dBFS: it is
+// the playback stream at full digital scale, measured at -7.3dBFS, and
+// +24dB on that is 17dB of hard clipping. A clipped reference does not
+// merely cancel badly, it teaches the adaptive filter a distorted echo
+// path.
+//
+// Returns nil when the buffer is short, which callers read as "no hardware
+// reference this period" and fall back rather than cancelling against
+// silence.
+func (b *Beamformer) EchoRef(raw []byte) []byte {
+	if len(raw) < frameSize {
+		return nil
+	}
+	return b.extractChannel(raw, echoRefCh, 1.0)
 }
 
 // ClippedSamples returns the running count of samples clamped by the mic

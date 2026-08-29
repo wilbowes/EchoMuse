@@ -116,6 +116,64 @@ type Canceller struct {
 	farPeak int32
 
 	sizeWarned bool // one-shot guard for the unsupported-buffer-size log
+
+	// Hardware far-end reference (#385). When set, the reference comes from
+	// ch8 of the mic capture — the device's own playback, looped back in the
+	// SAME TDM frame as the near-end samples — and the ring, the decimator,
+	// aecDelayMs and the occupancy governor are all bypassed, because every
+	// one of them exists to answer "where in time is the far end", which
+	// arriving in the same frame answers by construction.
+	//
+	// Owned here rather than decided at the call site so WriteFar and
+	// ProcessWithRef cannot disagree about which source is live: a period
+	// pushed into the ring while the hardware path is running would be
+	// consumed by nothing and sit there aging.
+	hwRef bool
+	// Periods seen with a usable hardware reference, and with one that was
+	// silent. Their ratio is the diagnosis when cancellation is poor: an
+	// always-silent reference is a capture/extraction fault, not a filter
+	// one, and reads identically from the attenuation line alone.
+	hwFrames uint64
+	hwSilent uint64
+}
+
+// SetHardwareRef selects the far-end source. True takes it from ch8 of the
+// mic capture; false uses the software tap at the speaker ALSA write.
+//
+// Switching drops any ring contents: on the way in they would never be
+// consumed, and on the way out they are stale by however long the hardware
+// path ran. The filter state is deliberately KEPT — the physical echo path
+// has not changed, only our view of the signal driving it, and the two
+// references are the same audio to within the converter delay the filter
+// already absorbs.
+func (c *Canceller) SetHardwareRef(on bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.hwRef == on {
+		return
+	}
+	c.hwRef = on
+	c.head, c.tail, c.count = 0, 0, 0
+	c.dsum, c.dcnt = 0, 0
+	log.Printf("[aec] far-end reference: %s",
+		map[bool]string{true: "hardware (ch8, frame-aligned)",
+			false: "software tap (ring + aecDelayMs)"}[on])
+}
+
+// Enabled reports whether cancellation is armed. Callers use it to skip
+// preparing a far-end reference that would be discarded — the AEC defaults
+// to OFF, so the extraction is wasted work on most devices most of the time.
+func (c *Canceller) Enabled() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.enabled
+}
+
+// HardwareRef reports the current far-end source.
+func (c *Canceller) HardwareRef() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.hwRef
 }
 
 // New returns a disabled Canceller. Call SetParams (config push) to arm it.
@@ -208,6 +266,12 @@ func (c *Canceller) WriteFar(period []byte) {
 	if !c.enabled {
 		return
 	}
+	if c.hwRef {
+		// Nothing drains the ring on the hardware path, so filling it would
+		// peg it at ringCap and leave the far-end telemetry describing a
+		// buffer no cancellation ever reads.
+		return
+	}
 	n := len(period) / 4 // frames (2ch × 2 bytes)
 	for i := 0; i < n; i++ {
 		l := int16(binary.LittleEndian.Uint16(period[i*4:]))
@@ -255,9 +319,44 @@ func (c *Canceller) WriteFar(period []byte) {
 // Hence: any size this function cannot handle is LOGGED, never silently
 // bypassed. Called from the mic goroutine.
 func (c *Canceller) Process(mono []byte) []byte {
+	return c.process(mono, nil)
+}
+
+// ProcessWithRef cancels using a far-end reference supplied by the CALLER,
+// taken from ch8 of the same raw mic period (#385). Both streams therefore
+// come off one ADC clock in one TDM frame, so alignment is structural rather
+// than inferred: the residual is the +33-sample (2.06ms) converter and
+// acoustic delay measured on hardware, which sits far inside the filter tail
+// and is absorbed like any other room delay. The measured polarity inversion
+// is likewise learned by the filter.
+//
+// hwRef must be set (SetHardwareRef) or this falls back to the ring, so that
+// a caller and the canceller cannot disagree about which reference is live.
+// A nil or short ref is treated as "no reference this period" and the frame
+// passes through uncancelled rather than being cancelled against silence —
+// which would be indistinguishable from a working AEC with nothing playing.
+func (c *Canceller) ProcessWithRef(mono, ref []byte) []byte {
+	return c.process(mono, ref)
+}
+
+func (c *Canceller) process(mono, hwref []byte) []byte {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.enabled || c.st == nil {
+		return mono
+	}
+	// The hardware path is only taken when both sides agree it is live and
+	// the caller actually supplied a matching period.
+	useHW := c.hwRef && hwref != nil && len(hwref) == len(mono)
+	if c.hwRef && !useHW {
+		// Counted, not logged per period: at 31 periods/s a log line here
+		// would bury the very telemetry used to diagnose it.
+		c.hwSilent++
+		if c.hwSilent == 1 || c.hwSilent%256 == 0 {
+			log.Printf("[aec] hardware reference missing or mismatched "+
+				"(mic %db, ref %db, occurrences=%d) — frames passed through",
+				len(mono), len(hwref), c.hwSilent)
+		}
 		return mono
 	}
 	if len(mono) == 0 || len(mono)%(FrameSize*2) != 0 {
@@ -282,14 +381,24 @@ func (c *Canceller) Process(mono []byte) []byte {
 			mic[i] = int16(binary.LittleEndian.Uint16(sub[i*2:]))
 		}
 		short := 0
-		for i := 0; i < FrameSize; i++ {
-			if c.count > 0 {
-				ref[i] = c.ring[c.tail]
-				c.tail = (c.tail + 1) % ringCap
-				c.count--
-			} else {
-				ref[i] = 0
-				short++
+		if useHW {
+			// Same frame, same clock — a straight copy, no ring, no delay
+			// bookkeeping. This is the whole point of #385.
+			hsub := hwref[off : off+FrameSize*2]
+			for i := 0; i < FrameSize; i++ {
+				ref[i] = int16(binary.LittleEndian.Uint16(hsub[i*2:]))
+			}
+			c.hwFrames++
+		} else {
+			for i := 0; i < FrameSize; i++ {
+				if c.count > 0 {
+					ref[i] = c.ring[c.tail]
+					c.tail = (c.tail + 1) % ringCap
+					c.count--
+				} else {
+					ref[i] = 0
+					short++
+				}
 			}
 		}
 		if short > 0 {
@@ -321,8 +430,14 @@ func (c *Canceller) Process(mono []byte) []byte {
 				if outAvg > 0 {
 					att = 20 * math.Log10(inAvg/outAvg)
 				}
-				log.Printf("[aec] att=%.1fdB mic=%.0f out=%.0f ref=%.0f ring=%d (delay=%dms)",
-					att, inAvg, outAvg, refAvg, c.count, c.delayMs)
+				if useHW {
+					log.Printf("[aec] att=%.1fdB mic=%.0f out=%.0f ref=%.0f "+
+						"src=hw(ch8) frames=%d",
+						att, inAvg, outAvg, refAvg, c.hwFrames)
+				} else {
+					log.Printf("[aec] att=%.1fdB mic=%.0f out=%.0f ref=%.0f ring=%d (delay=%dms)",
+						att, inAvg, outAvg, refAvg, c.count, c.delayMs)
+				}
 				c.statFrames, c.statInSum, c.statOutSum, c.statRefSum = 0, 0, 0, 0
 			}
 		}
@@ -349,6 +464,12 @@ func (c *Canceller) Process(mono []byte) []byte {
 	// killer — mic capture overruns trip this governor every ~20s in
 	// steady state, incl. mid-playback, and each reset threw away a
 	// converged filter for a ≤43ms alignment shift speexdsp tracks fine.)
+	// Not on the hardware path: there is no ring to trim, delayMs means
+	// nothing there, and leaving this running would log resyncs about a
+	// buffer nothing is filling.
+	if useHW {
+		return out
+	}
 	delaySamples := c.delayMs * sampleRate / 1000
 	if c.count > delaySamples+4*FrameSize {
 		drop := c.count - delaySamples

@@ -94,6 +94,31 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
 - **Beamformer** (`internal/beamformer/`) — selects the perimeter mic with the highest onset energy ratio (fast/slow EWMA) at voice turn start, then locks for the duration. Its `extractChannel` also applies the fixed mic gain (`micGainDb`, default +24dB) against the full 24-bit sample before quantising to S16 — captured speech sits at ~−70dBFS, so gain must happen pre-truncation to recover real resolution. `vadThreshold` stays in pre-gain units (the device scales it by the gain internally). **It is a selector, not a summing beamformer, and that is settled — do not propose delay-and-sum.** A frequency-domain implementation (exact FFT phase shifts, no interpolation artefacts) exists in `device/tools/bf_capture` and was measured as only marginally better than mic selection. The reason is the 72mm aperture, not the code: diffuse-field noise coherence is 0.84–0.99 below 1.5kHz where speech energy lives, so a sum has almost nothing uncorrelated to cancel, and 36mm adjacent spacing puts spatial aliasing at 4.76kHz — a working window of roughly 2–4.7kHz. Superdirective/differential beamforming is the only class that works at this aperture and it trades against white-noise gain (20dB+ amplification of sensor self-noise) on unmatched capsules across four ADCs. Full derivation and the coherence table are in SETUP.md's mic-array section (SETUP.md is the architecture reference; the chronological log is JOURNAL.md, the rooting prerequisites docs/rooting.md). **Far-field reach is therefore not a beamforming problem here** — it is room noise floor, distance and placement; the single-channel levers (`nsAsr`, wake model) are the ones that exist
 - **AEC** (`internal/aec/`) — speexdsp echo canceller (vendored C, SpeexDSP-1.2.1), whole mic path including the wake stream; far-end reference tapped at the speaker ALSA write (every period incl. silence), delayed by `aecDelayMs` — **keep 0**: the mic side's 160ms batch reads absorb the speaker's output latency, and higher values make the echo non-causal (zero cancellation). The mic ALSA ring is only 160ms deep, so >160ms capture stalls silently lose whole batches (~every 20–30s in steady state, load-correlated); an occupancy governor trims the resulting reference backlog **without resetting the filter** — the trim restores the alignment the filter converged against, and the reset that used to live there thrashed convergence to ≤5dB (the v2.7.8 fix). `[aec] att=`/`far:` telemetry logs ~1/s during playback; `[mic] clock/stall` lines track capture loss. `far:` carries `rms`, `mean` and `peak` — **rms alone cannot tell audio from a constant offset**, since both read high, and that ambiguity cost an evening on #117 where the device was writing rms≈4000 to a codec while every speaker stayed silent. `mean≈±rms` with a small peak-to-peak is a DC offset; `mean≈0` with peak well above rms is real audio and the fault is downstream. Note this tap sits after the (L+R)/2 downmix and 3:1 decimation, so DC survives intact but `peak` is mildly smoothed — read it as a floor. It reports only while `aecEnabled`, so a diagnosis that needs it must not have AEC turned off. Default off (`aecEnabled`); ~14dB per response, held across turns
 
+  **Implemented (#385), detected rather than assumed.** `beamformer.EchoRef`
+  pulls ch8 out of the same raw period the mic channels come from, and
+  `aec.ProcessWithRef` cancels against it with no ring, no `aecDelayMs` and no
+  occupancy governor — all three are bypassed on that path, and `WriteFar`
+  returns early so nothing fills a ring nothing drains. Measured 41.2dB in the
+  unit test with the real 33-sample offset and polarity inversion applied.
+
+  **The detector is deliberately narrow, and the narrowness is the point.**
+  A reference channel is BIT-EXACT ZERO when nothing plays *and* carries audio
+  when something does; only both together promote it (`data.go`,
+  `noteEchoRef`). "Has energy" alone would promote a genuine microphone on a
+  board that wires ch8 differently, and cancelling the near end against
+  another mic is far worse than not cancelling at all. Confirmation is
+  one-way — a device that flipped sources every time the room went quiet would
+  throw away a converged filter for nothing. `EM_AEC_HW_REF=off|on` overrides
+  it; an env var and not a config key, because this is a property of the board
+  rather than a user preference, and it exists so the two paths can be A/B'd on
+  one device without a controller round trip.
+
+  **Unity gain on the extraction, non-negotiably.** Mic channels get
+  `micGainDb` (+24dB default) applied pre-truncation because speech sits at
+  ~−70dBFS; the reference is playback at −7.3dBFS, and the same gain on it is
+  17dB of hard clipping — which does not merely cancel badly, it teaches the
+  filter a distorted echo path. Pinned by test.
+
   **The hardware has been handing us a sample-aligned reference all along, on
   Ch7/Ch8** (measured 2026-08-29 — see SETUP.md's Mic Array section). Those
   two channels are not unconnected mics: they are a stereo loopback of the

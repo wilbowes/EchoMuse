@@ -1,6 +1,7 @@
 package aec
 
 import (
+	"bytes"
 	"encoding/binary"
 	"math"
 	"testing"
@@ -245,5 +246,134 @@ func TestParamClamps(t *testing.T) {
 	c.SetParams(false, 0, minTailMs)
 	if c.st != nil {
 		t.Fatalf("disable did not free echo state")
+	}
+}
+
+// ─── Hardware far-end reference (#385) ────────────────────────────────────────
+
+// toBytes renders 16kHz mono S16 samples as the wire format both Process and
+// ProcessWithRef take.
+func toBytes(s []int16) []byte {
+	b := make([]byte, len(s)*2)
+	for i, v := range s {
+		binary.LittleEndian.PutUint16(b[i*2:], uint16(v))
+	}
+	return b
+}
+
+// TestHardwareRefCancelsWithoutRingOrDelay is the point of #385: the
+// reference arrives in the same frame as the near end, so there is no ring,
+// no aecDelayMs and no governor — and cancellation must still converge.
+//
+// The echo is delayed by 33 samples, the offset measured on hardware
+// (2.06ms of converter and acoustic delay), and inverted, because the
+// measured mic-to-reference correlation was negative. Both are things the
+// adaptive filter has to absorb rather than things the caller aligns.
+func TestHardwareRefCancelsWithoutRingOrDelay(t *testing.T) {
+	const frames = 120
+	const echoDelay = 33 // samples, measured on biscuit
+
+	c := New()
+	c.SetParams(true, 0, 200)
+	c.SetHardwareRef(true)
+
+	signal := synth(frames * FrameSize)
+	mic := make([]int16, len(signal))
+	for i := echoDelay; i < len(signal); i++ {
+		mic[i] = -signal[i-echoDelay] // inverted, as measured
+	}
+
+	var echoRMS, residRMS float64
+	measured := 0
+	for f := 0; f < frames; f++ {
+		lo, hi := f*FrameSize, (f+1)*FrameSize
+		micBytes := toBytes(mic[lo:hi])
+		refBytes := toBytes(signal[lo:hi])
+		out := c.ProcessWithRef(micBytes, refBytes)
+		if f >= frames-20 {
+			echoRMS += rms(micBytes)
+			residRMS += rms(out)
+			measured++
+		}
+	}
+	echoRMS /= float64(measured)
+	residRMS /= float64(measured)
+
+	t.Logf("echo RMS %.0f → residual RMS %.0f (%.1f dB attenuation)",
+		echoRMS, residRMS, 20*math.Log10(echoRMS/residRMS))
+	if residRMS > echoRMS*0.25 {
+		t.Fatalf("insufficient cancellation: echo RMS %.0f, residual RMS %.0f",
+			echoRMS, residRMS)
+	}
+	if c.underruns != 0 || c.resyncs != 0 {
+		t.Fatalf("ring machinery ran on the hardware path: underruns=%d resyncs=%d",
+			c.underruns, c.resyncs)
+	}
+	if c.hwFrames == 0 {
+		t.Fatal("no frames took the hardware path")
+	}
+}
+
+// TestHardwareRefIgnoresWriteFar pins that the ring is not being filled while
+// the hardware path is live. Nothing drains it there, so a WriteFar that kept
+// pushing would peg it at ringCap and leave the far-end telemetry describing a
+// buffer no cancellation ever reads.
+func TestHardwareRefIgnoresWriteFar(t *testing.T) {
+	c := New()
+	c.SetParams(true, 100, 200)
+	c.SetHardwareRef(true)
+
+	signal := synth(FrameSize)
+	for i := 0; i < 50; i++ {
+		c.WriteFar(to48kStereo(signal))
+	}
+	if c.count != 0 {
+		t.Fatalf("WriteFar filled the ring on the hardware path: %d samples", c.count)
+	}
+}
+
+// TestMissingHardwareRefPassesThrough — a caller that promises a hardware
+// reference and supplies none must not have its audio cancelled against
+// silence. That would be indistinguishable from a working AEC with nothing
+// playing, which is exactly the failure this project has already paid for
+// once (0dB cancellation, no underruns to give it away).
+func TestMissingHardwareRefPassesThrough(t *testing.T) {
+	c := New()
+	c.SetParams(true, 0, 200)
+	c.SetHardwareRef(true)
+
+	mic := toBytes(synth(FrameSize))
+	out := c.ProcessWithRef(mic, nil)
+	if !bytes.Equal(out, mic) {
+		t.Fatal("frame was altered despite having no reference")
+	}
+	if c.hwSilent == 0 {
+		t.Fatal("missing reference was not counted")
+	}
+
+	short := make([]byte, FrameSize) // half a frame
+	if out := c.ProcessWithRef(mic, short); !bytes.Equal(out, mic) {
+		t.Fatal("mismatched reference length was not rejected")
+	}
+}
+
+// TestSwitchingSourcesDropsStaleRing — the ring's contents are meaningless
+// across a switch (never consumed on the way in, stale by however long the
+// hardware path ran on the way out), and a stale reference is the one thing
+// that silently produces zero cancellation.
+func TestSwitchingSourcesDropsStaleRing(t *testing.T) {
+	c := New()
+	c.SetParams(true, 100, 200)
+
+	signal := synth(FrameSize)
+	for i := 0; i < 20; i++ {
+		c.WriteFar(to48kStereo(signal))
+	}
+	if c.count == 0 {
+		t.Fatal("precondition failed: ring should hold software-tap samples")
+	}
+	c.SetHardwareRef(true)
+	if c.count != 0 {
+		t.Fatalf("stale ring survived the switch: %d samples", c.count)
 	}
 }
