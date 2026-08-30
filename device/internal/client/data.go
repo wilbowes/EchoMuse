@@ -148,6 +148,28 @@ type DataClient struct {
 	// defer in connect for the zombie-stream incident this guards against).
 	micConn *websocket.Conn
 
+	// micWanted is the controller's INTENT, which outlives any one data
+	// connection: true from mic_start until mic_stop, across however many
+	// drops happen in between. micActive above is the stream's STATE, and
+	// the two coming apart is the whole point.
+	//
+	// Without this the device goes deaf on any data-plane drop that the
+	// control plane survives. StartMic has exactly two callers — the
+	// controller's mic_start and unmute — so nothing restarted a stream
+	// that died with its socket, and the controller had no reconnect event
+	// to fire a fresh mic_start from because ITS connection never dropped.
+	// Measured twice on Test Echo 1: 34s deaf on 2026-08-29, 41s+ on
+	// 2026-08-30, both from a data-plane reset alone. The controller's
+	// zombie ladder does eventually repair it, which is why this reads as a
+	// slow recovery rather than a dead device — but the device knows it
+	// reconnected and can fix it in zero.
+	//
+	// Mute needs no special case here: muting calls StopMic, which clears
+	// this, and a mic_start arriving while muted is refused in cmd/server.go
+	// before it ever reaches StartMic.
+	micWanted     bool
+	micWantedLock bool
+
 	// beamReq carries a pending beam lock/unlock request from the control
 	// plane to the mic streaming goroutine. Beamformer methods are not safe
 	// to call from other goroutines (same reason beam.Unlock is deferred
@@ -265,6 +287,13 @@ func (d *DataClient) RequestBeamUnlock() {
 func (d *DataClient) StartMic(lockMic bool) {
 	d.micMu.Lock()
 	defer d.micMu.Unlock()
+	// Recorded BEFORE either early return, so an instruction that cannot be
+	// carried out right now is carried out when it can be. That covers the
+	// boot race as well as reconnects: the controller's first mic_start can
+	// beat the data connection into existence, which logs "no connection
+	// yet" and then waits for the controller to ask again — 39 seconds on
+	// 2026-08-30's boot.
+	d.micWanted, d.micWantedLock = true, lockMic
 	if d.micActive {
 		log.Println("[data] StartMic: already active — ignoring")
 		return
@@ -273,7 +302,7 @@ func (d *DataClient) StartMic(lockMic bool) {
 	conn := d.conn
 	d.connMu.Unlock()
 	if conn == nil {
-		log.Println("[data] StartMic: no connection yet")
+		log.Println("[data] StartMic: no connection yet — will start on connect")
 		return
 	}
 	d.micActive = true
@@ -283,9 +312,35 @@ func (d *DataClient) StartMic(lockMic bool) {
 	log.Println("[data] Mic streaming started")
 }
 
+// resumeMic restores the stream on a new data connection when the
+// controller's standing instruction is to stream.
+//
+// Reads the intent under micMu and releases it before calling StartMic,
+// which takes the same lock — the alternative is a StartMic variant that
+// assumes the lock is held, and two entry points into the stream-start path
+// is how the ownership guards around micConn got subtle in the first place.
+// The window between the two acquisitions is harmless: a StopMic landing in
+// it clears micWanted and StartMic's own micActive check makes a double
+// start a no-op.
+func (d *DataClient) resumeMic() {
+	d.micMu.Lock()
+	want, lockMic, active := d.micWanted, d.micWantedLock, d.micActive
+	d.micMu.Unlock()
+	if !want || active {
+		return
+	}
+	log.Println("[data] restoring mic stream on the new connection")
+	d.StartMic(lockMic)
+}
+
 func (d *DataClient) StopMic() {
 	d.micMu.Lock()
 	defer d.micMu.Unlock()
+	// Cleared even when no stream is running, and that is the point: a
+	// mic_stop (or a mute) arriving while the data plane is down must
+	// cancel the intent, or the next connect would restore a stream the
+	// controller has already asked to end.
+	d.micWanted = false
 	if !d.micActive {
 		return
 	}
@@ -385,6 +440,15 @@ func (d *DataClient) connect(ctx context.Context, baseURL string) error {
 		}
 		d.connMu.Unlock()
 	}()
+
+	// Restore the stream the previous connection took with it. Placed after
+	// the publish above because StartMic reads d.conn, and after the defer
+	// so a connection that dies immediately still cleans up.
+	//
+	// Deliberately NOT conditional on this being a reconnect: on a first
+	// connect micWanted is false unless a mic_start already arrived and
+	// could not be served, which is exactly the case worth serving.
+	d.resumeMic()
 
 	// Keepalive — see the wsPingInterval block comment. Deadline refreshes
 	// all happen on this (the read) goroutine: the pong handler runs inside
