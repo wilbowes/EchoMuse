@@ -70,6 +70,7 @@ import em_api as api
 import em_pki
 import em_hostip
 import em_linkauth
+import em_wsclose
 import em_rttlog
 import em_eq
 import em_limiter
@@ -109,6 +110,10 @@ log = logging.getLogger("echomuse")
 # controller's own log, not just the relayed per-device one.
 api.install_log_ring(_LOG_FORMAT)
 
+# websockets' own logger stays quiet — its per-connection chatter is not
+# useful — but that ALSO silenced its account of why a connection closed,
+# and the handlers below discarded the exception carrying the close frames.
+# em_wsclose renders that ourselves, so the reason survives the silence.
 logging.getLogger("websockets.server").setLevel(logging.CRITICAL)
 
 
@@ -3736,8 +3741,13 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
     except asyncio.TimeoutError:
         log.warning(f"[control] Registration timeout from {remote}")
 
-    except websockets.exceptions.ConnectionClosed:
-        pass
+    except websockets.exceptions.ConnectionClosed as e:
+        _close_why = em_wsclose.from_exception(e)
+        _msg = f"[control] Connection closed: {em_wsclose.describe(*_close_why)}"
+        if em_wsclose.is_routine(_close_why[0], _close_why[2]):
+            log.info(_msg)
+        else:
+            log.warning(_msg)
 
     except Exception as e:
         log.error(f"[control] Handler error: {e}")
@@ -3820,6 +3830,10 @@ async def _release_device_services(device) -> None:
 async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
     device = None
     remote = ws.remote_address
+    # Initialised here, not in the handler below: the finally block reports
+    # it on EVERY exit path, including the ones that never raise
+    # ConnectionClosed at all.
+    _close_why = (None, None, None, None)
 
     try:
         raw = await asyncio.wait_for(ws.recv(), timeout=10.0)
@@ -3923,8 +3937,10 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
     except asyncio.TimeoutError:
         log.warning(f"[data] Identify timeout from {remote}")
 
-    except websockets.exceptions.ConnectionClosed:
-        pass
+    except websockets.exceptions.ConnectionClosed as e:
+        # Keep the reason — see em_wsclose. Discarding it here is what made
+        # three sessions of intermittent mid-response drops undiagnosable.
+        _close_why = em_wsclose.from_exception(e)
 
     except Exception as e:
         log.error(f"[data] Handler error: {e}")
@@ -3934,7 +3950,15 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
             if device.data_ws is ws:
                 device.data_ws = None
                 device.data_ready.clear()
-            log.info(f"[data] Data connection closed: {device.device_id}")
+            _msg = (f"[data] Data connection closed: {device.device_id} — "
+                    f"{em_wsclose.describe(*_close_why)}")
+            if em_wsclose.is_routine(_close_why[0], _close_why[2]):
+                log.info(_msg)
+            else:
+                # A device dropping every few minutes on a keepalive timeout
+                # is indistinguishable from one that never dropped, in a log
+                # of INFO lines.
+                log.warning(_msg)
 
 
 # ─── Router ───────────────────────────────────────────────────────────────────
