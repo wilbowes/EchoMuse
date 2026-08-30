@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"log"
 	"math"
-	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -214,7 +212,13 @@ type DataClient struct {
 	hwRefSeenSilent bool
 	hwRefSeenAudio  bool
 	hwRefOn         bool
-	hwRefMode       string // "auto" (default), "on", "off" — EM_AEC_HW_REF
+
+	// hwRefMode is the operator's override, config.AecRef{Auto,HW,SW}. It
+	// is the ONE field here written from another goroutine — the control
+	// plane, on every config push — so it is atomic while the rest stay
+	// plain: they are the detector's own state and never leave the mic
+	// goroutine.
+	hwRefMode atomic.Int32
 
 	// pipeMu serialises access to beam and proc, which hold unsynchronised
 	// per-period state (reused analysis buffers, EWMA smoothers, AGC gain).
@@ -233,7 +237,7 @@ type DataClient struct {
 // runs its near-end side on the mono mic stream. Disabled cancellers pass
 // audio through untouched.
 func NewDataClient(deviceID string, microphone mic.Subscribable, spk speaker.Speaker, canceller *aec.Canceller) *DataClient {
-	return &DataClient{
+	d := &DataClient{
 		deviceID: deviceID,
 		mic:      microphone,
 		spk:      spk,
@@ -241,24 +245,48 @@ func NewDataClient(deviceID string, microphone mic.Subscribable, spk speaker.Spe
 		beam:     beamformer.New(),
 		proc:     processor.New(),
 		aec:      canceller,
-		// EM_AEC_HW_REF: "off" pins the software tap, "on" trusts ch8 without
-		// waiting for the silence half of the proof. An env var rather than a
-		// config key because this is a property of the BOARD, not a user
-		// preference — and it exists so the two paths can be A/B'd on one
-		// device without a controller round trip.
-		hwRefMode: hwRefModeFromEnv(),
+	}
+	// Seeded from the env default so a device that never reaches a
+	// controller still honours EM_AEC_HW_REF; the first config push
+	// supersedes it (SetAecRefSource).
+	d.hwRefMode.Store(aecRefModeOf(config.Get().Snapshot().AecRefSource))
+	return d
+}
+
+// Far-end reference override, as an int so it can be atomic. Mirrors
+// config.AecRef{Auto,HW,SW} — converted once on the control goroutine rather
+// than string-compared per period on the mic goroutine.
+const (
+	hwRefAuto int32 = iota
+	hwRefForceHW
+	hwRefForceSW
+)
+
+func aecRefModeOf(v string) int32 {
+	switch v {
+	case config.AecRefHW:
+		return hwRefForceHW
+	case config.AecRefSW:
+		return hwRefForceSW
+	default:
+		return hwRefAuto
 	}
 }
 
-func hwRefModeFromEnv() string {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("EM_AEC_HW_REF"))) {
-	case "off":
-		return "off"
-	case "on":
-		return "on"
-	default:
-		return "auto"
+// SetAecRefSource applies the operator's far-end reference override. Called
+// from the control goroutine on every config push; a no-op when unchanged.
+//
+// The SWITCH itself is left to the mic goroutine (noteEchoRef), which owns
+// the canceller's source. Flipping it here would race a period already
+// mid-flight: ProcessWithRef checks the canceller's own hwRef flag, and
+// changing that between the caller's extraction and the call turns a
+// perfectly good reference into a "missing or mismatched" pass-through.
+func (d *DataClient) SetAecRefSource(v string) {
+	mode := aecRefModeOf(v)
+	if d.hwRefMode.Swap(mode) == mode {
+		return
 	}
+	log.Printf("[aec] far-end reference source: %s", v)
 }
 
 // noteEchoRef feeds one period of the candidate reference channel to the
@@ -269,14 +297,20 @@ func hwRefModeFromEnv() string {
 // device that flips sources mid-stream every time the room goes quiet, which
 // throws away a converged filter for nothing.
 func (d *DataClient) noteEchoRef(ref []byte) bool {
-	switch d.hwRefMode {
-	case "off":
+	switch d.hwRefMode.Load() {
+	case hwRefForceSW:
+		// Reversible, unlike the auto latch below: this is somebody running
+		// an A/B, and a pin that could not be undone without a reboot would
+		// make the comparison a one-way trip.
+		if d.hwRefOn {
+			d.hwRefOn = false
+			d.aec.SetHardwareRef(false)
+		}
 		return false
-	case "on":
+	case hwRefForceHW:
 		if !d.hwRefOn {
 			d.hwRefOn = true
 			d.aec.SetHardwareRef(true)
-			log.Printf("[aec] hardware reference forced on by EM_AEC_HW_REF")
 		}
 		return true
 	}

@@ -108,7 +108,7 @@ func main() {
 	ctx := context.Background()
 
 	dataClient := client.NewDataClient(deviceID, microphone, pcmSpeaker, canceller)
-	applyAecConfig(canceller) // arm from env defaults before any config push
+	applyAecConfig(canceller, dataClient) // arm from env defaults before any config push
 
 	// Direction callback — update LED ring to show estimated source angle
 	dataClient.OnDirectionChanged(func(angle float64) {
@@ -315,7 +315,7 @@ func main() {
 		if msg.StartupVolume > 0 {
 			s.SeedVolume(msg.StartupVolume)
 		}
-		applyAecConfig(canceller)
+		applyAecConfig(canceller, dataClient)
 		applyBleConfig(bleScanner)
 		applyShadowConfig(dataClient, controlClient, pcmSpeaker, s)
 	})
@@ -888,7 +888,7 @@ func applyHardwareConfig(msg config.ConfigMessage) {
 // SetParams no-ops when nothing changed, so calling it on every config push
 // is free; when delay/tail change it rebuilds the echo state (adaptive
 // filter state is meaningless across a timing change anyway).
-func applyAecConfig(canceller *aec.Canceller) {
+func applyAecConfig(canceller *aec.Canceller, dataClient *client.DataClient) {
 	snap := config.Get().Snapshot()
 	enabled := snap.AecEnabled != nil && *snap.AecEnabled
 	delayMs := 250
@@ -896,6 +896,10 @@ func applyAecConfig(canceller *aec.Canceller) {
 		delayMs = *snap.AecDelayMs
 	}
 	canceller.SetParams(enabled, delayMs, snap.AecTailMs)
+	// The reference SOURCE lives on the data client, not the canceller: it
+	// is the mic goroutine that extracts ch8 and decides per period whether
+	// to hand it over, so that goroutine has to own the switch.
+	dataClient.SetAecRefSource(snap.AecRefSource)
 }
 
 // applyBleConfig starts/stops the BLE proxy scanner from the current

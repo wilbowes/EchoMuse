@@ -102,6 +102,25 @@ type Device struct {
 	AecDelayMs int
 	AecTailMs  int
 
+	// AecRefSource picks where the far-end reference comes from: "auto",
+	// "hw" or "sw".
+	//
+	// It is an OVERRIDE for the detection, not a statement about the board
+	// — the same shape as OwwOnDevice, and config rather than an env var
+	// for the same reason. "auto" detects the hardware loopback and falls
+	// back to the software tap on a board without one, which is right
+	// almost always; "hw" and "sw" pin it, so the two paths can be
+	// A/B'd from the dashboard.
+	//
+	// This started as EM_AEC_HW_REF, on the argument that the reference is
+	// a property of the board rather than a user preference. That was
+	// wrong: the board property is already DETECTED, and what a person
+	// needs to set is which answer to trust — which cannot be a device
+	// env var, because changing one means an edit to start_server.sh on
+	// the device and a server restart. Making the measurement expensive is
+	// how it stays unmeasured.
+	AecRefSource string
+
 	// BLE proxy (passive scan over /dev/stpbt, internal/bluetooth) —
 	// pointer typed so false is expressible over the wire. Default off.
 	BleProxyEnabled *bool
@@ -158,6 +177,9 @@ func (d *Device) loadDefaults() {
 	d.AecEnabled = &aecEnabled
 	d.AecDelayMs = envInt("AEC_DELAY_MS", 0)
 	d.AecTailMs = envInt("AEC_TAIL_MS", 300)
+	// EM_AEC_HW_REF keeps working as the boot default for a device with no
+	// controller to push config, and is superseded the moment one does.
+	d.AecRefSource = normaliseAecRef(envStr("EM_AEC_HW_REF", AecRefAuto))
 	bleProxyEnabled := envBool("BLE_PROXY_ENABLED", false)
 	d.BleProxyEnabled = &bleProxyEnabled
 }
@@ -234,6 +256,9 @@ func (d *Device) Apply(msg ConfigMessage) {
 	if msg.AecTailMs > 0 {
 		d.AecTailMs = msg.AecTailMs
 	}
+	if msg.AecRefSource != "" {
+		d.AecRefSource = normaliseAecRef(msg.AecRefSource)
+	}
 	if msg.BleProxyEnabled != nil {
 		d.BleProxyEnabled = msg.BleProxyEnabled
 	}
@@ -289,6 +314,7 @@ func (d *Device) Snapshot() ConfigMessage {
 		AecEnabled:         &aecEnabled,
 		AecDelayMs:         &aecDelayMs,
 		AecTailMs:          d.AecTailMs,
+		AecRefSource:       d.AecRefSource,
 		BleProxyEnabled:    &bleProxyEnabled,
 		ListeningAnim:      d.ListeningAnim,
 	}
@@ -318,6 +344,7 @@ type ConfigMessage struct {
 	AecEnabled         *bool    `json:"aecEnabled,omitempty"`
 	AecDelayMs         *int     `json:"aecDelayMs,omitempty"`
 	AecTailMs          int      `json:"aecTailMs,omitempty"`
+	AecRefSource       string   `json:"aecRefSource,omitempty"`
 	BleProxyEnabled    *bool    `json:"bleProxyEnabled,omitempty"`
 
 	// ListeningAnim: raw led_anim spec for the listening ring (#263).
@@ -345,6 +372,12 @@ const (
 	OnDeviceOff    = "off"
 	OnDeviceShadow = "shadow"
 	OnDeviceOn     = "on"
+
+	// AecRefSource values. "auto" detects the hardware loopback and falls
+	// back to the software tap; the other two pin it for an A/B.
+	AecRefAuto = "auto"
+	AecRefHW   = "hw"
+	AecRefSW   = "sw"
 )
 
 // normaliseOnDevice maps a pushed value onto a known mode. Anything
@@ -368,6 +401,23 @@ func normaliseOnDevice(v string) string {
 	default:
 		log.Printf("[config] unknown owwOnDevice %q — treating as %q", v, OnDeviceOff)
 		return OnDeviceOff
+	}
+}
+
+// normaliseAecRef keeps an unknown value on the DETECTING path rather than
+// pinning one. A typo that pinned "sw" would silently disable the hardware
+// reference on every device it reached, and read as the feature not working.
+func normaliseAecRef(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case AecRefHW, "on", "true", "1":
+		return AecRefHW
+	case AecRefSW, "off", "false", "0":
+		return AecRefSW
+	case "", AecRefAuto:
+		return AecRefAuto
+	default:
+		log.Printf("[config] unknown aecRefSource %q — detecting", v)
+		return AecRefAuto
 	}
 }
 
