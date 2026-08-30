@@ -76,7 +76,11 @@ def test_both_time_sources_are_updated():
     hd = hd[:hd.index("async def", 10)]
     assert "data_connected_at" in hd, \
         "handle_data must timestamp each new connection"
-    wl = src[src.index("payload = await asyncio.wait_for("):
-             src.index("except asyncio.TimeoutError")]
+    # Both ends anchored from the SAME start, or the slice silently inverts:
+    # the end marker is searched from 0, so any `except asyncio.TimeoutError`
+    # appearing earlier in the file (voice-stream pacing added one) makes
+    # this src[later:earlier] — an empty string that fails with no clue why.
+    _wl_start = src.index("payload = await asyncio.wait_for(")
+    wl = src[_wl_start:src.index("except asyncio.TimeoutError", _wl_start)]
     assert "frames_seen_this_connection = True" in wl, \
         "a delivered frame must set the flag"

@@ -70,6 +70,7 @@ import em_api as api
 import em_pki
 import em_hostip
 import em_linkauth
+import em_pacing
 import em_wsclose
 import em_rttlog
 import em_eq
@@ -176,6 +177,41 @@ CHUNK_BYTES          = 1280 * 2   # 2560 bytes = 80ms at 16kHz S16_LE mono
 SPEAKER_RATE   = 48000
 SPEAKER_PERIOD = 2048
 SPEAKER_BYTES  = SPEAKER_PERIOD * 2       # 4096 bytes/period (mono S16)
+SPEAKER_PERIOD_SECONDS = SPEAKER_BYTES / (SPEAKER_RATE * 2)   # ~42.7ms
+
+# How far ahead of realtime a VOICE response may be queued.
+#
+# The voice path used to send every period as fast as the socket would take
+# it, with TCP backpressure as the only brake. That is what cut long
+# responses off mid-sentence, and the chain is mechanical:
+#
+#   1. controller pushes ~1.7x realtime, bounded only by the link
+#   2. the device's WS read goroutine calls PumpPeriod INLINE per 0x02 frame
+#   3. pump() ends in a BLOCKING channel send, on a channel 128 periods
+#      (~5.5s) deep
+#   4. once full, the read goroutine blocks inside PumpPeriod and stops
+#      calling ReadMessage
+#   5. gorilla fires the pong handler only INSIDE ReadMessage, so a blocked
+#      device cannot answer a ping
+#   6. we ping every 20s and close after 10s without a pong
+#   7. the buffer drains at realtime, so the block outlasts the timeout
+#   8. 1011 keepalive ping timeout, mid-response
+#
+# Measured on Test Echo 1, 2026-08-30: 3.4MB (35.4s of audio) sent in 21.3s,
+# 9.8s of that blocked in socket writes, connection closed 5s later. Short
+# responses never reproduce it because they never fill 5.5s.
+#
+# SENDING FASTER THAN THIS BUYS NOTHING. The device can hold 5.5s and no
+# more; everything beyond that sits in TCP buffers, which are lost on a
+# reconnect exactly like un-sent audio is. So the excess never improved
+# stall resilience — it only bought the block. Pacing to just under the
+# device's own depth keeps the same protection with none of the cost.
+#
+# 4.0s to match em_player.LEAD_S, which reached the same number from the
+# same constraint for the music plane: ~1.4s of headroom under audioChanDepth
+# so the feed can never outrun the device's channel. Voice had no equivalent,
+# and that asymmetry was the bug.
+VOICE_LEAD_S = 4.0
 
 # The device holds playback until ~this much audio is buffered (or EOS
 # arrives) — primePeriods in pcm_speaker.go. The post-playback drain sleep
@@ -923,10 +959,15 @@ class Device:
         # an investigation on 2026-07-20.
         send_seconds = 0.0
         first_send_time = None
+        # Audio actually handed to the socket, in seconds of playback, and
+        # the time pacing spent waiting. sent_seconds against wall time since
+        # the first period is the lead being held.
+        sent_seconds = 0.0
+        paced_seconds = 0.0
 
         async def send_period(chunk: bytes) -> None:
             """Send one whole device period, stamping the first one."""
-            nonlocal first_send_time, send_seconds
+            nonlocal first_send_time, send_seconds, sent_seconds, paced_seconds
             if first_send_time is None:
                 first_send_time = asyncio.get_event_loop().time()
                 self.playback_send_t0 = first_send_time
@@ -935,9 +976,34 @@ class Device:
                     f"[{self.device_id}] First streamed PCM period "
                     "sent to device"
                 )
+            else:
+                # Hold the queue to VOICE_LEAD_S ahead of realtime — see the
+                # constant for why sending faster is pure cost. The first
+                # period is exempt so nothing delays the start of playback,
+                # and the lead is then free to build at full speed until it
+                # is reached, which keeps the prime gate as prompt as it was.
+                delay = em_pacing.lead_delay(
+                    sent_seconds,
+                    asyncio.get_event_loop().time() - first_send_time,
+                    VOICE_LEAD_S,
+                )
+                if delay > 0:
+                    paced_seconds += delay
+                    # Raced against cancel_event, never a bare sleep: a
+                    # barge-in or mute has to land inside the pacing gap
+                    # rather than after it, or pacing would add its own
+                    # latency to the thing it must never delay.
+                    try:
+                        await asyncio.wait_for(
+                            self.cancel_event.wait(), timeout=delay)
+                    except asyncio.TimeoutError:
+                        pass
+                    if self.cancel_event.is_set():
+                        return
             _t_send = asyncio.get_event_loop().time()
             await self.send_data(bytes([SPEAKER_FRAME_TYPE]) + chunk)
             send_seconds += asyncio.get_event_loop().time() - _t_send
+            sent_seconds += SPEAKER_PERIOD_SECONDS
 
         async def drain_whole_periods() -> None:
             while len(pending) >= SPEAKER_BYTES:
@@ -988,7 +1054,8 @@ class Device:
             except BaseException:
                 pass
 
-        return total_pcm, int(eq_seconds * 1000), first_send_time, int(send_seconds * 1000)
+        return (total_pcm, int(eq_seconds * 1000), first_send_time,
+                int(send_seconds * 1000), int(paced_seconds * 1000))
 
 
 # The live device registry — keyed by device_id (ro.serialno).
@@ -1785,7 +1852,7 @@ async def _run_streaming_post_turn_playback(device: Device, pcm_chunks) -> int:
             log.info(f"[{device.device_id}] Cancelled during streamed playback")
             return 0
 
-        total_pcm, eq_ms, first_send_time, send_ms = stream_task.result()
+        total_pcm, eq_ms, first_send_time, send_ms, paced_ms = stream_task.result()
         device.playback_eq_ms = eq_ms
         device.playback_send_ms = send_ms
         stream_elapsed = asyncio.get_event_loop().time() - t_stream_start
@@ -1813,7 +1880,8 @@ async def _run_streaming_post_turn_playback(device: Device, pcm_chunks) -> int:
             f"[{device.device_id}] Streamed {total_pcm} bytes "
             f"({total_pcm//SPEAKER_BYTES} periods) in {stream_elapsed:.1f}s "
             f"while HA generated audio (socket writes {send_ms}ms — NOT "
-            f"delivery, see delivery_ms); awaiting device playback_stats "
+            f"delivery, see delivery_ms; paced {paced_ms}ms holding "
+            f"{VOICE_LEAD_S:.0f}s of lead); awaiting device playback_stats "
             f"(est {audio_duration:.1f}s, timeout {timeout:.1f}s)"
         )
         timeout_task = asyncio.create_task(asyncio.sleep(timeout))
