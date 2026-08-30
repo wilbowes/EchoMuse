@@ -15,7 +15,8 @@ em_linkauth and em_ble_health live on their own.
 WHICH SIDE CLOSED IS THE WHOLE POINT. A close frame we SENT means the
 controller gave up on the device; one we RECEIVED means the device or its
 network went first; neither means the TCP connection died with no close
-frame at all, which is a network event rather than a decision. Those three
+frame at all, which is a network event rather than a decision (or, more rarely, a handler
+error, which logs its own line). Those three
 want different investigations, and the log line has to say which it was.
 
 The case this was written for is `sent 1011 keepalive ping timeout`: the
@@ -71,7 +72,12 @@ def describe(
     itself worth seeing.
     """
     if sent_code is None and rcvd_code is None:
-        return "closed with no close frame either way (TCP reset or link loss)"
+        # No cause asserted. This is also reached when the handler exits
+        # on something other than a close — a generic error, which logs
+        # its own line just above — and a diagnostic that guesses is the
+        # habit this module exists to break.
+        return ("closed with no close frame either way "
+                "(TCP reset, link loss, or an error logged above)")
     if sent_code is not None and rcvd_code is not None:
         return f"we closed {_one(sent_code, sent_reason)}, peer echoed {_one(rcvd_code, rcvd_reason)}"
     if sent_code is not None:

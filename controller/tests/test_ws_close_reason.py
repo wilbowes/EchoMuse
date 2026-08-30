@@ -61,7 +61,9 @@ def test_no_frame_either_way_says_so_rather_than_guessing():
     """
     out = wsc.describe(None, None, None, None)
     assert "no close frame" in out
-    assert "TCP reset or link loss" in out
+    # No single cause asserted: this is also the path taken when the handler
+    # exits on a generic error rather than a close.
+    assert "TCP reset" in out and "error logged above" in out
 
 
 def test_both_frames_are_reported_when_both_exist():
