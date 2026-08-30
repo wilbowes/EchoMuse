@@ -129,12 +129,20 @@ type Canceller struct {
 	// pushed into the ring while the hardware path is running would be
 	// consumed by nothing and sit there aging.
 	hwRef bool
-	// Periods seen with a usable hardware reference, and with one that was
-	// silent. Their ratio is the diagnosis when cancellation is poor: an
-	// always-silent reference is a capture/extraction fault, not a filter
-	// one, and reads identically from the attenuation line alone.
-	hwFrames uint64
-	hwSilent uint64
+	// Periods cancelled against a hardware reference, and periods where one
+	// was expected and did not arrive (nil, or a length mismatch with the
+	// near end). A rising hwMissing with cancellation on is an extraction
+	// fault, not a filter one, and the attenuation line alone cannot tell
+	// them apart — those frames pass through uncancelled and simply read as
+	// att≈0dB.
+	//
+	// Deliberately NOT a silence counter. A reference that is present and
+	// all-zero is the correct state whenever nothing is playing, so counting
+	// it would be counting idle; the case worth catching — zero WHILE the
+	// speaker plays — is already visible as ref=0 against a loud mic on the
+	// once-a-second attenuation line.
+	hwFrames  uint64
+	hwMissing uint64
 
 	// Playback gain the hardware reference has NOT been through, as a linear
 	// scalar (1.0 = the codec's unity gain, index 127). Measured on hardware:
@@ -148,7 +156,8 @@ type Canceller struct {
 	// immediately after a change and took 3-4 seconds to climb back, over
 	// and over (2026-08-29). We are not obliged to guess it — the device
 	// SETS this volume, so it knows the scalar precisely.
-	refScale float64
+	refScale    float64
+	scaleWarned bool // one-shot guard for the unscaled-reference log
 }
 
 // SetPlaybackLevel tells the canceller the DAC volume index the reference has
@@ -202,8 +211,13 @@ func (c *Canceller) SetHardwareRef(on bool) {
 }
 
 // Enabled reports whether cancellation is armed. Callers use it to skip
-// preparing a far-end reference that would be discarded — the AEC defaults
-// to OFF, so the extraction is wasted work on most devices most of the time.
+// preparing a far-end reference that would be discarded.
+//
+// Note this is NOT the rare case: aecEnabled defaults TRUE controller-side
+// (em_db.DEFAULT_CONFIG), so a stock device runs the extraction on every
+// period. It is one allocation and a 512-sample copy per 32ms on the mic
+// goroutine, which is affordable — but it is the common path, not the
+// exception, so treat it as part of the steady-state budget.
 func (c *Canceller) Enabled() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -215,6 +229,26 @@ func (c *Canceller) HardwareRef() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.hwRef
+}
+
+// RefSource names the far-end reference in use, for the stats report:
+// "hw" once ch8 has proved itself the playback loopback, "sw" for the tap at
+// the ALSA write, "off" while cancellation is disarmed.
+//
+// Always one of those three, never empty: the controller reads an ABSENT
+// aecRef as "firmware too old to say", and an empty string arriving as a
+// fourth value would collapse that distinction.
+func (c *Canceller) RefSource() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	switch {
+	case !c.enabled:
+		return "off"
+	case c.hwRef:
+		return "hw"
+	default:
+		return "sw"
+	}
 }
 
 // New returns a disabled Canceller. Call SetParams (config push) to arm it.
@@ -243,6 +277,19 @@ func (c *Canceller) SetParams(enabled bool, delayMs, tailMs int) {
 	defer c.mu.Unlock()
 
 	if enabled == c.enabled && delayMs == c.delayMs && tailMs == c.tailMs {
+		return
+	}
+	// A delay-only change is a no-op on the hardware reference. delayMs
+	// never reaches speex — it only seeds the ring — so on a path with no
+	// ring the rebuild below would discard a converged filter to apply a
+	// number nothing reads. That is not hypothetical: the value still rides
+	// every config push, so one fleet-wide edit would reset cancellation on
+	// every device using the hardware reference.
+	//
+	// Stored anyway, so a later fall back to the software tap seeds its
+	// ring with the operator's current setting rather than a stale one.
+	if c.hwRef && c.st != nil && enabled == c.enabled && tailMs == c.tailMs {
+		c.delayMs = delayMs
 		return
 	}
 	c.freeLocked()
@@ -392,11 +439,11 @@ func (c *Canceller) process(mono, hwref []byte) []byte {
 	if c.hwRef && !useHW {
 		// Counted, not logged per period: at 31 periods/s a log line here
 		// would bury the very telemetry used to diagnose it.
-		c.hwSilent++
-		if c.hwSilent == 1 || c.hwSilent%256 == 0 {
+		c.hwMissing++
+		if c.hwMissing == 1 || c.hwMissing%256 == 0 {
 			log.Printf("[aec] hardware reference missing or mismatched "+
 				"(mic %db, ref %db, occurrences=%d) — frames passed through",
-				len(mono), len(hwref), c.hwSilent)
+				len(mono), len(hwref), c.hwMissing)
 		}
 		return mono
 	}
@@ -426,14 +473,26 @@ func (c *Canceller) process(mono, hwref []byte) []byte {
 			// Same frame, same clock — a straight copy, no ring, no delay
 			// bookkeeping. This is the whole point of #385.
 			hsub := hwref[off : off+FrameSize*2]
-			// refScale is 0 until the first SetPlaybackLevel, which arrives
-			// with the config push that seeds volume at startup. Treat
-			// "not yet told" as unity rather than as silence — a zero
-			// reference cancels nothing and looks identical to a working
-			// AEC with nothing playing.
+			// Unity if nobody has told us the volume yet. That should not
+			// happen — cmd/server.go seeds the level from the device's own
+			// tinymix reading as it wires the callback, before the control
+			// client dials — but unity is the least-wrong guess, since a
+			// zero reference cancels nothing and looks identical to a
+			// working AEC with nothing playing.
+			//
+			// It is warned about because it is not free: the device boots
+			// at whatever level the previous run left in tinymix, and if
+			// that is (say) index 60, an unscaled reference is 33dB hot and
+			// cancellation collapses exactly as it did in round one.
 			scale := c.refScale
 			if scale <= 0 {
 				scale = 1.0
+				if !c.scaleWarned {
+					c.scaleWarned = true
+					log.Printf("[aec] no playback level yet — hardware " +
+						"reference running unscaled; cancellation will be " +
+						"poor at any volume below unity")
+				}
 			}
 			for i := 0; i < FrameSize; i++ {
 				v := float64(int16(binary.LittleEndian.Uint16(hsub[i*2:]))) * scale

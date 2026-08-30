@@ -290,6 +290,7 @@ func main() {
 			st := collectStats()
 			st.Ble = bleScanner.Stats()
 			st.OwwShadow = shadowStats(dataClient)
+			st.AecRef = canceller.RefSource()
 			controlClient.SendStats(st)
 		}()
 		// Deliver any unacknowledged WiFi change outcome (including the
@@ -433,6 +434,15 @@ func main() {
 		// -1.7dB after a change and taking 3-4s to recover, repeatedly.
 		canceller.SetPlaybackLevel(level)
 	})
+	// Seed it from where the device actually is, right now. The callback
+	// above only fires on a CHANGE, and the two things that would produce
+	// one at startup both have holes: SeedVolume is skipped entirely when
+	// the controller pushes startupVolume=0 (a device it has no record
+	// for), and Set() is a no-op-shaped path nothing guarantees runs. Miss
+	// it and refScale stays 0 — read as unity — while the codec sits at
+	// whatever level the previous run left behind, which is round one's
+	// 33dB-hot reference reappearing on a device nobody touched.
+	canceller.SetPlaybackLevel(s.VolumeLevel())
 
 	// Volume set from controller (HA MediaPlayerCommandRequest forwarded down).
 	// Calls Set() which applies tinymix, updates LEDs, and fires the change
@@ -494,6 +504,7 @@ func main() {
 			st := collectStats()
 			st.Ble = bleScanner.Stats()
 			st.OwwShadow = shadowStats(dataClient)
+			st.AecRef = canceller.RefSource()
 			controlClient.SendStats(st)
 			if tick%10 == 0 {
 				var ms runtime.MemStats

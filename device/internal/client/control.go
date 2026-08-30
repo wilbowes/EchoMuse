@@ -748,8 +748,23 @@ func capabilities() []string {
 	// device that scores, stays silent, and looks broken. Announcing a
 	// capability the firmware has, rather than inferring one from a version
 	// string, is the rule the whole registration follows.
+	// "aec_hw_ref": this firmware can take the AEC far-end reference from a
+	// hardware playback loopback in the mic capture itself, and detects at
+	// runtime whether the board provides one — falling back to the software
+	// tap at the ALSA write when it does not. It gates the AEC delay
+	// control: that slider compensates write-to-ear latency for the
+	// software tap, and on the hardware path there is nothing to
+	// compensate, so leaving it live offers a knob that does nothing.
+	//
+	// Announced statically, like every other entry, because it describes
+	// the FIRMWARE. Whether the reference was actually found is a runtime
+	// answer and rides the stats report as aecRef — the same "could it" vs
+	// "is it" split as oww_shadow against shadow.active, and for the same
+	// reason: proving ch8 is a loopback needs the speaker to have played,
+	// which has not happened at registration.
 	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons",
-		"oww_shadow", "oww_trigger", "button_hold", "audio_mix"}
+		"oww_shadow", "oww_trigger", "button_hold", "audio_mix",
+		"aec_hw_ref"}
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}

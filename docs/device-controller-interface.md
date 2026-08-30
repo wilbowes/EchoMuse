@@ -59,8 +59,8 @@ message (`device/internal/client/control.go`):
 }
 ```
 
-`capabilities` is the negotiation signal. The Dot announces nine unconditionally
-plus one conditional (`capabilities()` in `control.go:738`):
+`capabilities` is the negotiation signal. The Dot announces ten unconditionally
+plus one conditional (`capabilities()` in `control.go`):
 
 | Capability | Condition | Meaning |
 |------------|-----------|---------|
@@ -73,7 +73,27 @@ plus one conditional (`capabilities()` in `control.go:738`):
 | `oww_trigger` | always | Can **act** on its own wake detection — kept separate from `oww_shadow` on purpose (see below) |
 | `button_hold` | always | Emits long-press (`heldMs`) |
 | `audio_mix` | always | Holds music on its own frame types and mixes it under voice rather than pausing |
+| `aec_hw_ref` | always | Can take the AEC far-end reference from a playback loopback in the mic capture itself, and falls back to the software tap at the ALSA write when the board has none |
 | `ambient_light` | only if the sensor is actually readable (`als.Present()`) | Reports light readings |
+
+**`aec_hw_ref` is a capability with a runtime companion, and both are needed.**
+The capability says the firmware knows *how* to use a hardware echo reference.
+Whether the board actually has one is answered by `aecRef` on the periodic
+`stats` message — `"hw"`, `"sw"` or `"off"`, and **absent** from firmware too
+old to say, which must not be read as `"sw"`.
+
+The split exists because the proof is only available at runtime: a channel is
+confirmed as a playback loopback by being bit-exact silent at idle *and*
+carrying audio while the speaker plays, and nothing has played at registration
+time. It matters for the AEC delay control, which compensates write-to-ear
+latency for the software tap and means nothing on a frame-aligned hardware
+reference. Gating that control on the capability would grey it out on every
+current device, including those that fall back to the tap and need it; gating
+it on `aecRef == "hw"` disables it exactly where it does nothing.
+
+A board with no loopback announces `aec_hw_ref` and reports `aecRef: "sw"`
+forever, which is the correct degraded behaviour and needs no controller
+change.
 
 **`oww_shadow` and `oww_trigger` are two capabilities, not one, and that split
 is load-bearing.** Shadow shipped first, so there is firmware in the field that
@@ -85,7 +105,8 @@ that only relays scoring announces `oww_shadow` alone.
 
 The controller reads capabilities via `@property` gates on the `Device` class
 (`controller/em_controller.py`): `led_anim_capable`, `audio_mix_capable`,
-`button_hold_capable`, `oww_shadow_capable`, `oww_trigger_capable`, plus direct
+`button_hold_capable`, `oww_shadow_capable`, `oww_trigger_capable`,
+`aec_hw_ref_capable`, plus direct
 membership checks for the base four (`mic`/`speaker`/`leds`/`buttons`). Every
 string the controller checks must be one the device can send, and every string
 the device sends must be one the controller understands — both directions are

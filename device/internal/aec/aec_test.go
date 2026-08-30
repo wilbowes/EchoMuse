@@ -347,7 +347,7 @@ func TestMissingHardwareRefPassesThrough(t *testing.T) {
 	if !bytes.Equal(out, mic) {
 		t.Fatal("frame was altered despite having no reference")
 	}
-	if c.hwSilent == 0 {
+	if c.hwMissing == 0 {
 		t.Fatal("missing reference was not counted")
 	}
 
@@ -459,5 +459,69 @@ func TestPlaybackLevelScaleIsTheCodecLaw(t *testing.T) {
 		if math.Abs(c.refScale-tc.want) > tc.want*0.001 {
 			t.Errorf("level %d → scale %.6f, want %.6f", tc.level, c.refScale, tc.want)
 		}
+	}
+}
+
+// A delay change must not rebuild the filter on the hardware reference:
+// delayMs only seeds the ring, and the hardware path has no ring. Rebuilding
+// would throw away a converged filter to apply a number nothing reads — and
+// the value rides every config push, so one fleet-wide edit would do it to
+// every device at once.
+func TestDelayChangeDoesNotRebuildOnTheHardwarePath(t *testing.T) {
+	c := New()
+	c.SetParams(true, 250, 300)
+	c.SetHardwareRef(true)
+	before := c.st
+	if before == nil {
+		t.Fatal("echo state not initialised")
+	}
+
+	c.SetParams(true, 400, 300)
+	if c.st != before {
+		t.Fatal("delay-only change rebuilt the echo state on the hardware path")
+	}
+	if c.delayMs != 400 {
+		t.Fatalf("delayMs not recorded for a later software fallback: got %d", c.delayMs)
+	}
+
+	// A TAIL change is a real filter change and must still rebuild.
+	c.SetParams(true, 400, 200)
+	if c.st == before {
+		t.Fatal("tail change must rebuild the echo state even on the hardware path")
+	}
+
+	// And on the software path a delay change must still re-seed the ring,
+	// which is the whole reason the rebuild exists.
+	c.SetHardwareRef(false)
+	prev := c.st
+	c.SetParams(true, 500, 200)
+	if c.st == prev {
+		t.Fatal("delay change must rebuild on the software path")
+	}
+	if c.count != 500*sampleRate/1000 {
+		t.Fatalf("ring not re-seeded to the bulk delay: got %d samples", c.count)
+	}
+}
+
+// RefSource is what the controller reads to tell a hardware reference from
+// the software tap. "off" must be a real value rather than an empty string:
+// the stats field is sent without omitempty precisely so that ABSENT means
+// "firmware too old to say", and an empty string would collapse the two.
+func TestRefSourceNamesTheLiveReference(t *testing.T) {
+	c := New()
+	if got := c.RefSource(); got != "off" {
+		t.Fatalf("disarmed canceller: got %q, want \"off\"", got)
+	}
+	c.SetParams(true, 0, 300)
+	if got := c.RefSource(); got != "sw" {
+		t.Fatalf("software tap: got %q, want \"sw\"", got)
+	}
+	c.SetHardwareRef(true)
+	if got := c.RefSource(); got != "hw" {
+		t.Fatalf("hardware reference: got %q, want \"hw\"", got)
+	}
+	c.SetParams(false, 0, 300)
+	if got := c.RefSource(); got != "off" {
+		t.Fatalf("disarmed while on hardware: got %q, want \"off\"", got)
 	}
 }

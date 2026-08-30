@@ -1748,6 +1748,17 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                          : (s?.volumePct != null ? `${s.volumePct}%` : '—'))}
                     {row('Link', device.connected ? (device.linkTls ? 'wss (TLS)' : 'plain ws') : '—',
                          device.connected ? (device.linkTls ? 'var(--ok)' : 'var(--warn)') : undefined)}
+                    {/* Which far-end reference the AEC found. Shown only
+                        while cancellation is running: "off" is already
+                        readable from the AEC toggle, and a row repeating it
+                        earns nothing. Absent on firmware that cannot say,
+                        which must not read as the software tap. */}
+                    {device.connected && (device.aecRef === 'hw' || device.aecRef === 'sw') &&
+                      row('Echo ref',
+                          device.aecRef === 'hw'
+                            ? 'hardware (frame-aligned)'
+                            : 'software tap (delay-compensated)',
+                          device.aecRef === 'hw' ? 'var(--ok)' : undefined)}
                     {row('Config', (() => {
                       const n = (device.config_sections ?? []).length;
                       const total = Object.keys(CONFIG_SECTIONS).length;
@@ -1924,6 +1935,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 triggerCapable={!device.connected || !!device.owwTriggerCapable}
                 mixCapable={!device.connected || !!device.audioMixCapable}
                 holdCapable={!device.connected || !!device.buttonHoldCapable}
+                hwEchoRef={device.connected && device.aecRef === 'hw'}
                 onScopeChange={(id, local) => {
                   setSections(prev => local
                     ? [...prev, id]
@@ -5072,7 +5084,13 @@ function onDeviceMode(config) {
 
 function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                             shadowCapable = true, mixCapable = true,
-                            holdCapable = true, triggerCapable = true }) {
+                            holdCapable = true, triggerCapable = true,
+                            hwEchoRef = false }) {
+  // hwEchoRef defaults FALSE while its neighbours default TRUE, because it
+  // is the only one that DISABLES a control rather than enabling one. The
+  // fleet view has no single device to ask, so it keeps the AEC delay
+  // slider live — which is right either way: the value is still pushed, and
+  // still used by any device that falls back to the software tap.
   // shadowCapable defaults TRUE because this form is also the fleet-config
   // view, where there is no single device whose capability could gate a
   // control. Referencing a `device` here is what blank-screened the Config
@@ -5455,7 +5473,12 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             <Toggle label="Beamforming" sub="perimeter mic lock during turns" value={config.beamformingEnabled ?? false} onChange={v => set('beamformingEnabled', v)}/>
             <Toggle label="Echo cancel (AEC)" sub="subtracts the device's own playback — wake + turns" value={config.aecEnabled ?? false} onChange={v => set('aecEnabled', v)}/>
             <Toggle label="Noise suppression" sub="DTLN denoise on speech-to-text audio only — helps fans/hum, not TV speech" value={config.nsAsr ?? false} onChange={v => set('nsAsr', v)}/>
-            <Slider label="AEC delay" sub="playback write-to-ear latency compensation" value={config.aecDelayMs ?? 250} min={0} max={1000} step={10} unit="ms" onChange={v => set('aecDelayMs', v)}/>
+            <Slider label="AEC delay"
+              sub={hwEchoRef
+                ? 'not used — this device has a hardware echo reference'
+                : 'playback write-to-ear latency compensation'}
+              disabled={hwEchoRef}
+              value={config.aecDelayMs ?? 250} min={0} max={1000} step={10} unit="ms" onChange={v => set('aecDelayMs', v)}/>
             <Slider label="AEC tail" sub="filter length — residual delay error + room reverb" value={config.aecTailMs ?? 300} min={50} max={500} step={10} unit="ms" onChange={v => set('aecTailMs', v)}/>
             {/* Three values, so a select. "Auto" is right almost always —
                 the other two exist so the two reference paths can be

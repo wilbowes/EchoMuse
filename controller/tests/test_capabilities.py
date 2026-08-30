@@ -231,3 +231,60 @@ def test_the_api_can_tell_no_sensor_from_no_reading():
     api = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
     assert "ambientLightCapable" in api, \
         "/api/devices must report whether the device found its ALS"
+
+
+def test_hardware_echo_reference_is_a_capability_and_a_runtime_state():
+    """
+    Two facts, and neither substitutes for the other.
+
+    `aec_hw_ref` says the FIRMWARE knows how to take the AEC far-end
+    reference from a playback loopback in the mic capture. `aecRef` on the
+    stats report says whether the board turned out to have one. They must
+    stay separate because the proof is only available at runtime: confirming
+    a channel is a loopback requires it to be bit-exact silent at idle AND
+    to carry audio while the speaker plays, and nothing has played at
+    registration time. A controller that read the capability as "it is using
+    a hardware reference" would disable the AEC delay slider on every device
+    the moment it connected, including the ones that fall back to the
+    software tap and need that slider.
+    """
+    caps = device_capabilities()
+    assert "aec_hw_ref" in caps, "firmware no longer announces aec_hw_ref"
+
+    ctl = CONTROLLER.read_text()
+    assert "aec_hw_ref_capable" in ctl, \
+        "em_controller must expose the hardware-reference capability"
+    assert '"aecRef"' in ctl or "'aecRef'" in ctl, \
+        "the stats allowlist must carry aecRef, or it is dropped in the relay"
+
+    api = API.read_text()
+    for field in ("aecHwRefCapable", "aecRef"):
+        assert field in api, f"/api/devices must surface {field}"
+
+    jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
+    assert "hwEchoRef" in jsx, \
+        "the dashboard must gate the AEC delay control on the live reference"
+
+
+def test_the_aec_delay_control_is_gated_on_the_live_reference_not_the_capability():
+    """
+    The delay slider compensates write-to-ear latency for the software tap.
+    On the frame-aligned hardware reference there is nothing to compensate,
+    so it must be shown disabled with the reason — but only for a device
+    actually running on it.
+
+    Gating on `aecHwRefCapable` instead would disable the slider on every
+    device with current firmware, including one whose board has no loopback,
+    leaving a real control permanently greyed out with a reason that is not
+    true of it.
+    """
+    jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
+    m = re.search(r"hwEchoRef=\{([^}]*)\}", jsx)
+    assert m, "dashboard must pass hwEchoRef to the config form"
+    expr = m.group(1)
+    assert "aecRef" in expr, \
+        "hwEchoRef must come from the runtime aecRef, not from the capability"
+    assert "aecHwRefCapable" not in expr, (
+        "hwEchoRef must NOT be driven by the capability: a capable device on "
+        "the software tap still needs its delay slider"
+    )

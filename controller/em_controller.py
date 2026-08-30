@@ -823,6 +823,40 @@ class Device:
         """
         return "oww_trigger" in (self.capabilities or [])
 
+    @property
+    def aec_hw_ref_capable(self) -> bool:
+        """
+        Whether this firmware can take the AEC far-end reference from a
+        hardware playback loopback in the mic capture, falling back to the
+        software tap at the ALSA write when the board has none.
+
+        This answers "could it" — `aec_ref` below answers "is it, right
+        now", the same split as oww_shadow_capable against shadow.active.
+        Both are needed and neither substitutes for the other: proving a
+        channel is a loopback requires the speaker to have played, which has
+        not happened at registration, so a capability alone can never say
+        the reference was found.
+
+        What it gates is the AEC delay control. That slider compensates
+        write-to-ear latency for the software tap; on a frame-aligned
+        hardware reference there is no latency to compensate, so a live
+        slider there is a knob that does nothing.
+        """
+        return "aec_hw_ref" in (self.capabilities or [])
+
+    @property
+    def aec_ref(self) -> str | None:
+        """
+        The far-end reference cancellation is actually running on: "hw",
+        "sw", "off", or None from firmware too old to report it.
+
+        None is NOT "sw". Every device predating this reports nothing, and
+        reading that as the software tap would tell the dashboard a fact
+        about a device that never stated one — the same reason a missing
+        playback_stats stores NULL rather than zero.
+        """
+        return (self.stats or {}).get("aecRef")
+
     async def send_led_anim(self, anim: dict):
         """
         Hand the ring to the device's local animation engine (led_anim
@@ -3516,6 +3550,13 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                             # device is not scoring (see the allowlist note above:
                             # DeviceStats, here, and the consumer below).
                             "owwShadow":     msg.get("owwShadow"),
+                            # Which far-end reference the AEC is on: "hw",
+                            # "sw", "off", or absent from firmware that
+                            # cannot say. Deliberately NOT added to
+                            # record_device_stats, unlike the rest of this
+                            # allowlist: it is a state, not a metric, and
+                            # the hourly rollup averages numbers.
+                            "aecRef":        msg.get("aecRef"),
                         }
                         # Shadow summary → hourly rollup. Present only while the
                         # device is scoring, so its presence is also the "was it

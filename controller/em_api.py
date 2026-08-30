@@ -4722,6 +4722,13 @@ def _merge_device(row) -> dict:
         # device that never answers.
         "owwTriggerCapable": getattr(live, "oww_trigger_capable", False) if live else False,
         "audioMixCapable": getattr(live, "audio_mix_capable", False) if live else False,
+        # Gates the AEC delay slider, which only means anything on the
+        # software tap. Paired with aecRef because the capability says the
+        # firmware KNOWS how to use a hardware reference and aecRef says
+        # whether this board turned out to have one — a device can be
+        # capable and still be running on the software tap.
+        "aecHwRefCapable": getattr(live, "aec_hw_ref_capable", False) if live else False,
+        "aecRef":          getattr(live, "aec_ref", None) if live else None,
         # Gates the tap-as-event toggle — see em_button.decide.
         "buttonHoldCapable": getattr(live, "button_hold_capable", False) if live else False,
         # Whether the device found its ambient light sensor. Reported so the
