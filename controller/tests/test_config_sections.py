@@ -263,3 +263,29 @@ def test_config_form_does_not_reference_a_device_it_never_receives():
         "(and which does not exist in the fleet-config view). Pass what the control "
         "needs explicitly.\n  " + "\n  ".join(offenders)
     )
+
+
+def test_the_echo_reference_override_is_scoped_and_offered():
+    """
+    aecRefSource pins the AEC far-end reference to the hardware loopback or
+    the software tap, or leaves it detecting.
+
+    It is config rather than a device env var for one reason: pinning it
+    otherwise means editing start_server.sh on the device and restarting the
+    server, which is how the hardware-vs-software comparison stayed
+    unmeasured for three sessions. A measurement that expensive does not get
+    made.
+
+    Three places or it does not work: the default (so it is pushed at all),
+    the section map (so it is scoped with the rest of the mic settings), and
+    the dashboard (so a person can change it).
+    """
+    assert em_db.DEFAULT_DEVICE_CONFIG.get("aecRefSource") == "auto", \
+        "must default to detecting, never to a pin — a pinned default would " \
+        "disable the hardware reference on every device at once"
+
+    assert "aecRefSource" in cs.SECTIONS["microphones"]["keys"], \
+        "aecRefSource must be scoped with the other mic settings"
+
+    jsx = DASHBOARD.read_text()
+    assert "aecRefSource" in jsx, "the dashboard must offer the control"

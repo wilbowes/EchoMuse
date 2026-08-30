@@ -76,6 +76,22 @@ DEFAULT_DEVICE_CONFIG = {
     "aecEnabled":       True,
     "aecDelayMs":       0,
     "aecTailMs":        300,
+    # aecRefSource: where the far-end reference comes from — "auto" (detect
+    # the hardware playback loopback in the mic capture, fall back to the
+    # software tap at the ALSA write), "hw" or "sw" to pin one. An override
+    # for the DETECTION rather than a claim about the board, the same shape
+    # as owwOnDevice.
+    #
+    # It is config rather than a device env var because pinning it otherwise
+    # means editing start_server.sh on the device and restarting the server,
+    # and that is exactly how the hardware-vs-software comparison stayed
+    # unmeasured for three sessions. Making a measurement expensive is how it
+    # does not get made.
+    #
+    # Firmware predating the hardware reference IGNORES this and keeps its
+    # existing behaviour — the device applies only non-empty config fields,
+    # so an unknown key costs an old device nothing.
+    "aecRefSource":     "auto",
     "startupVolume":    85,
     # vadThreshold: 0.001 (normalised RMS pre-AGC).
     # Q2 fix (2026-07-05 review, tracked as B6): this was drifted to 0.003 in

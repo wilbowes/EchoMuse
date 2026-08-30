@@ -1,5 +1,28 @@
 # Changelog
 
+## 2.22.0-ea.8 (Early Access)
+
+**Adds one setting, for testing echo cancellation.** Nothing else changes, and
+there is nothing to do before updating.
+
+### Echo reference (Config → Microphones → Advanced)
+
+Echo cancellation needs a copy of what the Echo is playing, so it can subtract
+it from what the microphones hear. There are two places that copy can come
+from, and newer firmware can use either:
+
+- **Auto** (default, and what you already have) — use the copy the audio chip
+  provides, and fall back to the software one if the chip does not offer it
+- **Hardware** / **Software tap** — pin one, to compare them
+
+Leave it on **Auto** unless you are deliberately measuring the difference.
+Pinning **Hardware** on an Echo whose chip does not provide that copy means no
+echo cancellation at all.
+
+**Needs firmware newer than v2.13.0.** Older Echoes ignore this setting
+entirely and carry on as they always have — nothing breaks, the setting simply
+has no effect.
+
 ## 2.22.0-ea.7 (Early Access)
 
 **Long spoken answers no longer cut off part-way through.** That is the whole

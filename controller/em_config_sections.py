@@ -40,7 +40,7 @@ SECTIONS: dict[str, dict] = {
         "keys": [
             "adcMicpga", "adcDigitalGain", "micGainDb",
             "beamformingEnabled", "beamAngle",
-            "aecEnabled", "aecDelayMs", "aecTailMs", "nsAsr",
+            "aecEnabled", "aecDelayMs", "aecTailMs", "aecRefSource", "nsAsr",
             "saveUtterances",
         ],
     },

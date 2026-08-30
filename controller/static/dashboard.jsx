@@ -4947,7 +4947,7 @@ const STAGE_MONO = "'DM Mono',monospace";
 const CONFIG_SECTIONS = {
   "playback": ["eqBands", "eqLoudness", "duckDb", "limiterEnabled", "limiterThreshold", "limiterRelease", "bassGuardEnabled", "bassGuardDb"],
   "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice"],
-  "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "nsAsr", "saveUtterances"],
+  "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "aecRefSource", "nsAsr", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
   "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs"],
   "bluetooth": ["bleProxyEnabled"]
@@ -5457,6 +5457,32 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             <Toggle label="Noise suppression" sub="DTLN denoise on speech-to-text audio only — helps fans/hum, not TV speech" value={config.nsAsr ?? false} onChange={v => set('nsAsr', v)}/>
             <Slider label="AEC delay" sub="playback write-to-ear latency compensation" value={config.aecDelayMs ?? 250} min={0} max={1000} step={10} unit="ms" onChange={v => set('aecDelayMs', v)}/>
             <Slider label="AEC tail" sub="filter length — residual delay error + room reverb" value={config.aecTailMs ?? 300} min={50} max={500} step={10} unit="ms" onChange={v => set('aecTailMs', v)}/>
+            {/* Three values, so a select. "Auto" is right almost always —
+                the other two exist so the two reference paths can be
+                compared on one device, which otherwise means editing an init
+                script on it and restarting the server.
+
+                NOT gated on a capability, deliberately, and this is the one
+                place that rule is relaxed: the device half ships separately
+                (#385), so there is no capability to read yet. The firmware
+                requirement is stated in the sub-text instead, which is the
+                point of the rule — a control that does nothing WITHOUT
+                saying why is what must never happen. Older firmware ignores
+                the key and keeps detecting. */}
+            <Select
+              label="Echo reference"
+              sub={(config.aecRefSource ?? 'auto') === 'hw'
+                ? 'pinned to the playback loopback in the mic capture — no delay to compensate, but a board without one cancels nothing'
+                : (config.aecRefSource ?? 'auto') === 'sw'
+                  ? 'pinned to the tap at the speaker write — uses the AEC delay above, and re-converges after every volume change'
+                  : 'detects the hardware loopback, falls back to the software tap. Needs firmware newer than v2.13.0; older Echoes ignore this'}
+              value={String(config.aecRefSource ?? 'auto').toLowerCase()}
+              options={[
+                { value: 'auto', label: 'Auto' },
+                { value: 'hw',   label: 'Hardware' },
+                { value: 'sw',   label: 'Software tap' },
+              ]}
+              onChange={v => set('aecRefSource', v)}/>
             <Toggle label="Save utterances" sub="keeps the last 10 turns' mic audio on the server — play or download from Activity" value={config.saveUtterances ?? false} onChange={v => set('saveUtterances', v)}/>
           </div>
         </StageAdvanced>
