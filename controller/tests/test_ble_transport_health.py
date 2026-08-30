@@ -9,95 +9,99 @@ patch download on the chip carrying the WiFi link. Observed once on
 after that.
 
 The device has counted `restarts`/`hciErrors` since the proxy shipped and
-sent them in the stats message. update_stats read `advertsSeen` and dropped
-both, so nothing anywhere could say how often this happens. These guard the
-counting rule, which is the part that is easy to get wrong: the counters are
-cumulative on the DEVICE, so the signal is a RISE, not a non-zero value.
+sent them in the stats message. `update_stats` read `advertsSeen` and
+dropped both, so nothing anywhere could say how often this happens.
+
+These test `em_ble_health` rather than reaching the decision through
+`em_ble_proxy`, which imports zeroconf — a dependency the CI test job does
+not install, so a test routed through that module passes locally and cannot
+run where it matters. That is the same reason the logic was split out at
+all; see controller/CLAUDE.md on keeping the suite to pure-logic modules.
 """
 
-import logging
+import re
+from pathlib import Path
 
-import pytest
+import em_ble_health as health
 
-import em_ble_proxy
-
-
-@pytest.fixture()
-def proxy(monkeypatch):
-    p = em_ble_proxy.DeviceBleProxyServer(
-        device_id="G090LF1180440C95", label="Test Echo 1",
-        mac_address="90:f1:18:04:40:c9", port=6053,
-    )
-    monkeypatch.setitem(em_ble_proxy._proxies, p.device_id, p)
-    return p
+CONTROLLER = Path(__file__).resolve().parents[1]
 
 
-def _warnings(caplog):
-    return [r for r in caplog.records if r.levelno >= logging.WARNING]
+def test_a_rise_warns():
+    obs = health.observe(0, 0, 1, 1)
+    assert obs.warning is not None
+    assert (obs.restarts, obs.errors) == (1, 1)
 
 
-def test_a_rise_warns_once_not_every_report(proxy, caplog):
+def test_an_unchanged_counter_does_not_re_warn():
     """
     The counters never fall on their own, so warning on "non-zero" would
     repeat the same reset every 30s forever and bury the next real one.
     """
-    with caplog.at_level(logging.WARNING, logger="echomuse.bleproxy"):
-        em_ble_proxy.update_stats(proxy.device_id, {"restarts": 1, "hciErrors": 1})
-        first = len(_warnings(caplog))
-        for _ in range(5):
-            em_ble_proxy.update_stats(proxy.device_id,
-                                      {"restarts": 1, "hciErrors": 1})
-        assert first == 1, "a rise must warn"
-        assert len(_warnings(caplog)) == 1, \
-            "an unchanged counter must not re-warn on every stats report"
+    obs = health.observe(1, 1, 1, 1)
+    assert obs.warning is None
+    assert (obs.restarts, obs.errors) == (1, 1)
 
 
-def test_a_second_rise_warns_again(proxy, caplog):
-    with caplog.at_level(logging.WARNING, logger="echomuse.bleproxy"):
-        em_ble_proxy.update_stats(proxy.device_id, {"restarts": 1, "hciErrors": 0})
-        em_ble_proxy.update_stats(proxy.device_id, {"restarts": 1, "hciErrors": 0})
-        em_ble_proxy.update_stats(proxy.device_id, {"restarts": 2, "hciErrors": 0})
-    assert len(_warnings(caplog)) == 2
+def test_either_counter_rising_is_enough():
+    assert health.observe(1, 0, 2, 0).warning is not None, "restarts alone"
+    assert health.observe(1, 0, 1, 1).warning is not None, "errors alone"
 
 
-def test_a_clean_transport_never_warns(proxy, caplog):
-    with caplog.at_level(logging.WARNING, logger="echomuse.bleproxy"):
-        for _ in range(10):
-            em_ble_proxy.update_stats(proxy.device_id,
-                                      {"advertsSeen": 900, "restarts": 0,
-                                       "hciErrors": 0})
-    assert _warnings(caplog) == []
+def test_the_warning_names_the_delta_and_the_total():
+    obs = health.observe(2, 3, 5, 9)
+    assert "+3 restarts" in obs.warning
+    assert "+6 errors" in obs.warning
+    assert "5/9 total" in obs.warning
 
 
-def test_a_device_restart_rebases_instead_of_going_negative(proxy, caplog):
+def test_a_clean_transport_never_warns():
+    prev = (0, 0)
+    for _ in range(10):
+        obs = health.observe(prev[0], prev[1], 0, 0)
+        assert obs.warning is None
+        prev = (obs.restarts, obs.errors)
+
+
+def test_a_device_restart_rebases_instead_of_going_negative():
     """
-    A device reboot resets both counters to 0. Treating that as a negative
-    delta and leaving the stored value high would silence the next genuine
-    rise all the way back up to the old total — which is precisely the
-    window after a reboot, when resets matter most.
+    A reboot resets both counters to 0. Treating that as a negative delta
+    and keeping the old baseline would silence the next genuine rise all the
+    way back up to the old total — precisely the window after a reboot, when
+    resets matter most.
     """
-    with caplog.at_level(logging.WARNING, logger="echomuse.bleproxy"):
-        em_ble_proxy.update_stats(proxy.device_id, {"restarts": 9, "hciErrors": 9})
-        before = len(_warnings(caplog))
-        em_ble_proxy.update_stats(proxy.device_id, {"restarts": 0, "hciErrors": 0})
-        assert len(_warnings(caplog)) == before, \
-            "a rebase is not a reset event and must not warn"
-        assert proxy.hci_restarts == 0, "counters must rebase to the new baseline"
-        em_ble_proxy.update_stats(proxy.device_id, {"restarts": 1, "hciErrors": 0})
-        assert len(_warnings(caplog)) == before + 1, \
-            "the first rise after a reboot must still warn"
+    obs = health.observe(9, 9, 0, 0)
+    assert obs.warning is None, "a rebase is not a reset event"
+    assert (obs.restarts, obs.errors) == (0, 0), "must adopt the new baseline"
+
+    after = health.observe(obs.restarts, obs.errors, 1, 0)
+    assert after.warning is not None, "the first rise after a reboot must warn"
 
 
-def test_status_surfaces_the_counters(proxy):
-    em_ble_proxy.update_stats(proxy.device_id, {"restarts": 4, "hciErrors": 6})
-    st = em_ble_proxy.get_status(proxy.device_id)
-    assert st["hciRestarts"] == 4
-    assert st["hciErrors"] == 6
+def test_missing_counters_are_treated_as_zero_not_as_a_crash():
+    """Firmware predating the counters sends neither field."""
+    obs = health.observe(0, 0, None, None)
+    assert obs.warning is None
+    assert (obs.restarts, obs.errors) == (0, 0)
 
 
-def test_a_missing_ble_object_is_not_an_error(proxy):
-    """Firmware predating the counters, and any non-dict, must be ignored."""
-    em_ble_proxy.update_stats(proxy.device_id, {})
-    em_ble_proxy.update_stats(proxy.device_id, None)
-    em_ble_proxy.update_stats("unknown-device", {"restarts": 3})
-    assert proxy.hci_restarts == 0
+# ── The wiring, asserted on source ───────────────────────────────────────────
+#
+# em_ble_proxy cannot be imported here (zeroconf), so the two facts that make
+# the pure logic above reach anything are checked against the file.
+
+def test_the_proxy_routes_its_counters_through_this_module():
+    src = (CONTROLLER / "em_ble_proxy.py").read_text()
+    assert "import em_ble_health" in src
+    assert re.search(r"em_ble_health\.observe\(", src), \
+        "update_stats must use the shared decision, not its own copy"
+
+
+def test_the_status_payload_surfaces_the_counters():
+    """
+    A non-zero value here is the first thing to check against an unexplained
+    link drop on that device, so it has to reach the dashboard.
+    """
+    src = (CONTROLLER / "em_ble_proxy.py").read_text()
+    assert '"hciRestarts"' in src
+    assert '"hciErrors"' in src

@@ -45,6 +45,8 @@ from esphome.satellite_server import SatelliteServerProtocol, serve, _HANDLED
 from esphome.feature_flags import BluetoothProxyFeature
 from esphome.vendor import api_pb2
 
+import em_ble_health
+
 log = logging.getLogger("echomuse.bleproxy")
 
 BT_PROXY_FLAGS = int(
@@ -420,35 +422,20 @@ def update_stats(device_id: str, ble_stats: dict) -> None:
         return
     proxy.adverts_seen = int(ble_stats.get("advertsSeen") or 0)
 
-    # Transport resets. These are worth a warning of their own because
-    # /dev/stpbt is NOT a Bluetooth-only device: it is the MT8163's combo
-    # radio behind MediaTek's WMT stack, shared with WiFi. A failed session
-    # makes the scanner reopen it, and opening it triggers a BT function-on
-    # plus firmware patch download on the chip carrying the WiFi link — so a
-    # BLE restart is a candidate explanation for a device that vanishes off
-    # the network entirely, which is a very different symptom from the
-    # gradual RTT/packet-loss degradation and should not be confused with it.
-    #
-    # Observed once (2026-08-30, Test Echo 1): stpbt read failed, reopen 5s
-    # later, `network is unreachable` 2s after that. Logged rather than acted
-    # on — the correlation is one occurrence, and the counters now persist in
-    # device_metrics so a second one is a query rather than an argument.
-    restarts = int(ble_stats.get("restarts") or 0)
-    errors   = int(ble_stats.get("hciErrors") or 0)
-    # A counter going BACKWARDS means the device process restarted, which
-    # rebases both. Treating that as a negative delta would silence the next
-    # genuine rise, so rebase instead of comparing.
-    if restarts < proxy.hci_restarts or errors < proxy.hci_errors:
-        proxy.hci_restarts, proxy.hci_errors = restarts, errors
-    elif restarts > proxy.hci_restarts or errors > proxy.hci_errors:
-        log.warning(
-            f"[bleproxy.{device_id[-8:]}] BLE transport reset "
-            f"(+{restarts - proxy.hci_restarts} restarts, "
-            f"+{errors - proxy.hci_errors} errors; {restarts}/{errors} total) "
-            f"— reopening /dev/stpbt re-initialises the radio WiFi shares, "
-            f"so check for a link drop around now"
-        )
-        proxy.hci_restarts, proxy.hci_errors = restarts, errors
+    # Transport resets. Worth a warning of their own because /dev/stpbt is
+    # NOT a Bluetooth-only device: it is the MT8163's combo radio behind
+    # MediaTek's WMT stack, shared with WiFi. See em_ble_health for the
+    # mechanism, why the signal is a RISE rather than a value, and why a
+    # counter going backwards rebases — the decision lives there as pure
+    # logic so it is testable without importing zeroconf through this
+    # module.
+    obs = em_ble_health.observe(
+        proxy.hci_restarts, proxy.hci_errors,
+        ble_stats.get("restarts"), ble_stats.get("hciErrors"),
+    )
+    proxy.hci_restarts, proxy.hci_errors = obs.restarts, obs.errors
+    if obs.warning:
+        log.warning(f"[bleproxy.{device_id[-8:]}] {obs.warning}")
 
     satellite = proxy.get_satellite()
     if satellite is not None:
