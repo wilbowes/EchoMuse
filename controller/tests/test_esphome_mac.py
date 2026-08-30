@@ -109,10 +109,22 @@ def _legacy_fleet(tmp_path, serials):
     db.init(str(path))
     for i, s in enumerate(serials):
         db.register_new_device(s, f"10.0.0.{i+2}", "v2.12.0")
-    # Rewind to v18 with the column dropped, as a real pre-v19 database is.
+    # Rewind to v18, as a real pre-v19 database is.
+    #
+    # EVERY column added after v18 has to go, not just esphome_mac: init()
+    # re-runs all of MIGRATIONS[18:], and an ALTER TABLE ADD COLUMN that
+    # finds its column already there fails the whole migration and takes
+    # init() down with it. Dropping only this test's own column made these
+    # cases fail the moment v20 was appended, which is a fragile helper
+    # rather than a real regression — so the set is derived from the
+    # migration SQL and needs no editing next time.
+    import re
     with db._tx() as conn:
         conn.execute("UPDATE devices SET esphome_mac = NULL")
-        conn.execute("ALTER TABLE devices DROP COLUMN esphome_mac")
+        for sql in db.MIGRATIONS[18:]:
+            for table, col in re.findall(
+                    r"ALTER TABLE (\w+)\s+ADD COLUMN (\w+)", sql):
+                conn.execute(f"ALTER TABLE {table} DROP COLUMN {col}")
         conn.execute("UPDATE system_config SET value = '18' WHERE key = 'schema_version'")
     db._conn.close(); db._conn = None
     db.init(str(path))            # runs v19 + its fixup
@@ -158,7 +170,15 @@ def test_migrations_are_append_only():
     The stored schema_version is an index into MIGRATIONS, so appending to a
     deployed entry corrupts every database that already ran it. v19 must be a
     new entry, and v18 must be untouched.
+
+    The length is pinned deliberately. Bumping it is the one moment somebody
+    adding a migration has to look at this file and confirm they APPENDED
+    rather than edited — which is the mistake this guards, and the one that
+    broke every stats write and disconnect-looped the fleet when it happened.
     """
-    assert len(db.MIGRATIONS) == 19
+    assert len(db.MIGRATIONS) == 20
     assert "esphome_mac" in db.MIGRATIONS[18]
     assert "esphome_mac" not in db.MIGRATIONS[17]
+    # v20 is its own entry and did not get appended onto v19's.
+    assert "ble_restarts_last" in db.MIGRATIONS[19]
+    assert "ble_restarts_last" not in db.MIGRATIONS[18]

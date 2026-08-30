@@ -796,6 +796,36 @@ MIGRATIONS: list[str] = [
 
     UPDATE system_config SET value = '19' WHERE key = 'schema_version';
     """,
+
+    # ── v20 — BLE transport resets, because they may not be BLE's problem ────
+    #
+    # The device has always counted these (bluetooth.Scanner.Stats: restarts,
+    # hciErrors) and always sent them inside the stats message's `ble` object.
+    # em_ble_proxy.update_stats read `advertsSeen` and dropped both, so the
+    # numbers existed on the wire for a month and nowhere else — the fleet
+    # question "how often does the transport reset" had no stored answer.
+    #
+    # Worth storing because /dev/stpbt is not a Bluetooth device, it is the
+    # MT8163's COMBO radio behind MediaTek's WMT stack, shared with WiFi. The
+    # scanner's own recovery reopens it, and opening it triggers a BT
+    # function-on plus firmware patch download on that shared chip
+    # (scanner.go, `session`). Observed 2026-08-30 on Test Echo 1: stpbt read
+    # failed, the scanner reopened 5s later, and the WiFi interface went
+    # `network is unreachable` 2s after that. One occurrence, mechanism
+    # plausible, nothing stored anywhere that could say whether it is common.
+    #
+    # GAUGES, NOT SUMS. These are cumulative counters since the device's
+    # process start, not per-window deltas like the RTT fields above, so
+    # adding them every 30s would multiply a single reset into hundreds.
+    # Keeping the latest value makes an hour-to-hour difference the number of
+    # resets in that hour, and makes a DROP to a smaller value mean the
+    # device restarted — which is worth seeing rather than smoothing away.
+    """
+    ALTER TABLE device_metrics ADD COLUMN ble_restarts_last   INTEGER;
+    ALTER TABLE device_metrics ADD COLUMN ble_hci_errors_last INTEGER;
+
+    UPDATE system_config SET value = '20' WHERE key = 'schema_version';
+    """,
 ]
 
 # Post-migration fixups that need Python rather than SQL. Keyed by the schema
@@ -2070,6 +2100,13 @@ def record_device_stats(device_id: str, stats: dict) -> None:
     cores_on   = stats.get("coresOnline")
     cores_tot  = stats.get("coresTotal")
     therm_lim  = stats.get("thermalCoreLimit")
+    # BLE transport health, from the `ble` object the scanner fills in.
+    # Absent on every device with the proxy off, which stores as NULL and
+    # must not read as "zero resets" — a device that never opened the
+    # transport is not a device that opened it and never faltered.
+    _ble       = stats.get("ble") or {}
+    ble_restarts = _ble.get("restarts")
+    ble_hci_err  = _ble.get("hciErrors")
     with _tx() as conn:
         conn.execute(
             """
@@ -2084,11 +2121,13 @@ def record_device_stats(device_id: str, stats: dict) -> None:
                 rtt_excursions, rtt_excursions_idle, rtt_samples_idle,
                 cpu_temp_sum, cpu_temp_samples, cpu_temp_max, max_temp_max,
                 cores_online_last, cores_online_min, cores_total,
-                thermal_limit_min
+                thermal_limit_min,
+                ble_restarts_last, ble_hci_errors_last
             ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                       ?, ?, ?, ?, ?, ?, ?, ?, ?,
                       ?, ?, ?, ?, ?, ?, ?,
-                      ?, ?, ?, ?, ?, ?, ?, ?)
+                      ?, ?, ?, ?, ?, ?, ?, ?,
+                      ?, ?)
             ON CONFLICT (device_id, hour_ts) DO UPDATE SET
                 samples          = samples + 1,
                 cpu_sum          = cpu_sum + excluded.cpu_sum,
@@ -2158,7 +2197,16 @@ def record_device_stats(device_id: str, stats: dict) -> None:
                 END,
                 rtt_excursions      = rtt_excursions      + excluded.rtt_excursions,
                 rtt_excursions_idle = rtt_excursions_idle + excluded.rtt_excursions_idle,
-                rtt_samples_idle    = rtt_samples_idle    + excluded.rtt_samples_idle
+                rtt_samples_idle    = rtt_samples_idle    + excluded.rtt_samples_idle,
+                -- Latest value, never a sum: these are cumulative since the
+                -- device's process start (see the v20 migration). The count
+                -- of resets in an hour is the difference against the previous
+                -- hour's row, and a value SMALLER than the previous hour's
+                -- means the device restarted in between.
+                ble_restarts_last   = COALESCE(excluded.ble_restarts_last,
+                                               ble_restarts_last),
+                ble_hci_errors_last = COALESCE(excluded.ble_hci_errors_last,
+                                               ble_hci_errors_last)
             """,
             (
                 device_id, hour_ts,
@@ -2196,6 +2244,11 @@ def record_device_stats(device_id: str, stats: dict) -> None:
                 int(cores_on) if cores_on else None,
                 int(cores_tot) if cores_tot else None,
                 int(therm_lim) if therm_lim else None,
+                # NULL when the proxy is off, and 0 is a real value meaning
+                # "opened the transport, never faltered" — so `or None` would
+                # be wrong here in a way it is not for the gauges above.
+                int(ble_restarts) if ble_restarts is not None else None,
+                int(ble_hci_err) if ble_hci_err is not None else None,
             ),
         )
         conn.execute(

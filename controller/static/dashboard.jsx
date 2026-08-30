@@ -1835,7 +1835,14 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                           {row('Home Assistant', haState, bp.haSubscribed ? 'var(--ok)' : undefined)}
                           {row('Forwarded to HA', String(bp.advertsForwarded ?? 0))}
                           {row('ESPHome port', String(bp.port))}
-                          {row('HCI errors / restarts', b ? `${b.hciErrors ?? 0} / ${b.restarts ?? 0}` : '—')}
+                          {/* Amber on any non-zero: reopening /dev/stpbt
+                              re-initialises the combo radio WiFi shares, so
+                              this is the first thing to check against an
+                              unexplained link drop on this device. */}
+                          {row('HCI errors / restarts',
+                               b ? `${b.hciErrors ?? 0} / ${b.restarts ?? 0}` : '—',
+                               b && ((b.hciErrors ?? 0) > 0 || (b.restarts ?? 0) > 0)
+                                 ? 'var(--warn)' : undefined)}
                         </div>
                       </div>
                     </Panel>

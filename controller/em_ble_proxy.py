@@ -160,6 +160,12 @@ class DeviceBleProxyServer:
         self.adverts_received = 0   # batches' adverts arriving from the device
         self.adverts_forwarded = 0  # actually sent to a subscribed HA
         self.adverts_seen = 0       # device-reported cumulative counter (stats)
+        # Transport health, device-reported and cumulative since ITS process
+        # start. Kept so update_stats can warn on a RISE rather than on a
+        # non-zero value — the counters never fall on their own, so warning
+        # on non-zero would repeat the same reset every 30s forever.
+        self.hci_restarts = 0
+        self.hci_errors   = 0
 
     def _protocol_factory(self):
         if self._active_satellite is not None:
@@ -413,6 +419,37 @@ def update_stats(device_id: str, ble_stats: dict) -> None:
     if proxy is None or not isinstance(ble_stats, dict):
         return
     proxy.adverts_seen = int(ble_stats.get("advertsSeen") or 0)
+
+    # Transport resets. These are worth a warning of their own because
+    # /dev/stpbt is NOT a Bluetooth-only device: it is the MT8163's combo
+    # radio behind MediaTek's WMT stack, shared with WiFi. A failed session
+    # makes the scanner reopen it, and opening it triggers a BT function-on
+    # plus firmware patch download on the chip carrying the WiFi link — so a
+    # BLE restart is a candidate explanation for a device that vanishes off
+    # the network entirely, which is a very different symptom from the
+    # gradual RTT/packet-loss degradation and should not be confused with it.
+    #
+    # Observed once (2026-08-30, Test Echo 1): stpbt read failed, reopen 5s
+    # later, `network is unreachable` 2s after that. Logged rather than acted
+    # on — the correlation is one occurrence, and the counters now persist in
+    # device_metrics so a second one is a query rather than an argument.
+    restarts = int(ble_stats.get("restarts") or 0)
+    errors   = int(ble_stats.get("hciErrors") or 0)
+    # A counter going BACKWARDS means the device process restarted, which
+    # rebases both. Treating that as a negative delta would silence the next
+    # genuine rise, so rebase instead of comparing.
+    if restarts < proxy.hci_restarts or errors < proxy.hci_errors:
+        proxy.hci_restarts, proxy.hci_errors = restarts, errors
+    elif restarts > proxy.hci_restarts or errors > proxy.hci_errors:
+        log.warning(
+            f"[bleproxy.{device_id[-8:]}] BLE transport reset "
+            f"(+{restarts - proxy.hci_restarts} restarts, "
+            f"+{errors - proxy.hci_errors} errors; {restarts}/{errors} total) "
+            f"— reopening /dev/stpbt re-initialises the radio WiFi shares, "
+            f"so check for a link drop around now"
+        )
+        proxy.hci_restarts, proxy.hci_errors = restarts, errors
+
     satellite = proxy.get_satellite()
     if satellite is not None:
         satellite.push_adverts_sensor(proxy.adverts_seen)
@@ -431,4 +468,9 @@ def get_status(device_id: str) -> Optional[dict]:
         "haSubscribed":     bool(satellite is not None and satellite.subscribed),
         "advertsReceived":  proxy.adverts_received,
         "advertsForwarded": proxy.adverts_forwarded,
+        # Transport resets, surfaced because a non-zero value here is the
+        # first thing to check against an unexplained link drop on this
+        # device — see update_stats for why a BLE restart can take WiFi out.
+        "hciRestarts":      proxy.hci_restarts,
+        "hciErrors":        proxy.hci_errors,
     }
