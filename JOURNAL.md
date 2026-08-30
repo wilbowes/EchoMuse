@@ -1812,3 +1812,117 @@ with its own leakage, so a weaker 440Hz component would not have shown. It
 does not affect production — the wire is mono and the device duplicates L=R —
 but it decides which channel is the correct reference if that ever changes.
 
+## 2026-08-30 — the long-response cutout, root-caused; and why the AEC is stuck at ~10dB
+
+Two answers today, both of which had been mistaken for other things.
+
+### Long responses were cutting off mid-sentence, and it was never the network
+
+Three sessions of testing had been ruined by the same drop, and it kept
+reading as a link fault because that is what the symptom looks like. It is
+not. The chain is mechanical, and every link is in our own code:
+
+1. the voice path sent every period as fast as the socket accepted, with TCP
+   backpressure as the only brake
+2. the device's WebSocket read goroutine calls `PumpPeriod` **inline** per
+   `0x02` frame
+3. `pump()` ends in a **blocking** channel send, on a channel 128 periods
+   (~5.5s) deep
+4. once full, that goroutine blocks inside `PumpPeriod` and stops calling
+   `ReadMessage`
+5. gorilla fires the pong handler only **inside** `ReadMessage` — a blocked
+   device cannot answer a keepalive ping
+6. we ping every 20s and close after 10s without a pong
+7. the buffer drains at realtime, so the block outlasts the timeout
+8. `1011 keepalive ping timeout`, mid-response
+
+Measured: **3,397,174 bytes — 35.4s of audio — sent in 21.3s**, 9.8s of it
+blocked in socket writes, connection closed five seconds later. Short
+responses never reproduce it because they never fill 5.5s, which is why six
+weeks of it read as intermittent.
+
+**The music plane had already solved this and voice never got the fix.**
+`em_player.LEAD_S` has been 4.0s since 2026-07-25, sized against the device's
+own depth with ~1.4s of headroom, and its comment states the constraint
+exactly. Voice queued the whole response. That asymmetry was the bug, and
+`VOICE_LEAD_S` = 4.0 now matches.
+
+**Sending faster bought nothing** — the point worth keeping. The device holds
+~5.5s and no more, so everything beyond that sat in TCP buffers, which are
+lost on a reconnect exactly like audio never sent. The excess never improved
+stall resilience. It only bought the block.
+
+**Two diagnostics had to be built before this was findable.** Every drop had
+logged `Data connection closed: <id>` and nothing else, because
+`except ConnectionClosed: pass` discarded the close frames and
+`websockets.server` is pinned to CRITICAL. Three sessions had timing to
+reason from and no stated cause. `em_wsclose` now renders the frames, and
+says which SIDE closed — we gave up on the device, the device went first, or
+the socket died with nobody saying anything are three different
+investigations.
+
+### The AEC is not limited by its reference, and never was
+
+**We vendored `mdf.c` and not `preprocess.c`.** speexdsp's own documented AEC
+is two stages: `speex_echo_cancellation` then `speex_preprocess_run` with
+`SPEEX_PREPROCESS_SET_ECHO_STATE` for residual echo suppression. We run the
+first and skip the second.
+
+That explains the number. A linear adaptive filter cancels only the *linear*
+part of an echo path, and a speaker 4cm from the mics in a small plastic
+enclosure, coupling mechanically through the chassis, is substantially
+nonlinear. **10–14dB is the textbook ceiling for linear-only AEC against a
+nonlinear loudspeaker**, and it is where we sit whichever reference we use.
+
+**So the hardware reference (#385) reaching parity is the correct result, not
+a disappointment.** The reference was never the limiting factor. What ch7/ch8
+buys is *alignment* — which is precisely what we measured, deleting the ring,
+the decimator, `aecDelayMs` and the occupancy governor while holding the same
+attenuation. Amazon's extra dB comes from the AFE's post-processing, not from
+the loopback.
+
+Caveat before anyone reaches for `preprocess.c`: a residual suppressor is
+gain-based and attenuates near-end speech during double-talk, which is
+exactly what barge-in needs preserved. It would very likely improve the `att`
+number and could make barge-in worse. Measure it, do not assume it.
+
+### Also today
+
+**The device went deaf for 34–41 seconds after any data-plane drop the
+control plane survived.** `StartMic` had two callers — the controller's
+`mic_start` and unmute — so nothing restarted a stream that died with its
+socket, and the controller had no reconnect event to fire a fresh
+`mic_start` from because its own connection never dropped. Fixed by
+separating the controller's INTENT from the stream's STATE; recovery is now
+~5s, verified on hardware. The same fault from the other side closed a
+39-second hole at boot, where the first `mic_start` could beat the data
+connection into existence and was discarded.
+
+**A BLE transport reset is a candidate for a total link drop**, and the
+counters proving it were being thrown away. `/dev/stpbt` is the MT8163's
+combo radio behind MediaTek's WMT stack, shared with WiFi, and the scanner's
+own recovery reopens it — triggering a BT function-on and firmware patch
+download on the chip carrying the link. Seen once (stpbt read failure,
+reopen 5s later, `network is unreachable` 2s after that). The device had
+counted `restarts`/`hciErrors` since the proxy shipped;
+`em_ble_proxy.update_stats` read `advertsSeen` and dropped both. Now stored
+per hour as gauges. **This does NOT explain the connectivity history
+generally** — the proxy defaults off, #139 root-caused the RTT excursions to
+packet loss and TCP RTO, and the Lounge/Office swap showed those follow the
+location. Different symptom, kept apart deliberately.
+
+**Seven AEC instances would fit.** "One canceller per mic won't run on an
+A53" had been asserted without measuring. Benchmarked: one canceller is
+95.7µs per 32ms period and seven are 674µs on an i5-12500 — 0.30% and 2.1%
+of one core, so roughly 30–55% of an A53 core. Affordable. Whether it is
+*worth* it depends on how much the beamformer's channel switching actually
+costs the filter, which is one dashboard toggle away and still unmeasured.
+Also: tail 150ms is only 17% cheaper than 300ms, because the cost is
+dominated by fixed per-frame FFT work rather than filter length — so a tail
+sweep is nearly free either way.
+
+**Three test helpers failed the same way in one day**: source-slicing guards
+that used an unanchored `index()` or dropped only their own migration column,
+so any unrelated addition broke them with no clue why. Worth watching for as
+a class.
+

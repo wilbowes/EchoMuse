@@ -550,7 +550,54 @@ Two guards sit in front of that, both tested by reintroducing the bug:
     **A device with no HA behind it stands down BEFORE arbitration, and never runs the turn at all** (`em_esphome.can_serve_turn`, the same `get_server`/`get_satellite` pair `trigger_voice_turn` refuses on, so a device counted as able cannot turn out to be unable a tick later). Detection order is a **proximity** proxy and says nothing about whether HA has ever dialled that device's satellite port, so unqualified first-detector-wins hands the utterance to an unlinked Echo, stands down the linked one, and the winner then dies `no_ha` in milliseconds: nothing answers, and the device that could have is the one that went dark. Measured on the fleet 2026-08-29 — a device scoring **0.912** lost to one scoring 0.609 that crossed 449ms earlier, so loudness and detection order do genuinely disagree; that is one observation and not a case for reopening best-SNR, which stays settled. The ordering is the guard: a check after the claim leaves the claim taken, and `tests/test_deploy.py` pins that `can_serve_turn` precedes `_wake_arbiter.claim` and gates it. `em_arbiter` deliberately does **not** know about any of this — a second copy of the rule is one that can disagree with the first.
 
     **The stand-down still records the wake and still plays the cue, every time** (`em_esphome.record_dropped_wake` + `_leds_turn_end`). Both matter for the same reason the row exists on the turn path: a wake during an HA outage that leaves no trace is indistinguishable from a device that heard nothing. And the cue reports the **device's state, not a turn's outcome**, so it fires whether or not another Echo took the utterance — gating it on losing would make it vanish exactly on the multi-device fleets where the confusion is worst. That is the correction to the first version of this, which only cued when the device ran its own doomed turn: standing in front of an unlinked Echo, you got a ring that lit and went dark while another room answered, which reads as a broken cue (Wil, 2026-08-29). The button path stands down identically — it is the control someone reaches for when the wake word appeared to do nothing, so silence there is the worst version of the bug.
-2. **Voice turn** — on wake or dot-button: drain stale frames → acquire `voice_lock` → stream mic to HA via the ESPHome satellite → receive TTS URL → **incrementally** fetch + ffmpeg-decode straight to 48kHz mono → **EQ → bass guard → limiter** (`em_eq.py`, `em_mbc.py`, `em_limiter.py` — see "The output chain" below for why that order) → stream back as 0x02 frames. `_stream_tts_audio` pipes the HTTP response into one long-lived ffmpeg and yields PCM as it decodes, so playback starts while HA is still generating — neither the encoded response nor the decoded speech is accumulated. **A retry is only safe before the first PCM has been emitted**; `_fetch_tts_audio` remains for callers that genuinely need the whole buffer
+2. **Voice turn** — on wake or dot-button: drain stale frames → acquire `voice_lock` → stream mic to HA via the ESPHome satellite → receive TTS URL → **incrementally** fetch + ffmpeg-decode straight to 48kHz mono → **EQ → bass guard → limiter** (`em_eq.py`, `em_mbc.py`, `em_limiter.py` — see "The output chain" below for why that order) → stream back as 0x02 frames, **paced to `VOICE_LEAD_S`=4.0s ahead of realtime** (see below). `_stream_tts_audio` pipes the HTTP response into one long-lived ffmpeg and yields PCM as it decodes, so playback starts while HA is still generating — neither the encoded response nor the decoded speech is accumulated. **A retry is only safe before the first PCM has been emitted**; `_fetch_tts_audio` remains for callers that genuinely need the whole buffer
+
+## Pacing: why the voice stream is held 4s ahead, not sent as fast as it can go
+
+**The voice path used to send every period as fast as the socket accepted, and
+that cut long responses off mid-sentence.** The chain is mechanical, and every
+link is in the code:
+
+1. `stream_speaker_chunks` drains every available period back to back, with TCP
+   backpressure as the only brake
+2. the device's WebSocket read goroutine calls `PumpPeriod` **inline** per
+   `0x02` frame (`data.go`)
+3. `pump()` ends in a **blocking** channel send, on a channel `audioChanDepth`
+   = 128 periods ≈ **5.5s** deep (`stream.go`)
+4. once full, that goroutine blocks inside `PumpPeriod` and stops calling
+   `ReadMessage`
+5. gorilla fires the pong handler only **inside** `ReadMessage`, so a blocked
+   device **cannot answer a keepalive ping**
+6. the controller pings every 20s and closes after 10s without a pong
+   (`websockets.serve(ping_interval=20, ping_timeout=10)`)
+7. the buffer drains at realtime, so the block outlasts the timeout
+8. `1011 keepalive ping timeout`, mid-response
+
+Measured on Test Echo 1, 2026-08-30: 3,397,174 bytes — **35.4s of audio sent in
+21.3s**, 9.8s of it blocked in socket writes, connection closed five seconds
+later. Short responses never reproduce it because they never fill 5.5s, which
+is exactly why it read as intermittent for three sessions.
+
+**Sending faster bought nothing.** The device holds ~5.5s and no more;
+everything beyond that sat in TCP buffers, which are lost on a reconnect
+exactly like audio that was never sent. The excess never improved stall
+resilience — it only bought the block.
+
+**`VOICE_LEAD_S` = 4.0 matches `em_player.LEAD_S`**, which reached the same
+number from the same constraint for the music plane. Music had been paced since
+2026-07-25; voice never was, and that asymmetry was the bug. `tests/
+test_voice_pacing.py` guards the lead against `audioChanDepth` **read from the
+Go source**, so raising one without the other fails in CI rather than on
+hardware.
+
+Three properties keep it safe: a stream behind realtime computes a **zero**
+delay (`em_pacing.lead_delay`), so a slow HA or a stalled link is never made
+worse; the **first period is exempt** and the lead builds at full speed, so the
+prime gate is as prompt as it ever was; and the wait is **raced against
+`cancel_event`** rather than a bare sleep, or pacing would add its own latency
+to barge-in. `send_ms` deliberately still excludes the pacing wait — it is
+documented as socket-write time, and folding a deliberate wait into it would
+recreate the misreading that cost an investigation on 2026-07-20.
 
 ## The output chain: EQ → bass guard → limiter
 

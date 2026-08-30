@@ -1,5 +1,61 @@
 # Changelog
 
+## 2.22.0-ea.7 (Early Access)
+
+**Long spoken answers no longer cut off part-way through.** That is the whole
+release, and it has been happening for weeks.
+
+**There is nothing to do before updating.** No database migration, no firmware
+requirement, nothing to change on your devices.
+
+### Why a long answer stopped mid-sentence
+
+Ask for something that takes a minute to say and the Echo would go quiet
+part-way through, then sit there looking like it was still speaking. Short
+answers were always fine, which made it look like a network problem that came
+and went.
+
+It was not the network. The controller was sending the whole answer to the Echo
+as fast as the connection would carry it — around 35 seconds of speech pushed
+across in 21. The Echo can only hold about five and a half seconds of audio
+ahead of what it is playing, so the rest piled up, and while the Echo was busy
+working through the backlog it stopped answering the controller's "are you
+still there?" checks. After ten seconds without an answer the controller
+assumed it had lost the Echo and hung up — mid-sentence.
+
+The controller now sends the answer four seconds ahead of what is playing and
+no further. Nothing is lost by slowing down: the Echo could never hold more
+than five and a half seconds anyway, so everything sent beyond that was
+queueing on the network rather than reaching the speaker. Music has worked this
+way since July; spoken answers simply never got the same treatment.
+
+You should notice nothing except that long answers now finish.
+
+### An Echo stopped listening for up to 40 seconds after a network blip
+
+If the audio connection dropped while the main connection stayed up, the Echo
+would stop listening and not start again until the controller eventually
+noticed — measured at 34 and 41 seconds on our own test device. It is now about
+five, because the Echo restarts listening itself as soon as it reconnects
+instead of waiting to be told. The same fix closes a gap at start-up where an
+Echo could sit not listening for around 40 seconds after booting.
+
+**This part needs firmware.** It is a device change, and device firmware ships
+separately from the controller — an Echo running v2.13.0 or earlier still has
+the old behaviour.
+
+### Better answers when something does go wrong
+
+Two diagnostic changes, both invisible unless you go looking:
+
+- When a connection to an Echo closes, the log now says **why**, and which side
+  hung up. Every drop used to log "connection closed" and nothing else, which
+  is what made the problem above take so long to find.
+- Bluetooth proxy resets are now recorded. On these Echos, Bluetooth and Wi-Fi
+  share one radio, so a Bluetooth hiccup can take the network with it. If you
+  use the Bluetooth proxy and see an Echo drop off, the Bluetooth panel now
+  shows whether the radio restarted around then.
+
 ## 2.22.0-ea.6 (Early Access)
 
 **An Echo with no Home Assistant connection now says so every time you speak to
