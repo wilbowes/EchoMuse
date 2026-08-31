@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.22.0-ea.9 (Early Access)
 
 **Your Echoes can now be asked a question by Home Assistant, and will listen for
 the answer.** Nothing to do before updating: no database migration, no firmware
