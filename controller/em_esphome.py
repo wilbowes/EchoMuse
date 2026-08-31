@@ -283,6 +283,27 @@ VOICE_ASSISTANT_FLAGS = int(
     | VoiceAssistantFeature.TIMERS
 )
 
+# START_CONVERSATION is advertised PER DEVICE, not in the constant above,
+# because it is the one flag whose feature we cannot deliver without hardware:
+# announce-then-listen needs a microphone. HA filters the eligible targets for
+# `assist_satellite.start_conversation` and `assist_satellite.ask_question` on
+# this bit, so a satellite that cannot listen must not carry it — otherwise it
+# appears in the picker and answers every question with silence.
+#
+# Everything else in VOICE_ASSISTANT_FLAGS is still advertised unconditionally,
+# which is a gap rather than a decision: SPEAKER-less hardware would want the
+# same treatment. Doing it for one flag is not the general fix, and the general
+# fix is not free — the flags ride DeviceInfoResponse, a ONE-SHOT at HA connect,
+# so this only works at all because set_device_capabilities bounces the HA
+# connection when the set changes (a device whose server exists before it has
+# registered would otherwise advertise from an empty capability list forever).
+VOICE_ASSISTANT_CONVERSATION_FLAG = int(VoiceAssistantFeature.START_CONVERSATION)
+
+# Trigger label for a turn Home Assistant started with an announcement, rather
+# than one a wake word or a button started. It is neither, and borrowing either
+# label would put HA-initiated turns into the wake-word statistics.
+CONVERSATION_TRIGGER = "start_conversation"
+
 # VoiceAssistantRequest flags=0 means "device already detected wake word,
 # run Assist pipeline from STT onward — do not run HA-side wake word
 # detection on the audio stream."
@@ -374,6 +395,17 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         # send before the turn has actually progressed (observed in practice —
         # see _handle_voice_event's RUN_END branch).
         self._intent_ended      = False
+        # STT_END seen this turn. Only read on an answer-only run, where
+        # INTENT_END structurally never arrives — see _answer_only.
+        self._stt_ended         = False
+        # This turn was started by HA's announce-then-listen, and HA may have
+        # truncated its own pipeline at STT. `assist_satellite.ask_question`
+        # sets `end_stage = STT` (entity.py, keyed on its answer future), so
+        # the run ends after STT_END with no INTENT_END and no TTS — and the
+        # RUN_END guard below waits for INTENT_END. Without this, every
+        # question answered correctly still parked the device on the 30s TTS
+        # wait and recorded the turn as a timeout.
+        self._answer_only       = False
         self._run_started       = False
         # Whether HA has told us this run is over. A run we started
         # that has not finished is still emitting onto this socket,
@@ -469,6 +501,18 @@ class EchoMuseSatellite(SatelliteServerProtocol):
     def _ambient_lux_capable(self) -> bool:
         return self._device_has("ambient_light")
 
+    def _voice_assistant_flags(self) -> int:
+        """
+        Feature flags for DeviceInfoResponse, gated on what the device has.
+
+        See VOICE_ASSISTANT_CONVERSATION_FLAG for why announce-then-listen is
+        the one that is conditional.
+        """
+        flags = VOICE_ASSISTANT_FLAGS
+        if self._device_has("mic"):
+            flags |= VOICE_ASSISTANT_CONVERSATION_FLAG
+        return flags
+
     @property
     def _current_volume(self) -> float:
         """Current volume as HA float (0.0–1.0), read from owning server."""
@@ -498,7 +542,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 # (session handoff finding #1)
                 project_name=f"EchoMuse.{ESPHOME_DEVICE_MODEL}",
                 project_version=ESPHOME_PROJECT_VERSION,
-                voice_assistant_feature_flags=VOICE_ASSISTANT_FLAGS,
+                voice_assistant_feature_flags=self._voice_assistant_flags(),
             )
             return
 
@@ -777,8 +821,22 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # claiming it buys nothing and costs an exception per announce.
             # Measured on HA 2026.8.3, alongside the setup wizard stalling on
             # SatelliteBusyError.
-            log.info(f"[{self._log_name}] AnnounceRequest: media_id={msg.media_id!r} text={msg.text!r}")
-            asyncio.create_task(self._run_announce(msg.media_id))
+            #
+            # `start_conversation` (field 4) is HA asking us to LISTEN once the
+            # announcement has played — the wire form of both
+            # `assist_satellite.start_conversation` and
+            # `assist_satellite.ask_question`. It rides the same message as a
+            # plain announcement, so the only difference on our side is what
+            # happens after the audio stops.
+            log.info(
+                f"[{self._log_name}] AnnounceRequest: media_id={msg.media_id!r} "
+                f"text={msg.text!r} start_conversation={msg.start_conversation}"
+            )
+            asyncio.create_task(self._run_announce(
+                msg.media_id,
+                preannounce_media_id=msg.preannounce_media_id,
+                start_conversation=msg.start_conversation,
+            ))
             yield api_pb2.MediaPlayerStateResponse(
                 key=MEDIA_PLAYER_KEY,
                 state=MediaPlayerState.PLAYING,
@@ -849,6 +907,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         elif event_type == ET.VOICE_ASSISTANT_STT_END:
             text = data.get("text", "")
             log.info(f"[{self._log_name}] STT result: {text!r}")
+            self._stt_ended = True
             # HA has final text, so no further microphone audio can change
             # this turn — stop feeding it, the same "HA is done" shape the
             # RUN_END-without-RUN_START and ERROR paths already use.
@@ -961,7 +1020,16 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # spoken response (e.g. a silent light-toggle intent) still passes
             # through INTENT_END first, so this doesn't add a 30s stall for
             # that case — only a premature RUN_END before INTENT_END is held.
-            if self._intent_ended or self._turn_cancelled:
+            #
+            # An answer-only run never reaches INTENT_END, so STT_END is its
+            # terminal marker instead. `assist_satellite.ask_question` sets
+            # `end_stage = STT`, so HA's pipeline is genuinely over: it has the
+            # text it asked for and there is no intent and no TTS to wait on.
+            # Narrow on purpose — only a turn HA started with an announcement,
+            # and only once STT has actually produced a result — because the
+            # premature RUN_END this guard exists for arrives before STT_START.
+            if self._intent_ended or self._turn_cancelled or (
+                    self._answer_only and self._stt_ended):
                 # The genuine terminal RUN_END. Nothing more is coming for
                 # this run, so teardown has nothing left to serialise
                 # against — the overwhelmingly common case.
@@ -1037,10 +1105,15 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         except Exception as e:
             log.error(f"[{self._log_name}] play_media announce failed: {e}")
 
-    async def _run_announce(self, media_id: str) -> None:
+    async def _run_announce(
+        self,
+        media_id: str,
+        preannounce_media_id: str = "",
+        start_conversation: bool = False,
+    ) -> None:
         """
         Background task: fetch TTS audio from HA, play it, then tell HA the
-        announcement is done.
+        announcement is done — and, if HA asked for a conversation, listen.
 
         The sequencing rules and their reasons live in em_announce, which is
         importable by the test suite. This is the adapter: it resolves the
@@ -1080,7 +1153,40 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             play=self._announce_play_cb(),
             on_finished=reply,
             log_name=self._log_name,
+            preannounce_media_id=preannounce_media_id,
         )
+
+        # AFTER the reply, deliberately. HA blocks on AnnounceFinished for the
+        # whole announcement (`_do_announce` awaits it), so a turn started
+        # before it would be listening while HA still believes it is speaking —
+        # and `async_internal_ask_question` only arms its answer future once
+        # `async_start_conversation` returns.
+        if start_conversation:
+            await self._start_conversation_turn()
+
+    async def _start_conversation_turn(self) -> None:
+        """
+        Open a voice turn nobody spoke a wake word for.
+
+        HA asked the question; the answer is the next thing said in the room.
+        Runs the ordinary turn path — the only differences are the trigger
+        label and that `ask_question` truncates HA's pipeline at STT (see the
+        RUN_END branch in _handle_voice_event).
+        """
+        start = getattr(self._owning_server, "_start_conversation", None)
+        if start is None:
+            # The physical Dot is not connected — HA is talking to a satellite
+            # whose device is absent. The announcement already reported that it
+            # did not play; there is nothing to listen with either.
+            log.warning(
+                f"[{self._log_name}] start_conversation with no device "
+                f"connected — nothing to listen with"
+            )
+            return
+        try:
+            await start()
+        except Exception as e:
+            log.error(f"[{self._log_name}] start_conversation turn failed: {e}")
 
     # ── Voice turn (outbound) ────────────────────────────────────────────
 
@@ -1126,6 +1232,18 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._tts_audio_url         = None
         self._tts_audio_data        = None
         self._intent_ended          = False
+        self._stt_ended             = False
+        # Derived from the trace's own trigger label rather than plumbed
+        # through as a parameter, so the flag and the activity stats can never
+        # disagree about what started this turn.
+        #
+        # A CONTINUATION of one of these turns keeps the label and so keeps the
+        # flag, which is not strictly right — a continuation runs HA's full
+        # pipeline and does reach INTENT_END. It costs nothing: the guard below
+        # is an OR, and INTENT_END satisfies it first on any turn that gets one.
+        self._answer_only           = bool(
+            trace is not None and trace.trigger == CONVERSATION_TRIGGER
+        )
         self._run_started           = False
         self._run_finished          = False
         self._ha_never_started      = False
@@ -1327,6 +1445,14 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     if trace: trace.outcome = why
                 elif pcm_bytes:
                     if trace: trace.outcome = "ok"
+            elif self._answer_only and self._stt_ended:
+                # Not a fault: `ask_question` ends HA's pipeline at STT, so
+                # there was never going to be a spoken reply — the transcript
+                # IS the deliverable, and HA matches it against the caller's
+                # answers. Distinct from "no_tts" so the activity stats do not
+                # read every question answered as a turn that produced nothing.
+                log.info(f"[{self._log_name}] Question answered — no reply expected")
+                if trace: trace.outcome = "answered"
             else:
                 log.info(f"[{self._log_name}] No TTS audio URL received — turn ended without response")
                 if trace: trace.outcome = "no_tts"
@@ -2058,6 +2184,12 @@ class DeviceESPhomeServer:
         # callable() each; None when no device is connected.
         self._ring_alarm = None
         self._stop_alarm = None
+        # Injected by device_connected() — async callable() that runs one
+        # voice turn nobody spoke a wake word for, for HA's announce-then-
+        # listen. In em_controller for _standalone_play's reason: it drives the
+        # mic, the ring and the voice lock. None when no device is connected,
+        # which is the honest answer to "listen now" for an absent device.
+        self._start_conversation = None
         # Live-timer state, driven by HA's VoiceAssistantTimerEventResponse
         # events. On the server (not the satellite) so it survives an HA
         # reconnect that replaces the satellite mid-countdown.
@@ -2797,6 +2929,7 @@ async def device_connected(
     send_volume_set=None,
     ring_alarm=None,
     stop_alarm=None,
+    start_conversation=None,
 ) -> None:
     """
     Called by em_controller.handle_control() when an Echo Dot connects.
@@ -2818,6 +2951,11 @@ async def device_connected(
     ring_alarm / stop_alarm: async callable() — start / stop the timer-alarm
     ring (chime + LED pulse). Provided by the controller as closures over the
     Device object, since ringing drives device speaker/mic/LEDs.
+
+    start_conversation: async callable() — runs one voice turn with no wake
+    word, for HA's announce-then-listen (`assist_satellite.start_conversation`
+    and `ask_question`). Same reasoning: it drives the mic, the ring and the
+    voice lock.
     """
     server = _servers.get(device_id)
     if server is None:
@@ -2836,6 +2974,7 @@ async def device_connected(
     server._send_volume_set = send_volume_set
     server._ring_alarm = ring_alarm
     server._stop_alarm = stop_alarm
+    server._start_conversation = start_conversation
     if server._server is not None:
         log.debug(f"[esphome.{device_id[-8:]}] device_connected: port {server.port} already listening")
         return
@@ -2864,6 +3003,7 @@ async def device_disconnected(device_id: str) -> None:
     server._timers.clear()
     server._ring_alarm = None
     server._stop_alarm = None
+    server._start_conversation = None
     await server.stop()
     log.info(f"[esphome.{device_id[-8:]}] ESPHome port {server.port} down (device disconnected)")
 

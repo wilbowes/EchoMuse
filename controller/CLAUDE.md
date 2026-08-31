@@ -415,6 +415,43 @@ wizard timing out — it would not have: the wizard's connection test does not
 wait on this message, it fires when the device fetches
 `CONNECTION_TEST_URL_BASE`.
 
+**Announce-then-listen is the SAME message with field 4 set** (#335, #396).
+`assist_satellite.start_conversation` and `assist_satellite.ask_question` both
+reach us as `VoiceAssistantAnnounceRequest` with `start_conversation=True`;
+`preannounce_media_id` (field 3) is the attention chime, and both were carried
+by the vendored protobuf and read by nothing. Four rules:
+
+- **HA filters eligible targets on `VoiceAssistantFeature.START_CONVERSATION`**,
+  so without that bit the device does not appear in the action's target picker
+  at all — no error, an empty list. It is advertised **per device**, gated on
+  the `mic` capability (`_voice_assistant_flags`), which is the only reason the
+  rest of `VOICE_ASSISTANT_FLAGS` being a module constant is a gap rather than a
+  bug. That gating works only because `set_device_capabilities` bounces the HA
+  connection when the set changes: the flags ride `DeviceInfoResponse`, a
+  one-shot at connect.
+- **Listen AFTER `AnnounceFinished`, not before.** HA blocks on it for the whole
+  announcement, and `async_internal_ask_question` arms its answer future only
+  once `async_start_conversation` returns.
+- **`ask_question` truncates HA's own pipeline at STT** — it sets
+  `end_stage = STT`, keyed on that future — so the run ends after `STT_END` with
+  **no `INTENT_END` and no TTS**, which the `RUN_END` guard above waits for.
+  Without `_answer_only`, every question was answered correctly and then parked
+  the device on the 30s TTS wait and recorded a timeout. The flag is derived
+  from the trace's own trigger label so it cannot disagree with the stats, and
+  the outcome is `answered`, not `no_tts`: the transcript IS the deliverable.
+- **A muted device runs the turn anyway, and that is deliberate.**
+  `async_internal_ask_question` awaits its answer future with **no timeout**, so
+  a satellite that refuses by staying silent hangs the caller's script for good.
+  The mute is enforced where it always was — the device rejects every
+  `mic_start` while muted and the ADC is muted in hardware — so nothing is
+  captured, the streaming phase gives up at its cap, and HA ends the run with no
+  answer. Refusing controller-side is the change that looks safer and is worse.
+
+The turn is the button turn with a different label (`CONVERSATION_TRIGGER`,
+`preroll_discard=0`, `is_wakeword=False`). It must **not** borrow "button" or a
+"wakeword(…)" label — the dashboard groups wake statistics by it, and
+`wake_word_phrase` is keyed on the prefix.
+
 **`cancel_event` must be cleared by anything that starts playing, not just a
 voice turn.** It is set by a cancel (a button press mid-turn, a mute) and was
 cleared *only* at voice-turn start, so a cancelled turn silently killed every

@@ -3378,6 +3378,48 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             await start_timer_alarm(_d)
         async def _stop_alarm(_d=_device_ref) -> None:
             await stop_timer_alarm(_d)
+        async def _start_conversation(_d=_device_ref) -> None:
+            # HA has finished asking; the answer is whatever is said next.
+            # Same shape as the button turn — a deliberate act with no wake
+            # word, so mic_stop/mic_start_turn to get the beam-locked stream,
+            # and preroll_discard 0 because there is no wake-word tail to trim.
+            #
+            # The mute check is here rather than a refusal further up because
+            # of what HA does with a refusal: `async_internal_ask_question`
+            # awaits its answer future with NO timeout, so a satellite that
+            # stays silent hangs the caller's script for good. Running the turn
+            # keeps that bounded — the device rejects every mic_start while
+            # muted (and the ADC is muted in hardware regardless), so nothing
+            # is captured, the streaming phase gives up at its cap and HA ends
+            # the run with no answer. The mute is not weakened by this; the
+            # device is still the one enforcing it.
+            if _d.muted:
+                log.info(
+                    f"[{_d.device_id}] start_conversation while muted — "
+                    f"the microphone stays closed"
+                )
+                db.log_device(
+                    _d.device_id, "info", "controller",
+                    "Home Assistant asked a question while the mic was muted"
+                )
+            _d.cancel_event.clear()
+            _d.oww_paused.set()
+            _d.oww_paused_since = asyncio.get_event_loop().time()
+            try:
+                await _d.mic_stop()
+                await _d.mic_start_turn()
+                await _run_voice_locked(
+                    _d,
+                    trigger_label=esphome.CONVERSATION_TRIGGER,
+                    is_wakeword=False,
+                )
+            finally:
+                # Back to the ch6 omni wake stream, exactly as the button turn
+                # does — and for its reason: a turn that ended without TTS
+                # leaves the beam-locked stream running, and a bare mic_start
+                # would no-op against it.
+                await _d.mic_stop()
+                await _d.mic_start()
         # Capabilities before the servers come up: they decide which HA
         # entities are advertised, and advertising is a one-shot at
         # ListEntities time.
@@ -3389,6 +3431,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             send_volume_set=_send_volume_set,
             ring_alarm=_ring_alarm,
             stop_alarm=_stop_alarm,
+            start_conversation=_start_conversation,
         )
         # The ESPHome server object caches the OWW model from server
         # creation — refresh it from the config we just loaded so HA's
