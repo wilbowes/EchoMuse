@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+**Your Echoes can now be asked a question by Home Assistant, and will listen for
+the answer.** Nothing to do before updating: no database migration, no firmware
+requirement, nothing to change on your devices.
+
+### Announce, then listen
+
+Home Assistant has two actions that speak to a satellite and then wait for a
+spoken reply — `assist_satellite.start_conversation` ("the garage door is open,
+want me to close it?") and `assist_satellite.ask_question`, which matches what
+you say against a list of answers you supply. EchoMuse devices never appeared as
+eligible targets for either, so the actions could not be pointed at them at all.
+
+They do now. Both work the same way from your side: the Echo plays the message,
+then its ring lights and it listens, exactly as it does after a wake word. An
+attention chime plays before the message — Home Assistant sends one, and we were
+discarding it. It matters more here than for an ordinary announcement, since an
+unprompted question otherwise arrives with no warning.
+
+Two things worth knowing:
+
+- **The Echo must have a microphone and be connected.** A device Home Assistant
+  cannot reach is not offered as a target.
+- **A muted Echo will not open its microphone**, and nothing in this change
+  weakens that. The question is still spoken; the answer is simply never heard,
+  and the action reports back that it got no answer.
+
+Reported by @pollocluck (#396), with the root cause found by @vbtheory (#335) —
+both halves of it, correctly, before either had been looked at here.
+
 ## 2.22.0-ea.8 (Early Access)
 
 **Adds one setting, for testing echo cancellation.** Nothing else changes, and
