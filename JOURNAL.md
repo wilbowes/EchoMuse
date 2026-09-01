@@ -1989,3 +1989,66 @@ that used an unanchored `index()` or dropped only their own migration column,
 so any unrelated addition broke them with no clue why. Worth watching for as
 a class.
 
+
+## 2026-09-01 — the BLE proxy degrades its own device's control plane
+
+**Crossover, not correlation.** Two Dots on one desk, same room as the AP,
+so RF and link quality are matched by construction. The one running the BLE
+proxy logged **3615 idle RTT excursions in 24h against its neighbour's 2**,
+worst 20049ms against 4792ms, 5 keepalive timeouts against 0. Moving the
+proxy to the other device moved the fault within minutes and reproduced the
+same *rate* on different hardware — 2.64/min against 2.49/min. Wil's
+pushback is what forced this: "both echos are sat next to each other on my
+desk" killed the lazy "bad link" story I had been repeating.
+
+**The mechanism is our own traffic on the liveness channel.**
+`SendBleAdverts` writes through `writeJSON`, which takes `connMu` on the
+CONTROL WebSocket — the same mutex and TCP stream as the RTT echo, the
+keepalive pong, wake events and stats. Bulk telemetry head-of-line-blocks
+the channel we measure health on, so the excursions partly measure the
+adverts themselves. Not RF coexistence: stock FireOS drove a Bluetooth
+speaker while streaming over WiFi, and the July recon measured coex clean.
+
+**What Home Assistant actually needs, read rather than assumed.**
+`habluetooth` tolerates 195s (connectable) to 900s per device before an
+advertisement is stale, retires a *scanner* only after 90s of silence,
+smooths RSSI itself at alpha=0.3, and switches proxy ownership on 16dB with a
+6dB deadband. Bermuda re-decides area every second. So the requirement is
+about one advertisement per device per second — ten to twenty times less than
+we were sending. Two things that look like fixes and are not: lowering the
+scan duty cycle (320/30 IS `esp32_ble_tracker`'s default, what Bermuda is
+tuned against) and the chip's `filter_duplicates=1` (it suppresses identical
+adverts, but RSSI is the field that varies and the field Bermuda consumes).
+
+**A first sighting is not an arrival.** The gate's first version flushed
+immediately on any unseen (address, payload). BLE privacy addresses rotate
+every ~15 minutes, so that branch fires continuously in a room with phones,
+and flush runs synchronously on the goroutine that reads HCI — a change
+built to reduce control-plane writes could emit more of them than the plain
+250ms batching it replaced. Urgency now needs a KNOWN address whose payload
+changed, and an early flush resets the tick so it moves a write earlier
+rather than adding one.
+
+**Then C95 threw the first HCI transport resets ever seen** — two in ~40
+minutes on gate builds, against zero on EFF in 23.5h with the proxy and no
+gate, and zero for the seven weeks the Status tab has displayed the counter.
+`read /dev/stpbt: ENOTSOCK`, then ~30s of `network is unreachable`.
+Unresolved; the detail and the two surviving hypotheses are in
+`device/CLAUDE.md`.
+
+**Three wrong calls in one evening, all the same shape.** I asserted the
+reopen of `/dev/stpbt` took the WiFi down (the timestamps show WiFi failing
+four seconds BEFORE the reopen — and the warning text I wrote for #388 is
+what led me there, a hypothesis printed as a fact). I told Wil he "couldn't
+have known" about HCI restarts (the counter has been on the Status tab since
+2026-07-12; his "never seen it" was evidence, and I used a false claim to
+discount it). And I floated GC pressure from the gate's table, when
+`pause_total` moved 2ms → 22ms over five minutes against mic stalls of
+465-2481ms — three orders of magnitude short, in a log I had already read.
+Each time the refuting number was already in hand.
+
+Also today: the streaming teardown fix (#402, closing #252) — killing ffmpeg
+before cancelling its feeder, since the old ordering could not terminate when
+nobody was draining stdout; measured 20/20 hung against 0/20. EA 2.22.0-ea.10
+cut and published. And the Echo ref row came back off the Status tab (#406) —
+conditional rows in a fixed layout give devices different panel heights.

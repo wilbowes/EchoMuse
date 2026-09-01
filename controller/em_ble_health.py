@@ -61,8 +61,15 @@ def observe(
     return Observation(
         restarts,
         errors,
+        # State what was counted, not why. The line used to assert that
+        # "reopening /dev/stpbt re-initialises the radio WiFi shares" — a
+        # hypothesis, printed as fact, in the one place someone reads while
+        # diagnosing. On 2026-09-01 it produced a confident wrong call: the
+        # WiFi link was already failing FOUR SECONDS BEFORE the reopen, and
+        # a mic capture stall preceded both by ten. Whatever the cause is,
+        # the log line should not have picked one.
         f"BLE transport reset (+{restarts - prev_restarts} restarts, "
         f"+{errors - prev_errors} errors; {restarts}/{errors} total) — "
-        f"reopening /dev/stpbt re-initialises the radio WiFi shares, "
-        f"so check for a link drop around now",
+        f"check the device log for the read error, and for mic or link "
+        f"trouble in the same window",
     )

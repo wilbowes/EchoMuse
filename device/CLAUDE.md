@@ -174,6 +174,7 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
 | `internal/bindings/als/` | Ambient light (ams **TSL2540** on i2c). Android does not expose it AT ALL — `dumpsys sensorservice` reports an empty list, nothing under `/sys/class/sensors`, no input device; it is visible only on the raw i2c bus, the same shape as the mute LED being on a different GPIO than the vendor HAL believed. Resolved **by name, not address** (`0-0039` is an enumeration accident). **The bus listing is not a hardware inventory**: both ALS names are registered by Amazon's board file, so a `tsl2540` at 0x39 and a `tsl2584tsv` at 0x29 appear on every unit whatever is soldered on (`modalias` is static kernel data). Which one answers differs by batch — ours have the 2540 and nothing at 0x29 (`taos_probe() err = -6`, ENXIO), the `G090LF096` batch has the 2584 instead, reachable only through IIO at `/sys/bus/iio/devices/iio:device0` (#90). A second-sourced part, not a driver fault, so the answer is to read the IIO sensor too, never to loosen the match to a `tsl` prefix. The **boot log is the real inventory** — both drivers probe on every unit and log what replied — but `dmesg` rolls, so it needs reading soon after a reboot. Never `unbind` the driver to experiment: it succeeds, leaves the `als_*` attributes in place, and the next read hangs the device until a power cycle. `Lux()` returns **nil, never 0** — a covered sensor reads a genuine 0. `Watch` reports a step change immediately (25% relative, 10-lux floor, measured noise ±1.5%); the steady value rides the ~30s stats tick. `Report()` says **why** there is no sensor (`ok`/`no_chip`/`no_attribute`/`unknown`, plus every i2c name it saw) and rides the register message as `ambient_light_status` — absence used to be logged only to the device's own stdout, which support bundles do not collect, so two users could not be told apart without a shell session (#90). The whole bus is enumerated **before** matching: returning at the match truncated the list on working devices, which is exactly the side you compare against |
 | `internal/bindings/jack/` | Headphone jack detect (`/sys/class/switch/h2w`, mediatek accdet). Polled, not evented — the ACCDET input node reports no keys on this hardware. Exists for ONE job: accdet mutes `Ext_Speaker_Amp_Switch` on insert (correctly) and **nothing turns it back on**, so the speaker stayed dead until the next boot (#80). Output routing itself is done by the jack's own switch contacts — a response was heard in headphones while the mixer still read `Headphone_Speaker_Mux=Speaker`, so those controls do NOT describe where audio goes and nothing should drive them |
 | `internal/wifi/` | Safe WiFi network change with auto-rollback (wifi_change/wifi_commit/wifi_scan control messages; pending-marker recovery at startup). Reload path is `svc wifi disable/enable` ONLY — see package comment for the hardware-proven constraints |
+| `internal/bluetooth/` | BLE proxy — raw HCI passive scan over `/dev/stpbt` (single-owner, so Android's Bluedroid is durably `pm disable`d first), parsed into adverts and forwarded to the controller. `emit.go` decides which of them are worth sending; see "The BLE proxy" below, and read it before changing the scan cadence or the filtering |
 | `pkg/led/`, `pkg/mic/`, `pkg/speaker/`, `pkg/buttons/` | Hardware abstractions (interfaces) |
 
 ## On-device wake word (shadow mode)
@@ -587,6 +588,107 @@ regmap is readable at `/sys/kernel/debug/regmap/2-0018/registers`
 (`tlv320aic32x4`). Do not drive `tinyplay` while the server is running: it
 contends for the same PCM and wedged a device hard enough to need a power
 cycle.
+
+## The BLE proxy, and what it costs the device running it
+
+Passive HCI scan over `/dev/stpbt`, forwarded to the controller as
+`ble_adverts` and re-presented to Home Assistant as a second ESPHome device.
+The recon and the scan cadence are in `controller/CLAUDE.md`; this is about
+what it does to the Echo it runs on.
+
+**It degrades the control plane of its own device, and that is measured, not
+suspected** (#404). Crossover on two Dots on one desk, same room as the AP,
+2026-09-01: the one running the proxy logged **3615 idle RTT excursions in
+24h against its neighbour's 2**, worst 20049ms against 4792ms, and 5
+keepalive timeouts against 0. Moving the proxy to the other device moved the
+fault within minutes and reproduced the same *rate* — 2.64/min against
+2.49/min — on different hardware. It is not RF coexistence: stock FireOS
+drove a Bluetooth speaker while streaming over WiFi, so the combo chip does
+both. It is our own traffic.
+
+**`SendBleAdverts` writes to the CONTROL WebSocket**, through `writeJSON`,
+which takes `connMu` — the same mutex and the same TCP stream as the RTT
+echo, the keepalive pong, wake events and stats. So bulk telemetry
+head-of-line-blocks the liveness channel, and RTT excursions are partly
+measuring the advert traffic itself. **Moving adverts to the data plane is
+the structural fix and is still open** — it needs capability negotiation,
+since an old controller must not be sent frames it cannot parse.
+
+### The emission gate (`emit.go`) — derived from what HA reads, not from taste
+
+Nothing downstream wants every broadcast. `habluetooth` tolerates 195s
+(connectable) to 900s between advertisements per device before treating one
+as stale and retires a *scanner* only after 90s of total silence; it smooths
+RSSI itself (EWMA α=0.3) and switches which proxy owns a device on 16dB with
+a 6dB deadband. The binding constraint is **Bermuda re-deciding which area a
+device is in every second**. So the requirement is about one advertisement
+per device per second, and a beacon broadcasting every 100ms is 10x waste.
+
+The gate forwards on: a payload a **known** address has not sent before; an
+RSSI move ≥3dB, rate-limited to one per 250ms; or nothing sent for that
+payload in 1s. A global 30s ceiling keeps the scanner alive to HA with 3x
+margin. Output is therefore bounded by **devices in range, not by how fast
+they broadcast** — measured at 20 devices: 10x reduction at 100ms intervals,
+5x at 200ms, 2x at 500ms, forwarding 1200 in every case.
+
+**A first sighting is NOT an arrival, and treating it as one is the trap.**
+BLE privacy addresses rotate every ~15 minutes, so "never seen this address"
+fires continuously in any room with phones in it. The first version of the
+gate flushed immediately on that branch, which in a busy room emits **more**
+small writes than the plain 250ms batching it replaced — on the goroutine
+that reads HCI. Urgency now requires a *known* address whose payload changed
+(a button press, a sensor reading), and an early flush **resets the flush
+ticker** so it moves a write earlier rather than adding one. A genuine
+arrival waits at most one tick, which nothing downstream can perceive.
+
+**Two things that look like the fix and are not:**
+
+- **Lowering the scan duty cycle.** 320ms/30ms is exactly
+  `esp32_ble_tracker`'s default, which is what every Bermuda deployment is
+  tuned against. Fine as a one-off diagnostic, wrong as a shipped value.
+- **`filter_duplicates=1` at the chip.** It suppresses identical
+  advertisements — but RSSI is the field that varies and the field Bermuda
+  consumes, so the chip filter discards the signal and keeps the noise.
+  Filtering on the device can be RSSI-aware; the chip cannot.
+
+### The HCI transport resets, unresolved as of 2026-09-01
+
+**Two on C95 in ~40 minutes of gate runtime, against zero on EFF in 23.5h
+with the proxy and no gate.** `read /dev/stpbt: socket operation on
+non-socket` (ENOTSOCK), then ~30s of `network is unreachable` — the WiFi
+interface itself, not a dropped socket. The counter has been on the Status
+tab as `HCI errors / restarts` since 2026-07-12 and read zero for seven
+weeks, so these are the first ever observed.
+
+Four things to know before picking this up:
+
+- **BLE is not the first thing to fail.** A **mic capture stall** precedes
+  the BLE read error by ten seconds, in a different goroutine reading ALSA.
+  Audio, then Bluetooth, then WiFi. Something stalls the whole process and
+  the read error is what that looks like from the driver.
+- **The WiFi was already failing BEFORE our reopen of `/dev/stpbt`.** The
+  "reopening re-initialises the radio WiFi shares" text in `em_ble_proxy`'s
+  warning is a hypothesis printed as a fact, and it produced a confident
+  wrong call on the night — the timestamps rule it out. Fix that wording.
+- **It is not RF coexistence.** Stock FireOS drove a Bluetooth speaker while
+  streaming over WiFi.
+- **Memory pressure from the gate's table is RULED OUT — do not re-derive
+  it.** The theory was that a 250ms buffer became a 5-minute retained table
+  and cost GC pauses. The table is ~300 entries at ~200 bytes (privacy
+  addresses rotate every ~15min, so a 5-minute window holds one or two per
+  device, not a stream), and C95's own `[mem]` lines show `heap_sys` flat at
+  7.4MB and RSS flat at 26MB of 471MB. Decisively: **`pause_total` moved 2ms
+  → 22ms across five minutes**, against mic stalls of 465ms, 1661ms and
+  2481ms — three orders of magnitude short. EFF, with no gate, runs *more*
+  GC than C95 (39/min against 17/min).
+
+**What is left is restart proximity and something below us.** Both resets
+came 3-7 minutes after a fresh process start on a device flashed four times
+that evening, and every `/dev/stpbt` open triggers WMT BT function-on plus a
+firmware patch download; EFF's clean record was earned running for days
+between restarts. The gate remains correlated (2 events against 0) with **no
+known mechanism**, which is where it honestly sits — resist the urge to
+promote that to a cause without one.
 
 ## CPU topology, thermals and why `cpuPct` lies
 
