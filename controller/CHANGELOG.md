@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.22.0-ea.10 (Early Access)
+
+**A fix for interrupting your Echo mid-response.** Nothing to do before
+updating: no database migration, no firmware requirement, nothing to change on
+your devices.
+
+### Talking over a response cleaned up badly
+
+When you interrupt an Echo while it is speaking, the controller stops decoding
+the rest of the response and tears down the audio pipeline. It was doing that
+in the wrong order, and two things followed.
+
+The visible one was noise in the log: an unhandled error with a full traceback,
+printed on every interruption. Harmless in itself, but it sat next to whatever
+someone was actually investigating and cost them time — and it goes into support
+bundles.
+
+The other was not visible and matters more. In the right conditions the teardown
+could stop making progress rather than finish, holding the turn open. We have
+not seen this happen on a real device, so this is a fault found by measurement
+rather than one reported from the field; the fix removes the possibility either
+way.
+
+Nothing about interrupting changes from your side — it behaves as it did, minus
+the error.
+
 ## 2.22.0-ea.9 (Early Access)
 
 **Your Echoes can now be asked a question by Home Assistant, and will listen for
