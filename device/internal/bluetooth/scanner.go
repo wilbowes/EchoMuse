@@ -81,6 +81,9 @@ type Scanner struct {
 	uniqueMu    sync.Mutex
 	unique      map[string]time.Time
 
+	// gate decides which adverts are worth the control plane (#404)
+	gate *emitGate
+
 	bluedroidDisabled bool
 }
 
@@ -89,6 +92,7 @@ func NewScanner(onBatch BatchCallback) *Scanner {
 		onBatch: onBatch,
 		unique:  make(map[string]time.Time),
 		pending: make(map[string]Advert),
+		gate:    newEmitGate(),
 	}
 }
 
@@ -265,6 +269,10 @@ func (s *Scanner) session(stopCh chan struct{}) error {
 
 	flushTicker := time.NewTicker(flushInterval)
 	defer flushTicker.Stop()
+	// The gate's table is swept on its own slow ticker — it is the cold
+	// path, and walking it at flushInterval would be its own small tax.
+	pruneTicker := time.NewTicker(emitEntryTTL / 5)
+	defer pruneTicker.Stop()
 	defer s.flush()
 	watchdog := time.NewTimer(watchdogQuiet)
 	defer watchdog.Stop()
@@ -281,6 +289,8 @@ func (s *Scanner) session(stopCh chan struct{}) error {
 			}
 		case <-flushTicker.C:
 			s.flush()
+		case <-pruneTicker.C:
+			s.gate.prune(time.Now())
 		case <-watchdog.C:
 			return fmt.Errorf("watchdog: no HCI events for %s — re-initialising", watchdogQuiet)
 		case err := <-readErr:
@@ -302,13 +312,28 @@ func (s *Scanner) ingest(adverts []Advert) {
 		s.unique[a.Addr] = now
 	}
 	s.uniqueMu.Unlock()
+
+	// Filter before batching (#404). Everything admitted here is something
+	// Home Assistant or Bermuda actually reads; the rest is a beacon
+	// repeating itself at 100-500ms into a control channel shared with the
+	// keepalive pong. See emit.go for what the constants are derived from.
+	keep, urgent := s.gate.admit(adverts, now)
+	if len(keep) == 0 {
+		return
+	}
+
 	s.batchMu.Lock()
-	for _, a := range adverts {
+	for _, a := range keep {
 		s.pending[batchKey(a)] = a
 	}
 	full := len(s.pending) >= flushCount
 	s.batchMu.Unlock()
-	if full {
+
+	// A payload never broadcast before is the case latency matters for — a
+	// device arriving, a button press, a sensor changing. Those go now
+	// rather than waiting up to flushInterval to be amortised against
+	// beacons repeating themselves; routine RSSI refreshes ride the tick.
+	if full || urgent {
 		s.flush()
 	}
 }
