@@ -1748,17 +1748,6 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                          : (s?.volumePct != null ? `${s.volumePct}%` : '—'))}
                     {row('Link', device.connected ? (device.linkTls ? 'wss (TLS)' : 'plain ws') : '—',
                          device.connected ? (device.linkTls ? 'var(--ok)' : 'var(--warn)') : undefined)}
-                    {/* Which far-end reference the AEC found. Shown only
-                        while cancellation is running: "off" is already
-                        readable from the AEC toggle, and a row repeating it
-                        earns nothing. Absent on firmware that cannot say,
-                        which must not read as the software tap. */}
-                    {device.connected && (device.aecRef === 'hw' || device.aecRef === 'sw') &&
-                      row('Echo ref',
-                          device.aecRef === 'hw'
-                            ? 'hardware (frame-aligned)'
-                            : 'software tap (delay-compensated)',
-                          device.aecRef === 'hw' ? 'var(--ok)' : undefined)}
                     {row('Config', (() => {
                       const n = (device.config_sections ?? []).length;
                       const total = Object.keys(CONFIG_SECTIONS).length;
