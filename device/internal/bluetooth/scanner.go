@@ -285,7 +285,10 @@ func (s *Scanner) session(stopCh chan struct{}) error {
 			}
 			watchdog.Reset(watchdogQuiet)
 			if adverts := parseAdvReports(pkt); len(adverts) > 0 {
-				s.ingest(adverts)
+				if s.ingest(adverts) {
+					// Keep the total flush rate at or below the plain tick.
+					flushTicker.Reset(flushInterval)
+				}
 			}
 		case <-flushTicker.C:
 			s.flush()
@@ -304,7 +307,9 @@ func (s *Scanner) session(stopCh chan struct{}) error {
 	}
 }
 
-func (s *Scanner) ingest(adverts []Advert) {
+// ingest filters, batches and (when warranted) flushes one parsed batch.
+// Returns true if it flushed early, so the caller can reset the flush tick.
+func (s *Scanner) ingest(adverts []Advert) bool {
 	s.advertsSeen.Add(uint64(len(adverts)))
 	now := time.Now()
 	s.uniqueMu.Lock()
@@ -319,7 +324,7 @@ func (s *Scanner) ingest(adverts []Advert) {
 	// keepalive pong. See emit.go for what the constants are derived from.
 	keep, urgent := s.gate.admit(adverts, now)
 	if len(keep) == 0 {
-		return
+		return false
 	}
 
 	s.batchMu.Lock()
@@ -329,13 +334,20 @@ func (s *Scanner) ingest(adverts []Advert) {
 	full := len(s.pending) >= flushCount
 	s.batchMu.Unlock()
 
-	// A payload never broadcast before is the case latency matters for — a
-	// device arriving, a button press, a sensor changing. Those go now
-	// rather than waiting up to flushInterval to be amortised against
-	// beacons repeating themselves; routine RSSI refreshes ride the tick.
+	// A known device whose payload changed — a button press, a sensor
+	// reading — goes now rather than waiting up to flushInterval to be
+	// amortised against beacons repeating themselves. Routine RSSI
+	// refreshes ride the tick.
+	//
+	// Reported back so the caller can RESET the tick: an early flush then
+	// moves a write earlier without adding one. That bound is the point —
+	// it holds the flush rate no higher than the plain 250ms batching this
+	// replaced, whatever the room does, on a goroutine that also reads HCI.
 	if full || urgent {
 		s.flush()
+		return true
 	}
+	return false
 }
 
 func (s *Scanner) flush() {

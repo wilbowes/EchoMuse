@@ -13,7 +13,7 @@ func adv(addr string, rssi int, data ...byte) Advert {
 	return Advert{Addr: addr, Rssi: rssi, Data: data}
 }
 
-func TestFirstSightingOfAPayloadIsForwardedAndUrgent(t *testing.T) {
+func TestFirstSightingIsForwardedButNotUrgent(t *testing.T) {
 	g := newEmitGate()
 	now := time.Now()
 
@@ -22,8 +22,31 @@ func TestFirstSightingOfAPayloadIsForwardedAndUrgent(t *testing.T) {
 	if len(keep) != 1 {
 		t.Fatalf("a device never seen before must be forwarded, got %d", len(keep))
 	}
-	if !urgent {
-		t.Fatal("a new device must bypass the batch tick — that is the arrival latency case")
+	if urgent {
+		t.Fatal("a first sighting must NOT cut the tick short — privacy addresses " +
+			"rotate, so an unseen address is as likely to be a rename as an arrival")
+	}
+}
+
+// The defect this test exists for: BLE privacy addresses rotate roughly every
+// 15 minutes, so treating an unseen address as an arrival makes the urgent
+// path fire continuously in any room with phones in it — emitting more small
+// writes than the plain batching it replaced, on the goroutine that reads HCI.
+func TestRotatingPrivacyAddressesNeverCutTheTickShort(t *testing.T) {
+	g := newEmitGate()
+	start := time.Now()
+
+	urgentCount := 0
+	for i := 0; i < 200; i++ {
+		// A phone re-randomising its address on every broadcast: the
+		// pathological case, and the shape of the real one.
+		a := adv(fmt.Sprintf("7A:BB:CC:DD:%02X:%02X", i/256, i%256), -60)
+		if _, urgent := g.admit([]Advert{a}, start.Add(time.Duration(i)*100*time.Millisecond)); urgent {
+			urgentCount++
+		}
+	}
+	if urgentCount != 0 {
+		t.Fatalf("rotating addresses triggered %d urgent flushes; must be 0", urgentCount)
 	}
 }
 
@@ -49,7 +72,8 @@ func TestAChangedPayloadIsForwardedImmediately(t *testing.T) {
 	g.admit([]Advert{adv("AA:BB:CC:DD:EE:01", -60, 0x02, 0x01, 0x06)}, now)
 
 	// Same address, different payload 10ms later — a button press or a
-	// sensor reading. This is the case the whole design is for.
+	// sensor reading. A KNOWN address changing what it says is the one case
+	// latency genuinely matters for, and the only thing that cuts the tick.
 	keep, urgent := g.admit(
 		[]Advert{adv("AA:BB:CC:DD:EE:01", -60, 0x02, 0x01, 0x1A)},
 		now.Add(10*time.Millisecond),
@@ -59,7 +83,7 @@ func TestAChangedPayloadIsForwardedImmediately(t *testing.T) {
 		t.Fatal("a changed payload must be forwarded, whatever the floor")
 	}
 	if !urgent {
-		t.Fatal("a changed payload must bypass the batch tick")
+		t.Fatal("a known address changing payload must cut the batch tick short")
 	}
 }
 

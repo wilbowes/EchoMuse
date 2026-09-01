@@ -61,24 +61,43 @@ type emitEntry struct {
 // that alternates payloads — ADV_IND against a scan response, or a sensor
 // rotating service data — keeps a separate floor for each rather than
 // reading as a change on every broadcast.
+//
+// `addrs` tracks addresses independently of payload, and exists for one
+// reason: **BLE privacy addresses rotate**, roughly every 15 minutes on
+// phones and watches. A never-before-seen address is therefore NOT evidence
+// that anything arrived — most of the time it is a device already in the
+// room wearing a new name. Resolving that properly needs the IRK, which is
+// Home Assistant's job and not something to attempt here.
 type emitGate struct {
 	mu      sync.Mutex
 	entries map[string]emitEntry
+	addrs   map[string]time.Time
 	lastAny time.Time
 	dropped uint64
 }
 
 func newEmitGate() *emitGate {
-	return &emitGate{entries: make(map[string]emitEntry)}
+	return &emitGate{
+		entries: make(map[string]emitEntry),
+		addrs:   make(map[string]time.Time),
+	}
 }
 
 // admit filters one batch of parsed advertisements.
 //
 // It returns the advertisements to forward and whether any of them is
-// URGENT — a payload this address has not broadcast before, which is the
-// case latency actually matters for: a new device arriving, a button press,
-// a sensor reading changing. Those bypass the batch tick; routine RSSI
-// refreshes ride it.
+// URGENT — a KNOWN address whose payload changed, which is the case latency
+// actually matters for: a button press, a sensor reading, a beacon changing
+// state. Those cut the batch tick short; everything else rides it.
+//
+// A first sighting of an address is deliberately NOT urgent, however new it
+// looks. Privacy addresses rotate, so in a room with a few phones the
+// "never seen this address" branch fires continuously — the first version of
+// this treated each rotation as an arrival and flushed on it, which made the
+// gate emit MORE small writes than the plain 250ms batching it replaced, on
+// the same goroutine that reads HCI. Exactly backwards. A genuine arrival
+// waits at most one tick, which nothing downstream can perceive: Home
+// Assistant tolerates 195s.
 func (g *emitGate) admit(adverts []Advert, now time.Time) (keep []Advert, urgent bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -90,12 +109,19 @@ func (g *emitGate) admit(adverts []Advert, now time.Time) (keep []Advert, urgent
 	for _, a := range adverts {
 		key := batchKey(a)
 		prev, seen := g.entries[key]
+		_, knownAddr := g.addrs[a.Addr]
+		g.addrs[a.Addr] = now
 
 		emit := false
 		switch {
 		case !seen:
-			// New address, or a payload this address has not sent before.
-			emit, urgent = true, true
+			// A payload this address has not sent before. Urgent only if we
+			// already knew the address — otherwise this is a first sighting,
+			// which is as likely to be an address rotation as an arrival.
+			emit = true
+			if knownAddr {
+				urgent = true
+			}
 		case now.Sub(prev.sent) >= emitMaxSilence:
 			emit = true
 		case abs(a.Rssi-prev.rssi) >= emitRssiDeltaDb &&
@@ -136,6 +162,14 @@ func (g *emitGate) prune(now time.Time) {
 	for k, e := range g.entries {
 		if now.Sub(e.seen) > emitEntryTTL {
 			delete(g.entries, k)
+		}
+	}
+	// Rotating addresses are the reason this map needs sweeping at all —
+	// without it, a room with a few phones adds a permanent entry every
+	// ~15 minutes for the life of the process.
+	for a, seen := range g.addrs {
+		if now.Sub(seen) > emitEntryTTL {
+			delete(g.addrs, a)
 		}
 	}
 }
