@@ -567,6 +567,13 @@ class Device:
         )
         self.barge_threshold  = 0.6
         self.barge_detected   = False
+        # Set when the interrupting utterance was arbitrated away to another
+        # Echo. Separate from barge_detected because the two answer different
+        # questions: barge_detected says playback must stop (the user spoke
+        # over this device, and that is true whoever ends up answering),
+        # barge_ceded says this device must not run the interrupting turn.
+        # Folding them into one flag is how both devices answered.
+        self.barge_ceded      = False
         self._barge_model     = None
         self._barge_model_key = None
 
@@ -1446,6 +1453,57 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                         f"Barge-in during {phase} (score={score:.3f})"
                     )
                     device.barge_detected = True
+
+                    # Arbitrate, exactly as a wake crossing does. Until
+                    # 2026-09-02 this path claimed nothing, so on a fleet with
+                    # two Echoes in earshot a barge-in produced TWO answers:
+                    # this device started its interrupting turn while an idle
+                    # neighbour heard the same utterance on its ordinary wake
+                    # listener and claimed an unopposed arbiter. Reported by
+                    # Wil, and it is the exact failure em_arbiter exists to
+                    # prevent — including the self-feeding loop where each
+                    # device transcribes the other's TTS as a follow-up.
+                    #
+                    # The original wake's claim cannot cover this: claim() is
+                    # bounded by window_s (300-700ms), not held until
+                    # release(), so it expired seconds ago.
+                    #
+                    # Same ORDER as the wake path — can_serve_turn before the
+                    # claim, so a device that cannot finish a turn never takes
+                    # one. HA can drop mid-turn, which is exactly when a user
+                    # talks over an answer that stopped making sense.
+                    #
+                    # Known asymmetry, deliberately not corrected here: this
+                    # device is scoring through its own playback, ~25dB down,
+                    # so it is handicapped against an idle neighbour and will
+                    # sometimes lose an utterance it was nearer to. The
+                    # consequence is that the neighbour answers and this
+                    # device only stops talking — one responder either way,
+                    # which is the bug being fixed. Giving the barged device
+                    # precedence is a SECOND rule that can disagree with the
+                    # first, and would need a way to revoke a claim a
+                    # neighbour has already started a turn on.
+                    serves = esphome.can_serve_turn(device.device_id)
+                    won_by = device.device_id
+                    if serves and device.wake_arb_ms > 0 and len(_devices) > 1:
+                        won_by = _wake_arbiter.claim(
+                            device.device_id, device.wake_arb_ms / 1000.0,
+                        )
+                    device.barge_ceded = (not serves) or won_by != device.device_id
+                    if device.barge_ceded:
+                        log.info(
+                            f"[{device.device_id}] Barge-in ceded to "
+                            f"{won_by if serves else 'nothing — no HA'} "
+                            f"(score={score:.3f}) — stopping playback, not "
+                            f"taking the turn"
+                        )
+                        db.log_device(
+                            device.device_id, "info", "controller",
+                            "Barge-in ceded to another device (arbitration)"
+                            if serves else
+                            "Barge-in heard but no HA connection",
+                        )
+
                     # Wake detail for the interrupting turn's persistent
                     # record — popped when the turn loop re-enters
                     # trigger_voice_turn with trigger "barge-in".
@@ -2225,6 +2283,18 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                         await device.mic_stop()
                     await cleanup_esphome()
                     log.info(f"[{device.device_id}] Voice turn complete (esphome mode)")
+
+                if device.barge_detected and device.barge_ceded:
+                    # Another Echo won the interrupting utterance, or there is
+                    # no pipeline behind this one. Playback has already been
+                    # cancelled and that stays cancelled — the user spoke over
+                    # this device and it must stop talking regardless of who
+                    # answers. What it must NOT do is run the turn as well.
+                    device.barge_detected = False
+                    device.barge_ceded    = False
+                    device.cancel_event.clear()
+                    device.last_wake = None
+                    break
 
                 if device.barge_detected:
                     # Barge-in: the watcher cancelled playback because

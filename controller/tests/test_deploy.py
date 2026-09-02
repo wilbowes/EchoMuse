@@ -2034,3 +2034,59 @@ def test_the_control_plane_advert_message_is_still_handled():
         "the control-plane ble_adverts message must stay handled for firmware "
         "that cannot use the data plane"
     )
+
+
+def test_a_barge_in_is_arbitrated_like_any_other_wake():
+    """
+    Until 2026-09-02 the barge path claimed nothing, so on a fleet with two
+    Echoes in earshot a barge-in produced TWO answers: the barged device
+    started its interrupting turn while an idle neighbour heard the same
+    utterance on its ordinary wake listener and claimed an unopposed arbiter.
+    Reported by Wil, reproduced in the source.
+
+    The original wake's claim cannot cover it — `claim()` is bounded by
+    `window_s` (300-700ms), not held until `release()`, so it expired seconds
+    before anyone talked over the answer.
+    """
+    src  = (CONTROLLER / "em_controller.py").read_text()
+    body = src[src.index("async def _barge_watcher"):]
+    body = body[:body.index("\nasync def ", 1)]
+
+    assert "_wake_arbiter.claim" in body, (
+        "the barge watcher must arbitrate — without it a second Echo answers "
+        "the same interrupting utterance"
+    )
+    # Same ordering rule as the wake path: a device that cannot finish a turn
+    # must not take the window first.
+    serves = body.index("can_serve_turn")
+    claim  = body.index("_wake_arbiter.claim")
+    assert serves < claim, (
+        "can_serve_turn must precede the claim, or an unlinked device takes "
+        "the window and then dies no_ha"
+    )
+
+
+def test_a_ceded_barge_still_stops_playback_but_takes_no_turn():
+    """
+    The two halves answer different questions. Playback must stop whoever
+    ends up answering — the user spoke over THIS device. Running the
+    interrupting turn as well is the part that must not happen.
+
+    Folding them into one flag is how both devices answered.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    assert "barge_ceded" in src, "the ceded case needs its own flag"
+
+    # The ceded branch must be tested BEFORE the branch that starts the
+    # interrupting turn, or the turn starts regardless and the flag is
+    # decoration.
+    ceded = src.index("device.barge_detected and device.barge_ceded")
+    start = src.index("Barge-in: starting interrupting turn")
+    assert ceded < start, (
+        "the ceded branch must come before the one that starts the turn"
+    )
+    branch = src[ceded:start]
+    assert "break" in branch, (
+        "a ceded barge must leave the turn loop rather than fall through "
+        "into the interrupting turn"
+    )
