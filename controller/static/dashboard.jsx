@@ -5664,6 +5664,10 @@ function DeployAllModal({ release, devices, deployState, onStarted, onDismiss, o
     // A recorded failure is terminal — without this the row (and the header
     // progress pill) sat at "updating…" forever after an aborted update.
     if (d.update_error)                  return { text: `✗ ${d.update_error}`, color: 'var(--error)' };
+    // Queued outranks "rebooting…": a device waiting its turn has had nothing
+    // sent to it, and a disconnected one in the queue is offline for its own
+    // reasons, not because we restarted it.
+    if (d.update_queued)                 return { text: 'queued',       color: 'var(--muted)' };
     if (!d.connected)                    return { text: 'rebooting…',   color: 'var(--warn)' };
     return { text: 'updating…', color: 'var(--accent)' };
   }

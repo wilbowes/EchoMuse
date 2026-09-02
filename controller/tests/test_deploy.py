@@ -1883,3 +1883,83 @@ def test_every_outcome_cue_names_a_scene_key_that_exists():
     scene = em_scenes.resolve({})
     for key in keys:
         assert key in scene, f"_OUTCOME_ANIM names {key}, which no scene defines"
+
+
+def _strip_prose(src: str) -> str:
+    """
+    Drop comments and string literals from a source slice.
+
+    A guard that greps for the thing it forbids finds the comment explaining
+    it and passes anyway — three separate tests in this tree have done exactly
+    that. The prose below this function's subject is unusually chatty about
+    locks, so strip it before asserting on code.
+    """
+    src = re.sub(r'""".*?"""', "", src, flags=re.S)
+    src = re.sub(r"#.*", "", src)
+    return src
+
+
+def test_firmware_updates_are_serialised_across_the_whole_controller():
+    """
+    Three concurrent OTAs stalled the event loop for 11.1 seconds (measured
+    2026-09-02, `[loop] event loop stalled` in the GA log) — and that loop is
+    what sends speaker periods and LED frames, so a device answering someone
+    pays for a device being updated.
+
+    `_updates_in_progress` cannot prevent it: it stops ONE device being
+    updated twice and says nothing about two devices at once. The serialiser
+    has to be a global lock taken inside `_run_update`, so both entry points —
+    the fleet deploy and a hand-clicked single update — go through it.
+    """
+    src  = (CONTROLLER / "em_api.py").read_text()
+    body = _strip_prose(_fn_body(src, "_run_update"))
+
+    assert "_ota_lock.acquire()" in body, (
+        "_run_update must take the global OTA lock — a per-device guard does "
+        "not stop two devices updating at once"
+    )
+    assert "_ota_lock.release()" in body, "the lock must be released"
+
+    # Nothing may reach the device before the lock is held, or the serialising
+    # is decorative: the transfer is the expensive part.
+    acquire  = body.index("_ota_lock.acquire()")
+    transfer = body.index("_stream_binary_to_slot")
+    assert acquire < transfer, (
+        "the lock must be acquired BEFORE the binary transfer starts"
+    )
+
+    # Released in the finally, not on the success path — an update that raises
+    # would otherwise hold the lock for the life of the process and no device
+    # could ever be updated again without a restart.
+    tail = body[body.rindex("finally:"):]
+    assert "_ota_lock.release()" in tail, (
+        "release the lock in the finally — a failed update must not strand "
+        "every later one behind it"
+    )
+
+
+def test_a_queued_update_is_reported_as_queued_not_as_in_progress():
+    """
+    Serialising means a device can be started and not yet touched. Reporting
+    that as `update_in_progress` claims a transfer that has not begun, which
+    is the same failure as any control that appears to work and does not.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+    assert '"update_queued":' in src, (
+        "/api/devices must expose update_queued, or the dashboard cannot tell "
+        "waiting from working"
+    )
+
+    body = _strip_prose(_fn_body(src, "_run_update"))
+    add     = body.index("_updates_queued.add")
+    acquire = body.index("_ota_lock.acquire()")
+    assert add < acquire, "a device must be marked queued BEFORE it waits"
+    assert "_updates_queued.discard" in body, (
+        "queued state must be cleared once the lock is held, or a device "
+        "reads as queued for the whole of its own update"
+    )
+
+    jsx = (CONTROLLER / "static" / "dashboard.jsx").read_text()
+    assert "update_queued" in jsx, (
+        "the fleet deploy modal must render the queued state it is sent"
+    )

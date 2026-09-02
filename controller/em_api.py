@@ -169,6 +169,30 @@ _event_clients: set[web.WebSocketResponse] = set()
 # Track in-progress OTA updates per device_id to enforce one-at-a-time.
 _updates_in_progress: set[str] = set()
 
+# Firmware updates are SERIALISED across the whole controller, not just per
+# device. Three concurrent OTAs stalled the event loop for 11.1 seconds on
+# 2026-09-02 — measured, in the `[loop] event loop stalled` warnings — and
+# that loop is what sends speaker periods and LED frames, so a device mid
+# response pays for a device being updated. The transfer is base64 over the
+# shell plane and CPU-bound in this process; the fix is to stop doing several
+# at once, not to make one cheaper.
+#
+# A device-level guard cannot do this: `_updates_in_progress` stops one device
+# being updated twice, and says nothing about two devices being updated at
+# once. So the lock is global and BOTH entry points go through it — the fleet
+# deploy and a hand-clicked single update, which collide identically.
+#
+# A failure does NOT stop the queue. Wil's call, 2026-09-02: mark it, carry on,
+# report at the end — one device that will not come back should not strand the
+# rest of a fleet update behind it.
+_ota_lock = asyncio.Lock()
+
+# Devices waiting on `_ota_lock`. Reported separately from
+# `update_in_progress` so the dashboard says "queued" rather than claiming
+# work that has not started — the same rule as everywhere else here: a control
+# that cannot act must say so rather than appear to work.
+_updates_queued: set[str] = set()
+
 # Last OTA failure per device, surfaced as `update_error` in /api/devices so
 # the dashboard (fleet deploy modal + per-device update log) can show *why* a
 # tile stopped progressing instead of sitting at "updating…" forever. Set by
@@ -1418,7 +1442,7 @@ async def _post_device_update(request: web.Request) -> web.Response:
     if live is None:
         return _error("device_offline", "Device is not connected", 409)
 
-    if device_id in _updates_in_progress:
+    if device_id in _updates_in_progress or device_id in _updates_queued:
         return _error("update_in_progress", "An update is already in progress", 409)
 
     asyncio.create_task(_run_update(device_id, release, binary_override))
@@ -1448,7 +1472,7 @@ async def _post_device_rollback(request: web.Request) -> web.Response:
     if live is None:
         return _error("device_offline", "Device is not connected", 409)
 
-    if device_id in _updates_in_progress:
+    if device_id in _updates_in_progress or device_id in _updates_queued:
         return _error("update_in_progress", "An update is already in progress", 409)
 
     asyncio.create_task(_run_rollback(device_id, row["firmware_previous"]))
@@ -1676,8 +1700,19 @@ async def _run_update(device_id: str, release: dict,
     5. Restart service and monitor reconnect.
     6. Detect auto-rollback (start_server.sh retry exhausted).
     """
-    _updates_in_progress.add(device_id)
     _update_errors.pop(device_id, None)  # fresh attempt clears the last failure
+
+    # Wait for any other device's update to finish before touching this one.
+    # Queued state is visible while waiting (see `_updates_queued`), and the
+    # binary is fetched INSIDE the lock so a queued device is holding nothing
+    # but its place in line.
+    _updates_queued.add(device_id)
+    try:
+        await _ota_lock.acquire()
+    finally:
+        _updates_queued.discard(device_id)
+
+    _updates_in_progress.add(device_id)
     loop = asyncio.get_event_loop()
     version = release["version"]
 
@@ -1862,6 +1897,9 @@ async def _run_update(device_id: str, release: dict,
         await _update_failed(device_id, f"OTA exception: {e}")
     finally:
         _updates_in_progress.discard(device_id)
+        # Release LAST, so the next queued device does not start its transfer
+        # while this one is still being cleaned up.
+        _ota_lock.release()
 
 
 async def _run_rollback(device_id: str, target_version: str) -> None:
@@ -2696,7 +2734,7 @@ async def _post_deploy_all(request: web.Request) -> web.Response:
         if not upload_token and row["firmware_ver"] == release["version"]:
             skipped.append({"device_id": device_id, "reason": "already_current"})
             continue
-        if device_id in _updates_in_progress:
+        if device_id in _updates_in_progress or device_id in _updates_queued:
             skipped.append({"device_id": device_id, "reason": "update_in_progress"})
             continue
 
@@ -4742,6 +4780,10 @@ def _merge_device(row) -> dict:
         "wifi":             wifi_state(device_id),
         # Update state
         "update_in_progress": device_id in _updates_in_progress,
+        # Waiting on the global OTA lock — started, but nothing has been sent
+        # to this device yet. Distinct from update_in_progress so the panel
+        # does not report a transfer that has not begun.
+        "update_queued":      device_id in _updates_queued,
         # Last OTA/rollback failure (None when the last attempt succeeded or
         # none was made) — lets the dashboard show a terminal ✗ state instead
         # of "updating…" forever when an update aborts.
