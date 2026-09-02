@@ -988,6 +988,10 @@ async def _delete_device(request: web.Request) -> web.Response:
     # silently. Lazy import — em_esphome imports em_api at module level.
     import em_esphome
     await em_esphome.device_deleted(device_id)
+    # A re-added device is the one whose payloads are least likely to be
+    # right, so it must not inherit the deleted row's debounce and skip its
+    # first reconcile — the bounce below has it redialling within seconds.
+    forget_reconcile(device_id)
     # ...and the device is told to redial, or it never notices it was deleted.
     # Link auth is decided once, at register time, so a connected device keeps
     # running on the socket it already has: it vanishes from the dashboard and
@@ -2426,6 +2430,13 @@ async def _stream_file_to_device(live, data: bytes, dest: str,
 
 
 
+# Appended to a probe command so an empty _shell_run result can be told apart
+# from a command that ran and printed nothing. _shell_run swallows every
+# exception and returns "", so without this "the file is missing" and "the
+# device never answered" are the same string — and they want opposite actions.
+_SHELL_OK = "__EM_SHELL_OK__"
+
+
 async def _sync_start_script(live, device_id: str) -> None:
     """
     OTA-time payload sync: heal /data/local/bin/start_server.sh drift.
@@ -2449,7 +2460,17 @@ async def _sync_start_script(live, device_id: str) -> None:
         return
     want = hashlib.md5(script).hexdigest()
 
-    out = await _shell_run(live, f"busybox md5sum {path} 2>/dev/null")
+    # The trailing marker separates "the file differs" from "the device did not
+    # answer". _shell_run returns "" for both — it swallows the exception — and
+    # an absent md5 was read as out-of-date, so a shell plane that is not up
+    # yet produced a push attempt and a user-visible "out of date" event that
+    # was not true. That was harmless while this only ran mid-OTA, with a shell
+    # already proven; it is not, now that it also runs seconds after connect.
+    out = await _shell_run(live, f"busybox md5sum {path} 2>/dev/null; echo {_SHELL_OK}")
+    if _SHELL_OK not in out:
+        log.info(f"[api] [{device_id}] start_server.sh: no answer from the "
+                 f"device — leaving it alone")
+        return
     if want in out:
         return  # in sync — the common case
     await asyncio.sleep(1.0)  # let the md5 shell session close cleanly
@@ -2533,9 +2554,19 @@ async def _sync_debloat(live, device_id: str) -> None:
 
     if script is not None:
         want = hashlib.md5(script).hexdigest()
-        out = await _shell_run(live, f"busybox md5sum {DEBLOAT_SCRIPT_PATH} 2>/dev/null")
+        # The marker is what makes an empty result readable — see
+        # _sync_start_script. It gates BOTH halves below: a device that did not
+        # answer the md5 will not answer `pm` either, and half 2 would
+        # otherwise report a hide-list sync failure that is really a shell
+        # that was never up.
+        out = await _shell_run(
+            live, f"busybox md5sum {DEBLOAT_SCRIPT_PATH} 2>/dev/null; echo {_SHELL_OK}")
+        if _SHELL_OK not in out:
+            log.info(f"[api] [{device_id}] debloat: no answer from the device "
+                     f"— leaving it alone")
+            return
         if want not in out:
-            # An empty result also lands here — a device provisioned before the
+            # An empty md5 also lands here — a device provisioned before the
             # script existed has no file at all, and installing it is right.
             await asyncio.sleep(1.0)
             await _push_log_event(device_id, "info", "controller",
@@ -3890,6 +3921,99 @@ async def _install_then_switch(device_id: str, model: str) -> None:
     log.info(f"[api] [{device_id}] wake word switched to {model} after install")
 
 
+# How long a device is left alone after a connect-time reconcile. Devices on
+# this fleet reconnect constantly — a data-plane blip, an OTA, a controller
+# restart — and none of those change what is installed on the device, so
+# without a debounce the shell plane would carry three round trips every time.
+# Fifteen minutes is chosen against how the payloads actually change: they
+# change when someone deploys a controller or edits a config, which is minutes
+# to days apart, never seconds.
+RECONCILE_DEBOUNCE_S = 15 * 60
+
+# device_id -> monotonic time of the last connect-time reconcile.
+_last_reconcile: dict[str, float] = {}
+
+
+def _reconcile_due(device_id: str, now: float,
+                   debounce_s: float = RECONCILE_DEBOUNCE_S) -> bool:
+    """Whether this device's connect-time reconcile should run, and claim it."""
+    last = _last_reconcile.get(device_id)
+    if last is not None and (now - last) < debounce_s:
+        return False
+    # Stamped BEFORE the work rather than after: the run takes shell round
+    # trips and possibly a multi-megabyte push, and a device that reconnects
+    # mid-run must not start a second one against the same shell plane.
+    _last_reconcile[device_id] = now
+    return True
+
+
+async def reconcile_on_connect(device_id: str, live) -> None:
+    """
+    Bring a freshly-connected device's three installed payloads back in line.
+
+    A device arriving is the one moment we know what it has, and until
+    2026-09-02 nothing used it: `reconcile_oww_assets` ran here but returned
+    early unless the device scored locally and then checked only the SELECTED
+    classifier, while `_sync_start_script` and `_sync_debloat` ran ONLY inside
+    an OTA or from the Maintenance button. So a device already on the latest
+    firmware never received a payload change at all — Office sat without three
+    of the four stock classifiers for a fortnight with every panel calling it
+    healthy.
+
+    Three rules:
+
+    - **Sequential, never gathered.** All three talk to the same device over
+      the same shell plane; running them concurrently contends for one session
+      for no gain, since none of them is on the critical path of anything.
+    - **One failure must not skip the other two.** They are unrelated payloads
+      and a device with a stale debloat list should still get its wake word
+      models. Each is best-effort in its own right, and this only stops them
+      taking each other down.
+    - **Debounced per device** (`RECONCILE_DEBOUNCE_S`), because reconnects are
+      routine on this fleet and the payloads are not.
+
+    Runs as a background task off the connect handler: nothing about the
+    handshake should wait on a shell round trip over a link measured at 5-7%
+    packet loss.
+    """
+    if not _reconcile_due(device_id, time.monotonic()):
+        return
+
+    # Held as callables, not coroutines: building all three up front and
+    # abandoning two of them leaves un-awaited coroutines to warn about later.
+    steps = (
+        ("oww assets", lambda: reconcile_oww_assets(device_id, live)),
+        ("start script", lambda: _sync_start_script(live, device_id)),
+        ("debloat", lambda: _sync_debloat(live, device_id)),
+    )
+    for name, make in steps:
+        # Re-read each time, and compare IDENTITY rather than presence: these
+        # take seconds, and a device that dropped and redialled part-way
+        # through is a different object in the registry. The one we are
+        # holding then has a shell plane nobody is on the other end of, so
+        # "still connected" would be true of the registry and false of us.
+        if _devices.get(device_id) is not live:
+            log.info(f"[api] [{device_id}] reconcile: device went away — "
+                     f"stopping before {name}")
+            return
+        try:
+            await make()
+        except Exception as e:
+            log.warning(f"[api] [{device_id}] reconcile: {name} failed ({e}) "
+                        f"— continuing with the rest")
+
+
+def forget_reconcile(device_id: str) -> None:
+    """
+    Drop a device's debounce stamp, so its next connect reconciles immediately.
+
+    Called when a device is deleted: a re-added device is exactly the one whose
+    payloads are least likely to be right, and it would otherwise inherit the
+    silence of the row that was removed.
+    """
+    _last_reconcile.pop(device_id, None)
+
+
 async def reconcile_oww_assets(device_id: str, live) -> None:
     """
     On connect: make sure a locally-scoring device HAS the model it was told
@@ -3951,6 +4075,23 @@ async def reconcile_oww_assets(device_id: str, live) -> None:
             effective.get("owwOnDevice"), live.oww_trigger_capable,
             model_ready=True,
         )
+        # The device can score TODAY, so nothing is degraded and no warning is
+        # owed — but it may still be short of the other stock classifiers, in
+        # which case selecting one of them tomorrow is the deaf device this
+        # whole path exists to prevent. Repair quietly; see missing_assets.
+        gaps = em_oww_assets.missing_assets(desired, state["installed"])
+        if gaps:
+            log.info(f"[api] [{device_id}] oww reconcile: {len(gaps)} asset(s) "
+                     f"missing ({', '.join(gaps)}) — installing")
+            try:
+                result = await _sync_oww_assets(live, device_id)
+            except Exception as e:
+                result = {"ok": False, "error": str(e)}
+            if not result.get("ok"):
+                # Not an error event: the device is scoring correctly and the
+                # user has lost nothing today. A log line is the right weight.
+                log.warning(f"[api] [{device_id}] oww reconcile: could not install "
+                            f"the missing assets ({result.get('error')})")
         return
 
     live.oww_model_ready = False

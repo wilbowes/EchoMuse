@@ -3405,14 +3405,12 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             config.get("owwOnDevice"), device.oww_trigger_capable,
             device.oww_model_ready,
         )
-        # oww_model_ready is True until something looks, and the config above
-        # has just been pushed unconditionally — so a device whose wake word
-        # changed while it was offline has been told to use a classifier it
-        # may not have. Check, and put the controller back in charge if so
-        # (#191). Background: a shell round trip and possibly a multi-megabyte
-        # push, neither of which the handshake should wait on.
+        # Wake word assets, start script and debloat, reconciled against what
+        # the device actually has — see api.reconcile_on_connect for why the
+        # arrival is the trigger. Background: shell round trips and possibly a
+        # multi-megabyte push, none of which the handshake should wait on.
         asyncio.create_task(
-            api.reconcile_oww_assets(device_id, device)
+            api.reconcile_on_connect(device_id, device)
         ).add_done_callback(_log_task_exception)
         device.eq_bands      = config.get("eqBands", [0.0] * 8)
         device.eq_loudness   = bool(config.get("eqLoudness", False))

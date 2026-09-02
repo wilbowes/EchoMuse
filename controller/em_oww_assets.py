@@ -355,6 +355,30 @@ def missing_selected_classifier(desired: list[Asset],
     return None if (have is not None and have[0] == sel.md5) else sel.name
 
 
+def missing_assets(desired: list[Asset],
+                   actual: dict[str, tuple[str, int]]) -> list[str]:
+    """
+    Every desired filename the device does not have at the right md5.
+
+    `missing_selected_classifier` answers "is this device DEAF" and is what
+    decides whether to stand its mode down. This answers the wider "is this
+    device COMPLETE", which is a repair job and not a degradation: a device
+    holding its selected model and none of the other stock classifiers scores
+    perfectly today and cannot be given a different wake word tomorrow.
+
+    That gap was live on Office from 2026-08-17 to 2026-09-02 — three of the
+    four stock classifiers absent while every panel reported it healthy,
+    because the only thing that ever looked checked the selected one. The
+    status was correct; nothing was asking the wider question.
+
+    Same md5 rule and the same caveat as the selected check: an empty `actual`
+    is indistinguishable from an inventory that could not be read, so callers
+    must have a successful listing in hand before acting on the result.
+    """
+    return [a.name for a in desired
+            if (actual.get(a.name) or (None,))[0] != a.md5]
+
+
 def parse_free_mb(df_line: str) -> int | None:
     """
     Free megabytes from a `busybox df -m` data line.

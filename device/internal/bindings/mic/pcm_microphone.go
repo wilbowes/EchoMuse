@@ -67,9 +67,29 @@ func (p *PcmMicrophone) Init() error {
 // discovered via the AEC reference governor tripping every ~20s on backlogs
 // of exactly N×2560 samples. Two measurements below: per-batch arrival gaps
 // (a gap ≫ the batch duration is an overrun in progress) and a ~1/min
-// audio-vs-wall-clock ledger (steady deficit growth = chronic loss; it also
-// distinguishes overruns from a clock-rate mismatch, which would grow the
-// deficit smoothly rather than in stall-sized steps).
+// audio-vs-wall-clock ledger.
+//
+// THE LEDGER'S SIGN IS ITS WHOLE MEANING, and it reads both ways. Positive
+// (wall ahead of audio) is audio the pipeline never got — overruns, the case
+// this was built for. Negative is the capture clock running FAST, which is
+// the ordinary state of this hardware and not a fault.
+//
+// Measured on SPJ over 11.8h, 2026-09-02: skew went -154ms to -14809ms, a
+// steady **+345ppm** of the ALSA sample clock against CLOCK_MONOTONIC. The
+// starting -154ms is just this loop counting the first batch's 160ms while
+// wall starts at its arrival; everything after is the rate mismatch.
+//
+// It arrives in 160ms STEPS, roughly one every 7.7 minutes, and the earlier
+// version of this comment said a rate mismatch would grow the deficit
+// "smoothly rather than in stall-sized steps" — it does not, because
+// delivery is quantised to whole 160ms batches, so the surplus banks in the
+// ALSA ring until it is a whole batch and then lands at once. 160ms ÷
+// 345ppm = 464s predicted against ~462s observed, which is what identifies
+// it. So step-shaped growth does NOT distinguish overruns from drift; the
+// SIGN does, and a device that is losing audio also raises stalls.
+//
+// Consequence for whoever reads a long uptime: seconds of accumulated
+// negative skew are expected and mean nothing is wrong.
 func (p *PcmMicrophone) readLoop() {
 	stream := make(chan []byte, 16)
 
@@ -107,8 +127,15 @@ func (p *PcmMicrophone) readLoop() {
 		if now.Sub(lastReport) >= time.Minute {
 			wall := now.Sub(firstArrival)
 			audioDur := time.Duration(framesTotal) * time.Second / time.Duration(rate)
-			log.Printf("[mic] clock: %.1fs audio over %.1fs wall (deficit %+dms, stalls=%d, sub_drops=%d)",
-				audioDur.Seconds(), wall.Seconds(), (wall - audioDur).Milliseconds(), stalls, subDrops)
+			// Name the direction rather than leaving a signed number to be
+			// read as loss either way — see readLoop's ledger note.
+			skew := (wall - audioDur).Milliseconds()
+			sense := "lost"
+			if skew < 0 {
+				sense = "capture fast"
+			}
+			log.Printf("[mic] clock: %.1fs audio over %.1fs wall (skew %+dms %s, stalls=%d, sub_drops=%d)",
+				audioDur.Seconds(), wall.Seconds(), skew, sense, stalls, subDrops)
 			lastReport = now
 		}
 

@@ -424,8 +424,10 @@ so under the old rule installing them would have silently deleted every custom
 model on the device — including ones a user trained and cannot re-download.
 Stock models are required by definition and never evictable.
 
-**Reconcile-on-connect** (`em_api.reconcile_oww_assets`) closes the offline
-case, and three rules keep it from doing harm:
+**Reconcile-on-connect** (`em_api.reconcile_oww_assets`, reached through
+`reconcile_on_connect` — see controller/CLAUDE.md for the other two payloads
+that ride with it) closes the offline case, and three rules keep it from doing
+harm:
 
 - **Failure to LOOK is not evidence of absence.** Any error reading the
   device's inventory leaves `model_ready` alone — the shell plane is very
@@ -443,6 +445,19 @@ case, and three rules keep it from doing harm:
 Presence is judged by **md5, not filename**: a re-trained custom model keeps
 its name, and counting that as installed leaves the device scoring against a
 classifier that silently disagrees with the controller.
+
+**"Can it score today" and "is it complete" are two questions, and only the
+first was ever asked.** `missing_selected_classifier` decides whether to stand
+the mode down, and correctly looks only at the selected model —
+a missing spare is not a deaf device. But nothing looked at the spares at all,
+so Office ran from 17 August to 2026-09-02 without `alexa`, `hey_mycroft` or
+`hey_rhasspy`, scoring its own wake word perfectly and reported healthy by
+every panel. The status was right; the question was too narrow, and the cost
+lands the day someone selects one of the missing ones — which is the deaf
+device the whole path exists to prevent. `em_oww_assets.missing_assets`
+answers the wider one, and the reconcile acts on it **without degrading
+anything**: repair quietly, log at info, no warn event, because the user has
+lost nothing today.
 
 The rest of #191 — custom slots and a per-device Repair action — is designed
 on the issue and not yet built.
@@ -574,7 +589,13 @@ Two traps for whoever picks this up:
 - The mic stall log line says "ALSA overrun", which is an interpretation.
   It measures the arrival gap in `readLoop`, and the GoTinyAlsa stream
   channel is 16 batches (2.56s) deep, so a stall of that goroutine looks
-  the same. The growing clock deficit does show audio is genuinely lost.
+  the same. A **positive** clock skew does show audio is genuinely lost —
+  and the sign is the whole reading. Every healthy device runs negative and
+  grows more so forever: the ALSA sample clock is ~345ppm fast (measured on
+  SPJ over 11.8h, 2026-09-02), which banks a whole 160ms batch every ~7.7
+  minutes and reached -14.8s in one uptime with `stalls=0`. That growth is
+  step-shaped, so steps do not distinguish drift from overruns either. The
+  field is named `skew` and says `lost`/`capture fast` for this reason.
 
 
 **Stereo is not supported and the device end is not the blocker.** ALSA is

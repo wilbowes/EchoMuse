@@ -369,3 +369,59 @@ def test_only_the_SELECTED_classifier_gates_readiness():
 def test_no_classifier_to_check_is_not_a_missing_one():
     """Nothing configured is not the same as configured-and-absent."""
     assert A.missing_selected_classifier(_base(), {}) is None
+
+
+# ─── missing_assets: the wider "is this device COMPLETE" question ─────────────
+#
+# missing_selected_classifier answers "is this device deaf", which is what
+# stands a mode down. These cover the repair question beside it — the one
+# nothing was asking while Office sat without three of the four stock
+# classifiers for a fortnight, reported healthy the whole time.
+
+def test_a_complete_device_has_nothing_missing():
+    desired = _base() + [_asset("selected.onnx", "c1", "classifier")]
+    actual = {a.name: (a.md5, NOW) for a in desired}
+    assert A.missing_assets(desired, actual) == []
+
+
+def test_a_spare_classifier_is_missing_even_though_the_device_can_score():
+    """
+    The exact Office shape: the selected model is present and correct, the
+    other stock ones are not. Nothing is degraded — and selecting one of them
+    tomorrow is a device with no wake word at all, which is what this catches.
+    """
+    desired = _base() + [
+        _asset("selected.onnx", "c1", "classifier"),
+        _asset("spare_a.onnx", "c2", "classifier"),
+        _asset("spare_b.onnx", "c3", "classifier"),
+    ]
+    actual = {**{a.name: (a.md5, NOW) for a in _base()},
+              "selected.onnx": ("c1", NOW)}
+    assert A.missing_selected_classifier(desired, actual) is None
+    assert A.missing_assets(desired, actual) == ["spare_a.onnx", "spare_b.onnx"]
+
+
+def test_the_runtime_and_shared_models_count_too():
+    """Not just classifiers — a device with no libonnxruntime scores nothing."""
+    desired = _base() + [_asset("selected.onnx", "c1", "classifier")]
+    actual = {"selected.onnx": ("c1", NOW)}
+    assert A.missing_assets(desired, actual) == [
+        A.RUNTIME_NAME, "melspectrogram.onnx", "embedding_model.onnx"]
+
+
+def test_the_right_name_with_the_wrong_bytes_is_missing_here_too():
+    """Same md5 rule as everywhere else in this module."""
+    desired = _base() + [_asset("spare.onnx", "c-new", "classifier")]
+    actual = {**{a.name: (a.md5, NOW) for a in _base()},
+              "spare.onnx": ("c-old", NOW)}
+    assert A.missing_assets(desired, actual) == ["spare.onnx"]
+
+
+def test_an_unreadable_inventory_reports_everything_missing():
+    """
+    Deliberate, and the reason the docstring tells callers to establish the
+    listing succeeded first: this function cannot tell an empty device from a
+    shell that never answered, and must not pretend to.
+    """
+    desired = _base() + [_asset("selected.onnx", "c1", "classifier")]
+    assert A.missing_assets(desired, {}) == [a.name for a in desired]

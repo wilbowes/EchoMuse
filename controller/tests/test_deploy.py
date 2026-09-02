@@ -2090,3 +2090,105 @@ def test_a_ceded_barge_still_stops_playback_but_takes_no_turn():
         "a ceded barge must leave the turn loop rather than fall through "
         "into the interrupting turn"
     )
+
+
+# ─── Connect-time reconcile ───────────────────────────────────────────────────
+#
+# Three payloads reach a device: the wake word assets, start_server.sh and the
+# debloat pair. Until 2026-09-02 the first ran on connect but returned early
+# unless the device scored locally, and the other two ran ONLY inside an OTA or
+# from the Maintenance button — so a device already on the latest firmware
+# never received a payload change. Office sat without three of the four stock
+# classifiers from 17 August with every panel reporting it healthy.
+
+def test_the_connect_handler_reconciles_all_three_payloads():
+    """
+    The handler must call the umbrella, not one payload's reconcile. Calling
+    reconcile_oww_assets directly is what left the other two with no trigger
+    that reaches a device on current firmware.
+    """
+    src = _strip_prose((CONTROLLER / "em_controller.py").read_text())
+    assert "api.reconcile_on_connect(" in src, (
+        "the connect handler must call api.reconcile_on_connect"
+    )
+    assert "api.reconcile_oww_assets(" not in src, (
+        "call the umbrella, not one payload — the other two then have no "
+        "trigger that reaches a device already on the latest firmware"
+    )
+
+
+def test_the_reconcile_runs_the_three_payloads_sequentially():
+    """
+    All three talk to one device over one shell plane. Gathering them contends
+    for a single session for no gain — nothing is on a critical path here.
+    """
+    fn = _strip_prose(_fn_body(
+        (CONTROLLER / "em_api.py").read_text(), "reconcile_on_connect"))
+
+    for step in ("reconcile_oww_assets", "_sync_start_script", "_sync_debloat"):
+        assert step in fn, f"{step} must run on connect"
+    assert "asyncio.gather" not in fn, (
+        "the three payloads share one shell plane — run them in order"
+    )
+
+
+def test_one_failing_payload_does_not_skip_the_others():
+    """
+    Unrelated payloads. A device with a stale debloat list must still get its
+    wake word models, so each step is caught individually rather than the loop
+    being wrapped in one try.
+    """
+    fn = _strip_prose(_fn_body(
+        (CONTROLLER / "em_api.py").read_text(), "reconcile_on_connect"))
+    body = fn[fn.index("for name"):]
+    assert "try:" in body and "except Exception" in body, (
+        "each step must be caught inside the loop, not around it"
+    )
+
+
+def test_the_reconcile_is_debounced_and_claimed_before_the_work():
+    """
+    Reconnects are routine on this fleet and the payloads are not. The stamp
+    goes in BEFORE the work: a run takes shell round trips and possibly a
+    multi-megabyte push, and a device that reconnects mid-run must not start a
+    second one against the same shell plane.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+    fn  = _strip_prose(_fn_body(src, "reconcile_on_connect"))
+    assert "_reconcile_due(" in fn, "the reconcile must be debounced per device"
+
+    decide = src[src.index("def _reconcile_due"):]
+    decide = _strip_prose(decide[:decide.index("\nasync def ")])
+    stamp  = decide.index("_last_reconcile[device_id] = now")
+    ret    = decide.index("return True")
+    assert stamp < ret, "claim the debounce before returning, not after the work"
+
+
+def test_deleting_a_device_forgets_its_debounce():
+    """
+    A re-added device is the one whose payloads are least likely to be right;
+    inheriting the deleted row's stamp would skip its first reconcile.
+    """
+    fn = _strip_prose(_fn_body(
+        (CONTROLLER / "em_api.py").read_text(), "_delete_device"))
+    assert "forget_reconcile(device_id)" in fn
+
+
+def test_the_payload_syncs_tell_a_missing_file_from_a_silent_device():
+    """
+    _shell_run swallows every exception and returns "" — so an absent md5 and
+    a device that never answered are the same string, and they want opposite
+    actions. Without the marker, a shell plane that is not up yet (likely,
+    seconds after connect) produces a push attempt and a user-visible "out of
+    date" event that is not true.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+    for name in ("_sync_start_script", "_sync_debloat"):
+        fn = _strip_prose(_fn_body(src, name))
+        assert "_SHELL_OK" in fn, (
+            f"{name} must be able to tell a missing file from a silent device"
+        )
+        # The guard has to precede the push decision, or it guards nothing.
+        assert fn.index("_SHELL_OK not in out") < fn.index("_stream_file_to_device"), (
+            f"{name} must check the device answered BEFORE deciding to push"
+        )
