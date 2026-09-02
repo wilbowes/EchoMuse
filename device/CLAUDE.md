@@ -591,10 +591,10 @@ cycle.
 
 ## The BLE proxy, and what it costs the device running it
 
-Passive HCI scan over `/dev/stpbt`, forwarded to the controller as
-`ble_adverts` and re-presented to Home Assistant as a second ESPHome device.
-The recon and the scan cadence are in `controller/CLAUDE.md`; this is about
-what it does to the Echo it runs on.
+Passive HCI scan over `/dev/stpbt`, forwarded to the controller and
+re-presented to Home Assistant as a second ESPHome device. The recon and the
+scan cadence are in `controller/CLAUDE.md`; this is about what it does to the
+Echo it runs on.
 
 **It degrades the control plane of its own device, and that is measured, not
 suspected** (#404). Crossover on two Dots on one desk, same room as the AP,
@@ -606,13 +606,41 @@ fault within minutes and reproduced the same *rate* — 2.64/min against
 drove a Bluetooth speaker while streaming over WiFi, so the combo chip does
 both. It is our own traffic.
 
-**`SendBleAdverts` writes to the CONTROL WebSocket**, through `writeJSON`,
-which takes `connMu` — the same mutex and the same TCP stream as the RTT
-echo, the keepalive pong, wake events and stats. So bulk telemetry
-head-of-line-blocks the liveness channel, and RTT excursions are partly
-measuring the advert traffic itself. **Moving adverts to the data plane is
-the structural fix and is still open** — it needs capability negotiation,
-since an old controller must not be sent frames it cannot parse.
+**The mechanism was our own traffic on the liveness channel.**
+`SendBleAdverts` wrote to the CONTROL WebSocket through `writeJSON`, which
+takes `connMu` — the same mutex and the same TCP stream as the RTT echo, the
+keepalive pong, wake events and stats. So bulk telemetry
+head-of-line-blocked the channel a device's health is judged on, and RTT
+excursions were partly measuring the advert traffic itself.
+
+**Fixed by moving them to the data plane as `frameTypeBleAdverts` (`0x06`),
+and the negotiation is the part not to unpick.** The device sends `0x06` only
+when the controller announced `ble_adverts_data` in its `ack`; otherwise it
+keeps using the control message. Unknown frame types are ignored in both
+directions, so an unnegotiated `0x06` would drop every advertisement in
+silence — a worse fault than the one being fixed, and one nothing would
+report. The controller keeps handling the control-plane message forever, for
+firmware that predates this.
+
+**Two sender-side rules in `DataClient.SendBleAdverts`, both of which look
+like caution and are not:**
+
+- **A batch that cannot be sent is DROPPED, never failed back to the control
+  plane.** Falling back puts bulk telemetry on the liveness channel exactly
+  when the link is already struggling. The scanner's own
+  `emitGlobalMaxSilence` is 30s and HA retires a scanner after 90s, against a
+  data reconnect measured in seconds, so a normal blip costs nothing.
+- **Nothing is sent while a mic stream is running.** One WebSocket is one TCP
+  stream and a frame already written cannot be preempted, so the only way a
+  turn's audio is not queued behind telemetry is not to write the telemetry.
+  This is admission control, not a priority scheduler — there is no scheduler
+  because there is nothing for it to do: mic frames are ~32KB/s during a turn
+  and adverts are a few hundred bytes a couple of times a second, and adverts
+  are the droppable half of that pair.
+
+The plane is chosen **per batch** in `cmd/server.go`, not once at
+registration: the control connection can drop and re-register against a
+different controller without the scanner callback being rebuilt.
 
 ### The emission gate (`emit.go`) — derived from what HA reads, not from taste
 

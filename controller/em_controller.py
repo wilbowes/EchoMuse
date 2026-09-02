@@ -26,7 +26,7 @@ Device WebSocket protocol:
     {"type": "pong"}
 
   /control — Server → Device:
-    {"type": "ack",     "device_id": "..."}
+    {"type": "ack",     "device_id": "...", "features": [...]}
     {"type": "pending"}
     {"type": "config",  "adcDigitalGain": 100, ...}
     {"type": "leds",    "leds": [...]}
@@ -36,6 +36,7 @@ Device WebSocket protocol:
 
   /data — Device → Server:
     <binary> [0x01][seq_hi][seq_lo][PCM mono S16_LE 2560 bytes]
+    <binary> [0x06][JSON {"adverts": [...]}]   (only if ble_adverts_data)
 
   /data — Server → Device:
     <binary> [0x02][PCM mono S16_LE 48kHz — 4096 bytes per period]
@@ -285,6 +286,28 @@ VAD_END_TYPE       = 0x04
 # the first's flag before it was consumed. OWW/barge-watcher consumers treat
 # both flavours identically; esphome's _stream_mic_audio differentiates.
 VAD_NO_SPEECH_TIMEOUT_TYPE = 0x05
+
+# BLE advertisement batches from the device's passive scanner, moved off the
+# control plane (#404). The control WebSocket is where liveness is measured —
+# the RTT echo and the keepalive pong take the same mutex and the same TCP
+# stream — so bulk telemetry there head-of-line-blocks the channel a device's
+# health is judged on. Proven by crossover on 2026-09-01: the proxy moved
+# between two Dots on one desk and took the excursions with it.
+#
+# Payload is the same JSON body the control message carried, so nothing about
+# what an advert IS changed; only which socket it arrives on.
+BLE_ADVERTS_TYPE   = 0x06
+
+# What this controller can do, announced to the device on the ack. The mirror
+# of the device's own `capabilities` in its register message, and it exists for
+# the same reason: negotiate by capability, never by version string.
+#
+# `ble_adverts_data` says this controller reads BLE_ADVERTS_TYPE off the data
+# plane. A device must not send those frames unnegotiated — an older controller
+# ignores unknown frame types, so the adverts would vanish in silence, which is
+# a worse fault than the one being fixed. The control-plane `ble_adverts`
+# message stays handled forever, for firmware that predates this.
+CONTROLLER_FEATURES = ["ble_adverts_data"]
 SPEAKER_FRAME_TYPE = 0x02
 SPEAKER_EOS_TYPE   = 0x03
 MIC_HEADER_LEN     = 3   # [type][seq_hi][seq_lo]
@@ -3277,7 +3300,11 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             f"Connected from {ip} version={version}"
         )
 
-        await device.send_control({"type": "ack", "device_id": device_id})
+        await device.send_control({
+            "type": "ack",
+            "device_id": device_id,
+            "features": CONTROLLER_FEATURES,
+        })
 
         config = await loop.run_in_executor(
             None, db.get_effective_device_config, device_id
@@ -4034,6 +4061,20 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
         async for raw in ws:
             try:
                 if not isinstance(raw, bytes):
+                    continue
+                # Checked before the mic-frame guards below, which would
+                # otherwise drop this on the header-length test.
+                if raw and raw[0] == BLE_ADVERTS_TYPE:
+                    try:
+                        body = json.loads(raw[1:])
+                    except Exception:
+                        log.warning(
+                            f"[{device.device_id}] malformed ble_adverts frame dropped"
+                        )
+                        continue
+                    em_ble_proxy.forward_adverts(
+                        device.device_id, body.get("adverts") or []
+                    )
                     continue
                 if len(raw) <= MIC_HEADER_LEN:
                     continue

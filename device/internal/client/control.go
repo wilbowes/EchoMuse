@@ -38,6 +38,12 @@ type controlMessage struct {
 	Down      bool            `json:"down,omitempty"`
 	LEDs      json.RawMessage `json:"leds,omitempty"`
 	LockMic   bool            `json:"lock_mic,omitempty"`
+	// Features is the controller's own capability list, sent on the ack.
+	// It is the mirror of the device's `capabilities` in the register
+	// message, and exists for the same reason: negotiate by capability,
+	// never by version string. Absent on older controllers, which is
+	// exactly how absence should read — as "does not do this".
+	Features  []string        `json:"features,omitempty"`
 }
 
 // ─── Callbacks ────────────────────────────────────────────────────────────────
@@ -88,6 +94,13 @@ type ControlClient struct {
 
 	conn         *websocket.Conn
 	connMu       sync.Mutex
+
+	// features is what the CONTROLLER announced on the ack. Guarded by its
+	// own mutex rather than connMu: HasFeature is read on the scanner's
+	// flush path, and making it wait on the connection write mutex would
+	// couple the two things this change exists to separate.
+	featureMu sync.Mutex
+	features  map[string]bool
 
 	// serverBaseURL is the WebSocket base URL actually in use
 	// ("ws://host:port" or "wss://host:tlsport"), set on successful
@@ -301,7 +314,10 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 	case "pending":
 		return errPending
 	case "ack":
-		// proceed
+		// The controller tells us what IT can do here. Recorded before conn
+		// is published, so a caller reading it can never see a stale set
+		// from the previous connection.
+		c.setFeatures(first.Features)
 	default:
 		return fmt.Errorf("unexpected first message: %s", first.Type)
 	}
@@ -922,6 +938,35 @@ func (c *ControlClient) SendOwwWake(score, threshold float32, ageMs int64) {
 		"ageMs":     ageMs,
 	})
 }
+
+// setFeatures records the controller's capability list from the ack,
+// replacing any set from a previous connection — a reconnect can land on a
+// different controller, or the same one after an upgrade.
+func (c *ControlClient) setFeatures(features []string) {
+	m := make(map[string]bool, len(features))
+	for _, f := range features {
+		m[f] = true
+	}
+	c.featureMu.Lock()
+	c.features = m
+	c.featureMu.Unlock()
+}
+
+// HasFeature reports whether the controller announced a capability on the
+// ack. False for every feature on an older controller, which is the correct
+// reading: it cannot do the thing, so keep doing what already worked.
+func (c *ControlClient) HasFeature(name string) bool {
+	c.featureMu.Lock()
+	defer c.featureMu.Unlock()
+	return c.features[name]
+}
+
+// FeatureBleAdvertsData is announced by a controller that can read BLE
+// advertisement batches off the DATA plane (frameTypeBleAdverts). Without
+// it the device must keep using the control plane, because an old
+// controller ignores unknown frame types and would drop every advert in
+// silence.
+const FeatureBleAdvertsData = "ble_adverts_data"
 
 // SendBleAdverts forwards a batch of BLE advertisements to the controller
 // (bluetooth_proxy path). adverts is marshalled as-is — []bluetooth.Advert,

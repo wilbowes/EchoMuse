@@ -129,12 +129,14 @@ absent optional fields take prior/default behaviour.
 | `oww_shadow_cross` | score/threshold/age fields | Shadow-mode wake crossing (report only) |
 | `oww_wake` | score, effective threshold, age | On-device trigger fired (`owwOnDevice=on`); lands in `Device.pending_wake` |
 | `ambient_light` | `value` | Light reading (only if `ambient_light`) |
+| `ble_adverts` | `adverts[]` | Batch from the passive BLE scanner. **Legacy path** — send these on `/data` as `0x06` whenever the controller announced `ble_adverts_data`, and use this message only when it did not (#404) |
 | `pong` | — | Keepalive reply |
 
 **Controller → Device**
 
 | `type` | Payload | Meaning |
 |--------|---------|---------|
+| `ack` | `device_id`, `features[]` | Registration accepted. `features` is the CONTROLLER's capability list — the mirror of the device's own, and read the same way: a feature that is absent is one the controller cannot do. Absent entirely on controllers before 2.23.0 |
 | `leds` | `leds[]`, `listening?` | One LED frame; `listening:true` marks the listening ring so the direction overlay keys off it |
 | `led_anim` | `{pattern, colors, periodMs, ttlSec}` | Local animation spec; sent only if `led_anim` |
 | `mic_start` | `lock_mic?` | Start mic stream. `lock_mic:false`/absent = always-on ungated wake stream; `true` = bounded, VAD-gated turn |
@@ -170,6 +172,7 @@ board implementer must not read a single global table.
 | `0x01` | mic | Mic PCM chunk (mono `S16_LE`, 16 kHz) |
 | `0x04` | VAD-end | Bounded turn: speech was detected, then ended |
 | `0x05` | no-speech-timeout | Bounded turn: no speech ever detected before the timeout |
+| `0x06` | ble adverts | Batch of scanned BLE advertisements — **only if the controller announced `ble_adverts_data`** |
 
 `0x04`/`0x05` are safe to reuse because playback frames only ever flow to the
 device and capture frames only ever flow from it. The two capture sentinels are
@@ -184,6 +187,29 @@ Mic stream shapes (`device/CLAUDE.md`, Device audio pipeline):
 - **Bounded turn stream** (`lock_mic:true`) is VAD-gated with a preroll ring,
   ends with a `0x04` sentinel when the gate closes after speech, and ends with
   `0x05` if no speech arrived within the timeout.
+
+### `0x06` — BLE advertisements
+
+Payload is UTF-8 JSON, `{"adverts": [ ... ]}`, each entry as described under
+`ble_adverts` above. It carries no sequence header: a batch is self-contained
+and a lost one is not worth retransmitting.
+
+**Send these only when the controller announced `ble_adverts_data` in its
+`ack`.** A controller that did not will ignore the frame — unknown frame types
+are ignored in both directions — and every advertisement disappears with no
+error anywhere. Fall back to the `ble_adverts` control message instead.
+
+Two sender-side rules, neither of which the controller can enforce for you:
+
+- **Do not send while a mic stream is running.** The data plane is one TCP
+  stream, so a frame already written cannot be preempted; the only way a
+  voice turn's audio is not queued behind telemetry is not to write the
+  telemetry. Home Assistant tolerates 195s of staleness per device, so
+  nothing downstream notices.
+- **Drop a batch you cannot send, rather than falling back to the control
+  plane.** Falling back puts bulk telemetry onto the liveness channel exactly
+  when the link is already in trouble, which is what this frame exists to
+  avoid.
 
 ## Config push — `ConfigMessage`
 

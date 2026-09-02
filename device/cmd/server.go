@@ -153,10 +153,28 @@ func main() {
 		s.StartAnim(spec)
 	})
 
-	// BLE proxy scanner — passive scan over /dev/stpbt, batches forwarded
-	// to the controller on the control plane. Armed from env defaults here
-	// and toggled live on config push (bleProxyEnabled, applyBleConfig).
+	// BLE proxy scanner — passive scan over /dev/stpbt, batches forwarded to
+	// the controller on the DATA plane where the controller can read them
+	// there, and on the control plane otherwise (#404). Armed from env
+	// defaults here and toggled live on config push (bleProxyEnabled,
+	// applyBleConfig).
+	//
+	// The plane is chosen per batch rather than once at registration: the
+	// control connection can drop and re-register against a different
+	// controller without this callback being rebuilt, and a stale choice
+	// would either strand the adverts or put them back on the liveness
+	// channel. It is two map reads on a path that runs a few times a second.
 	bleScanner := bluetooth.NewScanner(func(batch []bluetooth.Advert) {
+		if controlClient.HasFeature(client.FeatureBleAdvertsData) {
+			payload, err := json.Marshal(map[string]interface{}{"adverts": batch})
+			if err != nil {
+				log.Printf("[cmd] ble adverts: marshal failed: %v", err)
+				return
+			}
+			// Dropped rather than falling back: see DataClient.SendBleAdverts.
+			dataClient.SendBleAdverts(payload)
+			return
+		}
 		controlClient.SendBleAdverts(batch)
 	})
 	applyBleConfig(bleScanner)

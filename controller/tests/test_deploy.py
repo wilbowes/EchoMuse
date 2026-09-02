@@ -1980,3 +1980,57 @@ def test_a_queued_update_is_reported_as_queued_not_as_in_progress():
     assert "update_queued" in jsx, (
         "the fleet deploy modal must render the queued state it is sent"
     )
+
+
+def test_ble_adverts_leave_the_control_plane_only_when_negotiated():
+    """
+    Adverts moved to the data plane because the control plane is where
+    liveness is measured — `SendBleAdverts` wrote under the same mutex and TCP
+    stream as the RTT echo and the keepalive pong (#404, proven by crossover
+    on 2026-09-01).
+
+    The negotiation is the half that fails SILENTLY if it is dropped: an older
+    controller ignores unknown frame types, so a device sending 0x06
+    unannounced loses every advertisement with no error at either end.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+
+    assert "BLE_ADVERTS_TYPE" in src, "the data-plane frame code must be named"
+    # Double-quoted: the prose around it uses backticks, so this matches the
+    # announcement itself rather than the comment explaining it.
+    assert '"ble_adverts_data"' in src, (
+        "the controller must announce the feature, or no device will ever "
+        "use the data plane"
+    )
+    # Anchored on the CALL, not on the first mention: the module docstring
+    # documents the ack too, and a body-wide search passes on the prose while
+    # the field itself is gone.
+    ack = re.search(r"send_control\(\{[^}]*\"type\": \"ack\"[^}]*\}", src, re.S)
+    assert ack, "could not find the ack send_control call — did it move?"
+    assert "CONTROLLER_FEATURES" in ack.group(0), (
+        "the ack must carry the controller's feature list"
+    )
+
+    # The advert branch must precede the mic guards, which would otherwise
+    # drop a 0x06 frame on the mic header-length test and lose it silently.
+    handler = src[src.index("async def handle_data"):]
+    ble = handler.index("BLE_ADVERTS_TYPE")
+    mic = handler.index("!= MIC_FRAME_TYPE")
+    assert ble < mic, (
+        "the BLE frame branch must come before the mic-frame guards, or the "
+        "frame is dropped by a length check written for PCM"
+    )
+
+
+def test_the_control_plane_advert_message_is_still_handled():
+    """
+    Firmware in the field predates the data plane for this, and firmware
+    negotiates rather than assuming. Removing the old handler would silently
+    deafen every proxy running an older build — degrade to old behaviour,
+    never to a wrong answer.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    assert 'msg_type == "ble_adverts"' in src, (
+        "the control-plane ble_adverts message must stay handled for firmware "
+        "that cannot use the data plane"
+    )

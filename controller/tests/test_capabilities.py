@@ -288,3 +288,32 @@ def test_the_aec_delay_control_is_gated_on_the_live_reference_not_the_capability
         "hwEchoRef must NOT be driven by the capability: a capable device on "
         "the software tap still needs its delay slider"
     )
+
+
+def test_the_controller_announces_its_own_features_and_the_device_reads_them():
+    """
+    Negotiation runs both ways. The device announces `capabilities` in its
+    register message; the controller announces `features` on the ack, and the
+    two are read identically — absent means cannot.
+
+    This half exists because `ble_adverts` MOVED rather than being added
+    (#404): a device sending the new `0x06` data frame to a controller that
+    cannot read it loses every advertisement in silence, since unknown frame
+    types are ignored in both directions. The strings must therefore match
+    across the two languages for the same reason every other capability does.
+    """
+    py = CONTROLLER.read_text()
+    go = CONTROL_GO.read_text()
+
+    block = py[py.index("CONTROLLER_FEATURES = ["):]
+    block = block[:block.index("]") + 1]
+    announced = set(re.findall(r'"([a-z_]+)"', block))
+    assert announced, "CONTROLLER_FEATURES is empty — did it move?"
+
+    # Every announced feature must be a constant the device actually tests
+    # for. A typo here is permanently silent on both sides.
+    consumed = set(re.findall(r'Feature\w+\s*=\s*"([a-z_]+)"', go))
+    assert announced <= consumed, (
+        f"controller announces {announced - consumed} which the device never "
+        f"looks for — the feature would never be used and nothing would say so"
+    )
