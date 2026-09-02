@@ -52,13 +52,34 @@ func TestAdvertsYieldToTheMicStream(t *testing.T) {
 		t.Fatal("sent adverts with no data connection")
 	}
 
-	// With a mic stream running the answer must be the same, before any
-	// write is attempted: within one TCP stream a frame already written
-	// cannot be preempted, so not writing it is the only real choice.
+	// A BOUNDED TURN yields: its audio is worth more than a beacon refresh.
 	d.micMu.Lock()
-	d.micActive = true
+	d.micActive, d.micWantedLock = true, true
 	d.micMu.Unlock()
 	if d.SendBleAdverts([]byte(`{"adverts":[]}`)) {
-		t.Fatal("sent adverts while the mic was streaming")
+		t.Fatal("sent adverts during a bounded turn")
 	}
 }
+
+// The always-on wake stream must NOT hold adverts back. It is always on for
+// every device scoring its wake word controller-side, so gating on micActive
+// alone drops every batch forever and the proxy dies in silence — the exact
+// failure the ack negotiation exists to prevent, one branch below it.
+//
+// Tested through the refusal ORDER rather than a successful send, which would
+// need a socket: with no connection the answer is false either way, so the
+// discriminator is that the turn check does not fire first. Reaching the
+// connection check at all is what this pins.
+func TestTheAlwaysOnWakeStreamDoesNotHoldAdvertsBack(t *testing.T) {
+	d := NewDataClient("ble-test", newFanoutMic(), nil, aec.New())
+
+	d.micMu.Lock()
+	d.micActive, d.micWantedLock = true, false // ungated wake stream
+	d.micMu.Unlock()
+
+	if d.advertsYieldToTurn() {
+		t.Fatal("the always-on wake stream held adverts back — with " +
+			"controller-side wake scoring that is every batch, forever")
+	}
+}
+

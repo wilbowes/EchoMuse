@@ -201,11 +201,17 @@ error anywhere. Fall back to the `ble_adverts` control message instead.
 
 Two sender-side rules, neither of which the controller can enforce for you:
 
-- **Do not send while a mic stream is running.** The data plane is one TCP
-  stream, so a frame already written cannot be preempted; the only way a
-  voice turn's audio is not queued behind telemetry is not to write the
-  telemetry. Home Assistant tolerates 195s of staleness per device, so
-  nothing downstream notices.
+- **Do not send while a BOUNDED TURN is streaming** (`mic_start` with
+  `lock_mic:true`). The data plane is one TCP stream, so a frame already
+  written cannot be preempted; the only way a turn's audio is not queued
+  behind telemetry is not to write the telemetry. A turn lasts seconds and
+  Home Assistant tolerates 195s of staleness per device, so nothing
+  downstream notices.
+
+  **Do not extend that to the always-on wake stream.** It is always on for
+  any device whose wake word is scored controller-side, so holding adverts
+  back whenever the mic is streaming drops every batch forever and the proxy
+  dies with no error at either end.
 - **Drop a batch you cannot send, rather than falling back to the control
   plane.** Falling back puts bulk telemetry onto the liveness channel exactly
   when the link is already in trouble, which is what this frame exists to

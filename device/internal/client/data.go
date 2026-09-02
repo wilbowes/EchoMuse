@@ -430,17 +430,38 @@ func (d *DataClient) RequestBeamUnlock() {
 //     moved to avoid. The device's own scanner will not go quiet for longer
 //     than emitGlobalMaxSilence (30s) and Home Assistant retires a scanner
 //     after 90s of silence, against a data reconnect measured in seconds.
-//   - A mic stream is running. A voice turn's audio is worth more than a
-//     beacon refresh Home Assistant tolerates for 195 seconds, and yielding
-//     here is what stops head-of-line blocking simply moving from the control
-//     plane to the mic stream. This is admission control, not a scheduler:
-//     within one TCP stream a frame already written cannot be preempted, so
-//     the only real choice is what to write and when.
-func (d *DataClient) SendBleAdverts(payload []byte) bool {
+//   - A BOUNDED TURN is streaming (lockMic). A turn's audio is worth more
+//     than a beacon refresh Home Assistant tolerates for 195 seconds, and a
+//     turn lasts seconds, so nothing downstream notices.
+//
+// The second one must test lockMic and NOT micActive, and the difference is
+// the whole proxy. The always-on wake stream is exactly that — always on, for
+// every device scoring its wake word controller-side — so `micActive` is true
+// essentially permanently and gating on it drops every batch forever, with no
+// error at either end. That is the silent failure the ack negotiation exists
+// to prevent, one branch below it.
+//
+// It is a narrow rule on purpose. An advert batch is a few hundred bytes
+// against ~32KB/s of mic audio, so the yield buys little; the control plane
+// suffered because adverts contended for `connMu` with the keepalive pong and
+// because RTT is MEASURED on that stream, and neither is true here. This is
+// admission control, not a scheduler: within one TCP stream a frame already
+// written cannot be preempted, so the only real choice is what to write and
+// when.
+// advertsYieldToTurn reports whether a BOUNDED turn is streaming, in which
+// case adverts wait. Split out so the decision can be tested without a
+// socket — and because testing a copy of it in the test file would pass
+// while this one said something else.
+func (d *DataClient) advertsYieldToTurn() bool {
 	d.micMu.Lock()
-	active := d.micActive
-	d.micMu.Unlock()
-	if active {
+	defer d.micMu.Unlock()
+	// micActive alone is NOT the question: the always-on wake stream keeps it
+	// true permanently on any device scoring controller-side.
+	return d.micActive && d.micWantedLock
+}
+
+func (d *DataClient) SendBleAdverts(payload []byte) bool {
+	if d.advertsYieldToTurn() {
 		return false
 	}
 

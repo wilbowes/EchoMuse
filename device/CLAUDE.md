@@ -630,13 +630,19 @@ like caution and are not:**
   when the link is already struggling. The scanner's own
   `emitGlobalMaxSilence` is 30s and HA retires a scanner after 90s, against a
   data reconnect measured in seconds, so a normal blip costs nothing.
-- **Nothing is sent while a mic stream is running.** One WebSocket is one TCP
-  stream and a frame already written cannot be preempted, so the only way a
-  turn's audio is not queued behind telemetry is not to write the telemetry.
-  This is admission control, not a priority scheduler — there is no scheduler
-  because there is nothing for it to do: mic frames are ~32KB/s during a turn
-  and adverts are a few hundred bytes a couple of times a second, and adverts
-  are the droppable half of that pair.
+- **Nothing is sent while a BOUNDED TURN is streaming** — and it must be the
+  turn, not `micActive`. The always-on wake stream is always on for any device
+  scoring controller-side, so gating on "is the mic streaming" drops every
+  batch forever and the proxy dies in silence; that bug was written and caught
+  in review on 2026-09-02, one branch below the negotiation that exists to
+  prevent exactly this. `advertsYieldToTurn` is split out so the decision is
+  testable without a socket.
+  The rule is narrow on purpose. One WebSocket is one TCP stream and a written
+  frame cannot be preempted, so admission control is the only lever — but an
+  advert batch is a few hundred bytes against ~32KB/s of mic, so it buys
+  little. The control plane suffered because adverts took `connMu` against the
+  keepalive pong AND because RTT is measured on that stream; neither is true
+  here.
 
 The plane is chosen **per batch** in `cmd/server.go`, not once at
 registration: the control connection can drop and re-register against a
