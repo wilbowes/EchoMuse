@@ -691,9 +691,10 @@ def test_a_failed_update_asks_for_the_supervisor_log():
     from pathlib import Path
     api = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
 
-    # The failure paths live in _run_update, which is what awaits
-    # _monitor_reconnect and decides what its result means.
-    monitor = api[api.index("async def _run_update"):]
+    # The failure paths live in _run_update_locked, which is what awaits
+    # _monitor_reconnect and decides what its result means. (_run_update is
+    # now the queue wrapper in front of it.)
+    monitor = api[api.index("async def _run_update_locked"):]
     monitor = monitor[:monitor.index("\nasync def ", 1)]
     assert monitor.count("_supervisor_log_wanted.add") >= 2, (
         "both update-failure paths (auto-rollback and timeout) must request "
@@ -1921,11 +1922,27 @@ def test_firmware_updates_are_serialised_across_the_whole_controller():
     assert "_ota_lock.release()" in body, "the lock must be released"
 
     # Nothing may reach the device before the lock is held, or the serialising
-    # is decorative: the transfer is the expensive part.
-    acquire  = body.index("_ota_lock.acquire()")
-    transfer = body.index("_stream_binary_to_slot")
-    assert acquire < transfer, (
-        "the lock must be acquired BEFORE the binary transfer starts"
+    # is decorative: the transfer is the expensive part, and it all lives
+    # inside _run_update_locked.
+    acquire = body.index("_ota_lock.acquire()")
+    work    = body.index("_run_update_locked")
+    assert acquire < work, (
+        "the lock must be acquired BEFORE the update work starts"
+    )
+    inner = _strip_prose(_fn_body(src, "_run_update_locked"))
+    assert "_stream_binary_to_slot" in inner, (
+        "the transfer must live inside the locked half"
+    )
+    assert "_ota_lock" not in inner, (
+        "the locked half must not touch the lock — one owner, or a release "
+        "on a path that never acquired frees somebody else's turn"
+    )
+
+    # Bounded, or one wedged device holds the whole fleet's queue: the base64
+    # send loop has no timeout of its own.
+    assert "OTA_MAX_HOLD_S" in body and "wait_for" in body, (
+        "the locked half must run under a timeout — serialising turns a "
+        "device-local stall into a fleet-wide one"
     )
 
     # Released in the finally, not on the success path — an update that raises

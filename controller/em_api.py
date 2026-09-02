@@ -187,6 +187,12 @@ _updates_in_progress: set[str] = set()
 # rest of a fleet update behind it.
 _ota_lock = asyncio.Lock()
 
+# Longest one device may hold the OTA queue. A real update is a ~10MB transfer,
+# a reboot and a 90s reconnect watch, so this is a deadlock cap rather than a
+# performance budget: it exists because serialising made one wedged device able
+# to block the whole fleet's updates until the controller restarted.
+OTA_MAX_HOLD_S = 300.0
+
 # Devices waiting on `_ota_lock`. Reported separately from
 # `update_in_progress` so the dashboard says "queued" rather than claiming
 # work that has not started — the same rule as everywhere else here: a control
@@ -1713,6 +1719,41 @@ async def _run_update(device_id: str, release: dict,
         _updates_queued.discard(device_id)
 
     _updates_in_progress.add(device_id)
+    try:
+        # Bounded, because serialising turned a device-local stall into a
+        # fleet-wide one. Every `recv` in the transfer is wait_for-bounded but
+        # `await ws.send(line)` in the base64 loop is not: a device that stops
+        # reading applies backpressure and can hang there. Before the lock that
+        # stalled one device; now it would hold the queue and NOTHING could be
+        # updated until the controller restarted.
+        #
+        # Generous on purpose — a real update is a ~10MB transfer plus a reboot
+        # and a 90s reconnect watch, so this is a deadlock cap, not a
+        # performance budget. A device that trips it has failed anyway.
+        await asyncio.wait_for(
+            _run_update_locked(device_id, release, binary_override),
+            timeout=OTA_MAX_HOLD_S,
+        )
+    except asyncio.TimeoutError:
+        await _update_failed(
+            device_id,
+            f"Update abandoned after {OTA_MAX_HOLD_S:.0f}s so the queue "
+            f"could continue — the device may still be mid-update",
+        )
+    finally:
+        _updates_in_progress.discard(device_id)
+        # Release LAST, so the next queued device does not start its transfer
+        # while this one is still being cleaned up.
+        _ota_lock.release()
+
+
+async def _run_update_locked(device_id: str, release: dict,
+                             binary_override: bytes | None = None) -> None:
+    """
+    The update itself, run with `_ota_lock` already held. Split from
+    `_run_update` so the whole of it can sit under one timeout — the queue is
+    only as safe as its slowest member.
+    """
     loop = asyncio.get_event_loop()
     version = release["version"]
 
@@ -1895,11 +1936,6 @@ async def _run_update(device_id: str, release: dict,
     except Exception as e:
         log.exception(f"[api] OTA update error for {device_id}: {e}")
         await _update_failed(device_id, f"OTA exception: {e}")
-    finally:
-        _updates_in_progress.discard(device_id)
-        # Release LAST, so the next queued device does not start its transfer
-        # while this one is still being cleaned up.
-        _ota_lock.release()
 
 
 async def _run_rollback(device_id: str, target_version: str) -> None:
