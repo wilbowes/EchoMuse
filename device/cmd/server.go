@@ -23,8 +23,8 @@ import (
 
 	"github.com/wilbowes/EchoMuse/internal/aec"
 	"github.com/wilbowes/EchoMuse/internal/bindings/als"
-	"github.com/wilbowes/EchoMuse/internal/bindings/jack"
 	internalbuttons "github.com/wilbowes/EchoMuse/internal/bindings/buttons"
+	"github.com/wilbowes/EchoMuse/internal/bindings/jack"
 	"github.com/wilbowes/EchoMuse/internal/bindings/mic"
 	"github.com/wilbowes/EchoMuse/internal/bindings/speaker"
 	"github.com/wilbowes/EchoMuse/internal/bluetooth"
@@ -95,6 +95,13 @@ func main() {
 	srvPtr.Store(s)
 
 	buttonController.SetVolumeCallback(func(direction string) {
+		// Inert without a controller: nothing is playing to be louder or
+		// quieter, and showing the arc would acknowledge a device that
+		// cannot act. The mute button stays live — see Server.SetLinkDown.
+		if s.LinkDown() {
+			log.Println("[cmd] volume button ignored — no controller session")
+			return
+		}
 		if direction == "up" {
 			s.VolumeStepUp()
 		} else {
@@ -157,6 +164,15 @@ func main() {
 	// Button events — forward to controller via control plane
 	_, err = buttonController.SubscribeToButton(func(event pkgbuttons.ButtonClickEvent) {
 		log.Printf("Button event: clickType=%d down=%v", event.ClickType, event.Down)
+		// Inert without a controller session: the dot cannot start a turn
+		// with nothing to send it to, and the ring flash CancelVolumeDisplay
+		// produces would acknowledge a press that achieves nothing. Dropped
+		// here rather than at the binding — the binding is the portable
+		// hardware layer and knows nothing about sessions.
+		if s.LinkDown() {
+			log.Println("[cmd] action button ignored — no controller session")
+			return
+		}
 		// Muted presses are FORWARDED, with the mute state attached, and the
 		// controller decides what the gesture is allowed to do. Dropping them
 		// here was right while the dot button meant only "start a voice turn";
@@ -238,6 +254,10 @@ func main() {
 		pulseCtx, cancel := context.WithCancel(ctx)
 		pulseCancel = cancel
 		pulseKind = "orange"
+		// Ring belongs to the link state from here, and the action/volume
+		// buttons go inert. Set BEFORE the pulse starts, or its first frames
+		// are swallowed by the mute suppression on a muted device.
+		s.SetLinkDown(true)
 		go pulseOrange(pulseCtx, s)
 	})
 
@@ -252,6 +272,10 @@ func main() {
 		pulseCtx, cancel := context.WithCancel(ctx)
 		pulseCancel = cancel
 		pulseKind = "white"
+		// Pending approval is the same condition one step earlier: there is
+		// nothing above this device, so the white pulse owns the ring and the
+		// buttons do nothing.
+		s.SetLinkDown(true)
 		go pulseWhite(pulseCtx, s)
 	})
 
@@ -263,6 +287,9 @@ func main() {
 			pulseCancel = nil
 		}
 		pulseKind = ""
+		// Session restored: the ring goes back to the controller, the mute
+		// ring reasserts below if it applies, and the buttons work again.
+		s.SetLinkDown(false)
 		// Always report mute state on (re)connect — the controller may have
 		// restarted and lost its record of our state. Volume is only
 		// reported once the device holds an authoritative level (seeded
