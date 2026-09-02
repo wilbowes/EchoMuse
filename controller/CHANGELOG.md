@@ -1,5 +1,145 @@
 # Changelog
 
+## 2.22.0
+
+**Timers, and your Echoes can now be asked a question.** Everything from the ten
+2.22.0 Early Access builds.
+
+**There is nothing to do before updating.** No database migration, no firmware
+requirement, nothing to change on your devices.
+
+### Timers ring on the Echo
+
+Ask an Echo to set a timer and it rings on that Echo, with the same alert sound
+Home Assistant's own Voice PE hardware uses. Say "stop" — or press the button on
+top — and it stops. Saying something that merely contains the word "stop", like
+"stop the music", still does what you asked and still gets its answer.
+
+Stopping a ringing timer used to leave the Echo deaf. Dismiss it while the alarm
+was actually sounding, rather than in the pause between chimes, and the Echo
+went quiet as it should and then stopped responding to its wake word entirely,
+until the controller was restarted. The chime sounds for most of each cycle, so
+this caught roughly three dismissals in four.
+
+### Home Assistant can ask a question and wait for the answer
+
+`assist_satellite.start_conversation` ("the garage door is open, want me to close
+it?") and `assist_satellite.ask_question` now work. EchoMuse devices never
+appeared as eligible targets for either, so those actions could not be pointed at
+them at all.
+
+The Echo plays the message, then its ring lights and it listens, exactly as after
+a wake word. An attention chime plays first — Home Assistant sends one and we
+were discarding it, and it matters more here, since an unprompted question
+otherwise arrives with no warning.
+
+A muted Echo will not open its microphone, and nothing here weakens that. The
+question is still spoken; the answer is simply never heard.
+
+Reported by @pollocluck (#396), with the root cause found by @vbtheory (#335).
+
+### Long answers no longer cut off part-way through
+
+Ask for something that takes a minute to say and the Echo would go quiet
+mid-sentence, then sit there looking like it was still speaking. Short answers
+were always fine, which made it look like a network problem that came and went.
+
+It was not the network. The controller was sending the whole answer as fast as
+the connection would carry it — around 35 seconds of speech pushed across in 21 —
+and the Echo can only hold about five and a half seconds ahead of what it is
+playing. While it worked through the backlog it stopped answering the
+controller's "are you still there?" checks, and after ten seconds the controller
+hung up. The answer is now sent four seconds ahead of what is playing and no
+further. Nothing is lost by slowing down; everything beyond that was queueing on
+the network rather than reaching the speaker.
+
+### An Echo with nothing behind it now says so
+
+Say the wake word while Home Assistant is not connected to that Echo and the ring
+lit for a fraction of a second and went out. The Echo had heard you perfectly and
+had nowhere to send it, but from across the room it looked like a device that had
+failed to notice you.
+
+It now holds the listening ring briefly and flashes orange twice — the colour it
+already uses when it cannot find its controller, read one step further along. The
+button does the same, being the control people reach for when the wake word seems
+to have done nothing.
+
+This happens more often than it sounds: an Echo comes back from a restart in well
+under a minute and Home Assistant can take another minute to reconnect to it.
+Measured on our own hardware, fifty-six seconds.
+
+With several Echoes, one with no Home Assistant behind it could also win the
+utterance, silence the one that was ready and then fail. It now steps aside as
+soon as it hears the wake word, before deciding which Echo answers. The wake
+still appears in the device's activity history, so an outage remains visible
+afterwards.
+
+### The ring says it has stopped listening
+
+Start a turn with the button and the ring kept its listening animation from the
+press until the answer began — often ten seconds — with nothing to say the Echo
+had heard you stop. It made the Echo feel slow to react when it had finished
+listening at the usual time. A turn can end two ways, and only one of them
+switched the ring to its thinking spinner. Both do now.
+
+### Deleting an Echo removes it
+
+A deleted Echo carried on working. It vanished from the dashboard and kept
+serving conversations, kept its Home Assistant port and kept listening, only
+coming back as a new device when something else interrupted its connection. So
+"delete it and add it again" worked eventually, or never, depending on the
+weather. Adding it back had a second fault behind the first: the new entry
+inherited the port the old one had been deleted to move off, so the Status panel
+showed no voice port and the Bluetooth proxy panel disappeared with it.
+
+### Music, announcements and network blips
+
+- Music no longer comes back to full volume mid-answer when an announcement lands
+  while the Echo is already speaking.
+- Music asked for during a reply no longer plays over the reply, and a request
+  made during a turn survives instead of being dropped.
+- A four-second network interruption — a controller restart, an add-on update, a
+  moment of bad wifi — no longer deregisters the Echo's entities, drops its
+  Bluetooth proxy and stops what it was playing. It now waits to see whether the
+  device comes back first.
+- A struggling connection no longer makes the controller rebuild a microphone
+  that was working.
+- Interrupting the Echo mid-response no longer leaves an error and a traceback in
+  the log, and can no longer leave the turn open.
+
+### Dashboard and support
+
+- The Status panel has a **Voice assistant** row, so an Echo Home Assistant has
+  never connected to no longer looks exactly like one that works.
+- An expired dashboard session returns you to the sign-in page instead of quietly
+  asking for the device list forever. One tab left open overnight made 1262
+  refused requests.
+- Announcements no longer raise an error inside Home Assistant.
+- Support bundles reach substantially further back, by summarising the network
+  timing blips that made up half of one.
+- The approval step for a newly connected device is now a labelled prompt rather
+  than a tab that did not look like one.
+
+### One setting for newer firmware
+
+**Config → Microphones → Advanced** gains an **Echo reference** control, for
+choosing where echo cancellation takes its copy of what the Echo is playing.
+Leave it on **Auto** unless you are deliberately measuring the difference.
+
+It needs firmware newer than v2.13.0, **which is not published yet** — v2.13.0 is
+the current release. Older Echoes ignore the setting entirely and carry on as
+they always have.
+
+### Known issue: the Bluetooth proxy
+
+An Echo running the Bluetooth proxy sees brief reconnects — a few a day on our
+own hardware — because the advertisements it forwards share a connection with the
+messages that check the Echo is still there. Home Assistant shows the satellite
+drop out and come back within seconds. It is being worked on and tracked in #404;
+nothing in this release makes it worse, and turning the proxy off removes it
+entirely.
+
 ## 2.22.0-ea.10 (Early Access)
 
 **A fix for interrupting your Echo mid-response.** Nothing to do before

@@ -2052,3 +2052,40 @@ before cancelling its feeder, since the old ordering could not terminate when
 nobody was draining stdout; measured 20/20 hung against 0/20. EA 2.22.0-ea.10
 cut and published. And the Echo ref row came back off the Status tab (#406) —
 conditional rows in a fixed layout give devices different panel heights.
+
+## 2026-09-02 — the gate measured in a real room, and controller 2.22.0
+
+**Overnight, C95 (gate) against EFF (no gate), both with the proxy:** 949 idle
+RTT excursions in 36 windows against 1765 in 39 — 26.4 against 45.3 per 10m —
+and a worst RTT of 4431ms against 21025ms. Lower in ten hours of eleven, so not
+one quiet stretch. **Zero HCI transport resets** after 20:27:38, twelve hours
+clean; both of last night's fired within ~20s of the BLE proxy starting on a
+device flashed four times that evening, and both logged `1/1 total`.
+
+**Two clean reboots reproduced the stall and not the reset.** ~35s boots, then
+at +2m48s and +2m29s the same precursor — `no mic frames for 10s` — and a
+keepalive timeout, once on control and once on data. So the stall is the common
+event and the chip reset is a rare escalation of it, not its own fault. What the
+controller log cannot say is whether ALSA stalls before the network or they stop
+together; that needs `/tmp/server.log` from the device at the moment it happens,
+and is still owed.
+
+**The emission gate drops 9% in this room, not the 2x-10x the synthetic tests
+suggested.** Two Status tab readings 459s apart: 941 adverts seen, 856
+forwarded. The office produces ~2 adverts/s across ~29 devices — one broadcast
+per device every 14s — already far under the one-per-second Bermuda needs, so
+`emitMaxSilence` admits nearly everything and there is no firehose left to
+filter. Which means 9% fewer adverts cannot explain 42% fewer excursions: the
+coupling is the fault, not the quantity, and #404 half 2 is the fix rather than
+more tuning. Recorded on #404.
+
+The two advert counters on the Status tab are not comparable and invite exactly
+that comparison — `advertsSeen` resets with the device, `adverts_forwarded`
+lives on the controller's proxy object and survives every reconnect. #410.
+
+**Controller 2.22.0 cut**, rolling the ten Early Access builds into GA: timers,
+announce-then-listen, the long-answer pacing fix, the no-HA ring cue, the
+delete/re-add fix. Cut at HEAD rather than at ea.10's commit, so it also carries
+#406 — the Echo ref row coming off the Status tab, a layout fix that had never
+been in an EA build. The notes carry the Bluetooth proxy as a known issue, since
+most deployments appear to run it and #404 is not closed by this release.
