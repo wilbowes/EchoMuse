@@ -17,9 +17,9 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/wilbowes/EchoMuse/internal/bindings/als"
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/discovery"
-	"github.com/wilbowes/EchoMuse/internal/bindings/als"
 	"github.com/wilbowes/EchoMuse/pkg/buttons"
 	"github.com/wilbowes/EchoMuse/pkg/led"
 )
@@ -43,7 +43,7 @@ type controlMessage struct {
 	// message, and exists for the same reason: negotiate by capability,
 	// never by version string. Absent on older controllers, which is
 	// exactly how absence should read — as "does not do this".
-	Features  []string        `json:"features,omitempty"`
+	Features []string `json:"features,omitempty"`
 }
 
 // ─── Callbacks ────────────────────────────────────────────────────────────────
@@ -92,8 +92,8 @@ type ControlClient struct {
 	wifiCommitCallback    StateCallback
 	wifiScanCallback      StateCallback
 
-	conn         *websocket.Conn
-	connMu       sync.Mutex
+	conn   *websocket.Conn
+	connMu sync.Mutex
 
 	// features is what the CONTROLLER announced on the ack. Guarded by its
 	// own mutex rather than connMu: HasFeature is read on the scanner's
@@ -131,7 +131,7 @@ func NewControlClient(
 }
 
 func (c *ControlClient) OnLEDAnim(cb LEDAnimCallback)             { c.ledAnimCallback = cb }
-func (c *ControlClient) OnDisconnected(cb StateCallback)           { c.disconnectedCallback = cb }
+func (c *ControlClient) OnDisconnected(cb StateCallback)          { c.disconnectedCallback = cb }
 func (c *ControlClient) OnConnected(cb StateCallback)             { c.connectedCallback = cb }
 func (c *ControlClient) OnPending(cb StateCallback)               { c.pendingCallback = cb }
 func (c *ControlClient) OnConfigApplied(cb ConfigAppliedCallback) { c.configAppliedCallback = cb }
@@ -266,9 +266,9 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 	c.serverAddrMu.Unlock()
 
 	reg := map[string]interface{}{
-		"type":         "register",
-		"device_id":    c.deviceID,
-		"version":      Version,
+		"type":      "register",
+		"device_id": c.deviceID,
+		"version":   Version,
 		// Capabilities, not version strings, are how the controller decides
 		// what a device can be asked to do. A version comparison has to encode
 		// knowledge of our release history in the controller and gets it wrong
@@ -801,7 +801,7 @@ func (c *ControlClient) SendButton(event buttons.ButtonClickEvent) {
 		// Always sent, never omitempty: absent must mean "this firmware does
 		// not report it" so the controller can fall back to mute_state, and
 		// omitempty would make an unmuted press indistinguishable from that.
-		"muted":  event.Muted,
+		"muted": event.Muted,
 		"button": map[string]string{
 			"type": string(event.Button.Type),
 		},

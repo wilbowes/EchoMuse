@@ -32,7 +32,7 @@ const (
 	// device announcing "audio_mix".
 	frameTypeMusic    = byte(0x04)
 	frameTypeMusicEOS = byte(0x05)
-	frameTypeVADEnd  = byte(0x04)
+	frameTypeVADEnd   = byte(0x04)
 	// frameTypeNoSpeechTimeout signals that the turn ended because no speech
 	// was ever detected — distinct from frameTypeVADEnd (speech detected,
 	// then ended). Sent when noSpeechTimeout elapses with active==false the
