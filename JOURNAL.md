@@ -2089,3 +2089,65 @@ delete/re-add fix. Cut at HEAD rather than at ea.10's commit, so it also carries
 #406 — the Echo ref row coming off the Status tab, a layout fix that had never
 been in an EA build. The notes carry the Bluetooth proxy as a known issue, since
 most deployments appear to run it and #404 is not closed by this release.
+
+## 2026-09-02 — GA 2.22.0 and v2.14.0 shipped; the stall is the link, not ALSA
+
+**Released both halves.** Controller 2.22.0 (ten EA builds rolled into GA) and
+device v2.14.0, the first firmware since v2.13.0. GA carries the Bluetooth
+proxy as a stated known issue rather than silently, because most deployments
+appear to run it and #404 was not closed by the release. Five PRs landed on
+top: OTA serialisation (#412), adverts onto the data plane (#413), barge
+arbitration (#414), the link-state ring (#415), and @DennisGaida's
+`aiohttp.access` quieting (#376).
+
+**The advert gate drops 9% in a real room, not the 2x-10x the synthetic tests
+suggested.** Two Status readings 459s apart: 941 seen, 856 forwarded. The
+office produces ~2 adverts/s across ~29 devices — one broadcast per device
+every 14s — already far under the one-per-second Bermuda needs, so
+`emitMaxSilence` admits nearly everything. Which means 9% fewer adverts cannot
+explain the 42% fewer excursions measured overnight: the coupling is the
+fault, not the quantity, and #404 half 2 was the fix rather than more tuning.
+
+**`no mic frames for 10s` is a BLOCKED SOCKET WRITE, not an ALSA stall**, and
+this had been recorded the wrong way round since 2026-09-01. Device log from
+SPJ during a live event: `[mic] clock: 180.5s audio over 180.3s wall
+(deficit -158ms, stalls=0)` — capture kept perfect pace — while
+`streamMic: send error: write tcp …: i/o timeout` names the real blockage. The
+order is write blocks → `streamMic` stops draining the mic subscriber channel
+→ `subscriber channel full — batch dropped` → the controller sees nothing.
+Only the DATA plane died; control survived on the same host and port and the
+controller logged no event-loop stall. That is per-socket TCP retransmission,
+i.e. #139's 4.6-7.1% loss driving RTO to 500-800ms, and #140 is the answer.
+
+**A hypothesis built on n=3 and falsified in ten minutes.** Three stalls landed
+at +2m29s, +2m34s and +2m48s after connect; `linkInfoInterval` is 2 minutes and
+its expiry spawns two `wpa_cli` processes, so the first refresh looked like the
+trigger. A debug build at 45s ran nine refreshes at **12-36ms each with zero
+stalls**, and did not reproduce the 2m30s event either. Three points in a
+20-second band were over-read; the fault is intermittent (8 events in 7h on
+SPJ), not periodic. Office now carries a logging-only build that times every
+mic frame write and logs past 250ms, so the next natural stall shows its onset
+rather than only its 10-second deadline.
+
+**Two OTAs of the same shape, found by using the thing.** Three concurrent
+updates stalled the controller's event loop for 11.1s — the loop that sends
+speaker periods — which is what made serialising them worth doing. And Office
+turned out to be missing three of the four stock wake word classifiers since
+17 August: `reconcile_oww_assets` runs on connect but returns early unless
+on-device scoring is on, and then checks only the SELECTED model. Same shape
+for the other two payloads: `_sync_start_script` and `_sync_debloat` reconcile
+on OTA or on a click and never on connect. A device arriving is exactly the
+moment we know what it has.
+
+**Barge-in was not arbitrated at all**, reported by Wil and reproduced in the
+source: `_wake_arbiter.claim` had one call site, in the wake listener, so an
+idle neighbour answered the same interrupting utterance unopposed. The
+original wake's claim cannot cover it — `claim()` is bounded by `window_s`,
+not held until `release()`.
+
+**Three corrections of mine, all the same shape as yesterday's.** I merged
+#411 with checks still pending (Wil: "only merge on green"); I told Wil #414
+was branched off main when it and #415 were sitting uncommitted on #413's
+branch; and I twice reported a local test run that my own branch-switching had
+contaminated. The pattern is claiming a verification I had not actually
+performed.

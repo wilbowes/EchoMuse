@@ -820,6 +820,22 @@ Playback ring clearing waits for the device's `playback_stats` (`device.playback
 
 `server.go` maintains a `ledMode` (direction arc vs. system). System-level LEDs (controller commands, mute ring, pulse animations) always win over the beamformer direction arc. Two paint suppressions in `SetLEDs`/`SetDirectionLEDs` (state is still recorded in `baseLEDs` so the ring can be restored):
 
+- **The ring belongs to the LINK STATE, and mute yields to it.** `linkDown`
+  (disconnected OR pending approval) is set by the connection callbacks, and
+  `suppressPaint` — pure, truth-tabled — lets the device's own orange/white
+  pulse paint through the mute suppression. A muted device that lost its
+  controller used to sit showing red, which is not merely less useful than the
+  pulse, it is FALSE: red says "muted and working". `OnConnected` has always
+  called `RestoreMuteRing` with the comment "orange pulse overwrote the red
+  ring — restore it", and the pulse never overwrote it, because the
+  suppression below could not tell a controller frame from the device's own.
+  The same bug hid the white pending pulse.
+  **The action and volume buttons go inert while `linkDown`**, gated at the
+  consumers in `cmd` rather than in the evdev binding, which is the portable
+  hardware layer and knows nothing about sessions. **The MUTE button stays
+  live**: the ADC mute is hardware and its button LED is a GPIO, so it is the
+  one control that works with no controller at all — and making it inert would
+  hand back a live mic on reconnect, since mute is persisted in `state.json`.
 - **Mute ring** (solid red) is device-sovereign — enforced since v2.7.8: controller LED writes are recorded but not painted while muted. Needed because muting now terminates an active turn (controller cancels + `speaker_flush` on `mute_state`), so the cancelled turn's LED cleanup arrives after the red ring is up.
 - **Volume arc** owns the ring for its 2s display window against *animations* — they repaint ~every 100ms and would otherwise stomp the arc within one frame. It does **not** outrank a deliberate action-button press: a dot release calls `CancelVolumeDisplay()`, which drops the hold so the listening frame paints (it deliberately does not repaint — the controller's frame lands within an RTT, and clearing to black would put a dark gap between the two). The arc is protection from repaint churn, not from the user. On expiry the ring repaints the latest `baseLEDs` frame (`onDisplayExpire` → `paintBaseLEDs`), handing back mid-animation. The arc shows only for physical volume button presses (v2.9.5): remote sets and the boot-time volume seed apply silently (`volumeController.Set` showRing flag). The mute-button LED is sysfs gpio444, active-high — not the gpio445 in Amazon's `libled_hal.so`, whose constant is off by one and whose pad is muxed away (stock drives the pin via the `/dev/mtgpio` ioctl; see `mute_button.go`).
 

@@ -1130,6 +1130,46 @@ The device runs an A/B slot binary system:
 
 OTA is triggered from the dashboard — the controller pushes the new binary via the `/shell` WebSocket.
 
+**Updates are SERIALISED across the whole controller, and the queue is
+bounded.** Three concurrent OTAs stalled the event loop for 11.1 seconds
+(measured 2026-09-02 updating three devices to v2.14.0, in the `[loop] event
+loop stalled` warnings — the reliable source, since the reported peak reads 0
+under the add-on, #306). That loop sends speaker periods and LED frames, so a
+device answering someone pays for a device being updated.
+`_updates_in_progress` could never have prevented it: it stops ONE device
+being updated twice and says nothing about two at once. So `_ota_lock` is
+global and both entry points go through it — the fleet deploy and a
+hand-clicked single update collide identically, and only the first was ever
+going to be noticed.
+
+- **The binary is fetched inside the lock**, so a queued device holds nothing
+  but its place in line, and the lock is released in a `finally` — an update
+  that raises would otherwise hold it for the life of the process and no
+  device could be updated again without a restart.
+- **A failure does not stop the queue.** Mark it, carry on, report at the end:
+  one device that will not come back must not strand a fleet update behind it.
+- **`OTA_MAX_HOLD_S` (300s) caps the hold**, because serialising turns a
+  device-local stall into a fleet-wide one. Every `recv` in
+  `_stream_file_to_device` is `wait_for`-bounded but `await ws.send(line)` in
+  the base64 loop is not, and a device that stops reading applies backpressure
+  and can hang there. `_run_update` is a thin wrapper around
+  `_run_update_locked` so the whole of the update sits under one timeout.
+- **Queued is reported separately from in-progress** (`update_queued`), and
+  rendered as "queued": a device that has been started and not yet touched is
+  not having a transfer, and claiming otherwise is the same failure as any
+  control that appears to work.
+
+**Every payload reconciles on OTA or on a click, and nothing reconciles on
+CONNECT — which is the wrong trigger and is why devices drift.**
+`_sync_start_script` and `_sync_debloat` run inside `_run_update_locked` and
+from the Maintenance button; `reconcile_oww_assets` does run on connect but
+returns early unless `owwOnDevice` is on, and then checks only the SELECTED
+classifier. So a device can sit for weeks missing three of the four stock wake
+words — measured on Office 2026-09-02, provisioned 17 Aug with `hey_jarvis`
+alone — while every panel reports it healthy. A device arriving is exactly the
+moment we know what it has. Wil's call, same day: reconcile all three payloads
+on connect, debounced per device.
+
 **md5 decides whether a transfer succeeded, not the shell's exit status.**
 `TRANSFER_OK` only ever proved that the base64 decode pipeline and `chmod`
 exited 0 — never that the bytes on the device match the bytes sent. Bytes
