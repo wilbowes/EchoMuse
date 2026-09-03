@@ -1,5 +1,68 @@
 # Changelog
 
+## 2.23.0-ea.1 (Early Access)
+
+**The Bluetooth proxy stops crowding out the device it runs on, and the
+controller stops trusting a device to be up to date.** Nothing to do before
+updating: no database migration, nothing to change on your devices. Two of the
+changes below need firmware newer than v2.14.0 and do nothing until you have
+it — they are harmless without it.
+
+### The Bluetooth proxy no longer competes with its own device's health
+
+An Echo running the Bluetooth proxy sent every advertisement it heard over the
+same connection the controller uses to check the device is alive. Bulk
+telemetry and the liveness check took turns on one channel, so a busy room made
+the device look unwell — measured at 3615 round-trip delays in a day against 2
+on the Echo beside it, and the fault followed the proxy when it was moved.
+
+Advertisements now ride the data connection instead. **This needs firmware past
+v2.14.0 at both ends**, and the two halves agree before either uses the new
+path, so an older device keeps working exactly as before rather than silently
+dropping advertisements.
+
+### Firmware updates no longer slow down whoever is talking
+
+Updating several Echoes at once stalled the controller for as long as eleven
+seconds, and that is the same loop that sends audio and ring animations — so an
+Echo answering someone paid for an Echo being updated. Updates now run one at a
+time across the whole controller, queued rather than refused.
+
+### Only one Echo answers when you interrupt
+
+Interrupting a response in a room with more than one Echo could start a turn on
+each of them. The same arbitration that already decides which Echo answers a
+wake word now decides which one takes an interruption.
+
+### The ring shows whether the Echo can reach the controller
+
+An Echo that has lost the controller now says so on its ring rather than
+looking idle, and its buttons stand down instead of appearing to work. **Needs
+firmware past v2.14.0.**
+
+### Devices are checked against what they actually have
+
+The controller assumed a device already held its wake word models, its startup
+script and its debloat list, and only ever verified the first — and only when
+the device was scoring wake words itself. One of our own Echoes ran for a
+fortnight missing three of its four wake word models while every panel called
+it healthy. All three are now checked when a device connects.
+
+### Installing firmware an Echo already has
+
+Pushing a build an Echo is already running cost it a reboot and a slot for no
+change, and nothing stopped it. Updating one Echo now says so and refuses;
+updating the whole fleet skips the ones already on that version, which it did
+for published releases but never for a binary you uploaded yourself. You can
+still force it — writing the same version again is how a damaged slot gets
+repaired.
+
+### Smaller things
+
+Request logging is quiet by default, so the log is about your devices rather
+than about the dashboard polling itself — thank you to @DennisGaida. Security
+and dependency updates for websockets, cryptography and protobuf.
+
 ## 2.22.0
 
 **Timers, and your Echoes can now be asked a question.** Everything from the ten
