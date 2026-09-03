@@ -1405,8 +1405,25 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
     try {
       const up = await API.upload('/api/releases/upload', localFile);
       setUploading(false);
-      setPushLog(l => [...l, '✓ Upload complete — deploying…']);
-      const res = await API.post(`/api/devices/${device.device_id}/update`, { upload_token: up.upload_token });
+      setPushLog(l => [...l, `✓ Upload complete${up.version ? ` — ${up.version}` : ''}`]);
+
+      // Ask BEFORE spending a reboot and a slot on a binary the device is
+      // already running. The server refuses this too, so declining here is a
+      // convenience rather than the guard; what it buys is being told at the
+      // point of deciding instead of after. Re-flashing the same version is a
+      // real repair for a corrupt slot, so it is a question and not a wall.
+      let force = false;
+      if (up.version && up.version === device.firmware_ver) {
+        if (!confirm(`${device.label || device.device_id} is already running ${up.version}.\n\nInstall it again anyway?`)) {
+          setPushLog(l => [...l, 'Cancelled — device already running this build.']);
+          setPushing(false);
+          return;
+        }
+        force = true;
+      }
+
+      setPushLog(l => [...l, 'Deploying…']);
+      const res = await API.post(`/api/devices/${device.device_id}/update`, { upload_token: up.upload_token, force });
       setPushLog(l => [...l, `Deploying ${res.version} — waiting for reconnect…`]);
       _pollReconnect(res.version, device.firmware_ver);
     } catch(e) {

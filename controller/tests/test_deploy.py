@@ -2192,3 +2192,75 @@ def test_the_payload_syncs_tell_a_missing_file_from_a_silent_device():
         assert fn.index("_SHELL_OK not in out") < fn.index("_stream_file_to_device"), (
             f"{name} must check the device answered BEFORE deciding to push"
         )
+
+
+# ─── Installing what a device already runs ────────────────────────────────────
+#
+# Hit by hand on 2026-09-03: the same engineering build uploaded to a device
+# twice, costing a transfer, a reboot and a slot. The fleet endpoint had
+# skipped this for releases since it was written; the single-device endpoint
+# checked nothing, and neither could check an UPLOAD, because an uploaded
+# binary was labelled `local-<timestamp>` rather than being read for its
+# version. So the case most likely to happen by accident was the one case
+# nothing guarded.
+
+def test_the_update_endpoint_refuses_a_version_the_device_already_runs():
+    fn = _strip_prose(_fn_body(
+        (CONTROLLER / "em_api.py").read_text(), "_post_device_update"))
+
+    assert 'row["firmware_ver"] == release["version"]' in fn, (
+        "the update endpoint must compare the target against what the device "
+        "is already running"
+    )
+    assert "already_running" in fn, "the refusal needs a named error code"
+    assert 'body.get("force")' in fn, (
+        "re-flashing the same version repairs a corrupt slot — force must "
+        "exist, or this is a wall between an operator and their own device"
+    )
+
+
+def test_a_refused_update_does_not_consume_the_uploaded_binary():
+    """
+    The token is peeked and only popped once the update is actually started.
+    Popping first meant a refusal cost an 11MB re-upload to act on the very
+    advice the refusal had just given.
+    """
+    fn = _strip_prose(_fn_body(
+        (CONTROLLER / "em_api.py").read_text(), "_post_device_update"))
+
+    assert "_pending_uploads.get(upload_token)" in fn, (
+        "peek the token — every refusal below it must leave it usable"
+    )
+    pop = fn.index("_pending_uploads.pop")
+    run = fn.index("_run_update(")
+    refuse = fn.index("already_running")
+    assert refuse < pop, "the duplicate check must come before the token is consumed"
+    assert pop < run, "consume the token only once the update is committed"
+
+
+def test_the_fleet_endpoint_reads_the_version_out_of_an_uploaded_binary():
+    """
+    While an upload was labelled `local-<timestamp>`, it looked like a version
+    no device had ever run — so `already_current` could never fire for one and
+    a fleet push re-flashed every device with what it was already running.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+    fn  = _strip_prose(_fn_body(src, "_post_deploy_all"))
+
+    assert "_extract_binary_version(binary_override)" in fn, (
+        "the fleet path must read the uploaded binary's own version"
+    )
+    assert "not upload_token and" not in fn, (
+        "the already_current skip must no longer exclude uploads"
+    )
+
+
+def test_the_upload_endpoint_reports_what_was_uploaded():
+    """
+    The version rides back so the dashboard can warn at the point of deciding
+    rather than after the operator has committed.
+    """
+    fn = _strip_prose(_fn_body(
+        (CONTROLLER / "em_api.py").read_text(), "_post_upload_binary"))
+    assert "_extract_binary_version(binary)" in fn
+    assert '"version": version' in fn

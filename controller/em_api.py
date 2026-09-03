@@ -1432,7 +1432,11 @@ async def _post_device_update(request: web.Request) -> web.Response:
     release = None
 
     if upload_token:
-        binary_override = _pending_uploads.pop(upload_token, None)
+        # PEEKED, not popped. Every refusal below leaves the token usable, so
+        # re-deciding — or forcing — costs nothing. Popping first meant an
+        # 11MB re-upload to get past a check that had just told the operator
+        # something useful.
+        binary_override = _pending_uploads.get(upload_token)
         if binary_override is None:
             return _error("invalid_token", "Upload token not found or expired", 404)
         _embedded = _extract_binary_version(binary_override)
@@ -1455,6 +1459,30 @@ async def _post_device_update(request: web.Request) -> web.Response:
     if device_id in _updates_in_progress or device_id in _updates_queued:
         return _error("update_in_progress", "An update is already in progress", 409)
 
+    # Installing what the device is already running costs a transfer, a
+    # reboot and a slot — and the fleet endpoint has always skipped it for
+    # releases (`already_current`), while this endpoint checked nothing and
+    # the upload path could not check anything, because it labelled every
+    # uploaded binary `local-<timestamp>` instead of reading the version out
+    # of it. So the case most likely to happen by accident was the one case
+    # nothing guarded: an engineering build uploaded by hand, twice.
+    #
+    # Refused rather than silently skipped, because someone pressed a button
+    # here and a no-op reported as success is how they press it again.
+    # `force` exists because re-flashing the SAME version is a real repair —
+    # a corrupt slot is fixed by writing it again — so this must never become
+    # a wall between an operator and their own device.
+    if (release["version"] and row["firmware_ver"] == release["version"]
+            and not body.get("force")):
+        return _error(
+            "already_running",
+            f"This device is already running {release['version']}. "
+            f"Pass force to install it again.",
+            409,
+        )
+
+    if upload_token:
+        _pending_uploads.pop(upload_token, None)
     asyncio.create_task(_run_update(device_id, release, binary_override))
     return _ok({"status": "started", "version": release["version"]}, status=202)
 
@@ -1517,14 +1545,23 @@ async def _post_upload_binary(request: web.Request) -> web.Response:
 
         token = str(_uuid.uuid4())
         _pending_uploads[token] = binary
-        log.info(f"[api] Binary uploaded: {len(binary):,} bytes token={token[:8]}…")
+        version = _extract_binary_version(binary)
+        log.info(f"[api] Binary uploaded: {len(binary):,} bytes "
+                 f"version={version or 'unknown'} token={token[:8]}…")
 
         async def _expire():
             await asyncio.sleep(600)
             _pending_uploads.pop(token, None)
         asyncio.create_task(_expire())
 
-        return _ok({"upload_token": token, "size": len(binary)})
+        # The version rides back so the dashboard can say what was uploaded,
+        # and warn against a device already running it BEFORE the operator
+        # commits. The update endpoint refuses it either way; this is what
+        # makes the refusal something you see coming instead of something you
+        # find out afterwards. None means the binary carries no recognisable
+        # version — shown as unknown rather than guessed at.
+        return _ok({"upload_token": token, "size": len(binary),
+                    "version": version})
     except web.HTTPException:
         # aiohttp's own — HTTPRequestEntityTooLarge above all, raised by the
         # transport before this handler sees a byte. Swallowing it into a 500
@@ -2783,7 +2820,17 @@ async def _post_deploy_all(request: web.Request) -> web.Response:
         binary_override = _pending_uploads.pop(upload_token, None)
         if binary_override is None:
             return _error("invalid_token", "Upload token not found or expired", 404)
-        release = {"version": f"local-{time.strftime('%Y%m%d-%H%M')}", "url": None}
+        # Read the version OUT of the binary, as the single-device path does.
+        # Labelling it `local-<timestamp>` made every uploaded binary look
+        # like a version no device had ever run, so the already_current skip
+        # below could never fire for an upload and the whole fleet re-flashed
+        # what it was already running. The timestamp remains the fallback for
+        # a binary carrying no recognisable version.
+        _embedded = _extract_binary_version(binary_override)
+        release = {
+            "version": _embedded or f"local-{time.strftime('%Y%m%d-%H%M')}",
+            "url": None,
+        }
     else:
         release = await _get_cached_release()
         if release is None:
@@ -2798,7 +2845,12 @@ async def _post_deploy_all(request: web.Request) -> web.Response:
         if row is None or not row["approved"]:
             skipped.append({"device_id": device_id, "reason": "not_approved"})
             continue
-        if not upload_token and row["firmware_ver"] == release["version"]:
+        # No longer `not upload_token and …`: an uploaded binary now carries a
+        # real version, so this skip finally covers the fleet-wide re-flash of
+        # an engineering build too. `force` overrides it for the repair case,
+        # matching the single-device endpoint.
+        if (release["version"] and row["firmware_ver"] == release["version"]
+                and not body.get("force")):
             skipped.append({"device_id": device_id, "reason": "already_current"})
             continue
         if device_id in _updates_in_progress or device_id in _updates_queued:
