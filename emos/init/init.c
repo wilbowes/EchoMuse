@@ -508,7 +508,7 @@ static void rdstate(const char *tag)
 }
 
 /* Defined below, with the supervision machinery. */
-static void svc_add(const char *name, char *const *argv);
+static void svc_add(const char *name, char *const *argv, const char *req);
 static void supervise(void);
 
 int main(void)
@@ -655,6 +655,7 @@ int main(void)
      */
     /* RAM-backed scratch for logs and runtime state, so routine logging never
      * touches the eMMC. 4MB is ample for a 256KB x2 syslog rotation. */
+    mkdir("/tmp", 01777);          /* rootfs is a ramdisk: RAM-backed, as on stock */
     mkdir("/run", 0755);
     mount("tmpfs", "/run", "tmpfs", 0, "size=4m");
 
@@ -777,10 +778,22 @@ int main(void)
                         "-O", "/run/messages", "-s", "256", "-b", "2", NULL };
     char *klogd[]   = { "/system/bin/busybox", "klogd", "-n", NULL };
 
-    svc_add("net", NULL);          /* forked in-process, see below */
-    svc_add("syslogd", syslogd);
-    svc_add("klogd", klogd);
-    svc_add("console", NULL);      /* needs the tty as its stdio */
+    /* EchoMuse itself, via its OWN supervisor rather than directly.
+     *
+     * start_server.sh owns the A/B slot symlink, the fast-exit backoff and the
+     * log trimming that the OTA system depends on, so init starting the binary
+     * would quietly bypass firmware rollback. Android's init launched the same
+     * script; emOS does the job it used to. It is absent on a device where
+     * EchoMuse has not been installed, which is an ordinary state, not a fault.
+     */
+    char *echomuse[] = { "/system/bin/sh", "/data/local/bin/start_server.sh",
+                         NULL };
+
+    svc_add("net", NULL, NULL);          /* forked in-process, see below */
+    svc_add("syslogd", syslogd, NULL);
+    svc_add("klogd", klogd, NULL);
+    svc_add("echomuse", echomuse, "/data/local/bin/start_server.sh");
+    svc_add("console", NULL, NULL);      /* needs the tty as its stdio */
 
     supervise();
     return 0;
@@ -800,8 +813,11 @@ int main(void)
 struct svc {
     const char  *name;
     char *const *argv;   /* NULL for the two services started specially */
+    const char  *req;    /* must exist for the service to run; NULL = argv[0] */
     pid_t        pid;
     time_t       started;
+    int          fails;  /* consecutive fast exits */
+    int          gone;   /* logged as not-installed; stop trying */
 };
 static struct svc svcs[MAX_SVC];
 static int nsvc;
@@ -810,10 +826,31 @@ static volatile sig_atomic_t want_shutdown;
 
 static void on_term(int sig) { (void)sig; want_shutdown = 1; }
 
-static void svc_add(const char *name, char *const *argv)
+static void svc_add(const char *name, char *const *argv, const char *req)
 {
     if (nsvc < MAX_SVC)
-        svcs[nsvc++] = (struct svc){ .name = name, .argv = argv, .pid = -1 };
+        svcs[nsvc++] = (struct svc){ .name = name, .argv = argv,
+                                     .req = req, .pid = -1 };
+}
+
+/* How long to wait before restarting a service that keeps dying.
+ *
+ * A service that exits immediately used to be restarted every 2s forever,
+ * which spins PID 1, fills the log with its own failure, and buries whatever
+ * else was wrong. Anything that survives FAST_EXIT is treated as a normal
+ * run and resets the count; repeated fast exits back off 2,4,8,16,32,60s and
+ * stay at a minute. It never gives up permanently, because the reason is
+ * usually transient on this hardware — a PCM still held, a partition not
+ * mounted yet — and a device that has quietly stopped trying is worse than
+ * one that is still retrying slowly.
+ */
+#define FAST_EXIT 10
+static int svc_backoff(int fails)
+{
+    if (fails <= 1)
+        return 2;
+    int b = 2 << (fails - 1);
+    return b > 60 ? 60 : b;
 }
 
 /* The console is the one service that needs a controlling terminal, and it
@@ -890,17 +927,31 @@ static void supervise(void)
         pid_t d;
         while ((d = waitpid(-1, &st, WNOHANG)) > 0)
             for (int i = 0; i < nsvc; i++)
-                if (svcs[i].pid == d)
+                if (svcs[i].pid == d) {
                     svcs[i].pid = -1;
+                    if (time(NULL) - svcs[i].started < FAST_EXIT) {
+                        if (++svcs[i].fails == 3)
+                            note("svc %s failing fast, backing off\n",
+                                 svcs[i].name);
+                    } else
+                        svcs[i].fails = 0;
+                }
 
         time_t now = time(NULL);
         for (int i = 0; i < nsvc; i++) {
             struct svc *s = &svcs[i];
-            if (s->pid > 0)
+            if (s->pid > 0 || s->gone)
                 continue;
-            /* Backoff, so a service that dies instantly cannot spin PID 1. */
-            if (now - s->started < 2)
+            if (now - s->started < svc_backoff(s->fails))
                 continue;
+            /* Not installed is not a failure to retry: EchoMuse may simply not
+             * be on this device yet. Say so once and leave it alone. */
+            const char *need = s->req ? s->req : (s->argv ? s->argv[0] : NULL);
+            if (need && access(need, F_OK) != 0) {
+                note("svc %s absent (%s)\n", s->name, need);
+                s->gone = 1;
+                continue;
+            }
             s->started = now;
             if (!strcmp(s->name, "console"))
                 s->pid = start_console();
