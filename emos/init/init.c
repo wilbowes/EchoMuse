@@ -638,6 +638,9 @@ static void net_main(void)
                     led_frame(LED_N, 0x00, 0xFF, 0x00);
                     usleep(400000);
                     led_fade_out(0x00, 0xFF, 0x00);
+                    /* Ring handed back and the network is up: services that
+                     * wait on the boot completing may now start. */
+                    close(open("/run/net-up", O_WRONLY | O_CREAT, 0644));
                     /* The boot is confirmed: the device is reachable, which
                      * is the property that makes it fixable without hands. */
                     write_state(0);
@@ -664,7 +667,8 @@ static void rdstate(const char *tag)
 }
 
 /* Defined below, with the supervision machinery. */
-static void svc_add(const char *name, char *const *argv, const char *req);
+static void svc_add(const char *name, char *const *argv, const char *req,
+                    const char *after);
 static void supervise(void);
 
 int main(void)
@@ -958,11 +962,20 @@ int main(void)
     char *echomuse[] = { "/system/bin/sh", "/data/local/bin/start_server.sh",
                          NULL };
 
-    svc_add("net", NULL, NULL);          /* forked in-process, see below */
-    svc_add("syslogd", syslogd, NULL);
-    svc_add("klogd", klogd, NULL);
-    svc_add("echomuse", echomuse, "/data/local/bin/start_server.sh");
-    svc_add("console", NULL, NULL);      /* needs the tty as its stdio */
+    svc_add("net", NULL, NULL, NULL);       /* forked in-process, see below */
+    svc_add("syslogd", syslogd, NULL, NULL);
+    svc_add("klogd", klogd, NULL, NULL);
+    /* EchoMuse waits for the network stage to finish, and the wait is about
+     * the LED RING as much as connectivity. The firmware claims the ring the
+     * moment it starts, so a server starting mid-boot drives the same twelve
+     * LEDs as the boot progress bar and the two fight — the identical
+     * two-writer conflict, over the same i2C device, that the kernel's
+     * boot_animation caused. Waiting for /run/net-up means the ring has
+     * finished and faded before the firmware touches it, and EchoMuse has a
+     * controller to reach when it does start. */
+    svc_add("echomuse", echomuse, "/data/local/bin/start_server.sh",
+            "/run/net-up");
+    svc_add("console", NULL, NULL, NULL);   /* needs the tty as its stdio */
 
     supervise();
     return 0;
@@ -983,6 +996,7 @@ struct svc {
     const char  *name;
     char *const *argv;   /* NULL for the two services started specially */
     const char  *req;    /* must exist for the service to run; NULL = argv[0] */
+    const char  *after;  /* wait until this exists; unlike req, keep waiting */
     pid_t        pid;
     time_t       started;
     int          fails;  /* consecutive fast exits */
@@ -995,11 +1009,12 @@ static volatile sig_atomic_t want_shutdown;
 
 static void on_term(int sig) { (void)sig; want_shutdown = 1; }
 
-static void svc_add(const char *name, char *const *argv, const char *req)
+static void svc_add(const char *name, char *const *argv, const char *req,
+                    const char *after)
 {
     if (nsvc < MAX_SVC)
-        svcs[nsvc++] = (struct svc){ .name = name, .argv = argv,
-                                     .req = req, .pid = -1 };
+        svcs[nsvc++] = (struct svc){ .name = name, .argv = argv, .req = req,
+                                     .after = after, .pid = -1 };
 }
 
 /* How long to wait before restarting a service that keeps dying.
@@ -1112,6 +1127,10 @@ static void supervise(void)
             if (s->pid > 0 || s->gone)
                 continue;
             if (now - s->started < svc_backoff(s->fails))
+                continue;
+            /* Ordering, not just presence: a service with `after` waits for
+             * it and keeps waiting, where a missing `req` means give up. */
+            if (s->after && access(s->after, F_OK) != 0)
                 continue;
             /* Not installed is not a failure to retry: EchoMuse may simply not
              * be on this device yet. Say so once and leave it alone. */
