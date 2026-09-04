@@ -3,6 +3,7 @@
 package speaker
 
 import (
+	"context"
 	"log"
 	"math"
 	"os"
@@ -50,6 +51,13 @@ var silencePeriod = make([]byte, periodBytes)
 type PcmSpeaker struct {
 	session *tinyalsa.AudioSession
 	stopCh  chan struct{}
+	// jackInserted is the plug position last applied by SetJackRouting, and
+	// jackKnown says whether one has been applied at all. The reconcile loop
+	// needs a DESIRED state to compare against, and before jack.Watch has run
+	// there is none — acting on a default would fight whatever Init set up.
+	jackMu       sync.Mutex
+	jackInserted bool
+	jackKnown    bool
 	// deadCh is closed by silenceLoop on any exit so a pump call can return
 	// an error rather than block indefinitely waiting for a dead consumer.
 	deadCh chan struct{}
@@ -215,22 +223,115 @@ func waitForFreePcm(card, device int, timeout time.Duration) {
 		pcmOwner(string(b)), timeout)
 }
 
-// EnableSpeakerAmp switches the internal speaker amplifier back on.
+// SetJackRouting puts the codec into the state the current plug position
+// needs. Safe to call repeatedly with the same position — every write is
+// idempotent, which is what lets Watch dispatch the state it booted into
+// without special-casing it.
 //
-// accdet turns it off when a plug is inserted (correctly — the Dot should not
-// play to the room while headphones are connected) and NOTHING turns it back
-// on when the plug is removed. Init is otherwise the only thing that ever sets
-// it, which is why the speaker stayed silent until the next reboot (#80).
+// It replaces EnableSpeakerAmp, which acted only on REMOVAL and only on the
+// amp switch. Both halves of that were wrong, and each hid a symptom:
 //
-// Note this is the ONLY control involved: output routing is done in hardware
-// by the jack's switch contacts, so there is no mux or headphone-amp control
-// to drive alongside it.
-func (p *PcmSpeaker) EnableSpeakerAmp() {
-	if out, err := exec.Command("tinymix", "-D", "0", "5", "On").CombinedOutput(); err != nil {
-		log.Printf("[speaker] could not re-enable speaker amp: %v — %s", err, strings.TrimSpace(string(out)))
-		return
+//   - Insert was left entirely to accdet. accdet does mute the internal amp
+//     on the insert transition, but it also drops HP Driver Gain to the floor
+//     of its range, and on a stock Dot the audio HAL raises it back. Nothing
+//     of ours did, so the external output was inaudible — not quiet, silent —
+//     and the old comment here asserting the amp switch was "the ONLY control
+//     involved" is what stopped anyone looking (falsified 2026-09-03: writing
+//     ctl 62 with music playing took the jack from silent to audible, with the
+//     loopback tap `ref` unchanged, so it is a post-DAC analog stage).
+//   - Neither accdet nor the old code ran at BOOT, because both are
+//     edge-triggered and a boot has no edge. Init unconditionally sets the amp
+//     ON, so a device booted with a cable in played out its internal speaker
+//     until someone unplugged and replugged — which is exactly why replugging
+//     was the folk remedy. It manufactures the edge the boot never had.
+func (p *PcmSpeaker) SetJackRouting(inserted bool) {
+	p.jackMu.Lock()
+	p.jackInserted = inserted
+	p.jackKnown = true
+	p.jackMu.Unlock()
+
+	p.applyJackWrites(jackRouting(inserted))
+	log.Printf("[speaker] jack routing applied (%s)",
+		map[bool]string{true: "external", false: "internal"}[inserted])
+}
+
+func (p *PcmSpeaker) applyJackWrites(ws []mixerWrite) {
+	for _, w := range ws {
+		args := append([]string{"-D", "0", w.Ctl}, w.Args...)
+		if out, err := exec.Command("tinymix", args...).CombinedOutput(); err != nil {
+			log.Printf("[speaker] jack routing: ctl %s: %v — %s", w.Ctl, err, strings.TrimSpace(string(out)))
+		}
 	}
-	log.Println("[speaker] speaker amp re-enabled")
+}
+
+// JackReconcileInterval bounds how long the jack can sit at the wrong gain
+// after Android's HAL has rewritten it.
+//
+// 30s is a compromise, not a measurement. Shorter closes the window of silence
+// after each mediaserver restart; longer costs fewer process spawns, and spawns
+// are not free on this hardware — a heavy shell command was observed inducing
+// mic capture stalls on 2026-09-03, and the mic pipeline has a hard 160ms
+// deadline. Two short-lived reads per 30s sits well below what caused that,
+// and the reverts themselves only arrive every 60-90s.
+const JackReconcileInterval = 30 * time.Second
+
+// ReconcileJackRouting reads the routing controls back and rewrites only the
+// ones that have moved. Returns the number of controls it had to correct, so a
+// caller can tell "the HAL is fighting us" from "nothing is happening" — which
+// are identical from the outside and want opposite investigations.
+//
+// Does nothing until a jack position has actually been observed: before
+// jack.Watch has run there is no desired state, and guessing one would fight
+// whatever Init established.
+func (p *PcmSpeaker) ReconcileJackRouting() int {
+	p.jackMu.Lock()
+	inserted, known := p.jackInserted, p.jackKnown
+	p.jackMu.Unlock()
+	if !known {
+		return 0
+	}
+
+	current := map[string]string{}
+	for _, ctl := range []string{ctlSpeakerAmp, ctlHPDriverGain} {
+		out, err := exec.Command("tinymix", "-D", "0", ctl).CombinedOutput()
+		if err != nil {
+			continue // a failed read is not evidence of drift
+		}
+		if v, ok := tinymixValue(string(out)); ok {
+			current[ctl] = v
+		}
+	}
+
+	drift := jackRoutingDrift(inserted, current)
+	if len(drift) == 0 {
+		return 0
+	}
+	p.applyJackWrites(drift)
+	return len(drift)
+}
+
+// WatchJackRouting re-applies the routing for as long as ctx lives.
+//
+// Runs regardless of plug position: the HAL's rewrite is not specific to the
+// jack, and a gain left at the floor is just as wrong for the internal driver.
+func (p *PcmSpeaker) WatchJackRouting(ctx context.Context) {
+	t := time.NewTicker(JackReconcileInterval)
+	defer t.Stop()
+	var corrected int
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if n := p.ReconcileJackRouting(); n > 0 {
+				corrected += n
+				// Logged per event rather than counted silently: the RATE is
+				// the diagnostic, and it is the only place the HAL's
+				// interference is visible at all.
+				log.Printf("[speaker] jack routing drifted — %d control(s) rewritten (total %d)", n, corrected)
+			}
+		}
+	}
 }
 
 // silenceLoop is the ALSA write path: every period, take what each plane has

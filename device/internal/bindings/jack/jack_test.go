@@ -1,9 +1,11 @@
 package jack
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // State reads a fixed path, so the tests point it at a temp file by swapping
@@ -71,5 +73,65 @@ func TestUnparseableStateIsNotOk(t *testing.T) {
 	withStateFile(t, "banana\n")
 	if _, ok := State(); ok {
 		t.Fatal("unparseable content must report not-ok, not a state")
+	}
+}
+
+// Watch must report the state it STARTS in, not only later changes.
+//
+// A device booted with a cable in gets no accdet transition and no watcher
+// callback, and PcmSpeaker.Init has already asserted the internal amp — so
+// without this dispatch it plays to the room with a speaker plugged in, and
+// the jack sits at minimum gain. Measured on hardware 2026-09-03; this is the
+// regression test for it.
+func TestWatchReportsTheStateItStartsIn(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{"booted with a plug in", "1", true},
+		{"booted with the jack empty", "0", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withStateFile(t, tc.content)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			got := make(chan bool, 1)
+			go Watch(ctx, func(inserted bool) {
+				select {
+				case got <- inserted:
+				default:
+				}
+			})
+
+			select {
+			case v := <-got:
+				if v != tc.want {
+					t.Errorf("initial dispatch: got inserted=%v, want %v", v, tc.want)
+				}
+			case <-time.After(2 * time.Second):
+				t.Error("Watch never reported its initial state")
+			}
+			cancel()
+		})
+	}
+}
+
+// A device with no detect switch must stay silent rather than assert a
+// position it cannot know. Reporting "not inserted" here would drive the
+// routing on hardware we know nothing about.
+func TestWatchDispatchesNothingWithoutADetectSwitch(t *testing.T) {
+	withStateFile(t, "0")
+	statePath = filepath.Join(t.TempDir(), "absent")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	called := make(chan bool, 1)
+	go Watch(ctx, func(inserted bool) { called <- inserted })
+
+	select {
+	case <-called:
+		t.Error("dispatched a jack position on a device with no detect switch")
+	case <-time.After(300 * time.Millisecond):
 	}
 }

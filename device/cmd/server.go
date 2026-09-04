@@ -244,17 +244,20 @@ func main() {
 		controlClient.SendAmbientLight(lux)
 	})
 
-	// Headphone jack — accdet mutes the internal speaker amp on insert and
-	// never restores it on removal, so without this the speaker stays dead
-	// until the next reboot (issue #80, reproduced and fixed on hardware
-	// 2026-08-09). Insert needs nothing from us: accdet already handles the
-	// mute, and the output routing itself is done by the jack's own switch
-	// contacts, not by any mixer control.
+	// Headphone jack. BOTH directions need work from us, and so does the
+	// state the device booted into — accdet acts only on a transition, and
+	// Init leaves the internal amp on regardless of what is plugged in.
+	// SetJackRouting owns the whole mapping (issue #80 for the removal half,
+	// measured against a stock Dot 2026-09-03 for the rest).
 	go jack.Watch(ctx, func(inserted bool) {
-		if !inserted {
-			pcmSpeaker.EnableSpeakerAmp()
-		}
+		pcmSpeaker.SetJackRouting(inserted)
 	})
+	// Android's audio HAL rewrites the codec on every mediaserver restart —
+	// roughly once a minute with a plug inserted — so applying the routing on
+	// the jack edge alone holds for about a minute and then the jack goes
+	// quiet again. Measured 2026-09-03. Nothing can stop mediaserver (the
+	// framework crash-loops without it), so the routing is reconciled instead.
+	go pcmSpeaker.WatchJackRouting(ctx)
 
 	controlClient.OnDisconnected(func() {
 		// Stop any device-local animation: the controller that owned it is
