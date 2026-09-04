@@ -133,3 +133,81 @@ def test_base_os_rides_registration_not_stats():
     assert em_platform.REGISTER_KEY not in stats_src
     assert not hasattr(em_platform, "STATS_KEY"), \
         "STATS_KEY implies a stats-borne value; the field rides registration"
+
+
+# ─── The consumers of that answer ────────────────────────────────────────────
+
+def _api_src():
+    return (ROOT / "controller" / "em_api.py").read_text()
+
+
+def test_debloat_endpoint_refuses_server_side():
+    """
+    The Re-apply debloat endpoint refuses a non-Android device itself.
+
+    Greying the control out in the dashboard protects nothing — it is a plain
+    POST with a session token, so anyone with the network tab can call it, and
+    the cost is not a no-op: the write lands nowhere, TRANSFER_OK never comes,
+    and the transfer holds that device's shell lock for its whole timeout.
+    """
+    src = _api_src()
+    body = src[src.index("async def _post_debloat"):]
+    body = body[:body.index("\ndef ")]
+    assert "android_userspace" in body, \
+        "_post_debloat does not check the base OS"
+
+
+def test_dashboard_uses_the_servers_answer_not_its_own():
+    """
+    The dashboard gates on `androidUserspace`, the derived value the API
+    sends, rather than re-deriving the rule from baseOs.
+
+    Two copies of one rule is one that can disagree with the endpoint that
+    actually refuses — the same failure CONFIG_SECTIONS is mirrored to avoid.
+    """
+    jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
+    assert "androidUserspace" in jsx
+    assert "'Re-apply debloat'" in jsx
+    assert "androidUserspace" in src_near(jsx, "'Re-apply debloat'"), \
+        "the debloat control is not gated on androidUserspace"
+
+
+def src_near(text: str, needle: str, radius: int = 900) -> str:
+    i = text.index(needle)
+    return text[max(0, i - radius): i + radius]
+
+
+def test_transfer_checks_the_destination_directory():
+    """
+    A transfer probes that the destination directory exists before sending.
+
+    Without it, a write into a directory that is not there fails silently,
+    the trailing `echo TRANSFER_OK` never runs, and the transfer waits out
+    its full timeout holding the device's shell lock. Measured at 120s per
+    attempt on EFF, 2026-09-04, three times in one evening.
+    """
+    src = _api_src()
+    assert "DESTDIR:missing" in src and "DESTDIR:ok" in src
+
+
+def test_shell_lock_release_is_ownership_checked():
+    """
+    Only the task holding the shell lock may release it.
+
+    `Lock.locked()` says whether ANYONE holds the lock, so using it to guard
+    a release lets a caller that merely timed out waiting release the lock of
+    the transfer still using it — two shell sessions on one device, which is
+    what the lock exists to prevent.
+    """
+    src = _api_src()
+    assert "_shell_owner" in src, "no ownership tracking for the shell lock"
+    helper = src[src.index("def _release_shell_lock"):]
+    helper = helper[:helper.index("\nasync def ")]
+    assert "current_task()" in helper, \
+        "_release_shell_lock does not verify the caller owns the lock"
+
+    # And the bare release in the acquire path is gone: it fired on a lock
+    # another task may already have released, raising "Lock is not acquired"
+    # and surfacing as an empty result three steps away.
+    assert "_shell_lock[device_id].release()" not in src, \
+        "an unguarded shell-lock release is back"
