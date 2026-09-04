@@ -145,6 +145,22 @@ static void led_step(void)
     led_frame(bootstep, 0x00, 0x30, 0xFF);
 }
 
+/* Fade the ring out once the boot has finished.
+ *
+ * A ring left lit is just another light that means nothing — the same problem
+ * as the kernel animation this replaced. Fading says "done" and hands the LEDs
+ * back, so anything the ring shows afterwards is the firmware's to explain.
+ * ~640ms, slow enough to read as deliberate rather than as a glitch.
+ */
+static void led_fade_out(int r, int g, int b)
+{
+    for (int v = 255; v > 0; v -= 8) {
+        led_frame(LED_N, r * v / 255, g * v / 255, b * v / 255);
+        usleep(20000);
+    }
+    led_frame(0, 0, 0, 0);
+}
+
 /* A stage that failed leaves the ring red at the point it reached, so a dead
  * device says WHERE it died without a cable. */
 static void led_fail(void)
@@ -466,9 +482,10 @@ static void net_main(void)
                  */
                 if (!netup) {
                     netup = 1;
-                    /* Fully up: the whole ring goes green and stays there
-                     * until the firmware claims it. */
+                    /* Fully up: the ring goes green, then fades out. */
                     led_frame(LED_N, 0x00, 0xFF, 0x00);
+                    usleep(400000);
+                    led_fade_out(0x00, 0xFF, 0x00);
                     write_resolv_conf();
                     ntp = spawn(ntpd);
                 }
