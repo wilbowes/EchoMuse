@@ -121,6 +121,57 @@ the LED ring is the first of them, since init takes it off the kernel's own
   the audio IRQ handler. **Read it first after any unexplained reboot** — the
   next reboot destroys it.
 
+
+### Talking to the console: turn ECHO OFF
+
+**A serial port opened with default termios has `ECHO` on, so everything the
+device sends is echoed straight back into its own input.** The shell then
+executes its own prompt —
+
+```
+/system/bin/sh: root@androi: not found
+/system/bin/sh: 127: not found
+```
+
+— and every command returns 127. The console looks alive, echoes what you
+type, and runs nothing.
+
+This cost most of an evening on 2026-09-04 and produced a confident wrong
+diagnosis (two shells fighting over one tty; there was one, and the second
+`/system/bin/sh` was `start_server.sh`) plus a commit that had to be reverted.
+`tty.setraw(fd)` or `stty raw -echo` fixes it instantly. Anything driving this
+console — a script here, or the provisioning wizard over WebSerial, which has
+no `stty` to remind you — must do it explicitly.
+
+### What the kernel cmdline actually contains
+
+`/proc/cmdline` is not the boot image's cmdline: **LK appends its own
+parameters after ours, including a DUPLICATE `androidboot.selinux=enforce`
+that supersedes the `permissive` token the provisioning wizard patches in.**
+LK also supplies `androidboot.hardware`, `androidboot.slot_suffix` and
+`androidboot.serialno` — the last being where the firmware's serial fallback
+gets it on a system with no property service.
+
+Nothing under emOS reads any of them: there is no `/sys/fs/selinux` and no
+SELinux line in `dmesg`. So the wizard's permissive patch is inert here, which
+is why an emOS install does not need the boot patch at all.
+
+### WiFi comes from /data, and wpa_supplicant makes its own entropy
+
+`wpa_supplicant.conf` and `entropy.bin` both live in `/data/misc/wifi`, so
+they survive a boot-partition write — which is what lets a device be
+configured over adb on FireOS and then crossed to emOS. **`entropy.bin` is
+created if absent**: deleted on EFF, the device rebooted and was back on WiFi
+in 25 seconds with the file recreated. A device that never completed Alexa
+setup is not stranded.
+
+`wpa_cli -p /data/misc/wifi/sockets -i wlan0` works for `scan`,
+`scan_results` (bssid, frequency, signal, flags), `get_capability key_mgmt`
+and `save_config`. Note `get_capability key_mgmt` returns
+`NONE IEEE8021X WPA-EAP WPA-PSK` — **no SAE, so this radio cannot join WPA3**,
+and `save_config` needs `update_config=1` in the conf or it silently keeps
+nothing.
+
 ## Licensing
 
 Three layers, three different answers, and the design follows from them:
@@ -262,10 +313,13 @@ is not proof it rebooted — compare uptime or a build fingerprint.
   direction is for the controller to tell the device the time**, over the
   authenticated outbound link it already trusts: no DNS, no listener, no
   external dependency.
-- **Line out plays the left channel only.** The codec is symmetric and the
-  firmware duplicates mono into both channels, so the jack's right pin is
-  probably not driven by the headphone right driver on this board. The unused
-  `LOL`/`LOR` line-out drivers are the untested lead.
+- ~~Line out plays the left channel only.~~ **Fixed 2026-09-04.** A plug-out
+  and plug-in cycle now moves audio between the external speaker and the
+  internal driver in both directions with no interruption, verified against
+  the controller rather than by ear: no `no mic frames` warning, no defensive
+  `mic_start`, no escalation and no connection close — which together were the
+  whole of #117's signature, and which FireOS produced within seconds of every
+  unplug.
 - The speaker amp idles on and hisses. Gating it on idle is **not** the fix —
   toggling it clicks audibly, which is why the injected silence stream exists.
 - Hardware is resolved by fixed major/minor numbers, against the project's own
