@@ -39,7 +39,27 @@ fi
 # The ramdisk is init plus the empty mountpoints it needs. Everything else the
 # system uses is mounted from the device's own /system at runtime, which is why
 # no Amazon code is redistributed.
-mkdir -p "$WORK/root"/{dev,proc,sys,system,data}
+mkdir -p "$WORK/root"/{dev,proc,sys,system,data,etc}
+
+# Build identity, stamped in at build time rather than written at boot: it
+# describes the IMAGE, so it must not be something a running system can drift
+# from. /etc/os-release is the standard location and format, so ordinary
+# tooling can read it without knowing anything about emOS. init's /etc symlink
+# farm leaves it alone — symlink() into an existing name simply fails.
+# emOS has its own tag namespace. Without --match, `git describe` picks up the
+# nearest tag of ANY kind and stamps the image with a controller release
+# number, which is worse than "unknown" because it looks plausible.
+EMOS_VERSION=${EMOS_VERSION:-$(git -C "$HERE" describe --tags --match 'emos-v*' --dirty 2>/dev/null \
+    || echo "0.1-$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo unknown)")}
+cat > "$WORK/root/etc/os-release" <<OSREL
+NAME="emOS"
+ID=emos
+PRETTY_NAME="emOS $EMOS_VERSION"
+VERSION="$EMOS_VERSION"
+VERSION_ID="$EMOS_VERSION"
+BUILD_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+HOME_URL="https://github.com/wilbowes/EchoMuse"
+OSREL
 install -m 0755 "$WORK/init" "$WORK/root/init"
 ( cd "$WORK/root" && find . | cpio -o -H newc 2>/dev/null | gzip -9 ) > "$WORK/ramdisk.gz"
 
