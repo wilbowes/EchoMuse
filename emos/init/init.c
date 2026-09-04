@@ -32,6 +32,7 @@
 #include <sys/reboot.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <stdint.h>
 #include <sys/sysmacros.h>
 #include <sys/wait.h>
 #include <termios.h>
@@ -166,6 +167,157 @@ static void led_fade_out(int r, int g, int b)
 static void led_fail(void)
 {
     led_frame(bootstep + 1, 0xFF, 0x00, 0x00);
+}
+
+/* ── Boot rollback ───────────────────────────────────────────────────────────
+ *
+ * A boot image that starts init but then fails to become useful is the failure
+ * this recovers, and it is the one we actually hit: an image that reached the
+ * USB gadget and then crash-looped, needing TWRP and physical handling.
+ *
+ * The mechanism is deliberately ours and not the bootloader's. biscuit has a
+ * real second slot (boot_b_x, mmcblk0p11) but LK chooses between them and we
+ * have not reverse-engineered how — the standing guess is three tries per slot
+ * and then a soft brick, which is plausible and UNTESTED. Building on that
+ * guess would risk a device that boots something we did not choose, so instead
+ * init keeps its own known-good copy on /data and restores it.
+ *
+ * Honest about what it does NOT cover: an image that fails before init runs
+ * executes none of this and still needs recovery over USB. That case is what
+ * the byte-exact packer and the cache-dropped flash verification exist to make
+ * rare.
+ *
+ * A boot is CONFIRMED when the network comes up, not when init finishes.
+ * Reachability is the property that matters — a device we can reach is one we
+ * can fix without touching it.
+ */
+/* Defined further down; declared here so the rollback can use them. */
+static void note(const char *fmt, ...);
+static void netlog(const char *fmt, ...);
+static int  readint(const char *path);
+
+#define BOOTDEV   "/dev/block/mmcblk0p10"
+#define GOODIMG   "/data/emos/boot-good.img"
+#define BOOTSTATE "/data/emos/boot.state"
+#define MAX_TRIES 3
+
+static unsigned pad2048(unsigned n) { return (n + 2047u) / 2048u * 2048u; }
+
+/* Length of the Android boot image on the partition, from its own header, so
+ * only the image is copied rather than the whole 16MB partition. */
+static long boot_image_len(int fd)
+{
+    unsigned char h[64];
+    if (pread(fd, h, sizeof h, 0) != (ssize_t)sizeof h)
+        return -1;
+    if (memcmp(h, "ANDROID!", 8) != 0)
+        return -1;
+    unsigned ksz, rsz, ssz, ps;
+    memcpy(&ksz, h + 8,  4);
+    memcpy(&rsz, h + 16, 4);
+    memcpy(&ssz, h + 24, 4);
+    memcpy(&ps,  h + 36, 4);
+    if (ps != 2048)
+        return -1;
+    return (long)ps + pad2048(ksz) + pad2048(rsz) + pad2048(ssz);
+}
+
+static int copy_range(int in, int out, long len)
+{
+    char b[65536];
+    long done = 0;
+    while (done < len) {
+        long want = len - done < (long)sizeof b ? len - done : (long)sizeof b;
+        ssize_t n = read(in, b, want);
+        if (n <= 0)
+            return -1;
+        if (write(out, b, n) != n)
+            return -1;
+        done += n;
+    }
+    return 0;
+}
+
+static int read_state(void)
+{
+    return readint(BOOTSTATE);
+}
+
+static void write_state(int n)
+{
+    int fd = open(BOOTSTATE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0)
+        return;
+    char b[16];
+    int k = snprintf(b, sizeof b, "%d\n", n);
+    write(fd, b, k);
+    fsync(fd);
+    close(fd);
+}
+
+/* Write the known-good image back over the boot partition and reboot into it. */
+static void restore_good(void)
+{
+    int in = open(GOODIMG, O_RDONLY);
+    if (in < 0)
+        return;
+    struct stat st;
+    if (fstat(in, &st) != 0 || st.st_size < 2048) { close(in); return; }
+    int out = open(BOOTDEV, O_WRONLY);
+    if (out < 0) { close(in); return; }
+    int rc = copy_range(in, out, st.st_size);
+    fsync(out);
+    close(out);
+    close(in);
+    note("rollback restored rc=%d bytes=%ld\n", rc, (long)st.st_size);
+    led_frame(LED_N, 0xFF, 0x60, 0x00);      /* amber: rolling back */
+    write_state(0);
+    sync();
+    sleep(2);
+    reboot(RB_AUTOBOOT);
+}
+
+/* Keep the running image as the fallback, once it has proved itself. Only on
+ * change, so an unchanged image costs no writes at all. */
+static void promote_good(void)
+{
+    int in = open(BOOTDEV, O_RDONLY);
+    if (in < 0)
+        return;
+    long len = boot_image_len(in);
+    if (len <= 0) { close(in); return; }
+
+    /* Compare by the boot header's SHA1 image id, not by size: every emOS
+     * image built so far is byte-for-byte the same LENGTH, so a size check
+     * would never promote a new one and the fallback would stay pinned to the
+     * first image ever confirmed. The id is a digest over kernel and ramdisk,
+     * so it changes exactly when the image does. It sits after the magic, the
+     * ten header words, the 16-byte product name and the 512-byte cmdline. */
+    unsigned char id_dev[32], id_good[32];
+    if (pread(in, id_dev, sizeof id_dev, 576) == (ssize_t)sizeof id_dev) {
+        int g = open(GOODIMG, O_RDONLY);
+        if (g >= 0) {
+            ssize_t n = pread(g, id_good, sizeof id_good, 576);
+            close(g);
+            if (n == (ssize_t)sizeof id_good &&
+                memcmp(id_dev, id_good, sizeof id_dev) == 0) {
+                close(in);
+                return;                          /* already the known-good one */
+            }
+        }
+    }
+    if (lseek(in, 0, SEEK_SET) != 0) { close(in); return; }
+    int out = open(GOODIMG ".new", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (out < 0) { close(in); return; }
+    int rc = copy_range(in, out, len);
+    fsync(out);
+    close(out);
+    close(in);
+    if (rc == 0)
+        rename(GOODIMG ".new", GOODIMG);
+    else
+        unlink(GOODIMG ".new");
+    netlog("rollback promoted rc=%d bytes=%ld\n", rc, len);
 }
 
 static char trail[3072];
@@ -486,6 +638,10 @@ static void net_main(void)
                     led_frame(LED_N, 0x00, 0xFF, 0x00);
                     usleep(400000);
                     led_fade_out(0x00, 0xFF, 0x00);
+                    /* The boot is confirmed: the device is reachable, which
+                     * is the property that makes it fixable without hands. */
+                    write_state(0);
+                    promote_good();
                     write_resolv_conf();
                     ntp = spawn(ntpd);
                 }
@@ -660,6 +816,19 @@ int main(void)
     mount("tmpfs", "/run", "tmpfs", 0, "size=4m");
 
     mkdir("/data/emos", 0755);
+
+    /* Rollback bookkeeping. This runs as early as /data allows, because a boot
+     * that dies later must still have been counted — the counter is the only
+     * evidence that the previous boots failed. */
+    int tries = read_state();
+    if (tries < 0)
+        tries = 0;
+    note("stage=boot try=%d\n", tries + 1);
+    if (tries >= MAX_TRIES && access(GOODIMG, R_OK) == 0) {
+        note("rollback: %d unconfirmed boots, restoring known-good\n", tries);
+        restore_good();                 /* reboots; returns only on failure */
+    }
+    write_state(tries + 1);
     int lk = open("/proc/last_kmsg", O_RDONLY);
     if (lk >= 0) {
         /* Rotate, so a device that reboot-loops cannot overwrite the crash
