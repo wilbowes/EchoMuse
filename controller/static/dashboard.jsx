@@ -1424,6 +1424,13 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
 
       setPushLog(l => [...l, 'Deploying…']);
       const res = await API.post(`/api/devices/${device.device_id}/update`, { upload_token: up.upload_token, force });
+      // The picker has done its job — the bytes are on the controller and the
+      // deploy is running from the upload token, not from this File handle.
+      // Leaving the filename sitting there invites a second Deploy click on a
+      // build that is already installing, and the panel then reads as though
+      // something is still pending when nothing is.
+      setLocalFile(null);
+      if (fileInputRef.current) fileInputRef.current.value = '';
       setPushLog(l => [...l, `Deploying ${res.version} — waiting for reconnect…`]);
       _pollReconnect(res.version, device.firmware_ver);
     } catch(e) {

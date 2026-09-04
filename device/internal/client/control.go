@@ -20,6 +20,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/bindings/als"
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/discovery"
+	"github.com/wilbowes/EchoMuse/internal/platform"
 	"github.com/wilbowes/EchoMuse/pkg/buttons"
 	"github.com/wilbowes/EchoMuse/pkg/led"
 )
@@ -287,6 +288,21 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 		// the support bundle does not collect. Costs one small object per
 		// registration.
 		"ambient_light_status": als.Report(),
+		// Which userspace this firmware booted on — see internal/platform.
+		//
+		// On REGISTRATION and not the stats tick, which is where it was first
+		// put and where it was useless: its consumer is the payload reconcile,
+		// which runs the moment a device connects, ~30s before the first stats
+		// report. So the field resolved to "unknown" exactly when it was
+		// asked, the controller pushed Android payloads at an emOS device, and
+		// each one sat for the full 120s transfer timeout waiting for a
+		// TRANSFER_OK that a write into Magisk's absent overlay can never
+		// send. Measured on EFF, 2026-09-04: 240s across two attempts.
+		//
+		// It belongs here anyway. This is a static property of the boot, known
+		// before the network is up, exactly like ambient_light_status above —
+		// nothing about it needs re-reporting every 30 seconds.
+		"base_os": platform.Base(),
 	}
 	// Resolved fresh per registration: a cached-at-startup value goes stale
 	// after a WiFi change, and if the process started while the network was

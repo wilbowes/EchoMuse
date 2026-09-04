@@ -20,7 +20,7 @@ import em_platform  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 PLATFORM_GO = ROOT / "device" / "internal" / "platform" / "platform.go"
-STATS_GO = ROOT / "device" / "internal" / "client" / "stats.go"
+CONTROL_GO = ROOT / "device" / "internal" / "client" / "control.go"
 
 
 def _strip_comments(src: str) -> str:
@@ -104,41 +104,32 @@ def test_values_match_the_firmware():
 
 def test_wire_key_matches_the_firmware():
     """
-    The stats field is named the same at both ends.
+    The register field is named the same at both ends.
 
     A mismatch here is invisible: the controller reads a key nothing sends,
     every device reports None, and None correctly degrades to Android — so
     the fleet keeps working and the feature simply never activates.
     """
-    src = _strip_comments(STATS_GO.read_text())
-    m = re.search(r'BaseOs\s+string\s+`json:"([^"]+)"`', src)
-    assert m, "BaseOs field not found in stats.go"
-    assert m.group(1) == em_platform.STATS_KEY
+    src = _strip_comments(CONTROL_GO.read_text())
+    assert re.search(r'"%s":\s*platform\.Base\(\)' % em_platform.REGISTER_KEY, src), \
+        "the register message does not carry the base OS"
 
 
-def test_base_os_is_not_omitempty():
+def test_base_os_rides_registration_not_stats():
     """
-    `baseOs` must be sent even when empty.
+    It must arrive with REGISTRATION, not on the stats tick.
 
-    With omitempty, a device that could not determine its base would send
-    nothing, which is indistinguishable from firmware too old to have the
-    field. Those are different facts: one device was asked and could not
-    answer, the other was never able to be asked. Same reasoning as aecRef,
-    which carries the identical comment.
+    This is the whole bug that PR #427 shipped and #428 fixed. The only
+    consumer is the payload reconcile, which runs the instant a device
+    connects — roughly 30 seconds before the first stats report. Riding the
+    tick meant the field read as unknown exactly when it was asked, so an
+    emOS device was sent the Magisk service.d script and each attempt sat out
+    the full 120s transfer timeout. Measured on EFF, 2026-09-04: 240s.
     """
-    src = _strip_comments(STATS_GO.read_text())
-    m = re.search(r'BaseOs\s+string\s+`json:"([^"]+)"`', src)
-    assert m and "omitempty" not in m.group(1)
-
-
-def test_sendstats_actually_puts_it_on_the_wire():
-    """
-    The struct field is populated into the outgoing message.
-
-    DeviceStats is assembled in one place and marshalled by hand in another,
-    so a field can exist, be set, and never be sent — which would look exactly
-    like firmware too old to report it.
-    """
-    src = _strip_comments(STATS_GO.read_text())
-    assert re.search(r'"%s":\s*\w+\.BaseOs' % em_platform.STATS_KEY, src), \
-        "SendStats does not send BaseOs"
+    stats_src = _strip_comments(
+        (ROOT / "device" / "internal" / "client" / "stats.go").read_text())
+    assert "BaseOs" not in stats_src, \
+        "the base OS is back on the stats message, where it is 30s too late"
+    assert em_platform.REGISTER_KEY not in stats_src
+    assert not hasattr(em_platform, "STATS_KEY"), \
+        "STATS_KEY implies a stats-borne value; the field rides registration"

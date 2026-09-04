@@ -64,17 +64,10 @@ type DeviceStats struct {
 	// old to report it", and "off" collapsing into that would tell the
 	// dashboard a disarmed AEC is an unknown one.
 	AecRef string `json:"aecRef"`
-	// BaseOs is which userspace the firmware booted on: "emos", "fireos" or
-	// "unknown" (see internal/platform). The controller needs it because it
-	// distributes payloads that only mean anything under Android — the debloat
-	// script and the pm-hide list — and a device running emOS has no package
-	// manager to hide anything from.
-	//
-	// Not omitempty, for AecRef's reason and with more at stake: absent means
-	// "firmware too old to say", which the controller must treat as unknown
-	// rather than as FireOS. Reading absence as Android is how a device gets
-	// sent payloads it cannot use.
-	BaseOs string `json:"baseOs"`
+	// The base OS deliberately does NOT ride this message — it is a static
+	// property of the boot and goes out once, on registration (control.go).
+	// It was here first and that was the bug: the payload reconcile asks for
+	// it the instant a device connects, ~30s before the first stats tick.
 }
 
 // SendStats sends a stats message to the controller.
@@ -106,6 +99,5 @@ func (c *ControlClient) SendStats(s DeviceStats) {
 		"coresTotal":       s.CoresTotal,
 		"thermalCoreLimit": s.ThermalCoreLimit,
 		"aecRef":           s.AecRef,
-		"baseOs":           s.BaseOs,
 	})
 }
