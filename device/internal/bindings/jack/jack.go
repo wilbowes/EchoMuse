@@ -78,13 +78,25 @@ func Present() bool {
 	return ok
 }
 
-// Watch polls the jack and calls onChange when the plug state changes.
+// Watch polls the jack and calls onChange for the state it finds, then again
+// on every change.
 //
-// The FIRST reading seeds the baseline and never fires. Init has already put
-// the speaker amp in the right state for the current jack position by the time
-// this starts, so reporting the initial state would only re-do work — and on a
-// device booted WITH a plug in, would wrongly assert the speaker amp on while
-// headphones are connected.
+// The first reading DOES fire, and dropping it is what broke boot-with-a-plug.
+// It used to seed the baseline silently, on the reasoning that "Init has
+// already put the speaker amp in the right state for the current jack
+// position" — which was simply not true: PcmSpeaker.Init sets the amp ON
+// unconditionally, because its
+// click-free startup order needs the amp brought up onto a DAC already
+// clocking silence, and it has no idea whether a plug is present.
+//
+// So a device booted with a cable in got the internal amp asserted by Init and
+// nothing afterwards to correct it — accdet only acts on a transition, and a
+// boot has no transition. Both outputs were wrong at once: the Dot played to
+// the room, and the jack sat at minimum gain. Measured on hardware 2026-09-03
+// (h2w=1, Ext_Speaker_Amp_Switch=On). Unplugging and replugging "fixed" it by
+// manufacturing the edge the boot never had.
+//
+// onChange must therefore be idempotent, which SetJackRouting is.
 //
 // onChange runs on this goroutine. It shells out to tinymix, which takes
 // milliseconds, so there is no handoff here; if it ever grows into anything
@@ -99,6 +111,7 @@ func Watch(ctx context.Context, onChange func(inserted bool)) {
 	log.Printf("[jack] detect switch at %s (state=%d)", statePath, first)
 
 	was := first != 0
+	onChange(was)
 	t := time.NewTicker(PollInterval)
 	defer t.Stop()
 	for {
