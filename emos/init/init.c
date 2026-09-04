@@ -29,11 +29,13 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mount.h>
+#include <sys/reboot.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/wait.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 
 #define CACHE     "/dev/block/mmcblk0p15"
@@ -90,6 +92,65 @@ static const struct node nodes[] = {
     { "/dev/wmtWifi",   153, 0 },
     { "/dev/stpbt",     192, 0 },
 };
+
+/* ── The boot progress ring ──────────────────────────────────────────────────
+ *
+ * The twelve-LED ring is an is31fl3236 at i2c-0 0x3f, driven by writing 12
+ * RGB triplets as ASCII hex to its `frame` attribute — the same interface the
+ * firmware's LED binding uses, so nothing here is a new mechanism.
+ *
+ * Until userspace clears `boot_animation` the kernel driver runs its own
+ * orbiting animation on these LEDs, which tells the user nothing about whether
+ * the boot is progressing, stuck or dead — and fights any frame we write. So
+ * the ring is claimed as the FIRST thing init does, before any step that can
+ * fail, and one LED is lit per stage completed.
+ *
+ * That turns the single most opaque part of this device into a progress bar:
+ * a boot that stops at six LEDs stops in a knowable place, on hardware whose
+ * only other diagnostic channel is a raw partition read from recovery.
+ */
+#define LEDDIR "/sys/devices/soc/11007000.i2c/i2c-0/0-003f"
+#define LED_N  12
+
+static int bootstep;
+
+static void led_frame(int lit, int r, int g, int b)
+{
+    char f[LED_N * 6 + 1];
+    for (int i = 0; i < LED_N; i++)
+        snprintf(f + i * 6, 7, "%02X%02X%02X",
+                 i < lit ? r : 0, i < lit ? g : 0, i < lit ? b : 0);
+    int fd = open(LEDDIR "/frame", O_WRONLY);
+    if (fd < 0)
+        return;
+    write(fd, f, LED_N * 6);
+    close(fd);
+}
+
+/* Take the ring off the kernel's animation and set the drive current. */
+static void led_claim(void)
+{
+    int fd = open(LEDDIR "/boot_animation", O_WRONLY);
+    if (fd >= 0) { write(fd, "0", 1); close(fd); }
+    fd = open(LEDDIR "/led_current", O_WRONLY);
+    if (fd >= 0) { write(fd, "3", 1); close(fd); }
+    led_frame(0, 0, 0, 0);
+}
+
+/* One more stage done. Blue while booting; the net stage finishes in green. */
+static void led_step(void)
+{
+    if (bootstep < LED_N)
+        bootstep++;
+    led_frame(bootstep, 0x00, 0x30, 0xFF);
+}
+
+/* A stage that failed leaves the ring red at the point it reached, so a dead
+ * device says WHERE it died without a cable. */
+static void led_fail(void)
+{
+    led_frame(bootstep + 1, 0xFF, 0x00, 0x00);
+}
 
 static char trail[3072];
 static size_t trail_len;
@@ -207,6 +268,59 @@ static int has_ip(const char *name)
     return r == 0;
 }
 
+/* Run one command to completion and return its exit status. */
+static int run_wait(char *const argv[])
+{
+    int st = 0;
+    pid_t p = spawn(argv);
+    if (p < 0)
+        return -1;
+    waitpid(p, &st, 0);
+    return st;
+}
+
+/* Write /etc/resolv.conf pointing at the default gateway.
+ *
+ * The device has NO working DNS otherwise: FireOS keeps resolvers in Android
+ * properties rather than a file, there is no /system/etc/resolv.conf at all,
+ * and dhcpcd's "could not set property" lines are it failing to publish them
+ * to a property service we do not run. Nothing noticed for a long time because
+ * EchoMuse finds its controller over mDNS and connects by IP.
+ *
+ * The gateway is an ASSUMPTION, not a lease value: parsing dhcpcd's binary
+ * lease would be the correct source, and on the overwhelming majority of home
+ * networks the router that served DHCP is also the resolver. Stated here so
+ * that whoever hits the exception knows exactly which line lied to them.
+ */
+static char gwip[32];
+
+static void write_resolv_conf(void)
+{
+    FILE *f = fopen("/proc/net/route", "r");
+    if (!f)
+        return;
+    char line[256], iface[32];
+    unsigned dest, gw;
+    while (fgets(line, sizeof line, f)) {
+        if (sscanf(line, "%31s %x %x", iface, &dest, &gw) == 3 && dest == 0 && gw) {
+            snprintf(gwip, sizeof gwip, "%u.%u.%u.%u",
+                     gw & 0xff, (gw >> 8) & 0xff, (gw >> 16) & 0xff, (gw >> 24) & 0xff);
+            break;
+        }
+    }
+    fclose(f);
+    if (!gwip[0])
+        return;
+    int fd = open("/etc/resolv.conf", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0)
+        return;
+    char buf[64];
+    int n = snprintf(buf, sizeof buf, "nameserver %s\n", gwip);
+    write(fd, buf, n);
+    close(fd);
+    netlog("resolv.conf nameserver %s\n", gwip);
+}
+
 static int ifup(const char *name)
 {
     struct ifreq ifr;
@@ -272,6 +386,7 @@ static void net_main(void)
     r = ifup("wlan0");
     netlog("wlan0 present=%d ifup=%d\n",
          access("/sys/class/net/wlan0", F_OK) == 0, r);
+    bootstep = 10; led_step();                   /* 10: wlan0 exists */
 
     /* Supervise, driven by wlan0's carrier rather than by a fixed sequence.
      *
@@ -294,9 +409,25 @@ static void net_main(void)
      */
     char *reassoc[] = { "/system/bin/wpa_cli", "-p/data/misc/wifi/sockets",
                         "-iwlan0", "reassociate", NULL };
+    /* ntpd is pointed at the GATEWAY by IP, never at a hostname.
+     *
+     * bionic resolves DNS through Android's property service, not
+     * /etc/resolv.conf, so a bionic-linked binary has no working resolver on a
+     * device with no property service — busybox ntpd fails "bad address
+     * pool.ntp.org" however correct that file is. (Our Go firmware is fine: Go
+     * carries its own resolver and does read the file.)
+     *
+     * The gateway is the best available guess at a reachable time source and
+     * many home routers serve NTP; where it does not, the clock stays wrong
+     * and says so in this log rather than silently half-working.
+     *
+     * Client only. busybox ntpd SERVES time if given -l, and emOS holds no
+     * inbound sockets at all — every daemon added here has to keep it that way.
+     */
+    char *ntpd[] = { "/system/bin/busybox", "ntpd", "-n", "-p", gwip, NULL };
     pid_t wpa = spawn(supp);
-    pid_t dhc = -1;
-    int nudges = 0, dry = 0;
+    pid_t dhc = -1, ntp = -1;
+    int nudges = 0, dry = 0, netup = 0;
 
     for (;;) {
         pid_t d;
@@ -304,6 +435,7 @@ static void net_main(void)
             if (d == launcher)   launcher = spawn(launch);
             else if (d == wpa)   wpa = spawn(supp);
             else if (d == dhc)   dhc = -1;
+            else if (d == ntp)   ntp = netup ? spawn(ntpd) : -1;
         }
 
         if (readint("/sys/class/net/wlan0/carrier") != 1) {
@@ -311,6 +443,7 @@ static void net_main(void)
                 kill(dhc, SIGTERM);
             if (nudges++ % 3 == 0)
                 spawn(reassoc);
+            bootstep = 10; led_step();           /* 11: associating */
             dry = 0;
         } else {
             nudges = 0;
@@ -319,6 +452,26 @@ static void net_main(void)
                 dry = 0;
             } else if (has_ip("wlan0")) {
                 dry = 0;
+                /* First address of this boot: DNS, then the clock.
+                 *
+                 * ntpd is CLIENT-ONLY and must stay that way — busybox ntpd
+                 * serves time if given -l, and emOS listens on nothing. The
+                 * device holds no inbound sockets at all (verified with
+                 * netstat: zero TCP and zero UDP listeners), and every daemon
+                 * added here has to preserve that.
+                 *
+                 * -q would set the clock once and exit, which loses it again
+                 * on the next drift; -n keeps it in the foreground so the
+                 * supervisor above owns its lifetime like everything else.
+                 */
+                if (!netup) {
+                    netup = 1;
+                    /* Fully up: the whole ring goes green and stays there
+                     * until the firmware claims it. */
+                    led_frame(LED_N, 0x00, 0xFF, 0x00);
+                    write_resolv_conf();
+                    ntp = spawn(ntpd);
+                }
             } else if (++dry >= 4) {
                 kill(dhc, SIGTERM);
                 dry = 0;
@@ -336,6 +489,10 @@ static void rdstate(const char *tag)
     for (char *c = st; *c; c++) if (*c == '\n') *c = 0;
     note("%s state=%s\n", tag, st);
 }
+
+/* Defined below, with the supervision machinery. */
+static void svc_add(const char *name, char *const *argv);
+static void supervise(void);
 
 int main(void)
 {
@@ -365,6 +522,13 @@ int main(void)
      * 247:0 is ttyGS0, read off a running FireOS device rather than guessed.
      */
     mknod(CACHE, S_IFBLK | 0600, makedev(179, 15));
+    /* boot_a_x, so emOS can reflash itself over the network: the device has
+     * curl, busybox and dd, which turns a flash cycle from a TWRP trip into
+     * about thirty seconds. It is also the recovery target, so verify any
+     * write to it by dropping caches and reading BACK — a dd here can complete
+     * at page-cache speed, verify against that same cache, and be lost on the
+     * next reboot. Real writes to this eMMC run at about 9MB/s. */
+    mknod("/dev/block/mmcblk0p10", S_IFBLK | 0600, makedev(179, 10));
     mknod("/dev/null",    S_IFCHR | 0666, makedev(1, 3));
     mknod("/dev/zero",    S_IFCHR | 0666, makedev(1, 5));
     mknod("/dev/tty",     S_IFCHR | 0666, makedev(5, 0));
@@ -392,6 +556,8 @@ int main(void)
         if (n > 0) write_at(512, buf, n);
     }
     note("stage=mounts done devtmpfs_rc=%d tty=%d\n", dtr, access(TTY, F_OK));
+    led_claim();
+    led_step();                                  /* 1: mounts and device nodes */
 
     /* /system read-only: this is a diagnostic boot and nothing here should be
      * able to damage the Android install we still rely on for recovery. */
@@ -400,20 +566,95 @@ int main(void)
     int r = mount("/dev/block/mmcblk0p13", "/system", "ext4", MS_RDONLY, NULL);
     note("stage=mount_system rc=%d errno=%d sh=%d\n", r, r ? errno : 0,
          access("/system/bin/sh", X_OK));
+    if (r) led_fail(); else led_step();          /* 2: /system */
 
     /* /data read-WRITE: the firmware keeps config, wake-word models and logs
      * there. /system stays read-only — nothing here should be able to damage
      * the Android install we still rely on for recovery. */
     mkdir("/data", 0755);
     mknod("/dev/block/mmcblk0p16", S_IFBLK | 0600, makedev(179, 16));
+
+    /* Check /data before mounting it read-write.
+     *
+     * This is the one partition emOS writes, and the one whose loss a remote
+     * user cannot recover from. e2fsck is on /system (which is already mounted
+     * by this point, read-only, so it is safe to run from). -p is preen mode:
+     * fix only what is unambiguously safe and never ask a question, because
+     * there is nobody at the console to answer one. Anything needing a real
+     * decision is left alone and shows up in the trail.
+     */
+    char *fsck[] = { "/system/bin/e2fsck", "-p", "/dev/block/mmcblk0p16", NULL };
+    int fs = run_wait(fsck);
+    note("stage=fsck_data status=%d\n", fs);
+    led_step();                                  /* 3: fsck /data */
+
     r = mount("/dev/block/mmcblk0p16", "/data", "ext4", 0, NULL);
     note("stage=mount_data rc=%d errno=%d\n", r, r ? errno : 0);
+    if (r) led_fail(); else led_step();          /* 4: /data */
 
     /* Android's own root has these two symlinks and a surprising amount of
      * /system depends on them — the kernel firmware loader most of all, which
      * is what kept wlan0 from ever appearing. */
-    symlink("/system/etc", "/etc");
+    /* /etc is a real directory of symlinks, NOT a symlink to /system/etc.
+     *
+     * Android's root symlinks it, and copying that costs the system a writable
+     * /etc, because /system is mounted read-only and must stay that way. The
+     * casualty is resolv.conf: FireOS keeps resolvers in properties and ships
+     * no /system/etc/resolv.conf at all, so a symlinked /etc means the device
+     * can never have working DNS. A symlink farm gives every /system/etc entry
+     * at its expected path AND room to add our own files beside them.
+     *
+     * /vendor stays a plain symlink — nothing needs to write there.
+     */
+    mkdir("/etc", 0755);
     symlink("/system/vendor", "/vendor");
+    DIR *ed = opendir("/system/etc");
+    if (ed) {
+        struct dirent *de;
+        while ((de = readdir(ed))) {
+            if (de->d_name[0] == '.')
+                continue;
+            char src[512], dst[512];
+            snprintf(src, sizeof src, "/system/etc/%s", de->d_name);
+            snprintf(dst, sizeof dst, "/etc/%s", de->d_name);
+            symlink(src, dst);
+        }
+        closedir(ed);
+    }
+    note("stage=etc farm=%d\n", access("/etc/dhcpcd", F_OK) == 0);
+    led_step();                                  /* 5: /etc */
+
+    /* Preserve the previous boot's kernel log.
+     *
+     * MediaTek's ram_console publishes it at /proc/last_kmsg across a warm
+     * reset, and it is the ONLY channel this device has for a crash: there is
+     * no pstore on this kernel, and a fault that takes the box down leaves
+     * nothing in any userspace log. It was what root-caused a spontaneous
+     * reboot to a kernel data abort in the audio IRQ handler — but only
+     * because someone happened to read it within two minutes, since the NEXT
+     * reboot overwrites it. Copying it here means every crash survives for
+     * whoever asks about it later, including a user on the other side of the
+     * world who has since rebooted twice.
+     */
+    mkdir("/data/emos", 0755);
+    int lk = open("/proc/last_kmsg", O_RDONLY);
+    if (lk >= 0) {
+        int out = open("/data/emos/last_kmsg.prev", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        long long copied = 0;
+        if (out >= 0) {
+            char b[8192];
+            int n;
+            while ((n = read(lk, b, sizeof b)) > 0) {
+                if (write(out, b, n) != n)
+                    break;
+                copied += n;
+            }
+            close(out);
+        }
+        close(lk);
+        note("stage=last_kmsg bytes=%lld\n", copied);
+    led_step();                                  /* 6: previous kernel log kept */
+    }
 
     /* Put busybox's applets on PATH.
      *
@@ -444,6 +685,7 @@ int main(void)
     int lst = 0;
     waitpid(spawn(link), &lst, 0);
     note("stage=applets status=%d vi=%d\n", lst, access("/sbin/vi", X_OK));
+    led_step();                                  /* 7: busybox applets */
 
     /* Device mode: cmode 2 is charging-only, cmode 1 is device. */
     r = wr("/sys/devices/platform/mt_usb/cmode", "1");
@@ -456,55 +698,167 @@ int main(void)
     usbwr("functions", "acm");
     usbwr("bDeviceClass", "02");
     usbwr("enable", "1");
+    led_step();                                  /* 8: USB gadget */
 
     for (int i = 0; i < 15; i++) {
         sleep(1);
         char tag[32];
         snprintf(tag, sizeof tag, "wait=%d tty=%d", i, access(TTY, F_OK));
         rdstate(tag);
-        if (access(TTY, F_OK) == 0)
+        if (access(TTY, F_OK) == 0) {
+            led_step();                              /* 9: console */
             break;
+        }
     }
 
-    /* WiFi runs in its own process: the wmtWifi write blocks for ~13s and the
-     * daemons behind it need supervising, neither of which should hold up the
-     * console. */
-    pid_t net = fork();
-    if (net == 0) {
-        net_main();
-        _exit(0);
-    }
-    netlog("stage started pid=%d\n", (int)net);
+    /* WiFi is a supervised service like everything else — see svc_add below.
+     * It is NOT forked here.
+     *
+     * It was, once, and the leftover fork survived the move to the supervisor,
+     * so two WiFi stages ran concurrently: two wmt_loaders, two 6620_launchers
+     * and two `echo 1 > /dev/wmtWifi` power-ons racing each other on the
+     * MediaTek combo chip. The device crash-boot-looped. That is the same
+     * subsystem whose firmware assert took a kernel down on 2026-09-04, so
+     * racing its power-on is not a small thing to get wrong.
+     */
 
-    /* A console that exits once because the host had not attached yet is
-     * indistinguishable from one that never worked, so respawn. */
-    for (int gen = 0;; gen++) {
-        int t = open(TTY, O_RDWR | O_NOCTTY);
-        if (t < 0) {
-            if (gen % 30 == 0)
-                note("open %s failed errno=%d\n", TTY, errno);
-            sleep(2);
-            continue;
+    /* Local logging. Both of these are LOCAL ONLY and must stay that way:
+     * busybox syslogd forwards to a remote host with -R and listens with -R
+     * plus -L, and emOS holds no inbound sockets at all. klogd feeds the
+     * kernel ring into the same file so a userspace fault and the kernel
+     * message that explains it land in one timestamped stream. */
+    char *syslogd[] = { "/system/bin/busybox", "syslogd", "-n",
+                        "-O", "/data/emos/messages", "-s", "512", "-b", "3", NULL };
+    char *klogd[]   = { "/system/bin/busybox", "klogd", "-n", NULL };
+
+    svc_add("net", NULL);          /* forked in-process, see below */
+    svc_add("syslogd", syslogd);
+    svc_add("klogd", klogd);
+    svc_add("console", NULL);      /* needs the tty as its stdio */
+
+    supervise();
+    return 0;
+}
+
+/* ── Supervision ─────────────────────────────────────────────────────────────
+ *
+ * PID 1 has three jobs and the first version of this init did only one of
+ * them: it supervised a console, never reaped orphans (so anything that
+ * reparented to init became a permanent zombie), and had no shutdown path at
+ * all — reboots went through `reboot -f`, which leaves /data mounted
+ * read-write with unflushed writes. ext4's journal covered for that, but a
+ * corrupted /data is precisely the failure a remote user cannot recover from.
+ */
+
+#define MAX_SVC 8
+struct svc {
+    const char  *name;
+    char *const *argv;   /* NULL for the two services started specially */
+    pid_t        pid;
+    time_t       started;
+};
+static struct svc svcs[MAX_SVC];
+static int nsvc;
+
+static volatile sig_atomic_t want_shutdown;
+
+static void on_term(int sig) { (void)sig; want_shutdown = 1; }
+
+static void svc_add(const char *name, char *const *argv)
+{
+    if (nsvc < MAX_SVC)
+        svcs[nsvc++] = (struct svc){ .name = name, .argv = argv, .pid = -1 };
+}
+
+/* The console is the one service that needs a controlling terminal, and it
+ * cannot be started until the host has attached to the ACM gadget. A console
+ * that exits once because nobody was listening yet is indistinguishable from
+ * one that never worked, which is why it is respawned rather than run once. */
+static pid_t start_console(void)
+{
+    int t = open(TTY, O_RDWR | O_NOCTTY);
+    if (t < 0)
+        return -1;
+    pid_t pid = fork();
+    if (pid == 0) {
+        setsid();
+        ioctl(t, TIOCSCTTY, 1);
+        dup2(t, 0); dup2(t, 1); dup2(t, 2);
+        if (t > 2) close(t);
+        char *argv[] = { "/system/bin/sh", NULL };
+        char *envp[] = { "HOME=/", "TERM=vt100", "ANDROID_ROOT=/system",
+                         "PATH=/sbin:/system/bin:/system/xbin", NULL };
+        execve("/system/bin/sh", argv, envp);
+        _exit(127);
+    }
+    close(t);
+    return pid;
+}
+
+/* Stop everything, flush, and let the kernel reset.
+ *
+ * Order matters and none of it is optional: SIGTERM first so daemons can
+ * close their files, a bounded wait rather than an unbounded one (a service
+ * that will not die must not hang the reboot forever), then sync twice and
+ * remount /data read-only. The remount is the step that actually protects the
+ * filesystem — sync alone leaves the journal open.
+ */
+static void do_shutdown(void)
+{
+    note("stage=shutdown\n");
+    for (int i = 0; i < nsvc; i++)
+        if (svcs[i].pid > 0)
+            kill(svcs[i].pid, SIGTERM);
+    for (int i = 0; i < 50; i++) {          /* up to 5s */
+        if (waitpid(-1, NULL, WNOHANG) <= 0 && errno == ECHILD)
+            break;
+        usleep(100000);
+    }
+    kill(-1, SIGKILL);
+    sync();
+    sync();
+    mount(NULL, "/data", NULL, MS_REMOUNT | MS_RDONLY, NULL);
+    note("stage=shutdown done\n");
+    sync();
+    reboot(RB_AUTOBOOT);
+}
+
+static void supervise(void)
+{
+    signal(SIGTERM, on_term);
+    signal(SIGINT, on_term);
+
+    for (;;) {
+        if (want_shutdown)
+            do_shutdown();
+
+        /* Reap EVERYTHING, not just our own services: orphans reparent to PID
+         * 1 and nobody else will ever collect them. */
+        int st;
+        pid_t d;
+        while ((d = waitpid(-1, &st, WNOHANG)) > 0)
+            for (int i = 0; i < nsvc; i++)
+                if (svcs[i].pid == d)
+                    svcs[i].pid = -1;
+
+        time_t now = time(NULL);
+        for (int i = 0; i < nsvc; i++) {
+            struct svc *s = &svcs[i];
+            if (s->pid > 0)
+                continue;
+            /* Backoff, so a service that dies instantly cannot spin PID 1. */
+            if (now - s->started < 2)
+                continue;
+            s->started = now;
+            if (!strcmp(s->name, "console"))
+                s->pid = start_console();
+            else if (!strcmp(s->name, "net")) {
+                pid_t p = fork();
+                if (p == 0) { net_main(); _exit(0); }
+                s->pid = p;
+            } else
+                s->pid = spawn(s->argv);
         }
-        pid_t pid = fork();
-        if (pid == 0) {
-            setsid();
-            ioctl(t, TIOCSCTTY, 1);
-            dup2(t, 0); dup2(t, 1); dup2(t, 2);
-            if (t > 2) close(t);
-            char *argv[] = { "/system/bin/sh", NULL };
-            char *envp[] = { "HOME=/", "TERM=vt100",
-                             "PATH=/sbin:/system/bin:/system/xbin", NULL };
-            execve("/system/bin/sh", argv, envp);
-            _exit(127);
-        }
-        close(t);
-        if (gen < 3)
-            note("shell started gen=%d pid=%d\n", gen, (int)pid);
-        int st = 0;
-        waitpid(pid, &st, 0);
-        if (gen < 3)
-            note("shell exited gen=%d status=%d\n", gen, st);
         sleep(1);
     }
 }
