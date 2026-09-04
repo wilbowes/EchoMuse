@@ -72,6 +72,7 @@ import em_pki
 import em_hostip
 import em_linkauth
 import em_pacing
+import em_platform
 import em_wsclose
 import em_rttlog
 import em_eq
@@ -892,6 +893,28 @@ class Device:
         playback_stats stores NULL rather than zero.
         """
         return (self.stats or {}).get("aecRef")
+
+    @property
+    def base_os(self):
+        """
+        The userspace the device booted: "emos", "fireos", or None.
+
+        None means the firmware is too old to report it, NOT FireOS. The
+        distinction is the whole point of the field: `android_userspace`
+        below acts on it, and reading absence as Android would keep pushing
+        the debloat payload at an emOS device that has no package manager.
+        """
+        return (self.stats or {}).get(em_platform.STATS_KEY)
+
+    @property
+    def android_userspace(self) -> bool:
+        """
+        Whether Android-only payloads mean anything on this device.
+
+        The rule and its asymmetry live in em_platform, where a test can
+        reach them without aiohttp.
+        """
+        return em_platform.android_userspace(self.base_os)
 
     async def send_led_anim(self, anim: dict):
         """
@@ -3701,6 +3724,11 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                             # allowlist: it is a state, not a metric, and
                             # the hourly rollup averages numbers.
                             "aecRef":        msg.get("aecRef"),
+                            # Which userspace the device booted: "emos",
+                            # "fireos", or absent from firmware too old to
+                            # say. A state like aecRef, and kept out of
+                            # record_device_stats for the same reason.
+                            "baseOs":        msg.get("baseOs"),
                         }
                         # Shadow summary → hourly rollup. Present only while the
                         # device is scoring, so its presence is also the "was it
