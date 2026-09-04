@@ -2133,9 +2133,24 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     reaches. Idempotent, and newly hidden packages stop at the next
                     device restart.
                   </div>
-                  <Pill small disabled={!device.connected || debloating} onClick={doDebloat}>
+                  {/* Disabled WITH THE REASON on a device that is not running
+                      Android, rather than offered as a control that quietly
+                      achieves nothing. The payload is a package list and a
+                      Magisk boot script; on a device with neither, the write
+                      lands nowhere, the confirmation never comes, and the
+                      transfer holds that device's shell lock until it times
+                      out. `androidUserspace` is the server's own answer, not
+                      a rule re-derived here — the endpoint refuses on the
+                      same value. */}
+                  <Pill small disabled={!device.connected || debloating || device.androidUserspace === false}
+                        onClick={doDebloat}>
                     {debloating ? 'Applying…' : 'Re-apply debloat'}
                   </Pill>
+                  {device.androidUserspace === false && (
+                    <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)', marginTop:10 }}>
+                      Not available — this device is not running Android, so there is nothing to debloat.
+                    </div>
+                  )}
                 </Panel>
               )}
 

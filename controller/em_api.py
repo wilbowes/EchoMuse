@@ -38,7 +38,9 @@ import json
 import logging
 import os
 import platform
+import posixpath as _posixpath
 import re
+from shlex import quote as _sh_quote
 import shutil
 import sqlite3 as _sqlite3
 import sys
@@ -271,6 +273,19 @@ _shell_pending:   dict = {}
 _shell_dashboard: dict = {}
 _shell_ws:        dict = {}   # device_id → live ws for programmatic sessions
 _shell_lock:      dict = {}   # device_id → asyncio.Lock (one session at a time)
+# device_id → the asyncio Task that actually holds _shell_lock.
+#
+# `Lock.locked()` answers "is anyone holding this", never "am I", and the
+# cleanup paths used it as though it meant the second. So a caller that gave
+# up WAITING for the lock ran the same cleanup as one that had it, and
+# released the lock out from under the transfer still using it — two shell
+# sessions on one device, which is the exact thing the lock exists to stop.
+# Seen end to end on EFF 2026-09-04: a debloat push hung for 108s, the wake
+# word reconcile behind it timed out and released the debloat's lock, and the
+# slot detect that followed then failed with `Lock is not acquired` and
+# reported an empty result — surfacing to the operator as "could not
+# determine active slot", three steps from anything to do with locking.
+_shell_owner:     dict = {}   # device_id → task holding _shell_lock
 
 def init(devices_ref: dict, shell_pending_ref: dict, shell_dashboard_ref: dict) -> None:
     """
@@ -2111,6 +2126,10 @@ async def _get_device_shell_ws(live) -> object:
         await asyncio.wait_for(_shell_lock[device_id].acquire(), timeout=20.0)
     except asyncio.TimeoutError:
         raise RuntimeError(f"Shell lock acquisition timed out for {device_id}")
+    # Claimed immediately after a successful acquire and never before it:
+    # everything that cleans up asks whether it is the owner, so a caller
+    # that timed out above must not be able to answer yes.
+    _shell_owner[device_id] = asyncio.current_task()
 
     future = loop.create_future()
     _shell_pending[device_id] = future
@@ -2124,8 +2143,27 @@ async def _get_device_shell_ws(live) -> object:
     except asyncio.TimeoutError:
         _shell_pending.pop(device_id, None)
         _shell_ws.pop(device_id, None)
-        _shell_lock[device_id].release()
+        _release_shell_lock(device_id)
         raise
+
+
+def _release_shell_lock(device_id: str) -> None:
+    """
+    Release the shell lock, but only if THIS task is the one holding it.
+
+    `Lock.locked()` cannot answer that question — it says whether anyone
+    holds the lock — so guarding a release with it lets a caller that never
+    acquired release somebody else's. See the _shell_owner comment.
+    """
+    if _shell_owner.get(device_id) is not asyncio.current_task():
+        return
+    _shell_owner.pop(device_id, None)
+    lock = _shell_lock.get(device_id)
+    if lock and lock.locked():
+        try:
+            lock.release()
+        except RuntimeError:
+            pass
 
 
 async def _release_shell_ws(device_id: str, live=None) -> None:
@@ -2134,7 +2172,16 @@ async def _release_shell_ws(device_id: str, live=None) -> None:
 
     Closing ws wakes handle_shell's ws.wait_closed(), which then returns
     and lets the device clean up its side too.
+
+    **A task that does not hold the lock cleans up nothing.** Callers run
+    this from a `finally`, which is reached whether or not the acquire
+    succeeded — so a caller that timed out waiting used to close the
+    websocket belonging to the transfer that was still using it, send that
+    device `shell_close`, and release its lock. Every one of those is an
+    action against another operation's session.
     """
+    if _shell_owner.get(device_id) is not asyncio.current_task():
+        return
     ws = _shell_ws.pop(device_id, None)
     if ws:
         try:
@@ -2144,12 +2191,7 @@ async def _release_shell_ws(device_id: str, live=None) -> None:
     _shell_pending.pop(device_id, None)
     if live is not None:
         await live.send_control({"type": "shell_close"})
-    lock = _shell_lock.get(device_id)
-    if lock and lock.locked():
-        try:
-            lock.release()
-        except RuntimeError:
-            pass
+    _release_shell_lock(device_id)
 
 
 async def _shell_run(live, cmd: str, timeout: float = 30.0) -> str:
@@ -2310,7 +2352,21 @@ async def _stream_file_to_device(live, data: bytes, dest: str,
             "else echo DECODER:none; fi; "
             "if echo x | busybox md5sum >/dev/null 2>&1; then echo MD5:busybox; "
             "elif echo x | md5sum >/dev/null 2>&1; then echo MD5:plain; "
-            f"else echo MD5:none; fi; echo {DETECT_MARKER}\n"
+            f"else echo MD5:none; fi; "
+            # Does the destination DIRECTORY exist? Rides the round trip that
+            # was already happening, so it costs nothing.
+            #
+            # Without it a write into a directory that is not there fails, the
+            # `echo TRANSFER_OK` after it never runs, and the transfer waits
+            # out its full 120s timeout for a confirmation that can never
+            # come — holding the device's shell lock throughout. Measured on
+            # EFF 2026-09-04: the debloat payload targets Magisk's
+            # /sbin/.core overlay, which a device not running Magisk has no
+            # daemon to create, and every attempt cost two minutes and took
+            # the next shell operation down with it.
+            f"if [ -d {_sh_quote(_posixpath.dirname(dest) or '/')} ]; "
+            f"then echo DESTDIR:ok; else echo DESTDIR:missing; fi; "
+            f"echo {DETECT_MARKER}\n"
         )
 
         detect_buf = ""
@@ -2324,6 +2380,16 @@ async def _stream_file_to_device(live, data: bytes, dest: str,
                     break
             except asyncio.TimeoutError:
                 continue
+
+        # Checked before the decoder, because it is the more specific answer:
+        # a device with a perfectly good base64 and nowhere to put the file is
+        # not a device that failed to decode.
+        if "DESTDIR:missing" in detect_buf:
+            log.warning(f"[api] {device_id}: {dest} — the destination "
+                        f"directory does not exist on this device; not sending")
+            return _transfer_failed(
+                "destination",
+                f"{_posixpath.dirname(dest)} does not exist on the device")
 
         if "DECODER:busybox" in detect_buf:
             decode_cmd = "busybox base64 -d"
@@ -3096,6 +3162,21 @@ async def _post_debloat(request: web.Request) -> web.Response:
     live = _devices.get(device_id)
     if live is None:
         return _error("device_offline", f"Device not connected: {device_id}", 409)
+
+    # Refused server-side, not merely greyed out in the dashboard. This is a
+    # plain POST with a session token, so a dashboard-only rule protects
+    # nothing from anyone who opens the network tab — the same reasoning that
+    # puts the recordings check on the server. And the cost of running it
+    # anyway is not a no-op: the payload targets Magisk's /sbin/.core overlay,
+    # which a device without Magisk has no daemon to create, so the write
+    # fails, TRANSFER_OK never comes, and the transfer holds that device's
+    # shell lock for its full timeout.
+    if not live.android_userspace:
+        return _error(
+            "not_android",
+            "This device is not running Android, so there is nothing to "
+            "debloat — the payload is a package list and a Magisk boot script.",
+            409)
 
     # No explicit shell release here: _shell_run and _stream_file_to_device each
     # acquire and release the session in their own finally, which is why
@@ -5008,6 +5089,12 @@ def _merge_device(row) -> dict:
         # support bundle and the payload reconcile all need to tell "Android"
         # apart from "not asked".
         "baseOs":          getattr(live, "base_os", None) if live else None,
+        # The DERIVED answer, not a second copy of the rule. em_platform owns
+        # "which payloads mean anything here"; a dashboard that re-derived it
+        # from baseOs would be a mirror free to disagree with the server that
+        # actually refuses. Defaults True with no device, so a disconnected
+        # device shows the control as it always did.
+        "androidUserspace": getattr(live, "android_userspace", True) if live else True,
         # Gates the tap-as-event toggle — see em_button.decide.
         "buttonHoldCapable": getattr(live, "button_hold_capable", False) if live else False,
         # Whether the device found its ambient light sensor. Reported so the
