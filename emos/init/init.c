@@ -653,9 +653,18 @@ int main(void)
      * whoever asks about it later, including a user on the other side of the
      * world who has since rebooted twice.
      */
+    /* RAM-backed scratch for logs and runtime state, so routine logging never
+     * touches the eMMC. 4MB is ample for a 256KB x2 syslog rotation. */
+    mkdir("/run", 0755);
+    mount("tmpfs", "/run", "tmpfs", 0, "size=4m");
+
     mkdir("/data/emos", 0755);
     int lk = open("/proc/last_kmsg", O_RDONLY);
     if (lk >= 0) {
+        /* Rotate, so a device that reboot-loops cannot overwrite the crash
+         * that started it with the boring ones that followed. */
+        rename("/data/emos/last_kmsg.1", "/data/emos/last_kmsg.2");
+        rename("/data/emos/last_kmsg.prev", "/data/emos/last_kmsg.1");
         int out = open("/data/emos/last_kmsg.prev", O_WRONLY | O_CREAT | O_TRUNC, 0644);
         long long copied = 0;
         if (out >= 0) {
@@ -744,8 +753,28 @@ int main(void)
      * plus -L, and emOS holds no inbound sockets at all. klogd feeds the
      * kernel ring into the same file so a userspace fault and the kernel
      * message that explains it land in one timestamped stream. */
+    /* Routine logging goes to a RAM ring, NOT to flash.
+     *
+     * This device is meant to run for years on eMMC that cannot be replaced,
+     * and a syslog writing continuously is pure wear for logs nobody reads:
+     * measured at ~19 bytes/s idle, so ~1.6MB a day, forever. -C gives an
+     * in-memory circular buffer instead, read with `logread`, costing zero
+     * writes. (A console session inflates that rate a hundredfold, because
+     * this kernel logs one line PER BYTE transmitted on ttyGS0 — so the
+     * measurement above is the idle device, not a device being debugged.)
+     *
+     * A tmpfs is used rather than busybox's own -C ring, which needs System V
+     * shared memory this kernel does not have — `logread` returns "can't find
+     * syslogd buffer: Function not implemented". tmpfs is present and gives
+     * the same property: the log lives in RAM and costs no writes.
+     *
+     * Flash is reserved for post-mortems, which is the thing actually worth
+     * keeping: the previous boot's kernel log is copied at startup, and
+     * dump_log() spills the ring on the way down. Crashes survive; chatter
+     * does not.
+     */
     char *syslogd[] = { "/system/bin/busybox", "syslogd", "-n",
-                        "-O", "/data/emos/messages", "-s", "512", "-b", "3", NULL };
+                        "-O", "/run/messages", "-s", "256", "-b", "2", NULL };
     char *klogd[]   = { "/system/bin/busybox", "klogd", "-n", NULL };
 
     svc_add("net", NULL);          /* forked in-process, see below */
@@ -832,6 +861,12 @@ static void do_shutdown(void)
         usleep(100000);
     }
     kill(-1, SIGKILL);
+    /* Spill the in-memory log to flash. One bounded write per shutdown is a
+     * cost worth paying; the continuous stream that produced it is not. */
+    char *dump[] = { "/system/bin/sh", "-c",
+                     "cat /run/messages* > /data/emos/messages.last "
+                     "2>/dev/null", NULL };
+    run_wait(dump);
     sync();
     sync();
     mount(NULL, "/data", NULL, MS_REMOUNT | MS_RDONLY, NULL);
