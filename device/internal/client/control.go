@@ -1017,17 +1017,40 @@ func probeTCP(addr string, timeout time.Duration) bool {
 }
 
 // GetSerialNo reads ro.serialno — stable device identifier matching adb devices output.
+//
+// Falls back to androidboot.serialno on the kernel command line, which is where
+// the value comes from in the first place. The two sources are complementary
+// rather than redundant: Android's init consumes every androidboot.* argument
+// into a property and strips it from /proc/cmdline, so on stock FireOS only
+// getprop answers — while on a device booted without Android's userspace there
+// is no property service and only the cmdline answers. Both yield the identical
+// string, which matters because the whole fleet is keyed on the serial.
 func GetSerialNo() string {
 	out, err := exec.Command("getprop", "ro.serialno").Output()
+	if err == nil {
+		if serial := strings.TrimSpace(string(out)); serial != "" {
+			return serial
+		}
+	}
+	if serial := serialFromCmdline(); serial != "" {
+		return serial
+	}
+	log.Printf("[control] Warning: could not read ro.serialno: %v", err)
+	return "unknown-device"
+}
+
+func serialFromCmdline() string {
+	b, err := os.ReadFile("/proc/cmdline")
 	if err != nil {
-		log.Printf("[control] Warning: could not read ro.serialno: %v", err)
-		return "unknown-device"
+		return ""
 	}
-	serial := strings.TrimSpace(string(out))
-	if serial == "" {
-		return "unknown-device"
+	const key = "androidboot.serialno="
+	for _, field := range strings.Fields(string(b)) {
+		if strings.HasPrefix(field, key) {
+			return strings.TrimPrefix(field, key)
+		}
 	}
-	return serial
+	return ""
 }
 
 func getLocalIP() string {

@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/wilbowes/EchoMuse/internal/bindings/codec"
+
 	"github.com/Binozo/GoTinyAlsa/pkg/pcm"
 	"github.com/Binozo/GoTinyAlsa/pkg/tinyalsa"
 )
@@ -154,6 +156,11 @@ func (p *PcmSpeaker) Init() error {
 	// work to do and is only ever in the way.
 	exec.Command("stop", "media").Run()
 	waitForFreePcm(cardNr, deviceNr, pcmFreeTimeout)
+	// Connect the DAC to the output mixer before opening the stream: DAPM
+	// decides what to power at stream open, and an unrouted DAC is powered
+	// down, which presents as a clean "voice stream complete, underruns=0"
+	// into silence. See the codec package.
+	codec.EnsureRoutes()
 	exec.Command("tinymix", "-D", "0", "61", "0", "0").Run() // mute before touching amp or stream
 
 	device := tinyalsa.NewDevice(cardNr, deviceNr, pcm.Config{
