@@ -1,5 +1,40 @@
 # Changelog
 
+## 2.23.0-ea.2 (Early Access)
+
+**Sound through the headphone jack works properly, and the controller stops
+spending minutes sending maintenance files an Echo cannot use.** Nothing to do
+before updating: no database migration, nothing to change on your devices. The
+jack fixes need firmware newer than v2.14.0 and do nothing until you have it.
+
+### The headphone and line-out jack
+
+Plugging a speaker or headphones into the Echo produced almost no sound. The
+jack has its own output stage, and inserting a cable drops it to the bottom of
+its range — nothing on our side ever raised it again, so the audio was present
+and inaudible. It is now set whenever a cable is detected.
+
+Booting with a cable already plugged in was the same gap from the other
+direction. The Echo only corrected its audio routing when a cable was inserted
+or removed, and a device that started up with one connected never had such a
+moment — so it played to the room with a cable attached. Unplugging and
+replugging was the folk remedy for both, and is no longer needed.
+
+**Needs firmware newer than v2.14.0.**
+
+### The controller knows what each Echo is running
+
+Echoes now report which base system they booted, and the controller sends
+Android-specific maintenance files only to the ones actually running Android.
+Elsewhere each attempt sat for two minutes before giving up, which made an
+ordinary firmware update look as though it had stalled when the update itself
+had already finished.
+
+### Smaller things
+
+- The Local Build file picker clears itself once a deploy starts, rather than
+  leaving a filename sitting there as though something were still pending.
+
 ## 2.23.0-ea.1 (Early Access)
 
 **The Bluetooth proxy stops crowding out the device it runs on, and the
