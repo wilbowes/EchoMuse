@@ -274,7 +274,32 @@ func Lux() *int {
 const (
 	// PollInterval bounds how fast a change can be noticed. Reading faster
 	// than the chip's 346ms integration time buys nothing but syscalls.
-	PollInterval = time.Second
+	//
+	// 5s, not 1s, and the reason is the KERNEL LOG rather than the syscalls.
+	// This driver prints a line on every read that lands under its darkness
+	// threshold:
+	//
+	//     tsl2540 0-0039: tsl2540_get_lux: darkness (0 <= 10)
+	//
+	// At 1Hz that is ~86,000 kernel log lines a day, and it only fires in the
+	// dark — so it runs all night, which is precisely when a device sits idle
+	// and a crash most needs explaining afterwards. Measured on EFF
+	// 2026-09-04: the whole log ring was this one line, and
+	// /data/emos/messages.last had reached 609KB of it.
+	//
+	// The cost is not the disk. It is that MediaTek's ram_console is the ONLY
+	// crash channel this kernel has — /proc/last_kmsg is what root-caused the
+	// C95 kernel panic — and it is a fixed-size ring we do not control the
+	// content of. Anything that fills it evicts the evidence, and no amount of
+	// care on our own logging can offset that.
+	//
+	// 5s cuts it by 80% and costs nothing anybody can perceive: MinInterval
+	// already refuses to report more often than every 2s, so a 1s poll was
+	// finer than the reporting floor to begin with. If ambient-driven ring
+	// brightness (#296) ever wants faster, make the poll adaptive — quick
+	// while the level is moving, slow while it is not — rather than paying a
+	// permanent log flood for a latency nobody is watching for.
+	PollInterval = 5 * time.Second
 
 	// MinRatio is how much the level must change, RELATIVE to the level it
 	// changed from. An absolute threshold cannot work across the range: 50
