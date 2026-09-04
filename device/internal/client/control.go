@@ -18,6 +18,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/wilbowes/EchoMuse/internal/bindings/als"
+	"github.com/wilbowes/EchoMuse/internal/clock"
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/discovery"
 	"github.com/wilbowes/EchoMuse/internal/platform"
@@ -45,6 +46,13 @@ type controlMessage struct {
 	// never by version string. Absent on older controllers, which is
 	// exactly how absence should read — as "does not do this".
 	Features []string `json:"features,omitempty"`
+	// TimeMs is the controller's wall clock in unix milliseconds, sent on the
+	// ack. An Echo has no RTC that survives a power cut and boots reading
+	// 2010; under emOS nothing ever corrects that, because bionic resolves
+	// through Android's property service and so no bionic-linked binary there
+	// has DNS for an NTP pool. Absent from older controllers, which correctly
+	// reads as "no opinion" — see clock.ShouldStep.
+	TimeMs int64 `json:"time_ms,omitempty"`
 }
 
 // ─── Callbacks ────────────────────────────────────────────────────────────────
@@ -334,6 +342,24 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 		// is published, so a caller reading it can never see a stale set
 		// from the previous connection.
 		c.setFeatures(first.Features)
+		// ...and what time it is. Deliberately AFTER the connection exists,
+		// so nothing a connection depends on can depend on this: TLS keeps
+		// verifying against the build-time clamp, which is there precisely
+		// because the clock cannot be trusted at dial time.
+		//
+		// Every reconnect is the refresh. Once the clock is right the
+		// threshold makes this a no-op, so it costs a comparison.
+		if clock.ShouldStep(time.Now(), first.TimeMs) {
+			if err := clock.Step(first.TimeMs); err != nil {
+				// Not fatal, and not retried: a device that cannot set its
+				// own clock still does everything else, and the only cost is
+				// log lines that do not line up with the controller's.
+				log.Printf("[clock] could not set the clock from the controller: %v", err)
+			} else {
+				log.Printf("[clock] stepped to %s (from the controller)",
+					time.Now().Format(time.RFC3339))
+			}
+		}
 	default:
 		return fmt.Errorf("unexpected first message: %s", first.Type)
 	}
