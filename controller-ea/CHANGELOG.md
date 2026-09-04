@@ -1,5 +1,47 @@
 # Changelog
 
+## 2.23.0-ea.3 (Early Access)
+
+**Your Echoes will know what time it is, and updates stop stalling on things
+they cannot do.** Nothing to do before updating: no database migration, nothing
+to change on your devices. The clock needs firmware newer than v2.14.0 at both
+ends.
+
+### Echoes now know the time
+
+An Echo has no clock that survives being unplugged, so it starts up believing
+it is 2010 and only corrects itself if it can reach a time server. The
+controller now simply tells it, over the connection it already has. Device log
+timestamps line up with the controller's from the first moment, which is the
+difference between a readable support bundle and a puzzle.
+
+**Needs firmware newer than v2.14.0.**
+
+### Updates no longer stall for two minutes at a time
+
+A file transfer to a folder that does not exist on the device used to wait out
+its full two-minute timeout instead of failing immediately — and it held that
+device's connection for the whole time, so whatever came next failed too. One
+firmware update could lose four minutes to this and report a confusing error
+about something unrelated. Transfers now check first and fail straight away.
+
+A related fault could make the controller close a connection belonging to a
+transfer that was still using it, which is what turned a stalled transfer into
+an error message pointing somewhere else entirely.
+
+### Maintenance actions that do not apply are now greyed out
+
+The Re-apply debloat button is disabled, with the reason shown, on an Echo that
+is not running Android — there are no Amazon packages to hide there, and
+pressing it achieved nothing while tying the device up.
+
+### Smaller things
+
+- The ambient light sensor is read less often. Its driver logs a line every
+  time it reads in a dark room, which was filling the small area the Echo keeps
+  crash reports in — so a crash overnight could no longer be explained. Nothing
+  visible changes.
+
 ## 2.23.0-ea.2 (Early Access)
 
 **Sound through the headphone jack works properly, and the controller stops
