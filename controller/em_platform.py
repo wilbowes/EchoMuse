@@ -21,8 +21,10 @@ EMOS = "emos"
 FIREOS = "fireos"
 UNKNOWN = "unknown"
 
-# The wire key on the stats message.
-STATS_KEY = "baseOs"
+# The wire key on the REGISTER message. Snake case, matching its neighbours
+# there (`ambient_light_status`, `firmware_ver`) rather than the camelCase of
+# the stats report it briefly rode on.
+REGISTER_KEY = "base_os"
 
 
 def android_userspace(base_os) -> bool:

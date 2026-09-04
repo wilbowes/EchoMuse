@@ -369,6 +369,11 @@ class Device:
         self.control_ws   = control_ws
         # Set from the register message; None on firmware that predates it.
         self.ambient_light_status: dict | None = None
+        # Which userspace the device booted, from its register message.
+        # None until a device registers, and None forever for firmware too
+        # old to say — which em_platform resolves to Android, leaving the
+        # existing fleet exactly as it was.
+        self._base_os: str | None = None
 
         self.data_ws: WebSocketServerProtocol | None = None
         # Remaining reconnect grace for the speaker stream in flight. Armed by
@@ -903,8 +908,15 @@ class Device:
         distinction is the whole point of the field: `android_userspace`
         below acts on it, and reading absence as Android would keep pushing
         the debloat payload at an emOS device that has no package manager.
+
+        Set from the REGISTER message, not the stats tick. It rode the stats
+        report for exactly one commit, which put it 30 seconds too late for
+        its only consumer — the payload reconcile runs on connect, so it read
+        None, pushed the Magisk service.d script at an emOS device, and each
+        attempt sat out the full 120s transfer timeout waiting for a
+        TRANSFER_OK that could never come.
         """
-        return (self.stats or {}).get(em_platform.STATS_KEY)
+        return self._base_os
 
     @property
     def android_userspace(self) -> bool:
@@ -3376,6 +3388,10 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         # to tell them apart. Absent on firmware that does not send it, which
         # reads as "not reported" rather than as a fault.
         device.ambient_light_status = msg.get("ambient_light_status")
+        # Static property of the boot, so it arrives with registration
+        # rather than on the stats tick — reconcile_on_connect asks for it
+        # immediately and a stats-borne value is ~30s too late.
+        device._base_os = msg.get(em_platform.REGISTER_KEY)
         # Link-security telemetry for the dashboard: True when this control
         # connection arrived over the TLS listener.
         device.secure = secure
@@ -3724,11 +3740,6 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                             # allowlist: it is a state, not a metric, and
                             # the hourly rollup averages numbers.
                             "aecRef":        msg.get("aecRef"),
-                            # Which userspace the device booted: "emos",
-                            # "fireos", or absent from firmware too old to
-                            # say. A state like aecRef, and kept out of
-                            # record_device_stats for the same reason.
-                            "baseOs":        msg.get("baseOs"),
                         }
                         # Shadow summary → hourly rollup. Present only while the
                         # device is scoring, so its presence is also the "was it
