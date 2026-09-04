@@ -18,6 +18,13 @@ const privacyBrightnessPath = "/sys/devices/soc/10010000.keypad/amz_privacy/priv
 // i2C device that controls the actual LEDs
 const ledFrame = "/sys/devices/soc/11007000.i2c/i2c-0/0-003f/frame"
 
+// The is31fl3236 driver animates the ring itself from boot until something
+// clears this. Android's userspace does; ours does not, so on a device running
+// our own init the kernel animation and our frames drive the same LEDs over the
+// same i2C device and the ring visibly glitches. Reads 1 under our userspace and
+// 0 on stock.
+const bootAnimationPath = "/sys/devices/soc/11007000.i2c/i2c-0/0-003f/boot_animation"
+
 // file permission we need to access the i2C device
 const perm = os.FileMode(0644)
 
@@ -30,6 +37,11 @@ type I2CController struct {
 }
 
 func (i *I2CController) Init() error {
+
+	// Stop the kernel's boot animation before the first frame, or it keeps
+	// driving the same LEDs. Best-effort: on stock Android something has
+	// already cleared it, and a board without the attribute is not a failure.
+	_ = os.WriteFile(bootAnimationPath, []byte("0"), perm)
 
 	// Initialize the LED i2C device in order for us to control it
 	ledCurrentPacket := []byte("3")
