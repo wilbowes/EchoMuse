@@ -489,6 +489,58 @@ static void write_resolv_conf(void)
     netlog("resolv.conf nameserver %s\n", gwip);
 }
 
+/* Outbound-only packet filter, applied BEFORE the interface comes up.
+ *
+ * The device already holds no listening sockets at all — verified with
+ * netstat, zero TCP and zero UDP — so there is nothing to connect to. This is
+ * the second layer: it means a daemon that starts listening by accident, or a
+ * future one added without thinking, is not reachable anyway. Stock FireOS
+ * ships no rules whatsoever, so this is emOS being stricter than the thing it
+ * replaces rather than catching up to it.
+ *
+ * Order matters: every ACCEPT is installed before the policy flips to DROP, so
+ * the window where everything is dropped never exists. And it runs before
+ * ifup, so the interface is never up without the policy.
+ *
+ * Four exceptions, each needed and each verified on hardware:
+ *
+ *   - lo, or anything talking to itself breaks.
+ *   - ESTABLISHED,RELATED — the replies to our own outbound connections. This
+ *     is what makes "outbound only" work at all.
+ *   - udp sport 67 -> dport 68: DHCP offers are broadcast, so they match no
+ *     connection and conntrack cannot help. Without this the device gets no
+ *     address.
+ *   - udp sport 5353: mDNS responses. The device FINDS ITS CONTROLLER this
+ *     way, so dropping these is a device that boots perfectly and never
+ *     connects to anything. Tested by killing the server and watching it
+ *     rediscover: "mDNS: found Clara server at 10.10.1.81:8767".
+ *
+ * ICMP is allowed deliberately. It is not attack surface in any meaningful
+ * sense and ping is the cheapest way to tell whether a device is alive — the
+ * diagnostic value outweighs the theoretical purity of dropping it. Remove
+ * this line if that trade ever stops being worth it.
+ *
+ * IPv6 gets the same treatment; ICMPv6 must be allowed or IPv6 cannot
+ * function at all (neighbour discovery rides it).
+ */
+static void firewall(void)
+{
+    char *fw[] = { "/system/bin/sh", "-c",
+        "for T in iptables ip6tables; do "
+        "  $T -F INPUT; "
+        "  $T -A INPUT -i lo -j ACCEPT; "
+        "  $T -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT; "
+        "  $T -A INPUT -p udp --sport 5353 -j ACCEPT; "
+        "  $T -P INPUT DROP; "
+        "  $T -P FORWARD DROP; "
+        "done; "
+        "iptables -I INPUT 4 -p udp --sport 67 --dport 68 -j ACCEPT; "
+        "iptables -I INPUT 5 -p icmp -j ACCEPT; "
+        "ip6tables -I INPUT 4 -p icmpv6 -j ACCEPT", NULL };
+    int st = run_wait(fw);
+    netlog("firewall applied status=%d\n", st);
+}
+
 static int ifup(const char *name)
 {
     struct ifreq ifr;
@@ -551,6 +603,7 @@ static void net_main(void)
 
     for (int i = 0; i < 20 && access("/sys/class/net/wlan0", F_OK); i++)
         sleep(1);
+    firewall();                 /* before the interface is ever up */
     r = ifup("wlan0");
     netlog("wlan0 present=%d ifup=%d\n",
          access("/sys/class/net/wlan0", F_OK) == 0, r);
@@ -677,7 +730,13 @@ int main(void)
 
     /* mknod's mode is masked by the umask, so without this every node below
      * comes out 0644 no matter what it asks for — which is how dhcpcd's hook
-     * script ended up unable to open /dev/null for writing. */
+     * script ended up unable to open /dev/null for writing.
+     *
+     * It is restored to 022 as soon as the nodes exist, and that matters more
+     * than it looks: umask is INHERITED by every child, so leaving it at 0
+     * made PID 1 hand a permissive mask to every process on the device. The
+     * syslog and anything a spawned shell created came out world-writable
+     * (-rw-rw-rw-). Narrow the window to the thing that needs it. */
     umask(0);
 
     mkdir("/dev", 0755);
@@ -722,6 +781,8 @@ int main(void)
     for (unsigned i = 0; i < sizeof nodes / sizeof nodes[0]; i++)
         mknod(nodes[i].path, S_IFCHR | 0600,
               makedev(nodes[i].major, nodes[i].minor));
+
+    umask(022);   /* nodes exist; every child inherits a sane mask from here */
 
     snprintf(buf, sizeof buf, "EM64-INIT-OK acm-console\n");
     write_at(0, buf, strlen(buf));
