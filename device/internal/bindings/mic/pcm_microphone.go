@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wilbowes/EchoMuse/internal/bindings/codec"
 	pkgmic "github.com/wilbowes/EchoMuse/pkg/mic"
 	"github.com/Binozo/GoTinyAlsa/pkg/pcm"
 	"github.com/Binozo/GoTinyAlsa/pkg/tinyalsa"
@@ -52,6 +53,11 @@ func (p *PcmMicrophone) Init() error {
 	if err := cmd.Run(); err != nil {
 		log.Printf("mic: stop mixer: %v (continuing)", err)
 	}
+	// Route the differential mic inputs into the ADCs before opening the PCM.
+	// Without this the ADCs are powered down and capture returns the I2S bus's
+	// own noise floor — with a perfectly healthy ALSA clock, which is what
+	// makes it so hard to see. See the codec package.
+	codec.EnsureRoutes()
 	go p.readLoop()
 	return nil
 }
