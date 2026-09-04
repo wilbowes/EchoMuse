@@ -30,6 +30,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/bluetooth"
 	"github.com/wilbowes/EchoMuse/internal/client"
 	"github.com/wilbowes/EchoMuse/internal/config"
+	"github.com/wilbowes/EchoMuse/internal/platform"
 	"github.com/wilbowes/EchoMuse/internal/server"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/shadow"
 	"github.com/wilbowes/EchoMuse/internal/wifi"
@@ -631,6 +632,7 @@ func collectStats() client.DeviceStats {
 	speed, freq, bssid := linkInfo()
 	cpuC, maxC, coreLimit := thermals()
 	return client.DeviceStats{
+		BaseOs:           platform.Base(),
 		AmbientLux:       als.Lux(),
 		CPUTempC:         cpuC,
 		MaxTempC:         maxC,

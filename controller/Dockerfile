@@ -90,6 +90,7 @@ COPY em_hostip.py .
 COPY em_ingressauth.py .
 COPY em_linkauth.py .
 COPY em_pacing.py .
+COPY em_platform.py .
 COPY em_wsclose.py .
 COPY em_rttlog.py .
 COPY em_esphome.py .

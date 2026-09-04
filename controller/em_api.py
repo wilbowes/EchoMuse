@@ -4033,11 +4033,18 @@ async def reconcile_on_connect(device_id: str, live) -> None:
 
     # Held as callables, not coroutines: building all three up front and
     # abandoning two of them leaves un-awaited coroutines to warn about later.
-    steps = (
+    steps = [
         ("oww assets", lambda: reconcile_oww_assets(device_id, live)),
         ("start script", lambda: _sync_start_script(live, device_id)),
-        ("debloat", lambda: _sync_debloat(live, device_id)),
-    )
+    ]
+    # The debloat payload is Android-only: a pm-hide list and a Magisk
+    # service.d script. emOS has neither a package manager nor Magisk, so
+    # pushing it there spends a shell round trip to run `pm hide` against
+    # nothing and leave a boot script no init will read. Gated on the device
+    # having POSITIVELY said it is on emOS — see Device.android_userspace for
+    # why absence keeps today's behaviour.
+    if live.android_userspace:
+        steps.append(("debloat", lambda: _sync_debloat(live, device_id)))
     for name, make in steps:
         # Re-read each time, and compare IDENTITY rather than presence: these
         # take seconds, and a device that dropped and redialled part-way
@@ -4996,6 +5003,11 @@ def _merge_device(row) -> dict:
         # capable and still be running on the software tap.
         "aecHwRefCapable": getattr(live, "aec_hw_ref_capable", False) if live else False,
         "aecRef":          getattr(live, "aec_ref", None) if live else None,
+        # Which userspace the device booted: "emos", "fireos", or null from
+        # firmware that cannot say. Null is not FireOS — the wizard, the
+        # support bundle and the payload reconcile all need to tell "Android"
+        # apart from "not asked".
+        "baseOs":          getattr(live, "base_os", None) if live else None,
         # Gates the tap-as-event toggle — see em_button.decide.
         "buttonHoldCapable": getattr(live, "button_hold_capable", False) if live else False,
         # Whether the device found its ambient light sensor. Reported so the
