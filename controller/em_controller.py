@@ -56,6 +56,7 @@ import logging
 import os
 import socket
 import struct
+import time
 
 import numpy as np
 from aiohttp import web
@@ -3419,6 +3420,21 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             "type": "ack",
             "device_id": device_id,
             "features": CONTROLLER_FEATURES,
+            # The device's wall clock. An Echo has no RTC that survives a
+            # power cut and boots reading 2010; under emOS nothing ever
+            # corrects it, because bionic resolves through Android's property
+            # service so no bionic-linked binary there has DNS for an NTP
+            # pool. Telling it over the link it already trusts costs one
+            # integer on a message that already flows — against an NTP server
+            # here, which would mean a listening socket, a second way for the
+            # device to find us, and a daemon to supervise, for an accuracy
+            # nothing in this system reads. Every measurement we take is
+            # monotonic and the device never sends a timestamp.
+            #
+            # Not negotiated, and does not need to be: adding a field is safe
+            # unnegotiated, older firmware ignores it, and a device that gets
+            # no field leaves its clock alone.
+            "time_ms": int(time.time() * 1000),
         })
 
         config = await loop.run_in_executor(
