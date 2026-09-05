@@ -1,5 +1,70 @@
 # Changelog
 
+## 2.23.0-ea.4 (Early Access)
+
+**Your Echo can now run without any of Amazon's software on it, and the
+provisioning wizard installs it that way by default.** This release migrates
+the database (schema 21) — a backup is taken automatically before it does.
+Nothing to change on your devices.
+
+### emOS: an Echo with no Android on it at all
+
+emOS replaces the Echo Dot's entire Amazon userspace — no Android init, no
+system_server, no mediaserver, no audio HAL — while keeping the device's own
+kernel. A complete voice turn runs on it: wake word, Home Assistant, spoken
+answer, along with WiFi, the microphone array, the Bluetooth proxy, the buttons
+and the light ring.
+
+**It is proven on one device over two days, and it is not a finished product.**
+Nothing about your existing Echoes changes, and nothing here reaches a device
+unless you deliberately install it.
+
+### The provisioning wizard now installs emOS
+
+Setting up a new Echo takes nine steps instead of thirteen, and all of them
+happen in TWRP recovery — Magisk, the boot image patch and the root checks are
+gone, because none of them are needed when Android is never started. The most
+dangerous step in the old wizard went with them.
+
+Before it changes anything, the wizard reads your Echo's existing boot
+partition and hands you the file. That one file puts the device back exactly as
+it was, in about ten seconds, and leaves everything installed on it untouched.
+
+**It has not been tested on hardware end to end.** The last two steps, which
+watch the first boot and set up WiFi over the USB console, have never talked to
+a real device. Treat this as something to try on a spare Echo rather than on
+one you rely on — and keep the boot image it gives you at step 2.
+
+**Once an Echo is on emOS the wizard cannot be run against it again.** Setup
+needs Android's debug bridge and emOS does not have one, so the first step will
+not find the device. Going back is a manual job: hold the button combo to reach
+TWRP recovery, wipe cache, wipe data, and sideload a FireOS image. That erases
+the device, so it is a real undo rather than a convenient one. Re-provisioning
+an emOS Echo properly, over the network, is not built yet.
+
+The old FireOS install is unchanged and still available at `?flow=fireos` on
+the dashboard URL.
+
+### A password for the emOS console
+
+emOS puts a root shell on the USB port, which anyone with a cable could reach.
+You can now set a password for it under Config → Advanced → USB console, and it
+applies to every device at once. The password is hashed before it is stored or
+sent, so the plain text is never written down anywhere.
+
+This is a nod to security rather than a lock: anyone holding the device can
+delete the password from recovery. What it protects is the password itself,
+which people tend to reuse somewhere that matters. Forgetting it costs a
+reflash, not a device. FireOS devices are unaffected.
+
+### Smaller things
+
+- An Echo running emOS started EchoMuse **122 seconds late on every boot**,
+  waiting for an Amazon service that cannot exist there. It now starts in about
+  35 seconds.
+- Support bundles no longer include a console password record if one is quoted
+  in a log line.
+
 ## 2.23.0-ea.3 (Early Access)
 
 **Your Echoes will know what time it is, and updates stop stalling on things

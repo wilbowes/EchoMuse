@@ -8,11 +8,18 @@ It is a distribution in the ordinary sense: it does not include a kernel of its
 own. It pairs the device's existing MediaTek 3.18 kernel with our own PID 1,
 busybox, and bionic and tinyalsa mounted read-only from the device's `/system`.
 
-**Status: 0.1, bench-proven, not a release.** One device, one day. A complete
-voice turn has run on it — wake word scored on-device, Home Assistant pipeline,
-spoken answer — along with WiFi, the 9-channel mic array, hardware AEC, the BLE
-proxy, buttons, ambient light, jack detect and the LED ring. The known gaps are
-listed at the bottom and none of them is a research problem.
+**Status: 0.1, bench-proven, not field-proven.** One device, two days. A
+complete voice turn has run on it — wake word scored on-device, Home Assistant
+pipeline, spoken answer — along with WiFi, the 9-channel mic array, hardware
+AEC, the BLE proxy, buttons, ambient light, jack detect and the LED ring. The
+known gaps are listed at the bottom and none of them is a research problem.
+
+`emos-v0.1` is tagged and published so the provisioning wizard can fetch the
+init, which is the only part of an image that can be distributed. **A tag is
+not a claim that this is finished**: it has run on one device, and the wizard
+that installs it has not been through a full run on hardware at all. Try it on
+a spare Echo, and read the Known gaps first — in particular, a device on emOS
+cannot be re-provisioned by the wizard, and going back wipes it.
 
 ## Why
 
@@ -529,6 +536,35 @@ is not proof it rebooted — compare uptime or a build fingerprint.
   board.
 - The boot trail is a fixed-size buffer rewritten in place, so a shorter trail
   leaves the tail of the previous boot's behind and can be misread.
+- **A device on emOS cannot be re-provisioned by the wizard, and nothing in
+  the wizard says so.** Step 0 needs adbd, which emOS does not have and will
+  not — `f_acm` is the whole point of not needing a daemon. So the USB picker
+  offers nothing and the step fails with an error about the wrong device,
+  which does not name the actual reason. The duplicate-serial guard would
+  refuse it a second time over, since a provisioned device is registered.
+
+  Noticed by Wil on 2026-09-05, after the flow was built. The design's open
+  questions covered FireOS → emOS and deferred it; **nobody asked the
+  reverse**, which is how it got this far.
+
+  Three paths exist and none of them is in the wizard:
+
+  - **Return to stock, by hand.** Boot into TWRP with the button combo, wipe
+    cache, wipe data, and sideload the FireOS 5 image. This is the documented
+    answer and the one to give users today — see the recovery table in the
+    provisioning design and `docs/rooting.md`. Note it WIPES `/data`, so
+    EchoMuse and its config go with it; that is the difference between this
+    and restoring the escrowed boot image, which leaves `/data` alone but
+    also leaves the device on FireOS with emOS's install still sitting there.
+  - **Flash over the network from the running emOS**, which is how development
+    images are already moved (~30s a cycle). The device has a root shell and
+    the controller can reach it, so this is the natural home for a real
+    re-provision and needs no USB at all.
+  - **The console**, for a device that is on emOS but not on the network.
+
+  The middle one is the fix worth building, and it is the same self-flash the
+  design deferred for FireOS → emOS. Until then this is a one-way door: keep
+  the escrowed boot image.
 
 ## What emOS is worth beyond the stunt
 
