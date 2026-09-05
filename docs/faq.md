@@ -66,12 +66,25 @@ Add your HA URL at `chrome://flags/#unsafely-treat-insecure-origin-as-secure`
 — e.g. `http://homeassistant.local:8123` — and restart the browser. Tracked as
 [#170](https://github.com/wilbowes/EchoMuse/issues/170).
 
-### The USB connection drops immediately after a reboot step.
-Known on some devices ([#79](https://github.com/wilbowes/EchoMuse/issues/79)).
-Setting `persist.sys.usb.config` to `mtp,adb` before the reboot keeps it on
-the bus. If you hit this, please add your `getprop ro.build.fingerprint` and
-`getprop persist.sys.usb.config` to that issue — we can't reproduce it and
-want to know why some devices arrive unconfigured.
+### The USB connection drops and re-enumerates every few seconds.
+`persist.sys.usb.config` is set to `mtp,adb`, and the composite gadget is what
+drops the bus — roughly every six seconds, with `device firmware changed` in
+`dmesg` each time. Forcing it to `adb` alone fixes it. Nothing EchoMuse does
+needs MTP.
+
+**`setprop` from a booted device will not work.** Android's property service
+refuses that specific property whatever `ro.secure` and `ro.debuggable` say
+(`init: sys_prop: permission denied uid:2000 name:sys.usb.config`), so it has
+to be changed before that layer applies. From TWRP, unpack the boot image, edit
+`default.prop` to read `persist.sys.usb.config=adb`, add
+`persist.sys.usb.state=adb`, repack and write it back — the full commands are
+in [#79](https://github.com/wilbowes/EchoMuse/issues/79).
+
+Root-caused by @kylegordon and confirmed independently by @midiland, who found
+`setprop` did work on his device — worth trying first, since it costs nothing.
+
+*(This entry previously advised setting `mtp,adb`, which is the cause rather
+than the fix. Corrected 2026-09-05.)*
 
 ### A wizard step failed and I don't know why.
 Every failed step offers diagnostics. Grab those before retrying — the state
