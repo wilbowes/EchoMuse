@@ -204,7 +204,20 @@ static const unsigned char C_PEAK[3]   = { 0xFF, 0xFF, 0xFF };
                                         * still going. Under one whole LED, so
                                         * it can never reach a checkpoint the
                                         * boot has not actually passed. */
-#define BREATH_MIN ((SUB * 13) / 20)   /* the head dips to 65%, never dark */
+/* How far the head falls back toward the ground colour at the bottom of its
+ * breath. Two depths, because the breath is doing two different jobs.
+ *
+ * While the head is TRAVELLING it only has to look alive, and the movement
+ * carries that on its own — a deep pulse there would compete with the motion.
+ * Once it parks on position 12 and waits for the network, the breath is the
+ * only thing happening at all, for 27.6 seconds of a 35 second boot, so it has
+ * to actually read: 65% was measured on the device as not noticeable (Wil,
+ * 2026-09-05). Parked it swings most of the way back to blue, and slower, so
+ * it reads as waiting rather than as activity. */
+#define BREATH_MIN     ((SUB * 13) / 20)   /* moving: 65%, a shimmer */
+#define BREATH_PARKED  ((SUB *  1) / 5)    /* parked: 20%, a throb   */
+#define BREATH_MS         2400
+#define BREATH_PARKED_MS  3600
 
 enum { ANIM_RUN = 0, ANIM_FAIL, ANIM_FINISH, ANIM_OFF, ANIM_DONE };
 
@@ -277,11 +290,18 @@ static void scale(unsigned char out[3], const unsigned char c[3], int w)
  * pulsing evenly. This is what keeps the ring alive during a stage that takes
  * seconds: the head stops travelling as it approaches the next checkpoint, but
  * it never stops moving. */
-static int breath(int tick)
+/* A dip and a return, starting at FULL.
+ *
+ * Phased on how long the head has been still rather than on a free-running
+ * tick, and it begins at the top — so the moment the head stops, the breath
+ * starts from exactly the brightness the head already had. On a free tick it
+ * would jump to wherever the wave happened to be. */
+static int breath(int still, int period_ms)
 {
-    int per = 2400 / TICK_MS;
-    int x = tick % per;
-    int tri = x < per / 2 ? x * 2 * SUB / per : (per - x) * 2 * SUB / per;
+    int per = period_ms / TICK_MS;
+    int x = still % per;
+    int d = x < per / 2 ? per / 2 - x : x - per / 2;
+    int tri = d * 2 * SUB / per;
     return tri * tri / SUB;
 }
 
@@ -316,20 +336,47 @@ static int head_advance(int head_q, int stage)
 
 /* head_q is a position in SUB units around the ring, 0..LED_N*SUB. `trail`
  * shows progress behind the head; during the wind-in there is none to show. */
-static void anim_render(int head_q, int tick, int failed, int trail)
+/* still = ticks the head has been visually stationary; 0 means it is moving.
+ *
+ * The head is STEADY while it travels and throbs only once it stops. Both were
+ * happening at once, and they say opposite things — movement means progress,
+ * the throb means waiting — so overlapping them left the head restless without
+ * either reading clearly (Wil, 2026-09-05).
+ *
+ * The head mixes between the GROUND and the head colour rather than scaling
+ * toward black: scaling cyan down takes the blue channel with it, so the head
+ * would go dimmer than the ring it sits on. Mixing holds blue at full and
+ * moves only the green.
+ */
+static void anim_render(int head_q, int still, int failed, int trail)
 {
     unsigned char f[LED_N][3], head[3];
 
-    /* The head breathes between the GROUND and the head colour rather than
-     * toward black. Scaling cyan down takes the blue channel with it, so the
-     * head would go dimmer than the ring it sits on; mixing keeps blue at full
-     * and moves only the green, which reads as the head brightening and
-     * settling rather than blinking. */
+    /* Parked: arrived at the last segment with the boot still running. */
+    int parked = trail && head_q >= (LED_N - 1) * SUB;
+    int lo     = parked ? BREATH_PARKED : BREATH_MIN;
+    int mix    = still
+               ? lo + breath(still, parked ? BREATH_PARKED_MS : BREATH_MS)
+                      * (SUB - lo) / SUB
+               : SUB;
+
     if (failed)
         memcpy(head, C_FAIL, 3);
     else
-        blend(head, C_ORBIT, C_HEAD,
-              BREATH_MIN + breath(tick) * (SUB - BREATH_MIN) / SUB);
+        blend(head, C_ORBIT, C_HEAD, mix);
+
+    /* Parked is drawn on its own terms: the build colour all the way round and
+     * JUST the pair either side of the bottom gap throbbing on top of it. No
+     * comet glow on a neighbour — the head is not travelling any more, and a
+     * smear beside it reads as a tail that has not finished arriving. */
+    if (parked) {
+        for (int p = 0; p < LED_N; p++)
+            memcpy(f[p], C_ORBIT, 3);
+        memcpy(f[0], head, 3);
+        memcpy(f[LED_N - 1], head, 3);
+        led_write(f);
+        return;
+    }
 
     /* Ahead of the head the ring is DARK, and the tail paints the orbit's own
      * blue back onto it as it goes. Carrying the lit ring through instead —
@@ -362,13 +409,6 @@ static void anim_render(int head_q, int tick, int failed, int trail)
     if (glow)
         blend(f[far % LED_N], f[far % LED_N], head, glow);
 
-    /* Once the head reaches the last segment, the FIRST one lights with it and
-     * the pair closes the ring across the bottom gap, breathing together until
-     * the boot finishes. That wait is real and long — association and DHCP are
-     * most of the boot — so it wants something deliberate rather than a head
-     * sitting on its own. */
-    if (trail && head_q >= (LED_N - 1) * SUB)
-        blend(f[0], f[0], head, SUB);
     led_write(f);
 }
 
@@ -413,9 +453,29 @@ static int orbit_head_pos(void)
 /* Boot complete: close the ring, fill both sides from the bottom to the top,
  * take it to full and then take it away. The fade hands the LEDs back, so
  * anything shown afterwards is the firmware's to explain. */
-static void anim_finale(void)
+static void anim_finale(int still)
 {
-    unsigned char f[LED_N][3];
+    unsigned char f[LED_N][3], head[3];
+
+    /* Settle the throb to full before the sweep begins.
+     *
+     * The pair has been breathing for the whole network wait, so without this
+     * the first arm frame snaps it from wherever the breath happened to be
+     * straight to full — a flicker if it was caught near the bottom, and pure
+     * luck if it was not. Ramping from the CURRENT breath level means the
+     * brightening reads as one deliberate move into the sweep whatever phase
+     * it was in (Wil, 2026-09-05). */
+    int lo = BREATH_PARKED
+           + breath(still, BREATH_PARKED_MS) * (SUB - BREATH_PARKED) / SUB;
+    for (int v = lo; v < SUB; v += 24) {
+        for (int p = 0; p < LED_N; p++)
+            memcpy(f[p], C_ORBIT, 3);
+        blend(head, C_ORBIT, C_HEAD, v);
+        memcpy(f[0], head, 3);
+        memcpy(f[LED_N - 1], head, 3);
+        led_write(f);
+        usleep(TICK_MS * 1000);
+    }
 
     /* Both sides, bottom to top.
      *
@@ -526,7 +586,7 @@ static void anim_handover(void)
 
 static void anim_main(void)
 {
-    int head_q = 0, tick = 0;
+    int head_q = 0, still = 0;
 
     anim_claim();
     anim_handover();
@@ -540,13 +600,20 @@ static void anim_main(void)
             _exit(0);
         }
         if (mode == ANIM_FINISH) {
-            anim_finale();
+            anim_finale(still);
             ledst->mode = ANIM_DONE;
             _exit(0);
         }
-        if (mode != ANIM_FAIL)
+        if (mode != ANIM_FAIL) {
+            int was = head_q;
             head_q = head_advance(head_q, ledst->stage);
-        anim_render(head_q, tick++, mode == ANIM_FAIL, 1);
+            /* Visually stationary, not arithmetically: the ease decelerates to
+             * a crawl of one unit a tick, which is 1/256 of a segment and
+             * changes no pixel. Treating that as movement would suppress the
+             * throb for seconds while nothing appeared to happen. */
+            still = (head_q - was >= SUB / 32) ? 0 : still + 1;
+        }
+        anim_render(head_q, still, mode == ANIM_FAIL, 1);
         usleep(TICK_MS * 1000);
     }
 }

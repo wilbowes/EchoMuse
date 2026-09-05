@@ -109,7 +109,7 @@ static void run_boot(int fail_at, int start_pos)
     ledst->mode = ANIM_RUN;
     bootstep = 0;
 
-    int head_q = 0, tick = 0;
+    int head_q = 0, tick = 0, still = 0;
 
     /* No wind-in to model: anim_claim waits for the orbit to reach the bottom
      * before taking the ring, so our head always starts there. The handover
@@ -121,15 +121,17 @@ static void run_boot(int fail_at, int start_pos)
     for (int s = 0; s < LED_N; s++) {
         int ticks = stage_ms[s] / TICK_MS;
         for (int k = 0; k < ticks; k++) {
+            int was = head_q;
             head_q = head_advance(head_q, ledst->stage);
+            still = (head_q - was >= SUB / 32) ? 0 : still + 1;
             cur_head_q = head_q;
-            anim_render(head_q, tick++, 0, 1);
+            anim_render(head_q, still, 0, 1);
             sim_usleep(TICK_MS * 1000);
         }
         if (fail_at == s + 1) {
             for (int k = 0; k < 30; k++) {
                 cur_head_q = head_q;
-                anim_render(head_q, tick++, 1, 1);
+                anim_render(head_q, still, 1, 1);
                 sim_usleep(TICK_MS * 1000);
             }
             return;
@@ -141,7 +143,7 @@ static void run_boot(int fail_at, int start_pos)
      * colour and then takes it to white — so it is measured separately rather
      * than folded in, which is what made these read as failures at first. */
     boot_frames = nframes;
-    anim_finale();
+    anim_finale(still);
     capture();   /* the finale's last frame is black and has no sleep after it */
 }
 
