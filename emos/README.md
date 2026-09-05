@@ -165,13 +165,18 @@ Hashing is still worth it, for a different asset: it does not protect the
 DEVICE, it protects the PASSWORD, which the owner has probably reused somewhere
 that matters. Salted SHA-256, iterated, written out by hand in `init.c` because
 this is a static binary with no crypto library. `init/pwcheck.c` includes
-`init.c` whole and prints records for the same vectors
-`controller/tests/test_console_pw.py` carries, so the two implementations are
-compared rather than assumed:
+`init.c` whole and prints a record for each of its vectors, leading with the
+password that produced it, so the two implementations are compared rather than
+assumed:
 
 ```sh
 cd init && cc -O2 -o /tmp/pwcheck pwcheck.c && /tmp/pwcheck
 ```
+
+CI runs that and recomputes every record with `hashlib`, so a drift between the
+C and the Python fails a check rather than a login over USB. The password is in
+the output for exactly that reason: the checker derives the expected hash from
+`pwcheck`'s own inputs and needs no second copy of the table.
 
 Two behaviours chosen so a mistake fails open rather than shut: a record that
 cannot be parsed means NO password, and wrong answers slow down but never lock
@@ -355,7 +360,10 @@ cd init && cc -O2 -o /tmp/ringsim ringsim.c -lm
 Nothing is reimplemented there, so it cannot drift from what the device runs.
 It checks that the ring is never still for 400ms, that the head never travels
 backwards, that nothing lights ahead of it, and that the ring is handed back
-dark. Note the display is gamma-corrected: rendered linearly the dark blue
+dark. CI runs `--check` on every PR, so those invariants hold without anyone
+remembering to look. Only the clean boot is asserted: the failure display ends
+with the ring lit on purpose, so it fails the handed-back-dark check by design
+and needs its own invariants before it can be asserted too. Note the display is gamma-corrected: rendered linearly the dark blue
 trail reads as blank, which is a property of the ramp and not of the ring.
 
 **Three constants in `init.c` are still guesses** and are gathered under "Four

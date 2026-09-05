@@ -35,7 +35,13 @@ static void emit(const char *pw, const char *salthex, long iters)
         return;
     }
     pw_hash(salt, saltlen, pw, iters, out);
-    printf("%ld:%s:", iters, salthex);
+    /* The password leads the line, tab-separated, so a reader has every input
+     * that produced the record and can recompute it without being told what
+     * the inputs were. CI does exactly that: without this field the checker
+     * would need its own copy of the table below, which is the drift this
+     * file exists to catch rather than commit. A password may contain spaces,
+     * so the separator is a tab. */
+    printf("%s\t%ld:%s:", pw, iters, salthex);
     for (int i = 0; i < 32; i++)
         printf("%02x", out[i]);
     printf("\n");

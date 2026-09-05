@@ -382,7 +382,7 @@ jobs:
         run: docker rm -f em-ci 2>/dev/null || true
 
   device-firmware-build:
-    name: Device firmware builds (pinned compiler)
+    name: Device and emOS builds (pinned compiler)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -421,6 +421,125 @@ jobs:
           file device/build/server
           file device/build/server | grep -q "ARM" || {
             echo "::error::firmware is not an ARM binary"; exit 1; }
+      # emOS's init rides in this job rather than its own because the compiler
+      # it needs is already here: the NDK inside this image is the toolchain
+      # emos/build.sh reaches for, and building the image is minutes where the
+      # compile below is seconds. A second job would pay that cost twice for
+      # one clang invocation.
+      #
+      # It is AARCH64 while the firmware beside it is armv7a, and that is not a
+      # mistake in either. biscuit boots an ARM64 kernel — the fact that cost
+      # five flashed images of a 32-bit kernel that never executed an
+      # instruction (see the LibreEcho notes) — while the server binary is
+      # built for the Android userspace it has always run under.
+      #
+      # -static is the part that has to keep working. Three boots with a
+      # busybox script init produced no output at all, which is
+      # indistinguishable from a kernel that never started; there is no
+      # dynamic loader at PID 1 time, so a link that quietly picks up a shared
+      # object is a device that has to be recovered by hand to diagnose.
+      - name: Build the emOS init (aarch64, static)
+        run: |
+          mkdir -p emos/build
+          docker run --rm -v "$PWD/emos":/emos -w /emos echomuse-compiler bash -lc \
+            '/opt/android/ndk/21.4.7075529/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang \
+               -static -O2 -Wall -o build/init init/init.c'
+      - name: Check it is a static aarch64 binary
+        # Same reasoning as the firmware check above, plus the static half:
+        # both properties are silent when wrong and fatal on the device.
+        run: |
+          file emos/build/init
+          file emos/build/init | grep -q "ARM aarch64" || {
+            echo "::error::emOS init is not an aarch64 binary"; exit 1; }
+          file emos/build/init | grep -q "statically linked" || {
+            echo "::error::emOS init is not statically linked"; exit 1; }
+
+  emos-checks:
+    name: emOS init checks (ring and password)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # WHY THIS EXISTS: emos/ is ~1,900 lines of C that until now nothing in
+      # CI compiled, let alone ran. It is also the code with the longest
+      # feedback loop in the project — a change reaches a verdict only by
+      # flashing a boot partition and watching the device, so a mistake that a
+      # compiler or a simulator could have caught costs a reflash instead.
+      #
+      # Both tools below already existed for exactly this and were run by
+      # hand. Running them here is the whole change; neither reimplements
+      # anything, because both #include init.c whole and drive the real
+      # functions.
+      #
+      # Host cc, not the NDK: these are the OFF-TARGET tools, and their value
+      # is the behaviour they check rather than the code generation. The
+      # target build lives in the pinned-compiler job above, where the NDK is.
+      - name: The boot ring holds its invariants
+        # Only the clean boot is asserted. `ringsim --check <stage>` also
+        # renders the failure display, but that path deliberately ends with
+        # the ring LIT — it is an error indication — so it fails the
+        # handed-back-dark check by design and is not a scenario to assert
+        # here without a second invariant set.
+        run: |
+          cc -O2 -Wall -o /tmp/ringsim emos/init/ringsim.c -lm
+          /tmp/ringsim --check
+      # The C hashes a password by hand — init is a static binary with no
+      # crypto library — and the controller hashes it in Python. Nothing but
+      # equal output proves they agree, and the failure mode is a device
+      # refusing the password the dashboard just accepted, discovered over
+      # USB on hardware.
+      #
+      # The vectors are NOT restated here. pwcheck prints the password that
+      # produced each record, so this recomputes from the C's own inputs with
+      # nothing but hashlib; a third copy of the table would be the drift the
+      # check is for. It also needs no controller module, so it stands whether
+      # or not the console-password work is in the tree beside it.
+      - name: The C password hash agrees with Python's
+        run: |
+          cc -O2 -o /tmp/pwcheck emos/init/pwcheck.c
+          /tmp/pwcheck | tee /tmp/vectors.txt
+          # The vectors go in as an ARGUMENT, not on stdin: the heredoc below
+          # is already stdin, so a redirect here would be overridden and the
+          # loop would read the script's own source and find no records.
+          python3 - /tmp/vectors.txt <<'PY'
+          import hashlib, sys
+
+          n = 0
+          for line in open(sys.argv[1]):
+              line = line.rstrip("\n")
+              if not line:
+                  continue
+              pw, record = line.split("\t", 1)
+              iters, salthex, got = record.split(":")
+              h = hashlib.sha256(bytes.fromhex(salthex) + pw.encode()).digest()
+              for _ in range(int(iters) - 1):
+                  h = hashlib.sha256(h).digest()
+              if h.hex() != got:
+                  print(f"::error::{iters} rounds of {pw!r}: "
+                        f"C says {got}, Python says {h.hex()}")
+                  sys.exit(1)
+              n += 1
+          # A pwcheck that emitted nothing would otherwise pass this silently,
+          # which is the shape of bug ringsim's own frame count exists to catch.
+          if n < 4:
+              print(f"::error::pwcheck emitted {n} vectors, expected at least 4")
+              sys.exit(1)
+          print(f"{n} vectors agree")
+          PY
+      # mkboot.py cannot be exercised without a reference boot image, which is
+      # the one input we never ship — it comes off the user's own device. So
+      # this is the same undefined-name check the controller gets, for the
+      # same reason: it is the failure that is silent until the line runs, and
+      # the line here runs while somebody is writing to a boot partition.
+      - name: Check the packer for undefined names
+        run: |
+          pip install pyflakes
+          out=$(python -m pyflakes emos/mkboot.py 2>&1 | grep -i "undefined name" || true)
+          if [ -n "$out" ]; then
+            echo "$out"
+            echo "::error::pyflakes found undefined name(s) in mkboot.py"
+            exit 1
+          fi
+          echo "No undefined names."
 
   device-vet:
     name: Device go vet
