@@ -147,40 +147,47 @@ static const struct node nodes[] = {
  * boot trail. */
 static void note(const char *fmt, ...);
 
-/* ── Four numbers nobody has measured yet ────────────────────────────────────
+/* ── The orbit, as measured off EFF on 2026-09-05 ────────────────────────────
  *
- * Nothing in this project has ever needed to know how the ring is ORIENTED:
- * every animation we ship is rotationally symmetric, and the spinner's
- * direction was a free choice. This is the first display that is not, so the
- * geometry and the palette are guesses and are gathered here to be corrected
- * in one place rather than hunted for.
+ * Read straight out of the driver rather than eyeballed: `frame` is a
+ * read/write attribute on Amazon's 3.18 driver too, so writing 1 to
+ * boot_animation on a running device replays the orbit and each frame can be
+ * read back exactly as the kernel is displaying it.
  *
- * LED_BOTTOM — settled: the ring's existing fill starts at the LED just left
- *              of bottom centre, and that is where this one starts too (Wil,
- *              2026-09-05). Twelve LEDs at 30° put no LED at dead bottom, so
- *              the bottom is the gap between positions 0 and 11 and the
- *              finale's arms are the pairs either side of it.
- * LED_DIR    — still a guess. It only has to match the direction the kernel's
- *              orbit travels, which the probe below answers.
- * C_TRAIL / C_HEAD     — set ORBIT_PROBE, boot once, read the trail. The
- *                        kernel's own frames come back as hex, so the two
- *                        blues can be copied exactly rather than eyeballed,
- *                        and the sample interval gives the orbit's direction
- *                        and period to match ORBIT_MS against.
+ *   ground     0000ff on ALL TWELVE LEDs — a complete blue ring, not a dark
+ *              one with a lit segment. This is the fact the design turns on:
+ *              anything of ours that leaves LEDs dark is a hard cut at the
+ *              handover, however well the colours match.
+ *   head       00ffff — cyan. Not a lighter blue.
+ *   direction  rising physical index, wrapping 11 -> 0.
+ *   rate       109ms per step, min 100 max 120 over 13 clean transitions;
+ *              1.31s per revolution.
+ *
+ * Sampling at 100ms first suggested exactly one step per sample, which is the
+ * signature of aliasing rather than a measurement — hence the second pass at
+ * full speed against /proc/uptime.
+ *
+ * LED_BOTTOM is settled differently: the ring's existing fill starts at the
+ * LED just left of bottom centre and this one starts there too (Wil,
+ * 2026-09-05). Twelve LEDs at 30° put none at dead bottom, so the bottom is
+ * the GAP between positions 0 and 11, and the finale's arms are the pairs
+ * either side of it.
  */
 #define LED_BOTTOM 0        /* physical index of the LED at the bottom */
-#define LED_DIR    1        /* +1 if rising physical index runs clockwise */
-#define ORBIT_MS   2000     /* the kernel orbit's period, for rate-matching */
+#define LED_DIR    1        /* +1: the orbit runs on rising physical index */
+#define ORBIT_STEP_MS 109   /* measured; the wind-in matches this exactly */
 #define ORBIT_PROBE 1       /* sample the kernel's frames before claiming */
 
-static const unsigned char C_TRAIL[3] = { 0x00, 0x08, 0x30 };  /* dark ground */
-static const unsigned char C_HEAD[3]  = { 0x30, 0x80, 0xFF };  /* light head  */
-static const unsigned char C_FAIL[3]  = { 0xFF, 0x00, 0x00 };
-static const unsigned char C_AMBER[3] = { 0xFF, 0x60, 0x00 };
-/* The ring's last moment before it fades. Green here would say "network
- * confirmed" the way the old ring did; it is one line if that is ever wanted
- * back, but confirmation is a diagnostic and this ring is not one. */
-static const unsigned char C_PEAK[3]  = { 0x80, 0xD0, 0xFF };
+static const unsigned char C_GROUND[3] = { 0x00, 0x00, 0xFF }; /* the orbit's ring */
+static const unsigned char C_HEAD[3]   = { 0x00, 0xFF, 0xFF }; /* the orbit's head */
+/* Progress is the arc between the two: far enough toward the head to read as a
+ * filling ring, still plainly the same blue family as the ground. */
+static const unsigned char C_TRAIL[3]  = { 0x00, 0x70, 0xFF };
+static const unsigned char C_FAIL[3]   = { 0xFF, 0x00, 0x00 };
+static const unsigned char C_AMBER[3]  = { 0xFF, 0x60, 0x00 };
+/* Cyan is already full on two channels, so the only way UP is toward white —
+ * adding red is what "brighter" means once green and blue are at 0xFF. */
+static const unsigned char C_PEAK[3]   = { 0xFF, 0xFF, 0xFF };
 
 #define SUB       256                  /* sub-LED position units */
 #define TICK_MS   33                   /* ~30fps; 36 bytes of i2c per frame */
@@ -269,27 +276,85 @@ static int breath(int tick)
     return tri * tri / SUB;
 }
 
-/* head_q is a position in SUB units around the ring, 0..LED_N*SUB. */
-static void anim_render(int head_q, int tick, int failed)
+/* head_q is a position in SUB units around the ring, 0..LED_N*SUB. `trail`
+ * shows progress behind the head; during the wind-in there is none to show. */
+static void anim_render(int head_q, int tick, int failed, int trail)
 {
     unsigned char f[LED_N][3], head[3];
 
-    scale(head, failed ? C_FAIL : C_HEAD,
-          failed ? SUB : BREATH_MIN + breath(tick) * (SUB - BREATH_MIN) / SUB);
+    /* The head breathes between the GROUND and the head colour rather than
+     * toward black. Scaling cyan down takes the blue channel with it, so the
+     * head would go dimmer than the ring it sits on; mixing keeps blue at full
+     * and moves only the green, which reads as the head brightening and
+     * settling rather than blinking. */
+    if (failed)
+        memcpy(head, C_FAIL, 3);
+    else
+        blend(head, C_GROUND, C_HEAD,
+              BREATH_MIN + breath(tick) * (SUB - BREATH_MIN) / SUB);
 
+    /* The ground is the orbit's own ring, lit on every LED. Leaving the
+     * unreached segments dark is what would make the handover a cut, however
+     * well the colours matched. */
     int i = head_q / SUB, fr = head_q % SUB;
-    for (int p = 0; p < LED_N; p++) {
-        if (p < i)
-            memcpy(f[p], C_TRAIL, 3);
-        else
-            memset(f[p], 0, 3);
-    }
-    /* The head straddles two segments. Modulo, so a head arriving at LED_N
-     * lands back on the bottom rather than off the end of the ring. */
-    blend(f[i % LED_N], f[i % LED_N], head, SUB - fr);
-    if (fr)
-        blend(f[(i + 1) % LED_N], f[(i + 1) % LED_N], head, fr);
+    for (int p = 0; p < LED_N; p++)
+        memcpy(f[p], trail && p < i ? C_TRAIL : C_GROUND, 3);
+
+    /* The head straddles two segments, but it is NOT a plain cross-fade: the
+     * nearer LED always gets the head at full and the further one takes a
+     * proportional glow, widening to two full segments as it passes the
+     * midpoint. A plain cross-fade splits the head's brightness in half there,
+     * and at the bottom of the breath each half falls BELOW the trail — so the
+     * leading edge stops being the brightest thing on the ring and the trail
+     * reads as the head. Caught in ringsim, not on hardware.
+     *
+     * Modulo throughout, so a head arriving at LED_N lands back on the bottom
+     * rather than off the end of the ring. */
+    int near = fr < SUB / 2 ? i : i + 1;
+    int far  = fr < SUB / 2 ? i + 1 : i;
+    int glow = fr < SUB / 2 ? fr * 2 : (SUB - fr) * 2;
+    blend(f[near % LED_N], f[near % LED_N], head, SUB);
+    if (glow)
+        blend(f[far % LED_N], f[far % LED_N], head, glow);
     led_write(f);
+}
+
+/* Where the kernel's orbit had got to, in logical positions, so ours can carry
+ * on from there instead of jumping to the bottom. The head is whichever single
+ * segment is not the ground colour; anything else — a dark ring, a frame
+ * already claimed by somebody, two lit segments — is not an orbit we can join,
+ * and returns -1 to start at the bottom as before. */
+static int orbit_head_pos(void)
+{
+    int fd = open(LEDDIR "/frame", O_RDONLY);
+    if (fd < 0)
+        return -1;
+    char b[LED_N * 6 + 8];
+    int n = read(fd, b, sizeof b - 1);
+    close(fd);
+    if (n < LED_N * 6)
+        return -1;
+
+    char want[6];
+    puthex(want,     C_GROUND[0]);
+    puthex(want + 2, C_GROUND[1]);
+    puthex(want + 4, C_GROUND[2]);
+
+    int found = -1, count = 0;
+    for (int L = 0; L < LED_N; L++) {
+        int p = (LED_BOTTOM + LED_DIR * L) % LED_N;
+        if (p < 0)
+            p += LED_N;
+        int same = 1;
+        for (int k = 0; k < 6; k++) {
+            char a = b[p * 6 + k], w = want[k];
+            if (a >= 'a' && a <= 'f') a -= 32;   /* the kernel prints lower */
+            if (w >= 'a' && w <= 'f') w -= 32;
+            if (a != w) { same = 0; break; }
+        }
+        if (!same) { found = L; count++; }
+    }
+    return count == 1 ? found : -1;
 }
 
 /* Boot complete: close the ring, fill both sides from the bottom to the top,
@@ -306,7 +371,7 @@ static void anim_finale(int head_q, int tick)
         head_q += step;
         if (head_q > LED_N * SUB)
             head_q = LED_N * SUB;
-        anim_render(head_q, tick++, 0);
+        anim_render(head_q, tick++, 0, 1);
         usleep(TICK_MS * 1000);
     }
 
@@ -344,9 +409,20 @@ static void anim_finale(int head_q, int tick)
 
 /* The animator. Owns the ring for as long as it lives; reads the stage the
  * parent has reached and never writes it. */
-static void anim_main(void)
+static void anim_main(int start_pos)
 {
-    int head_q = 0, tick = 0;
+    int head_q = 0, tick = 0, winding = 0;
+
+    /* Carry the orbit on from wherever it had reached, at its own measured
+     * rate, until the head comes round to the bottom — then progress takes
+     * over from there. At most one lap, so 1.31s, spent while /system mounts
+     * and fsck runs. The one difference is that this glides where the kernel
+     * stepped a whole LED at a time; it is the same movement at the same rate,
+     * and the smoothing is the point rather than an accident. */
+    if (start_pos > 0) {
+        head_q = start_pos * SUB;
+        winding = 1;
+    }
 
     for (;;) {
         int mode = ledst->mode;
@@ -361,6 +437,18 @@ static void anim_main(void)
             ledst->mode = ANIM_DONE;
             _exit(0);
         }
+        if (winding && mode == ANIM_RUN) {
+            head_q += SUB * TICK_MS / ORBIT_STEP_MS;
+            if (head_q >= LED_N * SUB) {
+                head_q = 0;
+                winding = 0;
+            }
+            anim_render(head_q, tick++, 0, 0);
+            usleep(TICK_MS * 1000);
+            continue;
+        }
+        winding = 0;      /* a failure or a finish ends the wind-in early */
+
         if (mode != ANIM_FAIL) {
             int stage = ledst->stage;
             if (stage > LED_N)
@@ -377,7 +465,7 @@ static void anim_main(void)
                     head_q = target;
             }
         }
-        anim_render(head_q, tick++, mode == ANIM_FAIL);
+        anim_render(head_q, tick++, mode == ANIM_FAIL, 1);
         usleep(TICK_MS * 1000);
     }
 }
@@ -421,6 +509,11 @@ static void led_claim(void)
 {
     orbit_probe();
 
+    /* Read where the orbit is BEFORE stopping it — the frame keeps its last
+     * contents afterwards, but reading it live is the honest moment. */
+    int start_pos = orbit_head_pos();
+    note("orbit head at %d\n", start_pos);
+
     int fd = open(LEDDIR "/boot_animation", O_WRONLY);
     if (fd >= 0) { write(fd, "0", 1); close(fd); }
     fd = open(LEDDIR "/led_current", O_WRONLY);
@@ -438,7 +531,7 @@ static void led_claim(void)
 
     led_pid = fork();
     if (led_pid == 0) {
-        anim_main();
+        anim_main(start_pos);
         _exit(0);
     }
 }

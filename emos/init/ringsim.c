@@ -42,8 +42,14 @@ static void sim_usleep(unsigned us) { capture(); sim_now_us += us; }
 /* ── Capture ────────────────────────────────────────────────────────────────*/
 
 #define MAXFR 20000
-static struct { unsigned char rgb[LED_N][3]; long t; } frames[MAXFR];
+static struct { unsigned char rgb[LED_N][3]; long t; int head_q; } frames[MAXFR];
 static int nframes;
+static int boot_frames;   /* frames before the finale begins */
+/* The head position the animation was asked to draw, recorded per frame.
+ * Inferring it from brightness works until the head wraps past the top and
+ * the trail covers most of the ring, at which point the brightest segment is
+ * the head sitting at the BOTTOM and every inference from it is inverted. */
+static int cur_head_q;
 
 /* led_write goes to a file; read it back so the check sees exactly the bytes
  * the driver would. */
@@ -65,6 +71,7 @@ static void capture(void)
         frames[nframes].rgb[i][2] = b;
     }
     frames[nframes].t = sim_now_us;
+    frames[nframes].head_q = cur_head_q;
     nframes++;
 }
 
@@ -87,13 +94,28 @@ static const int stage_ms[LED_N] = {
     900,    /* 12 address                 */
 };
 
-static void run_boot(int fail_at)
+/* start_pos is where the kernel's orbit had reached when we claimed the ring;
+ * 7 is simply a mid-ring value, since it can be anything. */
+static void run_boot(int fail_at, int start_pos)
 {
     ledst = calloc(1, sizeof *ledst);
     ledst->mode = ANIM_RUN;
     bootstep = 0;
 
     int head_q = 0, tick = 0;
+
+    /* The wind-in, at the orbit's own measured rate. */
+    if (start_pos > 0) {
+        head_q = start_pos * SUB;
+        while (head_q < LED_N * SUB) {
+            head_q += SUB * TICK_MS / ORBIT_STEP_MS;
+            cur_head_q = head_q >= LED_N * SUB ? LED_N * SUB - 1 : head_q;
+            anim_render(cur_head_q, tick++, 0, 0);
+            sim_usleep(TICK_MS * 1000);
+        }
+        head_q = 0;
+    }
+
     for (int s = 0; s < LED_N; s++) {
         int ticks = stage_ms[s] / TICK_MS;
         for (int k = 0; k < ticks; k++) {
@@ -105,18 +127,25 @@ static void run_boot(int fail_at)
                 head_q += step;
                 if (head_q > target) head_q = target;
             }
-            anim_render(head_q, tick++, 0);
+            cur_head_q = head_q;
+            anim_render(head_q, tick++, 0, 1);
             sim_usleep(TICK_MS * 1000);
         }
         if (fail_at == s + 1) {
             for (int k = 0; k < 30; k++) {
-                anim_render(head_q, tick++, 1);
+                cur_head_q = head_q;
+                anim_render(head_q, tick++, 1, 1);
                 sim_usleep(TICK_MS * 1000);
             }
             return;
         }
         led_step();
     }
+    /* The invariants below describe the PROGRESS phase. The finale
+     * deliberately breaks two of them — it lights the whole ring in the head
+     * colour and then takes it to white — so it is measured separately rather
+     * than folded in, which is what made these read as failures at first. */
+    boot_frames = nframes;
     anim_finale(head_q, tick);
     capture();   /* the finale's last frame is black and has no sleep after it */
 }
@@ -181,22 +210,45 @@ static void check_run(void)
     printf("longest identical run: %d frames (%dms)\n", worst, worst * TICK_MS);
     ck(worst * TICK_MS < 400, "ring is never still for 400ms");
 
-    /* Progress is monotonic and never overtakes the boot. */
+    /* Progress is monotonic and never overtakes the boot. Wraps excluded: the
+     * wind-in legitimately carries the head round past 11 to the bottom. */
     int back = 0;
-    for (int i = 1; i < nframes; i++)
-        if (headpos(i) < headpos(i - 1) && headpos(i - 1) - headpos(i) < LED_N / 2)
+    for (int i = 1; i < boot_frames; i++)
+        if (headpos(i) < headpos(i - 1) && headpos(i - 1) - headpos(i) < LED_N / 2) {
+            if (back < 4)
+                printf("  backwards at frame %d (%ldms): %d -> %d\n",
+                       i, frames[i].t / 1000, headpos(i - 1), headpos(i));
             back++;
+        }
     ck(back == 0, "head never travels backwards");
 
-    /* Everything behind the head is trail, nothing ahead of it is lit. */
-    int ahead = 0;
-    for (int i = 0; i < nframes / 2; i++) {
-        int h = headpos(i);
+    /* Every LED is lit for the whole boot. This is the seamlessness property:
+     * the orbit hands over a complete blue ring, and any dark segment of ours
+     * is a visible cut at the handover however well the colours match. The
+     * fade at the very end is the one place the ring may go dark. */
+    int dark = 0;
+    for (int i = 0; i < boot_frames; i++)
+        for (int p = 0; p < LED_N; p++)
+            if (!(frames[i].rgb[p][0] | frames[i].rgb[p][1] | frames[i].rgb[p][2]))
+                dark++;
+    ck(dark == 0, "no LED is ever dark before the fade");
+
+    /* Unreached segments are exactly the orbit's ground colour. */
+    /* "Unreached" means strictly ahead of the head and its glow, measured
+     * from the position the animation was actually given. */
+    int off = 0;
+    for (int i = 0; i < boot_frames; i++) {
+        int h = frames[i].head_q / SUB;
         for (int p = h + 2; p < LED_N; p++)
-            if (frames[i].rgb[p][0] | frames[i].rgb[p][1] | frames[i].rgb[p][2])
-                ahead++;
+            if (memcmp(frames[i].rgb[p], C_GROUND, 3) != 0) {
+                if (off < 4)
+                    printf("  frame %d (%ldms) head=%d led %d = %02x%02x%02x\n",
+                           i, frames[i].t / 1000, h, p, frames[i].rgb[p][0],
+                           frames[i].rgb[p][1], frames[i].rgb[p][2]);
+                off++;
+            }
     }
-    ck(ahead == 0, "nothing lights ahead of the head");
+    ck(off == 0, "unreached segments sit at the orbit's ground colour");
 
     /* The ring must be handed back dark. A ring left lit is the thing the fade
      * exists to prevent — anything shown after this is the firmware's. */
@@ -219,7 +271,7 @@ int main(int argc, char **argv)
     int check = argc > 1 && !strcmp(argv[1], "--check");
     int fail  = argc > 2 ? atoi(argv[2]) : 0;
 
-    run_boot(fail);
+    run_boot(fail, argc > 3 ? atoi(argv[3]) : 7);
     if (!check) { show(); return 0; }
 
     printf("frames=%d simulated=%ldms\n\n", nframes, sim_now_us / 1000);
