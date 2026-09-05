@@ -334,6 +334,17 @@ type ConfigMessage struct {
 	OwwThreshold       float64  `json:"owwThreshold,omitempty"`
 	OwwModel           string   `json:"owwModel,omitempty"`
 	OwwOnDevice        string   `json:"owwOnDevice,omitempty"`
+	// ConsolePassword is the hashed record emOS's init checks before handing
+	// over a shell on the USB serial console. A POINTER, and it has to be: an
+	// EMPTY record is the legitimate "no password" setting, so with a plain
+	// string plus omitempty a removal would be indistinguishable from a field
+	// nobody sent, and clearing the password could never reach a device.
+	// Same reason DuckDb below is a pointer.
+	//
+	// Consumed by the firmware only to write it to disk for init — the
+	// firmware never checks it, because the console must work when the
+	// firmware is not running. Ignored on FireOS, which uses adbd.
+	ConsolePassword    *string  `json:"consolePassword,omitempty"`
 	BargeInEnabled     *bool    `json:"bargeInEnabled,omitempty"`
 	BargeInThreshold   float64  `json:"bargeInThreshold,omitempty"`
 	DuckDb             *float64 `json:"duckDb,omitempty"`

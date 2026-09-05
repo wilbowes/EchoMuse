@@ -213,6 +213,58 @@ def test_config_redaction_catches_credential_shaped_keys():
         assert out[k] == "<redacted>", f"{k} should have been redacted"
 
 
+def test_the_console_password_never_reaches_a_bundle():
+    """
+    A bundle is written to be attached to a PUBLIC issue, and the console
+    password record is the one config value whose disclosure has consequences
+    beyond this device — the owner has probably reused the passphrase.
+
+    It is caught by NAME rather than by anything knowing what it is, which is
+    the point of _CONFIG_DENY existing, so this pins the belt-and-braces rule
+    against the specific key rather than assuming the substring survives.
+    """
+    import em_console_pw as pw
+
+    record = pw.hash_password("a real password")
+    out = S.redact_config({"consolePassword": record, "owwThreshold": 0.5})
+    assert out["consolePassword"] == "<redacted>"
+    assert out["owwThreshold"] == 0.5, "the useful config must survive"
+
+
+def test_no_part_of_a_console_password_record_survives_a_whole_bundle():
+    """
+    Field-by-field checks miss the leak nobody predicts — a log line, a nested
+    config, a fleet default copied somewhere new — so this asserts the record
+    appears NOWHERE in the serialised output, the same way the other secrets
+    in this file are checked.
+    """
+    import json
+
+    import em_console_pw as pw
+
+    record = pw.hash_password("a real password")
+    bundle = S.build(
+        controller_version="test",
+        devices=[{"device_id": "SERIAL1", "label": "Kitchen", "approved": 1}],
+        fleet_config={"consolePassword": record, "owwThreshold": 0.5},
+        schema_version=21,
+        turns=[],
+        metrics=[],
+        counters=[],
+        device_configs={"SERIAL1": {"consolePassword": record}},
+        live_state={},
+        controller_log=[f"[control] Console password set {record}"],
+        device_log=[],
+    )
+    text = json.dumps(bundle)
+    assert record not in text
+    # The salt and hash halves separately, in case a partial redaction ever
+    # leaves one of them behind.
+    iterations, salt, digest = pw.parse(record)
+    assert salt.hex() not in text
+    assert digest.hex() not in text
+
+
 def test_account_names_are_stripped_from_log_prose():
     """
     Regression, from a real bundle: "Shell session opened by wil" carries the
