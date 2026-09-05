@@ -397,26 +397,24 @@ static int orbit_head_pos(void)
 /* Boot complete: close the ring, fill both sides from the bottom to the top,
  * take it to full and then take it away. The fade hands the LEDs back, so
  * anything shown afterwards is the firmware's to explain. */
-static void anim_finale(int head_q, int tick)
+static void anim_finale(void)
 {
     unsigned char f[LED_N][3];
 
-    while (head_q < LED_N * SUB) {
-        int step = (LED_N * SUB - head_q) / 6;
-        if (step < 3)
-            step = 3;
-        head_q += step;
-        if (head_q > LED_N * SUB)
-            head_q = LED_N * SUB;
-        anim_render(head_q, tick++, 0, 1);
-        usleep(TICK_MS * 1000);
-    }
-
-    /* Both sides, bottom to top. There is no LED at dead bottom — twelve at
-     * 30° leaves the bottom BETWEEN two of them, position 0 sitting just left
-     * of centre — so the arms are the pairs either side of that gap, (0,11),
-     * (1,10) … meeting at the top between 5 and 6. Starting from a single LED
-     * would put the seam a half-segment off and lean the whole figure. */
+    /* Both sides, bottom to top.
+     *
+     * Numbering the ring 1-12 the way it physically sits: 1 is just left of 6
+     * o'clock, 6 just left of 12 o'clock, 7 just right of 12 o'clock, 12 just
+     * right of 6 o'clock. So there is no LED at dead bottom or dead top —
+     * there is a GAP at each — and the balanced arms are the pairs either side
+     * of the bottom gap: (1,12), (2,11) … meeting at the top gap between 6 and
+     * 7. Zero-indexed here, so (0,11) up to (5,6).
+     *
+     * The progress head finishes on LED 12. This lights LED 1 alongside it
+     * rather than TRAVELLING the head across the bottom gap to reach it, which
+     * is what the first version did: that read as the head overshooting, and
+     * started the sweep off balance (Wil, 2026-09-05).
+     */
     for (int s = 0; s < LED_N / 2; s++) {
         for (int p = 0; p < LED_N; p++)
             memcpy(f[p], C_ORBIT, 3);
@@ -517,7 +515,7 @@ static void anim_main(void)
             _exit(0);
         }
         if (mode == ANIM_FINISH) {
-            anim_finale(head_q, tick);
+            anim_finale();
             ledst->mode = ANIM_DONE;
             _exit(0);
         }

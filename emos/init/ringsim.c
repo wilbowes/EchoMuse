@@ -135,7 +135,7 @@ static void run_boot(int fail_at, int start_pos)
      * colour and then takes it to white — so it is measured separately rather
      * than folded in, which is what made these read as failures at first. */
     boot_frames = nframes;
-    anim_finale(head_q, tick);
+    anim_finale();
     capture();   /* the finale's last frame is black and has no sleep after it */
 }
 
