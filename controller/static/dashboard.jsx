@@ -4757,21 +4757,43 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
 
   // Step 5 — build. The controller does the packing; see em_emos_build.py for
   // why it is there and not here.
-  async function runBuildEmos() {
+  async function runBuildEmos(useLatest) {
     if (!emosRef) {
       throw new Error('No escrowed boot image — run the Escrow Boot Image step first.');
     }
-    if (!initFile) {
-      throw new Error('Choose an emOS init binary to build with. Build it from '
-        + 'emos/ with build.sh, or take it from an emOS release.');
+
+    // The init comes from the latest emOS release by default. It is the only
+    // part of an emOS image that CAN be distributed — the kernel and device
+    // trees in a built image are the user's own — so this is the whole of
+    // what the wizard needs to fetch.
+    let initBlob = initFile;
+    let version = '0.1';
+    if (useLatest) {
+      addLog('Fetching the emOS init from the latest release…');
+      const resp = await fetch(ingressPath('/api/provision/emos_init'),
+                               { headers: { Authorization: `Bearer ${token}` } });
+      if (!resp.ok) {
+        let detail = `HTTP ${resp.status}`;
+        try { const j = await resp.json(); detail = j.message || j.error || detail; } catch {}
+        throw new Error(detail);
+      }
+      const bytes = new Uint8Array(await resp.arrayBuffer());
+      version = resp.headers.get('X-Emos-Version') || version;
+      initBlob = new Blob([bytes]);
+      addLog(`  ${version}, ${(bytes.length/1024/1024).toFixed(1)} MB`);
+    }
+    if (!initBlob) {
+      throw new Error('Choose an emOS init binary to build with, or use the '
+        + 'latest release. Build one from emos/ with build.sh if you need a '
+        + 'specific version.');
     }
     addLog(`Sending the escrowed image (${(emosRef.bytes.length/1024/1024).toFixed(1)} MB) `
-         + `and ${initFile.name} to the controller…`);
+         + `and the init to the controller…`);
 
     const fd = new FormData();
     fd.append('reference', new Blob([emosRef.bytes]), 'reference.img');
-    fd.append('init', initFile, 'init');
-    fd.append('version', '0.1');
+    fd.append('init', initBlob, 'init');
+    fd.append('version', version);
     const resp = await fetch(ingressPath('/api/provision/emos_image'), {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}` },
@@ -5061,7 +5083,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         case 2: await runEscrowBoot(c); break;
         case 3: await runInstallEchoMuse(c, binaryFile, useLatest); break;
         case 4: await runInstallOwwAssets(c); break;
-        case 5: await runBuildEmos(); break;
+        case 5: await runBuildEmos(useLatest); break;
         case 6: await runFlashEmos(c); break;
         case 7: await runRebootAndWatch(c); break;
         case 8: await runEmosWifi(); break;
@@ -5128,14 +5150,21 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // a button people can leave unpressed defeats the point of it being
     // mandatory.
     //
-    // emOS: escrow (2) and assets (4) auto-run for the same reason. Build (5)
-    // does not, because it currently needs an init binary chosen by hand; the
-    // flash (6) and the two serial steps are deliberately manual, since each
-    // is a partition write or a reboot and neither should start while nobody
+    // emOS: escrow (2), assets (4) and build (5) auto-run. The build writes
+    // nothing to the device — it is the controller repacking the escrowed
+    // image — and it takes the init from the latest emOS release, so there is
+    // nothing to ask for. If no release is published it fails with something
+    // to act on and the picker below is still there.
+    //
+    // The flash (6) and the two serial steps stay manual, deliberately: each
+    // is a partition write or a reboot, and neither should begin while nobody
     // is looking.
-    const autoSteps = isEmos ? new Set([2, 4]) : new Set([2, 4, 7, 8, 9, 12]);
+    const autoSteps = isEmos ? new Set([2, 4, 5]) : new Set([2, 4, 7, 8, 9, 12]);
     if (!autoSteps.has(step) || running || stepState[step] !== 'pending') return;
-    if (adb) { runStep(step); return; }
+    // The emOS build's default source is the release, so the auto path has to
+    // say so — `useLatest` is undefined otherwise and it would ask for a file
+    // nobody has chosen.
+    if (adb) { runStep(step, isEmos && step === 5); return; }
     // An auto step with no connection used to be a no-op, so the wizard sat on
     // it looking busy forever — which is exactly how the wake word asset step
     // failed on 2026-07-31, reached only after the previous step had rebooted
@@ -5299,21 +5328,22 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
               </div>
             )}
 
-            {/* emOS step 5: the init binary the image is built around.
-                A file picker is the first-cut shape and a known gap — the
-                natural home is a release asset beside `server`, so this can
-                offer "latest from GitHub" the way the step above does. */}
+            {/* emOS step 5: the init the image is built around. The release
+                is the ordinary path; the picker is for building against a
+                version that is not published yet. */}
             {isEmos && step === 5 && stepState[5] !== 'done' && !running && (
-              <div style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <Pill accent onClick={() => runStep(5, true)}>Build with the latest emOS release</Pill>
+                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', letterSpacing: '0.04em' }}>— or —</div>
                 <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--text2)', letterSpacing: '0.08em' }}>
-                  {stepState[5] === 'error' ? 'SELECT A DIFFERENT INIT' : 'EMOS INIT BINARY (AARCH64, STATIC)'}
+                  {stepState[5] === 'error' ? 'SELECT A DIFFERENT INIT' : 'YOUR OWN INIT BINARY (AARCH64, STATIC)'}
                 </div>
                 <input
                   type="file"
                   onChange={e => setInitFile(e.target.files[0])}
                   style={{ fontFamily: "'DM Mono',monospace", fontSize: 11 }}
                 />
-                {!!initFile && <Pill accent onClick={() => runStep(5)}>Build emOS Image</Pill>}
+                {!!initFile && <Pill onClick={() => runStep(5, false)}>Build with this init</Pill>}
               </div>
             )}
 

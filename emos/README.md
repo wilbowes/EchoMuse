@@ -52,6 +52,35 @@ dd if=emos-boot.img of=/dev/block/mmcblk0p10
 Prove recovery works before the first flash, not after. Doing that first is
 what made a day of failed boots cheap rather than frightening.
 
+Or use the **provisioning wizard**, which does all three from TWRP and never
+boots Android: it escrows your boot partition (and hands you the file), sends
+it to the controller to be repacked, flashes it and reads it back to check.
+The wizard is the emOS path by default; `?flow=fireos` still runs the old
+thirteen-step FireOS install.
+
+### Releasing emOS
+
+emOS has its **own tag namespace**, `emos-v*`. `build.sh` stamps the image
+with `git describe --match 'emos-v*'`, so without those tags it stamps
+whatever tag is nearest — a controller release number, which is worse than
+"unknown" because it looks plausible. The namespace also keeps emOS out of the
+firmware OTA's way: `_fetch_latest_release` selects a tag starting `v` with a
+`server` asset, and `emos-v0.1` matches neither.
+
+```sh
+git tag -a --cleanup=verbatim emos-v0.1 -m "..."   # -a always; the annotation IS the notes
+git push origin emos-v0.1
+```
+
+`emos-release.yml` compiles the init with the pinned NDK, asserts it is
+aarch64 and static, runs the ring and password checks against the source being
+published, and attaches **`init` and nothing else**.
+
+**Only the init is published, and it cannot be otherwise.** A bootable image
+contains the device's own kernel and device trees, so shipping one would mean
+redistributing Amazon's code. The init is ours; the image is assembled from
+the boot partition each user reads off their own device.
+
 Once emOS is running and on the network, flashing no longer needs TWRP:
 `curl` the image onto the device and `dd` it, about thirty seconds a cycle.
 

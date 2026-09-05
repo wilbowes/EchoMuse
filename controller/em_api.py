@@ -416,6 +416,7 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/provision/oww_asset/{name}", _get_provision_oww_asset)
     app.router.add_post("/api/provision/tls_credentials", _post_provision_tls_credentials)
     app.router.add_post("/api/provision/diagnostics",     _post_provision_diagnostics)
+    app.router.add_get("/api/provision/emos_init",     _get_provision_emos_init)
     app.router.add_post("/api/provision/emos_image",   _post_provision_emos_image)
     app.router.add_post("/api/devices/{id}/secure_link",  _post_secure_link)
     app.router.add_post("/api/devices/{id}/debloat",      _post_debloat)
@@ -4661,6 +4662,103 @@ async def _post_provision_diagnostics(request: web.Request) -> web.Response:
         content_type="application/json",
         headers={"Content-Disposition":
                  f'attachment; filename="echomuse-provision-{stamp}.json"'},
+    )
+
+
+async def _fetch_latest_emos_release() -> Optional[dict]:
+    """
+    The newest published emOS release carrying an `init` asset.
+
+    Separate from `_fetch_latest_release` rather than a parameter on it,
+    because the two select on opposite things and share no cache: firmware is
+    `v*` + a `server` asset, emOS is `emos-v*` + an `init` asset. Folding them
+    together would mean one cache holding whichever kind was asked for last.
+
+    Note the tag namespaces make this safe in both directions — `emos-v0.1`
+    does not `startswith("v")`, so the firmware poll can never select an emOS
+    release, and this one cannot select a firmware release.
+    """
+    repo = db.get_config("github_repo", "wilbowes/EchoMuse")
+    url = GITHUB_API_URL.format(repo=repo)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url,
+                headers={"Accept": "application/vnd.github.v3+json"},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    log.warning(f"[api] GitHub API returned {resp.status} for emOS releases")
+                    return None
+                releases = await resp.json()
+    except Exception as e:
+        log.warning(f"[api] Could not poll GitHub for emOS releases: {e}")
+        return None
+
+    for data in releases:
+        if data.get("draft") or data.get("prerelease"):
+            continue
+        tag = data.get("tag_name", "")
+        if not tag.startswith("emos-v"):
+            continue
+        asset = next(
+            (a for a in data.get("assets", []) if a.get("name") == "init"), None)
+        if asset is None:
+            continue
+        return {"version": tag, "url": asset["browser_download_url"],
+                "size": asset.get("size", 0)}
+    return None
+
+
+@auth.require_admin
+async def _get_provision_emos_init(request: web.Request) -> web.Response:
+    """
+    GET /api/provision/emos_init — the emOS init binary from the latest
+    emOS release, so the wizard does not need one chosen by hand.
+
+    Downloaded server-side for the reason `latest_binary` is: the device being
+    provisioned is not registered yet, and the browser cannot reach GitHub
+    under the dashboard's CSP.
+
+    **The init is the ONLY part of an emOS image we can distribute.** A
+    bootable image contains the device's own kernel and device trees, so
+    shipping one would mean redistributing Amazon's code; the image is
+    assembled from the boot partition the user read off their own device.
+
+    Verified before it is served, not after it is flashed. The same two checks
+    the build applies, run here as well, so a release built wrong is refused
+    at the point of download rather than at the point of boot.
+    """
+    release = await _fetch_latest_emos_release()
+    if release is None:
+        return _error(
+            "no_emos_release",
+            "No published emOS release with an 'init' asset was found. Build "
+            "one from emos/ with build.sh and select it by hand, or cut an "
+            "emos-v* tag.", 404)
+
+    binary = await _fetch_binary(release["url"], release["version"])
+    if binary is None:
+        return _error("fetch_failed",
+                      "Could not download the emOS init from GitHub", 502)
+
+    problems = em_emos_build.init_binary_problems(binary)
+    if problems:
+        # A release that is wrong is worth saying so about loudly: it is wrong
+        # for everyone, not just this download.
+        log.error(f"[api] emOS release {release['version']} carries an unusable "
+                  f"init: {'; '.join(problems)}")
+        return _error("bad_release_asset",
+                      f"The init in emOS release {release['version']} is not "
+                      f"usable: {'; '.join(problems)}", 502)
+
+    return web.Response(
+        body=binary,
+        content_type="application/octet-stream",
+        headers={
+            "Content-Disposition": 'attachment; filename="init"',
+            "X-Emos-Version": release["version"],
+        },
     )
 
 

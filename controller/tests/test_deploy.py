@@ -2385,3 +2385,59 @@ def test_the_emos_build_endpoint_stores_nothing():
     for writer in ("open(", "write_bytes", "Path(", "tempfile"):
         assert writer not in fn, (
             f"the emOS build endpoint must not persist anything (found {writer!r})")
+
+
+def test_the_emos_and_firmware_release_namespaces_cannot_select_each_other():
+    """
+    Two release kinds live in one repo's release list, and each selector has
+    to be blind to the other's releases. `emos-v0.1` does not start with "v",
+    and a firmware release carries `server` rather than `init` — either
+    property alone is enough, and both are present, which is what makes this
+    safe rather than lucky.
+
+    Same mechanism that keeps controller-v* out of the firmware poll. The
+    failure if it broke would be the OTA offering an aarch64 init to a fleet
+    of armv7a devices as a firmware update.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+
+    fw = _strip_prose(_fn_body(src, "_fetch_latest_release"))
+    assert 'startswith("v")' in fw and '"server"' in fw, \
+        "the firmware poll must select on a v* tag AND a server asset"
+
+    emos = _strip_prose(_fn_body(src, "_fetch_latest_emos_release"))
+    assert 'startswith("emos-v")' in emos and '"init"' in emos, \
+        "the emOS poll must select on an emos-v* tag AND an init asset"
+
+    workflow = (CONTROLLER.parent / ".github" / "workflows" / "emos-release.yml").read_text()
+    assert "'emos-v*'" in workflow, "the emOS release workflow must fire on emos-v* tags"
+    fw_workflow = (CONTROLLER.parent / ".github" / "workflows" / "release.yml").read_text()
+    assert "'v*'" in fw_workflow
+
+
+def test_the_emos_init_is_verified_before_it_is_served():
+    """
+    A release built wrong is wrong for everyone, so it is refused at the point
+    of download rather than at the point of boot. Both properties it checks
+    are silent when wrong and fatal on the device.
+    """
+    fn = _strip_prose(_fn_body(
+        (CONTROLLER / "em_api.py").read_text(), "_get_provision_emos_init"))
+    assert "init_binary_problems" in fn, (
+        "the init must be checked for aarch64/static before it is served")
+    assert "bad_release_asset" in fn
+
+
+def test_the_emos_release_workflow_asserts_what_it_publishes():
+    """
+    The last point before the artifact is something people flash. CI checks
+    the tip of a branch; this checks the thing being published.
+    """
+    wf = (CONTROLLER.parent / ".github" / "workflows" / "emos-release.yml").read_text()
+    assert "ARM aarch64" in wf, "the release must assert the init is aarch64"
+    assert "statically linked" in wf, "the release must assert the init is static"
+    assert "ringsim --check" in wf, "the release must run the ring invariants"
+    # The image is assembled on the user's side from their own boot partition,
+    # so the only thing published is the init.
+    assert "files: emos/build/init" in wf, \
+        "only the init is published — an image would carry Amazon's kernel"
