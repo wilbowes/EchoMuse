@@ -193,14 +193,82 @@ busybox, no bionic. Not legal advice; and never ship Amazon marks or branding.
 
 ## How it boots, and what the ring tells you
 
-Twelve stages, twelve LEDs. The ring is claimed before the first step that can
-fail, fills blue one LED per stage, goes fully green when the network is up and
-then fades out — handing the LEDs to the firmware, so anything shown afterwards
-is EchoMuse's to explain. **A stage that fails leaves the ring RED at the point
-it reached**, so a device that dies says where without a cable.
+The ring passes through three owners on the way up, and only the last is ours.
+Knowing which one you are looking at is most of the diagnosis:
+
+| what you see | who is driving it | what it means |
+|---|---|---|
+| solid dark blue | the bootloader | powered, before Linux. We have not confirmed whether this is the preloader or LK |
+| dark blue ring, one lighter segment orbiting | the **kernel**, via the `is31fl3236` driver's `boot_animation` | the kernel is up and **our init has not run**. It keeps orbiting until userspace claims the ring, so an orbit that never becomes a progress head means PID 1 never started or died before its first instruction |
+| dark blue trail behind a lighter blue head | emOS init | booting, and the head's position is how far |
+| both sides filling bottom to top, brightening, fading | emOS init | up, on the network, ring handed back |
+| red head, stopped | emOS init | that stage failed |
+| solid amber | emOS init | rolling back to the known-good image |
+
+Ours is deliberately a continuation of the kernel's orbit rather than a
+different display — same two blues, same direction, a lighter head leading a
+dark blue trail — because the user should see one object making progress, not
+three unrelated lights.
+
+**The head moves continuously, not in twelve jumps.** Stages are nothing like
+evenly spaced in time, so a head that advanced only on completion would sit
+motionless through `fsck` and WiFi association — the two longest stages, and
+precisely the ones someone reads as a hang. It eases towards the next stage and
+decelerates as it approaches, never arriving until that stage actually
+completes; a completed stage gives it a visible kick forward. It never claims
+progress that has not happened, and it is never still.
+
+Twelve stages, twelve LEDs:
+
+| # | reached when |
+|---|---|
+| 1 | `proc`/`sys`/`devpts` mounted and every device node created |
+| 2 | `/system` mounted read-only |
+| 3 | `e2fsck -p` on `/data` finished |
+| 4 | `/data` mounted read-write |
+| 5 | the `/etc` symlink farm is built |
+| 6 | the previous boot's kernel log is preserved |
+| 7 | busybox applets linked |
+| 8 | the USB gadget is up |
+| 9 | `/dev/ttyGS0` exists — the console is open |
+| 10 | `wlan0` exists |
+| 11 | associating |
+| 12 | carrier and an address — the boot is confirmed |
+
+Stage 10 did not exist until 2026-09-05: both the wlan0 and associating steps
+pinned the same number, so one LED never lit and the two states were the same
+picture. Harmless on a bar that fills; a visible stumble once the head travels.
 
 **Amber means a rollback is in progress** (see below). Cold boot to a working
 voice assistant is about 35 seconds.
+
+### Judging it without a device
+
+`init/ringsim.c` includes `init.c` whole and drives the real animation
+functions against a simulated clock, so the ring can be watched as text and its
+invariants checked without flashing anything:
+
+```sh
+cd init && cc -O2 -o /tmp/ringsim ringsim.c -lm
+/tmp/ringsim            # every frame, as a brightness ramp
+/tmp/ringsim --check    # the invariants
+/tmp/ringsim x 3        # what a failure at stage 3 looks like
+```
+
+Nothing is reimplemented there, so it cannot drift from what the device runs.
+It checks that the ring is never still for 400ms, that the head never travels
+backwards, that nothing lights ahead of it, and that the ring is handed back
+dark. Note the display is gamma-corrected: rendered linearly the dark blue
+trail reads as blank, which is a property of the ramp and not of the ring.
+
+**Three constants in `init.c` are still guesses** and are gathered under "Four
+numbers nobody has measured yet": the two blues, and which way round the index
+runs. `ORBIT_PROBE` reads the kernel's own frames back out of `frame` — it is a
+read/write attribute, so the driver hands back exactly what it is displaying —
+and writes them to the boot trail, which gives the palette exactly rather than
+by eye, plus the orbit's direction and period. One boot answers all three. The
+bottom LED is settled: position 0 is the one just left of bottom centre, where
+the ring's fill has always started.
 
 ## Services
 

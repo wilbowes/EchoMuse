@@ -28,6 +28,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/reboot.h>
 #include <sys/socket.h>
@@ -101,73 +102,376 @@ static const struct node nodes[] = {
  * firmware's LED binding uses, so nothing here is a new mechanism.
  *
  * Until userspace clears `boot_animation` the kernel driver runs its own
- * orbiting animation on these LEDs, which tells the user nothing about whether
- * the boot is progressing, stuck or dead — and fights any frame we write. So
+ * orbiting animation: a dark blue ring with one lighter segment travelling
+ * round it. That animation and the bootloader's ring before it are the only
+ * things a user sees until we arrive, and it fights any frame we write — so
  * the ring is claimed as the FIRST thing init does, before any step that can
- * fail, and one LED is lit per stage completed.
+ * fail.
  *
- * That turns the single most opaque part of this device into a progress bar:
- * a boot that stops at six LEDs stops in a knowable place, on hardware whose
- * only other diagnostic channel is a raw partition read from recovery.
+ * What replaces it is deliberately a CONTINUATION of it rather than a
+ * different display: the same two blues, a lighter head leading a dark blue
+ * trail, in the same direction at the same rate. The head's position is the
+ * boot's progress — twelve stages, one LED each, arriving back at the bottom
+ * as the network comes up.
+ *
+ * The head moves continuously rather than in twelve jumps, and that is the
+ * whole point of it. Stages are nothing like evenly spaced in time — linking
+ * busybox applets is instant, fsck and WiFi association are seconds — so a
+ * head that moved only on stage completion would sit motionless through
+ * exactly the parts of the boot someone is most likely to read as hung. It
+ * therefore eases towards the next stage and DECELERATES as it approaches,
+ * never arriving until that stage really completes, and completing one gives
+ * it a visible kick forward. It is never still, and it never claims progress
+ * that has not happened.
+ *
+ * Rendering a fractional position on twelve LEDs is a cross-fade between the
+ * two segments either side of it, which is also what makes it read as the same
+ * object as the kernel's orbit rather than a chunky imitation of one.
+ *
+ * A stage that fails turns the head red and stops it. That is a clue, not a
+ * diagnosis: the trail on the cache partition is the diagnosis.
+ *
+ * The animation runs in a FORKED CHILD holding the ring on its own ticker,
+ * because everything it renders over — fsck, mounts, association — blocks PID
+ * 1 for seconds at a time. The parent only ever publishes the stage it has
+ * reached into shared memory; it never writes a frame while the child lives.
  */
+/* Overridable so the ring animation can be rendered and checked off-target;
+ * see emos/init/ringsim.c. */
+#ifndef LEDDIR
 #define LEDDIR "/sys/devices/soc/11007000.i2c/i2c-0/0-003f"
+#endif
 #define LED_N  12
 
+/* Defined further down; declared here so the orbit probe can record into the
+ * boot trail. */
+static void note(const char *fmt, ...);
+
+/* ── Four numbers nobody has measured yet ────────────────────────────────────
+ *
+ * Nothing in this project has ever needed to know how the ring is ORIENTED:
+ * every animation we ship is rotationally symmetric, and the spinner's
+ * direction was a free choice. This is the first display that is not, so the
+ * geometry and the palette are guesses and are gathered here to be corrected
+ * in one place rather than hunted for.
+ *
+ * LED_BOTTOM — settled: the ring's existing fill starts at the LED just left
+ *              of bottom centre, and that is where this one starts too (Wil,
+ *              2026-09-05). Twelve LEDs at 30° put no LED at dead bottom, so
+ *              the bottom is the gap between positions 0 and 11 and the
+ *              finale's arms are the pairs either side of it.
+ * LED_DIR    — still a guess. It only has to match the direction the kernel's
+ *              orbit travels, which the probe below answers.
+ * C_TRAIL / C_HEAD     — set ORBIT_PROBE, boot once, read the trail. The
+ *                        kernel's own frames come back as hex, so the two
+ *                        blues can be copied exactly rather than eyeballed,
+ *                        and the sample interval gives the orbit's direction
+ *                        and period to match ORBIT_MS against.
+ */
+#define LED_BOTTOM 0        /* physical index of the LED at the bottom */
+#define LED_DIR    1        /* +1 if rising physical index runs clockwise */
+#define ORBIT_MS   2000     /* the kernel orbit's period, for rate-matching */
+#define ORBIT_PROBE 1       /* sample the kernel's frames before claiming */
+
+static const unsigned char C_TRAIL[3] = { 0x00, 0x08, 0x30 };  /* dark ground */
+static const unsigned char C_HEAD[3]  = { 0x30, 0x80, 0xFF };  /* light head  */
+static const unsigned char C_FAIL[3]  = { 0xFF, 0x00, 0x00 };
+static const unsigned char C_AMBER[3] = { 0xFF, 0x60, 0x00 };
+/* The ring's last moment before it fades. Green here would say "network
+ * confirmed" the way the old ring did; it is one line if that is ever wanted
+ * back, but confirmation is a diagnostic and this ring is not one. */
+static const unsigned char C_PEAK[3]  = { 0x80, 0xD0, 0xFF };
+
+#define SUB       256                  /* sub-LED position units */
+#define TICK_MS   33                   /* ~30fps; 36 bytes of i2c per frame */
+#define CREEP     ((SUB * 7) / 10)     /* how far into the next segment the
+                                        * head may run while its stage is
+                                        * still going. Under one whole LED, so
+                                        * it can never reach a checkpoint the
+                                        * boot has not actually passed. */
+#define BREATH_MIN ((SUB * 13) / 20)   /* the head dips to 65%, never dark */
+
+enum { ANIM_RUN = 0, ANIM_FAIL, ANIM_FINISH, ANIM_OFF, ANIM_DONE };
+
+struct ledshm {
+    volatile int stage;                /* stages completed, 0..LED_N */
+    volatile int mode;
+};
+static struct ledshm *ledst;
+static pid_t led_pid = -1;
 static int bootstep;
 
-static void led_frame(int lit, int r, int g, int b)
+static const char HEXD[] = "0123456789ABCDEF";
+
+static void puthex(char *o, unsigned char v)
 {
-    char f[LED_N * 6 + 1];
-    for (int i = 0; i < LED_N; i++)
-        snprintf(f + i * 6, 7, "%02X%02X%02X",
-                 i < lit ? r : 0, i < lit ? g : 0, i < lit ? b : 0);
+    o[0] = HEXD[v >> 4];
+    o[1] = HEXD[v & 15];
+}
+
+/* Write one frame, mapping LOGICAL positions (0 = bottom, rising the way the
+ * orbit travels) onto physical LED indices. Every animation here is written in
+ * logical space so the geometry lives in exactly one place.
+ *
+ * Note the hex is laid down two characters at a time rather than with
+ * snprintf: the physical indices are not visited in order, so a terminating
+ * NUL would land on the first character of a slot that had already been
+ * written. */
+static void led_write(const unsigned char f[LED_N][3])
+{
+    char hex[LED_N * 6];
+    for (int i = 0; i < LED_N; i++) {
+        int p = (LED_BOTTOM + LED_DIR * i) % LED_N;
+        if (p < 0)
+            p += LED_N;
+        puthex(hex + p * 6,     f[i][0]);
+        puthex(hex + p * 6 + 2, f[i][1]);
+        puthex(hex + p * 6 + 4, f[i][2]);
+    }
     int fd = open(LEDDIR "/frame", O_WRONLY);
     if (fd < 0)
         return;
-    write(fd, f, LED_N * 6);
+    write(fd, hex, sizeof hex);
     close(fd);
 }
 
-/* Take the ring off the kernel's animation and set the drive current. */
+static void led_solid(const unsigned char c[3])
+{
+    unsigned char f[LED_N][3];
+    for (int p = 0; p < LED_N; p++)
+        memcpy(f[p], c, 3);
+    led_write(f);
+}
+
+/* out = a, with w/SUB of b laid over it. */
+static void blend(unsigned char out[3], const unsigned char a[3],
+                  const unsigned char b[3], int w)
+{
+    for (int i = 0; i < 3; i++)
+        out[i] = (unsigned char)(a[i] + ((int)b[i] - (int)a[i]) * w / SUB);
+}
+
+static void scale(unsigned char out[3], const unsigned char c[3], int w)
+{
+    for (int i = 0; i < 3; i++)
+        out[i] = (unsigned char)(c[i] * w / SUB);
+}
+
+/* A slow rise and fall, squared so it lingers dim and peaks softly rather than
+ * pulsing evenly. This is what keeps the ring alive during a stage that takes
+ * seconds: the head stops travelling as it approaches the next checkpoint, but
+ * it never stops moving. */
+static int breath(int tick)
+{
+    int per = 2400 / TICK_MS;
+    int x = tick % per;
+    int tri = x < per / 2 ? x * 2 * SUB / per : (per - x) * 2 * SUB / per;
+    return tri * tri / SUB;
+}
+
+/* head_q is a position in SUB units around the ring, 0..LED_N*SUB. */
+static void anim_render(int head_q, int tick, int failed)
+{
+    unsigned char f[LED_N][3], head[3];
+
+    scale(head, failed ? C_FAIL : C_HEAD,
+          failed ? SUB : BREATH_MIN + breath(tick) * (SUB - BREATH_MIN) / SUB);
+
+    int i = head_q / SUB, fr = head_q % SUB;
+    for (int p = 0; p < LED_N; p++) {
+        if (p < i)
+            memcpy(f[p], C_TRAIL, 3);
+        else
+            memset(f[p], 0, 3);
+    }
+    /* The head straddles two segments. Modulo, so a head arriving at LED_N
+     * lands back on the bottom rather than off the end of the ring. */
+    blend(f[i % LED_N], f[i % LED_N], head, SUB - fr);
+    if (fr)
+        blend(f[(i + 1) % LED_N], f[(i + 1) % LED_N], head, fr);
+    led_write(f);
+}
+
+/* Boot complete: close the ring, fill both sides from the bottom to the top,
+ * take it to full and then take it away. The fade hands the LEDs back, so
+ * anything shown afterwards is the firmware's to explain. */
+static void anim_finale(int head_q, int tick)
+{
+    unsigned char f[LED_N][3];
+
+    while (head_q < LED_N * SUB) {
+        int step = (LED_N * SUB - head_q) / 6;
+        if (step < 3)
+            step = 3;
+        head_q += step;
+        if (head_q > LED_N * SUB)
+            head_q = LED_N * SUB;
+        anim_render(head_q, tick++, 0);
+        usleep(TICK_MS * 1000);
+    }
+
+    /* Both sides, bottom to top. There is no LED at dead bottom — twelve at
+     * 30° leaves the bottom BETWEEN two of them, position 0 sitting just left
+     * of centre — so the arms are the pairs either side of that gap, (0,11),
+     * (1,10) … meeting at the top between 5 and 6. Starting from a single LED
+     * would put the seam a half-segment off and lean the whole figure. */
+    for (int s = 0; s < LED_N / 2; s++) {
+        for (int p = 0; p < LED_N; p++)
+            memcpy(f[p], C_TRAIL, 3);
+        for (int k = 0; k <= s; k++) {
+            memcpy(f[k], C_HEAD, 3);
+            memcpy(f[LED_N - 1 - k], C_HEAD, 3);
+        }
+        led_write(f);
+        usleep(70000);
+    }
+
+    for (int v = 0; v <= SUB; v += 16) {
+        for (int p = 0; p < LED_N; p++)
+            blend(f[p], C_HEAD, C_PEAK, v);
+        led_write(f);
+        usleep(12000);
+    }
+    for (int v = SUB; v > 0; v -= 10) {
+        for (int p = 0; p < LED_N; p++)
+            scale(f[p], C_PEAK, v);
+        led_write(f);
+        usleep(10000);
+    }
+    memset(f, 0, sizeof f);
+    led_write(f);
+}
+
+/* The animator. Owns the ring for as long as it lives; reads the stage the
+ * parent has reached and never writes it. */
+static void anim_main(void)
+{
+    int head_q = 0, tick = 0;
+
+    for (;;) {
+        int mode = ledst->mode;
+
+        if (mode == ANIM_OFF) {
+            led_solid((const unsigned char[3]){ 0, 0, 0 });
+            ledst->mode = ANIM_DONE;
+            _exit(0);
+        }
+        if (mode == ANIM_FINISH) {
+            anim_finale(head_q, tick);
+            ledst->mode = ANIM_DONE;
+            _exit(0);
+        }
+        if (mode != ANIM_FAIL) {
+            int stage = ledst->stage;
+            if (stage > LED_N)
+                stage = LED_N;
+            int target = stage * SUB + (stage < LED_N ? CREEP : 0);
+            if (head_q < target) {
+                /* Exponential ease, with a floor so integer truncation cannot
+                 * stall it short of the target. */
+                int step = (target - head_q) / 8;
+                if (step < 1)
+                    step = 1;
+                head_q += step;
+                if (head_q > target)
+                    head_q = target;
+            }
+        }
+        anim_render(head_q, tick++, mode == ANIM_FAIL);
+        usleep(TICK_MS * 1000);
+    }
+}
+
+/* Sample the kernel's own animation before taking the ring away from it.
+ *
+ * `frame` is read/write, so the driver hands back exactly what it is
+ * displaying — which turns "match the orbit's blues" from an eyeballing job
+ * into two constants copied off a boot trail, and the sample interval gives
+ * its direction and period as well. Costs ~400ms of a boot; compile it out
+ * once the numbers above are filled in. */
+static void orbit_probe(void)
+{
+#if ORBIT_PROBE
+    for (int i = 0; i < 10; i++) {
+        int fd = open(LEDDIR "/frame", O_RDONLY);
+        if (fd < 0) {
+            note("orbit probe: frame unreadable errno=%d\n", errno);
+            return;
+        }
+        char b[LED_N * 6 + 8];
+        int n = read(fd, b, sizeof b - 1);
+        close(fd);
+        if (n <= 0) {
+            note("orbit probe: read n=%d errno=%d\n", n, errno);
+            return;
+        }
+        b[n] = 0;
+        for (int k = 0; k < n; k++)
+            if (b[k] == '\n')
+                b[k] = 0;
+        note("orbit %d %s\n", i, b);
+        usleep(40000);
+    }
+#endif
+}
+
+/* Take the ring off the kernel's animation, set the drive current, and start
+ * the animator. */
 static void led_claim(void)
 {
+    orbit_probe();
+
     int fd = open(LEDDIR "/boot_animation", O_WRONLY);
     if (fd >= 0) { write(fd, "0", 1); close(fd); }
     fd = open(LEDDIR "/led_current", O_WRONLY);
     if (fd >= 0) { write(fd, "3", 1); close(fd); }
-    led_frame(0, 0, 0, 0);
+
+    ledst = mmap(NULL, sizeof *ledst, PROT_READ | PROT_WRITE,
+                 MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (ledst == MAP_FAILED) {
+        ledst = NULL;
+        note("led: mmap failed errno=%d — no boot ring\n", errno);
+        return;
+    }
+    ledst->stage = 0;
+    ledst->mode  = ANIM_RUN;
+
+    led_pid = fork();
+    if (led_pid == 0) {
+        anim_main();
+        _exit(0);
+    }
 }
 
-/* One more stage done. Blue while booting; the net stage finishes in green. */
+/* One more stage done. Publishing the number is the whole of it — the head
+ * eases there on its own ticker. */
 static void led_step(void)
 {
     if (bootstep < LED_N)
         bootstep++;
-    led_frame(bootstep, 0x00, 0x30, 0xFF);
+    if (ledst)
+        ledst->stage = bootstep;
 }
 
-/* Fade the ring out once the boot has finished.
- *
- * A ring left lit is just another light that means nothing — the same problem
- * as the kernel animation this replaced. Fading says "done" and hands the LEDs
- * back, so anything the ring shows afterwards is the firmware's to explain.
- * ~640ms, slow enough to read as deliberate rather than as a glitch.
- */
-static void led_fade_out(int r, int g, int b)
-{
-    for (int v = 255; v > 0; v -= 8) {
-        led_frame(LED_N, r * v / 255, g * v / 255, b * v / 255);
-        usleep(20000);
-    }
-    led_frame(0, 0, 0, 0);
-}
-
-/* A stage that failed leaves the ring red at the point it reached, so a dead
- * device says WHERE it died without a cable. */
 static void led_fail(void)
 {
-    led_frame(bootstep + 1, 0xFF, 0x00, 0x00);
+    if (ledst)
+        ledst->mode = ANIM_FAIL;
 }
+
+/* Hand the ring back. Bounded: the boot is never held up by an animation. */
+static void led_end(int mode)
+{
+    if (!ledst)
+        return;
+    ledst->mode = mode;
+    for (int i = 0; i < 60 && ledst->mode != ANIM_DONE; i++)
+        usleep(50000);
+}
+
+#define led_finish() do { if (ledst) ledst->stage = LED_N; \
+                          led_end(ANIM_FINISH); } while (0)
+#define led_stop()   led_end(ANIM_OFF)
 
 /* ── Boot rollback ───────────────────────────────────────────────────────────
  *
@@ -270,7 +574,8 @@ static void restore_good(void)
     close(out);
     close(in);
     note("rollback restored rc=%d bytes=%ld\n", rc, (long)st.st_size);
-    led_frame(LED_N, 0xFF, 0x60, 0x00);      /* amber: rolling back */
+    led_stop();                              /* the animator owns the ring */
+    led_solid(C_AMBER);                      /* amber: rolling back */
     write_state(0);
     sync();
     sleep(2);
@@ -607,7 +912,7 @@ static void net_main(void)
     r = ifup("wlan0");
     netlog("wlan0 present=%d ifup=%d\n",
          access("/sys/class/net/wlan0", F_OK) == 0, r);
-    bootstep = 10; led_step();                   /* 10: wlan0 exists */
+    bootstep = 9; led_step();                    /* 10: wlan0 exists */
 
     /* Supervise, driven by wlan0's carrier rather than by a fixed sequence.
      *
@@ -664,7 +969,11 @@ static void net_main(void)
                 kill(dhc, SIGTERM);
             if (nudges++ % 3 == 0)
                 spawn(reassoc);
-            bootstep = 10; led_step();           /* 11: associating */
+            bootstep = 10; led_step();           /* 11: associating.
+                                                  * Pinned rather than
+                                                  * incremented: this is a
+                                                  * supervision loop and may
+                                                  * run many times. */
             dry = 0;
         } else {
             nudges = 0;
@@ -687,10 +996,9 @@ static void net_main(void)
                  */
                 if (!netup) {
                     netup = 1;
-                    /* Fully up: the ring goes green, then fades out. */
-                    led_frame(LED_N, 0x00, 0xFF, 0x00);
-                    usleep(400000);
-                    led_fade_out(0x00, 0xFF, 0x00);
+                    /* Fully up: the head comes home to the bottom, the ring
+                     * fills from there to the top, brightens and fades. */
+                    led_finish();
                     /* Ring handed back and the network is up: services that
                      * wait on the boot completing may now start. */
                     close(open("/run/net-up", O_WRONLY | O_CREAT, 0644));
