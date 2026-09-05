@@ -44,7 +44,8 @@ static void sim_usleep(unsigned us) { capture(); sim_now_us += us; }
 #define MAXFR 20000
 static struct { unsigned char rgb[LED_N][3]; long t; int head_q; } frames[MAXFR];
 static int nframes;
-static int boot_frames;   /* frames before the finale begins */
+static int boot_frames;       /* frames before the finale begins */
+static int handover_frames;   /* frames before the progress display starts */
 /* The head position the animation was asked to draw, recorded per frame.
  * Inferring it from brightness works until the head wraps past the top and
  * the trail covers most of the ring, at which point the brightest segment is
@@ -105,8 +106,11 @@ static void run_boot(int fail_at, int start_pos)
     int head_q = 0, tick = 0;
 
     /* No wind-in to model: anim_claim waits for the orbit to reach the bottom
-     * before taking the ring, so our head always starts there. */
+     * before taking the ring, so our head always starts there. The handover
+     * fade IS modelled — it is the transition the whole design turns on. */
     (void)start_pos;
+    anim_handover();
+    handover_frames = nframes;
 
     for (int s = 0; s < LED_N; s++) {
         int ticks = stage_ms[s] / TICK_MS;
@@ -214,25 +218,31 @@ static void check_run(void)
         }
     ck(back == 0, "head never travels backwards");
 
-    /* Every LED is lit for the whole boot. This is the seamlessness property:
-     * the orbit hands over a complete blue ring, and any dark segment of ours
-     * is a visible cut at the handover however well the colours match. The
-     * fade at the very end is the one place the ring may go dark. */
-    int dark = 0;
-    for (int i = 0; i < boot_frames; i++)
-        for (int p = 0; p < LED_N; p++)
-            if (!(frames[i].rgb[p][0] | frames[i].rgb[p][1] | frames[i].rgb[p][2]))
-                dark++;
-    ck(dark == 0, "no LED is ever dark before the fade");
+    /* The head is always the brightest thing on the ring. It stopped being so
+     * once — a plain cross-fade halved it across two segments and the tail
+     * behind it won — and that is the failure that reads as a broken display
+     * rather than a wrong one. */
+    int dim = 0;
+    for (int i = handover_frames; i < boot_frames; i++) {
+        int hl = 0, tl = 0;
+        for (int p = 0; p < LED_N; p++) {
+            const unsigned char *c = frames[i].rgb[p];
+            int l = c[0] * 30 + c[1] * 59 + c[2] * 11;
+            if (memcmp(c, C_ORBIT, 3) == 0) { if (l > tl) tl = l; }
+            else if (l > hl) hl = l;
+        }
+        if (tl && hl && hl <= tl) dim++;
+    }
+    ck(dim == 0, "the head is always brighter than the tail");
 
     /* Unreached segments are exactly the orbit's ground colour. */
     /* "Unreached" means strictly ahead of the head and its glow, measured
      * from the position the animation was actually given. */
     int off = 0;
-    for (int i = 0; i < boot_frames; i++) {
+    for (int i = handover_frames; i < boot_frames; i++) {
         int h = frames[i].head_q / SUB;
         for (int p = h + 2; p < LED_N; p++)
-            if (memcmp(frames[i].rgb[p], C_GROUND, 3) != 0) {
+            if (frames[i].rgb[p][0] | frames[i].rgb[p][1] | frames[i].rgb[p][2]) {
                 if (off < 4)
                     printf("  frame %d (%ldms) head=%d led %d = %02x%02x%02x\n",
                            i, frames[i].t / 1000, h, p, frames[i].rgb[p][0],
@@ -240,7 +250,7 @@ static void check_run(void)
                 off++;
             }
     }
-    ck(off == 0, "unreached segments sit at the orbit's ground colour");
+    ck(off == 0, "the ring ahead of the head is dark");
 
     /* The ring must be handed back dark. A ring left lit is the thing the fade
      * exists to prevent — anything shown after this is the firmware's. */

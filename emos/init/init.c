@@ -178,11 +178,9 @@ static void note(const char *fmt, ...);
 #define ORBIT_STEP_MS 109   /* measured; the wind-in matches this exactly */
 #define ORBIT_PROBE 1       /* sample the kernel's frames before claiming */
 
-static const unsigned char C_GROUND[3] = { 0x00, 0x00, 0xFF }; /* the orbit's ring */
+/* The orbit's ring, which is also what the tail repaints it with. */
+static const unsigned char C_ORBIT[3]  = { 0x00, 0x00, 0xFF };
 static const unsigned char C_HEAD[3]   = { 0x00, 0xFF, 0xFF }; /* the orbit's head */
-/* Progress is the arc between the two: far enough toward the head to read as a
- * filling ring, still plainly the same blue family as the ground. */
-static const unsigned char C_TRAIL[3]  = { 0x00, 0x70, 0xFF };
 static const unsigned char C_FAIL[3]   = { 0xFF, 0x00, 0x00 };
 static const unsigned char C_AMBER[3]  = { 0xFF, 0x60, 0x00 };
 /* Cyan is already full on two channels, so the only way UP is toward white —
@@ -290,15 +288,22 @@ static void anim_render(int head_q, int tick, int failed, int trail)
     if (failed)
         memcpy(head, C_FAIL, 3);
     else
-        blend(head, C_GROUND, C_HEAD,
+        blend(head, C_ORBIT, C_HEAD,
               BREATH_MIN + breath(tick) * (SUB - BREATH_MIN) / SUB);
 
-    /* The ground is the orbit's own ring, lit on every LED. Leaving the
-     * unreached segments dark is what would make the handover a cut, however
-     * well the colours matched. */
+    /* Ahead of the head the ring is DARK, and the tail paints the orbit's own
+     * blue back onto it as it goes. Carrying the lit ring through instead —
+     * the first version of this — put the tail and the ground two shades of
+     * the same blue apart, and on the device that read as no progress bar at
+     * all (Wil, from video, 2026-09-05). The handover is covered by fading the
+     * ring out rather than by keeping it lit; see anim_handover. */
     int i = head_q / SUB, fr = head_q % SUB;
-    for (int p = 0; p < LED_N; p++)
-        memcpy(f[p], trail && p < i ? C_TRAIL : C_GROUND, 3);
+    for (int p = 0; p < LED_N; p++) {
+        if (trail && p < i)
+            memcpy(f[p], C_ORBIT, 3);
+        else
+            memset(f[p], 0, 3);
+    }
 
     /* The head straddles two segments, but it is NOT a plain cross-fade: the
      * nearer LED always gets the head at full and the further one takes a
@@ -336,9 +341,9 @@ static int orbit_head_pos(void)
         return -1;
 
     char want[6];
-    puthex(want,     C_GROUND[0]);
-    puthex(want + 2, C_GROUND[1]);
-    puthex(want + 4, C_GROUND[2]);
+    puthex(want,     C_ORBIT[0]);
+    puthex(want + 2, C_ORBIT[1]);
+    puthex(want + 4, C_ORBIT[2]);
 
     int found = -1, count = 0;
     for (int L = 0; L < LED_N; L++) {
@@ -382,7 +387,7 @@ static void anim_finale(int head_q, int tick)
      * would put the seam a half-segment off and lean the whole figure. */
     for (int s = 0; s < LED_N / 2; s++) {
         for (int p = 0; p < LED_N; p++)
-            memcpy(f[p], C_TRAIL, 3);
+            memcpy(f[p], C_ORBIT, 3);
         for (int k = 0; k <= s; k++) {
             memcpy(f[k], C_HEAD, 3);
             memcpy(f[LED_N - 1 - k], C_HEAD, 3);
@@ -437,11 +442,39 @@ static void anim_claim(void)
     if (fd >= 0) { write(fd, "3", 1); close(fd); }
 }
 
+/* The handover: take the lit ring away, and leave the head behind.
+ *
+ * We stop the kernel's animation with its head at the bottom, so at this
+ * instant the ring is exactly what it has been showing all along. Fading the
+ * blue out from under that head — rather than cutting to a dark ring, or
+ * carrying the lit ring through — is what makes the two animations read as
+ * one: nothing jumps, nothing changes colour, the ring simply clears and the
+ * head is left standing where the orbit left it, about to travel.
+ *
+ * It also buys the contrast the progress display needs. Against a lit ring the
+ * tail was two shades of blue away from the ground and did not read as a
+ * progress bar at all; against a dark one it paints the orbit's own blue back
+ * on as it goes.
+ */
+static void anim_handover(void)
+{
+    unsigned char f[LED_N][3];
+
+    for (int v = SUB; v >= 0; v -= 16) {
+        for (int p = 0; p < LED_N; p++)
+            scale(f[p], C_ORBIT, v);
+        memcpy(f[0], C_HEAD, 3);      /* the head stays, and stays put */
+        led_write(f);
+        usleep(TICK_MS * 1000);
+    }
+}
+
 static void anim_main(void)
 {
     int head_q = 0, tick = 0;
 
     anim_claim();
+    anim_handover();
 
     for (;;) {
         int mode = ledst->mode;
