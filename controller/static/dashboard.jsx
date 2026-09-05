@@ -3846,6 +3846,12 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       addLog(`"${ssid}" was not in the last scan — configuring it as a hidden network.`, 'warn');
     }
 
+    // Android 5.1's WifiAutoJoinController blocks auto-join after enough
+    // "no internet" reports. On a local-only LAN every connection is flagged,
+    // so the counter grows every reboot until association is suppressed (#317).
+    addLog('Disabling captive portal detection (EchoMuse is local-only)…');
+    await c.shell('su -c "settings put global captive_portal_detection_enabled 0"');
+
     addLog('Enabling WiFi radio…');
     await c.shell("su -c 'svc wifi enable'");
     await new Promise(r => setTimeout(r, 2000));
