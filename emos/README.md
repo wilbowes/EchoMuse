@@ -550,12 +550,18 @@ is not proof it rebooted — compare uptime or a build fingerprint.
   Three paths exist and none of them is in the wizard:
 
   - **Return to stock, by hand.** Boot into TWRP with the button combo, wipe
-    cache, wipe data, and sideload the FireOS 5 image. This is the documented
-    answer and the one to give users today — see the recovery table in the
-    provisioning design and `docs/rooting.md`. Note it WIPES `/data`, so
-    EchoMuse and its config go with it; that is the difference between this
-    and restoring the escrowed boot image, which leaves `/data` alone but
-    also leaves the device on FireOS with emOS's install still sitting there.
+    cache, wipe data, sideload the FireOS 5 image, **and then flash
+    `f1r30s.zip`**. That last step is not optional: a stock flash restores
+    dm-verity against a partition table the unlock modified, so **the OS will
+    not boot without it** (`docs/rooting.md`). It is also the same four steps
+    that prepare a device for EchoMuse in the first place, on FireOS or emOS,
+    so this returns the device to the state an install starts from rather than
+    to a factory one.
+
+    Note it WIPES `/data`, so EchoMuse and its config go with it. That is the
+    difference between this and restoring the escrowed boot image, which
+    leaves `/data` alone but also leaves the device on FireOS with emOS's
+    install still sitting there.
   - **Flash over the network from the running emOS**, which is how development
     images are already moved (~30s a cycle). The device has a root shell and
     the controller can reach it, so this is the natural home for a real

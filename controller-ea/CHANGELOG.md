@@ -37,10 +37,15 @@ one you rely on — and keep the boot image it gives you at step 2.
 
 **Once an Echo is on emOS the wizard cannot be run against it again.** Setup
 needs Android's debug bridge and emOS does not have one, so the first step will
-not find the device. Going back is a manual job: hold the button combo to reach
-TWRP recovery, wipe cache, wipe data, and sideload a FireOS image. That erases
-the device, so it is a real undo rather than a convenient one. Re-provisioning
-an emOS Echo properly, over the network, is not built yet.
+not find the device.
+
+Going back is the same four steps that prepare a Dot for EchoMuse in the first
+place, done by hand: reach TWRP recovery with the button combo, wipe cache,
+wipe data, sideload a FireOS 5 image, **then flash `f1r30s.zip`**. Do not skip
+that last one — a stock flash restores dm-verity against a partition table the
+unlock modified, and the device will not boot without it. The sequence erases
+the Echo, so it is a real undo rather than a convenient one. Re-provisioning an
+emOS Echo properly, over the network, is not built yet.
 
 The old FireOS install is unchanged and still available at `?flow=fireos` on
 the dashboard URL.
