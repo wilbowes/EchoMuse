@@ -199,9 +199,19 @@ git submodule update --init          # GoTinyAlsa fork — see device/CLAUDE.md
 cd device && ./compile.sh            # needs the echomuse-compiler image
 cd device && go test ./...
 cd controller && python -m pytest tests/   # needs: pytest numpy scipy pyyaml
+cd emos/init && cc -O2 -o /tmp/ringsim ringsim.c -lm && /tmp/ringsim --check
+cd emos/init && cc -O2 -o /tmp/pwcheck pwcheck.c && /tmp/pwcheck
 ```
 
 Both suites plus `go vet` run in CI on every push/PR
 (`.github/workflows/ci.yml`). Controller tests deliberately cover the
 pure-logic modules only — see `controller/CLAUDE.md` before adding one that
 needs openwakeword or aiohttp.
+
+**emOS is C with no test framework, so its two off-target tools ARE its
+suite** — `ringsim --check` for the boot ring's invariants and `pwcheck` for
+the password hash the controller has to agree with. Both `#include init.c`
+whole and drive the real functions, so neither can drift from the device.
+CI runs both, builds the init for aarch64 in the pinned compiler image, and
+asserts the result is static — a dynamically linked PID 1 produces no output
+at all, which is indistinguishable from a kernel that never started.

@@ -1,6 +1,7 @@
 .idea
 __pycache__
 /device/build/
+/emos/build/
 controller/.env
 controller/.venv/
 controller/data/
