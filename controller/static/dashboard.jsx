@@ -2646,6 +2646,9 @@ const _ALEXA_PKGS = [
 // without a live handle.
 const CONNECT_STEPS = new Set([0, 1, 6]);
 
+// The emOS flow reconnects only once, at TWRP, and never returns to Android.
+const _EMOS_CONNECT_STEPS = new Set([0, 1]);
+
 // Which mode each step has to run in.
 //
 // This matters because the Dot's only power source is the same micro-USB port
@@ -2665,6 +2668,24 @@ const _STEP_MODE = {
   6: 'android', 7: 'android', 8: 'android', 9: 'android',
   10: 'android', 11: 'android', 12: 'android',
 };
+
+// emOS: ONE mode switch in the whole flow, at step 1, and everything after it
+// happens in TWRP. That is most of what makes this flow shorter than the
+// FireOS one — Magisk, the boot-image patch and the root checks all exist to
+// get root INSIDE Android, and root in TWRP is inherent.
+//
+// Steps 7 and 8 are marked 'serial' rather than a USB mode: by then the device
+// is running emOS, adbd is gone, and the console is a USB CDC-ACM port reached
+// through the Web Serial API. The mode check below does not apply to them, and
+// they are not ADB steps at all.
+const _EMOS_STEP_MODE = {
+  0: 'android',
+  1: 'twrp', 2: 'twrp', 3: 'twrp', 4: 'twrp', 5: 'twrp', 6: 'twrp',
+  7: 'serial', 8: 'serial',
+};
+
+// Steps driven over the serial console rather than ADB.
+const _EMOS_SERIAL_STEPS = new Set([7, 8]);
 
 // TWRP is checked first: its banner is "omni_biscuit", which also contains
 // "biscuit", so an Android-first test would call every TWRP device Android.
@@ -2752,6 +2773,40 @@ const _WIZARD_STEPS = [
   // capability is advertised by a device that cannot actually use it. USB is
   // also much better suited to 15MB than the shell plane.
   { id: 'install_oww',     label: 'Wake Word Assets',  desc: 'Push the ONNX runtime and wake models (~15MB) used for on-device wake word detection.' },
+];
+
+// The emOS flow. Nine steps against thirteen, and the four that go are the
+// four that only ever existed to obtain root inside Android:
+//
+//   Patch Boot Image   the permissive cmdline is inert (LK appends its own
+//                      duplicate androidboot.selinux=enforce after ours) and
+//                      emOS loads no policy; the init.rc entries are replaced
+//                      by emOS's own service table. THE MOST DANGEROUS STEP
+//                      IN THE WIZARD — in the wrong mode it writes over the
+//                      amonet unlock payload — and it is simply not needed.
+//   Install Magisk     we never boot Android; TWRP is already root.
+//   Pre-seed Root DB   only meaningful with Magisk.
+//   Verify Root        nothing downstream depends on Android root.
+//
+// Disable Alexa goes too, and dropping it is what removed the last reason to
+// boot Android at all: it never worked (see runDisableAlexa — she talks
+// regardless), and the userspace it silences is about to be replaced. Debloat
+// goes with it, since its package list targets a userspace being deleted and
+// its Magisk service.d script lives in the image being overwritten.
+//
+// WiFi moves to the END and is done over the console against emOS's own
+// wpa_supplicant — the real radio, so a network this hardware cannot join is
+// refused at pick time rather than after a flash.
+const _EMOS_STEPS = [
+  { id: 'connect_android', label: 'Connect Device',    desc: 'Connect the Echo Dot via USB. Device should be on and booted into Android. Appears as "AEOBC" in the USB picker.' },
+  { id: 'connect_twrp',    label: 'Connect to TWRP',   desc: 'Wait for TWRP recovery to appear, then reconnect. Appears as "Echo" in the USB picker. Everything after this happens here.' },
+  { id: 'escrow_boot',     label: 'Escrow Boot Image', desc: 'Read the stock boot partition off the device and keep a copy. This one file is both the build input and the ten-second undo.' },
+  { id: 'install_em',      label: 'Install EchoMuse',  desc: 'Push the server binary, startup script and TLS credentials to /data, which survives the boot-partition write.' },
+  { id: 'install_oww',     label: 'Wake Word Assets',  desc: 'Push the ONNX runtime and wake models (~15MB) used for on-device wake word detection.' },
+  { id: 'build_emos',      label: 'Build emOS',        desc: 'The controller repacks your own escrowed image with the emOS init, reusing your kernel and device trees.' },
+  { id: 'flash_emos',      label: 'Flash and Verify',  desc: 'Write the built image to the boot partition and read it back to confirm it landed.' },
+  { id: 'reboot_watch',    label: 'Reboot and Watch',  desc: 'Reboot into emOS and follow the first boot over the USB serial console while the ring fills.' },
+  { id: 'wifi_register',   label: 'Configure WiFi',    desc: 'Scan and join a network using the device’s own radio, then wait for it to register with the controller.' },
 ];
 
 // ── WifiPanel ──
@@ -2853,14 +2908,172 @@ function WifiPanel({ adb, wifiSsid, setWifiSsid, wifiPsk, setWifiPsk, onScan, ne
   );
 }
 
+// md5 rather than SHA-256, and that is not a security choice: the device
+// verifies with busybox md5sum, so this is the hash both ends can compute.
+// crypto.subtle has no md5, so it is implemented here — 40 lines against a
+// dependency the CSP would block anyway.
+function _md5Hex(bytes) {
+  const s = new Uint8Array(bytes);
+  const K = new Int32Array(64);
+  for (let i = 0; i < 64; i++) K[i] = (Math.abs(Math.sin(i + 1)) * 4294967296) | 0;
+  const S = [7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22,
+             5,9,14,20,5,9,14,20,5,9,14,20,5,9,14,20,
+             4,11,16,23,4,11,16,23,4,11,16,23,4,11,16,23,
+             6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21];
+  const n = s.length;
+  const withPad = ((n + 8) >> 6 << 6) + 64;
+  const M = new Uint8Array(withPad);
+  M.set(s);
+  M[n] = 0x80;
+  const bits = n * 8;
+  new DataView(M.buffer).setUint32(withPad - 8, bits >>> 0, true);
+  new DataView(M.buffer).setUint32(withPad - 4, Math.floor(bits / 4294967296), true);
+  let a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476;
+  const w = new Int32Array(16);
+  const dv = new DataView(M.buffer);
+  for (let off = 0; off < withPad; off += 64) {
+    for (let i = 0; i < 16; i++) w[i] = dv.getInt32(off + i * 4, true);
+    let A = a0, B = b0, C = c0, D = d0;
+    for (let i = 0; i < 64; i++) {
+      let F, g;
+      if (i < 16)      { F = (B & C) | (~B & D);        g = i; }
+      else if (i < 32) { F = (D & B) | (~D & C);        g = (5 * i + 1) & 15; }
+      else if (i < 48) { F = B ^ C ^ D;                 g = (3 * i + 5) & 15; }
+      else             { F = C ^ (B | ~D);              g = (7 * i) & 15; }
+      F = (F + A + K[i] + w[g]) | 0;
+      A = D; D = C; C = B;
+      B = (B + ((F << S[i]) | (F >>> (32 - S[i])))) | 0;
+    }
+    a0 = (a0 + A) | 0; b0 = (b0 + B) | 0; c0 = (c0 + C) | 0; d0 = (d0 + D) | 0;
+  }
+  const out = new Uint8Array(16);
+  new DataView(out.buffer).setInt32(0, a0, true);
+  new DataView(out.buffer).setInt32(4, b0, true);
+  new DataView(out.buffer).setInt32(8, c0, true);
+  new DataView(out.buffer).setInt32(12, d0, true);
+  return Promise.resolve(
+    Array.from(out).map(b => b.toString(16).padStart(2, '0')).join(''));
+}
+
+// Hand the operator a file. Used for the escrowed boot image, which must exist
+// somewhere that survives this tab being closed.
+function _downloadBytes(bytes, filename) {
+  const url = URL.createObjectURL(new Blob([bytes], { type: 'application/octet-stream' }));
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+// The emOS USB console, over Web Serial.
+//
+// NOT EXERCISED ON HARDWARE — written from what emos/README.md records rather
+// than from a run.
+//
+// Two rules, both from the same evening:
+//   ECHO OFF FIRST. A port opened with default termios has ECHO on, so
+//   everything the device sends is echoed straight back into its own input.
+//   The shell executes its own prompt and every command returns 127. It looks
+//   alive, echoes what you type, and runs nothing. There is no stty here to
+//   remind anyone, which is exactly why it belongs in the client.
+//   NEVER PUSH BULK DATA. This kernel logs one line per byte on ttyGS0.
+class _EmosConsole {
+  constructor(port, log) {
+    this.port = port;
+    this.log = log || (() => {});
+    this.reader = port.readable.getReader();
+    this.writer = port.writable.getWriter();
+    this.buf = '';
+    this._pump();
+  }
+
+  async _pump() {
+    const dec = new TextDecoder();
+    try {
+      for (;;) {
+        const { value, done } = await this.reader.read();
+        if (done) break;
+        this.buf += dec.decode(value, { stream: true });
+      }
+    } catch { /* the port went away; run() reports it as a timeout */ }
+  }
+
+  async _send(line) {
+    await this.writer.write(new TextEncoder().encode(line + '\n'));
+  }
+
+  async disableEcho() {
+    // `stty -echo` is the fix, and it has to go first — including before
+    // anything that reads output, since until it lands every reply is
+    // interleaved with the device's echo of the request.
+    await this._send('stty -echo');
+    await new Promise(r => setTimeout(r, 400));
+    this.buf = '';
+  }
+
+  // Commands are kept SHORT deliberately: the device's own echo garbles long
+  // ones into a 127, which is the second half of the same trap.
+  async run(cmd, timeoutMs = 15000) {
+    const mark = `__EM${Math.random().toString(36).slice(2, 8)}__`;
+    this.buf = '';
+    await this._send(`${cmd}; echo ${mark}`);
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const i = this.buf.indexOf(mark);
+      if (i >= 0) return this.buf.slice(0, i);
+      await new Promise(r => setTimeout(r, 100));
+    }
+    throw new Error(`The console did not answer "${cmd}" within `
+                  + `${Math.round(timeoutMs / 1000)}s.`);
+  }
+
+  async close() {
+    try { this.reader.releaseLock(); } catch {}
+    try { this.writer.releaseLock(); } catch {}
+    try { await this.port.close(); } catch {}
+  }
+}
+
+// Which flow the wizard runs.
+//
+// emOS is what a new device gets; the FireOS path stays reachable at
+// `?flow=fireos` and is not advertised in the UI. It is kept rather than
+// deleted because emOS is proven on one device, and a path that has
+// provisioned every device in the field is not something to remove on that
+// evidence — but offering the choice would ask the user to make a decision
+// they have no basis for.
+//
+// Read from the query string ONCE, not from state: changing flow mid-run
+// would renumber the steps under a wizard that has already done some of them.
+function _wizardFlow() {
+  try {
+    const want = new URLSearchParams(window.location.search).get('flow');
+    if (want === 'fireos') return 'fireos';
+  } catch { /* no location in a test harness; take the default */ }
+  return 'emos';
+}
+
 function ProvisionWizard({ token, onClose, knownDevices }) {
+  const flow = useRef(_wizardFlow()).current;
+  const isEmos = flow === 'emos';
+  const STEPS = isEmos ? _EMOS_STEPS : _WIZARD_STEPS;
+  const STEP_MODE = isEmos ? _EMOS_STEP_MODE : _STEP_MODE;
+  const CONNECT = isEmos ? _EMOS_CONNECT_STEPS : CONNECT_STEPS;
   const [step, setStep]         = useState(0);
-  const [stepState, setStepState] = useState(_WIZARD_STEPS.map(() => 'pending'));
+  const [stepState, setStepState] = useState(STEPS.map(() => 'pending'));
   const [log, setLog]           = useState([]);
   const [running, setRunning]   = useState(false);
   const [adb, setAdb]           = useState(null);
   const [magiskFile, setMagiskFile] = useState(null);
   const [binaryFile, setBinaryFile] = useState(null);
+  // emOS flow. `emosRef` is the escrowed stock boot image — the build input
+  // and the undo — held in the page for the length of the wizard; the copy
+  // that matters is the one downloaded to the operator's disk at step 2.
+  const [emosRef, setEmosRef]       = useState(null);
+  const [emosTarget, setEmosTarget] = useState(null);
+  const [emosImage, setEmosImage]   = useState(null);
+  const [initFile, setInitFile]     = useState(null);
+  const [emosConsole, setEmosConsole] = useState(null);
   const [wifiSsid, setWifiSsid] = useState('');
   const [wifiPsk, setWifiPsk]   = useState('');
   const [wifiNetworks, setWifiNetworks] = useState([]);
@@ -3009,7 +3222,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       }
     }
     return API.post('/api/provision/diagnostics', {
-      step:  _WIZARD_STEPS[stepIdx]?.id || String(stepIdx),
+      step:  STEPS[stepIdx]?.id || String(stepIdx),
       error: err?.message || '',
       probes,
       transcript: log.map(l => l.msg),
@@ -3087,9 +3300,32 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
            + `(${_TESTED_FIREOS_BUILD}). Other FireOS 5 builds may behave differently, `
            + `particularly around USB and ADB.`, 'warn');
     }
-    if (model && !model.toLowerCase().includes('amazon') && !name.toLowerCase().includes('biscuit')) {
+    // The emOS flow REFUSES a board it does not recognise, where the FireOS
+    // flow warns. The difference is what each one goes on to do: the FireOS
+    // path patches and boots the device's own Android, so a near-miss board
+    // has a fair chance of working, while emOS replaces the userspace and
+    // mounts /system at runtime for bionic and tinyalsa. On an unrecognised
+    // board that is not a lower chance of working, it is an unknown one, and
+    // the failure lands after the boot partition has been written.
+    const boardOk = (model && model.toLowerCase().includes('amazon'))
+                 || (name && name.toLowerCase().includes('biscuit'));
+    if (!boardOk) {
+      if (isEmos) {
+        expectDisconnect.current = true;
+        try { await c.close(); } catch {}
+        setAdb(null);
+        throw new Error(
+          `This does not look like an Echo Dot 2nd gen (model "${model || 'unknown'}", `
+          + `codename "${name || 'unknown'}"). emOS is built for biscuit and reuses this `
+          + `board's own kernel and /system, so it cannot be installed on anything else. `
+          + `Use ?flow=fireos if you meant to provision under FireOS.`);
+      }
       addLog('Warning: device may not be an Echo Dot 2nd gen — proceeding anyway.', 'warn');
     }
+    // The untested-build case stays a WARNING in both flows, deliberately, and
+    // it is the one place the two agree to be lenient: emOS mounts this
+    // build's /system at runtime so an untested one is genuinely unknown, but
+    // refusing someone whose device works is the worse error.
 
     // Refuse to re-provision a device already known to the controller —
     // this flow reboots into recovery, flashes a patched boot image, and
@@ -3463,7 +3699,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       // Say so when the device came back in the wrong mode. Without this the
       // reconnect looks like a success and the next Retry runs a TWRP step
       // against Android, or the reverse.
-      const want = _STEP_MODE[step];
+      const want = STEP_MODE[step];
       const got  = _bannerMode(c.banner);
       if (want && got !== 'unknown' && got !== want) {
         addLog(`Reconnected in ${_MODE_NAME[got]}, but this step needs ${_MODE_NAME[want]} `
@@ -4402,6 +4638,352 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     addLog('Staying connected — the wake word assets install next, then the device reboots.');
   }
 
+  // ── emOS flow ─────────────────────────────────────────────────────────────
+
+  // TWRP is root already but it is not Android, and the install steps below
+  // are shared with the FireOS flow, which assumes both `su` and `/sdcard`.
+  // Rather than rewrite two long, proven functions for a second environment,
+  // this makes the environment match what they expect. Both are no-ops when
+  // the thing is already there.
+  async function prepareTwrpForInstall(c) {
+    addLog('Preparing recovery environment…');
+
+    // /data holds everything we are about to install AND survives the boot
+    // partition write, which is the whole reason the install happens before
+    // the flash. TWRP does not always mount it on its own.
+    await c.shell('mount /data 2>/dev/null');
+    const dataOk = (await c.shell('mount | grep " /data " || true')).trim();
+    if (!dataOk) {
+      throw new Error('/data is not mounted in TWRP, so there is nowhere to '
+        + 'install EchoMuse. Mount it from TWRP\'s Mount menu and retry.');
+    }
+    addLog(`  /data mounted`);
+
+    // adbd runs as root here, so `su` is redundant — and frequently absent,
+    // which would fail every shared step with "su: not found". A shim costs
+    // nothing and leaves the shared functions untouched.
+    const uid = (await c.shell('id -u')).trim();
+    if (uid !== '0') {
+      throw new Error(`Expected a root shell in TWRP, got uid ${uid || '(unknown)'}.`);
+    }
+    const hasSu = (await c.shell('command -v su >/dev/null 2>&1 && echo yes || echo no')).trim();
+    if (hasSu !== 'yes') {
+      addLog('  no su in recovery — installing a shim (everything here is already root)');
+      await c.shell("printf '#!/bin/sh\\n[ \"$1\" = \"-c\" ] && shift\\nexec /bin/sh -c \"$*\"\\n' > /sbin/su; chmod 755 /sbin/su");
+      const shimOk = (await c.shell('su -c "id -u" 2>&1')).trim();
+      if (shimOk !== '0') {
+        throw new Error(`Could not make "su" work in recovery (got "${shimOk}").`);
+      }
+    }
+
+    // The shared steps stage uploads through /sdcard. In recovery that is not
+    // mounted; point it at the real storage so a 15MB push does not land in
+    // the recovery ramdisk and exhaust RAM.
+    const sdcard = (await c.shell('[ -d /sdcard ] && echo yes || echo no')).trim();
+    if (sdcard !== 'yes') {
+      await c.shell('mkdir -p /data/media/0 && ln -sf /data/media/0 /sdcard');
+      addLog('  /sdcard → /data/media/0');
+    }
+    addLog('Recovery environment ready.', 'ok');
+  }
+
+  // Step 2 — escrow. THE MOST IMPORTANT STEP IN THE FLOW, because it is the
+  // only one that makes every step after it reversible.
+  async function runEscrowBoot(c) {
+    await prepareTwrpForInstall(c);
+
+    addLog('Checking which partition the boot image lives in…');
+    const probe = await c.shell(
+      'd=$(readlink -f /dev/block/other-boot 2>/dev/null); echo "TARGET=$d"; '
+      + 'if [ -b "$d" ]; then echo "ISBLK=yes"; else echo "ISBLK=no"; fi; '
+      + 'for n in /dev/block/platform/*/by-name/boot_*; do '
+      + '[ -e "$n" ] && echo "NAME ${n##*/} $(readlink -f "$n" 2>/dev/null)"; done');
+    // The same guard the FireOS flow uses, and for the same reason: the
+    // by-name map is INVERTED between TWRP and Android, and reading the wrong
+    // alias here would escrow the amonet unlock payload while calling it a
+    // boot image — then flash emOS over the unlock at step 6.
+    const boot = classifyBootTarget(probe);
+    if (!boot.ok) throw new Error(boot.reason);
+    addLog(`  → ${boot.reason}`, boot.warn ? 'warn' : 'ok');
+    setEmosTarget(boot.target);
+
+    // IS THIS DEVICE ACTUALLY UNLOCKED? Checked here rather than at step 0,
+    // because this is where the evidence is: amonet's unlock reshapes the
+    // by-name map, and `boot_a_amonet` / `boot_b_amonet` exist only on a
+    // device it has been applied to. Android's map does not show them at all,
+    // so the question cannot be answered from where step 0 stands.
+    //
+    // Reaching TWRP is itself strong evidence — you get here by running
+    // amonet — so this is belt and braces rather than the only guard. It
+    // costs nothing, and the failure it prevents is a device that takes the
+    // flash and then does not boot, which is the most expensive outcome
+    // available here.
+    const amonet = /NAME boot_[ab]_amonet /.test(probe);
+    if (!amonet) {
+      addLog('No amonet partitions in the by-name map. This device may not be '
+           + 'unlocked, or may be unlocked by some other means. You are in TWRP, '
+           + 'which normally means it IS unlocked — but if the flash does not '
+           + 'boot, that is where to look first.', 'warn');
+    } else {
+      addLog('  amonet unlock confirmed in the partition map', 'ok');
+    }
+
+    addLog(`Reading ${boot.target} off the device (10–20s)…`);
+    const ddOut = await c.shell(`dd if=${boot.target} of=/tmp/emos_ref.img bs=1048576 2>&1`);
+    addLog(ddOut.trim() || '(done)');
+    const ref = await c.pull('/tmp/emos_ref.img');
+    await c.shell('rm -f /tmp/emos_ref.img');
+
+    const magic = new TextDecoder().decode(ref.slice(0, 8));
+    if (magic !== 'ANDROID!') {
+      throw new Error(
+        `Read ${ref.length} bytes from ${boot.target} and it does not start with `
+        + `"ANDROID!" (got "${magic.replace(/[^\x20-\x7e]/g, '.')}"). That is not a boot `
+        + `image, so nothing is being escrowed or flashed.`);
+    }
+    const md5 = await _md5Hex(ref);
+    addLog(`Escrowed ${(ref.length / 1024 / 1024).toFixed(1)} MB, md5 ${md5}`, 'ok');
+    setEmosRef({ bytes: ref, md5, target: boot.target });
+
+    // Handed to the operator as a file as well as held in the page. The copy
+    // in the browser is the convenient one; the one on their disk is the one
+    // that survives this tab being closed, and it is the ten-second undo for
+    // everything after this point.
+    _downloadBytes(ref, `echomuse-stock-boot-${md5.slice(0, 8)}.img`);
+    addLog('A copy has been downloaded to your computer. KEEP IT — it is both '
+         + 'the build input and the recovery image. Restoring it takes about '
+         + 'ten seconds and leaves /data untouched.', 'warn');
+  }
+
+  // Step 5 — build. The controller does the packing; see em_emos_build.py for
+  // why it is there and not here.
+  async function runBuildEmos(useLatest) {
+    if (!emosRef) {
+      throw new Error('No escrowed boot image — run the Escrow Boot Image step first.');
+    }
+
+    // The init comes from the latest emOS release by default. It is the only
+    // part of an emOS image that CAN be distributed — the kernel and device
+    // trees in a built image are the user's own — so this is the whole of
+    // what the wizard needs to fetch.
+    let initBlob = initFile;
+    let version = '0.1';
+    if (useLatest) {
+      addLog('Fetching the emOS init from the latest release…');
+      const resp = await fetch(ingressPath('/api/provision/emos_init'),
+                               { headers: { Authorization: `Bearer ${token}` } });
+      if (!resp.ok) {
+        let detail = `HTTP ${resp.status}`;
+        try { const j = await resp.json(); detail = j.message || j.error || detail; } catch {}
+        throw new Error(detail);
+      }
+      const bytes = new Uint8Array(await resp.arrayBuffer());
+      version = resp.headers.get('X-Emos-Version') || version;
+      initBlob = new Blob([bytes]);
+      addLog(`  ${version}, ${(bytes.length/1024/1024).toFixed(1)} MB`);
+    }
+    if (!initBlob) {
+      throw new Error('Choose an emOS init binary to build with, or use the '
+        + 'latest release. Build one from emos/ with build.sh if you need a '
+        + 'specific version.');
+    }
+    addLog(`Sending the escrowed image (${(emosRef.bytes.length/1024/1024).toFixed(1)} MB) `
+         + `and the init to the controller…`);
+
+    const fd = new FormData();
+    fd.append('reference', new Blob([emosRef.bytes]), 'reference.img');
+    fd.append('init', initBlob, 'init');
+    fd.append('version', version);
+    const resp = await fetch(ingressPath('/api/provision/emos_image'), {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: fd,
+    });
+    if (!resp.ok) {
+      // The build refuses rather than warns, and every refusal names something
+      // the operator can act on — surface it rather than the status code.
+      let detail = `HTTP ${resp.status}`;
+      try { const j = await resp.json(); detail = j.message || j.error || detail; } catch {}
+      throw new Error(`The controller refused to build the image: ${detail}`);
+    }
+    const buf = new Uint8Array(await resp.arrayBuffer());
+    const claimed = resp.headers.get('X-Image-MD5');
+    const got = await _md5Hex(buf);
+    if (claimed && claimed !== got) {
+      throw new Error(`The built image arrived corrupted (md5 ${got}, controller said ${claimed}).`);
+    }
+    let info = null;
+    try { info = JSON.parse(resp.headers.get('X-Build-Info') || 'null'); } catch {}
+    if (info) {
+      addLog(`  kernel and device trees carried over from your image `
+           + `(${(info.zimage_size/1024/1024).toFixed(1)} MB + ${info.dtb_size} bytes)`);
+      addLog(`  ramdisk ${(info.ramdisk_size/1024).toFixed(0)} KB`);
+      addLog(`  cmdline ${info.cmdline}`);
+    }
+    addLog(`Built ${(buf.length/1024/1024).toFixed(1)} MB, md5 ${got}`, 'ok');
+    setEmosImage({ bytes: buf, md5: got });
+  }
+
+  // Step 6 — flash and verify.
+  async function runFlashEmos(c) {
+    if (!emosImage) throw new Error('Nothing built yet — run the Build emOS step first.');
+    const target = emosTarget || emosRef?.target;
+    if (!target) throw new Error('No flash target resolved — re-run the escrow step.');
+
+    addLog(`Uploading the image to the device…`);
+    await c.push('/tmp/emos_boot.img', emosImage.bytes,
+      pct => setProgress({ label: 'Uploading image', pct }));
+    setProgress(null);
+
+    const staged = (await c.shell('busybox md5sum /tmp/emos_boot.img 2>/dev/null')).trim().split(/\s+/)[0];
+    if (staged !== emosImage.md5) {
+      await c.shell('rm -f /tmp/emos_boot.img');
+      throw new Error(`The image arrived on the device corrupted (md5 ${staged || 'unreadable'}, `
+                    + `expected ${emosImage.md5}). Nothing has been written.`);
+    }
+    addLog('  staged and verified on the device');
+
+    // conv=fsync, then sync, then drop the page cache BEFORE reading back.
+    // A read-back that comes from the cache confirms the cache, not the
+    // partition — and a write that reports implausible throughput (this eMMC
+    // does 2.5–9 MB/s) went to cache and is lost on the next boot.
+    addLog(`Writing to ${target}…`);
+    const t0 = Date.now();
+    const wrote = await c.shell(
+      `busybox dd if=/tmp/emos_boot.img of=${target} bs=1048576 conv=fsync 2>&1; sync`);
+    const secs = (Date.now() - t0) / 1000;
+    addLog(wrote.trim() || '(done)');
+    const mbps = (emosImage.bytes.length / 1024 / 1024) / Math.max(secs, 0.001);
+    addLog(`  ${mbps.toFixed(1)} MB/s over ${secs.toFixed(1)}s`);
+    if (mbps > 60) {
+      addLog('That throughput is not achievable on this eMMC, so the write '
+           + 'probably went to cache. The read-back below is the check that '
+           + 'matters.', 'warn');
+    }
+
+    await c.shell('echo 3 > /proc/sys/vm/drop_caches 2>/dev/null; sync');
+    addLog('Reading it back…');
+    const back = (await c.shell(
+      `busybox dd if=${target} bs=1048576 count=${Math.ceil(emosImage.bytes.length / 1048576)} `
+      + `2>/dev/null | busybox md5sum`)).trim().split(/\s+/)[0];
+    // dd reads whole megabytes, so hash the image padded the same way rather
+    // than comparing against the image's own md5 — otherwise a perfectly good
+    // flash fails on the tail padding.
+    const padded = new Uint8Array(Math.ceil(emosImage.bytes.length / 1048576) * 1048576);
+    padded.set(emosImage.bytes);
+    const want = await _md5Hex(padded);
+    if (back !== want) {
+      throw new Error(
+        `The partition does not contain what we wrote (read ${back || 'nothing'}, `
+        + `expected ${want}). DO NOT REBOOT. Restore the escrowed image with:\n`
+        + `  dd if=<your stock boot image> of=${target}`);
+    }
+    await c.shell('rm -f /tmp/emos_boot.img');
+    addLog('Flash verified against the partition itself.', 'ok');
+    addLog('The device is now an emOS device. If anything below goes wrong, '
+         + 'restoring the escrowed image takes about ten seconds and leaves '
+         + 'everything installed on /data alone.', 'warn');
+  }
+
+  // ── Steps 7 and 8 — the serial console ────────────────────────────────────
+  //
+  // NOT EXERCISED ON HARDWARE. Everything below is written from the measured
+  // behaviour recorded in emos/README.md rather than from a run, and it is the
+  // part of this flow most likely to need adjusting in front of a device.
+
+  async function runRebootAndWatch(c) {
+    if (!navigator.serial) {
+      throw new Error('This browser has no Web Serial API, so the first boot '
+        + 'cannot be watched. Chrome or Edge over https (or localhost) is '
+        + 'required. The device is flashed — you can reboot it by hand.');
+    }
+    if (c) {
+      addLog('Rebooting into emOS…');
+      expectDisconnect.current = true;
+      try { await c.shell('reboot'); } catch {}
+      try { await c.close(); } catch {}
+      setAdb(null);
+    }
+    addLog('The ring fills as the boot progresses. Pick the device\'s serial '
+         + 'port when the browser asks — it appears a few seconds in.', 'warn');
+
+    const port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 115200 });
+    const con = new _EmosConsole(port, addLog);
+    setEmosConsole(con);
+    // ECHO OFF FIRST, ALWAYS. A port opened with default termios echoes
+    // everything the device sends back into its own input; the shell then
+    // executes its own prompt and every command returns 127. It looks alive,
+    // echoes what you type, and runs nothing. Web Serial has no stty to
+    // remind you. This cost an evening on 2026-09-04.
+    await con.disableEcho();
+    const uname = await con.run('uname -a');
+    addLog(uname || '(no answer)');
+    const osrel = await con.run('cat /etc/os-release 2>/dev/null | head -3');
+    if (!/emos/i.test(osrel)) {
+      throw new Error('The console answered but this does not look like emOS '
+        + `(/etc/os-release says "${osrel.trim() || 'nothing'}"). `
+        + 'Restore the escrowed boot image before going further.');
+    }
+    addLog(osrel.trim(), 'ok');
+    addLog('emOS is running. Reaching this point with no network is expected — '
+         + 'WiFi is configured next.', 'ok');
+  }
+
+  async function runEmosWifi() {
+    const con = emosConsole;
+    if (!con) throw new Error('No serial console — re-run the Reboot and Watch step.');
+    if (!wifiSsid) throw new Error('Choose a network first.');
+
+    addLog(`Joining ${wifiSsid}…`);
+    // wpa_cli against emOS's own supplicant — the real radio, so a network
+    // this hardware cannot join fails here rather than after a flash. Note
+    // this radio reports no SAE, so it genuinely cannot do WPA3 (#82).
+    const id = (await con.run('wpa_cli -i wlan0 add_network')).trim().split('\n').pop().trim();
+    if (!/^\d+$/.test(id)) throw new Error(`wpa_cli would not add a network (said "${id}").`);
+    await con.run(`wpa_cli -i wlan0 set_network ${id} ssid '"${wifiSsid}"'`);
+    if (wifiPsk) {
+      await con.run(`wpa_cli -i wlan0 set_network ${id} psk '"${wifiPsk}"'`);
+    } else {
+      await con.run(`wpa_cli -i wlan0 set_network ${id} key_mgmt NONE`);
+    }
+    const en = await con.run(`wpa_cli -i wlan0 enable_network ${id}`);
+    if (!/OK/.test(en)) throw new Error(`wpa_cli refused to enable the network: ${en.trim()}`);
+
+    // save_config keeps NOTHING without update_config=1 in the conf, and says
+    // OK either way — so the device would join now and forget on reboot.
+    const saved = await con.run('wpa_cli -i wlan0 save_config');
+    if (!/OK/.test(saved)) {
+      addLog('wpa_cli could not save the network, so this will be forgotten on '
+           + 'reboot. Check update_config=1 in wpa_supplicant.conf.', 'warn');
+    }
+
+    addLog('Waiting for the device to register with the controller…');
+    // Association is not the success condition. A device can be perfectly on
+    // the network and running nothing; only registration proves EchoMuse was
+    // installed, its credentials are right, and the assistant actually runs.
+    const deadline = Date.now() + 120000;
+    let seen = null;
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 5000));
+      let list = [];
+      try { list = (await API.get('/api/devices')).devices || []; } catch {}
+      const known = new Set((knownDevices || []).map(d => d.device_id));
+      seen = list.find(d => !known.has(d.device_id));
+      if (seen) break;
+      const st = (await con.run('wpa_cli -i wlan0 status | grep wpa_state')).trim();
+      addLog(`  ${st || 'no answer'}`);
+    }
+    if (!seen) {
+      throw new Error('The device did not register within two minutes. It may be '
+        + 'on the network without EchoMuse running — check the console, and '
+        + 'restore the escrowed boot image if you want to start over.');
+    }
+    addLog(`Registered as ${seen.label || seen.device_id}.`, 'ok');
+    addLog('Provisioning complete. Approve the device on the dashboard if it is '
+         + 'waiting for approval.', 'ok');
+  }
+
   // ── Step executor ──
   async function runInstallOwwAssets(c) {
     // Pushed over USB rather than through the shell plane: a freshly-flashed
@@ -4447,6 +5029,16 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // the ADB connection, so any step after it can never run. Keeping it on
     // the success path (not in a finally) means a failure above leaves the
     // connection alive and the Retry button usable.
+    //
+    // In the emOS flow this step is FOURTH of nine, not last: rebooting here
+    // would drop the connection and strand the build, flash and console steps
+    // exactly as the wake word step was stranded in 2026-07-31. The reboot
+    // there belongs to Reboot and Watch, which is the last step that has a
+    // device to reboot.
+    if (isEmos) {
+      addLog('Staying in recovery — the image is built and flashed next.', 'ok');
+      return;
+    }
     addLog('Rebooting device to finish provisioning…');
     expectDisconnect.current = true;
     try { await c.shell('su -c reboot'); } catch {}
@@ -4469,17 +5061,34 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // and people paste it when something goes wrong — without these it is a
     // single 200-line stream with no way to tell which step a message
     // belongs to, or which one a failure happened in.
-    addLog(`── ${stepIdx + 1}/${_WIZARD_STEPS.length}  ${_WIZARD_STEPS[stepIdx].label.toUpperCase()} ──`, 'head');
+    addLog(`── ${stepIdx + 1}/${STEPS.length}  ${STEPS[stepIdx].label.toUpperCase()} ──`, 'head');
     let c = adb;
     try {
-      // Every step but the three connection steps needs a live handle. Passing
-      // a null one through produced an error naming a property of undefined,
+      // Every step but the connection steps needs a live handle. Passing a
+      // null one through produced an error naming a property of undefined,
       // which says nothing about the cable having been unplugged.
-      if (!CONNECT_STEPS.has(stepIdx) && !c) {
+      //
+      // The emOS serial steps are exempt: by then the device is running emOS
+      // and adbd is gone, so there is no ADB connection to be missing and
+      // demanding one would refuse every run at step 7.
+      const needsAdb = !CONNECT.has(stepIdx)
+                    && !(isEmos && _EMOS_SERIAL_STEPS.has(stepIdx));
+      if (needsAdb && !c) {
         throw new Error('There is no ADB connection. Click Reconnect, pick the '
                       + 'device from the USB picker, then Retry this step.');
       }
-      switch (stepIdx) {
+      if (isEmos) switch (stepIdx) {
+        case 0: c = await runConnectAndroid(); break;
+        case 1: c = await runConnectTwrp(); break;
+        case 2: await runEscrowBoot(c); break;
+        case 3: await runInstallEchoMuse(c, binaryFile, useLatest); break;
+        case 4: await runInstallOwwAssets(c); break;
+        case 5: await runBuildEmos(useLatest); break;
+        case 6: await runFlashEmos(c); break;
+        case 7: await runRebootAndWatch(c); break;
+        case 8: await runEmosWifi(); break;
+      }
+      else switch (stepIdx) {
         case  0: c = await runConnectAndroid(); break;
         case  1: c = await runConnectTwrp(); break;
         case  2: await runPatchBoot(c); break;
@@ -4496,7 +5105,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       }
       if (abandoned()) return;
       markStep(stepIdx, 'done');
-      if (stepIdx < _WIZARD_STEPS.length - 1) setStep(stepIdx + 1);
+      if (stepIdx < STEPS.length - 1) setStep(stepIdx + 1);
     } catch (e) {
       // A step abandoned mid-flight may still throw on its way out, once the
       // transport notices. The UI already says what happened; saying it again
@@ -4523,8 +5132,12 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       // Clear the file selection on failure — forces a deliberate reselect
       // before retry rather than silently re-flashing whatever was picked
       // last time (which, on a hash-mismatch failure, is the wrong file).
-      if (stepIdx === 3) setMagiskFile(null);
-      if (stepIdx === 11) setBinaryFile(null);
+      // Keyed off the step ID rather than its number: the two flows put
+      // Install EchoMuse at 11 and at 3, and a hardcoded index silently
+      // clears the wrong thing on the other one.
+      const failedId = STEPS[stepIdx]?.id;
+      if (failedId === 'install_magisk') setMagiskFile(null);
+      if (failedId === 'install_em') setBinaryFile(null);
     }
     if (!abandoned()) setRunning(false);
   }
@@ -4536,20 +5149,33 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // Step 12 (wake word assets) auto-runs: it needs no input, and making it
     // a button people can leave unpressed defeats the point of it being
     // mandatory.
-    const autoSteps = new Set([2, 4, 7, 8, 9, 12]);
+    //
+    // emOS: escrow (2), assets (4) and build (5) auto-run. The build writes
+    // nothing to the device — it is the controller repacking the escrowed
+    // image — and it takes the init from the latest emOS release, so there is
+    // nothing to ask for. If no release is published it fails with something
+    // to act on and the picker below is still there.
+    //
+    // The flash (6) and the two serial steps stay manual, deliberately: each
+    // is a partition write or a reboot, and neither should begin while nobody
+    // is looking.
+    const autoSteps = isEmos ? new Set([2, 4, 5]) : new Set([2, 4, 7, 8, 9, 12]);
     if (!autoSteps.has(step) || running || stepState[step] !== 'pending') return;
-    if (adb) { runStep(step); return; }
+    // The emOS build's default source is the release, so the auto path has to
+    // say so — `useLatest` is undefined otherwise and it would ask for a file
+    // nobody has chosen.
+    if (adb) { runStep(step, isEmos && step === 5); return; }
     // An auto step with no connection used to be a no-op, so the wizard sat on
     // it looking busy forever — which is exactly how the wake word asset step
     // failed on 2026-07-31, reached only after the previous step had rebooted
     // the device out from under it. A step that cannot start must SAY so.
-    addLog(`"${_WIZARD_STEPS[step].label}" needs an ADB connection and there isn't one — `
+    addLog(`"${STEPS[step].label}" needs an ADB connection and there isn't one — `
          + `the previous step disconnected the device. Reconnect and click Retry.`, 'error');
     markStep(step, 'error');
   }, [step, running, adb]);
 
-  const cur    = _WIZARD_STEPS[step];
-  const isDone = step === _WIZARD_STEPS.length - 1 && stepState[step] === 'done';
+  const cur    = STEPS[step];
+  const isDone = step === STEPS.length - 1 && stepState[step] === 'done';
 
   // Buttons are shown for manual steps; auto steps start themselves.
 
@@ -4588,7 +5214,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
 
           {/* Step list */}
           <div style={{ width: 176, borderRight: '1px solid var(--border)', background: 'var(--hairline)', padding: '12px 0', overflowY: 'auto', flexShrink: 0 }}>
-            {_WIZARD_STEPS.map((s, i) => {
+            {STEPS.map((s, i) => {
               const st = stepState[i]; const active = i === step;
               return (
                 <div key={s.id}
@@ -4617,7 +5243,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
             {/* ── Step-specific controls ── */}
 
             {/* Steps 0, 1, 6: connect / reconnect buttons */}
-            {CONNECT_STEPS.has(step) && stepState[step] === 'pending' && !running && (
+            {CONNECT.has(step) && stepState[step] === 'pending' && !running && (
               <div style={{ marginBottom: 10 }}>
                 <Pill onClick={() => runStep(step)}>
                   {step === 0 ? 'Connect Device' : step === 1 ? 'Connect to TWRP' : 'Reconnect Device'}
@@ -4625,8 +5251,8 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
               </div>
             )}
 
-            {/* Step 5: reboot button */}
-            {step === 5 && stepState[5] === 'pending' && !running && (
+            {/* Step 5: reboot button (FireOS flow only — emOS step 5 builds the image) */}
+            {!isEmos && step === 5 && stepState[5] === 'pending' && !running && (
               <div style={{ marginBottom: 10 }}>
                 <Pill onClick={() => runStep(5)}>Reboot to Android</Pill>
               </div>
@@ -4634,7 +5260,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
 
             {/* Step 3: Magisk zip file picker — stays visible through error so a
                 different file can be picked, not just gone after one attempt */}
-            {step === 3 && stepState[3] !== 'done' && !running && (
+            {!isEmos && step === 3 && stepState[3] !== 'done' && !running && (
               <div style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
                 <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--text2)', letterSpacing: '0.08em' }}>
                   {stepState[3] === 'error' ? 'SELECT A DIFFERENT FILE' : 'MAGISK-V17.3.ZIP'}
@@ -4651,7 +5277,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
             {/* Step 11: EchoMuse binary — custom upload or latest from controller.
                 Stays visible through error so a different file/source can be
                 tried instead of being stuck retrying whatever failed. */}
-            {step === 11 && stepState[11] !== 'done' && !running && (
+            {!isEmos && step === 11 && stepState[11] !== 'done' && !running && (
               <div style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                   <Pill accent onClick={() => runStep(11, true)}>Install latest from GitHub</Pill>
@@ -4677,8 +5303,89 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
               </div>
             )}
 
-            {/* Step 10: WiFi configuration */}
-            {step === 10 && stepState[10] !== 'done' && !running && (
+            {/* emOS step 3: the EchoMuse binary, same choice the FireOS flow
+                offers at its step 11. */}
+            {isEmos && step === 3 && stepState[3] !== 'done' && !running && (
+              <div style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <Pill accent onClick={() => runStep(3, true)}>Install latest from GitHub</Pill>
+                  <Pill small onClick={doCheckRelease} disabled={checkingRelease}>
+                    {checkingRelease ? 'Checking…' : 'Check for newer release'}
+                  </Pill>
+                  {latestRelease && (
+                    <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)' }}>
+                      Latest on GitHub: {latestRelease.version}
+                    </span>
+                  )}
+                </div>
+                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', letterSpacing: '0.04em' }}>— or —</div>
+                <input
+                  type="file"
+                  onChange={e => setBinaryFile(e.target.files[0])}
+                  style={{ fontFamily: "'DM Mono',monospace", fontSize: 11 }}
+                />
+                {!!binaryFile && <Pill onClick={() => runStep(3, false)}>Install Custom Build</Pill>}
+              </div>
+            )}
+
+            {/* emOS step 5: the init the image is built around. The release
+                is the ordinary path; the picker is for building against a
+                version that is not published yet. */}
+            {isEmos && step === 5 && stepState[5] !== 'done' && !running && (
+              <div style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <Pill accent onClick={() => runStep(5, true)}>Build with the latest emOS release</Pill>
+                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', letterSpacing: '0.04em' }}>— or —</div>
+                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--text2)', letterSpacing: '0.08em' }}>
+                  {stepState[5] === 'error' ? 'SELECT A DIFFERENT INIT' : 'YOUR OWN INIT BINARY (AARCH64, STATIC)'}
+                </div>
+                <input
+                  type="file"
+                  onChange={e => setInitFile(e.target.files[0])}
+                  style={{ fontFamily: "'DM Mono',monospace", fontSize: 11 }}
+                />
+                {!!initFile && <Pill onClick={() => runStep(5, false)}>Build with this init</Pill>}
+              </div>
+            )}
+
+            {/* emOS step 6: the partition write. Deliberately a button — this
+                is the only irreversible-looking step in the flow, and it
+                should not begin while nobody is watching. */}
+            {isEmos && step === 6 && stepState[6] !== 'done' && !running && (
+              <div style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)' }}>
+                  Writes the built image to {emosTarget || 'the boot partition'}.
+                  Your escrowed image restores it in about ten seconds and leaves /data alone.
+                </div>
+                <Pill accent onClick={() => runStep(6)}>Flash emOS</Pill>
+              </div>
+            )}
+
+            {/* emOS steps 7 and 8: reboot into emOS and configure WiFi over
+                the console. */}
+            {isEmos && step === 7 && stepState[7] !== 'done' && !running && (
+              <div style={{ marginBottom: 12 }}>
+                <Pill accent onClick={() => runStep(7)}>Reboot and Connect Console</Pill>
+              </div>
+            )}
+            {isEmos && step === 8 && stepState[8] !== 'done' && !running && (
+              <div style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <input
+                  placeholder="Network name (SSID)" value={wifiSsid}
+                  onChange={e => setWifiSsid(e.target.value)}
+                  style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, padding: 6 }} />
+                <input
+                  placeholder="Password (blank for an open network)" type="password" value={wifiPsk}
+                  onChange={e => setWifiPsk(e.target.value)}
+                  style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, padding: 6 }} />
+                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)' }}>
+                  This radio has no SAE, so it cannot join a WPA3-only network.
+                </div>
+                {!!wifiSsid && <Pill accent onClick={() => runStep(8)}>Join and Register</Pill>}
+              </div>
+            )}
+
+            {/* Step 10: WiFi configuration (FireOS flow — emOS configures WiFi over the console at step 8) */}
+            {!isEmos && step === 10 && stepState[10] !== 'done' && !running && (
               <WifiPanel
                 adb={adb}
                 wifiSsid={wifiSsid} setWifiSsid={setWifiSsid}
@@ -4717,7 +5424,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                     Unplugging the cable is a normal reaction to something
                     going wrong, and it used to leave the wizard holding a dead
                     handle with no way to get a live one (#91). */}
-                {!CONNECT_STEPS.has(step) && (
+                {!CONNECT.has(step) && (
                   <Pill onClick={reconnectAdb}>{adb ? 'Reconnect' : 'Reconnect device'}</Pill>
                 )}
                 {/* Collection is automatic on failure; sharing is deliberate.
