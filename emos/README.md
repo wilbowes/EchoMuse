@@ -199,45 +199,107 @@ Knowing which one you are looking at is most of the diagnosis:
 | what you see | who is driving it | what it means |
 |---|---|---|
 | solid dark blue | the bootloader | powered, before Linux. We have not confirmed whether this is the preloader or LK |
-| dark blue ring, one lighter segment orbiting | the **kernel**, via the `is31fl3236` driver's `boot_animation` | the kernel is up and **our init has not run**. It keeps orbiting until userspace claims the ring, so an orbit that never becomes a progress head means PID 1 never started or died before its first instruction |
-| dark blue trail behind a lighter blue head | emOS init | booting, and the head's position is how far |
-| both sides filling bottom to top, brightening, fading | emOS init | up, on the network, ring handed back |
-| red head, stopped | emOS init | that stage failed |
+| full blue ring, one cyan segment orbiting | the **kernel**, via the `is31fl3236` driver's `boot_animation` | the kernel is up and **our init has not run**. It orbits until userspace claims the ring, so an orbit that never becomes a progress head means PID 1 never started, or died before its first instruction |
+| the ring fading out, one cyan LED left at position 1 | emOS init | the handover: we have just taken the ring |
+| blue arc growing behind a cyan head | emOS init | booting, and the head's position is how far |
+| positions 12 and 1 lit and throbbing | emOS init | every stage done, waiting on the network — most of the boot |
+| both sides filling to the top, then white, then fading | emOS init | up, on the network, ring handed back |
+| red, stopped | emOS init | a stage failed, at the point it reached |
 | solid amber | emOS init | rolling back to the known-good image |
 
-Ours is deliberately a continuation of the kernel's orbit rather than a
-different display — same two blues, same direction, a lighter head leading a
-dark blue trail — because the user should see one object making progress, not
-three unrelated lights.
+### Positions
 
-**The head moves continuously, not in twelve jumps.** Stages are nothing like
-evenly spaced in time, so a head that advanced only on completion would sit
-motionless through `fsck` and WiFi association — the two longest stages, and
-precisely the ones someone reads as a hang. It eases towards the next stage and
-decelerates as it approaches, never arriving until that stage actually
-completes; a completed stage gives it a visible kick forward. It never claims
-progress that has not happened, and it is never still.
+The ring is twelve LEDs at 30°, numbered here the way it physically sits:
+**1 just left of 6 o'clock**, up the left side to **6 just left of 12
+o'clock**, then **7 just right of 12 o'clock**, down to **12 just right of 6
+o'clock**. So there is a GAP at dead bottom and dead top rather than an LED,
+which is why the balanced pairs are the ones either side of each gap. The
+kernel starts its orbit on physical index 0, which is position **2** — the
+mapping constant is `LED_BOTTOM`, and getting it wrong rotates the whole
+display by one LED including where the closing sweep meets.
 
-Twelve stages, twelve LEDs:
+### The handover
 
-| # | reached when |
-|---|---|
-| 1 | `proc`/`sys`/`devpts` mounted and every device node created |
-| 2 | `/system` mounted read-only |
-| 3 | `e2fsck -p` on `/data` finished |
-| 4 | `/data` mounted read-write |
-| 5 | the `/etc` symlink farm is built |
-| 6 | the previous boot's kernel log is preserved |
-| 7 | busybox applets linked |
-| 8 | the USB gadget is up |
-| 9 | `/dev/ttyGS0` exists — the console is open |
-| 10 | `wlan0` exists |
-| 11 | associating |
-| 12 | carrier and an address — the boot is confirmed |
+Ours is a continuation of the kernel's orbit rather than a different display,
+and the palette is measured off the driver rather than eyeballed — `frame` is a
+read/write attribute, so writing 1 to `boot_animation` on a running device
+replays the orbit and each frame reads back exactly as displayed. Measured on
+EFF, 2026-09-05: ground `0000ff` on **all twelve** LEDs, head `00ffff` cyan,
+rising physical index, 109ms per step (min 100, max 120, n=13), 1.31s per
+revolution. Sampling at 100ms first suggested exactly one step per sample,
+which is aliasing rather than a measurement — the figures come from a second
+pass at full speed against `/proc/uptime`.
 
-Stage 10 did not exist until 2026-09-05: both the wlan0 and associating steps
-pinned the same number, so one LED never lit and the two states were the same
-picture. Harmless on a bar that fills; a visible stumble once the head travels.
+The animation runs until userspace stops it, so WHEN we stop it is ours to
+choose: `anim_claim` polls the position and takes the ring the instant the
+orbit's head reaches **position 12**. Our next act is lighting position 1 —
+the step the orbit would have taken anyway — so the motion carries straight on.
+The blue ring then fades out from under that head, which is what buys the
+contrast: against a lit ring the progress arc was two shades of blue from the
+ground and did not read at all, so the ring is cleared and the tail **repaints**
+the orbit's own blue as the head travels.
+
+### The head
+
+**It moves continuously, not in twelve jumps**, and that is the point of it
+rather than a flourish. It eases towards the next stage and decelerates as it
+approaches, never arriving until that stage actually completes; completing one
+gives it a visible kick. It never claims progress that has not happened.
+
+It is **steady while travelling and throbs only once it stops**, because those
+say opposite things — movement is progress, the throb is waiting. "Stopped"
+means visually stationary, not arithmetically: the ease decelerates to 1/256 of
+a segment per tick, which changes no pixel.
+
+The head is never a plain cross-fade across the two segments it straddles. That
+halves its brightness at the midpoint, and at the bottom of a breath each half
+falls *below* the tail — so the leading edge stops being the brightest thing on
+the ring. The nearer LED takes the head at full and the further one a
+proportional glow.
+
+### The stages
+
+| # | reached when | measured |
+|---|---|---|
+| 1 | `proc`/`sys`/`devpts` mounted, every device node created | 2210ms |
+| 2 | `/system` mounted read-only | 2218ms |
+| 3 | `e2fsck -p` on `/data` finished | 2254ms |
+| 4 | `/data` mounted read-write | 2261ms |
+| 5 | the `/etc` symlink farm is built | 2265ms |
+| 6 | the previous boot's kernel log is preserved | 2277ms |
+| 7 | busybox applets linked | 2849ms |
+| 8 | the USB gadget is up | 2886ms |
+| 9 | `/dev/ttyGS0` exists — the console is open | 3888ms |
+| 10 | `wlan0` exists | 7738ms |
+| 11 | associating | 7738ms |
+| 12 | carrier and an address — the boot is confirmed | ~35366ms |
+
+Those are real, off EFF on 2026-09-05 (`note()` and `netlog()` timestamp every
+line from `CLOCK_MONOTONIC`). They are worth reading before changing anything
+here, because the shape is not what anyone assumes: **`fsck` is 36ms**, stages
+1-8 all land inside 676ms, and **association plus DHCP is 27.6 seconds — four
+fifths of the whole boot**. The head therefore arrives at position 12 at 7.7s
+and waits there for the rest, which is what the throbbing pair at 12 and 1 is
+for. Pacing the ring by elapsed time instead was considered and is not needed
+for that reason; it would also mean predicting durations, which this does not.
+
+Stage 10 did not exist until 2026-09-05: the wlan0 and associating steps pinned
+the same number, so one LED never lit. Note they still fire in the same
+millisecond, so 10 is lit and superseded immediately.
+
+### When a stage fails
+
+**Only two stages can fail this way** — `led_fail()` has exactly two callers,
+mounting `/system` (2) and mounting `/data` (4). The head turns red at the
+point it reached and **everything stops**, including the throb: a device that
+is stuck should look stuck.
+
+Everything else fails by *hanging* rather than by reporting, and that looks
+different: the head simply stays where it is. A hang before `/data` is mounted
+is the one to know about, because the rollback counter lives in
+`/data/emos/boot.state` and cannot be incremented until then — so a boot that
+dies earlier than that is never counted, never rolls back, and needs recovery
+over USB.
 
 **Amber means a rollback is in progress** (see below). Cold boot to a working
 voice assistant is about 35 seconds.

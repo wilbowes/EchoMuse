@@ -186,7 +186,11 @@ static long mono_ms(void);
 #define LED_BOTTOM 11
 #define LED_DIR    1        /* +1: the orbit runs on rising physical index */
 #define ORBIT_STEP_MS 109   /* measured; the wind-in matches this exactly */
-#define ORBIT_PROBE 1       /* sample the kernel's frames before claiming */
+/* Sampling the kernel's own frames before we stop it. OFF: it has done its
+ * job — the palette and rate above are measured and written down — and it
+ * costs ~400ms of every boot plus ten lines of the trail. Turn it back on if
+ * the orbit ever needs re-measuring, on this board or another. */
+#define ORBIT_PROBE 0
 
 /* The orbit's ring, which is also what the tail repaints it with. */
 static const unsigned char C_ORBIT[3]  = { 0x00, 0x00, 0xFF };
