@@ -78,23 +78,29 @@ static void capture(void)
 
 /* ── A boot, as it actually runs ────────────────────────────────────────────*/
 
-/* Measured shape of a real boot: most stages are instant, three are not.
- * Milliseconds spent IN each stage, i.e. before it completes. */
+/* The real shape of a boot, measured off EFF on 2026-09-05 from the trail's
+ * own timestamps. Milliseconds spent IN each stage before it completes.
+ *
+ * The guesses these replace were badly wrong in both directions: fsck was
+ * assumed to take seconds and takes 36ms, while the final stage — association
+ * and DHCP — was assumed to be 900ms and is 27.6 SECONDS, four fifths of the
+ * whole boot. Simulating it honestly is the only way the long dwell at the end
+ * gets exercised at all.
+ */
 static const int stage_ms[LED_N] = {
-    120,    /*  1 mounts and device nodes */
-    260,    /*  2 /system                 */
-    4200,   /*  3 fsck /data              — seconds, and silent */
-    340,    /*  4 /data                   */
-    60,     /*  5 /etc                    */
-    40,     /*  6 last_kmsg               */
-    90,     /*  7 busybox applets         */
-    150,    /*  8 USB gadget              */
-    1100,   /*  9 console                 */
-    2600,   /* 10 wlan0 exists            */
-    9000,   /* 11 associating             — the long silent one */
-    900,    /* 12 address                 */
+       20,   /*  1 mounts and device nodes */
+        8,   /*  2 /system                 */
+       36,   /*  3 fsck /data              */
+        7,   /*  4 /data                   */
+        4,   /*  5 /etc                    */
+       12,   /*  6 last_kmsg               */
+      572,   /*  7 busybox applets         */
+       37,   /*  8 USB gadget              */
+     1002,   /*  9 console                 */
+     3850,   /* 10 wlan0 exists            */
+        0,   /* 11 associating — same millisecond as 10 */
+    27628,   /* 12 carrier and an address  */
 };
-
 /* start_pos is where the kernel's orbit had reached when we claimed the ring;
  * 7 is simply a mid-ring value, since it can be anything. */
 static void run_boot(int fail_at, int start_pos)

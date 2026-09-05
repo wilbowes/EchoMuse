@@ -175,7 +175,15 @@ static long mono_ms(void);
  * the GAP between positions 0 and 11, and the finale's arms are the pairs
  * either side of it.
  */
-#define LED_BOTTOM 0        /* physical index of the LED at the bottom */
+/* Physical index of logical 0 — the LED just left of 6 o'clock, which is
+ * position 1 when the ring is numbered 1-12 the way it physically sits.
+ *
+ * It was 0, and that was one LED out: the takeover landed on position 2 rather
+ * than position 1, and every arm of the closing sweep was rotated with it, so
+ * the two sides met right of 12 o'clock instead of across it. Confirmed from
+ * the device — the kernel starts its orbit on physical 0, which is seen as
+ * position 2 (Wil, from video, 2026-09-05). */
+#define LED_BOTTOM 11
 #define LED_DIR    1        /* +1: the orbit runs on rising physical index */
 #define ORBIT_STEP_MS 109   /* measured; the wind-in matches this exactly */
 #define ORBIT_PROBE 1       /* sample the kernel's frames before claiming */
@@ -353,6 +361,14 @@ static void anim_render(int head_q, int tick, int failed, int trail)
     blend(f[near % LED_N], f[near % LED_N], head, SUB);
     if (glow)
         blend(f[far % LED_N], f[far % LED_N], head, glow);
+
+    /* Once the head reaches the last segment, the FIRST one lights with it and
+     * the pair closes the ring across the bottom gap, breathing together until
+     * the boot finishes. That wait is real and long — association and DHCP are
+     * most of the boot — so it wants something deliberate rather than a head
+     * sitting on its own. */
+    if (trail && head_q >= (LED_N - 1) * SUB)
+        blend(f[0], f[0], head, SUB);
     led_write(f);
 }
 
@@ -415,10 +431,15 @@ static void anim_finale(void)
      * is what the first version did: that read as the head overshooting, and
      * started the sweep off balance (Wil, 2026-09-05).
      */
-    for (int s = 0; s < LED_N / 2; s++) {
+    for (int s = 1; s < LED_N / 2; s++) {
         for (int p = 0; p < LED_N; p++)
             memcpy(f[p], C_ORBIT, 3);
-        for (int k = 0; k <= s; k++) {
+        /* 1 and 12 are already lit — the run ended on them — so the sweep
+         * ADDS to that pair rather than starting from it: 2,11 then 3,10,
+         * 4,9, 5,8 and finally 6,7 closing across 12 o'clock. */
+        memcpy(f[0], C_HEAD, 3);
+        memcpy(f[LED_N - 1], C_HEAD, 3);
+        for (int k = 1; k <= s; k++) {
             memcpy(f[k], C_HEAD, 3);
             memcpy(f[LED_N - 1 - k], C_HEAD, 3);
         }
@@ -462,7 +483,11 @@ static void anim_claim(void)
 {
     for (int i = 0; i < 100; i++) {
         int p = orbit_head_pos();
-        if (p <= 0)              /* at the bottom, or not an orbit we can read */
+        /* Position 12 — the LAST segment, not the first. Taking it there means
+         * our very next act is lighting position 1, which is the step the
+         * orbit would have taken anyway, so the motion carries straight on
+         * instead of repeating a position or starting a step late. */
+        if (p < 0 || p == LED_N - 1)
             break;
         usleep(20000);
     }
