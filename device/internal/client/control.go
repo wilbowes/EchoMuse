@@ -499,6 +499,22 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 			if err := json.Unmarshal(raw, &msg); err == nil {
 				cfg := config.Get()
 				cfg.Apply(msg)
+				// Persisted here rather than through OnConfigApplied,
+				// because emOS's init reads the file and the firmware only
+				// ever writes it — there is no in-process consumer for a
+				// callback to serve, and a callback nobody registers is a
+				// feature that silently does nothing. Absent field means the
+				// controller said nothing about it, which must not be read as
+				// "remove"; hence the pointer.
+				if msg.ConsolePassword != nil {
+					changed, err := config.WriteConsolePassword(*msg.ConsolePassword)
+					if err != nil {
+						log.Printf("[control] Console password: %v", err)
+					} else if changed {
+						log.Printf("[control] Console password %s",
+							map[bool]string{true: "set", false: "cleared"}[*msg.ConsolePassword != ""])
+					}
+				}
 				snap := cfg.Snapshot() // read back under the config lock
 				log.Printf("[control] Config applied: vad_threshold=%.4f oww_threshold=%.2f",
 					snap.VadThreshold, snap.OwwThreshold)

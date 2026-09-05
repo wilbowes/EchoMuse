@@ -58,6 +58,10 @@ SECTIONS: dict[str, dict] = {
             "agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs",
             # Already the button-turn section; these decide whether they happen.
             "buttonSingleTapEvent", "buttonMultiTapMs",
+            # Fleet-level in practice: a per-device console password would be a
+            # management problem with no upside. It sits in a section like
+            # every other key because the partition has to stay total.
+            "consolePassword",
         ],
     },
     "bluetooth": {

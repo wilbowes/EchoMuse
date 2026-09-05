@@ -3393,6 +3393,13 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         # rather than on the stats tick — reconcile_on_connect asks for it
         # immediately and a stats-borne value is ~30s too late.
         device._base_os = msg.get(em_platform.REGISTER_KEY)
+        # Persisted as well as held live (schema v21). The live value answers
+        # "what is THIS device", which is all payload gating ever needs; the
+        # stored one answers "what is the fleet", which is a question about
+        # devices that are mostly offline. Written on every register, because a
+        # device reflashed between FireOS and emOS is the case it has to track.
+        if device._base_os:
+            db.set_device_base_os(device_id, device._base_os)
         # Link-security telemetry for the dashboard: True when this control
         # connection arrived over the TLS listener.
         device.secure = secure

@@ -390,6 +390,53 @@ function Toggle({ label, sub, value, onChange, disabled = false }) {
   );
 }
 
+// A write-only secret. The stored value is never sent to the browser — the
+// controller hashes before storage and returns a sentinel — so there is
+// nothing to display and the field cannot be a normal text input showing its
+// own value.
+//
+// Three states, and the third is the one that gets forgotten: not set, set
+// (unchanged), and being replaced. `isSet` says which of the first two we are
+// in; typing moves to the third. Clearing sends the empty string, which is how
+// a password is REMOVED — the same value the field has when none was ever set,
+// which is why removal is an explicit button rather than "clear the box and
+// save", where an accidental clear would silently unlock every device.
+function PasswordField({ label, sub, isSet, onChange, disabled = false }) {
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState('');
+
+  const stop = () => { setEditing(false); setText(''); };
+
+  return (
+    <div style={{ marginBottom: 20, minWidth: 0 }}>
+      <div style={{ marginBottom: 6 }}>
+        <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: disabled ? 'var(--muted)' : 'var(--text2)' }}>{label}</span>
+        <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)', marginLeft: 8 }}>
+          {disabled ? '' : (isSet ? 'set' : 'not set')}
+        </span>
+      </div>
+      {sub && <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)', lineHeight: 1.6, marginBottom: 8 }}>{sub}</div>}
+      {!disabled && (editing ? (
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <input type="password" autoFocus value={text} placeholder="new password"
+            onChange={e => { setText(e.target.value); onChange(e.target.value); }}
+            className="em-inset"
+            style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, flex: '1 1 180px', minWidth: 0,
+                     color: 'var(--text)', border: '1px solid var(--border-hard)' }}/>
+          <Pill small onClick={() => { onChange('__unchanged__'); stop(); }}>Cancel</Pill>
+        </div>
+      ) : (
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <Pill small onClick={() => { setEditing(true); setText(''); onChange(''); }}>
+            {isSet ? 'Change' : 'Set password'}
+          </Pill>
+          {isSet && <Pill small danger onClick={() => onChange('')}>Remove</Pill>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // A segmented choice, for settings with more than two states. Written as
 // buttons rather than a native <select> so the unavailable options stay
 // VISIBLE and disabled: the capability rule is that a device lacking a feature
@@ -4990,7 +5037,7 @@ const CONFIG_SECTIONS = {
   "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice"],
   "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "aecRefSource", "nsAsr", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
-  "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs"],
+  "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs", "consolePassword"],
   "bluetooth": ["bleProxyEnabled"]
 };
 
@@ -5114,7 +5161,13 @@ function onDeviceMode(config) {
 function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                             shadowCapable = true, mixCapable = true,
                             holdCapable = true, triggerCapable = true,
-                            hwEchoRef = false, hwRefCapable = true }) {
+                            hwEchoRef = false, hwRefCapable = true,
+                            emosFleet = true }) {
+  // emosFleet defaults TRUE for the same reason the capability props above do,
+  // and for one more: it gates the console password, which is emOS-only, and
+  // disabling a setting because we do not KNOW the fleet has an emOS device
+  // would hide it exactly while someone sets up their first one. False is
+  // passed only when every device has positively reported Android.
   // hwEchoRef defaults FALSE while its neighbours default TRUE, because it
   // is the only one that DISABLES a control rather than enabling one. The
   // fleet view has no single device to ask, so it keeps the AEC delay
@@ -5638,6 +5691,17 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             onChange={v => set('buttonSingleTapEvent', v)}/>
           <Slider label="Multi-tap window" sub="0 = off. Coalesces quick taps into double/triple, at the cost of delaying every tap by this much. Needs 'Tap sends an event'" value={config.buttonMultiTapMs ?? 0} min={0} max={600} step={50} unit="ms" disabled={!(holdCapable && (config.buttonSingleTapEvent ?? false))} onChange={v => set('buttonMultiTapMs', v)}/>
         </div>
+        {subHeader('USB console')}
+        <div style={{ ...inputStyle }}>
+          <PasswordField
+            label="Console password"
+            disabled={!emosFleet}
+            sub={emosFleet
+              ? "prompts before the USB serial console hands over a root shell. Applies to emOS devices only — FireOS uses adb. Fleet-wide, and pushed straight to every connected device on save; one that is offline picks it up when it reconnects. Forgetting it costs a reflash, not a device."
+              : 'every device in this fleet runs FireOS, which uses adb for USB access — this setting would do nothing'}
+            isSet={config.consolePassword === '__unchanged__'}
+            onChange={v => set('consolePassword', v)}/>
+        </div>
         {subHeader('Turn processing')}
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px', ...inputStyle }}>
           <Toggle label="Auto gain (AGC)" sub="levels button-turn speech; never the wake stream" value={config.agcEnabled ?? true} onChange={v => set('agcEnabled', v)}/>
@@ -5803,7 +5867,8 @@ function DeployAllModal({ release, devices, deployState, onStarted, onDismiss, o
 // ─── SettingsPanel ─────────────────────────────────────────────────────────────
 // Gear icon → modal with two tabs: Fleet Config and Account.
 
-function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, isAdmin }) {
+function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, isAdmin,
+                        emosFleet = true }) {
   const [tab, setTab]             = useState('fleet');
   const [config, setConfig]       = useState({ ...globalConfig });
   const [dirty, setDirty]         = useState(false);
@@ -5940,7 +6005,8 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
               <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)', marginBottom:20, lineHeight:1.6 }}>
                 Default config applied to all devices unless overridden per-device.
               </div>
-              <DeviceConfigForm config={config} onChange={setConf} disabled={false}/>
+              <DeviceConfigForm config={config} onChange={setConf} disabled={false}
+                emosFleet={emosFleet}/>
               {dirty && (
                 <div style={{ display:'flex', gap:10, marginTop:24 }}>
                   <Pill accent disabled={saving} onClick={saveGlobalConfig}>{saving ? 'Saving…' : 'Save & push to fleet'}</Pill>
@@ -6498,6 +6564,11 @@ function App() {
         <SettingsPanel
           globalConfig={globalConfig}
           onGlobalConfigChange={setGlobalConfig}
+          /* Disable the console password only when every device has
+             POSITIVELY reported Android. An empty list means nothing has ever
+             said, which is not the same answer — see em_db.fleet_base_os. */
+          emosFleet={!status?.fleet_base_os?.length
+                     || status.fleet_base_os.includes('emos')}
           onClose={() => setShowSettings(false)}
           username={role}
           isAdmin={isAdmin}

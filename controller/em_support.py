@@ -143,6 +143,16 @@ _URL = re.compile(r"""https?://[^\s'"]+""")
 _IPV4 = re.compile(r"""\b\d{1,3}(?:\.\d{1,3}){3}\b""")
 _MAC = re.compile(r"""\b(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\b""")
 
+# A console password record — "<iterations>:<salt hex>:<hash hex>". Caught in
+# log prose as well as in config, because the config rule works on KEY NAMES
+# and a record quoted in a line has no key attached to it. Nothing currently
+# logs one; this is here so that nothing ever can, since a bundle is written to
+# be attached to a public issue and the record is the one config value whose
+# disclosure reaches beyond this device — the owner has likely reused the
+# passphrase it was made from. Same reasoning as the account-name rule below,
+# which was added after a real bundle carried names in prose.
+_PW_RECORD = re.compile(r"""\b\d{1,9}:[0-9a-fA-F]{8,}:[0-9a-fA-F]{64}\b""")
+
 
 # Device log lines that are pure volume. `[mem]` heap dumps were 89% of the
 # device_logs table and 87% of a real bundle's log tail — 294 lines of 339 —
@@ -337,6 +347,7 @@ def sanitise_log(lines: list[str], accounts: dict[str, str] | None = None) -> li
         ln = _URL.sub("<url>", ln)
         ln = _IPV4.sub("<ip>", ln)
         ln = _MAC.sub("<mac>", ln)
+        ln = _PW_RECORD.sub("<redacted>", ln)
         if users is not None:
             ln = users.sub(lambda m: f"<{roles.get(m.group(0).lower(), 'user')}>", ln)
         out.append(ln)
@@ -530,6 +541,7 @@ def _scrub(text: str) -> list[str]:
         ln = _URL.sub("<url>", ln)
         ln = _IPV4.sub("<ip>", ln)
         ln = _MAC.sub("<mac>", ln)
+        ln = _PW_RECORD.sub("<redacted>", ln)
         if ln.strip():
             out.append(ln.rstrip())
     return out

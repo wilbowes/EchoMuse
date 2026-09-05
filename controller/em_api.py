@@ -57,6 +57,7 @@ import em_db as db
 import em_auth as auth
 import em_ble_proxy
 import em_config_sections as sections_mod
+import em_console_pw
 import em_firmware
 import em_ingressauth
 import em_oww_assets
@@ -3258,6 +3259,12 @@ async def _get_system_status(request: web.Request) -> web.Response:
         # Home Assistant already draws (its own panel header and title) and
         # can avoid offering a theme toggle that fights HA's theme.
         "ha_ingress": INGRESS_ONLY,
+        # Which userspaces the fleet has reported (schema v21). Sorted for a
+        # stable response; EMPTY means nothing has ever said, which is not the
+        # same as "all Android" and must not be read that way — a control
+        # disabled on the strength of not knowing is worse than one that is
+        # merely useless on this fleet.
+        "fleet_base_os": sorted(db.fleet_base_os()),
         # Peak asyncio event-loop stall since start (ms). Non-trivial values
         # mean the controller itself delayed speaker frames and LED updates.
         "loop_lag_peak_ms": round(_ctrl._loop_lag_peak_ms, 1),
@@ -3367,7 +3374,31 @@ async def _get_global_config(request: web.Request) -> web.Response:
     """GET /api/global/config — fleet-wide default device config."""
     loop = asyncio.get_event_loop()
     config = await loop.run_in_executor(None, db.get_global_device_config)
-    return _ok(config)
+    return _ok(_redact_console_pw(config))
+
+
+# The console password record never leaves the controller. Hashing before
+# storage is pointless if the result is then handed to every client that asks
+# for the config, so reads see a sentinel and writes send it back untouched —
+# see em_console_pw.for_display / resolve_write.
+_CONSOLE_PW_KEY = "consolePassword"
+
+
+def _redact_console_pw(config: dict) -> dict:
+    if not config or _CONSOLE_PW_KEY not in config:
+        return config
+    out = dict(config)
+    out[_CONSOLE_PW_KEY] = em_console_pw.for_display(out[_CONSOLE_PW_KEY])
+    return out
+
+
+def _resolve_console_pw(incoming: dict, stored: dict) -> None:
+    """Turn whatever a client sent into the record to store, in place."""
+    if _CONSOLE_PW_KEY not in incoming:
+        return
+    incoming[_CONSOLE_PW_KEY] = em_console_pw.resolve_write(
+        incoming[_CONSOLE_PW_KEY], (stored or {}).get(_CONSOLE_PW_KEY)
+    )
 
 
 def _dropped_keys(incoming: dict, stored: dict) -> list[str]:
@@ -3411,6 +3442,7 @@ async def _post_global_config(request: web.Request) -> web.Response:
     # Raw (defaults NOT underlaid): see get_global_device_config_raw — a
     # newly-added default must not look like a key this body is deleting.
     stored = await loop.run_in_executor(None, db.get_global_device_config_raw)
+    _resolve_console_pw(config, stored)
     dropped = _dropped_keys(config, stored)
     if dropped and not explicit_replace:
         return _error(
