@@ -409,20 +409,39 @@ static void anim_finale(int head_q, int tick)
 
 /* The animator. Owns the ring for as long as it lives; reads the stage the
  * parent has reached and never writes it. */
-static void anim_main(int start_pos)
+/* Take the ring off the kernel, choosing WHEN rather than accepting wherever
+ * the orbit happens to be.
+ *
+ * The animation runs until userspace stops it, so the moment is ours to pick:
+ * wait for the orbit's head to reach the bottom and stop it exactly there.
+ * Our head then starts where its head was, and the handover has nothing to
+ * reconcile — no jump, and no winding the head round to the bottom afterwards,
+ * which is what this replaces.
+ *
+ * It costs nothing, because it happens in the animator child while init gets
+ * on with mounting /system. Bounded a little past one revolution so a ring we
+ * cannot read is a plain takeover rather than a hang, and polled well inside
+ * the 109ms step so the bottom is not missed.
+ */
+static void anim_claim(void)
 {
-    int head_q = 0, tick = 0, winding = 0;
-
-    /* Carry the orbit on from wherever it had reached, at its own measured
-     * rate, until the head comes round to the bottom — then progress takes
-     * over from there. At most one lap, so 1.31s, spent while /system mounts
-     * and fsck runs. The one difference is that this glides where the kernel
-     * stepped a whole LED at a time; it is the same movement at the same rate,
-     * and the smoothing is the point rather than an accident. */
-    if (start_pos > 0) {
-        head_q = start_pos * SUB;
-        winding = 1;
+    for (int i = 0; i < 100; i++) {
+        int p = orbit_head_pos();
+        if (p <= 0)              /* at the bottom, or not an orbit we can read */
+            break;
+        usleep(20000);
     }
+    int fd = open(LEDDIR "/boot_animation", O_WRONLY);
+    if (fd >= 0) { write(fd, "0", 1); close(fd); }
+    fd = open(LEDDIR "/led_current", O_WRONLY);
+    if (fd >= 0) { write(fd, "3", 1); close(fd); }
+}
+
+static void anim_main(void)
+{
+    int head_q = 0, tick = 0;
+
+    anim_claim();
 
     for (;;) {
         int mode = ledst->mode;
@@ -437,18 +456,6 @@ static void anim_main(int start_pos)
             ledst->mode = ANIM_DONE;
             _exit(0);
         }
-        if (winding && mode == ANIM_RUN) {
-            head_q += SUB * TICK_MS / ORBIT_STEP_MS;
-            if (head_q >= LED_N * SUB) {
-                head_q = 0;
-                winding = 0;
-            }
-            anim_render(head_q, tick++, 0, 0);
-            usleep(TICK_MS * 1000);
-            continue;
-        }
-        winding = 0;      /* a failure or a finish ends the wind-in early */
-
         if (mode != ANIM_FAIL) {
             int stage = ledst->stage;
             if (stage > LED_N)
@@ -503,22 +510,14 @@ static void orbit_probe(void)
 #endif
 }
 
-/* Take the ring off the kernel's animation, set the drive current, and start
- * the animator. */
+/* Start the animator. It claims the ring itself — see anim_claim. */
 static void led_claim(void)
 {
     orbit_probe();
+    note("orbit head at %d\n", orbit_head_pos());
 
-    /* Read where the orbit is BEFORE stopping it — the frame keeps its last
-     * contents afterwards, but reading it live is the honest moment. */
-    int start_pos = orbit_head_pos();
-    note("orbit head at %d\n", start_pos);
-
-    int fd = open(LEDDIR "/boot_animation", O_WRONLY);
-    if (fd >= 0) { write(fd, "0", 1); close(fd); }
-    fd = open(LEDDIR "/led_current", O_WRONLY);
-    if (fd >= 0) { write(fd, "3", 1); close(fd); }
-
+    /* The ring is NOT stopped here. anim_claim does it, in the child, once the
+     * orbit reaches the bottom — so init is not held up waiting for it. */
     ledst = mmap(NULL, sizeof *ledst, PROT_READ | PROT_WRITE,
                  MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     if (ledst == MAP_FAILED) {
@@ -531,7 +530,7 @@ static void led_claim(void)
 
     led_pid = fork();
     if (led_pid == 0) {
-        anim_main(start_pos);
+        anim_main();
         _exit(0);
     }
 }

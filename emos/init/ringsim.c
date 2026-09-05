@@ -104,17 +104,9 @@ static void run_boot(int fail_at, int start_pos)
 
     int head_q = 0, tick = 0;
 
-    /* The wind-in, at the orbit's own measured rate. */
-    if (start_pos > 0) {
-        head_q = start_pos * SUB;
-        while (head_q < LED_N * SUB) {
-            head_q += SUB * TICK_MS / ORBIT_STEP_MS;
-            cur_head_q = head_q >= LED_N * SUB ? LED_N * SUB - 1 : head_q;
-            anim_render(cur_head_q, tick++, 0, 0);
-            sim_usleep(TICK_MS * 1000);
-        }
-        head_q = 0;
-    }
+    /* No wind-in to model: anim_claim waits for the orbit to reach the bottom
+     * before taking the ring, so our head always starts there. */
+    (void)start_pos;
 
     for (int s = 0; s < LED_N; s++) {
         int ticks = stage_ms[s] / TICK_MS;
