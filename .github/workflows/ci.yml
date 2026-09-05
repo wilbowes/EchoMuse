@@ -82,6 +82,7 @@ jobs:
           node controller/tests/wifi_scan.test.mjs
           node controller/tests/boot_target.test.mjs
           node controller/tests/pm_verdict.test.mjs
+          node controller/tests/wizard_log_class.test.mjs
 
   device-tests:
     name: Device Go tests

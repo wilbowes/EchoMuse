@@ -2599,6 +2599,12 @@ const _ALEXA_PKGS = [
 // without a live handle.
 const CONNECT_STEPS = new Set([0, 1, 6]);
 
+// Steps that carry operator-fixable input: a file picker or a field. These get
+// different recovery copy ("Fix the input above") than a step that only needs
+// a retry. Zero-indexed against _WIZARD_STEPS; keep them in sync if a step is
+// ever inserted.
+const INPUT_STEPS = new Set([3, 10, 11]);
+
 // Which mode each step has to run in.
 //
 // This matters because the Dot's only power source is the same micro-USB port
@@ -2706,6 +2712,19 @@ const _WIZARD_STEPS = [
   // also much better suited to 15MB than the shell plane.
   { id: 'install_oww',     label: 'Wake Word Assets',  desc: 'Push the ONNX runtime and wake models (~15MB) used for on-device wake word detection.' },
 ];
+
+// Transcript styling only — copy uses e.msg verbatim.
+function _wizardLogClass(msg, type) {
+  if (type === 'head') return 'em-console__line--head';
+  if (type === 'error') return 'em-console__line--error';
+  if (type === 'ok') return 'em-console__line--ok';
+  if (type === 'warn') return 'em-console__line--warn';
+  if (/^Waiting for|still waiting on|^\s+\[\d+s\]/.test(msg)) return 'em-console__line--wait';
+  if (/^  adb:/.test(msg)) return 'em-console__line--adb';
+  if (/^Error:/.test(msg)) return 'em-console__line--error';
+  if (/^  →/.test(msg)) return 'em-console__line--detail';
+  return 'em-console__line--info';
+}
 
 // ── WifiPanel ──
 
@@ -2822,6 +2841,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   const [latestRelease, setLatestRelease] = useState(null);
   const [checkingRelease, setCheckingRelease] = useState(false);
   const [diagnostics, setDiagnostics] = useState(null);
+  const [waiting, setWaiting] = useState(false);
   const logRef = useRef(null);
   // Bumped whenever the step in flight is abandoned — by the cable being
   // pulled, or by the operator cancelling. A step that later settles compares
@@ -2872,6 +2892,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   function abandonStep(reason, idx = step) {
     stepEpoch.current++;
     setRunning(false);
+    setWaiting(false);
     markStep(idx, 'error');
     addLog(reason, 'error');
   }
@@ -3503,43 +3524,48 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     const TIMEOUT_MS = 600000;
     const started = Date.now();
     let boot = false, lastNote = -1, lastProbe = '', announced = false;
-    while (Date.now() - started < TIMEOUT_MS) {
-      if (!boot) boot = (await c.shell('getprop sys.boot_completed')).trim() === '1';
-      if (boot) {
-        // The package manager is the thing we actually need; ask it. It comes
-        // up meaningfully after boot_completed on this hardware, so the flag
-        // is a necessary condition, not the answer.
-        // Deliberately NOT via su: this is a read, it works as the shell
-        // user, and verify_root calls this before root is confirmed.
-        lastProbe = (await c.shell('pm path android 2>&1')).trim();
-        if (lastProbe.startsWith('package:')) {
-          // Only worth a line if there was actually a wait. Every step after
-          // the first re-gates (steps are individually retryable), and three
-          // "Framework ready after 0s" banners per run is noise that trains
-          // people to skim past the one time it matters.
-          if (announced) addLog(`Framework ready after ${Math.round((Date.now() - started) / 1000)}s.`, 'ok');
-          return;
+    setWaiting(true);
+    try {
+      while (Date.now() - started < TIMEOUT_MS) {
+        if (!boot) boot = (await c.shell('getprop sys.boot_completed')).trim() === '1';
+        if (boot) {
+          // The package manager is the thing we actually need; ask it. It comes
+          // up meaningfully after boot_completed on this hardware, so the flag
+          // is a necessary condition, not the answer.
+          // Deliberately NOT via su: this is a read, it works as the shell
+          // user, and verify_root calls this before root is confirmed.
+          lastProbe = (await c.shell('pm path android 2>&1')).trim();
+          if (lastProbe.startsWith('package:')) {
+            // Only worth a line if there was actually a wait. Every step after
+            // the first re-gates (steps are individually retryable), and three
+            // "Framework ready after 0s" banners per run is noise that trains
+            // people to skim past the one time it matters.
+            if (announced) addLog(`Framework ready after ${Math.round((Date.now() - started) / 1000)}s.`, 'ok');
+            return;
+          }
         }
+        if (!announced) {
+          announced = true;
+          addLog('Waiting for Android to finish booting — safe to have clicked Reconnect early, this waits as long as it takes…');
+        }
+        // Heartbeat every 15s so a multi-minute wait reads as progress rather
+        // than as a hang (lesson 3 above).
+        const elapsed = Math.floor((Date.now() - started) / 1000);
+        if (elapsed - lastNote >= 15) {
+          lastNote = elapsed;
+          addLog(`  [${elapsed}s] boot_completed=${boot ? '1' : '0'}`
+               + (boot ? `, package manager not answering yet${lastProbe ? ` (${lastProbe.split('\n')[0]})` : ''}` : ', still booting'));
+        }
+        await new Promise(r => setTimeout(r, 2000));
       }
-      if (!announced) {
-        announced = true;
-        addLog('Waiting for Android to finish booting — safe to have clicked Reconnect early, this waits as long as it takes…');
-      }
-      // Heartbeat every 15s so a multi-minute wait reads as progress rather
-      // than as a hang (lesson 3 above).
-      const elapsed = Math.floor((Date.now() - started) / 1000);
-      if (elapsed - lastNote >= 15) {
-        lastNote = elapsed;
-        addLog(`  [${elapsed}s] boot_completed=${boot ? '1' : '0'}`
-             + (boot ? `, package manager not answering yet${lastProbe ? ` (${lastProbe.split('\n')[0]})` : ''}` : ', still booting'));
-      }
-      await new Promise(r => setTimeout(r, 2000));
+      throw new Error(
+        `Android has not finished booting after 10 minutes, so ${what} cannot run. `
+        + `Every pm command would fail and the step would silently do nothing. `
+        + `This is long past a slow boot — suspect a bootloop rather than patience: `
+        + `check the device's light ring, and click Retry once it settles.`);
+    } finally {
+      setWaiting(false);
     }
-    throw new Error(
-      `Android has not finished booting after 10 minutes, so ${what} cannot run. `
-      + `Every pm command would fail and the step would silently do nothing. `
-      + `This is long past a slow boot — suspect a bootloop rather than patience: `
-      + `check the device's light ring, and click Retry once it settles.`);
   }
 
   async function runVerifyRoot(c) {
@@ -3599,33 +3625,38 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     let out = '';
     let rooted = false;
     const attemptStart = Date.now();
-    for (let i = 0; i < 15; i++) {
-      const callStart = Date.now();
-      // The line below reports the call's duration, but only once it returns —
-      // and a single su call has been observed blocking for 72s against a
-      // magiskd that isn't listening yet. That was 72 seconds of a completely
-      // silent wizard, which is indistinguishable from a hang. Tick while the
-      // call is still in flight, so the wait is visibly a wait.
-      const ticker = setInterval(
-        () => addLog(`    still waiting on su (${Math.round((Date.now() - callStart) / 1000)}s) — magiskd has not answered yet`),
-        15000);
-      try {
-        out = await c.shell('su -c id 2>&1');
-      } finally {
-        clearInterval(ticker);
+    setWaiting(true);
+    try {
+      for (let i = 0; i < 15; i++) {
+        const callStart = Date.now();
+        // The line below reports the call's duration, but only once it returns —
+        // and a single su call has been observed blocking for 72s against a
+        // magiskd that isn't listening yet. That was 72 seconds of a completely
+        // silent wizard, which is indistinguishable from a hang. Tick while the
+        // call is still in flight, so the wait is visibly a wait.
+        const ticker = setInterval(
+          () => addLog(`    still waiting on su (${Math.round((Date.now() - callStart) / 1000)}s) — magiskd has not answered yet`),
+          15000);
+        try {
+          out = await c.shell('su -c id 2>&1');
+        } finally {
+          clearInterval(ticker);
+        }
+        const callMs = Date.now() - callStart;
+        // Log every attempt with timing — the previous version of this loop
+        // was silent inside the loop body, so a single su -c id call that's
+        // unexpectedly slow (e.g. blocking on a magiskd socket that isn't
+        // listening yet, rather than failing fast with permission-denied)
+        // was indistinguishable from a true hang. This makes that visible:
+        // if callMs is large, the call itself is slow, not the wizard stuck.
+        addLog(`  attempt ${i + 1}/15 (${(callMs / 1000).toFixed(1)}s): ${out || '(empty)'}`);
+        if (out.includes('uid=0')) { rooted = true; break; }
+        // If a single su call already took a while, don't add the full 2s
+        // sleep on top — just move to the next attempt.
+        if (callMs < 2000) await new Promise(r => setTimeout(r, 2000 - callMs));
       }
-      const callMs = Date.now() - callStart;
-      // Log every attempt with timing — the previous version of this loop
-      // was silent inside the loop body, so a single su -c id call that's
-      // unexpectedly slow (e.g. blocking on a magiskd socket that isn't
-      // listening yet, rather than failing fast with permission-denied)
-      // was indistinguishable from a true hang. This makes that visible:
-      // if callMs is large, the call itself is slow, not the wizard stuck.
-      addLog(`  attempt ${i + 1}/15 (${(callMs / 1000).toFixed(1)}s): ${out || '(empty)'}`);
-      if (out.includes('uid=0')) { rooted = true; break; }
-      // If a single su call already took a while, don't add the full 2s
-      // sleep on top — just move to the next attempt.
-      if (callMs < 2000) await new Promise(r => setTimeout(r, 2000 - callMs));
+    } finally {
+      setWaiting(false);
     }
     addLog(`Total wait: ${((Date.now() - attemptStart) / 1000).toFixed(0)}s.`);
     if (!rooted) throw new Error('Root not working after waiting for boot + magiskd — check Magisk install and magisk.db.');
@@ -4503,13 +4534,33 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
 
   const cur    = _WIZARD_STEPS[step];
   const isDone = step === _WIZARD_STEPS.length - 1 && stepState[step] === 'done';
-
-  // Buttons are shown for manual steps; auto steps start themselves.
-
-  // Dashboard-palette step states — same tones the rest of the UI uses
-  // (accent slate for activity, deep green for done, rust for error).
+  const doneCount = stepState.filter(s => s === 'done').length;
+  // +0.35 for a running step is deliberate: it nudges the bar off the
+  // completed count so an in-flight step reads as progress rather than as a
+  // stall, but stays well under a full step so a step that hangs is still an
+  // obvious non-finish. It is a human-chosen fraction, not a derived figure.
+  const progressPct = Math.min(100, ((doneCount + (running ? 0.35 : 0)) / _WIZARD_STEPS.length) * 100);
+  const upcoming = _WIZARD_STEPS.slice(step + 1, step + 3);
+  const stepFailed = !running && stepState[step] === 'error';
   const statusColors = { pending: 'var(--muted)', running: 'var(--accent)', done: 'var(--ok)', error: 'var(--warn)' };
   const statusIcons  = { pending: '○', running: '◌', done: '●', error: '✕' };
+
+  function recoveryHint() {
+    if (CONNECT_STEPS.has(step)) {
+      return adb
+        ? 'The USB link is up but this step failed — click Retry to run it again.'
+        : 'Pick the device from the USB picker, then click Retry.';
+    }
+    if (INPUT_STEPS.has(step)) {
+      return diagnostics
+        ? 'Fix the input above, then retry. If it keeps failing, download diagnostics and attach them to your issue.'
+        : 'Fix the input above and retry. Reconnect if the device was unplugged.';
+    }
+    if (diagnostics) {
+      return 'Click Retry first. If it fails again, download diagnostics — the transcript is included.';
+    }
+    return 'Click Retry to run this step again. Use Reconnect if the cable was unplugged.';
+  }
 
   return (
     /* Same overlay + frame treatment as the Detail and Settings modals —
@@ -4539,33 +4590,71 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
 
         <div style={{ display: 'flex', flex: 1, overflow: 'hidden', minHeight: 0 }}>
 
-          {/* Step list */}
-          <div style={{ width: 176, borderRight: '1px solid var(--border)', background: 'var(--hairline)', padding: '12px 0', overflowY: 'auto', flexShrink: 0 }}>
+          {/* Step list + overall progress */}
+          <div style={{ width: 196, borderRight: '1px solid var(--border)', background: 'var(--hairline)', display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
+            <div className="em-wizard-progress">
+              <div className="em-wizard-progress__track">
+                <div className="em-wizard-progress__fill" style={{ width: `${progressPct}%` }}/>
+              </div>
+              <div className="em-wizard-progress__label">
+                {doneCount} of {_WIZARD_STEPS.length} complete · step {step + 1}
+              </div>
+            </div>
+            <div style={{ flex: 1, overflowY: 'auto', padding: '6px 0 12px' }}>
             {_WIZARD_STEPS.map((s, i) => {
               const st = stepState[i]; const active = i === step;
               return (
                 <div key={s.id}
-                  style={{
-                    padding: '6px 14px', display: 'flex', alignItems: 'center', gap: 7,
-                    background: active ? 'var(--hairline)' : 'transparent',
-                    cursor: 'default',
-                    opacity: running && !active ? 0.5 : 1,
-                  }}>
-                  <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: statusColors[st], flexShrink: 0 }}>{statusIcons[st]}</span>
-                  <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: active ? 'var(--text)' : 'var(--muted)', letterSpacing: '0.04em', lineHeight: 1.4 }}>{s.label}</span>
+                  className={[
+                    'em-wizard-step',
+                    active && 'em-wizard-step--active',
+                    st === 'done' && 'em-wizard-step--done',
+                    st === 'error' && 'em-wizard-step--error',
+                    st === 'pending' && 'em-wizard-step--pending',
+                  ].filter(Boolean).join(' ')}
+                  style={{ opacity: running && !active && st !== 'done' ? 0.55 : undefined }}>
+                  <span className="em-wizard-step__num">{i + 1}</span>
+                  <span className="em-wizard-step__icon" style={{ color: statusColors[st] }}>{statusIcons[st]}</span>
+                  <span className="em-wizard-step__label">{s.label}</span>
                 </div>
               );
             })}
+            </div>
           </div>
 
           {/* Content */}
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', padding: '18px 22px 14px' }}>
 
             {/* Step title + desc */}
-            <div style={{ marginBottom: 14 }}>
-              <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 14, fontWeight: 600, color: 'var(--text)', marginBottom: 4 }}>{cur.label}</div>
-              <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)' }}>{cur.desc}</div>
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 14, fontWeight: 600, color: 'var(--text)', marginBottom: 4 }}>
+                {step + 1}. {cur.label}
+              </div>
+              <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)', lineHeight: 1.6 }}>{cur.desc}</div>
             </div>
+
+            {upcoming.length > 0 && !isDone && (
+              <div className="em-wizard-upcoming">
+                <div className="em-label" style={{ marginBottom: 6 }}>Up next</div>
+                {upcoming.map(s => (
+                  <div key={s.id} className="em-wizard-upcoming__item">
+                    <span className="em-wizard-upcoming__name">{s.label}</span>
+                    <span className="em-wizard-upcoming__desc">{s.desc}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {running && (
+              <div className={'em-wizard-status' + (waiting ? ' em-wizard-status--wait' : '')}>
+                <span className="em-wizard-status__dot"/>
+                <span>
+                  {waiting
+                    ? 'Waiting on the device — this can take several minutes and is normal.'
+                    : 'Working on this step…'}
+                </span>
+              </div>
+            )}
 
             {/* ── Step-specific controls ── */}
 
@@ -4657,54 +4746,45 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
               </div>
             )}
 
-            {/* Retry button — re-runs the step directly (runStep marks it running).
-                Excludes steps with their own dedicated retry UI above (file
-                pickers for 3/11, WifiPanel for 10) — those already give a
-                complete retry path with fresh input, so a second generic
-                "Retry" here would just compete with it and, for the file
-                steps, retry with no file selected (since failure clears it). */}
-            {!running && stepState[step] === 'error' && ![3, 10, 11].includes(step) && (
-              <div style={{ marginBottom: 10, display: 'flex', gap: 8 }}>
-                <Pill onClick={() => runStep(step)}>Retry</Pill>
-                {/* Reachable from every step, not just the connection ones.
-                    Unplugging the cable is a normal reaction to something
-                    going wrong, and it used to leave the wizard holding a dead
-                    handle with no way to get a live one (#91). */}
-                {!CONNECT_STEPS.has(step) && (
-                  <Pill onClick={reconnectAdb}>{adb ? 'Reconnect' : 'Reconnect device'}</Pill>
-                )}
-                {/* Collection is automatic on failure; sharing is deliberate.
-                    The file is redacted controller-side (no SSIDs, BSSIDs or
-                    IPs) so it is safe to attach to a public issue, but it is
-                    still the operator's call whether to. */}
-                {diagnostics && (
-                  <Pill onClick={downloadDiagnostics}>Download diagnostics</Pill>
-                )}
-                {step === 0 && duplicateDeviceId && (
-                  <Pill danger onClick={async () => {
-                    try {
-                      await API.del(`/api/devices/${duplicateDeviceId}`);
-                      addLog(`Deleted "${duplicateDeviceId}" from controller. You can retry now.`, 'ok');
-                      setDuplicateDeviceId(null);
-                      markStep(0, 'pending');
-                    } catch (e) {
-                      addLog(`Delete failed: ${e.error || e.message || 'unknown error'} — check /api/devices/{id} DELETE exists in em_api.py.`, 'error');
-                    }
-                  }}>Delete "{duplicateDeviceId}" from controller</Pill>
-                )}
+            {/* Retry / recovery — one panel so the primary action is obvious */}
+            {stepFailed && !INPUT_STEPS.has(step) && (
+              <div className="em-panel em-wizard-recovery">
+                <div className="em-label">This step failed</div>
+                <p className="em-wizard-recovery__hint">{recoveryHint()}</p>
+                <div className="em-wizard-recovery__actions">
+                  <Pill accent onClick={() => runStep(step)}>Retry</Pill>
+                  {!CONNECT_STEPS.has(step) && (
+                    <Pill onClick={reconnectAdb}>{adb ? 'Reconnect' : 'Reconnect device'}</Pill>
+                  )}
+                  {diagnostics && (
+                    <Pill small onClick={downloadDiagnostics}>Download diagnostics</Pill>
+                  )}
+                  {step === 0 && duplicateDeviceId && (
+                    <Pill danger onClick={async () => {
+                      try {
+                        await API.del(`/api/devices/${duplicateDeviceId}`);
+                        addLog(`Deleted "${duplicateDeviceId}" from controller. You can retry now.`, 'ok');
+                        setDuplicateDeviceId(null);
+                        markStep(0, 'pending');
+                      } catch (e) {
+                        addLog(`Delete failed: ${e.error || e.message || 'unknown error'} — check /api/devices/{id} DELETE exists in em_api.py.`, 'error');
+                      }
+                    }}>Delete "{duplicateDeviceId}" from controller</Pill>
+                  )}
+                </div>
               </div>
             )}
 
-            {/* The file steps run their own buttons above and are excluded
-                from the Retry block, which left them with no way to reconnect
-                either. A dead handle is a dead handle whichever step is
-                showing, and step 11 pushes 10MB over that handle. */}
-            {!running && stepState[step] === 'error' && [3, 10, 11].includes(step) && (
-              <div style={{ marginBottom: 10, display: 'flex', gap: 8 }}>
-                <Pill onClick={reconnectAdb}>{adb ? 'Reconnect' : 'Reconnect device'}</Pill>
-                {diagnostics && (
-                  <Pill onClick={downloadDiagnostics}>Download diagnostics</Pill>
-                )}
+            {stepFailed && [3, 10, 11].includes(step) && (
+              <div className="em-panel em-wizard-recovery">
+                <div className="em-label">This step failed</div>
+                <p className="em-wizard-recovery__hint">{recoveryHint()}</p>
+                <div className="em-wizard-recovery__actions">
+                  <Pill onClick={reconnectAdb}>{adb ? 'Reconnect' : 'Reconnect device'}</Pill>
+                  {diagnostics && (
+                    <Pill small onClick={downloadDiagnostics}>Download diagnostics</Pill>
+                  )}
+                </div>
               </div>
             )}
 
@@ -4749,25 +4829,13 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
             </div>
             <div
               ref={logRef}
-              style={{
-                flex: 1, minHeight: 0, overflowY: 'auto',
-                background: 'linear-gradient(160deg,var(--lcd-face),var(--lcd-bg))',
-                border: '1px solid var(--lcd-line)', borderRadius: 8,
-                boxShadow: 'inset 0 2px 6px rgba(0,0,0,0.5)',
-                padding: '10px 14px',
-                fontFamily: "'DM Mono',monospace", fontSize: 10, lineHeight: 1.7,
-                marginTop: 10,
-              }}
+              className="em-console"
+              style={{ flex: 1, minHeight: 0, marginTop: 10 }}
             >
               {log.length === 0
                 ? <span style={{ color: 'var(--lcd-faint)' }}>— no output yet —</span>
                 : log.map((e, i) => (
-                  // 'head' is a step banner, not output — it is what turns 200
-                  // undifferentiated lines into something you can scan for the
-                  // step that went wrong.
-                  <div key={i} style={e.type === 'head'
-                    ? { color: 'var(--accent-lit)', letterSpacing: '0.12em', marginTop: i === 0 ? 0 : 10, paddingTop: 6, borderTop: i === 0 ? 'none' : '1px solid var(--lcd-faint)' }
-                    : { color: e.type === 'error' ? 'var(--error)' : e.type === 'ok' ? 'var(--ok)' : e.type === 'warn' ? 'var(--warn)' : 'var(--lcd-green)' }}>
+                  <div key={i} className={_wizardLogClass(e.msg, e.type)}>
                     {e.msg}
                   </div>
                 ))

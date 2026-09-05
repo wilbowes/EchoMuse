@@ -265,6 +265,96 @@
       font-family: 'DM Mono', monospace; font-size: 10px; line-height: 1.7;
       padding: 10px 14px; overflow-y: auto;
     }
+    .em-console__line--head {
+      color: var(--accent-lit); letter-spacing: 0.12em; font-weight: 600;
+      margin-top: 10px; padding-top: 6px;
+      border-top: 1px solid var(--lcd-faint);
+    }
+    .em-console__line--head:first-child { margin-top: 0; padding-top: 0; border-top: none; }
+    .em-console__line--error { color: var(--error); font-weight: 500; }
+    .em-console__line--ok    { color: var(--ok); }
+    .em-console__line--warn  { color: var(--warn); }
+    .em-console__line--wait  { color: var(--accent-lit); font-style: italic; }
+    .em-console__line--adb   { color: var(--lcd-dim); font-size: 9px; }
+    .em-console__line--detail { color: var(--lcd-green); opacity: 0.85; }
+    .em-console__line--info  { color: var(--lcd-green); }
+
+    /* Provisioning wizard chrome. */
+    .em-wizard-progress { padding: 10px 14px 8px; border-bottom: 1px solid var(--border); }
+    .em-wizard-progress__track {
+      height: 4px; background: var(--sunken); border-radius: 2px; overflow: hidden;
+    }
+    .em-wizard-progress__fill {
+      height: 100%; background: var(--accent); border-radius: 2px;
+      transition: width 0.25s ease;
+    }
+    .em-wizard-progress__label {
+      font-family: 'DM Mono', monospace; font-size: 8px; color: var(--muted);
+      letter-spacing: 0.08em; text-transform: uppercase; margin-top: 6px;
+    }
+    .em-wizard-step {
+      padding: 5px 12px; display: flex; align-items: flex-start; gap: 6px;
+      border-left: 2px solid transparent;
+    }
+    .em-wizard-step--active {
+      background: var(--hairline); border-left-color: var(--accent);
+    }
+    .em-wizard-step--done   { opacity: 0.75; }
+    .em-wizard-step--error  { border-left-color: var(--warn); }
+    .em-wizard-step__num {
+      font-family: 'DM Mono', monospace; font-size: 8px; color: var(--muted);
+      flex-shrink: 0; width: 14px; padding-top: 1px;
+    }
+    .em-wizard-step__icon {
+      font-family: 'DM Mono', monospace; font-size: 10px; flex-shrink: 0; width: 10px;
+    }
+    .em-wizard-step__label {
+      font-family: 'DM Mono', monospace; font-size: 9px; letter-spacing: 0.04em;
+      line-height: 1.4;
+    }
+    .em-wizard-step--active .em-wizard-step__label { color: var(--text); font-weight: 600; }
+    .em-wizard-step--pending .em-wizard-step__label { color: var(--muted); }
+    .em-wizard-status {
+      display: flex; align-items: center; gap: 8px; margin-bottom: 10px;
+      padding: 8px 12px; border-radius: 8px;
+      background: color-mix(in srgb, var(--accent) 12%, var(--hairline));
+      border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--border));
+      font-family: 'DM Mono', monospace; font-size: 10px; color: var(--text2);
+    }
+    .em-wizard-status__dot {
+      width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+      background: var(--accent);
+      animation: em-wizard-pulse 1.4s ease-in-out infinite;
+    }
+    .em-wizard-status--wait .em-wizard-status__dot { background: var(--warn); }
+    @keyframes em-wizard-pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.45; transform: scale(0.85); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .em-wizard-status__dot { animation: none; opacity: 0.7; }
+    }
+    .em-wizard-upcoming {
+      margin-bottom: 12px; padding: 10px 12px;
+      background: var(--hairline); border: 1px solid var(--border-soft);
+      border-radius: 8px;
+    }
+    .em-wizard-upcoming__item { margin-top: 6px; }
+    .em-wizard-upcoming__item:first-of-type { margin-top: 0; }
+    .em-wizard-upcoming__name {
+      font-family: 'DM Mono', monospace; font-size: 9px; color: var(--text2);
+      letter-spacing: 0.06em; display: block;
+    }
+    .em-wizard-upcoming__desc {
+      font-family: 'DM Mono', monospace; font-size: 9px; color: var(--muted);
+      line-height: 1.5; display: block; margin-top: 2px;
+    }
+    .em-wizard-recovery { margin-bottom: 12px; }
+    .em-wizard-recovery__hint {
+      font-family: 'DM Mono', monospace; font-size: 10px; color: var(--text2);
+      line-height: 1.6; margin: 0 0 10px;
+    }
+    .em-wizard-recovery__actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
     /* Keyboard focus. Inline styles cannot express :focus-visible at all, so
        until now there was no focus ring anywhere in the dashboard. */
