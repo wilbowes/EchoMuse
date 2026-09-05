@@ -1676,6 +1676,282 @@ static int svc_backoff(int fails)
  * cannot be started until the host has attached to the ACM gadget. A console
  * that exits once because nobody was listening yet is indistinguishable from
  * one that never worked, which is why it is respawned rather than run once. */
+/* ── The console password ────────────────────────────────────────────────────
+ *
+ * The USB console hands out a root shell to anyone who plugs in a cable, and
+ * the WiFi PSK is sitting in /data/misc/wifi/wpa_supplicant.conf. This puts a
+ * prompt in front of the shell.
+ *
+ * It is a NOD TO SECURITY, not Fort Knox, and it should not be "hardened"
+ * later into something more complicated: the record lives on /data, so anyone
+ * who can hold the device deletes it from TWRP and walks in. It is an
+ * inconvenience for a casual opportunist, nothing more.
+ *
+ * So why hash rather than compare a string? Because the two are not the same
+ * asset. The hash does not protect the DEVICE — deleting the file defeats it
+ * either way — it protects the PASSWORD, which the owner has probably reused
+ * somewhere that matters. Someone who dumps /data should get work to do rather
+ * than a credential.
+ *
+ * SHA-256 is written out by hand here because this is a static binary with no
+ * crypto library available. bcrypt would be better in the abstract and is not
+ * on the table; the iteration count is what buys margin instead, and it is
+ * carried in the record so it can be raised without stranding devices holding
+ * an older one. The controller's default of 100,000 rounds was measured on
+ * this hardware at 0.32s — a login prompt, so nobody notices.
+ *
+ * The record is `<iterations>:<salt hex>:<hash hex>`, written by the firmware
+ * from the controller's config push (config.WriteConsolePassword), and the
+ * hash is sha256(salt||password) folded `iterations` times.
+ * controller/em_console_pw.py is the other half of this and the two MUST
+ * agree — tests/test_console_pw.py carries the shared vectors.
+ *
+ * A record we cannot read means NO password. That is deliberate: refusing
+ * every login on the strength of a corrupt string would lock the owner out
+ * with nothing to type, and the file is the only thing standing between them
+ * and a device they own.
+ */
+#define CONSOLE_PW "/data/local/etc/echomuse/console.pw"
+
+struct sha256 {
+    unsigned int  h[8];
+    unsigned char buf[64];
+    unsigned long long len;
+    int n;
+};
+
+static const unsigned int SHA_K[64] = {
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,
+    0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,
+    0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,
+    0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,
+    0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,
+    0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,
+    0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,
+    0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,
+    0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2,
+};
+
+#define ROR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
+
+static void sha256_block(struct sha256 *c, const unsigned char *p)
+{
+    unsigned int w[64], a, b, cc, d, e, f, g, h, t1, t2;
+    for (int i = 0; i < 16; i++)
+        w[i] = (unsigned int)p[i*4] << 24 | (unsigned int)p[i*4+1] << 16 |
+               (unsigned int)p[i*4+2] << 8 | (unsigned int)p[i*4+3];
+    for (int i = 16; i < 64; i++) {
+        unsigned int s0 = ROR(w[i-15],7) ^ ROR(w[i-15],18) ^ (w[i-15] >> 3);
+        unsigned int s1 = ROR(w[i-2],17) ^ ROR(w[i-2],19) ^ (w[i-2] >> 10);
+        w[i] = w[i-16] + s0 + w[i-7] + s1;
+    }
+    a=c->h[0]; b=c->h[1]; cc=c->h[2]; d=c->h[3];
+    e=c->h[4]; f=c->h[5]; g=c->h[6]; h=c->h[7];
+    for (int i = 0; i < 64; i++) {
+        unsigned int S1 = ROR(e,6) ^ ROR(e,11) ^ ROR(e,25);
+        unsigned int ch = (e & f) ^ ((~e) & g);
+        t1 = h + S1 + ch + SHA_K[i] + w[i];
+        unsigned int S0 = ROR(a,2) ^ ROR(a,13) ^ ROR(a,22);
+        unsigned int mj = (a & b) ^ (a & cc) ^ (b & cc);
+        t2 = S0 + mj;
+        h=g; g=f; f=e; e=d+t1; d=cc; cc=b; b=a; a=t1+t2;
+    }
+    c->h[0]+=a; c->h[1]+=b; c->h[2]+=cc; c->h[3]+=d;
+    c->h[4]+=e; c->h[5]+=f; c->h[6]+=g; c->h[7]+=h;
+}
+
+static void sha256_init(struct sha256 *c)
+{
+    static const unsigned int iv[8] = {
+        0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,
+        0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19,
+    };
+    for (int i = 0; i < 8; i++)
+        c->h[i] = iv[i];
+    c->len = 0;
+    c->n = 0;
+}
+
+static void sha256_update(struct sha256 *c, const void *data, unsigned len)
+{
+    const unsigned char *p = data;
+    c->len += (unsigned long long)len * 8;
+    while (len) {
+        unsigned take = 64 - c->n;
+        if (take > len)
+            take = len;
+        memcpy(c->buf + c->n, p, take);
+        c->n += take; p += take; len -= take;
+        if (c->n == 64) { sha256_block(c, c->buf); c->n = 0; }
+    }
+}
+
+static void sha256_final(struct sha256 *c, unsigned char out[32])
+{
+    unsigned long long bits = c->len;
+    unsigned char pad = 0x80;
+    sha256_update(c, &pad, 1);
+    pad = 0;
+    while (c->n != 56)
+        sha256_update(c, &pad, 1);
+    unsigned char len8[8];
+    for (int i = 0; i < 8; i++)
+        len8[i] = (unsigned char)(bits >> (56 - i * 8));
+    sha256_update(c, len8, 8);
+    for (int i = 0; i < 8; i++) {
+        out[i*4]   = (unsigned char)(c->h[i] >> 24);
+        out[i*4+1] = (unsigned char)(c->h[i] >> 16);
+        out[i*4+2] = (unsigned char)(c->h[i] >> 8);
+        out[i*4+3] = (unsigned char)c->h[i];
+    }
+}
+
+static int unhex(const char *s, unsigned char *out, int max)
+{
+    int n = 0;
+    for (; s[0] && s[1] && n < max; s += 2, n++) {
+        int hi = -1, lo = -1;
+        for (int k = 0; k < 2; k++) {
+            char ch = s[k];
+            int v = ch >= '0' && ch <= '9' ? ch - '0'
+                  : ch >= 'a' && ch <= 'f' ? ch - 'a' + 10
+                  : ch >= 'A' && ch <= 'F' ? ch - 'A' + 10 : -1;
+            if (v < 0)
+                return -1;
+            if (k == 0) hi = v; else lo = v;
+        }
+        out[n] = (unsigned char)(hi << 4 | lo);
+    }
+    return s[0] ? -1 : n;
+}
+
+/* Fold sha256(salt||password) `iters` times, matching em_console_pw.py. */
+static void pw_hash(const unsigned char *salt, int saltlen,
+                    const char *pw, long iters, unsigned char out[32])
+{
+    struct sha256 c;
+    sha256_init(&c);
+    sha256_update(&c, salt, saltlen);
+    sha256_update(&c, pw, (unsigned)strlen(pw));
+    sha256_final(&c, out);
+    for (long i = 1; i < iters; i++) {
+        unsigned char t[32];
+        memcpy(t, out, 32);
+        sha256_init(&c);
+        sha256_update(&c, t, 32);
+        sha256_final(&c, out);
+    }
+}
+
+/* Read the record. Returns 0 when there is no password to enforce. */
+static int pw_load(long *iters, unsigned char *salt, int *saltlen,
+                   unsigned char want[32])
+{
+    int fd = open(CONSOLE_PW, O_RDONLY);
+    if (fd < 0)
+        return 0;
+    char b[256];
+    int n = read(fd, b, sizeof b - 1);
+    close(fd);
+    if (n <= 0)
+        return 0;
+    b[n] = 0;
+    char *nl = strchr(b, '\n');
+    if (nl) *nl = 0;
+
+    char *c1 = strchr(b, ':');
+    if (!c1) return 0;
+    *c1++ = 0;
+    char *c2 = strchr(c1, ':');
+    if (!c2) return 0;
+    *c2++ = 0;
+
+    *iters = atol(b);
+    if (*iters < 1)
+        return 0;
+    *saltlen = unhex(c1, salt, 32);
+    if (*saltlen <= 0)
+        return 0;
+    return unhex(c2, want, 32) == 32;
+}
+
+/* Prompt on the console until the password is right.
+ *
+ * Runs in the console child, after the tty is its stdio and before the shell
+ * is exec'd — so the boot trail and everything else the device prints stay
+ * freely readable, and only the SHELL is behind the prompt.
+ *
+ * ECHO is turned off while typing, which on this console is doubly worth
+ * doing: it stops the password appearing on the wire, and the device echoing
+ * its own output back into its input is the trap that cost an evening here
+ * once already (see README).
+ */
+static void console_gate(void)
+{
+    long iters;
+    unsigned char salt[32], want[32], got[32];
+    int saltlen;
+
+    if (!pw_load(&iters, salt, &saltlen, want))
+        return;
+
+    struct termios t, saved;
+    int have_t = tcgetattr(0, &t) == 0;
+    if (have_t) {
+        saved = t;
+        t.c_lflag &= ~(unsigned)ECHO;
+        tcsetattr(0, TCSANOW, &t);
+    }
+
+    for (int tries = 0; ; tries++) {
+        /* Slow down after a few wrong answers. Not a lockout: there is no
+         * lockout that a power cycle would not clear, and one that outlived a
+         * reboot would lock out the owner rather than anyone else. */
+        if (tries >= 3)
+            sleep(tries > 8 ? 5 : 2);
+
+        const char *p = "\r\nemOS console password: ";
+        write(1, p, strlen(p));
+
+        char in[128];
+        int n = 0;
+        while (n < (int)sizeof in - 1) {
+            char ch;
+            int r = read(0, &ch, 1);
+            if (r <= 0) {          /* cable pulled, or the port closed */
+                if (have_t) tcsetattr(0, TCSANOW, &saved);
+                _exit(0);
+            }
+            if (ch == '\r' || ch == '\n')
+                break;
+            if ((ch == 8 || ch == 127)) {      /* backspace */
+                if (n) n--;
+                continue;
+            }
+            in[n++] = ch;
+        }
+        in[n] = 0;
+        write(1, "\r\n", 2);
+
+        pw_hash(salt, saltlen, in, iters, got);
+        int ok = 1;
+        for (int i = 0; i < 32; i++)
+            if (got[i] != want[i])
+                ok = 0;
+        memset(in, 0, sizeof in);
+        if (ok)
+            break;
+
+        const char *no = "wrong\r\n";
+        write(1, no, strlen(no));
+    }
+
+    if (have_t)
+        tcsetattr(0, TCSANOW, &saved);
+}
+
 static pid_t start_console(void)
 {
     int t = open(TTY, O_RDWR | O_NOCTTY);
@@ -1687,6 +1963,7 @@ static pid_t start_console(void)
         ioctl(t, TIOCSCTTY, 1);
         dup2(t, 0); dup2(t, 1); dup2(t, 2);
         if (t > 2) close(t);
+        console_gate();
         char *argv[] = { "/system/bin/sh", NULL };
         char *envp[] = { "HOME=/", "TERM=vt100", "ANDROID_ROOT=/system",
                          "PATH=/sbin:/system/bin:/system/xbin", NULL };
