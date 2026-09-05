@@ -13,17 +13,32 @@
 MAX_ATTEMPTS=3
 MIN_RUNTIME=15   # seconds below which an exit is treated as a failed start
 
-# ── Wait for echoaudioservice (up to 4 minutes) ──────────────────────────────
-i=0
-while [ $i -lt 120 ]; do
-    pid=$(ps | grep echoaudio | grep -v grep)
-    if [ -n "$pid" ]; then
-        sleep 5
-        break
-    fi
-    sleep 2
-    i=$((i + 2))
-done
+# ── Wait for echoaudioservice, but only where Android exists ─────────────────
+#
+# This wait is for Amazon's audio service to bring the codec up before we take
+# it. On emOS there is no Android userspace and no echoaudioservice, so the
+# loop can never succeed and always runs its full 120 seconds — measured as a
+# 126s delay from boot to a working assistant, every boot, for a service that
+# will never appear. The firmware configures the codec's DAPM routes itself
+# now (internal/bindings/codec), so there is nothing to wait for there either.
+#
+# The test is whether ANDROID is running, not whether this is emOS: the same
+# script has to be correct on both for as long as both are supported, and a
+# build flag would mean two artifacts to keep in step. /dev/__properties__ is
+# Android's property service — present on FireOS, absent without it — so it
+# tests the thing the wait actually depends on.
+if [ -e /dev/__properties__ ]; then
+    i=0
+    while [ $i -lt 120 ]; do
+        pid=$(ps | grep echoaudio | grep -v grep)
+        if [ -n "$pid" ]; then
+            sleep 5
+            break
+        fi
+        sleep 2
+        i=$((i + 2))
+    done
+fi
 
 # ── Hardware init ─────────────────────────────────────────────────────────────
 ip link set p2p0 down
