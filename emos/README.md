@@ -143,6 +143,41 @@ diagnosis (two shells fighting over one tty; there was one, and the second
 console — a script here, or the provisioning wizard over WebSerial, which has
 no `stty` to remind you — must do it explicitly.
 
+### The console password
+
+The console is an unauthenticated root shell — anyone with a cable gets one,
+and the WiFi PSK is in `/data/misc/wifi/wpa_supplicant.conf`. Stock FireOS is
+better than us here, since adbd honours `ro.adb.secure`.
+
+Set it fleet-wide from the dashboard (Config → Advanced → USB console). The
+controller hashes it, pushes the record, and the firmware writes
+`/data/local/etc/echomuse/console.pw`; **init reads that file and prompts before
+handing over the shell**. Only the shell is gated — the boot trail and
+everything else the device prints stay readable, so a dead device is still
+diagnosable.
+
+**It is a nod to security, not Fort Knox.** The record is on `/data`: delete the
+file from TWRP and you are back in. It is an inconvenience for a casual
+opportunist and nothing more, and it should not be hardened later into
+something more complicated.
+
+Hashing is still worth it, for a different asset: it does not protect the
+DEVICE, it protects the PASSWORD, which the owner has probably reused somewhere
+that matters. Salted SHA-256, iterated, written out by hand in `init.c` because
+this is a static binary with no crypto library. `init/pwcheck.c` includes
+`init.c` whole and prints records for the same vectors
+`controller/tests/test_console_pw.py` carries, so the two implementations are
+compared rather than assumed:
+
+```sh
+cd init && cc -O2 -o /tmp/pwcheck pwcheck.c && /tmp/pwcheck
+```
+
+Two behaviours chosen so a mistake fails open rather than shut: a record that
+cannot be parsed means NO password, and wrong answers slow down but never lock
+out. Any lockout a power cycle clears is theatre, and one that survived a reboot
+would only ever trap the owner.
+
 ### What the kernel cmdline actually contains
 
 `/proc/cmdline` is not the boot image's cmdline: **LK appends its own
