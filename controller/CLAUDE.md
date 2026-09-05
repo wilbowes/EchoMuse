@@ -559,6 +559,21 @@ index into it, so appending to a deployed entry corrupts every database that
 already ran it. (Doing exactly that once broke every stats write and
 disconnect-looped the fleet.)
 
+**One deployed entry rewrites itself every time a config default is added, and
+it is fine — but not for a reason the rule above would tell you.** Migration
+**v3 is an f-string interpolating `DEFAULT_DEVICE_CONFIG`**, so adding any key
+to the defaults silently changes v3's text. It has been happening for a long
+time: v3 on main already carries `bleProxyEnabled`, `ledScene` and `agcEnabled`,
+all far newer than schema v3. It is harmless because the statement is
+`INSERT OR IGNORE` and a database past v3 never runs it again, so the only
+effect is that a FRESH database seeds its global config with today's defaults
+rather than 2025's. Noticed 2026-09-05 while adding v21, by diffing the
+migration list against main rather than by any test — `test_migrations_are_
+append_only` pins the LENGTH, which is the mistake worth catching, and says
+nothing about content. Do not "fix" v3 into a literal: that would freeze the
+seed at whatever the defaults were the day it was frozen, and every new install
+would then start with a config missing every key added since.
+
 A controller applies everything it is missing in one startup, so **a user
 several releases behind jumping straight to latest is the normal case**, not
 an exotic one — verified end to end from v11 to v16 with data intact. Each
@@ -1016,6 +1031,57 @@ does not lose data, so a stall delivers late, never never, and cannot punch
 holes in a saved utterance. That mistake was made and corrected on the day.
 
 **Utterance recordings (schema v12).** Opt-in per device via `saveUtterances` (Config → Microphones): the mic audio streamed to HA for a turn is kept as a 16kHz mono WAV in `recordings/` beside the DB, playable and downloadable from each turn's row in the Activity tab (`GET /api/devices/{id}/turns/{turn}/audio`). Lets you hear what STT heard instead of inferring it from a bad transcript. Buffered in `_stream_mic_audio` **below the denoiser**, so the file is byte-for-byte the ESPHome wire payload — it first shipped tapped pre-NS, which answered "how good is the mic" but could not answer "why was the transcript wrong" on any device with `nsAsr` on, and that is the question people actually ask. **Keep the tap below NS**; if a raw comparison is ever wanted it belongs as a *second* file, not by moving this one. Capped at `MAX_UTTERANCE_BYTES` (30s), written in `_persist_turn` because the filename is keyed on the turn's rowid. Retention is a hard per-device **file count** (`em_recordings.KEEP_PER_DEVICE`=10) — much shorter than `TURN_RETENTION`, so **a non-NULL `audio_file` on an older row is a claim to check, not to trust**; every reader goes through `em_recordings.resolve`, which also re-checks that the file belongs to the device in the URL (the endpoint takes both from the path) and treats a missing file as an ordinary 404. Default OFF and it should stay that way: this is the only feature that writes recognisable speech to disk. `db.delete_device` unlinks a device's recordings explicitly — nothing cascades to the filesystem. Note the dashboard fetches the WAV via `API.blob` rather than an `<a href>`: sessions are Bearer-header-only, no cookie is ever set, so browser-initiated requests would 401.
+
+## The emOS console password
+
+`consolePassword` (Config → Advanced → USB console) puts a prompt in front of
+the USB serial console's root shell on emOS. FireOS is unaffected — adbd
+honours `ro.adb.secure` and is already better than this.
+
+**A nod to security, not Fort Knox**, and it should not be hardened later into
+something more complicated for a threat it was never meant to address: the
+record lives on `/data`, so anyone holding the device deletes it from TWRP.
+
+**The hash therefore does not protect the device. It protects the PASSWORD**,
+which the owner has probably reused somewhere that matters — someone who dumps
+`/data` should get work to do rather than a credential. So `em_console_pw`
+hashes BEFORE the value is stored or pushed, and plaintext exists only in the
+browser and the request body. Salted SHA-256, iterated, because the other half
+of the comparison runs in emOS's init, a static C binary that cannot link a
+crypto library; the count rides the record (`<iterations>:<salt>:<hash>`) so
+raising it later strands nobody. Measured at **0.32s** on the Echo's own A53.
+
+`emos/init/pwcheck.c` includes `init.c` whole and drives the real functions, so
+the two implementations are compared rather than assumed — verified matching at
+1, 2, 3 and 100,000 rounds, on x86 and on the device. A drift here refuses a
+password the dashboard just set, and nothing else in either tree would notice.
+
+Four rules, each of which fails the safe way round:
+
+- **Reads return a sentinel, writes resolve it.** Sentinel means unchanged,
+  empty means remove, anything else is new plaintext to hash. That is what lets
+  a client read-modify-write the config without the record ever being disclosed
+  to it. Removal is an explicit button, not "clear the box and save", so an
+  accidental clear cannot silently unlock the fleet.
+- **An unparseable record means NO password**, at both ends. Refusing every
+  login on the strength of a corrupt string locks the owner out with nothing to
+  type, and the file is all that stands between them and a device they own.
+- **The control is disabled only when every device has POSITIVELY reported
+  Android.** An empty `fleet_base_os` means nothing has ever said, which is not
+  the same answer — the same field takes opposite defaults in its two readers,
+  because absence must keep today's behaviour for payload gating and must not
+  hide a setting from someone configuring their first emOS device.
+- **The record is redacted from support bundles twice**: by key name in
+  `redact_config`, and by shape in the log sanitiser (`_PW_RECORD`). The second
+  was added because the first works on KEY NAMES and a record quoted in a log
+  line has no key attached — found by the test that asserts no part of a record
+  survives a whole serialised bundle, which is the only kind that catches a leak
+  nobody predicted.
+
+`base_os` is persisted for this (schema v21). It rides the register message and
+used to live only on the live `Device`, which answers "what is THIS device" —
+all payload gating ever needs. "What is the fleet" is a question about devices
+that are mostly offline.
 
 ## Support bundles (`em_support.py`)
 

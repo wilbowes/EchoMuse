@@ -902,6 +902,38 @@ Playback ring clearing waits for the device's `playback_stats` (`device.playback
 - **Mute ring** (solid red) is device-sovereign — enforced since v2.7.8: controller LED writes are recorded but not painted while muted. Needed because muting now terminates an active turn (controller cancels + `speaker_flush` on `mute_state`), so the cancelled turn's LED cleanup arrives after the red ring is up.
 - **Volume arc** owns the ring for its 2s display window against *animations* — they repaint ~every 100ms and would otherwise stomp the arc within one frame. It does **not** outrank a deliberate action-button press: a dot release calls `CancelVolumeDisplay()`, which drops the hold so the listening frame paints (it deliberately does not repaint — the controller's frame lands within an RTT, and clearing to black would put a dark gap between the two). The arc is protection from repaint churn, not from the user. On expiry the ring repaints the latest `baseLEDs` frame (`onDisplayExpire` → `paintBaseLEDs`), handing back mid-animation. The arc shows only for physical volume button presses (v2.9.5): remote sets and the boot-time volume seed apply silently (`volumeController.Set` showRing flag). The mute-button LED is sysfs gpio444, active-high — not the gpio445 in Amazon's `libled_hal.so`, whose constant is off by one and whose pad is muxed away (stock drives the pin via the `/dev/mtgpio` ioctl; see `mute_button.go`).
 
+## The emOS console password
+
+`consolePassword` arrives on the config push and the firmware does exactly one
+thing with it: writes `/data/local/etc/echomuse/console.pw`
+(`config.WriteConsolePassword`). It never checks it. **emOS's init reads that
+file and puts the prompt in front of the shell**, because the console has to
+work when the firmware is not running — which is precisely when someone needs
+it.
+
+Three things not to undo:
+
+- **The field is a POINTER.** An empty record is the legitimate "no password"
+  setting, so with a plain string plus `omitempty` a removal would be
+  indistinguishable from a field nobody sent, and clearing the password could
+  never reach a device. Same reason `DuckDb` is a pointer.
+- **Written only when the content changes.** The config push repeats every
+  setting on every reconnect, and this device runs for years on eMMC that
+  cannot be replaced, so an unconditional write spends a flash write per
+  reconnect to store bytes already there.
+- **Written from the config handler in `control.go`, not through
+  `OnConfigApplied`.** There is no in-process consumer for a callback to serve,
+  and a callback nobody registers is a feature that silently does nothing.
+
+Written to a temp file and renamed, so init can never read a half-written
+record: a truncated one parses as unusable, which is read as NO password, and
+would leave the console open exactly while it looked configured.
+
+The record is `<iterations>:<salt hex>:<hash hex>`, already hashed by the
+controller — no plaintext passes through the firmware. The rest of the design,
+including why hashing is worth it when deleting the file defeats it, is in
+`controller/CLAUDE.md`.
+
 ## cgo dependency
 
 SpeexDSP C source (AEC) is vendored in `device/internal/aec/`. The compiler Docker image provides the ARM cross-toolchain. If adding new cgo dependencies, they must compile cleanly with the `echomuse-compiler` image against the FireOS 5 sysroot.
