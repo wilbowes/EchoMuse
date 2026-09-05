@@ -58,6 +58,7 @@ import em_auth as auth
 import em_ble_proxy
 import em_config_sections as sections_mod
 import em_console_pw
+import em_emos_build
 import em_firmware
 import em_ingressauth
 import em_oww_assets
@@ -415,6 +416,7 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/provision/oww_asset/{name}", _get_provision_oww_asset)
     app.router.add_post("/api/provision/tls_credentials", _post_provision_tls_credentials)
     app.router.add_post("/api/provision/diagnostics",     _post_provision_diagnostics)
+    app.router.add_post("/api/provision/emos_image",   _post_provision_emos_image)
     app.router.add_post("/api/devices/{id}/secure_link",  _post_secure_link)
     app.router.add_post("/api/devices/{id}/debloat",      _post_debloat)
 
@@ -4660,6 +4662,96 @@ async def _post_provision_diagnostics(request: web.Request) -> web.Response:
         headers={"Content-Disposition":
                  f'attachment; filename="echomuse-provision-{stamp}.json"'},
     )
+
+
+@auth.require_admin
+async def _post_provision_emos_image(request: web.Request) -> web.Response:
+    """
+    POST /api/provision/emos_image (multipart: "reference", "init", "version")
+
+    Build an emOS boot image from the reference the wizard just escrowed off
+    the device, and stream it back. Step 5 of the emOS provisioning flow.
+
+    ON THE CONTROLLER RATHER THAN IN THE BROWSER, for the reason the
+    diagnostics route above gives: the packer and its refusals live in
+    em_emos_build, with tests, and a second copy in JavaScript would drift
+    from them without anyone noticing until a device took a bad flash. This
+    function only carries; em_emos_build decides.
+
+    NOTHING IS STORED. The reference is the user's own boot partition and the
+    only copy that matters is the one the wizard escrowed to them — keeping a
+    second here would mean holding a device image we have no reason to hold,
+    and it is also the file we take care never to redistribute. Same reason
+    the built image is streamed rather than cached.
+
+    The init binary rides in the request rather than being resolved here. That
+    is the first-cut shape and it is a known gap: the natural home is a
+    release asset beside `server`, so the wizard can offer "latest from
+    GitHub" the way it already does for the firmware.
+    """
+    try:
+        reader = await request.multipart()
+        parts = {}
+        while True:
+            field = await reader.next()
+            if field is None:
+                break
+            if field.name in ("reference", "init"):
+                parts[field.name] = await field.read()
+            elif field.name == "version":
+                parts["version"] = (await field.read()).decode(errors="replace")[:64]
+
+        reference = parts.get("reference")
+        init_bin = parts.get("init")
+        if not reference:
+            return _error("invalid_upload",
+                          "Expected multipart field 'reference' — the boot "
+                          "image read off the device", 400)
+        if not init_bin:
+            return _error("invalid_upload",
+                          "Expected multipart field 'init' — the emOS init "
+                          "binary", 400)
+
+        version = parts.get("version") or "0.1"
+        loop = asyncio.get_event_loop()
+        # Off the event loop: gzipping a ramdisk and hashing two images blocks
+        # it for long enough to matter, and devices are streaming audio
+        # through this process while somebody provisions a new one.
+        info = await loop.run_in_executor(
+            None, em_emos_build.build_emos_image, reference, init_bin, version)
+
+        log.info(f"[api] emOS image built: {info['size']:,} bytes "
+                 f"md5={info['md5'][:8]}… from a {info['reference_size']:,} "
+                 f"byte reference (md5 {info['reference_md5'][:8]}…)")
+
+        image = info.pop("image")
+        return web.Response(
+            body=image,
+            content_type="application/octet-stream",
+            headers={
+                "Content-Disposition": 'attachment; filename="emos-boot.img"',
+                # The wizard compares this against its own hash of what it
+                # received, and again against what it reads back off the
+                # device after the flash. Both comparisons are the point of
+                # the step.
+                "X-Image-MD5": info["md5"],
+                "X-Image-SHA256": info["sha256"],
+                "X-Reference-MD5": info["reference_md5"],
+                "X-Build-Info": json.dumps(info),
+            },
+        )
+    except em_emos_build.BuildError as e:
+        # Every one of these is a refusal with something a person can act on,
+        # and each is a state we would rather meet here than after a partition
+        # write. 422 rather than 400: the request was well formed, the image
+        # is what could not be accepted.
+        log.warning(f"[api] emOS build refused: {e}")
+        return _error("build_refused", str(e), 422)
+    except web.HTTPException:
+        raise
+    except Exception as e:
+        log.error(f"[api] emOS build error: {e}")
+        return _error("build_failed", str(e), 500)
 
 
 @auth.require_admin

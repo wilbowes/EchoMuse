@@ -490,17 +490,29 @@ def test_the_wake_word_asset_wizard_step_is_mandatory():
     from pathlib import Path
     jsx = (Path(__file__).resolve().parent.parent / "static" / "dashboard.jsx").read_text()
 
-    steps = jsx[jsx.index("const _WIZARD_STEPS = ["):]
-    steps = steps[:steps.index("\n];")]
-    assert "'install_oww'" in steps, "the wake word asset step is missing from the wizard"
+    # Checked for BOTH flows. The wizard gained an emOS path whose steps are
+    # numbered differently, and an invariant that only held for the flow that
+    # happens to be second in the file is not an invariant.
+    auto_line = jsx[jsx.index("const autoSteps ="):]
+    auto_line = auto_line[:auto_line.index("\n")]
+    sets = re.findall(r"new Set\(\[([^\]]*)\]\)", auto_line)
+    assert len(sets) == 2, (
+        f"expected an autoSteps set per flow, found {len(sets)} in {auto_line!r}")
+    emos_auto, fireos_auto = [
+        {int(n) for n in re.findall(r"\d+", s)} for s in sets
+    ]
 
-    idx = steps.count("{ id:", 0, steps.index("'install_oww'")) - 1
-    auto = jsx[jsx.index("const autoSteps = new Set(["):]
-    auto = auto[:auto.index(")")]
-    assert str(idx) in auto, (
-        f"step {idx} (install_oww) must auto-run — a step that needs a click "
-        f"is one a user can skip"
-    )
+    for table, auto, flow in (("_WIZARD_STEPS", fireos_auto, "FireOS"),
+                              ("_EMOS_STEPS", emos_auto, "emOS")):
+        steps = jsx[jsx.index(f"const {table} = ["):]
+        steps = steps[:steps.index("\n];")]
+        assert "'install_oww'" in steps, \
+            f"the wake word asset step is missing from the {flow} wizard"
+        idx = steps.count("{ id:", 0, steps.index("'install_oww'")) - 1
+        assert idx in auto, (
+            f"{flow} step {idx} (install_oww) must auto-run — a step that "
+            f"needs a click is one a user can skip"
+        )
 
     runner = jsx[jsx.index("async function runInstallOwwAssets"):]
     runner = runner[:runner.index("\n  async function ", 1)]
@@ -2264,3 +2276,112 @@ def test_the_upload_endpoint_reports_what_was_uploaded():
         (CONTROLLER / "em_api.py").read_text(), "_post_upload_binary"))
     assert "_extract_binary_version(binary)" in fn
     assert '"version": version' in fn
+
+
+# ─── The emOS provisioning flow ───────────────────────────────────────────────
+#
+# This flow writes a boot partition, so its guards are the kind that must not
+# quietly disappear in a refactor. Source-shape tests, like the rest of this
+# file: the dashboard compiles to one classic script with no module boundary,
+# so there is nothing to import.
+
+def _jsx():
+    return (CONTROLLER / "static" / "dashboard.jsx").read_text()
+
+
+def _step_ids(table):
+    steps = _jsx()
+    steps = steps[steps.index(f"const {table} = ["):]
+    steps = steps[:steps.index("\n];")]
+    return re.findall(r"\{ id: '([a-z_]+)'", steps)
+
+
+def test_the_emos_flow_drops_every_android_only_step():
+    """
+    The whole point of the emOS flow. Magisk, the boot-image patch, the root
+    pre-seed and the root check all exist to obtain root INSIDE Android, which
+    this flow never boots; Disable Alexa never worked and silences a userspace
+    about to be replaced; Debloat's package list targets that same userspace
+    and its service.d script lives in the image being overwritten.
+
+    Patch Boot Image is the one that matters most: it is the most dangerous
+    step in the wizard, because in the wrong mode it writes over the amonet
+    unlock payload.
+    """
+    ids = set(_step_ids("_EMOS_STEPS"))
+    for gone in ("patch_boot", "install_magisk", "preseed_db", "verify_root",
+                 "disable_alexa", "debloat"):
+        assert gone not in ids, (
+            f"'{gone}' is an Android-only step and must not be in the emOS flow")
+    assert len(ids) == 9, f"the emOS flow is nine steps, found {len(ids)}: {ids}"
+
+
+def test_the_emos_flow_escrows_before_it_flashes():
+    """
+    The escrowed image is both the build input and the ten-second undo, so
+    every destructive step has to come after it. Ordering is the guard here —
+    a flash before an escrow is a device with no way back.
+    """
+    ids = _step_ids("_EMOS_STEPS")
+    assert ids.index("escrow_boot") < ids.index("build_emos") < ids.index("flash_emos"), \
+        f"escrow must precede build must precede flash, got {ids}"
+    # And the install lands on /data before the partition write, which is what
+    # lets it survive the flash.
+    assert ids.index("install_em") < ids.index("flash_emos")
+    assert ids.index("install_oww") < ids.index("flash_emos")
+
+
+def test_the_flash_step_verifies_against_the_partition():
+    """
+    A write that reports implausible throughput went to cache, and a read-back
+    from that same cache passes. So the caches are dropped before reading, and
+    a mismatch refuses rather than warns — and says not to reboot, because a
+    device that has not rebooted is still recoverable from where it stands.
+    """
+    src = _jsx()
+    fn = src[src.index("async function runFlashEmos"):]
+    fn = fn[:fn.index("\n  // ── Steps 7 and 8")]
+    assert "conv=fsync" in fn, "the write must be fsync'd"
+    assert "drop_caches" in fn, (
+        "the page cache must be dropped before the read-back, or the read-back "
+        "confirms the cache rather than the partition")
+    assert "DO NOT REBOOT" in fn, (
+        "a verification failure must tell the operator not to reboot")
+    assert fn.index("drop_caches") < fn.index("Reading it back"), \
+        "the caches must be dropped BEFORE the read-back, not after"
+
+
+def test_the_serial_console_disables_echo_before_anything_else():
+    """
+    A port opened with default termios echoes everything the device sends back
+    into its own input; the shell then executes its own prompt and every
+    command returns 127. It looks alive, echoes what you type, and runs
+    nothing. Web Serial has no stty to remind anyone, which is why this belongs
+    in the client and why it is pinned.
+
+    It cost an evening on 2026-09-04, a confident wrong diagnosis and a
+    reverted commit.
+    """
+    src = _jsx()
+    cls = src[src.index("class _EmosConsole"):]
+    cls = cls[:cls.index("\n}")]
+    assert "stty -echo" in cls, "the console client must disable echo"
+
+    watch = src[src.index("async function runRebootAndWatch"):]
+    watch = watch[:watch.index("\n  async function ", 1)]
+    assert "disableEcho" in watch, "the reboot step must disable echo"
+    assert watch.index("disableEcho") < watch.index("con.run("), \
+        "echo must be disabled BEFORE the first command, or its reply is garbled"
+
+
+def test_the_emos_build_endpoint_stores_nothing():
+    """
+    The reference is the user's own boot partition and the one file we take
+    care never to redistribute. Keeping a copy would mean holding a device
+    image for no reason.
+    """
+    fn = _strip_prose(_fn_body(
+        (CONTROLLER / "em_api.py").read_text(), "_post_provision_emos_image"))
+    for writer in ("open(", "write_bytes", "Path(", "tempfile"):
+        assert writer not in fn, (
+            f"the emOS build endpoint must not persist anything (found {writer!r})")
