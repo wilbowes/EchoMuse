@@ -143,9 +143,11 @@ static const struct node nodes[] = {
 #endif
 #define LED_N  12
 
-/* Defined further down; declared here so the orbit probe can record into the
- * boot trail. */
+/* Defined further down; declared here so the orbit probe and the stage marks
+ * can record into the boot trail and the network log. */
 static void note(const char *fmt, ...);
+static void netlog(const char *fmt, ...);
+static long mono_ms(void);
 
 /* ── The orbit, as measured off EFF on 2026-09-05 ────────────────────────────
  *
@@ -204,6 +206,7 @@ struct ledshm {
 };
 static struct ledshm *ledst;
 static pid_t led_pid = -1;
+static pid_t main_pid;
 static int bootstep;
 
 static const char HEXD[] = "0123456789ABCDEF";
@@ -272,6 +275,35 @@ static int breath(int tick)
     int x = tick % per;
     int tri = x < per / 2 ? x * 2 * SUB / per : (per - x) * 2 * SUB / per;
     return tri * tri / SUB;
+}
+
+/* Where the head goes next, given the stage the boot has reached.
+ *
+ * Split out because ringsim USED to carry its own copy of this loop, so a cap
+ * added here silently did not apply there — the drift the simulator exists to
+ * make impossible. One function, called by both.
+ */
+static int head_advance(int head_q, int stage)
+{
+    if (stage > LED_N)
+        stage = LED_N;
+    int target = stage * SUB + (stage < LED_N ? CREEP : 0);
+    /* Never past the LAST segment while the boot is still running. The creep
+     * carried the head to 11.7, which renders mostly on position 0 — so it had
+     * visually completed the lap and come back to the bottom with the boot
+     * unfinished, and the finale then had no journey home to make. Bringing
+     * the ring home is the finale's job (Wil, from video, 2026-09-05). */
+    if (target > (LED_N - 1) * SUB)
+        target = (LED_N - 1) * SUB;
+    if (head_q >= target)
+        return head_q;
+    /* Exponential ease, with a floor so integer truncation cannot stall it
+     * short of the target. */
+    int step = (target - head_q) / 8;
+    if (step < 1)
+        step = 1;
+    head_q += step;
+    return head_q > target ? target : head_q;
 }
 
 /* head_q is a position in SUB units around the ring, 0..LED_N*SUB. `trail`
@@ -489,22 +521,8 @@ static void anim_main(void)
             ledst->mode = ANIM_DONE;
             _exit(0);
         }
-        if (mode != ANIM_FAIL) {
-            int stage = ledst->stage;
-            if (stage > LED_N)
-                stage = LED_N;
-            int target = stage * SUB + (stage < LED_N ? CREEP : 0);
-            if (head_q < target) {
-                /* Exponential ease, with a floor so integer truncation cannot
-                 * stall it short of the target. */
-                int step = (target - head_q) / 8;
-                if (step < 1)
-                    step = 1;
-                head_q += step;
-                if (head_q > target)
-                    head_q = target;
-            }
-        }
+        if (mode != ANIM_FAIL)
+            head_q = head_advance(head_q, ledst->stage);
         anim_render(head_q, tick++, mode == ANIM_FAIL, 1);
         usleep(TICK_MS * 1000);
     }
@@ -546,6 +564,7 @@ static void orbit_probe(void)
 /* Start the animator. It claims the ring itself — see anim_claim. */
 static void led_claim(void)
 {
+    main_pid = getpid();
     orbit_probe();
     note("orbit head at %d\n", orbit_head_pos());
 
@@ -576,6 +595,14 @@ static void led_step(void)
         bootstep++;
     if (ledst)
         ledst->stage = bootstep;
+    /* Timestamp every stage, so the trail can answer which of them actually
+     * cost anything. note() rewrites a buffer that fork() has copied, so the
+     * network stages — which run in a child, and are the slow ones — have to
+     * go to the append-only log instead. */
+    if (getpid() == main_pid)
+        note("stage %d reached\n", bootstep);
+    else
+        netlog("stage %d reached\n", bootstep);
 }
 
 static void led_fail(void)
@@ -764,15 +791,31 @@ static int write_at(off_t off, const char *buf, size_t n)
     return w == (ssize_t)n ? 0 : -1;
 }
 
+/* Milliseconds since the kernel started. CLOCK_MONOTONIC begins at boot, so
+ * this covers the kernel's own time as well as ours and needs nothing set up.
+ * It is not for the clock — it is for knowing which stages actually cost
+ * anything, which the trail could not answer until now. */
+static long mono_ms(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0;
+    return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+}
+
 static void note(const char *fmt, ...)
 {
     char line[256];
+    int p = snprintf(line, sizeof line, "[%7ld] ", mono_ms());
+    if (p < 0 || p >= (int)sizeof line)
+        p = 0;
     va_list ap;
     va_start(ap, fmt);
-    int n = vsnprintf(line, sizeof line, fmt, ap);
+    int n = vsnprintf(line + p, sizeof line - p, fmt, ap);
     va_end(ap);
     if (n < 0)
         return;
+    n += p;
     if (n > (int)sizeof line - 1)
         n = sizeof line - 1;
     if (trail_len + n + 1 < sizeof trail) {
@@ -809,12 +852,16 @@ static void usbwr(const char *leaf, const char *val)
 static void netlog(const char *fmt, ...)
 {
     char line[256];
+    int p = snprintf(line, sizeof line, "[%7ld] ", mono_ms());
+    if (p < 0 || p >= (int)sizeof line)
+        p = 0;
     va_list ap;
     va_start(ap, fmt);
-    int n = vsnprintf(line, sizeof line, fmt, ap);
+    int n = vsnprintf(line + p, sizeof line - p, fmt, ap);
     va_end(ap);
     if (n <= 0)
         return;
+    n += p;
     int fd = open(NETLOG, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd < 0)
         return;

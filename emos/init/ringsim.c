@@ -115,14 +115,7 @@ static void run_boot(int fail_at, int start_pos)
     for (int s = 0; s < LED_N; s++) {
         int ticks = stage_ms[s] / TICK_MS;
         for (int k = 0; k < ticks; k++) {
-            int stage = ledst->stage;
-            int target = stage * SUB + (stage < LED_N ? CREEP : 0);
-            if (head_q < target) {
-                int step = (target - head_q) / 8;
-                if (step < 1) step = 1;
-                head_q += step;
-                if (head_q > target) head_q = target;
-            }
+            head_q = head_advance(head_q, ledst->stage);
             cur_head_q = head_q;
             anim_render(head_q, tick++, 0, 1);
             sim_usleep(TICK_MS * 1000);
@@ -276,7 +269,8 @@ int main(int argc, char **argv)
     run_boot(fail, argc > 3 ? atoi(argv[3]) : 7);
     if (!check) { show(); return 0; }
 
-    printf("frames=%d simulated=%ldms\n\n", nframes, sim_now_us / 1000);
+    printf("frames=%d simulated=%ldms handover_ends=%d boot_ends=%d\n\n",
+           nframes, sim_now_us / 1000, handover_frames, boot_frames);
     ck(nframes > 100, "the animation actually produced frames");
     check_run();
     printf("\n%s\n", fails ? "FAILED" : "all ok");
