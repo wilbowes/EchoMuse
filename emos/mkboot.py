@@ -28,14 +28,37 @@ MTK_MAGIC = 0x58881688
 PAGE = 2048
 
 
-def mtk_wrap(payload: bytes, name: bytes) -> bytes:
-    """Prepend the 0x200-byte MediaTek header LK validates before jumping."""
+def mtk_wrap(payload: bytes, name: bytes, header: bytes = b"") -> bytes:
+    """Prepend the 0x200-byte MediaTek header LK validates before jumping.
+
+    `header` is the reference image's OWN 0x200 header, reused verbatim when
+    given. That is the only correct answer: the padding byte after the name
+    field is NOT constant across images. Amazon's own images pad it with 0xff
+    and anything repacked by magiskboot pads it with 0x00, so a packer that
+    picks either one is right on half the fleet and puts 472 differing bytes
+    inside the header LK validates on the other half. This code has now been
+    wrong in BOTH directions: an early version padded 0xff on the strength of
+    a note, was corrected to 0x00 against a device that had been through the
+    FireOS flow, and then refused a stock FireOS 5 + f1r30s image at offset
+    0x28 of this header (measured on 3611NF, 2026-09-06).
+
+    Reusing it is safe because an emOS build does not touch the kernel: the
+    zImage and the DTBs are carried over from the reference, so the payload
+    this header describes is byte-identical and its size field still holds.
+    That is checked rather than assumed.
+    """
+    if header:
+        if len(header) != 0x200:
+            raise SystemExit(
+                f"the reference kernel header is {len(header)} bytes, expected 512")
+        magic, size = struct.unpack("<II", header[:8])
+        if magic != MTK_MAGIC or size != len(payload):
+            raise SystemExit(
+                "the reference kernel header does not describe its own payload "
+                f"(size says {size}, payload is {len(payload)} bytes)")
+        return header + payload
     hdr = struct.pack("<II", MTK_MAGIC, len(payload))
     hdr += name.ljust(32, b"\0")
-    # Padded with 0x00, READ OFF THE DEVICE'S OWN IMAGE. An earlier version of
-    # this script padded with 0xff on the strength of a note that turned out to
-    # be wrong; round-tripping stock through this packer put 472 differing
-    # bytes inside the very header LK validates before it jumps.
     hdr = hdr.ljust(0x200, b"\0")
     return hdr + payload
 
@@ -60,7 +83,8 @@ def split_reference(ref: bytes):
     i = payload.find(b"\xd0\x0d\xfe\xed")
     if i < 0:
         raise SystemExit("no DTB found in reference kernel payload")
-    return payload[i:], dict(kaddr=kaddr, raddr=raddr, saddr=saddr,
+    return payload[i:], dict(mtkhdr=kernel[:0x200],
+                             kaddr=kaddr, raddr=raddr, saddr=saddr,
                              tags=tags, hdrv=hdrv, osv=osv,
                              cmdline=ref[64:64 + 512].rstrip(b"\0"))
 
@@ -111,7 +135,7 @@ def main():
     if len(cmdline) > 511:
         raise SystemExit(f"cmdline too long for the 512-byte field: {len(cmdline)}")
 
-    kernel = mtk_wrap(zimage + dtbs, b"KERNEL")
+    kernel = mtk_wrap(zimage + dtbs, b"KERNEL", hf.get("mtkhdr", b""))
 
     hdr = b"ANDROID!"
     hdr += struct.pack("<10I", len(kernel), hf["kaddr"],

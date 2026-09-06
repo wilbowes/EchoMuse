@@ -47,11 +47,20 @@ KADDR, RADDR, SADDR, TAGS, HDRV, OSV = 0x40080000, 0x44000000, 0, 0x40000100, 0,
 CMDLINE = b"bootopt=64S3,32N2,64N2 androidboot.selinux=enforce"
 
 
-def make_reference(zimage=b"ZIMAGE" * 400, dtbs=None, ramdisk=b"RAMDISK" * 300):
-    """A boot image shaped like biscuit's, assembled the way the device's is."""
+def make_reference(zimage=b"ZIMAGE" * 400, dtbs=None, ramdisk=b"RAMDISK" * 300,
+                   mtk_pad=b"\x00"):
+    """A boot image shaped like biscuit's, assembled the way the device's is.
+
+    `mtk_pad` is the byte after the kernel header's name field. Amazon's own
+    images use 0xff and magiskboot-repacked ones use 0x00, and both are real —
+    see test_either_mtk_header_padding_round_trips.
+    """
     if dtbs is None:
         dtbs = DTB_MAGIC + b"\x11" * 512
-    kernel = eb.mtk_wrap(zimage + dtbs, b"KERNEL")
+    payload = zimage + dtbs
+    khdr = struct.pack("<II", eb.MTK_MAGIC, len(payload))
+    khdr += b"KERNEL".ljust(32, b"\0")
+    kernel = khdr.ljust(0x200, mtk_pad) + payload
     hdr = b"ANDROID!"
     hdr += struct.pack("<10I", len(kernel), KADDR, len(ramdisk), RADDR,
                        0, SADDR, TAGS, eb.PAGE, HDRV, OSV)
@@ -135,6 +144,38 @@ def test_round_trip_fails_when_the_image_is_not_what_it_says():
     bad = bytearray(make_reference())
     struct.pack_into("<I", bad, 8, struct.unpack_from("<I", bad, 8)[0] + 16)
     assert not eb.roundtrip_identical(bytes(bad))
+
+
+def test_either_mtk_header_padding_round_trips():
+    """
+    The byte after the MTK kernel header's name field is NOT constant across
+    images. Amazon's own images pad it with 0xff; anything repacked by
+    magiskboot pads it with 0x00. A packer that picks one is right on half the
+    fleet and puts 472 differing bytes inside the header LK validates on the
+    other half — and this code has now been wrong in BOTH directions.
+
+    The fix is to reuse the reference's own header rather than synthesise one,
+    which is safe because an emOS build carries the kernel over untouched.
+    """
+    for padbyte in (b"\x00", b"\xff"):
+        ref = make_reference(mtk_pad=padbyte)
+        assert eb.roundtrip_diff(ref, ignore_id=True) is None, padbyte.hex()
+        parts = eb.split_reference(ref)
+        built = eb.pack(parts, parts["zimage"], parts["dtbs"], parts["ramdisk"],
+                        extra_cmdline="")
+        assert built[eb.PAGE + 40:eb.PAGE + 41] == padbyte, \
+            "the reference's own padding must survive the repack"
+
+
+def test_a_kernel_header_that_lies_about_its_payload_is_refused():
+    """Reusing the header is only safe while it still describes the payload."""
+    ref = make_reference()
+    parts = eb.split_reference(ref)
+    bad = bytearray(parts["mtkhdr"])
+    struct.pack_into("<I", bad, 4, 12345)
+    parts["mtkhdr"] = bytes(bad)
+    with pytest.raises(eb.BuildError, match="does not describe its own payload"):
+        eb.pack(parts, parts["zimage"], parts["dtbs"], parts["ramdisk"])
 
 
 def test_a_stale_image_id_does_not_block_a_build():

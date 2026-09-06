@@ -143,13 +143,37 @@ def build_ramdisk(init_binary: bytes, version: str, build_id: str = "") -> bytes
 
 # ── The Android/MTK boot image ───────────────────────────────────────────────
 
-def mtk_wrap(payload: bytes, name: bytes) -> bytes:
-    """Prepend the 0x200-byte MediaTek header LK validates before jumping."""
+def mtk_wrap(payload: bytes, name: bytes, header: bytes = b"") -> bytes:
+    """Prepend the 0x200-byte MediaTek header LK validates before jumping.
+
+    `header` is the reference image's OWN 0x200 header, reused verbatim when
+    given. That is the only correct answer: the padding byte after the name
+    field is NOT constant across images. Amazon's own images pad it with 0xff
+    and anything repacked by magiskboot pads it with 0x00, so a packer that
+    picks either one is right on half the fleet and puts 472 differing bytes
+    inside the header LK validates on the other half. This code has now been
+    wrong in BOTH directions: an early version padded 0xff on the strength of
+    a note, was corrected to 0x00 against a device that had been through the
+    FireOS flow, and then refused a stock FireOS 5 + f1r30s image at offset
+    0x28 of this header (measured on 3611NF, 2026-09-06).
+
+    Reusing it is safe because an emOS build does not touch the kernel: the
+    zImage and the DTBs are carried over from the reference, so the payload
+    this header describes is byte-identical and its size field still holds.
+    That is checked rather than assumed.
+    """
+    if header:
+        if len(header) != 0x200:
+            raise BuildError(
+                f"the reference kernel header is {len(header)} bytes, expected 512")
+        magic, size = struct.unpack("<II", header[:8])
+        if magic != MTK_MAGIC or size != len(payload):
+            raise BuildError(
+                "the reference kernel header does not describe its own payload "
+                f"(size says {size}, payload is {len(payload)} bytes)")
+        return header + payload
     hdr = struct.pack("<II", MTK_MAGIC, len(payload))
     hdr += name.ljust(32, b"\0")
-    # Padded with 0x00, read off the device's own image. Padding with 0xff on
-    # the strength of a note put 472 differing bytes inside the header LK
-    # validates — see emos/mkboot.py.
     hdr = hdr.ljust(0x200, b"\0")
     return hdr + payload
 
@@ -183,6 +207,10 @@ def split_reference(ref: bytes) -> dict:
         raise BuildError("no DTB found in the reference kernel payload")
     roff = PAGE + len(pad(kernel))
     return dict(
+        # The reference's own MTK kernel header, reused verbatim by pack().
+        # See mtk_wrap: the padding byte after the name field is not constant
+        # across images, so synthesising one is right on half the fleet.
+        mtkhdr=kernel[:0x200],
         zimage=payload[:i],
         dtbs=payload[i:],
         ramdisk=ref[roff:roff + rsz],
@@ -202,7 +230,7 @@ def pack(parts: dict, zimage: bytes, dtbs: bytes, ramdisk: bytes,
             f"the kernel command line is too long for the 512-byte field "
             f"({len(cmdline)} bytes)")
 
-    kernel = mtk_wrap(zimage + dtbs, b"KERNEL")
+    kernel = mtk_wrap(zimage + dtbs, b"KERNEL", parts.get("mtkhdr", b""))
 
     hdr = b"ANDROID!"
     hdr += struct.pack("<10I", len(kernel), parts["kaddr"],
@@ -268,8 +296,14 @@ def roundtrip_diff(ref: bytes, ignore_id: bool = False):
     difference, with 16 bytes of context either side.
     """
     parts = split_reference(ref)
-    rebuilt = pack(parts, parts["zimage"], parts["dtbs"], parts["ramdisk"],
-                   extra_cmdline="")
+    try:
+        rebuilt = pack(parts, parts["zimage"], parts["dtbs"], parts["ramdisk"],
+                       extra_cmdline="")
+    except BuildError as e:
+        # A structural refusal from pack() IS a difference, and a more specific
+        # one than an offset — reported rather than raised so this function
+        # keeps its contract of returning a diff or None.
+        return (0, str(e), b"", b"")
     if rebuilt == ref:
         return None
     if len(rebuilt) != len(ref):
@@ -300,7 +334,8 @@ def roundtrip_diff(ref: bytes, ignore_id: bool = False):
 def pack_kernel_of(parts: dict) -> bytes:
     """The MTK-wrapped kernel as pack() will emit it. Used only for locating a
     difference; pack() builds its own."""
-    return mtk_wrap(parts["zimage"] + parts["dtbs"], b"KERNEL")
+    return mtk_wrap(parts["zimage"] + parts["dtbs"], b"KERNEL",
+                    parts.get("mtkhdr", b""))
 
 
 def init_binary_problems(init_binary: bytes) -> list:
