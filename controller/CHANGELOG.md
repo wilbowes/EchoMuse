@@ -1,5 +1,34 @@
 # Changelog
 
+## 2.23.0-ea.6 (Early Access)
+
+**Follow-up to ea.5, from the first emOS provisioning run that got past the
+install steps.** Two things that only showed up on hardware.
+
+### "Build emOS" failed with HTTP 413
+
+The wizard sends your escrowed boot partition to the controller to be repacked,
+and Home Assistant's ingress proxy refused the request before it ever reached
+the add-on. The escrow is a read of the whole 16MB partition, most of which is
+empty padding — the boot image itself is under 8MB on this hardware — so the
+wizard now sends the image rather than the partition. If the header cannot be
+read for any reason it falls back to sending everything, because a size
+optimisation should never be why a build cannot happen.
+
+### Connecting while already in TWRP
+
+Starting the wizard with the device already in recovery used to report "FireOS 5
+confirmed", warn about an untested firmware it had read off the recovery
+ramdisk, and reboot recovery into recovery. Nothing it checked could tell the
+two apart — TWRP reports Android 5.1.1 and answers every property with its own
+values.
+
+It now recognises recovery, reads the real FireOS build and device identity from
+`/system` instead of the ramdisk, and keeps the connection rather than
+rebooting — so you continue straight to "Connect to TWRP". Connecting in
+recovery is a normal thing to do on a retry, so it is handled rather than
+refused.
+
 ## 2.23.0-ea.5 (Early Access)
 
 **Fixes a provisioning wizard that could not install emOS at all, and adds a
