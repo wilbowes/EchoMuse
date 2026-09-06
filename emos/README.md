@@ -222,11 +222,12 @@ would only ever trap the owner.
 ### What the kernel cmdline actually contains
 
 `/proc/cmdline` is not the boot image's cmdline: **LK appends its own
-parameters after ours, including a DUPLICATE `androidboot.selinux=enforce`
-that supersedes the `permissive` token the provisioning wizard patches in.**
-LK also supplies `androidboot.hardware`, `androidboot.slot_suffix` and
-`androidboot.serialno` — the last being where the firmware's serial fallback
-gets it on a system with no property service.
+parameters after ours, including a DUPLICATE `androidboot.selinux=enforce`.**
+It does NOT supersede the `permissive` token the wizard patches in — the
+FIRST occurrence wins, for the reason set out under "What the slots actually
+contain" below. LK also supplies `androidboot.hardware`,
+`androidboot.slot_suffix` and `androidboot.serialno` — the last being where
+the firmware's serial fallback gets it on a system with no property service.
 
 Nothing under emOS reads any of them: there is no `/sys/fs/selinux` and no
 SELinux line in `dmesg`. So the wizard's permissive patch is inert here, which
@@ -559,6 +560,14 @@ read-only properties are write-once, so the second set is refused and the
 FIRST occurrence wins. Measured on 0C95 and 71VVV, 2026-09-06: `getenforce`
 Permissive, `ro.boot.selinux` permissive. The FireOS flow depends on this
 working - do not remove it.
+
+The intuition to resist is that a later cmdline token overrides an earlier
+one. That holds for parameters the KERNEL parses, and `androidboot.selinux`
+is not one of them - the kernel's own switches are `selinux=` and
+`enforcing=`, which nothing here sets. `androidboot.*` is read by Android's
+init, and a write-once property gives the opposite precedence to the one a
+kernel parameter would. Both tokens on the cmdline with the device reading
+permissive IS the measurement that settles it.
 
 Appending rather than replacing is therefore the fix, and it has to keep that
 property: append `androidboot.selinux=permissive` to whatever cmdline the
