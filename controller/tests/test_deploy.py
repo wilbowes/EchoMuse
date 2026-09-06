@@ -2439,6 +2439,34 @@ def test_the_serial_console_disables_echo_before_anything_else():
         "with 'The port is already open'")
 
 
+def test_the_wizard_reads_the_device_list_the_way_the_api_returns_it():
+    """
+    /api/devices returns a bare ARRAY (`_ok([...])`), not {devices: [...]}.
+
+    The emOS WiFi step read `.devices` off it, which is undefined, and the
+    `|| []` turned that into an empty list on every pass — so its wait loop
+    never examined a single device and always timed out on a device that had
+    registered perfectly. Three successive rewrites of the success condition
+    were all debugging a predicate that was never evaluated against anything
+    (2026-09-06).
+
+    A shape mismatch between an endpoint and its caller is invisible at every
+    layer: the fetch succeeds, the parse succeeds, and the empty result is
+    indistinguishable from "nothing matched yet".
+    """
+    src = _jsx()
+    assert "(await API.get('/api/devices')).devices" not in src, (
+        "/api/devices returns an array; reading .devices off it is silently "
+        "undefined")
+
+    api = (CONTROLLER / "em_api.py").read_text()
+    handler = api[api.index("async def _get_devices"):]
+    handler = handler[:handler.index("\n@")] if "\n@" in handler else handler[:400]
+    assert "_ok([" in handler, (
+        "this test assumes /api/devices returns a bare list — if that changed, "
+        "every caller in dashboard.jsx has to change with it")
+
+
 def test_emos_wpa_cli_calls_carry_the_control_socket_path():
     """
     wpa_cli defaults to /var/run/wpa_supplicant. emOS starts its supplicant

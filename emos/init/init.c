@@ -22,6 +22,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <net/if.h>
+#include <netinet/in.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -2077,6 +2078,122 @@ static void console_gate(void)
         tcsetattr(0, TCSANOW, &saved);
 }
 
+/* The console banner.
+ *
+ * Somebody reaching this console is usually doing so because something is
+ * wrong, over a USB cable, with no dashboard. The four facts below are the
+ * ones they would otherwise spend their first five minutes gathering, and
+ * three of them are questions this session has actually had to ask by hand.
+ *
+ * The controller address is read from /proc/net/tcp rather than from any
+ * stored value, because there isn't one — the firmware keeps its last-known
+ * server in memory only. An ESTABLISHED connection to 8767 or 8770 IS the
+ * controller, and reading it live means the banner says who we are talking to
+ * now rather than who we once did.
+ *
+ * ASCII only and inside 80 columns: this is a vt100 over a serial gadget.
+ */
+static void tcp_peer(char *out, size_t n)
+{
+    out[0] = 0;
+    FILE *f = fopen("/proc/net/tcp", "r");
+    if (!f)
+        return;
+    char line[512];
+    if (!fgets(line, sizeof line, f)) {          /* header */
+        fclose(f);
+        return;
+    }
+    while (fgets(line, sizeof line, f)) {
+        unsigned int ra, rp, st;
+        /* sl  local_address rem_address st ... */
+        if (sscanf(line, "%*d: %*8x:%*4x %8x:%4x %2x", &ra, &rp, &st) != 3)
+            continue;
+        if (st != 0x01)                          /* ESTABLISHED */
+            continue;
+        if (rp != 8767 && rp != 8770)
+            continue;
+        snprintf(out, n, "%u.%u.%u.%u:%u",
+                 ra & 0xff, (ra >> 8) & 0xff, (ra >> 16) & 0xff,
+                 (ra >> 24) & 0xff, rp);
+        break;
+    }
+    fclose(f);
+}
+
+static void iface_addr(char *out, size_t n)
+{
+    out[0] = 0;
+    int s = socket(AF_INET, SOCK_DGRAM, 0);
+    if (s < 0)
+        return;
+    struct ifreq r;
+    memset(&r, 0, sizeof r);
+    strncpy(r.ifr_name, "wlan0", IFNAMSIZ - 1);
+    if (ioctl(s, SIOCGIFADDR, &r) == 0) {
+        struct sockaddr_in *a = (struct sockaddr_in *)&r.ifr_addr;
+        unsigned char *b = (unsigned char *)&a->sin_addr;
+        snprintf(out, n, "%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
+    }
+    close(s);
+}
+
+static void console_banner(void)
+{
+    char host[80], ip[32], ctl[48];
+    const char *sn = serialno();
+
+    if (gethostname(host, sizeof host) != 0 || !host[0])
+        snprintf(host, sizeof host, "emos");
+    host[sizeof host - 1] = 0;
+    iface_addr(ip, sizeof ip);
+    tcp_peer(ctl, sizeof ctl);
+
+    long up = mono_ms() / 1000;
+
+    /* The version comes from /etc/os-release, which build.sh stamps from
+     * `git describe --match 'emos-v*'`. Read rather than compiled in, so the
+     * banner cannot disagree with the file everything else reads. */
+    char ver[64] = "";
+    FILE *osr = fopen("/etc/os-release", "r");
+    if (osr) {
+        char l[160];
+        while (fgets(l, sizeof l, osr)) {
+            if (strncmp(l, "VERSION=\"", 9) == 0) {
+                char *q = strchr(l + 9, '"');
+                if (q) {
+                    *q = 0;
+                    snprintf(ver, sizeof ver, "emOS %s", l + 9);
+                }
+                break;
+            }
+        }
+        fclose(osr);
+    }
+
+    dprintf(1,
+        "\r\n"
+        "   ___  _ __ ___     ___  ___\r\n"
+        "  / _ \\| '_ ` _ \\   / _ \\/ __|   EchoMuse\r\n"
+        " |  __/| | | | | | | (_) \\__ \\   %s\r\n"
+        "  \\___||_| |_| |_|  \\___/|___/   an Echo with no Amazon on it\r\n"
+        "\r\n"
+        "   host        %s\r\n"
+        "   serial      %s\r\n"
+        "   address     %s\r\n"
+        "   controller  %s\r\n"
+        "   up          %ldm %02lds\r\n"
+        "\r\n"
+        "   logs: /run/net.log  /run/messages  /tmp/server.log\r\n"
+        "\r\n",
+        *ver ? ver : "emOS",
+        host,
+        *sn  ? sn  : "(unknown)",
+        *ip  ? ip  : "no address",
+        *ctl ? ctl : "not connected",
+        up / 60, up % 60);
+}
+
 static pid_t start_console(void)
 {
     int t = open(TTY, O_RDWR | O_NOCTTY);
@@ -2089,6 +2206,7 @@ static pid_t start_console(void)
         dup2(t, 0); dup2(t, 1); dup2(t, 2);
         if (t > 2) close(t);
         console_gate();
+        console_banner();
         char *argv[] = { "/system/bin/sh", NULL };
         char *envp[] = { "HOME=/", "TERM=vt100", "ANDROID_ROOT=/system",
                          "PATH=/sbin:/system/bin:/system/xbin", NULL };

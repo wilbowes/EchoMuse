@@ -5613,8 +5613,16 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     let seen = null;
     while (Date.now() < deadline) {
       await new Promise(r => setTimeout(r, 5000));
+      // /api/devices returns a bare ARRAY, not {devices: [...]}. Reading
+      // .devices off it yielded undefined and the `|| []` made that an empty
+      // list on every pass — so this loop never examined a single device, and
+      // three successive rewrites of the condition below were all debugging a
+      // predicate that was never evaluated against anything. Two other call
+      // sites in this file use the response directly as an array; checking one
+      // of them would have settled it in seconds.
       let list = [];
-      try { list = (await API.get('/api/devices')).devices || []; } catch {}
+      try { list = await API.get('/api/devices') || []; } catch {}
+      if (!Array.isArray(list)) list = list.devices || [];
       seen = list.find(d => (d.connected || d.firmware_ver)
         && (!provSerial || (d.device_id || '').includes(provSerial)));
       if (seen) break;
