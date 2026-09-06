@@ -3297,17 +3297,71 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
 
   // ── Step runners ──
 
+  // The FireOS build, read off /system rather than from the running props.
+  //
+  // In recovery every getprop answers with the RECOVERY ramdisk's values, so
+  // the firmware identity the connect step prints is TWRP's own and the
+  // untested-build check compares against the wrong string entirely. The real
+  // answer is in /system/build.prop, which is where those properties come from
+  // on a normal boot — verified 2026-09-06 on 3611NF in TWRP, returning the
+  // same fingerprint 0C95 reports from a running Android.
+  //
+  // It matters most in the emOS flow, which is the one that runs entirely in
+  // recovery: emOS mounts this build's /system at runtime for bionic and
+  // tinyalsa, so the build that actually matters IS the one on that partition,
+  // and reading it there is more direct than inferring it from a boot we no
+  // longer perform.
+  //
+  // Resolved by NAME and by slot, never as p13 — the project rule, and the
+  // by-name glob matches TWO directories on this device, so it is iterated
+  // rather than passed to readlink, which takes a single argument and prints
+  // nothing when given two.
+  //
+  // Read-only, and it leaves the mount table as it found it. Nothing in either
+  // flow touches /system while provisioning, so this is safe — but a failure
+  // is a WARNING and never a refusal: a device whose /system will not mount is
+  // worth saying so about, not worth blocking a provision over.
+  async function readFireosBuild(c) {
+    const out = await c.shell(
+      'SLOT=$(getprop ro.boot.slot_suffix); S=""; '
+      + 'for d in /dev/block/platform/*/by-name; do '
+      + '  for n in "system$SLOT" system_a system; do '
+      + '    [ -z "$S" ] && [ -e "$d/$n" ] && S=$(readlink -f "$d/$n"); done; done; '
+      + 'echo "NODE=$S"; '
+      + '[ -z "$S" ] && exit 0; '
+      + 'WAS=$(mount | grep " /system " ); '
+      + '[ -z "$WAS" ] && mount -o ro "$S" /system 2>&1; '
+      + 'grep -E "^ro\\.(build\\.version\\.(name|incremental)|product\\.(model|name))=" '
+      + '  /system/build.prop 2>/dev/null; '
+      + '[ -z "$WAS" ] && umount /system 2>/dev/null; '
+      + 'echo _SYSREAD_OK');
+    if (!out.includes('_SYSREAD_OK')) return null;
+    const pick = k => ((out.match(new RegExp('^' + k + '=(.+)$', 'm')) || [])[1] || '').trim();
+    const build = pick('ro\\.build\\.version\\.incremental');
+    return build ? {
+      build,
+      name:  pick('ro\\.build\\.version\\.name'),
+      // The DEVICE's identity, not the recovery's. TWRP answers ro.product.*
+      // with its own strings ("Echo Dot 2nd Gen" / "omni_biscuit"), which pass
+      // the board check by containing "biscuit" — true, but it is TWRP being
+      // recognised rather than the board. /system carries the real pair
+      // (AEOBC / csm_biscuit), so in recovery the check tests the device.
+      model: pick('ro\\.product\\.model'),
+      pname: pick('ro\\.product\\.name'),
+    } : null;
+  }
+
   async function runConnectAndroid() {
     // requestDevice() handles USB open + ADB auth in one call.
     const c = await _ADB.Client.requestDevice(addLog);
     c._log = msg => addLog(`  adb: ${msg}`);
     setAdb(c);
-    const model   = await c.shell('getprop ro.product.model');
+    let model     = await c.shell('getprop ro.product.model');
     const release = await c.shell('getprop ro.build.version.release');
-    const name    = await c.shell('getprop ro.product.name');
+    let name      = await c.shell('getprop ro.product.name');
     const serial  = await c.shell('getprop ro.serialno') || await c.shell('getprop ro.boot.serialno');
-    const fwBuild = await c.shell('getprop ro.build.version.incremental');
-    const fwName  = await c.shell('getprop ro.build.version.name');
+    let fwBuild = await c.shell('getprop ro.build.version.incremental');
+    let fwName  = await c.shell('getprop ro.build.version.name');
     // TWRP answers every getprop above and reports Android 5.1.1 itself, so
     // none of them can tell recovery from FireOS — this step ran to completion
     // against a device sitting in TWRP, printed "FireOS 5 confirmed", warned
@@ -3323,15 +3377,27 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     const inRecovery = _bannerMode(c.banner) === 'twrp';
     addLog(`Model: ${model || '(unknown)'}  Build: Android ${release}  Codename: ${name || '(unknown)'}  Serial: ${serial || '(unknown)'}`);
     if (inRecovery) {
-      addLog('Device is already in TWRP recovery, not Android — the firmware '
-           + 'properties above are the recovery ramdisk\'s, not FireOS\'s.', 'warn');
+      addLog('Device is already in TWRP recovery — reading the FireOS build off '
+           + '/system, since every property above is the recovery ramdisk\'s.');
+      const sys = await readFireosBuild(c);
+      if (sys) {
+        fwBuild = sys.build; fwName = sys.name;
+        if (sys.model) model = sys.model;
+        if (sys.pname) name  = sys.pname;
+        addLog(`Firmware: ${fwName || '(unknown)'}  ${fwBuild}  (from /system)`);
+        addLog(`Device identity from /system: ${model || '?'} / ${name || '?'}`);
+      } else {
+        fwBuild = ''; fwName = '';
+        addLog('Could not read /system/build.prop, so the FireOS build is '
+             + 'unknown — continuing.', 'warn');
+      }
     } else {
       addLog(`Firmware: ${fwName || '(unknown)'}  ${fwBuild || ''}`);
     }
     if (!release.startsWith('5.')) {
       throw new Error(`Expected FireOS 5 (Android 5.x), got Android ${release}. Wrong device?`);
     }
-    if (!inRecovery && fwBuild && fwBuild !== _TESTED_FIREOS_BUILD) {
+    if (fwBuild && fwBuild !== _TESTED_FIREOS_BUILD) {
       addLog(`Untested firmware — EchoMuse is developed against ${_TESTED_FIREOS_NAME} `
            + `(${_TESTED_FIREOS_BUILD}). Other FireOS 5 builds may behave differently, `
            + `particularly around USB and ADB.`, 'warn');
