@@ -503,14 +503,14 @@ nothing guarantees B stays pristine, and it boots FireOS without our permissive
 cmdline or the `service echomuse` init entry, so EchoMuse does not start. It
 boots, which is what recovery is for.
 
-**Our cmdline patch DESTROYS the original arguments rather than appending
-them.** `runPatchBoot` zeroes bytes 64-576 of the header and writes 51 bytes,
-so slot A's cmdline is exactly `bootopt=64S3,32N2,64N2
-androidboot.selinux=permissive` and everything FireOS shipped is gone. The
-device boots regardless - LK supplies `root=`, `androidboot.hardware` and the
-rest, and the kernel defaults cover what is left - so this has been true for
-the life of the wizard with nothing to show for it. Slot B is the only reason
-it is visible at all.
+**The cmdline patch preserves the original arguments.** `runPatchBoot` appends
+`androidboot.selinux=permissive` to the existing NUL-terminated field. It does
+not replace FireOS's `bootopt`, `rootwait`, `init`, build-variant or verity
+arguments, and it refuses to patch if the combined value cannot fit while
+retaining a terminator. Earlier wizard versions zeroed bytes 64-576 and wrote
+only 51 bytes; the device happened to boot because LK supplied `root=`,
+`androidboot.hardware` and the rest, and the kernel defaults covered what was
+left. Slot B was the only reason the loss was visible.
 
 **The patch itself is NOT inert, and the ordering is why.** LK splices the
 image's cmdline into the middle of its own and then appends
@@ -521,13 +521,12 @@ FIRST occurrence wins. Measured on 0C95 and 71VVV, 2026-09-06: `getenforce`
 Permissive, `ro.boot.selinux` permissive. The FireOS flow depends on this
 working - do not remove it.
 
-Appending rather than replacing is therefore the fix, and it has to keep that
-property: append `androidboot.selinux=permissive` to whatever cmdline the
-image already carries, so it still lands ahead of LK's `enforce`. 215 bytes
-plus 31 against a 512-byte field, so it fits. It needs a hardware test, since
-an argument that is currently absent and unmissed may matter on a device that
-is not this one - and do NOT copy slot B's cmdline as a template: its `bootopt`
-third field is `32N2` against slot A's `64N2`, so it is a different build.
+The append keeps the ordering property: the image's permissive value still
+lands ahead of LK's `enforce`. The observed 215-byte field plus the appended
+argument fits within 512 bytes. The byte-level behavior is covered by a Node
+regression test, but the revised image still needs a hardware boot test. Do NOT
+copy slot B's cmdline as a template: its `bootopt` third field is `32N2`
+against slot A's `64N2`, so it is a different build.
 
 **`misc` (`p8`) holds a boot-control block, and it is empty.** 4KB of zeros
 with one record at offset **0x360**:

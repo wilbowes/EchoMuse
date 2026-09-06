@@ -1573,7 +1573,12 @@ probe output.
 Around it: `dd`'s stderr reaches the log rather than `/dev/null`, the pulled
 image must carry the `ANDROID!` magic before the fixed-offset cmdline patch
 runs against it, and the cmdline is read back off the partition afterwards.
-Every failure path leaves the device in TWRP and says so.
+`patchBootCmdline` appends only the exact permissive argument inside the
+512-byte NUL-terminated field: the existing FireOS cmdline stays byte-for-byte
+at the front, bytes outside offsets 64..575 are untouched, a repeat is
+idempotent, and an append that would leave no terminator is refused rather than
+truncated. `controller/tests/boot_target.test.mjs` pins those invariants. Every
+failure path leaves the device in TWRP and says so.
 
 ### Diagnostics when a step fails (`em_support.build_provision_diagnostics`)
 

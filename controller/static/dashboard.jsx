@@ -3585,6 +3585,41 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // able to read by-name is not evidence of danger, and refusing on it would
   // block any device whose TWRP lays that directory out differently — the same
   // reading the OTA free-space check applies to an unreadable df.
+  // Android boot image v0-v2 stores a 512-byte, NUL-terminated cmdline at
+  // bytes 64..575. The wizard only owns the permissive argument: FireOS's
+  // existing arguments remain byte-for-byte at the front of the field, and
+  // bytes outside the field are never touched. Refuse an image that cannot
+  // hold the appended argument rather than truncating an existing argument.
+  function patchBootCmdline(bootImg) {
+    const fieldStart = 64;
+    const fieldEnd = 576;
+    if (!bootImg || bootImg.length < fieldEnd) {
+      throw new Error(
+        `Boot image is too short for its cmdline field (${bootImg?.length || 0} bytes).`);
+    }
+
+    const field = bootImg.slice(fieldStart, fieldEnd);
+    const nul = field.indexOf(0);
+    const used = nul < 0 ? field.length : nul;
+    const existing = new TextDecoder().decode(field.slice(0, used));
+    const argument = 'androidboot.selinux=permissive';
+    if (existing.split(/\s+/).includes(argument)) return new Uint8Array(bootImg);
+
+    const needsSpace = used > 0 && !/\s/.test(existing.at(-1));
+    const addition = new TextEncoder().encode(`${needsSpace ? ' ' : ''}${argument}`);
+    // Keep one byte for the terminator. A full field is not a valid patch even
+    // if the kernel would happen to stop reading at the field boundary.
+    if (used + addition.length >= field.length) {
+      throw new Error(
+        `Boot cmdline is too long to append ${argument} without truncating FireOS arguments.`);
+    }
+
+    const patched = new Uint8Array(bootImg);
+    patched.set(addition, fieldStart + used);
+    patched[fieldStart + used + addition.length] = 0;
+    return patched;
+  }
+
   function classifyBootTarget(probe) {
     const target = (probe.match(/TARGET=(\S*)/) || [])[1] || '';
     const isBlock = /ISBLK=yes/.test(probe);
@@ -3698,10 +3733,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       addLog('cmdline already has androidboot.selinux=permissive — skipping cmdline patch.', 'warn');
     } else {
       addLog('Patching cmdline for SELinux permissive…');
-      const patched = new Uint8Array(bootImg);
-      const newCmd  = new TextEncoder().encode('bootopt=64S3,32N2,64N2 androidboot.selinux=permissive');
-      patched.fill(0, 64, 576);
-      patched.set(newCmd, 64);
+      const patched = patchBootCmdline(bootImg);
 
       addLog('Pushing patched image…');
       await c.push('/tmp/work/boot_patched.img', patched, pct => setProgress({ label: 'Pushing boot image', pct }));

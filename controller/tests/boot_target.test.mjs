@@ -46,6 +46,10 @@ const { classifyBootTarget } = await import(
   "data:text/javascript;base64," + Buffer.from(
     liftFunction("classifyBootTarget") + "\nexport { classifyBootTarget };"
   ).toString("base64"));
+const { patchBootCmdline } = await import(
+  "data:text/javascript;base64," + Buffer.from(
+    liftFunction("patchBootCmdline") + "\nexport { patchBootCmdline };"
+  ).toString("base64"));
 
 // TWRP's map. The bare names are remapped onto the KERNEL partitions and the
 // unlock payload is exposed explicitly as *_amonet. Both by-name directories
@@ -74,6 +78,48 @@ function check(name, cond, detail) {
   if (cond) return;
   failures++;
   console.error(`FAIL: ${name}${detail ? `\n      ${detail}` : ""}`);
+}
+
+// The cmdline is a 512-byte NUL-terminated field at offset 64. The wizard
+// needs one extra argument; everything FireOS already put there remains part
+// of the image, and bytes outside the field are not part of this operation.
+{
+  const original = "bootopt=64S3,32N2,64N2 rootwait ro init=/init buildvariant=user";
+  const image = new Uint8Array(640).fill(0xa5);
+  image.fill(0, 64, 576);
+  image.set(new TextEncoder().encode(original), 64);
+  const before = new Uint8Array(image);
+  const patched = patchBootCmdline(image);
+  const end = patched.indexOf(0, 64);
+  const cmdline = new TextDecoder().decode(patched.slice(64, end));
+
+  check("the FireOS cmdline is preserved",
+        cmdline === `${original} androidboot.selinux=permissive`, cmdline);
+  check("patchBootCmdline does not mutate its input",
+        image.every((byte, i) => byte === before[i]));
+  check("the boot header before the cmdline is untouched", patched[63] === 0xa5);
+  check("the boot image after the cmdline is untouched", patched[576] === 0xa5);
+}
+
+// Exact-token matching avoids treating a different value as already patched,
+// while still making a repeat invocation idempotent.
+{
+  const original = "rootwait androidboot.selinux=permissive ro init=/init";
+  const image = new Uint8Array(576);
+  image.set(new TextEncoder().encode(original), 64);
+  const patched = patchBootCmdline(image);
+  const cmdline = new TextDecoder().decode(patched.slice(64)).replace(/\0.*$/s, "");
+  check("an existing permissive argument is not duplicated", cmdline === original, cmdline);
+}
+
+// A full field must be refused. Truncation would silently remove a FireOS
+// argument, which is the same invariant violation as replacing the field.
+{
+  const image = new Uint8Array(576);
+  image.set(new TextEncoder().encode("x".repeat(490)), 64);
+  let error = "";
+  try { patchBootCmdline(image); } catch (e) { error = e.message; }
+  check("a cmdline that cannot fit is refused", /too long/i.test(error), error);
 }
 
 // The normal case, and the one measured in TWRP: other-boot resolves to p10,
