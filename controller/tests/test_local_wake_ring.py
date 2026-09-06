@@ -68,10 +68,19 @@ def test_the_arbitration_loser_gets_its_ring_turned_off():
     loses is lit with nothing on its path to darken it — leds_off and
     _leds_turn_end are both on the turn path a ceding device never reaches.
     It used to burn until listening_anim's 30s TTL expired.
+
+    The branch now has TWO exits — a device standing down because it has no
+    Home Assistant behind it, and a device that lost arbitration — and they
+    end differently on purpose: the first plays the no_ha cue, the second
+    goes plain dark. Slice to the ceding one specifically, or this passes on
+    the wrong path's code.
     """
     src = (CONTROLLER / "em_controller.py").read_text()
-    cede = src[src.index("if won_by != device.device_id:"):]
-    cede = cede[:cede.index("continue")]
+    branch = src[src.index("if not serves or won_by != device.device_id:"):]
+    # The no-HA sub-branch ends at its own `continue`; ceding is what follows.
+    stand = branch.index("if not serves:")
+    cede  = branch[branch.index("continue", stand) + len("continue"):]
+    cede  = cede[:cede.index("continue")]
     # Comments on this path necessarily discuss the call they exclude.
     code = "\n".join(
         line for line in cede.splitlines() if not line.lstrip().startswith("#")
@@ -80,3 +89,10 @@ def test_the_arbitration_loser_gets_its_ring_turned_off():
         "a ceding device must be told to darken its ring"
     assert "_leds_turn_end" not in code, \
         "the loser had no turn, so it gets plain off, not an outcome cue"
+
+    # And the two exits must stay distinguishable: the stand-down path is the
+    # one that cues, and reading it as a cede would take the cue away exactly
+    # on a multi-device fleet, which is how this was reported.
+    standdown = branch[stand:branch.index("continue", stand)]
+    assert "_leds_turn_end(device)" in standdown, \
+        "a device with no HA cues its state whether or not another Echo won"

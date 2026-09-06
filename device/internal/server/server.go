@@ -48,6 +48,13 @@ type Server struct {
 	// anim owns the device-rendered ring animation (led_anim messages).
 	anim animator
 
+	// linkDown is true while there is no controller session — disconnected
+	// or pending approval. Read on the LED paint path and the button paths,
+	// written from the connection callbacks; atomic rather than mutexed
+	// because it is read per pulse frame (every 50ms) and never in a
+	// compound decision with anything else it guards. See SetLinkDown.
+	linkDown atomic.Bool
+
 	// audioLevel holds the live speaker RMS as float64 bits — written by
 	// the speaker's ALSA pump via SetAudioLevel, read by the meter anim.
 	audioLevel atomic.Uint64
@@ -229,6 +236,40 @@ func (s *Server) RestoreMuteRing() {
 	s.mute.showMuteLEDs()
 }
 
+// SetLinkDown records whether the device currently has a controller session.
+// True while disconnected AND while pending approval — both mean the same
+// thing to everything that reads it: there is nothing above this device.
+//
+// It governs two things:
+//
+//   - The RING belongs to the link state. The mute ring is otherwise
+//     device-sovereign and suppresses every other paint, which made a muted
+//     device that lost its controller sit there showing red — a state that
+//     is not merely less useful than the orange pulse, it is wrong, because
+//     red says "muted and working". The pulse now paints through mute.
+//     RestoreMuteRing on reconnect has always expected exactly this ("orange
+//     pulse overwrote the red ring — restore it"); the suppression it was
+//     written against is what stopped the pulse ever painting.
+//   - The action and volume BUTTONS are inert. Neither can do anything
+//     without a controller — the dot cannot start a turn and volume changes
+//     a level nothing is playing at — so acknowledging them with a ring
+//     flash or an arc invents a working device.
+//
+// The MUTE button stays live, deliberately. It is the one control that
+// works with no controller at all: the ADC mute is hardware and the button
+// LED is a GPIO, neither needs the network. Making it inert would also mean
+// a user who mutes during an outage gets a live mic back when the controller
+// returns, since mute is persisted — a silent privacy surprise, which is
+// worse than a ring showing the wrong colour.
+func (s *Server) SetLinkDown(down bool) {
+	s.linkDown.Store(down)
+}
+
+// LinkDown reports whether the device is without a controller session.
+func (s *Server) LinkDown() bool {
+	return s.linkDown.Load()
+}
+
 func clearLeds(ledController led.Controller) {
 	numLEDs, err := ledController.GetNumLEDs()
 	if err != nil {
@@ -356,6 +397,7 @@ func clampAdd(v uint8, delta int) uint8 {
 //     overlap mute (mic stopped), but mute-terminates-turn (2026-07-10)
 //     means the cancelled turn's LED cleanup arrives after the red ring
 //     is up — it must not clear it. Unmute clears the ring explicitly.
+//
 // listeningHint is the controller's explicit "this frame is the listening
 // ring" flag (nil from pre-scene controllers). When absent, fall back to
 // the historical heuristic — a 12-LED all-green frame — which only works
@@ -384,10 +426,30 @@ func (s *Server) SetLEDs(leds []led.Led, listeningHint *bool) {
 	}
 	s.listeningLEDs = listeningRing
 	s.baseLEDsMu.Unlock()
-	if s.volume.DisplayActive() || s.mute.IsMuted() {
+	if suppressPaint(s.volume.DisplayActive(), s.mute.IsMuted(), s.LinkDown()) {
 		return
 	}
 	s.paintBaseLEDs()
+}
+
+// suppressPaint decides whether a ring paint is held back. Pure, so the
+// truth table can be tested without hardware — the same reason the
+// controller keeps its link-auth and barge decisions out of their callers.
+//
+//   - volumeActive: the arc owns the ring for its 2s window against
+//     animations, which repaint ~every 100ms and would stomp it in one frame.
+//   - muted: the red ring is device-sovereign, so a cancelled turn's LED
+//     cleanup cannot clear it.
+//   - linkDown: ...unless there is no controller, in which case the ring
+//     belongs to the link pulse. Red on a device with nothing above it is
+//     not less informative than orange, it is false — it says "muted and
+//     working". The mute BUTTON's own LED keeps reporting the mic, so
+//     nothing about the mute state stops being visible.
+func suppressPaint(volumeActive, muted, linkDown bool) bool {
+	if volumeActive {
+		return true
+	}
+	return muted && !linkDown
 }
 
 // paintBaseLEDs paints the ring from the stored controller state.

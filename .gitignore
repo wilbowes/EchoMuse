@@ -1,7 +1,9 @@
 .idea
 __pycache__
 /device/build/
+/emos/build/
 controller/.env
+controller/.venv/
 controller/data/
 controller/static/vendor/
 controller/static/dashboard.js
@@ -20,3 +22,24 @@ controller/models/
 *.db
 *.db-wal
 *.db-shm
+
+# The device-link PKI. em_pki.py writes tls/ NEXT TO THE DATABASE, so the
+# rule above about DB_PATH defaulting into controller/ applies here in exactly
+# the same way and for the same reason — a bare-metal dev run leaves a private
+# CA in the working tree, one directory from the case this file already
+# guards. PR #313 then swept ca.key and server.key into a public branch on a
+# `git add -A`, which is precisely how the database rule was learned.
+#
+# What leaks is worse than it looks: ca.key signs the identity every device
+# verifies, so anyone holding it can impersonate the controller to any device
+# that trusts that CA. Deleting tls/ regenerates it, and every device then
+# needs credentials re-pushed — recoverable, but only if someone notices.
+#
+# Globs, not one path: DB_PATH moves, the add-on writes /data/tls/, and a
+# second checkout or a tools/ scratch run puts it somewhere neither of us
+# predicted. A key must never be committable from any of them.
+tls/
+*.key
+
+# speaker_profile generates its test signals; generate_signals.py is the source
+device/tools/speaker_profile/*.wav

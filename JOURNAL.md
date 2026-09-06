@@ -19,6 +19,7 @@ are **append-only and in ascending date order** — new work goes at the end.
 - **Bermuda BT proxy** ✅ — shipped 2026-07-12. Each Echo is a second, separate ESPHome device forwarding raw BLE advertisements from a passive scanner over raw HCI (`/dev/stpbt`); enabling it durably disables Android's own BT stack. Room-level presence with Bermuda still wants the fuller fleet deployed to be useful
 - **Adaptive VAD** — calibrate threshold on startup from ambient noise floor × multiplier. Currently fixed at 0.001; in very noisy environments this may need runtime adjustment.
 - **RNNoise model upgrade** — **moot as of 2026-07-12**: device-side RNNoise was removed entirely. Noise suppression is controller-side now (`em_ns.py`/DTLN, per-device `nsAsr`, applied to the ASR-bound stream only), which sidesteps both the stale v0.1 model and the 48kHz-model-fed-16kHz mismatch that prompted this item.
+- **Voice-assistant timers** ✅ — shipped 2026-08-27 (#167, @bluescreen10). HA's timer intents ring on the Echo with the Voice PE alert sound; dismissal is recognised from the transcript HA already sends, because HA hands ringing to the satellite and expects the satellite to own dismissal. The alarm is a **fourth owner of the speaker** alongside voice, music and announcements, and the four-way state map is still owed — `docs/audio-states.md` §2 is the nearest thing to one.
 - **Startup chime** — short audio signature on EchoMuse init
 - **Holding response** — play audio while Clara is thinking if response takes >2s
 - **ESPHome native API satellite integration** ✅ — complete as of v2.6.0. Both devices registered in HA, voice turns working end-to-end.
@@ -1696,3 +1697,457 @@ are **append-only and in ascending date order** — new work goes at the end.
   **The 2-core HA VM was the real cause of "excruciatingly slow".** Whisper on two shared cores: STT median 4.8s, worst **20.5s**. On four: median **2.1s**, range 1.6–2.6s, with nothing else changed. Intent for a light is 0.04s either way, so the entire perceived delay was speech recognition waiting for a core. Recorded as a reference baseline in `docs/voice-pipeline.md` (#339) so the next person can compare rather than guess — three of tonight's four investigations ended at "not our bug", and each cost an evening to establish.
 
   Also worth knowing: at idle the **EchoMuse controller was the largest CPU consumer on that box at 25.9%**, scoring wake words for two Echoes that already score locally. That is #206, and it is ours to give back.
+
+- 2026-08-26 (**the soak that decided 2.21.0, and a bug the soak's own noise produced**): ea.7 ran 19.2 hours on both Echoes — 15 turns, 8 `ok`, and **zero failures attributable to the controller**. Sorting the other seven by cause is the whole point: 2 timeouts were HA-side (both `play music on EA Test Device 01`, STT clean, no TTS inside 30s, and the music itself arriving seven minutes later), 2 `no_speech` were false wakes on EFF at an RMS of 0.0023–0.0025 against a floor of 0.0022–0.0052, and the remaining three were a mute, a button press and a deliberate barge that succeeded. Raw success reads 53% against ea.6's 73% and means the opposite; ea.6 was 11 turns of a quieter afternoon.
+
+  **Each of the four fixes shows up in the log as itself.** #337: zero self-cancels, and six thinking-phase scores logged against the new 0.50 bar — 0.386, 0.233, 0.213, 0.142, 0.131, 0.115. The old tier sat at 0.20, so 0.386 would have cancelled a real request and 0.233 came within a thousandth. That is the fix earning its keep twice in a night, invisibly, which is the hard kind of evidence to collect. #333: a turn died `timeout` at 17:18:47 and the next turn, 12 seconds later, finished `ok` — the exact sequence that used to kill three turns in a row. #331: all eight responses reported `Streamed playback complete (device reported)`, no clipped tails. #326 was already confirmed by ear the day before.
+
+  **Barge-in completed end to end for the first time** (15:43:41): real speech over a response scoring 0.401/0.742, `outcome=barged`, and the interrupting turn answered in 13.3s. #194's serialisation and #195's bounding have been in the tree since 17 Aug and had never once been observed working — five measured barge-ins before this all died in 4–17ms.
+
+  **A new bug, and it was the HA-side slowness that produced it.** The two music intents that timed out arrived at 17:27:21 and 17:27:22, a second apart, seven minutes after we gave up on them. The second `play_media` called `stop()`, which sets `self.url = None`, while the first feed task was still on its way to `_spawn_decoder(self.url, …)` — `TypeError: 'NoneType' object has no attribute 'lower'`. The `.lower()` is #258's HTTPS check, so the crash *message* is new in 2.21.0 while the race is older: before #258 the same double-play would have failed a few lines later on `-i None`. The fix is to capture the URL at feed start rather than read it late. Deliberately **not** shipped in GA: it needs two plays inside a second, it left nothing broken behind it (the player went IDLE and the next turn was clean), and tagging a soaked commit is worth more than a one-line unsoaked fix.
+
+  Link health over the window: 253 RTT excursions/hour against ea.6's 336 on untouched code, which is variance and should not be read as a fix; 38 of 4864 excursions were busy-time. Two keepalive disconnects, both recovered. Five event-loop stalls of 336–766ms, all at turn boundaries. Every shadow comparison an exact controller/device match.
+
+- 2026-08-27 (**the release landed, and the morning after found three things the release did not**): 2.21.0 GA and firmware v2.13.0 both shipped on the evening of the 26th, tagged off a commit whose `Controller Build (main)` and all ten CI jobs were already green — the retag found its image immediately, which is the ordering ea.6 got wrong. Both annotations published intact. `forge-v1.0.4` followed the next morning.
+
+  **Prod looked healthy and was not, and the dashboard had no way to say so.** In the 14 hours after the update, three devices produced 30 wake events: 7 became a turn (3 `ok`, 4 `pipeline_refused`) and **23 could not start one at all**, logging `no active HA connection`. Every tile read Online and idle throughout, because `deviceState()` has no rank for "nothing is behind this device". The cause was mundane — the devices had not been re-added to Home Assistant after a channel switch — and that is the argument for the readout rather than against it: one line would have answered it and instead it took a log pull. Filed #349, built #350. The galling detail is that the **Bluetooth proxy has had exactly this readout since it shipped** (`dashboard.jsx:1763`, four states off `em_ble_proxy.get_status`), so the secondary feature could tell you where it stood and the one that decides whether speech works could not.
+
+  **Two theories died on the data, in the same hour.** First: the EA/GA satellite port collision. It is real — EA holds 16001/16002 because `esphome_port_base` is a floor applied at allocation and those two were allocated before it existed — but the worst-affected prod device, 17 of the 23 failures, is `0130NJG` on **16003**, which collides with nothing. Second: that HA had backed off after GA sat stopped for twenty hours during the soak. Wil supplied the actual answer, which no amount of log reading would have produced. Both wrong calls were cheap because the measurement came first; the port theory in particular looked overwhelming until the per-device split was taken.
+
+  **A source guard passed while the code was wrong, for the third time in this tree.** `test_voice_satellite_status.py` greps `em_esphome.py` for `haSubscribed` to prove the fourth state is absent — and matched the **docstring explaining why it is absent**. The 2026-08-25 entry records two guards matching their own comments; this is the same bug wearing a docstring, which the comment-stripping fix from that day does not catch. The helper now strips `"""` blocks as well as `#` lines. Worth stating as a rule: **a guard that searches for the thing it forbids will find the prose explaining the prohibition**, and prose is what this project produces most of.
+
+  **PR #313 put a private CA on a public branch, and `.gitignore` had never covered it.** `controller/tls/ca.key` and `server.key`, real `-----BEGIN PRIVATE KEY-----` blocks, alongside two unrelated German documents — a `git add -A` on a bare-metal dev checkout. `em_pki.py` writes `tls/` **next to the database**, and the `*.db` rule in that file carries a comment explaining that `DB_PATH` defaults into `controller/` so a dev run leaves a live database there. The identical accident, one directory over, and the rule was never generalised. Now `tls/` and `*.key`, as globs rather than one path, because the add-on writes `/data/tls/` and a second checkout puts it somewhere nobody predicted. `ca.key` signs the identity every device verifies, so that instance's CA is burnt and needs `tls/` deleted and credentials re-pushed. Scanned the other 19 open PRs; #313 is the only one.
+
+  **#351**, from a user's pasted log: `send_data` spends the reconnect grace once per stream — correctly, the comment says so — while the warning underneath it fires **per frame**. 90 identical lines in 100ms in @drjjr2's paste, on a stream that dropped near its end; a drop early in a long response would log hundreds. It matters because `LogRing` holds 2000 lines and already drops `aiohttp.access` to make room, so one dropped stream can spend the window a support bundle exists to capture — the failure this file already names, arriving from a direction nobody guarded.
+
+  **The discovery cluster has an unresolved design question sitting in the middle of it.** #74 (the original ask) → #106 (the design) → #166 (a working PR) → #316/#321 (the ring). #106 specifies a **cascade**: static → DNS → last-known → mDNS, each falling through, "so the automatic case keeps working and nobody has to configure anything". #166 implements a **switch**: "a configured endpoint list is authoritative and bypasses mDNS", rotating the list at two attempts per entry, on the reasoning that a device across a routing boundary would be stranded by an indefinitely-retrying browser. Both defensible, different products, and it decides how long #321's cylon sweep is ever on screen — the sweep exists to distinguish *still trying* from *given up*, and under a switch a full cycle is much shorter. That is what `needs-design` on #106 is for, and #166 is an implementation of the answer nobody has picked. Note #166 does resolve #106's stated TLS-port trap by construction, putting `tls_port` in the JSON rather than needing the mDNS TXT record.
+
+- 2026-08-27, evening (**a day spent almost entirely on other people's work, and the discovery that we had been mislabelling it for a fortnight**): nine PRs landed — #167, #345, #347, and #311/#312/#319/#320 as one merge — plus #343, #346 and #351 written here. 2.22.0 went from twelve open issues to six in an hour, four closed by the merge and two moved to 3.0.0 because the thing that actually fixes them (#334) lives there.
+
+  **Four contributor PRs had never run CI, and nothing said so.** #347, #345, #344 and #166 all sat at `action_required` — the first-time-contributor gate — for up to six days. Nobody had reviewed them because there was nothing green to review, and the PR list shows them as ordinary open PRs; only `gh run list` says `action_required`. dweng0's interface spec had been waiting since the 24th after being told on #322 it would be taken upstream on its own merits. **Check the run state, not the PR state**, when a contributor PR looks stalled for no reason.
+
+  **Ten of @chr-braun's PRs are in production and read `Closed`.** Found while explaining why #311 alone of the four missed the `Merged` label. #277 through #285 were all verified against `main` individually — every one shipped, every one reads as rejected on his profile. GitHub marks a PR merged only when **its own head commit** becomes reachable from the base, so a cherry-pick or rebase-and-land takes the code and leaves the label; there are duplicate commits on record for #258 and #159, same messages, different SHAs, which is the fingerprint. The second cause is ours and newer: **a `Closes #<PR-number>` keyword in the merging PR's body closes the target a moment before the detection fires.** That is what got #167 and #311; #312/#319/#320 rode the same merge commit and read correctly, because the keyword had been stripped by then. It cannot be repaired afterwards — a closed PR cannot be re-marked merged. The rule is `--merge` never `--squash`, and issue numbers in a merging body but never PR numbers.
+
+  **Our churn conflicted the same contributor twice in one day, and neither time was his fault.** #167 needed a third rebase after two he had already done at our request, both of which we had told him were our doing; it was resolved here instead, two `keep both` hunks in `em_esphome.py` where `_turn_end_reason` and `_dismissed_alarm` are pure additions on both sides. Then `b539c6a` (#346) landed on `em_player.py` and `test_player.py` three hours later and made #312 and #319 conflict — clean that morning, dirty by afternoon, the same two files. Also absorbed. **The pattern to watch is landing our own work on files where a green contributor PR has been waiting**; the cost of checking first is one `gh pr view --json mergeStateStatus`.
+
+  **A commit message promised a test its diff did not contain.** `9a75fed`, carried by #320, says it adds the general auth-decorator invariant *and* the `setUserRole` comment. Only the second survived being rebased off the abandoned #313 — so `main` still had the guard that names one helper, matches `require_auth` only, and never looks at the 31 `require_admin` sites. Written here as `979ca19`, credited to him, verified by reintroducing the sandwich. **When a rebase drops a file, the message outlives the diff**, and nothing checks that they agree.
+
+  **The auth guard had to be matched per line, because `em_api.py` contains `Do NOT add @auth.require_admin here` in a comment.** A whole-file regex counts that as a decorator site and then asserts about the line after it — the fourth instance in this tree of a source guard finding the prose explaining the thing it forbids. It also asserts a floor on the number of sites found, since a guard that silently matches nothing is precisely what it replaced.
+
+  **A fifth variant of the same trap, from the other direction.** `test_pacing_sleep_is_not_mistaken_for_a_source_stall` indexed the source for the literal `"    async def _feed(self)"`. Giving `_feed` its URL as an argument made that `.index()` raise a bare `ValueError` — the test failed as *broken* rather than as an invariant violated, which is the reading that wastes the most time. Re-anchored on `"    async def _feed("`; the invariant is about the timed read and has no opinion about the arguments.
+
+  **#343 was a real fix and the diagnosis is still unconfirmed.** `_stream_mic_audio` has three exits — HA's VAD end, the device's sentinel, and a 20s cap — and once `speech_seen` is true `em_turnclock` deliberately stops closing the turn, on the grounds that HA's VAD owns end-of-turn. That is right when HA emits `STT_VAD_END` and wrong when it does not: the device's RMS gate need not reclose in a noisy room, so a turn whose answer HA has already produced sits in the streaming phase until the cap. `STT_END` now sets `_ha_vad_end` — the same "HA is done, stop feeding it" shape the `RUN_END`-without-`RUN_START` and ERROR paths use. **Whether the reporter's pipeline actually withholds `STT_VAD_END` was never established**; the log line `HA VAD end — stopping mic streaming` either appears in his turns or it does not, and he was told exactly that rather than told it was solved.
+
+  **A spliced `sed` invented a catastrophic bug that was not there.** Printing `1455,1480p;1505,1580p` of `em_esphome.py` concatenated two non-adjacent regions and produced what looked like `self._no_speech_timeout = True` sitting inside the HA-VAD-end branch — which would have made every noisy-room turn return before waiting for TTS. Re-reading contiguously showed it belongs to the separate no-speech-verdict branch and the code is correct. **Two ranges in one `sed` is not a read of the file**, and the failure mode is confident and specific.
+
+  **A review finding was raised without checking what the code renders.** `recoveryHint()`'s `[3, 10, 11]` was flagged on #344 as a possible off-by-one because `install_magisk` "has no input". It has a file picker for the Magisk zip, and its error state already reads `SELECT A DIFFERENT FILE` (`dashboard.jsx:4482`). The contributor kept the indices and was right to; the correction went in the thread. The named-constant half of the suggestion stood, the correctness half did not.
+
+  **#354, from reviewing #320 rather than from a failure.** The control-plane grace defers the four service releases but leaves `_devices.pop` running immediately, so for the length of the grace the device is absent from the registry while its ESPHome satellite is still registered with HA and accepting turns. A turn HA starts in that window ends `no_speech` — the outcome `pipeline_refused` exists specifically to avoid, since `no_speech` is persisted and reads as a silent user. The deeper point is that **the data plane's grace, which #320 says it mirrors, never removes the device at all**: it waits inside `send_data`. Deferring an action and simulating absence are different things, and only the first was wanted.
+
+---
+
+## 2026-08-29 — the echo reference we already had
+
+**Ch7 and Ch8 are not unconnected. They are a stereo loopback of the device's
+own playback — a hardware echo reference, always on, needing no mixer change.**
+Full measurements and the numbers are in SETUP.md's Mic Array section; this is
+the story of how it was found, because the shape of the mistake is worth more
+than the result.
+
+The investigation started from the wrong hypothesis and got there anyway.
+`Audio_ExtCodec_EchoRef_Switch` (mixer control 41, `Off`) looked like a
+hardware echo-reference route somebody had left disabled, and the plan was to
+flip it and see whether a dead channel woke up. **The switch turned out to be
+irrelevant** — every measurement was taken with it `Off` and flipping it moved
+the reference by 0.00001 RMS. What made the experiment work was not the switch
+but the control that came with it: play a tone, capture all nine channels, and
+look at what the two "unconnected" channels do. They were carrying the tone at
+full digital scale the whole time.
+
+**Three months of a wrong line in SETUP.md, on evidence that could not have
+said anything else.** The 2026-05 channel mapping used a phone pressed against
+each mic hole — an external source, with the Dot's own speaker silent. Ch7 and
+Ch8 read bit-exact zero under exactly those conditions, at every angle. The
+tell was arithmetic rather than acoustics and it had been sitting in the tool's
+own README since the beginning: four stereo TLV320ADC3101s give eight channels,
+and the capture is nine wide. Nobody had asked what the ninth was for.
+
+The proof is a coincidence too large to be one. The probe tone was generated at
+amplitude 20000 of 32767, so a sine at that scale has RMS `20000/32767/√2` =
+0.43160. Ch7 and Ch8 measured **0.43159**. That is the digital signal itself,
+five significant figures deep — it never went through a speaker, the air or a
+microphone. And with nothing playing they read bit-exact zero, which no
+microphone can do.
+
+**What it is worth is alignment, not signal quality.** The reference is the
+same bytes we already tap in software at the speaker ALSA write. The difference
+is that it arrives *in the same TDM frame as the mic samples*, so the
+far-end/near-end offset is fixed by hardware — measured at +33 samples (2.06ms,
+polarity-inverted) — instead of being inferred. `aecDelayMs`, the occupancy
+governor and the capture-stall trim logic all exist to approximate a number the
+hardware has been handing us for free.
+
+**The clipping test was the one that paid for itself, and it exonerated an
+earlier decision.** At DAC index 170 the centre mic's loudest component is
+3080Hz — the *seventh harmonic* of the 440Hz tone — while the reference stays a
+clean 439.9Hz. So above unity gain the reference shares almost no energy with
+the real echo, and an AEC built on it would collapse exactly where the echo is
+loudest. That regime is already unreachable: `DEVICE_VOLUME_MAX` caps the
+control at 127 for the distortion reason recorded under Volume. The ceiling put
+there to protect the ear turns out to protect the AEC as well.
+
+**Method note.** The analysis script was self-tested against a synthetic
+capture with a planted 96-sample delay and a known L/R split before it was
+allowed near hardware, and it recovered all three planted answers. It also
+carried a multi-line f-string that only parses on Python 3.12+, which would
+have failed on the machine it was written for — worth the two minutes it cost
+to check, given the alternative was a syntax error arriving in the middle of
+someone else's hardware session.
+
+**Still open:** what the hardware does with a genuine stereo input. With
+L=440Hz and R=1200Hz the centre mic was dominated by 1200Hz, which fits both
+"takes R, discards L" and "sums, and the driver strongly favours 1200Hz". The
+analyser prints only the top three FFT bins and one strong peak fills those
+with its own leakage, so a weaker 440Hz component would not have shown. It
+does not affect production — the wire is mono and the device duplicates L=R —
+but it decides which channel is the correct reference if that ever changes.
+
+## 2026-08-29 (evening) — the reference was right, the volume was the problem
+
+Built the hardware reference into the mic path (#385) and ran it on Test Echo
+1. Two rounds, and the first one is the instructive half.
+
+**Round one: it worked mechanically and cancelled worse than what it
+replaced.** The detector fired correctly — ch8 is bit-exact silent at idle even
+with our own silence loop running, so the thing most likely to sink it did not
+— and every frame went through `src=hw(ch8)`. Attenuation was **5.9dB mean
+against the software tap's ~14dB, with one frame at −1.7dB**, i.e. the AEC
+making the signal worse.
+
+**The cause was in the timestamps rather than the DSP.** Cancellation collapsed
+immediately after every volume change and took 3–4 seconds to climb back, over
+and over. The reference confirmed it directly: `ref` sat at 4000–8000 through a
+`mic` swing of 1263→16766. The tap is upstream of the DAC volume control, so a
+volume change is a step in echo path gain the filter can only find by
+re-converging. That limitation was *documented* when the reference was
+discovered — measured as unchanged across a commanded 33.5dB cut — and still
+read as a footnote until it was the whole result.
+
+**The fix is a scalar the device already knows.** It SETS that volume, so
+`SetPlaybackLevel` takes it off the existing volume-change callback and scales
+the reference by `10^((level−127)/40)`, the control's own 0.5dB-per-step law.
+Round two: **14.2dB mean, median 14.2, range 11.1–16.7** — against 5.9dB mean
+and a 14dB-wide spread before.
+
+**And that is parity, not victory.** 14.2dB against a documented ~14dB is the
+same number. The case for this change is that it reaches it with the ring, the
+decimator, `aecDelayMs` and the occupancy governor deleted, and that it holds
+across volume changes where the software path structurally cannot (its ring
+holds pre-change audio, so the correction would land on the wrong samples). A
+like-for-like A/B in one session is still owed before claiming even parity,
+since ~14dB comes from different conditions.
+
+**A wake-word outage during the test was not ours, and one line proved it.**
+`[mic] clock: 180.6s audio over 180.2s wall (deficit −443ms, stalls=0,
+sub_drops=0)` — the capture path was perfectly healthy throughout. What
+happened was a 9.2-second gap in frame delivery (`maxGap=9168ms`,
+`minDepth=0`), the controller killing the data plane on a keepalive timeout,
+and the device then sitting deaf for **34 seconds** because nothing restarted
+the mic stream until the controller's zombie ladder did. Network-scale, not
+scheduling-scale, and the ~1KB per 160ms batch this change adds cannot produce
+it. Worth noting separately: a data-plane reconnect that does not restart the
+mic stream is a real deaf window the ladder bounds rather than prevents.
+
+**EQ presets rebuilt from the measurement** (#386). The old `Clarity` put +7dB
+on band 5 (3500Hz) — exactly where the driver peaks +8.9dB — landing around
++16dB at 3150 relative to 1kHz. It was making a harsh speaker harsher, and
+nobody could have known without the sweep. `Warmth` had the right shape at a
+fraction of the size, which is a good ear arriving at the same answer without
+the numbers. Now Flat / Speech / Music, with 125 left at zero because it is a
+shelf that would push everything below it into the bass guard, and 5500/8000
+left at zero because they moved up to 13.8dB between placements.
+
+**On band count**, asked and answered: eight octave-spaced bands at Q≈1.4 is
+the right resolution for a *taste* control and matches convention. It cannot do
+driver correction and neither could eighty, because that needs +26dB at 150Hz
+against our ±12dB range. Stock does not ship a user EQ at all — it applies a
+1024-tap FIR invisibly. The answer to #247 is a fixed measured correction
+stage with the eight-band EQ on top, which is what that issue already said.
+Note `eqBands` stores bare gains with no frequency metadata, so changing band
+centres silently reinterprets every saved curve.
+## 2026-08-30 — the long-response cutout, root-caused; and why the AEC is stuck at ~10dB
+
+Two answers today, both of which had been mistaken for other things.
+
+### Long responses were cutting off mid-sentence, and it was never the network
+
+Three sessions of testing had been ruined by the same drop, and it kept
+reading as a link fault because that is what the symptom looks like. It is
+not. The chain is mechanical, and every link is in our own code:
+
+1. the voice path sent every period as fast as the socket accepted, with TCP
+   backpressure as the only brake
+2. the device's WebSocket read goroutine calls `PumpPeriod` **inline** per
+   `0x02` frame
+3. `pump()` ends in a **blocking** channel send, on a channel 128 periods
+   (~5.5s) deep
+4. once full, that goroutine blocks inside `PumpPeriod` and stops calling
+   `ReadMessage`
+5. gorilla fires the pong handler only **inside** `ReadMessage` — a blocked
+   device cannot answer a keepalive ping
+6. we ping every 20s and close after 10s without a pong
+7. the buffer drains at realtime, so the block outlasts the timeout
+8. `1011 keepalive ping timeout`, mid-response
+
+Measured: **3,397,174 bytes — 35.4s of audio — sent in 21.3s**, 9.8s of it
+blocked in socket writes, connection closed five seconds later. Short
+responses never reproduce it because they never fill 5.5s, which is why six
+weeks of it read as intermittent.
+
+**The music plane had already solved this and voice never got the fix.**
+`em_player.LEAD_S` has been 4.0s since 2026-07-25, sized against the device's
+own depth with ~1.4s of headroom, and its comment states the constraint
+exactly. Voice queued the whole response. That asymmetry was the bug, and
+`VOICE_LEAD_S` = 4.0 now matches.
+
+**Sending faster bought nothing** — the point worth keeping. The device holds
+~5.5s and no more, so everything beyond that sat in TCP buffers, which are
+lost on a reconnect exactly like audio never sent. The excess never improved
+stall resilience. It only bought the block.
+
+**Two diagnostics had to be built before this was findable.** Every drop had
+logged `Data connection closed: <id>` and nothing else, because
+`except ConnectionClosed: pass` discarded the close frames and
+`websockets.server` is pinned to CRITICAL. Three sessions had timing to
+reason from and no stated cause. `em_wsclose` now renders the frames, and
+says which SIDE closed — we gave up on the device, the device went first, or
+the socket died with nobody saying anything are three different
+investigations.
+
+### The AEC is not limited by its reference, and never was
+
+**We vendored `mdf.c` and not `preprocess.c`.** speexdsp's own documented AEC
+is two stages: `speex_echo_cancellation` then `speex_preprocess_run` with
+`SPEEX_PREPROCESS_SET_ECHO_STATE` for residual echo suppression. We run the
+first and skip the second.
+
+That explains the number. A linear adaptive filter cancels only the *linear*
+part of an echo path, and a speaker 4cm from the mics in a small plastic
+enclosure, coupling mechanically through the chassis, is substantially
+nonlinear. **10–14dB is the textbook ceiling for linear-only AEC against a
+nonlinear loudspeaker**, and it is where we sit whichever reference we use.
+
+**So the hardware reference (#385) reaching parity is the correct result, not
+a disappointment.** The reference was never the limiting factor. What ch7/ch8
+buys is *alignment* — which is precisely what we measured, deleting the ring,
+the decimator, `aecDelayMs` and the occupancy governor while holding the same
+attenuation. Amazon's extra dB comes from the AFE's post-processing, not from
+the loopback.
+
+Caveat before anyone reaches for `preprocess.c`: a residual suppressor is
+gain-based and attenuates near-end speech during double-talk, which is
+exactly what barge-in needs preserved. It would very likely improve the `att`
+number and could make barge-in worse. Measure it, do not assume it.
+
+### Also today
+
+**The device went deaf for 34–41 seconds after any data-plane drop the
+control plane survived.** `StartMic` had two callers — the controller's
+`mic_start` and unmute — so nothing restarted a stream that died with its
+socket, and the controller had no reconnect event to fire a fresh
+`mic_start` from because its own connection never dropped. Fixed by
+separating the controller's INTENT from the stream's STATE; recovery is now
+~5s, verified on hardware. The same fault from the other side closed a
+39-second hole at boot, where the first `mic_start` could beat the data
+connection into existence and was discarded.
+
+**A BLE transport reset is a candidate for a total link drop**, and the
+counters proving it were being thrown away. `/dev/stpbt` is the MT8163's
+combo radio behind MediaTek's WMT stack, shared with WiFi, and the scanner's
+own recovery reopens it — triggering a BT function-on and firmware patch
+download on the chip carrying the link. Seen once (stpbt read failure,
+reopen 5s later, `network is unreachable` 2s after that). The device had
+counted `restarts`/`hciErrors` since the proxy shipped;
+`em_ble_proxy.update_stats` read `advertsSeen` and dropped both. Now stored
+per hour as gauges. **This does NOT explain the connectivity history
+generally** — the proxy defaults off, #139 root-caused the RTT excursions to
+packet loss and TCP RTO, and the Lounge/Office swap showed those follow the
+location. Different symptom, kept apart deliberately.
+
+**Seven AEC instances would fit.** "One canceller per mic won't run on an
+A53" had been asserted without measuring. Benchmarked: one canceller is
+95.7µs per 32ms period and seven are 674µs on an i5-12500 — 0.30% and 2.1%
+of one core, so roughly 30–55% of an A53 core. Affordable. Whether it is
+*worth* it depends on how much the beamformer's channel switching actually
+costs the filter, which is one dashboard toggle away and still unmeasured.
+Also: tail 150ms is only 17% cheaper than 300ms, because the cost is
+dominated by fixed per-frame FFT work rather than filter length — so a tail
+sweep is nearly free either way.
+
+**Three test helpers failed the same way in one day**: source-slicing guards
+that used an unanchored `index()` or dropped only their own migration column,
+so any unrelated addition broke them with no clue why. Worth watching for as
+a class.
+
+
+## 2026-09-01 — the BLE proxy degrades its own device's control plane
+
+**Crossover, not correlation.** Two Dots on one desk, same room as the AP,
+so RF and link quality are matched by construction. The one running the BLE
+proxy logged **3615 idle RTT excursions in 24h against its neighbour's 2**,
+worst 20049ms against 4792ms, 5 keepalive timeouts against 0. Moving the
+proxy to the other device moved the fault within minutes and reproduced the
+same *rate* on different hardware — 2.64/min against 2.49/min. Wil's
+pushback is what forced this: "both echos are sat next to each other on my
+desk" killed the lazy "bad link" story I had been repeating.
+
+**The mechanism is our own traffic on the liveness channel.**
+`SendBleAdverts` writes through `writeJSON`, which takes `connMu` on the
+CONTROL WebSocket — the same mutex and TCP stream as the RTT echo, the
+keepalive pong, wake events and stats. Bulk telemetry head-of-line-blocks
+the channel we measure health on, so the excursions partly measure the
+adverts themselves. Not RF coexistence: stock FireOS drove a Bluetooth
+speaker while streaming over WiFi, and the July recon measured coex clean.
+
+**What Home Assistant actually needs, read rather than assumed.**
+`habluetooth` tolerates 195s (connectable) to 900s per device before an
+advertisement is stale, retires a *scanner* only after 90s of silence,
+smooths RSSI itself at alpha=0.3, and switches proxy ownership on 16dB with a
+6dB deadband. Bermuda re-decides area every second. So the requirement is
+about one advertisement per device per second — ten to twenty times less than
+we were sending. Two things that look like fixes and are not: lowering the
+scan duty cycle (320/30 IS `esp32_ble_tracker`'s default, what Bermuda is
+tuned against) and the chip's `filter_duplicates=1` (it suppresses identical
+adverts, but RSSI is the field that varies and the field Bermuda consumes).
+
+**A first sighting is not an arrival.** The gate's first version flushed
+immediately on any unseen (address, payload). BLE privacy addresses rotate
+every ~15 minutes, so that branch fires continuously in a room with phones,
+and flush runs synchronously on the goroutine that reads HCI — a change
+built to reduce control-plane writes could emit more of them than the plain
+250ms batching it replaced. Urgency now needs a KNOWN address whose payload
+changed, and an early flush resets the tick so it moves a write earlier
+rather than adding one.
+
+**Then C95 threw the first HCI transport resets ever seen** — two in ~40
+minutes on gate builds, against zero on EFF in 23.5h with the proxy and no
+gate, and zero for the seven weeks the Status tab has displayed the counter.
+`read /dev/stpbt: ENOTSOCK`, then ~30s of `network is unreachable`.
+Unresolved; the detail and the two surviving hypotheses are in
+`device/CLAUDE.md`.
+
+**Three wrong calls in one evening, all the same shape.** I asserted the
+reopen of `/dev/stpbt` took the WiFi down (the timestamps show WiFi failing
+four seconds BEFORE the reopen — and the warning text I wrote for #388 is
+what led me there, a hypothesis printed as a fact). I told Wil he "couldn't
+have known" about HCI restarts (the counter has been on the Status tab since
+2026-07-12; his "never seen it" was evidence, and I used a false claim to
+discount it). And I floated GC pressure from the gate's table, when
+`pause_total` moved 2ms → 22ms over five minutes against mic stalls of
+465-2481ms — three orders of magnitude short, in a log I had already read.
+Each time the refuting number was already in hand.
+
+Also today: the streaming teardown fix (#402, closing #252) — killing ffmpeg
+before cancelling its feeder, since the old ordering could not terminate when
+nobody was draining stdout; measured 20/20 hung against 0/20. EA 2.22.0-ea.10
+cut and published. And the Echo ref row came back off the Status tab (#406) —
+conditional rows in a fixed layout give devices different panel heights.
+
+## 2026-09-02 — the gate measured in a real room, and controller 2.22.0
+
+**Overnight, C95 (gate) against EFF (no gate), both with the proxy:** 949 idle
+RTT excursions in 36 windows against 1765 in 39 — 26.4 against 45.3 per 10m —
+and a worst RTT of 4431ms against 21025ms. Lower in ten hours of eleven, so not
+one quiet stretch. **Zero HCI transport resets** after 20:27:38, twelve hours
+clean; both of last night's fired within ~20s of the BLE proxy starting on a
+device flashed four times that evening, and both logged `1/1 total`.
+
+**Two clean reboots reproduced the stall and not the reset.** ~35s boots, then
+at +2m48s and +2m29s the same precursor — `no mic frames for 10s` — and a
+keepalive timeout, once on control and once on data. So the stall is the common
+event and the chip reset is a rare escalation of it, not its own fault. What the
+controller log cannot say is whether ALSA stalls before the network or they stop
+together; that needs `/tmp/server.log` from the device at the moment it happens,
+and is still owed.
+
+**The emission gate drops 9% in this room, not the 2x-10x the synthetic tests
+suggested.** Two Status tab readings 459s apart: 941 adverts seen, 856
+forwarded. The office produces ~2 adverts/s across ~29 devices — one broadcast
+per device every 14s — already far under the one-per-second Bermuda needs, so
+`emitMaxSilence` admits nearly everything and there is no firehose left to
+filter. Which means 9% fewer adverts cannot explain 42% fewer excursions: the
+coupling is the fault, not the quantity, and #404 half 2 is the fix rather than
+more tuning. Recorded on #404.
+
+The two advert counters on the Status tab are not comparable and invite exactly
+that comparison — `advertsSeen` resets with the device, `adverts_forwarded`
+lives on the controller's proxy object and survives every reconnect. #410.
+
+**Controller 2.22.0 cut**, rolling the ten Early Access builds into GA: timers,
+announce-then-listen, the long-answer pacing fix, the no-HA ring cue, the
+delete/re-add fix. Cut at HEAD rather than at ea.10's commit, so it also carries
+#406 — the Echo ref row coming off the Status tab, a layout fix that had never
+been in an EA build. The notes carry the Bluetooth proxy as a known issue, since
+most deployments appear to run it and #404 is not closed by this release.
+
+## 2026-09-02 — GA 2.22.0 and v2.14.0 shipped; the stall is the link, not ALSA
+
+**Released both halves.** Controller 2.22.0 (ten EA builds rolled into GA) and
+device v2.14.0, the first firmware since v2.13.0. GA carries the Bluetooth
+proxy as a stated known issue rather than silently, because most deployments
+appear to run it and #404 was not closed by the release. Five PRs landed on
+top: OTA serialisation (#412), adverts onto the data plane (#413), barge
+arbitration (#414), the link-state ring (#415), and @DennisGaida's
+`aiohttp.access` quieting (#376).
+
+**The advert gate drops 9% in a real room, not the 2x-10x the synthetic tests
+suggested.** Two Status readings 459s apart: 941 seen, 856 forwarded. The
+office produces ~2 adverts/s across ~29 devices — one broadcast per device
+every 14s — already far under the one-per-second Bermuda needs, so
+`emitMaxSilence` admits nearly everything. Which means 9% fewer adverts cannot
+explain the 42% fewer excursions measured overnight: the coupling is the
+fault, not the quantity, and #404 half 2 was the fix rather than more tuning.
+
+**`no mic frames for 10s` is a BLOCKED SOCKET WRITE, not an ALSA stall**, and
+this had been recorded the wrong way round since 2026-09-01. Device log from
+SPJ during a live event: `[mic] clock: 180.5s audio over 180.3s wall
+(deficit -158ms, stalls=0)` — capture kept perfect pace — while
+`streamMic: send error: write tcp …: i/o timeout` names the real blockage. The
+order is write blocks → `streamMic` stops draining the mic subscriber channel
+→ `subscriber channel full — batch dropped` → the controller sees nothing.
+Only the DATA plane died; control survived on the same host and port and the
+controller logged no event-loop stall. That is per-socket TCP retransmission,
+i.e. #139's 4.6-7.1% loss driving RTO to 500-800ms, and #140 is the answer.
+
+**A hypothesis built on n=3 and falsified in ten minutes.** Three stalls landed
+at +2m29s, +2m34s and +2m48s after connect; `linkInfoInterval` is 2 minutes and
+its expiry spawns two `wpa_cli` processes, so the first refresh looked like the
+trigger. A debug build at 45s ran nine refreshes at **12-36ms each with zero
+stalls**, and did not reproduce the 2m30s event either. Three points in a
+20-second band were over-read; the fault is intermittent (8 events in 7h on
+SPJ), not periodic. Office now carries a logging-only build that times every
+mic frame write and logs past 250ms, so the next natural stall shows its onset
+rather than only its 10-second deadline.
+
+**Two OTAs of the same shape, found by using the thing.** Three concurrent
+updates stalled the controller's event loop for 11.1s — the loop that sends
+speaker periods — which is what made serialising them worth doing. And Office
+turned out to be missing three of the four stock wake word classifiers since
+17 August: `reconcile_oww_assets` runs on connect but returns early unless
+on-device scoring is on, and then checks only the SELECTED model. Same shape
+for the other two payloads: `_sync_start_script` and `_sync_debloat` reconcile
+on OTA or on a click and never on connect. A device arriving is exactly the
+moment we know what it has.
+
+**Barge-in was not arbitrated at all**, reported by Wil and reproduced in the
+source: `_wake_arbiter.claim` had one call site, in the wake listener, so an
+idle neighbour answered the same interrupting utterance unopposed. The
+original wake's claim cannot cover it — `claim()` is bounded by `window_s`,
+not held until `release()`.
+
+**Three corrections of mine, all the same shape as yesterday's.** I merged
+#411 with checks still pending (Wil: "only merge on green"); I told Wil #414
+was branched off main when it and #415 were sitting uncommitted on #413's
+branch; and I twice reported a local test run that my own branch-switching had
+contaminated. The pattern is claiming a verification I had not actually
+performed.

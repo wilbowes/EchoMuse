@@ -14,6 +14,15 @@ utterance immediately and answers with zero added latency. Any other
 device detecting within `window_s` of that claim loses and stands down.
 No one ever waits.
 
+**Only devices that can serve a turn get here.** Detection order is a
+proximity proxy and says nothing about whether Home Assistant is connected
+to that device, so an Echo with no pipeline behind it would otherwise win
+on nearness and then fail — silencing one that was ready. The caller
+(`em_controller.wake_word_listener`) stands such a device down before it
+claims, via `em_esphome.can_serve_turn`. That check is deliberately NOT
+repeated here: this module knows nothing of HA, and a second copy of the
+rule is one that can disagree with the first.
+
 Why not "best SNR", which this module did until 2026-07-20: it forced
 every wake to wait out the whole window (~364ms measured, on every
 device, because the gate was "2+ devices *connected*" rather than "in

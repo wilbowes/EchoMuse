@@ -38,7 +38,9 @@ import json
 import logging
 import os
 import platform
+import posixpath as _posixpath
 import re
+from shlex import quote as _sh_quote
 import shutil
 import sqlite3 as _sqlite3
 import sys
@@ -55,6 +57,8 @@ import em_db as db
 import em_auth as auth
 import em_ble_proxy
 import em_config_sections as sections_mod
+import em_console_pw
+import em_emos_build
 import em_firmware
 import em_ingressauth
 import em_oww_assets
@@ -169,6 +173,36 @@ _event_clients: set[web.WebSocketResponse] = set()
 # Track in-progress OTA updates per device_id to enforce one-at-a-time.
 _updates_in_progress: set[str] = set()
 
+# Firmware updates are SERIALISED across the whole controller, not just per
+# device. Three concurrent OTAs stalled the event loop for 11.1 seconds on
+# 2026-09-02 — measured, in the `[loop] event loop stalled` warnings — and
+# that loop is what sends speaker periods and LED frames, so a device mid
+# response pays for a device being updated. The transfer is base64 over the
+# shell plane and CPU-bound in this process; the fix is to stop doing several
+# at once, not to make one cheaper.
+#
+# A device-level guard cannot do this: `_updates_in_progress` stops one device
+# being updated twice, and says nothing about two devices being updated at
+# once. So the lock is global and BOTH entry points go through it — the fleet
+# deploy and a hand-clicked single update, which collide identically.
+#
+# A failure does NOT stop the queue. Wil's call, 2026-09-02: mark it, carry on,
+# report at the end — one device that will not come back should not strand the
+# rest of a fleet update behind it.
+_ota_lock = asyncio.Lock()
+
+# Longest one device may hold the OTA queue. A real update is a ~10MB transfer,
+# a reboot and a 90s reconnect watch, so this is a deadlock cap rather than a
+# performance budget: it exists because serialising made one wedged device able
+# to block the whole fleet's updates until the controller restarted.
+OTA_MAX_HOLD_S = 300.0
+
+# Devices waiting on `_ota_lock`. Reported separately from
+# `update_in_progress` so the dashboard says "queued" rather than claiming
+# work that has not started — the same rule as everywhere else here: a control
+# that cannot act must say so rather than appear to work.
+_updates_queued: set[str] = set()
+
 # Last OTA failure per device, surfaced as `update_error` in /api/devices so
 # the dashboard (fleet deploy modal + per-device update log) can show *why* a
 # tile stopped progressing instead of sitting at "updating…" forever. Set by
@@ -241,6 +275,19 @@ _shell_pending:   dict = {}
 _shell_dashboard: dict = {}
 _shell_ws:        dict = {}   # device_id → live ws for programmatic sessions
 _shell_lock:      dict = {}   # device_id → asyncio.Lock (one session at a time)
+# device_id → the asyncio Task that actually holds _shell_lock.
+#
+# `Lock.locked()` answers "is anyone holding this", never "am I", and the
+# cleanup paths used it as though it meant the second. So a caller that gave
+# up WAITING for the lock ran the same cleanup as one that had it, and
+# released the lock out from under the transfer still using it — two shell
+# sessions on one device, which is the exact thing the lock exists to stop.
+# Seen end to end on EFF 2026-09-04: a debloat push hung for 108s, the wake
+# word reconcile behind it timed out and released the debloat's lock, and the
+# slot detect that followed then failed with `Lock is not acquired` and
+# reported an empty result — surfacing to the operator as "could not
+# determine active slot", three steps from anything to do with locking.
+_shell_owner:     dict = {}   # device_id → task holding _shell_lock
 
 def init(devices_ref: dict, shell_pending_ref: dict, shell_dashboard_ref: dict) -> None:
     """
@@ -369,6 +416,8 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/provision/oww_asset/{name}", _get_provision_oww_asset)
     app.router.add_post("/api/provision/tls_credentials", _post_provision_tls_credentials)
     app.router.add_post("/api/provision/diagnostics",     _post_provision_diagnostics)
+    app.router.add_get("/api/provision/emos_init",     _get_provision_emos_init)
+    app.router.add_post("/api/provision/emos_image",   _post_provision_emos_image)
     app.router.add_post("/api/devices/{id}/secure_link",  _post_secure_link)
     app.router.add_post("/api/devices/{id}/debloat",      _post_debloat)
 
@@ -952,8 +1001,53 @@ async def _delete_device(request: web.Request) -> web.Response:
     await loop.run_in_executor(None, db.delete_device, device_id)
     # Row gone → reconcile tears down any BT proxy listener/mDNS for it.
     await em_ble_proxy.reconcile(device_id)
+    # The satellite needs the same, and had no equivalent: it survives an
+    # ordinary disconnect on purpose, so a delete used to leave it in
+    # `_servers` holding the old port for a re-added device to inherit
+    # silently. Lazy import — em_esphome imports em_api at module level.
+    import em_esphome
+    await em_esphome.device_deleted(device_id)
+    # A re-added device is the one whose payloads are least likely to be
+    # right, so it must not inherit the deleted row's debounce and skip its
+    # first reconcile — the bounce below has it redialling within seconds.
+    forget_reconcile(device_id)
+    # ...and the device is told to redial, or it never notices it was deleted.
+    # Link auth is decided once, at register time, so a connected device keeps
+    # running on the socket it already has: it vanishes from the dashboard and
+    # carries on serving turns, and only comes back as pending after something
+    # else drops the link — a reboot, a controller restart, a WiFi blip. The
+    # bounce is what makes delete mean "start over" within seconds instead of
+    # whenever. Deliberately AFTER the row is gone: the device redials in 5s
+    # and must find an empty registry, or it re-registers into the row we were
+    # deleting. em_linkauth ignores the token it still carries (rule 3), so it
+    # arrives as pending — except under REQUIRE_DEVICE_TLS, where it is
+    # refused and re-provisioning over USB is the intended path.
+    await _disconnect_device(device_id)
     await _push_event({"type": "device_deleted", "device_id": device_id})
     return _ok({})
+
+
+async def _disconnect_device(device_id: str) -> None:
+    """
+    Close a device's control plane, and any shell session riding on it.
+
+    Only the control plane is closed: the device's own loop cancels its data
+    client when control drops (`control.go` Run) and re-establishes both on
+    the next dial, so closing `/data` here would only race that. The shell
+    plane is separate and demand-opened, so an open session would otherwise
+    hang against a device that is about to redial. `_release_shell_ws` is
+    called even with no programmatic session registered, because the
+    `shell_close` it sends is the only thing that ends an INTERACTIVE
+    dashboard session — those deliberately do not set `_shell_ws`.
+    """
+    live = _devices.get(device_id)
+    if live is None:
+        return
+    await _release_shell_ws(device_id, live)
+    try:
+        await live.control_ws.close()
+    except Exception as e:
+        log.warning(f"[api] Could not close control plane for {device_id}: {e}")
 
 
 @auth.require_admin
@@ -1357,7 +1451,11 @@ async def _post_device_update(request: web.Request) -> web.Response:
     release = None
 
     if upload_token:
-        binary_override = _pending_uploads.pop(upload_token, None)
+        # PEEKED, not popped. Every refusal below leaves the token usable, so
+        # re-deciding — or forcing — costs nothing. Popping first meant an
+        # 11MB re-upload to get past a check that had just told the operator
+        # something useful.
+        binary_override = _pending_uploads.get(upload_token)
         if binary_override is None:
             return _error("invalid_token", "Upload token not found or expired", 404)
         _embedded = _extract_binary_version(binary_override)
@@ -1377,9 +1475,33 @@ async def _post_device_update(request: web.Request) -> web.Response:
     if live is None:
         return _error("device_offline", "Device is not connected", 409)
 
-    if device_id in _updates_in_progress:
+    if device_id in _updates_in_progress or device_id in _updates_queued:
         return _error("update_in_progress", "An update is already in progress", 409)
 
+    # Installing what the device is already running costs a transfer, a
+    # reboot and a slot — and the fleet endpoint has always skipped it for
+    # releases (`already_current`), while this endpoint checked nothing and
+    # the upload path could not check anything, because it labelled every
+    # uploaded binary `local-<timestamp>` instead of reading the version out
+    # of it. So the case most likely to happen by accident was the one case
+    # nothing guarded: an engineering build uploaded by hand, twice.
+    #
+    # Refused rather than silently skipped, because someone pressed a button
+    # here and a no-op reported as success is how they press it again.
+    # `force` exists because re-flashing the SAME version is a real repair —
+    # a corrupt slot is fixed by writing it again — so this must never become
+    # a wall between an operator and their own device.
+    if (release["version"] and row["firmware_ver"] == release["version"]
+            and not body.get("force")):
+        return _error(
+            "already_running",
+            f"This device is already running {release['version']}. "
+            f"Pass force to install it again.",
+            409,
+        )
+
+    if upload_token:
+        _pending_uploads.pop(upload_token, None)
     asyncio.create_task(_run_update(device_id, release, binary_override))
     return _ok({"status": "started", "version": release["version"]}, status=202)
 
@@ -1407,7 +1529,7 @@ async def _post_device_rollback(request: web.Request) -> web.Response:
     if live is None:
         return _error("device_offline", "Device is not connected", 409)
 
-    if device_id in _updates_in_progress:
+    if device_id in _updates_in_progress or device_id in _updates_queued:
         return _error("update_in_progress", "An update is already in progress", 409)
 
     asyncio.create_task(_run_rollback(device_id, row["firmware_previous"]))
@@ -1442,14 +1564,23 @@ async def _post_upload_binary(request: web.Request) -> web.Response:
 
         token = str(_uuid.uuid4())
         _pending_uploads[token] = binary
-        log.info(f"[api] Binary uploaded: {len(binary):,} bytes token={token[:8]}…")
+        version = _extract_binary_version(binary)
+        log.info(f"[api] Binary uploaded: {len(binary):,} bytes "
+                 f"version={version or 'unknown'} token={token[:8]}…")
 
         async def _expire():
             await asyncio.sleep(600)
             _pending_uploads.pop(token, None)
         asyncio.create_task(_expire())
 
-        return _ok({"upload_token": token, "size": len(binary)})
+        # The version rides back so the dashboard can say what was uploaded,
+        # and warn against a device already running it BEFORE the operator
+        # commits. The update endpoint refuses it either way; this is what
+        # makes the refusal something you see coming instead of something you
+        # find out afterwards. None means the binary carries no recognisable
+        # version — shown as unknown rather than guessed at.
+        return _ok({"upload_token": token, "size": len(binary),
+                    "version": version})
     except web.HTTPException:
         # aiohttp's own — HTTPRequestEntityTooLarge above all, raised by the
         # transport before this handler sees a byte. Swallowing it into a 500
@@ -1635,8 +1766,54 @@ async def _run_update(device_id: str, release: dict,
     5. Restart service and monitor reconnect.
     6. Detect auto-rollback (start_server.sh retry exhausted).
     """
-    _updates_in_progress.add(device_id)
     _update_errors.pop(device_id, None)  # fresh attempt clears the last failure
+
+    # Wait for any other device's update to finish before touching this one.
+    # Queued state is visible while waiting (see `_updates_queued`), and the
+    # binary is fetched INSIDE the lock so a queued device is holding nothing
+    # but its place in line.
+    _updates_queued.add(device_id)
+    try:
+        await _ota_lock.acquire()
+    finally:
+        _updates_queued.discard(device_id)
+
+    _updates_in_progress.add(device_id)
+    try:
+        # Bounded, because serialising turned a device-local stall into a
+        # fleet-wide one. Every `recv` in the transfer is wait_for-bounded but
+        # `await ws.send(line)` in the base64 loop is not: a device that stops
+        # reading applies backpressure and can hang there. Before the lock that
+        # stalled one device; now it would hold the queue and NOTHING could be
+        # updated until the controller restarted.
+        #
+        # Generous on purpose — a real update is a ~10MB transfer plus a reboot
+        # and a 90s reconnect watch, so this is a deadlock cap, not a
+        # performance budget. A device that trips it has failed anyway.
+        await asyncio.wait_for(
+            _run_update_locked(device_id, release, binary_override),
+            timeout=OTA_MAX_HOLD_S,
+        )
+    except asyncio.TimeoutError:
+        await _update_failed(
+            device_id,
+            f"Update abandoned after {OTA_MAX_HOLD_S:.0f}s so the queue "
+            f"could continue — the device may still be mid-update",
+        )
+    finally:
+        _updates_in_progress.discard(device_id)
+        # Release LAST, so the next queued device does not start its transfer
+        # while this one is still being cleaned up.
+        _ota_lock.release()
+
+
+async def _run_update_locked(device_id: str, release: dict,
+                             binary_override: bytes | None = None) -> None:
+    """
+    The update itself, run with `_ota_lock` already held. Split from
+    `_run_update` so the whole of it can sit under one timeout — the queue is
+    only as safe as its slowest member.
+    """
     loop = asyncio.get_event_loop()
     version = release["version"]
 
@@ -1819,8 +1996,6 @@ async def _run_update(device_id: str, release: dict,
     except Exception as e:
         log.exception(f"[api] OTA update error for {device_id}: {e}")
         await _update_failed(device_id, f"OTA exception: {e}")
-    finally:
-        _updates_in_progress.discard(device_id)
 
 
 async def _run_rollback(device_id: str, target_version: str) -> None:
@@ -1955,6 +2130,10 @@ async def _get_device_shell_ws(live) -> object:
         await asyncio.wait_for(_shell_lock[device_id].acquire(), timeout=20.0)
     except asyncio.TimeoutError:
         raise RuntimeError(f"Shell lock acquisition timed out for {device_id}")
+    # Claimed immediately after a successful acquire and never before it:
+    # everything that cleans up asks whether it is the owner, so a caller
+    # that timed out above must not be able to answer yes.
+    _shell_owner[device_id] = asyncio.current_task()
 
     future = loop.create_future()
     _shell_pending[device_id] = future
@@ -1968,8 +2147,27 @@ async def _get_device_shell_ws(live) -> object:
     except asyncio.TimeoutError:
         _shell_pending.pop(device_id, None)
         _shell_ws.pop(device_id, None)
-        _shell_lock[device_id].release()
+        _release_shell_lock(device_id)
         raise
+
+
+def _release_shell_lock(device_id: str) -> None:
+    """
+    Release the shell lock, but only if THIS task is the one holding it.
+
+    `Lock.locked()` cannot answer that question — it says whether anyone
+    holds the lock — so guarding a release with it lets a caller that never
+    acquired release somebody else's. See the _shell_owner comment.
+    """
+    if _shell_owner.get(device_id) is not asyncio.current_task():
+        return
+    _shell_owner.pop(device_id, None)
+    lock = _shell_lock.get(device_id)
+    if lock and lock.locked():
+        try:
+            lock.release()
+        except RuntimeError:
+            pass
 
 
 async def _release_shell_ws(device_id: str, live=None) -> None:
@@ -1978,7 +2176,16 @@ async def _release_shell_ws(device_id: str, live=None) -> None:
 
     Closing ws wakes handle_shell's ws.wait_closed(), which then returns
     and lets the device clean up its side too.
+
+    **A task that does not hold the lock cleans up nothing.** Callers run
+    this from a `finally`, which is reached whether or not the acquire
+    succeeded — so a caller that timed out waiting used to close the
+    websocket belonging to the transfer that was still using it, send that
+    device `shell_close`, and release its lock. Every one of those is an
+    action against another operation's session.
     """
+    if _shell_owner.get(device_id) is not asyncio.current_task():
+        return
     ws = _shell_ws.pop(device_id, None)
     if ws:
         try:
@@ -1988,12 +2195,7 @@ async def _release_shell_ws(device_id: str, live=None) -> None:
     _shell_pending.pop(device_id, None)
     if live is not None:
         await live.send_control({"type": "shell_close"})
-    lock = _shell_lock.get(device_id)
-    if lock and lock.locked():
-        try:
-            lock.release()
-        except RuntimeError:
-            pass
+    _release_shell_lock(device_id)
 
 
 async def _shell_run(live, cmd: str, timeout: float = 30.0) -> str:
@@ -2154,7 +2356,21 @@ async def _stream_file_to_device(live, data: bytes, dest: str,
             "else echo DECODER:none; fi; "
             "if echo x | busybox md5sum >/dev/null 2>&1; then echo MD5:busybox; "
             "elif echo x | md5sum >/dev/null 2>&1; then echo MD5:plain; "
-            f"else echo MD5:none; fi; echo {DETECT_MARKER}\n"
+            f"else echo MD5:none; fi; "
+            # Does the destination DIRECTORY exist? Rides the round trip that
+            # was already happening, so it costs nothing.
+            #
+            # Without it a write into a directory that is not there fails, the
+            # `echo TRANSFER_OK` after it never runs, and the transfer waits
+            # out its full 120s timeout for a confirmation that can never
+            # come — holding the device's shell lock throughout. Measured on
+            # EFF 2026-09-04: the debloat payload targets Magisk's
+            # /sbin/.core overlay, which a device not running Magisk has no
+            # daemon to create, and every attempt cost two minutes and took
+            # the next shell operation down with it.
+            f"if [ -d {_sh_quote(_posixpath.dirname(dest) or '/')} ]; "
+            f"then echo DESTDIR:ok; else echo DESTDIR:missing; fi; "
+            f"echo {DETECT_MARKER}\n"
         )
 
         detect_buf = ""
@@ -2168,6 +2384,16 @@ async def _stream_file_to_device(live, data: bytes, dest: str,
                     break
             except asyncio.TimeoutError:
                 continue
+
+        # Checked before the decoder, because it is the more specific answer:
+        # a device with a perfectly good base64 and nowhere to put the file is
+        # not a device that failed to decode.
+        if "DESTDIR:missing" in detect_buf:
+            log.warning(f"[api] {device_id}: {dest} — the destination "
+                        f"directory does not exist on this device; not sending")
+            return _transfer_failed(
+                "destination",
+                f"{_posixpath.dirname(dest)} does not exist on the device")
 
         if "DECODER:busybox" in detect_buf:
             decode_cmd = "busybox base64 -d"
@@ -2311,6 +2537,13 @@ async def _stream_file_to_device(live, data: bytes, dest: str,
 
 
 
+# Appended to a probe command so an empty _shell_run result can be told apart
+# from a command that ran and printed nothing. _shell_run swallows every
+# exception and returns "", so without this "the file is missing" and "the
+# device never answered" are the same string — and they want opposite actions.
+_SHELL_OK = "__EM_SHELL_OK__"
+
+
 async def _sync_start_script(live, device_id: str) -> None:
     """
     OTA-time payload sync: heal /data/local/bin/start_server.sh drift.
@@ -2334,7 +2567,17 @@ async def _sync_start_script(live, device_id: str) -> None:
         return
     want = hashlib.md5(script).hexdigest()
 
-    out = await _shell_run(live, f"busybox md5sum {path} 2>/dev/null")
+    # The trailing marker separates "the file differs" from "the device did not
+    # answer". _shell_run returns "" for both — it swallows the exception — and
+    # an absent md5 was read as out-of-date, so a shell plane that is not up
+    # yet produced a push attempt and a user-visible "out of date" event that
+    # was not true. That was harmless while this only ran mid-OTA, with a shell
+    # already proven; it is not, now that it also runs seconds after connect.
+    out = await _shell_run(live, f"busybox md5sum {path} 2>/dev/null; echo {_SHELL_OK}")
+    if _SHELL_OK not in out:
+        log.info(f"[api] [{device_id}] start_server.sh: no answer from the "
+                 f"device — leaving it alone")
+        return
     if want in out:
         return  # in sync — the common case
     await asyncio.sleep(1.0)  # let the md5 shell session close cleanly
@@ -2418,9 +2661,19 @@ async def _sync_debloat(live, device_id: str) -> None:
 
     if script is not None:
         want = hashlib.md5(script).hexdigest()
-        out = await _shell_run(live, f"busybox md5sum {DEBLOAT_SCRIPT_PATH} 2>/dev/null")
+        # The marker is what makes an empty result readable — see
+        # _sync_start_script. It gates BOTH halves below: a device that did not
+        # answer the md5 will not answer `pm` either, and half 2 would
+        # otherwise report a hide-list sync failure that is really a shell
+        # that was never up.
+        out = await _shell_run(
+            live, f"busybox md5sum {DEBLOAT_SCRIPT_PATH} 2>/dev/null; echo {_SHELL_OK}")
+        if _SHELL_OK not in out:
+            log.info(f"[api] [{device_id}] debloat: no answer from the device "
+                     f"— leaving it alone")
+            return
         if want not in out:
-            # An empty result also lands here — a device provisioned before the
+            # An empty md5 also lands here — a device provisioned before the
             # script existed has no file at all, and installing it is right.
             await asyncio.sleep(1.0)
             await _push_log_event(device_id, "info", "controller",
@@ -2637,7 +2890,17 @@ async def _post_deploy_all(request: web.Request) -> web.Response:
         binary_override = _pending_uploads.pop(upload_token, None)
         if binary_override is None:
             return _error("invalid_token", "Upload token not found or expired", 404)
-        release = {"version": f"local-{time.strftime('%Y%m%d-%H%M')}", "url": None}
+        # Read the version OUT of the binary, as the single-device path does.
+        # Labelling it `local-<timestamp>` made every uploaded binary look
+        # like a version no device had ever run, so the already_current skip
+        # below could never fire for an upload and the whole fleet re-flashed
+        # what it was already running. The timestamp remains the fallback for
+        # a binary carrying no recognisable version.
+        _embedded = _extract_binary_version(binary_override)
+        release = {
+            "version": _embedded or f"local-{time.strftime('%Y%m%d-%H%M')}",
+            "url": None,
+        }
     else:
         release = await _get_cached_release()
         if release is None:
@@ -2652,10 +2915,15 @@ async def _post_deploy_all(request: web.Request) -> web.Response:
         if row is None or not row["approved"]:
             skipped.append({"device_id": device_id, "reason": "not_approved"})
             continue
-        if not upload_token and row["firmware_ver"] == release["version"]:
+        # No longer `not upload_token and …`: an uploaded binary now carries a
+        # real version, so this skip finally covers the fleet-wide re-flash of
+        # an engineering build too. `force` overrides it for the repair case,
+        # matching the single-device endpoint.
+        if (release["version"] and row["firmware_ver"] == release["version"]
+                and not body.get("force")):
             skipped.append({"device_id": device_id, "reason": "already_current"})
             continue
-        if device_id in _updates_in_progress:
+        if device_id in _updates_in_progress or device_id in _updates_queued:
             skipped.append({"device_id": device_id, "reason": "update_in_progress"})
             continue
 
@@ -2899,6 +3167,21 @@ async def _post_debloat(request: web.Request) -> web.Response:
     if live is None:
         return _error("device_offline", f"Device not connected: {device_id}", 409)
 
+    # Refused server-side, not merely greyed out in the dashboard. This is a
+    # plain POST with a session token, so a dashboard-only rule protects
+    # nothing from anyone who opens the network tab — the same reasoning that
+    # puts the recordings check on the server. And the cost of running it
+    # anyway is not a no-op: the payload targets Magisk's /sbin/.core overlay,
+    # which a device without Magisk has no daemon to create, so the write
+    # fails, TRANSFER_OK never comes, and the transfer holds that device's
+    # shell lock for its full timeout.
+    if not live.android_userspace:
+        return _error(
+            "not_android",
+            "This device is not running Android, so there is nothing to "
+            "debloat — the payload is a package list and a Magisk boot script.",
+            409)
+
     # No explicit shell release here: _shell_run and _stream_file_to_device each
     # acquire and release the session in their own finally, which is why
     # _sync_start_script does not either. Releasing it from out here could close
@@ -2979,6 +3262,12 @@ async def _get_system_status(request: web.Request) -> web.Response:
         # Home Assistant already draws (its own panel header and title) and
         # can avoid offering a theme toggle that fights HA's theme.
         "ha_ingress": INGRESS_ONLY,
+        # Which userspaces the fleet has reported (schema v21). Sorted for a
+        # stable response; EMPTY means nothing has ever said, which is not the
+        # same as "all Android" and must not be read that way — a control
+        # disabled on the strength of not knowing is worse than one that is
+        # merely useless on this fleet.
+        "fleet_base_os": sorted(db.fleet_base_os()),
         # Peak asyncio event-loop stall since start (ms). Non-trivial values
         # mean the controller itself delayed speaker frames and LED updates.
         "loop_lag_peak_ms": round(_ctrl._loop_lag_peak_ms, 1),
@@ -3088,7 +3377,31 @@ async def _get_global_config(request: web.Request) -> web.Response:
     """GET /api/global/config — fleet-wide default device config."""
     loop = asyncio.get_event_loop()
     config = await loop.run_in_executor(None, db.get_global_device_config)
-    return _ok(config)
+    return _ok(_redact_console_pw(config))
+
+
+# The console password record never leaves the controller. Hashing before
+# storage is pointless if the result is then handed to every client that asks
+# for the config, so reads see a sentinel and writes send it back untouched —
+# see em_console_pw.for_display / resolve_write.
+_CONSOLE_PW_KEY = "consolePassword"
+
+
+def _redact_console_pw(config: dict) -> dict:
+    if not config or _CONSOLE_PW_KEY not in config:
+        return config
+    out = dict(config)
+    out[_CONSOLE_PW_KEY] = em_console_pw.for_display(out[_CONSOLE_PW_KEY])
+    return out
+
+
+def _resolve_console_pw(incoming: dict, stored: dict) -> None:
+    """Turn whatever a client sent into the record to store, in place."""
+    if _CONSOLE_PW_KEY not in incoming:
+        return
+    incoming[_CONSOLE_PW_KEY] = em_console_pw.resolve_write(
+        incoming[_CONSOLE_PW_KEY], (stored or {}).get(_CONSOLE_PW_KEY)
+    )
 
 
 def _dropped_keys(incoming: dict, stored: dict) -> list[str]:
@@ -3132,6 +3445,7 @@ async def _post_global_config(request: web.Request) -> web.Response:
     # Raw (defaults NOT underlaid): see get_global_device_config_raw — a
     # newly-added default must not look like a key this body is deleting.
     stored = await loop.run_in_executor(None, db.get_global_device_config_raw)
+    _resolve_console_pw(config, stored)
     dropped = _dropped_keys(config, stored)
     if dropped and not explicit_replace:
         return _error(
@@ -3775,6 +4089,106 @@ async def _install_then_switch(device_id: str, model: str) -> None:
     log.info(f"[api] [{device_id}] wake word switched to {model} after install")
 
 
+# How long a device is left alone after a connect-time reconcile. Devices on
+# this fleet reconnect constantly — a data-plane blip, an OTA, a controller
+# restart — and none of those change what is installed on the device, so
+# without a debounce the shell plane would carry three round trips every time.
+# Fifteen minutes is chosen against how the payloads actually change: they
+# change when someone deploys a controller or edits a config, which is minutes
+# to days apart, never seconds.
+RECONCILE_DEBOUNCE_S = 15 * 60
+
+# device_id -> monotonic time of the last connect-time reconcile.
+_last_reconcile: dict[str, float] = {}
+
+
+def _reconcile_due(device_id: str, now: float,
+                   debounce_s: float = RECONCILE_DEBOUNCE_S) -> bool:
+    """Whether this device's connect-time reconcile should run, and claim it."""
+    last = _last_reconcile.get(device_id)
+    if last is not None and (now - last) < debounce_s:
+        return False
+    # Stamped BEFORE the work rather than after: the run takes shell round
+    # trips and possibly a multi-megabyte push, and a device that reconnects
+    # mid-run must not start a second one against the same shell plane.
+    _last_reconcile[device_id] = now
+    return True
+
+
+async def reconcile_on_connect(device_id: str, live) -> None:
+    """
+    Bring a freshly-connected device's three installed payloads back in line.
+
+    A device arriving is the one moment we know what it has, and until
+    2026-09-02 nothing used it: `reconcile_oww_assets` ran here but returned
+    early unless the device scored locally and then checked only the SELECTED
+    classifier, while `_sync_start_script` and `_sync_debloat` ran ONLY inside
+    an OTA or from the Maintenance button. So a device already on the latest
+    firmware never received a payload change at all — Office sat without three
+    of the four stock classifiers for a fortnight with every panel calling it
+    healthy.
+
+    Three rules:
+
+    - **Sequential, never gathered.** All three talk to the same device over
+      the same shell plane; running them concurrently contends for one session
+      for no gain, since none of them is on the critical path of anything.
+    - **One failure must not skip the other two.** They are unrelated payloads
+      and a device with a stale debloat list should still get its wake word
+      models. Each is best-effort in its own right, and this only stops them
+      taking each other down.
+    - **Debounced per device** (`RECONCILE_DEBOUNCE_S`), because reconnects are
+      routine on this fleet and the payloads are not.
+
+    Runs as a background task off the connect handler: nothing about the
+    handshake should wait on a shell round trip over a link measured at 5-7%
+    packet loss.
+    """
+    if not _reconcile_due(device_id, time.monotonic()):
+        return
+
+    # Held as callables, not coroutines: building all three up front and
+    # abandoning two of them leaves un-awaited coroutines to warn about later.
+    steps = [
+        ("oww assets", lambda: reconcile_oww_assets(device_id, live)),
+        ("start script", lambda: _sync_start_script(live, device_id)),
+    ]
+    # The debloat payload is Android-only: a pm-hide list and a Magisk
+    # service.d script. emOS has neither a package manager nor Magisk, so
+    # pushing it there spends a shell round trip to run `pm hide` against
+    # nothing and leave a boot script no init will read. Gated on the device
+    # having POSITIVELY said it is on emOS — see Device.android_userspace for
+    # why absence keeps today's behaviour.
+    if live.android_userspace:
+        steps.append(("debloat", lambda: _sync_debloat(live, device_id)))
+    for name, make in steps:
+        # Re-read each time, and compare IDENTITY rather than presence: these
+        # take seconds, and a device that dropped and redialled part-way
+        # through is a different object in the registry. The one we are
+        # holding then has a shell plane nobody is on the other end of, so
+        # "still connected" would be true of the registry and false of us.
+        if _devices.get(device_id) is not live:
+            log.info(f"[api] [{device_id}] reconcile: device went away — "
+                     f"stopping before {name}")
+            return
+        try:
+            await make()
+        except Exception as e:
+            log.warning(f"[api] [{device_id}] reconcile: {name} failed ({e}) "
+                        f"— continuing with the rest")
+
+
+def forget_reconcile(device_id: str) -> None:
+    """
+    Drop a device's debounce stamp, so its next connect reconciles immediately.
+
+    Called when a device is deleted: a re-added device is exactly the one whose
+    payloads are least likely to be right, and it would otherwise inherit the
+    silence of the row that was removed.
+    """
+    _last_reconcile.pop(device_id, None)
+
+
 async def reconcile_oww_assets(device_id: str, live) -> None:
     """
     On connect: make sure a locally-scoring device HAS the model it was told
@@ -3836,6 +4250,23 @@ async def reconcile_oww_assets(device_id: str, live) -> None:
             effective.get("owwOnDevice"), live.oww_trigger_capable,
             model_ready=True,
         )
+        # The device can score TODAY, so nothing is degraded and no warning is
+        # owed — but it may still be short of the other stock classifiers, in
+        # which case selecting one of them tomorrow is the deaf device this
+        # whole path exists to prevent. Repair quietly; see missing_assets.
+        gaps = em_oww_assets.missing_assets(desired, state["installed"])
+        if gaps:
+            log.info(f"[api] [{device_id}] oww reconcile: {len(gaps)} asset(s) "
+                     f"missing ({', '.join(gaps)}) — installing")
+            try:
+                result = await _sync_oww_assets(live, device_id)
+            except Exception as e:
+                result = {"ok": False, "error": str(e)}
+            if not result.get("ok"):
+                # Not an error event: the device is scoring correctly and the
+                # user has lost nothing today. A log line is the right weight.
+                log.warning(f"[api] [{device_id}] oww reconcile: could not install "
+                            f"the missing assets ({result.get('error')})")
         return
 
     live.oww_model_ready = False
@@ -4234,6 +4665,193 @@ async def _post_provision_diagnostics(request: web.Request) -> web.Response:
     )
 
 
+async def _fetch_latest_emos_release() -> Optional[dict]:
+    """
+    The newest published emOS release carrying an `init` asset.
+
+    Separate from `_fetch_latest_release` rather than a parameter on it,
+    because the two select on opposite things and share no cache: firmware is
+    `v*` + a `server` asset, emOS is `emos-v*` + an `init` asset. Folding them
+    together would mean one cache holding whichever kind was asked for last.
+
+    Note the tag namespaces make this safe in both directions — `emos-v0.1`
+    does not `startswith("v")`, so the firmware poll can never select an emOS
+    release, and this one cannot select a firmware release.
+    """
+    repo = db.get_config("github_repo", "wilbowes/EchoMuse")
+    url = GITHUB_API_URL.format(repo=repo)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url,
+                headers={"Accept": "application/vnd.github.v3+json"},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    log.warning(f"[api] GitHub API returned {resp.status} for emOS releases")
+                    return None
+                releases = await resp.json()
+    except Exception as e:
+        log.warning(f"[api] Could not poll GitHub for emOS releases: {e}")
+        return None
+
+    for data in releases:
+        if data.get("draft") or data.get("prerelease"):
+            continue
+        tag = data.get("tag_name", "")
+        if not tag.startswith("emos-v"):
+            continue
+        asset = next(
+            (a for a in data.get("assets", []) if a.get("name") == "init"), None)
+        if asset is None:
+            continue
+        return {"version": tag, "url": asset["browser_download_url"],
+                "size": asset.get("size", 0)}
+    return None
+
+
+@auth.require_admin
+async def _get_provision_emos_init(request: web.Request) -> web.Response:
+    """
+    GET /api/provision/emos_init — the emOS init binary from the latest
+    emOS release, so the wizard does not need one chosen by hand.
+
+    Downloaded server-side for the reason `latest_binary` is: the device being
+    provisioned is not registered yet, and the browser cannot reach GitHub
+    under the dashboard's CSP.
+
+    **The init is the ONLY part of an emOS image we can distribute.** A
+    bootable image contains the device's own kernel and device trees, so
+    shipping one would mean redistributing Amazon's code; the image is
+    assembled from the boot partition the user read off their own device.
+
+    Verified before it is served, not after it is flashed. The same two checks
+    the build applies, run here as well, so a release built wrong is refused
+    at the point of download rather than at the point of boot.
+    """
+    release = await _fetch_latest_emos_release()
+    if release is None:
+        return _error(
+            "no_emos_release",
+            "No published emOS release with an 'init' asset was found. Build "
+            "one from emos/ with build.sh and select it by hand, or cut an "
+            "emos-v* tag.", 404)
+
+    binary = await _fetch_binary(release["url"], release["version"])
+    if binary is None:
+        return _error("fetch_failed",
+                      "Could not download the emOS init from GitHub", 502)
+
+    problems = em_emos_build.init_binary_problems(binary)
+    if problems:
+        # A release that is wrong is worth saying so about loudly: it is wrong
+        # for everyone, not just this download.
+        log.error(f"[api] emOS release {release['version']} carries an unusable "
+                  f"init: {'; '.join(problems)}")
+        return _error("bad_release_asset",
+                      f"The init in emOS release {release['version']} is not "
+                      f"usable: {'; '.join(problems)}", 502)
+
+    return web.Response(
+        body=binary,
+        content_type="application/octet-stream",
+        headers={
+            "Content-Disposition": 'attachment; filename="init"',
+            "X-Emos-Version": release["version"],
+        },
+    )
+
+
+@auth.require_admin
+async def _post_provision_emos_image(request: web.Request) -> web.Response:
+    """
+    POST /api/provision/emos_image (multipart: "reference", "init", "version")
+
+    Build an emOS boot image from the reference the wizard just escrowed off
+    the device, and stream it back. Step 5 of the emOS provisioning flow.
+
+    ON THE CONTROLLER RATHER THAN IN THE BROWSER, for the reason the
+    diagnostics route above gives: the packer and its refusals live in
+    em_emos_build, with tests, and a second copy in JavaScript would drift
+    from them without anyone noticing until a device took a bad flash. This
+    function only carries; em_emos_build decides.
+
+    NOTHING IS STORED. The reference is the user's own boot partition and the
+    only copy that matters is the one the wizard escrowed to them — keeping a
+    second here would mean holding a device image we have no reason to hold,
+    and it is also the file we take care never to redistribute. Same reason
+    the built image is streamed rather than cached.
+
+    The init binary rides in the request rather than being resolved here. That
+    is the first-cut shape and it is a known gap: the natural home is a
+    release asset beside `server`, so the wizard can offer "latest from
+    GitHub" the way it already does for the firmware.
+    """
+    try:
+        reader = await request.multipart()
+        parts = {}
+        while True:
+            field = await reader.next()
+            if field is None:
+                break
+            if field.name in ("reference", "init"):
+                parts[field.name] = await field.read()
+            elif field.name == "version":
+                parts["version"] = (await field.read()).decode(errors="replace")[:64]
+
+        reference = parts.get("reference")
+        init_bin = parts.get("init")
+        if not reference:
+            return _error("invalid_upload",
+                          "Expected multipart field 'reference' — the boot "
+                          "image read off the device", 400)
+        if not init_bin:
+            return _error("invalid_upload",
+                          "Expected multipart field 'init' — the emOS init "
+                          "binary", 400)
+
+        version = parts.get("version") or "0.1"
+        loop = asyncio.get_event_loop()
+        # Off the event loop: gzipping a ramdisk and hashing two images blocks
+        # it for long enough to matter, and devices are streaming audio
+        # through this process while somebody provisions a new one.
+        info = await loop.run_in_executor(
+            None, em_emos_build.build_emos_image, reference, init_bin, version)
+
+        log.info(f"[api] emOS image built: {info['size']:,} bytes "
+                 f"md5={info['md5'][:8]}… from a {info['reference_size']:,} "
+                 f"byte reference (md5 {info['reference_md5'][:8]}…)")
+
+        image = info.pop("image")
+        return web.Response(
+            body=image,
+            content_type="application/octet-stream",
+            headers={
+                "Content-Disposition": 'attachment; filename="emos-boot.img"',
+                # The wizard compares this against its own hash of what it
+                # received, and again against what it reads back off the
+                # device after the flash. Both comparisons are the point of
+                # the step.
+                "X-Image-MD5": info["md5"],
+                "X-Image-SHA256": info["sha256"],
+                "X-Reference-MD5": info["reference_md5"],
+                "X-Build-Info": json.dumps(info),
+            },
+        )
+    except em_emos_build.BuildError as e:
+        # Every one of these is a refusal with something a person can act on,
+        # and each is a state we would rather meet here than after a partition
+        # write. 422 rather than 400: the request was well formed, the image
+        # is what could not be accepted.
+        log.warning(f"[api] emOS build refused: {e}")
+        return _error("build_refused", str(e), 422)
+    except web.HTTPException:
+        raise
+    except Exception as e:
+        log.error(f"[api] emOS build error: {e}")
+        return _error("build_failed", str(e), 500)
+
+
 @auth.require_admin
 async def _get_support_bundle(request: web.Request) -> web.Response:
     """
@@ -4615,6 +5233,11 @@ def _merge_device(row) -> dict:
     """
     device_id = row["device_id"]
     live = _devices.get(device_id)
+    # Lazy, for the reason every other em_esphome call site here is lazy:
+    # em_esphome imports em_api at module level. After the first call this
+    # is a sys.modules lookup, which is what makes it affordable on a path
+    # that runs per device per dashboard poll.
+    import em_esphome
 
     return {
         # Persistent
@@ -4652,6 +5275,12 @@ def _merge_device(row) -> dict:
         # Controller-side BT proxy state — non-None only while the device's
         # bleProxyEnabled config has a proxy server instantiated.
         "bleProxy":         em_ble_proxy.get_status(device_id),
+        # Controller-side voice satellite state: whether Home Assistant is
+        # actually on the other end of this device's ESPHome port. Without
+        # it a device HA has never connected to renders as idle, which is
+        # the same thing a working device renders as (#349) — the wake word
+        # fires, the ring lights, and the turn dies in milliseconds.
+        "voiceSatellite":   em_esphome.get_status(device_id),
         # Device-link security: token issued (persistent) + whether the
         # current control connection came in over the TLS listener (live).
         "linkTokenIssued":  bool(row["token"]) if "token" in row.keys() else False,
@@ -4670,6 +5299,24 @@ def _merge_device(row) -> dict:
         # device that never answers.
         "owwTriggerCapable": getattr(live, "oww_trigger_capable", False) if live else False,
         "audioMixCapable": getattr(live, "audio_mix_capable", False) if live else False,
+        # Gates the AEC delay slider, which only means anything on the
+        # software tap. Paired with aecRef because the capability says the
+        # firmware KNOWS how to use a hardware reference and aecRef says
+        # whether this board turned out to have one — a device can be
+        # capable and still be running on the software tap.
+        "aecHwRefCapable": getattr(live, "aec_hw_ref_capable", False) if live else False,
+        "aecRef":          getattr(live, "aec_ref", None) if live else None,
+        # Which userspace the device booted: "emos", "fireos", or null from
+        # firmware that cannot say. Null is not FireOS — the wizard, the
+        # support bundle and the payload reconcile all need to tell "Android"
+        # apart from "not asked".
+        "baseOs":          getattr(live, "base_os", None) if live else None,
+        # The DERIVED answer, not a second copy of the rule. em_platform owns
+        # "which payloads mean anything here"; a dashboard that re-derived it
+        # from baseOs would be a mirror free to disagree with the server that
+        # actually refuses. Defaults True with no device, so a disconnected
+        # device shows the control as it always did.
+        "androidUserspace": getattr(live, "android_userspace", True) if live else True,
         # Gates the tap-as-event toggle — see em_button.decide.
         "buttonHoldCapable": getattr(live, "button_hold_capable", False) if live else False,
         # Whether the device found its ambient light sensor. Reported so the
@@ -4683,6 +5330,10 @@ def _merge_device(row) -> dict:
         "wifi":             wifi_state(device_id),
         # Update state
         "update_in_progress": device_id in _updates_in_progress,
+        # Waiting on the global OTA lock — started, but nothing has been sent
+        # to this device yet. Distinct from update_in_progress so the panel
+        # does not report a transfer that has not begun.
+        "update_queued":      device_id in _updates_queued,
         # Last OTA/rollback failure (None when the last attempt succeeded or
         # none was made) — lets the dashboard show a terminal ✗ state instead
         # of "updating…" forever when an update aborts.

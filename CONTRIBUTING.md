@@ -16,6 +16,70 @@ Hardware findings are the next most valuable, because most of us have one kind
 of Echo in one kind of room. If something behaves differently on your unit,
 that is worth an issue on its own.
 
+## Where to help
+
+Every open issue carries three labels, and between them they should tell you
+whether to start writing code.
+
+**State — read this one first.**
+
+| | |
+|---|---|
+| `ready` | Specified well enough that a PR can be reviewed against the issue text. Start here. |
+| `needs-design` | The problem is agreed, the solution is not. Comment with an approach before writing code. |
+| `needs-decision` | Waiting on a call about direction. A PR cannot settle it. |
+| `blocked` | Waiting on another issue, named in the body. |
+| `needs-reporter` | Waiting on someone outside the project. |
+| `needs-triage` | Just arrived; a maintainer has not read it properly yet. |
+
+**Area** — `area:device` (Go, on the Echo), `area:controller` (Python server),
+`area:dashboard`, `area:provisioning` (rooting, wizard, OTA), `area:ha`
+(add-on, ESPHome, entities), `area:forge` (wake word trainer), `area:docs`.
+
+**Signal** — `good first issue` is small and self-contained. `help wanted` is
+something we would rather not do ourselves. `hardware:welcome` needs a rooted
+Echo to do at all, and those are the ones we most want help with, because most
+of us have one kind of Echo in one kind of room. `needs-hardware` is the
+opposite: it needs measurement on our own bench before anyone can act.
+
+**Before you start, check nobody else has.** `claimed` means there is an open
+PR — GitHub only lets us assign collaborators, so that label is how an outside
+contributor's work in progress is marked. Say so on the issue when you pick
+one up and we will add it.
+
+`ready` is an invitation, and we mean it. If an issue is labelled `ready` and
+a PR arrives that implements it, that PR was not premature — if we got the
+label wrong, that is ours to fix, not yours.
+
+### Quick links
+
+Saved searches for the common questions. Counts move; the filters do not.
+
+- [Ready to pick up](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aready%20-label%3Aclaimed%20-label%3Aneeds-hardware) — Specified, unclaimed, nothing external blocking it.
+- [Good first issue](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3A%22good%20first%20issue%22%20-label%3Aclaimed) — Small and self-contained.
+- [Needs a device](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Ahardware%3Awelcome) — Can only be done with a rooted Echo — the ones we most want help with.
+- [Open bugs](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Abug%20label%3Aready) — Confirmed and specified.
+- [Design not settled](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aneeds-design) — Comment before writing code.
+- [Someone is on it](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aclaimed) — Check before starting.
+
+By area: [device](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Adevice) · [controller](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Acontroller) · [dashboard](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Adashboard) · [provisioning](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Aprovisioning) · [ha](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Aha) · [forge](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Aforge) · [docs](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Adocs)
+
+By release: [2.21.0](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20milestone%3A2.21.0) · [2.22.0](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20milestone%3A2.22.0) · [3.0.0](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20milestone%3A3.0.0)
+
+## Milestones and releases
+
+Issues are grouped by the release they are meant to land in, and a milestone
+is a theme rather than a bucket:
+
+- **2.21.0** — controller GA, in early access now. Closed to new work.
+- **2.22.0** — link resilience. The audio path survives a bad link (#140).
+- **3.0.0** — Sendspin multi-room, and the output chain moves to the device
+  (#272).
+
+An issue with no milestone is not scheduled, which is not the same as
+unwanted. A `ready` issue outside a milestone is still a fine thing to pick
+up.
+
 ## Before you open a PR
 
 ```bash

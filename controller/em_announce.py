@@ -47,6 +47,7 @@ async def run(
     on_finished: Callable[[bool], None],
     log_name: str = "",
     timeout: float = ANNOUNCE_TIMEOUT_S,
+    preannounce_media_id: str = "",
 ) -> bool:
     """
     Fetch the announcement audio, play it, then report completion exactly once.
@@ -58,6 +59,17 @@ async def run(
     that raise. It is a plain callable rather than a coroutine because the
     caller's job here is a socket write it may also decline to make (a closed
     transport), and awaiting a decision not to send is noise.
+
+    `preannounce_media_id` is the attention chime HA plays BEFORE the message,
+    on `VoiceAssistantAnnounceRequest` field 3. It matters most on
+    `start_conversation`, where an unprompted "the garage door is open" arrives
+    with no warning at all — nobody asked a question, so there is nothing else
+    to tell the listener that the device is about to talk and then listen.
+
+    **A preannounce failure is not an announcement failure.** The chime is a
+    cue for the message; a missing cue is worth a log line, not a swallowed
+    announcement, and `ok` reports the MESSAGE. Both share one timeout budget
+    so a wedged chime cannot extend the whole thing past it.
     """
     ok = False
     try:
@@ -65,7 +77,9 @@ async def run(
             log.warning(f"[{log_name}] AnnounceRequest with no media_id")
         else:
             ok = await asyncio.wait_for(
-                play_media(media_id, fetch, play, log_name), timeout)
+                _preannounce_then_play(
+                    media_id, preannounce_media_id, fetch, play, log_name),
+                timeout)
     except (asyncio.TimeoutError, TimeoutError):
         log.error(f"[{log_name}] Announce timed out after {timeout}s")
     except Exception as e:
@@ -73,6 +87,22 @@ async def run(
     finally:
         on_finished(ok)
     return ok
+
+
+async def _preannounce_then_play(
+    media_id: str,
+    preannounce_media_id: str,
+    fetch: Callable[[str], Awaitable[bytes]],
+    play: Optional[Callable[[bytes], Awaitable[object]]],
+    log_name: str = "",
+) -> bool:
+    """The chime, then the message. Returns whether the MESSAGE played."""
+    if preannounce_media_id:
+        try:
+            await play_media(preannounce_media_id, fetch, play, log_name)
+        except Exception as e:
+            log.warning(f"[{log_name}] Preannounce chime failed: {e}")
+    return await play_media(media_id, fetch, play, log_name)
 
 
 async def play_media(

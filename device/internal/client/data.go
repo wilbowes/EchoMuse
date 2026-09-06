@@ -32,7 +32,7 @@ const (
 	// device announcing "audio_mix".
 	frameTypeMusic    = byte(0x04)
 	frameTypeMusicEOS = byte(0x05)
-	frameTypeVADEnd  = byte(0x04)
+	frameTypeVADEnd   = byte(0x04)
 	// frameTypeNoSpeechTimeout signals that the turn ended because no speech
 	// was ever detected — distinct from frameTypeVADEnd (speech detected,
 	// then ended). Sent when noSpeechTimeout elapses with active==false the
@@ -43,6 +43,21 @@ const (
 	// why the controller had no way to short-circuit the former without
 	// risking mishandling the latter.
 	frameTypeNoSpeechTimeout = byte(0x05)
+	// frameTypeBleAdverts carries a batch of scanned BLE advertisements to
+	// the controller, as the same JSON body the control plane used to take
+	// (#404). It is here rather than there because the control WebSocket is
+	// where liveness is measured: SendBleAdverts wrote through connMu on the
+	// control connection, the same mutex and TCP stream as the RTT echo and
+	// the keepalive pong, so bulk telemetry head-of-line-blocked the channel
+	// we judge a device's health on. Measured by crossover on 2026-09-01 —
+	// the proxy moved between two Dots on one desk and took the excursions
+	// with it, 2.64/min against 2.49/min on different hardware.
+	//
+	// Only sent when the controller announced `ble_adverts_data` on the ack.
+	// An older controller ignores unknown frame types, so sending it
+	// unnegotiated would drop every advertisement in silence — a worse fault
+	// than the one being fixed.
+	frameTypeBleAdverts = byte(0x06)
 )
 
 // ─── WebSocket keepalive (data + control) ─────────────────────────────────────
@@ -148,6 +163,28 @@ type DataClient struct {
 	// defer in connect for the zombie-stream incident this guards against).
 	micConn *websocket.Conn
 
+	// micWanted is the controller's INTENT, which outlives any one data
+	// connection: true from mic_start until mic_stop, across however many
+	// drops happen in between. micActive above is the stream's STATE, and
+	// the two coming apart is the whole point.
+	//
+	// Without this the device goes deaf on any data-plane drop that the
+	// control plane survives. StartMic has exactly two callers — the
+	// controller's mic_start and unmute — so nothing restarted a stream
+	// that died with its socket, and the controller had no reconnect event
+	// to fire a fresh mic_start from because ITS connection never dropped.
+	// Measured twice on Test Echo 1: 34s deaf on 2026-08-29, 41s+ on
+	// 2026-08-30, both from a data-plane reset alone. The controller's
+	// zombie ladder does eventually repair it, which is why this reads as a
+	// slow recovery rather than a dead device — but the device knows it
+	// reconnected and can fix it in zero.
+	//
+	// Mute needs no special case here: muting calls StopMic, which clears
+	// this, and a mic_start arriving while muted is refused in cmd/server.go
+	// before it ever reaches StartMic.
+	micWanted     bool
+	micWantedLock bool
+
 	// beamReq carries a pending beam lock/unlock request from the control
 	// plane to the mic streaming goroutine. Beamformer methods are not safe
 	// to call from other goroutines (same reason beam.Unlock is deferred
@@ -175,6 +212,29 @@ type DataClient struct {
 	shadowMu     sync.Mutex
 	shadowScorer *shadow.Scorer
 
+	// Hardware echo reference detection (#385). Ch8 of the mic capture is a
+	// loopback of the device's own playback on biscuit, arriving in the same
+	// TDM frame as the mic samples, which makes it a far-end reference that
+	// needs no alignment. Touched only from the mic goroutine.
+	//
+	// DETECTED, NEVER ASSUMED, and the discriminator is deliberately narrow:
+	// a reference channel is BIT-EXACT ZERO when nothing is playing and
+	// carries audio when something is, and only both facts together confirm
+	// it. "Has energy" alone would promote a genuine microphone on a board
+	// that wires ch8 differently, and cancelling the near-end against
+	// another mic is far worse than not cancelling at all. A board that
+	// fails either test simply keeps the software tap.
+	hwRefSeenSilent bool
+	hwRefSeenAudio  bool
+	hwRefOn         bool
+
+	// hwRefMode is the operator's override, config.AecRef{Auto,HW,SW}. It
+	// is the ONE field here written from another goroutine — the control
+	// plane, on every config push — so it is atomic while the rest stay
+	// plain: they are the detector's own state and never leave the mic
+	// goroutine.
+	hwRefMode atomic.Int32
+
 	// pipeMu serialises access to beam and proc, which hold unsynchronised
 	// per-period state (reused analysis buffers, EWMA smoothers, AGC gain).
 	// Both are normally touched by a single streamMic goroutine, but a
@@ -192,7 +252,7 @@ type DataClient struct {
 // runs its near-end side on the mono mic stream. Disabled cancellers pass
 // audio through untouched.
 func NewDataClient(deviceID string, microphone mic.Subscribable, spk speaker.Speaker, canceller *aec.Canceller) *DataClient {
-	return &DataClient{
+	d := &DataClient{
 		deviceID: deviceID,
 		mic:      microphone,
 		spk:      spk,
@@ -201,6 +261,101 @@ func NewDataClient(deviceID string, microphone mic.Subscribable, spk speaker.Spe
 		proc:     processor.New(),
 		aec:      canceller,
 	}
+	// Seeded from the env default so a device that never reaches a
+	// controller still honours EM_AEC_HW_REF; the first config push
+	// supersedes it (SetAecRefSource).
+	d.hwRefMode.Store(aecRefModeOf(config.Get().Snapshot().AecRefSource))
+	return d
+}
+
+// Far-end reference override, as an int so it can be atomic. Mirrors
+// config.AecRef{Auto,HW,SW} — converted once on the control goroutine rather
+// than string-compared per period on the mic goroutine.
+const (
+	hwRefAuto int32 = iota
+	hwRefForceHW
+	hwRefForceSW
+)
+
+func aecRefModeOf(v string) int32 {
+	switch v {
+	case config.AecRefHW:
+		return hwRefForceHW
+	case config.AecRefSW:
+		return hwRefForceSW
+	default:
+		return hwRefAuto
+	}
+}
+
+// SetAecRefSource applies the operator's far-end reference override. Called
+// from the control goroutine on every config push; a no-op when unchanged.
+//
+// The SWITCH itself is left to the mic goroutine (noteEchoRef), which owns
+// the canceller's source. Flipping it here would race a period already
+// mid-flight: ProcessWithRef checks the canceller's own hwRef flag, and
+// changing that between the caller's extraction and the call turns a
+// perfectly good reference into a "missing or mismatched" pass-through.
+func (d *DataClient) SetAecRefSource(v string) {
+	mode := aecRefModeOf(v)
+	if d.hwRefMode.Swap(mode) == mode {
+		return
+	}
+	log.Printf("[aec] far-end reference source: %s", v)
+}
+
+// noteEchoRef feeds one period of the candidate reference channel to the
+// detector and reports whether the hardware path should be used for it.
+//
+// Confirmation is one-way. Once ch8 has been seen both bit-exact silent and
+// carrying audio, it is a reference and stays one: the alternative is a
+// device that flips sources mid-stream every time the room goes quiet, which
+// throws away a converged filter for nothing.
+func (d *DataClient) noteEchoRef(ref []byte) bool {
+	switch d.hwRefMode.Load() {
+	case hwRefForceSW:
+		// Reversible, unlike the auto latch below: this is somebody running
+		// an A/B, and a pin that could not be undone without a reboot would
+		// make the comparison a one-way trip.
+		if d.hwRefOn {
+			d.hwRefOn = false
+			d.aec.SetHardwareRef(false)
+		}
+		return false
+	case hwRefForceHW:
+		if !d.hwRefOn {
+			d.hwRefOn = true
+			d.aec.SetHardwareRef(true)
+		}
+		return true
+	}
+	if d.hwRefOn {
+		return true
+	}
+	if ref == nil {
+		return false
+	}
+	silent := true
+	for _, b := range ref {
+		if b != 0 {
+			silent = false
+			break
+		}
+	}
+	if silent {
+		d.hwRefSeenSilent = true
+	} else {
+		d.hwRefSeenAudio = true
+	}
+	if d.hwRefSeenSilent && d.hwRefSeenAudio {
+		d.hwRefOn = true
+		d.aec.SetHardwareRef(true)
+		log.Printf("[aec] ch8 confirmed as the playback loopback " +
+			"(bit-exact silent when idle, audio when playing) — " +
+			"using the frame-aligned hardware reference")
+		return true
+	}
+	return false
 }
 
 // OnDirectionChanged registers a callback invoked when the estimated dominant
@@ -262,9 +417,84 @@ func (d *DataClient) RequestBeamUnlock() {
 	atomic.StoreInt32(&d.beamReq, beamReqUnlock)
 }
 
+// SendBleAdverts writes one batch of scanned advertisements to the data plane
+// as a frameTypeBleAdverts frame. Returns false when the batch was not sent,
+// which the caller uses to decide nothing further — adverts are ephemeral and
+// there is no retry worth building for them.
+//
+// Two refusals, both deliberate:
+//
+//   - No connection. The batch is DROPPED, never failed back to the control
+//     plane. Falling back would put bulk telemetry onto the liveness channel
+//     exactly when the link is already struggling, which is the fault this
+//     moved to avoid. The device's own scanner will not go quiet for longer
+//     than emitGlobalMaxSilence (30s) and Home Assistant retires a scanner
+//     after 90s of silence, against a data reconnect measured in seconds.
+//   - A BOUNDED TURN is streaming (lockMic). A turn's audio is worth more
+//     than a beacon refresh Home Assistant tolerates for 195 seconds, and a
+//     turn lasts seconds, so nothing downstream notices.
+//
+// The second one must test lockMic and NOT micActive, and the difference is
+// the whole proxy. The always-on wake stream is exactly that — always on, for
+// every device scoring its wake word controller-side — so `micActive` is true
+// essentially permanently and gating on it drops every batch forever, with no
+// error at either end. That is the silent failure the ack negotiation exists
+// to prevent, one branch below it.
+//
+// It is a narrow rule on purpose. An advert batch is a few hundred bytes
+// against ~32KB/s of mic audio, so the yield buys little; the control plane
+// suffered because adverts contended for `connMu` with the keepalive pong and
+// because RTT is MEASURED on that stream, and neither is true here. This is
+// admission control, not a scheduler: within one TCP stream a frame already
+// written cannot be preempted, so the only real choice is what to write and
+// when.
+// advertsYieldToTurn reports whether a BOUNDED turn is streaming, in which
+// case adverts wait. Split out so the decision can be tested without a
+// socket — and because testing a copy of it in the test file would pass
+// while this one said something else.
+func (d *DataClient) advertsYieldToTurn() bool {
+	d.micMu.Lock()
+	defer d.micMu.Unlock()
+	// micActive alone is NOT the question: the always-on wake stream keeps it
+	// true permanently on any device scoring controller-side.
+	return d.micActive && d.micWantedLock
+}
+
+func (d *DataClient) SendBleAdverts(payload []byte) bool {
+	if d.advertsYieldToTurn() {
+		return false
+	}
+
+	d.connMu.Lock()
+	defer d.connMu.Unlock()
+	if d.conn == nil {
+		return false
+	}
+	frame := make([]byte, 1+len(payload))
+	frame[0] = frameTypeBleAdverts
+	copy(frame[1:], payload)
+	d.conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
+	if err := d.conn.WriteMessage(websocket.BinaryMessage, frame); err != nil {
+		log.Printf("[data] ble adverts: send error: %v", err)
+		// Same reasoning as streamMic's sendFrame: a write error leaves the
+		// gorilla conn permanently broken, so close it and let Run() redial
+		// rather than waiting out the read deadline.
+		d.conn.Close()
+		return false
+	}
+	return true
+}
+
 func (d *DataClient) StartMic(lockMic bool) {
 	d.micMu.Lock()
 	defer d.micMu.Unlock()
+	// Recorded BEFORE either early return, so an instruction that cannot be
+	// carried out right now is carried out when it can be. That covers the
+	// boot race as well as reconnects: the controller's first mic_start can
+	// beat the data connection into existence, which logs "no connection
+	// yet" and then waits for the controller to ask again — 39 seconds on
+	// 2026-08-30's boot.
+	d.micWanted, d.micWantedLock = true, lockMic
 	if d.micActive {
 		log.Println("[data] StartMic: already active — ignoring")
 		return
@@ -273,7 +503,7 @@ func (d *DataClient) StartMic(lockMic bool) {
 	conn := d.conn
 	d.connMu.Unlock()
 	if conn == nil {
-		log.Println("[data] StartMic: no connection yet")
+		log.Println("[data] StartMic: no connection yet — will start on connect")
 		return
 	}
 	d.micActive = true
@@ -283,9 +513,35 @@ func (d *DataClient) StartMic(lockMic bool) {
 	log.Println("[data] Mic streaming started")
 }
 
+// resumeMic restores the stream on a new data connection when the
+// controller's standing instruction is to stream.
+//
+// Reads the intent under micMu and releases it before calling StartMic,
+// which takes the same lock — the alternative is a StartMic variant that
+// assumes the lock is held, and two entry points into the stream-start path
+// is how the ownership guards around micConn got subtle in the first place.
+// The window between the two acquisitions is harmless: a StopMic landing in
+// it clears micWanted and StartMic's own micActive check makes a double
+// start a no-op.
+func (d *DataClient) resumeMic() {
+	d.micMu.Lock()
+	want, lockMic, active := d.micWanted, d.micWantedLock, d.micActive
+	d.micMu.Unlock()
+	if !want || active {
+		return
+	}
+	log.Println("[data] restoring mic stream on the new connection")
+	d.StartMic(lockMic)
+}
+
 func (d *DataClient) StopMic() {
 	d.micMu.Lock()
 	defer d.micMu.Unlock()
+	// Cleared even when no stream is running, and that is the point: a
+	// mic_stop (or a mute) arriving while the data plane is down must
+	// cancel the intent, or the next connect would restore a stream the
+	// controller has already asked to end.
+	d.micWanted = false
 	if !d.micActive {
 		return
 	}
@@ -385,6 +641,15 @@ func (d *DataClient) connect(ctx context.Context, baseURL string) error {
 		}
 		d.connMu.Unlock()
 	}()
+
+	// Restore the stream the previous connection took with it. Placed after
+	// the publish above because StartMic reads d.conn, and after the defer
+	// so a connection that dies immediately still cleans up.
+	//
+	// Deliberately NOT conditional on this being a reconnect: on a first
+	// connect micWanted is false unless a mic_start already arrived and
+	// could not be served, which is exactly the case worth serving.
+	d.resumeMic()
 
 	// Keepalive — see the wsPingInterval block comment. Deadline refreshes
 	// all happen on this (the read) goroutine: the pong handler runs inside
@@ -704,12 +969,30 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			mono, angle := d.beam.Process(raw, beamAngle, gainLin)
 			clipped := d.beam.ClippedSamples()
 
-			// AEC — subtract the speaker's own output (reference tapped at
-			// the ALSA write, aligned by aecDelayMs) before anything
+			// AEC — subtract the speaker's own output before anything
 			// measures or gates the signal. No-op while aecEnabled=false.
 			// (Has its own mutex — inside pipeMu only for lock ordering
 			// simplicity; aec.mu is a leaf lock, no inversion possible.)
-			mono = d.aec.Process(mono)
+			//
+			// Two far-end sources (#385). The hardware reference is ch8 of
+			// THIS SAME PERIOD — the device's own playback, looped back in
+			// the same TDM frame — so near and far end are aligned by
+			// construction and aecDelayMs, the ring and the occupancy
+			// governor are all bypassed. The software tap at the speaker
+			// ALSA write remains the fallback for any board where ch8 does
+			// not prove itself; see noteEchoRef for what counts as proof.
+			// Only extract when cancellation is actually armed: the AEC
+			// defaults to off, and this is an allocation and a copy per
+			// period on the deadline-bound mic goroutine.
+			var echoRef []byte
+			if d.aec.Enabled() {
+				echoRef = d.beam.EchoRef(raw)
+			}
+			if echoRef != nil && d.noteEchoRef(echoRef) {
+				mono = d.aec.ProcessWithRef(mono, echoRef)
+			} else {
+				mono = d.aec.Process(mono)
+			}
 
 			// ── Processing pipeline ──────────────────────────────────────
 			// VAD on raw beamformed output — pre-NS/AGC so threshold is

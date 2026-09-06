@@ -12,7 +12,12 @@ audio queue and cancels the TTS streaming task, then overwrites `_pipeline_task`
 *without cancelling the previous one* — so starting a second run orphans the
 first, which keeps emitting events onto the same socket.
 
-Barge-in is the only place we overlap two runs. Measured on 2026-08-17: five
+Barge-in is the obvious place two runs overlap, and not the only one: any
+turn that stops waiting while HA is still working leaves a live run behind
+it — a `timeout` after 30s, or a `no_speech` that never sends the end
+sentinel. Those are caught at turn teardown rather than per-path, because
+fixing the path that noticed is how `no_speech` sat uncovered while
+`timeout` was fixed beside it (#333). Measured on 2026-08-17: five
 barge-ins, five interrupting turns dead in 4-17ms with zero audio captured. The
 aborted run's RUN_END arrived ~4ms after the new turn started, the new turn had
 not yet seen a RUN_START of its own, and the "HA ended a run it never started"

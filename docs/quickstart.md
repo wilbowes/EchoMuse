@@ -124,7 +124,13 @@ That's it. The controller is now running two things:
 Assistant user — it has authenticated you, so a second password would be a
 lock on a door that is already locked. The first person to open the panel
 becomes the EchoMuse admin; anyone after that gets read-only access until an
-admin promotes them.
+admin promotes them under **Settings → Users**.
+
+Roles are EchoMuse's own and are **not** copied from Home Assistant — being an
+HA administrator does not make you an EchoMuse one. Read-only is a real
+restriction rather than a formality: recordings and the transcript text of a
+turn are admin-only, because reaching this dashboard is not the same as being
+trusted with speech from inside the house.
 
 **With Docker**, open `http://<SERVER_IP>:8768`. On a fresh install you'll
 see the Echo graphic with a **pulsing amber ring** and a setup form.

@@ -108,17 +108,35 @@ recorded.
 ## Device/controller compatibility
 
 The two halves version independently, so any pairing can occur in the field. Two rules, both guarded by `tests/test_capabilities.py`:
-- **Negotiate by capability, not version.** The device announces what it implements in its register message (`internal/client/control.go`: `mic`, `speaker`, `leds`, `led_anim`, `buttons`, `oww_shadow`, `button_hold`, and `ambient_light` **only when the sensor is actually readable**); the controller reads `Device.capabilities` via properties like `led_anim_capable` / `oww_shadow_capable`. Never compare version strings — that puts release history in the controller and misjudges dev builds. A UI control whose feature the device lacks is shown **disabled with the reason**, never as a control that silently does nothing.
+- **Negotiate by capability, not version.** The device announces what it implements in its register message (`internal/client/control.go`, `capabilities()`: `mic`, `speaker`, `leds`, `led_anim`, `buttons`, `oww_shadow`, `oww_trigger`, `button_hold`, `audio_mix`, `aec_hw_ref`, and `ambient_light` **only when the sensor is actually readable**); the controller reads `Device.capabilities` via properties like `led_anim_capable` / `oww_shadow_capable`. Never compare version strings — that puts release history in the controller and misjudges dev builds. A UI control whose feature the device lacks is shown **disabled with the reason**, never as a control that silently does nothing.
+  **`oww_shadow` and `oww_trigger` are two capabilities and must stay two.** Shadow shipped first, so there is firmware in the field that scores and reports but has no code to act — reading "can score" as "can trigger" stands the controller's own detection down and waits for a trigger that never comes, which presents as a device that scores perfectly and never answers. Same reason `audio_mix` is announced rather than assumed: without it the controller must keep the pause/resume path, because a device that cannot mix simply never plays the `0x04` stream.
+  **`aec_hw_ref` is the shape to copy when a capability cannot be proven at registration.** It says the firmware knows how to take the AEC far-end reference from a playback loopback in the mic capture; whether the board HAS one is answered separately by `aecRef` (`"hw"`/`"sw"`/`"off"`) on the stats report, because confirming a loopback needs the speaker to have played and nothing has at register time. Same "could it" vs "is it" split as `oww_shadow` against `shadow.active`. Gate UI on the runtime value, not the capability: the AEC delay control is meaningless on a frame-aligned reference but essential to a device that fell back to the software tap, and both announce the capability.
+  **Negotiation runs BOTH ways, and the controller's half is newer.** The `ack` carries `features` — the controller's own capability list, read exactly as the device's is: a feature that is absent is one the controller cannot do. It exists because `ble_adverts` moved from the control plane to `0x06` on the data plane (#404), and a device sending that frame to a controller which cannot read it loses every advertisement in **silence**, since unknown frame types are ignored. That is the general hazard whenever a message MOVES rather than being added: the old path stops being used and the new one is discarded, and nothing at either end reports it. Adding a message is safe unnegotiated; moving one never is.
+- **A static property of the boot rides the REGISTER message, not the stats tick, and is PERSISTED as well as held live.** `base_os` (`"emos"`/`"fireos"`, absent on older firmware) says which userspace the device booted, and the controller gates Android-only payloads on it — the debloat script and the pm-hide list mean nothing without a package manager. It shipped on the stats report for exactly one commit and that was the bug: its only consumer is `reconcile_on_connect`, which runs the instant a device connects, ~30s before the first stats tick. So it read as unknown precisely when it was asked, the Magisk `service.d` script was pushed at an emOS device, and each attempt sat out the full 120s transfer timeout — 240s across two attempts, measured on EFF 2026-09-04, presenting as "the OTA timed out" when the OTA was healthy. Absence resolves to Android, so the existing fleet is untouched. The rule generalises: ask when the consumer needs the answer, not when it is convenient to send.
+  **It is stored too (schema v21), because there are two different questions.** The live value answers "what is THIS device", which is all payload gating ever needs, since it only asks about a device it is currently talking to. "What is the FLEET" — asked by any control that is meaningful on only one userspace, such as the emOS console password — is a question about devices that are mostly offline, and answering it from live connections alone disables a setting exactly when the one relevant device happens to be off, and flickers as devices come and go. **The same field then takes OPPOSITE defaults in its two readers**, and that is deliberate rather than an inconsistency: absence must resolve to Android for payload gating, to keep the existing fleet's behaviour; and absence must NOT disable a control, because a control disabled on the strength of not knowing is worse than one that is merely useless on this fleet.
+- **The controller tells the device the time**, as `time_ms` on the `ack`. An Echo has no RTC that survives a power cut and boots reading 2010; under emOS nothing corrects it, because bionic resolves through Android's property service so no bionic-linked binary there has DNS for an NTP pool. Against running NTP here — a listening socket, a second way for the device to find us, and a daemon to supervise — for accuracy nothing reads: every measurement in this project is monotonic by design and the device never sends a timestamp. Stepped only past 30s, after the connection exists, so the TLS build-time clamp is untouched.
 - **Degrade to old behaviour, never to a wrong answer.** Unknown JSON fields and message types are ignored both ways. Where a new field records a measurement, absence stores as **NULL, not 0** — old firmware reporting no `playback_stats` must not read as "zero underruns", and a device that cannot score wake words locally must not read as "scored and missed" (hence `turns.dev_shadow` alongside `dev_wake_score`).
 
 ## Versioning / releases
 
-Device firmware and controller are versioned independently from the same repo:
+Device firmware, controller and emOS are versioned independently from the same repo:
 
 - **Device**: plain `v*` tags (e.g. `v2.7.6`) → `release.yml` → GitHub Release with the `server` binary asset. The tag is embedded in the binary and compared against `firmware_ver` by OTA — don't change this scheme.
+- **emOS**: `emos-v*` tags → `emos-release.yml` → GitHub Release with an **`init`** asset (aarch64, static, built with the pinned compiler image; the release asserts both properties and runs `ringsim --check` and `pwcheck` against the source it is publishing). **Only the init is published, and it cannot be otherwise** — a bootable image carries the device's own kernel and DTBs, so shipping one would redistribute Amazon's code; the image is assembled from the boot partition each user reads off their own device. The namespace is load-bearing twice: `emos/build.sh` stamps `/etc/os-release` from `git describe --match 'emos-v*'` and without it stamps whatever tag is nearest (a controller release number, which is worse than "unknown" because it looks plausible), and it keeps emOS out of the firmware OTA's way, since `_fetch_latest_release` selects a tag starting `v` with a `server` asset and `emos-v0.1` matches neither test. `_fetch_latest_emos_release` is the mirror image and is deliberately a separate function rather than a parameter — the two select on opposite things and share no cache, so folding them together would mean one cache holding whichever kind was asked for last. `git tag -a --cleanup=verbatim`, for the reason below.
 - **Controller**: `controller-v*` tags (e.g. `controller-v2.8.0`) → `controller-release.yml` → Docker image pushed to `ghcr.io/wilbowes/echomuse-controller` (`X.Y.Z` + `latest`, CPU-only, **multi-arch: linux/amd64 + linux/arm64** — it said amd64 here until 2026-08-13, long after arm64 shipped). **No GitHub Release is created** — the OTA system's release polling (`em_api._fetch_latest_release`) filters for `v*` tags with a `server` asset, but controller releases stay out of the releases list entirely by design. **Tag controller releases with `git tag -a --cleanup=verbatim` too**: with no Release behind them, the annotation is the *only* copy of the notes, and it is what the dashboard's controller-update notice displays (`em_api._fetch_controller_release` reads it via `git/matching-refs` + the tag object). A lightweight controller tag ships an image nobody can read a changelog for. Pick the newest tag by **parsed version, never list order** — the refs API sorts lexically and returns `controller-v2.9.0` *after* `controller-v2.10.0`.
 
   The notice is **advisory only and must stay that way** (`tests/test_deploy.py` enforces GET-only + no mutating call in the banner): the controller is the user's container, updated with their own `docker compose pull`. An in-app update would restart the process serving the page, mid-request, with no way to report the outcome. Note a locally-built image defaults `EM_CONTROLLER_VERSION` to `dev`, which resolves to `unknown` and correctly shows nothing — pass `--build-arg EM_CONTROLLER_VERSION=$(git describe --tags --match 'controller-v*')` for a local build that knows what it is. Version comparison lives in `version.py` (`parse`/`compare`) so it is unit-testable without aiohttp; a build between tags parses **equal** to its tag and is ahead, not behind.
+
+**The release workflow does NOT build — it re-tags the image the main build
+already published for that commit.** `controller-release.yml` looks for
+`:sha-<short>` and fails with "No image published for this commit" if
+`Controller Build (main)` has not finished. So the order is **merge → wait for
+`Controller Build (main)` to go green on the merge commit → then push the
+tag**, and a tag pushed seconds after a merge fails on a race rather than on
+anything being wrong. Hit on 2026-08-28 cutting `2.22.0-ea.4`: the build had
+started 23 seconds earlier and the release checked while it was still pushing.
+The recovery is only `gh run rerun <id>` once the build finishes — the tag,
+the commit and the annotation are all fine and must not be re-cut.
 
 **`--cleanup=verbatim` is not optional if the notes use Markdown headings.**
 `git tag -a` defaults to `--cleanup=strip`, which treats a line beginning with
@@ -140,6 +158,14 @@ The controller's own version is resolved by `controller/version.py` (env `EM_CON
 
 ### Device → Controller protocol
 
+**The full wire contract is `docs/device-controller-interface.md`** (#347,
+@dweng0) — every `/control` message both ways, the `/data` frame codes and
+their direction-namespacing, config-push semantics, link auth, and the exact
+capability list. It is written for someone building a device binary for a NEW
+board against a specification rather than by reading `biscuit`'s source, and
+it was more accurate about our own capability list than this file was. Keep
+the summary below as a summary; put detail there.
+
 Each device opens **three** WebSocket connections to the controller:
 
 | Path | Direction | Purpose |
@@ -158,13 +184,15 @@ Device behaviour (`tlscreds.go`): credentials live at `/data/local/etc/echomuse/
 
 Controller enforcement (`em_linkauth.decide`, called by `_link_auth_ok`): presented-but-wrong token always rejects; stored-token-but-none-presented is allowed (the credential push itself rides the plain shell plane, and rejecting there would deadlock the rollout); a token presented for a device with NOTHING on record is **ignored, not rejected**. Rejecting it made deleting a device a one-way door, since delete takes the token with the row while the device keeps re-reading its credential file, and the refusal covered the shell plane the controller would have fixed it over. It also bought nothing: a connection presenting no token at all is already allowed, so an attacker just omits the header. `REQUIRE_DEVICE_TLS=1` flips the posture to TLS+token mandatory and is unaffected by that: a deleted device is still refused there and needs credentials pushed over USB. Flip it only when every device shows `wss (TLS)` in the dashboard (Status tab "Link" row; `linkTls` in `/api/devices`).
 
+**Deleting a device must also close its control plane, and `_delete_device` does.** Link auth is decided ONCE, at register time, so removing the row does nothing to the socket a connected device is already on: it vanishes from the dashboard and carries on serving turns, holding its ESPHome port and wake-listening, and only comes back as pending when something else drops the link. The tell is `sqlite3.IntegrityError: FOREIGN KEY constraint failed` in `db.log_device` every time the orphan relays a log line — `device_logs` references `devices(device_id)` and the parent is gone — which is how this was found on the live EA controller, 2026-08-27, a device deleted five minutes earlier and still perfectly connected. The bounce goes **after** the row is deleted: the device redials in 5s, and closing first races the redial against the delete.
+
 Credential delivery: the provisioning wizard installs credentials over adb pre-first-contact (`POST /api/provision/tls_credentials` mints the token + pending device row from the serial); already-fleet devices get the dashboard **Secure link** action (`POST /api/devices/{id}/secure_link` — shell-plane file push, then a connection bounce to redial over wss).
 
 ## Device config push
 
 `config.ConfigMessage` JSON fields (camelCase) are sent from controller to device on connect and on per-device config change. Non-zero fields are applied; zero/nil fields are ignored (partial update). Changes take effect immediately — no restart required.
 
-Configurable parameters: `vadThreshold`, `vadSpeechMs`, `vadSilenceMs`, `owwThreshold`, `owwModel`, `owwSpeexNs`, `adcDigitalGain`, `adcMicpga`, `micGainDb`, `startupVolume`, `beamAngle`, `beamformingEnabled`, `aecEnabled`, `aecDelayMs`, `aecTailMs`, `agcEnabled`, `nsAsr`, `bargeInEnabled`, `bargeInThreshold`, `bleProxyEnabled`, `eqBands`, `eqLoudness`, `limiterEnabled`, `limiterThreshold`, `limiterRelease`, `bassGuardEnabled`, `bassGuardDb`, `ledScene`, `ledListenColor`, `ledThinkColor`, `meterAttack`, `meterDecay`, `meterFloor`, `meterGamma`, `meterRef`, `meterCurve`, `wakeArbitrationMs`, `duckDb`, `buttonSingleTapEvent`, `buttonMultiTapMs`, `owwOnDevice` and `saveUtterances` (the last two are controller-consumed for scoping purposes, though `owwOnDevice` IS acted on by the device; `saveUtterances`, `wakeArbitrationMs`, the two `button*` keys and the five output-chain keys — `limiter*` and `bassGuard*` — are ignored by it, because that processing all happens controller-side before the audio reaches the wire).
+Configurable parameters: `consolePassword`, `vadThreshold`, `vadSpeechMs`, `vadSilenceMs`, `owwThreshold`, `owwModel`, `owwSpeexNs`, `adcDigitalGain`, `adcMicpga`, `micGainDb`, `startupVolume`, `beamAngle`, `beamformingEnabled`, `aecEnabled`, `aecDelayMs`, `aecTailMs`, `aecRefSource`, `agcEnabled`, `nsAsr`, `bargeInEnabled`, `bargeInThreshold`, `bleProxyEnabled`, `eqBands`, `eqLoudness`, `limiterEnabled`, `limiterThreshold`, `limiterRelease`, `bassGuardEnabled`, `bassGuardDb`, `ledScene`, `ledListenColor`, `ledThinkColor`, `meterAttack`, `meterDecay`, `meterFloor`, `meterGamma`, `meterRef`, `meterCurve`, `wakeArbitrationMs`, `duckDb`, `buttonSingleTapEvent`, `buttonMultiTapMs`, `owwOnDevice` and `saveUtterances` (`consolePassword` is written to disk for emOS's init rather than acted on — the console must work when the firmware is not running — and its EMPTY value is meaningful, so it rides as a POINTER and the "non-zero means set" rule above does not apply to it; the last two are controller-consumed for scoping purposes, though `owwOnDevice` IS acted on by the device; `saveUtterances`, `wakeArbitrationMs`, the two `button*` keys and the five output-chain keys — `limiter*` and `bassGuard*` — are ignored by it, because that processing all happens controller-side before the audio reaches the wire).
 
 ## Build and test quickref
 
@@ -173,9 +201,19 @@ git submodule update --init          # GoTinyAlsa fork — see device/CLAUDE.md
 cd device && ./compile.sh            # needs the echomuse-compiler image
 cd device && go test ./...
 cd controller && python -m pytest tests/   # needs: pytest numpy scipy pyyaml
+cd emos/init && cc -O2 -o /tmp/ringsim ringsim.c -lm && /tmp/ringsim --check
+cd emos/init && cc -O2 -o /tmp/pwcheck pwcheck.c && /tmp/pwcheck
 ```
 
 Both suites plus `go vet` run in CI on every push/PR
 (`.github/workflows/ci.yml`). Controller tests deliberately cover the
 pure-logic modules only — see `controller/CLAUDE.md` before adding one that
 needs openwakeword or aiohttp.
+
+**emOS is C with no test framework, so its two off-target tools ARE its
+suite** — `ringsim --check` for the boot ring's invariants and `pwcheck` for
+the password hash the controller has to agree with. Both `#include init.c`
+whole and drive the real functions, so neither can drift from the device.
+CI runs both, builds the init for aarch64 in the pinned compiler image, and
+asserts the result is static — a dynamically linked PID 1 produces no output
+at all, which is indistinguishable from a kernel that never started.

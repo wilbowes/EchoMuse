@@ -163,6 +163,34 @@ for (const [part, dev] of [["boot_a", "/dev/block/mmcblk0p17"],
   check("alias order does not change the payload verdict", b.ok === false, JSON.stringify(b));
 }
 
+// The verdict is only worth as much as the node it is spent on. runPatchBoot
+// used to classify /dev/block/other-boot and then read, write and read back
+// through that same symlink rather than through the resolved target it had
+// just been given a verdict about — so the safety check and the write asked
+// two different questions moments apart, the flash log claimed boot.target
+// whichever answer it got, and the read-back would confirm a wrong-but-stable
+// resolution by reading exactly what it had written.
+//
+// Comments are stripped first. A guard that greps for the thing it forbids
+// otherwise finds the comment explaining why it is forbidden and passes — the
+// mistake this repo has now made three times.
+{
+  const body = liftFunction("runPatchBoot")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^[ \t]*\/\/.*$/gm, "");
+  check("runPatchBoot resolves the boot partition exactly once",
+        (body.match(/other-boot/g) || []).length === 1,
+        "other-boot should appear only in the probe that resolves it, "
+        + "never in a dd that follows the classifyBootTarget verdict");
+  for (const [what, re] of [
+    ["reads", /dd if=\$\{boot\.target\} of=\/tmp\/work\/boot\.img/],
+    ["writes", /dd if=\/tmp\/work\/new-boot\.img of=\$\{boot\.target\}/],
+    ["reads back", /dd if=\$\{boot\.target\} bs=1 skip=64/],
+  ]) {
+    check(`runPatchBoot ${what} the classified target`, re.test(body), body.slice(0, 0));
+  }
+}
+
 if (failures) {
   console.error(`\n${failures} check(s) failed.`);
   process.exit(1);

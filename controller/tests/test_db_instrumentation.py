@@ -444,3 +444,71 @@ def test_barge_in_turn_records_the_threshold_it_actually_cleared(fresh_db):
     # The comparison logic in em_api treats this as NOT comparable, because the
     # controller's bar (0.10) is below the device's (0.5).
     assert r["wake_threshold"] < r["dev_threshold"]
+
+
+# ── v20: BLE transport resets ────────────────────────────────────────────────
+#
+# The device has counted these since the proxy shipped and sent them inside
+# the stats message's `ble` object; nothing stored them, so "how often does
+# the transport reset" had no answer for the fleet. They matter because
+# /dev/stpbt is the combo radio WiFi also uses.
+
+def test_device_metrics_has_ble_transport_columns(fresh_db):
+    cols = _cols("device_metrics")
+    for c in ("ble_restarts_last", "ble_hci_errors_last"):
+        assert c in cols, f"device_metrics.{c} missing"
+
+
+def test_ble_counters_are_gauges_not_sums(fresh_db):
+    """
+    They are cumulative on the DEVICE, so summing them here multiplies one
+    reset into hundreds — at a report every 30s, an hour of a device sitting
+    at restarts=3 would store 360.
+    """
+    for _ in range(4):
+        db.record_device_stats("D", {"cpuPct": 1.0, "ble": {"restarts": 3,
+                                                            "hciErrors": 7}})
+    row = db._conn.execute(
+        "SELECT ble_restarts_last, ble_hci_errors_last, samples "
+        "FROM device_metrics WHERE device_id = 'D'"
+    ).fetchone()
+    assert row["samples"] == 4, "precondition: four reports folded into the row"
+    assert row["ble_restarts_last"] == 3, "restarts must be a gauge, not a sum"
+    assert row["ble_hci_errors_last"] == 7, "errors must be a gauge, not a sum"
+
+
+def test_a_later_report_replaces_the_earlier_count(fresh_db):
+    db.record_device_stats("D", {"cpuPct": 1.0, "ble": {"restarts": 1, "hciErrors": 1}})
+    db.record_device_stats("D", {"cpuPct": 1.0, "ble": {"restarts": 5, "hciErrors": 9}})
+    row = db._conn.execute(
+        "SELECT ble_restarts_last, ble_hci_errors_last "
+        "FROM device_metrics WHERE device_id = 'D'"
+    ).fetchone()
+    assert (row["ble_restarts_last"], row["ble_hci_errors_last"]) == (5, 9)
+
+
+def test_proxy_off_stores_null_not_zero(fresh_db):
+    """
+    A device with the proxy off never opens the transport, which is not the
+    same fact as opening it and never faltering. Zero would make the two
+    indistinguishable in exactly the query this column exists for.
+    """
+    db.record_device_stats("D", {"cpuPct": 1.0})
+    row = db._conn.execute(
+        "SELECT ble_restarts_last, ble_hci_errors_last "
+        "FROM device_metrics WHERE device_id = 'D'"
+    ).fetchone()
+    assert row["ble_restarts_last"] is None
+    assert row["ble_hci_errors_last"] is None
+
+
+def test_zero_is_stored_as_zero(fresh_db):
+    """The other side of the NULL rule: an enabled proxy reporting a clean
+    transport must store 0, not fall through to NULL on falsiness."""
+    db.record_device_stats("D", {"cpuPct": 1.0, "ble": {"restarts": 0, "hciErrors": 0}})
+    row = db._conn.execute(
+        "SELECT ble_restarts_last, ble_hci_errors_last "
+        "FROM device_metrics WHERE device_id = 'D'"
+    ).fetchone()
+    assert row["ble_restarts_last"] == 0
+    assert row["ble_hci_errors_last"] == 0

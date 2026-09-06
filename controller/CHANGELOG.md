@@ -1,5 +1,1072 @@
 # Changelog
 
+## 2.23.0-ea.7 (Early Access)
+
+**The emOS flash step could never succeed, and the fault was in the check
+rather than the write.** Setup flow only; nothing changes on running devices.
+
+### "Flash and Verify" failed on a write that was correct
+
+After writing the image, the wizard read the partition back and compared it
+against what it had sent. The read covered whole megabytes while the image is
+not a whole number of megabytes, so roughly 400KB of the *previous* boot image
+was being compared against empty space that had never been written. The write
+was complete every time; the comparison was not.
+
+It went unnoticed because the only version of this that had ever run on a real
+device was the restore, whose image is the entire boot partition and therefore
+an exact number of megabytes — so the mistake cancelled out and the check
+happened to be right.
+
+The wizard now reads back exactly as many bytes as it wrote.
+
+### Reconnecting when already in TWRP
+
+Starting the wizard with the device already in recovery kept the connection, as
+of ea.6 — but the next step then asked the browser for the same USB device a
+second time and failed until the third attempt. It now reuses the connection it
+already has.
+
+## 2.23.0-ea.6 (Early Access)
+
+**Follow-up to ea.5, from the first emOS provisioning run that got past the
+install steps.** Two things that only showed up on hardware.
+
+### "Build emOS" failed with HTTP 413
+
+The wizard sends your escrowed boot partition to the controller to be repacked,
+and Home Assistant's ingress proxy refused the request before it ever reached
+the add-on. The escrow is a read of the whole 16MB partition, most of which is
+empty padding — the boot image itself is under 8MB on this hardware — so the
+wizard now sends the image rather than the partition. If the header cannot be
+read for any reason it falls back to sending everything, because a size
+optimisation should never be why a build cannot happen.
+
+### Connecting while already in TWRP
+
+Starting the wizard with the device already in recovery used to report "FireOS 5
+confirmed", warn about an untested firmware it had read off the recovery
+ramdisk, and reboot recovery into recovery. Nothing it checked could tell the
+two apart — TWRP reports Android 5.1.1 and answers every property with its own
+values.
+
+It now recognises recovery, reads the real FireOS build and device identity from
+`/system` instead of the ramdisk, and keeps the connection rather than
+rebooting — so you continue straight to "Connect to TWRP". Connecting in
+recovery is a normal thing to do on a retry, so it is handled rather than
+refused.
+
+## 2.23.0-ea.5 (Early Access)
+
+**Fixes a provisioning wizard that could not install emOS at all, and adds a
+one-click undo if the flash goes wrong.** Nothing changes on devices already
+running; this is entirely the setup flow.
+
+### The emOS install steps now work
+
+Provisioning stopped at "Install EchoMuse" with every command reporting
+`su: not found`, having said the recovery environment was ready a step
+earlier. TWRP is already root, so the wizard installs a small `su` stand-in to
+let the shared install steps run unchanged — and it was written pointing at a
+shell path that does not exist in recovery, so it could never run. Worse, a
+retry then *skipped* the check that had just caught it, which is why step 3
+turned green and step 4 failed anyway.
+
+The stand-in is now built against the shell the device actually has, it is
+tested by running it rather than by looking for the file, and each step that
+needs it sets it up itself — reconnecting between steps used to quietly remove
+it.
+
+### If a flash fails, the wizard puts your image back
+
+A failed boot-partition write used to end with a warning and a command to type
+yourself. There is now a **Restore escrowed boot image** button on the flash
+and first-boot steps: it writes back the image the wizard escrowed before it
+changed anything, verifies it against the partition, and leaves everything on
+`/data` untouched. If the page has been reloaded, it accepts the `.img` file
+you downloaded at the escrow step.
+
+The flash itself also retries once automatically before giving up, refuses an
+image too large for the partition instead of writing a truncated one, and can
+now tell a short write from a corrupt one and a bad partition from an
+unreliable read.
+
+### Steps that said they worked when they had not
+
+Four places reported success having achieved nothing: the install step logged
+"Cleared." after every command failed, wake word assets were checked where they
+were uploaded rather than where they were installed, the startup script was
+copied without verification while the binary beside it was checked byte for
+byte, and WiFi's "Skip (already connected)" marked itself done without asking
+the device anything. All four now check.
+
+### Safer partition handling
+
+The wizard's one partition write now goes to the partition it ran its safety
+check against, rather than re-resolving a symlink that could answer
+differently. And every step confirms the device is in the mode it needs —
+unplugging an Echo powers it off, so a replug comes back in Android, and a
+recovery step run there had nothing but one guard in front of it.
+
+## 2.23.0-ea.4 (Early Access)
+
+**Your Echo can now run without any of Amazon's software on it, and the
+provisioning wizard installs it that way by default.** This release migrates
+the database (schema 21) — a backup is taken automatically before it does.
+Nothing to change on your devices.
+
+### emOS: an Echo with no Android on it at all
+
+emOS replaces the Echo Dot's entire Amazon userspace — no Android init, no
+system_server, no mediaserver, no audio HAL — while keeping the device's own
+kernel. A complete voice turn runs on it: wake word, Home Assistant, spoken
+answer, along with WiFi, the microphone array, the Bluetooth proxy, the buttons
+and the light ring.
+
+**It is proven on one device over two days, and it is not a finished product.**
+Nothing about your existing Echoes changes, and nothing here reaches a device
+unless you deliberately install it.
+
+### The provisioning wizard now installs emOS
+
+Setting up a new Echo takes nine steps instead of thirteen, and all of them
+happen in TWRP recovery — Magisk, the boot image patch and the root checks are
+gone, because none of them are needed when Android is never started. The most
+dangerous step in the old wizard went with them.
+
+Before it changes anything, the wizard reads your Echo's existing boot
+partition and hands you the file. That one file puts the device back exactly as
+it was, in about ten seconds, and leaves everything installed on it untouched.
+
+**It has not been tested on hardware end to end.** The last two steps, which
+watch the first boot and set up WiFi over the USB console, have never talked to
+a real device. Treat this as something to try on a spare Echo rather than on
+one you rely on — and keep the boot image it gives you at step 2.
+
+**Once an Echo is on emOS the wizard cannot be run against it again.** Setup
+needs Android's debug bridge and emOS does not have one, so the first step will
+not find the device.
+
+Going back is the same four steps that prepare a Dot for EchoMuse in the first
+place, done by hand: reach TWRP recovery with the button combo, wipe cache,
+wipe data, sideload a FireOS 5 image, **then flash `f1r30s.zip`**. Do not skip
+that last one — a stock flash restores dm-verity against a partition table the
+unlock modified, and the device will not boot without it. The sequence erases
+the Echo, so it is a real undo rather than a convenient one. Re-provisioning an
+emOS Echo properly, over the network, is not built yet.
+
+The old FireOS install is unchanged and still available at `?flow=fireos` on
+the dashboard URL.
+
+### A password for the emOS console
+
+emOS puts a root shell on the USB port, which anyone with a cable could reach.
+You can now set a password for it under Config → Advanced → USB console, and it
+applies to every device at once. The password is hashed before it is stored or
+sent, so the plain text is never written down anywhere.
+
+This is a nod to security rather than a lock: anyone holding the device can
+delete the password from recovery. What it protects is the password itself,
+which people tend to reuse somewhere that matters. Forgetting it costs a
+reflash, not a device. FireOS devices are unaffected.
+
+### Smaller things
+
+- An Echo running emOS started EchoMuse **122 seconds late on every boot**,
+  waiting for an Amazon service that cannot exist there. It now starts in about
+  35 seconds.
+- Support bundles no longer include a console password record if one is quoted
+  in a log line.
+
+## 2.23.0-ea.3 (Early Access)
+
+**Your Echoes will know what time it is, and updates stop stalling on things
+they cannot do.** Nothing to do before updating: no database migration, nothing
+to change on your devices. The clock needs firmware newer than v2.14.0 at both
+ends.
+
+### Echoes now know the time
+
+An Echo has no clock that survives being unplugged, so it starts up believing
+it is 2010 and only corrects itself if it can reach a time server. The
+controller now simply tells it, over the connection it already has. Device log
+timestamps line up with the controller's from the first moment, which is the
+difference between a readable support bundle and a puzzle.
+
+**Needs firmware newer than v2.14.0.**
+
+### Updates no longer stall for two minutes at a time
+
+A file transfer to a folder that does not exist on the device used to wait out
+its full two-minute timeout instead of failing immediately — and it held that
+device's connection for the whole time, so whatever came next failed too. One
+firmware update could lose four minutes to this and report a confusing error
+about something unrelated. Transfers now check first and fail straight away.
+
+A related fault could make the controller close a connection belonging to a
+transfer that was still using it, which is what turned a stalled transfer into
+an error message pointing somewhere else entirely.
+
+### Maintenance actions that do not apply are now greyed out
+
+The Re-apply debloat button is disabled, with the reason shown, on an Echo that
+is not running Android — there are no Amazon packages to hide there, and
+pressing it achieved nothing while tying the device up.
+
+### Smaller things
+
+- The ambient light sensor is read less often. Its driver logs a line every
+  time it reads in a dark room, which was filling the small area the Echo keeps
+  crash reports in — so a crash overnight could no longer be explained. Nothing
+  visible changes.
+
+## 2.23.0-ea.2 (Early Access)
+
+**Sound through the headphone jack works properly, and the controller stops
+spending minutes sending maintenance files an Echo cannot use.** Nothing to do
+before updating: no database migration, nothing to change on your devices. The
+jack fixes need firmware newer than v2.14.0 and do nothing until you have it.
+
+### The headphone and line-out jack
+
+Plugging a speaker or headphones into the Echo produced almost no sound. The
+jack has its own output stage, and inserting a cable drops it to the bottom of
+its range — nothing on our side ever raised it again, so the audio was present
+and inaudible. It is now set whenever a cable is detected.
+
+Booting with a cable already plugged in was the same gap from the other
+direction. The Echo only corrected its audio routing when a cable was inserted
+or removed, and a device that started up with one connected never had such a
+moment — so it played to the room with a cable attached. Unplugging and
+replugging was the folk remedy for both, and is no longer needed.
+
+**Needs firmware newer than v2.14.0.**
+
+### The controller knows what each Echo is running
+
+Echoes now report which base system they booted, and the controller sends
+Android-specific maintenance files only to the ones actually running Android.
+Elsewhere each attempt sat for two minutes before giving up, which made an
+ordinary firmware update look as though it had stalled when the update itself
+had already finished.
+
+### Smaller things
+
+- The Local Build file picker clears itself once a deploy starts, rather than
+  leaving a filename sitting there as though something were still pending.
+
+## 2.23.0-ea.1 (Early Access)
+
+**The Bluetooth proxy stops crowding out the device it runs on, and the
+controller stops trusting a device to be up to date.** Nothing to do before
+updating: no database migration, nothing to change on your devices. Two of the
+changes below need firmware newer than v2.14.0 and do nothing until you have
+it — they are harmless without it.
+
+### The Bluetooth proxy no longer competes with its own device's health
+
+An Echo running the Bluetooth proxy sent every advertisement it heard over the
+same connection the controller uses to check the device is alive. Bulk
+telemetry and the liveness check took turns on one channel, so a busy room made
+the device look unwell — measured at 3615 round-trip delays in a day against 2
+on the Echo beside it, and the fault followed the proxy when it was moved.
+
+Advertisements now ride the data connection instead. **This needs firmware past
+v2.14.0 at both ends**, and the two halves agree before either uses the new
+path, so an older device keeps working exactly as before rather than silently
+dropping advertisements.
+
+### Firmware updates no longer slow down whoever is talking
+
+Updating several Echoes at once stalled the controller for as long as eleven
+seconds, and that is the same loop that sends audio and ring animations — so an
+Echo answering someone paid for an Echo being updated. Updates now run one at a
+time across the whole controller, queued rather than refused.
+
+### Only one Echo answers when you interrupt
+
+Interrupting a response in a room with more than one Echo could start a turn on
+each of them. The same arbitration that already decides which Echo answers a
+wake word now decides which one takes an interruption.
+
+### The ring shows whether the Echo can reach the controller
+
+An Echo that has lost the controller now says so on its ring rather than
+looking idle, and its buttons stand down instead of appearing to work. **Needs
+firmware past v2.14.0.**
+
+### Devices are checked against what they actually have
+
+The controller assumed a device already held its wake word models, its startup
+script and its debloat list, and only ever verified the first — and only when
+the device was scoring wake words itself. One of our own Echoes ran for a
+fortnight missing three of its four wake word models while every panel called
+it healthy. All three are now checked when a device connects.
+
+### Installing firmware an Echo already has
+
+Pushing a build an Echo is already running cost it a reboot and a slot for no
+change, and nothing stopped it. Updating one Echo now says so and refuses;
+updating the whole fleet skips the ones already on that version, which it did
+for published releases but never for a binary you uploaded yourself. You can
+still force it — writing the same version again is how a damaged slot gets
+repaired.
+
+### Smaller things
+
+Request logging is quiet by default, so the log is about your devices rather
+than about the dashboard polling itself — thank you to @DennisGaida. Security
+and dependency updates for websockets, cryptography and protobuf.
+
+## 2.22.0
+
+**Timers, and your Echoes can now be asked a question.** Everything from the ten
+2.22.0 Early Access builds.
+
+**There is nothing to do before updating.** No database migration, no firmware
+requirement, nothing to change on your devices.
+
+### Timers ring on the Echo
+
+Ask an Echo to set a timer and it rings on that Echo, with the same alert sound
+Home Assistant's own Voice PE hardware uses. Say "stop" — or press the button on
+top — and it stops. Saying something that merely contains the word "stop", like
+"stop the music", still does what you asked and still gets its answer.
+
+Stopping a ringing timer used to leave the Echo deaf. Dismiss it while the alarm
+was actually sounding, rather than in the pause between chimes, and the Echo
+went quiet as it should and then stopped responding to its wake word entirely,
+until the controller was restarted. The chime sounds for most of each cycle, so
+this caught roughly three dismissals in four.
+
+### Home Assistant can ask a question and wait for the answer
+
+`assist_satellite.start_conversation` ("the garage door is open, want me to close
+it?") and `assist_satellite.ask_question` now work. EchoMuse devices never
+appeared as eligible targets for either, so those actions could not be pointed at
+them at all.
+
+The Echo plays the message, then its ring lights and it listens, exactly as after
+a wake word. An attention chime plays first — Home Assistant sends one and we
+were discarding it, and it matters more here, since an unprompted question
+otherwise arrives with no warning.
+
+A muted Echo will not open its microphone, and nothing here weakens that. The
+question is still spoken; the answer is simply never heard.
+
+Reported by @pollocluck (#396), with the root cause found by @vbtheory (#335).
+
+### Long answers no longer cut off part-way through
+
+Ask for something that takes a minute to say and the Echo would go quiet
+mid-sentence, then sit there looking like it was still speaking. Short answers
+were always fine, which made it look like a network problem that came and went.
+
+It was not the network. The controller was sending the whole answer as fast as
+the connection would carry it — around 35 seconds of speech pushed across in 21 —
+and the Echo can only hold about five and a half seconds ahead of what it is
+playing. While it worked through the backlog it stopped answering the
+controller's "are you still there?" checks, and after ten seconds the controller
+hung up. The answer is now sent four seconds ahead of what is playing and no
+further. Nothing is lost by slowing down; everything beyond that was queueing on
+the network rather than reaching the speaker.
+
+### An Echo with nothing behind it now says so
+
+Say the wake word while Home Assistant is not connected to that Echo and the ring
+lit for a fraction of a second and went out. The Echo had heard you perfectly and
+had nowhere to send it, but from across the room it looked like a device that had
+failed to notice you.
+
+It now holds the listening ring briefly and flashes orange twice — the colour it
+already uses when it cannot find its controller, read one step further along. The
+button does the same, being the control people reach for when the wake word seems
+to have done nothing.
+
+This happens more often than it sounds: an Echo comes back from a restart in well
+under a minute and Home Assistant can take another minute to reconnect to it.
+Measured on our own hardware, fifty-six seconds.
+
+With several Echoes, one with no Home Assistant behind it could also win the
+utterance, silence the one that was ready and then fail. It now steps aside as
+soon as it hears the wake word, before deciding which Echo answers. The wake
+still appears in the device's activity history, so an outage remains visible
+afterwards.
+
+### The ring says it has stopped listening
+
+Start a turn with the button and the ring kept its listening animation from the
+press until the answer began — often ten seconds — with nothing to say the Echo
+had heard you stop. It made the Echo feel slow to react when it had finished
+listening at the usual time. A turn can end two ways, and only one of them
+switched the ring to its thinking spinner. Both do now.
+
+### Deleting an Echo removes it
+
+A deleted Echo carried on working. It vanished from the dashboard and kept
+serving conversations, kept its Home Assistant port and kept listening, only
+coming back as a new device when something else interrupted its connection. So
+"delete it and add it again" worked eventually, or never, depending on the
+weather. Adding it back had a second fault behind the first: the new entry
+inherited the port the old one had been deleted to move off, so the Status panel
+showed no voice port and the Bluetooth proxy panel disappeared with it.
+
+### Music, announcements and network blips
+
+- Music no longer comes back to full volume mid-answer when an announcement lands
+  while the Echo is already speaking.
+- Music asked for during a reply no longer plays over the reply, and a request
+  made during a turn survives instead of being dropped.
+- A four-second network interruption — a controller restart, an add-on update, a
+  moment of bad wifi — no longer deregisters the Echo's entities, drops its
+  Bluetooth proxy and stops what it was playing. It now waits to see whether the
+  device comes back first.
+- A struggling connection no longer makes the controller rebuild a microphone
+  that was working.
+- Interrupting the Echo mid-response no longer leaves an error and a traceback in
+  the log, and can no longer leave the turn open.
+
+### Dashboard and support
+
+- The Status panel has a **Voice assistant** row, so an Echo Home Assistant has
+  never connected to no longer looks exactly like one that works.
+- An expired dashboard session returns you to the sign-in page instead of quietly
+  asking for the device list forever. One tab left open overnight made 1262
+  refused requests.
+- Announcements no longer raise an error inside Home Assistant.
+- Support bundles reach substantially further back, by summarising the network
+  timing blips that made up half of one.
+- The approval step for a newly connected device is now a labelled prompt rather
+  than a tab that did not look like one.
+
+### One setting for newer firmware
+
+**Config → Microphones → Advanced** gains an **Echo reference** control, for
+choosing where echo cancellation takes its copy of what the Echo is playing.
+Leave it on **Auto** unless you are deliberately measuring the difference.
+
+It needs firmware newer than v2.13.0, **which is not published yet** — v2.13.0 is
+the current release. Older Echoes ignore the setting entirely and carry on as
+they always have.
+
+### Known issue: the Bluetooth proxy
+
+An Echo running the Bluetooth proxy sees brief reconnects — a few a day on our
+own hardware — because the advertisements it forwards share a connection with the
+messages that check the Echo is still there. Home Assistant shows the satellite
+drop out and come back within seconds. It is being worked on and tracked in #404;
+nothing in this release makes it worse, and turning the proxy off removes it
+entirely.
+
+## 2.22.0-ea.10 (Early Access)
+
+**A fix for interrupting your Echo mid-response.** Nothing to do before
+updating: no database migration, no firmware requirement, nothing to change on
+your devices.
+
+### Talking over a response cleaned up badly
+
+When you interrupt an Echo while it is speaking, the controller stops decoding
+the rest of the response and tears down the audio pipeline. It was doing that
+in the wrong order, and two things followed.
+
+The visible one was noise in the log: an unhandled error with a full traceback,
+printed on every interruption. Harmless in itself, but it sat next to whatever
+someone was actually investigating and cost them time — and it goes into support
+bundles.
+
+The other was not visible and matters more. In the right conditions the teardown
+could stop making progress rather than finish, holding the turn open. We have
+not seen this happen on a real device, so this is a fault found by measurement
+rather than one reported from the field; the fix removes the possibility either
+way.
+
+Nothing about interrupting changes from your side — it behaves as it did, minus
+the error.
+
+## 2.22.0-ea.9 (Early Access)
+
+**Your Echoes can now be asked a question by Home Assistant, and will listen for
+the answer.** Nothing to do before updating: no database migration, no firmware
+requirement, nothing to change on your devices.
+
+### Announce, then listen
+
+Home Assistant has two actions that speak to a satellite and then wait for a
+spoken reply — `assist_satellite.start_conversation` ("the garage door is open,
+want me to close it?") and `assist_satellite.ask_question`, which matches what
+you say against a list of answers you supply. EchoMuse devices never appeared as
+eligible targets for either, so the actions could not be pointed at them at all.
+
+They do now. Both work the same way from your side: the Echo plays the message,
+then its ring lights and it listens, exactly as it does after a wake word. An
+attention chime plays before the message — Home Assistant sends one, and we were
+discarding it. It matters more here than for an ordinary announcement, since an
+unprompted question otherwise arrives with no warning.
+
+Two things worth knowing:
+
+- **The Echo must have a microphone and be connected.** A device Home Assistant
+  cannot reach is not offered as a target.
+- **A muted Echo will not open its microphone**, and nothing in this change
+  weakens that. The question is still spoken; the answer is simply never heard,
+  and the action reports back that it got no answer.
+
+Reported by @pollocluck (#396), with the root cause found by @vbtheory (#335) —
+both halves of it, correctly, before either had been looked at here.
+
+## 2.22.0-ea.8 (Early Access)
+
+**Adds one setting, for testing echo cancellation.** Nothing else changes, and
+there is nothing to do before updating.
+
+### Echo reference (Config → Microphones → Advanced)
+
+Echo cancellation needs a copy of what the Echo is playing, so it can subtract
+it from what the microphones hear. There are two places that copy can come
+from, and newer firmware can use either:
+
+- **Auto** (default, and what you already have) — use the copy the audio chip
+  provides, and fall back to the software one if the chip does not offer it
+- **Hardware** / **Software tap** — pin one, to compare them
+
+Leave it on **Auto** unless you are deliberately measuring the difference.
+Pinning **Hardware** on an Echo whose chip does not provide that copy means no
+echo cancellation at all.
+
+**Needs firmware newer than v2.13.0.** Older Echoes ignore this setting
+entirely and carry on as they always have — nothing breaks, the setting simply
+has no effect.
+
+## 2.22.0-ea.7 (Early Access)
+
+**Long spoken answers no longer cut off part-way through.** That is the whole
+release, and it has been happening for weeks.
+
+**There is nothing to do before updating.** No database migration, no firmware
+requirement, nothing to change on your devices.
+
+### Why a long answer stopped mid-sentence
+
+Ask for something that takes a minute to say and the Echo would go quiet
+part-way through, then sit there looking like it was still speaking. Short
+answers were always fine, which made it look like a network problem that came
+and went.
+
+It was not the network. The controller was sending the whole answer to the Echo
+as fast as the connection would carry it — around 35 seconds of speech pushed
+across in 21. The Echo can only hold about five and a half seconds of audio
+ahead of what it is playing, so the rest piled up, and while the Echo was busy
+working through the backlog it stopped answering the controller's "are you
+still there?" checks. After ten seconds without an answer the controller
+assumed it had lost the Echo and hung up — mid-sentence.
+
+The controller now sends the answer four seconds ahead of what is playing and
+no further. Nothing is lost by slowing down: the Echo could never hold more
+than five and a half seconds anyway, so everything sent beyond that was
+queueing on the network rather than reaching the speaker. Music has worked this
+way since July; spoken answers simply never got the same treatment.
+
+You should notice nothing except that long answers now finish.
+
+### An Echo stopped listening for up to 40 seconds after a network blip
+
+If the audio connection dropped while the main connection stayed up, the Echo
+would stop listening and not start again until the controller eventually
+noticed — measured at 34 and 41 seconds on our own test device. It is now about
+five, because the Echo restarts listening itself as soon as it reconnects
+instead of waiting to be told. The same fix closes a gap at start-up where an
+Echo could sit not listening for around 40 seconds after booting.
+
+**This part needs firmware.** It is a device change, and device firmware ships
+separately from the controller — an Echo running v2.13.0 or earlier still has
+the old behaviour.
+
+### Better answers when something does go wrong
+
+Two diagnostic changes, both invisible unless you go looking:
+
+- When a connection to an Echo closes, the log now says **why**, and which side
+  hung up. Every drop used to log "connection closed" and nothing else, which
+  is what made the problem above take so long to find.
+- Bluetooth proxy resets are now recorded. On these Echos, Bluetooth and Wi-Fi
+  share one radio, so a Bluetooth hiccup can take the network with it. If you
+  use the Bluetooth proxy and see an Echo drop off, the Bluetooth panel now
+  shows whether the radio restarted around then.
+
+## 2.22.0-ea.6 (Early Access)
+
+**An Echo with no Home Assistant connection now says so every time you speak to
+it.** One fix, correcting ea.5.
+
+**There is nothing to do before updating.** No database migration, no firmware
+requirement, nothing to change on your devices.
+
+### The orange flash did not appear if another Echo answered
+
+ea.5 added an orange double flash for an Echo that hears you with no Home
+Assistant behind it. It only appeared when that Echo was the one running the
+turn — so on a house with more than one, the flash vanished exactly when it was
+most needed. Stand in front of the disconnected Echo, say the wake word, and if
+a second Echo elsewhere took the utterance, the one in front of you lit its ring
+and went dark with no explanation, while a different room answered.
+
+The flash is not a report on the turn. It is the Echo telling you three things
+about itself: the wake word is working, the controller is connected, and Home
+Assistant is not. None of that depends on what any other Echo did, so it now
+shows every time, and still clears itself after a second rather than sitting
+there lit.
+
+The button does the same. It is the control people reach for when the wake word
+seems to have done nothing, so it was the worst one to answer with silence.
+
+### An Echo without Home Assistant no longer takes the turn at all
+
+It now steps aside as soon as it hears the wake word, before deciding which Echo
+answers, rather than claiming the utterance and failing a moment later. On a
+single-Echo setup you will see no difference beyond the flash. On several, it
+means a disconnected Echo can no longer take an answer away from one that was
+ready — including when it is the nearer of the two, which is the case that used
+to lose you the reply entirely.
+
+The wake still appears in the device's activity history, so an outage remains
+visible afterwards rather than looking like an Echo that never heard anything.
+
+## 2.22.0-ea.5 (Early Access)
+
+**The Echo now tells you when there is nothing to answer you.** Two fixes, both
+about what happens when Home Assistant is not connected.
+
+**There is nothing to do before updating.** No database migration, no firmware
+requirement, nothing to change on your devices.
+
+### The ring went dark instead of saying Home Assistant was missing
+
+Say the wake word — or press the button — while Home Assistant is not connected
+to that Echo, and the ring lit for a fraction of a second and went out. The Echo
+had heard you perfectly and had nowhere to send it, but from across the room it
+looked like a device that had failed to notice you at all.
+
+It now holds the listening ring briefly, to say it heard you, and then flashes
+orange twice. Orange is the colour the Echo already uses when it cannot find its
+controller, so it reads the same way one step further along: the problem is not
+this device, it is what sits above it.
+
+This happens more often than it sounds. An Echo comes back from a restart or a
+power cut in well under a minute, but Home Assistant can take another minute to
+reconnect to it — and in that gap the wake word works, the microphone works, and
+nothing can answer. Measured on our own hardware this week: fifty-six seconds
+between the Echo being ready and Home Assistant arriving.
+
+### With several Echoes, the one that could answer stood down
+
+When one utterance wakes more than one Echo, the first to hear it answers and
+the others stay quiet — otherwise they all reply at once. But "first to hear it"
+is about which one you are standing nearest, and that has nothing to do with
+whether Home Assistant is connected to it. So an Echo with no Home Assistant
+behind it could win, silence the one that was ready, and then fail.
+
+The Echoes Home Assistant is not connected to no longer take that decision away
+from the ones it is.
+
+## 2.22.0-ea.4 (Early Access)
+
+**The ring now tells you it has stopped listening, whichever way you started
+the turn.** One fix.
+
+**There is nothing to do before updating.** No database migration, no firmware
+requirement, nothing to change on your devices.
+
+### The ring stays on "listening" after you have finished speaking
+
+Start a turn with the button rather than the wake word and the ring kept its
+listening animation from the moment you pressed it until the answer began —
+often ten seconds or more — with nothing to say the Echo had heard you stop.
+It made the Echo feel slow to react when it had in fact finished listening at
+the usual time, within about three seconds.
+
+A turn can finish in two ways: Home Assistant deciding you have stopped
+speaking, or the Echo deciding it for itself. Only the first switched the ring
+to its thinking spinner. Both do now.
+
+**This was never really about the button.** Which of the two gets there first
+is a matter of timing, and a wake word turn on a slow network could lose the
+same feedback. The fix applies to both, so it cannot come back on the other
+one.
+
+The time between finishing speaking and hearing a reply is unchanged — that is
+mostly speech-to-text, and it depends on the machine running Home Assistant.
+
+## 2.22.0-ea.3 (Early Access)
+
+**Stopping a ringing timer no longer leaves the Echo deaf.** One fix, and it
+is worth taking straight away if you use timers at all.
+
+**There is nothing to do before updating.** No database migration, no firmware
+requirement, nothing to change on your devices.
+
+### Stopping a timer while it is chiming
+
+Press the button, or say stop, while the alarm was actually sounding — rather
+than in the pause between chimes — and the Echo went quiet as it should, but
+then stopped responding to its wake word entirely. Saying the wake word lit the
+ring for a while and did nothing else. The dashboard went on showing the Echo
+as **Speaking** the whole time. It stayed that way until the controller was
+restarted.
+
+The chime sounds for most of each cycle, so this caught roughly three
+dismissals in four, which is why it looked occasional rather than reliable.
+
+If you are on an affected version and it happens, pressing the button once more
+recovers the Echo — that takes a different path and clears the stuck state.
+
+## 2.22.0-ea.2 (Early Access)
+
+**Deleting an Echo now actually removes it, and the dashboard stops claiming
+things are fine when they are not.** Everything here was found on a running
+Early Access controller rather than in testing, which is the point of the
+channel.
+
+**There is nothing to do before updating.** No database migration, no firmware
+requirement, nothing to change on your devices. Your Echoes keep their Home
+Assistant entities.
+
+### Deleting an Echo removes it
+
+A deleted Echo carried on working. It vanished from the dashboard and kept
+serving conversations, kept its Home Assistant port and kept listening for the
+wake word, only coming back as a new device when something else interrupted
+its connection — a reboot, a controller restart, a moment of bad wifi. So
+"delete it and add it again" worked eventually, or never, depending on the
+weather.
+
+Adding it back had a second fault behind the first. The new entry inherited
+the port the old one had been deleted to move off, so the Status panel showed
+no voice port at all and the Bluetooth proxy panel disappeared with it. One
+cause, two panels, neither pointing at it.
+
+### The dashboard says whether Home Assistant is connected
+
+An Echo that Home Assistant has never connected to looked exactly like one
+that works: **Online, idle**. Nothing on the page distinguished them, so the
+usual cause — a stale Home Assistant entry after a device was re-added —
+looked like the Echo was broken.
+
+The Status panel now has a **Voice assistant** row that reads the same thing
+the conversation itself reads, so it cannot disagree with what actually
+happens:
+
+```
+Voice assistant     HA connected · port 16003
+Voice assistant     Waiting for HA · port 16003
+```
+
+### Announcements no longer throw an error in Home Assistant
+
+Every announcement the Echo made raised an error inside Home Assistant, with
+nothing visible to show for it. The Echo was reporting a playback state Home
+Assistant's ESPHome integration has no name for. It now reports one it does.
+
+### A dashboard tab left open no longer asks forever
+
+When a dashboard session expired, the page kept asking for the device list
+every five seconds and quietly discarding the refusal. The list simply stopped
+updating, which reads as a controller that has stopped responding, and there
+was no way to tell from the page that you had been signed out. One tab left
+open overnight made 1262 refused requests.
+
+An expired session now returns you to the sign-in page.
+
+### Support bundles reach back further
+
+Roughly half of a support bundle's log was one measurement, repeated: a line
+for every network timing blip on every Echo, thousands of them, when the same
+figures are already recorded properly with a total to compare them against.
+Blips that actually delayed audio are still logged one by one; the rest are
+summarised.
+
+Combined with the fix above, a bundle now covers substantially more of the
+period before the problem you are reporting.
+
+## 2.22.0-ea.1 (Early Access)
+
+**Timers.** Ask the Echo to set one and it rings on the Echo itself, with the
+same alert sound Home Assistant's own Voice PE hardware uses. Say "stop" — or
+press the button on top — and it stops. Saying something that merely contains
+the word "stop", like "stop the music", still does what you asked and still
+gets its answer.
+
+Alongside it, four fixes for things that went wrong when two parts of the
+Echo wanted the speaker at once, or when your network hiccuped.
+
+**There is nothing to do before updating.** No database migration, no firmware
+requirement, nothing to change on your devices.
+
+### Music no longer comes back to full volume mid-answer
+
+Music ducks under the Echo's voice and lifts again when it has finished. If
+two things were speaking — an announcement arriving while the Echo was already
+answering you — whichever finished first put the music back up, and the rest of
+the answer competed with it.
+
+### Music asked for during a reply no longer plays over the reply
+
+"Play some jazz" gets acted on by Home Assistant before the spoken confirmation
+has been generated, so the music can arrive while the Echo is still talking.
+That was already handled — but an announcement landing in the middle released
+the hold early, and the music started underneath the answer. A request you made
+during a turn also survives now, instead of being quietly dropped if an
+announcement happened to land after it.
+
+### A brief network blip no longer removes the Echo from Home Assistant
+
+A four-second interruption — a controller restart, an add-on update, a moment
+of bad wifi — used to deregister the Echo's entities, drop its Bluetooth proxy
+and stop whatever it was playing, then rebuild all of it when the device came
+back seconds later. It now waits to see whether the device returns first.
+
+### A struggling connection no longer makes the Echo restart its microphone
+
+When no audio arrived, the controller assumed the microphone had stopped and
+began rebuilding it — even when the reason was simply that the connection
+carrying the audio had dropped. It now checks. A microphone that really has
+stopped is still repaired, exactly as before.
+
+### The Echo stops listening once Home Assistant has heard you
+
+In a room with background noise the Echo could keep listening well after you
+had finished, holding back an answer that was already written. It now stops as
+soon as Home Assistant has the words.
+
+### Setting up a new Echo is clearer
+
+The approval step for a newly connected device was a single tab that did not
+look like one, so it was easy to miss entirely. It is now a labelled prompt.
+
+### Two quieter ones
+
+Two media requests arriving within a second of each other could kill playback
+for both. And a device that dropped off mid-stream wrote one warning per audio
+frame — thousands of identical lines that pushed everything explaining the
+fault out of the support bundle.
+
+## 2.21.0
+
+**The Echo stops throwing away the question you just asked.** Three separate
+faults could each lose a turn, and the worst of them made asking again the one
+thing guaranteed not to work. Alongside them: every Echo now knows all four
+wake words, noise suppression no longer deletes quiet speech, a single bad
+message can no longer drop a device off Home Assistant, and the Activity tab
+tells you how a turn ended rather than lumping every interruption together.
+
+**There is nothing to do before updating.** No database migration, no firmware
+requirement, nothing to change on your devices. One improvement waits on a
+firmware release that is not out yet, and says so where it appears.
+
+### Asking again after a turn that went nowhere no longer gets ignored
+
+If Home Assistant took too long to answer, the turn gave up after 30 seconds —
+and then so did the next one, and the one after that, each in about three
+milliseconds with nothing recorded but a refusal.
+
+Giving up left Home Assistant's side of the conversation still running. Its
+eventual "run finished" message arrived while the *next* question was
+starting, and that question was thrown away as though it had already ended.
+The natural thing to do — ask again — was the one thing that could not work.
+Every refusal in a 15-hour sample followed a slow answer; none followed a
+successful one.
+
+The same applies to the quieter version: saying the wake word and then not
+speaking left the conversation open in the same way. Any turn that ends
+without Home Assistant finishing its side now closes that side properly,
+whatever the reason it ended.
+
+**The slow answers themselves are a Home Assistant problem and are not fixed
+here.** What changes is that one slow answer now costs one turn instead of
+three.
+
+### The Echo no longer interrupts itself while it is thinking
+
+Ask for something, and while the Echo was working out what you meant it could
+decide you had spoken again — cancel what you actually asked for and reopen
+the microphone at you. Nothing you said was sent anywhere. It looked like the
+Echo had lost interest and started listening for no reason.
+
+It was reacting to room noise. While thinking, the bar for "they're talking
+over me" sat low enough that ordinary background sound could clear it twice in
+a row, and twice in a row was enough. That low bar was added to catch a real
+case, and the reason it was needed has since been fixed independently.
+
+Interrupting the Echo while it thinks still works exactly as before, because
+saying the wake word out loud scores far above anything a room does.
+
+### Responses no longer cut off at the last word
+
+About one response in nine ended a fraction of a second early and was recorded
+as a failure, having played almost to the end. Short replies lost their last
+syllable, and nothing in the log said why.
+
+The final fragment of audio is padded out to a whole block before it is sent.
+The loudness limiter holds a few milliseconds back, and when that held audio
+was handed over it could push the fragment past a whole block — at which point
+the padding was a negative length and the response stopped there.
+
+### The Echo that did not answer stops sitting there lit
+
+With more than one Echo in earshot, both wake up and one answers. The other
+now goes dark immediately instead of holding its ring lit for up to 30
+seconds.
+
+Each Echo lights its own ring the instant it hears the wake word, which is
+what makes the response feel immediate — and it means a device lights up
+before it can know whether it is the one answering. Nothing told the losing
+device to stop, so it sat lit until an unrelated timeout expired.
+
+### Every Echo now knows all four wake words
+
+Your Dot was given the recogniser for whichever wake word was selected when it
+was provisioned. Choose a different one later and it needed that recogniser
+copied across first — which normally happened, but left a gap: a device that
+was **offline** when you changed the wake word was told to listen for a word it
+did not have. On a device doing its own wake word detection, that is a Dot that
+hears nothing. Nothing warned, and the dashboard showed it as healthy.
+
+All four stock wake words (Hey Jarvis, Alexa, Hey Mycroft, Hey Rhasspy) are now
+installed on every device — 3 MB in total — so switching between them is
+instant and cannot fail. Devices you provisioned earlier collect the missing
+ones automatically the next time they connect, and any device found without the
+recogniser it was told to use falls back to the controller listening on its
+behalf, rather than going quietly deaf.
+
+Custom wake words you have trained yourself are untouched and are still copied
+across on selection.
+
+### Noise suppression no longer swallows quiet words
+
+**Noise suppression** could cut speech to complete silence rather than just
+turning it down. Measured on real turns: with it on, 8–15% of samples at a
+healthy speaking level were digital silence, against 0.3% with it off. That is
+the difference between a word sounding muffled and a word not being there at
+all, and it lands hardest on exactly the quiet speech the setting is meant to
+rescue.
+
+Suppression is now limited to 20 dB. A passage the denoiser judges to be noise
+is pushed well down instead of removed, and where it judges speech to be clean
+it passes through untouched — so nothing that was working gets quieter. Speech
+recognition stops improving well before 20 dB of noise reduction, so the limit
+costs nothing that was being collected.
+
+If you turned **Noise suppression** off because transcripts came back with
+words missing, it is worth another try.
+
+### A single bad message no longer drops the device
+
+One malformed or unexpected control message could take a device's whole
+connection down with it — the voice satellite, the Bluetooth proxy and the
+audio channel together — and it reconnected every time it happened. The
+message that triggered it in practice was a **playback statistics report**,
+which is pure telemetry: the least important thing the device sends was able
+to disconnect it.
+
+Each message is now handled on its own. One that fails is logged with what it
+was, and everything else carries on.
+
+### The Activity tab says how a turn ended
+
+Three different things stop a response, and until now they all recorded the
+same way. They are now distinct:
+
+| Outcome | What happened |
+|---|---|
+| **barged** | You said the wake word over it — a new turn followed |
+| **cancelled** | You pressed the action button |
+| **muted** | You muted the device, which also turns the microphone off |
+
+Before this, a response you cut off mid-sentence was recorded as a *completed
+answer*. A fleet interrupting a third of its responses read as a fleet
+answering everything, which is how a real fault stayed hidden for two days.
+
+**Expect your numbers to move.** Turns you interrupted on earlier builds were
+counted as answered, and mutes during a response were counted as cancels.
+Nothing about the fleet changed — only the counting. Older rows keep whatever
+they were recorded as; nothing is rewritten, because a cause that was never
+captured should not be invented later.
+
+### Promoting a user no longer needs the API
+
+The first person to sign in becomes admin and everyone after is read-only,
+which was correct and had no way to change it short of a hand-written API
+call. **Settings → Users** now lists every account with its role, shows which
+are linked to a Home Assistant login, and promotes or demotes per row. Where
+the server refuses — the last admin cannot be demoted — it says why.
+
+Contributed by @chr-braun.
+
+### Turning update checks off turns them off, and says so
+
+Setting **Update check interval** to `0` was the obvious way to stop the
+controller contacting GitHub, and it did the opposite: it removed the wait
+between checks entirely, so the controller polled continuously until GitHub
+rate-limited it. `0` now means off, and a value that is not a number falls back
+to the hourly default rather than silently killing update checking altogether.
+
+The Updates tab used to show "No release info" in that state, which looks
+exactly like GitHub being unreachable — so the tab you would open to find out
+what was wrong could not tell you. It now reads **Auto-checks off**. **Check
+now** still works either way: pressing it is a deliberate request, not
+background traffic.
+
+### If you build your own firmware
+
+Uploading your own compiled binary from **Updates → Local Build** failed with
+"an internal error occurred" — the controller was capping uploads at 1 MB
+against a firmware roughly ten times that, so the file never reached the code
+meant to handle it. This broke on 2026-08-18 in 2.20.2 when a routine
+dependency update changed how the web framework applies its size limit.
+Updating from a published release was never affected. The limit is now 50 MB,
+and a file over it says so, with its size.
+
+A successful upload also used to report a rollback that had not happened
+(`⚠ Device reconnected on v2.12.0-63-g99628d3 — auto-rolled back`). The
+controller now recognises the version string a clean checkout produces, and a
+mismatch reports what the device came back on and what was expected instead of
+guessing. A genuine rollback still says so.
+
+### Music playback
+
+A Music Assistant stream that stopped producing audio — an upstream failure
+rather than the end of a track — used to wait indefinitely, with Home Assistant
+showing **playing** against silence and nothing in the log to say otherwise. A
+source that produces nothing for 30 seconds now ends the stream, reports idle,
+and logs what happened. A stream that is merely slow still recovers; the clock
+resets on every chunk that arrives.
+
+Audio fetched over `https` did not verify the server's certificate. It does
+now. If you stream from a server with a private or self-signed certificate,
+point `EM_EXTRA_CA_CERT` at your CA and it works as before. Playback failures
+now include the decoder's own error message, which previously went nowhere.
+
+### The listening ring lights immediately — needs firmware v2.13.0
+
+On an Echo doing its own wake word detection, the ring waited for a round trip
+to the controller before lighting: measured at half a second, and longer on a
+busy network. It now lights the moment the device hears you.
+
+**That firmware is not published yet.** On the firmware you are running today
+everything behaves exactly as it does now, and the dashboard will offer the
+update when it is released.
+
+### Also
+
+- Clipping caught while the limiter is switched off is the backstop doing its
+  job on a boosted EQ, not a fault. It was counted alongside genuine faults, so
+  a working setup looked broken. The two are now counted separately.
+- The command-line tools in `controller/tools/` find the database under the
+  Home Assistant add-on as well as the standalone container.
+- The controller's event-loop stall figure read zero under the add-on however
+  busy it got. The warnings in the log were always correct; the number beside
+  them now agrees. Contributed by @chr-braun.
+
 ## 2.21.0-ea.7 (Early Access)
 
 One fix on ea.6, for a fault that could throw your question away before

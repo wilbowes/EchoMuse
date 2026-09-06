@@ -45,6 +45,8 @@ from esphome.satellite_server import SatelliteServerProtocol, serve, _HANDLED
 from esphome.feature_flags import BluetoothProxyFeature
 from esphome.vendor import api_pb2
 
+import em_ble_health
+
 log = logging.getLogger("echomuse.bleproxy")
 
 BT_PROXY_FLAGS = int(
@@ -160,6 +162,12 @@ class DeviceBleProxyServer:
         self.adverts_received = 0   # batches' adverts arriving from the device
         self.adverts_forwarded = 0  # actually sent to a subscribed HA
         self.adverts_seen = 0       # device-reported cumulative counter (stats)
+        # Transport health, device-reported and cumulative since ITS process
+        # start. Kept so update_stats can warn on a RISE rather than on a
+        # non-zero value — the counters never fall on their own, so warning
+        # on non-zero would repeat the same reset every 30s forever.
+        self.hci_restarts = 0
+        self.hci_errors   = 0
 
     def _protocol_factory(self):
         if self._active_satellite is not None:
@@ -413,6 +421,22 @@ def update_stats(device_id: str, ble_stats: dict) -> None:
     if proxy is None or not isinstance(ble_stats, dict):
         return
     proxy.adverts_seen = int(ble_stats.get("advertsSeen") or 0)
+
+    # Transport resets. Worth a warning of their own because /dev/stpbt is
+    # NOT a Bluetooth-only device: it is the MT8163's combo radio behind
+    # MediaTek's WMT stack, shared with WiFi. See em_ble_health for the
+    # mechanism, why the signal is a RISE rather than a value, and why a
+    # counter going backwards rebases — the decision lives there as pure
+    # logic so it is testable without importing zeroconf through this
+    # module.
+    obs = em_ble_health.observe(
+        proxy.hci_restarts, proxy.hci_errors,
+        ble_stats.get("restarts"), ble_stats.get("hciErrors"),
+    )
+    proxy.hci_restarts, proxy.hci_errors = obs.restarts, obs.errors
+    if obs.warning:
+        log.warning(f"[bleproxy.{device_id[-8:]}] {obs.warning}")
+
     satellite = proxy.get_satellite()
     if satellite is not None:
         satellite.push_adverts_sensor(proxy.adverts_seen)
@@ -431,4 +455,9 @@ def get_status(device_id: str) -> Optional[dict]:
         "haSubscribed":     bool(satellite is not None and satellite.subscribed),
         "advertsReceived":  proxy.adverts_received,
         "advertsForwarded": proxy.adverts_forwarded,
+        # Transport resets, surfaced because a non-zero value here is the
+        # first thing to check against an unexplained link drop on this
+        # device — see update_stats for why a BLE restart can take WiFi out.
+        "hciRestarts":      proxy.hci_restarts,
+        "hciErrors":        proxy.hci_errors,
     }

@@ -6,10 +6,22 @@ on the Echo Dot Gen 2 (biscuit) mic PCB.
 ## What this is for
 
 The biscuit has a 7-mic array (6 perimeter + 1 centre) on 4× TLV320ADC3101
-ADCs giving 8 channels, plus 1 unknown channel = 9 total. Amazon's firmware
-mapping is closed-source. This tool captures raw 9-channel audio and an
-analysis script identifies which channel corresponds to which physical mic
-by playing a tone from known angles.
+ADCs giving 8 channels, and the capture is 9 wide. Amazon's firmware mapping
+is closed-source. This tool captures raw 9-channel audio and an analysis
+script identifies which channel corresponds to which physical mic by playing
+a tone from known angles.
+
+**Ch7 and Ch8 are not mics.** They are a stereo loopback of the device's own
+playback — Ch7 left, Ch8 right — a hardware echo reference that is always
+present and needs no mixer change (measured 2026-08-29; see the Mic Array
+section of SETUP.md). Four stereo ADCs account for Ch0–Ch7, so one of those
+is an unused ADC input and the ninth channel has no ADC behind it at all.
+
+That is also why this tool's own procedure below cannot see them: it uses an
+external tone source with the Dot's speaker silent, and under that condition
+both channels read bit-exact zero. **If you are mapping mics, ignore Ch7/Ch8;
+if you are measuring the speaker, they are the reference signal, sample-aligned
+with the mics because they arrive in the same TDM frame.**
 
 ## Build
 
@@ -57,8 +69,10 @@ For each of the 6 positions (0°, 60°, 120°, 180°, 240°, 300°):
    ```
 4. Note the loudest channel
 
-After 3–4 positions the mapping is unambiguous. The centre mic (ch8 most likely)
-will be consistently loud regardless of angle.
+After 3–4 positions the mapping is unambiguous. The centre mic is **ch6** and
+is consistently loud regardless of angle. (This line used to guess "ch8 most
+likely"; ch8 is the right-channel echo reference and is silent for the whole
+of this procedure.)
 
 ## Output
 

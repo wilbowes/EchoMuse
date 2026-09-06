@@ -311,8 +311,19 @@ If a response ever cuts itself off, raise this. If interrupting stops working,
 lower it — but check whether AEC is on first, since that is the more common
 cause.
 
-(During the silent *thinking* pause the normal wake sensitivity applies
-instead — nothing is playing, so the low threshold is not needed there.)
+**During the silent *thinking* pause the normal wake sensitivity applies
+instead** — nothing is playing, so the low threshold is not needed there.
+
+> **This only became true in 2.21.0.** Until then a separate, lower bar
+> applied while the Echo was thinking, and it sat inside the range ordinary
+> room noise reaches — so background sound could cancel the question you had
+> just asked and reopen the microphone at you, before anything had been
+> transcribed. Measured across 505 near-misses and 30 real detections on this
+> hardware: no genuine wake word scored below 0.502, and noise reached 0.462.
+> The lower bar was compensating for a fault that had since been fixed
+> elsewhere. Note that **Barge threshold** never governed the thinking phase,
+> so raising it was not the fix and lowering it now costs nothing here — the
+> old tier was derived from the *wake* threshold instead.
 
 **What happens after you interrupt.** The device stops talking and listens
 straight away — say the wake word and your new command in one breath and it
@@ -688,7 +699,7 @@ These are set once, on the server, and need a controller restart to change:
 | `DEVICE_APPROVAL` | `strict` (you approve every new device — recommended) or `auto`. |
 | `SERVER_TLS_PORT` | Encrypted device link (wss) port — default 8770, `0` disables. Devices switch to it automatically once they hold pushed credentials (wizard install, or the **Secure link** button on the device Status tab). |
 | `REQUIRE_DEVICE_TLS` | Set to `1` **only after every device shows "wss (TLS)"** on its Status tab — from then on the controller rejects unencrypted or tokenless device connections. |
-| `EM_EXTRA_CA_CERT` | Path to a PEM CA certificate to trust — only needed if Home Assistant is served over HTTPS with your own internal certificate authority. See below. |
+| `EM_EXTRA_CA_CERT` | Path to a PEM CA certificate to trust — needed if Home Assistant, or a media server you stream from, is served over HTTPS with your own internal certificate authority. See below. |
 
 See `.env.example` for the complete list with comments.
 

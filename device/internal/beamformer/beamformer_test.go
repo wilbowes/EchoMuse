@@ -112,3 +112,72 @@ func TestBurstRatioPartialHistory(t *testing.T) {
 		t.Fatalf("burstRatio = %v, want %v", got, want)
 	}
 }
+
+// ─── Hardware echo reference (#385) ───────────────────────────────────────────
+
+// raw9 builds one period of 9-channel S24_3LE with a per-channel constant, so
+// each channel is identifiable by value alone.
+func raw9(frames int, valueFor func(ch int) int32) []byte {
+	buf := make([]byte, frames*frameSize)
+	for f := 0; f < frames; f++ {
+		for ch := 0; ch < nChannels; ch++ {
+			v := valueFor(ch)
+			b := f*frameSize + ch*byteSample
+			buf[b] = byte(v)
+			buf[b+1] = byte(v >> 8)
+			buf[b+2] = byte(v >> 16)
+		}
+	}
+	return buf
+}
+
+func TestEchoRefReadsChannel8(t *testing.T) {
+	b := New()
+	// Every channel gets a distinct value; ch8 gets one we can recognise.
+	raw := raw9(periodFrames, func(ch int) int32 {
+		if ch == echoRefCh {
+			return 0x200000 // +2097152 of 2^23 → 8192 after the 24→16 shift
+		}
+		return int32(ch) << 12
+	})
+	out := b.EchoRef(raw)
+	if len(out) != periodFrames*2 {
+		t.Fatalf("expected %d bytes, got %d", periodFrames*2, len(out))
+	}
+	got := int16(uint16(out[0]) | uint16(out[1])<<8)
+	if got != 8192 {
+		t.Fatalf("EchoRef read the wrong channel or gain: got %d, want 8192", got)
+	}
+}
+
+// TestEchoRefIsUnityGain is the one that matters. Mic extraction applies
+// micGainDb (+24dB by default) pre-truncation because speech sits at about
+// -70dBFS. The reference is the playback stream at full digital scale — it
+// measured -7.3dBFS on hardware — and the same gain on that is 17dB of hard
+// clipping, which does not merely cancel badly: it teaches the adaptive
+// filter a distorted echo path.
+func TestEchoRefIsUnityGain(t *testing.T) {
+	b := New()
+	// Near full scale on ch8. Any gain above unity clamps this.
+	raw := raw9(periodFrames, func(ch int) int32 {
+		if ch == echoRefCh {
+			return 0x7F0000 >> 0 // 8323072 — close to the 2^23 ceiling
+		}
+		return 0
+	})
+	out := b.EchoRef(raw)
+	got := int16(uint16(out[0]) | uint16(out[1])<<8)
+	if got == 32767 || got == -32768 {
+		t.Fatalf("reference clipped at %d — EchoRef must extract at unity gain", got)
+	}
+	if b.ClippedSamples() != 0 {
+		t.Fatalf("reference extraction clipped %d samples", b.ClippedSamples())
+	}
+}
+
+func TestEchoRefRejectsShortBuffer(t *testing.T) {
+	b := New()
+	if out := b.EchoRef(make([]byte, frameSize-1)); out != nil {
+		t.Fatal("a short period must report no reference, not a partial one")
+	}
+}

@@ -20,7 +20,7 @@ reference material on how the device actually works.
 
 ## Mic Array Architecture
 
-The biscuit has a 7-microphone array captured on ALSA card 0, device 24 as 9 channels S24_3LE at 16kHz. Ch7 and Ch8 are unconnected.
+The biscuit has a 7-microphone array captured on ALSA card 0, device 24 as 9 channels S24_3LE at 16kHz. **Ch7 and Ch8 are not mics — they are a stereo loopback of the device's own playback**, i.e. a hardware echo reference, always present and needing no mixer change.
 
 ```
 Ch0 → MK1 → 330°  (11 o'clock)  perimeter   ← confirmed empirically 2026-05
@@ -30,10 +30,32 @@ Ch3 → MK4 → 150°  ( 5 o'clock)  perimeter
 Ch4 → MK5 → 210°  ( 7 o'clock)  perimeter
 Ch5 → MK6 → 270°  ( 9 o'clock)  perimeter
 Ch6 → MK7 → centre              omnidirectional
-Ch7, Ch8 → unconnected
+Ch7 → playback echo reference, LEFT   ← measured 2026-08-29
+Ch8 → playback echo reference, RIGHT
 ```
 
 **Mapping confirmed** by tone injection testing (2026-05): phone speaker pressed against each mic hole in turn, per-channel RMS measured via `analyse_capture.py`. Previous documentation had Ch0/Ch1 swapped — corrected.
+
+**Ch7/Ch8 were called "unconnected" until 2026-08-29, and the evidence could not have said otherwise.** The 2026-05 mapping used an *external* tone source — a phone held against each mic hole — with the Dot's own speaker silent throughout. Under exactly that condition these two channels read bit-exact zero, at every angle, every time. The one experiment that reveals them is the one nobody had reason to run during a mic-mapping exercise: play something out of the device while capturing. A channel count that did not add up was sitting in plain sight the whole time — four stereo TLV320ADC3101s give **eight** channels, and the capture is nine wide.
+
+What the four measurements show (`aec_map.sh`, 440Hz/1200Hz tones, white noise, and a volume sweep):
+
+| Question | Result |
+|---|---|
+| Is it really the playback signal? | RMS **0.43159** against a generated sine of `20000/32767/√2` = **0.43160** — five significant figures, so it is the digital stream itself, not something that travelled through air |
+| Silence | **bit-exact zero** (−100dBFS) while every real mic sits at its −69 to −76dB noise floor. No microphone produces an exact zero |
+| Stereo? | Yes. L=440Hz arrived on **Ch7**, R=1200Hz on **Ch8** |
+| Mic lag | **+33 samples = 2.06ms** at 16kHz, and **polarity-inverted** (correlation −0.312). Consistent with DAC reconstruction plus the ADC's decimation group delay; treat as provisional at that correlation |
+| Before or after the volume control? | **Before.** Ch7 held 0.431574 → 0.431560 across a commanded 33.5dB cut, while the centre mic fell 33.2dB |
+| Does it show the DAC clipping? | **No.** At DAC index 170 the mic's loudest component is **3080Hz — the 7th harmonic of 440** — while the reference stays a clean 439.9Hz |
+
+`Audio_ExtCodec_EchoRef_Switch` (mixer control 41) is **not** what gates this. Every measurement above was taken with it `Off`, its shipping state; flipping it On changed the reference by 0.00001 RMS, i.e. nothing. It was the hypothesis that started the investigation and it was wrong — the reference is unconditional.
+
+**Why this matters, and what it is not.** The reference is not a *better* far-end signal than the software tap at the speaker ALSA write — it is the same bytes. What it is, is **aligned by construction**: it arrives in the same TDM frame as the mic samples, so the far-end/near-end offset is fixed by hardware at ~33 samples instead of being inferred. That is what `aecDelayMs`, the occupancy governor and the capture-stall trim logic all exist to approximate. See the AEC notes in `device/CLAUDE.md`.
+
+Two bounds on it, one benign and one to keep in view. It is pre-volume, so it does not track loudness and an adaptive filter has to find that gain itself — no worse than the software tap, which is also pre-volume. And it does not represent what the speaker emits once the DAC clips: at the top of the control's range the acoustic echo is mostly harmonics that are simply absent from the reference. That regime is already unreachable, because `DEVICE_VOLUME_MAX` caps the control at 127 (unity) for the distortion reason documented under Volume — the clipping ceiling protects the AEC as well as the ear.
+
+**Open:** what the hardware does with a genuine stereo input. With L=440Hz and R=1200Hz the centre mic was dominated by 1200Hz, which fits both "the speaker takes R and discards L" and "it sums, and the driver strongly favours 1200Hz over 440Hz". The analysis printed only the top three FFT bins, which one strong peak fills with its own leakage, so a weaker 440Hz component would not have shown. It does not affect production, where the wire is mono and the device duplicates L=R, but it decides which channel to use as the reference if that ever changes.
 
 **ADC architecture:** Four TLV320ADC3101 stereo ADCs (I2C bus 0, addresses 0x18–0x1b). Probe order at boot determines channel assignment: 0x18→Ch0/1, 0x19→Ch2/3, 0x1a→Ch4/5, 0x1b→Ch6/7. All chips share a TDM data bus (confirmed from PCB trace analysis — DOUT shared, not daisy-chained). Array radius: 36mm (confirmed from PCB measurement).
 

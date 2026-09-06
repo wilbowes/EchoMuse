@@ -4,11 +4,22 @@ Who owns the speaker, what is on the wire, and what happens when two things
 want it at once.
 
 This exists for the same reason `led-ring-states.md` does. Four things can now
-put audio on a device — a voice response, music, an HA announcement, and (with
+put audio on a device — a voice response, music, an HA announcement, and (since
 #167) a timer alarm — and each was added on its own, correct in isolation. The
-interactions between them are where the open bugs live: #261 (the duck lifting
-mid-response), #262 (music deferred until a turn ends), #243 (whether the
-output chain belongs device-side at all).
+interactions between them are where the bugs live.
+
+Two of those are now fixed, and the fix is the same shape both times: **owners
+are COUNTED, not flagged.** #261 lifted the duck mid-response because `ducked`
+was one boolean and the first of two overlapping owners to finish popped it;
+#314 released the turn's speaker ownership for the same reason. `duck_depth`
+and `owner_depth` are separate counters on purpose — the duck only increments
+on the mixing path, so a device that pauses instead of ducking has overlapping
+owners with no duck depth, and collapsing them would be correct everywhere
+except on exactly those devices.
+
+Still open: #262 (music deferred until a turn ends), #243 (whether the output
+chain belongs device-side at all), and the state map the alarm is owed as a
+fourth owner.
 
 Status markers match the LED doc: **[today]** is shipped behaviour verified in
 code, **[proposed]** is designed or in review and not merged.
@@ -48,7 +59,7 @@ underneath on its own plane and is ducked rather than displaced.
 |---|---|---|---|---|
 | 1 | Voice turn (wake word or button) | voice | `em_player.interrupt()` — **unconditional**, even with nothing playing | `resume_interrupted()` at turn end |
 | 2 | HA announcement | voice | same `interrupt()` path | announcement playback completes |
-| 3 | Timer alarm ring | voice | `start_timer_alarm()`, bursts gated on `speaker_busy` | dismissal (button / spoken / CANCELLED) or `MAX_RING_S` = 120s | **[proposed #167]** |
+| 3 | Timer alarm ring | voice | `start_timer_alarm()`, bursts gated on `speaker_busy` | dismissal (button / spoken / CANCELLED) or `MAX_RING_S` = 120s | **[today]** |
 | 4 | Media / music | music | `em_player.play()` | `stop()` / `pause()` / device gone |
 
 **Ownership is taken unconditionally, and that is deliberate** — not an
@@ -129,21 +140,21 @@ released it" want opposite investigations.
 | F2 | user stops/pauses music, no `audio_mix` | `speaker_flush` | music is on the voice plane there | [today] |
 | F3 | barge-in during a response | `speaker_flush` | cuts the buffered response; the rest is usually still in TCP, so the device discards until it sees the stream's `0x03` | [today] |
 | F4 | voice turn starts over music | **neither** | flushing would discard the buffered audio that makes ducking instant, and on a non-seekable stream it is gone for good | [today] |
-| F5 | alarm dismissed | `speaker_flush` | otherwise the ring plays out of ~5.5s of device buffer | **[proposed #167]** |
+| F5 | alarm dismissed | `speaker_flush` | otherwise the ring plays out of ~5.5s of device buffer | **[today]** |
 
 The gate for F1/F2 is `em_player.py:481`. **A voice turn must never send
 `music_flush`** — the device's own handler says so (`control.go:520`) and it is
 the whole reason the second plane exists.
 
-### 5.3 Timer alarm **[proposed — #167]**
+### 5.3 Timer alarm **[today — #167]**
 
 | # | Precondition | Action | Status |
 |---|---|---|---|
-| T1 | HA sends `TIMER_FINISHED` | ring starts: looped bursts + amber LED pulse if `led_anim_capable` | [proposed] |
-| T2 | a turn or announcement is playing | burst held off while `device.speaker_busy` is non-zero | [proposed] |
-| T3 | wake word heard over the ring | alert ducked by `DUCK_DB` for `DUCK_HOLD_S` = 12s so the command reaches STT | [proposed] |
-| T4 | dismissal (button, transcript, or `CANCELLED`) | ring stops, `speaker_flush` | [proposed] |
-| T5 | nobody answers | stops at `MAX_RING_S` = 120s | [proposed] |
+| T1 | HA sends `TIMER_FINISHED` | ring starts: looped bursts + amber LED pulse if `led_anim_capable` | [today] |
+| T2 | a turn or announcement is playing | burst held off while `device.speaker_busy` is non-zero | [today] |
+| T3 | wake word heard over the ring | alert ducked by `DUCK_DB` for `DUCK_HOLD_S` = 12s so the command reaches STT | [today] |
+| T4 | dismissal (button, transcript, or `CANCELLED`) | ring stops, `speaker_flush` | [today] |
+| T5 | nobody answers | stops at `MAX_RING_S` = 120s | [today] |
 
 `speaker_busy` is a counter rather than a flag because an announcement can
 overlap a turn's playback, and it is held in a `try/finally` because a
@@ -162,6 +173,24 @@ process.
 - **Q2 — where does the output chain belong?** EQ, limiter and bass guard all
   run controller-side today, on the voice plane, before the audio reaches the
   wire (#243). Music does not go through them at all.
+- **Q4 — the alarm and an announcement both write `0x02`, and only one of
+  them asks first (#373).** `_ring_timer_alarm` waits on `speaker_busy`
+  before every burst, for the stated reason that two writers would interleave
+  frames; `_standalone_play` performs no such check and streams into a chime
+  already in flight. Measured 2026-08-28: an announcement landing between
+  bursts plays, one landing during a burst is inaudible. Both paths also
+  share a single `playback_done` Event, so one device report satisfies two
+  waiters — observed as two `Playback complete` lines in the same
+  millisecond, and an announcement whose wait ended after a chime's duration
+  rather than its own.
+  **The exclusion is one-directional, which is the bug**; whether the silence
+  itself is EOS ordering on the device (§3, `stream_speaker`) is unconfirmed.
+  Blocking announcements outright while ringing is NOT the answer — HA blocks
+  on the announce call holding `_is_announcing`, so a 120s `MAX_RING_S` would
+  fail every other announcement to that satellite meanwhile. The longer-term
+  answer is likely the alarm moving to the music plane, where the device's
+  own mixer ducks it for free; that needs `audio_mix` gating, since a device
+  without it never plays `0x04` and the alarm would be silent.
 - **Q3 — what owns the speaker when the jack is occupied?** A plug in the jack
   degrades the whole audio subsystem (#117/#141) and, with a music session
   live, can silence everything including voice. That is a hardware/HAL fault
@@ -177,5 +206,5 @@ process.
 2. **A voice turn never flushes the music plane** (F4 above).
 3. **The mixer saturates, never wraps** (`mix_test.go:149` pins this).
 4. **Playback completion comes from the device**, not from a duration estimate.
-5. **`speaker_busy` is released in a `finally`.** [proposed #167]
+5. **`speaker_busy` is released in a `finally`.** [today]
 6. **Frame types are direction-scoped.** `0x04`/`0x05` are not free to reuse.

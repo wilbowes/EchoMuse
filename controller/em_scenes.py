@@ -20,6 +20,12 @@ resolve(config) returns everything em_controller's LED helpers need:
 
 NUM_LEDS = 12
 
+# The device's own "no controller" orange, at full brightness — allLEDs(255*br,
+# 40*br, 0) in device/cmd/server.go's pulseOrange. Reused rather than picked so
+# the two "nothing upstream" signals are the same colour; the device scales
+# brightness itself when it renders a pulse.
+LINK_ORANGE = (255, 40, 0)
+
 
 def _solid(r: int, g: int, b: int) -> list:
     return [(r, g, b)] * NUM_LEDS
@@ -255,6 +261,29 @@ def resolve(config: dict) -> dict:
         "ack_anim":       {
             "pattern": "solid", "colors": outcome_colors,
             "ttlSec": 1,
+        },
+        # Two orange throbs — "heard you, but there is nothing to talk to."
+        #
+        # The one cue that does NOT take its colour from the scene, for the
+        # reason the mute ring is always red: it reports a fault in the chain
+        # above the device rather than an outcome of the turn, and orange
+        # already carries exactly that meaning on this hardware — it is what
+        # the device pulses on its own while it cannot find a controller
+        # (pulseOrange, device/cmd/server.go). Home Assistant not being
+        # connected is the same condition one hop further up, so it reads as
+        # "the link upstream is down" without a legend, which no rhythm in the
+        # scene colour can say.
+        #
+        # It follows a brief hold of the listening ring (NO_HA_HOLD_S, in
+        # em_controller): the wake word WAS heard and the ack has to land
+        # before the fault, or the two read as one confusing signal.
+        #
+        # 500ms against the device's 1s TTL floor gives exactly two throbs
+        # and then a self-clear — runPulse starts and ends dim, so the count
+        # is the deliberate part.
+        "no_ha_anim":     {
+            "pattern": "pulse", "colors": [list(LINK_ORANGE)],
+            "periodMs": 500, "ttlSec": 1,
         },
     }
 

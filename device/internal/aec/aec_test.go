@@ -1,6 +1,7 @@
 package aec
 
 import (
+	"bytes"
 	"encoding/binary"
 	"math"
 	"testing"
@@ -245,5 +246,282 @@ func TestParamClamps(t *testing.T) {
 	c.SetParams(false, 0, minTailMs)
 	if c.st != nil {
 		t.Fatalf("disable did not free echo state")
+	}
+}
+
+// ─── Hardware far-end reference (#385) ────────────────────────────────────────
+
+// toBytes renders 16kHz mono S16 samples as the wire format both Process and
+// ProcessWithRef take.
+func toBytes(s []int16) []byte {
+	b := make([]byte, len(s)*2)
+	for i, v := range s {
+		binary.LittleEndian.PutUint16(b[i*2:], uint16(v))
+	}
+	return b
+}
+
+// TestHardwareRefCancelsWithoutRingOrDelay is the point of #385: the
+// reference arrives in the same frame as the near end, so there is no ring,
+// no aecDelayMs and no governor — and cancellation must still converge.
+//
+// The echo is delayed by 33 samples, the offset measured on hardware
+// (2.06ms of converter and acoustic delay), and inverted, because the
+// measured mic-to-reference correlation was negative. Both are things the
+// adaptive filter has to absorb rather than things the caller aligns.
+func TestHardwareRefCancelsWithoutRingOrDelay(t *testing.T) {
+	const frames = 120
+	const echoDelay = 33 // samples, measured on biscuit
+
+	c := New()
+	c.SetParams(true, 0, 200)
+	c.SetHardwareRef(true)
+
+	signal := synth(frames * FrameSize)
+	mic := make([]int16, len(signal))
+	for i := echoDelay; i < len(signal); i++ {
+		mic[i] = -signal[i-echoDelay] // inverted, as measured
+	}
+
+	var echoRMS, residRMS float64
+	measured := 0
+	for f := 0; f < frames; f++ {
+		lo, hi := f*FrameSize, (f+1)*FrameSize
+		micBytes := toBytes(mic[lo:hi])
+		refBytes := toBytes(signal[lo:hi])
+		out := c.ProcessWithRef(micBytes, refBytes)
+		if f >= frames-20 {
+			echoRMS += rms(micBytes)
+			residRMS += rms(out)
+			measured++
+		}
+	}
+	echoRMS /= float64(measured)
+	residRMS /= float64(measured)
+
+	t.Logf("echo RMS %.0f → residual RMS %.0f (%.1f dB attenuation)",
+		echoRMS, residRMS, 20*math.Log10(echoRMS/residRMS))
+	if residRMS > echoRMS*0.25 {
+		t.Fatalf("insufficient cancellation: echo RMS %.0f, residual RMS %.0f",
+			echoRMS, residRMS)
+	}
+	if c.underruns != 0 || c.resyncs != 0 {
+		t.Fatalf("ring machinery ran on the hardware path: underruns=%d resyncs=%d",
+			c.underruns, c.resyncs)
+	}
+	if c.hwFrames == 0 {
+		t.Fatal("no frames took the hardware path")
+	}
+}
+
+// TestHardwareRefIgnoresWriteFar pins that the ring is not being filled while
+// the hardware path is live. Nothing drains it there, so a WriteFar that kept
+// pushing would peg it at ringCap and leave the far-end telemetry describing a
+// buffer no cancellation ever reads.
+func TestHardwareRefIgnoresWriteFar(t *testing.T) {
+	c := New()
+	c.SetParams(true, 100, 200)
+	c.SetHardwareRef(true)
+
+	signal := synth(FrameSize)
+	for i := 0; i < 50; i++ {
+		c.WriteFar(to48kStereo(signal))
+	}
+	if c.count != 0 {
+		t.Fatalf("WriteFar filled the ring on the hardware path: %d samples", c.count)
+	}
+}
+
+// TestMissingHardwareRefPassesThrough — a caller that promises a hardware
+// reference and supplies none must not have its audio cancelled against
+// silence. That would be indistinguishable from a working AEC with nothing
+// playing, which is exactly the failure this project has already paid for
+// once (0dB cancellation, no underruns to give it away).
+func TestMissingHardwareRefPassesThrough(t *testing.T) {
+	c := New()
+	c.SetParams(true, 0, 200)
+	c.SetHardwareRef(true)
+
+	mic := toBytes(synth(FrameSize))
+	out := c.ProcessWithRef(mic, nil)
+	if !bytes.Equal(out, mic) {
+		t.Fatal("frame was altered despite having no reference")
+	}
+	if c.hwMissing == 0 {
+		t.Fatal("missing reference was not counted")
+	}
+
+	short := make([]byte, FrameSize) // half a frame
+	if out := c.ProcessWithRef(mic, short); !bytes.Equal(out, mic) {
+		t.Fatal("mismatched reference length was not rejected")
+	}
+}
+
+// TestSwitchingSourcesDropsStaleRing — the ring's contents are meaningless
+// across a switch (never consumed on the way in, stale by however long the
+// hardware path ran on the way out), and a stale reference is the one thing
+// that silently produces zero cancellation.
+func TestSwitchingSourcesDropsStaleRing(t *testing.T) {
+	c := New()
+	c.SetParams(true, 100, 200)
+
+	signal := synth(FrameSize)
+	for i := 0; i < 20; i++ {
+		c.WriteFar(to48kStereo(signal))
+	}
+	if c.count == 0 {
+		t.Fatal("precondition failed: ring should hold software-tap samples")
+	}
+	c.SetHardwareRef(true)
+	if c.count != 0 {
+		t.Fatalf("stale ring survived the switch: %d samples", c.count)
+	}
+}
+
+// TestReferenceScalingSurvivesAVolumeChange is the regression for what the
+// field log showed on 2026-08-29: the hardware reference is tapped upstream
+// of the DAC volume control, so a volume change is a step in the echo path
+// gain that the filter can only discover by re-converging — cancellation
+// dropped to -1.7dB immediately after a change and took 3-4 seconds to climb
+// back, over and over.
+//
+// The device SETS that volume, so it need not be guessed. Two identical runs,
+// one told about the change and one not, and the told one must be better in
+// exactly the frames after it.
+func TestReferenceScalingSurvivesAVolumeChange(t *testing.T) {
+	const frames = 160
+	const changeAt = 100
+	const echoDelay = 33
+	// 87 is 40 steps below unity at 0.5dB each: exactly -20dB, so the echo
+	// drops by a clean factor of 10.
+	const newLevel = 87
+	const newGain = 0.1
+
+	run := func(tellIt bool) float64 {
+		c := New()
+		c.SetParams(true, 0, 200)
+		c.SetHardwareRef(true)
+		c.SetPlaybackLevel(127) // unity to begin with
+
+		signal := synth(frames * FrameSize)
+		var residual float64
+		measured := 0
+		for f := 0; f < frames; f++ {
+			lo, hi := f*FrameSize, (f+1)*FrameSize
+			gain := 1.0
+			if f >= changeAt {
+				gain = newGain
+			}
+			if f == changeAt && tellIt {
+				c.SetPlaybackLevel(newLevel)
+			}
+			mic := make([]int16, FrameSize)
+			for i := 0; i < FrameSize; i++ {
+				src := lo + i - echoDelay
+				if src >= 0 {
+					mic[i] = int16(-float64(signal[src]) * gain)
+				}
+			}
+			out := c.ProcessWithRef(toBytes(mic), toBytes(signal[lo:hi]))
+			// The transient is what is being measured: the frames right
+			// after the change, before any filter would have re-converged.
+			if f >= changeAt && f < changeAt+15 {
+				residual += rms(out)
+				measured++
+			}
+		}
+		return residual / float64(measured)
+	}
+
+	told, untold := run(true), run(false)
+	t.Logf("post-change residual RMS: told %.1f, untold %.1f (%.1fdB better)",
+		told, untold, 20*math.Log10(untold/math.Max(told, 1e-9)))
+	if told >= untold {
+		t.Fatalf("scaling the reference did not help across a volume change: "+
+			"told %.1f, untold %.1f", told, untold)
+	}
+}
+
+func TestPlaybackLevelScaleIsTheCodecLaw(t *testing.T) {
+	c := New()
+	// 0.5dB per step, unity at 127 — the control's own law, see Volume in
+	// device/CLAUDE.md. Getting this wrong scales the reference to something
+	// the speaker never played, which is worse than not scaling at all.
+	for _, tc := range []struct {
+		level int
+		want  float64
+	}{
+		{127, 1.0},      // unity
+		{87, 0.1},       // -20dB
+		{47, 0.01},      // -40dB, the button floor
+	} {
+		c.SetPlaybackLevel(tc.level)
+		if math.Abs(c.refScale-tc.want) > tc.want*0.001 {
+			t.Errorf("level %d → scale %.6f, want %.6f", tc.level, c.refScale, tc.want)
+		}
+	}
+}
+
+// A delay change must not rebuild the filter on the hardware reference:
+// delayMs only seeds the ring, and the hardware path has no ring. Rebuilding
+// would throw away a converged filter to apply a number nothing reads — and
+// the value rides every config push, so one fleet-wide edit would do it to
+// every device at once.
+func TestDelayChangeDoesNotRebuildOnTheHardwarePath(t *testing.T) {
+	c := New()
+	c.SetParams(true, 250, 300)
+	c.SetHardwareRef(true)
+	before := c.st
+	if before == nil {
+		t.Fatal("echo state not initialised")
+	}
+
+	c.SetParams(true, 400, 300)
+	if c.st != before {
+		t.Fatal("delay-only change rebuilt the echo state on the hardware path")
+	}
+	if c.delayMs != 400 {
+		t.Fatalf("delayMs not recorded for a later software fallback: got %d", c.delayMs)
+	}
+
+	// A TAIL change is a real filter change and must still rebuild.
+	c.SetParams(true, 400, 200)
+	if c.st == before {
+		t.Fatal("tail change must rebuild the echo state even on the hardware path")
+	}
+
+	// And on the software path a delay change must still re-seed the ring,
+	// which is the whole reason the rebuild exists.
+	c.SetHardwareRef(false)
+	prev := c.st
+	c.SetParams(true, 500, 200)
+	if c.st == prev {
+		t.Fatal("delay change must rebuild on the software path")
+	}
+	if c.count != 500*sampleRate/1000 {
+		t.Fatalf("ring not re-seeded to the bulk delay: got %d samples", c.count)
+	}
+}
+
+// RefSource is what the controller reads to tell a hardware reference from
+// the software tap. "off" must be a real value rather than an empty string:
+// the stats field is sent without omitempty precisely so that ABSENT means
+// "firmware too old to say", and an empty string would collapse the two.
+func TestRefSourceNamesTheLiveReference(t *testing.T) {
+	c := New()
+	if got := c.RefSource(); got != "off" {
+		t.Fatalf("disarmed canceller: got %q, want \"off\"", got)
+	}
+	c.SetParams(true, 0, 300)
+	if got := c.RefSource(); got != "sw" {
+		t.Fatalf("software tap: got %q, want \"sw\"", got)
+	}
+	c.SetHardwareRef(true)
+	if got := c.RefSource(); got != "hw" {
+		t.Fatalf("hardware reference: got %q, want \"hw\"", got)
+	}
+	c.SetParams(false, 0, 300)
+	if got := c.RefSource(); got != "off" {
+		t.Fatalf("disarmed while on hardware: got %q, want \"off\"", got)
 	}
 }

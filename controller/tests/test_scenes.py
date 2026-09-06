@@ -159,3 +159,37 @@ def test_ack_cue_is_a_steady_hold_not_a_rhythm():
     assert 0 < ack["ttlSec"] <= 2, \
         "must retire on the device's own ticker, and well inside the gap " \
         "between the setup flow's two wake word prompts"
+
+
+def test_no_ha_cue_is_orange_in_every_scene():
+    """
+    The only cue that ignores the scene palette, and deliberately.
+
+    It does not report an outcome of the turn — it reports that there is
+    nothing above the device to answer, and orange is what the device already
+    pulses on its own while it cannot find a controller. HA not being
+    connected is that condition one hop further up, so the colour is the
+    message and a scene must not repaint it.
+    """
+    for name in ("standard", "airy", "malevolent", "pride"):
+        scene = em_scenes.resolve({"ledScene": name})
+        cue   = scene["no_ha_anim"]
+        assert cue["colors"] == [list(em_scenes.LINK_ORANGE)], \
+            "the fault colour must not follow the scene"
+        assert cue["colors"] != scene["error_anim"]["colors"], \
+            "and it must not land on the outcome cues' colour, or the two " \
+            "reads become one signal"
+
+
+def test_no_ha_cue_is_two_throbs_and_self_clearing():
+    """
+    Two throbs: runPulse starts and ends dim, so a 500ms period against the
+    device's 1s TTL floor is exactly a double flash and then a clear. The
+    count is the readable part — a longer period would leave one throb, a
+    shorter one an indistinct flicker.
+    """
+    cue = em_scenes.resolve({})["no_ha_anim"]
+    assert cue["pattern"] == "pulse"
+    assert cue["ttlSec"] == 1, \
+        "must retire on the device's own ticker with no follow-up message"
+    assert cue["ttlSec"] * 1000 / cue["periodMs"] == 2

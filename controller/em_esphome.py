@@ -86,6 +86,7 @@ import em_recordings
 import em_runbarrier
 import em_oww_models
 import em_player
+import em_timers
 import em_turnclock
 import em_volume
 
@@ -270,11 +271,38 @@ _MP_STATE = {
 # Voice assistant feature flags advertised to HA.
 # ANNOUNCE is required to trigger VoiceAssistantConfigurationRequest
 # (see session handoff finding #3).
+# TIMERS makes HA route "set a timer" intents here and push timer state as
+# VoiceAssistantTimerEventResponse events — the satellite rings on FINISHED
+# (see em_timers / _on_timer_event). The alert is entirely controller-side
+# (chime over the speaker plane + LED pulse), so this needs no firmware
+# support and works across the whole fleet.
 VOICE_ASSISTANT_FLAGS = int(
     VoiceAssistantFeature.VOICE_ASSISTANT
     | VoiceAssistantFeature.API_AUDIO
     | VoiceAssistantFeature.ANNOUNCE
+    | VoiceAssistantFeature.TIMERS
 )
+
+# START_CONVERSATION is advertised PER DEVICE, not in the constant above,
+# because it is the one flag whose feature we cannot deliver without hardware:
+# announce-then-listen needs a microphone. HA filters the eligible targets for
+# `assist_satellite.start_conversation` and `assist_satellite.ask_question` on
+# this bit, so a satellite that cannot listen must not carry it — otherwise it
+# appears in the picker and answers every question with silence.
+#
+# Everything else in VOICE_ASSISTANT_FLAGS is still advertised unconditionally,
+# which is a gap rather than a decision: SPEAKER-less hardware would want the
+# same treatment. Doing it for one flag is not the general fix, and the general
+# fix is not free — the flags ride DeviceInfoResponse, a ONE-SHOT at HA connect,
+# so this only works at all because set_device_capabilities bounces the HA
+# connection when the set changes (a device whose server exists before it has
+# registered would otherwise advertise from an empty capability list forever).
+VOICE_ASSISTANT_CONVERSATION_FLAG = int(VoiceAssistantFeature.START_CONVERSATION)
+
+# Trigger label for a turn Home Assistant started with an announcement, rather
+# than one a wake word or a button started. It is neither, and borrowing either
+# label would put HA-initiated turns into the wake-word statistics.
+CONVERSATION_TRIGGER = "start_conversation"
 
 # VoiceAssistantRequest flags=0 means "device already detected wake word,
 # run Assist pipeline from STT onward — do not run HA-side wake word
@@ -317,6 +345,21 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self.mac_address    = mac_address
         self.oww_model_id   = oww_model_id
         self._owning_server  = owning_server
+        # Strong references to in-flight timer-event tasks (see the
+        # VoiceAssistantTimerEventResponse branch).
+        self._timer_tasks: set = set()
+
+        def _log_timer_task_error(task, _dev=device_id) -> None:
+            """Surface a failed timer-event task instead of losing it to GC."""
+            if task.cancelled():
+                return
+            exc = task.exception()
+            if exc is not None:
+                log.error(
+                    f"[esphome.{_dev[-8:]}] timer event handler failed: {exc!r}",
+                    exc_info=exc,
+                )
+        self._log_timer_task_error = _log_timer_task_error
 
         # Set on the base class so connection_lost dispatches back to
         # DeviceESPhomeServer for claimant cleanup.
@@ -338,6 +381,9 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         # different things to find in the stats, and recording all of them
         # as "cancelled" loses the distinction the field is read for.
         self._turn_end_reason: Optional[str] = None
+        # Set when this turn's transcript dismissed a ringing alarm locally —
+        # suppresses HA's "there are no timers" reply for that turn.
+        self._dismissed_alarm   = False
         self._tts_audio_url:    Optional[str] = None
         self._tts_audio_data:   Optional[bytes] = None
         self._tts_event         = asyncio.Event()
@@ -349,6 +395,17 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         # send before the turn has actually progressed (observed in practice —
         # see _handle_voice_event's RUN_END branch).
         self._intent_ended      = False
+        # STT_END seen this turn. Only read on an answer-only run, where
+        # INTENT_END structurally never arrives — see _answer_only.
+        self._stt_ended         = False
+        # This turn was started by HA's announce-then-listen, and HA may have
+        # truncated its own pipeline at STT. `assist_satellite.ask_question`
+        # sets `end_stage = STT` (entity.py, keyed on its answer future), so
+        # the run ends after STT_END with no INTENT_END and no TTS — and the
+        # RUN_END guard below waits for INTENT_END. Without this, every
+        # question answered correctly still parked the device on the 30s TTS
+        # wait and recorded the turn as a timeout.
+        self._answer_only       = False
         self._run_started       = False
         # Whether HA has told us this run is over. A run we started
         # that has not finished is still emitting onto this socket,
@@ -390,10 +447,47 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         # cleared at turn end.
         self._on_tts_received   = None   # async callable(pcm_url_or_bytes)
         self._on_thinking       = None   # async callable()
+        # A turn can end in two places — HA's STT_VAD_END event, or our own
+        # device VAD sentinel — and both mean "the user stopped talking".
+        # _enter_thinking() is the single transition both call; this makes it
+        # once per turn, since on a slow turn both routes fire.
+        self._thinking_entered  = False
         self._on_stt_end        = None   # async callable(text: str)
         self._on_announce       = None   # async callable(pcm_bytes) — set only during an active voice turn (run_esphome_voice_turn); None otherwise. The standalone-announce path (setup wizard, push TTS) does NOT use this — it reads self._owning_server._standalone_play live at call time instead, since that value can legitimately change after this satellite was constructed (see _announce_play_cb).
 
     # ── Message handling ─────────────────────────────────────────────────
+
+    def _enter_thinking(self) -> None:
+        """
+        The user stopped talking. Ring to the spinner, dashboard out of
+        Listening, `thinking` set — whatever on_thinking does.
+
+        **Every route that concludes a turn's speech has ended must call
+        this**, and there are two: HA's STT_VAD_END event, and our own device
+        VAD sentinel in _stream_mic_audio. Wiring it to only the first is
+        what #370 was: a turn ending on the sentinel sent `end=True` to HA
+        and then sat on the listening ring through the whole STT-to-TTS
+        window — measured at ~11s on this fleet, with no indication it had
+        heard you finish.
+
+        It presented as "the button is slower than the wake word", and it is
+        not really about the trigger at all. Which route wins is a race
+        between two VAD timers; the trigger only correlates with the winner
+        (33/33 wake turns ended on HA's VAD, 11/11 button turns on the
+        sentinel, measured 2026-08-28). Nothing guarantees that correlation
+        holds on a slower link, so fixing the button case specifically would
+        have left a wake turn free to lose the same transition. The trigger
+        decides how a turn STARTS; nothing after it should differ.
+
+        Idempotent because on a slow turn both routes genuinely fire — the
+        sentinel sends end=True and HA can still emit STT_VAD_END for the
+        same silence.
+        """
+        if self._thinking_entered or self._turn_cancelled:
+            return
+        self._thinking_entered = True
+        if self._on_thinking:
+            asyncio.create_task(self._on_thinking())
 
     def _device_has(self, cap: str) -> bool:
         srv = self._owning_server
@@ -406,6 +500,18 @@ class EchoMuseSatellite(SatelliteServerProtocol):
     @property
     def _ambient_lux_capable(self) -> bool:
         return self._device_has("ambient_light")
+
+    def _voice_assistant_flags(self) -> int:
+        """
+        Feature flags for DeviceInfoResponse, gated on what the device has.
+
+        See VOICE_ASSISTANT_CONVERSATION_FLAG for why announce-then-listen is
+        the one that is conditional.
+        """
+        flags = VOICE_ASSISTANT_FLAGS
+        if self._device_has("mic"):
+            flags |= VOICE_ASSISTANT_CONVERSATION_FLAG
+        return flags
 
     @property
     def _current_volume(self) -> float:
@@ -436,7 +542,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 # (session handoff finding #1)
                 project_name=f"EchoMuse.{ESPHOME_DEVICE_MODEL}",
                 project_version=ESPHOME_PROJECT_VERSION,
-                voice_assistant_feature_flags=VOICE_ASSISTANT_FLAGS,
+                voice_assistant_feature_flags=self._voice_assistant_flags(),
             )
             return
 
@@ -646,6 +752,30 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             yield _HANDLED
             return
 
+        if isinstance(msg, api_pb2.VoiceAssistantTimerEventResponse):
+            # HA owns the countdown; we only track live timers and ring on
+            # FINISHED. Fire-and-forget to the owning server so a slow ring
+            # (which plays audio) never blocks the protocol read loop.
+            if self._owning_server is not None:
+                # Keep a reference and report failures: asyncio holds only a
+                # WEAK reference to a bare task, and an unretrieved exception
+                # on one is invisible until GC. Both make a ring that never
+                # happens indistinguishable from an event that never arrived.
+                task = asyncio.create_task(
+                    self._owning_server.on_timer_event(
+                        event_type=int(msg.event_type),
+                        timer_id=msg.timer_id,
+                        name=msg.name,
+                        total_seconds=int(msg.total_seconds),
+                        seconds_left=int(msg.seconds_left),
+                    )
+                )
+                self._timer_tasks.add(task)
+                task.add_done_callback(self._timer_tasks.discard)
+                task.add_done_callback(self._log_timer_task_error)
+            yield _HANDLED
+            return
+
         if isinstance(msg, api_pb2.VoiceAssistantAnnounceRequest):
             # HA-initiated announcement (setup wizard audio test, or TTS push).
             #
@@ -669,13 +799,47 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # this message at all — it fires when the device fetches the
             # CONNECTION_TEST_URL_BASE media id.
             #
-            # ANNOUNCING goes out now, synchronously, because it describes the
+            # The state goes out now, synchronously, because it describes the
             # state we are entering rather than one we have reached.
-            log.info(f"[{self._log_name}] AnnounceRequest: media_id={msg.media_id!r} text={msg.text!r}")
-            asyncio.create_task(self._run_announce(msg.media_id))
+            #
+            # It is PLAYING and NOT ANNOUNCING, however much ANNOUNCING is the
+            # truthful answer. HA's esphome media_player cannot map it:
+            #
+            #   File "homeassistant/components/esphome/media_player.py", line 115
+            #     return _STATES.from_esphome(self._state.state)
+            #   File "homeassistant/components/esphome/enum_mapper.py", line 28
+            #     return self._mapping[value]
+            #   KeyError: <MediaPlayerState.ANNOUNCING: 4>
+            #
+            # `MediaPlayerState.ANNOUNCING` is a real protobuf value (4) and
+            # `_STATES` has no entry for it, so every announcement we made
+            # raised inside `async_write_ha_state` — in the state-write path,
+            # which is nothing to do with the announcement's own result, so it
+            # surfaces as "Task exception was never retrieved" and nothing in
+            # HA's UI says a thing. Announcing state reaches the user through
+            # the assist_satellite entity's RESPONDING anyway; the media player
+            # claiming it buys nothing and costs an exception per announce.
+            # Measured on HA 2026.8.3, alongside the setup wizard stalling on
+            # SatelliteBusyError.
+            #
+            # `start_conversation` (field 4) is HA asking us to LISTEN once the
+            # announcement has played — the wire form of both
+            # `assist_satellite.start_conversation` and
+            # `assist_satellite.ask_question`. It rides the same message as a
+            # plain announcement, so the only difference on our side is what
+            # happens after the audio stops.
+            log.info(
+                f"[{self._log_name}] AnnounceRequest: media_id={msg.media_id!r} "
+                f"text={msg.text!r} start_conversation={msg.start_conversation}"
+            )
+            asyncio.create_task(self._run_announce(
+                msg.media_id,
+                preannounce_media_id=msg.preannounce_media_id,
+                start_conversation=msg.start_conversation,
+            ))
             yield api_pb2.MediaPlayerStateResponse(
                 key=MEDIA_PLAYER_KEY,
-                state=MediaPlayerState.ANNOUNCING,
+                state=MediaPlayerState.PLAYING,
                 volume=self._current_volume,
                 muted=False,
             )
@@ -738,15 +902,54 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # VAD is the endpointing authority for the turn from here on —
             # the device's own RMS gate becomes advisory (see review §3.1).
             self._ha_vad_end.set()
-            if self._on_thinking and not self._turn_cancelled:
-                asyncio.create_task(self._on_thinking())
+            self._enter_thinking()
 
         elif event_type == ET.VOICE_ASSISTANT_STT_END:
             text = data.get("text", "")
             log.info(f"[{self._log_name}] STT result: {text!r}")
+            self._stt_ended = True
+            # HA has final text, so no further microphone audio can change
+            # this turn — stop feeding it, the same "HA is done" shape the
+            # RUN_END-without-RUN_START and ERROR paths already use.
+            #
+            # Without this the only exits left are the device's own VAD
+            # sentinel and the 20s hard cap, and once speech_seen is true
+            # em_turnclock deliberately stops closing the turn (HA's VAD owns
+            # end-of-turn from that point). In a room with background noise
+            # the device's RMS gate need not reclose, so a turn whose answer
+            # HA has already produced sits in the streaming phase until the
+            # cap — the response is ready and nothing plays it (#343).
+            #
+            # STT_VAD_END normally gets here first and this is a no-op. It is
+            # the pipelines that never emit it that strand the turn.
+            self._ha_vad_end.set()
             if self._trace:
                 self._trace.stt_text = text
                 self._trace.t_stt_ms = self._trace.elapsed_ms()
+            # Spoken dismissal of a RINGING alarm is ours to handle: HA has
+            # already discarded the timer by the time it fires, so it would
+            # answer "there are no timers" (see em_timers.is_dismissal). Acted
+            # on here, at the transcript, rather than waiting for a CANCELLED
+            # that structurally cannot arrive.
+            srv = self._owning_server
+            if (srv is not None and srv.timer_ringing
+                    and em_timers.is_dismissal(text)):
+                # Stopping the ring is the generous match; suppressing HA's
+                # reply is NOT. "Turn off the kitchen light" is a dismissal by
+                # the rule above and also a real command HA answers, so the
+                # reply is only swallowed when the utterance is nothing but a
+                # dismissal (em_timers.is_dismissal_only).
+                self._dismissed_alarm = em_timers.is_dismissal_only(text)
+                log.info(
+                    f"[{self._log_name}] Spoken dismissal {text!r} — "
+                    f"stopping alarm locally"
+                    + ("" if self._dismissed_alarm
+                       else "; utterance carries a command, HA's reply stands")
+                )
+                task = asyncio.create_task(srv.dismiss_timer_alarm())
+                self._timer_tasks.add(task)
+                task.add_done_callback(self._timer_tasks.discard)
+                task.add_done_callback(self._log_timer_task_error)
             if self._on_stt_end and not self._turn_cancelled:
                 asyncio.create_task(self._on_stt_end(text))
 
@@ -817,7 +1020,16 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # spoken response (e.g. a silent light-toggle intent) still passes
             # through INTENT_END first, so this doesn't add a 30s stall for
             # that case — only a premature RUN_END before INTENT_END is held.
-            if self._intent_ended or self._turn_cancelled:
+            #
+            # An answer-only run never reaches INTENT_END, so STT_END is its
+            # terminal marker instead. `assist_satellite.ask_question` sets
+            # `end_stage = STT`, so HA's pipeline is genuinely over: it has the
+            # text it asked for and there is no intent and no TTS to wait on.
+            # Narrow on purpose — only a turn HA started with an announcement,
+            # and only once STT has actually produced a result — because the
+            # premature RUN_END this guard exists for arrives before STT_START.
+            if self._intent_ended or self._turn_cancelled or (
+                    self._answer_only and self._stt_ended):
                 # The genuine terminal RUN_END. Nothing more is coming for
                 # this run, so teardown has nothing left to serialise
                 # against — the overwhelmingly common case.
@@ -893,10 +1105,15 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         except Exception as e:
             log.error(f"[{self._log_name}] play_media announce failed: {e}")
 
-    async def _run_announce(self, media_id: str) -> None:
+    async def _run_announce(
+        self,
+        media_id: str,
+        preannounce_media_id: str = "",
+        start_conversation: bool = False,
+    ) -> None:
         """
         Background task: fetch TTS audio from HA, play it, then tell HA the
-        announcement is done.
+        announcement is done — and, if HA asked for a conversation, listen.
 
         The sequencing rules and their reasons live in em_announce, which is
         importable by the test suite. This is the adapter: it resolves the
@@ -936,7 +1153,40 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             play=self._announce_play_cb(),
             on_finished=reply,
             log_name=self._log_name,
+            preannounce_media_id=preannounce_media_id,
         )
+
+        # AFTER the reply, deliberately. HA blocks on AnnounceFinished for the
+        # whole announcement (`_do_announce` awaits it), so a turn started
+        # before it would be listening while HA still believes it is speaking —
+        # and `async_internal_ask_question` only arms its answer future once
+        # `async_start_conversation` returns.
+        if start_conversation:
+            await self._start_conversation_turn()
+
+    async def _start_conversation_turn(self) -> None:
+        """
+        Open a voice turn nobody spoke a wake word for.
+
+        HA asked the question; the answer is the next thing said in the room.
+        Runs the ordinary turn path — the only differences are the trigger
+        label and that `ask_question` truncates HA's pipeline at STT (see the
+        RUN_END branch in _handle_voice_event).
+        """
+        start = getattr(self._owning_server, "_start_conversation", None)
+        if start is None:
+            # The physical Dot is not connected — HA is talking to a satellite
+            # whose device is absent. The announcement already reported that it
+            # did not play; there is nothing to listen with either.
+            log.warning(
+                f"[{self._log_name}] start_conversation with no device "
+                f"connected — nothing to listen with"
+            )
+            return
+        try:
+            await start()
+        except Exception as e:
+            log.error(f"[{self._log_name}] start_conversation turn failed: {e}")
 
     # ── Voice turn (outbound) ────────────────────────────────────────────
 
@@ -977,10 +1227,23 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._turn_active           = True
         self._turn_cancelled        = False
         self._turn_end_reason       = None
+        self._dismissed_alarm       = False
         self._tts_event.clear()
         self._tts_audio_url         = None
         self._tts_audio_data        = None
         self._intent_ended          = False
+        self._stt_ended             = False
+        # Derived from the trace's own trigger label rather than plumbed
+        # through as a parameter, so the flag and the activity stats can never
+        # disagree about what started this turn.
+        #
+        # A CONTINUATION of one of these turns keeps the label and so keeps the
+        # flag, which is not strictly right — a continuation runs HA's full
+        # pipeline and does reach INTENT_END. It costs nothing: the guard below
+        # is an OR, and INTENT_END satisfies it first on any turn that gets one.
+        self._answer_only           = bool(
+            trace is not None and trace.trigger == CONVERSATION_TRIGGER
+        )
         self._run_started           = False
         self._run_finished          = False
         self._ha_never_started      = False
@@ -992,6 +1255,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._no_speech_timeout     = False
         self._ha_vad_end.clear()
         self._ha_vad_start.clear()
+        self._thinking_entered = False
         self._on_thinking    = on_thinking
         self._on_announce    = None   # set below after announcement path is confirmed
         self._trace          = trace  # may be None — all trace.x calls guard against this
@@ -1104,6 +1368,18 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 if trace: trace.outcome = why
                 return
 
+            if self._dismissed_alarm:
+                # We stopped the alarm ourselves off the transcript. HA does
+                # not know the timer existed any more, so its reply is "there
+                # are no timers" — playing it would contradict the alarm that
+                # just stopped, and the silence IS the confirmation.
+                log.info(
+                    f"[{self._log_name}] Alarm dismissed locally — "
+                    f"suppressing HA's reply"
+                )
+                if trace: trace.outcome = "alarm_dismissed"
+                return
+
             if self._tts_audio_url:
                 # HA deliberately keeps a streaming TTS response open while
                 # new utterances are synthesized. Buffering it with resp.read()
@@ -1169,6 +1445,14 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     if trace: trace.outcome = why
                 elif pcm_bytes:
                     if trace: trace.outcome = "ok"
+            elif self._answer_only and self._stt_ended:
+                # Not a fault: `ask_question` ends HA's pipeline at STT, so
+                # there was never going to be a spoken reply — the transcript
+                # IS the deliverable, and HA matches it against the caller's
+                # answers. Distinct from "no_tts" so the activity stats do not
+                # read every question answered as a turn that produced nothing.
+                log.info(f"[{self._log_name}] Question answered — no reply expected")
+                if trace: trace.outcome = "answered"
             else:
                 log.info(f"[{self._log_name}] No TTS audio URL received — turn ended without response")
                 if trace: trace.outcome = "no_tts"
@@ -1480,6 +1764,10 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     if self._trace and self._trace.t_vad_end_ms == -1:
                         self._trace.t_vad_end_ms = self._trace.elapsed_ms()
                     self._send_one(api_pb2.VoiceAssistantAudio(data=b"", end=True))
+                    # Same conclusion HA's STT_VAD_END reaches, so the same
+                    # transition (#370). Without it a turn ending here holds
+                    # the listening ring through STT, intent and TTS.
+                    self._enter_thinking()
                     return
 
                 if preroll_remaining > 0:
@@ -1771,6 +2059,34 @@ async def _stream_tts_audio_once(url: str) -> AsyncIterator[bytes]:
                         f"ffmpeg streaming decode failed: {err.decode()[:200]}"
                     )
     finally:
+        # Kill ffmpeg FIRST, before cancelling the feeder — the ordering is
+        # what makes this teardown terminate at all.
+        #
+        # On a barge-in the consumer stops iterating this generator, so
+        # nobody drains ffmpeg's stdout. Its stdout pipe fills, ffmpeg blocks
+        # writing, and a blocked ffmpeg stops reading stdin. The feeder is
+        # then stuck in drain(), and cancelling it runs its own finally,
+        # which awaits `stdin.wait_closed()` — a flush that needs ffmpeg to
+        # read and therefore never completes. The gather() below never
+        # returns and the kill never happens: teardown hangs, holding the
+        # turn. Killing first breaks both pipes, so those awaits raise
+        # instead of waiting.
+        #
+        # It also fixes #252. The InvalidStateError comes from asyncio
+        # resolving `_stdin_closed` twice — once when we close stdin, once
+        # when the kill tears the transport down. Killing while stdin is
+        # still open collapses that to one resolution, and the feeder's
+        # close() then finds a transport already closing and skips.
+        #
+        # Measured over 20 runs of a standalone repro of this shape, with
+        # nobody reading stdout: cancel-then-kill hung 20/20 and logged
+        # InvalidStateError 20/20; kill-first, 0/20 and 0/20.
+        #
+        # On the success path proc.wait() has already returned, so
+        # returncode is set and nothing is killed.
+        if proc is not None and proc.returncode is None:
+            proc.kill()
+            await proc.wait()
         for t in (feeder, stderr_task):
             if t is not None and not t.done():
                 t.cancel()
@@ -1778,9 +2094,6 @@ async def _stream_tts_audio_once(url: str) -> AsyncIterator[bytes]:
             *[t for t in (feeder, stderr_task) if t is not None],
             return_exceptions=True,
         )
-        if proc is not None and proc.returncode is None:
-            proc.kill()
-            await proc.wait()
 
 
 async def _fetch_tts_audio(url: str) -> bytes:
@@ -1890,6 +2203,22 @@ class DeviceESPhomeServer:
         # sends a volume_set control-plane message to the physical device.
         # None when no device is connected.
         self._send_volume_set = None
+        # Injected by device_connected() — the timer-alarm orchestrator. It
+        # lives in em_controller because ringing drives the device speaker,
+        # mic and LEDs (all Device state em_esphome cannot reach). async
+        # callable() each; None when no device is connected.
+        self._ring_alarm = None
+        self._stop_alarm = None
+        # Injected by device_connected() — async callable() that runs one
+        # voice turn nobody spoke a wake word for, for HA's announce-then-
+        # listen. In em_controller for _standalone_play's reason: it drives the
+        # mic, the ring and the voice lock. None when no device is connected,
+        # which is the honest answer to "listen now" for an absent device.
+        self._start_conversation = None
+        # Live-timer state, driven by HA's VoiceAssistantTimerEventResponse
+        # events. On the server (not the satellite) so it survives an HA
+        # reconnect that replaces the satellite mid-countdown.
+        self._timers = em_timers.TimerRegistry()
         # What the DEVICE says it implements, from its register message.
         # Drives which HA entities are advertised — negotiate by capability,
         # never by version (CLAUDE.md).
@@ -1912,6 +2241,56 @@ class DeviceESPhomeServer:
     def set_volume(self, volume: float) -> None:
         """Update stored volume (0.0–1.0) from a device volume_state report."""
         self.volume = max(0.0, min(1.0, volume))
+
+    async def on_timer_event(
+        self,
+        event_type: int,
+        timer_id: str = "",
+        name: str = "",
+        total_seconds: int = 0,
+        seconds_left: int = 0,
+    ) -> None:
+        """
+        Fold one HA timer event into the registry and start/stop the ring.
+
+        STARTED/UPDATED/CANCELLED only move the local state; a FINISHED that
+        begins a ring calls the injected orchestrator. A CANCELLED can still
+        end a ring — the registry handles it, and an HA that behaves that way
+        keeps working — but do not rely on one arriving for a RINGING alarm:
+        HA discards a timer when it finishes, so a spoken dismissal is
+        recognised from the transcript instead (em_timers.is_dismissal).
+        """
+        transition = self._timers.apply(event_type, timer_id)
+        ev_name = {
+            em_timers.TIMER_STARTED:   "started",
+            em_timers.TIMER_UPDATED:   "updated",
+            em_timers.TIMER_CANCELLED: "cancelled",
+            em_timers.TIMER_FINISHED:  "finished",
+        }.get(event_type, str(event_type))
+        log.info(
+            f"[esphome.{self.device_id[-8:]}] timer {ev_name} "
+            f"id={timer_id!r} name={name!r} left={seconds_left}s "
+            f"→ ring={transition} (active={self._timers.active_count()})"
+        )
+        if transition == em_timers.RING_START and self._ring_alarm is not None:
+            await self._ring_alarm()
+        elif transition == em_timers.RING_STOP and self._stop_alarm is not None:
+            await self._stop_alarm()
+
+    async def dismiss_timer_alarm(self) -> bool:
+        """
+        Local dismissal — a dot-button tap, or a spoken one recognised from
+        the transcript. Clears the registry and stops the ring. Returns
+        whether an alarm was actually ringing.
+        """
+        was_ringing = self._timers.clear()
+        if was_ringing and self._stop_alarm is not None:
+            await self._stop_alarm()
+        return was_ringing
+
+    @property
+    def timer_ringing(self) -> bool:
+        return self._timers.ringing
 
     def _protocol_factory(self):
         """
@@ -2132,12 +2511,104 @@ async def stop_esphome_servers() -> None:
     log.info("ESPHome servers stopped")
 
 
+async def device_deleted(device_id: str) -> None:
+    """
+    Drop a deleted device's satellite entirely — listener, mDNS record and
+    registry entry.
+
+    `device_disconnected` deliberately keeps the server object across a
+    disconnect (the port is the device's for good), so without this a delete
+    leaves it in `_servers` holding the OLD port. A re-added device then meets
+    that stale entry in `device_connected`, returns early on "already
+    listening", and never reaches `assign_esphome_port` — so it silently keeps
+    the port it was supposed to be leaving, under the previous row's label and
+    MAC, while its new DB row reads `esphome_api_port` NULL and the dashboard
+    shows no port at all. Measured 2026-08-27 on the EA controller, where the
+    delete was specifically an attempt to move a device off a colliding port.
+
+    Reusing the port is not a risk this creates: `assign_esphome_port` only
+    ever moves the counter forwards, so the number is retired either way.
+    """
+    server = _servers.pop(device_id, None)
+    _pending_caps.pop(device_id, None)
+    if server is None:
+        return
+    if server._mdns_info and _azc:
+        try:
+            await _azc.async_unregister_service(server._mdns_info)
+        except Exception as e:
+            log.warning(f"[{device_id}] mDNS deregistration failed: {e}")
+    await server.stop()
+    log.info(f"[esphome.{device_id[-8:]}] satellite removed (device deleted)")
+
+
 def get_server(device_id: str) -> Optional[DeviceESPhomeServer]:
     """Return the DeviceESPhomeServer for a device, or None."""
     return _servers.get(device_id)
 
 
+def get_status(device_id: str) -> Optional[dict]:
+    """
+    Controller-side voice satellite state for the dashboard (None when the
+    device has no server, which is itself the worst of the states below).
+
+    THIS MUST READ WHAT THE TURN PATH READS. `_start_esphome_voice_turn`
+    refuses a turn on exactly `get_server()` and `get_satellite()`, so those
+    are the two calls made here rather than a second opinion assembled from
+    flags beside them. A readout that can disagree with the decision it
+    describes is worse than none: it is the `speaking` drift (see the
+    dashboard notes in CLAUDE.md) waiting to happen on the panel someone
+    opens *because* the device is not answering.
+
+    THREE STATES, NOT FOUR. The BT proxy reports `haSubscribed` alongside
+    `haConnected` because a connected HA that has not subscribed to
+    advertisements is a real and distinct condition there. Voice has no
+    equivalent — the precondition is the satellite existing, full stop — so
+    there is deliberately no fourth field. Adding one would describe
+    something this code does not track.
+    """
+    server = _servers.get(device_id)
+    if server is None:
+        return None
+    return {
+        "port":        server.port,
+        "listening":   server._server is not None,
+        "haConnected": server.get_satellite() is not None,
+    }
+
+
 # ─── Voice turn trigger ───────────────────────────────────────────────────────
+
+def can_serve_turn(device_id: str) -> bool:
+    """
+    Whether a voice turn started on this device right now could reach Home
+    Assistant.
+
+    THE SAME TWO CALLS `_start_esphome_voice_turn` REFUSES ON, deliberately —
+    a caller standing a device down on a second opinion assembled from flags
+    beside them could disagree with the decision it is predicting, which is
+    the `get_status` rule one step further out. Callers use it to stand a
+    device down BEFORE it takes an arbitration claim or holds the voice lock,
+    so an Echo with nothing behind it cannot silence one that could answer.
+    """
+    server = _servers.get(device_id)
+    return server is not None and server.get_satellite() is not None
+
+
+async def record_dropped_wake(device, trigger_label: str, wake_info) -> None:
+    """
+    Record a wake that never became a turn because the device has no HA
+    behind it, and arm the ring cue for it.
+
+    The turn path reaches `_record_dropped_turn` by starting a turn and
+    finding nothing there; this is the same event caught one step earlier,
+    where the device stands down before holding the voice lock. Both must
+    record it, or wakes during an HA outage vanish from the activity history
+    depending on which path noticed — the events most worth seeing in a trend
+    review, distinguishable from a device that heard nothing only by this row.
+    """
+    await _record_dropped_turn(device, trigger_label, wake_info)
+
 
 async def _record_dropped_turn(device, trigger_label: str, wake_info) -> None:
     """
@@ -2145,6 +2616,12 @@ async def _record_dropped_turn(device, trigger_label: str, wake_info) -> None:
     no HA connection). Without this, wakes during an HA outage would vanish
     from the activity history — exactly the "device woke but nothing
     happened" events worth seeing in a trend review.
+
+    Also surfaces the outcome to the turn loop's ring cleanup, the same way a
+    completed turn does — the user standing in front of the device is the one
+    with no other way to find out. Without it the ring lit and cleared inside
+    a few milliseconds, which is the "looked like a glitch" failure ack_anim
+    was added for, on a device that will not answer until HA connects.
     """
     wi = wake_info or {}
     turn_record = {
@@ -2159,6 +2636,7 @@ async def _record_dropped_turn(device, trigger_label: str, wake_info) -> None:
     }
     await _persist_turn(device, turn_record)
     device.turn_history.append(turn_record)
+    device.last_turn_outcome = turn_record["outcome"]
 
 
 async def _save_utterance(device, turn_id: int, turn_record: dict) -> None:
@@ -2474,6 +2952,9 @@ async def device_connected(
     host: str = "0.0.0.0",
     standalone_play=None,
     send_volume_set=None,
+    ring_alarm=None,
+    stop_alarm=None,
+    start_conversation=None,
 ) -> None:
     """
     Called by em_controller.handle_control() when an Echo Dot connects.
@@ -2491,6 +2972,15 @@ async def device_connected(
     control-plane message to the physical device. Provided by the controller
     as a closure over the Device object. Used by the satellite to forward
     HA MediaPlayerCommandRequest volume changes down to the device.
+
+    ring_alarm / stop_alarm: async callable() — start / stop the timer-alarm
+    ring (chime + LED pulse). Provided by the controller as closures over the
+    Device object, since ringing drives device speaker/mic/LEDs.
+
+    start_conversation: async callable() — runs one voice turn with no wake
+    word, for HA's announce-then-listen (`assist_satellite.start_conversation`
+    and `ask_question`). Same reasoning: it drives the mic, the ring and the
+    voice lock.
     """
     server = _servers.get(device_id)
     if server is None:
@@ -2507,6 +2997,9 @@ async def device_connected(
         server = await _register_device_server(device_id, row["label"])
     server._standalone_play = standalone_play
     server._send_volume_set = send_volume_set
+    server._ring_alarm = ring_alarm
+    server._stop_alarm = stop_alarm
+    server._start_conversation = start_conversation
     if server._server is not None:
         log.debug(f"[esphome.{device_id[-8:]}] device_connected: port {server.port} already listening")
         return
@@ -2529,6 +3022,13 @@ async def device_disconnected(device_id: str) -> None:
         log.debug(f"[esphome.{device_id[-8:]}] device_disconnected: port already down")
         return
     server._send_volume_set = None
+    # The device is gone — a ring cannot reach it and its Device state is torn
+    # down, so drop any live timers rather than firing the orchestrator against
+    # a disconnected device. em_controller stops the ring task on its own side.
+    server._timers.clear()
+    server._ring_alarm = None
+    server._stop_alarm = None
+    server._start_conversation = None
     await server.stop()
     log.info(f"[esphome.{device_id[-8:]}] ESPHome port {server.port} down (device disconnected)")
 
@@ -2583,6 +3083,32 @@ def set_device_capabilities(device_id: str, caps: list[str]) -> None:
              + (f", lost {lost}" if lost else "")
              + " — bouncing HA connection so the entity list is rebuilt")
     satellite.disconnect()
+
+
+def clear_timers(device_id: str) -> None:
+    """
+    Drop the timer registry WITHOUT invoking the stop-alarm orchestrator.
+
+    For the ring loop's own safety-cap path: it is already stopping, so it
+    must clear the state (a later CANCELLED then no-ops) without re-entering
+    stop_timer_alarm against the task it is running inside.
+    """
+    server = _servers.get(device_id)
+    if server is not None:
+        server._timers.clear()
+
+
+async def dismiss_timer_alarm(device_id: str) -> bool:
+    """
+    Locally dismiss a ringing timer alarm (dot-button tap, or a spoken
+    dismissal). Returns whether an alarm was actually ringing, so the caller
+    can fall through to normal button behaviour when there was nothing to
+    dismiss.
+    """
+    server = _servers.get(device_id)
+    if server is None:
+        return False
+    return await server.dismiss_timer_alarm()
 
 
 def send_button_event(device_id: str, event_type: str) -> None:

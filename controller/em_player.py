@@ -282,8 +282,15 @@ async def interrupt(device_id: str) -> None:
     turn replaces that intent (see resume_interrupted).
     """
     s = _session(device_id)
+    # #314: ownership is reference-counted, exactly like the duck below.
+    # A nested owner (announcement landing mid-turn) must not release the
+    # turn's ownership when IT finishes, nor wipe a playback command the
+    # user issued during the turn — only the FIRST claim clears stale
+    # deferrals from before it started.
+    if s.owner_depth == 0:
+        s.pending = None
+    s.owner_depth += 1
     s.owned_by_turn = True
-    s.pending = None
 
     device = _get_device(device_id) if _get_device else None
     if device is not None and getattr(device, "audio_mix_capable", False):
@@ -292,14 +299,25 @@ async def interrupt(device_id: str) -> None:
         # nothing is lost: no seek, no bookmark, no position drift on a
         # non-seekable flow stream, and no need for the entity to claim it is
         # playing while internally paused.
-        s.ducked = True
+        #
+        # #261: reference-counted, NOT boolean. Two overlapping owners —
+        # a barge-in turn, or an announcement landing mid-turn — both used to
+        # set one flag, and whichever finished FIRST popped it and sent
+        # duck:off while the other was still speaking: music back at full
+        # level under an unfinished answer. Each owner holds one count; the
+        # wire command goes out only on the 0→1 and 1→0 transitions.
+        s.duck_depth += 1
         # Yield the shared data plane to the response. The music keeps
         # playing from the device's own buffer while the feed holds off.
         s.lead_s = TURN_LEAD_S
-        try:
-            await device.send_control({"type": "duck", "on": True})
-        except Exception as e:
-            log.warning(f"[{device_id}] duck failed: {e}")
+        if s.duck_depth == 1:
+            try:
+                await device.send_control({"type": "duck", "on": True})
+                log.info(f"[{device_id}] duck ON (depth {s.duck_depth})")
+            except Exception as e:
+                log.warning(f"[{device_id}] duck failed: {e}")
+        else:
+            log.info(f"[{device_id}] duck held (depth {s.duck_depth})")
         return
 
     if s.state == PLAYING:
@@ -322,19 +340,37 @@ async def resume_interrupted(device_id: str) -> None:
     s = _sessions.get(device_id)
     if s is None:
         return
-    s.owned_by_turn = False
-    pending, s.pending = s.pending, None
-    resume_after, s.resume_after = s.resume_after, False
-    ducked, s.ducked = s.ducked, False
-    s.lead_s = LEAD_S
+    # #314: same reference counting as the duck — ownership, pending and
+    # resume_after are released only by the LAST owner leaving. An earlier
+    # finisher leaves all three untouched: the voice turn still speaking
+    # keeps its shield against play_media landing on the response plane,
+    # and the user's deferred command survives an announcement that merely
+    # passed through.
+    if s.owner_depth > 0:
+        s.owner_depth -= 1
+    last_owner = s.owner_depth == 0
+    s.owned_by_turn = s.owner_depth > 0
+    if last_owner:
+        pending, s.pending = s.pending, None
+        resume_after, s.resume_after = s.resume_after, False
+    else:
+        pending, resume_after = None, False
+    # #261: this release only unducks when it is the LAST owner leaving —
+    # otherwise the other speaker's tail competes with the music again.
+    was_ducking = s.duck_depth > 0
+    if was_ducking:
+        s.duck_depth -= 1
+    ducked_off = was_ducking and s.duck_depth == 0
+    s.lead_s = TURN_LEAD_S if s.duck_depth > 0 else LEAD_S
 
-    if ducked:
+    if ducked_off:
         # Release the duck before settling any deferred command, so the music
         # is already back at level by the time a stop or pause lands.
         device = _get_device(device_id) if _get_device else None
         if device is not None:
             try:
                 await device.send_control({"type": "duck", "on": False})
+                log.info(f"[{device_id}] duck released (depth 0)")
             except Exception as e:
                 log.warning(f"[{device_id}] unduck failed: {e}")
 
@@ -346,7 +382,7 @@ async def resume_interrupted(device_id: str) -> None:
             await s.resume()
         elif kind == "stop":
             await s.stop()
-        elif kind == "pause" and ducked:
+        elif kind == "pause" and was_ducking:
             # When we ducked, nothing was ever paused — so the user's pause
             # has to actually happen here. On the pausing path interrupt()
             # had already done it and dropping resume_after was the whole of
@@ -382,7 +418,8 @@ class MediaSession:
         # ducked: this turn lowered the music rather than pausing it (a device
         # that mixes). It changes what turn end has to do — there is nothing
         # to resume, but a deferred pause must actually be carried out.
-        self.ducked = False
+        self.duck_depth = 0   # #261: reference-counted, see interrupt()
+        self.owner_depth = 0  # #314: owners of the speaker, counted like the duck
         # Effective pacing lead. Reduced while a turn owns the speaker so the
         # music feed stops monopolising the shared data plane (see
         # TURN_LEAD_S); restored when the turn releases it.
@@ -505,10 +542,21 @@ class MediaSession:
         # t0 for the playback chain trace: the moment we were ASKED to play,
         # so every later stage can be reported as a delta from the command.
         self._t_play = asyncio.get_event_loop().time()
+        url = self.url
+        if url is None:
+            # Nothing to play. Both callers set it first, so this is a guard
+            # against a future third rather than a state we expect.
+            log.warning(f"[{self.device_id}] Media play requested with no URL")
+            return
         self.state = PLAYING
-        self._task = asyncio.create_task(self._feed())
+        # The URL is CAPTURED here and passed in, never re-read by the feed.
+        # stop() clears self.url as part of teardown, and play() is
+        # stop() → set url → _start_feed(); a feed that has not yet reached a
+        # cancellation point when the next play_media lands would otherwise
+        # read the None its own teardown just wrote (#346).
+        self._task = asyncio.create_task(self._feed(url))
         log.info(
-            f"[{self.device_id}] Media playing: {self.url!r} "
+            f"[{self.device_id}] Media playing: {url!r} "
             f"(from {self._pos:.1f}s)"
         )
 
@@ -571,7 +619,7 @@ class MediaSession:
             except Exception as e:
                 log.warning(f"[{self.device_id}] media state push failed: {e}")
 
-    async def _feed(self) -> None:
+    async def _feed(self, url: str) -> None:
         loop = asyncio.get_running_loop()
         device = _get_device(self.device_id) if _get_device else None
         if device is None:
@@ -637,7 +685,7 @@ class MediaSession:
         t_first_send = None
 
         try:
-            proc = await self._spawn_decoder(self.url, start_pos)
+            proc = await self._spawn_decoder(url, start_pos)
             self._proc = proc
             stderr_drain = asyncio.create_task(
                 self._drain_stderr(proc, stderr_tail))
@@ -669,7 +717,7 @@ class MediaSession:
                     if stderr_drain is not None:
                         stderr_drain.cancel()
                         stderr_drain = None
-                    proc = await self._spawn_decoder(self.url, 0.0)
+                    proc = await self._spawn_decoder(url, 0.0)
                     self._proc = proc
                     stderr_drain = asyncio.create_task(
                         self._drain_stderr(proc, stderr_tail))

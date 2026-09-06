@@ -229,6 +229,10 @@ issue with a support bundle attached (Dashboard → Support → Download bundle)
 it carries the logs, versions and metrics needed to diagnose something
 remotely, with transcripts, recordings and network names excluded.
 
+Before filing, check the [FAQ](docs/faq.md) — it collects the workarounds for
+the things that come up most. If you'd like to test systematically, the
+[UAT guide](docs/uat.md) is a checklist of what to try and how to report it.
+
 ---
 
 ## License

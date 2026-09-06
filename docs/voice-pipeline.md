@@ -139,7 +139,8 @@ wake word?" Cross the sensitivity bar and the conversation starts.
 
 With more than one device online, the **first** Echo to hear you answers
 straight away, and any other device detecting the same word within the
-**arbitration window** (default 700ms, configurable) stands down silently.
+**arbitration window** (default 700ms, configurable) stands down silently,
+its ring going dark as soon as the other device claims the turn.
 One utterance, one response, even in earshot of two devices — and no added
 latency, because the winner claims the turn on the spot rather than waiting
 out the window.
@@ -279,3 +280,59 @@ behaviour — pause for the turn, resume after.
 3. **Boring and continuous beats clever and gated.** The always-on,
    unprocessed wake stream replaced a cleverer design that degraded over
    days. When in doubt, the pipeline chooses the predictable option.
+
+## What a healthy turn looks like
+
+If your Echo feels slow, the useful question is *which stage* is slow — the
+answer sends you to a completely different component each time. These are
+measured on the reference setup below, so you have something to compare
+against rather than a feeling.
+
+A "turn on the office light" command, end to end:
+
+| Stage | What it is | Reference |
+|---|---|---|
+| wake → first frame | the Echo starts streaming | **3ms** |
+| speech | you talking, until Home Assistant's VAD says you stopped | 3.1s |
+| **speech recognition** | Whisper turning audio into text | **1.8s** |
+| **intent** | Home Assistant deciding what you meant, and generating speech | **0.04s** |
+| fetch | downloading the spoken reply | 0.4s |
+| playback | the reply, spoken | 2.2s |
+| **total** | wake word to finished | **7.1s** |
+
+Most of that is you speaking and the assistant replying. The part a slow
+system inflates is **speech recognition**, and it is the stage most sensitive
+to how much CPU the machine running it has: on two shared cores the same
+commands took **4.8s median and up to 20.5s**, against 2.1s median and a
+1.6–2.6s spread on four. Nothing else in the pipeline changed.
+
+A local intent like a light or a timer resolves in **tens of milliseconds**.
+If your *intent* stage is seconds rather than milliseconds, you are probably
+routing through a conversation agent (an LLM) rather than Home Assistant's
+built-in intents — which is a choice, not a fault, but it is worth knowing
+which one you made.
+
+Two things worth knowing before you compare:
+
+- **The first request after a restart is always slow**, because the speech
+  model loads on demand. Discard it.
+- **These numbers are a reference, not a target.** A slower machine is not
+  broken. The point is to tell "my speech recognition takes 15 seconds" from
+  "my Echo is not responding", because only one of those is about EchoMuse.
+
+### The reference setup
+
+| | |
+|---|---|
+| Home Assistant | OS 18.2, Core 2026.8.3, in a VM |
+| CPU / RAM | 4 vCPU, 8GB |
+| Speech to text | Whisper add-on, `faster-whisper`, model `auto` |
+| Text to speech | Piper |
+| EchoMuse controller | Home Assistant add-on |
+| Devices | 2 × Echo Dot 2nd gen, on-device wake word, 2.4GHz WiFi |
+
+Home Assistant, Whisper, Piper, Music Assistant and the EchoMuse controller
+all share those four cores. Speech recognition is the hungriest of them by a
+wide margin, so if you run other add-ons on the same box, that is the one
+that will feel it.
+

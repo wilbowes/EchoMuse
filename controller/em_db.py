@@ -76,6 +76,22 @@ DEFAULT_DEVICE_CONFIG = {
     "aecEnabled":       True,
     "aecDelayMs":       0,
     "aecTailMs":        300,
+    # aecRefSource: where the far-end reference comes from — "auto" (detect
+    # the hardware playback loopback in the mic capture, fall back to the
+    # software tap at the ALSA write), "hw" or "sw" to pin one. An override
+    # for the DETECTION rather than a claim about the board, the same shape
+    # as owwOnDevice.
+    #
+    # It is config rather than a device env var because pinning it otherwise
+    # means editing start_server.sh on the device and restarting the server,
+    # and that is exactly how the hardware-vs-software comparison stayed
+    # unmeasured for three sessions. Making a measurement expensive is how it
+    # does not get made.
+    #
+    # Firmware predating the hardware reference IGNORES this and keeps its
+    # existing behaviour — the device applies only non-empty config fields,
+    # so an unknown key costs an old device nothing.
+    "aecRefSource":     "auto",
     "startupVolume":    85,
     # vadThreshold: 0.001 (normalised RMS pre-AGC).
     # Q2 fix (2026-07-05 review, tracked as B6): this was drifted to 0.003 in
@@ -254,6 +270,23 @@ DEFAULT_DEVICE_CONFIG = {
     # configs is harmless: new firmware ignores unknown fields, and old
     # firmware keeps honouring the stored False until it's OTA'd.)
     "agcEnabled":       True,
+    # consolePassword: gate the emOS USB serial console behind a password.
+    #
+    # Stored and pushed as "<salt>:<hash>", never as a passphrase — the
+    # controller hashes before this key is ever written, so plaintext exists
+    # only in the browser and the request body. Empty means no password, which
+    # is the default and also the removal path.
+    #
+    # It is a nod to security, not Fort Knox: an inconvenience for someone who
+    # plugs a cable into a device on a shelf, not a defence against anyone with
+    # the device in their hands. Recovery is deleting one file on /data from
+    # TWRP, which is also why the hash exists — not to protect the DEVICE, but
+    # to keep a dumped /data from yielding a passphrase the owner has reused
+    # somewhere that matters.
+    #
+    # emOS only. FireOS has adbd, which honours ro.adb.secure and is already
+    # better than this.
+    "consolePassword":  "",
 }
 
 # Maximum log rows retained per device. Older rows are pruned on insert.
@@ -796,6 +829,62 @@ MIGRATIONS: list[str] = [
 
     UPDATE system_config SET value = '19' WHERE key = 'schema_version';
     """,
+
+    # ── v20 — BLE transport resets, because they may not be BLE's problem ────
+    #
+    # The device has always counted these (bluetooth.Scanner.Stats: restarts,
+    # hciErrors) and always sent them inside the stats message's `ble` object.
+    # em_ble_proxy.update_stats read `advertsSeen` and dropped both, so the
+    # numbers existed on the wire for a month and nowhere else — the fleet
+    # question "how often does the transport reset" had no stored answer.
+    #
+    # Worth storing because /dev/stpbt is not a Bluetooth device, it is the
+    # MT8163's COMBO radio behind MediaTek's WMT stack, shared with WiFi. The
+    # scanner's own recovery reopens it, and opening it triggers a BT
+    # function-on plus firmware patch download on that shared chip
+    # (scanner.go, `session`). Observed 2026-08-30 on Test Echo 1: stpbt read
+    # failed, the scanner reopened 5s later, and the WiFi interface went
+    # `network is unreachable` 2s after that. One occurrence, mechanism
+    # plausible, nothing stored anywhere that could say whether it is common.
+    #
+    # GAUGES, NOT SUMS. These are cumulative counters since the device's
+    # process start, not per-window deltas like the RTT fields above, so
+    # adding them every 30s would multiply a single reset into hundreds.
+    # Keeping the latest value makes an hour-to-hour difference the number of
+    # resets in that hour, and makes a DROP to a smaller value mean the
+    # device restarted — which is worth seeing rather than smoothing away.
+    """
+    ALTER TABLE device_metrics ADD COLUMN ble_restarts_last   INTEGER;
+    ALTER TABLE device_metrics ADD COLUMN ble_hci_errors_last INTEGER;
+
+    UPDATE system_config SET value = '20' WHERE key = 'schema_version';
+    """,
+
+    # ── v21 — remember which userspace each device booted ────────────────────
+    #
+    # base_os ("emos"/"fireos") arrives on the REGISTER message and until now
+    # lived only on the live Device object, so the answer vanished the moment a
+    # device disconnected. That was fine for its first consumer — payload
+    # gating, which only ever asks about a device it is currently talking to —
+    # and is not fine for asking about the FLEET, which is a question about
+    # devices that are mostly offline at any moment.
+    #
+    # Storing it makes the composition knowable without every device being
+    # online. The immediate need is the console password: it is an emOS-only
+    # feature, so the control should be disabled when nothing in the fleet can
+    # use it — and answering that from live connections only would disable the
+    # setting exactly when the one emOS device happened to be off, and flicker
+    # as devices came and went.
+    #
+    # NULL means never reported: old firmware, or a device that has not
+    # registered since this column existed. Absence is NOT "fireos" — the two
+    # consumers want opposite defaults from it, and conflating them is how a
+    # control gets disabled on the strength of not knowing.
+    """
+    ALTER TABLE devices ADD COLUMN base_os TEXT;
+
+    UPDATE system_config SET value = '21' WHERE key = 'schema_version';
+    """,
 ]
 
 # Post-migration fixups that need Python rather than SQL. Keyed by the schema
@@ -1296,6 +1385,35 @@ def set_device_label(device_id: str, label: str) -> None:
             "UPDATE devices SET label = ? WHERE device_id = ?",
             (label, device_id),
         )
+
+
+def set_device_base_os(device_id: str, base_os: Optional[str]) -> None:
+    """
+    Record which userspace a device booted, from its register message.
+
+    Written on every register rather than only on change: a device reflashed
+    between FireOS and emOS is exactly the case this has to keep up with, and
+    the write is one UPDATE per connection.
+    """
+    with _tx() as conn:
+        conn.execute(
+            "UPDATE devices SET base_os = ? WHERE device_id = ?",
+            (base_os, device_id),
+        )
+
+
+def fleet_base_os() -> set[str]:
+    """
+    Every base_os the fleet has reported, as a set.
+
+    NULLs are dropped rather than mapped to a default, so the caller can tell
+    "no device has ever said" from "every device said fireos" — the two want
+    opposite answers wherever this is used to decide whether a control can act.
+    An empty set therefore means we do not know, never that the fleet is
+    Android.
+    """
+    rows = _q("SELECT DISTINCT base_os FROM devices WHERE base_os IS NOT NULL")
+    return {r["base_os"] for r in rows}
 
 
 def set_device_config(device_id: str, config: dict) -> None:
@@ -2070,6 +2188,13 @@ def record_device_stats(device_id: str, stats: dict) -> None:
     cores_on   = stats.get("coresOnline")
     cores_tot  = stats.get("coresTotal")
     therm_lim  = stats.get("thermalCoreLimit")
+    # BLE transport health, from the `ble` object the scanner fills in.
+    # Absent on every device with the proxy off, which stores as NULL and
+    # must not read as "zero resets" — a device that never opened the
+    # transport is not a device that opened it and never faltered.
+    _ble       = stats.get("ble") or {}
+    ble_restarts = _ble.get("restarts")
+    ble_hci_err  = _ble.get("hciErrors")
     with _tx() as conn:
         conn.execute(
             """
@@ -2084,11 +2209,13 @@ def record_device_stats(device_id: str, stats: dict) -> None:
                 rtt_excursions, rtt_excursions_idle, rtt_samples_idle,
                 cpu_temp_sum, cpu_temp_samples, cpu_temp_max, max_temp_max,
                 cores_online_last, cores_online_min, cores_total,
-                thermal_limit_min
+                thermal_limit_min,
+                ble_restarts_last, ble_hci_errors_last
             ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                       ?, ?, ?, ?, ?, ?, ?, ?, ?,
                       ?, ?, ?, ?, ?, ?, ?,
-                      ?, ?, ?, ?, ?, ?, ?, ?)
+                      ?, ?, ?, ?, ?, ?, ?, ?,
+                      ?, ?)
             ON CONFLICT (device_id, hour_ts) DO UPDATE SET
                 samples          = samples + 1,
                 cpu_sum          = cpu_sum + excluded.cpu_sum,
@@ -2158,7 +2285,16 @@ def record_device_stats(device_id: str, stats: dict) -> None:
                 END,
                 rtt_excursions      = rtt_excursions      + excluded.rtt_excursions,
                 rtt_excursions_idle = rtt_excursions_idle + excluded.rtt_excursions_idle,
-                rtt_samples_idle    = rtt_samples_idle    + excluded.rtt_samples_idle
+                rtt_samples_idle    = rtt_samples_idle    + excluded.rtt_samples_idle,
+                -- Latest value, never a sum: these are cumulative since the
+                -- device's process start (see the v20 migration). The count
+                -- of resets in an hour is the difference against the previous
+                -- hour's row, and a value SMALLER than the previous hour's
+                -- means the device restarted in between.
+                ble_restarts_last   = COALESCE(excluded.ble_restarts_last,
+                                               ble_restarts_last),
+                ble_hci_errors_last = COALESCE(excluded.ble_hci_errors_last,
+                                               ble_hci_errors_last)
             """,
             (
                 device_id, hour_ts,
@@ -2196,6 +2332,11 @@ def record_device_stats(device_id: str, stats: dict) -> None:
                 int(cores_on) if cores_on else None,
                 int(cores_tot) if cores_tot else None,
                 int(therm_lim) if therm_lim else None,
+                # NULL when the proxy is off, and 0 is a real value meaning
+                # "opened the transport, never faltered" — so `or None` would
+                # be wrong here in a way it is not for the gauges above.
+                int(ble_restarts) if ble_restarts is not None else None,
+                int(ble_hci_err) if ble_hci_err is not None else None,
             ),
         )
         conn.execute(

@@ -1,0 +1,106 @@
+name: emOS Release (init binary)
+
+# emOS has its OWN tag namespace, and that is deliberate rather than tidiness.
+#
+# `emos/build.sh` stamps the image with `git describe --match 'emos-v*'`:
+# without the match it picks up the nearest tag of any kind and stamps an emOS
+# image with a controller release number, which is worse than "unknown"
+# because it looks plausible. The tags have to exist for that to resolve to
+# anything.
+#
+# It also keeps this out of the firmware OTA's way. `em_api._fetch_latest_
+# release` selects the newest release whose tag `startswith("v")` and which
+# carries a `server` asset — `emos-v0.1` matches neither test, so publishing
+# here can never be mistaken for a firmware release. That is the same
+# mechanism that keeps `controller-v*` out of it.
+#
+# WHAT IS PUBLISHED IS THE INIT, NOT AN IMAGE. A bootable emOS image contains
+# the device's own kernel and device trees, so we cannot ship one without
+# redistributing Amazon's code — the image is assembled on the user's side,
+# from the boot partition they read off their own device. The init is ours
+# and is the only part that needs distributing.
+
+on:
+  push:
+    tags:
+      - 'emos-v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # The same pinned image the firmware is built from, for the reason
+      # device/CLAUDE.md gives: it carries the NDK against a 2015 platform we
+      # cannot upgrade, and a floating toolchain would change what boots under
+      # us with no PR.
+      - name: Build compiler image
+        run: docker build -t echomuse-compiler device/compiler/
+
+      # AARCH64, unlike the firmware beside it, which is armv7a. biscuit boots
+      # an ARM64 kernel — the fact that cost five flashed images of a 32-bit
+      # kernel that never executed an instruction — while the server binary is
+      # built for the Android userspace it has always run under.
+      #
+      # -static is what has to keep working. There is no dynamic loader at
+      # PID 1 time, and three boots with a busybox script init produced no
+      # output whatsoever, which is indistinguishable from a kernel that never
+      # started.
+      # No version is compiled INTO the init: it describes the image rather
+      # than the binary, and it reaches the device through /etc/os-release,
+      # which whatever assembles the image writes. The tag is the version, and
+      # it travels with the asset.
+      - name: Compile init
+        run: |
+          mkdir -p emos/build
+          docker run --rm -v "${{ github.workspace }}/emos":/emos -w /emos \
+            echomuse-compiler bash -lc \
+            "/opt/android/ndk/21.4.7075529/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang \
+               -static -O2 -Wall -o build/init init/init.c"
+
+      - name: Verify it is a static aarch64 binary
+        # Both properties are silent when wrong and fatal on the device, and
+        # this is the last point before the artifact is something people
+        # flash. Checked here as well as in CI because CI checks the tip of a
+        # branch and this checks the thing being published.
+        run: |
+          file emos/build/init
+          ls -lh emos/build/init
+          file emos/build/init | grep -q "ARM aarch64" || {
+            echo "::error::init is not an aarch64 binary"; exit 1; }
+          file emos/build/init | grep -q "statically linked" || {
+            echo "::error::init is not statically linked"; exit 1; }
+
+      # The off-target checks, against the exact source being published.
+      - name: Ring and password checks
+        run: |
+          cc -O2 -Wall -o /tmp/ringsim emos/init/ringsim.c -lm
+          /tmp/ringsim --check
+          cc -O2 -o /tmp/pwcheck emos/init/pwcheck.c
+          /tmp/pwcheck
+
+      # Same rule as the firmware release: the notes come from the ANNOTATED
+      # tag, because whoever reads them is deciding whether to reflash a boot
+      # partition. `git tag -a`, always — and `--cleanup=verbatim` if they use
+      # Markdown headings, or every line starting with # is deleted whole.
+      - name: Release notes from the tag annotation
+        run: |
+          git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > /tmp/emos-notes.md
+          echo "--- notes that will be published ---"
+          cat /tmp/emos-notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          name: emOS ${{ github.ref_name }}
+          files: emos/build/init
+          body_path: /tmp/emos-notes.md
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

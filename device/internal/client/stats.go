@@ -53,6 +53,21 @@ type DeviceStats struct {
 	// the same cost class as every other counter here, and the reason
 	// per-frame scores are never sent.
 	OwwShadow interface{} `json:"owwShadow,omitempty"`
+	// AecRef is which far-end reference echo cancellation is running on:
+	// "hw" (the frame-aligned ch8 playback loopback), "sw" (the tap at the
+	// ALSA write) or "off". The aec_hw_ref capability says this firmware
+	// CAN use a hardware reference; this says whether the board actually
+	// provided one, which cannot be known at registration because proving
+	// it needs the speaker to have played (see noteEchoRef).
+	//
+	// Never omitempty, unlike its neighbours: absent must mean "firmware too
+	// old to report it", and "off" collapsing into that would tell the
+	// dashboard a disarmed AEC is an unknown one.
+	AecRef string `json:"aecRef"`
+	// The base OS deliberately does NOT ride this message — it is a static
+	// property of the boot and goes out once, on registration (control.go).
+	// It was here first and that was the bug: the payload reconcile asks for
+	// it the instant a device connects, ~30s before the first stats tick.
 }
 
 // SendStats sends a stats message to the controller.
@@ -83,5 +98,6 @@ func (c *ControlClient) SendStats(s DeviceStats) {
 		"coresOnline":      s.CoresOnline,
 		"coresTotal":       s.CoresTotal,
 		"thermalCoreLimit": s.ThermalCoreLimit,
+		"aecRef":           s.AecRef,
 	})
 }
