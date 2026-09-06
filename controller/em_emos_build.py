@@ -223,7 +223,16 @@ def pack(parts: dict, zimage: bytes, dtbs: bytes, ramdisk: bytes,
          extra_cmdline: str = RAMOOPS_CMDLINE) -> bytes:
     """Assemble a boot image from its parts, using the reference's own header."""
     cmdline = parts["cmdline"]
-    if extra_cmdline:
+    # Appended only if it is not already there.
+    #
+    # The reference is normally a FireOS image, which carries none of this. But
+    # rebuilding an emOS image FROM an emOS image — which is what an in-place
+    # update does — hands us a cmdline that already ends in these parameters,
+    # and appending blindly doubles them. Every rebuild would add another copy
+    # until the 511-byte field overflowed and the build failed, on the third
+    # pass. Found 2026-09-06 building 0.3 from Test Echo 2's own partition,
+    # which is the first time anything has repacked an emOS image.
+    if extra_cmdline and extra_cmdline.encode() not in cmdline:
         cmdline = cmdline + b" " + extra_cmdline.encode()
     if len(cmdline) > 511:
         raise BuildError(
@@ -442,6 +451,10 @@ def build_emos_image(reference: bytes, init_binary: bytes, version: str,
         dtb_size=len(parts["dtbs"]),
         ramdisk_size=len(ramdisk),
         kernel_addr=parts["kaddr"],
-        cmdline=(parts["cmdline"] + b" " + RAMOOPS_CMDLINE.encode()).decode(
-            errors="replace"),
+        # Read back out of the image rather than reconstructed, so what the
+        # wizard shows is what was actually written. Rebuilding it here meant
+        # duplicating pack()'s rule, and the copies disagreed the moment pack
+        # learned not to append a cmdline it already had — reporting the
+        # ramoops parameters twice for an image that carried them once.
+        cmdline=image[64:64 + 512].rstrip(b"\0").decode(errors="replace"),
     )

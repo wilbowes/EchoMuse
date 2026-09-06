@@ -130,7 +130,16 @@ def main():
     ramdisk = open(rd_p, "rb").read()
 
     cmdline = hf["cmdline"]
-    if extra:
+    # Appended only if it is not already there.
+    #
+    # The reference is normally a FireOS image, which carries none of this. But
+    # rebuilding an emOS image FROM an emOS image — which is what an in-place
+    # update does — hands us a cmdline that already ends in these parameters,
+    # and appending blindly doubles them. Every rebuild would add another copy
+    # until the 511-byte field overflowed and the build failed, on the third
+    # pass. Found 2026-09-06 building 0.3 from Test Echo 2's own partition,
+    # which is the first time anything has repacked an emOS image.
+    if extra and extra.encode() not in cmdline:
         cmdline = cmdline + b" " + extra.encode()
     if len(cmdline) > 511:
         raise SystemExit(f"cmdline too long for the 512-byte field: {len(cmdline)}")

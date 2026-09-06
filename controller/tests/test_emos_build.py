@@ -146,6 +146,42 @@ def test_round_trip_fails_when_the_image_is_not_what_it_says():
     assert not eb.roundtrip_identical(bytes(bad))
 
 
+def test_rebuilding_an_emos_image_does_not_double_the_cmdline():
+    """
+    An in-place update repacks an emOS image, whose cmdline already ends in the
+    ramoops parameters. Appending blindly adds another copy every time, and the
+    511-byte field overflows on the third pass — so an update mechanism would
+    work twice and then refuse, with nothing to say why.
+
+    Found 2026-09-06 building 0.3 from Test Echo 2's own boot partition, the
+    first time anything had repacked an emOS image rather than a FireOS one.
+    """
+    ref = make_reference()
+    once = eb.pack(eb.split_reference(ref), *(
+        lambda p: (p["zimage"], p["dtbs"], p["ramdisk"]))(eb.split_reference(ref)))
+    assert once[64:576].count(eb.RAMOOPS_CMDLINE.encode()) == 1
+
+    # Repack the result: its cmdline already carries the parameters.
+    twice = eb.pack(eb.split_reference(once), *(
+        lambda p: (p["zimage"], p["dtbs"], p["ramdisk"]))(eb.split_reference(once)))
+    assert twice[64:576].count(eb.RAMOOPS_CMDLINE.encode()) == 1, \
+        "repacking an emOS image must not append the ramoops params again"
+    assert twice[64:576] == once[64:576]
+
+
+def test_the_reported_cmdline_is_the_one_in_the_image():
+    """
+    build_emos_image used to reconstruct the cmdline it reports instead of
+    reading it back, so the two disagreed the moment pack() learned not to
+    append a cmdline it already had — it reported the ramoops parameters twice
+    for an image that carried them once. A number the wizard shows the operator
+    has to come from the artefact, not from a second copy of the rule.
+    """
+    info = eb.build_emos_image(make_reference(), fake_init(), "0.3")
+    assert info["cmdline"] == \
+        info["image"][64:64 + 512].rstrip(b"\0").decode()
+
+
 def test_either_mtk_header_padding_round_trips():
     """
     The byte after the MTK kernel header's name field is NOT constant across
