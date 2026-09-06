@@ -1449,6 +1449,103 @@ Two device behaviours the wizard works around rather than fixes:
   presence is not cosmetic: a run with it running spent 9s cycling
   DISCONNECTED/SCANNING before associating, against 1s on a clean one.
 
+### The emOS flow, and what a run against real hardware found
+
+The nine-step emOS flow ran end to end for the first time on 2026-09-06 and
+failed at four different steps. Every one of those failures was in a CHECK
+rather than in the thing it was checking — the writes and pushes were correct
+throughout — so the rules below are all one rule seen from different angles.
+
+- **Test whether a thing RUNS, never whether a file exists.** TWRP is already
+  root and frequently has no `su`, so the flow installs a shim to let the
+  shared install steps run unchanged. It was written with `#!/bin/sh` and there
+  is no `/bin` in a recovery ramdisk, so it could never execute — and the guard
+  was `command -v su`, which a broken shim satisfies. A failed first attempt
+  therefore handed the retry a shim that was on PATH, executable and unusable,
+  and the retry SKIPPED the verification that had just caught it. Step 3 went
+  green and every `su` in step 4 died. The test is now `su -c "id -u"` returning
+  0, unconditionally.
+- **A check that cannot run must not read as a pass.** `readlink` with stderr
+  discarded returns the same empty string for "the symlink is gone" and for
+  "`su` is not working", and the install step logged `Cleared.` after every
+  command had failed. Probes carry a sentinel (`echo _CLEARCHK`) so the two
+  answers are distinguishable — the same fix `_sync_start_script` needed for
+  `_SHELL_OK`, in a different file.
+- **Verify the bytes you wrote, not the block that contains them.** The flash
+  step read back whole megabytes and compared against the image zero-padded to
+  match, so 425,984 bytes of the PREVIOUS boot image were checked against zeros
+  nobody had written. Every emOS flash failed on a write `dd` reported as
+  complete. It hid because the only path ever exercised was the restore, whose
+  image is the whole 16MB partition — an exact number of blocks, so the padding
+  was empty and the comparison was accidentally right.
+- **The recovery environment is a RAMDISK and every step must build its own.**
+  The `su` shim and the `/sdcard` symlink live in `/sbin` and vanish on a
+  replug — which the wizard actively invites after any failure. Steps 4 and 5
+  call `prepareTwrpForInstall` themselves; it is idempotent and costs three
+  round trips.
+- **Nothing `getprop` returns distinguishes TWRP from Android.** Recovery
+  reports `ro.build.version.release` 5.1.1 and answers every other property
+  with its own values, and `boardOk` passes on `omni_biscuit` because it
+  contains "biscuit" — so step 1 ran to completion against a device in
+  recovery, printed "FireOS 5 confirmed", warned about an untested firmware it
+  had read off the ramdisk, and rebooted recovery into recovery. The BANNER is
+  the only discriminator. The real answers are on `/system`: mount
+  `system_<slot>` read-only, by NAME and by slot rather than as p13, and read
+  `build.prop`. That is also the partition emOS mounts at runtime for bionic
+  and tinyalsa, so it is the build that actually matters.
+- **`_STEP_MODE` is enforced at every step, not only on Reconnect.** It existed
+  and was correct and was consulted in one place, where a mismatch logged a
+  line and left Retry enabled. In Android `/dev/block/other-boot` is amonet's
+  unlock payload, and `classifyBootTarget` was the only thing in front of that
+  write.
+- **A serial console command's completion marker must be assembled ON THE
+  DEVICE.** Sending `cmd; echo __EMxxx__` puts the marker in the shell's echo
+  BEFORE the command runs, so `indexOf` matches instantly and `run()` returns
+  the text of its own request. `uname -a` "answered" with `uname -a; echo `,
+  and the emOS check then received the text of the next command and reported
+  the device was not emOS. `stty -echo` is still sent first but cannot be what
+  correctness rests on: it needs `stty` present and the shell up.
+- **A failed step must release the serial port.** The browser refuses to reopen
+  one that is already open, no retry clears it, and it blocks terminal programs
+  outside the browser too.
+- **Home Assistant's ingress caps a request body far below what the controller
+  accepts** (58MB). Sending the whole 16MB escrow plus the init was refused
+  with a 413 that never reached the add-on at all — no controller log line, so
+  nothing server-side to read. `_bootImageLength` sends the boot image rather
+  than the partition: four little-endian u32s at fixed offsets, verified
+  against real headers, and returning 0 (send everything) on anything it does
+  not understand, because a size optimisation must never be why a build cannot
+  happen.
+- **The emOS flow must leave a `wpa_supplicant.conf` behind.** emOS starts the
+  supplicant with `-c/data/misc/wifi/wpa_supplicant.conf` and the control
+  socket comes from `ctrl_interface` INSIDE that file, so with no file there is
+  no socket and every `wpa_cli` fails — including init's own `reassociate`
+  nudge, which is what association depends on. The device then sits at boot
+  stage 11 for ever. WiFi is configured at the END of this flow, over a console
+  talking to a supplicant that must already be running, so the skeleton is
+  written at step 4 while `/data` is writable and before the flash. **Never
+  overwritten**: a FireOS-provisioned device's conf has real networks in it.
+  It stayed hidden because the first emOS device had crossed from FireOS
+  carrying a good conf on `/data`.
+- **The packer does not require the reference's image id to reproduce.** It is
+  a SHA1 over the kernel and ramdisk, and a tool that repacks a ramdisk while
+  preserving the header verbatim leaves a stale one — f1r30s does, so stock
+  FireOS 5 + f1r30s was refused, which is the state `docs/rooting.md` tells
+  users to be in. The round trip used to double as an integrity check on the
+  escrow through that same id; it now checks the reference's **md5 on
+  arrival**, which covers the whole transfer instead of two of its regions. Do
+  not try to keep both in the id: "stored id does not match the regions" is
+  equally true of a stale id and of a corrupted byte, so any rule tolerating
+  one tolerates the other.
+
+**The restore is the wizard's undo and it is proven.** `_writeBootPartition` is
+shared by the flash and the restore deliberately — it is the only code here
+that can leave a device unbootable, and a second copy is one that drifts from
+its checks. On 2026-09-06 the restore put a device back after two failed
+flashes, verified against the partition, and the device booted. It needs ADB,
+so it only helps while the device is in TWRP — which is where both the flash
+failure and the first-boot failure leave it.
+
 ### The one partition the wizard writes
 
 Patch Boot Image is the only partition write in the whole wizard, and the only

@@ -241,6 +241,28 @@ created if absent**: deleted on EFF, the device rebooted and was back on WiFi
 in 25 seconds with the file recreated. A device that never completed Alexa
 setup is not stranded.
 
+**A device that has never had WiFi has no conf, and then nothing works.**
+wpa_supplicant is started with `-c/data/misc/wifi/wpa_supplicant.conf` and its
+control socket comes from `ctrl_interface` INSIDE that file — so with no file
+it exits immediately, creates no socket, and every `wpa_cli` fails with
+"Failed to connect to non-global ctrl_ifname". That includes init's own
+`reassociate` nudge, which is what association depends on here, so the device
+sits at boot stage 11 for ever with the ring throbbing at position 12.
+Measured on 3611NF, 2026-09-06: no conf, `sockets/` empty, `wpa_supplicant`
+and `wpa_cli` both zombies, the nudge failing every five seconds.
+
+It stayed hidden because the first emOS device had crossed from FireOS
+carrying a good conf on `/data`, which is the path this section describes. A
+device provisioned straight to emOS has never had one, so the wizard now
+writes a skeleton (`ctrl_interface` + `update_config=1`) while `/data` is
+writable and before the flash. Recovering by hand needs only those two lines
+and a reboot.
+
+**`reboot` does nothing; use `busybox reboot`.** Plain `reboot` signals init,
+and emOS's init does not handle that signal, so it exits silently having done
+nothing. `busybox reboot` goes to the syscall. Worth knowing before concluding
+a device is wedged.
+
 `wpa_cli -p /data/misc/wifi/sockets -i wlan0` works for `scan`,
 `scan_results` (bssid, frequency, signal, flags), `get_capability key_mgmt`
 and `save_config`. Note `get_capability key_mgmt` returns

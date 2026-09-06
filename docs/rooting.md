@@ -13,8 +13,26 @@ risk.
 - Codename: biscuit
 - SoC: MediaTek MT8163, quad-core ARM Cortex-A53 @ 1.5GHz
 - RAM: 512MB
-- OS: FireOS 5 (Android 5.1, API 22) or FireOS 6 (Android 7.2)
+- OS: FireOS 5 (Android 5.1, API 22) — see the note below on FireOS 6
 - MicroUSB cable required
+
+> **FireOS 6 exists for biscuit and cannot be booted once you have unlocked.**
+> `Fire OS 6.5.7.0 (NS6570/6077)` is real, and amonet's instructions tell you
+> to update *to* it before unlocking, because the exploit downgrades the
+> firmware partitions on the way through. But after unlocking, only FireOS 5
+> based ROMs boot — R0rt1z2's thread is explicit that flashing FireOS 6 "may
+> result in a (soft) brick".
+>
+> Two reasons, and the second is the real one. FireOS 6 on this board is a
+> **32-bit** kernel while amonet's payload forced 64-bit — since fixed
+> upstream, by parsing the cmdline. The blocker underneath is the signature
+> chain: FireOS 6 likely needs a newer TrustZone, and a newer TZ cannot be
+> flashed because the FireOS 5 preloader refuses to boot one whose signature
+> differs. That is below the boundary this project writes to, so it is not
+> something EchoMuse can address.
+>
+> Practically: EchoMuse targets FireOS 5, and a newer Android is not a route
+> to a newer kernel on this device.
 
 ## What you need
 
