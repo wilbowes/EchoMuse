@@ -128,20 +128,56 @@ def test_round_trip_fails_when_the_image_is_not_what_it_says():
     """
     The gate has to be capable of saying no, or it is decoration.
 
-    Two ways in, and the first is broader than it looks: because the header
-    carries a SHA1 over the regions, a single flipped byte ANYWHERE in the
-    kernel makes the repack disagree with the stored id. So the round trip is
-    an integrity check on the escrowed image as well as a check on the packer
-    — a reference that arrived corrupted cannot pass it.
+    A header field that does not describe the body is the case that matters:
+    the packer would reassemble it wrongly, and the refusal is what stops that
+    reaching a partition.
     """
-    bad = bytearray(make_reference())
-    bad[eb.PAGE + 0x200 + 4] ^= 0xFF        # one byte inside the zImage
-    assert not eb.roundtrip_identical(bytes(bad))
-
-    # And a header field that does not describe the body.
     bad = bytearray(make_reference())
     struct.pack_into("<I", bad, 8, struct.unpack_from("<I", bad, 8)[0] + 16)
     assert not eb.roundtrip_identical(bytes(bad))
+
+
+def test_a_stale_image_id_does_not_block_a_build():
+    """
+    Some images legitimately carry an id that does not describe their contents
+    — a tool that repacks a ramdisk while preserving the header verbatim
+    leaves one, and f1r30s does exactly that. Reproducing it is impossible by
+    definition, and requiring it refused stock FireOS 5 + f1r30s, which is the
+    state docs/rooting.md tells users to be in (measured 2026-09-06).
+
+    The id is a checksum over regions this build replaces outright, and pack()
+    computes a fresh one for what it emits, so the reference's is not an input
+    to anything.
+    """
+    bad = bytearray(make_reference())
+    for i in range(eb._ID_START, eb._ID_START + 20):
+        bad[i] ^= 0xFF
+    assert not eb.roundtrip_identical(bytes(bad)), "the strict check still sees it"
+    assert eb.roundtrip_diff(bytes(bad), ignore_id=True) is None
+
+
+def test_relaxing_the_id_does_not_relax_anything_else():
+    """
+    Everything the packer SYNTHESISES must still reproduce. The kernel and the
+    ramdisk are copied verbatim so they cannot differ, but the MTK kernel
+    header, the product name, the extra command line and every pad byte are
+    rebuilt, and a disagreement in any of them means the image was misread.
+    """
+    for offset, what in ((50, "product name"), (700, "extra cmdline")):
+        bad = bytearray(make_reference())
+        bad[offset] ^= 0xFF
+        assert eb.roundtrip_diff(bytes(bad), ignore_id=True) is not None, what
+
+
+def test_the_round_trip_diff_names_the_field():
+    """A bare False is not actionable — finding out why a real image was
+    refused cost a hex dump over adb and a field-by-field decode."""
+    bad = bytearray(make_reference())
+    bad[eb._ID_START] ^= 0xFF
+    off, where, got, made = eb.roundtrip_diff(bytes(bad))
+    assert off == eb._ID_START
+    assert "image id" in where
+    assert got != made
 
 
 def test_build_refuses_an_image_it_cannot_reproduce():

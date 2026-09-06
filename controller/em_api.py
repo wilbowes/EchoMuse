@@ -4796,6 +4796,9 @@ async def _post_provision_emos_image(request: web.Request) -> web.Response:
                 break
             if field.name in ("reference", "init"):
                 parts[field.name] = await field.read()
+            elif field.name == "reference_md5":
+                parts["reference_md5"] = (await field.read()).decode(
+                    errors="replace")[:64].strip().lower()
             elif field.name == "version":
                 parts["version"] = (await field.read()).decode(errors="replace")[:64]
 
@@ -4809,6 +4812,30 @@ async def _post_provision_emos_image(request: web.Request) -> web.Response:
             return _error("invalid_upload",
                           "Expected multipart field 'init' — the emOS init "
                           "binary", 400)
+
+        # The escrow arrived intact, checked before anything reads it.
+        #
+        # This replaces a property the packer's round-trip used to provide as a
+        # side effect: the boot header carries a SHA1 over the kernel and
+        # ramdisk, so a byte corrupted in transfer made the repack disagree and
+        # was refused. That check had to be relaxed — some images legitimately
+        # carry a stale id that cannot be reproduced by definition, and no rule
+        # can tell a stale id from a corrupted byte — so the integrity half is
+        # now explicit, and covers the WHOLE transfer rather than two of its
+        # regions.
+        #
+        # Absent md5 is accepted: an older wizard does not send one, and
+        # refusing there would break provisioning for a dashboard that has not
+        # been reloaded. Present-and-wrong always refuses.
+        want_md5 = parts.get("reference_md5")
+        if want_md5:
+            got_md5 = hashlib.md5(reference).hexdigest()
+            if got_md5 != want_md5:
+                return _error(
+                    "corrupt_upload",
+                    f"The boot image arrived corrupted: the wizard read "
+                    f"{want_md5} off the device and {got_md5} arrived. "
+                    f"Nothing has been built. Re-run the escrow step.", 400)
 
         version = parts.get("version") or "0.1"
         loop = asyncio.get_event_loop()

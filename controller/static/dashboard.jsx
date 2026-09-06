@@ -5135,6 +5135,11 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
 
     const fd = new FormData();
     fd.append('reference', new Blob([reference]), 'reference.img');
+    // The controller checks this before it reads a byte of the image. It is
+    // the integrity check on the escrow — the packer's round trip used to
+    // provide one as a side effect of reproducing the boot header's SHA1, and
+    // that had to be relaxed for images carrying a stale id.
+    fd.append('reference_md5', await _md5Hex(reference));
     fd.append('init', initBlob, 'init');
     fd.append('version', version);
     const resp = await fetch(ingressPath('/api/provision/emos_image'), {

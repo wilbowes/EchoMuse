@@ -252,7 +252,11 @@ _HDR_FIELDS = (
 )
 
 
-def roundtrip_diff(ref: bytes):
+# The image id: 20 bytes of SHA1 padded to 32, at offset 576 of the header.
+_ID_START, _ID_END = 576, 608
+
+
+def roundtrip_diff(ref: bytes, ignore_id: bool = False):
     """Where the repacked reference stops matching the original, or None.
 
     Split out of roundtrip_identical because a bare False is not actionable.
@@ -272,7 +276,13 @@ def roundtrip_diff(ref: bytes):
         return (min(len(rebuilt), len(ref)),
                 f"the lengths differ: the reference is {len(ref)} bytes and "
                 f"repacking it gives {len(rebuilt)}", b"", b"")
-    off = next(i for i in range(len(ref)) if ref[i] != rebuilt[i])
+    rng = range(len(ref))
+    if ignore_id:
+        rng = [i for i in rng if not (_ID_START <= i < _ID_END)]
+    diffs = [i for i in rng if ref[i] != rebuilt[i]]
+    if not diffs:
+        return None
+    off = diffs[0]
 
     where = f"offset {off}"
     for start, end, name in _HDR_FIELDS:
@@ -334,7 +344,43 @@ def build_emos_image(reference: bytes, init_binary: bytes, version: str,
         raise BuildError("; ".join(problems))
 
     parts = split_reference(reference)
-    diff = roundtrip_diff(reference)
+    # Everything EXCEPT the image id has to reproduce byte for byte.
+    #
+    # The id is a SHA1 over the kernel and ramdisk — regions this build is
+    # about to replace outright, since the whole point is to swap the ramdisk
+    # for emOS's. So the reference's id is not an input to anything we emit:
+    # pack() computes a fresh one over the new contents, and the image we flash
+    # carries a correct id whatever the reference carried.
+    #
+    # Requiring it to match therefore tests the wrong thing. It asks whether
+    # whichever tool last wrote this image recomputed a checksum, not whether
+    # WE understand the layout — and a tool that repacks a ramdisk while
+    # preserving the header verbatim leaves a stale id that is impossible to
+    # reproduce by definition. That is what f1r30s does: measured 2026-09-06 on
+    # a stock FireOS 5 + f1r30s image, the id was the ONLY difference, and
+    # refusing over it blocked the exact state docs/rooting.md tells users to
+    # be in.
+    #
+    # Everything else still has to match exactly, and that is the half that
+    # carries the meaning: if the kernel, the ramdisk, the addresses, the
+    # cmdline or the padding disagree, the packer has misread the image and
+    # the refusal stands.
+    # The id is not required to reproduce, and the reference's md5 is checked
+    # on arrival instead (_post_provision_emos_image).
+    #
+    # This gate USED to double as an integrity check on the escrowed image: the
+    # stored SHA1 covers the kernel and ramdisk, so a byte corrupted in
+    # transfer changed the repack and was refused. That property is real and
+    # was worth keeping, so it has been replaced rather than dropped — by an
+    # md5 over the WHOLE transfer, which is strictly better than a checksum
+    # covering two of its regions.
+    #
+    # Note there is no way to keep it here. "Stored id does not match the
+    # regions" is equally true of a tool that left a stale id and of a byte
+    # corrupted in flight, so any rule that tolerates the first tolerates the
+    # second. A heuristic that appears to separate them would fire in exactly
+    # the cases the strict check was for, which is worse than not having one.
+    diff = roundtrip_diff(reference, ignore_id=True)
     if diff is not None:
         _, where, got, made = diff
         detail = f" It first differs in {where}"
