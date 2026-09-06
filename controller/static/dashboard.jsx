@@ -3493,8 +3493,8 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // connection, rather than rebooting recovery into recovery and making the
     // operator re-pick the same device from the USB picker.
     if (inRecovery) {
-      addLog('Already in TWRP — no reboot needed. Continue with "Connect to TWRP" '
-           + '(the device is still connected).', 'ok');
+      addLog('Already in TWRP — no reboot needed, and the next step reuses this '
+           + 'connection.', 'ok');
       return c;
     }
     addLog('FireOS 5 confirmed. Rebooting to TWRP recovery…');
@@ -5797,7 +5797,17 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // is a partition write or a reboot, and neither should begin while nobody
     // is looking.
     const autoSteps = isEmos ? new Set([2, 4, 5]) : new Set([2, 4, 7, 8, 9, 12]);
-    if (!autoSteps.has(step) || running || stepState[step] !== 'pending') return;
+    // Connect to TWRP runs itself when the device is ALREADY in TWRP.
+    //
+    // Step 1 keeps its handle when it finds the device in recovery, so step 2
+    // has nothing left to do but confirm what step 1 just said — and asking
+    // for a click to be told "still connected" is a button whose only possible
+    // outcome is yes. It stays manual in every other case, because then it
+    // genuinely means "I have got the device into TWRP, go and look".
+    const alreadyThere = isEmos && step === 1 && adb
+                      && _bannerMode(adb.banner) === 'twrp';
+    if ((!autoSteps.has(step) && !alreadyThere)
+        || running || stepState[step] !== 'pending') return;
     // The emOS build's default source is the release, so the auto path has to
     // say so — `useLatest` is undefined otherwise and it would ask for a file
     // nobody has chosen.
