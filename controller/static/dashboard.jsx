@@ -2778,12 +2778,26 @@ const _WIZARD_STEPS = [
 // The emOS flow. Nine steps against thirteen, and the four that go are the
 // four that only ever existed to obtain root inside Android:
 //
-//   Patch Boot Image   the permissive cmdline is inert (LK appends its own
-//                      duplicate androidboot.selinux=enforce after ours) and
-//                      emOS loads no policy; the init.rc entries are replaced
-//                      by emOS's own service table. THE MOST DANGEROUS STEP
-//                      IN THE WIZARD — in the wrong mode it writes over the
-//                      amonet unlock payload — and it is simply not needed.
+//   Patch Boot Image   emOS loads no SELinux policy at all, so the permissive
+//                      cmdline has nothing to act on, and the init.rc entries
+//                      are replaced by emOS's own service table. THE MOST
+//                      DANGEROUS STEP IN THE WIZARD — in the wrong mode it
+//                      writes over the amonet unlock payload — and it is
+//                      simply not needed.
+//
+//                      This used to say the cmdline was inert because LK
+//                      appends its own androidboot.selinux=enforce after ours.
+//                      That reason is WRONG and the measurement is the other
+//                      way round: on FireOS, ro.boot.selinux commits
+//                      `permissive` with both values on the cmdline, because
+//                      androidboot.* becomes a read-only property and those
+//                      are write-once — so the FIRST occurrence wins, and LK
+//                      splices the image cmdline in ahead of its own enforce.
+//                      Measured on 0C95 and 71VVV, 2026-09-06: getenforce
+//                      Permissive, ro.boot.selinux permissive. The patch works
+//                      and the FireOS flow depends on it; do not remove it on
+//                      the strength of the old sentence. It is dropped here
+//                      only because emOS has no policy to be permissive about.
 //   Install Magisk     we never boot Android; TWRP is already root.
 //   Pre-seed Root DB   only meaningful with Magisk.
 //   Verify Root        nothing downstream depends on Android root.
