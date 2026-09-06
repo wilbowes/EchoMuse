@@ -3480,6 +3480,18 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   }
 
   async function runConnectTwrp() {
+    // Reuse the connection rather than asking WebUSB for a second claim on an
+    // interface we already hold. Step 1 now keeps its handle when it finds the
+    // device already in recovery, and calling requestDevice() again against
+    // that same open claim fails — the picker returns, the authenticate races
+    // a session that was never torn down, and the step dies with "Step
+    // cancelled" or a spurious disconnect. Measured 2026-09-06: two failed
+    // attempts before a third succeeded, purely from the handle step 1 kept.
+    // Same hazard reconnectAdb documents from the other direction.
+    if (adb && _bannerMode(adb.banner) === 'twrp') {
+      addLog('Already connected to TWRP — reusing the existing session.', 'ok');
+      return adb;
+    }
     const c = await _ADB.Client.requestDevice(addLog);
     c._log = msg => addLog(`  adb: ${msg}`);
     setAdb(c);
@@ -5141,17 +5153,37 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
            + 'larger than the partition it is being written to', 'error');
     }
 
-    const blocks = Math.ceil(bytes.length / 1048576);
-    const padded = new Uint8Array(blocks * 1048576);
-    padded.set(bytes);
-    // dd reads whole megabytes, so hash the image padded the same way rather
-    // than comparing against the image's own md5 — otherwise a perfectly good
-    // flash fails on the tail padding.
-    const want = await _md5Hex(padded);
+    // Read back EXACTLY as many bytes as were written, and compare against the
+    // image's own md5.
+    //
+    // This used to read whole megabytes and hash the image zero-padded to the
+    // same length, on the reasoning that dd reads in block units. The padding
+    // is the bug: dd wrote 6,914,048 bytes and the read covered 7,340,032, so
+    // 425,984 bytes of the PREVIOUS boot image were being compared against
+    // zeros that were never written. Every flash failed and the write was
+    // always fine — measured 2026-09-06, `6+1 records out` with a full byte
+    // count, two writes and four reads all agreeing on the same wrong hash.
+    //
+    // It hid because the only path that had ever run was the restore, whose
+    // image is the whole 16MB partition — exactly sixteen blocks, so the
+    // padding was empty and the comparison happened to be right.
+    //
+    // pack() page-aligns every region, so the length is always a multiple of
+    // 2048 and the read is exact. A length that is not gets the old
+    // whole-megabyte comparison, which is wrong in the same way but no worse
+    // than it was, and cannot arise from an image this wizard built.
+    const exact = bytes.length % 2048 === 0;
+    const want = exact ? md5 : await (async () => {
+      const padded = new Uint8Array(Math.ceil(bytes.length / 1048576) * 1048576);
+      padded.set(bytes);
+      return _md5Hex(padded);
+    })();
+    const readCmd = exact
+      ? `busybox dd if=${target} bs=2048 count=${bytes.length / 2048}`
+      : `busybox dd if=${target} bs=1048576 count=${Math.ceil(bytes.length / 1048576)}`;
     const readBack = async () => {
       await c.shell('echo 3 > /proc/sys/vm/drop_caches 2>/dev/null; sync');
-      return (await c.shell(
-        `busybox dd if=${target} bs=1048576 count=${blocks} 2>/dev/null | busybox md5sum`))
+      return (await c.shell(`${readCmd} 2>/dev/null | busybox md5sum`))
         .trim().split(/\s+/)[0];
     };
     addLog('Reading it back…');

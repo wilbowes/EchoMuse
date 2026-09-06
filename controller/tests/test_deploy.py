@@ -2347,6 +2347,21 @@ def test_the_flash_step_verifies_against_the_partition():
     write = src[src.index("async function _writeBootPartition"):]
     write = write[:write.index("\n  async function runFlashEmos")]
     assert "conv=fsync" in write, "the write must be fsync'd"
+
+    # The read-back must cover exactly what was written. It used to read whole
+    # megabytes and compare against the image zero-padded to match, so 425,984
+    # bytes of the PREVIOUS boot image were checked against zeros nobody wrote
+    # — every emOS flash failed on a write that was provably complete. It hid
+    # because the only path that had ever run was the restore, whose image is
+    # the whole 16MB partition and therefore an exact number of blocks.
+    assert "bs=2048" in write, (
+        "the read-back must use page-sized blocks so it can cover exactly the "
+        "bytes written, not round up to the next megabyte")
+    assert "bytes.length / 2048" in write, (
+        "the read-back block count must come from the image length")
+    assert "% 2048 === 0" in write, (
+        "an image that is not page-aligned must be detected rather than "
+        "silently read short")
     assert "drop_caches" in write, (
         "the page cache must be dropped before the read-back, or the read-back "
         "confirms the cache rather than the partition")
