@@ -258,6 +258,27 @@ writes a skeleton (`ctrl_interface` + `update_config=1`) while `/data` is
 writable and before the flash. Recovering by hand needs only those two lines
 and a reboot.
 
+**Nothing routine writes to the eMMC.** `/run/net.log` (128KB, one rotation)
+takes netlog's own lines AND every spawned child's stdout and stderr —
+wmt_loader, wpa_supplicant, dhcpcd, ntpd and the wpa_cli nudge — and syslogd
+writes `/run/messages` at 256KB x 2. Both are tmpfs.
+
+That log lived on `/data` and was appended with no bound until 2026-09-06, so a
+device that could not join its network wrote to flash every five seconds for
+ever, in exactly the failure state nobody is watching. The trade is that it
+does not survive a reboot, which is right: it answers "why is the network not
+up NOW", read over the console while the device is running, and a crash that
+spans a reboot is what the `last_kmsg` copies are for.
+
+The persistent writers are all bounded and all write on CHANGE rather than on a
+timer: `boot.state` once per boot, `last_kmsg.{prev,1,2}` rotated three deep,
+`console.pw` and `wpa_supplicant.conf` when they change, and `boot-good.img`
+only when the boot header's SHA1 image id differs from the stored one — a size
+check would never promote a new image, since every emOS build so far is the
+same length. The firmware's `supervisor.log` is trimmed to 32KB before each
+append; its `server.log` is on tmpfs and trimmed (it reached 45MB once, in
+2026-07).
+
 **`reboot` does nothing; use `busybox reboot`.** Plain `reboot` signals init,
 and emOS's init does not handle that signal, so it exits silently having done
 nothing. `busybox reboot` goes to the syscall. Worth knowing before concluding
