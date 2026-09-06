@@ -2405,11 +2405,54 @@ def test_the_serial_console_disables_echo_before_anything_else():
     cls = cls[:cls.index("\n}")]
     assert "stty -echo" in cls, "the console client must disable echo"
 
-    watch = src[src.index("async function runRebootAndWatch"):]
+    watch = src[src.index("async function _watchFirstBoot"):]
     watch = watch[:watch.index("\n  async function ", 1)]
     assert "disableEcho" in watch, "the reboot step must disable echo"
     assert watch.index("disableEcho") < watch.index("con.run("), \
         "echo must be disabled BEFORE the first command, or its reply is garbled"
+
+    # Disabling echo is not enough on its own, and 2026-09-06 is how we know:
+    # stty is not guaranteed present and the shell is not guaranteed up, so
+    # echo survived and every run() returned the text of its OWN request. The
+    # marker must therefore be assembled ON THE DEVICE, so it cannot appear in
+    # the shell's echo of the command that asks for it.
+    assert "; echo ${mark}" not in cls and "; echo ${mark}`" not in cls, (
+        "the completion marker must not be sent whole — with echo on it "
+        "arrives before the command runs and run() answers with its own request")
+    assert "__a=__EM" in cls, (
+        "the marker must be assembled on the device from parts that do not "
+        "spell it in the echoed command")
+
+    # A failed attempt must release the serial port. The browser refuses to
+    # reopen one that is already open, and no amount of retrying clears it.
+    step = src[src.index("async function runRebootAndWatch"):]
+    step = step[:step.index("\n  async function ", 1)]
+    assert "con.close()" in step, (
+        "a failed first-boot watch must close the port, or every retry fails "
+        "with 'The port is already open'")
+
+
+def test_emos_wpa_cli_calls_carry_the_control_socket_path():
+    """
+    wpa_cli defaults to /var/run/wpa_supplicant. emOS starts its supplicant
+    with -p/data/misc/wifi/sockets (init.c), so a bare `wpa_cli -i wlan0`
+    fails every time with "Failed to connect to non-global ctrl_ifname".
+
+    Found by hand on the console on 2026-09-06, before the WiFi step had ever
+    run on hardware — it would have failed on its first call. The FireOS flow
+    has always passed -p; the emOS step was written without it.
+
+    Comments are stripped first: the explanation of this rule necessarily
+    quotes the broken form, and a guard that greps for the thing it forbids
+    otherwise fails a file that is correct.
+    """
+    src = _jsx()
+    body = re.sub(r"^\s*//.*$", "", src, flags=re.M)
+    bare = [ln.strip() for ln in body.splitlines()
+            if "wpa_cli -i " in ln]
+    assert not bare, (
+        "every wpa_cli invocation must pass -p /data/misc/wifi/sockets: "
+        + "; ".join(bare))
 
 
 def test_the_emos_build_endpoint_stores_nothing():

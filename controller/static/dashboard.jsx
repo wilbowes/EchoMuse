@@ -3028,13 +3028,35 @@ class _EmosConsole {
   // Commands are kept SHORT deliberately: the device's own echo garbles long
   // ones into a 127, which is the second half of the same trap.
   async run(cmd, timeoutMs = 15000) {
-    const mark = `__EM${Math.random().toString(36).slice(2, 8)}__`;
+    const id   = Math.random().toString(36).slice(2, 8);
+    const mark = `__EM${id}__`;
     this.buf = '';
-    await this._send(`${cmd}; echo ${mark}`);
+    // The marker is ASSEMBLED ON THE DEVICE, so it cannot appear in the
+    // shell's echo of this very command. Sending `echo __EMxxx__` looks
+    // obvious and is the bug: with echo on, the marker arrives in the echo
+    // before the command has run, indexOf finds it immediately, and run()
+    // returns the text of its own request as the answer. That is exactly what
+    // happened on 2026-09-06 — `uname -a` "answered" with "uname -a; echo ",
+    // and the os-release check then received the text of the os-release
+    // command and reported the device was not emOS. It was; the console was
+    // reading itself.
+    //
+    // disableEcho() is still sent first and still preferred, but it depends on
+    // stty being present and on the shell being up, and neither is something
+    // this can afford to assume. Splitting the marker makes run() correct
+    // whether echo is on or off, which is the property worth having.
+    await this._send(`${cmd}; __a=__EM; __b=${id}__; echo "$__a$__b"`);
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const i = this.buf.indexOf(mark);
-      if (i >= 0) return this.buf.slice(0, i);
+      if (i >= 0) {
+        let out = this.buf.slice(0, i);
+        // With echo on, the first line is the request. Drop it rather than
+        // returning it as output.
+        const nl = out.indexOf('\n');
+        if (nl >= 0 && out.slice(0, nl).includes(cmd)) out = out.slice(nl + 1);
+        return out;
+      }
       await new Promise(r => setTimeout(r, 100));
     }
     throw new Error(`The console did not answer "${cmd}" within `
@@ -4822,6 +4844,59 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         addLog('TLS credentials installed — device will connect over wss.', 'ok');
       }
     }
+
+    // A wpa_supplicant.conf that at least declares a control socket, written
+    // only if the device does not already have one.
+    //
+    // emOS starts wpa_supplicant with -c/data/misc/wifi/wpa_supplicant.conf
+    // (init.c) and the CONTROL SOCKET comes from ctrl_interface inside that
+    // file — so with no file the supplicant exits immediately, creates no
+    // socket, and every wpa_cli fails with "Failed to connect to non-global
+    // ctrl_ifname". That includes init's own `reassociate` nudge, which is
+    // what association depends on here, so the device sits at boot stage 11
+    // for ever with the ring throbbing at position 12.
+    //
+    // The emOS flow never wrote one: WiFi moved to the END of that flow, to be
+    // configured over the console against emOS's own supplicant — which
+    // presumes a supplicant that is running. It is a chicken and egg, and it
+    // only stayed hidden because EFF had been through the FireOS WiFi step
+    // first and crossed to emOS carrying its conf on /data. A device that goes
+    // straight to emOS has never had one. Measured on 3611NF 2026-09-06:
+    // wpa_supplicant and wpa_cli both zombies, sockets/ empty, no conf.
+    //
+    // Step 4 rather than step 9 because /data is writable here and this is
+    // before the flash, so the FIRST emOS boot comes up with a socket instead
+    // of needing a console rescue.
+    //
+    // NEVER overwritten. A device that has been through the FireOS WiFi step
+    // has a conf with real networks in it, and clobbering that would take the
+    // device off the air — the skeleton is a floor, not a template.
+    addLog('Checking the WiFi supplicant config…');
+    const wpaConf = '/data/misc/wifi/wpa_supplicant.conf';
+    const wpaOut = (await c.shell(
+      `su -c 'mkdir -p /data/misc/wifi/sockets; `
+      + `if [ -f ${wpaConf} ]; then echo KEPT; else `
+      + `  { echo ctrl_interface=/data/misc/wifi/sockets; echo update_config=1; } > ${wpaConf} `
+      + `  && echo WROTE; fi; `
+      // uid/gid 1010 is "wifi" — numeric because TWRP's passwd database does
+      // not necessarily carry Android's names, and the supplicant runs as that
+      // user (confirmed in ps on the device).
+      + `chown -R 1010:1010 /data/misc/wifi 2>/dev/null; `
+      + `chmod 660 ${wpaConf} 2>/dev/null; `
+      + `grep -c ctrl_interface ${wpaConf}' 2>&1`)).trim();
+    if (/WROTE/.test(wpaOut)) {
+      addLog('  wrote a minimal wpa_supplicant.conf — emOS needs one to open '
+           + 'its control socket');
+    } else if (/KEPT/.test(wpaOut)) {
+      addLog('  existing wpa_supplicant.conf left alone');
+    }
+    // The last line is grep -c: a config with no ctrl_interface produces no
+    // socket just as surely as no config at all, and that is worth saying now
+    // rather than discovering it at stage 11.
+    if (!/(^|\n)[1-9]\d*$/.test(wpaOut)) {
+      addLog(`  WARNING: ${wpaConf} declares no ctrl_interface, so emOS will `
+           + 'not be able to configure WiFi. Output was: ' + wpaOut.replace(/\n/g, ' | '), 'warn');
+    }
     // NO reboot here. This step used to end the wizard, so it rebooted, closed
     // the connection and cleared `adb` — and when the wake word asset step was
     // appended after it, that step's auto-run gate (`&& adb`) was false, so it
@@ -5345,6 +5420,22 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     await port.open({ baudRate: 115200 });
     const con = new _EmosConsole(port, addLog);
     setEmosConsole(con);
+    // Everything from here is wrapped so a failure CLOSES the port. Without
+    // this, the first failed attempt left it open and every retry died with
+    // "Failed to execute 'open' on 'SerialPort': The port is already open" —
+    // an error about the browser's port table that says nothing about the
+    // device, and which no amount of retrying can clear. Measured 2026-09-06:
+    // three attempts lost to it after one genuine failure.
+    try {
+      await _watchFirstBoot(con);
+    } catch (e) {
+      setEmosConsole(null);
+      try { await con.close(); } catch {}
+      throw e;
+    }
+  }
+
+  async function _watchFirstBoot(con) {
     // ECHO OFF FIRST, ALWAYS. A port opened with default termios echoes
     // everything the device sends back into its own input; the shell then
     // executes its own prompt and every command returns 127. It looks alive,
@@ -5370,23 +5461,30 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     if (!wifiSsid) throw new Error('Choose a network first.');
 
     addLog(`Joining ${wifiSsid}…`);
+    // Every call carries -p. wpa_cli defaults to /var/run/wpa_supplicant and
+    // emOS's supplicant is started with -p/data/misc/wifi/sockets (init.c:1202,
+    // and the same path the FireOS flow uses), so without it every command
+    // fails with "Failed to connect to non-global ctrl_ifname: wlan0". Found
+    // by hand on the console 2026-09-06, before this step had ever run — it
+    // would have failed on its first call.
+    //
     // wpa_cli against emOS's own supplicant — the real radio, so a network
     // this hardware cannot join fails here rather than after a flash. Note
     // this radio reports no SAE, so it genuinely cannot do WPA3 (#82).
-    const id = (await con.run('wpa_cli -i wlan0 add_network')).trim().split('\n').pop().trim();
+    const id = (await con.run('wpa_cli -p /data/misc/wifi/sockets -i wlan0 add_network')).trim().split('\n').pop().trim();
     if (!/^\d+$/.test(id)) throw new Error(`wpa_cli would not add a network (said "${id}").`);
-    await con.run(`wpa_cli -i wlan0 set_network ${id} ssid '"${wifiSsid}"'`);
+    await con.run(`wpa_cli -p /data/misc/wifi/sockets -i wlan0 set_network ${id} ssid '"${wifiSsid}"'`);
     if (wifiPsk) {
-      await con.run(`wpa_cli -i wlan0 set_network ${id} psk '"${wifiPsk}"'`);
+      await con.run(`wpa_cli -p /data/misc/wifi/sockets -i wlan0 set_network ${id} psk '"${wifiPsk}"'`);
     } else {
-      await con.run(`wpa_cli -i wlan0 set_network ${id} key_mgmt NONE`);
+      await con.run(`wpa_cli -p /data/misc/wifi/sockets -i wlan0 set_network ${id} key_mgmt NONE`);
     }
-    const en = await con.run(`wpa_cli -i wlan0 enable_network ${id}`);
+    const en = await con.run(`wpa_cli -p /data/misc/wifi/sockets -i wlan0 enable_network ${id}`);
     if (!/OK/.test(en)) throw new Error(`wpa_cli refused to enable the network: ${en.trim()}`);
 
     // save_config keeps NOTHING without update_config=1 in the conf, and says
     // OK either way — so the device would join now and forget on reboot.
-    const saved = await con.run('wpa_cli -i wlan0 save_config');
+    const saved = await con.run('wpa_cli -p /data/misc/wifi/sockets -i wlan0 save_config');
     if (!/OK/.test(saved)) {
       addLog('wpa_cli could not save the network, so this will be forgotten on '
            + 'reboot. Check update_config=1 in wpa_supplicant.conf.', 'warn');
@@ -5405,7 +5503,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       const known = new Set((knownDevices || []).map(d => d.device_id));
       seen = list.find(d => !known.has(d.device_id));
       if (seen) break;
-      const st = (await con.run('wpa_cli -i wlan0 status | grep wpa_state')).trim();
+      const st = (await con.run('wpa_cli -p /data/misc/wifi/sockets -i wlan0 status | grep wpa_state')).trim();
       addLog(`  ${st || 'no answer'}`);
     }
     if (!seen) {
