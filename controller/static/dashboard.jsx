@@ -3072,6 +3072,10 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   const [emosRef, setEmosRef]       = useState(null);
   const [emosTarget, setEmosTarget] = useState(null);
   const [emosImage, setEmosImage]   = useState(null);
+  // Holds the operator's own copy of the escrowed image when this session no
+  // longer has one — a page reload loses emosRef, which is exactly when the
+  // restore is needed. See restoreStockBoot.
+  const [restoreFile, setRestoreFile] = useState(null);
   const [initFile, setInitFile]     = useState(null);
   const [emosConsole, setEmosConsole] = useState(null);
   const [wifiSsid, setWifiSsid] = useState('');
@@ -4923,21 +4927,37 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   }
 
   // Step 6 — flash and verify.
-  async function runFlashEmos(c) {
-    if (!emosImage) throw new Error('Nothing built yet — run the Build emOS step first.');
-    const target = emosTarget || emosRef?.target;
-    if (!target) throw new Error('No flash target resolved — re-run the escrow step.');
+  // dd's stderr, which is logged and was never read. "16+0 records in / 16+0
+  // records out" is the whole diagnosis of a short write, and a short write and
+  // a corrupt one want opposite responses — one means the image does not fit or
+  // the partition ended early, the other means retry.
+  function _ddShortWrite(out) {
+    const rec = [...out.matchAll(/^(\d+)\+(\d+) records (in|out)$/gm)];
+    const inn = rec.find(m => m[3] === 'in');
+    const got = rec.find(m => m[3] === 'out');
+    if (!inn || !got) return null;
+    if (inn[1] === got[1] && inn[2] === got[2]) return null;
+    return `${got[1]}+${got[2]} of ${inn[1]}+${inn[2]} blocks reached the partition`;
+  }
 
-    addLog(`Uploading the image to the device…`);
-    await c.push('/tmp/emos_boot.img', emosImage.bytes,
-      pct => setProgress({ label: 'Uploading image', pct }));
+  // One write to the boot partition, verified against the partition itself.
+  // Shared by the flash and the restore rather than copied: this is the only
+  // code in the wizard that can leave a device unbootable, and a second copy
+  // is one that drifts from the checks this one carries.
+  //
+  // Returns null on success, or a string naming what went wrong — the caller
+  // decides whether that is a retry, a restore, or a stop.
+  async function _writeBootPartition(c, target, bytes, md5, what) {
+    addLog(`Uploading the ${what} to the device…`);
+    await c.push('/tmp/emos_boot.img', bytes,
+      pct => setProgress({ label: `Uploading ${what}`, pct }));
     setProgress(null);
 
     const staged = (await c.shell('busybox md5sum /tmp/emos_boot.img 2>/dev/null')).trim().split(/\s+/)[0];
-    if (staged !== emosImage.md5) {
+    if (staged !== md5) {
       await c.shell('rm -f /tmp/emos_boot.img');
-      throw new Error(`The image arrived on the device corrupted (md5 ${staged || 'unreadable'}, `
-                    + `expected ${emosImage.md5}). Nothing has been written.`);
+      return `The ${what} arrived on the device corrupted (md5 ${staged || 'unreadable'}, `
+           + `expected ${md5}). Nothing has been written.`;
     }
     addLog('  staged and verified on the device');
 
@@ -4951,36 +4971,159 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       `busybox dd if=/tmp/emos_boot.img of=${target} bs=1048576 conv=fsync 2>&1; sync`);
     const secs = (Date.now() - t0) / 1000;
     addLog(wrote.trim() || '(done)');
-    const mbps = (emosImage.bytes.length / 1024 / 1024) / Math.max(secs, 0.001);
+    const mbps = (bytes.length / 1024 / 1024) / Math.max(secs, 0.001);
     addLog(`  ${mbps.toFixed(1)} MB/s over ${secs.toFixed(1)}s`);
     if (mbps > 60) {
       addLog('That throughput is not achievable on this eMMC, so the write '
            + 'probably went to cache. The read-back below is the check that '
            + 'matters.', 'warn');
     }
+    const short = _ddShortWrite(wrote);
+    if (short) {
+      addLog(`  dd reports a short write: ${short}`, 'error');
+    }
+    if (/no space left/i.test(wrote)) {
+      addLog('  the partition filled before the image ended — the image is '
+           + 'larger than the partition it is being written to', 'error');
+    }
 
-    await c.shell('echo 3 > /proc/sys/vm/drop_caches 2>/dev/null; sync');
-    addLog('Reading it back…');
-    const back = (await c.shell(
-      `busybox dd if=${target} bs=1048576 count=${Math.ceil(emosImage.bytes.length / 1048576)} `
-      + `2>/dev/null | busybox md5sum`)).trim().split(/\s+/)[0];
+    const blocks = Math.ceil(bytes.length / 1048576);
+    const padded = new Uint8Array(blocks * 1048576);
+    padded.set(bytes);
     // dd reads whole megabytes, so hash the image padded the same way rather
     // than comparing against the image's own md5 — otherwise a perfectly good
     // flash fails on the tail padding.
-    const padded = new Uint8Array(Math.ceil(emosImage.bytes.length / 1048576) * 1048576);
-    padded.set(emosImage.bytes);
     const want = await _md5Hex(padded);
-    if (back !== want) {
-      throw new Error(
-        `The partition does not contain what we wrote (read ${back || 'nothing'}, `
-        + `expected ${want}). DO NOT REBOOT. Restore the escrowed image with:\n`
-        + `  dd if=<your stock boot image> of=${target}`);
+    const readBack = async () => {
+      await c.shell('echo 3 > /proc/sys/vm/drop_caches 2>/dev/null; sync');
+      return (await c.shell(
+        `busybox dd if=${target} bs=1048576 count=${blocks} 2>/dev/null | busybox md5sum`))
+        .trim().split(/\s+/)[0];
+    };
+    addLog('Reading it back…');
+    const back = await readBack();
+    if (back === want) {
+      await c.shell('rm -f /tmp/emos_boot.img');
+      addLog('Write verified against the partition itself.', 'ok');
+      return null;
     }
-    await c.shell('rm -f /tmp/emos_boot.img');
-    addLog('Flash verified against the partition itself.', 'ok');
+
+    // A second read separates a partition that genuinely holds the wrong bytes
+    // from a read that is unstable or still cached — same answer twice is the
+    // partition, a different answer twice is not, and they are not the same
+    // problem. Cheap, and it runs once, on a path that has already failed.
+    addLog('  read-back does not match — reading a second time to tell a bad '
+         + 'write from an unstable read…', 'warn');
+    const again = await readBack();
+    const detail = again === back
+      ? `the partition consistently reads ${back || 'nothing'}, expected ${want}`
+      : `two reads of the partition disagree (${back || 'nothing'} then `
+        + `${again || 'nothing'}), so the read itself is unreliable`;
+    return `The write did not take: ${detail}.`
+         + (short ? ` ${short}.` : '');
+  }
+
+  async function runFlashEmos(c) {
+    if (!emosImage) throw new Error('Nothing built yet — run the Build emOS step first.');
+    const target = emosTarget || emosRef?.target;
+    if (!target) throw new Error('No flash target resolved — re-run the escrow step.');
+
+    // The escrow is a whole-partition read (dd bs=1M with no count), so the
+    // reference length IS the partition size. An image larger than it cannot
+    // be written, and nothing asserted that — not the builder, not here. It
+    // would have failed correctly at the read-back and then blamed the
+    // partition, sending the operator to restore a device that was never
+    // touched by anything worse than a truncated write. Refuse before writing.
+    if (emosRef && emosImage.bytes.length > emosRef.bytes.length) {
+      throw new Error(
+        `The built image is ${(emosImage.bytes.length/1024/1024).toFixed(1)} MB but the boot `
+        + `partition is ${(emosRef.bytes.length/1024/1024).toFixed(1)} MB, so it cannot fit. `
+        + 'Nothing has been written and the device is untouched — this is a build '
+        + 'problem, not a device one. Re-run Build emOS.');
+    }
+
+    let err = await _writeBootPartition(
+      c, target, emosImage.bytes, emosImage.md5, 'emOS image');
+    if (err) {
+      // One retry, automatically. The device is already sitting on a boot
+      // partition that does not hold what we wanted, so writing the same bytes
+      // again cannot make it worse, and a transient eMMC write failure is the
+      // likeliest cause of a single bad verify. Once, never in a loop.
+      addLog(`${err}`, 'error');
+      addLog('Retrying the write once before giving up…', 'warn');
+      err = await _writeBootPartition(
+        c, target, emosImage.bytes, emosImage.md5, 'emOS image (retry)');
+    }
+    if (err) {
+      throw new Error(
+        `${err}\n\nDO NOT REBOOT — the device is still in TWRP and recoverable from `
+        + 'here. Use "Restore stock boot image" below to put your escrowed image '
+        + 'back; it takes about ten seconds and leaves /data untouched.');
+    }
     addLog('The device is now an emOS device. If anything below goes wrong, '
          + 'restoring the escrowed image takes about ten seconds and leaves '
          + 'everything installed on /data alone.', 'warn');
+  }
+
+  // Put the device back the way it was found. Offered on a flash or first-boot
+  // failure rather than printed as a dd command for the operator to run: the
+  // escrowed bytes are already in the page, the write path is the same verified
+  // one the flash uses, and someone whose device will not boot is not in a good
+  // position to be handed homework.
+  //
+  // `file` overrides the in-page escrow, because a page reload loses emosRef
+  // and that is exactly when this is needed — the copy downloaded at step 3 is
+  // the same bytes.
+  async function restoreStockBoot(file) {
+    setRunning(true);
+    try {
+      const c = adb;
+      if (!c) throw new Error('There is no ADB connection. Click Reconnect and try again.');
+      const target = emosTarget || emosRef?.target;
+      if (!target) {
+        throw new Error('No partition target is known in this session. Re-run the '
+          + 'Escrow Boot Image step — it only reads, and it resolves the target.');
+      }
+      let bytes = emosRef?.bytes;
+      let md5   = emosRef?.md5;
+      if (file) {
+        bytes = new Uint8Array(await file.arrayBuffer());
+        md5   = await _md5Hex(bytes);
+        addLog(`Using ${file.name} (${(bytes.length/1024/1024).toFixed(1)} MB, md5 ${md5}).`);
+      }
+      if (!bytes) {
+        throw new Error('No escrowed image in this session. Choose the '
+          + 'echomuse-stock-boot-*.img file downloaded at the escrow step.');
+      }
+      // The same guard the escrow and the patch step apply. Restoring is the
+      // one operation nobody will check afterwards, so a file that is not a
+      // boot image must not reach the partition.
+      const magic = new TextDecoder().decode(bytes.slice(0, 8));
+      if (magic !== 'ANDROID!') {
+        throw new Error(`That file does not start with "ANDROID!" `
+          + `(got "${magic.replace(/[^\x20-\x7e]/g, '.')}"), so it is not a boot image. `
+          + 'Nothing has been written.');
+      }
+      addLog('── RESTORE STOCK BOOT IMAGE ──', 'head');
+      let err = await _writeBootPartition(c, target, bytes, md5, 'stock boot image');
+      if (err) {
+        addLog(`${err}`, 'error');
+        addLog('Retrying the restore once…', 'warn');
+        err = await _writeBootPartition(c, target, bytes, md5, 'stock boot image (retry)');
+      }
+      if (err) {
+        throw new Error(`${err}\n\nThe restore did not verify. Do not reboot. The `
+          + `device is still in TWRP, and the image can also be written by hand from `
+          + `a TWRP shell with:\n  dd if=<your stock boot image> of=${target}`);
+      }
+      addLog('Stock boot image restored and verified against the partition. The '
+           + 'device will boot FireOS as it did before. Everything installed on '
+           + '/data is untouched.', 'ok');
+    } catch (e) {
+      addLog(`Restore failed: ${e.message}`, 'error');
+    } finally {
+      setRunning(false);
+    }
   }
 
   // ── Steps 7 and 8 — the serial console ────────────────────────────────────
@@ -5499,6 +5642,37 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                   Your escrowed image restores it in about ten seconds and leaves /data alone.
                 </div>
                 <Pill accent onClick={() => runStep(6)}>Flash emOS</Pill>
+              </div>
+            )}
+
+            {/* The undo, offered where it is needed rather than printed as a dd
+                command. Shown on a failed flash (6) and a failed first boot (7)
+                — the second is the case that matters most, because a device
+                that took the write and never came back is the one whose
+                operator has nothing else to try. It needs ADB, so it is only
+                useful while the device is still in TWRP; that is exactly the
+                state both failures leave it in. */}
+            {isEmos && (step === 6 || step === 7)
+              && stepState[step] === 'error' && !running && (
+              <div className="em-inset" style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 8, padding: 10 }}>
+                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)' }}>
+                  Put {emosTarget || 'the boot partition'} back to the image escrowed at step 3
+                  {emosRef ? ` (md5 ${emosRef.md5.slice(0, 8)}…)` : ''}. Verified against the
+                  partition afterwards, and /data is untouched — everything installed stays.
+                </div>
+                {!emosRef && (
+                  <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--warn)' }}>
+                    This session has no escrowed image — choose the
+                    echomuse-stock-boot-*.img downloaded at step 3.
+                  </div>
+                )}
+                <input type="file" accept=".img"
+                  onChange={e => setRestoreFile(e.target.files[0] || null)}
+                  style={{ fontFamily: "'DM Mono',monospace", fontSize: 10 }} />
+                <Pill danger disabled={!adb || (!emosRef && !restoreFile)}
+                  onClick={() => restoreStockBoot(restoreFile)}>
+                  Restore stock boot image
+                </Pill>
               </div>
             )}
 
