@@ -3492,7 +3492,16 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // stderr carried through rather than discarded: dd reports its record
     // counts there, and a silenced read failure used to reach magiskboot as
     // an empty file with nothing in the log to say why.
-    const pullOut = await c.shell('dd if=/dev/block/other-boot of=/tmp/work/boot.img bs=1048576 2>&1');
+    // Every read and write below uses boot.target — the node classifyBootTarget
+    // actually reached a verdict about — never /dev/block/other-boot again.
+    // Re-resolving the symlink at write time means the safety check and the
+    // write are asking two different questions moments apart, and the log line
+    // at the flash claims boot.target either way, so a disagreement would be
+    // invisible. It also made the read-back self-consistent: a wrong-but-stable
+    // resolution reads back exactly what it just wrote and passes. Same reason
+    // the ESPHome mac is resolved once and passed rather than derived twice,
+    // and the emOS flow below already does it this way.
+    const pullOut = await c.shell(`dd if=${boot.target} of=/tmp/work/boot.img bs=1048576 2>&1`);
     addLog(pullOut.trim() || '(done)');
     const bootImg = await c.pull('/tmp/work/boot.img');
     addLog(`Boot image: ${(bootImg.length / 1024 / 1024).toFixed(1)} MB`);
@@ -3565,14 +3574,14 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     addLog(repackOut || '(done)');
 
     addLog(`Flashing patched boot image to ${boot.names.length ? `${boot.names.join(', ')} (${boot.target})` : boot.target}…`);
-    const flashOut = await c.shell('dd if=/tmp/work/new-boot.img of=/dev/block/other-boot bs=1048576 2>&1');
+    const flashOut = await c.shell(`dd if=/tmp/work/new-boot.img of=${boot.target} bs=1048576 2>&1`);
     addLog(flashOut.trim() || '(done)');
 
     // Read the cmdline back off the partition rather than trusting dd's exit.
     // This is the write the device has to boot from next, and a bad one costs
     // a rollback and a boot attempt to discover — the same reasoning the OTA
     // path applies to md5 before it moves a symlink.
-    const readback = await c.shell('dd if=/dev/block/other-boot bs=1 skip=64 count=512 2>/dev/null');
+    const readback = await c.shell(`dd if=${boot.target} bs=1 skip=64 count=512 2>/dev/null`);
     if (!readback.includes('androidboot.selinux=permissive')) {
       throw new Error(
         `Flashed the patched image to ${boot.target} but reading it back does not show the `
@@ -4291,6 +4300,41 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     throw new Error(`Associated to "${ssid}" but did not get an IP within 20s. Check device logcat for DHCP issues.`);
   }
 
+  // "Skip (already connected)" used to mark the step done and advance, having
+  // asked the device nothing. The button makes a claim about the device, and
+  // the claim is testable with the same wpa_cli the step itself waits on — so
+  // test it. Skipping on a device that is not actually associated provisions a
+  // Dot that then never reaches the controller, and the wizard's transcript
+  // says WiFi was fine.
+  async function skipWifiIfConnected() {
+    setRunning(true);
+    try {
+      const status = await adb.shell(
+        "su -c 'wpa_cli -p /data/misc/wifi/sockets -i wlan0 status' 2>&1");
+      const state = (status.match(/wpa_state=(\S+)/) || [])[1];
+      if (state !== 'COMPLETED') {
+        addLog(`Not skipping: the device reports wpa_state=${state || 'nothing readable'}, `
+             + 'so it is not on a network. Pick one above and join it.', 'error');
+        return;
+      }
+      const ssid = (status.match(/^ssid=(.+)$/m) || [])[1];
+      const ip   = (await adb.shell(
+        "su -c 'ip addr show wlan0 | grep \"inet \" | while read proto addr rest; do echo ${addr%/*}; done'")).trim();
+      if (!/\d+\.\d+\.\d+\.\d+/.test(ip)) {
+        addLog(`Not skipping: associated to "${ssid || '?'}" but with no IP address, `
+             + 'so nothing can reach the controller.', 'error');
+        return;
+      }
+      addLog(`Already connected to "${ssid || '?'}" (${ip}) — skipping WiFi setup.`, 'ok');
+      markStep(10, 'done');
+      setStep(11);
+    } catch (e) {
+      addLog(`Could not confirm the device is already connected: ${e.message}`, 'error');
+    } finally {
+      setRunning(false);
+    }
+  }
+
   async function runDisableAlexa(c) {
     // `su -c id` succeeding (the previous step) only confirms Magisk/root
     // is up — it does NOT mean the Android framework has finished booting.
@@ -4526,7 +4570,19 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // empty output, so capturing stderr here would corrupt the "empty
     // means gone" check below. Discard stderr instead, matching the
     // existing proven pattern in em_api.py exactly.
-    const linkAfterClear = (await c.shell('su -c "readlink /data/local/bin/server" 2>/dev/null')).trim();
+    // The sentinel is what separates "the symlink is gone" from "su could not
+    // run", which discarded stderr renders identical — and the second answer
+    // read as success, so a run where every su failed still logged "Cleared."
+    // and went on to install nothing (measured 2026-09-06). echo and readlink
+    // are both already proven on this device.
+    const clearProbe = await c.shell(
+      'su -c "readlink /data/local/bin/server; echo _CLEARCHK" 2>/dev/null');
+    if (!clearProbe.includes('_CLEARCHK')) {
+      throw new Error('Could not confirm the install was cleared — the check '
+        + 'produced no output at all, so "su" is not working on this device '
+        + 'rather than the symlink being gone. Retry the previous step.');
+    }
+    const linkAfterClear = clearProbe.replace('_CLEARCHK', '').trim();
     if (linkAfterClear) {
       throw new Error(`Failed to clear pre-existing install — /data/local/bin/server still links to "${linkAfterClear}" after rm. Check permissions/mount state with "su -c mount" before retrying.`);
     }
@@ -4593,7 +4649,22 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // can race with the cat process. start_server.sh isn't executed
     // immediately here (only copied), so push() is safe for this one.
     await c.push('/sdcard/start_server.sh', new TextEncoder().encode(script));
-    await c.shell("su -c 'cp /sdcard/start_server.sh /data/local/bin/start_server.sh && chmod 755 /data/local/bin/start_server.sh'");
+    const scriptOut = (await c.shell("su -c 'cp /sdcard/start_server.sh /data/local/bin/start_server.sh && chmod 755 /data/local/bin/start_server.sh' 2>&1")).trim();
+    if (scriptOut) addLog(`  → ${scriptOut}`);
+    // The binary above is verified byte for byte and this was not checked at
+    // all — and this is the file init actually executes, so a device with a
+    // perfect binary and no start script never runs EchoMuse and says nothing
+    // about why. md5 rather than a cat comparison: the shell mangles line
+    // endings and the OTA path already treats md5 as the only definition of a
+    // successful transfer.
+    const scriptWant = await _md5Hex(new TextEncoder().encode(script));
+    const scriptGot  = (await c.shell(
+      "su -c 'busybox md5sum /data/local/bin/start_server.sh' 2>/dev/null")).trim().split(/\s+/)[0];
+    if (scriptGot !== scriptWant) {
+      throw new Error('Startup script install verification failed — '
+        + `/data/local/bin/start_server.sh reads ${scriptGot || 'unreadable'}, expected `
+        + `${scriptWant}. Without it the device will never start EchoMuse.`);
+    }
     addLog('EchoMuse installed.', 'ok');
 
     // Device-link TLS credentials — pushed pre-first-contact so the very
@@ -4666,14 +4737,41 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     if (uid !== '0') {
       throw new Error(`Expected a root shell in TWRP, got uid ${uid || '(unknown)'}.`);
     }
-    const hasSu = (await c.shell('command -v su >/dev/null 2>&1 && echo yes || echo no')).trim();
-    if (hasSu !== 'yes') {
-      addLog('  no su in recovery — installing a shim (everything here is already root)');
-      await c.shell("printf '#!/bin/sh\\n[ \"$1\" = \"-c\" ] && shift\\nexec /bin/sh -c \"$*\"\\n' > /sbin/su; chmod 755 /sbin/su");
-      const shimOk = (await c.shell('su -c "id -u" 2>&1')).trim();
-      if (shimOk !== '0') {
-        throw new Error(`Could not make "su" work in recovery (got "${shimOk}").`);
+    // The test is whether `su` RUNS, never whether a file called su exists.
+    // A shim with an unusable interpreter is on PATH and executable, so
+    // `command -v su` says yes and every `su -c` after it still dies with
+    // "su: not found" — the shell's message for ENOENT on exec is the same
+    // whether the binary or its interpreter is the thing missing. That made a
+    // failed first attempt hand the retry a broken shim, which then SKIPPED
+    // this whole block and reported the environment ready (measured on
+    // G090LF11803611NF, 2026-09-06: step 3 green, every su in step 4 dead).
+    let suUid = (await c.shell('su -c "id -u" 2>&1')).trim();
+    if (suUid !== '0') {
+      addLog('  no working su in recovery — installing a shim (everything here is already root)');
+      // There is no /bin on Android or in a TWRP ramdisk — the shell is
+      // /sbin/sh here and /system/bin/sh under Android — so a `#!/bin/sh`
+      // shim is unrunnable by construction. Ask the device which one it has
+      // rather than naming one and hoping.
+      const sh = (await c.shell(
+        'for p in /sbin/sh /system/bin/sh /bin/sh; do [ -x "$p" ] && { echo "$p"; break; }; done'
+      )).trim();
+      if (!sh) {
+        throw new Error('No usable shell found in recovery (tried /sbin/sh, '
+          + '/system/bin/sh, /bin/sh), so "su" cannot be shimmed.');
       }
+      const writeOut = (await c.shell(
+        `printf '#!${sh}\\n[ "$1" = "-c" ] && shift\\nexec ${sh} -c "$*"\\n' > /sbin/su 2>&1; `
+        + 'chmod 755 /sbin/su 2>&1'
+      )).trim();
+      if (writeOut) addLog(`  → ${writeOut}`);
+      suUid = (await c.shell('su -c "id -u" 2>&1')).trim();
+      if (suUid !== '0') {
+        throw new Error(`Could not make "su" work in recovery (shell ${sh}, `
+          + `got "${suUid}"). /sbin is a tmpfs and should be writable — if the `
+          + 'write above reported an error, this TWRP build is not one the '
+          + 'wizard can drive.');
+      }
+      addLog(`  su → ${sh}`);
     }
 
     // The shared steps stage uploads through /sdcard. In recovery that is not
@@ -5019,7 +5117,20 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         await c.shell('su -c "rm -f /sdcard/em_oww_asset"');
         throw new Error(`${a.name} arrived corrupted (md5 ${got || 'unreadable'}, expected ${a.md5}).`);
       }
-      await c.shell(`su -c "mv /sdcard/em_oww_asset ${manifest.dir}/${a.name} && chmod 644 ${manifest.dir}/${a.name}"`);
+      // The md5 above proves the bytes reached /sdcard, which is NOT where they
+      // have to end up. The move was unchecked and the tick was printed either
+      // way, so a full /data or a broken su logged fifteen megabytes of
+      // successful pushes and installed nothing — the failure then surfaces at
+      // dlopen on the device, naming nothing useful. Hash the destination.
+      const moveOut = (await c.shell(
+        `su -c "mv /sdcard/em_oww_asset ${manifest.dir}/${a.name} && chmod 644 ${manifest.dir}/${a.name}" 2>&1`)).trim();
+      if (moveOut) addLog(`  → ${moveOut}`);
+      const landed = (await c.shell(
+        `su -c "busybox md5sum ${manifest.dir}/${a.name}" 2>/dev/null`)).trim().split(/\s+/)[0];
+      if (landed !== a.md5) {
+        throw new Error(`${a.name} did not land in ${manifest.dir} `
+          + `(md5 ${landed || 'unreadable'}, expected ${a.md5}). Check free space on /data.`);
+      }
       addLog(`  ✓ ${a.name}`);
     }
     addLog('Wake word assets installed. On-device scoring is off by default — '
@@ -5077,12 +5188,43 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         throw new Error('There is no ADB connection. Click Reconnect, pick the '
                       + 'device from the USB picker, then Retry this step.');
       }
+      // The mode the device is actually in, checked against the mode this step
+      // needs, on EVERY run. _STEP_MODE existed before this and was consulted
+      // in exactly one place — reconnectAdb — where a mismatch only logged a
+      // line and left Retry enabled, so a TWRP step could still be run against
+      // Android. That was the wrong shape twice over: pulling the cable powers
+      // the Dot off and a replug is a cold boot into Android, so arriving in
+      // the wrong mode is the NORMAL consequence of the recovery the wizard
+      // invites; and in Android /dev/block/other-boot is amonet's unlock
+      // payload rather than a kernel. classifyBootTarget refuses that write,
+      // but it was the only thing standing in front of it, and a guard is
+      // worth more when it is not the last one. Steps run over the serial
+      // console have no ADB handle and are exempt via needsAdb.
+      const wantMode = STEP_MODE[stepIdx];
+      const gotMode  = _bannerMode(c?.banner);
+      if (needsAdb && wantMode && gotMode !== 'unknown' && gotMode !== wantMode) {
+        throw new Error(
+          `This step runs in ${_MODE_NAME[wantMode]}, but the device is in `
+          + `${_MODE_NAME[gotMode]} (banner "${c.banner}"). Nothing has been run. `
+          + (wantMode === 'twrp'
+              ? 'Unplug, plug back in, and hold the mute button for about 5 seconds '
+                + 'as soon as the blue LED appears, then Reconnect.'
+              : 'Reboot the device to Android and Reconnect.'));
+      }
       if (isEmos) switch (stepIdx) {
         case 0: c = await runConnectAndroid(); break;
         case 1: c = await runConnectTwrp(); break;
         case 2: await runEscrowBoot(c); break;
-        case 3: await runInstallEchoMuse(c, binaryFile, useLatest); break;
-        case 4: await runInstallOwwAssets(c); break;
+        // Every TWRP step prepares its own environment rather than inheriting
+        // step 2's. The su shim and the /sdcard symlink both live in the
+        // recovery ramdisk, so a Reconnect between steps — which the operator
+        // is invited to do on any failure — silently takes them away, and the
+        // steps below are the shared FireOS ones that assume both. It is
+        // idempotent and costs three shell round trips.
+        case 3: await prepareTwrpForInstall(c);
+                await runInstallEchoMuse(c, binaryFile, useLatest); break;
+        case 4: await prepareTwrpForInstall(c);
+                await runInstallOwwAssets(c); break;
         case 5: await runBuildEmos(useLatest); break;
         case 6: await runFlashEmos(c); break;
         case 7: await runRebootAndWatch(c); break;
@@ -5393,7 +5535,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                 onScan={() => scanWifi(adb).then(nets => setWifiNetworks(nets)).catch(e => addLog(`Scan failed: ${e.message}`, 'error'))}
                 networks={wifiNetworks}
                 onConnect={() => { if (wifiSsid) runStep(10); }}
-                onSkip={() => { markStep(10, 'done'); setStep(11); }}
+                onSkip={skipWifiIfConnected}
                 onAbort={() => { markStep(10, 'error'); addLog('WiFi skipped — provision incomplete.', 'warn'); }}
               />
             )}
