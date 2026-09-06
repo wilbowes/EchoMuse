@@ -2820,12 +2820,20 @@ const _EMOS_STEPS = [
   { id: 'build_emos',      label: 'Build emOS',        desc: 'The controller repacks your own escrowed image with the emOS init, reusing your kernel and device trees.' },
   { id: 'flash_emos',      label: 'Flash and Verify',  desc: 'Write the built image to the boot partition and read it back to confirm it landed.' },
   { id: 'reboot_watch',    label: 'Reboot and Watch',  desc: 'Reboot into emOS and follow the first boot over the USB serial console while the ring fills.' },
-  { id: 'wifi_register',   label: 'Configure WiFi',    desc: 'Join a network using the device’s own radio, then wait for it to register with the controller. Enter the name and password — scanning from the console is not wired up yet (#459).' },
+  { id: 'wifi_register',   label: 'Configure WiFi',    desc: 'Scan and join a network using the device’s own radio, then wait for it to register with the controller.' },
 ];
 
 // ── WifiPanel ──
 
-function WifiPanel({ adb, wifiSsid, setWifiSsid, wifiPsk, setWifiPsk, onScan, networks, onConnect, onSkip, onAbort }) {
+// `ready` is whatever transport this panel is driving — an ADB handle in the
+// FireOS flow, the serial console in the emOS one. Only its truthiness is
+// used, to disable the buttons when there is nothing to talk to.
+//
+// onSkip and onAbort are optional. Neither means anything in the emOS flow:
+// there is no "already connected" to skip to, because registering over this
+// network IS the step, and by then the boot partition is already written so
+// there is no provisioning left to abort.
+function WifiPanel({ ready, wifiSsid, setWifiSsid, wifiPsk, setWifiPsk, onScan, networks, onConnect, onSkip, onAbort }) {
   const [scanning, setScanning] = useState(false);
   const [showPsk, setShowPsk]   = useState(false);
 
@@ -2840,7 +2848,7 @@ function WifiPanel({ adb, wifiSsid, setWifiSsid, wifiPsk, setWifiPsk, onScan, ne
 
       {/* Scan row */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <Pill small onClick={doScan} disabled={scanning || !adb}>
+        <Pill small onClick={doScan} disabled={scanning || !ready}>
           {scanning ? 'Scanning…' : 'Scan for networks'}
         </Pill>
         {networks.length > 0 && (
@@ -2914,9 +2922,9 @@ function WifiPanel({ adb, wifiSsid, setWifiSsid, wifiPsk, setWifiPsk, onScan, ne
 
       {/* Actions */}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        <Pill accent onClick={onConnect} disabled={!wifiSsid || !adb}>Connect</Pill>
-        <Pill small onClick={onSkip}>Skip (already connected)</Pill>
-        <Pill small danger onClick={onAbort}>Abort provisioning</Pill>
+        <Pill accent onClick={onConnect} disabled={!wifiSsid || !ready}>Connect</Pill>
+        {onSkip  && <Pill small onClick={onSkip}>Skip (already connected)</Pill>}
+        {onAbort && <Pill small danger onClick={onAbort}>Abort provisioning</Pill>}
       </div>
     </div>
   );
@@ -5465,6 +5473,36 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
          + 'WiFi is configured next.', 'ok');
   }
 
+  // Scan from the DEVICE'S OWN RADIO, over the console.
+  //
+  // The FireOS flow scans over adb; by this point adbd is gone and the console
+  // is all there is. Same wpa_cli, same output, same parser — the only new
+  // part is the transport, which is why parseScanResults is shared rather than
+  // reimplemented.
+  //
+  // The flags column is the reason this is worth having at all: this radio
+  // reports no SAE, so a [SAE] network can never be joined however correct the
+  // password is, and a 5GHz-only one is invisible to it. Both present as an
+  // unexplained failure when someone types a name from memory.
+  async function scanWifiConsole(con) {
+    if (!con) throw new Error('No serial console — re-run the Reboot and Watch step.');
+    const started = await con.run('wpa_cli -p /data/misc/wifi/sockets -i wlan0 scan');
+    if (!/OK/.test(started)) {
+      throw new Error(`wpa_cli would not start a scan (said "${started.trim() || 'nothing'}").`);
+    }
+    // A scan takes a few seconds; asking too early returns the previous
+    // results or none at all.
+    await new Promise(r => setTimeout(r, 4000));
+    const raw = await con.run(
+      'wpa_cli -p /data/misc/wifi/sockets -i wlan0 scan_results', 20000);
+    const nets = parseScanResults(raw);
+    if (!nets.length) {
+      addLog('The scan returned no networks. The radio is up — try again, or '
+           + 'type the name if it is hidden.', 'warn');
+    }
+    return nets;
+  }
+
   async function runEmosWifi() {
     const con = emosConsole;
     if (!con) throw new Error('No serial console — re-run the Reboot and Watch step.');
@@ -6046,26 +6084,21 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
               </div>
             )}
             {isEmos && step === 8 && stepState[8] !== 'done' && !running && (
-              <div style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
-                <input
-                  placeholder="Network name (SSID)" value={wifiSsid}
-                  onChange={e => setWifiSsid(e.target.value)}
-                  style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, padding: 6 }} />
-                <input
-                  placeholder="Password (blank for an open network)" type="password" value={wifiPsk}
-                  onChange={e => setWifiPsk(e.target.value)}
-                  style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, padding: 6 }} />
-                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)' }}>
-                  This radio has no SAE, so it cannot join a WPA3-only network.
-                </div>
-                {!!wifiSsid && <Pill accent onClick={() => runStep(8)}>Join and Register</Pill>}
-              </div>
+              <WifiPanel
+                ready={emosConsole}
+                wifiSsid={wifiSsid} setWifiSsid={setWifiSsid}
+                wifiPsk={wifiPsk}   setWifiPsk={setWifiPsk}
+                onScan={() => scanWifiConsole(emosConsole)
+                  .then(nets => setWifiNetworks(nets))
+                  .catch(e => addLog(`Scan failed: ${e.message}`, 'error'))}
+                networks={wifiNetworks}
+                onConnect={() => { if (wifiSsid) runStep(8); }}
+              />
             )}
-
             {/* Step 10: WiFi configuration (FireOS flow — emOS configures WiFi over the console at step 8) */}
             {!isEmos && step === 10 && stepState[10] !== 'done' && !running && (
               <WifiPanel
-                adb={adb}
+                ready={adb}
                 wifiSsid={wifiSsid} setWifiSsid={setWifiSsid}
                 wifiPsk={wifiPsk}   setWifiPsk={setWifiPsk}
                 onScan={() => scanWifi(adb).then(nets => setWifiNetworks(nets)).catch(e => addLog(`Scan failed: ${e.message}`, 'error'))}
