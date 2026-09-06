@@ -237,10 +237,60 @@ def roundtrip_identical(ref: bytes) -> bool:
     and the correct response is to refuse to build rather than to flash
     something assembled by a parser that has already been shown to be wrong.
     """
+    return roundtrip_diff(ref) is None
+
+
+# Which header field a byte offset falls in, for the message below. Offsets are
+# the Android boot header v0 layout, which split_reference already assumes.
+_HDR_FIELDS = (
+    (0, 8, "the ANDROID! magic"),
+    (8, 48, "the size/address fields"),
+    (48, 64, "the product name"),
+    (64, 576, "the kernel command line"),
+    (576, 608, "the image id (a SHA1 of the regions)"),
+    (608, 1632, "the extra command line"),
+)
+
+
+def roundtrip_diff(ref: bytes):
+    """Where the repacked reference stops matching the original, or None.
+
+    Split out of roundtrip_identical because a bare False is not actionable.
+    The refusal it drives is correct and the operator could do nothing with it:
+    on 2026-09-06 a stock+f1r30s image was refused, and finding out why meant
+    dumping the header by hand over adb and decoding it a field at a time.
+
+    Returns (offset, description, ref_bytes, rebuilt_bytes) for the first
+    difference, with 16 bytes of context either side.
+    """
     parts = split_reference(ref)
     rebuilt = pack(parts, parts["zimage"], parts["dtbs"], parts["ramdisk"],
                    extra_cmdline="")
-    return rebuilt == ref
+    if rebuilt == ref:
+        return None
+    if len(rebuilt) != len(ref):
+        return (min(len(rebuilt), len(ref)),
+                f"the lengths differ: the reference is {len(ref)} bytes and "
+                f"repacking it gives {len(rebuilt)}", b"", b"")
+    off = next(i for i in range(len(ref)) if ref[i] != rebuilt[i])
+
+    where = f"offset {off}"
+    for start, end, name in _HDR_FIELDS:
+        if start <= off < end:
+            where = f"{name} (offset {off})"
+            break
+    else:
+        page = parts.get("psz", PAGE)
+        koff = page + len(pad(pack_kernel_of(parts)))
+        where = (f"the kernel image (offset {off})" if off < koff
+                 else f"the ramdisk (offset {off})")
+    return (off, where, ref[off:off + 16], rebuilt[off:off + 16])
+
+
+def pack_kernel_of(parts: dict) -> bytes:
+    """The MTK-wrapped kernel as pack() will emit it. Used only for locating a
+    difference; pack() builds its own."""
+    return mtk_wrap(parts["zimage"] + parts["dtbs"], b"KERNEL")
 
 
 def init_binary_problems(init_binary: bytes) -> list:
@@ -284,11 +334,19 @@ def build_emos_image(reference: bytes, init_binary: bytes, version: str,
         raise BuildError("; ".join(problems))
 
     parts = split_reference(reference)
-    if not roundtrip_identical(reference):
+    diff = roundtrip_diff(reference)
+    if diff is not None:
+        _, where, got, made = diff
+        detail = f" It first differs in {where}"
+        if got or made:
+            detail += (f": the image has {got.hex()} and repacking it produces "
+                       f"{made.hex()}")
+        detail += "."
         raise BuildError(
             "The packer could not reproduce this boot image byte for byte, so "
             "it does not fully understand it. Refusing to build rather than "
-            "flash something assembled by a parser already shown to be wrong.")
+            "flash something assembled by a parser already shown to be wrong."
+            + detail)
 
     ramdisk = build_ramdisk(init_binary, version, build_id)
     image = pack(parts, parts["zimage"], parts["dtbs"], ramdisk)
