@@ -3053,17 +3053,25 @@ class _EmosConsole {
     // stty being present and on the shell being up, and neither is something
     // this can afford to assume. Splitting the marker makes run() correct
     // whether echo is on or off, which is the property worth having.
-    await this._send(`${cmd}; __a=__EM; __b=${id}__; echo "$__a$__b"`);
+    // TWO markers, so the echo can be discarded by POSITION rather than by
+    // recognising it. Everything before the start marker is the console
+    // repeating the request back; everything between them is the answer.
+    //
+    // Matching the echo textually does not work: the terminal wraps at 80
+    // columns, so the request arrives split across lines and no single line
+    // contains the command. That left the request interleaved through the
+    // transcript at exactly the moment someone needs to read it (2026-09-06).
+    const start = `__EM${id}S__`;
+    await this._send(
+      `__a=__EM; __b=${id}S__; echo "$__a$__b"; ${cmd}; __b=${id}__; echo "$__a$__b"`);
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const i = this.buf.indexOf(mark);
       if (i >= 0) {
         let out = this.buf.slice(0, i);
-        // With echo on, the first line is the request. Drop it rather than
-        // returning it as output.
-        const nl = out.indexOf('\n');
-        if (nl >= 0 && out.slice(0, nl).includes(cmd)) out = out.slice(nl + 1);
-        return out;
+        const j = out.lastIndexOf(start);
+        if (j >= 0) out = out.slice(j + start.length);
+        return out.replace(/^\r?\n/, '');
       }
       await new Promise(r => setTimeout(r, 100));
     }
@@ -5581,38 +5589,60 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // Association is not the success condition. A device can be perfectly on
     // the network and running nothing; only registration proves EchoMuse was
     // installed, its credentials are right, and the assistant actually runs.
-    // Success is THIS device being CONNECTED, asked by serial.
+    // Success is THIS device having REGISTERED, asked by serial, and the
+    // evidence is firmware_ver rather than `connected`.
     //
-    // It used to be "a device_id appeared that was not in the list when the
-    // wizard opened", and that is broken in both directions by the wizard's
-    // own behaviour: step 4 mints TLS credentials, which creates a device row
-    // to hold the token whether or not the device ever connects. So the old
-    // test could match a row that proves nothing, and — if the serial was
-    // already on file from an earlier run — never match at all while the
-    // device sat there working perfectly. The second is what happened on
-    // 3611NF, 2026-09-06: associated, registered, and the wizard timed out.
+    // A device pending approval is not connected and cannot become connected:
+    // em_controller records it with upsert_device_seen, sends {"type":
+    // "pending"} and CLOSES the socket, so it never enters _devices and
+    // `connected` stays false until somebody approves it. Waiting on that is a
+    // deadlock — the wizard would be waiting for the very thing it exists to
+    // tell the operator to go and do.
+    //
+    // firmware_ver is the right signal: ensure_device_token leaves it NULL
+    // when it creates the row to hold the TLS token at step 4, and only
+    // upsert_device_seen sets it, which only a real registration reaches. So
+    // it means "this device has actually talked to the controller" regardless
+    // of approval.
+    //
+    // Two earlier versions of this were wrong. "A device_id appeared that was
+    // not in the list when the wizard opened" matched the credential row that
+    // proves nothing, or never matched if the serial was already on file.
+    // Then `connected` deadlocked. Both found on 3611NF, 2026-09-06.
     const deadline = Date.now() + 120000;
     let seen = null;
     while (Date.now() < deadline) {
       await new Promise(r => setTimeout(r, 5000));
       let list = [];
       try { list = (await API.get('/api/devices')).devices || []; } catch {}
-      seen = list.find(d => d.connected
+      seen = list.find(d => (d.connected || d.firmware_ver)
         && (!provSerial || (d.device_id || '').includes(provSerial)));
       if (seen) break;
-      const st = (await con.run('wpa_cli -p /data/misc/wifi/sockets -i wlan0 status | grep wpa_state')).trim();
-      addLog(`  ${st || 'no answer'}`);
+      // The address, not the association. wpa_state has said COMPLETED since
+      // before this loop started, so repeating it says nothing — a device
+      // that associates and never gets an address looks identical, and that
+      // is the failure this wait is actually exposed to.
+      const ip = (await con.run(
+        "ip addr show wlan0 | grep 'inet '")).trim().split(/\s+/)[1] || '';
+      addLog(`  ${ip ? `address ${ip}, waiting for it to register`
+                     : 'associated, still no address'}`);
     }
     if (!seen) {
       throw new Error('The device did not register within two minutes. It may be '
         + 'on the network without EchoMuse running — check the console, and '
         + 'restore the escrowed boot image if you want to start over.');
     }
-    addLog(`Registered as ${seen.label || seen.device_id}.`, 'ok');
+    addLog(`Registered as ${seen.label || seen.device_id}`
+         + `${seen.firmware_ver ? ` running ${seen.firmware_ver}` : ''}.`, 'ok');
     addLog('── PROVISIONING COMPLETE ──', 'head');
-    addLog(`This Echo is now running emOS and talking to the controller. `
-         + `${seen.approved ? 'It is already approved and ready to use.'
-                            : 'One thing left: approve it on the Devices page.'}`, 'ok');
+    if (seen.approved) {
+      addLog('This Echo is running emOS, on your network, and approved. '
+           + 'Nothing further to do — say the wake word.', 'ok');
+    } else {
+      addLog('This Echo is running emOS and has reached the controller. '
+           + 'ONE THING LEFT: approve it on the Devices page, and it will '
+           + 'connect within a few seconds.', 'ok');
+    }
   }
 
   // ── Step executor ──

@@ -2423,6 +2423,13 @@ def test_the_serial_console_disables_echo_before_anything_else():
         "the marker must be assembled on the device from parts that do not "
         "spell it in the echoed command")
 
+    # Two markers, so the echo is discarded by POSITION. Recognising it
+    # textually does not work — the terminal wraps at 80 columns, so the
+    # request arrives split across lines and no line holds the whole command.
+    assert "S__" in cls and "lastIndexOf(start)" in cls, (
+        "run() must bracket the answer between a start and an end marker, or "
+        "the console's echo of the request is returned as part of the answer")
+
     # A failed attempt must release the serial port. The browser refuses to
     # reopen one that is already open, and no amount of retrying clears it.
     step = src[src.index("async function runRebootAndWatch"):]
