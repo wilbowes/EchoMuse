@@ -230,9 +230,24 @@ func (s *Server) CancelVolumeDisplay() {
 	s.volume.CancelDisplay()
 }
 
-// RestoreMuteRing re-applies the red mute ring. Called on reconnect to
-// recover the visual state that the orange pulse animation overwrote.
+// RestoreMuteRing re-applies the red mute ring IF the device is muted. Called
+// on reconnect to recover the visual state that the orange pulse animation
+// overwrote.
+//
+// The guard is the whole function. Without it this painted a full red ring on
+// every reconnect regardless of mute state — and a device pending approval
+// reconnects repeatedly, so the pending pulse was interrupted by a red flash
+// every time, on a device whose mic was not muted. Seen on 3611NF's first emOS
+// boot, 2026-09-06, and read as a fault indicator, which is exactly what a red
+// ring means to anyone looking at it.
+//
+// Every other painter of this ring already checks: server.go's startup path
+// gates on IsMuted(), and volume.go's display-expiry gates on isMuted(). This
+// was the one that did not.
 func (s *Server) RestoreMuteRing() {
+	if !s.mute.IsMuted() {
+		return
+	}
 	s.mute.showMuteLEDs()
 }
 

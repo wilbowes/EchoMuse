@@ -1,6 +1,10 @@
 package server
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/wilbowes/EchoMuse/pkg/led"
+)
 
 // A muted device that lost its controller sat there showing the red mute
 // ring — which does not merely say less than the orange link pulse, it says
@@ -51,5 +55,40 @@ func TestLinkDownDefaultsToConnected(t *testing.T) {
 	if s.LinkDown() {
 		t.Fatal("SetLinkDown(false) not recorded — the ring would never go " +
 			"back to the controller after a reconnect")
+	}
+}
+
+// RestoreMuteRing paints a FULL RED RING, and red on this device means one
+// thing: muted. It was called unconditionally on every reconnect, so an
+// unmuted device pending approval — which reconnects repeatedly — showed a red
+// flash through its pending pulse, over and over, saying something false about
+// a device that was working. Seen on 3611NF's first emOS boot, 2026-09-06.
+//
+// Every other painter of this ring already checks: the startup path in
+// server.go gates on IsMuted(), and volume.go's display-expiry gates on
+// isMuted(). This was the one that did not.
+func TestRestoreMuteRingOnlyPaintsWhenMuted(t *testing.T) {
+	reached := 0
+	// showMuteLEDs calls ledCtrl() first, so counting that call counts
+	// whether the paint was REACHED. Returning nil makes it a no-op after
+	// that, which is what we want — the assertion is about the guard.
+	s := &Server{mute: &muteController{
+		ledCtrl: func() led.Controller { reached++; return nil },
+	}}
+
+	if s.mute.IsMuted() {
+		t.Fatal("a fresh muteController must not report muted")
+	}
+	s.RestoreMuteRing()
+	if reached != 0 {
+		t.Errorf("unmuted: reached the paint %d times, want 0", reached)
+	}
+
+	s.mute.mu.Lock()
+	s.mute.muted = true
+	s.mute.mu.Unlock()
+	s.RestoreMuteRing()
+	if reached != 1 {
+		t.Errorf("muted: reached the paint %d times, want 1", reached)
 	}
 }
