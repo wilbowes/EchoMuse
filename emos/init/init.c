@@ -1394,6 +1394,24 @@ int main(void)
     int dtr = mount("devtmpfs", "/dev", "devtmpfs", 0, NULL);
     mount("proc", "/proc", "proc", 0, NULL);
     mount("sysfs", "/sys", "sysfs", 0, NULL);
+    /* debugfs, for the eMMC's own health.
+     *
+     * The flash reports wear through PRE_EOL_INFO and two life-time estimates
+     * in the Extended CSD, and on this kernel the only way to read them is
+     * /sys/kernel/debug/mmc0/mmc0:0001/ext_csd — the generic sysfs life_time
+     * and pre_eol_info attributes are a Linux 4.9 addition and 3.18 has
+     * neither. Samsung's vendor samsung_smart attribute exists here and
+     * answers "version 0, error mode: Invalid", so it is not a route either.
+     *
+     * Without this the directory is empty and the health of the part we are
+     * writing to is unreadable on the OS doing the writing. Confirmed on Test
+     * Echo 2, 2026-09-06: mounting it by hand returned rc=0 and the dump read
+     * straight out (PRE_EOL_INFO normal, 10-20% of rated life used).
+     *
+     * mkdir first: the kernel provides the mount point on a normal Android
+     * boot and our ramdisk does not. */
+    mkdir("/sys/kernel/debug", 0755);
+    mount("debugfs", "/sys/kernel/debug", "debugfs", 0, NULL);
     mkdir("/dev/block", 0755);
 
     /* Every device node is created by hand.
