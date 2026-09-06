@@ -1538,6 +1538,26 @@ throughout — so the rules below are all one rule seen from different angles.
   equally true of a stale id and of a corrupted byte, so any rule tolerating
   one tolerates the other.
 
+- **`/api/devices` returns a bare ARRAY, not `{devices: [...]}`.** The WiFi
+  step read `.devices` off it, which is `undefined`, and the `|| []` made that
+  an empty list on every pass — so its wait loop never examined a single device
+  and always timed out on a device that had registered perfectly. THREE
+  successive rewrites of the success condition were all debugging a predicate
+  that was never evaluated against anything, while two other call sites in the
+  same file use the response directly as an array. A shape mismatch between an
+  endpoint and its caller is invisible at every layer: the fetch succeeds, the
+  parse succeeds, and an empty result is indistinguishable from "nothing
+  matched yet". Pinned by `tests/test_deploy.py`.
+- **Success is the device REGISTERING, not connecting.** An unapproved device
+  is recorded with `upsert_device_seen`, sent `{"type": "pending"}` and then
+  DISCONNECTED, so it never enters `_devices` and `connected` stays false until
+  somebody approves it — which the operator cannot do without closing the
+  wizard. Waiting on that is a deadlock. `firmware_ver` is the signal:
+  `ensure_device_token` leaves it NULL when it creates the row for the TLS
+  token, and only a real registration sets it. **Nothing in the wizard's
+  completion may depend on something reachable only after the wizard is
+  closed.**
+
 **The restore is the wizard's undo and it is proven.** `_writeBootPartition` is
 shared by the flash and the restore deliberately — it is the only code here
 that can leave a device unbootable, and a second copy is one that drifts from

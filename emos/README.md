@@ -258,6 +258,32 @@ writes a skeleton (`ctrl_interface` + `update_config=1`) while `/data` is
 writable and before the flash. Recovering by hand needs only those two lines
 and a reboot.
 
+### The console banner
+
+A shell on `/dev/ttyGS0` opens with the device's name, serial, address, the
+controller it is connected to, and where the logs are. Somebody on this console
+is usually there because something is wrong, over a USB cable, with no
+dashboard — these are the facts they would otherwise spend five minutes
+gathering.
+
+**The controller address is read from `/proc/net/tcp`, not from a stored
+value**, because there is not one: the firmware keeps its last-known server in
+memory only. An ESTABLISHED connection to 8767 or 8770 IS the controller, so
+the banner names who the device is talking to NOW, and says "not connected"
+when there is nobody.
+
+The version is read from `/etc/os-release` rather than compiled in, so it
+cannot disagree with the file `build.sh` stamps. It prints AFTER
+`console_gate()`, so it is not a free hint to somebody who has not answered the
+password prompt.
+
+**It also constrains the wizard.** Step 8 decides a device is emOS by reading
+`/etc/os-release` over this console, and the banner now says "emOS" and the
+version too — so that check is anchored to `^ID=emos$` rather than matching the
+substring anywhere in the reply. A loose match could otherwise be satisfied by
+the banner rather than the file, which is a false positive on the one test that
+gates continuing after a partition write.
+
 **The eMMC reports its own wear, and debugfs is how you read it.** The flash
 carries `PRE_EOL_INFO` and two life-time estimates in its Extended CSD, and on
 this kernel the only route to them is
