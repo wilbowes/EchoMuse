@@ -3761,10 +3761,21 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     }
 
     // Android 5.1's WifiAutoJoinController blocks auto-join after enough
-    // "no internet" reports. On a local-only LAN every connection is flagged,
-    // so the counter grows every reboot until association is suppressed (#317).
+    // "no internet" reports. Reset the persisted counter before disabling the
+    // source of new reports, so an already-provisioned device recovers too.
+    addLog('Resetting Android WiFi network history…');
+    await c.shell('su -c "rm -f /data/misc/wifi/networkHistory.txt"');
+
+    // On a local-only LAN every connection is flagged, so the counter grows
+    // every reboot until association is suppressed (#317).
     addLog('Disabling captive portal detection (EchoMuse is local-only)…');
     await c.shell('su -c "settings put global captive_portal_detection_enabled 0"');
+    const captivePortal = (await c.shell(
+      'su -c "settings get global captive_portal_detection_enabled"')).trim();
+    if (captivePortal !== '0') {
+      throw new Error(`Captive portal detection setting read back ${captivePortal || '(empty)'}, expected 0.`);
+    }
+    addLog('Captive portal detection disabled (read back 0).', 'ok');
 
     addLog('Enabling WiFi radio…');
     await c.shell("su -c 'svc wifi enable'");
