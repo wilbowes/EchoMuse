@@ -459,10 +459,66 @@ After three unconfirmed boots init restores the known-good image, shows an
 amber ring and reboots.
 
 This is deliberately NOT the bootloader's A/B. biscuit has a real second slot
-(`boot_b_x`, `mmcblk0p11`) but LK chooses between them and we have not reverse
-engineered how; the standing guess is three tries per slot and then a soft
-brick, which is plausible and **untested**. Building on that guess risks a
-device booting something we did not choose.
+and LK chooses between them; we have not reverse engineered how, and the
+standing guess — three tries per slot and then a soft brick — remains
+**untested**. Building on that guess risks a device booting something we did
+not choose.
+
+### What the slots actually contain
+
+Measured on G090LF11803611NF in TWRP, 2026-09-06, all reads. Recorded because
+the paragraph above was written from the partition table alone and three of
+these were unknown.
+
+**Slot B is a full peer, and it is populated.** `boot_a_x` (`p10`) and
+`boot_b_x` (`p11`) are both 32768 sectors — 16MB each. p11 carries a complete
+`ANDROID!` boot image with the untouched stock FireOS cmdline
+(`… rootwait ro init=/init buildvariant=user veritykeyid=…`) and a larger
+ramdisk than A. So a provisioned device carries a **second stock image we did
+not put there**, which is a usable last resort if an operator loses the escrow
+downloaded at the wizard's escrow step. It is not a substitute for that file:
+nothing guarantees B stays pristine, and it boots FireOS without our permissive
+cmdline or the `service echomuse` init entry, so EchoMuse does not start. It
+boots, which is what recovery is for.
+
+**Our cmdline patch DESTROYS the original arguments rather than appending
+them.** `runPatchBoot` zeroes bytes 64–576 of the header and writes 51 bytes,
+so slot A's cmdline is exactly `bootopt=64S3,32N2,64N2
+androidboot.selinux=permissive` and everything FireOS shipped is gone. The
+device boots regardless — LK supplies `root=`, `androidboot.hardware` and the
+rest, and the kernel defaults cover what is left — so this has been true for
+the life of the wizard with nothing to show for it. Slot B is the only reason
+it is visible at all. Appending rather than replacing is the obvious fix and it
+needs a hardware test, since the argument that is currently absent and unmissed
+may be load-bearing on a device that is not this one.
+
+**`misc` (`p8`) holds a boot-control block, and it is empty.** 4KB of zeros
+with one record at offset **0x360**:
+
+```
+00000360  00 41 42 42 01 8f 00 00   |.ABB....|
+```
+
+The first four bytes are little-endian `0x42424100`, which is AOSP's
+`BOOT_CTRL_MAGIC`. Two things do not fit the standard struct: the offset is not
+one AOSP uses, so this is an MTK/Amazon variant; and everything past
+`version=1` and a single flags byte is zero, so the `slot_info[]` array — where
+per-slot priority and `tries_remaining` live — carries nothing.
+
+An empty control block should mean no slot is bootable. The device boots A.
+**So on the evidence LK is not taking its decision from this block**, or it
+ignores it and defaults to A. That is the answer to "could we just select slot
+B and leave FireOS alone": the metadata that would let us choose is present in
+shape, empty in content, and visibly disregarded by the bootloader. Writing a
+priority into it would be acting on a struct we have watched LK ignore, against
+a documented downside — both slots running out of attempts — whose recovery
+means opening the case. The decision lives in `lk_a_real` (`p3`), which we can
+dump freely and have not analysed.
+
+Note the escrow is therefore **not a stock image** on a device that has been
+through the FireOS flow — it is whatever was on the partition, patch included.
+That is the correct thing to restore, and it is why the wizard's restore
+control says "the image escrowed at step 3" rather than "stock".
 
 **The limit, plainly: an image that fails before init runs executes none of
 this and still needs recovery over USB.** The byte-exact packer and the

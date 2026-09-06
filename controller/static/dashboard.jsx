@@ -3066,7 +3066,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   const [adb, setAdb]           = useState(null);
   const [magiskFile, setMagiskFile] = useState(null);
   const [binaryFile, setBinaryFile] = useState(null);
-  // emOS flow. `emosRef` is the escrowed stock boot image — the build input
+  // emOS flow. `emosRef` is the escrowed boot image — the build input
   // and the undo — held in the page for the length of the wizard; the copy
   // that matters is the one downloaded to the operator's disk at step 2.
   const [emosRef, setEmosRef]       = useState(null);
@@ -3074,7 +3074,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   const [emosImage, setEmosImage]   = useState(null);
   // Holds the operator's own copy of the escrowed image when this session no
   // longer has one — a page reload loses emosRef, which is exactly when the
-  // restore is needed. See restoreStockBoot.
+  // restore is needed. See restoreEscrowedBoot.
   const [restoreFile, setRestoreFile] = useState(null);
   const [initFile, setInitFile]     = useState(null);
   const [emosConsole, setEmosConsole] = useState(null);
@@ -5057,7 +5057,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     if (err) {
       throw new Error(
         `${err}\n\nDO NOT REBOOT — the device is still in TWRP and recoverable from `
-        + 'here. Use "Restore stock boot image" below to put your escrowed image '
+        + 'here. Use "Restore escrowed boot image" below to put it back '
         + 'back; it takes about ten seconds and leaves /data untouched.');
     }
     addLog('The device is now an emOS device. If anything below goes wrong, '
@@ -5065,8 +5065,15 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
          + 'everything installed on /data alone.', 'warn');
   }
 
-  // Put the device back the way it was found. Offered on a flash or first-boot
-  // failure rather than printed as a dd command for the operator to run: the
+  // Put the device back the way it was found — which is NOT necessarily stock.
+  // On a device that has been through the FireOS flow the escrow carries our
+  // own permissive cmdline patch (measured 2026-09-06: slot A reads exactly
+  // `bootopt=64S3,32N2,64N2 androidboot.selinux=permissive`, slot B still has
+  // the untouched FireOS one). What was on the partition is the right thing to
+  // put back, so the copy says "escrowed", never "stock".
+  //
+  // Offered on a flash or first-boot failure rather than printed as a dd
+  // command for the operator to run: the
   // escrowed bytes are already in the page, the write path is the same verified
   // one the flash uses, and someone whose device will not boot is not in a good
   // position to be handed homework.
@@ -5074,7 +5081,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // `file` overrides the in-page escrow, because a page reload loses emosRef
   // and that is exactly when this is needed — the copy downloaded at step 3 is
   // the same bytes.
-  async function restoreStockBoot(file) {
+  async function restoreEscrowedBoot(file) {
     setRunning(true);
     try {
       const c = adb;
@@ -5104,21 +5111,21 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
           + `(got "${magic.replace(/[^\x20-\x7e]/g, '.')}"), so it is not a boot image. `
           + 'Nothing has been written.');
       }
-      addLog('── RESTORE STOCK BOOT IMAGE ──', 'head');
-      let err = await _writeBootPartition(c, target, bytes, md5, 'stock boot image');
+      addLog('── RESTORE ESCROWED BOOT IMAGE ──', 'head');
+      let err = await _writeBootPartition(c, target, bytes, md5, 'escrowed image');
       if (err) {
         addLog(`${err}`, 'error');
         addLog('Retrying the restore once…', 'warn');
-        err = await _writeBootPartition(c, target, bytes, md5, 'stock boot image (retry)');
+        err = await _writeBootPartition(c, target, bytes, md5, 'escrowed image (retry)');
       }
       if (err) {
         throw new Error(`${err}\n\nThe restore did not verify. Do not reboot. The `
           + `device is still in TWRP, and the image can also be written by hand from `
-          + `a TWRP shell with:\n  dd if=<your stock boot image> of=${target}`);
+          + `a TWRP shell with:\n  dd if=<your escrowed .img> of=${target}`);
       }
-      addLog('Stock boot image restored and verified against the partition. The '
-           + 'device will boot FireOS as it did before. Everything installed on '
-           + '/data is untouched.', 'ok');
+      addLog('Escrowed image restored and verified against the partition. The '
+           + 'device will boot exactly as it did before this run. Everything '
+           + 'installed on /data is untouched.', 'ok');
     } catch (e) {
       addLog(`Restore failed: ${e.message}`, 'error');
     } finally {
@@ -5670,8 +5677,8 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                   onChange={e => setRestoreFile(e.target.files[0] || null)}
                   style={{ fontFamily: "'DM Mono',monospace", fontSize: 10 }} />
                 <Pill danger disabled={!adb || (!emosRef && !restoreFile)}
-                  onClick={() => restoreStockBoot(restoreFile)}>
-                  Restore stock boot image
+                  onClick={() => restoreEscrowedBoot(restoreFile)}>
+                  Restore escrowed boot image
                 </Pill>
               </div>
             )}
