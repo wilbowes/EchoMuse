@@ -1,5 +1,57 @@
 # Changelog
 
+## 2.23.0-ea.5 (Early Access)
+
+**Fixes a provisioning wizard that could not install emOS at all, and adds a
+one-click undo if the flash goes wrong.** Nothing changes on devices already
+running; this is entirely the setup flow.
+
+### The emOS install steps now work
+
+Provisioning stopped at "Install EchoMuse" with every command reporting
+`su: not found`, having said the recovery environment was ready a step
+earlier. TWRP is already root, so the wizard installs a small `su` stand-in to
+let the shared install steps run unchanged — and it was written pointing at a
+shell path that does not exist in recovery, so it could never run. Worse, a
+retry then *skipped* the check that had just caught it, which is why step 3
+turned green and step 4 failed anyway.
+
+The stand-in is now built against the shell the device actually has, it is
+tested by running it rather than by looking for the file, and each step that
+needs it sets it up itself — reconnecting between steps used to quietly remove
+it.
+
+### If a flash fails, the wizard puts your image back
+
+A failed boot-partition write used to end with a warning and a command to type
+yourself. There is now a **Restore escrowed boot image** button on the flash
+and first-boot steps: it writes back the image the wizard escrowed before it
+changed anything, verifies it against the partition, and leaves everything on
+`/data` untouched. If the page has been reloaded, it accepts the `.img` file
+you downloaded at the escrow step.
+
+The flash itself also retries once automatically before giving up, refuses an
+image too large for the partition instead of writing a truncated one, and can
+now tell a short write from a corrupt one and a bad partition from an
+unreliable read.
+
+### Steps that said they worked when they had not
+
+Four places reported success having achieved nothing: the install step logged
+"Cleared." after every command failed, wake word assets were checked where they
+were uploaded rather than where they were installed, the startup script was
+copied without verification while the binary beside it was checked byte for
+byte, and WiFi's "Skip (already connected)" marked itself done without asking
+the device anything. All four now check.
+
+### Safer partition handling
+
+The wizard's one partition write now goes to the partition it ran its safety
+check against, rather than re-resolving a symlink that could answer
+differently. And every step confirms the device is in the mode it needs —
+unplugging an Echo powers it off, so a replug comes back in Android, and a
+recovery step run there had nothing but one guard in front of it.
+
 ## 2.23.0-ea.4 (Early Access)
 
 **Your Echo can now run without any of Amazon's software on it, and the

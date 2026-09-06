@@ -2339,16 +2339,39 @@ def test_the_flash_step_verifies_against_the_partition():
     device that has not rebooted is still recoverable from where it stands.
     """
     src = _jsx()
-    fn = src[src.index("async function runFlashEmos"):]
-    fn = fn[:fn.index("\n  // ── Steps 7 and 8")]
-    assert "conv=fsync" in fn, "the write must be fsync'd"
-    assert "drop_caches" in fn, (
+    # The write itself lives in _writeBootPartition, shared by the flash and the
+    # restore. Shared rather than copied on purpose: this is the only code in
+    # the wizard that can leave a device unbootable, and a second copy is one
+    # that drifts from the checks this one carries — so pin that both callers
+    # go through it and that neither grew a dd of its own.
+    write = src[src.index("async function _writeBootPartition"):]
+    write = write[:write.index("\n  async function runFlashEmos")]
+    assert "conv=fsync" in write, "the write must be fsync'd"
+    assert "drop_caches" in write, (
         "the page cache must be dropped before the read-back, or the read-back "
         "confirms the cache rather than the partition")
+    assert write.index("drop_caches") < write.index("Reading it back"), \
+        "the caches must be dropped BEFORE the read-back, not after"
+
+    fn = src[src.index("async function runFlashEmos"):]
+    fn = fn[:fn.index("\n  // ── Steps 7 and 8")]
     assert "DO NOT REBOOT" in fn, (
         "a verification failure must tell the operator not to reboot")
-    assert fn.index("drop_caches") < fn.index("Reading it back"), \
-        "the caches must be dropped BEFORE the read-back, not after"
+    # Both callers write through the shared path, and neither writes a
+    # partition any other way.
+    for caller in ("runFlashEmos", "restoreEscrowedBoot"):
+        body = fn[fn.index(f"async function {caller}"):]
+        body = body[:body.index("\n  async function ", 1)] if "\n  async function " in body[1:] else body
+        assert "_writeBootPartition" in body, (
+            f"{caller} must write through _writeBootPartition, not its own dd")
+    # Matched against shell CALLS, not against the text "of=" — the restore's
+    # failure message quotes a dd command for the operator to run by hand, and
+    # a guard that greps for the thing it forbids finds the prose explaining it
+    # and fails on a file that is correct. Three times now.
+    for line in fn.splitlines():
+        assert not ("c.shell(" in line and "of=" in line), (
+            "no caller may issue its own partition write — the one dd that "
+            f"does lives in _writeBootPartition: {line.strip()}")
 
 
 def test_the_serial_console_disables_echo_before_anything_else():
