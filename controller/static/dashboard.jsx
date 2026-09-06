@@ -3308,12 +3308,30 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     const serial  = await c.shell('getprop ro.serialno') || await c.shell('getprop ro.boot.serialno');
     const fwBuild = await c.shell('getprop ro.build.version.incremental');
     const fwName  = await c.shell('getprop ro.build.version.name');
+    // TWRP answers every getprop above and reports Android 5.1.1 itself, so
+    // none of them can tell recovery from FireOS — this step ran to completion
+    // against a device sitting in TWRP, printed "FireOS 5 confirmed", warned
+    // about an untested firmware it had read off the RECOVERY ramdisk, and
+    // rebooted to recovery from recovery (Wil, 2026-09-06). Harmless, and a
+    // step that verified nothing while claiming otherwise. The banner is the
+    // only thing here that distinguishes the two.
+    //
+    // Tolerated rather than refused: arriving already in TWRP is the normal
+    // state on a retry, the device identification below works identically
+    // there, and the only thing this step does afterwards is a reboot that is
+    // already unnecessary.
+    const inRecovery = _bannerMode(c.banner) === 'twrp';
     addLog(`Model: ${model || '(unknown)'}  Build: Android ${release}  Codename: ${name || '(unknown)'}  Serial: ${serial || '(unknown)'}`);
-    addLog(`Firmware: ${fwName || '(unknown)'}  ${fwBuild || ''}`);
+    if (inRecovery) {
+      addLog('Device is already in TWRP recovery, not Android — the firmware '
+           + 'properties above are the recovery ramdisk\'s, not FireOS\'s.', 'warn');
+    } else {
+      addLog(`Firmware: ${fwName || '(unknown)'}  ${fwBuild || ''}`);
+    }
     if (!release.startsWith('5.')) {
       throw new Error(`Expected FireOS 5 (Android 5.x), got Android ${release}. Wrong device?`);
     }
-    if (fwBuild && fwBuild !== _TESTED_FIREOS_BUILD) {
+    if (!inRecovery && fwBuild && fwBuild !== _TESTED_FIREOS_BUILD) {
       addLog(`Untested firmware — EchoMuse is developed against ${_TESTED_FIREOS_NAME} `
            + `(${_TESTED_FIREOS_BUILD}). Other FireOS 5 builds may behave differently, `
            + `particularly around USB and ADB.`, 'warn');
@@ -3378,6 +3396,14 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       }
     }
 
+    // Already where the next step needs the device: say so and keep the
+    // connection, rather than rebooting recovery into recovery and making the
+    // operator re-pick the same device from the USB picker.
+    if (inRecovery) {
+      addLog('Already in TWRP — no reboot needed. Continue with "Connect to TWRP" '
+           + '(the device is still connected).', 'ok');
+      return c;
+    }
     addLog('FireOS 5 confirmed. Rebooting to TWRP recovery…');
     expectDisconnect.current = true;
     try { await c.shell('reboot recovery'); } catch {}
@@ -4871,6 +4897,34 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
          + 'ten seconds and leaves /data untouched.', 'warn');
   }
 
+  // How much of a whole-partition read is actually the boot image. The rest is
+  // padding the builder never looks at, and sending it is what put the wizard's
+  // build POST over Home Assistant's ingress body limit — a 413 that never
+  // reached the add-on at all (measured 2026-09-06).
+  //
+  // Four little-endian u32s at fixed offsets, verified against real headers off
+  // G090LF1180440C95 and G090LF11803611NF. This is NOT a second copy of
+  // split_reference(): that goes on to parse the MTK wrapper and split the DTBs,
+  // and everything it reads lives inside the region computed here. It also
+  // validates what it is given, so a wrong answer here fails loudly on the next
+  // call rather than producing a bad image.
+  //
+  // Returns 0 when the header does not parse or the arithmetic lands outside the
+  // buffer, meaning "send the whole thing" — a size optimisation must never be
+  // the reason a build cannot happen.
+  function _bootImageLength(bytes) {
+    if (!bytes || bytes.length < 2048) return 0;
+    if (new TextDecoder().decode(bytes.slice(0, 8)) !== 'ANDROID!') return 0;
+    const hdr  = new DataView(bytes.buffer, bytes.byteOffset);
+    const page = hdr.getUint32(36, true);
+    if (!page || page > bytes.length) return 0;
+    const upTo = n => Math.ceil(n / page) * page;
+    const end = page + upTo(hdr.getUint32(8, true))
+                     + upTo(hdr.getUint32(16, true))
+                     + upTo(hdr.getUint32(24, true));
+    return (end > page && end <= bytes.length) ? end : 0;
+  }
+
   // Step 5 — build. The controller does the packing; see em_emos_build.py for
   // why it is there and not here.
   async function runBuildEmos(useLatest) {
@@ -4903,11 +4957,31 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         + 'latest release. Build one from emos/ with build.sh if you need a '
         + 'specific version.');
     }
-    addLog(`Sending the escrowed image (${(emosRef.bytes.length/1024/1024).toFixed(1)} MB) `
+    // Send the BOOT IMAGE, not the whole partition. The escrow is a
+    // whole-partition read, so most of its 16MB is padding past the last
+    // region — and Home Assistant's ingress proxy caps a request body well
+    // below what the controller itself accepts (58MB), so the full reference
+    // plus the init was refused with a 413 that never reached the add-on at
+    // all: measured 2026-09-06, the emos_init GETs are in the controller log
+    // and the emos_image POST simply is not.
+    //
+    // The end of the image is four header fields, all little-endian u32 at
+    // fixed offsets — this is not a second copy of split_reference(), which
+    // goes on to parse the MTK wrapper and split the DTBs. Everything that
+    // function reads lives inside the region computed here, and it validates
+    // what it gets, so a wrong answer fails loudly on the next line rather
+    // than producing a bad image.
+    const imageEnd = _bootImageLength(emosRef.bytes);
+    const reference = imageEnd ? emosRef.bytes.subarray(0, imageEnd) : emosRef.bytes;
+    if (reference.length < emosRef.bytes.length) {
+      addLog(`  boot image is ${(reference.length/1024/1024).toFixed(1)} MB of the `
+           + `${(emosRef.bytes.length/1024/1024).toFixed(1)} MB partition — sending that`);
+    }
+    addLog(`Sending the escrowed image (${(reference.length/1024/1024).toFixed(1)} MB) `
          + `and the init to the controller…`);
 
     const fd = new FormData();
-    fd.append('reference', new Blob([emosRef.bytes]), 'reference.img');
+    fd.append('reference', new Blob([reference]), 'reference.img');
     fd.append('init', initBlob, 'init');
     fd.append('version', version);
     const resp = await fetch(ingressPath('/api/provision/emos_image'), {
