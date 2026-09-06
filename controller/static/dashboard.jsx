@@ -2820,7 +2820,7 @@ const _EMOS_STEPS = [
   { id: 'build_emos',      label: 'Build emOS',        desc: 'The controller repacks your own escrowed image with the emOS init, reusing your kernel and device trees.' },
   { id: 'flash_emos',      label: 'Flash and Verify',  desc: 'Write the built image to the boot partition and read it back to confirm it landed.' },
   { id: 'reboot_watch',    label: 'Reboot and Watch',  desc: 'Reboot into emOS and follow the first boot over the USB serial console while the ring fills.' },
-  { id: 'wifi_register',   label: 'Configure WiFi',    desc: 'Scan and join a network using the device’s own radio, then wait for it to register with the controller.' },
+  { id: 'wifi_register',   label: 'Configure WiFi',    desc: 'Join a network using the device’s own radio, then wait for it to register with the controller. Enter the name and password — scanning from the console is not wired up yet (#459).' },
 ];
 
 // ── WifiPanel ──
@@ -3112,6 +3112,10 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // longer has one — a page reload loses emosRef, which is exactly when the
   // restore is needed. See restoreEscrowedBoot.
   const [restoreFile, setRestoreFile] = useState(null);
+  // The serial read at step 1. Step 9 needs it to ask whether THIS
+  // device has connected, rather than inferring it from the device list
+  // having grown.
+  const [provSerial, setProvSerial] = useState('');
   const [initFile, setInitFile]     = useState(null);
   const [emosConsole, setEmosConsole] = useState(null);
   const [wifiSsid, setWifiSsid] = useState('');
@@ -3397,6 +3401,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // there, and the only thing this step does afterwards is a reboot that is
     // already unnecessary.
     const inRecovery = _bannerMode(c.banner) === 'twrp';
+    if (serial) setProvSerial(serial);
     addLog(`Model: ${model || '(unknown)'}  Build: Android ${release}  Codename: ${name || '(unknown)'}  Serial: ${serial || '(unknown)'}`);
     if (inRecovery) {
       addLog('Device is already in TWRP recovery — reading the FireOS build off '
@@ -5494,19 +5499,68 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       addLog('wpa_cli could not save the network, so this will be forgotten on '
            + 'reboot. Check update_config=1 in wpa_supplicant.conf.', 'warn');
     }
+    // Flush it. save_config returns as soon as wpa_supplicant has written and
+    // closed the file, and the bytes then sit in page cache for up to ~30s —
+    // so a user who unplugs the Echo in that window loses the network they
+    // just configured and has to do it again over a console.
+    //
+    // Pulling the power IS the normal shutdown on a smart speaker; nothing
+    // here may depend on a graceful one, and "run sync first" is not advice we
+    // are entitled to give. wpa_supplicant writes this file, not us, so this
+    // is the only place we can make it durable.
+    await con.run('sync');
+
+    // Prove it associates BEFORE leaving it in the config.
+    //
+    // save_config above has already written it, so a wrong SSID or PSK is
+    // persisted and the device retries it for ever — recoverable only over a
+    // console, which is the thing this step exists to avoid needing. And
+    // retrying the step calls add_network again, so each attempt stacked
+    // another entry.
+    addLog('Waiting for the network to come up…');
+    let joined = false;
+    for (let i = 0; i < 12 && !joined; i++) {
+      await new Promise(r => setTimeout(r, 2500));
+      const st = await con.run(
+        'wpa_cli -p /data/misc/wifi/sockets -i wlan0 status | grep wpa_state');
+      addLog(`  ${st.trim() || 'no answer'}`);
+      joined = /wpa_state=COMPLETED/.test(st);
+    }
+    if (!joined) {
+      addLog('Not associating — removing the network so the device is not left '
+           + 'retrying it for ever.', 'warn');
+      await con.run(`wpa_cli -p /data/misc/wifi/sockets -i wlan0 remove_network ${id}`);
+      await con.run('wpa_cli -p /data/misc/wifi/sockets -i wlan0 save_config');
+      await con.run('sync');
+      throw new Error(
+        `The device did not join "${wifiSsid}" within 30s, and the network has `
+        + 'been removed again. Check the name and password. Note this radio '
+        + 'cannot join WPA3 — it reports no SAE — so a WPA3-only network will '
+        + 'never associate however correct the password is.');
+    }
 
     addLog('Waiting for the device to register with the controller…');
     // Association is not the success condition. A device can be perfectly on
     // the network and running nothing; only registration proves EchoMuse was
     // installed, its credentials are right, and the assistant actually runs.
+    // Success is THIS device being CONNECTED, asked by serial.
+    //
+    // It used to be "a device_id appeared that was not in the list when the
+    // wizard opened", and that is broken in both directions by the wizard's
+    // own behaviour: step 4 mints TLS credentials, which creates a device row
+    // to hold the token whether or not the device ever connects. So the old
+    // test could match a row that proves nothing, and — if the serial was
+    // already on file from an earlier run — never match at all while the
+    // device sat there working perfectly. The second is what happened on
+    // 3611NF, 2026-09-06: associated, registered, and the wizard timed out.
     const deadline = Date.now() + 120000;
     let seen = null;
     while (Date.now() < deadline) {
       await new Promise(r => setTimeout(r, 5000));
       let list = [];
       try { list = (await API.get('/api/devices')).devices || []; } catch {}
-      const known = new Set((knownDevices || []).map(d => d.device_id));
-      seen = list.find(d => !known.has(d.device_id));
+      seen = list.find(d => d.connected
+        && (!provSerial || (d.device_id || '').includes(provSerial)));
       if (seen) break;
       const st = (await con.run('wpa_cli -p /data/misc/wifi/sockets -i wlan0 status | grep wpa_state')).trim();
       addLog(`  ${st || 'no answer'}`);
@@ -5517,8 +5571,10 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         + 'restore the escrowed boot image if you want to start over.');
     }
     addLog(`Registered as ${seen.label || seen.device_id}.`, 'ok');
-    addLog('Provisioning complete. Approve the device on the dashboard if it is '
-         + 'waiting for approval.', 'ok');
+    addLog('── PROVISIONING COMPLETE ──', 'head');
+    addLog(`This Echo is now running emOS and talking to the controller. `
+         + `${seen.approved ? 'It is already approved and ready to use.'
+                            : 'One thing left: approve it on the Devices page.'}`, 'ok');
   }
 
   // ── Step executor ──
