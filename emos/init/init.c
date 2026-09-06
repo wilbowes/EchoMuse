@@ -930,6 +930,49 @@ static int wr(const char *path, const char *val)
     return n > 0 ? 0 : -1;
 }
 
+/* The device's serial, read from androidboot.serialno on the kernel cmdline.
+ *
+ * LK puts it there (confirmed in /proc/cmdline on this board), which is the
+ * only source available to us: there is no property service under emOS, so
+ * getprop ro.serialno does not exist, and /system carries the BUILD's identity
+ * rather than this unit's.
+ *
+ * Returns a pointer to a static buffer, empty if it could not be read. Callers
+ * must treat empty as "unknown" and carry on — nothing here is worth failing a
+ * boot over.
+ */
+static const char *serialno(void)
+{
+    static char buf[64];
+    static int done;
+    if (done)
+        return buf;
+    done = 1;
+
+    int fd = open("/proc/cmdline", O_RDONLY);
+    if (fd < 0)
+        return buf;
+    char line[2048];
+    ssize_t n = read(fd, line, sizeof line - 1);
+    close(fd);
+    if (n <= 0)
+        return buf;
+    line[n] = 0;
+
+    const char *key = "androidboot.serialno=";
+    char *p = strstr(line, key);
+    if (!p)
+        return buf;
+    p += strlen(key);
+    size_t i = 0;
+    while (p[i] && p[i] != ' ' && p[i] != '\n' && i < sizeof buf - 1) {
+        buf[i] = p[i];
+        i++;
+    }
+    buf[i] = 0;
+    return buf;
+}
+
 static void usbwr(const char *leaf, const char *val)
 {
     char p[256];
@@ -1456,6 +1499,28 @@ int main(void)
 
     mkdir("/data/emos", 0755);
 
+    /* Name the device. The kernel default is "android", so every console
+     * session and every log line said root@android — which is actively
+     * misleading on a device whose whole point is that Android is gone, and
+     * useless for telling two Echoes apart over USB. mksh reads gethostname()
+     * when it builds its prompt, so this has to happen before any shell is
+     * spawned, which is why it sits here rather than beside the USB gadget.
+     *
+     * Falls back to plain "emos" when the serial cannot be read: a nameless
+     * device is better than a boot that stopped over a cosmetic. */
+    {
+        char host[80];
+        const char *sn = serialno();
+        snprintf(host, sizeof host, *sn ? "em-%s" : "emos", sn);
+        /* Via /proc rather than sethostname(2): bionic does not declare that
+         * at API 21, and an implicit declaration in a static PID 1 is not
+         * something to ship — the failure would be silent and on the device.
+         * The sysctl is equivalent and wr() is already the way everything
+         * else here writes to /proc. */
+        int hr = wr("/proc/sys/kernel/hostname", host);
+        note("hostname=%s rc=%d\n", host, hr);
+    }
+
     /* Rollback bookkeeping. This runs as early as /data allows, because a boot
      * that dies later must still have been counted — the counter is the only
      * evidence that the previous boots failed. */
@@ -1529,6 +1594,16 @@ int main(void)
     usbwr("enable", "0");
     usbwr("idVendor", "1949");
     usbwr("idProduct", "2007");
+    /* Say what this is. Without these the descriptor carries no strings at all
+     * and the host falls back to whatever it has cached for the port — on a
+     * Mac that showed as "MT65xx Android Phone", left over from the same
+     * device in preloader or FireOS mode, so the operator picking a serial
+     * port in the provisioning wizard has nothing to aim at. Stock sets all
+     * three (Amazon / AEOBC / serial); we were setting none. */
+    usbwr("iManufacturer", "EchoMuse");
+    usbwr("iProduct", "emOS console");
+    if (*serialno())
+        usbwr("iSerial", serialno());
     usbwr("f_acm/instances", "1");
     usbwr("functions", "acm");
     usbwr("bDeviceClass", "02");
