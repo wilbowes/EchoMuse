@@ -43,7 +43,11 @@ hear the answer through the Dot's speaker. The hardware you already own
   its own event instead, if you'd rather bind the tap. The hold keeps working
   with the mic muted, so a Dot muted for privacy is still a button.
 - **Headphones** — plug into the 3.5mm jack and audio moves there, unplug and
-  it comes back, no reboot needed.
+  it comes back, no reboot needed. Two known faults, both open: booting with a
+  plug already inserted is unreliable, and unplugging can stall the microphone
+  for around thirty seconds ([#117](https://github.com/wilbowes/EchoMuse/issues/117),
+  [#141](https://github.com/wilbowes/EchoMuse/issues/141)). Plugging in and out
+  of a running device works.
 - **Fleet dashboard** — provisioning wizard, per-device or global config
   pushed live (EQ, LED ring scenes, mic tuning), A/B-slot OTA updates with
   automatic fallback, root shell, logs, and per-turn activity analytics

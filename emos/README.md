@@ -8,18 +8,27 @@ It is a distribution in the ordinary sense: it does not include a kernel of its
 own. It pairs the device's existing MediaTek 3.18 kernel with our own PID 1,
 busybox, and bionic and tinyalsa mounted read-only from the device's `/system`.
 
-**Status: 0.1, bench-proven, not field-proven.** One device, two days. A
-complete voice turn has run on it — wake word scored on-device, Home Assistant
-pipeline, spoken answer — along with WiFi, the 9-channel mic array, hardware
-AEC, the BLE proxy, buttons, ambient light, jack detect and the LED ring. The
-known gaps are listed at the bottom and none of them is a research problem.
+**Status: 0.3, bench-proven, not field-proven.** Still a small number of
+devices over a handful of days. A complete voice turn has run on it — wake word
+scored on-device, Home Assistant pipeline, spoken answer — along with WiFi, the
+9-channel mic array, hardware AEC, the BLE proxy, buttons, ambient light, jack
+detect and the LED ring. The known gaps are listed at the bottom and none of
+them is a research problem.
 
-`emos-v0.1` is tagged and published so the provisioning wizard can fetch the
-init, which is the only part of an image that can be distributed. **A tag is
-not a claim that this is finished**: it has run on one device, and the wizard
-that installs it has not been through a full run on hardware at all. Try it on
-a spare Echo, and read the Known gaps first — in particular, a device on emOS
-cannot be re-provisioned by the wizard, and going back wipes it.
+Two things changed since 0.1 that are worth knowing before you try it:
+
+- **The provisioning wizard has now run end to end**, on a device restored to
+  genuine stock. It failed at four different steps first, and every one of
+  those failures was in a *check* rather than in the operation being checked.
+- **emOS updates in place, over the network.** A device was taken 0.1 → 0.3
+  with no TWRP, no cable and no wipe. So a bug in a released emOS is something
+  we can push a fix for, rather than something that strands a device.
+
+`emos-v0.3` is tagged and published so the wizard can fetch the init, which is
+the only part of an image that can be distributed. **A tag is not a claim that
+this is finished.** Try it on a spare Echo, and read the Known gaps first — in
+particular, a device on emOS cannot be re-provisioned by the wizard, and going
+back means a TWRP wipe that erases `/data`.
 
 ## Why
 
@@ -31,7 +40,7 @@ than that in one sense and much thicker in another:
 - SETUP.md claimed Amazon's audio HAL was what started the I2S clock and that
   playback would hang without it. **That was reasoning, not measurement, and it
   is false.** Both directions clock with no HAL, no mediaserver and no
-  framework.
+  framework. (SETUP.md now carries the correction rather than the claim.)
 - But the HAL *was* silently configuring the codec for us. Nothing in the
   firmware ever closed the codec's DAPM routes, because the HAL always got
   there first. On a device with no Android, both the microphones and the
@@ -72,11 +81,11 @@ with `git describe --match 'emos-v*'`, so without those tags it stamps
 whatever tag is nearest — a controller release number, which is worse than
 "unknown" because it looks plausible. The namespace also keeps emOS out of the
 firmware OTA's way: `_fetch_latest_release` selects a tag starting `v` with a
-`server` asset, and `emos-v0.1` matches neither.
+`server` asset, and `emos-v0.3` matches neither.
 
 ```sh
-git tag -a --cleanup=verbatim emos-v0.1 -m "..."   # -a always; the annotation IS the notes
-git push origin emos-v0.1
+git tag -a --cleanup=verbatim emos-v0.4 -m "..."   # -a always; the annotation IS the notes
+git push origin emos-v0.4
 ```
 
 `emos-release.yml` compiles the init with the pinned NDK, asserts it is

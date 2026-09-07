@@ -690,7 +690,11 @@ done
 
 **Why device 23?** The biscuit exposes 25+ PCM devices. Device 23 is the TLV320 DAC output path. Most other devices are modem/voice paths or internal DSP routes that hang or error on open.
 
-**Why keep echoaudioservice?** The MediaTek audio DSP requires initialisation that happens inside Amazon's audio HAL (`audio.primary.mt8163.so`). Without `echoaudioservice` running, the I2S clock never starts and `tinyplay` hangs indefinitely. The service is a manifest stub — no Java code — its sole job is to trigger HAL initialisation via the Android audio framework.
+**Why keep echoaudioservice?** The service is a manifest stub — no Java code — whose job is to trigger HAL initialisation via the Android audio framework, and it is left in place because nothing has been gained by removing it.
+
+> **Corrected 2026-09-04.** This paragraph used to say the MediaTek DSP needed initialisation inside Amazon's HAL, and that without `echoaudioservice` the I2S clock never starts and `tinyplay` hangs for ever. **That was reasoning rather than measurement, and it is false.** Both capture and playback clock with no HAL, no mediaserver and no Android framework at all — demonstrated by emOS, which runs a full voice turn without any of them (`emos/README.md`).
+>
+> What the HAL *was* silently doing is a different thing: it configured the codec's DAPM routes, which nothing in our firmware ever did because the HAL always got there first. On a device with no Android, the microphones and the speaker are both powered down until we set those routes ourselves. See `device/internal/bindings/codec`.
 
 **`stop media`, and why the ordering matters.** Since the audio-jack fix (#80), `PcmSpeaker.Init()` also runs `stop media` before opening the PCM. It has to: with a headphone plug inserted at boot, mediaserver claims device 23 and our blocking `snd_pcm_open` waits behind it forever, taking the whole device down with it (no buttons, no wake word, no registration — everything in `main()` is initialised after the speaker).
 
@@ -698,9 +702,18 @@ This depends on the HAL having already initialised by the time we stop it, per t
 
 **`stop media` is temporary, and that is fine — better than fine.** Android restarts mediaserver shortly afterwards: measured on hardware, `init.svc.media` reads `running` again with a live pid, while our server still owns `pcm23p` in `RUNNING` state. So `stop media` is a "get out of the way for a moment" rather than a removal, and what actually makes the fix work is winning the device once and then holding it for the life of the process. `Init()` re-runs it on every start, so an OTA or supervisor restart gets the same treatment.
 
-That also disposes of the worry above: because mediaserver comes back, the HAL, the DSP and the I2S clock stay initialised. Nothing is being permanently deprived. `echoaudioservice` is untouched and still required. **Do not turn this into a permanent disable** — that would remove the very thing the first note says the audio path depends on.
+**Do not turn this into a permanent disable.** The reason is not the one this section used to give — it is not that the DSP or the I2S clock would be deprived, which is false per the correction above. It is that **holding mediaserver down makes everything worse, measured 2026-09-03**: the mic stall rate doubles (0.9/min → 1.8/min) and `wlan0` disappears entirely, twice, once needing a reboot. The mechanism is that mediaserver publishes `AudioFlinger` and `AudioPolicyService`, so denying them crash-loops `system_server` — which owns `WifiService`.
 
-One consequence worth knowing: with mediaserver alive, Android still reacts to jack events. Inserting a plug makes its `AudioOut_2` thread reconfigure the amp, DAC mux and ramp underneath us. Removal produced no such reaction in testing — only our own `tinymix`. If codec state changes with nothing in our logs to explain it, this is why.
+The consequence for project direction is worth stating plainly: **the vendor HAL cannot be evicted while the Android framework runs**, because AOSP's own `system_server` is built on the media stack hosting it. "Ditch Amazon's audio" is not a patch to this file; it is the emOS direction.
+
+One consequence worth knowing: with mediaserver alive, Android still reacts to jack events. Inserting a plug makes its `AudioOut_2` thread reconfigure the amp, DAC mux and ramp underneath us, and it wipes `HP Driver Gain Volume` on every one of its restarts (~every 60–90s). If codec state changes with nothing in our logs to explain it, this is why.
+
+**The jack's output stage is `HP Driver Gain Volume` (tinymix ctl 62), and it is ours to set.** Root-caused 2026-09-03 by diffing all 239 mixer controls across an insert on our device and on a stock one: accdet's switch state makes the HAL drop ctl 62 to **0, the floor of a 0..35 range**, and a stock Dot's HAL then raises it to 11. We had nothing that did, so the external output sat at minimum gain and read as "the jack does not work". `PcmSpeaker.SetJackRouting` now owns both the amp switch and the gain, in both directions, and `WatchJackRouting` re-applies them every 30s because mediaserver keeps wiping them.
+
+Two things this does NOT fix, so do not read it as "the jack works":
+
+- **Booting with a plug already inserted is still faulty** — that is [#117](https://github.com/wilbowes/EchoMuse/issues/117), still open. accdet acts on the insert *transition* and a boot has no transition, and the reproduction is simply "boot with a plug in, wait ~16 minutes" (measured: `stalls=0` → `+10806ms, stalls=12`). The 30s reconciler has never been exercised against that path, because doing so requires the mediaserver churn that only a boot-with-plug produces.
+- **The accdet driver writes no mixer control at all.** Read the source rather than inferring: `accdet_report_status()` reads the GPIO and calls `switch_set_state()` on `/sys/class/switch/h2w`, and touches no codec register ever. Every "accdet mutes the amp" line elsewhere in this project's docs was wrong. It is Android's HAL reacting to that switch state, which relocates the whole insert-versus-boot difference out of the kernel and into Android userspace.
 
 **The mixer defaults are wrong.** Three mixer controls must be set after every boot — `start_server.sh` handles this automatically. Without them, tinyplay hangs silently on device 23.
 
