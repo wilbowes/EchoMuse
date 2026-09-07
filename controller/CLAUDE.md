@@ -856,16 +856,49 @@ is #373.** `_ring_timer_alarm` gates every burst on `speaker_busy` because two
 writers would interleave frames on `0x02` — but `_standalone_play` performs no
 such check and streams straight into a chime already in flight. Measured
 2026-08-28: an announcement landing between bursts plays, one landing during a
-burst is **inaudible**. Both paths also share a single `device.playback_done`
-Event, so one device report satisfies two waiters (observed as two `Playback
-complete` lines in the same millisecond, and an announcement whose wait ended
-after a chime's duration rather than its own). **The exclusion being
-one-directional is the bug** — do not "fix" it by blocking announcements while
-ringing, because HA blocks on the announce call holding `_is_announcing` and a
-120s `MAX_RING_S` would fail every other announcement to that satellite. See
-`docs/audio-states.md` §6 Q4 for the options, including the longer-term move of
-the alarm onto the music plane (which needs `audio_mix` gating, or the alarm is
-silent on firmware that cannot mix).
+burst is **inaudible**.
+
+**The priority model is decided (Wil, 2026-09-07) and it INVERTS what the ring
+does today.** A timer must go off exactly when it ends — ringing late is simply
+wrong — so the alarm never waits; it silences music in its favour and is itself
+ducked under a voice response. The announcement is the writer that waits: for a
+response to finish, and behind other announcements. So the fix is not "add the
+missing check to `_standalone_play`", it is to move the check to the other
+side, and the code currently makes the one writer whose timing is the whole
+point the one that defers.
+
+**Ducking the alarm under a response needs no new firmware**, which is why this
+shape was chosen. `Mixer.Mix(voice, music, target)` takes exactly two inputs
+and attenuates only the music side, so the alarm rides the music plane, music
+is suspended while it rings, and the existing duck does the rest — on the
+device, sample-interpolated and click-free. It must be gated on `audio_mix`:
+firmware without it never plays `0x04`, and a silent timer is the worst
+available failure. Those devices keep `0x02`, where the alarm takes the plane
+rather than yielding. An alarm-specific duck depth is wanted rather than
+borrowing `duckDb`, which was tuned for a music bed under speech.
+
+**Do not "fix" the announcement by blocking it for the whole ring** — HA blocks
+on the announce call holding `_is_announcing`, and a 120s `MAX_RING_S` would
+fail every other announcement to that satellite. Waiting for the BURST in
+flight is a different thing: the chime is 1.68s of every 2.3s, and real
+responses measure 1.6–2.6s of audio, so a capped wait is seconds rather than
+minutes. That distinction is why this sat open — the warning against the
+unbounded wait was read as forbidding the bounded one too.
+
+**The shared completion Event is FIXED** (#481, 2026-09-07). `playback_done`
+was one `asyncio.Event` per device with two waiters and one setter, so
+concurrent playbacks both woke on whichever report arrived first — two
+`Playback complete` lines in the same millisecond. It is now a FIFO queue of
+per-playback waiters (`begin_playback` / `signal_playback_done` /
+`end_playback`), FIFO because the device plays one stream at a time and reports
+in the order it finishes them. **`end_playback` belongs in a `finally`**: a
+playback cancelled mid-stream never gets its report, and a waiter left queued
+takes the next playback's report and desynchronises every one after it,
+permanently. The old `clear()` calls are gone with it — a fresh Event per
+playback cannot carry a stale set, so that hazard is removed by construction
+rather than by discipline.
+
+See `docs/audio-states.md` §6 Q4 for the surrounding options.
 
 **A cancelled playback must release `speaking` (#366).** `_run_post_turn_playback`
 clears it in the `finally`, beside `speaker_busy`, and shielded — it used to sit
@@ -1240,7 +1273,11 @@ on connect, debounced per device.
 
 **A transfer probes that the destination DIRECTORY exists before sending.** The heredoc writes with `>`, so a write into a directory that is not there fails, the trailing `echo TRANSFER_OK` never runs, and the transfer waits out its whole 120s timeout holding the device's shell lock. The probe rides the round trip that already detects the base64 decoder and the md5 tool, so it costs nothing, and it is checked BEFORE the decoder because "nowhere to put the file" is the more specific answer. The case that found it: the debloat payload targets Magisk's `/sbin/.core` overlay, which a device without Magisk has no daemon to create.
 
-**Android-only payloads are gated on `Device.android_userspace`** (`em_platform`, pure and tested), which is False only for a device that has POSITIVELY reported `base_os: emos`. Old firmware, a device that has not registered, and any unrecognised value all keep today's behaviour — the two ways of being wrong are not equal. `_post_debloat` refuses server-side rather than relying on the greyed-out control, since it is a plain POST with a session token; the endpoint and the dashboard read the same derived `androidUserspace` so they cannot disagree. Note the reconcile debounce does NOT cover this: `_sync_debloat` is called directly inside `_run_update_locked`, so every OTA pushes it regardless of the stamp.
+**Android-only payloads are gated on `Device.android_userspace`** (`em_platform`, pure and tested), which is False only for a device that has POSITIVELY reported `base_os: emos`. Old firmware, a device that has not registered, and any unrecognised value all keep today's behaviour — the two ways of being wrong are not equal. `_post_debloat` refuses server-side rather than relying on the greyed-out control, since it is a plain POST with a session token; the endpoint and the dashboard read the same derived `androidUserspace` so they cannot disagree. **All THREE call sites must check, and for a while only two did.** `reconcile_on_connect` gates on `android_userspace` and `_post_debloat` refuses `not_android`, but the OTA path in `_run_update_locked` called `_sync_debloat` unconditionally until #480. Found in the field 2026-09-07 on EFF's first OTA after it moved to emOS: the transfer targeted `/sbin/.core/img/.core/service.d/` on a device with no Magisk daemon to have created it. It cost only a wasted shell round trip because the destination-directory probe above caught it — **the probe is the backstop, not the gate**, and without it this is the 240s stall measured on the same device on 2026-09-04. `tests/test_deploy.py` now asserts per call site rather than by counting, so a fourth has to answer too.
+
+Worth noting HOW it was missed, because this exact line was already documented as special: the reconcile debounce does NOT cover it either — `_sync_debloat` is called directly inside `_run_update_locked`, so every OTA pushes it regardless of the stamp. Somebody reasoned about one guard this call site bypasses and stopped there. **A call site documented as an exception to one rule is worth checking against every rule its siblings follow.**
+
+`_sync_start_script` beside it is deliberately NOT gated: emOS runs that same script — its init supervises `/system/bin/sh /data/local/bin/start_server.sh` (`emos/init/init.c`) because the script owns the A/B slot symlink and the fast-exit backoff, which both bases need. Gating it by symmetry would strand every emOS device on whatever script it was provisioned with.
 
 **md5 decides whether a transfer succeeded, not the shell's exit status.**
 `TRANSFER_OK` only ever proved that the base64 decode pipeline and `chmod`

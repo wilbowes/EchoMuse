@@ -173,24 +173,37 @@ process.
 - **Q2 — where does the output chain belong?** EQ, limiter and bass guard all
   run controller-side today, on the voice plane, before the audio reaches the
   wire (#243). Music does not go through them at all.
-- **Q4 — the alarm and an announcement both write `0x02`, and only one of
-  them asks first (#373).** `_ring_timer_alarm` waits on `speaker_busy`
-  before every burst, for the stated reason that two writers would interleave
-  frames; `_standalone_play` performs no such check and streams into a chime
-  already in flight. Measured 2026-08-28: an announcement landing between
-  bursts plays, one landing during a burst is inaudible. Both paths also
-  share a single `playback_done` Event, so one device report satisfies two
-  waiters — observed as two `Playback complete` lines in the same
-  millisecond, and an announcement whose wait ended after a chime's duration
-  rather than its own.
-  **The exclusion is one-directional, which is the bug**; whether the silence
-  itself is EOS ordering on the device (§3, `stream_speaker`) is unconfirmed.
-  Blocking announcements outright while ringing is NOT the answer — HA blocks
-  on the announce call holding `_is_announcing`, so a 120s `MAX_RING_S` would
-  fail every other announcement to that satellite meanwhile. The longer-term
-  answer is likely the alarm moving to the music plane, where the device's
-  own mixer ducks it for free; that needs `audio_mix` gating, since a device
-  without it never plays `0x04` and the alarm would be silent.
+- **Q4 — DECIDED 2026-09-07: the alarm never waits, the announcement does
+  (#373).** Both write `0x02` today and only `_ring_timer_alarm` asks first,
+  which is backwards: a timer must go off exactly when it ends, so the writer
+  whose timing is the whole point is the one currently deferring. Measured
+  2026-08-28: an announcement landing between chime bursts plays, one landing
+  during a burst is inaudible.
+
+  The rule is **silence the music in favour of the alarm, duck the alarm in
+  favour of the response**. That resolves the three-way case — music playing,
+  turn active, timer fires — without new firmware: `Mixer.Mix(voice, music,
+  target)` takes exactly two inputs and attenuates only the music side, so the
+  alarm rides the music plane, music is suspended while it rings, and the
+  device's existing duck does the rest. Gated on `audio_mix`, since firmware
+  without it never plays `0x04` and a silent timer is the worst available
+  failure; those devices keep `0x02` with the alarm taking the plane.
+
+  The announcement waits for a response to finish and queues behind other
+  announcements, with a cap. Blocking it for the whole ring is still wrong —
+  HA holds `_is_announcing` and 120s of `MAX_RING_S` would fail every other
+  announcement — but that is the UNBOUNDED wait. Waiting for the burst in
+  flight is under two seconds, and reading the warning as forbidding both is
+  why this sat open.
+
+  Open: the alarm's duck depth wants its own value rather than `duckDb`, which
+  was tuned for a music bed under speech; and music resumption after dismissal
+  rejoins the live edge on a non-seekable stream, so a 30s alarm costs 30s of
+  the track.
+
+  **The shared `playback_done` Event is fixed** (#481): it is now a FIFO queue
+  of per-playback waiters, so one device report no longer satisfies two.
+
 - **Q3 — what owns the speaker when the jack is occupied?** A plug in the jack
   degrades the whole audio subsystem (#117/#141) and, with a music session
   live, can silence everything including voice. That is a hardware/HAL fault
