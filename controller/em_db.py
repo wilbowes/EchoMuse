@@ -287,6 +287,26 @@ DEFAULT_DEVICE_CONFIG = {
     # emOS only. FireOS has adbd, which honours ro.adb.secure and is already
     # better than this.
     "consolePassword":  "",
+    # consoleTimeoutMin: log the emOS USB serial console out when idle.
+    #
+    # 0 means no timeout, otherwise 1-90 minutes. Zero is a CHOICE rather than
+    # an absence — a device whose owner deliberately turned this off must not
+    # be moved by a later change of default — so it is pushed as a pointer and
+    # never elided.
+    #
+    # Minutes because that is the unit it is chosen in. The device stores
+    # minutes and emOS's init multiplies to seconds for the shell's TMOUT at
+    # the one point of use, so the stored value, the pushed value and the
+    # number on screen never disagree by a factor of sixty.
+    #
+    # It exists because console_gate() runs ONCE, when init spawns the shell.
+    # A session authenticated before a config change keeps its old behaviour
+    # for as long as it stays open, which on EFF was days: setting a password
+    # appeared to do nothing until something ended the session. The timeout is
+    # what ends it.
+    #
+    # emOS only, like the password beside it.
+    "consoleTimeoutMin": 0,
 }
 
 # Maximum log rows retained per device. Older rows are pruned on insert.

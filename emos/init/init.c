@@ -2014,6 +2014,55 @@ static int pw_load(long *iters, unsigned char *salt, int *saltlen,
  * its own output back into its input is the trap that cost an evening here
  * once already (see README).
  */
+/* Where the firmware writes the console idle timeout, in MINUTES. Beside the
+ * password record and for the same reason: the firmware writes it and init
+ * reads it, because the console has to work when EchoMuse is not running. */
+#define CONSOLE_TMOUT "/data/local/etc/echomuse/console.timeout"
+
+/* Console idle timeout in SECONDS for the shell's TMOUT, or 0 for none.
+ *
+ * Stored in minutes because that is the unit it is chosen in (0, then 1-90);
+ * multiplied here, at the one point of use, so the stored value and the
+ * number on screen never disagree by a factor of sixty.
+ *
+ * Anything unparseable, negative or over the ceiling reads as NO timeout. Same
+ * rule as the password record: refusing to behave on a corrupt string would
+ * strand the owner, and the failure has to fall toward the console still
+ * working. A too-SHORT timeout from a truncated read is the dangerous
+ * direction — it presents as the device dropping the link — so a partial
+ * number is rejected rather than used.
+ */
+static long console_timeout_secs(void)
+{
+    int fd = open(CONSOLE_TMOUT, O_RDONLY);
+    if (fd < 0)
+        return 0;
+    char b[32];
+    int n = (int)read(fd, b, sizeof b - 1);
+    close(fd);
+    if (n <= 0)
+        return 0;
+    b[n] = 0;
+
+    long v = 0;
+    int digits = 0;
+    for (int i = 0; i < n; i++) {
+        if (b[i] >= '0' && b[i] <= '9') {
+            v = v * 10 + (b[i] - '0');
+            digits++;
+            if (v > 90)          /* over the ceiling; stop before overflowing */
+                return 0;
+        } else if (b[i] == '\n' || b[i] == '\r' || b[i] == ' ' || b[i] == '\t') {
+            break;               /* trailing whitespace ends the number */
+        } else {
+            return 0;            /* anything else means the record is not a number */
+        }
+    }
+    if (!digits || v <= 0)
+        return 0;
+    return v * 60;
+}
+
 static void console_gate(void)
 {
     long iters;
@@ -2208,8 +2257,32 @@ static pid_t start_console(void)
         console_gate();
         console_banner();
         char *argv[] = { "/system/bin/sh", NULL };
+        /* TMOUT is mksh's own idle timeout and costs no code here: an
+         * interactive shell idle at its PROMPT for that long exits, init
+         * respawns the console, and console_gate() above runs again. Timeout
+         * and password gate are the same mechanism seen twice.
+         *
+         * Idle at the prompt, not wall clock — a long foreground command is
+         * not killed under someone watching it, which matters because
+         * `logread -f` on a device being debugged is exactly the session that
+         * must not be dropped.
+         *
+         * The slot is left out of the array entirely when there is no
+         * timeout, rather than set to 0: mksh treats TMOUT=0 as no timeout
+         * too, but an absent variable cannot be misread by anything else
+         * inheriting this environment. */
+        /* Sized for the widest long, not for the 90-minute ceiling: the
+         * bound is enforced by console_timeout_secs and a buffer that
+         * depends on a check in another function is one refactor from
+         * truncating. */
+        char tmout[32];
         char *envp[] = { "HOME=/", "TERM=vt100", "ANDROID_ROOT=/system",
-                         "PATH=/sbin:/system/bin:/system/xbin", NULL };
+                         "PATH=/sbin:/system/bin:/system/xbin", NULL, NULL };
+        long tsec = console_timeout_secs();
+        if (tsec > 0) {
+            snprintf(tmout, sizeof tmout, "TMOUT=%ld", tsec);
+            envp[4] = tmout;
+        }
         execve("/system/bin/sh", argv, envp);
         _exit(127);
     }

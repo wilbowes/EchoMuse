@@ -61,7 +61,7 @@ SECTIONS: dict[str, dict] = {
             # Fleet-level in practice: a per-device console password would be a
             # management problem with no upside. It sits in a section like
             # every other key because the partition has to stay total.
-            "consolePassword",
+            "consolePassword", "consoleTimeoutMin",
         ],
     },
     "bluetooth": {

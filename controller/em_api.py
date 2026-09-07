@@ -1258,6 +1258,11 @@ async def _post_device_config(request: web.Request) -> web.Response:
             409,
         )
 
+    # Validated BEFORE anything is written: a refusal must leave the stored
+    # config untouched, not half-applied with the bad key rejected later.
+    if (err := _validate_console_timeout(body)):
+        return _error("bad_console_timeout", err, 400)
+
     # Apply scoping first: set_device_config_sections prunes the values of
     # any section no longer overridden, so what follows writes into an
     # already-clean picture.
@@ -3427,6 +3432,36 @@ def _resolve_console_pw(incoming: dict, stored: dict) -> None:
     )
 
 
+# The console idle timeout, in minutes: 0 for none, otherwise 1-90.
+_CONSOLE_TMOUT_KEY = "consoleTimeoutMin"
+_CONSOLE_TMOUT_MAX = 90
+
+
+def _validate_console_timeout(config: dict) -> str | None:
+    """
+    Return an error message when the timeout is out of range, else None.
+
+    REFUSED rather than clamped, deliberately. A value of 600 is somebody who
+    meant seconds, and silently giving them ten minutes is a console that logs
+    them out all day from a setting that looked accepted. The device refuses
+    it too — the controller validating first means a bad value reaching the
+    firmware is a bug rather than a user, but neither end assumes the other is
+    the careful one.
+
+    Absence is fine: it means the body did not mention the key.
+    """
+    if _CONSOLE_TMOUT_KEY not in config:
+        return None
+    v = config[_CONSOLE_TMOUT_KEY]
+    if isinstance(v, bool) or not isinstance(v, int):
+        return (f"{_CONSOLE_TMOUT_KEY} must be a whole number of minutes, "
+                f"got {v!r}")
+    if v < 0 or v > _CONSOLE_TMOUT_MAX:
+        return (f"{_CONSOLE_TMOUT_KEY} must be 0 (no timeout) or 1-"
+                f"{_CONSOLE_TMOUT_MAX} minutes, got {v}")
+    return None
+
+
 def _dropped_keys(incoming: dict, stored: dict) -> list[str]:
     """
     Keys present in the stored config that the incoming body would delete.
@@ -3469,6 +3504,8 @@ async def _post_global_config(request: web.Request) -> web.Response:
     # newly-added default must not look like a key this body is deleting.
     stored = await loop.run_in_executor(None, db.get_global_device_config_raw)
     _resolve_console_pw(config, stored)
+    if (err := _validate_console_timeout(config)):
+        return _error("bad_console_timeout", err, 400)
     dropped = _dropped_keys(config, stored)
     if dropped and not explicit_replace:
         return _error(

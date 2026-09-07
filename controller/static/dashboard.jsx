@@ -6709,7 +6709,7 @@ const CONFIG_SECTIONS = {
   "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice"],
   "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "aecRefSource", "nsAsr", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
-  "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs", "consolePassword"],
+  "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs", "consolePassword", "consoleTimeoutMin"],
   "bluetooth": ["bleProxyEnabled"]
 };
 
@@ -7373,6 +7373,18 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
               : 'every device in this fleet runs FireOS, which uses adb for USB access — this setting would do nothing'}
             isSet={config.consolePassword === '__unchanged__'}
             onChange={v => set('consolePassword', v)}/>
+          {/* The gate runs when init SPAWNS the console, not per keystroke, so
+              a session authenticated before a change keeps its old behaviour
+              until something ends it. That is what this ends. */}
+          <Slider
+            label="Console idle timeout"
+            sub={emosFleet
+              ? 'logs the USB console out after this long with no typing. 0 = never. A long command is not interrupted — only an idle prompt.'
+              : 'every device in this fleet runs FireOS, which uses adb for USB access — this setting would do nothing'}
+            value={config.consoleTimeoutMin ?? 0}
+            min={0} max={90} step={5} unit="min"
+            disabled={!emosFleet}
+            onChange={v => set('consoleTimeoutMin', v)}/>
         </div>
         {subHeader('Turn processing')}
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px', ...inputStyle }}>

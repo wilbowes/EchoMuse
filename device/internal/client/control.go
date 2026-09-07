@@ -515,6 +515,21 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 							map[bool]string{true: "set", false: "cleared"}[*msg.ConsolePassword != ""])
 					}
 				}
+				// Same shape and the same reasons: a pointer so zero can
+				// mean "no timeout" rather than "not mentioned", written to
+				// disk for init, never acted on here.
+				if msg.ConsoleTimeoutMin != nil {
+					changed, err := config.WriteConsoleTimeout(*msg.ConsoleTimeoutMin)
+					if err != nil {
+						log.Printf("[control] Console timeout: %v", err)
+					} else if changed {
+						if *msg.ConsoleTimeoutMin == 0 {
+							log.Printf("[control] Console timeout cleared")
+						} else {
+							log.Printf("[control] Console timeout %dm", *msg.ConsoleTimeoutMin)
+						}
+					}
+				}
 				snap := cfg.Snapshot() // read back under the config lock
 				log.Printf("[control] Config applied: vad_threshold=%.4f oww_threshold=%.2f",
 					snap.VadThreshold, snap.OwwThreshold)

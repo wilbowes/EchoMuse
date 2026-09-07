@@ -498,6 +498,16 @@ jobs:
         run: |
           cc -O2 -Wall -o /tmp/ringsim emos/init/ringsim.c -lm
           /tmp/ringsim --check
+      # The console idle timeout is parsed by hand in C from a file the
+      # FIRMWARE writes and INIT reads, in different languages in different
+      # trees. Every way it can be wrong is silent on hardware: a shorter
+      # timeout than was set presents as the device dropping the link, and
+      # accepting a corrupt record logs somebody out of the console they
+      # reached for because everything else had already failed.
+      - name: The console timeout parser reads what the firmware writes
+        run: |
+          cc -O2 -o /tmp/tmoutcheck emos/init/tmoutcheck.c
+          /tmp/tmoutcheck
       # The C hashes a password by hand — init is a static binary with no
       # crypto library — and the controller hashes it in Python. Nothing but
       # equal output proves they agree, and the failure mode is a device
