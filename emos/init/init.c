@@ -2017,7 +2017,12 @@ static int pw_load(long *iters, unsigned char *salt, int *saltlen,
 /* Where the firmware writes the console idle timeout, in MINUTES. Beside the
  * password record and for the same reason: the firmware writes it and init
  * reads it, because the console has to work when EchoMuse is not running. */
+/* Overridable like LEDDIR, so the off-target check can point it at a path it
+ * is allowed to write. The CI runner is not root and /data does not exist
+ * there, which the first version of tmoutcheck.c discovered the hard way. */
+#ifndef CONSOLE_TMOUT
 #define CONSOLE_TMOUT "/data/local/etc/echomuse/console.timeout"
+#endif
 
 /* Console idle timeout in SECONDS for the shell's TMOUT, or 0 for none.
  *

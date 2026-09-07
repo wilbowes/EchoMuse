@@ -22,7 +22,10 @@
 #include <string.h>
 #include <unistd.h>
 
-#define LEDDIR "/tmp/emos-tmoutcheck"
+#define LEDDIR        "/tmp/emos-tmoutcheck"
+/* The record lives under /data on a device. Redirected here so the check
+ * runs anywhere — as a non-root CI runner on a machine with no /data. */
+#define CONSOLE_TMOUT "/tmp/emos-tmoutcheck.timeout"
 #define main   init_main_unused
 
 #include "init.c"
@@ -38,20 +41,6 @@ static void check(const char *label, const char *body, long want)
 {
     unlink(CONSOLE_TMOUT);
     if (body) {
-        /* mkdir -p of the record's directory, so this runs anywhere. */
-        char dir[256];
-        snprintf(dir, sizeof dir, "%s", CONSOLE_TMOUT);
-        char *slash = strrchr(dir, '/');
-        if (slash) {
-            *slash = 0;
-            char cmd[512];
-            snprintf(cmd, sizeof cmd, "mkdir -p '%s'", dir);
-            if (system(cmd) != 0) {
-                printf("FAIL  %s: could not create %s\n", label, dir);
-                failures++;
-                return;
-            }
-        }
         FILE *f = fopen(CONSOLE_TMOUT, "w");
         if (!f) {
             printf("FAIL  %s: could not write the record\n", label);
