@@ -725,7 +725,9 @@ is not proof it rebooted — compare uptime or a build fingerprint.
 
   Three paths exist and none of them is in the wizard:
 
-  - **Return to stock, by hand.** Boot into TWRP with the button combo, wipe
+  - **Return to stock, by hand.** Boot into TWRP — unplug the power, hold
+    **mute** down, and apply power with it still held, until the ring shows an
+    alternating cyan pattern — then wipe
     cache, wipe data, sideload the FireOS 5 image, **and then flash
     `f1r30s.zip`**. That last step is not optional: a stock flash restores
     dm-verity against a partition table the unlock modified, so **the OS will

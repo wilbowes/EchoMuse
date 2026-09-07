@@ -6326,9 +6326,36 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
 
             {/* emOS steps 7 and 8: reboot into emOS and configure WiFi over
                 the console. */}
+            {/* The first boot is the one moment the operator has to watch,
+                and the only one where the wrong reaction makes things worse.
+                Told BEFORE the reboot rather than after it goes wrong: this
+                asks somebody to act on their own hardware, so it keeps its
+                length. The ring states are the ones in emos/README.md — the
+                orbiting segment is the case that needs a human, because it
+                means PID 1 never ran and nothing on the device will recover
+                itself. */}
             {isEmos && step === 7 && stepState[7] !== 'done' && !running && (
-              <div style={{ marginBottom: 12 }}>
-                <Pill accent onClick={() => runStep(7)}>Reboot and Connect Console</Pill>
+              <div className="em-panel" style={{ marginBottom: 12, borderColor: 'var(--warn)' }}>
+                <div className="em-label" style={{ marginBottom: 6 }}>Watch the light ring on this boot</div>
+                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)', lineHeight: 1.7 }}>
+                  <div><strong style={{ color: 'var(--ok)' }}>Filling, then white, then fading</strong> — up and on the network. Done, about 30 seconds.</div>
+                  <div><strong>Two lit segments at the top, throbbing</strong> — waiting for the network. Normal, and most of the boot.</div>
+                  <div><strong style={{ color: 'var(--warn)' }}>Solid amber</strong> — the device is restoring its own last good image. Leave it alone; it reboots itself.</div>
+                  <div><strong style={{ color: 'var(--warn)' }}>Red and stopped</strong> — a boot stage failed. Recoverable, see below.</div>
+                  <div><strong style={{ color: 'var(--error)' }}>A single segment orbiting a full blue ring, for more than a minute</strong> — emOS never started. This is the one that needs you.</div>
+                </div>
+                <p style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)', lineHeight: 1.7, margin: '10px 0 0' }}>
+                  <strong>If it does not come up, do not keep power cycling it.</strong> To reach
+                  TWRP: unplug the power, hold the <strong>mute</strong> button down, and apply
+                  power with it still held — the ring shows an <strong>alternating cyan
+                  pattern</strong> once you are in recovery. Reconnect here and use
+                  <strong> Restore escrowed boot image</strong> below: about ten seconds, and it
+                  leaves everything on /data alone. Repeatedly power cycling a device that will
+                  not boot is what turns a recoverable one into a case-opening job.
+                </p>
+                <div style={{ marginTop: 12 }}>
+                  <Pill accent onClick={() => runStep(7)}>Reboot and Connect Console</Pill>
+                </div>
               </div>
             )}
             {isEmos && step === 8 && stepState[8] !== 'done' && !running && (

@@ -222,9 +222,57 @@ path today, pick FireOS on the wizard's first step.
 
 ## Recovery
 
-If one of the wizard's steps fails, the device should still boot to TWRP —
-reboot to recovery and re-flash the affected component. If it will not reach
-TWRP at all, that is the unlock's territory and R0rt1z2's thread covers
+**The rule that matters: if a device will not boot, do not keep power cycling
+it.** Repeatedly power cycling one that will not come up is what turns a
+device recoverable from a cable into one that needs the case opened and a pin
+shorted. Go to TWRP instead — it is one button combo away and it costs about
+ten seconds to put the old boot image back.
+
+**Reaching TWRP on a device that will not boot:**
+
+1. Unplug the power.
+2. Hold the **mute** button down, and keep holding it.
+3. Apply power with the button still held.
+4. Wait for the ring to show an **alternating cyan pattern** — that is the
+   confirmation you are in recovery, and you can let go once you see it.
+
+`adb reboot recovery` is the easy route and it needs a device that is already
+up, which is exactly what you do not have here.
+
+### If a wizard step failed
+
+The device is still in TWRP and the wizard says so. Reconnect and use
+**Restore escrowed boot image** — it writes back the image read off your own
+device at the escrow step, verifies it against the partition, and leaves
+`/data` untouched. If you have reloaded the page since, choose the
+`echomuse-stock-boot-*.img` file you downloaded at that step; it is the same
+bytes.
+
+### If the first boot after flashing emOS does not come up
+
+The light ring says which case you are in:
+
+| Ring | What it means | What to do |
+|---|---|---|
+| Filling, then white, then fading | Up and on the network | Nothing — done, about 30 seconds |
+| Two lit segments at the top, throbbing | Waiting for the network | Nothing — this is most of the boot |
+| Solid amber | emOS is restoring its own last known-good image | **Leave it.** It reboots itself |
+| Red, stopped | A boot stage failed | Recoverable — go to TWRP and restore |
+| One segment orbiting a full blue ring, for more than a minute | emOS never started | Go to TWRP and restore |
+
+The last row is the only one that needs you. It means the kernel came up and
+our init never ran, so nothing on the device is going to fix itself — the
+orbit is the kernel's own boot animation, still running because userspace
+never claimed the ring.
+
+The amber row is worth knowing about precisely so you *do not* intervene:
+emOS counts boots that never reached the network and, after three, puts its
+own known-good image back and reboots. Interrupting that is the one way to
+make it worse.
+
+### If it will not reach TWRP either
+
+That is the unlock's territory rather than ours, and R0rt1z2's thread covers
 recovery and unbricking.
 
 ## Credits
