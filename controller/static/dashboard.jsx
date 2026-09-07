@@ -3108,15 +3108,22 @@ class _EmosConsole {
 
 // Which flow the wizard runs.
 //
-// emOS is what a new device gets; the FireOS path stays reachable at
-// `?flow=fireos` and is not advertised in the UI. It is kept rather than
-// deleted because emOS is proven on one device, and a path that has
-// provisioned every device in the field is not something to remove on that
-// evidence — but offering the choice would ask the user to make a decision
-// they have no basis for.
+// emOS is the default and FireOS is offered beside it, on the wizard's first
+// step only (Wil's call, 2026-09-07). The earlier version hid FireOS behind
+// `?flow=fireos` on the grounds that offering a choice would ask the user to
+// decide something they had no basis for. The answer to that is to GIVE them
+// the basis rather than to withhold the choice, so both options carry the
+// thing that actually separates them.
 //
-// Read from the query string ONCE, not from state: changing flow mid-run
-// would renumber the steps under a wizard that has already done some of them.
+// Why emOS is the default rather than the safer-sounding incumbent: on FireOS
+// we share the audio path with Amazon's stack permanently and cannot stop —
+// evicting the HAL crash-loops `system_server` and takes WiFi with it — which
+// is why the jack faults there are worked around on a 30s reconciler rather
+// than fixed. emOS has neither the HAL nor the faults. What it does have is
+// far less field evidence, and a way back that costs the user their `/data`.
+//
+// `?flow=fireos` still works and still wins, so a support answer can put
+// somebody on a known path without talking them through a control.
 function _wizardFlow() {
   try {
     const want = new URLSearchParams(window.location.search).get('flow');
@@ -3126,7 +3133,11 @@ function _wizardFlow() {
 }
 
 function ProvisionWizard({ token, onClose, knownDevices }) {
-  const flow = useRef(_wizardFlow()).current;
+  // State rather than a ref, but frozen the moment anything has run — see
+  // `flowLocked` below. The two flows have different step COUNTS, so switching
+  // one mid-run would renumber the steps under a wizard that has already done
+  // some of them, which is what the ref was protecting against.
+  const [flow, setFlow] = useState(_wizardFlow);
   const isEmos = flow === 'emos';
   const STEPS = isEmos ? _EMOS_STEPS : _WIZARD_STEPS;
   const STEP_MODE = isEmos ? _EMOS_STEP_MODE : _STEP_MODE;
@@ -3194,6 +3205,23 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     setTimeout(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, 30);
   }
   function markStep(i, st) { setStepState(s => { const n = [...s]; n[i] = st; return n; }); }
+
+  // The flow can only be chosen while the wizard has done nothing: on step 0,
+  // not running, with no step yet in any state but pending, and no device
+  // attached. Anything else and the choice is locked — switching would
+  // renumber the steps under work already done.
+  const flowLocked = running || step !== 0 || !!adb
+                  || stepState.some(s => s !== 'pending');
+
+  function chooseFlow(next) {
+    if (next === flow || flowLocked) return;
+    // Step count differs between the flows, so the per-step state has to be
+    // rebuilt rather than carried across.
+    setFlow(next);
+    setStepState((next === 'emos' ? _EMOS_STEPS : _WIZARD_STEPS).map(() => 'pending'));
+    setStep(0);
+    setLog([]);
+  }
 
   // Abandon whatever step is in flight.
   //
@@ -6054,6 +6082,41 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
               </div>
               <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)', lineHeight: 1.6 }}>{cur.desc}</div>
             </div>
+
+            {/* Which OS to install. Step 0 only, and gone once anything has
+                run — see flowLocked. Both options state the thing that
+                actually decides it, because a choice offered without one is
+                the objection this control was held back for. Above "Up next",
+                which previews the flow being chosen. */}
+            {step === 0 && !flowLocked && (
+              <div style={{ marginBottom: 12 }}>
+                <div className="em-label" style={{ marginBottom: 6 }}>What to install</div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  {[
+                    { id: 'emos', name: 'emOS',
+                      sub: 'No Amazon software. The 3.5mm jack works.',
+                      warn: 'Newer, and going back to FireOS wipes the device.' },
+                    { id: 'fireos', name: 'FireOS + root',
+                      sub: 'Keeps Android. Every device in the field runs this.',
+                      warn: 'The 3.5mm jack is unreliable on this path.' },
+                  ].map(o => (
+                    <div key={o.id} onClick={() => chooseFlow(o.id)}
+                      style={{
+                        flex: 1, cursor: 'pointer', padding: '9px 11px', borderRadius: 8,
+                        border: `1px solid ${flow === o.id ? 'var(--accent)' : 'var(--border-soft)'}`,
+                        background: flow === o.id ? 'var(--hairline)' : 'transparent',
+                      }}>
+                      <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 12, fontWeight: 600,
+                                    color: flow === o.id ? 'var(--text)' : 'var(--text2)' }}>
+                        {o.name}{o.id === 'emos' && <span style={{ fontWeight: 400, color: 'var(--muted)' }}> · default</span>}
+                      </div>
+                      <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--text2)', marginTop: 3, lineHeight: 1.5 }}>{o.sub}</div>
+                      <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--warn)', marginTop: 2, lineHeight: 1.5 }}>{o.warn}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {upcoming.length > 0 && !isDone && (
               <div className="em-wizard-upcoming">
