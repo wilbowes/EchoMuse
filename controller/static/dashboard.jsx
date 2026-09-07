@@ -21,6 +21,39 @@ function isIngress() {
   return document.baseURI.includes('/hassio_ingress/');
 }
 
+// Why WebUSB is unavailable, or null when it is fine.
+//
+// WebUSB needs a secure context and no amount of code changes that, so this
+// exists only to say so BEFORE somebody unboxes a device — it used to surface
+// at the first click of Connect, with a cable already in their hand.
+//
+// One copy, read by both the wizard's pre-flight panel and requestDevice's
+// throw. A second copy would drift, and this is text somebody acts on.
+//
+// The origin is named because Chrome's allowlist matches scheme, host and port
+// exactly, and the add-on's page is served from HOME ASSISTANT's origin rather
+// than the controller's — so an entry added for the standalone dashboard does
+// nothing here and gives no clue why (#169).
+function webUsbBlocked() {
+  if (navigator.usb) return null;
+  const origin = window.location.origin;
+  return {
+    origin,
+    why: `WebUSB needs a secure context, and this page is on ${origin}.`,
+    // Under the add-on there is no localhost route to offer:
+    // _ingress_only_middleware rejects anything that is not the Supervisor
+    // gateway, so suggesting a direct port would send the user to a 403.
+    fix: isIngress()
+      ? `Serve Home Assistant over HTTPS, or add exactly ${origin} to `
+        + `chrome://flags/#unsafely-treat-insecure-origin-as-secure and relaunch `
+        + `the browser. An allowlist entry for the controller's own address does `
+        + `not cover this one.`
+      : `Open the dashboard at http://localhost:8768, or add exactly ${origin} to `
+        + `chrome://flags/#unsafely-treat-insecure-origin-as-secure and relaunch `
+        + `the browser.`,
+  };
+}
+
 function ingressWebSocketUrl(path) {
   const url = new URL(ingressPath(path), document.baseURI);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -2531,30 +2564,8 @@ const _ADB = (() => {
     // Open the browser USB picker, load the library, authenticate, return a
     // ready Client.  logFn is optional — wizard passes addLog.
     static async requestDevice(logFn = () => {}) {
-      if (!navigator.usb) {
-        // Name the origin. Chrome's insecure-origin allowlist is per-origin
-        // and matches on scheme, host and port exactly, so someone who has
-        // already allowlisted the standalone dashboard gets no benefit here
-        // and has no way to tell why — the add-on's page is served from
-        // Home Assistant's origin, not the controller's.
-        const origin = window.location.origin;
-        throw new Error(
-          `WebUSB not available — requires a secure context (HTTPS or localhost). ` +
-          `This page is on ${origin}. ` +
-          (isIngress()
-            // Under the add-on there is no localhost route to offer:
-            // _ingress_only_middleware rejects anything that is not the
-            // Supervisor gateway, so suggesting a direct port would send
-            // the user to a 403.
-            ? `Serve Home Assistant over HTTPS, or add exactly ${origin} to ` +
-              `chrome://flags/#unsafely-treat-insecure-origin-as-secure and ` +
-              `relaunch the browser. An allowlist entry for the controller's ` +
-              `own address does not cover this one.`
-            : `Open the dashboard at http://localhost:8768, or add exactly ` +
-              `${origin} to chrome://flags/#unsafely-treat-insecure-origin-as-secure ` +
-              `and relaunch the browser.`)
-        );
-      }
+      const blocked = webUsbBlocked();
+      if (blocked) throw new Error(`${blocked.why} ${blocked.fix}`);
 
       const { manager, Transport, Adb, defaultAuths } = await _load(logFn);
 
@@ -5992,6 +6003,9 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   const progressPct = Math.min(100, ((doneCount + (running ? 0.35 : 0)) / STEPS.length) * 100);
   const upcoming = STEPS.slice(step + 1, step + 3);
   const stepFailed = !running && stepState[step] === 'error';
+  // Evaluated per render rather than held in state: a browser relaunched with
+  // the flag set is a new page load, so there is nothing to invalidate.
+  const usbBlocked = webUsbBlocked();
   const statusColors = { pending: 'var(--muted)', running: 'var(--accent)', done: 'var(--ok)', error: 'var(--warn)' };
   const statusIcons  = { pending: '○', running: '◌', done: '●', error: '✕' };
 
@@ -6083,6 +6097,24 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
               <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)', lineHeight: 1.6 }}>{cur.desc}</div>
             </div>
 
+            {/* WebUSB pre-flight. Shown on step 0 rather than at the first
+                click, because the point is to be read before a device is
+                unboxed — the throw in requestDevice says the same thing to
+                somebody already holding a cable. Both fixes are named; there
+                is no third one, and nothing here can be worked around in
+                code. */}
+            {step === 0 && usbBlocked && (
+              <div className="em-panel" style={{ marginBottom: 12, borderColor: 'var(--warn)' }}>
+                <div className="em-label" style={{ marginBottom: 6 }}>USB is unavailable in this browser</div>
+                <p style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)', lineHeight: 1.6, margin: '0 0 6px' }}>
+                  {usbBlocked.why}
+                </p>
+                <p style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)', lineHeight: 1.6, margin: 0 }}>
+                  {usbBlocked.fix}
+                </p>
+              </div>
+            )}
+
             {/* Which OS to install. Step 0 only, and gone once anything has
                 run — see flowLocked. Both options state the thing that
                 actually decides it, because a choice offered without one is
@@ -6146,7 +6178,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
             {/* Steps 0, 1, 6: connect / reconnect buttons */}
             {CONNECT.has(step) && stepState[step] === 'pending' && !running && (
               <div style={{ marginBottom: 10 }}>
-                <Pill onClick={() => runStep(step)}>
+                <Pill disabled={!!usbBlocked} onClick={() => runStep(step)}>
                   {step === 0 ? 'Connect Device' : step === 1 ? 'Connect to TWRP' : 'Reconnect Device'}
                 </Pill>
               </div>
