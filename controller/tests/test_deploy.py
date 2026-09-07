@@ -316,8 +316,17 @@ def test_streamed_playback_waits_for_the_device_not_a_computed_sleep():
     fn = src[src.index("async def _run_streaming_post_turn_playback"):]
     fn = fn[:fn.index("\nasync def ", 1)]
 
-    assert "playback_done" in fn, \
+    # Named on the API rather than on a variable: `playback_done` was a single
+    # Event on the Device and became a queue of per-playback waiters (#373), so
+    # the thing to assert is that this path registers one and waits on it, not
+    # what the old attribute was called.
+    assert "begin_playback()" in fn, \
+        "streamed playback must register a playback waiter"
+    assert "playback_ev.wait()" in fn, \
         "streamed playback must await the device's playback_stats"
+    assert "end_playback(" in fn, \
+        ("the waiter must be retired in a finally, or a cancelled playback "
+         "takes the next one's report and desynchronises every one after it")
     assert "asyncio.sleep(remaining)" not in fn, \
         "the computed drain estimate was removed on 2026-07-24 — do not restore it"
 

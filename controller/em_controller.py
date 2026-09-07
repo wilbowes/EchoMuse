@@ -635,11 +635,26 @@ class Device:
         # Set when the device reports playback_stats for the stream being
         # played. This is the authoritative "the audio has finished" signal
         # — the device emits it once its audio channel has drained after
-        # EOS, i.e. when the last period has gone to ALSA. Cleared at the
-        # start of every speaker stream; awaited by _run_post_turn_playback
-        # in place of the wall-clock estimate that used to clear the ring
-        # while the device was still playing (up to 6.1s early, 2026-07-24).
-        self.playback_done = asyncio.Event()
+        # EOS, i.e. when the last period has gone to ALSA. Awaited in place
+        # of the wall-clock estimate that used to clear the ring while the
+        # device was still playing (up to 6.1s early, 2026-07-24).
+        #
+        # A QUEUE of waiters, one per playback, rather than a single Event on
+        # the device. It was one Event with two waiters and one setter, so two
+        # concurrent playbacks both woke on whichever report arrived first —
+        # observed 2026-08-28 as two `Playback complete` lines in the same
+        # millisecond, and an announcement whose wait ended after a chime's
+        # duration rather than its own (#373).
+        #
+        # FIFO because the device plays one stream at a time and reports in
+        # the order it finishes them, so the oldest outstanding playback is
+        # the one a report belongs to.
+        #
+        # This also retires the `clear()` that every caller had to remember:
+        # a fresh Event per playback cannot carry a stale set from the
+        # previous one, so the hazard those calls guarded against is gone by
+        # construction rather than by discipline.
+        self._playback_waiters: collections.deque = collections.deque()
         # Outcome of the most recently persisted turn, set by em_esphome and
         # consumed once by the turn loop's ring cleanup (see _leds_turn_end).
         self.last_turn_outcome: str | None = None
@@ -682,6 +697,44 @@ class Device:
             or self.speaking
             or em_player.is_playing(self.device_id)
         )
+
+    # ── Playback completion ──────────────────────────────────────────
+    #
+    # One waiter per playback. See _playback_waiters for why this is a queue
+    # and not a single Event.
+
+    def begin_playback(self) -> asyncio.Event:
+        """Register a waiter for this playback and return it."""
+        ev = asyncio.Event()
+        self._playback_waiters.append(ev)
+        return ev
+
+    def end_playback(self, ev: asyncio.Event) -> None:
+        """
+        Retire a waiter, whether or not the device ever reported.
+
+        Must be called from a finally: a playback cancelled mid-stream (a
+        barge-in, a mute, a dropped device) never gets its report, and a
+        waiter left in the queue would take the NEXT playback's report and
+        desynchronise every one after it. Idempotent, because teardown paths
+        in this file are reached more than once by design.
+        """
+        try:
+            self._playback_waiters.remove(ev)
+        except ValueError:
+            pass
+
+    def signal_playback_done(self) -> None:
+        """
+        Resolve the oldest outstanding playback: the device has finished one.
+
+        A report with nothing waiting is dropped rather than remembered. That
+        matches the old single-Event behaviour for a stray report, and a
+        report cannot be "saved up" for a playback that has not started —
+        which is the stale-set hazard the old `clear()` calls existed for.
+        """
+        if self._playback_waiters:
+            self._playback_waiters.popleft().set()
 
     def record_rtt(self, rtt_ms: int, was_busy: bool) -> None:
         self.rtt_last_ms = rtt_ms
@@ -1634,8 +1687,8 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
             f"{em_eq.describe_activity(_limiter, _guard)}"
         )
         cancel_task    = asyncio.create_task(device.cancel_event.wait())
-        device.playback_done.clear()
-        done_task      = asyncio.create_task(device.playback_done.wait())
+        playback_ev    = device.begin_playback()
+        done_task      = asyncio.create_task(playback_ev.wait())
         stream_task    = asyncio.create_task(device.stream_speaker(speaker_pcm))
         t_stream_start = asyncio.get_event_loop().time()
         # Opens the delivery window measured against the device's
@@ -1706,6 +1759,11 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
         done_task.cancel()
     finally:
         device.speaker_busy -= 1
+        # Retire the waiter whether or not the device ever reported. A
+        # cancelled playback — barge-in, mute, a device that dropped — never
+        # gets its report, and a waiter left queued would take the NEXT
+        # playback's report and desynchronise every one after it.
+        device.end_playback(playback_ev)
 
         # The real end of audio, not the end of the socket write. The device
         # reports playback_stats once its audio channel drains after EOS, and
@@ -1989,12 +2047,13 @@ async def _run_streaming_post_turn_playback(device: Device, pcm_chunks) -> int:
         limiter=_limiter_for(device),
         guard=_guard_for(device),
     )
-    # Cleared BEFORE streaming starts: the device sets it when its audio
-    # channel drains after EOS, and a stale set from the previous response
-    # would end this turn the moment we started waiting.
-    device.playback_done.clear()
+    # Registered BEFORE streaming starts, so a report that arrives while we
+    # are still writing has a waiter to resolve. A fresh Event per playback
+    # cannot carry a stale set from the previous response, which is what the
+    # clear() this replaces was for.
+    playback_ev = device.begin_playback()
     cancel_task = asyncio.create_task(device.cancel_event.wait())
-    done_task   = asyncio.create_task(device.playback_done.wait())
+    done_task   = asyncio.create_task(playback_ev.wait())
     stream_task = asyncio.create_task(
         device.stream_speaker_chunks(pcm_chunks, stream_eq)
     )
@@ -2066,6 +2125,7 @@ async def _run_streaming_post_turn_playback(device: Device, pcm_chunks) -> int:
         # reports, not when the last byte reached the socket. In the finally so
         # a cancel or an error leaves the tile idle rather than stuck Speaking.
         await device._set_speaking(False)
+        device.end_playback(playback_ev)
         for t in (cancel_task, done_task):
             t.cancel()
         if not stream_task.done():
@@ -3881,7 +3941,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                         # Release _run_post_turn_playback: this report IS the
                         # end of audio, and the ring clears on it rather than
                         # on a wall-clock guess.
-                        device.playback_done.set()
+                        device.signal_playback_done()
                         # Delivery window: first speaker frame sent -> this
                         # report. The metric the 07-20 investigation lacked —
                         # "Streaming took Xs" times the socket write and reads
