@@ -45,13 +45,21 @@ function liftFunction(name) {
 
 // Both are lifted: webUsbBlocked calls isIngress, so stubbing isIngress here
 // would test a copy of the branch rather than the branch.
+//
+// The browser globals are declared at MODULE scope so the lifted functions
+// resolve them lexically, rather than being assigned onto globalThis. Node 21
+// added a real `navigator` global with only a getter, so assigning to it
+// throws — which passes on Node 20 and fails in CI. Shadowing needs no
+// permission from the runtime and cannot rot the same way.
 const code = [
+  "let navigator, window, document;",
+  "export function __setPage(n, w, d) { navigator = n; window = w; document = d; }",
   liftFunction("isIngress"),
   liftFunction("webUsbBlocked"),
   "export { webUsbBlocked };",
 ].join("\n");
 
-const { webUsbBlocked } = await import(
+const { webUsbBlocked, __setPage } = await import(
   "data:text/javascript;base64," + Buffer.from(code).toString("base64"));
 
 let failures = 0;
@@ -64,12 +72,8 @@ function check(label, cond, detail) {
 // The globals the two functions read. Set per-case rather than once, since the
 // whole point is that the answer differs by deployment.
 function withPage({ usb, origin, baseURI }, fn) {
-  globalThis.navigator = usb ? { usb: {} } : {};
-  globalThis.window = { location: { origin } };
-  globalThis.document = { baseURI };
-  try { return fn(); } finally {
-    delete globalThis.navigator; delete globalThis.window; delete globalThis.document;
-  }
+  __setPage(usb ? { usb: {} } : {}, { location: { origin } }, { baseURI });
+  try { return fn(); } finally { __setPage(undefined, undefined, undefined); }
 }
 
 const STANDALONE = { origin: "http://192.168.1.10:8768", baseURI: "http://192.168.1.10:8768/" };
