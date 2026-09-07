@@ -121,7 +121,8 @@ from a device already in that state; it does not run the exploit.
   boot partition and hands you the file, then replaces that partition with an
   image built from your own kernel and device trees plus our init. The result
   runs no Amazon userspace at all. See [`emos/README.md`](../emos/README.md).
-- **FireOS** — thirteen steps, reached at `?flow=fireos` on the dashboard URL.
+- **FireOS** — thirteen steps, chosen on the wizard's first step (or by
+  adding `?flow=fireos` to the dashboard URL).
   Keeps Android and adds root: the SELinux cmdline patch, Magisk, and the
   root-grant database. This is the path every device in the field took.
 
@@ -217,7 +218,7 @@ on a handful of devices. Its first full run against a device restored to
 genuine stock failed at four separate steps before it worked — all four were
 faults in the wizard's own checks rather than in the writes, and all four are
 fixed, but that is the maturity to price in. If you want the better-evidenced
-path today, use `?flow=fireos`.
+path today, pick FireOS on the wizard's first step.
 
 ## Recovery
 

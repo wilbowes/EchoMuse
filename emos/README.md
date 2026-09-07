@@ -71,8 +71,8 @@ what made a day of failed boots cheap rather than frightening.
 Or use the **provisioning wizard**, which does all three from TWRP and never
 boots Android: it escrows your boot partition (and hands you the file), sends
 it to the controller to be repacked, flashes it and reads it back to check.
-The wizard is the emOS path by default; `?flow=fireos` still runs the old
-thirteen-step FireOS install.
+The wizard defaults to emOS and offers FireOS beside it on the first step;
+`?flow=fireos` still selects the old thirteen-step FireOS install directly.
 
 ### Releasing emOS
 
