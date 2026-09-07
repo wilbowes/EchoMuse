@@ -41,6 +41,18 @@ it. The wizard now turns that check off during setup and clears the counter
 that had already built up, so a device provisioned onto a network it used under
 Alexa recovers too.
 
+**Custom wake word models now carry their own name and language.** A model
+trained in the wake word trainer is stamped with the phrase it was actually
+trained on, so Home Assistant shows that rather than a name guessed from the
+filename — which could only ever be one phrase, even for a model trained on
+several, and was always English. Models without that stamp, including every
+stock one, keep the existing behaviour. Thanks to **@be-student**.
+
+One thing to expect the first time you update: stamping changes each model's
+checksum, so every custom model is pushed to its devices once more. They are
+about 1.2MB and the push is verified, so it costs a few seconds and nothing
+else.
+
 **Fixed: repacking an emOS image added a second copy of its own boot
 parameters** each time, so an Echo updated in place three times would refuse to
 build a fourth image. **The emOS console now carries a banner** with the
