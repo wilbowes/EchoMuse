@@ -1,5 +1,52 @@
 # Changelog
 
+## 2.23.0-ea.14 (Early Access)
+
+**You can now choose which operating system the wizard installs.** The first
+step offers emOS or FireOS side by side, each with the one line that actually
+separates them, and emOS stays the default. FireOS keeps Android underneath and
+is what every device in the field runs; emOS removes Amazon's software
+entirely, which is also why the 3.5mm jack behaves properly on it. Setting
+`?flow=fireos` on the dashboard URL still works and still wins.
+
+**The wizard now says what to watch on an emOS device's first boot, before it
+reboots rather than after something goes wrong.** The light ring already told
+you which of five states you were in; that table was only in a file written for
+people building emOS. Four of the five need nothing from you — including solid
+amber, which means the Echo is restoring its own last known-good image and
+should be left alone. The fifth, a single segment orbiting a full blue ring,
+means emOS never started, and it is the only one that needs you.
+
+If that happens, **do not keep power cycling it** — that is what turns an Echo
+you can fix with a cable into one that needs the case opened. Unplug the power,
+hold the mute button, apply power still holding it, and wait for the
+alternating cyan ring; you are in TWRP, and restoring the boot image the wizard
+escrowed for you takes about ten seconds and leaves everything on the device
+alone. This is written out properly in the rooting guide now too.
+
+**If your browser cannot do USB, the wizard says so on the first step** rather
+than at the first click with an Echo already unboxed and plugged in. It names
+your exact address, which matters because the browser flag matches it exactly —
+an entry added for a different address silently does nothing.
+
+**The wizard is easier to follow.** A progress bar and numbered steps, a
+visible indicator while it is waiting on the Echo rather than a silent pause, a
+preview of what is coming next, and a failure panel that puts the action you
+want in front of you instead of a row of equal buttons. Thanks to
+**@Mr-Neutr0n** for this and for the WiFi fix below.
+
+**Fixed: WiFi stops reconnecting after a reboot on a network with no internet
+access.** Android counts the network as bad and eventually refuses to auto-join
+it. The wizard now turns that check off during setup and clears the counter
+that had already built up, so a device provisioned onto a network it used under
+Alexa recovers too.
+
+**Fixed: repacking an emOS image added a second copy of its own boot
+parameters** each time, so an Echo updated in place three times would refuse to
+build a fourth image. **The emOS console now carries a banner** with the
+device's name, address, controller and uptime, and its network log stays in
+memory rather than writing to the Echo's flash every five seconds.
+
 ## 2.23.0-ea.13 (Early Access)
 
 **The setup wizard now tells you when it has finished.** Setup flow only.
