@@ -6,6 +6,7 @@ forgotten (bitten by em_scenes.py 2026-07-10 and em_oww_models.py
 2026-07-19).
 """
 
+import ast
 import re
 from pathlib import Path
 
@@ -2557,3 +2558,73 @@ def test_the_emos_release_workflow_asserts_what_it_publishes():
     # so the only thing published is the init.
     assert "files: emos/build/init" in wf, \
         "only the init is published — an image would carry Amazon's kernel"
+
+
+def test_every_debloat_push_asks_which_userspace_the_device_booted():
+    """
+    The debloat payload is Android-only — a pm-hide list and a Magisk
+    service.d script — and emOS has neither a package manager nor Magisk.
+
+    `_sync_debloat` has THREE call sites and for a while only two of them
+    asked. `reconcile_on_connect` gates on `live.android_userspace` and
+    `_post_debloat` refuses with `not_android`, but the OTA path in
+    `_run_update_locked` called it unconditionally. Found on EFF, 2026-09-07,
+    at its first OTA after being moved to emOS: the transfer targeted
+    `/sbin/.core/img/.core/service.d/` on a device with no Magisk daemon to
+    have created it.
+
+    That cost only a wasted shell round trip, because the destination
+    directory probe caught it — but the probe is the backstop, not the gate.
+    Without it this is the 240s stall measured on the same device on
+    2026-09-04, where TRANSFER_OK never arrives and the transfer holds the
+    device's shell lock for its full timeout, twice.
+
+    Asserted per call site rather than by counting, so a fourth one has to
+    answer the question too.
+    """
+    # Parsed, not grepped, so _strip_prose is neither needed nor wanted: an
+    # AST contains no comments at all, and stripping them first breaks the
+    # parse on any line whose prose was load-bearing to the syntax.
+    tree = ast.parse((CONTROLLER / "em_api.py").read_text())
+
+    def gated(node) -> bool:
+        """True when `android_userspace` is tested anywhere above this call."""
+        for anc in ancestors.get(node, ()):
+            if isinstance(anc, ast.If) and "android_userspace" in ast.dump(anc.test):
+                return True
+        return False
+
+    ancestors: dict = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            ancestors[child] = (parent,) + ancestors.get(parent, ())
+
+    calls = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Name)
+        and n.func.id == "_sync_debloat"
+    ]
+    assert len(calls) >= 3, (
+        f"expected at least three _sync_debloat call sites, found {len(calls)} — "
+        "if one was removed, update this test rather than deleting it"
+    )
+
+    ungated = [n.lineno for n in calls if not gated(n)]
+    # _post_debloat guards by returning `not_android` BEFORE reaching the call,
+    # so its call site has no enclosing `if` and is exempt by name.
+    enclosing = {
+        n.lineno: next(
+            (a.name for a in ancestors.get(n, ())
+             if isinstance(a, (ast.AsyncFunctionDef, ast.FunctionDef))),
+            "?",
+        )
+        for n in calls
+    }
+    ungated = [ln for ln in ungated if enclosing[ln] != "_post_debloat"]
+    assert not ungated, (
+        "these _sync_debloat call sites do not check android_userspace: "
+        + ", ".join(f"line {ln} in {enclosing[ln]}()" for ln in ungated)
+        + " — an emOS device has no package manager to hide packages from and "
+          "no Magisk daemon to have created the service.d directory."
+    )
