@@ -69,7 +69,12 @@ _CONFIG_DENY = ("psk", "password", "token", "secret", "key")
 _TURN_FIELDS = (
     "id", "device_id", "ts", "trigger_type", "wake_model", "wake_score",
     "wake_threshold", "dev_shadow", "dev_wake_score", "dev_threshold",
-    "noise_floor", "outcome", "total_ms", "vad_end_ms", "stt_ms",
+    # vad_start_ms sits beside vad_end_ms because the PAIR is the diagnosis:
+    # an end with no start is a turn HA's VAD never engaged on, which runs to
+    # HA's 15s cap and reports as an ordinary endpoint. A bundle carrying only
+    # the end cannot tell those apart, and #485 had to be read out of a log
+    # excerpt for exactly that reason.
+    "noise_floor", "outcome", "total_ms", "vad_start_ms", "vad_end_ms", "stt_ms",
     "tts_url_ms", "tts_fetch_ms", "playback_ms", "send_ms", "delivery_ms",
     "eq_ms", "underruns", "min_depth", "prime_wait_ms", "recv_span_ms",
     "max_gap_ms", "bytes_recv",

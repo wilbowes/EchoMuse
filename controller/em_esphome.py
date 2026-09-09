@@ -119,6 +119,13 @@ class TurnTrace:
     trigger:          str   = ""      # "wakeword(0.522)" or "button"
     t0:               float = 0.0     # turn start (time.monotonic())
     t_first_frame_ms: int   = -1      # ms from t0 to first real audio frame
+    # ms from t0 to HA's STT_VAD_START. Stays -1 when HA's VAD never engaged,
+    # which is the whole point of recording it: that is the turn shape that
+    # runs to HA's 15s cap, and until now nothing distinguished it from a turn
+    # HA endpointed properly. It is also the number the fallback's grace
+    # window should be tuned from — 2.5s is currently set against a single
+    # measured turn (1.077s) plus microVAD's floor of ~1.06s.
+    t_vad_start_ms:   int   = -1
     t_vad_end_ms:     int   = -1      # ms from t0 to VAD sentinel received
     audio_frames:     int   = 0       # number of PCM frames sent to HA
     t_stt_ms:         int   = -1      # ms from t0 to STT result received
@@ -173,6 +180,7 @@ class TurnTrace:
             f"[TURN] trigger={self.trigger} outcome={self.outcome} "
             f"total={fmt(self.t_complete_ms)} "
             f"first_frame={fmt(self.t_first_frame_ms)} "
+            f"vad_start={fmt(self.t_vad_start_ms)} "
             f"vad_end={fmt(self.t_vad_end_ms)} audio={self.audio_frames}frames/{audio_ms}ms "
             f"stt={fmt(self.t_stt_ms)} text={self.stt_text!r} "
             f"tts_url={fmt(self.t_tts_url_ms)} "
@@ -896,6 +904,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # _stream_mic_audio (covers quiet speech in a noisy room that
             # misses the 3×-floor test there).
             self._ha_vad_start.set()
+            if self._trace and self._trace.t_vad_start_ms == -1:
+                self._trace.t_vad_start_ms = self._trace.elapsed_ms()
 
         elif event_type == ET.VOICE_ASSISTANT_STT_VAD_END:
             # Speech ended — HA is now processing (STT → intent → TTS).
@@ -1524,6 +1534,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     "noise_floor":    wi.get("noise_floor"),
                     "outcome":        trace.outcome,
                     "total_ms":       trace.t_complete_ms,
+                    "vad_start_ms":   trace.t_vad_start_ms,
                     "vad_end_ms":     trace.t_vad_end_ms,
                     "stt_ms":         trace.t_stt_ms,
                     "tts_url_ms":     trace.t_tts_url_ms,
@@ -1655,6 +1666,16 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         listening_since = None      # monotonic; set when the first real frame lands
         turn_start = time.monotonic()
 
+        # Controller-side endpointing, armed only when HA's VAD has been ruled
+        # out — see em_turnclock.ha_vad_stalled_verdict for why the absence of
+        # STT_VAD_START is the discriminator and not a timer. These two marks
+        # are what that verdict reads. Keeping them current costs one RMS over
+        # an 80ms frame for the whole turn rather than only until the first
+        # hit, which is the same arithmetic the barge watcher already runs per
+        # frame throughout playback.
+        first_speech_at = None
+        last_speech_at  = None
+
         def _is_speech(chunk: bytes) -> bool:
             samples = np.frombuffer(chunk, dtype=np.int16)
             if samples.size == 0:
@@ -1707,6 +1728,25 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     )
                     self._send_one(api_pb2.VoiceAssistantAudio(data=b"", end=True))
                     self._no_speech_timeout = True
+                    return
+
+                # HA's VAD failed to engage — endpoint the turn ourselves
+                # rather than sitting out HA's 15s cap. This is a real end of
+                # speech, so it takes the same exit as the device sentinel
+                # below: end=True to HA, and the thinking transition, or the
+                # ring stays lit through STT and intent (#370).
+                stalled, stall_why = em_turnclock.ha_vad_stalled_verdict(
+                    now=time.monotonic(), speech_seen=speech_seen,
+                    ha_vad_started=self._ha_vad_start.is_set(),
+                    first_speech_at=first_speech_at,
+                    last_speech_at=last_speech_at,
+                )
+                if stalled:
+                    log.info(f"[{self._log_name}] {stall_why} — sending audio end to HA")
+                    if self._trace and self._trace.t_vad_end_ms == -1:
+                        self._trace.t_vad_end_ms = self._trace.elapsed_ms()
+                    self._send_one(api_pb2.VoiceAssistantAudio(data=b"", end=True))
+                    self._enter_thinking()
                     return
 
                 # Race the queue-get against _ha_vad_end directly rather than a
@@ -1786,7 +1826,16 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     if self._trace:
                         self._trace.t_first_frame_ms = self._trace.elapsed_ms()
 
-                if not speech_seen and _is_speech(payload):
+                # Every frame, not just until the first hit: the controller's
+                # own endpoint needs to know when speech LAST was, not only
+                # that it once happened.
+                if _is_speech(payload):
+                    now = time.monotonic()
+                    last_speech_at = now
+                    if first_speech_at is None:
+                        first_speech_at = now
+
+                if not speech_seen and last_speech_at is not None:
                     speech_seen = True
                     log.debug(
                         f"[{self._log_name}] Speech detected (above noise floor "
