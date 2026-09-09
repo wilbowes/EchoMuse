@@ -1428,9 +1428,28 @@ when broken — the wizard drives hardware nobody is watching a log of.
   and magiskd both come up long before the framework — `su -c id` returning
   root in 0.4s says nothing about `pm`. `waitForFramework` polls
   `sys.boot_completed` *and* probes `pm path android` (the flag is necessary,
-  not sufficient), budgets 10 minutes, and **throws** on timeout. Measured
-  boots take ~86s, so the 30s poll it replaced was never enough. No step may
+  not sufficient), budgets 10 minutes, and **throws** on timeout. No step may
   require the operator to have guessed a long enough wait.
+  **The boot this step waits on is the SLOWEST one the device will ever do,
+  and the number to expect is 163s.** Measured 2026-09-09 on a factory-fresh
+  device straight off the amonet unlock. The unlock wipes `/data` and the
+  documented path is unlock → wizard, so a post-wipe first boot is the NORMAL
+  wizard experience rather than an unlucky one. Almost certainly dexopt:
+  Android 5.1 is ART, PackageManagerService compiles every installed APK on a
+  fresh `/data`, and the whole Amazon stack is still present because nothing
+  is hidden until step 10. Nothing to optimise — the cost is paid before the
+  wizard has any say in it.
+  **The same device booted in 34s once provisioned**, which is the figure to
+  quote to a user asking how long their Echo takes to come back.
+  The ~86s this used to say is superseded rather than a middle point: it
+  predates the second round of debloating and its `/data` state was never
+  recorded, so it is not comparable to either number above and should not be
+  read as one. Do not reconstruct a series out of the three.
+  This belongs in the doc and not a code comment because the figure is what
+  somebody consults to decide whether a run has HUNG. Against 86s, a real
+  163s boot emitting `boot_completed=0` every 16 seconds looks hung at about
+  the halfway mark — and the response to that belief is pulling the cable,
+  which is the one thing this flow does not survive cleanly.
 
 Three more rules, all learned on 2026-08-08 by pulling a cable at the wrong
 moment:
@@ -1463,8 +1482,9 @@ moment:
 Two device behaviours the wizard works around rather than fixes:
 
 - **Amazon's OOBE cannot be stopped in time.** It announces itself and spins
-  an amber ring the moment the framework is up (~86s), and the earliest root
-  lands is magiskd attaching (~74s later, measured) — so Disable Alexa is
+  an amber ring the moment the framework is up (163s on a post-unlock device
+  — see the boot measurements above), and the earliest root lands is magiskd
+  attaching (~74s later, measured; 64s on 2026-09-09) — so Disable Alexa is
   structurally too late, and `pm hide` in Debloat is later still and does not
   stop a running instance. The speaker is muted instead, right after the
   framework answers, with `input keyevent 25` — shell user only, no root.
