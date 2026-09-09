@@ -2248,3 +2248,121 @@ so the list was empty on every pass and none of the conditions was ever
 evaluated. Two other call sites in the same file use the response directly as
 an array. The whole day was about checks that cannot see what they claim to
 check, and I spent three rounds inside one.
+
+## 2026-09-09 — the fifteen-second turn is Home Assistant's, and it was in our own stats all along
+
+**@maxwellh reported that speaking immediately after the wake word costs about
+fifteen seconds, while pausing half a second first costs three.** With a support
+bundle, which is what made it findable. The fault turned out not to be ours, not
+to be his setup, and not to be new: it has been firing on 3.2% of wake turns on
+this fleet since at least mid-July, and nobody had looked at the shape of
+`vad_end_ms`.
+
+**The 15s is Home Assistant's `VoiceCommandSegmenter.timeout_seconds`, and it
+fires because HA's VAD never STARTS.** The segmenter needs 0.3s of audio scored
+above 0.2 before it will set `in_command` and emit `STT_VAD_START`; a command
+that never clears that bar has one exit left, and the `STT_VAD_END` it then
+emits is byte-identical to a real endpoint. It sets `timed_out` and nothing in
+the whole of home-assistant/core reads it, so a satellite cannot tell the two
+apart on the wire. Our own streaming cap is 20s — above HA's 15s — so HA won
+that race every time.
+
+The discriminator in his log was an absence: event type 11 (`STT_VAD_START`)
+present at +1,077ms on the fast turn and **entirely missing** on the slow one,
+whose `STT_VAD_END` landed 15,056ms after the first audio frame.
+
+**Two things make the bar unreachable, and neither is audio quality — which is
+what the 2024 upstream report guessed at.** microVAD returns a `-1.0` sentinel
+for its first 760ms whatever the input (measured identical for digital silence,
+room tone at 0.0021 and 0.0043, continuous speech and a 1kHz tone), and HA
+compares it straight against the 0.2 threshold, so the warm-up counts as
+silence while still spending the 15s budget. And a short command is over before
+that warm-up ends: synthesised "Stop" yields 0.09s of detected speech against
+the 0.30s needed, and 0.00s once our 240ms preroll discard has taken the front
+off it.
+
+**The measurement that settled it needed no hardware**: HA's own `vad.py`
+driven with its pinned `pymicro-vad==1.0.1`, chunked at 10ms exactly as
+`_speech_to_text_stream` does. It also falsified two of my own ideas within
+minutes — the beamformer locking on a bad frame (`d.beam.Lock()` no-ops when
+already locked) and two concurrent HA pipeline consumers (15.12s of audio
+consumed in 15.14s wall clock, so a single real-time reader). **And it nearly
+sold me a wrong fix**: padding the stream with leading room tone looked like it
+worked on one noise seed and fails 40/40 when swept properly. Single draws lie;
+report rates.
+
+**Then the fleet's own turns table settled the severity.** 27 of 845 wake turns
+(3.2%) sit in a single 250ms bin at 15.25s with 0–3 turns in every neighbouring
+bin, each carrying exactly 15,120ms of audio, half of them returning `no_tts` —
+somebody spoke, waited fifteen seconds and got nothing. A spike in one bin is a
+fixed cap firing; a smooth tail would have been long commands.
+
+**Wil then confirmed it on hardware, with a control I had asked for and not
+expected to get for free.** "Stop" via the wake word hit the cap both times he
+tried it; the same word as a *continuation* — which passes `preroll_discard=0`
+— endpointed normally at 3.7s. Same word, same room, same device. The 240ms is
+the margin, on real far-field audio rather than TTS.
+
+**The fix keys on the ABSENCE of `STT_VAD_START`, not on a timer**, which is
+the same shape as the `RUN_END`-with-no-`RUN_START` rule beside it: the
+protocol's structure says what a timeout cannot. While HA's VAD is engaged it
+never fires and HA keeps end-of-turn. Both constants are conservative because
+cutting somebody off mid-sentence is worse than the stall — 2.5s grace, more
+than twice the earliest an `STT_VAD_START` can physically arrive, and 1.0s of
+silence measured from the LAST speech frame so a pause restarts it.
+
+**Note the fix HIDES the fault rather than removing it**, so schema v22 records
+`vad_start_ms` alongside `vad_end_ms`: an end with no start is this fault, and
+it is now countable rather than something to infer. `-1` means never engaged,
+NULL means the row predates the column, and conflating them would answer the
+wrong question.
+
+**Upstream: reported in 2024 and closed by a bot without a diagnosis.**
+home-assistant/core#122177 (@HarvsG, July 2024) has the same symptom and the
+right file, was marked stale twice with a user still saying it happened, and
+was auto-closed in February 2025. The only thing that landed was #122182's log
+line — which synesthesiam then deliberately downgraded to debug in #132987
+("No need to be user facing"), and which is where `timed_out` came from,
+tested and never wired to anything. Reading that history changed the ask:
+filed as **home-assistant/core#181747** leading with the `-1.0` sentinel being
+compared as data, explicitly NOT asking to undo #132987, and staying off
+`speech_seconds` tuning because #134360 shows it was already tried and
+reverted.
+
+**A second fault, found because re-provisioning EFF to emOS failed at step 8.**
+The device booted fine and ran the server; the wizard reported the console
+"did not answer `uname -a`". It was sitting at a password prompt. `console.pw`
+lives on `/data`, a boot-partition write leaves `/data` alone, and emOS's init
+gates the console on it — so a device carrying a password from its previous
+life met a wizard with no login step, which sent `stty -echo` and `uname -a`
+straight into the gate as wrong attempts. The error pointed at the boot, the
+flash and the image; at everything except a login.
+
+**Wil's call on the fix, and he was right against my objection.** I argued
+against deleting the record as a side effect, on the grounds that it is a
+user's secret. He pointed out the case that decides it: a device moved from
+another EchoMuse deployment should not carry the previous operator's password,
+and its new owner — holding the device and the cable — should not be locked out
+by somebody who has neither. The threat model already excludes physical access
+and the wizard is *in TWRP with /data mounted*, one command from doing this
+anyway. Provisioning now clears it, verified with a `_PWCHK` sentinel because
+"gone" and "su is broken" are otherwise the same empty string — the identical
+mistake this file made three steps up. `run()` also names the gate now.
+
+**Shipped as controller-ea 2.23.0-ea.15** (PRs #486, #487, #488). Also
+corrected the wizard's boot-time figure: 163s on a factory-fresh post-unlock
+device against the ~86s recorded, and 34s once provisioned. The unlock wipes
+`/data` and the documented path is unlock → wizard, so a post-wipe first boot
+— almost certainly dexopt — is the normal case rather than the exception. 86s
+is what somebody consults to decide a run has hung, and at 163s that judgement
+gets made at the halfway mark, followed by pulling the cable. The old figure is
+recorded as superseded rather than kept as a middle point: Wil noted it predates
+the second round of debloating and its `/data` state was never written down, so
+interpolating across the three would invent a series nobody measured.
+
+**Still owed.** The 2.5s grace is set against a single measured turn and wants
+retuning from `vad_start_ms` once ea.15 has a few days behind it. #488 has
+never run on hardware — the next provisioning run is its first real test. And
+the thing most likely to mislead later: those turns still happen, we just stop
+waiting on them, so `vad_start=—` is the count to watch rather than the absence
+of complaints.

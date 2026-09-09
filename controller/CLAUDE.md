@@ -392,6 +392,57 @@ barge starts a phantom turn that hears nothing and runs 20–46s, and
 `oww_paused` covers the whole turn — so the device is deaf throughout. It
 reads as "it stopped talking and then ignored me". Bounding that is #195.
 
+**HA's endpointing can fail to engage AT ALL, and when it does the turn does
+not end late — it ends at exactly 15s and reports that as success.** The C1
+fix made HA's VAD authoritative over the device's RMS gate, on the correct
+grounds that a model beats a fixed threshold. What it did not anticipate is
+HA's VAD producing no verdict whatsoever.
+
+`VoiceCommandSegmenter` needs 0.3s of audio scored above 0.2 before it will
+set `in_command` and emit `STT_VAD_START`. A command that never clears that
+bar has one remaining exit, `timeout_seconds = 15.0`, and the `STT_VAD_END`
+it then emits is **byte-identical to a real endpoint** — the segmenter sets
+`timed_out` and nothing in the whole of home-assistant/core reads it. Our own
+streaming cap is 20s, above HA's 15s, so HA won that race every time and the
+user sat through it with the ring lit.
+
+Two things make the bar unreachable, both measured against HA's own segmenter
+and its pinned `pymicro-vad==1.0.1`. microVAD returns a **`-1.0` sentinel for
+its first 760ms** whatever the input — identical for digital silence, room
+tone at either measured floor, continuous speech and a 1kHz tone — and HA
+compares it straight against the threshold, so the warm-up counts as silence
+while still spending the 15s budget. And a short command is over before that
+warm-up ends: synthesised "Stop" yields 0.09s of detected speech against the
+0.30s needed, and 0.00s once `VOICE_PREROLL_DISCARD` has taken 240ms off the
+front. Filed upstream as home-assistant/core#181747; the symptom was reported
+in #122177 in 2024 and closed by the stale bot without a diagnosis.
+
+**It was in our own stats the whole time.** 3.2% of wake turns (27 of 845,
+2026-07-14..08-13) sit in a single 250ms bin at 15.25s with 0-3 turns in every
+neighbouring bin, each carrying exactly 15,120ms of audio, half of them
+returning `no_tts`. Nobody had looked at the shape of `vad_end_ms`. Confirmed
+live on 2026-09-09: "stop" via the wake word hit the cap both times it was
+tried, while the same word as a **continuation** — which passes
+`preroll_discard=0` — endpointed normally at 3.7s. Same word, same room, same
+device; the 240ms is the margin.
+
+`em_turnclock.ha_vad_stalled_verdict` is the answer, and the shape matters:
+it keys on the **absence of `STT_VAD_START`**, not on a timer, exactly as the
+`RUN_END`-with-no-`RUN_START` rule above does — the protocol's structure says
+what a timeout cannot. While HA's VAD is engaged it never fires and HA keeps
+end-of-turn, which is where it belongs. Both constants are conservative
+because cutting somebody off mid-sentence is worse than the stall: 2.5s grace
+(more than twice the earliest an `STT_VAD_START` can physically arrive) and
+1.0s of silence, measured from the LAST speech frame so a mid-sentence pause
+restarts it and a turn whose frames stop arriving still ends.
+
+**The fix hides the fault rather than removing it, so `vad_start_ms` is the
+thing to watch** (schema v22, on the `[TURN]` line as `vad_start=` and in the
+support bundle). `-1` means HA's VAD never engaged on that turn; NULL means
+the row predates the column, and the two must not be conflated. It is also
+the number the 2.5s grace should be retuned from — it is currently set
+against a single measured turn (1.077s) plus microVAD's structural floor.
+
 **Announcements: HA has TWO paths and only one waits for a reply.**
 `VoiceAssistantAnnounceRequest` blocks —
 `assist_satellite.entity.async_internal_announce` holds `_is_announcing` and
@@ -975,7 +1026,7 @@ single written ladder. `docs/audio-states.md` §2 is the nearest thing.
 | `em_config_sections.py` | Fleet-vs-device config scoping — the six sections, `STATE_KEYS`, and the merge that resolves a device's effective config |
 | `em_tap_burst.py` | Coalesces a burst of action-button taps into one single/double/triple event. The window is restarted per tap and `enabled()` is re-checked at expiry, both correct. **The window is timed at the CONTROLLER, on arrival**, so the gap it measures is the real gap plus the RTT difference between the two taps — 26.4% of probes on this fleet exceed 200ms, which is why double/triple are unreliable below ~350ms (#115). The fix is a device-measured gap, the same reasoning as `heldMs` |
 | `em_recordings.py` | Utterance capture storage — WAVs in `recordings/` beside the DB, per-device file-count retention, ownership-checked path resolution |
-| `em_turnclock.py` | When a voice turn stops waiting, as a pure function. **The no-speech window is measured from the FIRST REAL AUDIO FRAME, not from turn start** — those answer different questions, and measured from turn start a slow link masquerades as a silent user. A 1373ms delivery gap (#139) shortened a 5s window to 3.6s and answered `no_speech` to someone mid-sentence, with the audio captured perfectly on the device and TCP holding it. `FIRST_AUDIO_GRACE` bounds the other side so audio that never arrives still ends the turn |
+| `em_turnclock.py` | When a voice turn stops waiting, as a pure function. **The no-speech window is measured from the FIRST REAL AUDIO FRAME, not from turn start** — those answer different questions, and measured from turn start a slow link masquerades as a silent user. A 1373ms delivery gap (#139) shortened a 5s window to 3.6s and answered `no_speech` to someone mid-sentence, with the audio captured perfectly on the device and TCP holding it. `FIRST_AUDIO_GRACE` bounds the other side so audio that never arrives still ends the turn. Also holds `ha_vad_stalled_verdict` — the controller's own endpoint for turns HA's VAD never engaged on, see below |
 | `em_runbarrier.py` | Serialising ESPHome pipeline runs across a barge-in, as a pure state machine. The protocol carries **no run identifier**, so the satellite is what keeps two runs from overlapping — see the barge-in rules under the voice backend. Split out for `em_linkauth`'s reason: the suite cannot import `em_esphome` |
 | `em_announce.py` | Running an HA announcement to completion. Owns the two rules that pull against each other — never reply early, always reply — because `VoiceAssistantAnnounceFinished` is HA's completion signal and HA **blocks** on it |
 | `em_linkauth.py` | The device-link auth decision as a pure function. Split out of `em_controller._link_auth_ok` so it is testable: the suite does not import em_controller, so this was security logic with no coverage until it orphaned a device |
@@ -1032,6 +1083,8 @@ stomp a volume changed by hand.
 
 Every voice turn is persisted to SQLite at completion (`turns` table, `db.insert_turn` from `em_esphome`): trigger, wake model/score/threshold, room noise floor at detection, outcome, STT text, stage latencies, and playback underruns.
 
+**`vad_start_ms` and `vad_end_ms` are a PAIR and only mean something together** (schema v22). An end with no start is a turn Home Assistant's VAD never engaged on — it ran to HA's 15s cap and reported that as an ordinary endpoint, which is the fault described under the voice backend. Storing only the end is why 3.2% of turns were doing this for months in plain sight. `-1` is "never engaged" and NULL is "row predates the column": the sentinel is deliberately not NULL, because an old row and a stalled VAD want opposite conclusions and this is precisely the "absence stores as NULL, not 0" rule seen from the other side.
+
 **Delivery instrumentation (schema v7, firmware v2.9.6+).** Underruns are rare and binary; these measure the *margin* on every stream so degradation is visible before it's audible. Device-reported in `playback_stats`: `min_depth` (fewest periods left in the device buffer mid-stream — the headline number), `prime_wait_ms`, `recv_span_ms` (first→last frame arrival; longer than the audio duration means delivery was slower than realtime), `max_gap_ms`, `bytes_recv`. Controller-measured: `send_ms`, `delivery_ms` (first frame sent → device's `playback_stats` arrival), `eq_ms`. **`send_ms` is a socket-write time and completes near-instantly however slow the link is — never read it as delivery; that mistake cost a whole investigation on 2026-07-20.** `device_metrics` gained link context (`link_speed_last/min`, `wifi_freq_last`, `wifi_bssid_last`, tx/rx byte and error sums) — band and BSSID matter because one SSID spanning 2.4/5GHz lets a device silently re-associate to a much slower radio. `event_loop_lag_monitor` tracks controller-side stalls (peak on `/api/system/status` as `loop_lag_peak_ms`); anything blocking the loop also delays speaker frames. **That peak reads 0 under the add-on and always has — #306.** `em_start.py` execs `em_controller.py`, so the running module is `__main__`, while `/api/system/status` and the support bundle both `import em_controller` and get a SECOND module object whose global is still the initial 0.0. The logged warnings are correct; the reported peak is not, so read the log line and not the field until that is fixed. It resolves correctly under docker-compose, which is why it survived — the deployment most users run is the one where it lies. The underrun count arrives asynchronously — the device reports `playback_stats` (periods + underruns) once per completed speaker stream, and the controller attaches it to `device.last_turn_id` (consumed on use so an announcement's report can't overwrite a turn's stats; NULL underruns = never reported, e.g. pre-v2.9 firmware). Two hourly rollup tables ride alongside: `wake_counters` (near-miss counts/max score, flushed through the existing 2s-rate-limited near-miss path; plus non-turn underruns) and `device_metrics` (CPU/RAM/storage/RSSI sums+extremes upserted per ~30s device stats report — averages computed at read). `Device.turn_history` is hydrated from `turns` on connect, so the dashboard Activity tab survives restarts. Read APIs: `/api/devices/{id}/turns` (raw, `limit`/`since`) and `/api/devices/{id}/activity?days=N` (per-day aggregates, per-wake-model rollups, counters, metrics — plot-ready). Keep instrumentation at this cost class: one insert per turn, one upsert per 30s/2s — nothing per audio frame. The v7 device counters honour this: per-period work is one `len(chan)` compare plus one `time.Now()` on a single-writer path (no locks, no allocation, no logging), all of it emitted on the *existing* `playback_stats` message. `wpa_cli` is the one exception that costs a process spawn, so `linkInfo()` caches it for 2 minutes rather than running per stats tick.
 
 **Control-plane RTT (schema v9/v10).** The RF layer is OPAQUE on this hardware and its counters are worthless: the MTK driver leaves retry/discard/missed-beacon at zero in `/proc/net/wireless` whatever the link is doing, reports `NOISE=9999`, and there is no `iw` binary — so `tx_errors`/`tx_dropped`/`rx_crc` are STRUCTURALLY zero and `get_device_metrics` deliberately does not surface them (a zero there reads as "healthy link" and is not). RTT is the latency signal that works: the controller stamps each control-plane `ping` with a sequence id (every `PING_INTERVAL_SEC`=5s), the device echoes it, and RTT is computed against one monotonic clock — the device never stamps its own, because Echos boot with bogus clocks pre-NTP. Unsolicited keepalive pongs carry no id and are ignored rather than paired with whatever ping is outstanding. Samples aggregate in memory (`Device.record_rtt`/`drain_rtt`) and flush on the existing ~30s stats report, so the DB cost is unchanged; note this means **adding an RTT field needs `drain_rtt` updated as well as `record_device_stats`** — the relay guard in `tests/test_db_instrumentation.py` covers both sources. Excursions (≥`RTT_EXCURSION_MS`=200) are split by whether the device was busy at SEND time, and `rtt_samples_idle` is the denominator that makes the split meaningful: without it "every excursion was idle" is vacuous, since almost every sample is idle. Read API exposes per-state RATES, never raw counts. **ROOT-CAUSED 2026-08-11 (#139): the link is fast and LOSSY, and the
@@ -1074,6 +1127,25 @@ honours `ro.adb.secure` and is already better than this.
 **A nod to security, not Fort Knox**, and it should not be hardened later into
 something more complicated for a threat it was never meant to address: the
 record lives on `/data`, so anyone holding the device deletes it from TWRP.
+
+**Provisioning DELETES the record, and that follows from the line above rather
+than contradicting it.** The record survives a boot-partition write, so a
+device re-provisioned — or moved from somebody else's EchoMuse — arrives still
+carrying the previous operator's password, and emOS's init puts it in front of
+the console. The new owner, holding the device and its cable, is locked out by
+somebody who has neither. Since the threat model already excludes physical
+access and the wizard is executing in TWRP with `/data` mounted, it is one
+command from doing this anyway; what the hash protects is the PASSWORD, and
+that argument is untouched by removing the record from hardware being handed
+on. Safe because `em_controller` pushes the whole effective config on every
+connect rather than only on change, so it comes back by itself — and the push
+carries the real record, not `for_display`'s `__unchanged__` sentinel, which
+is applied in the API read path only. Were that ever to change, the device
+would write an unparseable record, which reads as NO password: a silent
+failure, not a loud one.
+
+It also unbroke the emOS wizard, which drives the serial console at two steps
+and had no way past a prompt — see the emOS flow's rules below.
 
 **The hash therefore does not protect the device. It protects the PASSWORD**,
 which the owner has probably reused somewhere that matters — someone who dumps
@@ -1584,6 +1656,23 @@ throughout — so the rules below are all one rule seen from different angles.
   overwritten**: a FireOS-provisioned device's conf has real networks in it.
   It stayed hidden because the first emOS device had crossed from FireOS
   carrying a good conf on `/data`.
+- **`/data` surviving the flash cuts both ways, and the console password is
+  the case where it cut.** The same persistence that carries the WiFi conf
+  across also carries `console.pw`, and emOS's init gates the console on it —
+  so a device re-provisioned out of a fleet that had one arrived asking for a
+  password, and the wizard drove that console with no login step at all. It
+  sent `stty -echo` and then `uname -a` straight into the gate, both consumed
+  as wrong attempts, and reported that the console **"did not answer"** —
+  pointing the operator at the boot, the flash and the image, at everything
+  except a login, while the device was running perfectly (2026-09-09). The
+  install step now clears the record; see the console password section above
+  for why deleting it is right rather than merely convenient. `run()` also
+  names the gate when it times out with a prompt in the buffer, because the
+  wizard is not the only way to reach a console and somebody re-flashing a
+  working device on the strength of that error message is the expensive
+  outcome. **Anything else that ever lands on `/data` needs this question
+  asked of it**: does it belong to the DEVICE, or to the deployment that
+  previously owned it?
 - **The packer does not require the reference's image id to reproduce.** It is
   a SHA1 over the kernel and ramdisk, and a tool that repacks a ramdisk while
   preserving the header verbatim leaves a stale one — f1r30s does, so stock

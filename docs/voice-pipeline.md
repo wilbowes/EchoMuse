@@ -175,6 +175,21 @@ Assistant's well-maintained detector rather than home-grown logic, and the
 false-wake backstop adapts to each room by itself — a quiet study and a
 loud lounge get equally sensible behaviour with zero tuning.
 
+**There is a second backstop, for when that detector never starts at all.**
+Home Assistant needs to hear about a third of a second of speech it is
+confident about before it will decide you have started talking — and until it
+decides that, it cannot decide you have stopped. A short command like "stop"
+may never clear that bar, in which case Home Assistant waits out its own
+fifteen-second limit and then reports the turn as though you had simply
+finished speaking. Nothing it sends says otherwise, which is why this looked
+for a long time like the Echo being slow.
+
+So the controller watches for that specific shape — speech heard, and Home
+Assistant still not having said it noticed — and ends the turn itself about a
+second after you stop. Whenever Home Assistant's own detector is working, it
+still decides; its judgement is better than ours. Reported upstream as
+home-assistant/core#181747.
+
 **Caveat:** in a noisy room, the detector sometimes hangs on a beat too
 long and the tail of TV dialogue rides along into speech-to-text (you'll
 occasionally see a stray phrase appended to your transcript). Cleaning the
