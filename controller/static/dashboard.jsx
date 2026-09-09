@@ -3106,6 +3106,23 @@ class _EmosConsole {
       }
       await new Promise(r => setTimeout(r, 100));
     }
+    // A console sitting at emOS's password gate swallows everything sent to
+    // it, so every command times out and the generic message above points the
+    // operator at the boot, the flash and the image — at everything except a
+    // login. That cost an evening on 2026-09-09, on a device re-provisioned
+    // out of a fleet that had a console password set.
+    //
+    // The install step now clears that record, so the wizard should not meet
+    // this. It is still worth naming, because the wizard is not the only way
+    // to reach a console and a device we did NOT provision can be sitting at
+    // one. Reporting the cause is cheap; guessing at it is not.
+    if (this.buf.includes('emOS console password:')) {
+      throw new Error('The console is asking for a password, so it never ran '
+        + `"${cmd}". This device is running emOS with a console password set `
+        + '— log in over the serial port by hand, or clear '
+        + '/data/local/etc/echomuse/console.pw from TWRP. It is re-applied '
+        + 'from the controller config when the device next connects.');
+    }
     throw new Error(`The console did not answer "${cmd}" within `
                   + `${Math.round(timeoutMs / 1000)}s.`);
   }
@@ -4858,6 +4875,55 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // step would either overwrite it (fine) or fail loudly and get
     // caught by that verification anyway.
     addLog('Cleared.', 'ok');
+
+    // The console password record goes with the binary, and it is the one
+    // piece of state here that belongs to a PREVIOUS OWNER rather than to
+    // this device.
+    //
+    // It lives on /data (config.ConsolePasswordPath), which a boot-partition
+    // write leaves alone, so a device moved between EchoMuse deployments
+    // arrives carrying the old operator's password — and emOS's init puts
+    // that in front of the console before handing over a shell. The new
+    // owner, holding the device and its cable, is locked out of it by
+    // somebody who no longer has either.
+    //
+    // Deleting it is not a weakening: the feature's threat model already
+    // excludes physical access ("a nod to security, not Fort Knox" — anyone
+    // holding the device deletes this file from TWRP), and this code IS in
+    // TWRP with /data mounted. What it protects is the PASSWORD, which the
+    // owner has probably reused, and that argument is unaffected by removing
+    // the record from hardware being handed on.
+    //
+    // Safe because it is restored automatically: em_controller pushes the
+    // whole effective config on every connect, not only when it changes
+    // (`send_control({"type": "config", **config})`), and the device's
+    // WriteConsolePassword writes it back. So the gap is provisioning-to-
+    // first-connect, with the operator holding the cable.
+    //
+    // It also unbroke the emOS wizard, which drives the serial console at
+    // steps 8 and 9 and had no way past a password prompt — it sent
+    // `uname -a` into the gate and reported that the console "did not
+    // answer", pointing the operator at the boot, the flash and the image
+    // rather than at a login (2026-09-09).
+    addLog('Clearing console password and timeout from the previous install…');
+    const pwRm = (await c.shell(
+      'su -c "rm -f /data/local/etc/echomuse/console.pw '
+      + '/data/local/etc/echomuse/console.timeout" 2>&1')).trim();
+    if (pwRm) addLog(`  → ${pwRm}`);
+    const pwProbe = await c.shell(
+      'su -c "cat /data/local/etc/echomuse/console.pw; echo _PWCHK" 2>/dev/null');
+    if (!pwProbe.includes('_PWCHK')) {
+      throw new Error('Could not confirm the console password was cleared — '
+        + 'the check produced no output at all, so "su" is not working rather '
+        + 'than the record being gone. Retry the previous step.');
+    }
+    if (pwProbe.replace('_PWCHK', '').trim()) {
+      throw new Error('The console password record is still present after rm. '
+        + 'A device provisioned with it in place will ask for the previous '
+        + "owner's password on its serial console. Check mount state with "
+        + '"su -c mount" before retrying.');
+    }
+    addLog('  → cleared; the controller re-applies it when the device connects', 'ok');
 
     addLog('Installing to /data/local/bin/ (A slot)…');
     // Each step checked individually instead of && chained — the original
