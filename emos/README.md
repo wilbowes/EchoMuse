@@ -188,6 +188,40 @@ diagnosis (two shells fighting over one tty; there was one, and the second
 console — a script here, or the provisioning wizard over WebSerial, which has
 no `stty` to remind you — must do it explicitly.
 
+### Getting to TWRP: `/init recovery`
+
+**`/system/bin/reboot` cannot reboot an emOS device at all**, and the way it
+fails is misleading. It reaches Android's property service over
+`/dev/socket/property_service`, which nothing here runs, so `connect()` returns
+ENOENT and it prints `reboot: No such file or directory` — naming a missing
+file, where the file it means is a socket that was never going to exist. It
+fails identically with **no argument**, which is the tell: this is not the
+recovery path being unavailable, it is Amazon's userspace talking to an Android
+that is not there.
+
+What `adb reboot recovery` actually does is one syscall — `RESTART2` carrying a
+mode string, which MediaTek's restart handler turns into the value LK reads on
+the next boot. No property service, no ueventd, no by-name symlinks, no BCB
+write into `misc`. The init owns that syscall and runs as a tool when it is not
+PID 1, so from the console:
+
+```
+/init recovery
+```
+
+Confirmed on hardware 2026-09-10: the kernel accepts the string and LK acts on
+it, landing in TWRP.
+
+**The multi-call discriminator is `getpid()`, not `argc`.** The kernel can pass
+arguments to init from the boot cmdline, so a device whose bootloader appended
+one would take the tool path and never boot — a brick produced by an argument
+nobody typed.
+
+This matters beyond convenience: a device on emOS has no adb, so "get a binary
+onto it" is a real problem rather than a step, and reaching TWRP used to mean a
+power-off and a held mute button. Re-provisioning an emOS device is now a
+command from the console you are already connected to.
+
 ### The console password
 
 The console is an unauthenticated root shell — anyone with a cable gets one,

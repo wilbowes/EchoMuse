@@ -35,7 +35,9 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <stdint.h>
+#include <sys/syscall.h>
 #include <sys/sysmacros.h>
+#include <linux/reboot.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <time.h>
@@ -806,6 +808,37 @@ static void write_state(int n)
     close(fd);
 }
 
+/* Reboot into a named boot mode — "recovery" gets you TWRP.
+ *
+ * This is the whole of what `adb reboot recovery` does: one syscall carrying a
+ * mode string, which MediaTek's restart handler turns into the value LK reads
+ * on the next boot. No property service, no ueventd, no by-name symlinks, no
+ * BCB write into the misc partition.
+ *
+ * It has to be done here because **Amazon's /system/bin/reboot cannot reboot an
+ * emOS device at all** — not merely for recovery, but with no argument either.
+ * It reaches Android's property service over /dev/socket/property_service,
+ * which nothing here runs, so every mode fails with ENOENT. That is a confusing
+ * error to meet at a console, because it names a missing file and the file it
+ * means is a socket that was never going to exist. Measured on hardware
+ * 2026-09-10, along with the confirmation that the kernel accepts the string
+ * and LK acts on it.
+ *
+ * bionic's reboot(2) wrapper takes no argument, so it cannot express a mode.
+ * The raw syscall can, which is why this is syscall() rather than reboot().
+ *
+ * Returns only when the kernel refused; there is nothing useful to do then but
+ * say so, since the caller is a person at a serial console.
+ */
+static int reboot_into(const char *mode)
+{
+    sync();
+    sync();
+    syscall(__NR_reboot, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2,
+            LINUX_REBOOT_CMD_RESTART2, mode);
+    return -1;
+}
+
 /* Write the known-good image back over the boot partition and reboot into it. */
 static void restore_good(void)
 {
@@ -1374,9 +1407,42 @@ static void svc_add(const char *name, char *const *argv, const char *req,
                     const char *after);
 static void supervise(void);
 
-int main(void)
+/* Run as anything other than PID 1, this binary is a small tool instead of an
+ * init. It is the obvious place for the reboot: it is already static, already
+ * in the ramdisk at a known path, and already owns the syscall — so a person
+ * at the console types `/init recovery` and needs nothing pushed to the device.
+ * That matters more than it sounds, because a device on emOS has no adb, so
+ * "get a binary onto it" is the problem this avoids rather than solves.
+ *
+ * THE DISCRIMINATOR IS getpid(), NOT argc. The kernel can pass arguments to
+ * init from the boot cmdline, so a device whose bootloader appended one would
+ * take the tool path and never boot — a brick produced by an argument nobody
+ * typed. PID 1 is what "am I the init" actually means.
+ */
+static int tool_main(int argc, char **argv)
+{
+    const char *mode = (argc > 1) ? argv[1] : "recovery";
+
+    if (argc > 1 && (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help"))) {
+        dprintf(1, "usage: %s [mode]    (default: recovery)\n"
+                   "reboots into the named boot mode; \"recovery\" is TWRP\n",
+                argv[0]);
+        return 0;
+    }
+
+    dprintf(1, "rebooting into \"%s\"...\n", mode);
+    reboot_into(mode);
+    dprintf(2, "the kernel refused the boot mode \"%s\": %s\n",
+            mode, strerror(errno));
+    return 1;
+}
+
+int main(int argc, char **argv)
 {
     char buf[512];
+
+    if (getpid() != 1)
+        return tool_main(argc, argv);
 
     /* mknod's mode is masked by the umask, so without this every node below
      * comes out 0644 no matter what it asks for — which is how dhcpcd's hook
@@ -2239,6 +2305,7 @@ static void console_banner(void)
         "   up          %ldm %02lds\r\n"
         "\r\n"
         "   logs: /run/net.log  /run/messages  /tmp/server.log\r\n"
+        "   /init recovery   reboot into TWRP  (Amazon's reboot cannot)\r\n"
         "\r\n",
         *ver ? ver : "emOS",
         host,

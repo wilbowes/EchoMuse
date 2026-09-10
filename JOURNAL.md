@@ -2366,3 +2366,56 @@ never run on hardware — the next provisioning run is its first real test. And
 the thing most likely to mislead later: those turns still happen, we just stop
 waiting on them, so `vad_start=—` is the count to watch rather than the absence
 of complaints.
+
+## 2026-09-10 — emOS can reach TWRP with one syscall, and Amazon's reboot cannot reboot at all
+
+**A device on emOS had no way to get to TWRP except powering off and holding
+the mute button.** That is the whole of what made emOS a one-way door for the
+provisioning wizard, and it is what made "emOS as the GA default" a decision
+rather than a formality. It turns out to be one syscall.
+
+**`adb reboot recovery` is not an adb feature.** adbd calls
+`android_reboot(ANDROID_RB_RESTART2, 0, "recovery")`, which is the `reboot()`
+syscall with `LINUX_REBOOT_CMD_RESTART2` and a mode string; MediaTek's restart
+handler reads that string and sets the boot-mode value LK checks on the next
+boot. No property service, no ueventd, no by-name symlinks, no BCB write into
+`misc`.
+
+**Amazon's own `/system/bin/reboot` cannot do it under emOS — and cannot
+reboot at all.** It fails with `reboot: No such file or directory` for
+`recovery` AND with no argument, which is the tell. It reaches Android's
+property service over `/dev/socket/property_service`; nothing here runs one, so
+`connect()` returns ENOENT. The error names a missing file and the file it
+means is a socket that was never going to exist.
+
+**Three of my guesses were wrong before that landed**, all in the same
+direction — assuming the failure was specific to the recovery path. I suspected
+the missing `/dev/block/platform/*/by-name/` symlinks (emOS has no ueventd and
+creates four nodes by hand), then a `/proc` bootmode node, then the BCB. Wil's
+greps found no such strings in libcutils, `/proc/dumchar_info` does not exist on
+this kernel, and then **plain `reboot` with no argument failed identically**,
+which killed all three at once. The discriminator was the cheapest test
+available and I should have asked for it first.
+
+**Getting the test binary onto the device was the real obstacle**, and it is
+the same obstacle the feature exists to remove: no adb, and a 4MB static build
+with nowhere to come from. A freestanding version came to 680 bytes — small
+enough to paste as base64 through the console — and Wil then pointed out the
+device has WiFi and this box has an HTTP server, which is obviously right and
+took thirty seconds.
+
+It is now `/init recovery`. The init is already static, already in the ramdisk
+at a known path, and already owns the syscall, so nothing has to be pushed to
+the device at all. **The multi-call discriminator is `getpid()`, not `argc`**:
+the kernel can pass arguments to init from the boot cmdline, so a device whose
+bootloader appended one would take the tool path and never boot — a brick
+produced by an argument nobody typed. The console banner now names it, since
+the banner exists for exactly the facts someone would otherwise spend five
+minutes gathering.
+
+**What this changes.** "Wipe and reprovision isn't really an issue, the device
+has TWRP" was true and meant a power-off and a held mute button in the dark.
+It is now a command on the console you are already connected to, and most of
+the one-way-door objection to emOS-as-default goes with it. It is also the
+first genuinely useful entry for the guided console menu (#451), which until
+now had nothing to guide anyone to.
