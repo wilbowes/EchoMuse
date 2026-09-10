@@ -1,5 +1,124 @@
 # Changelog
 
+## 2.23.0
+
+The Early Access work from ea.1 to ea.15, in one release. The headline is that
+**an Echo can now run without any of Amazon's software on it**, but most of
+this is voice turns behaving the way you expected them to already.
+
+### Your Echo can run without Amazon's software
+
+**emOS replaces Android on the device entirely**, keeping Amazon's kernel and
+nothing above it. The setup wizard installs it, and it is now the option the
+wizard offers first — FireOS is still there, one click away, labelled, and is
+what every device in the field is running today.
+
+Two reasons it is the default rather than the adventurous choice. Amazon's
+audio layer cannot be evicted while Android is running, which is why the 3.5mm
+jack behaves properly on emOS and imperfectly on FireOS. And FireOS is not the
+safe option so much as the known-bad one we understand.
+
+**Before you choose it**, two things are worth knowing. The wizard escrows your
+original boot image before it writes anything, and restoring that takes about
+ten seconds and leaves everything on the device alone — this has been used in
+anger and it works. And a device already running emOS cannot be re-run through
+the wizard; getting back means going through TWRP, which is a cable and a
+button press rather than a dead end.
+
+### Voice turns
+
+**Fixed: some commands took fifteen seconds to answer.** Speaking immediately
+after the wake word, or saying something short like "stop", could leave the
+Echo silent for about fifteen seconds while the same words after a pause came
+back in three. The cause is in Home Assistant's end-of-speech detection rather
+than here — it is reported upstream as home-assistant/core#181747 — and the
+controller now stops waiting on it instead of sitting out the full fifteen
+seconds. Reported by **@maxwellh**.
+
+**Fixed: long spoken answers were cut off part-way through.** The controller
+sent audio faster than the Echo could play it, which eventually broke the
+connection mid-sentence. Short answers never showed it, which is why this
+looked intermittent for so long.
+
+**Fixed: interrupting your Echo mid-response.** Barge-in never actually worked
+— the interrupting turn died in milliseconds every time. It also used to fire
+on its own voice during long answers, cutting them off and then ignoring you.
+
+**Fixed: the Echo threw away the question you had just asked**, in three
+separate ways, and stopped answering after a timer was dismissed mid-chime.
+
+**Timers ring on the Echo itself**, with the chime coming from the device, and
+stopping one no longer leaves it deaf.
+
+**Home Assistant can ask your Echo a question** and wait for the answer —
+`assist_satellite.ask_question` and `start_conversation` both work, including
+the attention chime.
+
+**Fixed: noise suppression could cut speech to complete silence** rather than
+merely cleaning it up.
+
+### The light ring tells you more
+
+An Echo with no Home Assistant behind it now says so **every time** you speak
+to it, rather than lighting up and going dark as though it were thinking. The
+ring also stops listening visibly whichever way the turn started, and says when
+there is nothing available to answer you.
+
+### Sound
+
+**The headphone jack works properly.** Plugging in during playback, unplugging,
+and booting with something already plugged in all behave.
+
+**The Bluetooth proxy no longer crowds out the device running it.** Advertisements
+were sharing a connection with the keepalive traffic, so the Echo doing proxy
+duty had a measurably worse link than the others.
+
+### Setup
+
+**The wizard is considerably easier to follow** — a progress bar, numbered
+steps, a visible indicator while it waits on the Echo, and a failure panel that
+puts the useful action in front of you. Thanks to **@Mr-Neutr0n** for this and
+for the WiFi fix below.
+
+**Fixed: WiFi stopped reconnecting after a reboot on a network with no internet
+access.** Android decides such a network is bad and eventually refuses to
+auto-join it.
+
+**If your browser cannot do USB, the wizard says so on the first step**, naming
+your exact address, rather than at the first click with an Echo already
+unboxed.
+
+**Fixed: setting up a device that already had a console password could not
+finish.** The password survives a reinstall, so a device set up again — or
+moved from somebody else's EchoMuse — arrived still holding it. Provisioning
+now clears it and the controller puts it back when the device connects. If you
+are taking on an Echo from someone else, their password should not follow the
+hardware to you.
+
+### Smaller things
+
+- **Your Echoes know what time it is.** An Echo has no clock that survives a
+  power cut, and under emOS nothing was correcting it.
+- **Custom wake word models carry their own name and language**, instead of
+  being renamed by the file they arrived in.
+- **Deleting an Echo actually removes it.** It used to keep serving turns.
+- **An Echo running emOS can have a password on its USB console**, with an idle
+  timeout.
+- **Updates no longer stall** pushing Android-only payloads at a device with no
+  Android on it.
+- Two announcements or timers playing at once no longer collide.
+- Config → Microphones → Advanced gains an echo-reference control, for testing
+  echo cancellation on hardware that supports it.
+
+### Before you update
+
+Nothing to do — the database migrates itself, and there is no manual step.
+
+**Some of this needs device firmware newer than v2.14.0, which is not published
+yet.** The jack fixes, the clock, and the echo reference are device changes;
+your Echoes will ignore those settings until a firmware release catches up.
+Everything else in this list is controller-side and works as soon as you update.
+
 ## 2.23.0-ea.15 (Early Access)
 
 **Fixed: some commands took fifteen seconds to answer.** If you spoke
