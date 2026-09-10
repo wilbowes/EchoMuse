@@ -1,5 +1,29 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
+// The bundle THIS page is executing, read off its own script tag.
+//
+// _serve_dashboard stamps `?v=<mtime>` onto the URL so a browser cannot serve
+// a cached bundle after a deploy — but that only bites on a page LOAD. A tab
+// left open across a controller update keeps its JavaScript indefinitely, and
+// until this existed nothing in the page could tell.
+//
+// It is not a cosmetic problem. On 2026-09-10 a provisioning run on a stale
+// tab silently skipped a step that had shipped hours earlier: the server was
+// right, the file on disk was right, and the wizard was running yesterday's
+// code. The version in the header made it WORSE — that comes from the API, so
+// it names the new controller while the old code runs, which is the one number
+// somebody checks to rule this out.
+//
+// "" when the tag cannot be found, which compares equal to the "" the server
+// sends for an unreadable bundle: the check then says nothing rather than
+// prompting for a reload that would fix nothing.
+const LOADED_BUNDLE = (() => {
+  try {
+    const el = document.querySelector('script[src*="dashboard.js"]');
+    return new URL(el.src, location.href).searchParams.get('v') || '';
+  } catch { return ''; }
+})();
+
 // ─── Ingress ──────────────────────────────────────────────────────────────────
 
 // Under Home Assistant Ingress the dashboard is mounted below a generated
@@ -7976,6 +8000,10 @@ function App() {
   const [ctrlNotesOpen, setCtrlNotesOpen] = useState(false);
   const [checkingRelease, setCheckingRelease] = useState(false);
   const [status, setStatus] = useState(null);
+  // Latched, never cleared: a controller that is updated twice while this tab
+  // is open is still one stale tab, and a prompt that flickered off would be
+  // read as having fixed itself.
+  const [staleBundle, setStaleBundle] = useState(false);
   const [loadError, setLoadError] = useState(null);
   const [showWizard, setShowWizard] = useState(false);
   const [showDeployAll, setShowDeployAll] = useState(false);
@@ -8131,9 +8159,29 @@ function App() {
       API.get('/api/devices').then(setDevices).catch(() => {});
     }, 5000);
 
+    // Staleness is checked on its own, much slower, timer. It rides no
+    // existing poll because /api/system/status gathers process and disk
+    // stats, and a controller update happens on the order of weeks — asking
+    // every five seconds would spend real work answering a question whose
+    // answer almost never changes.
+    //
+    // setStatus is deliberately NOT called here. The header's version must
+    // keep naming the controller this page was LOADED against, or the stale
+    // indicator contradicts itself: a fresh version beside a reload prompt
+    // reads as a bug in the prompt. Only the comparison is updated.
+    const stale = setInterval(() => {
+      API.get('/api/system/status')
+        .then(st => {
+          if (st?.bundle_version && LOADED_BUNDLE &&
+              st.bundle_version !== LOADED_BUNDLE) setStaleBundle(true);
+        })
+        .catch(() => {});
+    }, 60000);
+
     return () => {
       ws.close();
       clearInterval(poll);
+      clearInterval(stale);
     };
 
   }, [token]);
@@ -8160,7 +8208,20 @@ function App() {
           <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 28, color: 'var(--text)', fontWeight: 600, letterSpacing: '-0.02em' }}>EchoMuse</div>
           <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)', letterSpacing: '0.12em', textTransform: 'uppercase' }}>Device Management</div>
           {status?.controller_version && (
-            <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)' }}>{status.controller_version}</div>
+            /* Deliberately IN PLACE of the version rather than a banner beside
+               it: this is the element that was lying, so it is the element
+               that should say so, and it costs no vertical space. */
+            staleBundle ? (
+              <button onClick={() => location.reload()}
+                title={`This page is running an older build than the controller (${status.controller_version}). Reload to update.`}
+                style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--warn)',
+                         background: 'none', border: '1px solid var(--warn)', borderRadius: 4,
+                         padding: '1px 6px', cursor: 'pointer' }}>
+                {status.controller_version} · reload
+              </button>
+            ) : (
+              <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)' }}>{status.controller_version}</div>
+            )
           )}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>

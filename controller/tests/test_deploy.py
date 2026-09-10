@@ -49,7 +49,17 @@ def test_dashboard_bundle_is_cache_busted():
         "dashboard.html itself must be revalidated, or the new URL is never seen"
     # A version-string token would not change between two local "dev" builds;
     # mtime changes on every rebuild.
-    assert "st_mtime" in handler, \
+    # The token must be an mtime, not a version string: `version.py` reports
+    # "dev" for every local build and so would never change between two of
+    # them. The stamp moved into _bundle_version() when /api/system/status
+    # started publishing it for stale-tab detection, so the requirement is now
+    # that the handler uses that ONE definition and that the definition is an
+    # mtime — see test_the_bundle_stamp_has_exactly_one_definition.
+    assert "_bundle_version()" in handler, \
+        "the handler must take its token from _bundle_version()"
+    helper = src[src.index("def _bundle_version("):]
+    helper = helper[:helper.index("\nasync def ", 1)]
+    assert "st_mtime" in helper, \
         "cache-bust on the bundle's mtime, not on a version string"
 
 
@@ -2637,3 +2647,60 @@ def test_every_debloat_push_asks_which_userspace_the_device_booted():
         + " — an emOS device has no package manager to hide packages from and "
           "no Magisk daemon to have created the service.d directory."
     )
+
+
+def test_the_bundle_stamp_has_exactly_one_definition():
+    """
+    A stale-tab check is worthless if the two ends derive the stamp
+    separately.
+
+    `_serve_dashboard` stamps the bundle URL and `/api/system/status`
+    publishes the same value for a running page to compare against. If those
+    two ever compute it independently they can drift, and the failure is
+    silent in both directions: permanently stale (a reload prompt nobody can
+    satisfy) or permanently fresh (the check does nothing, which is the state
+    this replaced).
+
+    The bug it exists for: a tab open across a controller update keeps its old
+    JavaScript, the wizard silently ran a step that had shipped hours earlier,
+    and the version in the header named the NEW controller because it comes
+    from the API — so the one number somebody checks to rule this out was the
+    number lying to them (2026-09-10).
+    """
+    src = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
+
+    assert src.count("def _bundle_version(") == 1, (
+        "_bundle_version must be the single definition of the bundle stamp")
+    assert '"bundle_version": _bundle_version()' in src, (
+        "/api/system/status must publish the stamp via _bundle_version(), so "
+        "the page can compare what it loaded against what is being served")
+
+    # The URL stamp must come from the same call, not a second stat().
+    serve = src[src.index("async def _serve_dashboard"):]
+    serve = serve[:serve.index("async def _redirect_root")]
+    assert "_bundle_version()" in serve, (
+        "_serve_dashboard must stamp the URL from _bundle_version() rather "
+        "than re-deriving the mtime")
+    assert "st_mtime" not in serve, (
+        "_serve_dashboard re-derives the bundle mtime — that is the drift "
+        "this test exists to prevent; use _bundle_version()")
+
+
+def test_the_stale_bundle_check_does_not_refresh_the_displayed_version():
+    """
+    The header must keep naming the controller the page was LOADED against.
+
+    Calling setStatus from the staleness poll would show the new version
+    beside a reload prompt, which reads as a bug in the prompt rather than a
+    stale page — and it is exactly the misleading behaviour being fixed, just
+    arrived at from the other side.
+    """
+    jsx = (Path(__file__).resolve().parent.parent
+           / "static" / "dashboard.jsx").read_text()
+
+    start = jsx.index("const stale = setInterval(")
+    block = jsx[start:jsx.index("return () => {", start)]
+    assert "bundle_version" in block, "the staleness poll must compare bundle_version"
+    assert "setStatus" not in block, (
+        "the staleness poll must not call setStatus — the header's version "
+        "has to keep naming the controller this page was loaded against")

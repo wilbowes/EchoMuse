@@ -500,6 +500,25 @@ async def _serve_spa(request: web.Request) -> web.Response:
     )
 
 
+def _bundle_version() -> str:
+    """The dashboard bundle's mtime, as the string used in its URL.
+
+    One function so `_serve_dashboard` (which stamps it) and
+    `/api/system/status` (which publishes it for comparison) cannot disagree
+    about what identifies a build. Two call sites deriving the same value
+    independently is how a staleness check ends up permanently stale, or
+    permanently fresh, with nothing to show for it either way.
+
+    An unreadable bundle returns "", which compares equal to the "" a client
+    reports when it cannot find its own script tag — so the check degrades to
+    "say nothing" rather than to a reload prompt nobody can satisfy.
+    """
+    try:
+        return str(int((STATIC_DIR / "dashboard.js").stat().st_mtime))
+    except OSError:
+        return ""
+
+
 async def _serve_dashboard(request: web.Request) -> web.Response:
     """
     Serve dashboard.html for /dashboard, with the JS bundle cache-busted.
@@ -522,11 +541,11 @@ async def _serve_dashboard(request: web.Request) -> web.Response:
     if not dashboard.exists():
         return web.Response(status=503, text="dashboard.html not found in static/")
     page = _with_ingress_base(dashboard.read_text(encoding="utf-8"), request)
-    bundle = STATIC_DIR / "dashboard.js"
-    if bundle.exists():
+    stamp = _bundle_version()
+    if stamp:
         page = page.replace(
             "static/dashboard.js",
-            f"static/dashboard.js?v={int(bundle.stat().st_mtime)}",
+            f"static/dashboard.js?v={stamp}",
         )
     return web.Response(
         text=page,
@@ -3283,6 +3302,23 @@ async def _get_system_status(request: web.Request) -> web.Response:
 
     return _ok({
         "controller_version": CONTROLLER_VERSION,
+        # The mtime stamped onto the dashboard bundle's URL by
+        # _serve_dashboard, so a running page can tell whether the JavaScript
+        # it is executing is still the JavaScript this controller serves.
+        #
+        # A long-lived SPA tab survives an add-on update and keeps its old
+        # bundle indefinitely — the URL is cache-busted, but only on a page
+        # LOAD. Nothing in the page could notice, and `controller_version`
+        # above made it worse rather than better: it is read from the server,
+        # so it reports the NEW version while the page runs the OLD code.
+        # Measured 2026-09-10, when a wizard run on a stale tab silently
+        # skipped a provisioning step that had shipped hours earlier and the
+        # header cheerfully named a version whose code was not running.
+        #
+        # Compared rather than displayed, so it does not matter that an mtime
+        # is meaningless to a person; `version.py` cannot be used here because
+        # a local build is "dev" for every build and would never differ.
+        "bundle_version": _bundle_version(),
         # True when running as a Home Assistant add-on behind Supervisor's
         # ingress proxy. Presentation only — the dashboard is the same
         # dashboard either way, with the same features, and nothing should
