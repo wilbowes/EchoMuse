@@ -385,6 +385,88 @@ function Slider({ label, sub, value, min, max, step = 1, unit = '', formatValue,
   );
 }
 
+// A plain number box, for settings where the exact value is the point.
+//
+// Slider is right for anything tuned by ear against a real room — the LED
+// meter response, duck depth — where you drag and listen and the number is
+// incidental. It is wrong when somebody already knows what they want, because
+// `step` decides which values exist at all: the console timeout ran 0-90 at
+// step 5, so "twenty minutes" meant hunting a 1px target and "seven" was not
+// expressible.
+//
+// `disabled` is honoured in the HANDLER as well as the styling, for the reason
+// spelled out on Toggle below: a control that greys itself while still writing
+// is worse than one that does nothing, because the stored setting then
+// disagrees with what is on screen.
+//
+// INTEGERS ONLY, and enforced by stripping non-digits as they are typed rather
+// than by rounding afterwards. Rounding looks equivalent and is not: `0.1`
+// rounds to 0, and 0 here means NEVER — so the one entry a person makes when
+// they want the shortest possible timeout would silently turn the timeout off.
+// Stripping makes 0 reachable only by typing it, which is the property worth
+// having. It also matches the device, whose parser reads digits and stops at
+// anything else (`console_timeout_secs` in emos/init/init.c), so a fraction
+// would land there as 0 regardless — better refused at the box than
+// reinterpreted three layers down.
+//
+// Empty input is allowed WHILE TYPING and simply not committed — clearing the
+// box to type a new number must not write 0 mid-keystroke, for the same
+// reason. The value is clamped on commit rather than rejected, so a typed 200
+// becomes the maximum instead of an error nobody can act on.
+function NumberField({ label, sub, value, min = 0, max = 100, unit = '',
+                       onChange, disabled = false }) {
+  const [text, setText] = useState(String(value ?? min));
+
+  // Follow the stored value when it changes underneath us (a fleet config
+  // load, or reverting a section), except while this box is being edited.
+  const [editing, setEditing] = useState(false);
+  useEffect(() => { if (!editing) setText(String(value ?? min)); }, [value, editing, min]);
+
+  const digits = (s) => String(s).replace(/[^0-9]/g, '');
+
+  const commit = (raw) => {
+    if (disabled) return;
+    if (raw === '') return;                       // still typing
+    const n = Number(raw);
+    if (!Number.isInteger(n)) return;
+    onChange(Math.min(max, Math.max(min, n)));
+  };
+
+  return (
+    <div style={{ marginBottom: 20, minWidth: 0 }}>
+      <div style={{ marginBottom: 6 }}>
+        <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: disabled ? 'var(--muted)' : 'var(--text2)' }}>{label}</span>
+      </div>
+      {sub && <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)', lineHeight: 1.6, marginBottom: 8 }}>{sub}</div>}
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', minWidth: 0 }}>
+        {/* text, not type="number": a number input still ACCEPTS "0.1" and
+            "1e3" (and reports an empty string for them in some browsers,
+            which is worse), so the filtering below would have nothing to bite
+            on. inputMode brings up the numeric keypad regardless. */}
+        <input type="text" inputMode="numeric" autoComplete="off"
+          value={text} disabled={disabled}
+          onFocus={() => setEditing(true)}
+          onChange={e => { const d = digits(e.target.value); setText(d); commit(d); }}
+          onBlur={e => {
+            setEditing(false);
+            // Snap the box back to what was actually stored, so a cleared or
+            // out-of-range entry cannot be left on screen looking saved.
+            const d = digits(e.target.value);
+            const v = d === '' ? (value ?? min)
+                               : Math.min(max, Math.max(min, Number(d)));
+            setText(String(v));
+            commit(String(v));
+          }}
+          className="em-inset"
+          style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, width: 84, minWidth: 0,
+                   color: 'var(--text)', border: '1px solid var(--border-hard)',
+                   opacity: disabled ? 0.45 : 1 }}/>
+        {unit && <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)' }}>{unit}</span>}
+      </div>
+    </div>
+  );
+}
+
 function Toggle({ label, sub, value, onChange, disabled = false }) {
   // minWidth: 0 on the flex container and label lets long label/sub text
   // shrink and wrap instead of forcing the row (and the switch with it)
@@ -7442,13 +7524,13 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
           {/* The gate runs when init SPAWNS the console, not per keystroke, so
               a session authenticated before a change keeps its old behaviour
               until something ends it. That is what this ends. */}
-          <Slider
+          <NumberField
             label="Console idle timeout"
             sub={emosFleet
-              ? 'logs the USB console out after this long with no typing. 0 = never. A long command is not interrupted — only an idle prompt.'
+              ? 'minutes of no typing before the USB console logs out, 0-90. 0 = never. A long command is not interrupted — only an idle prompt.'
               : 'every device in this fleet runs FireOS, which uses adb for USB access — this setting would do nothing'}
             value={config.consoleTimeoutMin ?? 0}
-            min={0} max={90} step={5} unit="min"
+            min={0} max={90} unit="min"
             disabled={!emosFleet}
             onChange={v => set('consoleTimeoutMin', v)}/>
         </div>

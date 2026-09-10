@@ -98,6 +98,7 @@ jobs:
           node controller/tests/web_usb_blocked.test.mjs
           node controller/tests/emos_md5.test.mjs
           node controller/tests/boot_image_length.test.mjs
+          node controller/tests/number_field.test.mjs
 
   device-tests:
     name: Device Go tests
