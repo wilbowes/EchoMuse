@@ -1868,3 +1868,21 @@ while a value lives at the call site.**
   inline styles cannot express `:hover` or `:focus-visible` at all, so until
   the class layer existed the dashboard had **no keyboard focus ring
   anywhere**.
+- **Slider or NumberField is a question about the SETTING, not the layout.**
+  A slider is right where the value is tuned by ear against a real room — the
+  LED meter response, `duckDb` — and you drag, listen, and the number is
+  incidental. It is wrong where somebody already knows the number they want,
+  because `step` decides which values exist at all: the console idle timeout
+  ran 0-90 at step 5, so "twenty minutes" meant hitting a 1px target and
+  "seven" could not be expressed (Wil, 2026-09-10).
+  **NumberField takes integers by STRIPPING non-digits as they are typed, not
+  by rounding afterwards**, and those are not equivalent in the way they look.
+  `Math.round("0.1")` is 0, and 0 in that control means NEVER — so the single
+  entry somebody makes when they want the shortest possible timeout would have
+  silently switched the timeout off. Stripping makes 0 reachable only by typing
+  it. It is `type="text"` with `inputMode="numeric"` rather than
+  `type="number"`, because a number input accepts `0.1` and `1e3` anyway and
+  hands some browsers an empty string for them, leaving the filter nothing to
+  bite on. Empty is "still typing" and commits nothing; out of range clamps
+  rather than rejects, since an error nobody can act on beside a box still
+  showing their number is worse than the nearest legal value.

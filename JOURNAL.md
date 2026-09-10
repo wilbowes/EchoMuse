@@ -2419,3 +2419,88 @@ It is now a command on the console you are already connected to, and most of
 the one-way-door objection to emOS-as-default goes with it. It is also the
 first genuinely useful entry for the guided console menu (#451), which until
 now had nothing to guide anyone to.
+
+## 2026-09-10 — GA 2.23.0, firmware v2.15.0 and emOS 0.4, cut together
+
+**Three release trains in one evening, because two of them gate the third.**
+The wizard fetches its init from whatever emOS release is latest, so without
+an `emos-v0.4` the GA would have shipped a wizard installing a four-releases-
+stale init — no `/init recovery`, no console idle timeout. And the controller
+changelog had been carrying an apology since ea.4: three features listed and
+then withdrawn as "needs device firmware newer than v2.14.0, which is not
+published yet". Publishing v2.15.0 turned that into an instruction.
+
+Order was `emos-v0.4` → `v2.15.0` → `controller-v2.23.0`, so the controller's
+notes could promise things that were already installable.
+
+**#488's console-password clear was validated end to end on hardware**, which
+was the last GA blocker. Four steps, and the third is the one that had only
+ever been read rather than run: the clear fires during provisioning; the emOS
+wizard gets through steps 8 and 9 with no prompt, on a device that genuinely
+had a record; the controller re-applies it on connect; and the console
+challenges on the next session. That last one needed a reboot, because
+`console_gate()` runs when init SPAWNS the console and never again — the
+session Wil was sitting on predated the push, which is exactly the property
+#484 exists to bound.
+
+**Two things cost a run each, and both were checks rather than operations.**
+
+A stale dashboard tab ran the ea.14 bundle against an ea.15 controller, so the
+console-password clear silently did not happen and the wizard log simply
+lacked the line. The bundle URL is already cache-busted by mtime, but that
+only applies on a page LOAD — a tab open across an add-on update keeps its
+JavaScript indefinitely. **The version in the header is fetched once, in the
+"Load initial data" effect, so it reports the controller version as of page
+load** — which means the one number you would check to detect a stale page is
+itself stale, and lies in the same direction. Not fixed yet; it is the
+smallest useful thing on the list.
+
+And `/init reboot` on an emOS **0.3** device, which has no multi-call: the
+argument was ignored and the entire init sequence ran again as an ordinary
+process. `/system` and `/data` were already mounted, so both returned EBUSY
+and `led_fail()` lit the ring red at stages 2 and 4 — a real failure
+indication for a boot that was never happening. It then incremented the
+rollback counter (`/data/emos/boot.state`) and ran on to the shutdown path,
+which is why the device eventually rebooted on its own. At `MAX_TRIES` 3 that
+counter restores the known-good image over the boot partition, so one of three
+was spent on nothing. It self-healed: the counter is reset when the network
+comes up and the boot confirms, and read 0 afterwards.
+
+**That is the failure `/init recovery`'s `getpid()` guard prevents, and it
+arrived from the direction I did not write it for.** The guard exists because
+the kernel can pass arguments to init from the boot cmdline; the likelier path
+turns out to be a person at a console typing `/init` something.
+
+**emOS stopped being a one-way door, and the README had to be corrected rather
+than merely updated.** It said a device on emOS cannot be re-provisioned and
+that going back means a TWRP wipe erasing `/data`. Both were true when
+written. But `runConnectAndroid()` — step 0 of BOTH flows — already accepts a
+device sitting in TWRP and reads the FireOS build off `/system`, so reaching
+recovery was the whole of what was missing, and `/init recovery` is that.
+emOS → recovery → re-provision now works. What survives is that nothing tells
+you so, and the duplicate-serial guard still stops you until you take its
+offer to delete the row.
+
+**Also confirmed in passing, from three lines of console output.**
+`boot-good.img` is 6,914,048 bytes — byte-identical to what the wizard
+flashed — so `promote_good()` has run and a rollback would now restore emOS
+rather than silently putting the device back on FireOS. And the file's
+timestamp is correct, which on emOS only happens because the controller told
+the device the time (#430); nothing else there can, since bionic resolves
+through Android's property service.
+
+**Two corrections of mine.** `sync_channels.py --set-version` targets the
+CHANNEL, not GA — the first attempt moved `controller-ea` to `2.23.0`, which
+would have pinned the EA add-on to an image tagged for GA. And I hedged that
+v2.15.0 was "14 commits of device changes I have never seen run", which was
+wrong in the unhelpful direction: Wil's local builds are
+`v2.14.0-81-gd5e397d`, so 13 of the 14 were already field-exercised, and the
+single exception is #484 — whose device half and emOS half are both new and
+both already declared untested in the 0.4 notes.
+
+**Still owed.** `vad_start=—` is now measurable across every GA fleet rather
+than one bench, and it remains the count that says whether HA's endpointing is
+still failing — the fix hides that fault rather than removing it. The 2.5s
+grace is set from two samples (1,077ms and 1,025ms). home-assistant/core#181747
+has had no human response; #122177 died to the stale bot twice, so that one
+wants a nudge with a PR offer rather than an "any update?".

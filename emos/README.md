@@ -8,14 +8,14 @@ It is a distribution in the ordinary sense: it does not include a kernel of its
 own. It pairs the device's existing MediaTek 3.18 kernel with our own PID 1,
 busybox, and bionic and tinyalsa mounted read-only from the device's `/system`.
 
-**Status: 0.3, bench-proven, not field-proven.** Still a small number of
+**Status: 0.4, bench-proven, not field-proven.** Still a small number of
 devices over a handful of days. A complete voice turn has run on it — wake word
 scored on-device, Home Assistant pipeline, spoken answer — along with WiFi, the
 9-channel mic array, hardware AEC, the BLE proxy, buttons, ambient light, jack
 detect and the LED ring. The known gaps are listed at the bottom and none of
 them is a research problem.
 
-Two things changed since 0.1 that are worth knowing before you try it:
+Three things changed since 0.1 that are worth knowing before you try it:
 
 - **The provisioning wizard has now run end to end**, on a device restored to
   genuine stock. It failed at four different steps first, and every one of
@@ -23,12 +23,15 @@ Two things changed since 0.1 that are worth knowing before you try it:
 - **emOS updates in place, over the network.** A device was taken 0.1 → 0.3
   with no TWRP, no cable and no wipe. So a bug in a released emOS is something
   we can push a fix for, rather than something that strands a device.
+- **emOS is no longer a one-way door.** `/init recovery` reboots the device
+  into TWRP from its own console, and the wizard's first step already accepts
+  a device that is in TWRP — so emOS → recovery → re-provision is a path that
+  works, without powering the device off and holding the mute button in the
+  dark. New in 0.4, confirmed on hardware 2026-09-10.
 
-`emos-v0.3` is tagged and published so the wizard can fetch the init, which is
+`emos-v0.4` is tagged and published so the wizard can fetch the init, which is
 the only part of an image that can be distributed. **A tag is not a claim that
-this is finished.** Try it on a spare Echo, and read the Known gaps first — in
-particular, a device on emOS cannot be re-provisioned by the wizard, and going
-back means a TWRP wipe that erases `/data`.
+this is finished.** Try it on a spare Echo, and read the Known gaps first.
 
 ## Why
 
@@ -81,7 +84,7 @@ with `git describe --match 'emos-v*'`, so without those tags it stamps
 whatever tag is nearest — a controller release number, which is worse than
 "unknown" because it looks plausible. The namespace also keeps emOS out of the
 firmware OTA's way: `_fetch_latest_release` selects a tag starting `v` with a
-`server` asset, and `emos-v0.3` matches neither.
+`server` asset, and `emos-v0.4` matches neither.
 
 ```sh
 git tag -a --cleanup=verbatim emos-v0.4 -m "..."   # -a always; the annotation IS the notes
@@ -746,18 +749,28 @@ is not proof it rebooted — compare uptime or a build fingerprint.
   board.
 - The boot trail is a fixed-size buffer rewritten in place, so a shorter trail
   leaves the tail of the previous boot's behind and can be misread.
-- **A device on emOS cannot be re-provisioned by the wizard, and nothing in
-  the wizard says so.** Step 0 needs adbd, which emOS does not have and will
-  not — `f_acm` is the whole point of not needing a daemon. So the USB picker
-  offers nothing and the step fails with an error about the wrong device,
-  which does not name the actual reason. The duplicate-serial guard would
-  refuse it a second time over, since a provisioned device is registered.
+- **A device on emOS cannot start the wizard directly, and nothing in the
+  wizard says so** — but since 0.4 there is a one-command way round it, so
+  this is an unhelpful error rather than the dead end it was.
+
+  Step 0 needs adbd, which emOS does not have and will not — `f_acm` is the
+  whole point of not needing a daemon. So the USB picker offers nothing and
+  the step fails with an error about the wrong device, which does not name the
+  actual reason.
+
+  **`/init recovery` from the console is the way through.** The wizard's first
+  step already accepts a device that is in TWRP (it reads the FireOS build off
+  `/system`, since every property in recovery belongs to the ramdisk), so
+  reaching recovery is the whole of what was missing. What remains is that
+  nothing tells you that, and the duplicate-serial guard still refuses a
+  device that is already registered — it offers to delete it, which is the
+  right answer but has to be found.
 
   Noticed by Wil on 2026-09-05, after the flow was built. The design's open
   questions covered FireOS → emOS and deferred it; **nobody asked the
   reverse**, which is how it got this far.
 
-  Three paths exist and none of them is in the wizard:
+  The other three paths remain, and none of them is in the wizard either:
 
   - **Return to stock, by hand.** Boot into TWRP — unplug the power, hold
     **mute** down, and apply power with it still held, until the ring shows an
@@ -780,9 +793,12 @@ is not proof it rebooted — compare uptime or a build fingerprint.
     re-provision and needs no USB at all.
   - **The console**, for a device that is on emOS but not on the network.
 
-  The middle one is the fix worth building, and it is the same self-flash the
-  design deferred for FireOS → emOS. Until then this is a one-way door: keep
-  the escrowed boot image.
+  The middle one is still the fix worth building, and it is the same self-flash
+  the design deferred for FireOS → emOS — it needs no USB and no recovery at
+  all. It is no longer urgent, though: `/init recovery` plus the wizard's
+  existing TWRP entry covers the case that mattered. Keep the escrowed boot
+  image regardless; it is the ten-second undo for a device that will not boot,
+  which is the one situation none of these paths help with.
 
 ## What emOS is worth beyond the stunt
 
