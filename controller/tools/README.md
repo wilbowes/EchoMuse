@@ -31,3 +31,11 @@ docker exec echomuse-controller python /tmp/devshell.py "<shell command>" ["<ano
   multi-megabyte files; **deletes the destination first** unless
   `--resume`, since resuming on size alone will append to a different file
   and then report success. Success means md5 agreement, nothing less.
+
+One runs on the **host**, not in the container:
+
+- **cpu_baseline_check.sh** — runs an image under an emulated Proxmox
+  `kvm64` CPU and fails if any dependency needs more (#496):
+  `controller/tools/cpu_baseline_check.sh <image>`. Needs
+  `qemu-user-static`. CI runs it on every image build; `cpu_baseline_probe.py`
+  is its payload.

@@ -90,6 +90,17 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # The PR check (ci.yml) only runs when the Dockerfile or requirements
+      # change, but the base image FLOATS, so what ships can move without a
+      # PR. This is the artifact that gets promoted, so it is checked here
+      # too, by digest. amd64 only — see the script. #496.
+      - name: CPU baseline (kvm64)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-user-static
+          controller/tools/cpu_baseline_check.sh \
+            ghcr.io/${{ github.repository_owner }}/echomuse-controller@${{ steps.build.outputs.digest }}
+
       # By digest, for the reason the release workflow documents: there is
       # no string to get wrong and no chance of scanning something other
       # than the artifact just built.

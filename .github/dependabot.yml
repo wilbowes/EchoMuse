@@ -43,9 +43,16 @@ updates:
     # above — as an ordinary weekly PR, alongside bumps that genuinely were
     # routine. Nothing in CI can catch an inference regression, so the guard
     # has to be here or it does not exist.
+    #
+    # numpy is ignored on MINOR too since it was held at 2.3 (#496): 2.4+
+    # wheels need an x86-64-v2 CPU and stop the add-on starting on Proxmox
+    # kvm64. A weekly PR offering 2.4 would be red on the kvm64 check every
+    # Monday, which is noise, not a decision — moving it is #224.
     ignore:
       - dependency-name: numpy
-        update-types: ["version-update:semver-major"]
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
       - dependency-name: onnxruntime
         update-types:
           - version-update:semver-major

@@ -33,7 +33,30 @@ zeroconf==0.150.0
 # Wake word inference — openwakeword deps installed manually to avoid
 # tflite-runtime which has no Python 3.12 x86_64 build.
 # openwakeword itself is installed via --no-deps in the Dockerfile.
-numpy==2.4.4
+#
+# numpy is held BELOW 2.4 for the CPU, not for the API (#496). numpy 2.4's
+# x86_64 wheels are built with an x86-64-v2 baseline (SSE4.2, POPCNT), so
+# on a CPU without it `import numpy` dies before our code runs — and
+# Proxmox's `kvm64` CPU type, still what many Home Assistant VMs carry,
+# is exactly such a CPU. The add-on did not start at all there. scipy,
+# scikit-learn and openwakeword go down with it, since they import numpy.
+#
+# Measured 2026-09-11 against the published 2.23.0 image under
+# `qemu-x86_64 -cpu kvm64`: 2.4.4 dies; 2.3.5 in the same image runs the
+# whole stack including a wake word prediction. It costs nothing on a
+# modern CPU, because numpy dispatches AVX2/AVX-512 at RUNTIME whatever
+# the baseline — oww scoring 2.96-3.06% of realtime against 2.92-2.99%,
+# three runs each — and wake scores are bit-identical across 4,588 frames
+# of real recordings (with np.random seeded: openwakeword fills its
+# feature buffer with random noise at Model init, and an unseeded
+# comparison measures that instead of numpy).
+#
+# The `CPU baseline (kvm64)` step in CI runs the built image under that
+# emulated CPU, so this is guarded rather than remembered: a bump past 2.3,
+# or ANY dependency raising its baseline the same way, fails there. Moving
+# numpy forward (#224) therefore means deciding to drop kvm64, or building
+# numpy from source with a lower baseline — not a version edit.
+numpy==2.3.5
 scipy
 tqdm
 scikit-learn

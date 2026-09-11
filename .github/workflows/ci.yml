@@ -258,9 +258,22 @@ jobs:
         with:
           context: controller
           push: false
+          load: true
+          tags: echomuse-controller:pr
           platforms: linux/amd64
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      # A wheel's CPU baseline is invisible to every other check, because
+      # every runner is newer than the CPUs it excludes. numpy 2.4 needed
+      # x86-64-v2 and the add-on would not start on Proxmox's kvm64 (#496)
+      # while this job was green. The trigger above is exactly right for it:
+      # only a Dockerfile or requirements change can move a baseline.
+      - name: CPU baseline (kvm64)
+        if: steps.changed.outputs.build == 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-user-static
+          controller/tools/cpu_baseline_check.sh echomuse-controller:pr
 
 
   controller-imports:
