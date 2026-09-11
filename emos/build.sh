@@ -26,14 +26,42 @@ trap 'rm -rf "$WORK"' EXIT
 # `#!/bin/busybox sh` init produced no output whatsoever, which is
 # indistinguishable from a kernel that never started. See README.md.
 NDK=${NDK:-/opt/android/ndk/21.4.7075529/toolchains/llvm/prebuilt/linux-x86_64/bin}
-CC=${CC:-$NDK/aarch64-linux-android21-clang}
+
+# The init must match the REFERENCE kernel's architecture. FireOS 5 boots a
+# 64-bit (AArch64) kernel and FireOS 6 a 32-bit ARM one — the same 3.18.19
+# source, compiled both ways — and an init of the wrong architecture boots to
+# nothing at all, with no output. So it is read out of the reference rather
+# than assumed: a zImage (magic 0x016f2818 at 0x24) is ARM, a raw gzip stream
+# whose Image carries "ARM\x64" at 0x38 is AArch64. Anything else is refused.
+ARCH=$(python3 - "$REF" <<'EOF'
+import struct, sys, zlib
+ref = open(sys.argv[1], "rb").read()
+ksz = struct.unpack("<I", ref[8:12])[0]
+p = ref[2048:2048 + ksz][0x200:]
+if p[0x24:0x28] == b"\x18\x28\x6f\x01":
+    print("arm")
+elif p[:2] == b"\x1f\x8b" and \
+        zlib.decompressobj(31).decompress(p, 0x40)[0x38:0x3c] == b"ARM\x64":
+    print("arm64")
+else:
+    print("unknown")
+EOF
+)
+case "$ARCH" in
+    arm64) TRIPLE=aarch64-linux-android21 ;;
+    arm)   TRIPLE=armv7a-linux-androideabi21 ;;
+    *)     echo "cannot tell the reference kernel's architecture — not building" >&2
+           exit 1 ;;
+esac
+echo "reference kernel is $ARCH: building a matching init"
+CC=${CC:-$NDK/$TRIPLE-clang}
 
 if [ -x "$CC" ]; then
     "$CC" -static -O2 -Wall -o "$WORK/init" "$HERE/init/init.c"
 else
     echo "building init in the echomuse-compiler image ($CC not found)"
     docker run --rm -v "$HERE":/emos -v "$WORK":/out -w /emos echomuse-compiler \
-        bash -lc "$NDK/aarch64-linux-android21-clang -static -O2 -Wall -o /out/init init/init.c"
+        bash -lc "$NDK/$TRIPLE-clang -static -O2 -Wall -o /out/init init/init.c"
 fi
 
 # The ramdisk is init plus the empty mountpoints it needs. Everything else the

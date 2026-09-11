@@ -69,7 +69,9 @@ class of dependency visible. No log, test or dashboard could show it.
 #    build input and the recovery image.
 adb shell su -c 'dd if=/dev/block/mmcblk0p10' > boot_a_x.img
 
-# 2. Build. Reuses the kernel and DTBs out of your own image.
+# 2. Build. Reuses the kernel and DTBs out of your own image, and builds the
+#    init for that kernel's architecture: 64-bit for FireOS 5, 32-bit ARM for
+#    FireOS 6 (untested on hardware as of 2026-09-11).
 ./build.sh boot_a_x.img emos-boot.img
 
 # 3. Flash (TWRP, or over the network from a running emOS — see below).

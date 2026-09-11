@@ -1072,6 +1072,34 @@ static void netlog(const char *fmt, ...)
     close(fd);
 }
 
+/* The first of `cands` that exists and is executable, or NULL.
+ *
+ * FireOS 5 and FireOS 6 put the same tools in different places: WiFi bring-up
+ * moved to /system/vendor, 6620_launcher became wmt_launcher, and a FireOS 6
+ * /system ships no busybox at all, only toybox. Resolving by what is present
+ * keeps one init for both kernels rather than two that drift — the same
+ * "resolve by name, not by number" rule the rest of the project follows.
+ */
+static const char *first_exec(const char *const cands[])
+{
+    for (int i = 0; cands[i]; i++)
+        if (access(cands[i], X_OK) == 0)
+            return cands[i];
+    return NULL;
+}
+
+/* busybox: from /system on FireOS 5; on FireOS 6, which has none, a static
+ * copy placed on /data. NULL when there is none, and every caller then falls
+ * back to the FireOS 5 path, so a missing busybox fails exactly as it always
+ * did rather than in some new way. Only meaningful once /system and /data are
+ * mounted. */
+static const char *busybox_path(void)
+{
+    static const char *const c[] = { "/system/bin/busybox", "/system/xbin/busybox",
+                                     "/data/local/bin/busybox", NULL };
+    return first_exec(c);
+}
+
 /* fork+exec, returning the pid. NULL-terminated argv, argv[0] is the path. */
 static pid_t spawn(char *const argv[])
 {
@@ -1262,9 +1290,22 @@ static int ifup(const char *name)
  */
 static void net_main(void)
 {
-    char *loader[] = { "/system/bin/wmt_loader", NULL };
-    char *launch[] = { "/system/bin/6620_launcher", "-p",
-                       "/system/etc/firmware/", NULL };
+    /* FireOS 6 moved the combo-chip tools under /system/vendor and renamed
+     * the launcher; its own init.connectivity.rc runs
+     * `wmt_launcher -p /vendor/firmware/`, which is where its kernel's
+     * compiled-in firmware path points too. Same sequence, other paths. */
+    static const char *const loaders[] = { "/system/bin/wmt_loader",
+                                           "/system/vendor/bin/wmt_loader", NULL };
+    const char *ldr = first_exec(loaders);
+    int vendor = access("/system/bin/6620_launcher", X_OK) != 0
+              && access("/system/vendor/bin/wmt_launcher", X_OK) == 0;
+    char *loader[] = { (char *)(ldr ? ldr : loaders[0]), NULL };
+    char *launch[] = { vendor ? "/system/vendor/bin/wmt_launcher"
+                              : "/system/bin/6620_launcher", "-p",
+                       vendor ? "/system/vendor/firmware/"
+                              : "/system/etc/firmware/", NULL };
+    netlog("wifi tools: %s layout, loader %s\n",
+           vendor ? "vendor (FireOS 6)" : "system (FireOS 5)", loader[0]);
     char *supp[]   = { "/system/bin/wpa_supplicant", "-iwlan0", "-Dnl80211",
                        "-c/data/misc/wifi/wpa_supplicant.conf",
                        "-e/data/misc/wifi/entropy.bin", NULL };
@@ -1325,7 +1366,9 @@ static void net_main(void)
      * Client only. busybox ntpd SERVES time if given -l, and emOS holds no
      * inbound sockets at all — every daemon added here has to keep it that way.
      */
-    char *ntpd[] = { "/system/bin/busybox", "ntpd", "-n", "-p", gwip, NULL };
+    const char *bb_ntp = busybox_path();
+    char *ntpd[] = { (char *)(bb_ntp ? bb_ntp : "/system/bin/busybox"),
+                     "ntpd", "-n", "-p", gwip, NULL };
     pid_t wpa = spawn(supp);
     pid_t dhc = -1, ntp = -1;
     int nudges = 0, dry = 0, netup = 0;
@@ -1694,11 +1737,18 @@ int main(int argc, char **argv)
      * broken interpreter is indistinguishable from a kernel that never ran.
      */
     mkdir("/sbin", 0755);
-    char *link[] = { "/system/bin/sh", "-c",
-        "for a in $(busybox --list); do "
+    /* By absolute path, since on FireOS 6 busybox is not in /system/bin and
+     * so not on PATH yet — which is the whole reason these links exist. */
+    const char *bb_app = busybox_path();
+    if (!bb_app)
+        bb_app = "/system/bin/busybox";
+    char applets[512];
+    snprintf(applets, sizeof applets,
+        "for a in $(%s --list); do "
         "  [ -e /system/bin/$a ] || [ -e /system/xbin/$a ] || "
-        "    busybox ln -sf /system/bin/busybox /sbin/$a; "
-        "done", NULL };
+        "    %s ln -sf %s /sbin/$a; "
+        "done", bb_app, bb_app, bb_app);
+    char *link[] = { "/system/bin/sh", "-c", applets, NULL };
     int lst = 0;
     waitpid(spawn(link), &lst, 0);
     note("stage=applets status=%d vi=%d\n", lst, access("/sbin/vi", X_OK));
@@ -1774,9 +1824,11 @@ int main(int argc, char **argv)
      * dump_log() spills the ring on the way down. Crashes survive; chatter
      * does not.
      */
-    char *syslogd[] = { "/system/bin/busybox", "syslogd", "-n",
+    const char *bb_log = busybox_path();
+    char *bbl = (char *)(bb_log ? bb_log : "/system/bin/busybox");
+    char *syslogd[] = { bbl, "syslogd", "-n",
                         "-O", "/run/messages", "-s", "256", "-b", "2", NULL };
-    char *klogd[]   = { "/system/bin/busybox", "klogd", "-n", NULL };
+    char *klogd[]   = { bbl, "klogd", "-n", NULL };
 
     /* EchoMuse itself, via its OWN supervisor rather than directly.
      *
