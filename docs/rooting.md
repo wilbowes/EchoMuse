@@ -3,6 +3,20 @@
 > **You do this at your own risk. We accept no responsibility for negative
 > outcomes experienced.**
 
+> **⚠️ Do not install amonet-biscuit v2.0.0 on an Echo you use with EchoMuse.**
+> Version 2.0.0 of the unlock (10 September 2026) replaces the Echo's
+> bootloaders, and after that FireOS 5 no longer boots. EchoMuse only runs on
+> FireOS 5, emOS included, because emOS uses the FireOS 5 kernel. The XDA
+> thread now tells unlocked users to update. If your Echo runs EchoMuse,
+> don't.
+>
+> - **Unlocking a new Echo?** Use **amonet-biscuit v1.1.0**, which is still
+>   attached to the XDA thread.
+> - **Already updated?** Do not try to go back by flashing FireOS 5 or an
+>   older amonet. v2.0.0 rewrote the preloader, LK and TrustZone, and writing
+>   old ones back by hand is how an Echo gets hard-bricked. EchoMuse does not
+>   run on FireOS 6 today, so for now that Echo stays on FireOS 6.
+
 EchoMuse needs an Echo Dot Gen 2 that is already unlocked and running
 FireOS 5. Two separate jobs get you there, and they carry very different
 risk.
@@ -16,23 +30,22 @@ risk.
 - OS: FireOS 5 (Android 5.1, API 22) — see the note below on FireOS 6
 - MicroUSB cable required
 
-> **FireOS 6 exists for biscuit and cannot be booted once you have unlocked.**
-> `Fire OS 6.5.7.0 (NS6570/6077)` is real, and amonet's instructions tell you
-> to update *to* it before unlocking, because the exploit downgrades the
-> firmware partitions on the way through. But after unlocking, only FireOS 5
-> based ROMs boot — R0rt1z2's thread is explicit that flashing FireOS 6 "may
-> result in a (soft) brick".
+> **Which FireOS boots depends on which amonet you used.** Up to v1.1.0, only
+> FireOS 5 based ROMs boot after unlocking; R0rt1z2's thread said flashing
+> FireOS 6 "may result in a (soft) brick". v2.0.0 (10 September 2026) turns
+> that round: it boots FireOS 6, and FireOS 5 no longer boots.
 >
-> Two reasons, and the second is the real one. FireOS 6 on this board is a
-> **32-bit** kernel while amonet's payload forced 64-bit — since fixed
-> upstream, by parsing the cmdline. The blocker underneath is the signature
-> chain: FireOS 6 likely needs a newer TrustZone, and a newer TZ cannot be
-> flashed because the FireOS 5 preloader refuses to boot one whose signature
-> differs. That is below the boundary this project writes to, so it is not
-> something EchoMuse can address.
+> What changes is the bootloaders, not the kernel's bitness. The v2.0.0
+> installer writes a newer preloader, LK and TrustZone to the device, and
+> FireOS 5's kernel does not run on them. Its LK patch starts a 32-bit or
+> 64-bit kernel according to what the boot image asks for, so bitness was not
+> the obstacle. (This corrects an earlier version of this note, which put it
+> down to the TrustZone signature chain.)
 >
-> Practically: EchoMuse targets FireOS 5, and a newer Android is not a route
-> to a newer kernel on this device.
+> EchoMuse, emOS included, runs on FireOS 5, so it needs **v1.1.0**. For that
+> version, `Fire OS 6.5.7.0 (NS6570/6077)` still matters: its instructions
+> tell you to update *to* it before unlocking, because the exploit downgrades
+> the firmware partitions on the way through.
 
 ## What you need
 
@@ -41,7 +54,9 @@ For the unlock itself (R0rt1z2's thread has the authoritative list):
 - **Linux machine** with ADB and fastboot installed — see the note below on macOS
 - Python 3 (for boot image patching and Magisk DB creation)
 - The following files downloaded and ready:
-  - `amonet-biscuit-v1.1.0.zip` — from R0rt1z2's XDA thread
+  - `amonet-biscuit-v1.1.0.zip` — from R0rt1z2's XDA thread. **Not
+    v2.0.0**, which is what the thread now offers first; see the warning at
+    the top of this page.
   - `update-kindle-csm_biscuit-272.6.8.0_user_680767620.bin` — FireOS 5 firmware
     (**this exact build** — see below)
   - `f1r30s.zip` — from R0rt1z2's XDA thread. Does four things, not one:
@@ -93,7 +108,9 @@ The persistent unlock, the bootrom exploit and TWRP for this device are
 
 Follow that thread, not this page. We link to it rather than copying it
 because a copy goes out of date without anyone noticing. If the two ever
-disagree, the thread is correct.
+disagree, the thread is correct, **with one exception: the version.** Use
+v1.1.0, not v2.0.0. v2.0.0 stops FireOS 5 booting, and EchoMuse needs
+FireOS 5; see the warning at the top of this page.
 
 **This is the part that can ruin a device.** It runs a bootrom exploit,
 modifies the partition table and wipes userdata. A failure here can leave a

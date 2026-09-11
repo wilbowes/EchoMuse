@@ -11,6 +11,20 @@ faults worth checking before you file, and
 
 ## Rooting and unlocking
 
+### The XDA thread says to update to amonet v2.0.0. Should I?
+**Not on an Echo you use with EchoMuse.** v2.0.0 (10 September 2026) replaces
+the Echo's bootloaders, and after that FireOS 5 no longer boots. EchoMuse only
+runs on FireOS 5, emOS included, because emOS uses the FireOS 5 kernel.
+
+- **Unlocking a new Echo:** use **v1.1.0**, which is still attached to the
+  thread.
+- **Already installed v2.0.0:** do not try to go back by flashing FireOS 5 or
+  an older amonet. v2.0.0 rewrote the preloader, LK and TrustZone, and writing
+  old ones back by hand is how an Echo gets hard-bricked. EchoMuse does not run
+  on FireOS 6 today, so for now that Echo stays on FireOS 6.
+
+Why it happens is explained at the top of [rooting](rooting.md).
+
 ### The unlock won't run on my Mac.
 **It needs Linux.** The unlock is
 [R0rt1z2's work on XDA](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/),
@@ -61,10 +75,12 @@ Use **Chrome or Edge**. The wizard talks to the device over WebUSB and other
 browsers vary. Brave in particular is unconfirmed.
 
 ### The wizard says it needs a secure context.
-If you reach Home Assistant over plain `http://`, the browser blocks WebUSB.
-Add your HA URL at `chrome://flags/#unsafely-treat-insecure-origin-as-secure`
-— e.g. `http://homeassistant.local:8123` — and restart the browser. Tracked as
-[#170](https://github.com/wilbowes/EchoMuse/issues/170).
+If you reach Home Assistant over plain `http://`, the browser blocks WebUSB, and
+the wizard's first step names the exact origin to allow. Either serve Home
+Assistant over HTTPS, or add that origin at
+`chrome://flags/#unsafely-treat-insecure-origin-as-secure` and restart the
+browser. The entry has to match scheme, host **and port** exactly, so one for
+some other address does not cover it.
 
 ### The USB connection drops and re-enumerates every few seconds.
 `persist.sys.usb.config` is set to `mtp,adb`, and the composite gadget is what
@@ -89,6 +105,25 @@ than the fix. Corrected 2026-09-05.)*
 ### A wizard step failed and I don't know why.
 Every failed step offers diagnostics. Grab those before retrying — the state
 the device is in is the diagnostic, and retrying destroys it.
+
+---
+
+## emOS
+
+### emOS or FireOS: which should I pick in the wizard?
+The wizard offers **emOS** first. It replaces Android on the Echo entirely,
+keeping only Amazon's kernel, and it is why the 3.5mm jack behaves properly.
+**FireOS** is one labelled click away and is what most fielded devices run.
+The emOS flow saves your original boot image before writing anything, and
+restoring it takes about ten seconds; the FireOS flow does not yet
+([#468](https://github.com/wilbowes/EchoMuse/issues/468)). Both need the amonet
+**v1.1.0** unlock; see the first question on this page.
+
+### How do I run the wizard again on an emOS device?
+emOS has no adb, so the wizard cannot see it directly. Open the USB console,
+run `/init recovery`, and the Echo reboots into TWRP, where the wizard's first
+step accepts it. This needs emOS 0.4 or later. If the wizard then says the
+device is already registered, let it delete the old entry.
 
 ---
 
@@ -121,6 +156,16 @@ docker compose pull && docker compose up -d
 or update the add-on from Home Assistant. **The dashboard's update notice is
 advisory and always will be** — the controller is your container, and a
 process cannot restart itself mid-request and then tell you how it went.
+
+### Home Assistant offers an update, but installing it fails.
+Wait a few minutes and try again. Home Assistant can see a new version shortly
+before its image has finished publishing, and until then the install fails
+with `manifest unknown`. Nothing is wrong with your setup.
+
+### The add-on won't start: "NumPy was built with baseline optimizations: (X86_V2)".
+Fixed in **2.23.1**; update the add-on. It affected Proxmox VMs using the
+`kvm64` CPU type, which lacks instructions NumPy 2.4 needed.
+[#496](https://github.com/wilbowes/EchoMuse/issues/496).
 
 ### The update notice shows no release notes.
 Notes come from the tag annotation. If they're empty, that's ours to fix —
@@ -175,7 +220,10 @@ See [#210](https://github.com/wilbowes/EchoMuse/issues/210) — and please add
 your setup, that one needs more reports than it has.
 
 ### The device isn't offered as a target for "start a conversation".
-Not implemented yet. [#335](https://github.com/wilbowes/EchoMuse/issues/335).
+**Update the controller.** `assist_satellite.start_conversation` and
+`assist_satellite.ask_question` are both supported, attention chime included.
+A device only appears as a target once it reports a working microphone, so if
+it is still missing, check the device is connected.
 
 ---
 
@@ -224,19 +272,28 @@ substantial driver correction we don't yet —
 Ducking needs firmware that advertises audio mixing. Update the device
 firmware; if it still pauses, check Device → Status and report it.
 
+### Some commands take fifteen seconds to answer.
+Fixed in **2.23.0**; update the controller. It hit short commands like
+"stop", and speaking straight after the wake word, because Home Assistant's
+end-of-speech detection sometimes never started and waited out its own
+fifteen-second limit. If it still happens, report it with a support bundle.
+[#485](https://github.com/wilbowes/EchoMuse/issues/485).
+
 ### Long responses cut off part-way.
-Known: [#324](https://github.com/wilbowes/EchoMuse/issues/324). A support
-bundle with the time it happened genuinely helps here.
+Fixed; update the controller. If a long answer still stops early, a support
+bundle with the time it happened is the right report.
+[#324](https://github.com/wilbowes/EchoMuse/issues/324).
 
 ### Can I interrupt it while it's talking?
 Yes — say the wake word again. Enable it under **Config → Wake word →
 Barge-in** if it isn't already.
 
 ### Does it do timers?
-Yes, as of the current release — ask for one the way you'd expect. **Stopping
-a ringing timer by voice is known to be unreliable**, and that half is still
-being worked on. Report what you said and what happened; the wording people
-actually use is the useful part.
+Yes — ask for one the way you'd expect, and it rings on the Echo itself.
+Stopping one no longer leaves the Echo deaf. **Stopping a ringing timer by
+voice can still be unreliable**, because the chime competes with what you say.
+Report what you said and what happened; the wording people actually use is the
+useful part.
 
 ---
 
@@ -283,8 +340,11 @@ report it.
 Not yet — [#133](https://github.com/wilbowes/EchoMuse/issues/133).
 
 ### The device won't reconnect to WiFi after a reboot.
-If your network has no internet access, this is a known Android behaviour
-blocking auto-join — [#317](https://github.com/wilbowes/EchoMuse/issues/317).
+If your network has no internet access, Android decides it is bad and stops
+auto-joining it. **Fixed for devices provisioned by the current wizard**
+([#317](https://github.com/wilbowes/EchoMuse/issues/317)). A device provisioned
+before that fix can still hit it, and clearing it on a fielded device is
+[#439](https://github.com/wilbowes/EchoMuse/issues/439).
 
 ### There's no ambient light sensor on my device.
 Some Dots ship a second-source sensor that binds a different driver. Known,

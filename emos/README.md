@@ -8,6 +8,15 @@ It is a distribution in the ordinary sense: it does not include a kernel of its
 own. It pairs the device's existing MediaTek 3.18 kernel with our own PID 1,
 busybox, and bionic and tinyalsa mounted read-only from the device's `/system`.
 
+> **⚠️ emOS needs the FireOS 5 kernel, so do not install amonet-biscuit
+> v2.0.0.** Version 2.0.0 of the unlock (10 September 2026) replaces the
+> Echo's bootloaders, and after that FireOS 5, and with it emOS, no longer
+> boots. The emOS init is also a 64-bit (aarch64) binary, which FireOS 6's
+> 32-bit kernel cannot run. Unlock with **v1.1.0**. If you have already
+> installed v2.0.0, **do not try to go back by flashing FireOS 5 or an older
+> amonet**: that rewrites bootloaders by hand, which is how an Echo gets
+> hard-bricked. See the top of [`docs/rooting.md`](../docs/rooting.md).
+
 **Status: 0.4, bench-proven, not field-proven.** Still a small number of
 devices over a handful of days. A complete voice turn has run on it — wake word
 scored on-device, Home Assistant pipeline, spoken answer — along with WiFi, the

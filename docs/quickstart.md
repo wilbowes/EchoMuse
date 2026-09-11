@@ -24,6 +24,14 @@ pretending it's easy.
 
 ## Step 1 — Root the Dot (one time, per device)
 
+> **⚠️ Unlock with amonet-biscuit v1.1.0, not v2.0.0.** v2.0.0 (10 September
+> 2026) replaces the Echo's bootloaders so that FireOS 5 no longer boots, and
+> EchoMuse, emOS included, only runs on FireOS 5. The XDA thread now offers
+> v2.0.0 first and tells unlocked users to update. If you have already
+> installed it, **do not try to go back by flashing FireOS 5 or an older
+> amonet**: that rewrites bootloaders by hand, which is how an Echo gets
+> hard-bricked. The details are at the top of [rooting](rooting.md).
+
 The Dot ships locked to Amazon's software. Unlocking it involves flashing
 modified firmware over USB — it's the only genuinely fiddly part of the
 project, it takes an hour or so the first time, and it's fully documented

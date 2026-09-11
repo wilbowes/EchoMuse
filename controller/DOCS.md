@@ -4,6 +4,15 @@ Runs the EchoMuse controller — wake word detection, fleet dashboard, and
 Home Assistant integration for rooted Echo Dot 2nd Gen devices — as a Home
 Assistant add-on instead of a separate docker-compose deployment.
 
+> **⚠️ Do not install amonet-biscuit v2.0.0 on an Echo you use with
+> EchoMuse.** Version 2.0.0 of the unlock (10 September 2026) replaces the
+> Echo's bootloaders, and after that FireOS 5 no longer boots. EchoMuse only
+> runs on FireOS 5, emOS included. Unlock new Echoes with **v1.1.0**. If you
+> have already installed v2.0.0, **do not try to go back by flashing FireOS 5
+> or an older amonet**: that rewrites bootloaders by hand, which is how an
+> Echo gets hard-bricked. Details:
+> [Rooting a device](https://github.com/wilbowes/EchoMuse/blob/main/docs/rooting.md).
+
 ## Installation
 
 1. Install the add-on and start it. **Controller LAN IP address** can be
