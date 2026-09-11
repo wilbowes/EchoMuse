@@ -2851,6 +2851,39 @@ service echomuse /data/local/bin/start_server.sh
 const _TESTED_FIREOS_BUILD = '272.6.8.0_user_680767620';
 const _TESTED_FIREOS_NAME  = 'Fire OS 5.5.5.4';
 
+// Was this Echo unlocked with amonet-biscuit v2.0.0 or later? v2.0.0
+// (R0rt1z2, 10 Sep 2026) writes a newer preloader, LK and TrustZone, and
+// FireOS 5 does not boot on them — so neither does EchoMuse, emOS included,
+// since emOS runs the FireOS 5 kernel. Provisioning such a device ends in a
+// flash that cannot boot, so the connect step refuses it up front.
+//
+// Decided from EVIDENCE of v2, never from the absence of v1. A probe that
+// fails to run returns empty strings, and empty must read as "no evidence":
+// refusing a working v1.1.0 device because `od` was missing would be the
+// worse error. Three independent signs, any one of which is enough:
+//
+//   expdb   — first four bytes of the expdb partition, as hex. v2's preloader
+//             exploit loads the real LK from expdb (amonet-koboreru,
+//             `LK_PART_NAME "expdb"` for biscuit), so an MTK image header —
+//             magic 0x58881688, stored little-endian as 88 16 88 58 — at its
+//             start is v2's own mechanism rather than a side effect of it.
+//             v1 leaves expdb alone. Checked in recovery only: it needs root.
+//   twrp    — the TWRP version. v2 installs 3.7.0_9-0, v1 ships 3.2.3-0.
+//             Compared numerically, so 3.10 is not read as older than 3.7.
+//   release — the Android release that MATTERS: getprop in Android, but
+//             /system's build.prop in recovery, because TWRP answers getprop
+//             with its own ramdisk. FireOS 6 is Android 7.1; v1 boots only
+//             FireOS 5, so a release of 6 or later on this board means v2.
+const _unlockVerdict = ({ release = '', expdb = '', twrp = '' }) => {
+  const evidence = [];
+  if (expdb.toLowerCase() === '88168858') evidence.push('a bootloader image in expdb');
+  const tv = twrp.match(/(\d+)\.(\d+)/);
+  if (tv && (+tv[1] > 3 || (+tv[1] === 3 && +tv[2] >= 7))) evidence.push(`TWRP ${twrp}`);
+  const major = parseInt(release, 10);
+  if (major >= 6) evidence.push(`Android ${release}, which is FireOS 6`);
+  return { v2: evidence.length > 0, evidence };
+};
+
 // WiFi security labels, used in the network picker and in error messages.
 // Module scope so WifiPanel and the wizard's step runners share one set.
 const _SECURITY_LABEL = {
@@ -3557,7 +3590,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       + '[ -z "$S" ] && exit 0; '
       + 'WAS=$(mount | grep " /system " ); '
       + '[ -z "$WAS" ] && mount -o ro "$S" /system 2>&1; '
-      + 'grep -E "^ro\\.(build\\.version\\.(name|incremental)|product\\.(model|name))=" '
+      + 'grep -E "^ro\\.(build\\.version\\.(name|incremental|release)|product\\.(model|name))=" '
       + '  /system/build.prop 2>/dev/null; '
       + '[ -z "$WAS" ] && umount /system 2>/dev/null; '
       + 'echo _SYSREAD_OK');
@@ -3567,6 +3600,11 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     return build ? {
       build,
       name:  pick('ro\\.build\\.version\\.name'),
+      // The ANDROID release of the build on /system. In recovery the running
+      // getprop is TWRP's: v1's TWRP happens to say 5.1.1, which made the
+      // FireOS 5 check pass by accident, and v2's TWRP 3.7 says something
+      // newer and would be refused as a wrong device. See _unlockVerdict.
+      release: pick('ro\\.build\\.version\\.release'),
       // The DEVICE's identity, not the recovery's. TWRP answers ro.product.*
       // with its own strings ("Echo Dot 2nd Gen" / "omni_biscuit"), which pass
       // the board check by containing "biscuit" — true, but it is TWRP being
@@ -3603,10 +3641,14 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     const inRecovery = _bannerMode(c.banner) === 'twrp';
     if (serial) setProvSerial(serial);
     addLog(`Model: ${model || '(unknown)'}  Build: Android ${release}  Codename: ${name || '(unknown)'}  Serial: ${serial || '(unknown)'}`);
+    // In recovery the release that matters is /system's, not TWRP's; unknown
+    // stays '' so the checks below skip it rather than guess.
+    let effRelease = release;
     if (inRecovery) {
       addLog('Device is already in TWRP recovery — reading the FireOS build off '
            + '/system, since every property above is the recovery ramdisk\'s.');
       const sys = await readFireosBuild(c);
+      effRelease = (sys && sys.release) || '';
       if (sys) {
         fwBuild = sys.build; fwName = sys.name;
         if (sys.model) model = sys.model;
@@ -3621,8 +3663,40 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     } else {
       addLog(`Firmware: ${fwName || '(unknown)'}  ${fwBuild || ''}`);
     }
-    if (!release.startsWith('5.')) {
-      throw new Error(`Expected FireOS 5 (Android 5.x), got Android ${release}. Wrong device?`);
+    // amonet v2.0.0 — see _unlockVerdict. expdb and the TWRP version can only
+    // be read in recovery (expdb needs root); in Android the release is the
+    // evidence, and a v2 device that boots Android is necessarily on FireOS 6.
+    let expdb = '', twrp = '';
+    if (inRecovery) {
+      const u = await c.shell(
+        'P=""; for d in /dev/block/platform/*/by-name /dev/block/by-name; do '
+        + '[ -z "$P" ] && [ -e "$d/expdb" ] && P="$d/expdb"; done; '
+        + 'echo "EXPDB=$([ -n "$P" ] && dd if="$P" bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d \' \\n\')"; '
+        + 'echo "TWRP=$(getprop ro.twrp.version)"; '
+        + 'echo "TWRPLOG=$(grep -m1 -o \'Starting TWRP [0-9][^ ]*\' /tmp/recovery.log 2>/dev/null)"; '
+        + 'echo _UNLOCKCHK');
+      if (u.includes('_UNLOCKCHK')) {
+        const pick = k => ((u.match(new RegExp('^' + k + '=(.*)$', 'm')) || [])[1] || '').trim();
+        expdb = pick('EXPDB');
+        twrp  = pick('TWRP') || pick('TWRPLOG').replace(/^Starting TWRP /, '');
+      }
+      addLog(`Unlock check: TWRP ${twrp || 'unknown'}, expdb ${expdb || 'unreadable'}`);
+    }
+    const unlock = _unlockVerdict({ release: effRelease, expdb, twrp });
+    if (unlock.v2) {
+      expectDisconnect.current = true;
+      try { await c.close(); } catch {}
+      setAdb(null);
+      throw new Error(
+        `This Echo was unlocked with amonet-biscuit v2.0.0 or later (${unlock.evidence.join('; ')}). `
+        + 'v2.0.0 replaces the Echo\'s bootloaders and FireOS 5 does not boot on them, and '
+        + 'EchoMuse, emOS included, needs FireOS 5 — so nothing has been written. Do not try '
+        + 'to go back by flashing FireOS 5 or an older amonet: that means writing bootloaders '
+        + 'by hand, which is how an Echo gets hard-bricked. See the warning at the top of '
+        + 'docs/rooting.md.');
+    }
+    if ((!inRecovery || effRelease) && !effRelease.startsWith('5.')) {
+      throw new Error(`Expected FireOS 5 (Android 5.x), got Android ${effRelease}. Wrong device?`);
     }
     if (fwBuild && fwBuild !== _TESTED_FIREOS_BUILD) {
       addLog(`Untested firmware — EchoMuse is developed against ${_TESTED_FIREOS_NAME} `

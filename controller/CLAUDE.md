@@ -1622,6 +1622,26 @@ throughout — so the rules below are all one rule seen from different angles.
   `system_<slot>` read-only, by NAME and by slot rather than as p13, and read
   `build.prop`. That is also the partition emOS mounts at runtime for bionic
   and tinyalsa, so it is the build that actually matters.
+  **The FireOS 5 check itself used TWRP's getprop until 2026-09-11**, and
+  passed only because v1's TWRP 3.2.3 happens to report 5.1.1. In recovery
+  the release now comes from `/system` (`readFireosBuild().release`), and an
+  unknown one skips the check rather than guessing.
+- **A device unlocked with amonet-biscuit v2.0.0 is refused at the connect
+  step, on EVIDENCE, never on absence** (`_unlockVerdict`). v2.0.0 (R0rt1z2,
+  10 Sep 2026) writes a newer preloader, LK and TrustZone, FireOS 5 does not
+  boot on them, and neither does emOS, which runs the FireOS 5 kernel — so
+  without this the emOS flow would escrow, build and flash an image that
+  cannot boot. Any one of three signs refuses: an MTK image header
+  (`88168858`) at the start of `expdb`, where v2's preloader exploit loads LK
+  from (amonet-koboreru's `LK_PART_NAME`); TWRP 3.7 or later (v2 ships
+  3.7.0_9-0, v1 3.2.3-0); or Android 6+ as the release that matters. A probe
+  that could not run yields empty strings, and empty is NOT evidence — the
+  error that must not happen is refusing a working v1.1.0 device because `od`
+  was missing. The absence of `boot_[ab]_amonet` is deliberately not one of
+  the signs: v2's installer does not rewrite the GPT, so a device upgraded
+  from v1 may still carry v1's names. Derived from R0rt1z2's published
+  sources, not from a v2 device, since none has been through the wizard yet.
+  `unlock_verdict.test.mjs`.
 - **`_STEP_MODE` is enforced at every step, not only on Reconnect.** It existed
   and was correct and was consulted in one place, where a mismatch logged a
   line and left Retry enabled. In Android `/dev/block/other-boot` is amonet's
