@@ -1343,26 +1343,31 @@ struct wmt_patch_info {
     uint8_t  name[256];
 };
 
-/* The four address bytes the driver hands back to its own downloader.
+/* The four address bytes the driver splices into WMT_PATCH_P_ADDRESS_CMD.
  *
- * THIS OFFSET IS THE ONE VALUE HERE THAT IS NOT CONFIRMED. Every patch file
- * on this device starts with a 16-byte ASCII build stamp and a 4-byte chip id
- * ("1636"), and these four bytes follow. If the download turns out to fail
- * with the HIF configured and the patches found, this is what to question
- * first -- the rest of the sequence is verified. */
-#define WMT_PATCH_ADDR_OFF 0x18
+ * Taken from Amazon's own wmt_launcher, observed live under an LD_PRELOAD
+ * ioctl shim on a rooted FireOS 6 (2026-09-12) rather than guessed: it sends
+ * 00 00 06 00 for ROMv2_lm_patch_1_0_hdr.bin and 00 00 0e f0 for
+ * ROMv2_lm_patch_1_1_hdr.bin. The two live bytes are at header offset 0x1A
+ * and the top two are ZERO -- 0x18 is the tail of ucPLat in the 28-byte
+ * WMT_PATCH header (ucDateTime[16], u2HwVer, u2SwVer, u4PatchVer, ucPLat[4]),
+ * and sending all four from 0x18 puts rubbish in the high half. */
+#define WMT_PATCH_ADDR_OFF 0x1A
 
 static int wmt_patch_addr(const char *path, uint8_t out[4])
 {
     int fd = open(path, O_RDONLY);
     if (fd < 0)
         return -1;
-    uint8_t hdr[WMT_PATCH_ADDR_OFF + 4];
+    uint8_t hdr[WMT_PATCH_ADDR_OFF + 2];
     ssize_t n = read(fd, hdr, sizeof hdr);
     close(fd);
     if (n < (ssize_t)sizeof hdr)
         return -1;
-    memcpy(out, hdr + WMT_PATCH_ADDR_OFF, 4);
+    out[0] = 0;
+    out[1] = 0;
+    out[2] = hdr[WMT_PATCH_ADDR_OFF];
+    out[3] = hdr[WMT_PATCH_ADDR_OFF + 1];
     return 0;
 }
 
@@ -1409,7 +1414,11 @@ static int wmt_answer_patches(int fd, const char *dir)
         char full[512];
 
         memset(&pi, 0, sizeof pi);
-        pi.seq = i + 1;
+        /* Download order runs BACKWARDS through the sorted names: Amazon's
+         * launcher gives ROMv2_lm_patch_1_0 seq 2 and ..._1_1 seq 1, so the
+         * higher-numbered file is downloaded first. Observed live; assigning
+         * 1,2 in name order sends them in the wrong order. */
+        pi.seq = n - i;
         snprintf(full, sizeof full, "%s%s", dir, names[i]);
         if (wmt_patch_addr(full, pi.addr))
             netlog("wmt: no header address in %s\n", names[i]);
