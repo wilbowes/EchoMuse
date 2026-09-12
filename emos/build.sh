@@ -67,7 +67,19 @@ fi
 # The ramdisk is init plus the empty mountpoints it needs. Everything else the
 # system uses is mounted from the device's own /system at runtime, which is why
 # no Amazon code is redistributed.
-mkdir -p "$WORK/root"/{dev,proc,sys,system,data,etc}
+mkdir -p "$WORK/root"/{dev,proc,sys,system,data,etc,sbin}
+
+# emOS's own wpa_supplicant, when one has been built. FireOS 6's cannot be
+# used at all -- it is linked against Android IPC and aborts when /dev/binder
+# is absent -- and ours (hostap 2.10, static ARM32, nl80211, internal crypto)
+# needs nothing from Android. Optional on purpose: an image built without it
+# falls back to /system/bin/wpa_supplicant, which is what the FireOS 5 fleet
+# runs today. See tools/build-wpa-supplicant.sh.
+SUPPLICANT=${SUPPLICANT:-$HERE/prebuilt/wpa_supplicant}
+if [ -f "$SUPPLICANT" ]; then
+    install -m 0755 "$SUPPLICANT" "$WORK/root/sbin/wpa_supplicant"
+    echo "including wpa_supplicant ($(stat -c%s "$SUPPLICANT") bytes)"
+fi
 
 # Build identity, stamped in at build time rather than written at boot: it
 # describes the IMAGE, so it must not be something a running system can drift

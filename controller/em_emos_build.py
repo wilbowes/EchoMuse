@@ -88,7 +88,8 @@ _S_IFDIR = 0o040000
 _S_IFREG = 0o100000
 
 
-def build_ramdisk(init_binary: bytes, version: str, build_id: str = "") -> bytes:
+def build_ramdisk(init_binary: bytes, version: str, build_id: str = "",
+                  supplicant: bytes = b"") -> bytes:
     """The gzipped cpio the boot image carries: init, mountpoints, os-release.
 
     The mountpoints have to exist in the ramdisk because there is no devtmpfs
@@ -125,6 +126,14 @@ def build_ramdisk(init_binary: bytes, version: str, build_id: str = "") -> bytes
     out.write(_newc_entry("etc/os-release", _S_IFREG | 0o644, os_release, ino))
     ino += 1
     out.write(_newc_entry("init", _S_IFREG | 0o755, init_binary, ino))
+    # emOS's own wpa_supplicant, when the caller has one. Optional because an
+    # image without it falls back to /system/bin/wpa_supplicant -- which is
+    # what the FireOS 5 fleet runs today, and works. FireOS 6's aborts under
+    # emOS (it opens /dev/binder), so a FireOS 6 image needs this one.
+    if supplicant:
+        out.write(_newc_entry("sbin", _S_IFDIR | 0o755, b"", ino))
+        out.write(_newc_entry("sbin/wpa_supplicant", _S_IFREG | 0o755,
+                              supplicant, ino))
     ino += 1
     out.write(_newc_entry("TRAILER!!!", 0, b"", ino))
     # The archive is padded to a 512-byte boundary by convention; the kernel

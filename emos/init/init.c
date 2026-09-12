@@ -1500,6 +1500,8 @@ static int wmt_bringup(const char *patch_dir)
     return p > 0 ? 0 : -1;
 }
 
+#define UDHCPC_SCRIPT "/tmp/udhcpc.sh"
+
 static void net_main(void)
 {
     /* FireOS 6 moved the combo-chip tools under /system/vendor and renamed
@@ -1516,13 +1518,68 @@ static void net_main(void)
                               : "/system/bin/6620_launcher", "-p",
                        vendor ? "/system/vendor/firmware/"
                               : "/system/etc/firmware/", NULL };
-    netlog("wifi tools: %s layout, loader %s\n",
-           vendor ? "vendor (FireOS 6)" : "system (FireOS 5)", loader[0]);
-    char *supp[]   = { "/system/bin/wpa_supplicant", "-iwlan0", "-Dnl80211",
+    /* Prefer emOS's own supplicant when the image carries one.
+     *
+     * FireOS 6's /system/bin/wpa_supplicant cannot be used here at all: it is
+     * linked against Android IPC and aborts before main() when /dev/binder is
+     * absent, which it is under emOS. Ours is hostap 2.10 built static for
+     * ARM32 with nl80211 and internal crypto (emos/tools/build-wpa-
+     * supplicant.sh), so it needs nothing from Android.
+     *
+     * The fallback is deliberate rather than tidy: a FireOS 5 image built
+     * without the binary keeps using Amazon's, which works on the fleet today
+     * and should not be swapped for something untested by a build-time
+     * default. Drop the binary in and it is preferred; leave it out and
+     * nothing changes. */
+    const char *bbp = busybox_path();
+    if (!bbp)
+        bbp = "/system/bin/busybox";
+    static const char *const supps[] = { "/sbin/wpa_supplicant",
+                                         "/system/bin/wpa_supplicant", NULL };
+    const char *sup = first_exec(supps);
+    netlog("wifi tools: %s layout, loader %s, supplicant %s\n",
+           vendor ? "vendor (FireOS 6)" : "system (FireOS 5)", loader[0],
+           sup ? sup : supps[1]);
+    char *supp[]   = { (char *)(sup ? sup : supps[1]), "-iwlan0", "-Dnl80211",
                        "-c/data/misc/wifi/wpa_supplicant.conf",
                        "-e/data/misc/wifi/entropy.bin", NULL };
-    char *dhcp[]   = { "/system/bin/dhcpcd", "-ABK", "-f",
-                       "/system/etc/dhcpcd/dhcpcd.conf", "wlan0", NULL };
+    /* DHCP: Amazon's dhcpcd on FireOS 5, busybox udhcpc on FireOS 6.
+     *
+     * FireOS 6's /system/bin/dhcpcd aborts under emOS for the same reason its
+     * wpa_supplicant does -- Android IPC it cannot reach -- so on that layout
+     * it is not an option at all. busybox udhcpc needs a script to do anything
+     * with a lease it gets, which is written below; without one it obtains an
+     * address and discards it, which reads as a DHCP failure and is not.
+     *
+     * FireOS 5 keeps dhcpcd: it works on the fleet today. */
+    /* Sized generously: the busybox path is itself up to ~40 bytes and appears
+     * twice, and snprintf truncates SILENTLY -- a short buffer here cost a
+     * boot with an address but no default route, because the line that adds
+     * it was cut in half. */
+    char udhcpc_script[512];
+    snprintf(udhcpc_script, sizeof udhcpc_script,
+             "#!/system/bin/sh\n"
+             "[ \"$1\" = bound ] || [ \"$1\" = renew ] || exit 0\n"
+             "%s ifconfig $interface $ip netmask $subnet\n"
+             "[ -n \"$router\" ] && %s route add default gw $router\n",
+             bbp, bbp);
+    /* Not wr(): that is for sysfs and opens O_WRONLY without O_CREAT, so it
+     * cannot make a file that does not exist yet. */
+    int sfd = open(UDHCPC_SCRIPT, O_WRONLY | O_CREAT | O_TRUNC, 0755);
+    if (sfd >= 0) {
+        ssize_t sw = write(sfd, udhcpc_script, strlen(udhcpc_script));
+        close(sfd);
+        if (sw < 0)
+            netlog("udhcpc script write failed errno=%d\n", errno);
+    } else {
+        netlog("udhcpc script create failed errno=%d\n", errno);
+    }
+
+    char *dhcp_fos5[] = { "/system/bin/dhcpcd", "-ABK", "-f",
+                          "/system/etc/dhcpcd/dhcpcd.conf", "wlan0", NULL };
+    char *dhcp_fos6[] = { "/sbin/udhcpc", "-f", "-i", "wlan0",
+                          "-s", (char *)UDHCPC_SCRIPT, NULL };
+    char **dhcp = vendor ? dhcp_fos6 : dhcp_fos5;
     int st = 0;
 
     waitpid(spawn(loader), &st, 0);
