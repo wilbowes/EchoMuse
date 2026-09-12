@@ -1500,7 +1500,36 @@ static int wmt_bringup(const char *patch_dir)
     return p > 0 ? 0 : -1;
 }
 
+/* Where the WiFi credentials come from, and why it is NOT Android's file.
+ *
+ * /data survives a boot-partition write and is shared with whatever else the
+ * device can boot. Boot FireOS 6 from the other slot and Amazon's supplicant
+ * rewrites /data/misc/wifi/wpa_supplicant.conf with fields our build rejects
+ * (p2p_no_group_iface, max_oper_chwidth) -- and ONE unparsable field discards
+ * the WHOLE network block, so the device returns to emOS with no WiFi and no
+ * way to report it except over a cable. Same lesson as console.pw: anything
+ * on /data belongs to whoever wrote it last, not to us.
+ *
+ * emOS therefore keeps its own file in a namespace nothing else writes, and
+ * falls back to Android's only when it has none of its own -- which is a
+ * device that crossed over from a FireOS install and has not been told its
+ * network yet. */
+#define EMOS_WPA_CONF    "/data/emos/wpa.conf"
+#define ANDROID_WPA_CONF "/data/misc/wifi/wpa_supplicant.conf"
+
+static const char *wpa_conf(void)
+{
+    if (access(EMOS_WPA_CONF, R_OK) == 0)
+        return EMOS_WPA_CONF;
+    if (access(ANDROID_WPA_CONF, R_OK) == 0)
+        return ANDROID_WPA_CONF;
+    return NULL;
+}
+
 #define UDHCPC_SCRIPT "/tmp/udhcpc.sh"
+
+/* 24 turns of a 5s loop = two minutes. */
+#define WIFI_FAIL_TURNS 24
 
 static void net_main(void)
 {
@@ -1540,9 +1569,9 @@ static void net_main(void)
     netlog("wifi tools: %s layout, loader %s, supplicant %s\n",
            vendor ? "vendor (FireOS 6)" : "system (FireOS 5)", loader[0],
            sup ? sup : supps[1]);
+    char cflag[160] = "-c" ANDROID_WPA_CONF;
     char *supp[]   = { (char *)(sup ? sup : supps[1]), "-iwlan0", "-Dnl80211",
-                       "-c/data/misc/wifi/wpa_supplicant.conf",
-                       "-e/data/misc/wifi/entropy.bin", NULL };
+                       cflag, "-e/data/misc/wifi/entropy.bin", NULL };
     /* DHCP: Amazon's dhcpcd on FireOS 5, busybox udhcpc on FireOS 6.
      *
      * FireOS 6's /system/bin/dhcpcd aborts under emOS for the same reason its
@@ -1649,17 +1678,48 @@ static void net_main(void)
     const char *bb_ntp = busybox_path();
     char *ntpd[] = { (char *)(bb_ntp ? bb_ntp : "/system/bin/busybox"),
                      "ntpd", "-n", "-p", gwip, NULL };
-    pid_t wpa = spawn(supp);
+    pid_t wpa = -1;
     pid_t dhc = -1, ntp = -1;
     int nudges = 0, dry = 0, netup = 0;
+    /* Loop turns spent with a conf in place but no carrier. The ring goes red
+     * after WIFI_FAIL_TURNS of them, because at that point the credentials
+     * exist and are not working, which is a fault worth showing. Waiting with
+     * NO conf is not a fault and never turns it red -- see below. */
+    int nocarrier = 0, said_fail = 0, said_noconf = 0;
 
     for (;;) {
         pid_t d;
         while ((d = waitpid(-1, &st, WNOHANG)) > 0) {
             if (launcher > 0 && d == launcher) launcher = spawn(launch);
-            else if (d == wpa)   wpa = spawn(supp);
+            else if (d == wpa)   wpa = -1;
             else if (d == dhc)   dhc = -1;
             else if (d == ntp)   ntp = netup ? spawn(ntpd) : -1;
+        }
+
+        /* No credentials yet: hold here rather than failing.
+         *
+         * This is the normal state during provisioning -- the wizard writes
+         * WiFi over the USB console AFTER emOS is already running -- so the
+         * boot waits at stage 11 until a conf appears and then carries on. A
+         * supplicant started without one just exits and respawns for ever. */
+        const char *conf = wpa_conf();
+        if (!conf) {
+            if (wpa > 0) { kill(wpa, SIGTERM); wpa = -1; }
+            if (!said_noconf) {
+                said_noconf = 1;
+                netlog("no wifi conf yet (%s or %s) - waiting\n",
+                       EMOS_WPA_CONF, ANDROID_WPA_CONF);
+            }
+            bootstep = 10; led_step();
+            sleep(5);
+            continue;
+        }
+        if (wpa < 0) {
+            snprintf(cflag, sizeof cflag, "-c%s", conf);
+            netlog("wifi conf %s\n", conf);
+            wpa = spawn(supp);
+            said_noconf = 0;
+            nocarrier = 0;
         }
 
         if (readint("/sys/class/net/wlan0/carrier") != 1) {
@@ -1673,8 +1733,18 @@ static void net_main(void)
                                                   * supervision loop and may
                                                   * run many times. */
             dry = 0;
+            /* Credentials present and still no carrier: say so. A red head is
+             * the only channel left when the network is the broken thing.
+             * Once, and the loop keeps trying -- it is a clue, not a halt. */
+            if (++nocarrier >= WIFI_FAIL_TURNS && !said_fail) {
+                said_fail = 1;
+                netlog("no carrier after %ds with %s - giving up quietly\n",
+                       WIFI_FAIL_TURNS * 5, conf);
+                led_fail();
+            }
         } else {
             nudges = 0;
+            nocarrier = 0;
             if (dhc < 0) {
                 dhc = spawn(dhcp);
                 dry = 0;
