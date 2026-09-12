@@ -23,6 +23,7 @@
 #include <fcntl.h>
 #include <net/if.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -1288,6 +1289,208 @@ static int ifup(const char *name)
  * Writing "1" to /dev/wmtWifi blocks for ~13s while the chip is powered and the
  * firmware loaded, which is why this runs in its own process.
  */
+/* The combo chip, brought up without Amazon's wmt_loader and wmt_launcher.
+ *
+ * On FireOS 6 those two do not work in emOS's environment: wmt_loader exits
+ * 255, wmt_launcher runs but sits silent, WMT_OPID_HIF_CONF is never posted,
+ * the chip never powers on, and the /dev/wmtWifi write returns EIO. They
+ * coordinate through Android properties, and emOS has no property service --
+ * but building one to satisfy them would make Amazon's userspace MORE
+ * load-bearing, which is the wrong direction. So init talks to the kernel
+ * driver itself.
+ *
+ * Everything here comes from MediaTek's GPL source (the conn_soc variant,
+ * which is what this kernel is built from) and every number below was checked
+ * against the running driver on hardware, 2026-09-12.
+ *
+ * Two steps, and the second is the whole reason Amazon ships a launcher:
+ *
+ *   1. SET_PATCH_NAME then SET_STP_MODE. The SET_STP_MODE handler calls
+ *      wmt_lib_set_hif() and posts WMT_OPID_HIF_CONF -- the "WMT HIF info
+ *      added" line. Its argument is (fm << 4) | stp. A value it does not
+ *      recognise is rejected by wmt_lib_set_hif with no hardware touched, so
+ *      getting it wrong fails safe.
+ *
+ *   2. A daemon loop. Powering the chip makes the driver ask USERSPACE to
+ *      locate the firmware patches: it posts the string "srh_patch" and
+ *      blocks. The answer is SET_PATCH_NUM, then one SET_PATCH_INFO per
+ *      patch, then "ok" written back to release it. The driver does not care
+ *      who answers -- there is no registration of any kind -- so init answers.
+ *      Without this, power-on dies at "patch info perpare fail" and there is
+ *      no wlan0.
+ */
+#define WMT_IOC_MAGIC             0xa0
+#define WMT_IOCTL_SET_PATCH_NAME  _IOW(WMT_IOC_MAGIC, 4, char *)
+#define WMT_IOCTL_SET_STP_MODE    _IOW(WMT_IOC_MAGIC, 5, int)
+#define WMT_IOCTL_SET_PATCH_NUM   _IOW(WMT_IOC_MAGIC, 14, int)
+#define WMT_IOCTL_SET_PATCH_INFO  _IOW(WMT_IOC_MAGIC, 15, char *)
+
+/* wmt_dev.h: STP_UART_FULL 1, STP_UART_MAND 2, STP_BTIF_FULL 3, STP_SDIO 4.
+ * wmt_core.h: WMT_FM_I2C 1, WMT_FM_COMM 2.
+ * biscuit is BTIF -- the driver reports back "hifType 2" for this value. */
+#define WMT_STP_BTIF_FULL 0x3
+#define WMT_FM_COMM       0x2
+#define WMT_HIF_ARG       ((WMT_FM_COMM << 4) | WMT_STP_BTIF_FULL)
+
+#define WMT_PATCH_MAX 8
+
+/* WMT_PATCH_INFO, wmt_lib.h. The layout is fixed by the driver's
+ * copy_from_user, so the field order and the 256-byte name are not ours to
+ * choose. */
+struct wmt_patch_info {
+    uint32_t seq;
+    uint8_t  addr[4];
+    uint8_t  name[256];
+};
+
+/* The four address bytes the driver hands back to its own downloader.
+ *
+ * THIS OFFSET IS THE ONE VALUE HERE THAT IS NOT CONFIRMED. Every patch file
+ * on this device starts with a 16-byte ASCII build stamp and a 4-byte chip id
+ * ("1636"), and these four bytes follow. If the download turns out to fail
+ * with the HIF configured and the patches found, this is what to question
+ * first -- the rest of the sequence is verified. */
+#define WMT_PATCH_ADDR_OFF 0x18
+
+static int wmt_patch_addr(const char *path, uint8_t out[4])
+{
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return -1;
+    uint8_t hdr[WMT_PATCH_ADDR_OFF + 4];
+    ssize_t n = read(fd, hdr, sizeof hdr);
+    close(fd);
+    if (n < (ssize_t)sizeof hdr)
+        return -1;
+    memcpy(out, hdr + WMT_PATCH_ADDR_OFF, 4);
+    return 0;
+}
+
+/* Answer one "srh_patch". Returns the number of patches reported. */
+static int wmt_answer_patches(int fd, const char *dir)
+{
+    char names[WMT_PATCH_MAX][256];
+    int n = 0;
+    DIR *d = opendir(dir);
+    struct dirent *de;
+
+    if (!d)
+        return 0;
+    while (n < WMT_PATCH_MAX && (de = readdir(d))) {
+        size_t l = strlen(de->d_name);
+        /* The ROM patches are the *_hdr.bin files; WIFI_RAM_CODE_* and the
+         * .cfg in the same directory are not patches and must not be
+         * counted, or the driver waits for a download that never comes. */
+        if (l > 8 && !strcmp(de->d_name + l - 8, "_hdr.bin"))
+            snprintf(names[n++], sizeof names[0], "%s", de->d_name);
+    }
+    closedir(d);
+    if (!n)
+        return 0;
+
+    /* Download order is the driver's `dowloadSeq`, 1-based. The files sort
+     * into it by name (…_1_0_hdr, …_1_1_hdr), so sort rather than trust
+     * readdir, whose order is the filesystem's and not stable. */
+    for (int i = 0; i < n; i++)
+        for (int j = i + 1; j < n; j++)
+            if (strcmp(names[j], names[i]) < 0) {
+                char t[256];
+                memcpy(t, names[i], sizeof t);
+                memcpy(names[i], names[j], sizeof t);
+                memcpy(names[j], t, sizeof t);
+            }
+
+    if (ioctl(fd, WMT_IOCTL_SET_PATCH_NUM, n) < 0) {
+        netlog("wmt: SET_PATCH_NUM(%d) failed errno=%d\n", n, errno);
+        return 0;
+    }
+    for (int i = 0; i < n; i++) {
+        struct wmt_patch_info pi;
+        char full[512];
+
+        memset(&pi, 0, sizeof pi);
+        pi.seq = i + 1;
+        snprintf(full, sizeof full, "%s%s", dir, names[i]);
+        if (wmt_patch_addr(full, pi.addr))
+            netlog("wmt: no header address in %s\n", names[i]);
+        /* FULL PATH, not a bare name. wmt_dev_patch_get does not use
+         * request_firmware -- it filp_open()s this string exactly as given,
+         * from kernel context, so a bare name is opened relative to / and
+         * fails with "load file (…) fail, iRet(-1)". SET_PATCH_NAME does not
+         * get prepended for us. */
+        snprintf((char *)pi.name, sizeof pi.name, "%s", full);
+        if (ioctl(fd, WMT_IOCTL_SET_PATCH_INFO, &pi) < 0)
+            netlog("wmt: SET_PATCH_INFO(%d,%s) failed errno=%d\n",
+                   pi.seq, names[i], errno);
+    }
+    return n;
+}
+
+/* Stand in for wmt_launcher for as long as the chip is up.
+ *
+ * Never returns. The driver blocks its power-on inside wmt_ctrl_ul_cmd until
+ * this answers, so the loop has to outlive the bring-up rather than run once:
+ * a chip reset asks again. */
+static void wmt_daemon(int fd, const char *dir)
+{
+    for (;;) {
+        struct pollfd pfd = { .fd = fd, .events = POLLIN };
+        if (poll(&pfd, 1, -1) < 0) {
+            if (errno == EINTR)
+                continue;
+            netlog("wmt: poll failed errno=%d\n", errno);
+            return;
+        }
+        char cmd[64] = { 0 };
+        ssize_t n = read(fd, cmd, sizeof cmd - 1);
+        if (n <= 0)
+            continue;
+        cmd[n] = '\0';
+        if (!strncmp(cmd, "srh_patch", 9)) {
+            int got = wmt_answer_patches(fd, dir);
+            netlog("wmt: srh_patch -> %d patch(es)\n", got);
+            /* Anything but "ok" is read as failure by the driver, so say ok
+             * only when we actually found something. */
+            if (write(fd, got ? "ok" : "fail", got ? 2 : 4) < 0)
+                netlog("wmt: reply failed errno=%d\n", errno);
+        } else {
+            netlog("wmt: unhandled daemon cmd '%s'\n", cmd);
+            if (write(fd, "fail", 4) < 0)
+                netlog("wmt: reply failed errno=%d\n", errno);
+        }
+    }
+}
+
+/* Configure the HIF and fork the daemon. Returns 0 when the HIF took. */
+static int wmt_bringup(const char *patch_dir)
+{
+    int fd = open("/dev/stpwmt", O_RDWR);
+    if (fd < 0) {
+        netlog("wmt: open /dev/stpwmt failed errno=%d\n", errno);
+        return -1;
+    }
+    if (ioctl(fd, WMT_IOCTL_SET_PATCH_NAME, patch_dir) < 0)
+        netlog("wmt: SET_PATCH_NAME failed errno=%d\n", errno);
+
+    int r = ioctl(fd, WMT_IOCTL_SET_STP_MODE, WMT_HIF_ARG);
+    netlog("wmt: SET_STP_MODE(0x%x) rc=%d errno=%d\n",
+           WMT_HIF_ARG, r, r ? errno : 0);
+    if (r < 0) {
+        close(fd);
+        return -1;
+    }
+
+    pid_t p = fork();
+    if (p == 0) {
+        wmt_daemon(fd, patch_dir);
+        _exit(0);
+    }
+    /* The parent keeps its own copy closed: the daemon owns the fd, and the
+     * driver's command state is per-open. */
+    close(fd);
+    return p > 0 ? 0 : -1;
+}
+
 static void net_main(void)
 {
     /* FireOS 6 moved the combo-chip tools under /system/vendor and renamed
@@ -1316,7 +1519,18 @@ static void net_main(void)
     waitpid(spawn(loader), &st, 0);
     netlog("wmt_loader status=%d\n", st);
 
-    pid_t launcher = spawn(launch);
+    /* FireOS 6's wmt_launcher does not work here (see wmt_bringup above), so
+     * on that layout emOS configures the HIF and answers patch searches
+     * itself. FireOS 5's 6620_launcher is left alone: it works today on the
+     * fleet, and replacing a working path with an untested one is not a trade
+     * worth making until ours has run on hardware. */
+    pid_t launcher = -1;
+    if (vendor) {
+        if (wmt_bringup("/system/vendor/firmware/"))
+            netlog("wmt: bring-up failed, wlan0 will not appear\n");
+    } else {
+        launcher = spawn(launch);
+    }
     sleep(2);
 
     int r = wr("/dev/wmtWifi", "1");
@@ -1376,7 +1590,7 @@ static void net_main(void)
     for (;;) {
         pid_t d;
         while ((d = waitpid(-1, &st, WNOHANG)) > 0) {
-            if (d == launcher)   launcher = spawn(launch);
+            if (launcher > 0 && d == launcher) launcher = spawn(launch);
             else if (d == wpa)   wpa = spawn(supp);
             else if (d == dhc)   dhc = -1;
             else if (d == ntp)   ntp = netup ? spawn(ntpd) : -1;
