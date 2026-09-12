@@ -81,6 +81,16 @@ if [ -f "$SUPPLICANT" ]; then
     echo "including wpa_supplicant ($(stat -c%s "$SUPPLICANT") bytes)"
 fi
 
+# wpa_cli and em-wifi, the console's way to set WiFi without the wizard. The
+# console is the only channel left when the network is the broken thing, so
+# these ride in the ramdisk rather than living on /data.
+WPA_CLI=${WPA_CLI:-$HERE/prebuilt/wpa_cli}
+if [ -f "$WPA_CLI" ]; then
+    install -m 0755 "$WPA_CLI" "$WORK/root/sbin/wpa_cli"
+    install -m 0755 "$HERE/device/em-wifi" "$WORK/root/sbin/em-wifi"
+    echo "including wpa_cli and em-wifi"
+fi
+
 # Build identity, stamped in at build time rather than written at boot: it
 # describes the IMAGE, so it must not be something a running system can drift
 # from. /etc/os-release is the standard location and format, so ordinary
