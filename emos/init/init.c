@@ -1579,9 +1579,44 @@ int main(int argc, char **argv)
     mkdir("/system", 0755);
     mknod("/dev/block/mmcblk0p13", S_IFBLK | 0600, makedev(179, 13));
     int r = mount("/dev/block/mmcblk0p13", "/system", "ext4", MS_RDONLY, NULL);
-    note("stage=mount_system rc=%d errno=%d sh=%d\n", r, r ? errno : 0,
-         access("/system/bin/sh", X_OK));
-    if (r) led_fail(); else led_step();          /* 2: /system */
+
+    /* FireOS 6 is SYSTEM-AS-ROOT: the partition's root is the Android root
+     * filesystem — init, init.rc, fstab.mt8163, sbin — with the real tree in a
+     * nested `system/`, where FireOS 5 puts that tree at the partition root.
+     * So every absolute /system/... path in this file is one directory short
+     * on FireOS 6: the shell the console execs, the linker, wpa_supplicant,
+     * wmt_loader and the WiFi firmware.
+     *
+     * The mount SUCCEEDS either way, which is what made this expensive to
+     * find (measured on hardware 2026-09-12, FireOS 6.5.7.4 under amonet
+     * v2.0.0): stage 2 passed, the console execs /system/bin/sh and exits 127
+     * so the supervisor respawned it every few seconds, and the WiFi stage sat
+     * at 11 for ever with no wlan0. Nothing said /system was unusable.
+     *
+     * Bind the nested tree over the mountpoint rather than resolving a prefix
+     * per call site. A prefix cannot work here: `vendor` and `etc` inside a
+     * system-as-root partition are ABSOLUTE symlinks to /system/..., which
+     * point at themselves once the partition is mounted at /system — ELOOP,
+     * measured. Binding makes them resolve exactly as they do on a real
+     * FireOS 6 boot, and leaves every path below untouched, including the
+     * vendor-versus-system WiFi tool resolution, which is already correct and
+     * only ever needed the right root.
+     *
+     * Detected by what RUNS rather than by a build property: the shell is what
+     * the console execs and what everything below depends on. */
+    int nested = 0;
+    if (!r && access("/system/bin/sh", X_OK) != 0
+           && access("/system/system/bin/sh", X_OK) == 0) {
+        nested = mount("/system/system", "/system", NULL, MS_BIND, NULL) == 0;
+        if (!nested)
+            note("stage=mount_system bind_errno=%d\n", errno);
+    }
+    note("stage=mount_system rc=%d errno=%d nested=%d sh=%d\n", r, r ? errno : 0,
+         nested, access("/system/bin/sh", X_OK));
+
+    /* A mount that landed on a tree with no shell is not a working /system,
+     * and reading it as one is precisely what let that boot look healthy. */
+    if (r || access("/system/bin/sh", X_OK) != 0) led_fail(); else led_step();  /* 2: /system */
 
     /* /data read-WRITE: the firmware keeps config, wake-word models and logs
      * there. /system stays read-only — nothing here should be able to damage
