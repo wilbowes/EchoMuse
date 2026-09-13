@@ -375,18 +375,14 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 		default:
 			if usingStatic {
 				if healthy {
-					// The connection stayed up long enough to be a genuine
-					// recovery, not a connect-then-drop flap (that's what
-					// staticHealthyDuration is for) — not a fresh discovery
-					// event, so always restart at the top of the list and
-					// reset backoff, or the device could drift down the
-					// hierarchy and never climb back to its preferred
-					// endpoint, and a brief blip six hours from now would
-					// wait out a backoff tier it never earned.
+					// A connection that lasted staticHealthyDuration is a
+					// real recovery rather than a connect-then-drop flap, so
+					// restart the pass at the top and reset the backoff.
+					// Without this the device drifts down the list and never
+					// climbs back to its preferred endpoint.
 					//
-					// err is still non-nil here — connect's read loop always
-					// exits with an error, healthy or not — so this cannot
-					// be reached by checking err == nil; it never fires.
+					// Test healthy, not err == nil: connect's read loop
+					// always exits with an error, so err == nil never fires.
 					targetIdx, targetAttempts, passNum = 0, 0, 0
 				} else {
 					targetAttempts++
