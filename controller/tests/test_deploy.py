@@ -842,6 +842,33 @@ def _fn_body(src: str, name: str) -> str:
     return src[start:start + 1 + end]
 
 
+def _js_fn_body(src: str, name: str) -> str:
+    """Slice one JavaScript function out of dashboard.jsx, by matching braces.
+
+    Braces rather than the next declaration, because these are nested inside
+    components at arbitrary indentation — there is no top-level boundary to cut
+    at, the way _fn_body has for Python. Strings and comments are not parsed, so
+    an unbalanced brace inside one would throw this off; none of the functions it
+    is pointed at contain one, and a bad slice fails the caller's assertion
+    rather than passing it.
+    """
+    for decl in (f"async function {name}(", f"function {name}("):
+        if decl in src:
+            start = src.index(decl)
+            break
+    else:
+        raise AssertionError(f"no function {name} in the source")
+    depth = 0
+    for i in range(src.index("{", start), len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start:i + 1]
+    raise AssertionError(f"function {name} is never closed")
+
+
 def test_firmware_transfer_is_verified_by_md5_not_by_an_exit_status():
     """
     TRANSFER_OK only ever proved that the decode pipeline and chmod exited 0 —
@@ -2554,14 +2581,29 @@ def test_the_emos_and_firmware_release_namespaces_cannot_select_each_other():
 def test_the_emos_init_is_verified_before_it_is_served():
     """
     A release built wrong is wrong for everyone, so it is refused at the point
-    of download rather than at the point of boot. Both properties it checks
-    are silent when wrong and fatal on the device.
+    of download rather than at the point of boot. Every property it checks is
+    silent when wrong and fatal on the device.
+
+    The checks live in the shared resolver rather than at either entry point.
+    There are TWO ways to get an init now — the GET, and the image build
+    resolving one from the reference — and they are two entry points to one
+    question, so a check at only one of them is a way in that does not verify.
     """
-    fn = _strip_prose(_fn_body(
-        (CONTROLLER / "em_api.py").read_text(), "_get_provision_emos_init"))
-    assert "init_binary_problems" in fn, (
-        "the init must be checked for aarch64/static before it is served")
-    assert "bad_release_asset" in fn
+    api = (CONTROLLER / "em_api.py").read_text()
+    resolver = _strip_prose(_fn_body(api, "_fetch_emos_init"))
+    assert "init_binary_problems" in resolver, (
+        "the init must be checked for architecture/static before it is served")
+    assert "bad_release_asset" in resolver
+    # The architecture asked for is what it is checked against, not a constant.
+    assert "init_binary_problems(binary, arch)" in resolver, (
+        "the init must be verified against the architecture that was requested")
+
+    # Both entry points go through it, so neither can serve an unchecked init.
+    for name in ("_get_provision_emos_init", "_post_provision_emos_image"):
+        fn = _strip_prose(_fn_body(api, name))
+        assert "_fetch_emos_init" in fn, (
+            f"{name} must resolve the init through _fetch_emos_init, which is "
+            f"where it is verified")
 
 
 def test_the_emos_release_workflow_asserts_what_it_publishes():
@@ -2601,10 +2643,61 @@ def test_the_emos_release_workflow_asserts_what_it_publishes():
         f"got {sorted(published)}. A boot image would carry Amazon's kernel "
         "and DTBs, so it is assembled on the user's side from their own "
         "partition and never shipped from here.")
-    # `init` keeps that exact name: _fetch_latest_emos_release selects on it by
-    # exact name, so renaming it strands every controller already in the field.
-    assert '== "init"' in (CONTROLLER / "em_api.py").read_text(), \
-        "the release asset selection must match `init` by exact name"
+    # `init` keeps that exact name. The controller selects release assets by
+    # exact name, so renaming it strands every controller already in the field
+    # looking for it — which is why the second init was ADDED as `init32`
+    # rather than the pair being renamed to `init-arm64`/`init-arm`.
+    api = (CONTROLLER / "em_api.py").read_text()
+    mapping = api[api.index("EMOS_INIT_ASSETS = {"):]
+    mapping = mapping[:mapping.index("}") + 1]
+    assert '"init"' in mapping and '"init32"' in mapping, (
+        f"the arch-to-asset map must name the published assets, got: {mapping}")
+    for name in ("init", "init32"):
+        assert f"emos/build/{name}" in published, (
+            f"{name} is in EMOS_INIT_ASSETS but the release does not publish it")
+
+
+def test_the_init_architecture_is_decided_where_the_reference_is():
+    """
+    The init must match the escrowed image's KERNEL — FireOS 5 boots a 64-bit
+    one, FireOS 6 a 32-bit one — and an init of the wrong architecture takes the
+    flash and then produces no output at all, which is indistinguishable from a
+    kernel that never started.
+
+    So the decision belongs at the one place holding the reference. The wizard
+    must NOT pick: doing so needs a second copy of `reference_kernel_arch` in
+    JavaScript, and two copies of that rule can disagree with nothing able to
+    see it. This pins the shape rather than the behaviour, because the build step
+    is a fetch-driven async function with no seam to test through.
+    """
+    jsx = (CONTROLLER / "static" / "dashboard.jsx").read_text()
+    api = (CONTROLLER / "em_api.py").read_text()
+    build = _js_fn_body(jsx, "runBuildEmos")
+
+    # The wizard asks the controller to resolve it, and does not fetch one to
+    # send. Fetching would mean choosing an architecture with no reference in
+    # hand, which is the guess this whole path removes.
+    assert "use_latest_init" in build, (
+        "the wizard must ask the controller to resolve the init, so the "
+        "architecture is read off the reference rather than guessed")
+    assert "/api/provision/emos_init" not in build, (
+        "the build step must not fetch an init — that endpoint cannot know "
+        "which architecture this image needs")
+
+    # Neither the sniffer nor its magic numbers may be reimplemented here.
+    for magic in ("016f2818", "ARM\\x64", "0x24", "reference_kernel_arch"):
+        assert magic not in build, (
+            f"{magic!r} in the wizard means a second copy of the architecture "
+            f"sniffer — it lives in em_emos_build.reference_kernel_arch")
+
+    # The endpoint reads it off the reference, and refuses rather than
+    # defaulting when it cannot: an init chosen by guess is the one failure with
+    # no symptom on the device.
+    handler = _fn_body(api, "_post_provision_emos_image")
+    assert "reference_kernel_arch" in handler, (
+        "the image endpoint must read the architecture off the reference")
+    assert "unknown_reference_arch" in handler, (
+        "an unreadable reference must refuse, not fall back to an architecture")
 
 
 def test_every_debloat_push_asks_which_userspace_the_device_booted():

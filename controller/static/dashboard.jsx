@@ -5440,27 +5440,36 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       throw new Error('No escrowed boot image — run the Escrow Boot Image step first.');
     }
 
-    // The init comes from the latest emOS release by default. It is the only
-    // part of an emOS image that CAN be distributed — the kernel and device
-    // trees in a built image are the user's own — so this is the whole of
-    // what the wizard needs to fetch.
-    let initBlob = initFile;
-    let version = '0.1';
+    // The init comes from the latest emOS release by default, and the CONTROLLER
+    // resolves it rather than the wizard fetching it first.
+    //
+    // That is not a tidying-up. The init must match the escrowed image's KERNEL
+    // architecture — FireOS 5 boots a 64-bit kernel and FireOS 6 a 32-bit one,
+    // and an init of the wrong one takes the flash and then produces no output
+    // at all — and the only thing that knows which is the image itself. Choosing
+    // here would mean a second copy of the sniffer in JavaScript, against the
+    // one in em_emos_build.py, and the two could disagree with no test able to
+    // see it. The image is going to the controller anyway, so the question is
+    // answered where the evidence is.
+    //
+    // It also keeps ~3.5MB out of a request that has already been too big once:
+    // HA's ingress caps the body well below what the controller accepts, and the
+    // reference plus an init was refused with a 413 that never reached the
+    // add-on at all (2026-09-06).
+    // useLatest OVERRIDES a chosen file, as it did before: it is a separate
+    // button, so clicking it after picking a file means the operator changed
+    // their mind. The old code overrode by overwriting initBlob with what it
+    // fetched; nothing is fetched now, so the override has to be explicit.
+    let initBlob = useLatest ? null : initFile;
+    // Only sent for a hand-picked init, where nothing else knows what it is. On
+    // the latest-release path the controller stamps the release's own tag, which
+    // is the version the image actually is — sending a placeholder here would
+    // override it and put "0.1" in /etc/os-release on every provisioned device.
+    let version = useLatest ? '' : '0.1';
     if (useLatest) {
-      addLog('Fetching the emOS init from the latest release…');
-      const resp = await fetch(ingressPath('/api/provision/emos_init'),
-                               { headers: { Authorization: `Bearer ${token}` } });
-      if (!resp.ok) {
-        let detail = `HTTP ${resp.status}`;
-        try { const j = await resp.json(); detail = j.message || j.error || detail; } catch {}
-        throw new Error(detail);
-      }
-      const bytes = new Uint8Array(await resp.arrayBuffer());
-      version = resp.headers.get('X-Emos-Version') || version;
-      initBlob = new Blob([bytes]);
-      addLog(`  ${version}, ${(bytes.length/1024/1024).toFixed(1)} MB`);
+      addLog('The controller will pick the init matching this image’s kernel.');
     }
-    if (!initBlob) {
+    if (!useLatest && !initBlob) {
       throw new Error('Choose an emOS init binary to build with, or use the '
         + 'latest release. Build one from emos/ with build.sh if you need a '
         + 'specific version.');
@@ -5486,7 +5495,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
            + `${(emosRef.bytes.length/1024/1024).toFixed(1)} MB partition — sending that`);
     }
     addLog(`Sending the escrowed image (${(reference.length/1024/1024).toFixed(1)} MB) `
-         + `and the init to the controller…`);
+         + `to the controller…`);
 
     const fd = new FormData();
     fd.append('reference', new Blob([reference]), 'reference.img');
@@ -5495,8 +5504,17 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // provide one as a side effect of reproducing the boot header's SHA1, and
     // that had to be relaxed for images carrying a stale id.
     fd.append('reference_md5', await _md5Hex(reference));
-    fd.append('init', initBlob, 'init');
-    fd.append('version', version);
+    // One or the other, never both: the controller resolves the init from the
+    // reference's own kernel when asked, and an explicit part wins when the
+    // operator picked a file by hand.
+    if (initBlob) {
+      fd.append('init', initBlob, 'init');
+    } else {
+      fd.append('use_latest_init', '1');
+    }
+    if (version) {
+      fd.append('version', version);
+    }
     const resp = await fetch(ingressPath('/api/provision/emos_image'), {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}` },
