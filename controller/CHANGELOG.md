@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.24.0-ea.4 (Early Access)
+
+**Fixes the flash step reporting that a write did not take, on a device where
+nothing had been written at all** (#520).
+
+The wizard asked the device to copy the image with an option its recovery does
+not support, so the copy never happened. What you saw was an impossible write
+speed, then a partition that still held the old image, then an automatic retry
+doing exactly the same thing. Your device was never modified.
+
+The wizard now asks whether that option is available and leaves it out where it
+is not. Every write is still followed by a flush and checked by reading the
+partition back, which is what actually proves an image landed.
+
+**It also now tells the two cases apart.** A copy that never ran and a copy
+that failed looked identical, and only one of them means anything is wrong with
+your device. If the tool refuses to run, the wizard says so in its own words
+and tells you the partition is untouched, instead of reporting a mismatch.
+
 ## 2.24.0-ea.3 (Early Access)
 
 **Fixes the wizard stopping at the Install EchoMuse step with "start_server.sh
