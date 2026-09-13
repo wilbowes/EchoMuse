@@ -3170,7 +3170,12 @@ function _md5Hex(bytes) {
 // `command -v` answers about PATH, and busybox applets are not on it — the
 // question is whether the command works, which is the same distinction the
 // TWRP `su` shim taught us when a file that existed could not execute.
-const _TOOL_NAMES = ['md5sum', 'dd', 'base64', 'tee'];
+// `sync` is in here because it is the DURABILITY BARRIER on every
+// partition write, not a convenience: dd returns once the kernel has the
+// bytes, and sync() is what waits for them to reach the device. A
+// recovery without it has to be refused rather than written to with no
+// barrier and nothing saying so.
+const _TOOL_NAMES = ['md5sum', 'dd', 'base64', 'tee', 'sync'];
 
 async function deviceTools(c) {
   if (c._tools) return c._tools;
@@ -5795,7 +5800,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     addLog(`Writing to ${target}…`);
     const t0 = Date.now();
     const wrote = await c.shell(
-      `${T.dd} if=/tmp/emos_boot.img of=${target} bs=1048576${T.ddConv} 2>&1; sync`);
+      `${T.dd} if=/tmp/emos_boot.img of=${target} bs=1048576${T.ddConv} 2>&1; ${T.sync}`);
     const secs = (Date.now() - t0) / 1000;
     addLog(wrote.trim() || '(done)');
     const mbps = (bytes.length / 1024 / 1024) / Math.max(secs, 0.001);
@@ -5857,7 +5862,12 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       ? `${T.dd} if=${target} bs=2048 count=${bytes.length / 2048}`
       : `${T.dd} if=${target} bs=1048576 count=${Math.ceil(bytes.length / 1048576)}`;
     const readBack = async () => {
-      await c.shell('echo 3 > /proc/sys/vm/drop_caches 2>/dev/null; sync');
+      // sync FIRST, then drop. drop_caches evicts only CLEAN pages, so a
+      // dirty one survives it and the read below could still be answered from
+      // cache — which would confirm the cache rather than the partition. The
+      // other order happened to work, but only because the write command ends
+      // in a sync of its own; this makes the read-back stand on its own.
+      await c.shell(`${T.sync}; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null`);
       return (await c.shell(`${readCmd} 2>/dev/null | ${T.md5sum}`))
         .trim().split(/\s+/)[0];
     };

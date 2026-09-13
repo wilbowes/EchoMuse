@@ -36,10 +36,19 @@ function liftFunction(name) {
   return src.slice(start, i + 1);
 }
 
-const { deviceTools } = await import(
+// _TOOL_NAMES is lifted from the source too, never restated here. A second
+// copy of the list silently disagrees the moment a tool is added — which it
+// did, the first time `sync` was added to the real one.
+function liftConst(name) {
+  const m = src.match(new RegExp(`^const ${name} = .*?;$`, "m"));
+  if (!m) throw new Error(`dashboard.jsx no longer defines ${name}`);
+  return m[0];
+}
+
+const { deviceTools, _TOOL_NAMES } = await import(
   "data:text/javascript;base64," + Buffer.from(
-    "const _TOOL_NAMES = ['md5sum', 'dd', 'base64', 'tee'];\n"
-    + liftFunction("deviceTools") + "\nexport { deviceTools };"
+    liftConst("_TOOL_NAMES") + "\n"
+    + liftFunction("deviceTools") + "\nexport { deviceTools, _TOOL_NAMES };"
   ).toString("base64"));
 
 let failures = 0;
@@ -54,7 +63,7 @@ const fakeClient = (out) => ({ shell: async () => out });
 // A stock FireOS 6 recovery: toybox, no busybox. The real measured case.
 {
   const c = fakeClient(
-    "TOOL md5sum md5sum\nTOOL dd dd\nTOOL base64 base64\nTOOL tee tee");
+    "TOOL md5sum md5sum\nTOOL dd dd\nTOOL base64 base64\nTOOL tee tee\nTOOL sync sync");
   const t = await deviceTools(c);
   check("toybox recovery resolves every tool plain",
         t.md5sum === "md5sum" && t.dd === "dd" && t.base64 === "base64" && t.tee === "tee",
@@ -67,7 +76,7 @@ const fakeClient = (out) => ({ shell: async () => out });
 {
   const c = fakeClient(
     "TOOL md5sum busybox md5sum\nTOOL dd busybox dd\n"
-    + "TOOL base64 busybox base64\nTOOL tee busybox tee");
+    + "TOOL base64 busybox base64\nTOOL tee busybox tee\nTOOL sync sync");
   const t = await deviceTools(c);
   check("busybox recovery keeps the busybox form",
         t.md5sum === "busybox md5sum" && t.dd === "busybox dd", JSON.stringify(t));
@@ -76,7 +85,7 @@ const fakeClient = (out) => ({ shell: async () => out });
 // Mixed, which is the case an "all or nothing" implementation would get wrong.
 {
   const c = fakeClient(
-    "TOOL md5sum md5sum\nTOOL dd busybox dd\nTOOL base64 base64\nTOOL tee tee");
+    "TOOL md5sum md5sum\nTOOL dd busybox dd\nTOOL base64 base64\nTOOL tee tee\nTOOL sync sync");
   const t = await deviceTools(c);
   check("a mixed recovery resolves per tool",
         t.md5sum === "md5sum" && t.dd === "busybox dd", JSON.stringify(t));
@@ -91,7 +100,7 @@ const fakeClient = (out) => ({ shell: async () => out });
   const c = { shell: async (cmd) => {
     calls++;
     return cmd.includes("CONV_OK") ? "CONV_OK"
-         : "TOOL md5sum md5sum\nTOOL dd dd\nTOOL base64 base64\nTOOL tee tee";
+         : "TOOL md5sum md5sum\nTOOL dd dd\nTOOL base64 base64\nTOOL tee tee\nTOOL sync sync";
   } };
   await deviceTools(c);
   const afterFirst = calls;
@@ -106,8 +115,8 @@ const fakeClient = (out) => ({ shell: async () => out });
 // made the original bug read as corruption rather than as a missing tool.
 for (const [what, out] of [
   ["nothing at all", ""],
-  ["md5sum missing", "TOOL dd dd\nTOOL base64 base64\nTOOL tee tee"],
-  ["dd missing", "TOOL md5sum md5sum\nTOOL base64 base64\nTOOL tee tee"],
+  ["md5sum missing", "TOOL dd dd\nTOOL base64 base64\nTOOL tee tee\nTOOL sync sync"],
+  ["dd missing", "TOOL md5sum md5sum\nTOOL base64 base64\nTOOL tee tee\nTOOL sync sync"],
 ]) {
   let threw = null;
   try { await deviceTools(fakeClient(out)); } catch (e) { threw = e; }
@@ -143,7 +152,7 @@ for (const [what, out] of [
   const c = {
     shell: async (cmd) => cmd.includes("CONV_OK")
       ? "CONV_OK"
-      : "TOOL md5sum md5sum\nTOOL dd dd\nTOOL base64 base64\nTOOL tee tee",
+      : "TOOL md5sum md5sum\nTOOL dd dd\nTOOL base64 base64\nTOOL tee tee\nTOOL sync sync",
   };
   const t = await deviceTools(c);
   check("conv=fsync is used where dd supports it", t.ddConv === " conv=fsync", JSON.stringify(t));
@@ -153,7 +162,7 @@ for (const [what, out] of [
   const c = {
     shell: async (cmd) => cmd.includes("CONV_OK")
       ? "dd: conv option disabled"
-      : "TOOL md5sum md5sum\nTOOL dd dd\nTOOL base64 base64\nTOOL tee tee",
+      : "TOOL md5sum md5sum\nTOOL dd dd\nTOOL base64 base64\nTOOL tee tee\nTOOL sync sync",
   };
   const t = await deviceTools(c);
   check("conv=fsync is dropped where dd refuses it", t.ddConv === "", JSON.stringify(t));
@@ -166,7 +175,7 @@ for (const [what, out] of [
   const c = {
     shell: async (cmd) => cmd.includes("CONV_OK")
       ? "CONV_OK"
-      : "TOOL md5sum md5sum\nTOOL dd dd\nTOOL base64 base64\nTOOL tee tee",
+      : "TOOL md5sum md5sum\nTOOL dd dd\nTOOL base64 base64\nTOOL tee tee\nTOOL sync sync",
   };
   const t = await deviceTools(c);
   check("the conv flag carries its own separator", t.ddConv.startsWith(" "), JSON.stringify(t.ddConv));
@@ -180,6 +189,36 @@ for (const [what, out] of [
         /records in/i.test(body), "no guard on dd's record counts");
   check("_writeBootPartition composes the conv flag rather than hardcoding it",
         body.includes("${T.ddConv}") && !/conv=fsync/.test(body), body.slice(0, 0));
+}
+
+// sync is the durability barrier, so a recovery without it is refused rather
+// than written to with no barrier.
+{
+  let threw = null;
+  try {
+    await deviceTools(fakeClient(
+      "TOOL md5sum md5sum\nTOOL dd dd\nTOOL base64 base64\nTOOL tee tee"));
+  } catch (e) { threw = e; }
+  check("a recovery with no sync is refused", threw !== null, "resolved without a barrier");
+  if (threw) check("that refusal names sync", /sync/.test(threw.message), threw.message);
+}
+
+// The read-back must sync BEFORE dropping caches: drop_caches evicts only
+// clean pages, so the other order can leave the just-written pages in cache
+// and confirm the cache rather than the partition.
+{
+  const body = liftFunction("_writeBootPartition").replace(/^[ \t]*\/\/.*$/gm, "");
+  const m = body.match(/\$\{T\.sync\};\s*echo 3 > \/proc\/sys\/vm\/drop_caches/);
+  check("read-back syncs before dropping caches", m !== null,
+        "expected `${T.sync}; echo 3 > /proc/sys/vm/drop_caches`");
+  check("the write is barriered by the probed sync",
+        /2>&1; \$\{T\.sync\}/.test(body), "write does not end in the resolved sync");
+}
+
+// The resolved set has to include every tool the write path composes into a
+// command, or a missing one reaches the device as an empty string.
+for (const n of ["md5sum", "dd", "base64", "tee", "sync"]) {
+  check(`_TOOL_NAMES includes ${n}`, _TOOL_NAMES.includes(n), _TOOL_NAMES.join(","));
 }
 
 if (failures) {
