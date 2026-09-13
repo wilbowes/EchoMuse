@@ -3100,8 +3100,9 @@ function WifiPanel({ ready, wifiSsid, setWifiSsid, wifiPsk, setWifiPsk, onScan, 
   );
 }
 
-// md5 rather than SHA-256, and that is not a security choice: the device
-// verifies with busybox md5sum, so this is the hash both ends can compute.
+// md5 rather than SHA-256, and that is not a security choice: the device side
+// is whatever md5sum the recovery has (see deviceTools), so this is the hash
+// both ends can compute.
 // crypto.subtle has no md5, so it is implemented here — 40 lines against a
 // dependency the CSP would block anyway.
 function _md5Hex(bytes) {
@@ -3145,6 +3146,54 @@ function _md5Hex(bytes) {
   new DataView(out.buffer).setInt32(12, d0, true);
   return Promise.resolve(
     Array.from(out).map(b => b.toString(16).padStart(2, '0')).join(''));
+}
+
+// Which shell tools this recovery actually has, resolved once per connection.
+//
+// The wizard used to write `busybox md5sum` and `busybox dd` literally, and
+// busybox is not something a recovery is guaranteed to have. It depends on
+// what has been installed on that device rather than on the TWRP version: a
+// stock FireOS 6 install carries toybox, with md5sum and dd on PATH and no
+// busybox at all, while a device with a root component added may well have
+// both. So neither form can be assumed and both have to be tried.
+//
+// Measured 2026-09-13 on G090LF11752215LE, TWRP 3.7.0_9-0, stock FireOS 6:
+// `busybox md5sum` exits 127 and produces an empty string, which surfaced as
+// "start_server.sh reads unreadable" on a device whose script was installed
+// perfectly. The transfer was fine; the CHECK could not run.
+//
+// The plain name is preferred and busybox is the fallback rather than the
+// other way round: the escrow step has always used a bare `dd` and works
+// everywhere it has been run, so plain is the form with evidence behind it.
+//
+// Resolved by RUNNING each candidate rather than by looking for the binary.
+// `command -v` answers about PATH, and busybox applets are not on it — the
+// question is whether the command works, which is the same distinction the
+// TWRP `su` shim taught us when a file that existed could not execute.
+const _TOOL_NAMES = ['md5sum', 'dd', 'base64', 'tee'];
+
+async function deviceTools(c) {
+  if (c._tools) return c._tools;
+  const probe = _TOOL_NAMES.map(n =>
+    `for t in "${n}" "busybox ${n}"; do `
+    + `if $t </dev/null >/dev/null 2>&1; then echo "TOOL ${n} $t"; break; fi; done`
+  ).join('; ');
+  const out = await c.shell(probe);
+  const tools = {};
+  for (const m of out.matchAll(/^TOOL (\S+) (.+)$/gm)) tools[m[1]] = m[2].trim();
+  c._tools = tools;
+  const missing = _TOOL_NAMES.filter(n => !tools[n]);
+  if (missing.length) {
+    // Named rather than substituted with a guess. A wrong tool here writes a
+    // partition or verifies one, and "command not found" swallowed into an
+    // empty string is what made this cost an evening in the first place.
+    throw new Error(
+      `This recovery has no usable ${missing.join(', ')} — the wizard needs `
+      + `${missing.length > 1 ? 'them' : 'it'} to verify what it writes, so `
+      + `nothing has been written. Please report this with the TWRP version `
+      + `from step 1.`);
+  }
+  return tools;
 }
 
 // Hand the operator a file. Used for the escrowed boot image, which must exist
@@ -4725,7 +4774,8 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     const b64 = btoa(unescape(encodeURIComponent(confLines)));
     await c.shell('su -c "chmod 770 /data/misc/wifi"');
     await c.shell('su -c "rm -f /tmp/wpa_supplicant.conf"');
-    await c.shell(`su -c "echo ${b64} | busybox base64 -d | busybox tee /tmp/wpa_supplicant.conf"`);
+    const T = await deviceTools(c);
+    await c.shell(`su -c "echo ${b64} | ${T.base64} -d | ${T.tee} /tmp/wpa_supplicant.conf"`);
 
     // Verify the staged file actually has the SSID we intended — catches
     // the b64-via-shell-arg path silently mangling content before we ever
@@ -5270,8 +5320,9 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // endings and the OTA path already treats md5 as the only definition of a
     // successful transfer.
     const scriptWant = await _md5Hex(new TextEncoder().encode(script));
+    const tools = await deviceTools(c);
     const scriptGot  = (await c.shell(
-      "su -c 'busybox md5sum /data/local/bin/start_server.sh' 2>/dev/null")).trim().split(/\s+/)[0];
+      `su -c '${tools.md5sum} /data/local/bin/start_server.sh' 2>/dev/null`)).trim().split(/\s+/)[0];
     if (scriptGot !== scriptWant) {
       throw new Error('Startup script install verification failed — '
         + `/data/local/bin/start_server.sh reads ${scriptGot || 'unreadable'}, expected `
@@ -5699,12 +5750,18 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // Returns null on success, or a string naming what went wrong — the caller
   // decides whether that is a retry, a restore, or a stop.
   async function _writeBootPartition(c, target, bytes, md5, what) {
+    // Before the upload, not after it: a recovery that cannot verify what it
+    // is about to write should say so rather than spend a minute pushing an
+    // image first. deviceTools caches per connection, so this is free on
+    // every call after the first.
+    const T = await deviceTools(c);
+
     addLog(`Uploading the ${what} to the device…`);
     await c.push('/tmp/emos_boot.img', bytes,
       pct => setProgress({ label: `Uploading ${what}`, pct }));
     setProgress(null);
 
-    const staged = (await c.shell('busybox md5sum /tmp/emos_boot.img 2>/dev/null')).trim().split(/\s+/)[0];
+    const staged = (await c.shell(`${T.md5sum} /tmp/emos_boot.img 2>/dev/null`)).trim().split(/\s+/)[0];
     if (staged !== md5) {
       await c.shell('rm -f /tmp/emos_boot.img');
       return `The ${what} arrived on the device corrupted (md5 ${staged || 'unreadable'}, `
@@ -5719,7 +5776,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     addLog(`Writing to ${target}…`);
     const t0 = Date.now();
     const wrote = await c.shell(
-      `busybox dd if=/tmp/emos_boot.img of=${target} bs=1048576 conv=fsync 2>&1; sync`);
+      `${T.dd} if=/tmp/emos_boot.img of=${target} bs=1048576 conv=fsync 2>&1; sync`);
     const secs = (Date.now() - t0) / 1000;
     addLog(wrote.trim() || '(done)');
     const mbps = (bytes.length / 1024 / 1024) / Math.max(secs, 0.001);
@@ -5764,11 +5821,11 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       return _md5Hex(padded);
     })();
     const readCmd = exact
-      ? `busybox dd if=${target} bs=2048 count=${bytes.length / 2048}`
-      : `busybox dd if=${target} bs=1048576 count=${Math.ceil(bytes.length / 1048576)}`;
+      ? `${T.dd} if=${target} bs=2048 count=${bytes.length / 2048}`
+      : `${T.dd} if=${target} bs=1048576 count=${Math.ceil(bytes.length / 1048576)}`;
     const readBack = async () => {
       await c.shell('echo 3 > /proc/sys/vm/drop_caches 2>/dev/null; sync');
-      return (await c.shell(`${readCmd} 2>/dev/null | busybox md5sum`))
+      return (await c.shell(`${readCmd} 2>/dev/null | ${T.md5sum}`))
         .trim().split(/\s+/)[0];
     };
     addLog('Reading it back…');
@@ -6151,6 +6208,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // device is not connected to the controller yet, and 15MB of base64
     // heredoc would be slow. Same bytes and same destination as the field
     // path — only the transport differs.
+    const assetTools = await deviceTools(c);
     addLog('Fetching wake word assets from controller…');
     const manifest = await API.get('/api/provision/oww_assets');
     (manifest.problems || []).forEach(p => addLog(`  ⚠ ${p}`, 'error'));
@@ -6175,7 +6233,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       // md5 is the only definition of success: a truncated push produces a
       // file of plausible size that fails later at dlopen, with an error that
       // names nothing useful.
-      const got = (await c.shell('su -c "busybox md5sum /sdcard/em_oww_asset" 2>/dev/null')).trim().split(/\s+/)[0];
+      const got = (await c.shell(`su -c "${assetTools.md5sum} /sdcard/em_oww_asset" 2>/dev/null`)).trim().split(/\s+/)[0];
       if (got !== a.md5) {
         await c.shell('su -c "rm -f /sdcard/em_oww_asset"');
         throw new Error(`${a.name} arrived corrupted (md5 ${got || 'unreadable'}, expected ${a.md5}).`);
@@ -6189,7 +6247,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         `su -c "mv /sdcard/em_oww_asset ${manifest.dir}/${a.name} && chmod 644 ${manifest.dir}/${a.name}" 2>&1`)).trim();
       if (moveOut) addLog(`  → ${moveOut}`);
       const landed = (await c.shell(
-        `su -c "busybox md5sum ${manifest.dir}/${a.name}" 2>/dev/null`)).trim().split(/\s+/)[0];
+        `su -c "${assetTools.md5sum} ${manifest.dir}/${a.name}" 2>/dev/null`)).trim().split(/\s+/)[0];
       if (landed !== a.md5) {
         throw new Error(`${a.name} did not land in ${manifest.dir} `
           + `(md5 ${landed || 'unreadable'}, expected ${a.md5}). Check free space on /data.`);
