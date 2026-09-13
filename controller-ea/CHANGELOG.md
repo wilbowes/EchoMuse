@@ -1,5 +1,38 @@
 # Changelog
 
+## 2.24.0-ea.1 (Early Access)
+
+**The setup wizard can now install emOS on a device unlocked with
+amonet-biscuit v2.0.0.** That unlock only boots FireOS 6, and until now those
+devices had no path through the wizard at all.
+
+This needs emOS 0.5 or newer. On an older emOS release the build refuses with a
+message naming the problem, rather than producing an image that will not boot.
+
+The FireOS 6 path has been through CI and host tests. It has not yet run on
+hardware, which is what Early Access is for.
+
+**The wizard picks the init to match your device's kernel.** It reads the
+architecture out of the boot image you escrowed, so a 32-bit device gets the
+32-bit init. An init of the wrong architecture boots to nothing at all, with no
+output, so this is detected rather than left as a setting you could get wrong.
+If the architecture cannot be read, the build refuses instead of guessing.
+
+**amonet v2.0.0 devices are accepted by the emOS flow.** 2.23.1 refused them at
+the first step, because the FireOS path genuinely cannot work on FireOS 6. That
+refusal stays for the FireOS flow. Only the emOS flow accepts them.
+
+**Changing WiFi and scanning for networks now work on emOS.** Those went
+through an Android command that emOS does not have, so the controller writes the
+network and restarts the supplicant instead.
+
+Also in this release: the dashboard tells you when a tab has gone stale against
+a newer controller, and the init is now fetched by the controller rather than
+uploaded by your browser, which takes about 3.5MB out of a request that has hit
+Home Assistant's ingress size limit before.
+
+No database migration. No firmware update.
+
 ## 2.23.1-ea.1 (Early Access)
 
 **Brings Early Access level with 2.23.1.** That's the fix for the add-on not
