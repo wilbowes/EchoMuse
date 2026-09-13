@@ -3682,25 +3682,59 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       }
       addLog(`Unlock check: TWRP ${twrp || 'unknown'}, expdb ${expdb || 'unreadable'}`);
     }
+    // A v2 device is refused by the FireOS flow and ACCEPTED by the emOS one,
+    // and that split is the point rather than a loosening.
+    //
+    // amonet-biscuit v2.0.0 writes a newer preloader, LK and TrustZone, and
+    // FireOS 5 does not boot on them — so the FireOS flow, which patches and
+    // boots the device's own Android 5, still cannot work and still refuses.
+    //
+    // What changed is emOS. It ran on FireOS 5's 64-bit kernel only, which is
+    // why this used to say "emOS included"; it now also runs on FireOS 6's
+    // 32-bit kernel, which is the only FireOS v2 boots. So refusing a v2 device
+    // here would refuse exactly the devices emOS newly supports, and the
+    // escrow-build-flash sequence the emOS flow runs is not FireOS-5-specific at
+    // any step: it reads the device's own boot image, rebuilds it with an init
+    // matching that image's kernel, and writes it back.
     const unlock = _unlockVerdict({ release: effRelease, expdb, twrp });
-    if (unlock.v2) {
+    if (unlock.v2 && !isEmos) {
       expectDisconnect.current = true;
       try { await c.close(); } catch {}
       setAdb(null);
       throw new Error(
         `This Echo was unlocked with amonet-biscuit v2.0.0 or later (${unlock.evidence.join('; ')}). `
-        + 'v2.0.0 replaces the Echo\'s bootloaders and FireOS 5 does not boot on them, and '
-        + 'EchoMuse, emOS included, needs FireOS 5 — so nothing has been written. Do not try '
-        + 'to go back by flashing FireOS 5 or an older amonet: that means writing bootloaders '
-        + 'by hand, which is how an Echo gets hard-bricked. See the warning at the top of '
-        + 'docs/rooting.md.');
+        + 'v2.0.0 replaces the Echo\'s bootloaders and FireOS 5 does not boot on them, so the '
+        + 'FireOS flow cannot work on this device — nothing has been written. Use the emOS flow '
+        + 'instead, which runs on the FireOS 6 kernel this device has. Do not try to go back by '
+        + 'flashing FireOS 5 or an older amonet: that means writing bootloaders by hand, which is '
+        + 'how an Echo gets hard-bricked. See the warning at the top of docs/rooting.md.');
     }
-    if ((!inRecovery || effRelease) && !effRelease.startsWith('5.')) {
-      throw new Error(`Expected FireOS 5 (Android 5.x), got Android ${effRelease}. Wrong device?`);
+    if (unlock.v2) {
+      // Said loudly, and not as a refusal. The operator is about to have their
+      // boot partition rewritten on a device class that has not been through
+      // this wizard before, and the thing that makes that recoverable is the
+      // escrow two steps away — so it is named here, while they can still stop.
+      addLog(`This Echo was unlocked with amonet-biscuit v2.0.0 or later `
+           + `(${unlock.evidence.join('; ')}), so it runs FireOS 6. emOS supports that `
+           + `kernel, and the wizard will build a 32-bit image to match it.`, 'warn');
+      addLog('No Echo unlocked with v2 has been through this wizard before. The '
+           + 'Escrow Boot Image step is the way back — keep that file.', 'warn');
+    }
+    // Which releases each flow can work with. FireOS 6 is Android 7.1, and there
+    // is no FireOS on this board reporting 6.x, so the emOS flow accepts 5 and 7
+    // by name rather than "not 5" — an unexpected release is still a wrong
+    // device, and the point of this check is to catch that before anything is
+    // written.
+    const okRelease = isEmos ? ['5.', '7.'] : ['5.'];
+    if ((!inRecovery || effRelease)
+        && !okRelease.some(p => effRelease.startsWith(p))) {
+      throw new Error(
+        `Expected ${isEmos ? 'FireOS 5 or 6 (Android 5.x or 7.x)' : 'FireOS 5 (Android 5.x)'}`
+        + `, got Android ${effRelease}. Wrong device?`);
     }
     if (fwBuild && fwBuild !== _TESTED_FIREOS_BUILD) {
       addLog(`Untested firmware — EchoMuse is developed against ${_TESTED_FIREOS_NAME} `
-           + `(${_TESTED_FIREOS_BUILD}). Other FireOS 5 builds may behave differently, `
+           + `(${_TESTED_FIREOS_BUILD}). Other builds may behave differently, `
            + `particularly around USB and ADB.`, 'warn');
     }
     // The emOS flow REFUSES a board it does not recognise, where the FireOS

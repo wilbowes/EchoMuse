@@ -3,19 +3,30 @@
 > **You do this at your own risk. We accept no responsibility for negative
 > outcomes experienced.**
 
-> **⚠️ Do not install amonet-biscuit v2.0.0 on an Echo you use with EchoMuse.**
-> Version 2.0.0 of the unlock (10 September 2026) replaces the Echo's
-> bootloaders, and after that FireOS 5 no longer boots. EchoMuse only runs on
-> FireOS 5, emOS included, because emOS uses the FireOS 5 kernel. The XDA
-> thread now tells unlocked users to update. If your Echo runs EchoMuse,
-> don't.
+> **⚠️ Don't install amonet-biscuit v2.0.0 on an Echo that is already running
+> EchoMuse on FireOS 5.** Version 2.0.0 of the unlock (10 September 2026)
+> replaces the Echo's bootloaders, and after that FireOS 5 no longer boots — so
+> a working FireOS 5 device would stop working, and there is no safe way back.
+> The XDA thread now tells unlocked users to update. If your Echo runs EchoMuse
+> on FireOS 5, don't.
 >
 > - **Unlocking a new Echo?** Use **amonet-biscuit v1.1.0**, which is still
->   attached to the XDA thread.
-> - **Already updated?** Do not try to go back by flashing FireOS 5 or an
->   older amonet. v2.0.0 rewrote the preloader, LK and TrustZone, and writing
->   old ones back by hand is how an Echo gets hard-bricked. EchoMuse does not
->   run on FireOS 6 today, so for now that Echo stays on FireOS 6.
+>   attached to the XDA thread. It is the path this project has the most
+>   hardware hours on by a wide margin.
+> - **Already updated to v2.0.0?** **Do not try to go back** by flashing
+>   FireOS 5 or an older amonet. v2.0.0 rewrote the preloader, LK and
+>   TrustZone, and writing old ones back by hand is how an Echo gets
+>   hard-bricked. Your Echo stays on FireOS 6 — and that is no longer a dead
+>   end: **emOS runs on FireOS 6's kernel** (first booted on hardware
+>   12 September 2026), so use the wizard's **emOS flow**, which accepts a v2
+>   device. The FireOS flow cannot work there and will refuse, because it boots
+>   the device's own Android 5.
+>
+>   Two honest caveats on that, because this is your hardware and it is new:
+>   it has been booted on **one** Echo so far, and **no Echo unlocked with
+>   v2.0.0 has been through the wizard end to end yet**. The wizard's Escrow
+>   Boot Image step is the way back from a bad flash — keep that file
+>   somewhere other than the device.
 
 EchoMuse needs an Echo Dot Gen 2 that is already unlocked and running
 FireOS 5. Two separate jobs get you there, and they carry very different
@@ -42,7 +53,15 @@ risk.
 > the obstacle. (This corrects an earlier version of this note, which put it
 > down to the TrustZone signature chain.)
 >
-> EchoMuse, emOS included, runs on FireOS 5, so it needs **v1.1.0**. For that
+> **The firmware runs on FireOS 5; emOS runs on both.** EchoMuse's own
+> firmware targets the Android userspace, which is 32-bit on either FireOS, so
+> the binary is the same. What differs is emOS's init, which has to match the
+> kernel — 64-bit on FireOS 5, 32-bit on FireOS 6 — and the wizard picks that
+> by reading the architecture out of your own escrowed boot image rather than
+> asking you.
+>
+> The FireOS flow needs **v1.1.0**, since it boots the device's own Android 5.
+> For that
 > version, `Fire OS 6.5.7.0 (NS6570/6077)` still matters: its instructions
 > tell you to update *to* it before unlocking, because the exploit downgrades
 > the firmware partitions on the way through.

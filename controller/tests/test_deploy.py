@@ -2755,6 +2755,46 @@ def test_the_wifi_tools_go_only_into_a_32_bit_image():
         assert f'"{name}"' in tools, f"{name} missing from EMOS_SBIN_ASSETS"
 
 
+def test_a_v2_device_is_refused_by_the_fireos_flow_and_accepted_by_emos():
+    """
+    amonet-biscuit v2.0.0 writes a newer preloader, LK and TrustZone, and
+    FireOS 5 does not boot on them. So the FireOS flow — which patches and boots
+    the device's own Android 5 — must still refuse such a device outright.
+
+    emOS must NOT. It ran only on FireOS 5's 64-bit kernel, which is why the
+    refusal used to cover it; it now runs on FireOS 6's 32-bit kernel, which is
+    the only FireOS v2 boots. Refusing there would refuse exactly the devices
+    emOS newly supports, and the emOS flow's escrow-build-flash sequence is not
+    FireOS-5-specific at any step.
+
+    Both directions are pinned because each is silent in its own way: refuse in
+    emOS and the feature is unreachable with a message blaming the device;
+    accept in FireOS and the operator flashes a boot image that cannot boot.
+    """
+    jsx = (CONTROLLER / "static" / "dashboard.jsx").read_text()
+    fn = _js_fn_body(jsx, "runConnectAndroid")
+
+    assert "unlock.v2 && !isEmos" in fn, (
+        "the hard refusal must be gated on NOT being the emOS flow — emOS "
+        "supports the FireOS 6 kernel a v2 device has")
+    # The FireOS refusal still closes the connection and writes nothing.
+    assert "setAdb(null)" in fn and "hard-bricked" in fn, (
+        "the FireOS refusal must still stop the flow and warn against flashing "
+        "bootloaders by hand")
+    # And a v2 device reaching the emOS flow is told so, loudly, while it can
+    # still be stopped — the escrow is what makes the write recoverable.
+    assert "Escrow Boot Image step is the way back" in fn, (
+        "a v2 device on the emOS flow must be told the escrow is the way back, "
+        "before anything is written")
+
+    # The release gate is flow-aware too, and names what it accepts rather than
+    # accepting everything that is not 5.x: an unexpected release is still a
+    # wrong device, which is the whole point of the check.
+    assert "isEmos ? ['5.', '7.'] : ['5.']" in fn, (
+        "the emOS flow must accept Android 5.x and 7.x (FireOS 6 is 7.1) and "
+        "the FireOS flow only 5.x")
+
+
 def test_every_debloat_push_asks_which_userspace_the_device_booted():
     """
     The debloat payload is Android-only — a pm-hide list and a Magisk
