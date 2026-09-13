@@ -29,6 +29,10 @@ name: emOS Release (init binary)
 # are as distributable as the init. A FireOS 6 image NEEDS them, because Amazon's
 # supplicant aborts under emOS before main() (it opens /dev/binder).
 #
+# All of that ships as ONE bundle with a manifest of sha256s, so a partially
+# published release cannot hand a build a mismatched set of parts. The loose
+# `init` is published beside it for compatibility only — see the release step.
+#
 # Every asset here is byte-identical build to build: the toolchain is a
 # digest-pinned image, the init is repo source, and the wpa sources are pinned by
 # sha256 and by commit. That is what makes a release something a device can be
@@ -56,19 +60,13 @@ jobs:
       - name: Build compiler image
         run: docker build -t echomuse-compiler device/compiler/
 
-      # BOTH ARCHITECTURES, and the init is the only thing here needing two.
+      # BOTH ARCHITECTURES — the init is the only thing here needing two, since
+      # it must match the KERNEL: 64-bit on FireOS 5, 32-bit on FireOS 6 (the
+      # only FireOS amonet v2.0.0 boots). Getting it wrong cost five flashed
+      # images that never executed. The firmware stays armv7a for both.
       #
-      # The init must match the device's KERNEL: FireOS 5 boots a 64-bit one,
-      # FireOS 6 — the only FireOS amonet-biscuit v2.0.0 boots — a 32-bit build
-      # of the same 3.18.19 source. Getting it wrong is the fact that cost five
-      # flashed images of a 32-bit kernel that never executed an instruction.
-      # The firmware beside it stays armv7a for both, because it targets the
-      # Android userspace, which is 32-bit either way.
-      #
-      # `init` keeps its name rather than becoming `init-arm64`: it is what every
-      # published release has carried and what `_fetch_latest_emos_release`
-      # selects on by EXACT name, so renaming it strands every controller
-      # already in the field looking for it.
+      # `init` keeps its name: _fetch_latest_emos_release selects on it by exact
+      # name, so renaming it strands every fielded controller.
       #
       # -static is what has to keep working. There is no dynamic loader at
       # PID 1 time, and three boots with a busybox script init produced no
@@ -94,14 +92,10 @@ jobs:
                -static -O2 -Wall -o build/init32 init/init.c"
 
       - name: Verify both are static, and are the architecture each claims
-        # Every one of these is silent when wrong and fatal on the device, and
-        # this is the last point before the artifacts are something people
-        # flash. Checked here as well as in CI because CI checks the tip of a
-        # branch and this checks the thing being published.
-        #
-        # They are also compared against EACH OTHER. Two compiles differing only
-        # in a toolchain triple is exactly the shape where a copy-paste publishes
-        # one binary under both names, and each grep would still pass.
+        # Each is silent when wrong and fatal on the device, and CI only checks
+        # a branch tip — this checks what is published. They are also compared
+        # against EACH OTHER: two compiles differing only in a triple is where a
+        # copy-paste publishes one binary twice and each grep still passes.
         run: |
           file emos/build/init emos/build/init32
           ls -lh emos/build/init emos/build/init32
@@ -118,17 +112,12 @@ jobs:
             exit 1
           fi
 
-      # emOS's own WiFi userspace. ONE build for both kernels, unlike the init:
-      # these run as ordinary processes, and a 64-bit kernel runs 32-bit binaries
-      # — it has to, since the whole Android userspace on biscuit is 32-bit on
-      # top of FireOS 5's 64-bit kernel.
+      # emOS's own WiFi userspace. One build for both kernels, unlike the init:
+      # these are ordinary processes and a 64-bit kernel runs 32-bit binaries.
       #
-      # Built here rather than committed, so what ships can be traced to sources:
-      # the script pins hostap by sha256 and libnl-tiny by commit, and the
-      # toolchain is the same digest-pinned image the init uses. Measured
-      # byte-identical across build directories, which is what makes a published
-      # artifact worth anything when somebody is troubleshooting a device against
-      # a release.
+      # Built here rather than committed so what ships traces to sources — hostap
+      # pinned by sha256, libnl-tiny by commit, same digest-pinned toolchain as
+      # the init. Measured byte-identical across build directories.
       - name: Build wpa_supplicant and wpa_cli (armv7a, static)
         run: |
           mkdir -p emos/build/wpa
@@ -137,9 +126,8 @@ jobs:
             echomuse-compiler bash -lc '/emos/tools/build-wpa-supplicant.sh /out'
 
       - name: Verify the wpa tools are static 32-bit ARM
-        # Same reasoning as the inits: emOS execs these directly with no dynamic
-        # loader available, so a dynamically linked one is a boot that reaches the
-        # network stage and stops there with nothing said.
+        # emOS execs these directly with no dynamic loader, so a dynamically
+        # linked one reaches the network stage and stops there silently.
         run: |
           file emos/build/wpa/wpa_supplicant emos/build/wpa/wpa_cli
           for f in wpa_supplicant wpa_cli; do
@@ -156,6 +144,22 @@ jobs:
             echo "::error::em-wifi has no interpreter line"; exit 1; }
           sh -n emos/build/wpa/em-wifi || {
             echo "::error::em-wifi is not valid shell"; exit 1; }
+
+      # ONE bundle, with a manifest of sha256s. Four assets fetched in sequence
+      # could each fail on their own and hand a build a mismatched set; the
+      # manifest is also the first digest in this path the RELEASE computed.
+      #
+      # The format lives in controller/em_emos_build.py and is imported from
+      # there, so writer and reader cannot drift. The script reads its output
+      # back through the real reader, so a release cannot publish a bundle its
+      # own consumer would refuse.
+      - name: Bundle the payload
+        run: |
+          python3 emos/tools/make-payload-bundle.py "$GITHUB_REF_NAME" \
+            emos/build/emos-payload.zip \
+            emos/build/init emos/build/init32 \
+            emos/build/wpa/wpa_supplicant emos/build/wpa/wpa_cli \
+            emos/build/wpa/em-wifi
 
       # The off-target checks, against the exact source being published. All
       # four of them: each drives a parser or an invariant whose failure is
@@ -186,12 +190,15 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           name: emOS ${{ github.ref_name }}
+          # The bundle, plus the loose `init` — and that one is NOT redundant.
+          # `_fetch_latest_emos_release` selects a release by matching that exact
+          # asset name, so a controller already in the field looks for it;
+          # dropping it would leave every fielded controller seeing no usable
+          # emOS release, which breaks FireOS 5 provisioning too. Everything else
+          # travels inside the bundle rather than being published twice.
           files: |
             emos/build/init
-            emos/build/init32
-            emos/build/wpa/wpa_supplicant
-            emos/build/wpa/wpa_cli
-            emos/build/wpa/em-wifi
+            emos/build/emos-payload.zip
           body_path: /tmp/emos-notes.md
           generate_release_notes: true
         env:

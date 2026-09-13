@@ -16,16 +16,14 @@ SUP=/sbin/wpa_supplicant
 
 [ -x "$CLI" ] || { echo "em-wifi: $CLI is missing (older image?)"; exit 1; }
 
-# The control socket directory is READ from the conf the supplicant is running
-# on, never assumed -- the same rule, and the same two spellings, as
-# wpa_ctrl_dir() in init.c and sockDir() in internal/wifi.
+# READ from the conf the supplicant is running on, never assumed -- same rule
+# and same two spellings as wpa_ctrl_dir() in init.c and sockDir() in
+# internal/wifi.
 #
-# It matters most on a device migrated from FireOS 5. That device carries
-# Android's conf declaring /data/misc/wifi/sockets, and init starts a supplicant
-# on it -- so pgrep below finds one and no throwaway is started, and a wpa_cli
-# pointed at /data/emos/sockets then reaches nothing. The scan comes back empty
-# and this script used to say "No networks found. Is the radio up?" on a device
-# that was up and associated, which sends whoever is reading it at the radio.
+# It matters most on a device migrated from FireOS 5, which carries Android's
+# conf: init starts a supplicant on it, pgrep below finds one, and a wpa_cli
+# pointed at /data/emos/sockets reaches nothing. This used to report "No networks
+# found. Is the radio up?" on a device that was up and associated.
 ctrl_from_conf() {
     [ -r "$1" ] || return 1
     awk '
@@ -39,11 +37,9 @@ ctrl_from_conf() {
     ' "$1"
 }
 
-# Pick the conf init would have started the supplicant on -- wpa_conf() -- and
-# then read only that one. Consulting both in turn would disagree with init on a
-# conf that declares no ctrl_interface at all, which the provisioning wizard
-# already warns about: init falls back to Android's directory there, so this
-# must too, rather than reading the other file's answer.
+# Pick the conf init would have used -- wpa_conf() -- and read only that one.
+# Consulting both in turn would disagree with init on a conf declaring no
+# ctrl_interface, where init falls back to Android's directory.
 ACTIVE=
 [ -r "$CONF" ] && ACTIVE=$CONF
 [ -z "$ACTIVE" ] && [ -r "$ANDROID_CONF" ] && ACTIVE=$ANDROID_CONF

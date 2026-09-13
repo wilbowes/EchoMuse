@@ -1,11 +1,10 @@
 // Package wifi implements safe WiFi network changes with automatic
 // rollback, plus scan/status queries for the dashboard Connectivity tab.
 //
-// It runs on BOTH bases from one firmware — see the "Which base OS" section
-// below and internal/platform. Everything down to reloadConf is shared; what
-// differs is which file the config lives in, where the supplicant's control
-// socket is, and how the supplicant is made to re-read it. FireOS is expected
-// to have a long tail, so the framework path is not transitional.
+// One firmware, both bases — see "Which base OS" below. What differs is which
+// file the config lives in, where the control socket is, and how the supplicant
+// is made to re-read it. FireOS has a long tail, so its path is not
+// transitional.
 //
 // The FireOS mechanics mirror the provisioning wizard's runConfigWifi
 // (controller/static/dashboard.jsx), which was hard-won on real hardware:
@@ -18,9 +17,8 @@
 //     interface dies (INTERFACE_DISABLED, never recovers).
 //   - The config is a FULL replacement of wpa_supplicant.conf with a
 //     single network block — no ambiguity about which AP it joins.
-//   - wpa_cli needs BOTH -p <socket dir> (never the default) and -i wlan0.
-//     The directory is declared inside the conf and is NOT the same on both
-//     bases, so it is read from there rather than written down — see sockDir.
+//   - wpa_cli needs BOTH -p <socket dir> and -i wlan0. That directory is
+//     declared inside the conf and differs by base — see sockDir.
 //
 // Two further lessons found on hardware 2026-07-11, AFTER the wizard:
 //
@@ -37,9 +35,9 @@
 //
 // Unlike the wizard (ADB shell), this package runs inside the root Go
 // binary, so file writes use plain os.WriteFile — none of the mksh
-// redirect quirks apply. On FireOS ownership must still be restored to
-// wifi:wifi (AID_WIFI=1010) mode 0660 or the framework can't read the config;
-// on emOS there is no such user and the file holds a PSK, so it is 0600.
+// redirect quirks apply. FireOS needs ownership restored to wifi:wifi
+// (AID_WIFI=1010) 0660 or the framework can't read it; emOS has no such user
+// and the file holds a PSK, so 0600.
 //
 // Safety model (the connection to the controller dies mid-change, so the
 // device owns the whole sequence):
@@ -83,9 +81,8 @@ const (
 	emosConf    = "/data/emos/wpa.conf"
 	markerPath  = "/data/local/tmp/echomuse_wifi_pending"
 
-	// Fallback control socket directory, and the default on FireOS. Mirrors
-	// WPA_CTRL_DEFAULT in emos/init/init.c — the real value is read out of
-	// the conf by sockDir, because on emOS it is not a constant.
+	// Fallback, and the default on FireOS. Mirrors WPA_CTRL_DEFAULT in
+	// emos/init/init.c; the real value comes from sockDir.
 	defaultSockDir = "/data/misc/wifi/sockets"
 	iface          = "wlan0"
 
@@ -134,14 +131,9 @@ var (
 
 // ─── Which base OS, and therefore which paths ─────────────────────────────────
 //
-// ONE firmware runs on both bases and resolves this at runtime — see
-// internal/platform for why that is a value rather than a build flag. FireOS is
-// expected to have a long tail, so neither path is transitional: the framework
-// sequence below is what most of the fleet runs and is hardware-proven, and the
-// emOS one sits beside it rather than replacing it.
-//
-// Indirected through vars so both bases are exercisable from a host that is
-// neither, which is the same reason platform.Detect takes a root.
+// One firmware, resolved at runtime — see internal/platform. FireOS has a long
+// tail, so neither path is transitional. Indirected through vars so both bases
+// are exercisable from a host that is neither.
 var (
 	baseOS       = platform.Base
 	androidConfP = androidConf
@@ -152,22 +144,15 @@ func onEmOS() bool { return baseOS() == platform.EmOS }
 
 // confPaths says where the supplicant's config is read from and written to.
 //
-// The READ rule mirrors wpa_conf() in emos/init/init.c exactly — emOS's own
-// file when it exists, Android's otherwise — because reading a different file
-// than the running supplicant was started with is how every value below ends up
-// describing a config nothing is using.
+// READ mirrors wpa_conf() in emos/init/init.c — ours if it exists, Android's
+// otherwise — since reading a different file than the running supplicant was
+// started with describes a config nothing is using.
 //
-// The WRITE path on emOS is always emOS's own file, whichever one it is reading
-// now. That namespace is the whole point: anything under /data/misc/wifi
-// belongs to whichever OS booted last, and booting FireOS 6 from the other slot
-// rewrites it with fields our supplicant survives only by patch.
-//
-// So the two differ on exactly one device — an emOS install that crossed over
-// from FireOS and has never been told its network here. A change there backs up
-// Android's file and writes ours, which then takes precedence; a revert
-// restores the old content into ours, so the network that comes back is the one
-// that was there. Android's copy is left alone deliberately, as the thing to
-// fall back to if ours is ever lost.
+// WRITE on emOS is always ours: anything under /data/misc/wifi belongs to
+// whichever OS booted last, and FireOS 6 rewrites it with fields our supplicant
+// survives only by patch. The two differ on exactly one device — a migrated
+// install never told its network here, which backs up Android's file and writes
+// ours. Android's copy is deliberately left as the fallback.
 func confPaths() (read, write string) {
 	if !onEmOS() {
 		return androidConfP, androidConfP
@@ -181,38 +166,26 @@ func confPaths() (read, write string) {
 	return emosConfP, emosConfP
 }
 
-// backupPath keeps the pre-change config beside the config it backs up, for
-// the same reason em-wifi writes to /data/emos at all — a backup in Android's
-// directory is one FireOS is free to clobber, and it would be read back on
-// precisely the boot where the current config has already been lost.
+// backupPath sits beside the config it backs up: one in Android's directory is
+// one FireOS may clobber, read back on the boot that already lost the current.
 func backupPath() string {
 	_, write := confPaths()
 	return write + ".echomuse-bak"
 }
 
-// legacyBackupPath is where every firmware before this one wrote the backup,
-// on both bases. RecoverIfPending has to look here too: the marker outlives an
-// OTA, so a change still in flight when the device takes new firmware comes
-// back to a process looking in a place the old one never wrote. It would
-// recover — "no backup to restore" clears the marker and keeps the current
-// conf — but the current conf is the UNCONFIRMED one, which is the network
-// nobody has established works, and the backup sitting on disk is the answer.
+// legacyBackupPath is where pre-upgrade firmware wrote it. The marker outlives
+// an OTA, so without this a change in flight across one keeps the UNCONFIRMED
+// network while its backup sits unread.
 func legacyBackupPath() string { return androidConfP + ".echomuse-bak" }
 
-// sockDir reads the supplicant's control socket directory out of the conf.
+// sockDir reads the control socket directory out of the conf. Not a constant:
+// em-wifi declares /data/emos/sockets and a wizard-provisioned device Android's,
+// and a wpa_cli pointed at the wrong one fails silently — presenting as a device
+// that cannot scan and reports no SSID.
 //
-// It cannot be a constant: em-wifi writes /data/emos/sockets into emOS's own
-// file while a wizard-provisioned device carries Android's, and confPaths
-// prefers ours the moment it exists — so the same device moves from one to the
-// other the first time somebody sets WiFi from the console. A wpa_cli pointed
-// at the wrong one fails with "Failed to connect to non-global ctrl_ifname",
-// which here reads as a device that cannot scan and reports no SSID at all.
-//
-// Deliberately re-read per call rather than cached: em-wifi can move it while
-// this process is running, and reading a 4KB file costs nothing beside the
-// wpa_cli fork it is about to feed. The parsing matches wpa_ctrl_dir in
-// emos/init/init.c, including last-declaration-wins — pinned by test on both
-// sides, since the two halves are in different languages in different trees.
+// Re-read per call, since em-wifi can move it while this process runs. Parsing
+// matches wpa_ctrl_dir in emos/init/init.c, last declaration winning; pinned by
+// test on both sides.
 func sockDir() string {
 	read, _ := confPaths()
 	b, err := os.ReadFile(read)
@@ -225,15 +198,13 @@ func sockDir() string {
 		if !ok {
 			continue
 		}
-		// Two spellings, both legal and both in the field: Amazon's conf
-		// uses hostap's "DIR=/path GROUP=wifi" form, ours a bare path.
+		// Amazon's uses hostap's "DIR=/path GROUP=wifi"; ours a bare path.
 		v = strings.TrimPrefix(v, "DIR=")
 		if i := strings.IndexAny(v, " \t"); i >= 0 {
 			v = v[:i]
 		}
-		// A relative value is hostap's abstract socket namespace, which
-		// `wpa_cli -p` cannot address — keep the default rather than pass on
-		// an argument that looks plausible and can never connect.
+		// Relative means hostap's abstract namespace, which `wpa_cli -p`
+		// cannot address.
 		if strings.HasPrefix(v, "/") {
 			dir = v
 		}
@@ -366,19 +337,14 @@ func getprop(key, fallback string) string {
 // composeConf builds the full-replacement wpa_supplicant.conf. An empty psk
 // produces an open (key_mgmt=NONE) network block.
 //
-// The control socket is carried through from whatever the conf already declared
-// (sockDir), never written as a constant. Writing the constant would MOVE the
-// socket out from under everything else that talks to the supplicant — init's
-// reassociate nudge and em-wifi, each of which resolves it its own way — and
-// nothing in that failure names this function.
+// The control socket is carried through from the conf (sockDir), never written
+// as a constant: that would move the socket out from under init's reassociate
+// nudge and em-wifi, and nothing in that failure names this function.
 //
-// On FireOS the globals are the provisioning wizard's template, including the
-// WPS and P2P block the framework populates from properties. On emOS they are
-// dropped: our supplicant is hostap 2.10 built without CONFIG_WPS or
-// CONFIG_P2P, so every one of those lines is a field it cannot use. It survives
-// them — the build patches unknown globals to warn and carry on, precisely so a
-// conf left behind by FireOS 6 does not cost the network — but relying on that
-// patch to absorb lines we chose to write is using the safety net as the floor.
+// FireOS keeps the wizard's WPS/P2P globals. emOS drops them — our hostap is
+// built without CONFIG_WPS or CONFIG_P2P, so they are fields it cannot use. It
+// tolerates them by patch, but that patch is for confs FireOS 6 left behind, not
+// a licence to write dead lines.
 func composeConf(ssid, psk string) string {
 	network := []string{
 		"network={",
@@ -421,10 +387,8 @@ func composeConf(ssid, psk string) string {
 func writeConf(content string) error {
 	_, path := confPaths()
 	if onEmOS() {
-		// Nothing on emOS reads this as another user, so 0600 — and it holds
-		// the PSK. MkdirAll because a device that has never had WiFi set here
-		// has no /data/emos/wpa.conf and may have no /data/emos either; init
-		// creates it, but only on a boot that got that far.
+		// 0600: no other user reads it and it holds the PSK. MkdirAll because
+		// /data/emos may not exist on a device never configured here.
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			return fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
 		}
@@ -482,16 +446,13 @@ func enableWifi() error {
 }
 
 // retireSupplicant ends the running supplicant so emOS's init restarts it
-// against the conf just written. That supervision loop is a 5s ticker
-// (net_main in emos/init/init.c), so the replacement is along within about
-// five seconds and brings up DHCP behind it.
+// against the new conf; that supervision loop is a 5s ticker (net_main in
+// emos/init/init.c).
 //
-// The pid is found by walking /proc rather than by shelling out to killall:
-// that applet only exists because init symlinks busybox into /sbin, and a
-// missing symlink would present here as a WiFi change that silently does
-// nothing. /proc/<pid>/comm is the whole name — "wpa_supplicant" is 14
-// characters against the kernel's 15-character field, so there is no
-// truncation to match around.
+// /proc is walked rather than shelling out to killall, which exists only because
+// init symlinks busybox into /sbin — a missing symlink would present as a WiFi
+// change that silently does nothing. "wpa_supplicant" is 14 chars against the
+// kernel's 15-char comm field, so there is no truncation to match around.
 func retireSupplicant() error {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
@@ -514,8 +475,7 @@ func retireSupplicant() error {
 		found++
 	}
 	if found == 0 {
-		// Not an error: init starts one as soon as a conf exists, so a device
-		// that has never had one is exactly where a first change lands.
+		// Not an error: init starts one as soon as a conf exists.
 		log.Println("[wifi] no running supplicant to retire — init will start one")
 		return nil
 	}
@@ -525,19 +485,15 @@ func retireSupplicant() error {
 
 // reloadConf swaps in a new config and gets the supplicant onto it.
 //
-// On FireOS the conf must be written with WiFi DOWN, and that order is what
-// makes it work: on disable, WifiStateMachine saves its in-memory network list
-// back to wpa_supplicant.conf, so a conf written while WiFi is up gets
-// clobbered by that save and the device silently rejoins the old network (found
-// on hardware 2026-07-11; provisioning never hit it because a factory device
-// has no framework-known networks to save).
+// On FireOS the conf must be written with WiFi DOWN: on disable,
+// WifiStateMachine saves its in-memory network list back over it, so a conf
+// written while WiFi is up is clobbered and the device silently rejoins the old
+// network (hardware, 2026-07-11).
 //
-// On emOS the opposite is true and the whole dance is wrong. There is no
-// framework to bounce and nothing else that writes the file, so there is no save
-// to lose a write to — and `svc` needs a package manager and a property service
-// that are both absent, meaning the disable would fail and take the change with
-// it. Write, then retire the supplicant and let init's supervisor bring up a
-// replacement, which is what em-wifi does from the console for the same reason.
+// On emOS that dance is wrong. `svc` needs a framework and property service that
+// are absent, so the disable fails and takes the change with it — and nothing
+// else writes the file, so there is no save to lose a write to. Write, then
+// retire the supplicant for init's supervisor to replace, as em-wifi does.
 func reloadConf(content string) error {
 	if onEmOS() {
 		if err := writeConf(content); err != nil {
@@ -743,8 +699,7 @@ func RecoverIfPending() {
 	_ = json.Unmarshal(mk, &m)
 	log.Printf("[wifi] uncommitted change to %q found at startup — restoring previous network", m.NewSSID)
 
-	// Ours first, then where pre-upgrade firmware wrote it — see
-	// legacyBackupPath. On FireOS the two are the same path.
+	// Ours, then where pre-upgrade firmware wrote it. Same path on FireOS.
 	from := backupPath()
 	backup, err := os.ReadFile(from)
 	if err != nil {

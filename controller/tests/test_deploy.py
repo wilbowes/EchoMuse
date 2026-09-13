@@ -2580,14 +2580,10 @@ def test_the_emos_and_firmware_release_namespaces_cannot_select_each_other():
 
 def test_the_emos_init_is_verified_before_it_is_served():
     """
-    A release built wrong is wrong for everyone, so it is refused at the point
-    of download rather than at the point of boot. Every property it checks is
-    silent when wrong and fatal on the device.
-
-    The checks live in the shared resolver rather than at either entry point.
-    There are TWO ways to get an init now — the GET, and the image build
-    resolving one from the reference — and they are two entry points to one
-    question, so a check at only one of them is a way in that does not verify.
+    A release built wrong is wrong for everyone, so it is refused at download
+    rather than at boot. The checks live in the shared resolver: there are two
+    ways to get an init, and a check at only one is a way in that does not
+    verify.
     """
     api = (CONTROLLER / "em_api.py").read_text()
     resolver = _strip_prose(_fn_body(api, "_fetch_one_init"))
@@ -2612,13 +2608,11 @@ def test_the_emos_init_is_verified_before_it_is_served():
 
 def test_the_emos_release_workflow_asserts_what_it_publishes():
     """
-    The last point before the artifact is something people flash. CI checks
-    the tip of a branch; this checks the thing being published.
+    The last point before the artifact is something people flash. CI checks a
+    branch tip; this checks what is published.
 
-    Read as YAML rather than grepped for a literal, because the published set is
-    now a list and the old substring check (`files: emos/build/init`) asserted
-    the FORMATTING of a one-item list — so adding the second init broke a test
-    that had no opinion about the thing it was protecting.
+    Read as YAML, not grepped: the old substring check pinned the FORMATTING of a
+    one-item list, so adding an asset broke a test with no opinion about it.
     """
     import yaml
     path = CONTROLLER.parent / ".github" / "workflows" / "emos-release.yml"
@@ -2631,6 +2625,12 @@ def test_the_emos_release_workflow_asserts_what_it_publishes():
     # one drives a parser or an invariant whose failure is silent on hardware.
     for check in ("ringsim --check", "pwcheck", "tmoutcheck", "wpacheck"):
         assert check in wf, f"the release must run {check}"
+    # The bundle is what carries everything but the compat init, so a release
+    # that skipped building it would publish an empty-handed payload.
+    assert "make-payload-bundle.py" in wf, \
+        "the release must build the payload bundle"
+    for f in ("init32", "wpa_supplicant", "wpa_cli", "em-wifi"):
+        assert f in wf, f"{f} must go into the bundle"
 
     published = set()
     for job in yaml.safe_load(wf)["jobs"].values():
@@ -2647,12 +2647,11 @@ def test_the_emos_release_workflow_asserts_what_it_publishes():
     # A BOOT IMAGE MUST NEVER APPEAR. It carries the device's own kernel and
     # DTBs, so publishing one would redistribute Amazon's code — the image is
     # assembled on the user's side from the partition they read off their device.
-    assert published == {
-        "emos/build/init", "emos/build/init32",
-        "emos/build/wpa/wpa_supplicant", "emos/build/wpa/wpa_cli",
-        "emos/build/wpa/em-wifi",
-    }, (f"the published set changed — got {sorted(published)}. Everything here "
-        f"must be ours, and a boot image must never be among it.")
+    assert published == {"emos/build/init", "emos/build/emos-payload.zip"}, (
+        f"the published set changed — got {sorted(published)}. Everything here "
+        f"must be ours, and a boot image must never be among it. The loose "
+        f"`init` is not redundant: _fetch_latest_emos_release matches it by "
+        f"exact name, so dropping it strands every fielded controller.")
     assert not any(".img" in f or "boot" in f.rsplit("/", 1)[-1]
                    for f in published), (
         "an image or boot partition must never be a release asset — it carries "
@@ -2666,23 +2665,18 @@ def test_the_emos_release_workflow_asserts_what_it_publishes():
     mapping = mapping[:mapping.index("}") + 1]
     assert '"init"' in mapping and '"init32"' in mapping, (
         f"the arch-to-asset map must name the published assets, got: {mapping}")
-    for name in ("init", "init32"):
-        assert f"emos/build/{name}" in published, (
-            f"{name} is in EMOS_INIT_ASSETS but the release does not publish it")
+    # init32 is not a published asset any more — it travels inside the bundle,
+    # which the step check above pins.
+    assert "emos/build/init" in published, \
+        "the compat init must still be published loose"
 
 
 def test_the_init_architecture_is_decided_where_the_reference_is():
     """
-    The init must match the escrowed image's KERNEL — FireOS 5 boots a 64-bit
-    one, FireOS 6 a 32-bit one — and an init of the wrong architecture takes the
-    flash and then produces no output at all, which is indistinguishable from a
-    kernel that never started.
-
-    So the decision belongs at the one place holding the reference. The wizard
-    must NOT pick: doing so needs a second copy of `reference_kernel_arch` in
-    JavaScript, and two copies of that rule can disagree with nothing able to
-    see it. This pins the shape rather than the behaviour, because the build step
-    is a fetch-driven async function with no seam to test through.
+    An init of the wrong architecture flashes fine and then produces no output at
+    all, so the decision belongs where the reference is. The wizard must not pick
+    — that needs a second copy of reference_kernel_arch in JavaScript. Shape
+    rather than behaviour, the build step having no seam to test through.
     """
     jsx = (CONTROLLER / "static" / "dashboard.jsx").read_text()
     api = (CONTROLLER / "em_api.py").read_text()
@@ -2716,20 +2710,13 @@ def test_the_init_architecture_is_decided_where_the_reference_is():
 
 def test_the_wifi_tools_go_only_into_a_32_bit_image():
     """
-    emOS's own wpa_supplicant is included for a FireOS 6 image and NOT for a
-    FireOS 5 one, and that asymmetry is the whole point rather than caution.
+    init prefers /sbin/wpa_supplicant the moment one exists, so including these
+    in a FireOS 5 image would move the whole fleet off Amazon's working
+    supplicant as a side effect of a provisioning change. Same for wpa_cli, which
+    init's nudge now prefers.
 
-    init prefers /sbin/wpa_supplicant over /system/bin/wpa_supplicant the moment
-    one exists. So shipping these into a FireOS 5 image would move the entire
-    existing fleet off Amazon's supplicant — which works today — onto ours, as a
-    side effect of a provisioning change nobody connected to it. emos/build.sh
-    makes the same choice for the same reason: supply the binary and it is
-    preferred, leave it out and nothing changes. It applies to wpa_cli too, since
-    init's reassociate nudge now prefers /sbin/wpa_cli.
-
-    A FireOS 6 image missing them is fatal rather than degraded: Amazon's
-    supplicant aborts under emOS before main(), so the image would have no WiFi
-    at all and no way to report it except over a cable.
+    Missing them on FireOS 6 is fatal, not degraded: Amazon's aborts under emOS,
+    so the image would have no WiFi and no way to report it but a cable.
     """
     api = (CONTROLLER / "em_api.py").read_text()
     fn = _strip_prose(_fn_body(api, "_fetch_emos_payload"))
@@ -2757,19 +2744,13 @@ def test_the_wifi_tools_go_only_into_a_32_bit_image():
 
 def test_a_v2_device_is_refused_by_the_fireos_flow_and_accepted_by_emos():
     """
-    amonet-biscuit v2.0.0 writes a newer preloader, LK and TrustZone, and
-    FireOS 5 does not boot on them. So the FireOS flow — which patches and boots
-    the device's own Android 5 — must still refuse such a device outright.
+    FireOS 5 does not boot on v2's bootloaders, so the FireOS flow must still
+    refuse. emOS must not — it now runs on FireOS 6's kernel, the only FireOS v2
+    boots, and its escrow-build-flash sequence is not FireOS-5-specific.
 
-    emOS must NOT. It ran only on FireOS 5's 64-bit kernel, which is why the
-    refusal used to cover it; it now runs on FireOS 6's 32-bit kernel, which is
-    the only FireOS v2 boots. Refusing there would refuse exactly the devices
-    emOS newly supports, and the emOS flow's escrow-build-flash sequence is not
-    FireOS-5-specific at any step.
-
-    Both directions are pinned because each is silent in its own way: refuse in
-    emOS and the feature is unreachable with a message blaming the device;
-    accept in FireOS and the operator flashes a boot image that cannot boot.
+    Both directions pinned: refuse in emOS and the feature is unreachable behind
+    a message blaming the device; accept in FireOS and somebody flashes a boot
+    image that cannot boot.
     """
     jsx = (CONTROLLER / "static" / "dashboard.jsx").read_text()
     fn = _js_fn_body(jsx, "runConnectAndroid")
