@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.24.0-ea.3 (Early Access)
+
+**Fixes the wizard stopping at the Install EchoMuse step with "start_server.sh
+reads unreadable"** (#516). The file was installed correctly. Only the check
+that confirms it could not run.
+
+The wizard was asking the device to hash files with busybox, and a recovery
+does not always have it — a stock FireOS 6 install carries a different set of
+tools. It now asks the device which tools it has and uses those, so both kinds
+of recovery work.
+
+This also affected the flash step, which verifies the image on the device
+before writing it and reads the partition back afterwards. Both used the same
+missing tool, so a device that got past the install step would have stopped
+there instead. Neither could ever have written something unverified — they
+refuse rather than continue — but the run could not finish.
+
+If the recovery turns out to have no usable tool at all, the wizard now says
+which one is missing and stops before writing anything, rather than reporting
+the file as corrupt.
+
 ## 2.24.0-ea.2 (Early Access)
 
 **Fixes the wizard stopping at the Escrow Boot Image step on a device unlocked
