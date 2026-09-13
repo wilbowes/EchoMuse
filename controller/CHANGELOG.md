@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.24.0-ea.2 (Early Access)
+
+**Fixes the wizard stopping at the Escrow Boot Image step on a device unlocked
+with amonet-biscuit v2.0.0** (#513). It refused with a message about
+`/dev/block/other-boot` not being a block device, and nothing was read or
+written.
+
+That unlock arranges the partitions differently from the older one, and the
+wizard assumed the older layout everywhere. It now recognises both, and reads
+which of the two boot slots your device actually started from rather than
+assuming — v2 devices switch slots when you install a FireOS update, so
+guessing would write to the slot the device is not using and look like the
+flash had done nothing.
+
+If it cannot tell which slot booted, it refuses rather than picking one.
+
+This has been through the test suite against the partition layout read off a
+real v2 device, and has not yet run on hardware.
+
 ## 2.24.0-ea.1 (Early Access)
 
 **The setup wizard can now install emOS on a device unlocked with
