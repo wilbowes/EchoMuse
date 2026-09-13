@@ -2687,3 +2687,98 @@ The uncomfortable part is that the device needing a bigger prime most is the one
 where it costs the most start latency, since on Lounge delivery is slower than
 realtime — so it wants to be adaptive from the `primeWaitMs` the device already
 reports, not a blanket bump.
+
+## 2026-09-13 (evening) — emOS boots on FireOS 6, four EA builds getting there
+
+The FireOS 6 wizard path ran on hardware for the first time, against the spare
+(G090LF11752215LE) on a stock FireOS 6 install unlocked with amonet-biscuit
+v2.0.0. **emOS booted** — `armv7l`, `emos-v0.5`, from an image the wizard built
+out of the device's own kernel — and associated to WiFi with our own
+`wpa_supplicant`. It stops one step short of finishing, and the reason is #524.
+
+Four Early Access builds went out in three hours, each closing the fault the
+previous hardware run exposed. Every one of those faults was the same shape: a
+tool or a layout assumed rather than asked about.
+
+**The layout (#513).** `classifyBootTarget` was built entirely on amonet v1,
+where TWRP INVERTS the by-name map and publishes `/dev/block/other-boot` for the
+real kernel. v2 does not invert anything: it points `lk`, `preloader` and `tee`
+at `/tmp/ota-decoy/` so an OTA writing a bootloader writes to tmpfs, which is why
+`boot_a`/`boot_b` stay pointing at real flash, there is no `other-boot`, no `_x`
+alias and no `_amonet` alias, and the payload lives in `expdb`. Four assumptions,
+all absent. The sharp part is that fixing only the `other-boot` lookup drops
+through to the "no `_x` alias, so this is amonet's payload" branch, which refuses
+with a confident explanation that is wrong on v2.
+
+`other-boot` resolving to ITSELF is the discriminator — `readlink -f` echoes its
+argument back for a path that does not exist — so absent is distinguishable from
+"resolves somewhere bad", which is still the tmpfs refusal.
+
+**The slot MOVES, and that is the half the fix got wrong first.** v1 got the
+active slot for free because `other-boot` named it. On v2 `ro.boot.slot_suffix`
+answers which slot the device BOOTED FROM, and installing a FireOS zip stages a
+switch — TWRP says "Flashing A/B zip to inactive slot: A … reboot recovery to
+switch". So with a switch pending, booted-from and boot-next differ: the wizard
+escrowed and flashed B, correctly and consistently, and the bootloader then
+booted A. Everything verified; the wrong partition. Consuming the pending switch
+by rebooting made the next run work. Still open as a real flaw — booted-from is
+not boot-next, and the wizard has no way to read the second.
+
+**The tools (#516, #520).** The wizard wrote `busybox md5sum` and `busybox dd`
+literally at nine call sites. A stock FireOS 6 recovery carries toybox and no
+busybox, so they exited 127 and printed nothing — and the callers take
+`.split(/\s+/)[0]` of that, compare an empty string to the expected hash, and
+report corruption. `start_server.sh` was installed perfectly, with exactly the
+expected md5, and the run stopped. `deviceTools` now resolves each tool by
+RUNNING it, since busybox applets are not on PATH and `command -v` answers a
+different question.
+
+Then `dd … conv=fsync`: toybox builds `conv=` optionally and this recovery has it
+compiled out, so dd answered "conv option disabled" and copied nothing. That
+presents as 180MB/s on an eMMC that does 2.5–9, then a read-back still holding
+the old image, twice through the retry. **dd always prints its record counts**,
+so their absence is "did not run" rather than "the write failed" — two states
+that want different words, and only one of which means anything is wrong with the
+device.
+
+**Checking whether dropping `conv=fsync` left the write unbarriered turned up
+something adjacent.** It did not — `sync` after the dd is the barrier and the
+read-back after `drop_caches` is what proves content, which is strictly stronger
+than fsync, since fsync says nothing about what ended up on the partition. But
+the read-back ran `drop_caches` and THEN `sync`, and drop_caches evicts only
+CLEAN pages: a dirty one survives it and the read can be answered from cache.
+It was correct only because the write command sixty lines earlier ends in a sync
+of its own. Reordered, and `sync` is now a resolved tool rather than a bare word,
+so a recovery without one is refused rather than written to with no barrier.
+
+**The packer was cleared before any of this was touched**, against a real stock
+FireOS 6 boot image read off the device — an input it had never seen, and the
+place its four historical refusals came from. `roundtrip_identical` True byte for
+byte including the SHA1 id, arch `arm` to `init32`, the aarch64 init correctly
+refused with both reasons, kernel and DTBs byte-identical through the rebuild,
+ramoops appended exactly once, 7,768,064 bytes into a 16MB partition. Worth
+knowing that `pack` reuses the reference's cmdline and only APPENDS ramoops, so
+an emOS image carries Amazon's cmdline verbatim and the ramoops suffix is the
+only thing distinguishing the two in a header dump — reading 180 bytes of a
+512-byte field and concluding from the prefix is how an hour went.
+
+**Where it stops (#524).** `init.c` starts DHCP on FireOS 6 with `/sbin/udhcpc`,
+deliberately, because FireOS 6's own `dhcpcd` aborts under emOS. Nothing ships
+it. The FireOS 6 WiFi work on 2026-09-12 was done on a device that had busybox
+from **amonet v2's optional root component**, so `/sbin/udhcpc` was simply there
+and nobody noticed it was not ours. The same component explains why the
+hardcoded busybox above had worked everywhere it had been tried.
+
+So the rule, which is the durable part of the evening: **emOS must not depend on
+anything that is optional for the unlock.** We ship our own `wpa_supplicant`
+precisely because Amazon's aborts, and then leaned on somebody else's busybox for
+the other half of the same job. It also puts a caveat on the 09-12 result: full
+WiFi on FireOS 6 with no Amazon binary is true, and it was not self-contained.
+
+**A support-bundle finding that cost an hour, from the other end of the day**
+(#507): `em_support._LOG_DROP` contains `text=`, and the announcement log line is
+`AnnounceRequest: media_id=… text=… start_conversation=…`. So every bundle drops
+the one line that identifies an `ask_question` flow — the exact flow being
+debugged in #423, where an `ask_question` called from a voice turn's own intent
+deadlocks against that turn's 30s TTS wait (#506). The marker was meant for
+transcripts; `{msg.text!r}` is quoted and `_QUOTED` already covers it.
