@@ -69,7 +69,9 @@ class of dependency visible. No log, test or dashboard could show it.
 #    build input and the recovery image.
 adb shell su -c 'dd if=/dev/block/mmcblk0p10' > boot_a_x.img
 
-# 2. Build. Reuses the kernel and DTBs out of your own image.
+# 2. Build. Reuses the kernel and DTBs out of your own image, and builds the
+#    init for that kernel's architecture: 64-bit for FireOS 5, 32-bit ARM for
+#    FireOS 6 (untested on hardware as of 2026-09-11).
 ./build.sh boot_a_x.img emos-boot.img
 
 # 3. Flash (TWRP, or over the network from a running emOS — see below).
@@ -150,9 +152,44 @@ every one of them is a comment in the source rather than folklore:
 
 ### WiFi
 
-Amazon's own sequence, read off a running FireOS device rather than
-reconstructed — but two steps appear in no `.rc` file on the device and were
-each found the hard way. `wmt_loader` must run **first** (it registers the
+**On FireOS 6 none of Amazon's networking binaries can be used, so emOS does
+it itself.** `wmt_loader` exits 255 there where FireOS 5's exits 0,
+`wmt_launcher` runs and sits silent, and both `wpa_supplicant` and `dhcpcd`
+abort before `main()` — traced to `open /dev/binder -> -1`; they are linked
+against Android IPC that emOS deliberately does not provide. The answer was
+not to give emOS a property service and a binder node so that Amazon's tools
+are happy, which would make their userspace *more* load-bearing, but to
+replace them:
+
+- **The combo chip is brought up by init**, from MediaTek's GPL source:
+  `SET_PATCH_NAME` and `SET_STP_MODE` on `/dev/stpwmt` configure the HIF
+  (`(fm << 4) | stp`; biscuit is BTIF, `0x23`), then a daemon loop answers the
+  driver's `srh_patch` requests with `SET_PATCH_NUM` and `SET_PATCH_INFO`.
+  The patch download order runs **backwards** through the sorted names —
+  `ROMv2_lm_patch_1_0` is sequence 2 — and the address is
+  `{0, 0, hdr[0x1A], hdr[0x1B]}`; offset 0x18 is the tail of `ucPLat` in the
+  28-byte header. Both were read off Amazon's own launcher under an
+  `LD_PRELOAD` ioctl shim rather than guessed. This drops `wmt_loader` and
+  `wmt_launcher` on **both** kernels.
+- **emOS ships its own `wpa_supplicant`** — hostap 2.10, static ARM32,
+  nl80211, internal crypto, ~1MB — built by `tools/build-wpa-supplicant.sh`.
+  Four things in that script are load-bearing and each cost a build: full
+  libnl will not cross-compile against bionic (use OpenWrt's libnl-tiny,
+  patched to defer to `<linux/netlink.h>`), hostap's `priv_netlink.h` needs
+  the same and its system includes must precede its `#ifndef IFLA_*`
+  fallbacks, bionic ships no `librt`, and **WEXT is not an option on this
+  driver** — it scans but association never completes.
+- **DHCP on FireOS 6 is busybox `udhcpc`**, which needs a script to apply a
+  lease it has already obtained; without one it gets an address and discards
+  it, which reads as a DHCP failure and is not.
+
+FireOS 5 keeps Amazon's supplicant and `dhcpcd` unless an image carries ours,
+because that path works on the fleet today and should not be swapped for
+something untested by a build-time default.
+
+The FireOS 5 sequence below is Amazon's own, read off a running device rather
+than reconstructed — but two steps appear in no `.rc` file on the device and
+were each found the hard way. `wmt_loader` must run **first** (it registers the
 stp/wmt/BT character devices; without it `6620_launcher` idles forever with
 nothing to open), and `wpa_supplicant` does not associate on its own here — it
 needs a `wpa_cli reassociate` nudge, which the supervisor issues until carrier
@@ -288,11 +325,35 @@ Nothing under emOS reads any of them: there is no `/sys/fs/selinux` and no
 SELinux line in `dmesg`. So the wizard's permissive patch is inert here, which
 is why an emOS install does not need the boot patch at all.
 
-### WiFi comes from /data, and wpa_supplicant makes its own entropy
+### WiFi comes from /data — but emOS keeps its OWN file
 
-`wpa_supplicant.conf` and `entropy.bin` both live in `/data/misc/wifi`, so
-they survive a boot-partition write — which is what lets a device be
-configured over adb on FireOS and then crossed to emOS. **`entropy.bin` is
+**emOS reads `/data/emos/wpa.conf`, not Android's `wpa_supplicant.conf`**, and
+falls back to Android's only when it has none of its own. `/data` survives a
+boot-partition write and is shared with whatever else the device can boot: a
+user who boots FireOS 6 from the other slot has Amazon's supplicant rewrite
+`/data/misc/wifi/wpa_supplicant.conf` with fields ours rejects, and **one
+unusable field discarded the whole network block** — leaving a device that
+boots, throbs at stage 11 for ever and is invisible on the network, so
+recovery needs a cable. Same lesson as `console.pw`: anything on `/data`
+belongs to whoever wrote it last.
+
+Two more defences, because each covers the other's blind spot. Our supplicant
+is patched to **warn and carry on** for a line it cannot use rather than
+discarding the network — and both the network *and* the global parse sites
+need it, since `p2p_no_group_iface` is a global and kills the file before the
+network block is read. (Upstream already does exactly this for unsupported
+WEP parameters.) And **no conf at all is a wait, not a failure**: the wizard
+writes WiFi over the console *after* emOS is running, so init holds at stage
+11, starts no supplicant, and picks the file up the moment it appears. A conf
+that is present and not working turns the ring red after two minutes.
+
+**`em-wifi` sets the network from the console** — scan, pick a number, type a
+password, and it waits to see an address before claiming success. WPA3 and WEP
+networks are listed and refused with the reason rather than offered and then
+failing at association. That is the way back for a device that has moved house
+or come back from FireOS, without a full re-provision.
+
+`entropy.bin` lives in `/data/misc/wifi` alongside Android's conf. **`entropy.bin` is
 created if absent**: deleted on EFF, the device rebooted and was back on WiFi
 in 25 seconds with the file recreated. A device that never completed Alexa
 setup is not stranded.
@@ -755,7 +816,25 @@ is not proof it rebooted — compare uptime or a build fingerprint.
   toggling it clicks audibly, which is why the injected silence stream exists.
 - Hardware is resolved by fixed major/minor numbers, against the project's own
   "resolve by name, not number" rule. Fine for biscuit, wrong for a second
-  board.
+  board. `/system` and `/data` are likewise hardcoded to p13 and p16; those
+  were checked on a FireOS 6 device under amonet v2 and are still correct
+  there, but nothing enforces it.
+- **The provisioning wizard cannot install a FireOS 6 image yet.** It fetches
+  the `init` asset from the emOS release and hands it to the controller's
+  packer; the supplicant and `wpa_cli` need the same road — a second release
+  asset, an endpoint, and a passthrough. The packer half already accepts
+  them. A locally built image installs today. Publishing them is allowed for
+  the same reason `init` is: they are our build (hostap is BSD, libnl-tiny
+  LGPL) and contain no Amazon code, unlike a boot image.
+- **WPA3 is one layer away, not three.** Asked of the driver rather than
+  inferred from kernel strings: userspace is solved, since emOS now ships a
+  supplicant with SAE; **PMF is not blocked** — the driver advertises
+  BIP-CMAC-128, which corrects a previously recorded belief that the closed
+  firmware prevented it; but the driver does not do SAE and
+  `NL80211_CMD_EXTERNAL_AUTH`, which would let the supplicant do it instead,
+  is a Linux 4.17 addition on a 3.18 kernel. Both cfg80211 and the wlan
+  driver are built in, so there is no module to replace — it is a kernel
+  build, which puts it on the same fork as the arm64 kernel work.
 - The boot trail is a fixed-size buffer rewritten in place, so a shorter trail
   leaves the tail of the previous boot's behind and can be misread.
 - **A device on emOS cannot start the wizard directly, and nothing in the

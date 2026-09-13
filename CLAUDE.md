@@ -122,7 +122,7 @@ The two halves version independently, so any pairing can occur in the field. Two
 Device firmware, controller and emOS are versioned independently from the same repo:
 
 - **Device**: plain `v*` tags (e.g. `v2.7.6`) → `release.yml` → GitHub Release with the `server` binary asset. The tag is embedded in the binary and compared against `firmware_ver` by OTA — don't change this scheme.
-- **emOS**: `emos-v*` tags → `emos-release.yml` → GitHub Release with an **`init`** asset (aarch64, static, built with the pinned compiler image; the release asserts both properties and runs `ringsim --check` and `pwcheck` against the source it is publishing). **Only the init is published, and it cannot be otherwise** — a bootable image carries the device's own kernel and DTBs, so shipping one would redistribute Amazon's code; the image is assembled from the boot partition each user reads off their own device. The namespace is load-bearing twice: `emos/build.sh` stamps `/etc/os-release` from `git describe --match 'emos-v*'` and without it stamps whatever tag is nearest (a controller release number, which is worse than "unknown" because it looks plausible), and it keeps emOS out of the firmware OTA's way, since `_fetch_latest_release` selects a tag starting `v` with a `server` asset and `emos-v0.1` matches neither test. `_fetch_latest_emos_release` is the mirror image and is deliberately a separate function rather than a parameter — the two select on opposite things and share no cache, so folding them together would mean one cache holding whichever kind was asked for last. `git tag -a --cleanup=verbatim`, for the reason below.
+- **emOS**: `emos-v*` tags → `emos-release.yml` → GitHub Release with **two init assets** — `init` (aarch64, for FireOS 5's 64-bit kernel) and `init32` (armv7a, for FireOS 6's 32-bit one), both static and built with the pinned compiler image. The init must match the device's KERNEL, not its userspace; the firmware beside it is armv7a either way. The release asserts each one's architecture, that both are static, and that they are not the same file (two compiles differing only in a triple is where a copy-paste publishes one binary twice), then runs all four off-target checks against the source it is publishing. **`init` keeps that name** — `_fetch_latest_emos_release` selects on it by exact name, so renaming it strands every controller in the field. **An init is all that is published, and it cannot be otherwise** — a bootable image carries the device's own kernel and DTBs, so shipping one would redistribute Amazon's code; the image is assembled from the boot partition each user reads off their own device. The namespace is load-bearing twice: `emos/build.sh` stamps `/etc/os-release` from `git describe --match 'emos-v*'` and without it stamps whatever tag is nearest (a controller release number, which is worse than "unknown" because it looks plausible), and it keeps emOS out of the firmware OTA's way, since `_fetch_latest_release` selects a tag starting `v` with a `server` asset and `emos-v0.1` matches neither test. `_fetch_latest_emos_release` is the mirror image and is deliberately a separate function rather than a parameter — the two select on opposite things and share no cache, so folding them together would mean one cache holding whichever kind was asked for last. `git tag -a --cleanup=verbatim`, for the reason below.
 - **Controller**: `controller-v*` tags (e.g. `controller-v2.8.0`) → `controller-release.yml` → Docker image pushed to `ghcr.io/wilbowes/echomuse-controller` (`X.Y.Z` + `latest`, CPU-only, **multi-arch: linux/amd64 + linux/arm64** — it said amd64 here until 2026-08-13, long after arm64 shipped). **No GitHub Release is created** — the OTA system's release polling (`em_api._fetch_latest_release`) filters for `v*` tags with a `server` asset, but controller releases stay out of the releases list entirely by design. **Tag controller releases with `git tag -a --cleanup=verbatim` too**: with no Release behind them, the annotation is the *only* copy of the notes, and it is what the dashboard's controller-update notice displays (`em_api._fetch_controller_release` reads it via `git/matching-refs` + the tag object). A lightweight controller tag ships an image nobody can read a changelog for. Pick the newest tag by **parsed version, never list order** — the refs API sorts lexically and returns `controller-v2.9.0` *after* `controller-v2.10.0`.
 
   The notice is **advisory only and must stay that way** (`tests/test_deploy.py` enforces GET-only + no mutating call in the banner): the controller is the user's container, updated with their own `docker compose pull`. An in-app update would restart the process serving the page, mid-request, with no way to report the outcome. Note a locally-built image defaults `EM_CONTROLLER_VERSION` to `dev`, which resolves to `unknown` and correctly shows nothing — pass `--build-arg EM_CONTROLLER_VERSION=$(git describe --tags --match 'controller-v*')` for a local build that knows what it is. Version comparison lives in `version.py` (`parse`/`compare`) so it is unit-testable without aiohttp; a build between tags parses **equal** to its tag and is ahead, not behind.
@@ -203,6 +203,8 @@ cd device && go test ./...
 cd controller && python -m pytest tests/   # needs: pytest numpy scipy pyyaml
 cd emos/init && cc -O2 -o /tmp/ringsim ringsim.c -lm && /tmp/ringsim --check
 cd emos/init && cc -O2 -o /tmp/pwcheck pwcheck.c && /tmp/pwcheck
+cd emos/init && cc -O2 -o /tmp/tmoutcheck tmoutcheck.c && /tmp/tmoutcheck
+cd emos/init && cc -O2 -o /tmp/wpacheck wpacheck.c && /tmp/wpacheck
 ```
 
 Both suites plus `go vet` run in CI on every push/PR
@@ -210,10 +212,16 @@ Both suites plus `go vet` run in CI on every push/PR
 pure-logic modules only — see `controller/CLAUDE.md` before adding one that
 needs openwakeword or aiohttp.
 
-**emOS is C with no test framework, so its two off-target tools ARE its
-suite** — `ringsim --check` for the boot ring's invariants and `pwcheck` for
-the password hash the controller has to agree with. Both `#include init.c`
-whole and drive the real functions, so neither can drift from the device.
-CI runs both, builds the init for aarch64 in the pinned compiler image, and
+**emOS is C with no test framework, so its off-target tools ARE its suite** —
+`ringsim --check` for the boot ring's invariants, `pwcheck` for the password
+hash the controller has to agree with, `tmoutcheck` for the console idle
+timeout, and `wpacheck` for finding the supplicant's control socket in
+whichever conf is in use. They all `#include init.c` whole and drive the real
+functions, so none can drift from the device. **They exist where a wrong
+answer is SILENT on hardware** — that is the criterion for adding another: a
+parser over a file written by the other half of the project, where being wrong
+looks like something else entirely (a wrong password, a dropped console, a
+device that never associates). CI runs all four, builds the init for aarch64
+in the pinned compiler image, and
 asserts the result is static — a dynamically linked PID 1 produces no output
 at all, which is indistinguishable from a kernel that never started.

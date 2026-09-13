@@ -23,6 +23,7 @@
 #include <fcntl.h>
 #include <net/if.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -1072,6 +1073,34 @@ static void netlog(const char *fmt, ...)
     close(fd);
 }
 
+/* The first of `cands` that exists and is executable, or NULL.
+ *
+ * FireOS 5 and FireOS 6 put the same tools in different places: WiFi bring-up
+ * moved to /system/vendor, 6620_launcher became wmt_launcher, and a FireOS 6
+ * /system ships no busybox at all, only toybox. Resolving by what is present
+ * keeps one init for both kernels rather than two that drift — the same
+ * "resolve by name, not by number" rule the rest of the project follows.
+ */
+static const char *first_exec(const char *const cands[])
+{
+    for (int i = 0; cands[i]; i++)
+        if (access(cands[i], X_OK) == 0)
+            return cands[i];
+    return NULL;
+}
+
+/* busybox: from /system on FireOS 5; on FireOS 6, which has none, a static
+ * copy placed on /data. NULL when there is none, and every caller then falls
+ * back to the FireOS 5 path, so a missing busybox fails exactly as it always
+ * did rather than in some new way. Only meaningful once /system and /data are
+ * mounted. */
+static const char *busybox_path(void)
+{
+    static const char *const c[] = { "/system/bin/busybox", "/system/xbin/busybox",
+                                     "/data/local/bin/busybox", NULL };
+    return first_exec(c);
+}
+
 /* fork+exec, returning the pid. NULL-terminated argv, argv[0] is the path. */
 static pid_t spawn(char *const argv[])
 {
@@ -1260,22 +1289,400 @@ static int ifup(const char *name)
  * Writing "1" to /dev/wmtWifi blocks for ~13s while the chip is powered and the
  * firmware loaded, which is why this runs in its own process.
  */
+/* The combo chip, brought up without Amazon's wmt_loader and wmt_launcher.
+ *
+ * On FireOS 6 those two do not work in emOS's environment: wmt_loader exits
+ * 255, wmt_launcher runs but sits silent, WMT_OPID_HIF_CONF is never posted,
+ * the chip never powers on, and the /dev/wmtWifi write returns EIO. They
+ * coordinate through Android properties, and emOS has no property service --
+ * but building one to satisfy them would make Amazon's userspace MORE
+ * load-bearing, which is the wrong direction. So init talks to the kernel
+ * driver itself.
+ *
+ * Everything here comes from MediaTek's GPL source (the conn_soc variant,
+ * which is what this kernel is built from) and every number below was checked
+ * against the running driver on hardware, 2026-09-12.
+ *
+ * Two steps, and the second is the whole reason Amazon ships a launcher:
+ *
+ *   1. SET_PATCH_NAME then SET_STP_MODE. The SET_STP_MODE handler calls
+ *      wmt_lib_set_hif() and posts WMT_OPID_HIF_CONF -- the "WMT HIF info
+ *      added" line. Its argument is (fm << 4) | stp. A value it does not
+ *      recognise is rejected by wmt_lib_set_hif with no hardware touched, so
+ *      getting it wrong fails safe.
+ *
+ *   2. A daemon loop. Powering the chip makes the driver ask USERSPACE to
+ *      locate the firmware patches: it posts the string "srh_patch" and
+ *      blocks. The answer is SET_PATCH_NUM, then one SET_PATCH_INFO per
+ *      patch, then "ok" written back to release it. The driver does not care
+ *      who answers -- there is no registration of any kind -- so init answers.
+ *      Without this, power-on dies at "patch info perpare fail" and there is
+ *      no wlan0.
+ */
+#define WMT_IOC_MAGIC             0xa0
+#define WMT_IOCTL_SET_PATCH_NAME  _IOW(WMT_IOC_MAGIC, 4, char *)
+#define WMT_IOCTL_SET_STP_MODE    _IOW(WMT_IOC_MAGIC, 5, int)
+#define WMT_IOCTL_SET_PATCH_NUM   _IOW(WMT_IOC_MAGIC, 14, int)
+#define WMT_IOCTL_SET_PATCH_INFO  _IOW(WMT_IOC_MAGIC, 15, char *)
+
+/* wmt_dev.h: STP_UART_FULL 1, STP_UART_MAND 2, STP_BTIF_FULL 3, STP_SDIO 4.
+ * wmt_core.h: WMT_FM_I2C 1, WMT_FM_COMM 2.
+ * biscuit is BTIF -- the driver reports back "hifType 2" for this value. */
+#define WMT_STP_BTIF_FULL 0x3
+#define WMT_FM_COMM       0x2
+#define WMT_HIF_ARG       ((WMT_FM_COMM << 4) | WMT_STP_BTIF_FULL)
+
+#define WMT_PATCH_MAX 8
+
+/* WMT_PATCH_INFO, wmt_lib.h. The layout is fixed by the driver's
+ * copy_from_user, so the field order and the 256-byte name are not ours to
+ * choose. */
+struct wmt_patch_info {
+    uint32_t seq;
+    uint8_t  addr[4];
+    uint8_t  name[256];
+};
+
+/* The four address bytes the driver splices into WMT_PATCH_P_ADDRESS_CMD.
+ *
+ * Taken from Amazon's own wmt_launcher, observed live under an LD_PRELOAD
+ * ioctl shim on a rooted FireOS 6 (2026-09-12) rather than guessed: it sends
+ * 00 00 06 00 for ROMv2_lm_patch_1_0_hdr.bin and 00 00 0e f0 for
+ * ROMv2_lm_patch_1_1_hdr.bin. The two live bytes are at header offset 0x1A
+ * and the top two are ZERO -- 0x18 is the tail of ucPLat in the 28-byte
+ * WMT_PATCH header (ucDateTime[16], u2HwVer, u2SwVer, u4PatchVer, ucPLat[4]),
+ * and sending all four from 0x18 puts rubbish in the high half. */
+#define WMT_PATCH_ADDR_OFF 0x1A
+
+static int wmt_patch_addr(const char *path, uint8_t out[4])
+{
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return -1;
+    uint8_t hdr[WMT_PATCH_ADDR_OFF + 2];
+    ssize_t n = read(fd, hdr, sizeof hdr);
+    close(fd);
+    if (n < (ssize_t)sizeof hdr)
+        return -1;
+    out[0] = 0;
+    out[1] = 0;
+    out[2] = hdr[WMT_PATCH_ADDR_OFF];
+    out[3] = hdr[WMT_PATCH_ADDR_OFF + 1];
+    return 0;
+}
+
+/* Answer one "srh_patch". Returns the number of patches reported. */
+static int wmt_answer_patches(int fd, const char *dir)
+{
+    char names[WMT_PATCH_MAX][256];
+    int n = 0;
+    DIR *d = opendir(dir);
+    struct dirent *de;
+
+    if (!d)
+        return 0;
+    while (n < WMT_PATCH_MAX && (de = readdir(d))) {
+        size_t l = strlen(de->d_name);
+        /* The ROM patches are the *_hdr.bin files; WIFI_RAM_CODE_* and the
+         * .cfg in the same directory are not patches and must not be
+         * counted, or the driver waits for a download that never comes. */
+        if (l > 8 && !strcmp(de->d_name + l - 8, "_hdr.bin"))
+            snprintf(names[n++], sizeof names[0], "%s", de->d_name);
+    }
+    closedir(d);
+    if (!n)
+        return 0;
+
+    /* Download order is the driver's `dowloadSeq`, 1-based. The files sort
+     * into it by name (…_1_0_hdr, …_1_1_hdr), so sort rather than trust
+     * readdir, whose order is the filesystem's and not stable. */
+    for (int i = 0; i < n; i++)
+        for (int j = i + 1; j < n; j++)
+            if (strcmp(names[j], names[i]) < 0) {
+                char t[256];
+                memcpy(t, names[i], sizeof t);
+                memcpy(names[i], names[j], sizeof t);
+                memcpy(names[j], t, sizeof t);
+            }
+
+    if (ioctl(fd, WMT_IOCTL_SET_PATCH_NUM, n) < 0) {
+        netlog("wmt: SET_PATCH_NUM(%d) failed errno=%d\n", n, errno);
+        return 0;
+    }
+    for (int i = 0; i < n; i++) {
+        struct wmt_patch_info pi;
+        char full[512];
+
+        memset(&pi, 0, sizeof pi);
+        /* Download order runs BACKWARDS through the sorted names: Amazon's
+         * launcher gives ROMv2_lm_patch_1_0 seq 2 and ..._1_1 seq 1, so the
+         * higher-numbered file is downloaded first. Observed live; assigning
+         * 1,2 in name order sends them in the wrong order. */
+        pi.seq = n - i;
+        snprintf(full, sizeof full, "%s%s", dir, names[i]);
+        if (wmt_patch_addr(full, pi.addr))
+            netlog("wmt: no header address in %s\n", names[i]);
+        /* FULL PATH, not a bare name. wmt_dev_patch_get does not use
+         * request_firmware -- it filp_open()s this string exactly as given,
+         * from kernel context, so a bare name is opened relative to / and
+         * fails with "load file (…) fail, iRet(-1)". SET_PATCH_NAME does not
+         * get prepended for us. */
+        snprintf((char *)pi.name, sizeof pi.name, "%s", full);
+        if (ioctl(fd, WMT_IOCTL_SET_PATCH_INFO, &pi) < 0)
+            netlog("wmt: SET_PATCH_INFO(%d,%s) failed errno=%d\n",
+                   pi.seq, names[i], errno);
+    }
+    return n;
+}
+
+/* Stand in for wmt_launcher for as long as the chip is up.
+ *
+ * Never returns. The driver blocks its power-on inside wmt_ctrl_ul_cmd until
+ * this answers, so the loop has to outlive the bring-up rather than run once:
+ * a chip reset asks again. */
+static void wmt_daemon(int fd, const char *dir)
+{
+    for (;;) {
+        struct pollfd pfd = { .fd = fd, .events = POLLIN };
+        if (poll(&pfd, 1, -1) < 0) {
+            if (errno == EINTR)
+                continue;
+            netlog("wmt: poll failed errno=%d\n", errno);
+            return;
+        }
+        char cmd[64] = { 0 };
+        ssize_t n = read(fd, cmd, sizeof cmd - 1);
+        if (n <= 0)
+            continue;
+        cmd[n] = '\0';
+        if (!strncmp(cmd, "srh_patch", 9)) {
+            int got = wmt_answer_patches(fd, dir);
+            netlog("wmt: srh_patch -> %d patch(es)\n", got);
+            /* Anything but "ok" is read as failure by the driver, so say ok
+             * only when we actually found something. */
+            if (write(fd, got ? "ok" : "fail", got ? 2 : 4) < 0)
+                netlog("wmt: reply failed errno=%d\n", errno);
+        } else {
+            netlog("wmt: unhandled daemon cmd '%s'\n", cmd);
+            if (write(fd, "fail", 4) < 0)
+                netlog("wmt: reply failed errno=%d\n", errno);
+        }
+    }
+}
+
+/* Configure the HIF and fork the daemon. Returns 0 when the HIF took. */
+static int wmt_bringup(const char *patch_dir)
+{
+    int fd = open("/dev/stpwmt", O_RDWR);
+    if (fd < 0) {
+        netlog("wmt: open /dev/stpwmt failed errno=%d\n", errno);
+        return -1;
+    }
+    if (ioctl(fd, WMT_IOCTL_SET_PATCH_NAME, patch_dir) < 0)
+        netlog("wmt: SET_PATCH_NAME failed errno=%d\n", errno);
+
+    int r = ioctl(fd, WMT_IOCTL_SET_STP_MODE, WMT_HIF_ARG);
+    netlog("wmt: SET_STP_MODE(0x%x) rc=%d errno=%d\n",
+           WMT_HIF_ARG, r, r ? errno : 0);
+    if (r < 0) {
+        close(fd);
+        return -1;
+    }
+
+    pid_t p = fork();
+    if (p == 0) {
+        wmt_daemon(fd, patch_dir);
+        _exit(0);
+    }
+    /* The parent keeps its own copy closed: the daemon owns the fd, and the
+     * driver's command state is per-open. */
+    close(fd);
+    return p > 0 ? 0 : -1;
+}
+
+/* Where the WiFi credentials come from, and why it is NOT Android's file.
+ *
+ * /data survives a boot-partition write and is shared with whatever else the
+ * device can boot. Boot FireOS 6 from the other slot and Amazon's supplicant
+ * rewrites /data/misc/wifi/wpa_supplicant.conf with fields our build rejects
+ * (p2p_no_group_iface, max_oper_chwidth) -- and ONE unparsable field discards
+ * the WHOLE network block, so the device returns to emOS with no WiFi and no
+ * way to report it except over a cable. Same lesson as console.pw: anything
+ * on /data belongs to whoever wrote it last, not to us.
+ *
+ * emOS therefore keeps its own file in a namespace nothing else writes, and
+ * falls back to Android's only when it has none of its own -- which is a
+ * device that crossed over from a FireOS install and has not been told its
+ * network yet. */
+#define EMOS_WPA_CONF    "/data/emos/wpa.conf"
+#define ANDROID_WPA_CONF "/data/misc/wifi/wpa_supplicant.conf"
+
+static const char *wpa_conf(void)
+{
+    if (access(EMOS_WPA_CONF, R_OK) == 0)
+        return EMOS_WPA_CONF;
+    if (access(ANDROID_WPA_CONF, R_OK) == 0)
+        return ANDROID_WPA_CONF;
+    return NULL;
+}
+
+/* The control socket directory is declared INSIDE the conf, so it cannot be a
+ * constant here. em-wifi writes emOS's own file with /data/emos/sockets, while
+ * a wizard-provisioned device carries Android's /data/misc/wifi/sockets -- and
+ * wpa_conf() above prefers ours the moment it exists, so the same device moves
+ * from one to the other the first time somebody sets WiFi from the console.
+ *
+ * A wpa_cli pointed at the wrong directory fails with "Failed to connect to
+ * non-global ctrl_ifname", which is silent here: the only caller is the
+ * reassociate nudge below, and without it the supplicant sat at
+ * wpa_state=DISCONNECTED for three minutes instead of associating in ten
+ * seconds. So the directory is read from whichever conf the supplicant was
+ * actually started with, and logged next to it.
+ *
+ * The default is Android's, which is what every conf written before this
+ * declared, and what a device with no readable conf would have used anyway. */
+#define WPA_CTRL_DEFAULT "/data/misc/wifi/sockets"
+
+static void wpa_ctrl_dir(const char *conf, char *out, size_t n)
+{
+    snprintf(out, n, "%s", WPA_CTRL_DEFAULT);
+    int fd = open(conf, O_RDONLY);
+    if (fd < 0)
+        return;
+    char b[4096];
+    int r = (int)read(fd, b, sizeof b - 1);
+    close(fd);
+    if (r <= 0)
+        return;
+    b[r] = 0;
+    /* Last declaration wins, as it does in hostap: wpa_config_process_global
+     * is called per line and simply overwrites. Scanning the whole file rather
+     * than stopping at the first match keeps the two in agreement. */
+    for (char *p = b; p; ) {
+        char *line = p;
+        char *nl = strchr(p, '\n');
+        p = nl ? nl + 1 : NULL;
+        if (nl)
+            *nl = 0;
+        while (*line == ' ' || *line == '\t')
+            line++;
+        if (strncmp(line, "ctrl_interface=", 15) != 0)
+            continue;
+        char *v = line + 15;
+        /* Two spellings, both legal: Amazon's conf uses wpa_supplicant's
+         * "DIR=/path GROUP=wifi" form, ours writes a bare path. */
+        if (strncmp(v, "DIR=", 4) == 0)
+            v += 4;
+        char *sp = strpbrk(v, " \t");
+        if (sp)
+            *sp = 0;
+        /* A relative value means an abstract socket namespace, which wpa_cli
+         * -p cannot address -- leave the default rather than pass it on. */
+        if (*v == '/')
+            snprintf(out, n, "%s", v);
+    }
+}
+
+#define UDHCPC_SCRIPT "/tmp/udhcpc.sh"
+
+/* 24 turns of a 5s loop = two minutes. */
+#define WIFI_FAIL_TURNS 24
+
 static void net_main(void)
 {
-    char *loader[] = { "/system/bin/wmt_loader", NULL };
-    char *launch[] = { "/system/bin/6620_launcher", "-p",
-                       "/system/etc/firmware/", NULL };
-    char *supp[]   = { "/system/bin/wpa_supplicant", "-iwlan0", "-Dnl80211",
-                       "-c/data/misc/wifi/wpa_supplicant.conf",
-                       "-e/data/misc/wifi/entropy.bin", NULL };
-    char *dhcp[]   = { "/system/bin/dhcpcd", "-ABK", "-f",
-                       "/system/etc/dhcpcd/dhcpcd.conf", "wlan0", NULL };
+    /* FireOS 6 moved the combo-chip tools under /system/vendor and renamed
+     * the launcher; its own init.connectivity.rc runs
+     * `wmt_launcher -p /vendor/firmware/`, which is where its kernel's
+     * compiled-in firmware path points too. Same sequence, other paths. */
+    static const char *const loaders[] = { "/system/bin/wmt_loader",
+                                           "/system/vendor/bin/wmt_loader", NULL };
+    const char *ldr = first_exec(loaders);
+    int vendor = access("/system/bin/6620_launcher", X_OK) != 0
+              && access("/system/vendor/bin/wmt_launcher", X_OK) == 0;
+    char *loader[] = { (char *)(ldr ? ldr : loaders[0]), NULL };
+    char *launch[] = { vendor ? "/system/vendor/bin/wmt_launcher"
+                              : "/system/bin/6620_launcher", "-p",
+                       vendor ? "/system/vendor/firmware/"
+                              : "/system/etc/firmware/", NULL };
+    /* Prefer emOS's own supplicant when the image carries one.
+     *
+     * FireOS 6's /system/bin/wpa_supplicant cannot be used here at all: it is
+     * linked against Android IPC and aborts before main() when /dev/binder is
+     * absent, which it is under emOS. Ours is hostap 2.10 built static for
+     * ARM32 with nl80211 and internal crypto (emos/tools/build-wpa-
+     * supplicant.sh), so it needs nothing from Android.
+     *
+     * The fallback is deliberate rather than tidy: a FireOS 5 image built
+     * without the binary keeps using Amazon's, which works on the fleet today
+     * and should not be swapped for something untested by a build-time
+     * default. Drop the binary in and it is preferred; leave it out and
+     * nothing changes. */
+    const char *bbp = busybox_path();
+    if (!bbp)
+        bbp = "/system/bin/busybox";
+    static const char *const supps[] = { "/sbin/wpa_supplicant",
+                                         "/system/bin/wpa_supplicant", NULL };
+    const char *sup = first_exec(supps);
+    netlog("wifi tools: %s layout, loader %s, supplicant %s\n",
+           vendor ? "vendor (FireOS 6)" : "system (FireOS 5)", loader[0],
+           sup ? sup : supps[1]);
+    char cflag[160] = "-c" ANDROID_WPA_CONF;
+    char *supp[]   = { (char *)(sup ? sup : supps[1]), "-iwlan0", "-Dnl80211",
+                       cflag, "-e/data/misc/wifi/entropy.bin", NULL };
+    /* DHCP: Amazon's dhcpcd on FireOS 5, busybox udhcpc on FireOS 6.
+     *
+     * FireOS 6's /system/bin/dhcpcd aborts under emOS for the same reason its
+     * wpa_supplicant does -- Android IPC it cannot reach -- so on that layout
+     * it is not an option at all. busybox udhcpc needs a script to do anything
+     * with a lease it gets, which is written below; without one it obtains an
+     * address and discards it, which reads as a DHCP failure and is not.
+     *
+     * FireOS 5 keeps dhcpcd: it works on the fleet today. */
+    /* Sized generously: the busybox path is itself up to ~40 bytes and appears
+     * twice, and snprintf truncates SILENTLY -- a short buffer here cost a
+     * boot with an address but no default route, because the line that adds
+     * it was cut in half. */
+    char udhcpc_script[512];
+    snprintf(udhcpc_script, sizeof udhcpc_script,
+             "#!/system/bin/sh\n"
+             "[ \"$1\" = bound ] || [ \"$1\" = renew ] || exit 0\n"
+             "%s ifconfig $interface $ip netmask $subnet\n"
+             "[ -n \"$router\" ] && %s route add default gw $router\n",
+             bbp, bbp);
+    /* Not wr(): that is for sysfs and opens O_WRONLY without O_CREAT, so it
+     * cannot make a file that does not exist yet. */
+    int sfd = open(UDHCPC_SCRIPT, O_WRONLY | O_CREAT | O_TRUNC, 0755);
+    if (sfd >= 0) {
+        ssize_t sw = write(sfd, udhcpc_script, strlen(udhcpc_script));
+        close(sfd);
+        if (sw < 0)
+            netlog("udhcpc script write failed errno=%d\n", errno);
+    } else {
+        netlog("udhcpc script create failed errno=%d\n", errno);
+    }
+
+    char *dhcp_fos5[] = { "/system/bin/dhcpcd", "-ABK", "-f",
+                          "/system/etc/dhcpcd/dhcpcd.conf", "wlan0", NULL };
+    char *dhcp_fos6[] = { "/sbin/udhcpc", "-f", "-i", "wlan0",
+                          "-s", (char *)UDHCPC_SCRIPT, NULL };
+    char **dhcp = vendor ? dhcp_fos6 : dhcp_fos5;
     int st = 0;
 
     waitpid(spawn(loader), &st, 0);
     netlog("wmt_loader status=%d\n", st);
 
-    pid_t launcher = spawn(launch);
+    /* FireOS 6's wmt_launcher does not work here (see wmt_bringup above), so
+     * on that layout emOS configures the HIF and answers patch searches
+     * itself. FireOS 5's 6620_launcher is left alone: it works today on the
+     * fleet, and replacing a working path with an untested one is not a trade
+     * worth making until ours has run on hardware. */
+    pid_t launcher = -1;
+    if (vendor) {
+        if (wmt_bringup("/system/vendor/firmware/"))
+            netlog("wmt: bring-up failed, wlan0 will not appear\n");
+    } else {
+        launcher = spawn(launch);
+    }
     sleep(2);
 
     int r = wr("/dev/wmtWifi", "1");
@@ -1308,7 +1715,14 @@ static void net_main(void)
      * goes away, and killed (to be respawned) if it has held carrier for 20s
      * without getting an address.
      */
-    char *reassoc[] = { "/system/bin/wpa_cli", "-p/data/misc/wifi/sockets",
+    /* Ours when the image carries it, Amazon's otherwise -- the same
+     * preference and the same reason as the supplicant above. The -p argument
+     * is filled in from the conf each time the supplicant is (re)started. */
+    static const char *const clis[] = { "/sbin/wpa_cli",
+                                        "/system/bin/wpa_cli", NULL };
+    const char *cli = first_exec(clis);
+    char pflag[160] = "-p" WPA_CTRL_DEFAULT;
+    char *reassoc[] = { (char *)(cli ? cli : clis[1]), pflag,
                         "-iwlan0", "reassociate", NULL };
     /* ntpd is pointed at the GATEWAY by IP, never at a hostname.
      *
@@ -1325,18 +1739,56 @@ static void net_main(void)
      * Client only. busybox ntpd SERVES time if given -l, and emOS holds no
      * inbound sockets at all — every daemon added here has to keep it that way.
      */
-    char *ntpd[] = { "/system/bin/busybox", "ntpd", "-n", "-p", gwip, NULL };
-    pid_t wpa = spawn(supp);
+    const char *bb_ntp = busybox_path();
+    char *ntpd[] = { (char *)(bb_ntp ? bb_ntp : "/system/bin/busybox"),
+                     "ntpd", "-n", "-p", gwip, NULL };
+    pid_t wpa = -1;
     pid_t dhc = -1, ntp = -1;
     int nudges = 0, dry = 0, netup = 0;
+    /* Loop turns spent with a conf in place but no carrier. The ring goes red
+     * after WIFI_FAIL_TURNS of them, because at that point the credentials
+     * exist and are not working, which is a fault worth showing. Waiting with
+     * NO conf is not a fault and never turns it red -- see below. */
+    int nocarrier = 0, said_fail = 0, said_noconf = 0;
 
     for (;;) {
         pid_t d;
         while ((d = waitpid(-1, &st, WNOHANG)) > 0) {
-            if (d == launcher)   launcher = spawn(launch);
-            else if (d == wpa)   wpa = spawn(supp);
+            if (launcher > 0 && d == launcher) launcher = spawn(launch);
+            else if (d == wpa)   wpa = -1;
             else if (d == dhc)   dhc = -1;
             else if (d == ntp)   ntp = netup ? spawn(ntpd) : -1;
+        }
+
+        /* No credentials yet: hold here rather than failing.
+         *
+         * This is the normal state during provisioning -- the wizard writes
+         * WiFi over the USB console AFTER emOS is already running -- so the
+         * boot waits at stage 11 until a conf appears and then carries on. A
+         * supplicant started without one just exits and respawns for ever. */
+        const char *conf = wpa_conf();
+        if (!conf) {
+            if (wpa > 0) { kill(wpa, SIGTERM); wpa = -1; }
+            if (!said_noconf) {
+                said_noconf = 1;
+                netlog("no wifi conf yet (%s or %s) - waiting\n",
+                       EMOS_WPA_CONF, ANDROID_WPA_CONF);
+            }
+            bootstep = 10; led_step();
+            sleep(5);
+            continue;
+        }
+        if (wpa < 0) {
+            snprintf(cflag, sizeof cflag, "-c%s", conf);
+            /* Re-read per start, not once: em-wifi can change which conf
+             * wpa_conf() returns while this loop is running. */
+            char ctrl[128];
+            wpa_ctrl_dir(conf, ctrl, sizeof ctrl);
+            snprintf(pflag, sizeof pflag, "-p%s", ctrl);
+            netlog("wifi conf %s ctrl %s cli %s\n", conf, ctrl, reassoc[0]);
+            wpa = spawn(supp);
+            said_noconf = 0;
+            nocarrier = 0;
         }
 
         if (readint("/sys/class/net/wlan0/carrier") != 1) {
@@ -1350,8 +1802,18 @@ static void net_main(void)
                                                   * supervision loop and may
                                                   * run many times. */
             dry = 0;
+            /* Credentials present and still no carrier: say so. A red head is
+             * the only channel left when the network is the broken thing.
+             * Once, and the loop keeps trying -- it is a clue, not a halt. */
+            if (++nocarrier >= WIFI_FAIL_TURNS && !said_fail) {
+                said_fail = 1;
+                netlog("no carrier after %ds with %s - giving up quietly\n",
+                       WIFI_FAIL_TURNS * 5, conf);
+                led_fail();
+            }
         } else {
             nudges = 0;
+            nocarrier = 0;
             if (dhc < 0) {
                 dhc = spawn(dhcp);
                 dry = 0;
@@ -1536,9 +1998,44 @@ int main(int argc, char **argv)
     mkdir("/system", 0755);
     mknod("/dev/block/mmcblk0p13", S_IFBLK | 0600, makedev(179, 13));
     int r = mount("/dev/block/mmcblk0p13", "/system", "ext4", MS_RDONLY, NULL);
-    note("stage=mount_system rc=%d errno=%d sh=%d\n", r, r ? errno : 0,
-         access("/system/bin/sh", X_OK));
-    if (r) led_fail(); else led_step();          /* 2: /system */
+
+    /* FireOS 6 is SYSTEM-AS-ROOT: the partition's root is the Android root
+     * filesystem — init, init.rc, fstab.mt8163, sbin — with the real tree in a
+     * nested `system/`, where FireOS 5 puts that tree at the partition root.
+     * So every absolute /system/... path in this file is one directory short
+     * on FireOS 6: the shell the console execs, the linker, wpa_supplicant,
+     * wmt_loader and the WiFi firmware.
+     *
+     * The mount SUCCEEDS either way, which is what made this expensive to
+     * find (measured on hardware 2026-09-12, FireOS 6.5.7.4 under amonet
+     * v2.0.0): stage 2 passed, the console execs /system/bin/sh and exits 127
+     * so the supervisor respawned it every few seconds, and the WiFi stage sat
+     * at 11 for ever with no wlan0. Nothing said /system was unusable.
+     *
+     * Bind the nested tree over the mountpoint rather than resolving a prefix
+     * per call site. A prefix cannot work here: `vendor` and `etc` inside a
+     * system-as-root partition are ABSOLUTE symlinks to /system/..., which
+     * point at themselves once the partition is mounted at /system — ELOOP,
+     * measured. Binding makes them resolve exactly as they do on a real
+     * FireOS 6 boot, and leaves every path below untouched, including the
+     * vendor-versus-system WiFi tool resolution, which is already correct and
+     * only ever needed the right root.
+     *
+     * Detected by what RUNS rather than by a build property: the shell is what
+     * the console execs and what everything below depends on. */
+    int nested = 0;
+    if (!r && access("/system/bin/sh", X_OK) != 0
+           && access("/system/system/bin/sh", X_OK) == 0) {
+        nested = mount("/system/system", "/system", NULL, MS_BIND, NULL) == 0;
+        if (!nested)
+            note("stage=mount_system bind_errno=%d\n", errno);
+    }
+    note("stage=mount_system rc=%d errno=%d nested=%d sh=%d\n", r, r ? errno : 0,
+         nested, access("/system/bin/sh", X_OK));
+
+    /* A mount that landed on a tree with no shell is not a working /system,
+     * and reading it as one is precisely what let that boot look healthy. */
+    if (r || access("/system/bin/sh", X_OK) != 0) led_fail(); else led_step();  /* 2: /system */
 
     /* /data read-WRITE: the firmware keeps config, wake-word models and logs
      * there. /system stays read-only — nothing here should be able to damage
@@ -1694,11 +2191,18 @@ int main(int argc, char **argv)
      * broken interpreter is indistinguishable from a kernel that never ran.
      */
     mkdir("/sbin", 0755);
-    char *link[] = { "/system/bin/sh", "-c",
-        "for a in $(busybox --list); do "
+    /* By absolute path, since on FireOS 6 busybox is not in /system/bin and
+     * so not on PATH yet — which is the whole reason these links exist. */
+    const char *bb_app = busybox_path();
+    if (!bb_app)
+        bb_app = "/system/bin/busybox";
+    char applets[512];
+    snprintf(applets, sizeof applets,
+        "for a in $(%s --list); do "
         "  [ -e /system/bin/$a ] || [ -e /system/xbin/$a ] || "
-        "    busybox ln -sf /system/bin/busybox /sbin/$a; "
-        "done", NULL };
+        "    %s ln -sf %s /sbin/$a; "
+        "done", bb_app, bb_app, bb_app);
+    char *link[] = { "/system/bin/sh", "-c", applets, NULL };
     int lst = 0;
     waitpid(spawn(link), &lst, 0);
     note("stage=applets status=%d vi=%d\n", lst, access("/sbin/vi", X_OK));
@@ -1774,9 +2278,11 @@ int main(int argc, char **argv)
      * dump_log() spills the ring on the way down. Crashes survive; chatter
      * does not.
      */
-    char *syslogd[] = { "/system/bin/busybox", "syslogd", "-n",
+    const char *bb_log = busybox_path();
+    char *bbl = (char *)(bb_log ? bb_log : "/system/bin/busybox");
+    char *syslogd[] = { bbl, "syslogd", "-n",
                         "-O", "/run/messages", "-s", "256", "-b", "2", NULL };
-    char *klogd[]   = { "/system/bin/busybox", "klogd", "-n", NULL };
+    char *klogd[]   = { bbl, "klogd", "-n", NULL };
 
     /* EchoMuse itself, via its OWN supervisor rather than directly.
      *

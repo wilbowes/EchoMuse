@@ -18,9 +18,11 @@ Nothing of Amazon's is stored here or shipped in this image; what we add is the
 static `init` and a ramdisk of empty mountpoints. The artifact never leaves the
 user's own infrastructure.
 
-THE INIT BINARY IS AN INPUT, NOT SOMETHING THIS BUILDS. It is aarch64 static,
-and the controller image has no NDK — see `init_binary_problems()` for the
-checks applied to whatever it is handed.
+THE INIT BINARY IS AN INPUT, NOT SOMETHING THIS BUILDS — the controller image
+has no NDK. It is static, and its ARCHITECTURE must match the reference image's
+KERNEL rather than being fixed: FireOS 5 boots a 64-bit kernel and FireOS 6 a
+32-bit one. `reference_kernel_arch()` reads that off the reference and
+`init_binary_problems()` checks the init against it.
 
 Pure standard library on purpose, so the whole packer is unit-testable without
 aiohttp. See controller/CLAUDE.md.
@@ -30,6 +32,7 @@ import gzip
 import hashlib
 import io
 import struct
+import zlib
 
 MTK_MAGIC = 0x58881688
 PAGE = 2048
@@ -44,15 +47,31 @@ RAMOOPS_CMDLINE = (
     "ramoops.dump_oops=1"
 )
 
-# ELF header bytes for a 64-bit little-endian AArch64 executable. Checked
-# rather than assumed because the failure it prevents is silent and expensive:
-# an init of the wrong architecture flashes fine, and the device then produces
-# no output at all, which is indistinguishable from a kernel that never
-# started. See emos/README.md.
+# ELF header bytes. Checked rather than assumed because the failure they
+# prevent is silent and expensive: an init of the wrong architecture flashes
+# fine, and the device then produces no output at all, which is
+# indistinguishable from a kernel that never started. See emos/README.md.
 _ELF_MAGIC = b"\x7fELF"
+_ELF_CLASS32 = 1
 _ELF_CLASS64 = 2
 _ELF_LITTLE = 1
+_EM_ARM = 40
 _EM_AARCH64 = 183
+
+# The two kernel architectures biscuit boots, and what an init must be for each.
+#
+# THE INIT MUST MATCH THE KERNEL, NOT THE USERSPACE. FireOS 5 boots a 64-bit
+# kernel; FireOS 6 — the only FireOS amonet-biscuit v2.0.0 boots — a 32-bit
+# build of the same 3.18.19 source. The firmware is armv7a on both, because it
+# targets the Android userspace, which is 32-bit either way; only the init
+# differs. Getting this wrong is what cost five flashed images of a 32-bit
+# kernel under a 64-bit boot chain.
+ARCH_ARM = "arm"
+ARCH_ARM64 = "arm64"
+_ARCH_ELF = {
+    ARCH_ARM:   (_ELF_CLASS32, _EM_ARM,     "32-bit", "ARM"),
+    ARCH_ARM64: (_ELF_CLASS64, _EM_AARCH64, "64-bit", "AArch64"),
+}
 
 
 class BuildError(Exception):
@@ -88,7 +107,8 @@ _S_IFDIR = 0o040000
 _S_IFREG = 0o100000
 
 
-def build_ramdisk(init_binary: bytes, version: str, build_id: str = "") -> bytes:
+def build_ramdisk(init_binary: bytes, version: str, build_id: str = "",
+                  supplicant: bytes = b"") -> bytes:
     """The gzipped cpio the boot image carries: init, mountpoints, os-release.
 
     The mountpoints have to exist in the ramdisk because there is no devtmpfs
@@ -125,6 +145,14 @@ def build_ramdisk(init_binary: bytes, version: str, build_id: str = "") -> bytes
     out.write(_newc_entry("etc/os-release", _S_IFREG | 0o644, os_release, ino))
     ino += 1
     out.write(_newc_entry("init", _S_IFREG | 0o755, init_binary, ino))
+    # emOS's own wpa_supplicant, when the caller has one. Optional because an
+    # image without it falls back to /system/bin/wpa_supplicant -- which is
+    # what the FireOS 5 fleet runs today, and works. FireOS 6's aborts under
+    # emOS (it opens /dev/binder), so a FireOS 6 image needs this one.
+    if supplicant:
+        out.write(_newc_entry("sbin", _S_IFDIR | 0o755, b"", ino))
+        out.write(_newc_entry("sbin/wpa_supplicant", _S_IFREG | 0o755,
+                              supplicant, ino))
     ino += 1
     out.write(_newc_entry("TRAILER!!!", 0, b"", ino))
     # The archive is padded to a 512-byte boundary by convention; the kernel
@@ -217,6 +245,42 @@ def split_reference(ref: bytes) -> dict:
         kaddr=kaddr, raddr=raddr, saddr=saddr, tags=tags, hdrv=hdrv, osv=osv,
         cmdline=ref[64:64 + 512].rstrip(b"\0"),
     )
+
+
+def reference_kernel_arch(ref: bytes) -> str:
+    """Which architecture the reference image's KERNEL is, or "" if unreadable.
+
+    Read out of the reference rather than asked of the user or inferred from
+    anything else, for split_reference's reason: the device's own image is the
+    only thing that knows, and every other source has been wrong at least once.
+
+    Two shapes, both taken off real images. An ARM zImage is a self-decompressing
+    executable carrying 0x016f2818 at offset 0x24. An AArch64 kernel has no such
+    stub — it is a raw gzip stream whose decompressed Image carries the literal
+    "ARM\\x64" at 0x38.
+
+    "" means the payload matched neither, which callers must NOT read as either
+    architecture: emos/build.sh refuses to build on it, and init_binary_problems
+    keeps demanding the FireOS 5 arch, so an unrecognised image can cost a
+    refusal but never a wrong flash.
+    """
+    if len(ref) < PAGE or ref[:8] != b"ANDROID!":
+        return ""
+    ksz = struct.unpack("<I", ref[8:12])[0]
+    payload = ref[PAGE:PAGE + ksz][0x200:]
+    if payload[0x24:0x28] == b"\x18\x28\x6f\x01":
+        return ARCH_ARM
+    if payload[:2] == b"\x1f\x8b":
+        try:
+            # 31 = gzip wrapper. Only the first 0x40 bytes are needed, and a
+            # truncated stream raises rather than answering — an Image whose
+            # head cannot be decompressed is not evidence of anything.
+            head = zlib.decompressobj(31).decompress(payload, 0x40)
+        except zlib.error:
+            return ""
+        if head[0x38:0x3c] == b"ARM\x64":
+            return ARCH_ARM64
+    return ""
 
 
 def pack(parts: dict, zimage: bytes, dtbs: bytes, ramdisk: bytes,
@@ -347,24 +411,33 @@ def pack_kernel_of(parts: dict) -> bytes:
                     parts.get("mtkhdr", b""))
 
 
-def init_binary_problems(init_binary: bytes) -> list:
+def init_binary_problems(init_binary: bytes, arch: str = ARCH_ARM64) -> list:
     """Everything wrong with a candidate init, as sentences, or an empty list.
 
     Both properties are silent when wrong and fatal on the device: there is no
     dynamic loader at PID 1 time, and an init of the wrong architecture leaves
     a box that boots to nothing at all. Neither is worth discovering after a
     partition write.
+
+    `arch` is the REFERENCE KERNEL's architecture, from reference_kernel_arch —
+    not a property of the init and not a preference. It defaults to the FireOS 5
+    answer, which is what this checked unconditionally before FireOS 6 was
+    supported, so a caller with no reference to hand, or one holding an image
+    whose kernel could not be read, keeps exactly the old behaviour: correct on
+    the existing fleet, and a refusal rather than a bad flash anywhere else.
     """
     problems = []
     if len(init_binary) < 64 or init_binary[:4] != _ELF_MAGIC:
         return ["the init binary is not an ELF executable"]
-    if init_binary[4] != _ELF_CLASS64 or init_binary[5] != _ELF_LITTLE:
-        problems.append("the init binary is not 64-bit little-endian")
+    elf_class, e_machine_want, width, machine_name = _ARCH_ELF.get(
+        arch, _ARCH_ELF[ARCH_ARM64])
+    if init_binary[4] != elf_class or init_binary[5] != _ELF_LITTLE:
+        problems.append(f"the init binary is not {width} little-endian")
     e_machine = struct.unpack("<H", init_binary[18:20])[0]
-    if e_machine != _EM_AARCH64:
+    if e_machine != e_machine_want:
         problems.append(
-            f"the init binary is not AArch64 (ELF machine {e_machine}); "
-            "biscuit boots an ARM64 kernel")
+            f"the init binary is not {machine_name} (ELF machine {e_machine}); "
+            f"this device's kernel is {arch}")
     e_type = struct.unpack("<H", init_binary[16:18])[0]
     # ET_EXEC (2) is what -static produces. ET_DYN (3) is a PIE, which needs an
     # interpreter this system does not have at PID 1.
@@ -383,7 +456,11 @@ def build_emos_image(reference: bytes, init_binary: bytes, version: str,
     Returns the image and what went into it, so the wizard can show the user
     the numbers it decided on rather than asking them to trust the result.
     """
-    problems = init_binary_problems(init_binary)
+    # Against the REFERENCE's kernel, not a constant: this same function builds
+    # for both a 64-bit FireOS 5 kernel and a 32-bit FireOS 6 one, and the only
+    # thing that knows which is the image the user read off their own device.
+    arch = reference_kernel_arch(reference)
+    problems = init_binary_problems(init_binary, arch or ARCH_ARM64)
     if problems:
         raise BuildError("; ".join(problems))
 

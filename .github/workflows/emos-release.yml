@@ -19,6 +19,10 @@ name: emOS Release (init binary)
 # redistributing Amazon's code — the image is assembled on the user's side,
 # from the boot partition they read off their own device. The init is ours
 # and is the only part that needs distributing.
+#
+# TWO of them, because the init must match the device's KERNEL: `init` is
+# aarch64 for FireOS 5 and `init32` is armv7a for FireOS 6. See the compile
+# steps. Nothing else published here is per-architecture.
 
 on:
   push:
@@ -42,20 +46,29 @@ jobs:
       - name: Build compiler image
         run: docker build -t echomuse-compiler device/compiler/
 
-      # AARCH64, unlike the firmware beside it, which is armv7a. biscuit boots
-      # an ARM64 kernel — the fact that cost five flashed images of a 32-bit
-      # kernel that never executed an instruction — while the server binary is
-      # built for the Android userspace it has always run under.
+      # BOTH ARCHITECTURES, and the init is the only thing here needing two.
+      #
+      # The init must match the device's KERNEL: FireOS 5 boots a 64-bit one,
+      # FireOS 6 — the only FireOS amonet-biscuit v2.0.0 boots — a 32-bit build
+      # of the same 3.18.19 source. Getting it wrong is the fact that cost five
+      # flashed images of a 32-bit kernel that never executed an instruction.
+      # The firmware beside it stays armv7a for both, because it targets the
+      # Android userspace, which is 32-bit either way.
+      #
+      # `init` keeps its name rather than becoming `init-arm64`: it is what every
+      # published release has carried and what `_fetch_latest_emos_release`
+      # selects on by EXACT name, so renaming it strands every controller
+      # already in the field looking for it.
       #
       # -static is what has to keep working. There is no dynamic loader at
       # PID 1 time, and three boots with a busybox script init produced no
       # output whatsoever, which is indistinguishable from a kernel that never
       # started.
-      # No version is compiled INTO the init: it describes the image rather
+      # No version is compiled INTO either: it describes the image rather
       # than the binary, and it reaches the device through /etc/os-release,
       # which whatever assembles the image writes. The tag is the version, and
       # it travels with the asset.
-      - name: Compile init
+      - name: Compile init (aarch64, for FireOS 5)
         run: |
           mkdir -p emos/build
           docker run --rm -v "${{ github.workspace }}/emos":/emos -w /emos \
@@ -63,26 +76,51 @@ jobs:
             "/opt/android/ndk/21.4.7075529/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang \
                -static -O2 -Wall -o build/init init/init.c"
 
-      - name: Verify it is a static aarch64 binary
-        # Both properties are silent when wrong and fatal on the device, and
-        # this is the last point before the artifact is something people
+      - name: Compile init32 (armv7a, for FireOS 6)
+        run: |
+          docker run --rm -v "${{ github.workspace }}/emos":/emos -w /emos \
+            echomuse-compiler bash -lc \
+            "/opt/android/ndk/21.4.7075529/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang \
+               -static -O2 -Wall -o build/init32 init/init.c"
+
+      - name: Verify both are static, and are the architecture each claims
+        # Every one of these is silent when wrong and fatal on the device, and
+        # this is the last point before the artifacts are something people
         # flash. Checked here as well as in CI because CI checks the tip of a
         # branch and this checks the thing being published.
+        #
+        # They are also compared against EACH OTHER. Two compiles differing only
+        # in a toolchain triple is exactly the shape where a copy-paste publishes
+        # one binary under both names, and each grep would still pass.
         run: |
-          file emos/build/init
-          ls -lh emos/build/init
+          file emos/build/init emos/build/init32
+          ls -lh emos/build/init emos/build/init32
           file emos/build/init | grep -q "ARM aarch64" || {
             echo "::error::init is not an aarch64 binary"; exit 1; }
-          file emos/build/init | grep -q "statically linked" || {
-            echo "::error::init is not statically linked"; exit 1; }
+          file emos/build/init32 | grep -q "32-bit LSB executable, ARM" || {
+            echo "::error::init32 is not a 32-bit ARM binary"; exit 1; }
+          for f in init init32; do
+            file "emos/build/$f" | grep -q "statically linked" || {
+              echo "::error::$f is not statically linked"; exit 1; }
+          done
+          if cmp -s emos/build/init emos/build/init32; then
+            echo "::error::init and init32 are identical — one triple built both"
+            exit 1
+          fi
 
-      # The off-target checks, against the exact source being published.
-      - name: Ring and password checks
+      # The off-target checks, against the exact source being published. All
+      # four of them: each drives a parser or an invariant whose failure is
+      # silent on hardware, which is the criterion in CLAUDE.md for having one.
+      - name: Off-target checks
         run: |
           cc -O2 -Wall -o /tmp/ringsim emos/init/ringsim.c -lm
           /tmp/ringsim --check
           cc -O2 -o /tmp/pwcheck emos/init/pwcheck.c
           /tmp/pwcheck
+          cc -O2 -o /tmp/tmoutcheck emos/init/tmoutcheck.c
+          /tmp/tmoutcheck
+          cc -O2 -o /tmp/wpacheck emos/init/wpacheck.c
+          /tmp/wpacheck
 
       # Same rule as the firmware release: the notes come from the ANNOTATED
       # tag, because whoever reads them is deciding whether to reflash a boot
@@ -99,7 +137,9 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           name: emOS ${{ github.ref_name }}
-          files: emos/build/init
+          files: |
+            emos/build/init
+            emos/build/init32
           body_path: /tmp/emos-notes.md
           generate_release_notes: true
         env:

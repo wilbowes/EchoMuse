@@ -2504,3 +2504,104 @@ still failing — the fix hides that fault rather than removing it. The 2.5s
 grace is set from two samples (1,077ms and 1,025ms). home-assistant/core#181747
 has had no human response; #122177 died to the stale bot twice, so that one
 wants a nudge with a PR offer rather than an "any update?".
+
+## 2026-09-12 — emOS on FireOS 6 has WiFi, and none of it is Amazon's
+
+The spare-Echo test for amonet v2.0.0, which turned into building most of a
+network stack.
+
+**The v2 questions, settled on hardware.** FireOS 5 does not boot under
+amonet v2.0.0 — R0rt1z2's claim confirmed, and #500's warning is if anything
+understated. **emOS on the FireOS 5 kernel does not boot either**, which
+falsifies the offline hypothesis that a TEE break would take out only Android
+services. A user who applies v2.0.0 loses EchoMuse entirely. FireOS 6 boots
+fine, and the wizard's v2 detection (#501) was confirmed against real hardware
+for the first time: `ro.twrp.version` 3.7.0_9-0 and expdb magic `88 16 88 58`,
+both as predicted. Under v2 the by-name map loses v1's names — `boot_a_x` and
+`boot_a_amonet` are gone — so the wizard's refusal-on-missing-`_amonet` path
+needs revisiting, since on a v2 device those partitions never exist.
+
+**FireOS 6 is system-as-root**, and that was the whole of why emOS would not
+run on it. The partition's root IS the Android root filesystem, with the real
+tree in a nested `system/`, where FireOS 5 puts it at the partition root. Every
+absolute `/system/...` path in init.c was one directory short. The mount
+succeeds either way, which is what made it expensive: stage 2 passed, the ring
+showed a healthy boot, the console execed a shell that was not there and
+respawned every few seconds — which over a serial line reads as a banner
+cycling, not a failure. The fix is a bind mount of the nested tree over the
+mountpoint, never a path prefix: `vendor` and `etc` inside such a partition are
+ABSOLUTE symlinks to `/system/...`, so with the partition mounted at /system
+they point at themselves.
+
+**Then the combo chip, which took the rest of the day.** FireOS 6's
+`wmt_loader` exits 255 where FireOS 5's exits 0, and `wmt_launcher` runs and
+sits silent, so `WMT_OPID_HIF_CONF` is never posted and `/dev/wmtWifi` returns
+EIO. Rather than give emOS the Android property service those two coordinate
+through — which would make Amazon's userspace *more* load-bearing — init now
+talks to the kernel driver itself, from MediaTek's GPL source: `SET_PATCH_NAME`
++ `SET_STP_MODE` to configure the HIF, and a daemon loop answering the driver's
+`srh_patch` requests with `SET_PATCH_NUM`/`SET_PATCH_INFO`. That drops both
+binaries on both kernels.
+
+Two values in that were wrong for hours because they were reasoned about
+rather than measured: the download sequence runs BACKWARDS through the sorted
+patch names (`_1_0` is seq 2), and the address is `{0, 0, hdr[0x1A],
+hdr[0x1B]}` — offset 0x18 is the tail of `ucPLat`. Both were settled in minutes
+by preloading an `ioctl()` shim into Amazon's own launcher on a rooted FireOS 6
+and watching what it sent. That capture also confirmed `SET_STP_MODE 0x23` byte
+for byte. **Watching the working system beat reasoning about it, and it was
+available the whole time.**
+
+**FireOS 6's networking binaries cannot be used at all.** `wpa_supplicant`
+aborts before `main()` — traced with a second shim to `open /dev/binder -> -1`,
+it is linked against Android IPC — and `dhcpcd` aborts the same way. So emOS
+now ships its own: hostap 2.10, static ARM32, nl80211 via OpenWrt's libnl-tiny,
+internal crypto, about 1MB; DHCP is busybox udhcpc. Full libnl will not
+cross-compile against bionic, WEXT scans but never completes association on
+this driver, and bionic has no librt — each of those cost a build to find and
+each is written down in `emos/tools/build-wpa-supplicant.sh`.
+
+Cold boot to internet, with no Amazon binary anywhere in the path.
+
+**Hardening, from a good question.** Boot FireOS 6 from the other slot and
+Amazon's supplicant rewrites `/data/misc/wifi/wpa_supplicant.conf` with fields
+ours rejects — and one unusable field discarded the whole network block, so the
+device would come back up, throb at stage 11 for ever, and be invisible on the
+network. Same lesson as `console.pw`: anything on `/data` belongs to whoever
+wrote it last. emOS now keeps its own `/data/emos/wpa.conf`; the supplicant
+warns and carries on for a line it cannot use (both the network AND the global
+site need patching — `p2p_no_group_iface` is a global and killed the file
+before the network was read); and **no credentials at all is a wait, not a
+failure**, which is the normal state during provisioning and also fixed a
+supplicant respawn loop. Credentials present and not working turn the ring red
+after two minutes, because that is the only channel left when the network is
+the broken thing. `em-wifi` sets the network from the console — scan, pick,
+password, wait for an address — so a device that has moved house no longer
+needs a full re-provision.
+
+**WPA3 is down to one blocking layer, and one of the three we recorded was
+wrong.** Asked of the driver rather than inferred from kernel strings
+(`key_mgmt=0xd0f enc=0x10f flags=0x191f7280`): userspace is solved, since we
+now ship a supplicant with SAE; **PMF is NOT blocked** — the driver advertises
+BIP-CMAC-128, contradicting the recorded position that the closed firmware
+prevented it; and SAE remains blocked because the driver does not do it and
+`NL80211_CMD_EXTERNAL_AUTH` is a 4.17 addition on a 3.18 kernel. Both cfg80211
+and the wlan driver are built in, so there is no module to swap — it is a
+kernel build, which puts it on the same fork as the arm64 kernel work.
+
+**Still owed.** The wizard cannot install this yet: the emOS release publishes
+only `init`, and the supplicant and `wpa_cli` need the same road — a release
+asset, an endpoint, and a passthrough. The packer half is done. A locally built
+image installs today.
+
+**Wrong turns worth remembering**, because three of them shared a shape. I
+built theories on `Read CONSYS chipId(0x00000000)` and
+`do_connectivity_driver_init failed` — both appear on the WORKING FireOS 5
+device and in Amazon's own working boot. An error the healthy system also logs
+is not evidence. I attributed a preserved `last_kmsg` to Android on rotation
+order alone and announced a finding from it; `[1:init]` does not discriminate,
+because emOS's init is PID 1 and also called init. And I proposed building a
+property service off a theory that one command on a working device then
+disproved. The rule that would have saved most of the day: **assemble a
+known-good reference running the same software and diff it, before theorising
+about mechanism.**

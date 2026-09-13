@@ -26,20 +26,78 @@ trap 'rm -rf "$WORK"' EXIT
 # `#!/bin/busybox sh` init produced no output whatsoever, which is
 # indistinguishable from a kernel that never started. See README.md.
 NDK=${NDK:-/opt/android/ndk/21.4.7075529/toolchains/llvm/prebuilt/linux-x86_64/bin}
-CC=${CC:-$NDK/aarch64-linux-android21-clang}
+
+# The init must match the REFERENCE kernel's architecture. FireOS 5 boots a
+# 64-bit (AArch64) kernel and FireOS 6 a 32-bit ARM one — the same 3.18.19
+# source, compiled both ways — and an init of the wrong architecture boots to
+# nothing at all, with no output. So it is read out of the reference rather
+# than assumed.
+#
+# The sniffer lives in the CONTROLLER's packer and is called from here rather
+# than reimplemented. It used to be a second copy inline in this file, which is
+# the shape everything else in this pair has a test against: the wizard and this
+# script must agree about which architecture an image wants, and two copies of
+# the rule can disagree without either one being wrong on its own. Note the
+# import is by path — emos/ is outside the controller package, exactly as
+# tests/test_emos_build.py loads mkboot.py from the other direction.
+PACKER=$HERE/../controller/em_emos_build.py
+[ -f "$PACKER" ] || {
+    echo "cannot find the packer at $PACKER — it is where the architecture" >&2
+    echo "sniffer lives, so run this from a full checkout rather than a copy" >&2
+    echo "of emos/ on its own." >&2
+    exit 1
+}
+ARCH=$(python3 - "$PACKER" "$REF" <<'EOF'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("_eb", sys.argv[1])
+eb = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(eb)
+print(eb.reference_kernel_arch(open(sys.argv[2], "rb").read()) or "unknown")
+EOF
+)
+case "$ARCH" in
+    arm64) TRIPLE=aarch64-linux-android21 ;;
+    arm)   TRIPLE=armv7a-linux-androideabi21 ;;
+    *)     echo "cannot tell the reference kernel's architecture — not building" >&2
+           exit 1 ;;
+esac
+echo "reference kernel is $ARCH: building a matching init"
+CC=${CC:-$NDK/$TRIPLE-clang}
 
 if [ -x "$CC" ]; then
     "$CC" -static -O2 -Wall -o "$WORK/init" "$HERE/init/init.c"
 else
     echo "building init in the echomuse-compiler image ($CC not found)"
     docker run --rm -v "$HERE":/emos -v "$WORK":/out -w /emos echomuse-compiler \
-        bash -lc "$NDK/aarch64-linux-android21-clang -static -O2 -Wall -o /out/init init/init.c"
+        bash -lc "$NDK/$TRIPLE-clang -static -O2 -Wall -o /out/init init/init.c"
 fi
 
 # The ramdisk is init plus the empty mountpoints it needs. Everything else the
 # system uses is mounted from the device's own /system at runtime, which is why
 # no Amazon code is redistributed.
-mkdir -p "$WORK/root"/{dev,proc,sys,system,data,etc}
+mkdir -p "$WORK/root"/{dev,proc,sys,system,data,etc,sbin}
+
+# emOS's own wpa_supplicant, when one has been built. FireOS 6's cannot be
+# used at all -- it is linked against Android IPC and aborts when /dev/binder
+# is absent -- and ours (hostap 2.10, static ARM32, nl80211, internal crypto)
+# needs nothing from Android. Optional on purpose: an image built without it
+# falls back to /system/bin/wpa_supplicant, which is what the FireOS 5 fleet
+# runs today. See tools/build-wpa-supplicant.sh.
+SUPPLICANT=${SUPPLICANT:-$HERE/prebuilt/wpa_supplicant}
+if [ -f "$SUPPLICANT" ]; then
+    install -m 0755 "$SUPPLICANT" "$WORK/root/sbin/wpa_supplicant"
+    echo "including wpa_supplicant ($(stat -c%s "$SUPPLICANT") bytes)"
+fi
+
+# wpa_cli and em-wifi, the console's way to set WiFi without the wizard. The
+# console is the only channel left when the network is the broken thing, so
+# these ride in the ramdisk rather than living on /data.
+WPA_CLI=${WPA_CLI:-$HERE/prebuilt/wpa_cli}
+if [ -f "$WPA_CLI" ]; then
+    install -m 0755 "$WPA_CLI" "$WORK/root/sbin/wpa_cli"
+    install -m 0755 "$HERE/device/em-wifi" "$WORK/root/sbin/em-wifi"
+    echo "including wpa_cli and em-wifi"
+fi
 
 # Build identity, stamped in at build time rather than written at boot: it
 # describes the IMAGE, so it must not be something a running system can drift

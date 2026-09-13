@@ -458,11 +458,17 @@ jobs:
       # compile below is seconds. A second job would pay that cost twice for
       # one clang invocation.
       #
-      # It is AARCH64 while the firmware beside it is armv7a, and that is not a
-      # mistake in either. biscuit boots an ARM64 kernel — the fact that cost
-      # five flashed images of a 32-bit kernel that never executed an
-      # instruction (see the LibreEcho notes) — while the server binary is
-      # built for the Android userspace it has always run under.
+      # It is built for BOTH ARM architectures, because the init must match the
+      # device's KERNEL, not its userspace: FireOS 5 boots a 64-bit kernel and
+      # FireOS 6 — the only FireOS amonet-biscuit v2.0.0 boots — a 32-bit build
+      # of the same 3.18.19 source. The firmware beside it is armv7a either way,
+      # since it targets the Android userspace, which is 32-bit on both. A
+      # mismatch is the fact that cost five flashed images of a 32-bit kernel
+      # under a 64-bit boot chain (see the LibreEcho notes), and build.sh picks
+      # the architecture from the reference image for the same reason.
+      #
+      # Only the aarch64 init is published today (emos-release.yml); the armv7a
+      # compile is here so the 32-bit build cannot quietly rot before it ships.
       #
       # -static is the part that has to keep working. Three boots with a
       # busybox script init produced no output at all, which is
@@ -484,6 +490,18 @@ jobs:
             echo "::error::emOS init is not an aarch64 binary"; exit 1; }
           file emos/build/init | grep -q "statically linked" || {
             echo "::error::emOS init is not statically linked"; exit 1; }
+      - name: Build the emOS init (armv7a, static)
+        run: |
+          docker run --rm -v "$PWD/emos":/emos -w /emos echomuse-compiler bash -lc \
+            '/opt/android/ndk/21.4.7075529/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang \
+               -static -O2 -Wall -o build/init32 init/init.c'
+      - name: Check it is a static 32-bit ARM binary
+        run: |
+          file emos/build/init32
+          file emos/build/init32 | grep -q "32-bit LSB executable, ARM" || {
+            echo "::error::emOS armv7a init is not a 32-bit ARM binary"; exit 1; }
+          file emos/build/init32 | grep -q "statically linked" || {
+            echo "::error::emOS armv7a init is not statically linked"; exit 1; }
 
   emos-checks:
     name: emOS init checks (ring and password)
@@ -523,6 +541,17 @@ jobs:
         run: |
           cc -O2 -o /tmp/tmoutcheck emos/init/tmoutcheck.c
           /tmp/tmoutcheck
+      # The supplicant's control socket directory is declared inside the conf,
+      # and emOS has two confs that declare different ones — em-wifi's own file
+      # and the wizard's Android one — with wpa_conf() switching between them
+      # on which exists. Reading the wrong one is silent: the only caller is
+      # the reassociate nudge, so it does not fail, it leaves a device with
+      # good credentials sitting at DISCONNECTED for minutes, which looks on
+      # the ring exactly like a wrong password.
+      - name: The control socket is found in whichever conf is in use
+        run: |
+          cc -O2 -o /tmp/wpacheck emos/init/wpacheck.c
+          /tmp/wpacheck
       # The C hashes a password by hand — init is a static binary with no
       # crypto library — and the controller hashes it in Python. Nothing but
       # equal output proves they agree, and the failure mode is a device

@@ -1,0 +1,160 @@
+#!/system/bin/sh
+# em-wifi — set the device's WiFi from the USB console.
+#
+# The console is the only channel left when the network is the broken thing,
+# so this works with nothing but a serial terminal: scan, pick a number, type
+# a password, and it waits to see the device actually join.
+#
+# It writes emOS's own /data/emos/wpa.conf and NOT Android's file, on purpose
+# -- see wpa_conf() in init.c. Anything under /data/misc/wifi belongs to
+# whichever OS booted last, and FireOS 6 rewrites it.
+set -u
+CONF=/data/emos/wpa.conf
+ANDROID_CONF=/data/misc/wifi/wpa_supplicant.conf
+CLI=/sbin/wpa_cli
+SUP=/sbin/wpa_supplicant
+
+[ -x "$CLI" ] || { echo "em-wifi: $CLI is missing (older image?)"; exit 1; }
+
+# The control socket directory is READ from the conf the supplicant is running
+# on, never assumed -- the same rule, and the same two spellings, as
+# wpa_ctrl_dir() in init.c and sockDir() in internal/wifi.
+#
+# It matters most on a device migrated from FireOS 5. That device carries
+# Android's conf declaring /data/misc/wifi/sockets, and init starts a supplicant
+# on it -- so pgrep below finds one and no throwaway is started, and a wpa_cli
+# pointed at /data/emos/sockets then reaches nothing. The scan comes back empty
+# and this script used to say "No networks found. Is the radio up?" on a device
+# that was up and associated, which sends whoever is reading it at the radio.
+ctrl_from_conf() {
+    [ -r "$1" ] || return 1
+    awk '
+        /^[ \t]*ctrl_interface=/ {
+            sub(/^[ \t]*ctrl_interface=/, "")
+            sub(/^DIR=/, "")
+            sub(/[ \t].*$/, "")
+            if ($0 ~ /^\//) d = $0     # last wins, as in hostap
+        }
+        END { if (d != "") print d }
+    ' "$1"
+}
+
+# Pick the conf init would have started the supplicant on -- wpa_conf() -- and
+# then read only that one. Consulting both in turn would disagree with init on a
+# conf that declares no ctrl_interface at all, which the provisioning wizard
+# already warns about: init falls back to Android's directory there, so this
+# must too, rather than reading the other file's answer.
+ACTIVE=
+[ -r "$CONF" ] && ACTIVE=$CONF
+[ -z "$ACTIVE" ] && [ -r "$ANDROID_CONF" ] && ACTIVE=$ANDROID_CONF
+
+if [ -n "$ACTIVE" ]; then
+    CTRL=$(ctrl_from_conf "$ACTIVE" || true)
+    # init's own default, for a conf that declares nothing usable.
+    [ -n "$CTRL" ] || CTRL=/data/misc/wifi/sockets
+else
+    # No conf at all: nothing to preserve, and this is a first-time setup. emOS's
+    # own directory is ours to create, unlike /data/misc/wifi on a device that
+    # has never booted Android.
+    CTRL=/data/emos/sockets
+fi
+
+# Scanning needs a running supplicant. If none is up -- which is the normal
+# state on an unprovisioned device, where init is waiting for a conf -- start
+# one on a throwaway config; we want its radio, not its networks.
+if ! pgrep wpa_supplicant >/dev/null 2>&1; then
+    mkdir -p "$CTRL"
+    printf 'ctrl_interface=%s\nupdate_config=1\n' "$CTRL" > /tmp/em-wifi-scan.conf
+    "$SUP" -iwlan0 -Dnl80211 -c/tmp/em-wifi-scan.conf -B >/dev/null 2>&1
+    sleep 2
+fi
+
+echo "Scanning..."
+"$CLI" -p "$CTRL" -iwlan0 scan >/dev/null 2>&1
+sleep 4
+
+# Strongest first, one entry per SSID, unnamed networks dropped.
+"$CLI" -p "$CTRL" -iwlan0 scan_results 2>/dev/null \
+  | awk 'NR>1 && $5 != "" { if (!seen[$5]++) printf "%s\t%s\t%s\n", $3, $4, $5 }' \
+  | sort -rn | head -20 > /tmp/em-wifi-list
+
+if [ ! -s /tmp/em-wifi-list ]; then
+    echo "No networks found. Is the radio up? See /run/net.log."
+    exit 1
+fi
+
+echo ""
+n=0
+while IFS="$(printf '\t')" read -r sig flags ssid; do
+    n=$((n + 1))
+    case "$flags" in
+        *SAE*) note=" (WPA3 - not supported)" ;;
+        *PSK*) note="" ;;
+        *WEP*) note=" (WEP - not supported)" ;;
+        *)     note=" (open)" ;;
+    esac
+    printf '%2d) %-32s %4s dBm%s\n' "$n" "$ssid" "$sig" "$note"
+done < /tmp/em-wifi-list
+echo ""
+
+printf 'Number (or q to quit): '
+read choice
+case "$choice" in
+    q|Q|"") echo "Cancelled."; exit 0 ;;
+esac
+
+line=$(sed -n "${choice}p" /tmp/em-wifi-list)
+[ -n "$line" ] || { echo "No such entry."; exit 1; }
+flags=$(echo "$line" | cut -f2)
+ssid=$(echo "$line" | cut -f3)
+
+case "$flags" in
+    *SAE*)
+        echo "$ssid is WPA3, which this device cannot join. Its driver does"
+        echo "not do SAE and the kernel is too old to let us do it instead."
+        exit 1 ;;
+esac
+
+case "$flags" in
+    *PSK*)
+        printf 'Password for %s: ' "$ssid"
+        read psk
+        [ -n "$psk" ] || { echo "No password given."; exit 1; }
+        keymgmt="WPA-PSK" ;;
+    *)
+        psk=""
+        keymgmt="NONE" ;;
+esac
+
+mkdir -p /data/emos
+{
+    echo "ctrl_interface=$CTRL"
+    echo "update_config=1"
+    echo "network={"
+    echo "        ssid=\"$ssid\""
+    [ -n "$psk" ] && echo "        psk=\"$psk\""
+    echo "        key_mgmt=$keymgmt"
+    echo "}"
+} > "$CONF"
+chmod 600 "$CONF"
+echo "Wrote $CONF."
+
+# init supervises the supplicant and restarts it against whatever conf is
+# there, so all this does is retire the old process and watch for an address.
+killall wpa_supplicant 2>/dev/null
+echo "Connecting..."
+i=0
+while [ $i -lt 40 ]; do
+    if [ "$(cat /sys/class/net/wlan0/carrier 2>/dev/null)" = "1" ]; then
+        addr=$(ip addr show wlan0 2>/dev/null | sed -n 's/.*inet \([0-9.]*\).*/\1/p')
+        if [ -n "$addr" ]; then
+            echo "Connected to $ssid as $addr."
+            exit 0
+        fi
+    fi
+    sleep 2
+    i=$((i + 1))
+done
+
+echo "No address after 80s. See /run/net.log."
+exit 1

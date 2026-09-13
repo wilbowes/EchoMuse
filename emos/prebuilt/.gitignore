@@ -1,0 +1,4 @@
+# Built artifacts, not source. wpa_supplicant is ~1MB and is produced by
+# tools/build-wpa-supplicant.sh; build.sh picks it up from here if present.
+wpa_supplicant
+wpa_cli
