@@ -2590,7 +2590,7 @@ def test_the_emos_init_is_verified_before_it_is_served():
     question, so a check at only one of them is a way in that does not verify.
     """
     api = (CONTROLLER / "em_api.py").read_text()
-    resolver = _strip_prose(_fn_body(api, "_fetch_emos_init"))
+    resolver = _strip_prose(_fn_body(api, "_fetch_one_init"))
     assert "init_binary_problems" in resolver, (
         "the init must be checked for architecture/static before it is served")
     assert "bad_release_asset" in resolver
@@ -2598,12 +2598,16 @@ def test_the_emos_init_is_verified_before_it_is_served():
     assert "init_binary_problems(binary, arch)" in resolver, (
         "the init must be verified against the architecture that was requested")
 
-    # Both entry points go through it, so neither can serve an unchecked init.
-    for name in ("_get_provision_emos_init", "_post_provision_emos_image"):
+    # Every route to an init goes through that one function, so none of them can
+    # serve an unchecked one.
+    assert "_fetch_one_init" in _strip_prose(_fn_body(api, "_fetch_emos_init")), \
+        "the download endpoint's resolver must go through _fetch_one_init"
+    assert "_fetch_one_init" in _strip_prose(_fn_body(api, "_fetch_emos_payload")), \
+        "the image endpoint's resolver must go through _fetch_one_init"
+    for name, want in (("_get_provision_emos_init", "_fetch_emos_init"),
+                       ("_post_provision_emos_image", "_fetch_emos_payload")):
         fn = _strip_prose(_fn_body(api, name))
-        assert "_fetch_emos_init" in fn, (
-            f"{name} must resolve the init through _fetch_emos_init, which is "
-            f"where it is verified")
+        assert want in fn, f"{name} must resolve through {want}"
 
 
 def test_the_emos_release_workflow_asserts_what_it_publishes():
@@ -2635,14 +2639,24 @@ def test_the_emos_release_workflow_asserts_what_it_publishes():
             if files:
                 published |= {f.strip() for f in files.split("\n") if f.strip()}
 
-    # TWO inits, because the init must match the device's KERNEL: aarch64 for
-    # FireOS 5 and armv7a for FireOS 6. Publishing only one is how the wizard
-    # ended up unable to build a FireOS 6 image at all.
-    assert published == {"emos/build/init", "emos/build/init32"}, (
-        "an init is all that may be published, one per kernel architecture — "
-        f"got {sorted(published)}. A boot image would carry Amazon's kernel "
-        "and DTBs, so it is assembled on the user's side from their own "
-        "partition and never shipped from here.")
+    # Pinned as an exact SET, so adding an asset is a deliberate edit here. The
+    # invariant is that everything published is OURS: two inits (one per kernel
+    # architecture) and emOS's own WiFi userspace, which is hostap under BSD,
+    # libnl-tiny under LGPL and our own shell script.
+    #
+    # A BOOT IMAGE MUST NEVER APPEAR. It carries the device's own kernel and
+    # DTBs, so publishing one would redistribute Amazon's code — the image is
+    # assembled on the user's side from the partition they read off their device.
+    assert published == {
+        "emos/build/init", "emos/build/init32",
+        "emos/build/wpa/wpa_supplicant", "emos/build/wpa/wpa_cli",
+        "emos/build/wpa/em-wifi",
+    }, (f"the published set changed — got {sorted(published)}. Everything here "
+        f"must be ours, and a boot image must never be among it.")
+    assert not any(".img" in f or "boot" in f.rsplit("/", 1)[-1]
+                   for f in published), (
+        "an image or boot partition must never be a release asset — it carries "
+        "the device's own kernel and DTBs")
     # `init` keeps that exact name. The controller selects release assets by
     # exact name, so renaming it strands every controller already in the field
     # looking for it — which is why the second init was ADDED as `init32`
@@ -2698,6 +2712,47 @@ def test_the_init_architecture_is_decided_where_the_reference_is():
         "the image endpoint must read the architecture off the reference")
     assert "unknown_reference_arch" in handler, (
         "an unreadable reference must refuse, not fall back to an architecture")
+
+
+def test_the_wifi_tools_go_only_into_a_32_bit_image():
+    """
+    emOS's own wpa_supplicant is included for a FireOS 6 image and NOT for a
+    FireOS 5 one, and that asymmetry is the whole point rather than caution.
+
+    init prefers /sbin/wpa_supplicant over /system/bin/wpa_supplicant the moment
+    one exists. So shipping these into a FireOS 5 image would move the entire
+    existing fleet off Amazon's supplicant — which works today — onto ours, as a
+    side effect of a provisioning change nobody connected to it. emos/build.sh
+    makes the same choice for the same reason: supply the binary and it is
+    preferred, leave it out and nothing changes. It applies to wpa_cli too, since
+    init's reassociate nudge now prefers /sbin/wpa_cli.
+
+    A FireOS 6 image missing them is fatal rather than degraded: Amazon's
+    supplicant aborts under emOS before main(), so the image would have no WiFi
+    at all and no way to report it except over a cable.
+    """
+    api = (CONTROLLER / "em_api.py").read_text()
+    fn = _strip_prose(_fn_body(api, "_fetch_emos_payload"))
+    assert "ARCH_ARM" in fn, (
+        "the WiFi tools must be gated on the reference's kernel architecture")
+    assert "no_wifi_tools_for_arch" in fn, (
+        "a 32-bit image with no WiFi tools available must refuse, not build "
+        "something with no network")
+
+    # The gate must test for the 32-bit kernel specifically. `ARCH_ARM64` is a
+    # prefix-free constant but `ARCH_ARM` is not a substring test anyone should
+    # rely on, so the comparison is pinned literally.
+    assert "arch == em_emos_build.ARCH_ARM" in fn, (
+        "the gate must be an equality against ARCH_ARM, so arm64 cannot satisfy it")
+
+    # And all three travel together: em-wifi is useless without the two binaries
+    # it drives, and wpa_cli alone would change which binary init's nudge uses.
+    assert "EMOS_SBIN_ASSETS" in fn, \
+        "the tools must come from the one list, so they cannot diverge"
+    tools = api[api.index("EMOS_SBIN_ASSETS = ("):]
+    tools = tools[:tools.index(")") + 1]
+    for name in ("wpa_supplicant", "wpa_cli", "em-wifi"):
+        assert f'"{name}"' in tools, f"{name} missing from EMOS_SBIN_ASSETS"
 
 
 def test_every_debloat_push_asks_which_userspace_the_device_booted():

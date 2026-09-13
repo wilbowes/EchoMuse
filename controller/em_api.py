@@ -4827,18 +4827,76 @@ EMOS_INIT_ASSETS = {
     em_emos_build.ARCH_ARM: "init32",
 }
 
+# emOS's own WiFi userspace, installed into the image's /sbin. ONE build serves
+# both kernels — these are ordinary processes, and a 64-bit kernel runs 32-bit
+# binaries — so unlike the init there is nothing per-architecture here.
+EMOS_SBIN_ASSETS = ("wpa_supplicant", "wpa_cli", "em-wifi")
+
+
+async def _fetch_emos_payload(arch: str) -> tuple:
+    """Everything an emOS image needs for `arch`, from ONE release.
+
+    Returns (init, sbin, version, error) — `sbin` being the /sbin tools the
+    packer installs, and `error` a ready web.Response on failure and None on
+    success, so every caller refuses identically. They are entry points to one
+    question, and an answer that differed between them would be a bug nobody
+    would look for.
+
+    ONE release lookup for all of it, deliberately: resolving the init and the
+    tools separately could straddle a release being published and build an image
+    from two of them, which is the sort of thing that is invisible until somebody
+    is trying to troubleshoot a device against a version number.
+    """
+    release = await _fetch_latest_emos_release()
+    if release is None:
+        return None, {}, "", _error(
+            "no_emos_release",
+            "No published emOS release with an 'init' asset was found. Build "
+            "one from emos/ with build.sh and select it by hand, or cut an "
+            "emos-v* tag.", 404)
+
+    init, version, err = await _fetch_one_init(release, arch)
+    if err is not None:
+        return None, {}, version, err
+
+    # The WiFi userspace goes in ONLY for a 32-bit kernel, i.e. FireOS 6.
+    #
+    # Not caution — init prefers /sbin/wpa_supplicant over /system/bin's the
+    # moment one exists, so shipping these to a FireOS 5 image would move the
+    # whole existing fleet off Amazon's supplicant, which works today, onto ours
+    # by side effect of a provisioning change. emos/build.sh makes the same
+    # choice for the same reason: include the binary and it is preferred, leave
+    # it out and nothing changes. It applies to wpa_cli too, since init's
+    # reassociate nudge now prefers /sbin/wpa_cli.
+    sbin = {}
+    if arch == em_emos_build.ARCH_ARM:
+        for name in EMOS_SBIN_ASSETS:
+            asset = release.get("assets", {}).get(name)
+            if asset is None:
+                # Fatal for this architecture rather than a warning. Amazon's
+                # supplicant aborts under emOS before main() on FireOS 6, so an
+                # image without ours has no WiFi at all and no way to say so
+                # except over a cable.
+                return None, {}, release["version"], _error(
+                    "no_wifi_tools_for_arch",
+                    f"emOS release {release['version']} carries no '{name}' "
+                    f"asset. A FireOS 6 image needs emOS's own WiFi tools — "
+                    f"Amazon's supplicant cannot run under emOS — so there is "
+                    f"nothing to build a working image from. Cut a newer "
+                    f"emos-v* tag.", 404)
+            data = await _fetch_binary(asset["url"],
+                                       f"{release['version']}-{name}")
+            if data is None:
+                return None, {}, release["version"], _error(
+                    "fetch_failed",
+                    f"Could not download {name} from GitHub", 502)
+            sbin[name] = data
+
+    return init, sbin, release["version"], None
+
 
 async def _fetch_emos_init(arch: str) -> tuple:
-    """The init for `arch` from the latest emOS release: (binary, version, error).
-
-    `error` is a ready web.Response on failure and None on success, so both
-    endpoints refuse identically — they are two entry points to one question and
-    an answer that differed between them would be a bug nobody would look for.
-
-    Validation happens HERE, against the architecture that was asked for, so a
-    release built wrong is refused at the point of download rather than at the
-    point of boot.
-    """
+    """Just the init, for the download endpoint: (binary, version, error)."""
     release = await _fetch_latest_emos_release()
     if release is None:
         return None, "", _error(
@@ -4846,7 +4904,16 @@ async def _fetch_emos_init(arch: str) -> tuple:
             "No published emOS release with an 'init' asset was found. Build "
             "one from emos/ with build.sh and select it by hand, or cut an "
             "emos-v* tag.", 404)
+    return await _fetch_one_init(release, arch)
 
+
+async def _fetch_one_init(release: dict, arch: str) -> tuple:
+    """The init for `arch` out of an already-resolved release.
+
+    Validation happens HERE, against the architecture that was asked for, so a
+    release built wrong is refused at the point of download rather than at the
+    point of boot — and every route to an init goes through this one function.
+    """
     name = EMOS_INIT_ASSETS.get(arch, EMOS_INIT_ASSETS[em_emos_build.ARCH_ARM64])
     asset = release.get("assets", {}).get(name)
     if asset is None:
@@ -5020,6 +5087,10 @@ async def _post_provision_emos_image(request: web.Request) -> web.Response:
                     f"Nothing has been built. Re-run the escrow step.", 400)
 
         version = parts.get("version") or "0.1"
+        # Empty unless resolved below. A hand-picked init carries no WiFi tools
+        # with it, which matches emos/build.sh: supply the binary and it is used,
+        # leave it out and init falls back to /system/bin's.
+        sbin = {}
 
         # Resolve the init HERE when asked to, because this is the only place
         # that holds the reference — and the reference is the only thing that
@@ -5045,19 +5116,21 @@ async def _post_provision_emos_image(request: web.Request) -> web.Response:
                     "image, so there is no way to tell which init it needs. "
                     "Check the escrow is the whole boot image, or build an init "
                     "from emos/ with build.sh and select it by hand.", 400)
-            init_bin, init_version, err = await _fetch_emos_init(arch)
+            init_bin, sbin, init_version, err = await _fetch_emos_payload(arch)
             if err is not None:
                 return err
             version = parts.get("version") or init_version
             log.info(f"[api] emOS image: reference kernel is {arch}, using "
-                     f"{EMOS_INIT_ASSETS[arch]} from {init_version}")
+                     f"{EMOS_INIT_ASSETS[arch]} from {init_version}"
+                     + (f" plus {', '.join(sorted(sbin))}" if sbin else ""))
 
         loop = asyncio.get_event_loop()
         # Off the event loop: gzipping a ramdisk and hashing two images blocks
         # it for long enough to matter, and devices are streaming audio
         # through this process while somebody provisions a new one.
         info = await loop.run_in_executor(
-            None, em_emos_build.build_emos_image, reference, init_bin, version)
+            None, em_emos_build.build_emos_image, reference, init_bin, version,
+            "", sbin)
 
         log.info(f"[api] emOS image built: {info['size']:,} bytes "
                  f"md5={info['md5'][:8]}… from a {info['reference_size']:,} "

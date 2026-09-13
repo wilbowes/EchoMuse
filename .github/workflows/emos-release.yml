@@ -23,6 +23,16 @@ name: emOS Release (init binary)
 # TWO of them, because the init must match the device's KERNEL: `init` is
 # aarch64 for FireOS 5 and `init32` is armv7a for FireOS 6. See the compile
 # steps. Nothing else published here is per-architecture.
+#
+# Alongside them: emOS's own `wpa_supplicant`, `wpa_cli` and `em-wifi`. Ours,
+# not Amazon's — hostap is BSD, libnl-tiny LGPL, em-wifi is our source — so they
+# are as distributable as the init. A FireOS 6 image NEEDS them, because Amazon's
+# supplicant aborts under emOS before main() (it opens /dev/binder).
+#
+# Every asset here is byte-identical build to build: the toolchain is a
+# digest-pinned image, the init is repo source, and the wpa sources are pinned by
+# sha256 and by commit. That is what makes a release something a device can be
+# troubleshot against rather than a moving target.
 
 on:
   push:
@@ -108,6 +118,45 @@ jobs:
             exit 1
           fi
 
+      # emOS's own WiFi userspace. ONE build for both kernels, unlike the init:
+      # these run as ordinary processes, and a 64-bit kernel runs 32-bit binaries
+      # — it has to, since the whole Android userspace on biscuit is 32-bit on
+      # top of FireOS 5's 64-bit kernel.
+      #
+      # Built here rather than committed, so what ships can be traced to sources:
+      # the script pins hostap by sha256 and libnl-tiny by commit, and the
+      # toolchain is the same digest-pinned image the init uses. Measured
+      # byte-identical across build directories, which is what makes a published
+      # artifact worth anything when somebody is troubleshooting a device against
+      # a release.
+      - name: Build wpa_supplicant and wpa_cli (armv7a, static)
+        run: |
+          mkdir -p emos/build/wpa
+          docker run --rm -v "${{ github.workspace }}/emos":/emos \
+            -v "${{ github.workspace }}/emos/build/wpa":/out -w /tmp \
+            echomuse-compiler bash -lc '/emos/tools/build-wpa-supplicant.sh /out'
+
+      - name: Verify the wpa tools are static 32-bit ARM
+        # Same reasoning as the inits: emOS execs these directly with no dynamic
+        # loader available, so a dynamically linked one is a boot that reaches the
+        # network stage and stops there with nothing said.
+        run: |
+          file emos/build/wpa/wpa_supplicant emos/build/wpa/wpa_cli
+          for f in wpa_supplicant wpa_cli; do
+            file "emos/build/wpa/$f" | grep -q "32-bit LSB executable, ARM" || {
+              echo "::error::$f is not a 32-bit ARM binary"; exit 1; }
+            file "emos/build/wpa/$f" | grep -q "statically linked" || {
+              echo "::error::$f is not statically linked"; exit 1; }
+          done
+          # em-wifi is repo source, not a build product, but it is published
+          # beside them because the controller image cannot reach emos/ — the
+          # same constraint that put a second copy of the packer in controller/.
+          cp emos/device/em-wifi emos/build/wpa/em-wifi
+          head -1 emos/build/wpa/em-wifi | grep -q '^#!' || {
+            echo "::error::em-wifi has no interpreter line"; exit 1; }
+          sh -n emos/build/wpa/em-wifi || {
+            echo "::error::em-wifi is not valid shell"; exit 1; }
+
       # The off-target checks, against the exact source being published. All
       # four of them: each drives a parser or an invariant whose failure is
       # silent on hardware, which is the criterion in CLAUDE.md for having one.
@@ -140,6 +189,9 @@ jobs:
           files: |
             emos/build/init
             emos/build/init32
+            emos/build/wpa/wpa_supplicant
+            emos/build/wpa/wpa_cli
+            emos/build/wpa/em-wifi
           body_path: /tmp/emos-notes.md
           generate_release_notes: true
         env:
