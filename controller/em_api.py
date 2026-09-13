@@ -4838,6 +4838,13 @@ async def _get_provision_emos_init(request: web.Request) -> web.Response:
         return _error("fetch_failed",
                       "Could not download the emOS init from GitHub", 502)
 
+    # No arch argument, so this checks against FireOS 5's 64-bit kernel — which
+    # is right, because the release publishes exactly one `init` asset and it is
+    # the aarch64 one. It is a KNOWN GAP rather than an assumption: a FireOS 6
+    # device needs the 32-bit init, no release carries one, and this endpoint has
+    # no device context to choose by even once one does. The build refuses the
+    # mismatch (it reads the arch off the reference), so the failure lands as a
+    # refusal at build time rather than a device that boots to nothing.
     problems = em_emos_build.init_binary_problems(binary)
     if problems:
         # A release that is wrong is worth saying so about loudly: it is wrong

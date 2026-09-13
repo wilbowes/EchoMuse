@@ -31,20 +31,28 @@ NDK=${NDK:-/opt/android/ndk/21.4.7075529/toolchains/llvm/prebuilt/linux-x86_64/b
 # 64-bit (AArch64) kernel and FireOS 6 a 32-bit ARM one — the same 3.18.19
 # source, compiled both ways — and an init of the wrong architecture boots to
 # nothing at all, with no output. So it is read out of the reference rather
-# than assumed: a zImage (magic 0x016f2818 at 0x24) is ARM, a raw gzip stream
-# whose Image carries "ARM\x64" at 0x38 is AArch64. Anything else is refused.
-ARCH=$(python3 - "$REF" <<'EOF'
-import struct, sys, zlib
-ref = open(sys.argv[1], "rb").read()
-ksz = struct.unpack("<I", ref[8:12])[0]
-p = ref[2048:2048 + ksz][0x200:]
-if p[0x24:0x28] == b"\x18\x28\x6f\x01":
-    print("arm")
-elif p[:2] == b"\x1f\x8b" and \
-        zlib.decompressobj(31).decompress(p, 0x40)[0x38:0x3c] == b"ARM\x64":
-    print("arm64")
-else:
-    print("unknown")
+# than assumed.
+#
+# The sniffer lives in the CONTROLLER's packer and is called from here rather
+# than reimplemented. It used to be a second copy inline in this file, which is
+# the shape everything else in this pair has a test against: the wizard and this
+# script must agree about which architecture an image wants, and two copies of
+# the rule can disagree without either one being wrong on its own. Note the
+# import is by path — emos/ is outside the controller package, exactly as
+# tests/test_emos_build.py loads mkboot.py from the other direction.
+PACKER=$HERE/../controller/em_emos_build.py
+[ -f "$PACKER" ] || {
+    echo "cannot find the packer at $PACKER — it is where the architecture" >&2
+    echo "sniffer lives, so run this from a full checkout rather than a copy" >&2
+    echo "of emos/ on its own." >&2
+    exit 1
+}
+ARCH=$(python3 - "$PACKER" "$REF" <<'EOF'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("_eb", sys.argv[1])
+eb = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(eb)
+print(eb.reference_kernel_arch(open(sys.argv[2], "rb").read()) or "unknown")
 EOF
 )
 case "$ARCH" in

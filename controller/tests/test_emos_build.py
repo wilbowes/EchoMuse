@@ -17,6 +17,7 @@ and a raw ramdisk.
 import hashlib
 import importlib.util
 import struct
+import zlib
 import sys
 from pathlib import Path
 
@@ -82,6 +83,27 @@ def fake_init(machine=183, elf_class=2, e_type=2, size=4096):
     b += struct.pack("<HH", e_type, machine)
     b += b"\0" * (size - len(b))
     return bytes(b)
+
+
+def arm_zimage(size=2400):
+    """An ARM zImage: a self-decompressing stub carrying 0x016f2818 at 0x24."""
+    b = bytearray(b"\x00" * size)
+    b[0x24:0x28] = b"\x18\x28\x6f\x01"
+    return bytes(b)
+
+
+def arm64_zimage(size=2400):
+    """An AArch64 kernel: a raw gzip stream whose Image carries "ARM\\x64" at 0x38.
+
+    Compressed here rather than pasted as a blob so the test reads the same way
+    the sniffer does, and so a change to either end has to survive a real
+    decompress rather than a fixture somebody hand-edited.
+    """
+    image = bytearray(b"\x00" * 0x100)
+    image[0x38:0x3c] = b"ARM\x64"
+    co = zlib.compressobj(9, zlib.DEFLATED, 31)
+    out = co.compress(bytes(image) + b"\x00" * size) + co.flush()
+    return out
 
 
 # ── The cross-implementation contract ────────────────────────────────────────
@@ -295,14 +317,96 @@ def test_a_good_init_has_no_problems():
     assert eb.init_binary_problems(fake_init()) == []
 
 
-def test_an_arm32_init_is_refused():
+def test_an_arm32_init_is_refused_for_a_64_bit_kernel():
     """
-    The mistake that cost five flashed images: biscuit boots ARM64, and an
-    ARM32 kernel never executed an instruction. The same error in an init is
-    just as silent.
+    The mistake that cost five flashed images: FireOS 5's biscuit boots ARM64,
+    and an ARM32 kernel never executed an instruction. The same error in an init
+    is just as silent.
     """
     problems = eb.init_binary_problems(fake_init(machine=40))   # EM_ARM
     assert any("AArch64" in p for p in problems)
+
+
+# ── Which architecture the reference wants ────────────────────────────────────
+#
+# The init must match the reference image's KERNEL, and the two FireOS versions
+# differ. Every way of getting this wrong is silent on the device: it takes the
+# flash, reports success, and then produces no output at all — which is exactly
+# what a kernel that never started looks like, so there is nothing to read.
+
+def test_reference_kernel_arch_reads_both_shapes():
+    assert eb.reference_kernel_arch(
+        make_reference(zimage=arm_zimage())) == eb.ARCH_ARM
+    assert eb.reference_kernel_arch(
+        make_reference(zimage=arm64_zimage())) == eb.ARCH_ARM64
+
+
+def test_reference_kernel_arch_says_nothing_rather_than_guessing():
+    """
+    An unreadable payload must return "", never an architecture. A wrong answer
+    here is a wrong init, and the caller can refuse on "" — it cannot recover
+    from being told the wrong thing confidently.
+    """
+    assert eb.reference_kernel_arch(make_reference(zimage=b"NEITHER" * 300)) == ""
+    assert eb.reference_kernel_arch(b"not a boot image at all" * 200) == ""
+    assert eb.reference_kernel_arch(b"") == ""
+    # A gzip stream that cannot be decompressed is not evidence of anything.
+    assert eb.reference_kernel_arch(
+        make_reference(zimage=b"\x1f\x8b" + b"\x00" * 600)) == ""
+    # Gzip that decompresses but is not an AArch64 Image.
+    co = zlib.compressobj(9, zlib.DEFLATED, 31)
+    notimage = co.compress(b"\x00" * 0x200) + co.flush()
+    assert eb.reference_kernel_arch(make_reference(zimage=notimage)) == ""
+
+
+def test_a_32_bit_init_is_accepted_for_a_32_bit_kernel():
+    """FireOS 6 boots a 32-bit kernel, so there the ARM init is the right one."""
+    assert eb.init_binary_problems(
+        fake_init(machine=40, elf_class=1), eb.ARCH_ARM) == []
+
+
+def test_a_64_bit_init_is_refused_for_a_32_bit_kernel():
+    """The other direction, which nothing checked before FireOS 6 existed."""
+    problems = eb.init_binary_problems(fake_init(), eb.ARCH_ARM)
+    assert any("not ARM" in p for p in problems)
+    assert any("32-bit" in p for p in problems)
+
+
+def test_the_build_checks_the_init_against_the_reference_it_was_given():
+    """
+    The whole point: the same packer serves both kernels, and the reference is
+    the only thing that knows which. Each arch's init must be accepted with its
+    own reference and refused with the other's.
+    """
+    arm_ref = make_reference(zimage=arm_zimage())
+    arm64_ref = make_reference(zimage=arm64_zimage())
+    arm_init = fake_init(machine=40, elf_class=1)
+    arm64_init = fake_init()
+
+    # Right pairings build.
+    assert eb.build_emos_image(arm_ref, arm_init, "0.1")["image"]
+    assert eb.build_emos_image(arm64_ref, arm64_init, "0.1")["image"]
+
+    # Wrong pairings refuse, in both directions.
+    with pytest.raises(eb.BuildError, match="ARM"):
+        eb.build_emos_image(arm_ref, arm64_init, "0.1")
+    with pytest.raises(eb.BuildError, match="AArch64"):
+        eb.build_emos_image(arm64_ref, arm_init, "0.1")
+
+
+def test_an_unreadable_reference_keeps_demanding_the_fireos5_arch():
+    """
+    Absence is not evidence, and the fallback has to be the OLD behaviour: this
+    checked AArch64 unconditionally before FireOS 6 was supported, so a
+    reference whose kernel cannot be read keeps that answer. It is correct on
+    the existing fleet, and anywhere else it costs a refusal rather than a
+    flash that boots to nothing.
+    """
+    unreadable = make_reference(zimage=b"NEITHER" * 300)
+    assert eb.reference_kernel_arch(unreadable) == ""
+    assert eb.build_emos_image(unreadable, fake_init(), "0.1")["image"]
+    with pytest.raises(eb.BuildError, match="AArch64"):
+        eb.build_emos_image(unreadable, fake_init(machine=40, elf_class=1), "0.1")
 
 
 def test_a_dynamically_linked_init_is_refused():
