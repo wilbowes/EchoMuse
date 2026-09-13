@@ -108,13 +108,24 @@ _S_IFREG = 0o100000
 
 
 def build_ramdisk(init_binary: bytes, version: str, build_id: str = "",
-                  supplicant: bytes = b"") -> bytes:
+                  sbin: dict = None) -> bytes:
     """The gzipped cpio the boot image carries: init, mountpoints, os-release.
 
     The mountpoints have to exist in the ramdisk because there is no devtmpfs
     and nothing populates anything on its own — see emos/README.md. Everything
     the running system uses beyond this is mounted from the device's own
     /system, which is why no Amazon code is redistributed.
+
+    `sbin` maps a name to its bytes, for the executables emOS carries in /sbin:
+    `wpa_supplicant`, `wpa_cli` and `em-wifi`. All optional, because a FireOS 5
+    image works without them — init falls back to /system/bin/wpa_supplicant,
+    which is what the fleet runs today. A FireOS 6 image needs its own: Amazon's
+    aborts under emOS before main(), since it opens /dev/binder.
+
+    A DICT rather than one keyword per file, because this replaced a single
+    `supplicant=` parameter that could not express the other two at all — so the
+    controller-side packer structurally could not build what emos/build.sh
+    builds, and the console's own network tool was the thing it could not carry.
     """
     if not init_binary:
         raise BuildError("no init binary was supplied")
@@ -137,6 +148,7 @@ def build_ramdisk(init_binary: bytes, version: str, build_id: str = "",
 
     out = io.BytesIO()
     ino = 1
+    _sbin_written = False
     # Sorted and fixed, so the archive is byte-stable across Python versions
     # and filesystems. `find` order is not a promise.
     for d in ("dev", "proc", "sys", "system", "data", "etc"):
@@ -145,15 +157,33 @@ def build_ramdisk(init_binary: bytes, version: str, build_id: str = "",
     out.write(_newc_entry("etc/os-release", _S_IFREG | 0o644, os_release, ino))
     ino += 1
     out.write(_newc_entry("init", _S_IFREG | 0o755, init_binary, ino))
-    # emOS's own wpa_supplicant, when the caller has one. Optional because an
-    # image without it falls back to /system/bin/wpa_supplicant -- which is
-    # what the FireOS 5 fleet runs today, and works. FireOS 6's aborts under
-    # emOS (it opens /dev/binder), so a FireOS 6 image needs this one.
-    if supplicant:
-        out.write(_newc_entry("sbin", _S_IFDIR | 0o755, b"", ino))
-        out.write(_newc_entry("sbin/wpa_supplicant", _S_IFREG | 0o755,
-                              supplicant, ino))
     ino += 1
+
+    # /sbin, and only if something goes in it — an empty directory would differ
+    # from what emos/build.sh produces for a FireOS 5 image, and this archive is
+    # compared byte for byte against that one.
+    #
+    # EVERY ENTRY GETS ITS OWN INODE. The previous version gave init, sbin and
+    # sbin/wpa_supplicant the same one, because the increment sat after the
+    # block rather than inside it. In newc, c_ino plus c_nlink is how hardlinks
+    # are represented, so three distinct files sharing an inode is a malformed
+    # archive that an extractor is entitled to read as links to one file. It
+    # survived because nothing ever passed a supplicant: the parameter was dead
+    # from the day it was added, and this path had no test.
+    #
+    # Sorted, for the reason the mountpoints are: reproducibility cannot depend
+    # on a dict's insertion order at the call site.
+    for name in sorted((sbin or {})):
+        data = (sbin or {})[name]
+        if not data:
+            continue
+        if not _sbin_written:
+            out.write(_newc_entry("sbin", _S_IFDIR | 0o755, b"", ino))
+            ino += 1
+            _sbin_written = True
+        out.write(_newc_entry(f"sbin/{name}", _S_IFREG | 0o755, data, ino))
+        ino += 1
+
     out.write(_newc_entry("TRAILER!!!", 0, b"", ino))
     # The archive is padded to a 512-byte boundary by convention; the kernel
     # does not require it and LK never looks, but tools that read the image
@@ -450,7 +480,7 @@ def init_binary_problems(init_binary: bytes, arch: str = ARCH_ARM64) -> list:
 
 
 def build_emos_image(reference: bytes, init_binary: bytes, version: str,
-                     build_id: str = "") -> dict:
+                     build_id: str = "", sbin: dict = None) -> dict:
     """Build the image, refusing rather than warning at every gate.
 
     Returns the image and what went into it, so the wizard can show the user
@@ -515,7 +545,7 @@ def build_emos_image(reference: bytes, init_binary: bytes, version: str,
             "flash something assembled by a parser already shown to be wrong."
             + detail)
 
-    ramdisk = build_ramdisk(init_binary, version, build_id)
+    ramdisk = build_ramdisk(init_binary, version, build_id, sbin)
     image = pack(parts, parts["zimage"], parts["dtbs"], ramdisk)
     return dict(
         image=image,

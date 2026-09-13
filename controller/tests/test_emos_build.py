@@ -472,6 +472,118 @@ def test_an_empty_init_is_refused():
         eb.build_ramdisk(b"", "0.1")
 
 
+# ── /sbin: the wpa tools and the console's network tool ───────────────────────
+#
+# This path had NO test and the parameter behind it was dead — nothing ever
+# passed a supplicant — which is how it kept an inode bug and could not express
+# wpa_cli or em-wifi at all. A FireOS 6 image needs all three: Amazon's
+# supplicant aborts under emOS before main() because it opens /dev/binder.
+
+def _newc_entries(archive: bytes) -> list:
+    """Parse a newc cpio into (name, mode, ino, data), so the test reads the
+    archive the kernel would rather than grepping the bytes for a substring."""
+    out, off = [], 0
+    while True:
+        assert archive[off:off + 6] == b"070701", "not a newc header"
+        f = [int(archive[off + 6 + i * 8: off + 14 + i * 8], 16) for i in range(13)]
+        ino, mode, nlink, size, namesize = f[0], f[1], f[4], f[6], f[11]
+        name_off = off + 110
+        name = archive[name_off:name_off + namesize - 1].decode()
+        data_off = name_off + namesize
+        data_off += -data_off % 4
+        data = archive[data_off:data_off + size]
+        if name == "TRAILER!!!":
+            return out
+        out.append((name, mode, ino, data, nlink))
+        off = data_off + size
+        off += -off % 4
+
+
+def test_the_ramdisk_carries_all_three_sbin_tools():
+    import gzip
+    supp, cli, emwifi = b"SUPPLICANT" * 40, b"WPACLI" * 30, b"#!/system/bin/sh\n"
+    raw = gzip.decompress(eb.build_ramdisk(fake_init(), "0.1", sbin={
+        "wpa_supplicant": supp, "wpa_cli": cli, "em-wifi": emwifi}))
+    entries = {n: (m, i, d) for n, m, i, d, _ in _newc_entries(raw)}
+
+    assert "sbin" in entries, "/sbin must exist before anything inside it"
+    assert entries["sbin"][0] & eb._S_IFDIR, "/sbin must be a directory"
+    for name, data in (("wpa_supplicant", supp), ("wpa_cli", cli),
+                       ("em-wifi", emwifi)):
+        key = f"sbin/{name}"
+        assert key in entries, f"{key} missing — emos/build.sh installs it"
+        mode, _, got = entries[key]
+        assert got == data, f"{key} contents differ from what was passed"
+        # init execs these directly; a non-executable one is a boot that reaches
+        # the network stage and stops there.
+        assert mode & 0o111, f"{key} is not executable (mode {mode:o})"
+
+
+def test_the_sbin_directory_comes_before_its_contents():
+    """cpio is applied in order, so a file whose parent has not been created
+    yet is a file the kernel cannot place."""
+    import gzip
+    raw = gzip.decompress(eb.build_ramdisk(
+        fake_init(), "0.1", sbin={"wpa_cli": b"X" * 64}))
+    names = [n for n, *_ in _newc_entries(raw)]
+    assert names.index("sbin") < names.index("sbin/wpa_cli")
+
+
+def test_every_ramdisk_entry_has_its_own_inode():
+    """
+    In newc, c_ino plus c_nlink is how hardlinks are represented, so distinct
+    files sharing an inode is a malformed archive an extractor may read as links
+    to one file. The first version of the /sbin path gave init, sbin and
+    sbin/wpa_supplicant the same inode, because the increment sat after the
+    block rather than inside it — and nothing caught it, because nothing ever
+    passed a supplicant.
+    """
+    import gzip
+    raw = gzip.decompress(eb.build_ramdisk(fake_init(), "0.1", sbin={
+        "wpa_supplicant": b"S" * 64, "wpa_cli": b"C" * 64, "em-wifi": b"E" * 64}))
+    entries = _newc_entries(raw)
+    inodes = [i for _, _, i, _, _ in entries]
+    assert len(set(inodes)) == len(inodes), (
+        "duplicate inodes: " + ", ".join(
+            f"{n}={i}" for n, _, i, _, _ in entries))
+    assert all(nlink == 1 for *_, nlink in entries), \
+        "nlink must be 1 — nothing here is a hardlink"
+
+
+def test_no_sbin_directory_when_there_are_no_tools():
+    """
+    A FireOS 5 image carries none of these, and emos/build.sh produces no /sbin
+    for it — and this archive is compared byte for byte against that one, so an
+    empty directory here would be a drift with no functional symptom.
+    """
+    import gzip
+    for sbin in (None, {}, {"wpa_cli": b""}):
+        raw = gzip.decompress(eb.build_ramdisk(fake_init(), "0.1", sbin=sbin))
+        names = [n for n, *_ in _newc_entries(raw)]
+        assert not any(n == "sbin" or n.startswith("sbin/") for n in names), \
+            f"sbin appeared for sbin={sbin!r}: {names}"
+
+
+def test_the_sbin_tools_do_not_break_reproducibility():
+    """Insertion order at the call site must not reach the archive."""
+    a = eb.build_ramdisk(fake_init(), "0.1", sbin={
+        "wpa_supplicant": b"S" * 64, "wpa_cli": b"C" * 64, "em-wifi": b"E" * 64})
+    b = eb.build_ramdisk(fake_init(), "0.1", sbin={
+        "em-wifi": b"E" * 64, "wpa_cli": b"C" * 64, "wpa_supplicant": b"S" * 64})
+    assert a == b
+
+
+def test_the_image_build_carries_the_sbin_tools_through():
+    """The packer takes them, not just the ramdisk — build_emos_image is what
+    the wizard calls, and a parameter it cannot pass is a parameter nothing has."""
+    import gzip
+    info = eb.build_emos_image(make_reference(), fake_init(), "0.1",
+                               sbin={"wpa_cli": b"CLI" * 40})
+    parts = eb.split_reference(info["image"])
+    names = [n for n, *_ in _newc_entries(gzip.decompress(parts["ramdisk"]))]
+    assert "sbin/wpa_cli" in names
+
+
 # ── The built image ──────────────────────────────────────────────────────────
 
 def test_the_built_image_is_a_boot_image_the_packer_understands():
