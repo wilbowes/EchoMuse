@@ -10,11 +10,54 @@
 # whichever OS booted last, and FireOS 6 rewrites it.
 set -u
 CONF=/data/emos/wpa.conf
-CTRL=/data/emos/sockets
+ANDROID_CONF=/data/misc/wifi/wpa_supplicant.conf
 CLI=/sbin/wpa_cli
 SUP=/sbin/wpa_supplicant
 
 [ -x "$CLI" ] || { echo "em-wifi: $CLI is missing (older image?)"; exit 1; }
+
+# The control socket directory is READ from the conf the supplicant is running
+# on, never assumed -- the same rule, and the same two spellings, as
+# wpa_ctrl_dir() in init.c and sockDir() in internal/wifi.
+#
+# It matters most on a device migrated from FireOS 5. That device carries
+# Android's conf declaring /data/misc/wifi/sockets, and init starts a supplicant
+# on it -- so pgrep below finds one and no throwaway is started, and a wpa_cli
+# pointed at /data/emos/sockets then reaches nothing. The scan comes back empty
+# and this script used to say "No networks found. Is the radio up?" on a device
+# that was up and associated, which sends whoever is reading it at the radio.
+ctrl_from_conf() {
+    [ -r "$1" ] || return 1
+    awk '
+        /^[ \t]*ctrl_interface=/ {
+            sub(/^[ \t]*ctrl_interface=/, "")
+            sub(/^DIR=/, "")
+            sub(/[ \t].*$/, "")
+            if ($0 ~ /^\//) d = $0     # last wins, as in hostap
+        }
+        END { if (d != "") print d }
+    ' "$1"
+}
+
+# Pick the conf init would have started the supplicant on -- wpa_conf() -- and
+# then read only that one. Consulting both in turn would disagree with init on a
+# conf that declares no ctrl_interface at all, which the provisioning wizard
+# already warns about: init falls back to Android's directory there, so this
+# must too, rather than reading the other file's answer.
+ACTIVE=
+[ -r "$CONF" ] && ACTIVE=$CONF
+[ -z "$ACTIVE" ] && [ -r "$ANDROID_CONF" ] && ACTIVE=$ANDROID_CONF
+
+if [ -n "$ACTIVE" ]; then
+    CTRL=$(ctrl_from_conf "$ACTIVE" || true)
+    # init's own default, for a conf that declares nothing usable.
+    [ -n "$CTRL" ] || CTRL=/data/misc/wifi/sockets
+else
+    # No conf at all: nothing to preserve, and this is a first-time setup. emOS's
+    # own directory is ours to create, unlike /data/misc/wifi on a device that
+    # has never booted Android.
+    CTRL=/data/emos/sockets
+fi
 
 # Scanning needs a running supplicant. If none is up -- which is the normal
 # state on an unprovisioned device, where init is waiting for a conf -- start

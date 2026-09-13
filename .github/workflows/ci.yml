@@ -541,6 +541,17 @@ jobs:
         run: |
           cc -O2 -o /tmp/tmoutcheck emos/init/tmoutcheck.c
           /tmp/tmoutcheck
+      # The supplicant's control socket directory is declared inside the conf,
+      # and emOS has two confs that declare different ones — em-wifi's own file
+      # and the wizard's Android one — with wpa_conf() switching between them
+      # on which exists. Reading the wrong one is silent: the only caller is
+      # the reassociate nudge, so it does not fail, it leaves a device with
+      # good credentials sitting at DISCONNECTED for minutes, which looks on
+      # the ring exactly like a wrong password.
+      - name: The control socket is found in whichever conf is in use
+        run: |
+          cc -O2 -o /tmp/wpacheck emos/init/wpacheck.c
+          /tmp/wpacheck
       # The C hashes a password by hand — init is a static binary with no
       # crypto library — and the controller hashes it in Python. Nothing but
       # equal output proves they agree, and the failure mode is a device

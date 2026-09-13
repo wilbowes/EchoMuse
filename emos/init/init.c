@@ -1526,6 +1526,63 @@ static const char *wpa_conf(void)
     return NULL;
 }
 
+/* The control socket directory is declared INSIDE the conf, so it cannot be a
+ * constant here. em-wifi writes emOS's own file with /data/emos/sockets, while
+ * a wizard-provisioned device carries Android's /data/misc/wifi/sockets -- and
+ * wpa_conf() above prefers ours the moment it exists, so the same device moves
+ * from one to the other the first time somebody sets WiFi from the console.
+ *
+ * A wpa_cli pointed at the wrong directory fails with "Failed to connect to
+ * non-global ctrl_ifname", which is silent here: the only caller is the
+ * reassociate nudge below, and without it the supplicant sat at
+ * wpa_state=DISCONNECTED for three minutes instead of associating in ten
+ * seconds. So the directory is read from whichever conf the supplicant was
+ * actually started with, and logged next to it.
+ *
+ * The default is Android's, which is what every conf written before this
+ * declared, and what a device with no readable conf would have used anyway. */
+#define WPA_CTRL_DEFAULT "/data/misc/wifi/sockets"
+
+static void wpa_ctrl_dir(const char *conf, char *out, size_t n)
+{
+    snprintf(out, n, "%s", WPA_CTRL_DEFAULT);
+    int fd = open(conf, O_RDONLY);
+    if (fd < 0)
+        return;
+    char b[4096];
+    int r = (int)read(fd, b, sizeof b - 1);
+    close(fd);
+    if (r <= 0)
+        return;
+    b[r] = 0;
+    /* Last declaration wins, as it does in hostap: wpa_config_process_global
+     * is called per line and simply overwrites. Scanning the whole file rather
+     * than stopping at the first match keeps the two in agreement. */
+    for (char *p = b; p; ) {
+        char *line = p;
+        char *nl = strchr(p, '\n');
+        p = nl ? nl + 1 : NULL;
+        if (nl)
+            *nl = 0;
+        while (*line == ' ' || *line == '\t')
+            line++;
+        if (strncmp(line, "ctrl_interface=", 15) != 0)
+            continue;
+        char *v = line + 15;
+        /* Two spellings, both legal: Amazon's conf uses wpa_supplicant's
+         * "DIR=/path GROUP=wifi" form, ours writes a bare path. */
+        if (strncmp(v, "DIR=", 4) == 0)
+            v += 4;
+        char *sp = strpbrk(v, " \t");
+        if (sp)
+            *sp = 0;
+        /* A relative value means an abstract socket namespace, which wpa_cli
+         * -p cannot address -- leave the default rather than pass it on. */
+        if (*v == '/')
+            snprintf(out, n, "%s", v);
+    }
+}
+
 #define UDHCPC_SCRIPT "/tmp/udhcpc.sh"
 
 /* 24 turns of a 5s loop = two minutes. */
@@ -1658,7 +1715,14 @@ static void net_main(void)
      * goes away, and killed (to be respawned) if it has held carrier for 20s
      * without getting an address.
      */
-    char *reassoc[] = { "/system/bin/wpa_cli", "-p/data/misc/wifi/sockets",
+    /* Ours when the image carries it, Amazon's otherwise -- the same
+     * preference and the same reason as the supplicant above. The -p argument
+     * is filled in from the conf each time the supplicant is (re)started. */
+    static const char *const clis[] = { "/sbin/wpa_cli",
+                                        "/system/bin/wpa_cli", NULL };
+    const char *cli = first_exec(clis);
+    char pflag[160] = "-p" WPA_CTRL_DEFAULT;
+    char *reassoc[] = { (char *)(cli ? cli : clis[1]), pflag,
                         "-iwlan0", "reassociate", NULL };
     /* ntpd is pointed at the GATEWAY by IP, never at a hostname.
      *
@@ -1716,7 +1780,12 @@ static void net_main(void)
         }
         if (wpa < 0) {
             snprintf(cflag, sizeof cflag, "-c%s", conf);
-            netlog("wifi conf %s\n", conf);
+            /* Re-read per start, not once: em-wifi can change which conf
+             * wpa_conf() returns while this loop is running. */
+            char ctrl[128];
+            wpa_ctrl_dir(conf, ctrl, sizeof ctrl);
+            snprintf(pflag, sizeof pflag, "-p%s", ctrl);
+            netlog("wifi conf %s ctrl %s cli %s\n", conf, ctrl, reassoc[0]);
             wpa = spawn(supp);
             said_noconf = 0;
             nocarrier = 0;
