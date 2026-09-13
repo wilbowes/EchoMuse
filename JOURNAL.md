@@ -2605,3 +2605,85 @@ property service off a theory that one command on a working device then
 disproved. The rule that would have saved most of the day: **assemble a
 known-good reference running the same software and diff it, before theorising
 about mechanism.**
+
+## 2026-09-13 — the wizard can build a FireOS 6 image, and two "free wins" that were not
+
+Ten commits, all on `emos-fireos6-layout` (#502). No hardware today: everything
+here is code plus host tests, and the two things still owed both need a device.
+
+**WiFi under emOS was broken three ways, and the socket directory was the
+thread.** `wpa_supplicant.conf` declares its own control socket directory, and
+three places each hardcoded a different answer. `em-wifi` shipped yesterday
+writing emOS's own conf with `/data/emos/sockets`, while init's reassociate nudge
+and the firmware's `wpa_cli` both assumed Android's — so the moment anybody set
+WiFi from the console, the nudge and every scan reached nothing. The nudge
+failing is silent and expensive: without it a supplicant sat at
+`wpa_state=DISCONNECTED` for three minutes instead of associating in ten
+seconds, which on the ring is indistinguishable from a wrong password.
+
+All three now read the directory out of whichever conf `wpa_conf()` picked, with
+the same two spellings (`DIR=/path GROUP=wifi` and a bare path) and the same
+last-declaration-wins rule. `emos/init/wpacheck.c` is the fourth off-target check
+tool, 19 cases, and CI runs it.
+
+The firmware's own WiFi path needed more than that. `svc wifi disable/enable`
+cannot work without a framework, so the reload is now write-then-retire-the-
+supplicant on emOS and init's supervisor brings up a replacement — what em-wifi
+does from the console, for the same reason. `composeConf` also dropped the WPS
+and P2P globals there: our hostap is built without `CONFIG_WPS` or `CONFIG_P2P`,
+so they were fields it cannot use, tolerated only by the patch that exists for
+confs FireOS 6 left behind.
+
+**The wizard's FireOS 6 path was blocked in four places, not one.** The packer
+refused any init that was not AArch64, with a message asserting that emOS needs
+FireOS 5 — true when written, false since yesterday. `emos/build.sh` already
+sniffed the reference kernel correctly, so the shell path could build a FireOS 6
+image and the wizard could not. That sniffer moved into the packer and build.sh
+now calls it: two copies of "which architecture does this image want" can
+disagree without either being wrong alone.
+
+`init32` had been compiled in CI since FireOS 6 support landed, deliberately so
+it could not rot, and had never been published. It is published now — and the
+init is resolved by the endpoint that holds the reference rather than fetched by
+the wizard, because the reference is the only thing that knows which kernel it
+has. That also takes ~3.5MB out of a request that has already hit Home
+Assistant's ingress limit once.
+
+**The WiFi userspace was not reproducible and only half-built.**
+`build-wpa-supplicant.sh` fetched libnl-tiny from `master`, so nobody could say
+what the shipped binary was built from, and it only ever built `wpa_supplicant`
+— `wpa_cli`, which init needs for the nudge above, was made by hand. Now pinned
+(hostap by sha256, cross-checked against Arch's published value; libnl-tiny by
+commit) and measured **byte-identical across three builds in three directories**.
+The inits are byte-identical too, and the compiler image is `FROM` a
+digest-pinned base with no apt, pip or curl installs, so the whole release
+reproduces rather than merely being pinned.
+
+All of it ships as one bundle with a manifest of sha256s, so a partially
+published release cannot hand a build a mismatched set of parts. That manifest is
+also the first publisher-side digest anywhere in this path — `em_firmware`'s md5
+compares a cached file against bytes we downloaded ourselves, which catches a
+truncated cache and says nothing about what arrived from GitHub.
+
+**The tools go only into a 32-bit image, and the asymmetry is the point.** init
+prefers `/sbin/wpa_supplicant` the moment one exists, so including them in a
+FireOS 5 image would move the whole existing fleet off Amazon's working
+supplicant as a side effect of a provisioning change nobody would connect to it.
+
+**Two "free wins" on the audio path did not survive measurement**, and both would
+have been changes for the worse. `compression=None` on the WebSocket was carried
+as costing CPU "for no byte saving": measured on 89s of real TTS at the wire
+format, deflate **saves 25.6%** of bytes for **0.25% of a core**. Turning it off
+sends a quarter more bytes over the link that is already the bottleneck. And the
+EQ chain, recorded as 4–5% of stream duration, measures 1.1% here with a longest
+single event-loop block of **2.24ms** — nowhere near what produces Lounge's 9.7s
+`send_ms`. `write_limit` does not survive scrutiny either: it bounds what is
+buffered in the controller, not the device's 5.5s queue, so it only bites when
+the link cannot keep up and backpressure is correct there.
+
+What remains cheap and untouched is the prime gate: `primePeriods` is a
+hardcoded 24 (~1s of audio) against a 5.5s channel and is not in the config push.
+The uncomfortable part is that the device needing a bigger prime most is the one
+where it costs the most start latency, since on Lounge delivery is slower than
+realtime — so it wants to be adaptive from the `primeWaitMs` the device already
+reports, not a blanket bump.
