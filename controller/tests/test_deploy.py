@@ -2568,15 +2568,43 @@ def test_the_emos_release_workflow_asserts_what_it_publishes():
     """
     The last point before the artifact is something people flash. CI checks
     the tip of a branch; this checks the thing being published.
+
+    Read as YAML rather than grepped for a literal, because the published set is
+    now a list and the old substring check (`files: emos/build/init`) asserted
+    the FORMATTING of a one-item list — so adding the second init broke a test
+    that had no opinion about the thing it was protecting.
     """
-    wf = (CONTROLLER.parent / ".github" / "workflows" / "emos-release.yml").read_text()
+    import yaml
+    path = CONTROLLER.parent / ".github" / "workflows" / "emos-release.yml"
+    wf = path.read_text()
     assert "ARM aarch64" in wf, "the release must assert the init is aarch64"
-    assert "statically linked" in wf, "the release must assert the init is static"
-    assert "ringsim --check" in wf, "the release must run the ring invariants"
-    # The image is assembled on the user's side from their own boot partition,
-    # so the only thing published is the init.
-    assert "files: emos/build/init" in wf, \
-        "only the init is published — an image would carry Amazon's kernel"
+    assert "32-bit LSB executable, ARM" in wf, \
+        "the release must assert init32 is a 32-bit ARM binary"
+    assert "statically linked" in wf, "the release must assert the inits are static"
+    # All four off-target checks run against the source being published. Each
+    # one drives a parser or an invariant whose failure is silent on hardware.
+    for check in ("ringsim --check", "pwcheck", "tmoutcheck", "wpacheck"):
+        assert check in wf, f"the release must run {check}"
+
+    published = set()
+    for job in yaml.safe_load(wf)["jobs"].values():
+        for step in job["steps"]:
+            files = (step.get("with") or {}).get("files")
+            if files:
+                published |= {f.strip() for f in files.split("\n") if f.strip()}
+
+    # TWO inits, because the init must match the device's KERNEL: aarch64 for
+    # FireOS 5 and armv7a for FireOS 6. Publishing only one is how the wizard
+    # ended up unable to build a FireOS 6 image at all.
+    assert published == {"emos/build/init", "emos/build/init32"}, (
+        "an init is all that may be published, one per kernel architecture — "
+        f"got {sorted(published)}. A boot image would carry Amazon's kernel "
+        "and DTBs, so it is assembled on the user's side from their own "
+        "partition and never shipped from here.")
+    # `init` keeps that exact name: _fetch_latest_emos_release selects on it by
+    # exact name, so renaming it strands every controller already in the field.
+    assert '== "init"' in (CONTROLLER / "em_api.py").read_text(), \
+        "the release asset selection must match `init` by exact name"
 
 
 def test_every_debloat_push_asks_which_userspace_the_device_booted():
