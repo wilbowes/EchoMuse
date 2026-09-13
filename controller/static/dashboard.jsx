@@ -3877,14 +3877,37 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // able to read by-name is not evidence of danger, and refusing on it would
   // block any device whose TWRP lays that directory out differently — the same
   // reading the OTA free-space check applies to an unreadable df.
+  // Two unlock generations put the boot partition in two different places.
+  //
+  // amonet v1 INVERTS the by-name map under TWRP: the bare boot_a points at
+  // the unlock payload and TWRP publishes /dev/block/other-boot for the real
+  // kernel. Everything below the `v1` comment is that layout, unchanged.
+  //
+  // amonet v2 does not invert anything. It protects itself by pointing lk,
+  // preloader and tee at /tmp/ota-decoy/ instead, so an OTA writing a
+  // bootloader writes to tmpfs — which is why boot_a/boot_b are left pointing
+  // at real flash and there is no other-boot, no _x alias and no _amonet
+  // alias anywhere (v2 keeps its payload in expdb). Measured on a v2 device,
+  // TWRP 3.7.0_9-0, 2026-09-13.
+  //
+  // The consequence that matters: v1 got the ACTIVE slot for free, because
+  // other-boot named it. v2 flips the active slot on every install, so the
+  // slot has to be read at the moment the wizard runs — `ro.boot.slot_suffix`,
+  // which the bootloader sets on the kernel cmdline and TWRP itself uses.
+  // Never default to boot_a: escrowing the wrong slot backs up the other
+  // image while calling it a backup, and flashing it leaves the device
+  // booting what it booted before, which reads as the flash doing nothing.
   function classifyBootTarget(probe) {
     const target = (probe.match(/TARGET=(\S*)/) || [])[1] || '';
     const isBlock = /ISBLK=yes/.test(probe);
-    const names = [];
-    for (const m of probe.matchAll(/^NAME (\S+) (\S+)$/gm)) {
-      if (m[2] === target && !names.includes(m[1])) names.push(m[1]);
-    }
-    names.sort();
+    const entries = [...probe.matchAll(/^NAME (\S+) (\S+)$/gm)];
+    const namesFor = (dev) => {
+      const out = [];
+      for (const m of entries) if (m[2] === dev && !out.includes(m[1])) out.push(m[1]);
+      out.sort();
+      return out;
+    };
+    const names = namesFor(target);
     const label = names.length ? `${names.join(', ')} (${target})` : target;
 
     if (!target) {
@@ -3892,6 +3915,54 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         '/dev/block/other-boot did not resolve to anything. TWRP normally creates it; '
         + 'without it there is nothing safe to write to.' };
     }
+
+    // `readlink -f` echoes its argument back when the path does not exist, so
+    // target still reading other-boot means the alias is ABSENT rather than
+    // pointing somewhere bad. Those are different states: absent is v2 and is
+    // normal, whereas resolving to a non-block path is the tmpfs case below
+    // and is never safe.
+    if (target === '/dev/block/other-boot') {
+      const suffix = ((probe.match(/SUFFIX=(\S*)/) || [])[1] || '').trim();
+      const slotDev = ((probe.match(/SLOTDEV=(\S*)/) || [])[1] || '').trim();
+      const slotBlock = /SLOTBLK=yes/.test(probe);
+
+      // A v1-shaped map with no other-boot is a combination nothing has seen.
+      // Refusing costs a bug report; guessing costs the unlock.
+      const v1Aliases = entries.filter(m => /_(amonet|x)$/.test(m[1])).map(m => m[1]);
+      if (v1Aliases.length) {
+        return { ok: false, target, names, reason:
+          `/dev/block/other-boot does not exist, but the by-name map carries `
+          + `${v1Aliases.sort().join(', ')} — which belongs to the older amonet layout, `
+          + 'where the bare names are not the kernel. That combination is not a state '
+          + 'the wizard has seen, so nothing has been read or written. Please report '
+          + 'this with the line above.' };
+      }
+      if (!/^_[ab]$/.test(suffix)) {
+        return { ok: false, target, names, reason:
+          `Could not read which slot this device booted (ro.boot.slot_suffix is `
+          + `${suffix ? `"${suffix}"` : 'empty'}). This device has boot_a and boot_b and `
+          + 'switches between them, so there is no safe default — writing to the wrong '
+          + 'one leaves the device booting the image it booted before. Nothing has been '
+          + 'read or written.' };
+      }
+      const wanted = `boot${suffix}`;
+      if (!slotDev || slotDev === `/dev/block/by-name/${wanted}`) {
+        return { ok: false, target, names, reason:
+          `This device booted slot ${suffix.slice(1).toUpperCase()}, but `
+          + `/dev/block/by-name/${wanted} did not resolve to anything.` };
+      }
+      if (!slotBlock) {
+        return { ok: false, target, names, reason:
+          `/dev/block/by-name/${wanted} resolves to "${slotDev}", which is not a block `
+          + 'device. Writing there would land in TWRP\'s tmpfs and never reach flash.' };
+      }
+      const slotNames = namesFor(slotDev);
+      return { ok: true, layout: 'v2', slot: suffix, target: slotDev, names: slotNames,
+        reason: `${slotNames.length ? `${slotNames.join(', ')} ` : ''}(${slotDev}), `
+              + `the active slot ${suffix.slice(1).toUpperCase()}` };
+    }
+
+    // ── v1: other-boot exists and names the real kernel ──────────────────
     if (!isBlock) {
       return { ok: false, target, names, reason:
         `/dev/block/other-boot resolves to "${target}", which is not a block device. `
@@ -3907,7 +3978,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         + 'report this with the line above: it is not a state the wizard has seen.' };
     }
     if (names.some(n => n.endsWith('_x'))) {
-      return { ok: true, target, names, reason: label };
+      return { ok: true, layout: 'v1', target, names, reason: label };
     }
     // No _x alias and no _amonet alias, but named boot_a/boot_b: this is the
     // Android-style map, where the bare name IS the payload. The wizard should
@@ -3919,7 +3990,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         + 'Under that layout the bare name is amonet\'s payload rather than the FireOS '
         + 'kernel, so this is not somewhere to write a kernel. Refusing.' };
     }
-    return { ok: true, warn: true, target, names, reason:
+    return { ok: true, warn: true, layout: 'v1', target, names, reason:
       `could not identify ${target} in by-name — continuing, but it is not a partition this `
       + 'has been checked against.' };
   }
@@ -3936,10 +4007,18 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     const probe = await c.shell(
       'd=$(readlink -f /dev/block/other-boot 2>/dev/null); echo "TARGET=$d"; '
       + 'if [ -b "$d" ]; then echo "ISBLK=yes"; else echo "ISBLK=no"; fi; '
+      // The slot the BOOTLOADER picked. ro.boot.* comes from the kernel
+      // cmdline LK passed, so it is true inside TWRP too — unlike the
+      // ro.build.* properties, which describe the recovery ramdisk. Empty on
+      // amonet v1, where other-boot answers the same question.
+      + 's=$(getprop ro.boot.slot_suffix 2>/dev/null); echo "SUFFIX=$s"; '
+      + 'sd=$(readlink -f /dev/block/by-name/boot$s 2>/dev/null); echo "SLOTDEV=$sd"; '
+      + 'if [ -b "$sd" ]; then echo "SLOTBLK=yes"; else echo "SLOTBLK=no"; fi; '
       // Glob every boot_* rather than naming the four we expect: the payload
       // is only visible under TWRP as boot_a_amonet/boot_b_amonet, and a
-      // fixed list cannot report a name it was not told to look for.
-      + 'for n in /dev/block/platform/*/by-name/boot_*; do '
+      // fixed list cannot report a name it was not told to look for. Both
+      // by-name directories, because amonet v2's TWRP has only the short one.
+      + 'for n in /dev/block/platform/*/by-name/boot_* /dev/block/by-name/boot_*; do '
       + '[ -e "$n" ] && echo "NAME ${n##*/} $(readlink -f "$n" 2>/dev/null)"; done');
     const boot = classifyBootTarget(probe);
     if (!boot.ok) throw new Error(boot.reason);
@@ -5380,7 +5459,18 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     const probe = await c.shell(
       'd=$(readlink -f /dev/block/other-boot 2>/dev/null); echo "TARGET=$d"; '
       + 'if [ -b "$d" ]; then echo "ISBLK=yes"; else echo "ISBLK=no"; fi; '
-      + 'for n in /dev/block/platform/*/by-name/boot_*; do '
+      // The slot the BOOTLOADER picked. ro.boot.* comes from the kernel
+      // cmdline LK passed, so it is true inside TWRP too — unlike the
+      // ro.build.* properties, which describe the recovery ramdisk. Empty on
+      // amonet v1, where other-boot answers the same question.
+      + 's=$(getprop ro.boot.slot_suffix 2>/dev/null); echo "SUFFIX=$s"; '
+      + 'sd=$(readlink -f /dev/block/by-name/boot$s 2>/dev/null); echo "SLOTDEV=$sd"; '
+      + 'if [ -b "$sd" ]; then echo "SLOTBLK=yes"; else echo "SLOTBLK=no"; fi; '
+      // Glob every boot_* rather than naming the four we expect: the payload
+      // is only visible under TWRP as boot_a_amonet/boot_b_amonet, and a
+      // fixed list cannot report a name it was not told to look for. Both
+      // by-name directories, because amonet v2's TWRP has only the short one.
+      + 'for n in /dev/block/platform/*/by-name/boot_* /dev/block/by-name/boot_*; do '
       + '[ -e "$n" ] && echo "NAME ${n##*/} $(readlink -f "$n" 2>/dev/null)"; done');
     // The same guard the FireOS flow uses, and for the same reason: the
     // by-name map is INVERTED between TWRP and Android, and reading the wrong
@@ -5402,8 +5492,16 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // costs nothing, and the failure it prevents is a device that takes the
     // flash and then does not boot, which is the most expensive outcome
     // available here.
+    //
+    // v2 keeps its payload in expdb rather than in a partition alias, so the
+    // absence of boot_*_amonet there is expected and says nothing. Step 1 has
+    // already identified the unlock generation from expdb and the TWRP
+    // version; warning again here would contradict it.
     const amonet = /NAME boot_[ab]_amonet /.test(probe);
-    if (!amonet) {
+    if (boot.layout === 'v2') {
+      addLog(`  amonet v2 layout, booted slot `
+           + `${boot.slot.slice(1).toUpperCase()}`, 'ok');
+    } else if (!amonet) {
       addLog('No amonet partitions in the by-name map. This device may not be '
            + 'unlocked, or may be unlocked by some other means. You are in TWRP, '
            + 'which normally means it IS unlocked — but if the flash does not '

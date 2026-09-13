@@ -130,9 +130,14 @@ for (const [part, dev] of [["boot_a", "/dev/block/mmcblk0p17"],
   check("an unresolved target is refused", r.ok === false, JSON.stringify(r));
 }
 
-// Resolves to a name, but not to a block device.
+// Resolves, but not to a block device. The path has to be something OTHER
+// than other-boot itself: `readlink -f` echoes its argument back when the
+// path does not exist, so other-boot resolving to other-boot means the alias
+// is ABSENT, which is amonet v2 and is handled further down. amonet v2 points
+// lk/preloader/tee at /tmp/ota-decoy, so a tmpfs target is a real hazard
+// rather than a hypothetical one.
 {
-  const r = classifyBootTarget(probe("/dev/block/other-boot", TWRP, false));
+  const r = classifyBootTarget(probe("/tmp/ota-decoy/boot", TWRP, false));
   check("a non-block target is refused", r.ok === false, JSON.stringify(r));
   check("non-block refusal says so", /not a block device/.test(r.reason), r.reason);
 }
@@ -188,6 +193,125 @@ for (const [part, dev] of [["boot_a", "/dev/block/mmcblk0p17"],
     ["reads back", /dd if=\$\{boot\.target\} bs=1 skip=64/],
   ]) {
     check(`runPatchBoot ${what} the classified target`, re.test(body), body.slice(0, 0));
+  }
+}
+
+// ── amonet v2 ────────────────────────────────────────────────────────────────
+//
+// Read off a v2 device in TWRP 3.7.0_9-0 on 2026-09-13. Nothing is inverted:
+// there is no other-boot, no _x alias and no _amonet alias, the payload lives
+// in expdb, and boot_a/boot_b point at the real kernel partitions. Only
+// /dev/block/by-name exists — the platform path the v1 probe globbed does not.
+//
+// The active slot MOVES: installing a FireOS zip flashes the inactive slot and
+// switches to it, so `ro.boot.slot_suffix` is the only thing that can answer
+// which partition this device actually boots.
+const V2 = [
+  ["boot_a", "p10"], ["boot_b", "p11"],
+].map(([n, p]) => `NAME ${n} /dev/block/mmcblk0${p}`).join("\n");
+
+// `readlink -f` echoes its argument back when the path does not exist, which
+// is what an absent other-boot looks like.
+const v2probe = (suffix, names = V2, slotBlock = true, slotDev = undefined) => {
+  const dev = slotDev !== undefined ? slotDev
+            : (suffix === "_a" ? "/dev/block/mmcblk0p10"
+             : suffix === "_b" ? "/dev/block/mmcblk0p11"
+             : `/dev/block/by-name/boot${suffix}`);
+  return `TARGET=/dev/block/other-boot\nISBLK=no\nSUFFIX=${suffix}\n`
+       + `SLOTDEV=${dev}\nSLOTBLK=${slotBlock ? "yes" : "no"}\n${names}`;
+};
+
+// The measured device: booted slot B, so p11 and never p10.
+{
+  const r = classifyBootTarget(v2probe("_b"));
+  check("v2 slot B is accepted", r.ok === true, JSON.stringify(r));
+  check("v2 slot B targets p11", r.target === "/dev/block/mmcblk0p11", JSON.stringify(r));
+  check("v2 slot B is reported as v2", r.layout === "v2", JSON.stringify(r));
+  check("v2 slot B records the slot", r.slot === "_b", JSON.stringify(r));
+  check("v2 slot B names the partition", r.names.join(",") === "boot_b", JSON.stringify(r.names));
+  check("v2 slot B is not warned about", !r.warn, JSON.stringify(r));
+}
+
+// The other slot, since it is whichever one the last install did not write.
+{
+  const r = classifyBootTarget(v2probe("_a"));
+  check("v2 slot A is accepted", r.ok === true, JSON.stringify(r));
+  check("v2 slot A targets p10", r.target === "/dev/block/mmcblk0p10", JSON.stringify(r));
+}
+
+// No slot suffix is a REFUSAL, never a default. boot_a is the wrong answer
+// half the time, and writing it leaves the device booting what it booted
+// before — which reads as the flash having silently done nothing.
+for (const suffix of ["", "_c", "a", "_ab"]) {
+  const r = classifyBootTarget(v2probe(suffix));
+  check(`v2 refuses slot suffix ${JSON.stringify(suffix)}`, r.ok === false, JSON.stringify(r));
+  check(`v2 refusal for ${JSON.stringify(suffix)} says nothing was written`,
+        /Nothing has been (read or )?written/.test(r.reason), r.reason);
+  check(`v2 refusal for ${JSON.stringify(suffix)} does not name a target`,
+        r.target !== "/dev/block/mmcblk0p10" && r.target !== "/dev/block/mmcblk0p11",
+        JSON.stringify(r));
+}
+
+// A slot that resolves to something that is not a block device is the tmpfs
+// case, which is never safe — amonet v2 points lk/preloader/tee at
+// /tmp/ota-decoy, so a wrong name really can land there.
+{
+  const r = classifyBootTarget(v2probe("_b", V2, false, "/tmp/ota-decoy/boot_b"));
+  check("v2 refuses a non-block slot", r.ok === false, JSON.stringify(r));
+  check("v2 non-block refusal mentions tmpfs", /tmpfs/.test(r.reason), r.reason);
+}
+
+// A slot that does not resolve at all.
+{
+  const r = classifyBootTarget(v2probe("_b", V2, false, "/dev/block/by-name/boot_b"));
+  check("v2 refuses an unresolved slot", r.ok === false, JSON.stringify(r));
+  check("v2 unresolved refusal names the slot", /boot_b/.test(r.reason), r.reason);
+}
+
+// A v1-shaped map with no other-boot is a combination nothing has seen.
+// Refusing costs a bug report; guessing costs the unlock.
+{
+  const r = classifyBootTarget(v2probe("_a", TWRP));
+  check("no other-boot but v1 aliases is refused", r.ok === false, JSON.stringify(r));
+  check("that refusal names the v1 aliases", /_amonet|_x/.test(r.reason), r.reason);
+}
+
+// v1 must be completely unaffected by any of the above: its probe carries no
+// SUFFIX at all, and other-boot resolving to a block device still decides.
+{
+  const withSuffix = probe("/dev/block/mmcblk0p10") + "\nSUFFIX=\nSLOTDEV=\nSLOTBLK=no";
+  const r = classifyBootTarget(withSuffix);
+  check("v1 ignores an empty slot suffix", r.ok === true, JSON.stringify(r));
+  check("v1 is reported as v1", r.layout === "v1", JSON.stringify(r));
+  check("v1 still targets p10", r.target === "/dev/block/mmcblk0p10", JSON.stringify(r));
+}
+
+// A v1 device that DOES report a slot suffix must still go down the v1 path —
+// other-boot is the discriminator, not the presence of the property.
+{
+  const withSuffix = probe("/dev/block/mmcblk0p11") + "\nSUFFIX=_a\nSLOTDEV=/dev/block/mmcblk0p10\nSLOTBLK=yes";
+  const r = classifyBootTarget(withSuffix);
+  check("v1 with a slot suffix still uses other-boot", r.ok === true, JSON.stringify(r));
+  check("v1 with a slot suffix keeps other-boot's target",
+        r.target === "/dev/block/mmcblk0p11", JSON.stringify(r));
+}
+
+// The probes in both flows must collect what the v2 branch reads, or it is
+// dead code that refuses every v2 device. Comments stripped first, for the
+// reason the runPatchBoot check below gives.
+for (const fn of ["runEscrowBoot", "runPatchBoot"]) {
+  // Line comments only. The block-comment pattern treats the `/*/` inside
+  // /dev/block/platform/*/by-name as a comment and eats the rest of the
+  // command — stripping it would fail a probe that is present and correct.
+  const body = liftFunction(fn).replace(/^[ \t]*\/\/.*$/gm, "");
+  for (const [what, needle] of [
+    ["reads the slot suffix", "ro.boot.slot_suffix"],
+    ["emits SUFFIX", "SUFFIX="],
+    ["emits SLOTDEV", "SLOTDEV="],
+    ["emits SLOTBLK", "SLOTBLK="],
+    ["globs the short by-name path", "/dev/block/by-name/boot_*"],
+  ]) {
+    check(`${fn} ${what}`, body.includes(needle), `${fn} probe is missing ${needle}`);
   }
 }
 
