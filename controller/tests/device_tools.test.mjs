@@ -83,13 +83,22 @@ const fakeClient = (out) => ({ shell: async () => out });
 }
 
 // Resolved once per connection: the result is cached on the client, so the
-// partition write does not pay a round trip per call.
+// partition write does not pay round trips per call. Resolution itself takes
+// more than one shell call (the tools, then whether dd accepts conv=), so what
+// is asserted is that a SECOND call spends nothing — not a call count.
 {
   let calls = 0;
-  const c = { shell: async () => { calls++; return "TOOL md5sum md5sum\nTOOL dd dd\nTOOL base64 base64\nTOOL tee tee"; } };
+  const c = { shell: async (cmd) => {
+    calls++;
+    return cmd.includes("CONV_OK") ? "CONV_OK"
+         : "TOOL md5sum md5sum\nTOOL dd dd\nTOOL base64 base64\nTOOL tee tee";
+  } };
   await deviceTools(c);
+  const afterFirst = calls;
   await deviceTools(c);
-  check("tools are probed once per connection", calls === 1, `probed ${calls} times`);
+  check("a second resolve costs nothing", calls === afterFirst,
+        `${calls - afterFirst} extra shell call(s) on the cached path`);
+  check("the first resolve is bounded", afterFirst <= 2, `${afterFirst} calls to resolve`);
 }
 
 // A tool that answers nowhere must THROW and name itself. Returning a guess
@@ -122,6 +131,55 @@ for (const [what, out] of [
   check("no call site hardcodes a busybox tool",
         hits.length === 0,
         `found ${hits.join(", ")} — use deviceTools(c) instead`);
+}
+
+// ── conv=fsync ───────────────────────────────────────────────────────────────
+//
+// toybox builds conv= optionally and a stock FireOS 6 recovery has it compiled
+// out: `dd ... conv=fsync` answers "dd: conv option disabled" and copies
+// nothing. On a partition write that presents as impossible throughput and a
+// read-back still holding the old image, which is what it cost on hardware.
+{
+  const c = {
+    shell: async (cmd) => cmd.includes("CONV_OK")
+      ? "CONV_OK"
+      : "TOOL md5sum md5sum\nTOOL dd dd\nTOOL base64 base64\nTOOL tee tee",
+  };
+  const t = await deviceTools(c);
+  check("conv=fsync is used where dd supports it", t.ddConv === " conv=fsync", JSON.stringify(t));
+}
+
+{
+  const c = {
+    shell: async (cmd) => cmd.includes("CONV_OK")
+      ? "dd: conv option disabled"
+      : "TOOL md5sum md5sum\nTOOL dd dd\nTOOL base64 base64\nTOOL tee tee",
+  };
+  const t = await deviceTools(c);
+  check("conv=fsync is dropped where dd refuses it", t.ddConv === "", JSON.stringify(t));
+  check("the dd tool itself still resolves", t.dd === "dd", JSON.stringify(t));
+}
+
+// The flag is a whole argument including its leading space, so composing it
+// into the command can never produce `bs=1048576conv=fsync`.
+{
+  const c = {
+    shell: async (cmd) => cmd.includes("CONV_OK")
+      ? "CONV_OK"
+      : "TOOL md5sum md5sum\nTOOL dd dd\nTOOL base64 base64\nTOOL tee tee",
+  };
+  const t = await deviceTools(c);
+  check("the conv flag carries its own separator", t.ddConv.startsWith(" "), JSON.stringify(t.ddConv));
+}
+
+// _writeBootPartition must treat a dd that printed no record counts as "did
+// not run" rather than as a failed write, and must not go on to read back.
+{
+  const body = liftFunction("_writeBootPartition").replace(/^[ \t]*\/\/.*$/gm, "");
+  check("_writeBootPartition checks dd actually ran",
+        /records in/i.test(body), "no guard on dd's record counts");
+  check("_writeBootPartition composes the conv flag rather than hardcoding it",
+        body.includes("${T.ddConv}") && !/conv=fsync/.test(body), body.slice(0, 0));
 }
 
 if (failures) {

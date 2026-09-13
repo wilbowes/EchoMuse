@@ -3181,6 +3181,24 @@ async function deviceTools(c) {
   const out = await c.shell(probe);
   const tools = {};
   for (const m of out.matchAll(/^TOOL (\S+) (.+)$/gm)) tools[m[1]] = m[2].trim();
+
+  // Whether this dd accepts `conv=`. toybox builds it optionally and a stock
+  // FireOS 6 recovery has it compiled OUT: the command exits with
+  // "dd: conv option disabled" having written nothing at all, which on a
+  // partition write reads as 180MB/s and a read-back that still holds the old
+  // image. Measured 2026-09-13 on G090LF11752215LE; the device was never
+  // modified, because a dd that refuses its arguments does nothing.
+  //
+  // Asked with a one-byte write to a temp file rather than by parsing a
+  // version, and the fallback is simply to drop the flag — the callers
+  // already follow every write with `sync`, and the read-back after
+  // drop_caches is what actually proves a write landed.
+  if (tools.dd) {
+    const conv = await c.shell(
+      `${tools.dd} if=/dev/zero of=/tmp/.em_ddconv bs=1 count=1 conv=fsync `
+      + `>/dev/null 2>&1 && echo CONV_OK; rm -f /tmp/.em_ddconv`);
+    tools.ddConv = /CONV_OK/.test(conv) ? ' conv=fsync' : '';
+  }
   c._tools = tools;
   const missing = _TOOL_NAMES.filter(n => !tools[n]);
   if (missing.length) {
@@ -5769,14 +5787,15 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     }
     addLog('  staged and verified on the device');
 
-    // conv=fsync, then sync, then drop the page cache BEFORE reading back.
-    // A read-back that comes from the cache confirms the cache, not the
-    // partition — and a write that reports implausible throughput (this eMMC
-    // does 2.5–9 MB/s) went to cache and is lost on the next boot.
+    // conv=fsync where dd supports it, then sync, then drop the page cache
+    // BEFORE reading back. A read-back that comes from the cache confirms the
+    // cache, not the partition — and a write that reports implausible
+    // throughput (this eMMC does 2.5–9 MB/s) went to cache and is lost on the
+    // next boot.
     addLog(`Writing to ${target}…`);
     const t0 = Date.now();
     const wrote = await c.shell(
-      `${T.dd} if=/tmp/emos_boot.img of=${target} bs=1048576 conv=fsync 2>&1; sync`);
+      `${T.dd} if=/tmp/emos_boot.img of=${target} bs=1048576${T.ddConv} 2>&1; sync`);
     const secs = (Date.now() - t0) / 1000;
     addLog(wrote.trim() || '(done)');
     const mbps = (bytes.length / 1024 / 1024) / Math.max(secs, 0.001);
@@ -5785,6 +5804,20 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       addLog('That throughput is not achievable on this eMMC, so the write '
            + 'probably went to cache. The read-back below is the check that '
            + 'matters.', 'warn');
+    }
+    // dd ALWAYS prints its record counts to stderr, which is captured above.
+    // Their absence means it never copied anything — it rejected its own
+    // arguments and exited. That is not a failed write, it is no write, and
+    // saying so is the difference between one line and an evening: a stock
+    // FireOS 6 recovery's toybox dd has conv= compiled out and answers
+    // "dd: conv option disabled", which otherwise presents as an impossible
+    // 180MB/s followed by a read-back that still holds the old image.
+    if (!/records in/i.test(wrote)) {
+      await c.shell('rm -f /tmp/emos_boot.img');
+      return `dd did not run: it answered ${JSON.stringify(wrote.trim()) || '(nothing)'} `
+           + `and copied nothing, so ${target} is untouched and the device is `
+           + `exactly as it was. This is a fault in the wizard rather than in `
+           + `your device — please report it with that message.`;
     }
     const short = _ddShortWrite(wrote);
     if (short) {
