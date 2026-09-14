@@ -145,6 +145,78 @@ def test_agrees_with_mkboot(tmp_path):
         "module docstring in em_emos_build.py")
 
 
+def test_the_two_packers_stamp_the_system_partition_identically(tmp_path):
+    """The stamp decides which FireOS userspace emOS mounts, so the wizard's
+    packer and the standalone tool must write it the same way.
+
+    Drift here is invisible: both images boot, and the one built by the wrong
+    tool mounts a different Amazon userspace than it was built beside."""
+    import os
+    mkboot = _load_mkboot()
+    ref = make_reference()
+    parts = eb.split_reference(ref)
+    ramdisk = eb.build_ramdisk(fake_init(), "0.1-test")
+
+    mine = eb.pack(parts, parts["zimage"], parts["dtbs"], ramdisk,
+                   system_part=14)
+
+    ref_p, z_p = tmp_path / "ref.img", tmp_path / "zimage"
+    rd_p, out_p = tmp_path / "ramdisk.gz", tmp_path / "out.img"
+    ref_p.write_bytes(ref)
+    z_p.write_bytes(parts["zimage"])
+    rd_p.write_bytes(ramdisk)
+    argv, env = sys.argv, os.environ.get("EMOS_SYSTEM_PART")
+    sys.argv = ["mkboot.py", str(ref_p), str(z_p), str(rd_p), str(out_p)]
+    os.environ["EMOS_SYSTEM_PART"] = "14"
+    try:
+        mkboot.main()
+    finally:
+        sys.argv = argv
+        if env is None:
+            os.environ.pop("EMOS_SYSTEM_PART", None)
+        else:
+            os.environ["EMOS_SYSTEM_PART"] = env
+
+    assert out_p.read_bytes() == mine, (
+        "the two packers stamp emos.system= differently")
+    cmdline = mine[64:64 + 512].split(b"\0")[0].decode()
+    assert "emos.system=/dev/block/mmcblk0p14" in cmdline
+    # Exactly one. The kernel takes the last of a repeated parameter, so a
+    # second stamp is an image that works and reads as whichever you looked at.
+    assert cmdline.count("emos.system=") == 1
+
+
+def test_restamping_replaces_rather_than_appends():
+    """Rebuilding an emOS image for a different slot is the case that produces
+    two stamps, and it is reachable — the packer already handles rebuilding
+    from an emOS image for the ramoops block."""
+    once = eb._stamp_cmdline_key(b"ro init=/init", eb.SYSTEM_CMDLINE_KEY,
+                                 "/dev/block/mmcblk0p13")
+    twice = eb._stamp_cmdline_key(once, eb.SYSTEM_CMDLINE_KEY,
+                                  "/dev/block/mmcblk0p14")
+    assert twice.decode().count("emos.system=") == 1
+    assert b"mmcblk0p14" in twice and b"mmcblk0p13" not in twice
+
+
+def test_the_system_stamp_key_is_the_same_string():
+    """Two packers, one key — and init.c's parser matches on it exactly."""
+    assert eb.SYSTEM_CMDLINE_KEY == _load_mkboot().SYSTEM_CMDLINE_KEY
+    init_c = (REPO / "emos" / "init" / "init.c").read_text()
+    assert f'"{eb.SYSTEM_CMDLINE_KEY}"' in init_c, (
+        "init.c does not parse the key the packers write")
+
+
+def test_an_impossible_system_partition_is_refused():
+    """A wrong partition mounts a different userspace and boots, so this is
+    refused at build time rather than discovered on a device."""
+    parts = eb.split_reference(make_reference())
+    ramdisk = eb.build_ramdisk(fake_init(), "0.1")
+    for bad in (0, -1, 128, 999):
+        with pytest.raises(eb.BuildError, match="mmcblk0 partition number"):
+            eb.pack(parts, parts["zimage"], parts["dtbs"], ramdisk,
+                    system_part=bad)
+
+
 def test_the_ramoops_cmdline_is_the_same_string():
     """It names a physical address the vendor device tree reserves; a copy that
     drifts points the crash log at memory something else owns."""

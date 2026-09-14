@@ -100,6 +100,7 @@ jobs:
           node controller/tests/boot_image_length.test.mjs
           node controller/tests/number_field.test.mjs
           node controller/tests/unlock_verdict.test.mjs
+          node controller/tests/slot_choice.test.mjs
 
   device-tests:
     name: Device Go tests
@@ -552,6 +553,8 @@ jobs:
         run: |
           cc -O2 -o /tmp/wpacheck emos/init/wpacheck.c
           /tmp/wpacheck
+          cc -O2 -o /tmp/cmdlinecheck emos/init/cmdlinecheck.c
+          /tmp/cmdlinecheck
       # The C hashes a password by hand — init is a static binary with no
       # crypto library — and the controller hashes it in Python. Nothing but
       # equal output proves they agree, and the failure mode is a device

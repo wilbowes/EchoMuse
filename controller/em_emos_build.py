@@ -407,8 +407,34 @@ def reference_kernel_arch(ref: bytes) -> str:
     return ""
 
 
+# The partition holding the FireOS userspace an image was built beside, stamped
+# onto its own cmdline so emOS can mount the right one — see cmdline_system_part
+# in emos/init/init.c, and emos/init/cmdlinecheck.c, which pins this format.
+#
+# A full device path rather than a bare number because this is the field
+# somebody supporting a device gets asked to read out of `od` on the image or
+# `/proc/cmdline` on the device, and "13" alone says nothing.
+SYSTEM_CMDLINE_KEY = "emos.system="
+
+
+def _stamp_cmdline_key(cmdline: bytes, key: str, value: str) -> bytes:
+    """Set `key=value` on a cmdline, replacing any value already there.
+
+    Not the same dedup as the ramoops block below, and it cannot be: that one
+    asks whether the WHOLE string is already present, which is right for a
+    fixed block and wrong for a key whose value changes. Rebuilding an emOS
+    image stamped p13 against a device wanting p14 would append a second
+    `emos.system=`, and the kernel takes the LAST of a repeated parameter — so
+    the image would work, carry two contradictory stamps, and read as whichever
+    one somebody happened to look at.
+    """
+    kept = [tok for tok in cmdline.split() if not tok.startswith(key.encode())]
+    kept.append(f"{key}{value}".encode())
+    return b" ".join(kept)
+
+
 def pack(parts: dict, zimage: bytes, dtbs: bytes, ramdisk: bytes,
-         extra_cmdline: str = RAMOOPS_CMDLINE) -> bytes:
+         extra_cmdline: str = RAMOOPS_CMDLINE, system_part: int = None) -> bytes:
     """Assemble a boot image from its parts, using the reference's own header."""
     cmdline = parts["cmdline"]
     # Appended only if it is not already there.
@@ -422,6 +448,15 @@ def pack(parts: dict, zimage: bytes, dtbs: bytes, ramdisk: bytes,
     # which is the first time anything has repacked an emOS image.
     if extra_cmdline and extra_cmdline.encode() not in cmdline:
         cmdline = cmdline + b" " + extra_cmdline.encode()
+    # After the ramoops block, so the stamp is last and most visible in a dump.
+    if system_part is not None:
+        if not 1 <= int(system_part) <= 127:
+            raise BuildError(
+                f"the /system partition must be an mmcblk0 partition number, "
+                f"not {system_part!r}")
+        cmdline = _stamp_cmdline_key(
+            cmdline, SYSTEM_CMDLINE_KEY,
+            f"/dev/block/mmcblk0p{int(system_part)}")
     if len(cmdline) > 511:
         raise BuildError(
             f"the kernel command line is too long for the 512-byte field "
@@ -571,11 +606,19 @@ def init_binary_problems(init_binary: bytes, arch: str = ARCH_ARM64) -> list:
 
 
 def build_emos_image(reference: bytes, init_binary: bytes, version: str,
-                     build_id: str = "", sbin: dict = None) -> dict:
+                     build_id: str = "", sbin: dict = None,
+                     system_part: int = None) -> dict:
     """Build the image, refusing rather than warning at every gate.
 
     Returns the image and what went into it, so the wizard can show the user
     the numbers it decided on rather than asking them to trust the result.
+
+    `system_part` is the partition holding the FireOS userspace this reference
+    was read beside, stamped onto the image's own cmdline. It is passed rather
+    than derived because only the caller knows it: the wizard resolves
+    system_a/system_b through TWRP's by-name map, which is the one place those
+    names exist. Omitted, the image carries no stamp and emOS falls back to the
+    partition it hardcoded before this existed, so older behaviour is kept.
     """
     # Against the REFERENCE's kernel, not a constant: the same function builds
     # for both, and only the user's own image knows which.
@@ -636,7 +679,8 @@ def build_emos_image(reference: bytes, init_binary: bytes, version: str,
             + detail)
 
     ramdisk = build_ramdisk(init_binary, version, build_id, sbin)
-    image = pack(parts, parts["zimage"], parts["dtbs"], ramdisk)
+    image = pack(parts, parts["zimage"], parts["dtbs"], ramdisk,
+                 system_part=system_part)
     return dict(
         image=image,
         md5=hashlib.md5(image).hexdigest(),

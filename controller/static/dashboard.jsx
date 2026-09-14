@@ -3393,6 +3393,8 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // that matters is the one downloaded to the operator's disk at step 2.
   const [emosRef, setEmosRef]       = useState(null);
   const [emosTarget, setEmosTarget] = useState(null);
+  // Which slot keeps stock and which one emOS goes in — see chooseBootSlots.
+  const [emosPlan, setEmosPlan]     = useState(null);
   const [emosImage, setEmosImage]   = useState(null);
   // Holds the operator's own copy of the escrowed image when this session no
   // longer has one — a page reload loses emosRef, which is exactly when the
@@ -3969,6 +3971,94 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // Never default to boot_a: escrowing the wrong slot backs up the other
   // image while calling it a backup, and flashing it leaves the device
   // booting what it booted before, which reads as the flash doing nothing.
+  // ── Which slot holds stock, and which one emOS goes in ───────────────────
+  //
+  // An emOS install is a PAIR: the stock boot image we built from, and the
+  // FireOS userspace it was read beside. Which boot slot emOS physically
+  // occupies is just storage — the bootloader is pointed at it afterwards.
+  //
+  // So the stock boot image is never overwritten. It is the build reference,
+  // it is the only way back to FireOS, and it is the only way to rebuild an
+  // emOS image later — the packer needs a stock kernel and DTBs, and we ship
+  // neither. Writing the slot the device happens to have BOOTED, which is what
+  // this used to do, destroys it on every provision: a stock device boots the
+  // slot its stock image is in.
+  //
+  // Note /system is never written by any of this. Both system partitions hold
+  // Amazon's userspace on every device, untouched, which is why a device with
+  // emOS in both boot slots still runs.
+  //
+  // Three states per slot, off one 512-byte header read:
+  //   absent  no such partition
+  //   empty   no ANDROID! magic — nothing bootable there
+  //   ours    magic, and our own emos.system= on the cmdline
+  //   stock   magic, no stamp — somebody else's, i.e. Amazon's
+  function classifyBootSlots(probe) {
+    const out = { a: { state: 'absent', dev: '' }, b: { state: 'absent', dev: '' },
+                  sys: { a: '', b: '' } };
+    for (const m of probe.matchAll(/^SLOT ([ab]) (\S+) ?(\S*)$/gm)) {
+      out[m[1]] = { state: m[2], dev: m[3] || '' };
+    }
+    for (const m of probe.matchAll(/^SYS ([ab]) (\S+)$/gm)) out.sys[m[1]] = m[2];
+    return out;
+  }
+
+  // The decision, pure so it can be tested without a device.
+  //
+  // `suffix` is ro.boot.slot_suffix — the slot the device BOOTED FROM. It is
+  // used only to break the both-stock tie, never to choose where to write: it
+  // says nothing about boot-next, which lives in the BCB.
+  function chooseBootSlots(slots, suffix) {
+    const other = (s) => (s === 'a' ? 'b' : 'a');
+    const stock = ['a', 'b'].filter(s => slots[s].state === 'stock');
+    const booted = /^_([ab])$/.test(suffix || '') ? suffix.slice(1) : '';
+
+    if (!stock.length) {
+      const both = ['a', 'b'].every(s => slots[s].state === 'ours');
+      return { ok: false, reason: both
+        ? 'Both boot slots already hold emOS, so there is no stock FireOS boot '
+          + 'image on this device to build from or fall back to. Restore your '
+          + 'escrowed boot image into one slot first, then run this again.'
+        : 'Neither boot slot holds a stock FireOS boot image, so there is '
+          + 'nothing to build an emOS image from. Nothing has been read or '
+          + 'written.' };
+    }
+
+    // Both stock: keep the one the device boots today and take the other, so
+    // the image the user is running is the one preserved.
+    const donor = stock.length === 2 ? (booted || 'a') : stock[0];
+    const target = other(donor);
+
+    if (slots[target].state === 'stock' && stock.length !== 2) {
+      return { ok: false, reason: 'Internal error choosing boot slots.' };
+    }
+    if (!slots[target].dev) {
+      return { ok: false, reason:
+        `Slot ${target.toUpperCase()} is where emOS would go, but `
+        + `/dev/block/by-name/boot_${target} did not resolve to a block device. `
+        + 'Nothing has been read or written.' };
+    }
+
+    // The system partition PAIRED with the donor — stamped into the image so
+    // emOS mounts the userspace it was built beside rather than assuming.
+    const sysDev = slots.sys[donor] || '';
+    const sysPart = (sysDev.match(/mmcblk0p(\d+)$/) || [])[1];
+    if (!sysPart) {
+      return { ok: false, reason:
+        `Could not resolve system_${donor} to a partition `
+        + `(/dev/block/by-name/system_${donor} reads "${sysDev || 'nothing'}"). `
+        + 'emOS needs Amazon\'s userspace from that slot to run, so the image '
+        + 'cannot be built without knowing which one it is.' };
+    }
+
+    return { ok: true, donor, target,
+             donorDev: slots[donor].dev, targetDev: slots[target].dev,
+             systemPart: Number(sysPart),
+             reason: `stock FireOS stays in slot ${donor.toUpperCase()}; emOS goes `
+                   + `in slot ${target.toUpperCase()}, built against system_${donor} `
+                   + `(p${sysPart})` };
+  }
+
   function classifyBootTarget(probe) {
     const target = (probe.match(/TARGET=(\S*)/) || [])[1] || '';
     const isBlock = /ISBLK=yes/.test(probe);
@@ -5545,7 +5635,24 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       // fixed list cannot report a name it was not told to look for. Both
       // by-name directories, because amonet v2's TWRP has only the short one.
       + 'for n in /dev/block/platform/*/by-name/boot_* /dev/block/by-name/boot_*; do '
-      + '[ -e "$n" ] && echo "NAME ${n##*/} $(readlink -f "$n" 2>/dev/null)"; done');
+      + '[ -e "$n" ] && echo "NAME ${n##*/} $(readlink -f "$n" 2>/dev/null)"; done; '
+      // What each boot slot HOLDS, from its own 512-byte header — see
+      // classifyBootSlots. `ANDROID!` says there is a boot image there at all;
+      // our own emos.system= on the cmdline says it is ours. Reading the
+      // header on the device rather than pulling 16MB twice.
+      + 'for x in a b; do '
+      + 'd=$(readlink -f /dev/block/by-name/boot_$x 2>/dev/null); '
+      + 'if [ ! -b "$d" ]; then echo "SLOT $x absent"; continue; fi; '
+      + 'm=$(dd if="$d" bs=8 count=1 2>/dev/null); '
+      + 'if [ "$m" != "ANDROID!" ]; then echo "SLOT $x empty $d"; continue; fi; '
+      + 'c=$(dd if="$d" bs=1 skip=64 count=512 2>/dev/null | tr -d "\\000"); '
+      + 'case "$c" in *emos.system=*) echo "SLOT $x ours $d";; '
+      + '*) echo "SLOT $x stock $d";; esac; done; '
+      // The system partitions, resolved by NAME here because this is the one
+      // place those names exist — emOS has no by-name map of its own.
+      + 'for x in a b; do '
+      + 'sd=$(readlink -f /dev/block/by-name/system_$x 2>/dev/null); '
+      + '[ -b "$sd" ] && echo "SYS $x $sd"; done');
     // The same guard the FireOS flow uses, and for the same reason: the
     // by-name map is INVERTED between TWRP and Android, and reading the wrong
     // alias here would escrow the amonet unlock payload while calling it a
@@ -5553,7 +5660,30 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     const boot = classifyBootTarget(probe);
     if (!boot.ok) throw new Error(boot.reason);
     addLog(`  → ${boot.reason}`, boot.warn ? 'warn' : 'ok');
-    setEmosTarget(boot.target);
+
+    // WHICH SLOT KEEPS STOCK, AND WHICH ONE emOS GOES IN.
+    //
+    // Not the slot the device booted, which is what this used to write: on a
+    // stock device that IS the stock slot, so every provision destroyed the
+    // only stock boot image on the device — the build reference for any future
+    // emOS image, and the only way back to FireOS. Both are things we ship
+    // neither of.
+    //
+    // v1 is left alone. Its `other-boot` alias already names the slot that is
+    // not running, which is the same answer this arrives at, and it has no BCB
+    // to point afterwards.
+    let plan = null;
+    if (boot.layout === 'v2') {
+      const slots = classifyBootSlots(probe);
+      addLog(`  slot A: ${slots.a.state}, slot B: ${slots.b.state}`);
+      plan = chooseBootSlots(slots, (probe.match(/SUFFIX=(\S*)/) || [])[1] || '');
+      if (!plan.ok) throw new Error(plan.reason);
+      addLog(`  → ${plan.reason}`, 'ok');
+    }
+    setEmosPlan(plan);
+    // The ESCROW and the build reference come from the donor; the flash goes to
+    // the target. They are deliberately different partitions now.
+    setEmosTarget(plan ? plan.targetDev : boot.target);
 
     // IS THIS DEVICE ACTUALLY UNLOCKED? Checked here rather than at step 0,
     // because this is where the evidence is: amonet's unlock reshapes the
@@ -5721,6 +5851,15 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     if (version) {
       fd.append('version', version);
     }
+    // Which FireOS userspace this image is built beside, stamped onto its
+    // cmdline so emOS mounts that one. Resolved at the escrow step, where
+    // TWRP's by-name map makes system_a/system_b readable — emOS has no such
+    // map of its own, which is why it is carried in the image rather than
+    // looked up at boot. Absent on the v1 path, where the image falls back to
+    // the partition emOS hardcoded before this existed.
+    if (emosPlan && emosPlan.ok && emosPlan.systemPart) {
+      fd.append('system_part', String(emosPlan.systemPart));
+    }
     const resp = await fetch(ingressPath('/api/provision/emos_image'), {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}` },
@@ -5763,6 +5902,112 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     if (!inn || !got) return null;
     if (inn[1] === got[1] && inn[2] === got[2]) return null;
     return `${got[1]}+${got[2]} of ${inn[1]}+${inn[2]} blocks reached the partition`;
+  }
+
+  // ── The boot slot, which is NOT chosen by writing to it ──────────────────
+  //
+  // Amazon's bootloader picks its slot from the BCB — a bootloader_control
+  // struct in `misc` — and nothing about writing a partition changes it. So a
+  // flash can be complete, verified byte for byte against the partition, and
+  // still boot the OTHER slot, which reads as the flash having done nothing.
+  //
+  // `ro.boot.slot_suffix` cannot answer this. It is the slot the device BOOTED
+  // FROM, and a v2 device switches slots on every install, so a staged switch
+  // makes booted-from and boot-next different values — which is exactly the
+  // state a user arrives in after installing a FireOS zip.
+  //
+  // Layout, read off a live device 2026-09-14 and confirmed against
+  // `bcbtool dump` on the same boot. It sits at `misc` + 864, which is where
+  // AOSP's bootloader_message puts `slot_suffix`; Amazon uses that space for
+  // their own struct instead, so this is NOT the AOSP layout despite the
+  // offset:
+  //
+  //   864..867  magic 0x42424100 (LE)
+  //   868       version (1)
+  //   869       slot A metadata
+  //   870       slot B metadata
+  //
+  // and each metadata byte packs AOSP's bitfield — priority in the low 4 bits,
+  // tries_remaining in the next 3, successful in the top one. A healthy device
+  // reads A=0x8f (prio 15, tries 0, successful) and B=0x00.
+  const BCB_OFFSET = 864;
+  const BCB_MAGIC = '00 41 42 42';
+
+  // Read the active slot WITHOUT bcbtool, so a device whose recovery lacks it
+  // can still be told it is about to boot the wrong image. Read-only: this
+  // never writes the BCB, because a malformed one is a brick and the tool that
+  // ships with the recovery is the one that has been tested against this
+  // bootloader.
+  async function _readBcbActive(c, T) {
+    const out = await c.shell(
+      `${T.dd} if=/dev/block/by-name/misc bs=1 skip=${BCB_OFFSET} count=8 `
+      + `2>/dev/null | od -An -tx1; echo "_BCBRAW=$?"`);
+    if (!/_BCBRAW=0/.test(out)) return null;
+    const hex = (out.match(/^[\s0-9a-f]+$/gm) || []).join(' ').trim().split(/\s+/);
+    if (hex.length < 7) return null;
+    if (hex.slice(0, 4).join(' ') !== BCB_MAGIC) return null;
+    const prio = (b) => parseInt(b, 16) & 0x0f;
+    return prio(hex[5]) >= prio(hex[6]) ? 'a' : 'b';
+  }
+
+  // Ask bcbtool, falling back to the raw read. A sentinel rather than
+  // `command -v`: the question is whether it RUNS, and a recovery that has the
+  // name on PATH but cannot execute it must not read as a working tool.
+  async function _activeSlot(c, T) {
+    const out = await c.shell('bcbtool get_active 2>&1; echo "_BCBRC=$?"');
+    const m = /_BCBRC=0/.test(out) && out.match(/^\s*([ab])\s*$/m);
+    if (m) return { slot: m[1], viaTool: true };
+    const raw = await _readBcbActive(c, T);
+    return raw ? { slot: raw, viaTool: false } : null;
+  }
+
+  // Point the bootloader at the slot we just wrote.
+  //
+  // Takes the PLAN rather than the escrow step's classification, because after
+  // the stock-preservation rule those name different slots: stock keeps the
+  // one it is in, emOS goes in the other, and this is what makes the device
+  // boot the one we wrote.
+  //
+  // Returns null when the device will boot it, or a message when it will not.
+  // A null plan is the v1 path, skipped entirely: `other-boot` resolves its
+  // slot for free and there is no BCB of this shape to correct.
+  async function _activateBootSlot(c, plan) {
+    if (!plan || !plan.ok) return null;
+    const want = plan.target;
+    if (!/^[ab]$/.test(want || '')) {
+      return `Cannot tell which slot the image was written to (target reads `
+           + `"${want || 'empty'}"), so the bootloader has not been pointed at it.`;
+    }
+    const T = await deviceTools(c);
+
+    const before = await _activeSlot(c, T);
+    if (before && before.slot !== want) {
+      // The staged-switch case, and the whole reason this step exists. Say so
+      // rather than silently correcting it: it means the device was mid-way
+      // through a FireOS install, which the operator may want to know.
+      addLog(`This device was staged to boot slot ${before.slot.toUpperCase()}, but emOS `
+           + `was written to slot ${want.toUpperCase()}.`, 'warn');
+    }
+
+    const set = await c.shell(`bcbtool set_active ${want} 2>&1; echo "_BCBRC=$?"`);
+    const after = await _activeSlot(c, T);
+
+    if (after && after.slot === want) {
+      addLog(`Boot slot set to ${want.toUpperCase()}${after.viaTool ? '' : ' (read from misc)'}.`, 'ok');
+      return null;
+    }
+    // Already right and we merely could not change it: harmless, because the
+    // bootloader is going to pick the slot we wrote either way.
+    if (before && before.slot === want) {
+      addLog('Could not set the boot slot, but it already points at the slot emOS '
+           + `was written to. Continuing. (${(set.trim() || '(no output)').split('\n')[0]})`, 'warn');
+      return null;
+    }
+    return `emOS was written to slot ${want.toUpperCase()} and verified, but the bootloader `
+         + `still points at ${after ? `slot ${after.slot.toUpperCase()}` : 'an unknown slot'}. `
+         + `Rebooting now would start the image that was there before, which looks exactly `
+         + `like the flash having done nothing. bcbtool answered: `
+         + `${JSON.stringify(set.trim()) || '(nothing)'}`;
   }
 
   // One write to the boot partition, verified against the partition itself.
@@ -5931,6 +6176,17 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         + 'here. Use "Restore escrowed boot image" below to put it back '
         + 'back; it takes about ten seconds and leaves /data untouched.');
     }
+    // Writing a slot does not select it. Amazon's bootloader picks from the
+    // BCB in `misc`, so a verified write can still boot the other slot — which
+    // presents as the flash having done nothing at all.
+    const slotErr = await _activateBootSlot(c, emosPlan);
+    if (slotErr) {
+      throw new Error(
+        `${slotErr}\n\nDO NOT REBOOT — the device is still in TWRP. Use "Restore `
+        + 'escrowed boot image" below if you want to put it back, or set the slot '
+        + 'by hand from the TWRP terminal with: bcbtool set_active <a|b>');
+    }
+
     addLog('The device is now an emOS device. If anything below goes wrong, '
          + 'restoring the escrowed image takes about ten seconds and leaves '
          + 'everything installed on /data alone.', 'warn');

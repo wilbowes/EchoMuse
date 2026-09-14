@@ -965,6 +965,98 @@ static int wr(const char *path, const char *val)
     return n > 0 ? 0 : -1;
 }
 
+/* ── Which /system this image was built against ───────────────────────────
+ *
+ * `emos.system=` is stamped onto the cmdline by the packer at BUILD time and
+ * names the partition holding the FireOS userspace this image was built from.
+ *
+ * It is a build-time fact on purpose. emOS carries Amazon's kernel and its own
+ * ramdisk, and nothing else: bionic, the linker, tinyalsa, /system/bin/sh and
+ * the WiFi firmware all come from /system at runtime, which is 768MB of
+ * Amazon's code we neither ship nor could. So an image is a PAIR -- a kernel
+ * and the system it was taken beside -- and the pairing has to travel with the
+ * image rather than be guessed at each boot.
+ *
+ * Do NOT derive this from the boot slot. Once emOS is installed beside a
+ * preserved stock image the two are DELIBERATELY different: stock keeps its
+ * slot, emOS goes in the other, and the bootloader is pointed at emOS. The
+ * slot says where these bytes live; it says nothing about which userspace they
+ * were built against.
+ *
+ * Absent means an image built before this existed: fall back to p13, which is
+ * what those images hardcoded, so they keep booting exactly as they did.
+ */
+#define SYSTEM_PART_DEFAULT 13
+
+/* The value of `key` on the cmdline, copied into `out`. NULL when absent.
+ *
+ * Matched at a TOKEN BOUNDARY, unlike the strstr() below: a bare substring
+ * search for "emos.system=" is also satisfied by "xemos.system=", and the
+ * value it would then return belongs to a parameter we know nothing about.
+ * Mounting the wrong partition on the strength of that is not a failure
+ * anybody could read off the symptom.
+ */
+static const char *cmdline_value(const char *cmdline, const char *key,
+                                 char *out, size_t outlen)
+{
+    size_t klen = strlen(key);
+    for (const char *p = cmdline; *p; ) {
+        while (*p == ' ' || *p == '\t' || *p == '\n')
+            p++;
+        if (!*p)
+            break;
+        const char *end = p;
+        while (*end && *end != ' ' && *end != '\t' && *end != '\n')
+            end++;
+        if ((size_t)(end - p) > klen && !strncmp(p, key, klen)) {
+            size_t vlen = (size_t)(end - p) - klen;
+            if (vlen >= outlen)
+                return NULL;              /* too long to be one of ours */
+            memcpy(out, p + klen, vlen);
+            out[vlen] = 0;
+            return out;
+        }
+        p = end;
+    }
+    return NULL;
+}
+
+/* The mmcblk0 partition minor named by emos.system=, or SYSTEM_PART_DEFAULT.
+ *
+ * The value is a full device path rather than a bare number so it reads as
+ * what it is in a header dump and in /proc/cmdline -- this is the one field
+ * somebody supporting a device will be asked to read out loud.
+ *
+ * Anything that is not exactly /dev/block/mmcblk0p<N> falls back rather than
+ * being interpreted generously. A stamp we do not recognise means the image
+ * was built by something we do not know, and guessing at its intent is how a
+ * wrong partition gets mounted and reported as a healthy boot.
+ */
+static int cmdline_system_part(const char *cmdline)
+{
+    char val[64];
+    if (!cmdline_value(cmdline, "emos.system=", val, sizeof val))
+        return SYSTEM_PART_DEFAULT;
+
+    static const char pfx[] = "/dev/block/mmcblk0p";
+    size_t plen = sizeof pfx - 1;
+    if (strncmp(val, pfx, plen))
+        return SYSTEM_PART_DEFAULT;
+
+    const char *d = val + plen;
+    if (!*d)
+        return SYSTEM_PART_DEFAULT;
+    int n = 0;
+    for (; *d; d++) {
+        if (*d < '0' || *d > '9')
+            return SYSTEM_PART_DEFAULT;
+        n = n * 10 + (*d - '0');
+        if (n > 127)                      /* minor 0 is the whole device */
+            return SYSTEM_PART_DEFAULT;
+    }
+    return n > 0 ? n : SYSTEM_PART_DEFAULT;
+}
+
 /* The device's serial, read from androidboot.serialno on the kernel cmdline.
  *
  * LK puts it there (confirmed in /proc/cmdline on this board), which is the
@@ -2009,8 +2101,22 @@ int main(int argc, char **argv)
     /* /system read-only: this is a diagnostic boot and nothing here should be
      * able to damage the Android install we still rely on for recovery. */
     mkdir("/system", 0755);
-    mknod("/dev/block/mmcblk0p13", S_IFBLK | 0600, makedev(179, 13));
-    int r = mount("/dev/block/mmcblk0p13", "/system", "ext4", MS_RDONLY, NULL);
+    /* Which partition, from the stamp the packer put on our own cmdline --
+     * see cmdline_system_part(). Read here rather than at the top of main so
+     * the number appears in the stage line beside the mount it explains. */
+    char cmdl[2048] = "";
+    int cfd = open("/proc/cmdline", O_RDONLY);
+    if (cfd >= 0) {
+        ssize_t cn = read(cfd, cmdl, sizeof cmdl - 1);
+        close(cfd);
+        if (cn > 0)
+            cmdl[cn] = 0;
+    }
+    int sysp = cmdline_system_part(cmdl);
+    char sysdev[48];
+    snprintf(sysdev, sizeof sysdev, "/dev/block/mmcblk0p%d", sysp);
+    mknod(sysdev, S_IFBLK | 0600, makedev(179, sysp));
+    int r = mount(sysdev, "/system", "ext4", MS_RDONLY, NULL);
 
     /* FireOS 6 is SYSTEM-AS-ROOT: the partition's root is the Android root
      * filesystem — init, init.rc, fstab.mt8163, sbin — with the real tree in a
@@ -2043,7 +2149,8 @@ int main(int argc, char **argv)
         if (!nested)
             note("stage=mount_system bind_errno=%d\n", errno);
     }
-    note("stage=mount_system rc=%d errno=%d nested=%d sh=%d\n", r, r ? errno : 0,
+    note("stage=mount_system part=%d rc=%d errno=%d nested=%d sh=%d\n",
+         sysp, r, r ? errno : 0,
          nested, access("/system/bin/sh", X_OK));
 
     /* A mount that landed on a tree with no shell is not a working /system,

@@ -22,6 +22,7 @@ with no upside for a first boot test.
 """
 import hashlib
 import struct
+import os
 import sys
 
 MTK_MAGIC = 0x58881688
@@ -111,10 +112,43 @@ RAMOOPS_CMDLINE = (
 )
 
 
+# The partition holding the FireOS userspace this image is built beside,
+# stamped onto its own cmdline so emOS mounts the right one. Mirrors
+# SYSTEM_CMDLINE_KEY in controller/em_emos_build.py; test_agrees_with_mkboot
+# pins the two together.
+#
+# Taken from the ENVIRONMENT rather than a seventh positional argument: the
+# existing four-then-optional-two CLI is what build.sh and the parity test both
+# drive, and appending to it makes the dtb and extra-cmdline slots mandatory to
+# reach this one.
+#
+# Unset means no stamp, which is right for this tool: build.sh runs on a
+# workstation against a file and cannot know which slot the reference came
+# from. The wizard can, because it reads the partition by name off the device,
+# so that is where the value normally comes from. An unstamped image falls back
+# to the partition emOS hardcoded before this existed.
+SYSTEM_CMDLINE_KEY = "emos.system="
+
+
+def stamp_cmdline_key(cmdline: bytes, key: str, value: str) -> bytes:
+    """Set `key=value`, replacing any value already there.
+
+    Not the same dedup as the ramoops block: that asks whether the whole string
+    is already present, which is right for a fixed block and wrong for a key
+    whose value changes. Rebuilding a p13 image for a p14 device would
+    otherwise carry two stamps, and the kernel takes the LAST of a repeated
+    parameter — so the image works and reads as whichever one you looked at.
+    """
+    kept = [tok for tok in cmdline.split() if not tok.startswith(key.encode())]
+    kept.append(f"{key}{value}".encode())
+    return b" ".join(kept)
+
+
 def main():
     ref_p, z_p, rd_p, out_p = sys.argv[1:5]
     dtb_p = sys.argv[5] if len(sys.argv) > 5 else None
     extra = sys.argv[6] if len(sys.argv) > 6 else RAMOOPS_CMDLINE
+    sys_part = os.environ.get("EMOS_SYSTEM_PART", "").strip()
     ref = open(ref_p, "rb").read()
     dtbs, hf = split_reference(ref)
     if dtb_p:
@@ -141,6 +175,14 @@ def main():
     # which is the first time anything has repacked an emOS image.
     if extra and extra.encode() not in cmdline:
         cmdline = cmdline + b" " + extra.encode()
+    # After the ramoops block, so the stamp is last and most visible in a dump.
+    if sys_part:
+        if not (sys_part.isdigit() and 1 <= int(sys_part) <= 127):
+            raise SystemExit(
+                f"EMOS_SYSTEM_PART must be an mmcblk0 partition number "
+                f"(1-127), not {sys_part!r}")
+        cmdline = stamp_cmdline_key(cmdline, SYSTEM_CMDLINE_KEY,
+                                    f"/dev/block/mmcblk0p{int(sys_part)}")
     if len(cmdline) > 511:
         raise SystemExit(f"cmdline too long for the 512-byte field: {len(cmdline)}")
 

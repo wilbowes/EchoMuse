@@ -5128,6 +5128,26 @@ async def _post_provision_emos_image(request: web.Request) -> web.Response:
         # A hand-picked init carries no WiFi tools, matching emos/build.sh.
         sbin = {}
 
+        # Which FireOS userspace this reference was read beside, stamped onto
+        # the image so emOS mounts that one rather than assuming. The WIZARD
+        # resolves it, because system_a/system_b are names and TWRP's by-name
+        # map is the only place those names exist — this end never guesses.
+        #
+        # Absent is allowed: an image with no stamp falls back to the partition
+        # emOS hardcoded before this existed, so an older wizard keeps working.
+        # A value we cannot read is refused rather than dropped, because
+        # silently omitting it builds an image that mounts the wrong userspace
+        # and boots.
+        system_part = None
+        raw_part = (parts.get("system_part") or "").strip()
+        if raw_part:
+            if not raw_part.isdigit() or not 1 <= int(raw_part) <= 127:
+                return _error(
+                    "bad_system_part",
+                    f"system_part must be an mmcblk0 partition number (1-127), "
+                    f"not {raw_part!r}. Nothing has been built.", 400)
+            system_part = int(raw_part)
+
         # Also keeps ~3.5MB out of a request that has already hit HA ingress's
         # 413 once (2026-09-06).
         if parts.get("use_latest_init"):
@@ -5155,9 +5175,12 @@ async def _post_provision_emos_image(request: web.Request) -> web.Response:
         # through this process while somebody provisions a new one.
         info = await loop.run_in_executor(
             None, em_emos_build.build_emos_image, reference, init_bin, version,
-            "", sbin)
+            "", sbin, system_part)
 
-        log.info(f"[api] emOS image built: {info['size']:,} bytes "
+        log.info(f"[api] emOS image built"
+                 + (f" for /system on p{system_part}" if system_part else
+                    " with no /system stamp (older wizard)")
+                 + f": {info['size']:,} bytes "
                  f"md5={info['md5'][:8]}… from a {info['reference_size']:,} "
                  f"byte reference (md5 {info['reference_md5'][:8]}…)")
 

@@ -11,6 +11,17 @@
 #   adb shell su -c 'dd if=/dev/block/mmcblk0p10' > boot_a_x.img
 #
 # and KEEP IT. It is the recovery image as well as the build input.
+#
+# EMOS_SYSTEM_PART names the partition holding the FireOS userspace this
+# reference was read beside, and is stamped onto the image's cmdline so emOS
+# mounts that one rather than assuming. It is optional here because this script
+# runs against a FILE and cannot know which slot it came from -- unset, the
+# image carries no stamp and emOS falls back to the partition it hardcoded
+# before this existed. The provisioning wizard always sets it, because it reads
+# the partition by name off the device.
+#
+#   EMOS_SYSTEM_PART=13 ./build.sh boot_a_x.img     # built beside system_a
+#   EMOS_SYSTEM_PART=14 ./build.sh boot_a_x.img     # built beside system_b
 set -e
 
 REF=${1:?usage: build.sh <reference boot_a_x.img> [output.img]}
@@ -140,7 +151,7 @@ install -m 0755 "$WORK/init" "$WORK/root/init"
 # LK gunzips an AArch64 Image, so the kernel must go back in COMPRESSED — the
 # same bytes the reference image carries. Handing it an uncompressed Image
 # silently doubles the image and does not boot.
-python3 "$HERE/mkboot.py" "$REF" <(python3 - "$REF" <<'EOF'
+EMOS_SYSTEM_PART="${EMOS_SYSTEM_PART:-}" python3 "$HERE/mkboot.py" "$REF" <(python3 - "$REF" <<'EOF'
 import struct, sys
 ref = open(sys.argv[1], "rb").read()
 ksz = struct.unpack("<I", ref[8:12])[0]
