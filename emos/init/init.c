@@ -1089,14 +1089,34 @@ static const char *first_exec(const char *const cands[])
     return NULL;
 }
 
-/* busybox: from /system on FireOS 5; on FireOS 6, which has none, a static
- * copy placed on /data. NULL when there is none, and every caller then falls
- * back to the FireOS 5 path, so a missing busybox fails exactly as it always
- * did rather than in some new way. Only meaningful once /system and /data are
- * mounted. */
+/* busybox. OURS FIRST, on every layout. NULL when the image carries none, and
+ * every caller then falls back as it always did, so an old image behaves
+ * exactly as before rather than losing the network outright. Only meaningful
+ * once /system and /data are mounted.
+ *
+ * The ordering is the point. Every other candidate here belongs to somebody
+ * else: /system's copy is Amazon's on FireOS 5 and does not exist on FireOS 6,
+ * and /data/local/bin is where a third-party root leaves one -- amonet v2's
+ * OPTIONAL component, or a root zip from the XDA thread. Searching those first
+ * means DHCP, ntpd and the system log are served by a binary of unknown
+ * vintage that the user can remove by reflashing, and nothing reports the
+ * swap. That is precisely how #524 happened: FireOS 6 appeared to work because
+ * amonet had left a busybox behind, and the first clean install had no udhcpc
+ * at all.
+ *
+ * So the answer is not "prefer ours where theirs is missing" but "use ours,
+ * full stop". It is the one we build, pin, and test: 1.38.0, static, and
+ * verified on hardware to bring up DHCP, the log and ~300 applets.
+ *
+ * This DOES change FireOS 5, which has run on Amazon's copy until now, and
+ * that is deliberate rather than incidental. It is not a change under a
+ * running device: a device only gets ours by being flashed with an image that
+ * carries it, which is the same act that delivers the rest of the release.
+ */
 static const char *busybox_path(void)
 {
-    static const char *const c[] = { "/system/bin/busybox", "/system/xbin/busybox",
+    static const char *const c[] = { "/sbin/busybox", "/system/bin/busybox",
+                                     "/system/xbin/busybox",
                                      "/data/local/bin/busybox", NULL };
     return first_exec(c);
 }
@@ -1106,7 +1126,10 @@ static pid_t spawn(char *const argv[])
 {
     pid_t pid = fork();
     if (pid == 0) {
-        char *envp[] = { "HOME=/", "ANDROID_ROOT=/system",
+        /* ANDROID_DATA: see start_console(). Services inherit this too, so
+         * without it the tzdata warning lands in the log rather than on a
+         * terminal, two lines per exec. */
+        char *envp[] = { "HOME=/", "ANDROID_ROOT=/system", "ANDROID_DATA=/data",
                          "PATH=/sbin:/system/bin:/system/xbin", NULL };
         int n = netlog_open();
         if (n < 0)
@@ -2298,7 +2321,15 @@ int main(int argc, char **argv)
      * controller to reach when it does start. */
     svc_add("echomuse", echomuse, "/data/local/bin/start_server.sh",
             "/run/net-up");
-    svc_add("console", NULL, NULL, NULL);   /* needs the tty as its stdio */
+    /* `req` is given even though start_console() supplies its own argv: the
+     * supervisor's absent-check reads req, falling back to argv[0], and this
+     * service has neither. Without it an unexecutable shell is respawned every
+     * few seconds for ever, which on the USB console looks like the banner
+     * cycling rather than like a failure -- and that is exactly how the FireOS
+     * 6 system-as-root layout hid for a day, with /system mounted, stage 2
+     * passed and the ring throbbing happily. Every other service would have
+     * said `svc <name> absent` once and stopped. */
+    svc_add("console", NULL, "/system/bin/sh", NULL);  /* tty is its stdio */
 
     supervise();
     return 0;
@@ -2844,12 +2875,19 @@ static pid_t start_console(void)
          * depends on a check in another function is one refactor from
          * truncating. */
         char tmout[32];
+        /* ANDROID_DATA is set because bionic looks for tzdata under it before
+         * falling back to ANDROID_ROOT, and without it EVERY command run on
+         * this console prints two lines of
+         * `__bionic_open_tzdata_path: ANDROID_DATA not set!` before its own
+         * output. Harmless, and it made the one channel available on a broken
+         * device unreadable. */
         char *envp[] = { "HOME=/", "TERM=vt100", "ANDROID_ROOT=/system",
+                         "ANDROID_DATA=/data",
                          "PATH=/sbin:/system/bin:/system/xbin", NULL, NULL };
         long tsec = console_timeout_secs();
         if (tsec > 0) {
             snprintf(tmout, sizeof tmout, "TMOUT=%ld", tsec);
-            envp[4] = tmout;
+            envp[5] = tmout;
         }
         execve("/system/bin/sh", argv, envp);
         _exit(127);

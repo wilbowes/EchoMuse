@@ -5,8 +5,9 @@ EchoMuse with **no Amazon userspace at all** — no Android init, no
 `system_server`, no `mediaserver`, no audio HAL.
 
 It is a distribution in the ordinary sense: it does not include a kernel of its
-own. It pairs the device's existing MediaTek 3.18 kernel with our own PID 1,
-busybox, and bionic and tinyalsa mounted read-only from the device's `/system`.
+own. It pairs the device's existing MediaTek 3.18 kernel with our own PID 1 and
+our own busybox, with bionic and tinyalsa mounted read-only from the device's
+`/system`.
 
 > **⚠️ emOS needs the FireOS 5 kernel, so do not install amonet-biscuit
 > v2.0.0.** Version 2.0.0 of the unlock (10 September 2026) replaces the
@@ -182,6 +183,26 @@ replace them:
 - **DHCP on FireOS 6 is busybox `udhcpc`**, which needs a script to apply a
   lease it has already obtained; without one it gets an address and discards
   it, which reads as a DHCP failure and is not.
+- **emOS ships its own busybox** — 1.38.0, static ARM32, built by
+  `tools/build-busybox.sh`. A FireOS 6 `/system` has toybox and **no busybox at
+  all**, so without ours there is no `udhcpc` (hence no address), no `ntpd`, no
+  `syslogd`/`klogd`, and no `awk` for `em-wifi` to read a scan with. It was
+  working on the first FireOS 6 device only because amonet v2's OPTIONAL root
+  component had left one at `/data/local/bin/busybox` — which is the rule that
+  cost: **emOS must not depend on anything that is optional for the unlock.**
+
+  It is built on **Alpine, not the NDK**, and that is the one deliberate
+  exception to the pinned-toolchain rule. The binary is static, so it needs
+  only the kernel's syscall ABI — bionic is a free choice and the wrong one.
+  `defconfig` against the NDK needs eight source patches and twenty applets
+  disabled, and clang 9 segfaults compiling `hush.c`; against musl the same
+  `defconfig` builds with none of that. The only thing trimmed is the eleven
+  listening daemons (`telnetd`, `httpd`, `inetd`, …), which is a posture
+  choice, not a build one.
+
+  `busybox_path()` looks in `/system` FIRST and `/sbin` last, so the FireOS 5
+  fleet keeps running on Amazon's copy and only FireOS 6 — where none of this
+  ever worked — gets ours.
 
 FireOS 5 keeps Amazon's supplicant and `dhcpcd` unless an image carries ours,
 because that path works on the fleet today and should not be swapped for
@@ -464,12 +485,17 @@ Three layers, three different answers, and the design follows from them:
 - **Amazon's `/system`** — bionic, the linker, tinyalsa, wpa_supplicant. No
   licence to redistribute. Mounting it at runtime on a device that already has
   it is a different act from shipping it.
-- **Our code** — MIT, like the rest of the repo. busybox is GPL-2.0 and is the
-  device's own copy, not ours.
+- **Our code** — MIT, like the rest of the repo.
+- **busybox** — GPL-2.0, and since `emos-v0.6` it is OURS: we build it and the
+  release publishes the binary. That is the only licence here that obliges us
+  to offer SOURCE, so the release notes carry the pinned upstream URL and point
+  at `tools/build-busybox.sh`, which is the complete recipe. Keep that in the
+  notes. On FireOS 5 the copy in use is still the device's own.
 
 Leaning on `/system` is legally clean but pins emOS to one FireOS build. A
-self-contained ramdisk would need our own userspace — a static Go binary and
-busybox, no bionic. Not legal advice; and never ship Amazon marks or branding.
+self-contained ramdisk would need our own userspace — a static Go binary, and
+the busybox and supplicant we now ship, with no bionic. Not legal advice; and
+never ship Amazon marks or branding.
 
 ## How it boots, and what the ring tells you
 

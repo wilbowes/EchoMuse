@@ -2606,6 +2606,47 @@ def test_the_emos_init_is_verified_before_it_is_served():
         assert want in fn, f"{name} must resolve through {want}"
 
 
+def test_the_busybox_build_can_satisfy_the_gpl_obligation():
+    """
+    busybox is the only GPL-2.0 thing emOS ships, and the obligation is met by
+    publishing source ALONGSIDE the binary — not by a link, which would leave
+    compliance depending on busybox.net's server layout.
+
+    Asserted against code rather than prose: every string checked here is an
+    executable line, because a test that greps for the words would be satisfied
+    by the comment explaining them.
+    """
+    script = (CONTROLLER.parent / "emos" / "tools" / "build-busybox.sh").read_text()
+    body = "\n".join(l for l in script.splitlines()
+                     if l.strip() and not l.lstrip().startswith("#"))
+
+    # The tarball is pinned, and checked on EVERY run rather than only after a
+    # download — a cached or pre-seeded one is no less likely to be wrong.
+    assert "BB_SHA512=" in body, "the busybox source must be pinned by hash"
+    assert "sha512sum -c -" in body, "the pin must actually be checked"
+
+    # Both artifacts reach the output directory, which is what the release
+    # publishes. Without these the binary ships with no corresponding source.
+    assert '"$OUT/busybox-$BB_VER.tar.bz2"' in body, \
+        "the source tarball must be installed into the output directory"
+    assert '"$OUT/busybox-LICENSE"' in body, \
+        "the licence text must be installed into the output directory"
+
+    # And the tarball must actually BE the source of the binary. The build diffs
+    # the tree it compiled against a fresh extraction and refuses on any
+    # modified or missing upstream file — the supplicant build beside this one
+    # patches its sources with inline python, so "we do not patch busybox" has
+    # to be enforced rather than assumed.
+    assert "diff -rq" in body, \
+        "the build must prove the tree it compiled matches the published tarball"
+
+    # The release gate, which fails the publish rather than the build.
+    wf = (CONTROLLER.parent / ".github" / "workflows"
+          / "emos-release.yml").read_text()
+    assert "busybox-LICENSE" in wf and "busybox-$BB_VER.tar.bz2" in wf, \
+        "the release must verify both GPL assets exist before publishing"
+
+
 def test_the_emos_release_workflow_asserts_what_it_publishes():
     """
     The last point before the artifact is something people flash. CI checks a
@@ -2640,18 +2681,29 @@ def test_the_emos_release_workflow_asserts_what_it_publishes():
                 published |= {f.strip() for f in files.split("\n") if f.strip()}
 
     # Pinned as an exact SET, so adding an asset is a deliberate edit here. The
-    # invariant is that everything published is OURS: two inits (one per kernel
-    # architecture) and emOS's own WiFi userspace, which is hostap under BSD,
-    # libnl-tiny under LGPL and our own shell script.
+    # invariant is that we have the RIGHT to redistribute everything in it: two
+    # inits (one per kernel architecture) and emOS's own userspace, which is
+    # hostap under BSD, libnl-tiny under LGPL, busybox under GPL-2.0 and our own
+    # shell script.
+    #
+    # The two busybox-* assets are the GPL-2.0 OBLIGATION, not extras. §3(a) wants
+    # the corresponding source to accompany the binary, so the verified upstream
+    # tarball and the licence text are published beside it — a link to busybox.net
+    # would leave compliance depending on a third party's server. Dropping either
+    # ships GPL-2.0 object code with no source, which is why they are pinned here
+    # rather than left to the release step.
     #
     # A BOOT IMAGE MUST NEVER APPEAR. It carries the device's own kernel and
     # DTBs, so publishing one would redistribute Amazon's code — the image is
     # assembled on the user's side from the partition they read off their device.
-    assert published == {"emos/build/init", "emos/build/emos-payload.zip"}, (
+    assert published == {"emos/build/init", "emos/build/emos-payload.zip",
+                         "emos/build/bb/busybox-*.tar.bz2",
+                         "emos/build/bb/busybox-LICENSE"}, (
         f"the published set changed — got {sorted(published)}. Everything here "
-        f"must be ours, and a boot image must never be among it. The loose "
-        f"`init` is not redundant: _fetch_latest_emos_release matches it by "
-        f"exact name, so dropping it strands every fielded controller.")
+        f"must be redistributable by us, and a boot image must never be among "
+        f"it. The loose `init` is not redundant: _fetch_latest_emos_release "
+        f"matches it by exact name, so dropping it strands every fielded "
+        f"controller. The busybox source and licence are a GPL-2.0 obligation.")
     assert not any(".img" in f or "boot" in f.rsplit("/", 1)[-1]
                    for f in published), (
         "an image or boot partition must never be a release asset — it carries "
@@ -2738,7 +2790,7 @@ def test_the_wifi_tools_go_only_into_a_32_bit_image():
         "the tools must come from the one list, so they cannot diverge"
     tools = api[api.index("EMOS_SBIN_ASSETS = ("):]
     tools = tools[:tools.index(")") + 1]
-    for name in ("wpa_supplicant", "wpa_cli", "em-wifi"):
+    for name in ("wpa_supplicant", "wpa_cli", "em-wifi", "busybox"):
         assert f'"{name}"' in tools, f"{name} missing from EMOS_SBIN_ASSETS"
 
 

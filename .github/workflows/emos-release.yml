@@ -24,10 +24,25 @@ name: emOS Release (init binary)
 # aarch64 for FireOS 5 and `init32` is armv7a for FireOS 6. See the compile
 # steps. Nothing else published here is per-architecture.
 #
-# Alongside them: emOS's own `wpa_supplicant`, `wpa_cli` and `em-wifi`. Ours,
-# not Amazon's — hostap is BSD, libnl-tiny LGPL, em-wifi is our source — so they
-# are as distributable as the init. A FireOS 6 image NEEDS them, because Amazon's
-# supplicant aborts under emOS before main() (it opens /dev/binder).
+# Alongside them: emOS's own `wpa_supplicant`, `wpa_cli`, `em-wifi` and
+# `busybox`. Ours, not Amazon's — hostap is BSD, libnl-tiny LGPL, busybox
+# GPLv2, em-wifi is our source — so they are as distributable as the init. A
+# FireOS 6 image NEEDS them: Amazon's supplicant aborts under emOS before
+# main() (it opens /dev/binder), and a FireOS 6 /system ships toybox and no
+# busybox at all, so there is no udhcpc to get an address with.
+#
+# busybox is GPLv2, the only licence here that obliges us to distribute SOURCE,
+# and that obligation is met by ASSETS rather than by wording in the notes.
+# Every release publishes `busybox-<ver>.tar.bz2` (the unmodified upstream
+# tarball this binary was built from, verified against its pin) and
+# `busybox-LICENSE`, beside the binary. A link to busybox.net would not do:
+# §3(a) wants the source to accompany the binary, and a link makes our
+# compliance depend on a third party not reorganising their server.
+#
+# We patch nothing — the build only configures — so the tarball plus
+# emos/tools/build-busybox.sh (the "scripts used to control compilation" that
+# §3 also asks for, public in this repo) is the complete corresponding source.
+# The compliance step below fails the release if either asset is missing.
 #
 # All of that ships as ONE bundle with a manifest of sha256s, so a partially
 # published release cannot hand a build a mismatched set of parts. The loose
@@ -42,6 +57,16 @@ on:
   push:
     tags:
       - 'emos-v*'
+
+env:
+  # Pinned by DIGEST for the same reason device/compiler/Dockerfile pins its
+  # base: `:3.21` is a tag somebody else can move, and a toolchain that changes
+  # with no PR first shows up as a binary that does not run on the hardware.
+  # This is alpine:3.21's manifest list; --platform picks the armv7 image out
+  # of it. Alpine because it is a distribution's own gcc and musl rather than
+  # one maintainer's convenience image.
+  ALPINE_ARMV7_DIGEST: >-
+    sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
 
 jobs:
   build:
@@ -145,7 +170,71 @@ jobs:
           sh -n emos/build/wpa/em-wifi || {
             echo "::error::em-wifi is not valid shell"; exit 1; }
 
-      # ONE bundle, with a manifest of sha256s. Four assets fetched in sequence
+      # busybox is built on ALPINE, not the NDK, and that is a deliberate
+      # exception to the pinned-toolchain rule the rest of this file follows.
+      #
+      # The binary is static, and a static binary needs only the kernel's
+      # syscall ABI — not bionic, not Android's linker. busybox does not target
+      # bionic: defconfig against the NDK needs eight source patches and twenty
+      # applets disabled, and clang 9 segfaults on hush.c. Against musl the same
+      # defconfig builds with none of that. Measured 2026-09-14.
+      #
+      # qemu + an armv7 Alpine image makes it a NATIVE build, so there is no
+      # cross-compilation surface to get wrong. It costs ~8 minutes.
+      - name: Set up qemu (for the armv7 busybox build)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm
+
+      - name: Build busybox (armv7, static)
+        run: |
+          mkdir -p emos/build/bb
+          docker run --rm --platform linux/arm/v7 \
+            -v "${{ github.workspace }}/emos":/emos \
+            -v "${{ github.workspace }}/emos/build/bb":/out -w /tmp \
+            alpine@${{ env.ALPINE_ARMV7_DIGEST }} \
+            sh /emos/tools/build-busybox.sh /out
+
+      - name: Verify busybox is static 32-bit ARM
+        # Same check as the wpa tools, for the same reason: emOS execs this with
+        # no dynamic loader, so a dynamically linked one reaches the network
+        # stage and stops there silently.
+        run: |
+          file emos/build/bb/busybox
+          file emos/build/bb/busybox | grep -q "32-bit LSB executable, ARM" || {
+            echo "::error::busybox is not a 32-bit ARM executable"; exit 1; }
+          file emos/build/bb/busybox | grep -q "statically linked" || {
+            echo "::error::busybox is not statically linked"; exit 1; }
+
+      - name: Verify the GPL-2.0 obligation is actually satisfiable
+        # This is a RELEASE gate, not a build detail. If the binary ships and
+        # the source does not, we have distributed GPL-2.0 object code with no
+        # accompanying source — and nothing else in this pipeline would notice,
+        # because the image builds and the device boots either way.
+        run: |
+          BB_VER=$(sed -n 's/^BB_VER=//p' emos/tools/build-busybox.sh)
+          BB_SHA512=$(sed -n 's/^BB_SHA512=//p' emos/tools/build-busybox.sh)
+          src=emos/build/bb/busybox-$BB_VER.tar.bz2
+          for f in "$src" emos/build/bb/busybox-LICENSE; do
+            [ -s "$f" ] || {
+              echo "::error::$f is missing — the busybox binary cannot be"
+              echo "::error::published without its corresponding source"
+              exit 1; }
+          done
+          # The published source must be the source we built from, not merely
+          # a tarball with the right name.
+          echo "$BB_SHA512  $src" | sha512sum -c - || {
+            echo "::error::the published busybox source does not match the pin"
+            exit 1; }
+          # That the binary was built from UNMODIFIED upstream — which is what
+          # makes the tarball sufficient on its own — is proven in the build
+          # itself: build-busybox.sh diffs the built tree against this tarball
+          # and refuses if any upstream file was changed. Checking it here with
+          # a keyword grep would be theatre, since the supplicant build beside
+          # it patches sources with inline python that no grep would catch.
+          echo "GPL-2.0: source + licence present, source matches the pin"
+
+      # ONE bundle, with a manifest of sha256s. Five assets fetched in sequence
       # could each fail on their own and hand a build a mismatched set; the
       # manifest is also the first digest in this path the RELEASE computed.
       #
@@ -159,7 +248,7 @@ jobs:
             emos/build/emos-payload.zip \
             emos/build/init emos/build/init32 \
             emos/build/wpa/wpa_supplicant emos/build/wpa/wpa_cli \
-            emos/build/wpa/em-wifi
+            emos/build/wpa/em-wifi emos/build/bb/busybox
 
       # The off-target checks, against the exact source being published. All
       # four of them: each drives a parser or an invariant whose failure is
@@ -199,6 +288,8 @@ jobs:
           files: |
             emos/build/init
             emos/build/emos-payload.zip
+            emos/build/bb/busybox-*.tar.bz2
+            emos/build/bb/busybox-LICENSE
           body_path: /tmp/emos-notes.md
           generate_release_notes: true
         env:

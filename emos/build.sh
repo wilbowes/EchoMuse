@@ -99,6 +99,22 @@ if [ -f "$WPA_CLI" ]; then
     echo "including wpa_cli and em-wifi"
 fi
 
+# busybox, when one has been built. A FireOS 6 /system ships toybox and NO
+# busybox, so without this there is no udhcpc (hence no address), no ntpd, no
+# syslogd/klogd, and no awk for em-wifi to parse a scan with. FireOS 5 keeps
+# using /system's copy either way -- busybox_path() looks there first.
+#
+# The udhcpc symlink is explicit because init execs /sbin/udhcpc by path and
+# busybox chooses its applet from argv[0]. init's applet stage would create it
+# too, but DHCP must not depend on that stage having succeeded.
+# See tools/build-busybox.sh.
+BUSYBOX=${BUSYBOX:-$HERE/prebuilt/busybox}
+if [ -f "$BUSYBOX" ]; then
+    install -m 0755 "$BUSYBOX" "$WORK/root/sbin/busybox"
+    ln -sf busybox "$WORK/root/sbin/udhcpc"
+    echo "including busybox ($(stat -c%s "$BUSYBOX") bytes)"
+fi
+
 # Build identity, stamped in at build time rather than written at boot: it
 # describes the IMAGE, so it must not be something a running system can drift
 # from. /etc/os-release is the standard location and format, so ordinary

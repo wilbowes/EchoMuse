@@ -617,6 +617,50 @@ def test_the_ramdisk_carries_all_three_sbin_tools():
         assert mode & 0o111, f"{key} is not executable (mode {mode:o})"
 
 
+def test_busybox_brings_a_udhcpc_symlink():
+    """init execs /sbin/udhcpc by PATH and busybox picks its applet from
+    argv[0], so without this a FireOS 6 image associates and never gets an
+    address. It is written into the archive rather than left to init's applet
+    stage, because DHCP must not depend on that stage having succeeded."""
+    import gzip
+    raw = gzip.decompress(eb.build_ramdisk(
+        fake_init(), "0.1", sbin={"busybox": b"BUSYBOX" * 64}))
+    entries = {n: (m, i, d) for n, m, i, d, _ in _newc_entries(raw)}
+
+    assert "sbin/udhcpc" in entries, "no udhcpc — FireOS 6 gets no address"
+    mode, _, target = entries["sbin/udhcpc"]
+    assert mode & eb._S_IFLNK == eb._S_IFLNK, \
+        f"sbin/udhcpc must be a symlink, not mode {mode:o}"
+    assert target == b"busybox", \
+        f"udhcpc must point at busybox, not {target!r}"
+    # Relative, so it resolves inside the ramdisk rather than against a
+    # /sbin that is only there once the boot has got that far.
+    assert not target.startswith(b"/"), "the link target must be relative"
+
+
+def test_no_udhcpc_symlink_without_busybox():
+    """A dangling /sbin/udhcpc would make init exec something that is not
+    there, which reads as a DHCP failure rather than as a missing binary."""
+    import gzip
+    for sbin in (None, {}, {"wpa_cli": b"C" * 64}, {"busybox": b""}):
+        raw = gzip.decompress(eb.build_ramdisk(fake_init(), "0.1", sbin=sbin))
+        names = [n for n, *_ in _newc_entries(raw)]
+        assert "sbin/udhcpc" not in names, f"udhcpc appeared for sbin={sbin!r}"
+
+
+def test_the_udhcpc_symlink_has_its_own_inode():
+    """The symlink is an entry like any other — sharing busybox's inode would
+    make it a hardlink to a 1MB binary in any extractor that honours nlink."""
+    import gzip
+    raw = gzip.decompress(eb.build_ramdisk(fake_init(), "0.1", sbin={
+        "busybox": b"B" * 64, "wpa_supplicant": b"S" * 64,
+        "wpa_cli": b"C" * 64, "em-wifi": b"E" * 64}))
+    entries = _newc_entries(raw)
+    inodes = [i for _, _, i, _, _ in entries]
+    assert len(set(inodes)) == len(inodes), "duplicate inodes with busybox in"
+    assert all(nlink == 1 for *_, nlink in entries), "nothing here is a hardlink"
+
+
 def test_the_sbin_directory_comes_before_its_contents():
     """cpio applies in order: a file before its parent cannot be placed."""
     import gzip

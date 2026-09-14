@@ -1,4 +1,9 @@
 # Built artifacts, not source. wpa_supplicant is ~1MB and is produced by
-# tools/build-wpa-supplicant.sh; build.sh picks it up from here if present.
+# tools/build-wpa-supplicant.sh; busybox is ~1MB and comes from
+# tools/build-busybox.sh; build.sh picks each up from here if present.
+#
+# Listed by NAME rather than as a glob, so this file itself stays tracked and a
+# new artifact has to be added here deliberately.
 wpa_supplicant
 wpa_cli
+busybox

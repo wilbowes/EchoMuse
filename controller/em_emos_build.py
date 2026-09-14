@@ -202,6 +202,9 @@ def _newc_entry(name: str, mode: int, data: bytes, ino: int) -> bytes:
 
 _S_IFDIR = 0o040000
 _S_IFREG = 0o100000
+# In newc a symlink is an ordinary entry whose DATA is the target path — no
+# terminator, no special casing anywhere else in the writer.
+_S_IFLNK = 0o120000
 
 
 def build_ramdisk(init_binary: bytes, version: str, build_id: str = "",
@@ -214,9 +217,16 @@ def build_ramdisk(init_binary: bytes, version: str, build_id: str = "",
     /system, which is why no Amazon code is redistributed.
 
     `sbin` maps name -> bytes for what emOS carries in /sbin: `wpa_supplicant`,
-    `wpa_cli`, `em-wifi`. Optional — a FireOS 5 image falls back to
+    `wpa_cli`, `em-wifi`, `busybox`. Optional — a FireOS 5 image falls back to
     /system/bin/wpa_supplicant, which the fleet runs today. FireOS 6 needs ours,
     since Amazon's aborts under emOS before main() (it opens /dev/binder).
+
+    `busybox` also gets a `sbin/udhcpc` SYMLINK, because init execs
+    /sbin/udhcpc by path and busybox picks its applet from argv[0]. The link is
+    written here rather than left to init's applet stage: that stage is what
+    populates /sbin from whatever busybox it finds, and if it fails, DHCP on
+    FireOS 6 fails with it. A symlink in the archive costs nine bytes and does
+    not depend on a stage having run.
     """
     if not init_binary:
         raise BuildError("no init binary was supplied")
@@ -266,6 +276,12 @@ def build_ramdisk(init_binary: bytes, version: str, build_id: str = "",
             ino += 1
             _sbin_written = True
         out.write(_newc_entry(f"sbin/{name}", _S_IFREG | 0o755, data, ino))
+        ino += 1
+
+    # After the files, so the name ordering above stays purely alphabetical and
+    # the archive is a function of the inputs alone.
+    if (sbin or {}).get("busybox"):
+        out.write(_newc_entry("sbin/udhcpc", _S_IFLNK | 0o777, b"busybox", ino))
         ino += 1
 
     out.write(_newc_entry("TRAILER!!!", 0, b"", ino))
