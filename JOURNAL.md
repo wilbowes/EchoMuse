@@ -2782,3 +2782,135 @@ the one line that identifies an `ask_question` flow — the exact flow being
 debugged in #423, where an `ask_question` called from a voice turn's own intent
 deadlocks against that turn's 30s TTS wait (#506). The marker was meant for
 transcripts; `{msg.text!r}` is quoted and `_QUOTED` already covers it.
+
+## 2026-09-14 — we ship busybox, and stop overwriting the stock boot image
+
+Two dependencies emOS should never have had, and both were invisible because
+something else on the device happened to cover for them.
+
+**The first was busybox** (#524). `init.c` starts DHCP on FireOS 6 with
+`/sbin/udhcpc`, and nothing ever shipped one — the 09-12 WiFi work was done on a
+device carrying amonet v2's *optional* root component, which had left a busybox
+at `/data/local/bin`. It reached further than DHCP: `ntpd`, `syslogd`/`klogd`
+and `em-wifi`'s `awk` all resolved through the same lookup, and on FireOS 5 the
+copy in use was Amazon's.
+
+**The toolchain was the whole problem, and the OS was not.** Building busybox
+`defconfig` against the pinned NDK needed eight source patches — `utmpx.h`,
+`sys/kd.h`, `in6_ifreq` defined twice, no `SYSLOG_NAMES`, `union semun`, missing
+`SWAP_FLAG_*`, then `getusershell`/`ether_hostton`/`setbit`/`gethostid`/
+`explicit_bzero` absent at link — twenty applets disabled to get that far, and
+clang 9 **segfaults** compiling `hush.c`, reproduced at `-j1` with 17GB free.
+The binary is static, so it needs only the kernel's syscall ABI and the libc is
+a free choice; bionic is the wrong one because busybox does not target it.
+Against musl the same `defconfig` built first try with zero patches and zero
+disables. That is also why amonet's busybox "just worked" — it is an
+OpenWrt-style musl build.
+
+Alpine over a convenience image, because it is a distribution's own gcc and musl
+rather than one maintainer's; qemu makes it a native armv7 build with no
+cross-compilation surface to get wrong, at ~8 minutes. 980,284 bytes, 397
+applets, static ET_EXEC ARM32, and byte-identical across four independent builds
+once `SOURCE_DATE_EPOCH` is pinned — without it the banner carries wall-clock
+time and nothing is verifiable.
+
+**toybox was evaluated properly and is not the answer**, which is worth writing
+down because 0BSD makes it look like one. Built it: 617,636 bytes, 228 applets —
+and of the 21 emOS needs, eight are in `toys/pending/`, whose own README says the
+code "may or may not work, some of the commands here are unfinished stubs".
+`dhcp`, `syslogd`, `klogd`, `route`, `ip`, `awk`, `vi`, `less` — every one of
+them. `pending/dhcp.c` is copyright 2012–2013 and has sat there unpromoted for
+over a decade. The decisive part: **FireOS 6 already ships toybox**, so "use
+toybox" is the configuration we have and it is what fails.
+
+**Ordering, not just presence.** `busybox_path()` now puts ours FIRST on every
+layout. Everything else in that list belongs to somebody else — Amazon's on
+FireOS 5, a third-party root's on FireOS 6 — and searching those first hands
+DHCP, `ntpd` and the system log to a binary of unknown vintage that a reflash
+can remove, with nothing reporting the swap. Proven by planting a decoy busybox
+at `/data/local/bin` and rebooting: `/sbin/awk -> /sbin/busybox`, ours still won.
+
+**GPL-2.0 is the only licence here obliging us to distribute SOURCE**, and that
+is met by ASSETS rather than by wording in the notes. Every release publishes the
+verified upstream tarball and the licence text beside the binary; a link to
+busybox.net would leave compliance depending on a third party's server layout.
+The build proves the binary came from that tarball by diffing the compiled tree
+against a fresh extraction — "we do not patch busybox" is a claim about the
+build, and the supplicant script beside it patches its sources with inline
+python, so a keyword grep for `patch` would have been theatre.
+
+**The second dependency was the stock boot image**, and the wizard was eating it.
+It wrote the slot the device had BOOTED, which on a stock device is the slot the
+stock image is in. That image is the build reference for every future emOS image
+and the only way back to FireOS, and we ship neither a kernel nor a userspace —
+so once both slots hold emOS there is nothing on the device to rebuild from. The
+spare was in exactly that state, its only surviving stock FireOS 6 boot image an
+escrow on a laptop.
+
+**Where boot-next lives, finally.** `misc` offset 864 held `00 41 42 42 01 8f`,
+recorded as undecoded since 09-13. It is Amazon's own `bootloader_control`:
+magic `0x42424100`, a version byte, then AOSP's `slot_metadata` bitfield per slot
+— priority in the low 4 bits, tries in the next 3, successful in the top. A
+healthy device reads A=`0x8f` and B=`0x00`. TWRP ships `bcbtool` (a wrapper on
+`amzn_bcbtool`) with `get_active`/`set_active`, which confirmed the decode on the
+same boot. **Writing a slot does not select it**, and that is the whole defect:
+a verified write can still boot the other slot, which presents as the flash
+having done nothing.
+
+**An emOS install is a PAIR**, and this is the part that took the longest to see.
+emOS carries Amazon's kernel and its own ramdisk and nothing else — bionic, the
+linker, tinyalsa, `/system/bin/sh` and the WiFi firmware all come from `/system`
+at runtime, 768MB of Amazon's code we neither ship nor could. `init.c` hardcoded
+`mmcblk0p13` for it, which is right only while the reference comes from slot A —
+and once stock keeps its slot and emOS goes in the other, the boot slot and the
+system slot are *deliberately different*. So the packer stamps
+`emos.system=/dev/block/mmcblk0pN` onto the image's own cmdline and init mounts
+that. A build-time fact frozen into the image, deliberately NOT read from the
+BCB: that says where emOS is booting FROM, which is precisely the slot we do not
+want. `cmdlinecheck.c` is the fifth off-target check, because a misparse does not
+fail the mount — every system partition on these devices holds a valid FireOS, so
+it mounts a *different* Amazon userspace, boots, and looks healthy.
+
+Proven by stamping **p14** on purpose, since p13 is what the fallback picks and
+would have proven nothing: `/proc/mounts` came back p14 and the boot was healthy.
+Which incidentally settles the version-skew worry — emOS runs fine off either
+FireOS 6 system.
+
+**The hardware run found a bug no test could have.** Running the shipped probe
+against the spare returned `SLOT b stock` for a slot holding an *older emOS
+image*: `emos.system=` only exists on images built since the stamp, so every emOS
+image already in the field read as stock. The wizard would have escrowed an emOS
+image AS the stock recovery image, preserved it, and never found the real one.
+`ramoops.mem_address=0x44400000` covers those — our packer has appended it to
+every image it has ever built — and it is matched by full address rather than the
+bare key, because the two ways of being wrong are not equal: reading OURS as
+stock costs the escrow, reading STOCK as ours overwrites it. The classification
+happens in shell, so the guard matches the `case` statement rather than the
+comment above it.
+
+Then the whole rule end to end: both-ours refused with the escrow instruction,
+stock restored into slot B, donor B / target A chosen (**not** the booted slot,
+which is what the old rule followed), image built against `system_b`, written to
+slot A, BCB pointed at A, device booted emOS mounting p14 — with
+`7506fab6…` still sitting in slot B.
+
+**FireOS 5 is untouched and does not get the fix.** Every new path is gated on
+the v2 layout. `system_a` is p13 there too (verified on a live FireOS 5 device),
+so an unstamped v1 image falls back correctly; but the boot partitions are p17/p18
+in Android's map against p10/p11 on v2, and v1's `other-boot` names the ACTIVE
+slot — so that flow still overwrites the stock image, and fixing it needs a v1
+device to write against.
+
+Two smaller things fixed on the way, both known and both unfixed since 09-12: the
+console now sets `ANDROID_DATA`, so commands stop printing two lines of tzdata
+warning before their own output; and `console` has a `req`, so an unexecutable
+shell logs `svc console absent` once instead of respawning for ever — the failure
+mode that hid the FireOS 6 system-as-root layout for a day.
+
+**Still open from today**: `ntpd` runs and queries `10.10.1.1` — the router, from
+DHCP — which does not serve NTP, so it backs off for ever and the clock stays at
+2010 until the controller's `ack` supplies it. Real, not a regression, and
+choosing an NTP source is a decision with a phone-home flavour rather than a bug
+fix. Also worth knowing: `pgrep` on emOS reports nothing for `ntpd`, `syslogd` or
+`klogd` while `/run/messages` is actively being written, so it is not evidence a
+service is dead.

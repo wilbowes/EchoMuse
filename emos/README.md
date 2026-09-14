@@ -183,6 +183,20 @@ replace them:
 - **DHCP on FireOS 6 is busybox `udhcpc`**, which needs a script to apply a
   lease it has already obtained; without one it gets an address and discards
   it, which reads as a DHCP failure and is not.
+- **emOS mounts the `/system` its image was BUILT beside**, named by
+  `emos.system=/dev/block/mmcblk0pN` on its own cmdline and parsed by
+  `cmdline_system_part()`. It used to hardcode p13, which is right only while
+  the reference comes from slot A — and since the wizard now leaves stock FireOS
+  in its own slot and puts emOS in the other, the boot slot and the system slot
+  are deliberately different values. Absent, it falls back to p13, so images
+  built before this keep booting exactly as they did.
+
+  An emOS image is Amazon's kernel plus our ramdisk and nothing else; bionic,
+  the linker, tinyalsa, `/system/bin/sh` and the WiFi firmware all come from
+  `/system` at runtime. So an image is a PAIR — a kernel and the userspace it
+  was taken beside — and the pairing travels with the image rather than being
+  guessed at each boot. Read it with `od` on the image or from `/proc/cmdline`
+  on a running device; `cmdlinecheck.c` pins the parser.
 - **emOS ships its own busybox** — 1.38.0, static ARM32, built by
   `tools/build-busybox.sh`. A FireOS 6 `/system` has toybox and **no busybox at
   all**, so without ours there is no `udhcpc` (hence no address), no `ntpd`, no

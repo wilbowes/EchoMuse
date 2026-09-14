@@ -1724,6 +1724,47 @@ throughout — so the rules below are all one rule seen from different angles.
   completion may depend on something reachable only after the wizard is
   closed.**
 
+**The stock boot image is PRESERVED, not overwritten, and the slot it keeps is
+not the one the device booted.** Until 2026-09-14 the flow escrowed and wrote
+`boot$(getprop ro.boot.slot_suffix)` — which on a stock device is the slot the
+stock image is in, so every provision destroyed it. That image is the build
+reference for any future emOS image and the only way back to FireOS, and we ship
+neither a kernel nor a userspace: once both slots hold emOS there is nothing on
+the device to rebuild from.
+
+`classifyBootSlots` reads each slot's own 512-byte header and `chooseBootSlots`
+decides; both are pure, and `tests/slot_choice.test.mjs` covers them. Four
+outcomes — one stock and one ours (the re-provision case, so running twice is
+idempotent), both stock (keep the one that boots, take the other), one stock and
+one empty, and **both ours, which refuses** and names the escrow as the way out.
+That refusal is the state every device the old rule touched is already in.
+
+- **Ours-vs-stock is decided in SHELL, not in the parser**, so no test of
+  `classifyBootSlots` can reach it. It matches TWO markers: `emos.system=`,
+  which the packer stamps, and `ramoops.mem_address=0x44400000`, which it has
+  appended to every image it has ever built. The stamp alone classified a
+  FIELDED emOS image as stock — measured on the spare, slot B — which would have
+  escrowed an emOS image AS the stock recovery image while the real one was
+  never found. Matched by full ADDRESS, because reading OURS as stock costs the
+  escrow and reading STOCK as ours overwrites it.
+- **Writing a slot does not select it.** Amazon's bootloader picks from a
+  `bootloader_control` at `misc`+864 — magic `0x42424100`, a version byte, then
+  AOSP's `slot_metadata` bitfield per slot (priority low 4 bits, tries next 3,
+  successful top). `_activateBootSlot` sets it with TWRP's `bcbtool set_active`,
+  with a raw read as fallback so a recovery without the tool can still be TOLD
+  it is about to boot the wrong image. Without this a verified write boots the
+  other slot, which presents as the flash having done nothing.
+- **The image records which `/system` it was built beside** (`system_part` on
+  the build POST → `emos.system=` on the cmdline). The wizard resolves
+  `system_a`/`system_b` through TWRP's by-name map because that is the only
+  place those names exist; emOS has none. Do NOT derive it from the BCB — that
+  says where emOS is booting FROM, which after this change is deliberately the
+  other slot.
+- **v1 is gated out of all of it.** Its `other-boot` names the active slot and
+  it has no BCB of this shape. It therefore still overwrites the stock image,
+  and fixing that needs a v1 device: the boot partitions are p17/p18 in
+  Android's map against p10/p11 on v2, so nothing here transfers by inspection.
+
 **The restore is the wizard's undo and it is proven.** `_writeBootPartition` is
 shared by the flash and the restore deliberately — it is the only code here
 that can leave a device unbootable, and a second copy is one that drifts from
