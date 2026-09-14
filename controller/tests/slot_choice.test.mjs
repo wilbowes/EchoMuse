@@ -132,5 +132,28 @@ const probe = (a, b) =>
   check("donor is never the target", true);
 }
 
+// ── the probe's own marker test ─────────────────────────────────────────────
+//
+// classifyBootSlots only parses what the probe decided, so the decision of
+// ours-vs-stock is made in SHELL and no test above can reach it. This checks
+// the case statement itself, not the comment above it — a grep that matched
+// the prose would be satisfied by the explanation of the bug.
+//
+// Both markers are required. `emos.system=` is stamped only since the stamp
+// existed; every emOS image built before it carries `ramoops.mem_address=`
+// and nothing else. Matching on the stamp alone read a FIELDED emOS image as
+// stock — measured on the spare 2026-09-14, slot B — which would have made
+// the wizard escrow an emOS image as the stock recovery image.
+{
+  const line = src.split("\n").find(l => l.includes("*emos.system=*") && l.includes("SLOT $x ours"));
+  check("the probe classifies on the emos.system stamp", !!line);
+  check("...and on ramoops, so pre-stamp emOS images are not read as stock",
+        !!line && line.includes("ramoops.mem_address=0x44400000"));
+  // The bare key would match a stock image that happened to carry ramoops at
+  // some other address; reading stock as ours is the error that overwrites it.
+  check("...by full address, not the bare ramoops key",
+        !!line && !/ramoops\.mem_address=\*/.test(line));
+}
+
 console.log(fails ? "\nFAILED" : "\nall ok");
 process.exit(fails ? 1 : 0);

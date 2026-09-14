@@ -5638,15 +5638,30 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       + '[ -e "$n" ] && echo "NAME ${n##*/} $(readlink -f "$n" 2>/dev/null)"; done; '
       // What each boot slot HOLDS, from its own 512-byte header — see
       // classifyBootSlots. `ANDROID!` says there is a boot image there at all;
-      // our own emos.system= on the cmdline says it is ours. Reading the
-      // header on the device rather than pulling 16MB twice.
+      // the cmdline says whose it is. Reading the header on the device rather
+      // than pulling 16MB twice.
+      //
+      // TWO markers, and the second one is why. `emos.system=` is stamped by
+      // the packer, but only since this change — every emOS image built before
+      // it carries no stamp at all, and matching on that alone classified a
+      // FIELDED emOS image as stock. Measured on the spare 2026-09-14: slot B
+      // held an older emOS build and read as `stock`, which would have made
+      // the wizard escrow an emOS image AS the stock recovery image and then
+      // preserve it, while the real stock image was never found.
+      //
+      // `ramoops.mem_address=0x44400000` covers those: our packer has appended
+      // it to every image it has ever built. The full ADDRESS rather than the
+      // bare key, because it names the region the vendor device tree reserves
+      // for us — the two ways of being wrong here are not equal, and reading a
+      // stock image as ours is the one that overwrites it.
       + 'for x in a b; do '
       + 'd=$(readlink -f /dev/block/by-name/boot_$x 2>/dev/null); '
       + 'if [ ! -b "$d" ]; then echo "SLOT $x absent"; continue; fi; '
       + 'm=$(dd if="$d" bs=8 count=1 2>/dev/null); '
       + 'if [ "$m" != "ANDROID!" ]; then echo "SLOT $x empty $d"; continue; fi; '
       + 'c=$(dd if="$d" bs=1 skip=64 count=512 2>/dev/null | tr -d "\\000"); '
-      + 'case "$c" in *emos.system=*) echo "SLOT $x ours $d";; '
+      + 'case "$c" in '
+      + '*emos.system=*|*ramoops.mem_address=0x44400000*) echo "SLOT $x ours $d";; '
       + '*) echo "SLOT $x stock $d";; esac; done; '
       // The system partitions, resolved by NAME here because this is the one
       // place those names exist — emOS has no by-name map of its own.
