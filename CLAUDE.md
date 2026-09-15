@@ -97,7 +97,14 @@ before he can send it has failed, however accurate it is.
 
 **Five habits to spend sparingly** (derived from claudisms.ai, CC0). Generated
 prose is recognisable by frequency rather than by any single phrase, so these
-are budgets, not bans — except the third, which is a ban:
+are budgets, not bans — except the third, which is a ban.
+
+**The target is prose that does not read as stock, and authorship is not the
+point.** Claude wrote most of this project and the record says so — commit
+trailers, the `— Team EchoMuse (powered by Claude)` sign-off on every issue
+reply. Nothing here is concealment, so do not write self-consciously to avoid
+sounding like a model; that reads as strangely as the clichés do. Aim at clear.
+A reader's objection is to stock phrasing, never to who typed it.
 
 - **Say it; don't rate it.** No "this matters", "worth noting", "the most
   interesting part", "the right way". The reader decides what is important.
