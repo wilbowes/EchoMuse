@@ -90,8 +90,26 @@ before he can send it has failed, however accurate it is.
   specifics; a user with a dead device gets what to do next; a passing
   question gets one line.
 - **Cut** process narration, restating the person's own issue back at them,
-  and hedging.
+  and hedging. That includes narrating your own structure or candour — "I'm
+  going to make three points", "the point is", "here's where it gets
+  interesting", "to be honest". Make the points.
 - **Offer detail rather than pre-empting it.** One line does that.
+
+**Five habits to spend sparingly** (derived from claudisms.ai, CC0). Generated
+prose is recognisable by frequency rather than by any single phrase, so these
+are budgets, not bans — except the third, which is a ban:
+
+- **Say it; don't rate it.** No "this matters", "worth noting", "the most
+  interesting part", "the right way". The reader decides what is important.
+- **Plain verb before metaphor** — "is", "happens", "shows" ahead of "lives",
+  "sits", "surfaces", "names", "carries". About one metaphor a page, where it
+  does work a plain verb cannot.
+- **Never contrastive negation**: "not X, it's Y", "not only X, but Y". Every
+  published analysis of AI tells lands on this one first, and it is the
+  easiest to write without noticing.
+- **Vary sentence length.** Four short declaratives in a row is a tic; one
+  short sentence after a long one is punctuation.
+- **No corporate verbs**: leverage, unpack, double-click, surface.
 
 **The exception is anything irreversible**, or anything asking someone to act
 on their own hardware — an OTA, rooting, a schema migration, a partition
