@@ -7744,10 +7744,23 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
     ? { name: wwModelLabel(config.owwModel), file: config.owwModel.split('/').pop(), path: config.owwModel, missing: true }
     : null;
 
-  // Sensitivity: map owwThreshold (0.1–0.9) to 1–9 int, inverted (low threshold = eager)
-  const sensitivityToThreshold = v => Number((1.0 - (v - 1) / 8 * 0.8).toFixed(2));
-  const thresholdToSensitivity = t => Math.round((1.0 - t) / 0.8 * 8) + 1;
-  const sensitivity = thresholdToSensitivity(config.owwThreshold ?? 0.5);
+  // Sensitivity runs Precise -> Eager left to right, which is the reverse of
+  // the threshold it sets, so the track carries the threshold reflected about
+  // the midpoint of its range. reflectT is its own inverse — the same call
+  // converts both ways.
+  //
+  // The precise end stops at 0.975, not 1.0. openwakeword's score is a sigmoid
+  // that saturates below 1.0 and both scorers test `score >= threshold`
+  // (em_controller.py's ctrl_hit, and shadow.go's crossed on-device), so a
+  // threshold of 1.0 is a bar nothing can clear: the most precise notch used to
+  // be a setting that could never wake. 18,021 scored frames across three Gen 2
+  // Dots peaked at 0.999, with 178 at or above 0.98 — so 0.975 is strict but
+  // reachable.
+  //
+  // 0.025 per step rather than 0.1, because the precision/recall tradeoff lives
+  // in the range above 0.9 and 0.1 steps jumped straight over it.
+  const WAKE_T_MIN = 0.1, WAKE_T_MAX = 0.975, WAKE_T_STEP = 0.025;
+  const reflectT = t => Number((WAKE_T_MIN + WAKE_T_MAX - t).toFixed(3));
 
   const bands = config.eqBands ?? [0,0,0,0,0,0,0,0];
   const RING_SCENES = [
@@ -7945,11 +7958,12 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
           </div>
           <div>
             <div style={inputStyle}>
-              <div style={{ fontFamily: mono, fontSize: 11, color: 'var(--text2)', marginBottom: 6 }}>Sensitivity</div>
-              <input type="range" min={1} max={9} step={1} value={sensitivity}
-                style={{ width: '100%' }}
-                onChange={e => set('owwThreshold', sensitivityToThreshold(Number(e.target.value)))}/>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
+              <Slider label="Sensitivity" sub="wake confidence needed — raise it if ordinary speech wakes the Echo"
+                value={reflectT(config.owwThreshold ?? 0.5)}
+                min={WAKE_T_MIN} max={WAKE_T_MAX} step={WAKE_T_STEP}
+                formatValue={v => reflectT(v).toFixed(3)}
+                onChange={v => set('owwThreshold', reflectT(v))}/>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: -12 }}>
                 <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)' }}>Precise</span>
                 <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)' }}>Eager</span>
               </div>

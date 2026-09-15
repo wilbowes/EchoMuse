@@ -102,6 +102,7 @@ jobs:
           node controller/tests/number_field.test.mjs
           node controller/tests/unlock_verdict.test.mjs
           node controller/tests/slot_choice.test.mjs
+          node controller/tests/wake_sensitivity.test.mjs
 
   device-tests:
     name: Device Go tests
