@@ -265,6 +265,8 @@ jobs:
           /tmp/wpacheck
           cc -O2 -o /tmp/cmdlinecheck emos/init/cmdlinecheck.c
           /tmp/cmdlinecheck
+          cc -O2 -o /tmp/serialcheck emos/init/serialcheck.c
+          /tmp/serialcheck
 
       # Same rule as the firmware release: the notes come from the ANNOTATED
       # tag, because whoever reads them is deciding whether to reflash a boot

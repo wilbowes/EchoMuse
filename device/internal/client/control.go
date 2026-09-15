@@ -1289,38 +1289,98 @@ func probeTCP(addr string, timeout time.Duration) bool {
 	return true
 }
 
-// GetSerialNo reads ro.serialno — stable device identifier matching adb devices output.
+// idmePath is Amazon's ID Manager, exported by their kernel driver. It holds
+// this unit's factory identity — serial, board_id, MAC addresses, per-unit ALS
+// and microphone calibration — and the files are world-readable.
 //
-// Falls back to androidboot.serialno on the kernel command line, which is where
-// the value comes from in the first place. The two sources are complementary
-// rather than redundant: Android's init consumes every androidboot.* argument
-// into a property and strips it from /proc/cmdline, so on stock FireOS only
-// getprop answers — while on a device booted without Android's userspace there
-// is no property service and only the cmdline answers. Both yield the identical
-// string, which matters because the whole fleet is keyed on the serial.
+// A variable so tests can point it elsewhere.
+var idmePath = "/proc/idme/serial"
+
+// GetSerialNo returns this unit's serial. The whole fleet is keyed on it, so a
+// wrong or missing answer is not cosmetic: every device that cannot resolve one
+// registers as "unknown-device" and they collide with each other.
+//
+// Three sources, in descending order of how much has to be working for them to
+// answer:
+//
+//  1. /proc/idme/serial — the hardware value, straight from Amazon's kernel
+//     driver. No property service, no bootloader argument, and it answers
+//     identically under FireOS, emOS and TWRP. Verified 2026-09-15 on a v1
+//     (FireOS 5, matching getprop exactly) and a v2 (FireOS 6, in recovery).
+//  2. getprop ro.serialno — needs Android's property service, so FireOS only.
+//  3. androidboot.serialno on the kernel command line, where the property came
+//     from — needs Android's init NOT to have run, since it consumes every
+//     androidboot.* argument and strips it from /proc/cmdline.
+//
+// idme leads because the cmdline is not reliably there to be read. On FireOS 6
+// the kernel is 32-bit, COMMAND_LINE_SIZE is 1024, and emOS's own cmdline is
+// 385 bytes against stock's 70 — which pushes androidboot.serialno, near the
+// end of what LK appends, to byte 1040. It is truncated away before the kernel
+// ever sees it, and both this and emOS's init then correctly find nothing.
+// Measured on the spare, 2026-09-15.
 func GetSerialNo() string {
+	if serial := serialFromIdme(); serial != "" {
+		return serial
+	}
 	out, err := exec.Command("getprop", "ro.serialno").Output()
 	if err == nil {
-		if serial := strings.TrimSpace(string(out)); serial != "" {
+		if serial := sanitiseSerial(string(out)); serial != "" {
 			return serial
 		}
 	}
 	if serial := serialFromCmdline(); serial != "" {
 		return serial
 	}
-	log.Printf("[control] Warning: could not read ro.serialno: %v", err)
+	log.Printf("[control] Warning: no serial from idme, getprop or cmdline: %v", err)
 	return "unknown-device"
 }
 
+func serialFromIdme() string {
+	// Not cached, for the reason als.resolve() documents: this is first asked
+	// at registration, moments after boot, and a negative answer frozen there
+	// would outlive the condition that caused it.
+	b, err := os.ReadFile(idmePath)
+	if err != nil {
+		return ""
+	}
+	return sanitiseSerial(string(b))
+}
+
+// sanitiseSerial trims and validates a serial read from a device file.
+//
+// procfs hands back a value with no trailing newline, other sources add one,
+// and a partially written or absent field can read as NULs. Anything that is
+// not printable ASCII is rejected outright rather than passed on: a serial is
+// an identifier the controller stores, logs and keys rows on, and a plausible
+// but corrupt one is worse than none, since "unknown-device" at least says so.
+func sanitiseSerial(raw string) string {
+	if i := strings.IndexByte(raw, 0); i >= 0 {
+		raw = raw[:i]
+	}
+	s := strings.TrimSpace(raw)
+	if s == "" || len(s) > 64 {
+		return ""
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x21 || s[i] > 0x7e {
+			return ""
+		}
+	}
+	return s
+}
+
+// A variable so tests can point it elsewhere, like idmePath.
+var cmdlinePath = "/proc/cmdline"
+
 func serialFromCmdline() string {
-	b, err := os.ReadFile("/proc/cmdline")
+	b, err := os.ReadFile(cmdlinePath)
 	if err != nil {
 		return ""
 	}
 	const key = "androidboot.serialno="
 	for _, field := range strings.Fields(string(b)) {
 		if strings.HasPrefix(field, key) {
-			return strings.TrimPrefix(field, key)
+			return sanitiseSerial(strings.TrimPrefix(field, key))
 		}
 	}
 	return ""

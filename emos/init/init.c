@@ -1057,16 +1057,78 @@ static int cmdline_system_part(const char *cmdline)
     return n > 0 ? n : SYSTEM_PART_DEFAULT;
 }
 
-/* The device's serial, read from androidboot.serialno on the kernel cmdline.
+/* Copy a serial out of `raw` into `out`, trimmed and validated.
  *
- * LK puts it there (confirmed in /proc/cmdline on this board), which is the
- * only source available to us: there is no property service under emOS, so
- * getprop ro.serialno does not exist, and /system carries the BUILD's identity
- * rather than this unit's.
+ * Stops at the first space, newline or NUL, and REJECTS anything that is not
+ * printable ASCII by returning an empty string. The serial is the identity the
+ * whole fleet is keyed on, so a plausible but corrupt one is worse than none —
+ * "unknown" at least says it does not know, while a mangled value quietly
+ * becomes a second device.
  *
- * Returns a pointer to a static buffer, empty if it could not be read. Callers
- * must treat empty as "unknown" and carry on — nothing here is worth failing a
- * boot over.
+ * Returns 1 when it wrote a usable serial, 0 otherwise.
+ */
+static int serial_copy(const char *raw, char *out, size_t outsz)
+{
+    size_t i = 0;
+    out[0] = 0;
+    if (!raw)
+        return 0;
+    while (raw[i] && raw[i] != ' ' && raw[i] != '\n' && raw[i] != '\r'
+           && i < outsz - 1) {
+        /* Clear on rejection. Leaving the bytes copied so far would hand the
+         * caller a truncated serial, or -- if its buffer is stack memory a
+         * previous call used -- a stale one that looks entirely valid. Caught
+         * exactly that way by serialcheck.c. */
+        if (raw[i] < 0x21 || raw[i] > 0x7e) {
+            out[0] = 0;
+            return 0;
+        }
+        out[i] = raw[i];
+        i++;
+    }
+    out[i] = 0;
+    return i > 0;
+}
+
+/* Find androidboot.serialno= on a kernel cmdline. Empty if it is not there.
+ *
+ * The key must start the line or follow a space, so a longer argument merely
+ * ENDING in ours cannot answer -- the same match rule cmdline_system_part()
+ * applies to emos.system=.
+ */
+static int serial_from_cmdline(const char *line, char *out, size_t outsz)
+{
+    const char *key = "androidboot.serialno=";
+    const char *p = line;
+    out[0] = 0;
+    if (!line)
+        return 0;
+    while ((p = strstr(p, key))) {
+        if (p == line || p[-1] == ' ')
+            return serial_copy(p + strlen(key), out, outsz);
+        p += strlen(key);
+    }
+    return 0;
+}
+
+/* The device's serial.
+ *
+ * TWO sources, and idme leads because the cmdline is not reliably there to be
+ * read. /proc/idme/serial is Amazon's ID Manager, exported by their kernel
+ * driver and world-readable — the hardware value, needing no property service
+ * and no bootloader argument. Verified 2026-09-15 on a v1 (FireOS 5, matching
+ * getprop exactly) and a v2 (FireOS 6, in recovery).
+ *
+ * The cmdline stays as a fallback, and it is the one that failed: on FireOS 6
+ * the kernel is 32-bit, so COMMAND_LINE_SIZE is 1024, and our image cmdline is
+ * 385 bytes against stock's 70. That pushes androidboot.serialno — near the end
+ * of what LK appends — to byte 1040, where it is truncated away before the
+ * kernel sees it. The parse was always correct; there was nothing to find.
+ * Measured on the spare, 2026-09-15.
+ *
+ * Returns a pointer to a static buffer, empty if neither source answered.
+ * Callers must treat empty as "unknown" and carry on — nothing here is worth
+ * failing a boot over.
  */
 static const char *serialno(void)
 {
@@ -1076,27 +1138,27 @@ static const char *serialno(void)
         return buf;
     done = 1;
 
-    int fd = open("/proc/cmdline", O_RDONLY);
+    char raw[2048];
+    int fd = open("/proc/idme/serial", O_RDONLY);
+    if (fd >= 0) {
+        ssize_t n = read(fd, raw, sizeof raw - 1);
+        close(fd);
+        if (n > 0) {
+            raw[n] = 0;
+            if (serial_copy(raw, buf, sizeof buf))
+                return buf;
+        }
+    }
+
+    fd = open("/proc/cmdline", O_RDONLY);
     if (fd < 0)
         return buf;
-    char line[2048];
-    ssize_t n = read(fd, line, sizeof line - 1);
+    ssize_t n = read(fd, raw, sizeof raw - 1);
     close(fd);
     if (n <= 0)
         return buf;
-    line[n] = 0;
-
-    const char *key = "androidboot.serialno=";
-    char *p = strstr(line, key);
-    if (!p)
-        return buf;
-    p += strlen(key);
-    size_t i = 0;
-    while (p[i] && p[i] != ' ' && p[i] != '\n' && i < sizeof buf - 1) {
-        buf[i] = p[i];
-        i++;
-    }
-    buf[i] = 0;
+    raw[n] = 0;
+    serial_from_cmdline(raw, buf, sizeof buf);
     return buf;
 }
 

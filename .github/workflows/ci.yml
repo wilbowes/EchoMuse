@@ -556,6 +556,8 @@ jobs:
           /tmp/wpacheck
           cc -O2 -o /tmp/cmdlinecheck emos/init/cmdlinecheck.c
           /tmp/cmdlinecheck
+          cc -O2 -o /tmp/serialcheck emos/init/serialcheck.c
+          /tmp/serialcheck
       # The C hashes a password by hand — init is a static binary with no
       # crypto library — and the controller hashes it in Python. Nothing but
       # equal output proves they agree, and the failure mode is a device
