@@ -3385,7 +3385,17 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   const [stepState, setStepState] = useState(STEPS.map(() => 'pending'));
   const [log, setLog]           = useState([]);
   const [running, setRunning]   = useState(false);
-  const [adb, setAdb]           = useState(null);
+  // The ADB handle is held twice: `adb` renders, `adbRef` is read from async
+  // code. A step runner connects and calls setAdb() inside one async callback,
+  // so everything after it in that callback still closes over the RENDER-time
+  // value — null on a fresh page load. That is why the diagnostics capture in
+  // runStep's catch reported "No ADB connection" on step 1 while connected and
+  // authenticated, losing the download for the step where an unfamiliar device
+  // is most likely to fail (#517, #87). Set through this wrapper, never
+  // _setAdb, so the two cannot diverge.
+  const [adb, _setAdb]          = useState(null);
+  const adbRef                  = useRef(null);
+  const setAdb = c => { adbRef.current = c; _setAdb(c); };
   const [magiskFile, setMagiskFile] = useState(null);
   const [binaryFile, setBinaryFile] = useState(null);
   // emOS flow. `emosRef` is the escrowed boot image — the build input
@@ -3582,7 +3592,10 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   }
 
   async function captureDiagnostics(stepIdx, err) {
-    if (!adb) {
+    // adbRef, not adb: this runs from runStep's catch, in the same async
+    // callback that connected.
+    const c = adbRef.current;
+    if (!c) {
       // No connection means no probes, and a button that downloads a file
       // containing nothing but the error would be worse than no button.
       addLog('No ADB connection, so device state could not be captured.', 'warn');
@@ -3590,7 +3603,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     }
     addLog('Capturing device state for diagnostics…');
     try {
-      setDiagnostics(await collectProvisionDiagnostics(adb, stepIdx, err));
+      setDiagnostics(await collectProvisionDiagnostics(c, stepIdx, err));
       addLog('Device state captured — "Download diagnostics" below.', 'ok');
     } catch (e) {
       // Never let the diagnostic path bury the real failure.
@@ -3654,20 +3667,40 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // flow touches /system while provisioning, so this is safe — but a failure
   // is a WARNING and never a refusal: a device whose /system will not mount is
   // worth saying so about, not worth blocking a provision over.
-  async function readFireosBuild(c) {
-    const out = await c.shell(
+  // The shell half, kept separate so a test can read it without a device.
+  // Both faults it guards are SILENT on hardware: the wizard warns that the
+  // build is unknown and carries on, which looks like a quirk of one unit.
+  function _sysreadScript() {
+    return (
       'SLOT=$(getprop ro.boot.slot_suffix); S=""; '
-      + 'for d in /dev/block/platform/*/by-name; do '
+      // BOTH by-name directories. amonet v2 has only the short one, so
+      // globbing the long path alone left S empty and this function returned
+      // null on every v2 device — the FireOS build, the Android release and
+      // the device identity were unreadable, not merely missing on one unit
+      // (#517). Same assumption #513 fixed in classifyBootTarget's probe.
+      + 'for d in /dev/block/platform/*/by-name /dev/block/by-name; do '
       + '  for n in "system$SLOT" system_a system; do '
       + '    [ -z "$S" ] && [ -e "$d/$n" ] && S=$(readlink -f "$d/$n"); done; done; '
       + 'echo "NODE=$S"; '
       + '[ -z "$S" ] && exit 0; '
       + 'WAS=$(mount | grep " /system " ); '
       + '[ -z "$WAS" ] && mount -o ro "$S" /system 2>&1; '
+      // FireOS 6 is system-as-root: the tree sits in a /system directory
+      // INSIDE the partition, so mounting system_<slot> at /system puts the
+      // file at /system/system/build.prop. FireOS 5 keeps it at the root.
+      // Prefer the nested one where it exists — emOS's init resolves the same
+      // layout the same way (emos/init/init.c).
+      + 'B=/system/build.prop; '
+      + '[ -f /system/system/build.prop ] && B=/system/system/build.prop; '
+      + 'echo "PROP=$B"; '
       + 'grep -E "^ro\\.(build\\.version\\.(name|incremental|release)|product\\.(model|name))=" '
-      + '  /system/build.prop 2>/dev/null; '
+      + '  "$B" 2>/dev/null; '
       + '[ -z "$WAS" ] && umount /system 2>/dev/null; '
       + 'echo _SYSREAD_OK');
+  }
+
+  async function readFireosBuild(c) {
+    const out = await c.shell(_sysreadScript());
     if (!out.includes('_SYSREAD_OK')) return null;
     const pick = k => ((out.match(new RegExp('^' + k + '=(.+)$', 'm')) || [])[1] || '').trim();
     const build = pick('ro\\.build\\.version\\.incremental');
@@ -3897,9 +3930,15 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // cancelled" or a spurious disconnect. Measured 2026-09-06: two failed
     // attempts before a third succeeded, purely from the handle step 1 kept.
     // Same hazard reconnectAdb documents from the other direction.
-    if (adb && _bannerMode(adb.banner) === 'twrp') {
+    // adbRef for the same reason captureDiagnostics uses it: this decides
+    // whether a handle exists, and step 1 may have set one in a callback this
+    // render has not seen. Asking WebUSB for a second claim on a live
+    // interface is the failure documented above, so reading stale here costs
+    // the step rather than a log line.
+    const held = adbRef.current;
+    if (held && _bannerMode(held.banner) === 'twrp') {
       addLog('Already connected to TWRP — reusing the existing session.', 'ok');
-      return adb;
+      return held;
     }
     const c = await _ADB.Client.requestDevice(addLog);
     c._log = msg => addLog(`  adb: ${msg}`);
