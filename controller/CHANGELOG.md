@@ -1,5 +1,36 @@
 # Changelog
 
+## 2.24.0-ea.5 (Early Access)
+
+**Provisioning a FireOS 6 device no longer overwrites the stock boot image**
+(#525). The wizard wrote emOS over the slot the device had booted from, which
+on a stock device is the slot holding the only copy of Amazon's boot image.
+That image is the reference any future emOS build is made from, and the only
+way back to FireOS. EchoMuse ships neither a kernel nor a userspace, so once
+both slots held emOS there was nothing left on the device to rebuild from.
+
+The wizard now reads both slots, keeps the stock one, writes emOS to the other
+and points the bootloader at it.
+
+**If your device was provisioned before this release, both slots already hold
+emOS and the wizard will refuse to provision it again.** It names the boot
+image you escrowed during provisioning as the way out. Keep that file — on this
+hardware it cannot be recovered from anywhere else. Restoring it to one slot
+puts the device back in a state the wizard can work with.
+
+**emOS ships its own busybox** (#524), so a device no longer depends on tools a
+third-party root happened to leave behind. A plain stock FireOS 6 install has
+none, which is why some devices booted emOS, joined the WiFi and then never got
+an IP address. DHCP, the system log and the console all use our own copy now.
+
+Requires emOS 0.6 or later. The wizard fetches it automatically.
+
+**Fixes the controller's memory growing by roughly a gigabyte a day on a busy
+fleet** (#512, @scragnog). Every time a device reconnected, the controller
+built a fresh copy of the wake word model and never released the old one — 50
+copies and about 2.5 GB over three days. Models are now kept per device and
+reused across reconnects.
+
 ## 2.24.0-ea.4 (Early Access)
 
 **Fixes the flash step reporting that a write did not take, on a device where
