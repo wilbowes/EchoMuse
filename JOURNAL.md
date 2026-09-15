@@ -2914,3 +2914,75 @@ choosing an NTP source is a decision with a phone-home flavour rather than a bug
 fix. Also worth knowing: `pgrep` on emOS reports nothing for `ntpd`, `syslogd` or
 `klogd` while `/run/messages` is actively being written, so it is not evidence a
 service is dead.
+
+## 2026-09-15 — two releases, and the serial was never on the cmdline to find
+
+Shipped `emos-v0.6` (busybox 1.38.0, stock boot image preserved, GPL source as
+release assets) and `controller-ea-v2.24.0-ea.5` carrying it. GA stays 2.23.1
+and `:latest` did not move. The order was not optional: `EMOS_SBIN_ASSETS` now
+refuses a payload without `busybox`, so a controller built after #533 cannot
+build a FireOS 6 image against emOS 0.5.
+
+Also merged #528 (the OWW model leak, ~2.5GB over three days, @scragnog) and
+#540, which fixed three faults in the wizard's connect step. One of those is
+worth restating because the issue understated it: `readFireosBuild` globbed
+`/dev/block/platform/*/by-name`, which amonet v2 does not have, so **no** v2
+device could ever have its FireOS build, Android release or identity read. #513
+had fixed the same belief in `classifyBootTarget` without sweeping the second
+call site. When a wrong assumption is fixed, grep for its other homes.
+
+**The serial.** An emOS device on amonet 2.x reports none, and the fleet is
+keyed on it — every such device registers as `unknown-device` and they collide.
+The first three hypotheses were all wrong and all cheap to kill: amonet 2.x's LK
+not supplying it (it does — read it straight off the device), the emOS packer
+dropping it (it preserves the donor cmdline and appends), and PR #463's
+territory (that is the FireOS flow's patcher, a different path).
+
+It is **length**. LK wraps the image cmdline with 421 bytes of prefix and 344 of
+suffix; emOS's own cmdline is 385 against stock's 70, for a total of 1150.
+FireOS 6 runs the 32-bit kernel — the reason we ship `init32` — where
+`COMMAND_LINE_SIZE` is 1024. `androidboot.serialno` sits near the end of LK's
+suffix, starts at byte 1040, and is cut off before the kernel sees it. FireOS 5
+boots aarch64, limit 2048, same string fits. Both parsers were correct the whole
+time and there was nothing to find, which is why it presented as a v2 quirk.
+
+The fix came from Wil asking whether the hardware exposed it somewhere.
+**`/proc/idme/serial`** — Amazon's ID Manager, exported by their kernel driver,
+world-readable, no property service and no bootloader argument. It reads
+correctly on a v1 under Android (matching `getprop` exactly) and on a v2 in
+TWRP where the cmdline is empty. Both halves now try it first.
+
+Trimming the cmdline was the alternative and is worse: it buys bytes by dropping
+FireOS arguments (`lowmemorykiller.*`, `veritykeyid`) whose only proof is a
+boot, and it leaves the serial hostage to a budget the next addition silently
+blows again. The cmdline stays as a fallback and is now **logged when used**,
+because it is the one source that can be wrong rather than absent — a value cut
+mid-truncation is short but well formed, and procfs appends a newline either
+way, so it cannot be told from a serial legitimately last on the line.
+
+`serialcheck.c` is the sixth off-target check and earned its place before it was
+wired into CI: it caught `serial_copy` leaving partial output on rejection,
+which handed back stale stack bytes that read as a perfectly valid serial, and
+`serial_from_cmdline` matching a longer argument merely *ending* in our key —
+the same trap `cmdlinecheck.c` already guards for `emos.system=`. The Go half's
+test then failed in CI having passed locally, because the fixtures were written
+`0o444` and rewritten in the same test: root ignores the permission bits and the
+runner does not.
+
+**`/proc/idme` carries more than the serial** — `board_id`, `product_name`,
+`device_type_id`, and per-unit `alscal` and `miccal.0`–`miccal.6`. That matters
+for #541, filed today for the board framework: `/proc/device-tree/model` reads
+`MT8163` on both Dots, so it names the SoC and cannot discriminate between
+boards on the same chip, while `device_type_id` can. The microphone calibration
+values have never been read by anything in this project.
+
+Also today: #541 itself, after @vithurshanselvarajah asked on #535 what
+maintenance would be expected of someone porting to an Echo 2 (radar). The
+answer is architectural rather than a policy — the firmware should detect the
+board and resolve every hardware hook by name, so nobody has to hold every piece
+of hardware to keep a board alive. The four `pkg/` interfaces already exist; what
+is missing is selection, topology hardcoded inside the bindings, and bindings
+that cannot build off-target. Device emulation in CI was considered and parked:
+the bugs this project actually has — DAC clipping, mixer state, a kernel bus
+timeout in the audio IRQ, a partition write landing in the wrong slot — all live
+below the line any emulator draws.

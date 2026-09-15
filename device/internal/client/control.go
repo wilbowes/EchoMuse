@@ -1328,7 +1328,16 @@ func GetSerialNo() string {
 			return serial
 		}
 	}
+	// Last resort, and the only source that can be WRONG rather than absent.
+	// The kernel truncates at COMMAND_LINE_SIZE wherever it lands, so a cut
+	// mid-value leaves a short but well-formed serial — and it cannot be told
+	// apart from a real one, because procfs appends a newline either way and a
+	// serial legitimately last on the line looks identical. Hence the log line:
+	// the fallback being used at all is the thing worth seeing, since every
+	// device with an idme node should never reach here.
 	if serial := serialFromCmdline(); serial != "" {
+		log.Printf("[control] Serial came from the kernel cmdline, not idme — "+
+			"%q may be truncated; check /proc/idme/serial", serial)
 		return serial
 	}
 	log.Printf("[control] Warning: no serial from idme, getprop or cmdline: %v", err)

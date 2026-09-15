@@ -902,6 +902,48 @@ Playback ring clearing waits for the device's `playback_stats` (`device.playback
 - **Mute ring** (solid red) is device-sovereign — enforced since v2.7.8: controller LED writes are recorded but not painted while muted. Needed because muting now terminates an active turn (controller cancels + `speaker_flush` on `mute_state`), so the cancelled turn's LED cleanup arrives after the red ring is up.
 - **Volume arc** owns the ring for its 2s display window against *animations* — they repaint ~every 100ms and would otherwise stomp the arc within one frame. It does **not** outrank a deliberate action-button press: a dot release calls `CancelVolumeDisplay()`, which drops the hold so the listening frame paints (it deliberately does not repaint — the controller's frame lands within an RTT, and clearing to black would put a dark gap between the two). The arc is protection from repaint churn, not from the user. On expiry the ring repaints the latest `baseLEDs` frame (`onDisplayExpire` → `paintBaseLEDs`), handing back mid-animation. The arc shows only for physical volume button presses (v2.9.5): remote sets and the boot-time volume seed apply silently (`volumeController.Set` showRing flag). The mute-button LED is sysfs gpio444, active-high — not the gpio445 in Amazon's `libled_hal.so`, whose constant is off by one and whose pad is muxed away (stock drives the pin via the `/dev/mtgpio` ioctl; see `mute_button.go`).
 
+## Where the serial comes from
+
+The whole fleet is keyed on it, so a missing one is not cosmetic: every device
+that cannot resolve a serial registers as `unknown-device` and they collide
+with each other. Three sources, in `GetSerialNo`, and emOS's `init.c` mirrors
+the same order for the same reasons:
+
+1. **`/proc/idme/serial`** — Amazon's ID Manager, exported by their kernel
+   driver and world-readable. The hardware value, needing no property service
+   and no bootloader argument, and it answers identically under FireOS, emOS
+   and TWRP. Verified 2026-09-15 on a v1 (matching `getprop` exactly) and a v2
+   in recovery.
+2. **`getprop ro.serialno`** — needs Android's property service, so FireOS only.
+3. **`androidboot.serialno` on the kernel cmdline** — needs Android's init NOT
+   to have run, since it consumes every `androidboot.*` argument and strips it.
+
+**idme leads because the cmdline is not reliably there to be read.** On FireOS 6
+the kernel is 32-bit, so `COMMAND_LINE_SIZE` is 1024; LK wraps the image cmdline
+with 421 bytes of prefix and 344 of suffix, and emOS's own cmdline is 385 bytes
+against stock's 70. Total 1150, and `androidboot.serialno` — near the end of
+LK's suffix — starts at byte 1040 and is cut off before the kernel sees it.
+FireOS 5 boots aarch64 where the limit is 2048 and the same string fits, which
+is why this presented as specific to amonet 2.x. Measured on the spare,
+2026-09-15.
+
+**The cmdline is the only source that can be WRONG rather than absent**, and it
+cannot be guarded against: a value cut mid-truncation is short but well formed,
+and procfs appends a newline either way, so it is byte-identical to a serial
+legitimately last on the line. Using it at all is therefore logged.
+
+A value that is not printable ASCII is **rejected**, not passed on. This is an
+identifier the controller stores, logs and keys rows on, so a plausible-looking
+wrong one is worse than none — `unknown-device` at least says it does not know.
+`emos/init/serialcheck.c` covers both parsers off-target.
+
+**`/proc/idme` carries more than the serial**: `board_id`, `product_name`,
+`productid`, `device_type_id`, and per-unit `alscal` and `miccal.0`–`miccal.6`.
+The board fields are the identity candidate for #541 — `/proc/device-tree/model`
+reads `MT8163` on every board using that SoC and cannot discriminate between
+them, while `device_type_id` (`A3S5BH2HU6VAYF` on a Dot 2) can. The calibration
+values have never been read by anything here.
+
 ## The emOS console password
 
 `consolePassword` arrives on the config push and the firmware does exactly one

@@ -57,7 +57,7 @@ func TestSerialFromIdme(t *testing.T) {
 	// Exactly what the device gives: 16 characters, no newline. Read off
 	// G090LF11752215LE on 2026-09-15.
 	idmePath = filepath.Join(dir, "serial")
-	if err := os.WriteFile(idmePath, []byte("G090LF11752215LE"), 0o444); err != nil {
+	if err := os.WriteFile(idmePath, []byte("G090LF11752215LE"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := serialFromIdme(), "G090LF11752215LE"; got != want {
@@ -72,7 +72,7 @@ func TestSerialFromIdme(t *testing.T) {
 	}
 
 	// A corrupt field is rejected rather than registered.
-	if err := os.WriteFile(idmePath, []byte("\x00\x00\x00"), 0o444); err != nil {
+	if err := os.WriteFile(idmePath, []byte("\x00\x00\x00"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if got := serialFromIdme(); got != "" {
@@ -92,7 +92,7 @@ func TestSerialFromCmdline(t *testing.T) {
 	cmdlinePath = path
 
 	write := func(s string) {
-		if err := os.WriteFile(path, []byte(s), 0o444); err != nil {
+		if err := os.WriteFile(path, []byte(s), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
