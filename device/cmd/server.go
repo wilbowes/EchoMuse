@@ -918,17 +918,24 @@ func wifiRSSI() *int {
 // applyHardwareConfig runs tinymix commands for fields that map to hardware.
 // Called whenever the controller pushes a config message.
 func applyHardwareConfig(msg config.ConfigMessage) {
-	if msg.AdcDigitalGain > 0 {
-		tinymix("89", strconv.Itoa(msg.AdcDigitalGain), strconv.Itoa(msg.AdcDigitalGain))
-		tinymix("107", strconv.Itoa(msg.AdcDigitalGain), strconv.Itoa(msg.AdcDigitalGain))
-		tinymix("125", strconv.Itoa(msg.AdcDigitalGain), strconv.Itoa(msg.AdcDigitalGain))
-		tinymix("143", strconv.Itoa(msg.AdcDigitalGain), strconv.Itoa(msg.AdcDigitalGain))
+	// Non-nil rather than non-zero: 0 is the bottom of each control's own
+	// range and a legitimate setting. Under the old guard the dashboard
+	// offered it, the config stored it, and the mic stayed where it was —
+	// a control that appeared to work. Absent is still absent, so firmware
+	// meeting a controller that omits the key behaves as it always did.
+	if msg.AdcDigitalGain != nil {
+		g := strconv.Itoa(*msg.AdcDigitalGain)
+		tinymix("89", g, g)
+		tinymix("107", g, g)
+		tinymix("125", g, g)
+		tinymix("143", g, g)
 	}
-	if msg.AdcMicpga > 0 {
-		tinymix("92", strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
-		tinymix("110", strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
-		tinymix("128", strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
-		tinymix("146", strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
+	if msg.AdcMicpga != nil {
+		g := strconv.Itoa(*msg.AdcMicpga)
+		tinymix("92", g, g)
+		tinymix("110", g, g)
+		tinymix("128", g, g)
+		tinymix("146", g, g)
 	}
 }
 
