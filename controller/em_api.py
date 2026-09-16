@@ -5051,10 +5051,28 @@ async def _get_provision_emos_init(request: web.Request) -> web.Response:
     )
 
 
+# The multipart fields _post_provision_emos_image reads, and the only ones. A
+# field the wizard sends that is not named here is dropped without a word.
+#
+# That is how `system_part` went missing for the life of the feature (#545).
+# The wizard resolved it, logged which partition it had chosen, and appended
+# it; the loop below had no branch for it, so `parts` never carried it, the
+# validation that follows could not fire, and every v2 image was built with no
+# `emos.system=` stamp — while the release notes, the wizard transcript and
+# this file all said otherwise. emOS then fell back to its hardcoded p13, which
+# is the right partition about half the time.
+#
+# tests/test_emos_image_fields.py compares this against what dashboard.jsx
+# appends to the same POST, so the next field to be added has to be read here
+# or fail CI.
+EMOS_IMAGE_FIELDS = ("reference", "init", "reference_md5", "version",
+                     "use_latest_init", "system_part")
+
+
 @auth.require_admin
 async def _post_provision_emos_image(request: web.Request) -> web.Response:
     """
-    POST /api/provision/emos_image (multipart: "reference", "init", "version")
+    POST /api/provision/emos_image (multipart: EMOS_IMAGE_FIELDS)
 
     Build an emOS boot image from the reference the wizard just escrowed off
     the device, and stream it back. Step 5 of the emOS provisioning flow.
@@ -5084,8 +5102,18 @@ async def _post_provision_emos_image(request: web.Request) -> web.Response:
             field = await reader.next()
             if field is None:
                 break
+            if field.name not in EMOS_IMAGE_FIELDS:
+                # Loud, because the silent version of this cost every v2
+                # device its /system stamp.
+                log.warning(f"[api] emOS image: ignoring multipart field "
+                            f"{field.name!r}, which this endpoint does not "
+                            f"read")
+                continue
             if field.name in ("reference", "init"):
                 parts[field.name] = await field.read()
+            elif field.name == "system_part":
+                parts["system_part"] = (await field.read()).decode(
+                    errors="replace")[:8]
             elif field.name == "reference_md5":
                 parts["reference_md5"] = (await field.read()).decode(
                     errors="replace")[:64].strip().lower()
@@ -5185,8 +5213,13 @@ async def _post_provision_emos_image(request: web.Request) -> web.Response:
             "", sbin, system_part)
 
         log.info(f"[api] emOS image built"
+                 # Not "(older wizard)", which is one of three ways to get
+                 # here and was the wrong one when this line last mattered:
+                 # the v1 path sends no partition by design, and until #545
+                 # the handler dropped the one the wizard did send. State
+                 # what is true — no stamp — and leave the cause alone.
                  + (f" for /system on p{system_part}" if system_part else
-                    " with no /system stamp (older wizard)")
+                    " with no /system stamp")
                  + f": {info['size']:,} bytes "
                  f"md5={info['md5'][:8]}… from a {info['reference_size']:,} "
                  f"byte reference (md5 {info['reference_md5'][:8]}…)")
