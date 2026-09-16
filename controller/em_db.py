@@ -131,6 +131,7 @@ DEFAULT_DEVICE_CONFIG = {
     # likely ending no_speech. Lower it per device if a custom wake model
     # trades recall for false positives (see oww_forge/README.md).
     "owwThreshold":     0.5,
+    # The ceiling is OWW_THRESHOLD_MAX below, enforced on every write.
     # Barge-in (§3.2, controller-side): wake word spoken during TTS playback
     # cancels it and starts a fresh turn. Requires device AEC (aecEnabled)
     # on — with barge-in the mic streams through playback, and AEC is what
@@ -308,6 +309,23 @@ DEFAULT_DEVICE_CONFIG = {
     # emOS only, like the password beside it.
     "consoleTimeoutMin": 0,
 }
+
+# The highest wake threshold that can ever fire, enforced on every config
+# write by _clamp_wake_threshold below.
+#
+# openwakeword's score is a sigmoid: it approaches 1.0 and never reaches it,
+# and both scorers compare with `>=` (em_controller's ctrl_hit, and the
+# device's own shadow.go). So a threshold of exactly 1.0 is a bar nothing
+# clears — a device that scores perfectly and never wakes, which presents as
+# one that has stopped responding rather than as a value set too high.
+#
+# The dashboard's Sensitivity slider could write 1.0 until #543, so stored
+# values at the ceiling exist in the field. This is the write-side guard: a
+# value that cannot work must not reach the database, whichever client sent
+# it. 0.975 rather than something rounder because it is the strictest setting
+# that has been measured to fire — 18,021 scored frames across three Gen 2
+# Dots peaked at 0.999, with 178 at or above 0.98.
+OWW_THRESHOLD_MAX = 0.975
 
 # Maximum log rows retained per device. Older rows are pruned on insert.
 LOG_RETENTION = 10_000
@@ -1463,6 +1481,36 @@ def fleet_base_os() -> set[str]:
     return {r["base_os"] for r in rows}
 
 
+def _clamp_wake_threshold(config: dict, where: str) -> dict:
+    """Hold owwThreshold at or below OWW_THRESHOLD_MAX.
+
+    Applied at the two write choke points rather than in the API handlers,
+    because all four callers go through those and a per-handler copy is one
+    that can disagree with the others. Idempotent, so the internal writers
+    (section pruning, the register path) pay one comparison.
+
+    Returns a NEW dict when it changes something — callers reuse the dict they
+    passed, and editing it under them would make the clamp visible in places
+    that never asked for it.
+
+    A non-number passes through untouched: storing a wrong TYPE is somebody
+    else's bug and inventing a value here would hide it. `bool` is excluded
+    explicitly because it is a subclass of int in Python, so True would
+    otherwise clamp to a plausible-looking 0.975.
+    """
+    value = config.get("owwThreshold")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return config
+    if value <= OWW_THRESHOLD_MAX:
+        return config
+    log.warning(
+        f"[db] {where}: owwThreshold {value} cannot fire — openwakeword's "
+        f"score never reaches 1.0 and the comparison is >=. Storing "
+        f"{OWW_THRESHOLD_MAX}."
+    )
+    return {**config, "owwThreshold": OWW_THRESHOLD_MAX}
+
+
 def set_device_config(device_id: str, config: dict) -> None:
     """
     Persist updated config for a device.
@@ -1470,6 +1518,7 @@ def set_device_config(device_id: str, config: dict) -> None:
     The caller is responsible for immediately pushing the config to the
     live device over the control WebSocket if it is currently connected.
     """
+    config = _clamp_wake_threshold(config, device_id)
     with _tx() as conn:
         conn.execute(
             "UPDATE devices SET config = ? WHERE device_id = ?",
@@ -1541,6 +1590,7 @@ def get_global_device_config_raw() -> dict:
 
 def set_global_device_config(config: dict) -> None:
     """Persist updated fleet-wide default device config."""
+    config = _clamp_wake_threshold(config, "fleet")
     with _tx() as conn:
         conn.execute(
             "INSERT OR REPLACE INTO system_config (key, value) VALUES ('global_device_config', ?)",
