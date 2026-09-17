@@ -2223,6 +2223,34 @@ def test_the_reconcile_is_debounced_and_claimed_before_the_work():
     assert stamp < ret, "claim the debounce before returning, not after the work"
 
 
+def test_emos_crash_logs_are_checked_on_connect_before_the_debounce():
+    """
+    A device that crashed and reconnected inside the debounce window is the
+    one most worth looking at, so the crash check sits in front of it — and
+    only for a device that positively reported emOS, which is what saves the
+    ram console.
+    """
+    fn = _strip_prose(_fn_body(
+        (CONTROLLER / "em_api.py").read_text(), "reconcile_on_connect"))
+    assert "_collect_crash_log(" in fn
+    assert fn.index("_collect_crash_log(") < fn.index("_reconcile_due(")
+    gate = fn[:fn.index("_collect_crash_log(")]
+    assert "not live.android_userspace" in gate
+
+
+def test_the_crash_log_marker_is_written_only_after_a_complete_read():
+    """
+    The marker says "this boot was examined". Writing it before the read
+    completed would lose a crash to a dropped shell session.
+    """
+    fn = _strip_prose(_fn_body(
+        (CONTROLLER / "em_api.py").read_text(), "_collect_crash_log"))
+    read = fn.index("cat {kmsg}")
+    assert fn.index("_SHELL_OK not in out") > read
+    assert fn.index("summarise(") > fn.index("_SHELL_OK not in out")
+    assert fn.index("> {seen}") > fn.index("summarise(")
+
+
 def test_deleting_a_device_forgets_its_debounce():
     """
     A re-added device is the one whose payloads are least likely to be right;

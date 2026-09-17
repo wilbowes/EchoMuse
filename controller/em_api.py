@@ -58,6 +58,7 @@ import em_auth as auth
 import em_ble_proxy
 import em_config_sections as sections_mod
 import em_console_pw
+import em_crashlog
 import em_emos_build
 import em_firmware
 import em_ingressauth
@@ -4218,6 +4219,58 @@ def _reconcile_due(device_id: str, now: float,
     return True
 
 
+# How long to wait before asking again when the shell plane did not answer:
+# seconds after a register it is often not up yet.
+CRASH_LOG_RETRY_S = 10.0
+
+
+async def _collect_crash_log(live, device_id: str) -> None:
+    """
+    Report an emOS device's previous boot if it did not end cleanly.
+
+    emOS saves the ram console on every boot (em_crashlog explains how a crash
+    is told from a restart). A marker on the device records which copy has been
+    handled, so each boot is examined once however often the device reconnects,
+    and a controller restart does not report the same crash twice. The marker
+    is written only after a successful read, so a device that did not answer
+    is asked again on its next connect.
+    """
+    kmsg, seen = em_crashlog.KMSG_PATH, em_crashlog.SEEN_PATH
+    probe = ""
+    for attempt in range(2):
+        probe = await _shell_run(
+            live, f"busybox md5sum {kmsg} 2>/dev/null; cat {seen} 2>/dev/null; "
+                  f"echo {_SHELL_OK}")
+        if _SHELL_OK in probe:
+            break
+        if attempt == 0:
+            await asyncio.sleep(CRASH_LOG_RETRY_S)
+            if _devices.get(device_id) is not live:
+                return
+    else:
+        log.info(f"[api] [{device_id}] crash log: no answer from the device")
+        return
+    m = re.search(r"\b([0-9a-f]{32})\s+" + re.escape(kmsg), probe)
+    if not m:
+        return  # nothing saved: a cold boot, or init that predates the copy
+    md5 = m.group(1)
+    if probe.count(md5) > 1:
+        return  # this copy was already handled
+    await asyncio.sleep(1.0)  # let the probe's shell session close
+    out = await _shell_run(live, f"cat {kmsg}; echo {_SHELL_OK}", timeout=60.0)
+    if _SHELL_OK not in out:
+        log.info(f"[api] [{device_id}] crash log: read incomplete, will retry "
+                 f"on the next connect")
+        return
+    msg = em_crashlog.summarise(out[:out.rindex(_SHELL_OK)])
+    if msg:
+        log.warning(f"[api] [{device_id}] previous boot did not end cleanly — "
+                    f"kernel log saved to the device's log events")
+        await _push_log_event(device_id, "error", "kernel", msg)
+    await asyncio.sleep(1.0)
+    await _shell_run(live, f"echo {md5} > {seen}")
+
+
 async def reconcile_on_connect(device_id: str, live) -> None:
     """
     Bring a freshly-connected device's three installed payloads back in line.
@@ -4246,7 +4299,16 @@ async def reconcile_on_connect(device_id: str, live) -> None:
     Runs as a background task off the connect handler: nothing about the
     handshake should wait on a shell round trip over a link measured at 5-7%
     packet loss.
+
+    An emOS device's crash log is checked first and is NOT debounced: a device
+    that crashed and came back inside the window is exactly the one to look
+    at, and the on-device marker already makes a repeat check one round trip.
     """
+    if not live.android_userspace:
+        try:
+            await _collect_crash_log(live, device_id)
+        except Exception as e:
+            log.warning(f"[api] [{device_id}] crash log check failed ({e})")
     if not _reconcile_due(device_id, time.monotonic()):
         return
 

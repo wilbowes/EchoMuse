@@ -1294,6 +1294,23 @@ record that an explanation is owed and the next successful connect collects
 it into the device's log events. Takes effect on the next device reboot after
 the script syncs.
 
+**A kernel crash on emOS is collected the same way** (`em_crashlog`,
+`_collect_crash_log`, 2026-09-17). emOS init copies the ram console to
+`/data/emos/last_kmsg.prev` on every boot, and nothing read it — a crash was
+found only if someone opened a USB console before the next reboot. On connect,
+before the reconcile debounce, the controller md5s that copy and compares it
+with `last_kmsg.prev.seen` on the device; a new copy is read, and if the boot
+did not end cleanly an excerpt becomes an `error` log event from `kernel`,
+which is how it reaches support bundles. Three rules: **clean is positive
+evidence** — `reboot: Restarting system` or `reboot: Power down` — because
+MediaTek prints a `Call trace:` on every restart and a crash need not leave a
+panic line (C95's recursed in its own printk until reset); the crash markers
+only anchor the excerpt, with the tail as the fallback. **The marker is written
+after a complete read**, so a dropped session retries on the next connect.
+**Lines naming an SSID are dropped and addresses masked** before storage, since
+the WLAN driver logs association. `messages.last` is not used: init writes it
+only on an orderly shutdown, so it never exists after a crash.
+
 
 The device runs an A/B slot binary system:
 - `/data/local/bin/server` is a symlink to either `server_a` or `server_b`
