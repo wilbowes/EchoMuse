@@ -140,7 +140,9 @@ sup_log "boot slot=$(readlink /data/local/bin/server 2>/dev/null)"
 # it can never hold up the server; a failure leaves the kernel defaults, which
 # are the stricter setting.
 if [ ! -e /dev/__properties__ ] && grep -q EM_PLATFORM_INIT_V1 /data/local/bin/server 2>/dev/null; then
-    /data/local/bin/server platform-init > /tmp/platform-init.log 2>&1 &
+    # stderr apart: FireOS 5's linker prints warnings there first, and the
+    # supervisor log keeps only the first line of the result.
+    /data/local/bin/server platform-init > /tmp/platform-init.log 2>/tmp/platform-init.err &
     PI_PID=$!
     i=0
     while kill -0 $PI_PID 2>/dev/null && [ $i -lt 15 ]; do
