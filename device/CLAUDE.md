@@ -864,6 +864,24 @@ not survive a reboot — hence applying it in the binary, which re-applies every
 start. Do NOT write `cpu1/online` directly: HPS re-parks it within
 `down_times`, giving a setting that appears to work and silently stops.
 
+**Board tuning under emOS (`pkg/board`, 2026-09-17).** Nothing in emOS applies
+what FireOS's `thermal_manager` and init did, so the kernel's compiled-in
+defaults ran instead — measured against a stock device: the FireOS 6 kernel
+scales cores at 50/30% (FireOS 5: 80/70), CPU throttling starts at 65°C (stock
+84°C) and the board sensor `tmp103` at 50.25°C (stock 56.5°C). `server
+platform-init`, run once per boot by `start_server.sh` on emOS only, applies
+stock's values. Three rules: the board is identified POSITIVELY by idme
+`device_type_id` (the device tree says only `MT8163`, as every MT8163 product
+does — and idme values are NUL-terminated); every zone and cooler the profile
+names is resolved by type before ANY write, else nothing is written; and every
+value is read back. An unknown board keeps the kernel defaults, which are the
+stricter setting — the wrong profile on the wrong device is the failure to
+avoid. The script greps the binary for `EM_PLATFORM_INIT_V1` first, because a
+binary without the mode ignores the argument and starts a second server.
+Stock's `.tp/thermal.conf` is MediaTek's obfuscated format (char minus
+position mod 10); Amazon's `thermal.policy.conf` is plaintext. The
+`thermal_budget` cooler's `levels` are written 0-based and read back 1-based.
+
 **`cpuPct` is a share of ONLINE capacity**, derived from the aggregate
 `/proc/stat` line. The same absolute work therefore reads as *half* the
 percentage once a second core comes up — measured on Lounge, 51% on one core

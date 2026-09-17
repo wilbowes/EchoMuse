@@ -31,14 +31,19 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/bluetooth"
 	"github.com/wilbowes/EchoMuse/internal/client"
 	"github.com/wilbowes/EchoMuse/internal/config"
+	"github.com/wilbowes/EchoMuse/internal/platform"
 	"github.com/wilbowes/EchoMuse/internal/server"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/shadow"
 	"github.com/wilbowes/EchoMuse/internal/wifi"
 	pkgbuttons "github.com/wilbowes/EchoMuse/pkg/buttons"
+	"github.com/wilbowes/EchoMuse/pkg/board"
 	"github.com/wilbowes/EchoMuse/pkg/led"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "platform-init" {
+		os.Exit(platformInit())
+	}
 	log.SetOutput(os.Stdout)
 	log.Printf("EchoMuse %s starting", client.Version)
 
@@ -1339,6 +1344,38 @@ func coresOnline() int {
 // fighting the governor is how you get a setting that appears to work and
 // silently stops.
 const hpsCoreFloor = 2
+
+// platformInitMarker is how start_server.sh tells a binary that has the
+// platform-init mode from one that would ignore the argument and start a
+// second server. It greps the binary for this string.
+const platformInitMarker = "EM_PLATFORM_INIT_V1"
+
+// platformInit applies the detected board's kernel tuning and exits. emOS only:
+// on FireOS the vendor's thermal_manager owns this. An unknown board is not a
+// failure — it keeps the kernel defaults, which are the stricter setting.
+func platformInit() int {
+	fmt.Printf("platform-init (%s) base=%s", platformInitMarker, platform.Base())
+	b := board.Detect("")
+	fmt.Printf(" board=%s", board.IDOf(b))
+	if platform.Base() != platform.EmOS {
+		fmt.Println(" — not emOS, nothing to do")
+		return 0
+	}
+	if b == nil || b.Tuning == nil {
+		fmt.Println(" — no profile, kernel defaults kept")
+		return 0
+	}
+	lines, err := board.Apply("", b.Tuning)
+	for _, l := range lines {
+		fmt.Printf(" | %s", l)
+	}
+	if err != nil {
+		fmt.Printf(" — FAILED: %v\n", err)
+		return 1
+	}
+	fmt.Println(" — ok")
+	return 0
+}
 
 // applyCoreFloor raises the hotplug floor, best-effort.
 //

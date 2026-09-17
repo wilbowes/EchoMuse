@@ -132,6 +132,29 @@ sup_log() {
 
 sup_log "boot slot=$(readlink /data/local/bin/server 2>/dev/null)"
 
+# ── Board tuning (emOS only) ─────────────────────────────────────────────────
+# Without Android nothing applies the vendor's thermal profile or hotplug
+# thresholds, so the firmware does it once per boot (pkg/board). On FireOS
+# thermal_manager already has. The marker check matters: a binary without this
+# mode ignores the argument and would start a second server. Capped at 15s so
+# it can never hold up the server; a failure leaves the kernel defaults, which
+# are the stricter setting.
+if [ ! -e /dev/__properties__ ] && grep -q EM_PLATFORM_INIT_V1 /data/local/bin/server 2>/dev/null; then
+    /data/local/bin/server platform-init > /tmp/platform-init.log 2>&1 &
+    PI_PID=$!
+    i=0
+    while kill -0 $PI_PID 2>/dev/null && [ $i -lt 15 ]; do
+        sleep 1
+        i=$((i + 1))
+    done
+    kill -9 $PI_PID 2>/dev/null
+    wait $PI_PID
+    PI_RC=$?
+    PI_OUT=""
+    read PI_OUT < /tmp/platform-init.log 2>/dev/null
+    sup_log "platform-init rc=$PI_RC $PI_OUT"
+fi
+
 # ── Amp safety ────────────────────────────────────────────────────────────────
 # Mute + amp off whenever the server is not running. The server does this
 # itself on SIGTERM (PcmSpeaker.Close), but SIGKILL/panic paths skip it —

@@ -22,6 +22,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/discovery"
 	"github.com/wilbowes/EchoMuse/internal/platform"
+	"github.com/wilbowes/EchoMuse/pkg/board"
 	"github.com/wilbowes/EchoMuse/pkg/buttons"
 	"github.com/wilbowes/EchoMuse/pkg/led"
 )
@@ -510,6 +511,9 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 		// before the network is up, exactly like ambient_light_status above —
 		// nothing about it needs re-reporting every 30 seconds.
 		"base_os": platform.Base(),
+		// Which board detection matched (pkg/board), "unknown" when none did.
+		// Unread by current controllers, so safe to add unnegotiated.
+		"board": board.IDOf(board.Detect("")),
 	}
 	// Resolved fresh per registration: a cached-at-startup value goes stale
 	// after a WiFi change, and if the process started while the network was
