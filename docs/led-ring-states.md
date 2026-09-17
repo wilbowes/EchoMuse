@@ -195,6 +195,20 @@ State names used below: `IDLE`, `LISTENING`, `THINKING`, `PLAYING`, `MUTED`,
 Mute is the reference implementation of principle 5, and its behaviour is
 **not changing**.
 
+**The soft mute Home Assistant can set (#286) is a steady dim violet
+`(60,0,120)`.** It is a controller-only state — the wake word is ignored and
+the wake stream is stopped — painted by `leds_off`, which is where every
+turn, announcement and alarm hands the ring back, so it returns by itself.
+It is a state and not a cue, so it carries no TTL. Violet because nothing
+else on the ring is (principle 3): red is the button mute above, and red
+means "no software can change this", which a soft mute would make untrue.
+The button clears it in both directions (M1 and M3) and the hard mute
+suppresses the paint as it does every other, so the rows above are
+unchanged. The colour is `em_scenes.SOFT_MUTE_VIOLET`; a per-device
+setting or HA's own choice (#66) would replace it there and nowhere else.
+Lighting only the mute-button LED for it needs a control message the
+device does not have yet — it is a bare GPIO that only `mute.go` drives.
+
 ### 4.3 Volume buttons — clickType 115 / 114 (device-local)
 
 | # | State | Device action | Ring outcome | Status |

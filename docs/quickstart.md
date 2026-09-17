@@ -183,6 +183,12 @@ The device appears in HA as **`<name> Voice Assistant`** (e.g. "Lounge
 Voice Assistant"), with Model "Echo Dot Gen 2 (biscuit)" — the Bluetooth
 proxy, if enabled, shows up separately as `<name> BT Proxy`.
 
+Besides the voice assistant itself, each device carries a **media player**,
+an **Action Button** event entity (hold-capable firmware), an **Ambient
+Light** sensor (where the hardware has one), a read-only **Microphone
+Muted** sensor for the physical mute button, and a **Soft Mute** switch HA
+can set — see [Muting from Home Assistant](faq.md#can-home-assistant-mute-a-device-or-tell-whether-it-is-muted).
+
 > **Auto-discovery:** if Home Assistant runs on the **same subnet** as the
 > controller, devices should also pop up automatically as discovered
 > "echomuse-…" entries (fixed in v2.7.5 — earlier versions advertised
@@ -210,6 +216,7 @@ The LED ring tells you what's happening:
 | Spinning | Thinking (Home Assistant is processing) |
 | Cyan arc | Volume level, shown for 2 seconds after a volume press (even mid-response) |
 | Solid red | Microphones muted (the physical mute button — hardware-level since v2.7.4). Pressing mute mid-conversation also cancels whatever the assistant was doing |
+| Dim violet | Soft-muted from Home Assistant (the **Soft Mute** switch): the wake word is ignored until HA clears it or the mute button is pressed |
 
 ## Everyday things
 

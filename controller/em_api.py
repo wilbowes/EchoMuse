@@ -5723,6 +5723,7 @@ def _merge_device(row) -> dict:
         "connected":        live is not None,
         "speaking":         live.speaking  if live else False,
         "muted":            getattr(live, "muted",     False) if live else False,
+        "soft_muted":       getattr(live, "soft_muted", False) if live else False,
         "listening":        getattr(live, "listening", False) if live else False,
         "thinking":         getattr(live, "thinking",  False) if live else False,
         "stats":            live.stats if live else None,

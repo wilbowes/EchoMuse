@@ -85,6 +85,7 @@ import em_oww_warmup
 import em_barge
 import em_arbiter
 import em_button
+import em_softmute
 import em_tap_burst
 import em_esphome as esphome
 import em_ble_proxy
@@ -423,6 +424,10 @@ class Device:
         # Transient state — read by em_api._merge_device()
         self.speaking  = False
         self.muted     = False
+        # HA's soft mute (#286). The Device copy is a mirror of the server's
+        # (em_esphome holds the truth so it survives a reconnect); set from
+        # it at connect and by _set_soft_mute.
+        self.soft_muted = False
         self.listening = False
         self.thinking  = False
 
@@ -996,6 +1001,15 @@ class Device:
         await self.send_control({"type": "ping"})
 
     async def mic_start(self):
+        # The wake stream stays down under HA's soft mute (#286). This is the
+        # gate rather than each of the call sites that restart the stream
+        # after a turn, an announcement, an alarm or a barge — the same shape
+        # as the device refusing mic_start under the hard mute. The turn
+        # stream (mic_start_turn) is deliberately not gated: an HA-initiated
+        # turn is HA's own decision, the same as it is under the hard mute.
+        if self.soft_muted:
+            log.debug(f"[{self.device_id}] mic_start skipped — soft muted")
+            return
         await self.send_control({"type": "mic_start"})
 
     async def mic_start_turn(self):
@@ -1345,6 +1359,7 @@ async def _push_device_state(device: Device) -> None:
             "connected": True,
             "speaking":  device.speaking,
             "muted":     device.muted,
+            "soft_muted": device.soft_muted,
             "listening": device.listening,
             "thinking":  device.thinking,
         },
@@ -1358,6 +1373,17 @@ def _make_leds(r, g, b):
 
 
 async def leds_off(device: Device):
+    # "Off" is where every turn, announcement and alarm hands the ring back,
+    # so it is the one place the soft mute's colour has to be (#286): while
+    # HA holds the soft mute the idle ring is violet rather than dark, and
+    # it comes back by itself after anything that borrowed the ring. Under
+    # the hard mute the device records this and paints red regardless.
+    if device.soft_muted:
+        if device.led_anim_capable:
+            await device.send_led_anim(device.led_scene["soft_mute_anim"])
+        else:
+            await device.set_leds(_make_leds(*em_scenes.SOFT_MUTE_VIOLET))
+        return
     if device.led_anim_capable:
         await device.send_led_anim({"pattern": "off"})
     else:
@@ -1424,6 +1450,17 @@ async def _leds_turn_end(device: Device):
                 # so this is a hold, not a repaint.
                 await asyncio.sleep(NO_HA_HOLD_S)
             await device.send_led_anim(anim)
+            if device.soft_muted:
+                # The cue clears to BLACK when its TTL expires, which would
+                # leave a soft-muted ring dark after an unanswered question.
+                # Hand back to the soft-mute colour once the cue has played;
+                # a newer paint in between supersedes it via the animator's
+                # generation counter, same as any late frame.
+                async def _repaint(_d=device, ttl=anim.get("ttlSec", 1)):
+                    await asyncio.sleep(ttl + 0.2)
+                    if _d.soft_muted and not _d.voice_lock.locked():
+                        await leds_off(_d)
+                asyncio.create_task(_repaint()).add_done_callback(_log_task_exception)
             return
     await leds_off(device)
 
@@ -2774,13 +2811,15 @@ async def wake_word_listener(device: Device):
                         device.oww_paused.clear()
                         device.oww_paused_since = None
                     continue
-                if device.muted:
+                if not em_softmute.wake_allowed(hard=device.muted, soft=device.soft_muted):
                     # Hardware mute is device-sovereign: the device rejects
                     # every mic_start while muted, so a silent stream is the
                     # expected state — retrying just spams both logs every
                     # 10s. The device restarts its own wake stream on unmute
                     # (and device.muted clears with the mute_state message),
                     # so the watchdog resumes naturally if that ever fails.
+                    # A soft mute is the same silence, stopped by us: the
+                    # watchdog restarting the stream would undo the switch.
                     dead_streak = 0
                     continue
                 # #299: "no frames" has two causes, and the ladder below
@@ -2854,7 +2893,7 @@ async def wake_word_listener(device: Device):
             if device.oww_paused.is_set():
                 continue
 
-            if device.muted:
+            if not em_softmute.wake_allowed(hard=device.muted, soft=device.soft_muted):
                 buf.clear()
                 continue
 
@@ -3719,6 +3758,31 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                 # would no-op against it.
                 await _d.mic_stop()
                 await _d.mic_start()
+        async def _set_soft_mute(on: bool, _d=_device_ref) -> None:
+            # HA's soft mute switch (#286). The decision is em_softmute's;
+            # this applies it: the Device flag gates the wake listener and
+            # mic_start, the stream command follows, and the state HA sees
+            # is pushed from what was applied rather than what was asked.
+            hard, soft = esphome.get_mute_state(_d.device_id)
+            t = em_softmute.on_switch(want=on, soft=soft, hard=hard)
+            if not t.changed:
+                return
+            _d.soft_muted = t.soft
+            log.info(f"[{_d.device_id}] Soft mute {'on' if t.soft else 'off'} (Home Assistant)")
+            if t.stop_stream:
+                await _d.mic_stop()
+            if t.start_stream:
+                await _d.mic_start()
+            # The ring: violet on, dark off — unless a turn owns it, in
+            # which case the turn's end hands back through leds_off anyway.
+            if not _d.voice_lock.locked():
+                await leds_off(_d)
+            esphome.update_soft_mute(_d.device_id, t.soft)
+            await api._push_event({
+                "type":      "device_update",
+                "device_id": _d.device_id,
+                "state":     {"soft_muted": t.soft},
+            })
         # Capabilities before the servers come up: they decide which HA
         # entities are advertised, and advertising is a one-shot at
         # ListEntities time.
@@ -3731,7 +3795,14 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             ring_alarm=_ring_alarm,
             stop_alarm=_stop_alarm,
             start_conversation=_start_conversation,
+            set_soft_mute=_set_soft_mute,
         )
+        # A soft mute set before this connection is still in force — it is
+        # HA's, and a Dot dropping off Wi-Fi is not HA clearing it. Seeded
+        # before the wake listener starts so its mic_start is skipped.
+        device.soft_muted = esphome.get_mute_state(device_id)[1]
+        if device.soft_muted:
+            await leds_off(device)
         # The ESPHome server object caches the OWW model from server
         # creation — refresh it from the config we just loaded so HA's
         # wake-word dropdown tracks dashboard changes across controller
@@ -3808,6 +3879,26 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
 
                     elif msg_type == "mute_state":
                         device.muted = msg.get("muted", False)
+                        # The button wins (#286): a transition clears the
+                        # soft mute. Compared against the server's copy, not
+                        # this Device's default — the device re-sends
+                        # mute_state on every reconnect, and that is not a
+                        # press. The stream is left alone either way: the
+                        # device stops and restarts it itself on the button.
+                        hard_before, soft = esphome.get_mute_state(device_id)
+                        esphome.update_mute_state(device_id, device.muted)
+                        t = em_softmute.on_hard_mute(
+                            hard_before=hard_before, hard_now=device.muted, soft=soft,
+                        )
+                        if t.changed:
+                            device.soft_muted = t.soft
+                            log.info(f"[{device_id}] Soft mute cleared by the mute button")
+                            esphome.update_soft_mute(device_id, t.soft)
+                            # Take the violet out of the device's recorded
+                            # base frame. Under the new hard mute it is
+                            # recorded rather than painted; on an unmute the
+                            # device hands the ring back to this frame.
+                            await leds_off(device)
                         if device.muted and device.voice_lock.locked():
                             # Mute during an active turn terminates it — same
                             # cancel as the dot button, plus speaker_flush so
@@ -3827,7 +3918,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                         await api._push_event({
                             "type":      "device_update",
                             "device_id": device_id,
-                            "state":     {"muted": device.muted},
+                            "state":     {"muted": device.muted, "soft_muted": device.soft_muted},
                         })
 
                     elif msg_type == "volume_state":

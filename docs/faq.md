@@ -320,6 +320,26 @@ comes back as pending.
 ### I re-added a device and its voice port is missing.
 Same fix, same answer: update the controller.
 
+### Can Home Assistant mute a device, or tell whether it is muted?
+Both, as two separate entities, and the split is deliberate.
+
+**Microphone Muted** (`binary_sensor`) reports the physical mute button and
+is read-only. That mute cuts the microphone in hardware and nothing in
+software can clear it — which is what makes it worth having, so there is no
+entity that could. Check it before `assist_satellite.ask_question`: a muted
+device runs the question and captures nothing, and HA waits on the answer
+with no timeout.
+
+**Soft Mute** (`switch`) is a mute HA can set and clear — "mute while the
+TV is playing", or only enable a room's Dot when its motion sensor sees
+someone. On, the device ignores the wake word and stops streaming its
+microphone to the controller. It does not touch the hardware, so an
+HA-initiated `start_conversation` or `ask_question` still listens, exactly
+as it does under the button mute. The ring holds a dim violet while it is
+on — red stays reserved for the button — and **the button always wins**:
+pressing mute or unmute clears the soft mute. It is not persisted across a controller
+restart; an automation that sets it should re-assert it.
+
 ### My device changed its Home Assistant entity IDs.
 That happens whenever a device is deleted and re-added — HA keys entities on
 identity, and a re-added device is a new one. There's no way to carry the old

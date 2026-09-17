@@ -236,7 +236,8 @@ Home Assistant only reads a satellite's wake word configuration when it
 connects, so the controller drops and remakes that connection to make the new
 name show up. It takes a few milliseconds, but during it **every entity for
 that device goes unavailable and comes straight back** — the voice assistant,
-the media player, the action button, the ambient light sensor.
+the media player, the action button, the ambient light sensor, the mute
+sensor and the soft-mute switch.
 
 That matters if you have an automation using a **state trigger** on any of
 them: coming back online is a state change, and the automation will fire. The

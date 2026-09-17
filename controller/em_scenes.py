@@ -25,6 +25,12 @@ NUM_LEDS = 12
 # the two "nothing upstream" signals are the same colour; the device scales
 # brightness itself when it renders a pulse.
 LINK_ORANGE = (255, 40, 0)
+# The soft mute Home Assistant sets (#286). Violet because nothing else on
+# the ring is: red is the button mute, orange the link, cyan the volume arc,
+# white the pending pulse, and the scene palettes take green, light blue,
+# dark pink and the rainbow. Dim on purpose — the case for a soft mute is a
+# film in a dark room, where a bright ring is the complaint.
+SOFT_MUTE_VIOLET = (60, 0, 120)
 
 
 def _solid(r: int, g: int, b: int) -> list:
@@ -284,6 +290,19 @@ def resolve(config: dict) -> dict:
         "no_ha_anim":     {
             "pattern": "pulse", "colors": [list(LINK_ORANGE)],
             "periodMs": 500, "ttlSec": 1,
+        },
+        # A steady violet — "Home Assistant has this device on soft mute."
+        #
+        # A state rather than a cue, so no TTL: it holds until HA or the
+        # button clears it, and a dead-man here would leave a soft-muted
+        # device dark after a second. The colour follows no scene, for the
+        # reason the mute ring is always red: it has exactly one meaning.
+        # em_controller.leds_off paints it wherever the ring would otherwise
+        # go idle. A per-device colour (`ledSoftMuteColor`) or HA's own
+        # choice (#66) would replace SOFT_MUTE_VIOLET here and nowhere else.
+        "soft_mute_anim": {
+            "pattern": "solid", "colors": [list(SOFT_MUTE_VIOLET)],
+            "ttlSec": 0,
         },
     }
 

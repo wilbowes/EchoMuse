@@ -193,3 +193,23 @@ def test_no_ha_cue_is_two_throbs_and_self_clearing():
     assert cue["ttlSec"] == 1, \
         "must retire on the device's own ticker with no follow-up message"
     assert cue["ttlSec"] * 1000 / cue["periodMs"] == 2
+
+
+def test_soft_mute_ring_is_a_steady_colour_nothing_else_uses():
+    """
+    The soft mute (#286) is a state, not a cue: it holds until HA or the
+    button clears it, so it carries no TTL — a dead-man here would leave a
+    soft-muted device with a dark ring after a second. Its colour follows no
+    scene, for the mute ring's reason: it has one meaning, and must not be
+    red (the button mute), orange (link down) or a scene's listening colour.
+    """
+    for name in list(em_scenes._PRESETS) + ["custom"]:
+        scene = em_scenes.resolve({"ledScene": name})
+        anim = scene["soft_mute_anim"]
+        assert anim["pattern"] == "solid"
+        assert anim.get("ttlSec", 0) == 0, "a state does not expire on its own"
+        assert anim["colors"] == [list(em_scenes.SOFT_MUTE_VIOLET)], \
+            "the soft mute colour must not follow the scene"
+        assert anim["colors"][0] != list(em_scenes.LINK_ORANGE)
+        assert anim["colors"][0] != [180, 0, 0], "red is the button's"
+        assert anim["colors"][0] not in [list(c) for c in scene["listening_anim"]["colors"]]

@@ -239,6 +239,8 @@ MEDIA_PLAYER_KEY = 1
 # Append only.
 EVENT_KEY        = 2   # action-button hold, as an HA event entity
 AMBIENT_LUX_KEY  = 3   # TSL2540 ambient light, as an HA sensor
+MIC_MUTED_KEY    = 4   # the button mute, as a read-only binary sensor (#438)
+SOFT_MUTE_KEY    = 5   # the soft mute HA can set, as a switch (#286)
 
 # Press types the event entity advertises. double/triple were parked because
 # detecting them means delaying the single press by the multi-tap window to
@@ -512,6 +514,10 @@ class EchoMuseSatellite(SatelliteServerProtocol):
     def _ambient_lux_capable(self) -> bool:
         return self._device_has("ambient_light")
 
+    @property
+    def _mic_capable(self) -> bool:
+        return self._device_has("mic")
+
     def _voice_assistant_flags(self) -> int:
         """
         Feature flags for DeviceInfoResponse, gated on what the device has.
@@ -616,6 +622,24 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     device_class="illuminance",
                     state_class=1,   # STATE_CLASS_MEASUREMENT
                 )
+            # The two mutes, kept apart on purpose (#286, #438). The button
+            # mute is a binary sensor and nothing else: its value is that no
+            # software can clear it, so a writable entity here would be a
+            # remote unmute. The soft mute is the switch — controller-only,
+            # never touches the hardware path, and the button clears it.
+            if self._mic_capable:
+                yield api_pb2.ListEntitiesBinarySensorResponse(
+                    object_id="mic_muted",
+                    key=MIC_MUTED_KEY,
+                    name="Microphone Muted",
+                    icon="mdi:microphone-off",
+                )
+                yield api_pb2.ListEntitiesSwitchResponse(
+                    object_id="soft_mute",
+                    key=SOFT_MUTE_KEY,
+                    name="Soft Mute",
+                    icon="mdi:microphone-off",
+                )
             yield api_pb2.ListEntitiesDoneResponse()
             return
 
@@ -623,6 +647,12 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                              api_pb2.SubscribeHomeAssistantStatesRequest)):
             log.debug(f"[{self._log_name}] {type(msg).__name__} from {self.peer}")
             yield self._media_state_msg()
+            # The button mute only changes when someone presses it, so
+            # without an initial state here HA would show "unknown" until
+            # that happens — which could be never.
+            if self._mic_capable:
+                yield self._mute_state_msg()
+                yield self._soft_mute_msg()
             return
 
         if isinstance(msg, api_pb2.SubscribeVoiceAssistantRequest):
@@ -681,6 +711,26 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     f"— not applied; this device's wake word is set in the "
                     f"EchoMuse dashboard and stays {self.oww_model_id}"
                 )
+            yield _HANDLED
+            return
+
+        if isinstance(msg, api_pb2.SwitchCommandRequest):
+            # The soft mute is the only switch. Anything else is a key we
+            # never advertised — log and ignore, like an unhandled command.
+            if msg.key != SOFT_MUTE_KEY:
+                log.debug(f"[{self._log_name}] SwitchCommandRequest for unknown key {msg.key}")
+                yield _HANDLED
+                return
+            set_fn = (self._owning_server._set_soft_mute
+                      if self._owning_server is not None else None)
+            if set_fn is None:
+                log.warning(f"[{self._log_name}] soft mute requested but device not connected")
+                yield _HANDLED
+                return
+            log.info(f"[{self._log_name}] soft mute {'on' if msg.state else 'off'} from HA")
+            # The state is pushed back by update_soft_mute once the
+            # controller has applied it, not optimistically here.
+            asyncio.create_task(set_fn(bool(msg.state)))
             yield _HANDLED
             return
 
@@ -1088,6 +1138,22 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             state=st,
             volume=self._current_volume,
             muted=False,
+        )
+
+    def _mute_state_msg(self) -> "api_pb2.BinarySensorStateResponse":
+        # The button mute as the device last reported it. It reports on every
+        # (re)connect, so the server's copy is current for a connected device.
+        srv = self._owning_server
+        return api_pb2.BinarySensorStateResponse(
+            key=MIC_MUTED_KEY,
+            state=bool(srv is not None and srv.muted),
+        )
+
+    def _soft_mute_msg(self) -> "api_pb2.SwitchStateResponse":
+        srv = self._owning_server
+        return api_pb2.SwitchStateResponse(
+            key=SOFT_MUTE_KEY,
+            state=bool(srv is not None and srv.soft_muted),
         )
 
     def _announce_play_cb(self):
@@ -2256,6 +2322,21 @@ class DeviceESPhomeServer:
         # every volume_state message from the device. Read by the satellite
         # for MediaPlayerStateResponse rather than hardcoding 1.0.
         self.volume: float = 1.0
+        # The two mutes, on the server rather than the Device because a
+        # Device is rebuilt per connection and both must outlive one:
+        # `muted` is the button mute as last reported, and is what a fresh
+        # `mute_state` is compared against to tell a press from the
+        # re-report the device sends on every reconnect; `soft_muted` is the
+        # HA switch, which a Dot dropping off Wi-Fi mid-film must not clear.
+        # Neither survives a controller restart — the switch comes back off
+        # and HA's automation re-asserts it.
+        self.muted: bool = False
+        self.soft_muted: bool = False
+        # Injected by device_connected() — async callable(on: bool) that
+        # applies the soft mute on the controller side (wake gate, mic
+        # stream) and pushes the resulting state back. None when no device
+        # is connected.
+        self._set_soft_mute = None
         # Injected by device_connected() — async callable(pcm_bytes) for
         # standalone announce playback (setup wizard, push TTS) when no
         # voice turn is active.
@@ -3029,6 +3110,7 @@ async def device_connected(
     ring_alarm=None,
     stop_alarm=None,
     start_conversation=None,
+    set_soft_mute=None,
 ) -> None:
     """
     Called by em_controller.handle_control() when an Echo Dot connects.
@@ -3055,6 +3137,11 @@ async def device_connected(
     word, for HA's announce-then-listen (`assist_satellite.start_conversation`
     and `ask_question`). Same reasoning: it drives the mic, the ring and the
     voice lock.
+
+    set_soft_mute: async callable(on: bool) — applies HA's soft mute switch
+    (#286): the wake gate and the mic stream are Device state, so the
+    decision is made in em_controller and the resulting state pushed back
+    with update_soft_mute().
     """
     server = _servers.get(device_id)
     if server is None:
@@ -3074,6 +3161,7 @@ async def device_connected(
     server._ring_alarm = ring_alarm
     server._stop_alarm = stop_alarm
     server._start_conversation = start_conversation
+    server._set_soft_mute = set_soft_mute
     if server._server is not None:
         log.debug(f"[esphome.{device_id[-8:]}] device_connected: port {server.port} already listening")
         return
@@ -3103,6 +3191,7 @@ async def device_disconnected(device_id: str) -> None:
     server._ring_alarm = None
     server._stop_alarm = None
     server._start_conversation = None
+    server._set_soft_mute = None
     await server.stop()
     log.info(f"[esphome.{device_id[-8:]}] ESPHome port {server.port} down (device disconnected)")
 
@@ -3230,6 +3319,47 @@ def update_ambient_lux(device_id: str, lux) -> None:
         state=float(lux) if lux is not None else 0.0,
         missing_state=lux is None,
     ))
+
+
+def get_mute_state(device_id: str) -> tuple[bool, bool]:
+    """(hard, soft) as the server remembers them — False, False for a device
+    with no server, which is also the right answer for one HA never saw."""
+    server = _servers.get(device_id)
+    if server is None:
+        return False, False
+    return server.muted, server.soft_muted
+
+
+def update_mute_state(device_id: str, muted: bool) -> None:
+    """
+    Record the button mute as the device reported it and push it to HA as
+    the read-only binary sensor (#438). Recorded on the server even with no
+    HA connection, so the next SubscribeStates answers correctly.
+    """
+    server = _servers.get(device_id)
+    if server is None:
+        return
+    server.muted = bool(muted)
+    satellite = server.get_satellite()
+    if satellite is None:
+        return
+    satellite._send_one(satellite._mute_state_msg())
+
+
+def update_soft_mute(device_id: str, soft: bool) -> None:
+    """
+    Record the soft mute and push it to HA as the switch state (#286). This
+    is the only path that reports the switch — the command handler does not
+    answer optimistically, so HA sees what the controller actually applied.
+    """
+    server = _servers.get(device_id)
+    if server is None:
+        return
+    server.soft_muted = bool(soft)
+    satellite = server.get_satellite()
+    if satellite is None:
+        return
+    satellite._send_one(satellite._soft_mute_msg())
 
 
 def update_device_volume(device_id: str, volume: float) -> None:
