@@ -3683,19 +3683,27 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       + '    [ -z "$S" ] && [ -e "$d/$n" ] && S=$(readlink -f "$d/$n"); done; done; '
       + 'echo "NODE=$S"; '
       + '[ -z "$S" ] && exit 0; '
-      + 'WAS=$(mount | grep " /system " ); '
-      + '[ -z "$WAS" ] && mount -o ro "$S" /system 2>&1; '
+      // Mounted on a PRIVATE directory, never on /system. TWRP 3.7 (amonet v2)
+      // makes /system a symlink to /system_root/system, which does not exist
+      // until system_root is mounted, so `mount ... /system` failed with "No
+      // such file or directory" and the read found nothing — measured on the
+      // spare 2026-09-17. It still printed the sentinel, so every v2 device
+      // read as "build unknown" and the release and board checks skipped. If
+      // the partition is already mounted somewhere, read it there.
+      + 'M=$(mount | sed -n "s|^$S on \\([^ ]*\\) .*|\\1|p" | sed -n 1p); OWN=""; '
+      + 'if [ -z "$M" ]; then M=/tmp/em_sysread; mkdir -p "$M"; OWN=1; '
+      + '  mount -o ro "$S" "$M" 2>&1 || echo "MOUNTFAIL"; fi; '
+      + 'echo "MNT=$M"; '
       // FireOS 6 is system-as-root: the tree sits in a /system directory
-      // INSIDE the partition, so mounting system_<slot> at /system puts the
-      // file at /system/system/build.prop. FireOS 5 keeps it at the root.
-      // Prefer the nested one where it exists — emOS's init resolves the same
-      // layout the same way (emos/init/init.c).
-      + 'B=/system/build.prop; '
-      + '[ -f /system/system/build.prop ] && B=/system/system/build.prop; '
+      // INSIDE the partition, so the file is at <mount>/system/build.prop.
+      // FireOS 5 keeps it at the root. Prefer the nested one where it exists —
+      // emOS's init resolves the same layout the same way (emos/init/init.c).
+      + 'B="$M/build.prop"; '
+      + '[ -f "$M/system/build.prop" ] && B="$M/system/build.prop"; '
       + 'echo "PROP=$B"; '
       + 'grep -E "^ro\\.(build\\.version\\.(name|incremental|release)|product\\.(model|name))=" '
       + '  "$B" 2>/dev/null; '
-      + '[ -z "$WAS" ] && umount /system 2>/dev/null; '
+      + '[ -n "$OWN" ] && { umount "$M" 2>/dev/null; rmdir "$M" 2>/dev/null; }; '
       + 'echo _SYSREAD_OK');
   }
 
@@ -3704,6 +3712,12 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     if (!out.includes('_SYSREAD_OK')) return null;
     const pick = k => ((out.match(new RegExp('^' + k + '=(.+)$', 'm')) || [])[1] || '').trim();
     const build = pick('ro\\.build\\.version\\.incremental');
+    if (!build) {
+      // Say what the read saw, so a transcript names the cause instead of
+      // "unknown" — the failure this replaced looked like a quirk of one unit.
+      addLog('  /system read: ' + out.split('\n')
+        .filter(l => /^(NODE|MNT|PROP)=|MOUNTFAIL|mount:/.test(l)).join(' | '), 'warn');
+    }
     return build ? {
       build,
       name:  pick('ro\\.build\\.version\\.name'),
