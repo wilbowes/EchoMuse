@@ -1749,12 +1749,29 @@ reference for any future emOS image and the only way back to FireOS, and we ship
 neither a kernel nor a userspace: once both slots hold emOS there is nothing on
 the device to rebuild from.
 
+**emOS always goes in `boot_a`, because amonet v2's bootloader on biscuit only
+ever starts `boot_a` (#544).** The BCB changes `androidboot.slot_suffix` and
+nothing else. Measured twice: the reporter's device, BCB B-active, ran the stock
+image in `boot_a` while a marker stamped into `boot_b`'s cmdline never
+appeared; and the spare on 2026-09-17, BCB B-active, booted the emOS image in
+`boot_a` with `slot_suffix=_b`. kaeru hooks the slot choice and passes normal
+boots straight to the stock LK's `get_boot_part()`, so the source does not
+settle it — the hardware does. The earlier rule (write the slot that is not
+stock) was right only when stock happened to be in B, which is why the spare
+provisioned fine on 09-16 and @jthoward64's device did not.
+
 `classifyBootSlots` reads each slot's own 512-byte header and `chooseBootSlots`
-decides; both are pure, and `tests/slot_choice.test.mjs` covers them. Four
-outcomes — one stock and one ours (the re-provision case, so running twice is
-idempotent), both stock (keep the one that boots, take the other), one stock and
-one empty, and **both ours, which refuses** and names the escrow as the way out.
-That refusal is the state every device the old rule touched is already in.
+decides; both are pure, and `tests/slot_choice.test.mjs` covers them. The
+target is A in every case:
+- **stock in A, stock in B** — build from A, overwrite A, B keeps its stock.
+- **stock only in A** — copy A to B first, through the same verified
+  `_writeBootPartition`, and do not touch A unless that copy verified.
+- **stock only in B** (the re-provision case) — build from B, overwrite A.
+- **no stock anywhere, or no slot B to keep a copy in** — refuse.
+
+The escrow reads the DONOR slot (`plan.donorDev`), not the slot LK reports
+booting, since the suffix says nothing about which image is running. The
+restore writes the escrow to A, which is what makes it boot.
 
 - **Ours-vs-stock is decided in SHELL, not in the parser**, so no test of
   `classifyBootSlots` can reach it. It matches TWO markers: `emos.system=`,
@@ -1764,19 +1781,17 @@ That refusal is the state every device the old rule touched is already in.
   escrowed an emOS image AS the stock recovery image while the real one was
   never found. Matched by full ADDRESS, because reading OURS as stock costs the
   escrow and reading STOCK as ours overwrites it.
-- **Writing a slot does not select it.** Amazon's bootloader picks from a
-  `bootloader_control` at `misc`+864 — magic `0x42424100`, a version byte, then
-  AOSP's `slot_metadata` bitfield per slot (priority low 4 bits, tries next 3,
-  successful top). `_activateBootSlot` sets it with TWRP's `bcbtool set_active`,
-  with a raw read as fallback so a recovery without the tool can still be TOLD
-  it is about to boot the wrong image. Without this a verified write boots the
-  other slot, which presents as the flash having done nothing.
+- **The BCB is still set to A** (`_activateBootSlot`, TWRP's `bcbtool
+  set_active`, raw read as fallback). It no longer chooses the image, but it
+  decides the suffix LK passes, and a stock image restored into A expects its
+  own slot's system. Layout at `misc`+864: magic `0x42424100`, a version byte,
+  then AOSP's `slot_metadata` bitfield per slot (priority low 4 bits, tries
+  next 3, successful top), no checksum.
 - **The image records which `/system` it was built beside** (`system_part` on
   the build POST → `emos.system=` on the cmdline). The wizard resolves
   `system_a`/`system_b` through TWRP's by-name map because that is the only
-  place those names exist; emOS has none. Do NOT derive it from the BCB — that
-  says where emOS is booting FROM, which after this change is deliberately the
-  other slot.
+  place those names exist; emOS has none. Do NOT derive it from the BCB or
+  the suffix — neither says which image is running.
 - **v1 is gated out of all of it.** Its `other-boot` names the active slot and
   it has no BCB of this shape. It therefore still overwrites the stock image,
   and fixing that needs a v1 device: the boot partitions are p17/p18 in

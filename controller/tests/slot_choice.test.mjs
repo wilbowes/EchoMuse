@@ -59,77 +59,100 @@ const probe = (a, b) =>
         s.a.state === "absent" && s.b.state === "absent");
 }
 
-// ── the four cases ──────────────────────────────────────────────────────────
+// ── where emOS goes: always slot A (#544) ────────────────────────────────────
+//
+// amonet v2's bootloader on biscuit starts boot_a whatever the BCB says; the
+// BCB only changes androidboot.slot_suffix. Measured on the spare 2026-09-17
+// (BCB B-active booted the image in boot_a with slot_suffix=_b) and in the
+// #544 report (an image written to boot_b never ran). So the target is A in
+// every case, and stock is kept in B.
+const ALL = ["stock", "ours", "empty", "weird"];
 {
-  // Stock in A, emOS already in B: the re-provision case. Must rebuild from
-  // stock and overwrite ours, so running the wizard twice is idempotent and
-  // never eats the stock image.
-  const r = chooseBootSlots(classifyBootSlots(probe("stock", "ours")), "_a");
-  check("stock/ours -> donor A, target B", r.ok && r.donor === "a" && r.target === "b");
-  check("stock/ours -> system_a stamped", r.systemPart === 13);
+  for (const a of ALL) for (const b of ALL) for (const suf of ["_a", "_b", ""]) {
+    const r = chooseBootSlots(classifyBootSlots(probe(a, b)), suf);
+    if (r.ok && r.target !== "a") {
+      console.log(`FAIL  ${a}/${b}${suf}: target ${r.target}`); fails++;
+    }
+  }
+  check("the target is slot A in every case, whatever the suffix says", true);
 }
 {
-  // Stock in B this time. The donor is chosen by WHERE STOCK IS, not by which
-  // slot booted — and the stamp follows the donor, so the image is built
-  // against the userspace its kernel came from.
-  const r = chooseBootSlots(classifyBootSlots(probe("ours", "stock")), "_a");
-  check("ours/stock -> donor B, target A", r.ok && r.donor === "b" && r.target === "a");
-  check("ours/stock -> system_b stamped", r.systemPart === 14);
-}
-{
-  const r = chooseBootSlots(classifyBootSlots(probe("stock", "empty")), "_a");
-  check("stock/empty -> donor A, target B", r.ok && r.donor === "a" && r.target === "b");
-}
-{
-  // Both stock: keep the one the device actually boots, take the other.
+  // The #544 case: stock in both, booted A. Old rule wrote B, which never runs.
   const r = chooseBootSlots(classifyBootSlots(probe("stock", "stock")), "_a");
-  check("stock/stock booted A -> donor A", r.ok && r.donor === "a" && r.target === "b");
+  check("stock/stock -> target A, built from A", r.ok && r.target === "a" && r.donor === "a");
+  check("stock/stock -> B already stock, nothing to copy", r.ok && r.preserveDev === "");
+  check("stock/stock -> system_a stamped", r.systemPart === 13);
   const r2 = chooseBootSlots(classifyBootSlots(probe("stock", "stock")), "_b");
-  check("stock/stock booted B -> donor B", r2.ok && r2.donor === "b" && r2.target === "a");
-  check("stock/stock booted B -> system_b stamped", r2.systemPart === 14);
-  const r3 = chooseBootSlots(classifyBootSlots(probe("stock", "stock")), "");
-  check("stock/stock, slot unknown -> still decides", r3.ok && r3.donor === "a");
+  check("stock/stock with suffix _b decides the same way", r2.ok && r2.target === "a" && r2.donor === "a");
 }
 {
-  // The refusal, and it is the state every device the OLD rule touched is in.
+  // A holds the only stock image: copy it to B before overwriting A.
+  for (const b of ["empty", "ours", "weird"]) {
+    const r = chooseBootSlots(classifyBootSlots(probe("stock", b)), "_a");
+    check(`stock/${b} -> copy A to B, then write A`,
+          r.ok && r.target === "a" && r.donor === "a"
+          && r.preserveDev === "/dev/block/mmcblk0p11");
+  }
+}
+{
+  // Stock only in B: the re-provision case. Build from B, leave B alone.
+  for (const a of ["ours", "empty"]) {
+    const r = chooseBootSlots(classifyBootSlots(probe(a, "stock")), "_a");
+    check(`${a}/stock -> build from B, write A, copy nothing`,
+          r.ok && r.donor === "b" && r.target === "a" && r.preserveDev === "");
+    check(`${a}/stock -> system_b stamped`, r.systemPart === 14);
+  }
+}
+{
+  // The refusals.
   const r = chooseBootSlots(classifyBootSlots(probe("ours", "ours")), "_a");
   check("ours/ours refuses", !r.ok);
   check("ours/ours says how to recover", /escrowed boot image/.test(r.reason));
-}
-{
-  const r = chooseBootSlots(classifyBootSlots(probe("empty", "empty")), "_a");
-  check("empty/empty refuses", !r.ok);
+  check("empty/empty refuses", !chooseBootSlots(classifyBootSlots(probe("empty", "empty")), "_a").ok);
+  check("no stock anywhere refuses", !chooseBootSlots(classifyBootSlots(probe("weird", "weird")), "_a").ok);
 }
 
 // ── things that must not become a write ─────────────────────────────────────
 {
-  // A system partition we cannot resolve means we cannot stamp the image, and
-  // an unstamped image silently falls back to p13 — which is the WRONG
-  // userspace whenever the donor is B. Refuse rather than build it.
+  // An unresolved system partition means an unstamped image, which silently
+  // falls back to p13 — the WRONG userspace whenever the donor is B.
   const p = `SLOT a stock /dev/block/mmcblk0p10\nSLOT b empty /dev/block/mmcblk0p11`;
-  const r = chooseBootSlots(classifyBootSlots(p), "_a");
-  check("no system map -> refuses rather than guessing", !r.ok);
+  check("no system map -> refuses rather than guessing", !chooseBootSlots(classifyBootSlots(p), "_a").ok);
 }
 {
-  const p = `SLOT a stock /dev/block/mmcblk0p10\nSLOT b empty\n${SYS}`;
-  const r = chooseBootSlots(classifyBootSlots(p), "_a");
-  check("target with no block device -> refuses", !r.ok);
+  // A holds the only stock image and there is nowhere to keep a copy.
+  const p = `SLOT a stock /dev/block/mmcblk0p10\nSLOT b absent\n${SYS}`;
+  check("stock A with no slot B -> refuses", !chooseBootSlots(classifyBootSlots(p), "_a").ok);
+  const p2 = `SLOT a stock /dev/block/mmcblk0p10\nSLOT b empty\n${SYS}`;
+  check("stock A with an unresolved slot B -> refuses", !chooseBootSlots(classifyBootSlots(p2), "_a").ok);
 }
 {
-  // An unknown state is not a licence to write there.
-  const r = chooseBootSlots(classifyBootSlots(probe("stock", "weird")), "_a");
-  check("unknown target state still writes only the non-stock slot",
-        r.ok && r.target === "b");
-  const r2 = chooseBootSlots(classifyBootSlots(probe("weird", "weird")), "_a");
-  check("no stock anywhere refuses whatever the states say", !r2.ok);
+  // Slot A unresolved: there is nowhere emOS can run from.
+  const p = `SLOT a empty\nSLOT b stock /dev/block/mmcblk0p11\n${SYS}`;
+  check("unresolved slot A -> refuses", !chooseBootSlots(classifyBootSlots(p), "_a").ok);
 }
 {
-  // The donor is never the target. Nothing else in the wizard re-checks this.
-  for (const [a, b] of [["stock","ours"],["ours","stock"],["stock","empty"],["stock","stock"]]) {
+  // The stock copy is never the partition emOS is written to, and a stock
+  // image in B is never overwritten.
+  for (const a of ALL) for (const b of ALL) {
     const r = chooseBootSlots(classifyBootSlots(probe(a, b)), "_a");
-    if (r.ok && r.donor === r.target) { console.log(`FAIL  donor===target for ${a}/${b}`); fails++; }
+    if (!r.ok) continue;
+    if (r.preserveDev && r.preserveDev === r.targetDev) { console.log(`FAIL  copy===target ${a}/${b}`); fails++; }
+    if (b === "stock" && r.preserveDev) { console.log(`FAIL  stock B overwritten ${a}/${b}`); fails++; }
+    if (r.donor === "b" && r.donorDev !== "/dev/block/mmcblk0p11") { console.log(`FAIL  donorDev ${a}/${b}`); fails++; }
   }
-  check("donor is never the target", true);
+  check("the copy never lands on the target, and a stock B is never overwritten", true);
+}
+
+// ── the flash and escrow use the plan ────────────────────────────────────────
+{
+  const flash = liftFunction("runFlashEmos");
+  const copyAt = flash.indexOf("emosPlan.preserveDev");
+  const writeAt = flash.indexOf("emosImage.bytes, emosImage.md5, 'emOS image'");
+  check("the stock copy happens before emOS is written", copyAt > 0 && writeAt > copyAt);
+  check("a failed copy stops before slot A is touched",
+        /throw new Error\(`\$\{perr\}/.test(flash.slice(copyAt, writeAt)));
+  check("the escrow reads the donor slot", /const refDev = plan \? plan\.donorDev : boot\.target;/.test(src));
 }
 
 // ── the probe's own marker test ─────────────────────────────────────────────

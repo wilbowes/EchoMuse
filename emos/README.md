@@ -725,6 +725,13 @@ nothing guarantees B stays pristine, and it boots FireOS without our permissive
 cmdline or the `service echomuse` init entry, so EchoMuse does not start. It
 boots, which is what recovery is for.
 
+**On amonet v2 that last resort does not boot from where it is.** v2's
+bootloader only ever starts `boot_a` (#544); the BCB changes
+`androidboot.slot_suffix` and nothing else. A stock image kept in B is a copy
+to restore INTO A, not a slot to switch to. The wizard therefore always writes
+emOS to A and keeps stock in B, copying it there first when A held the only
+one.
+
 **Our cmdline patch DESTROYS the original arguments rather than appending
 them.** `runPatchBoot` zeroes bytes 64-576 of the header and writes 51 bytes,
 so slot A's cmdline is exactly `bootopt=64S3,32N2,64N2

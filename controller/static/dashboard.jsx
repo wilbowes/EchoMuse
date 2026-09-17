@@ -4013,8 +4013,9 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // ── Which slot holds stock, and which one emOS goes in ───────────────────
   //
   // An emOS install is a PAIR: the stock boot image we built from, and the
-  // FireOS userspace it was read beside. Which boot slot emOS physically
-  // occupies is just storage — the bootloader is pointed at it afterwards.
+  // FireOS userspace it was read beside. Which slot emOS occupies is NOT a
+  // free choice on amonet v2: its bootloader only ever starts boot_a (#544,
+  // see chooseBootSlots).
   //
   // So the stock boot image is never overwritten. It is the build reference,
   // it is the only way back to FireOS, and it is the only way to rebuild an
@@ -4044,16 +4045,20 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
 
   // The decision, pure so it can be tested without a device.
   //
-  // `suffix` is ro.boot.slot_suffix — the slot the device BOOTED FROM. It is
-  // used only to break the both-stock tie, never to choose where to write: it
-  // says nothing about boot-next, which lives in the BCB.
+  // **amonet v2's bootloader on biscuit starts boot_a whatever the BCB says**
+  // (#544). The BCB only changes androidboot.slot_suffix: measured on the
+  // spare 2026-09-17, BCB B-active booted the emOS image in boot_a with
+  // `slot_suffix=_b`, and the reporter's B-active boot ran the stock image in
+  // boot_a while a marker stamped into boot_b never appeared. So emOS always
+  // goes in slot A, and the stock image is KEPT in slot B — copied there from
+  // A first when A holds the only one.
+  //
+  // `suffix` (ro.boot.slot_suffix) is therefore no guide to what is running,
+  // and is not used to choose anything.
   function chooseBootSlots(slots, suffix) {
-    const other = (s) => (s === 'a' ? 'b' : 'a');
-    const stock = ['a', 'b'].filter(s => slots[s].state === 'stock');
-    const booted = /^_([ab])$/.test(suffix || '') ? suffix.slice(1) : '';
-
-    if (!stock.length) {
-      const both = ['a', 'b'].every(s => slots[s].state === 'ours');
+    const st = (s) => slots[s].state;
+    if (st('a') !== 'stock' && st('b') !== 'stock') {
+      const both = st('a') === 'ours' && st('b') === 'ours';
       return { ok: false, reason: both
         ? 'Both boot slots already hold emOS, so there is no stock FireOS boot '
           + 'image on this device to build from or fall back to. Restore your '
@@ -4062,20 +4067,23 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
           + 'nothing to build an emOS image from. Nothing has been read or '
           + 'written.' };
     }
-
-    // Both stock: keep the one the device boots today and take the other, so
-    // the image the user is running is the one preserved.
-    const donor = stock.length === 2 ? (booted || 'a') : stock[0];
-    const target = other(donor);
-
-    if (slots[target].state === 'stock' && stock.length !== 2) {
-      return { ok: false, reason: 'Internal error choosing boot slots.' };
-    }
-    if (!slots[target].dev) {
+    if (!slots.a.dev) {
       return { ok: false, reason:
-        `Slot ${target.toUpperCase()} is where emOS would go, but `
-        + `/dev/block/by-name/boot_${target} did not resolve to a block device. `
-        + 'Nothing has been read or written.' };
+        'Slot A is where emOS has to go — it is the only slot this bootloader '
+        + 'starts — but /dev/block/by-name/boot_a did not resolve to a block '
+        + 'device. Nothing has been read or written.' };
+    }
+
+    // Stock in A: build from it, and make sure B keeps a copy before A is
+    // overwritten. Stock only in B: build from B, which stays as it is.
+    const donor = st('a') === 'stock' ? 'a' : 'b';
+    const preserve = donor === 'a' && st('b') !== 'stock';
+    if (preserve && !slots.b.dev) {
+      return { ok: false, reason:
+        'Slot A holds the only stock FireOS boot image and emOS has to replace '
+        + 'it, but there is no slot B to keep a copy in '
+        + '(/dev/block/by-name/boot_b did not resolve). Nothing has been read '
+        + 'or written.' };
     }
 
     // The system partition PAIRED with the donor — stamped into the image so
@@ -4090,11 +4098,17 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         + 'cannot be built without knowing which one it is.' };
     }
 
-    return { ok: true, donor, target,
-             donorDev: slots[donor].dev, targetDev: slots[target].dev,
+    const kept = preserve
+      ? `stock FireOS is copied to slot B and kept there (slot B holds ${st('b')} today)`
+      : donor === 'a'
+        ? 'slot B already holds a stock FireOS image and keeps it'
+        : 'stock FireOS stays in slot B';
+    return { ok: true, donor, target: 'a',
+             donorDev: slots[donor].dev, targetDev: slots.a.dev,
+             preserveDev: preserve ? slots.b.dev : '',
              systemPart: Number(sysPart),
-             reason: `stock FireOS stays in slot ${donor.toUpperCase()}; emOS goes `
-                   + `in slot ${target.toUpperCase()}, built against system_${donor} `
+             reason: `emOS goes in slot A, the slot this bootloader starts; ${kept}; `
+                   + `built from slot ${donor.toUpperCase()} against system_${donor} `
                    + `(p${sysPart})` };
   }
 
@@ -5768,8 +5782,11 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       addLog('  amonet unlock confirmed in the partition map', 'ok');
     }
 
-    addLog(`Reading ${boot.target} off the device (10–20s)…`);
-    const ddOut = await c.shell(`dd if=${boot.target} of=/tmp/emos_ref.img bs=1048576 2>&1`);
+    // The escrow is the STOCK image — the build input and the undo. On v2 that
+    // is the donor slot, which is not necessarily the one LK reports booting.
+    const refDev = plan ? plan.donorDev : boot.target;
+    addLog(`Reading ${refDev} off the device (10–20s)…`);
+    const ddOut = await c.shell(`dd if=${refDev} of=/tmp/emos_ref.img bs=1048576 2>&1`);
     addLog(ddOut.trim() || '(done)');
     const ref = await c.pull('/tmp/emos_ref.img');
     await c.shell('rm -f /tmp/emos_ref.img');
@@ -5777,13 +5794,13 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     const magic = new TextDecoder().decode(ref.slice(0, 8));
     if (magic !== 'ANDROID!') {
       throw new Error(
-        `Read ${ref.length} bytes from ${boot.target} and it does not start with `
+        `Read ${ref.length} bytes from ${refDev} and it does not start with `
         + `"ANDROID!" (got "${magic.replace(/[^\x20-\x7e]/g, '.')}"). That is not a boot `
         + `image, so nothing is being escrowed or flashed.`);
     }
     const md5 = await _md5Hex(ref);
     addLog(`Escrowed ${(ref.length / 1024 / 1024).toFixed(1)} MB, md5 ${md5}`, 'ok');
-    setEmosRef({ bytes: ref, md5, target: boot.target });
+    setEmosRef({ bytes: ref, md5, target: refDev });
 
     // Handed to the operator as a file as well as held in the page. The copy
     // in the browser is the convenient one; the one on their disk is the one
@@ -6210,6 +6227,30 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         + `partition is ${(emosRef.bytes.length/1024/1024).toFixed(1)} MB, so it cannot fit. `
         + 'Nothing has been written and the device is untouched — this is a build '
         + 'problem, not a device one. Re-run Build emOS.');
+    }
+
+    // Keep the stock image before slot A is overwritten (#544): emOS has to
+    // go in A, and when A holds the only stock image it is copied to B first,
+    // through the same verified write. B held nothing worth keeping, and A is
+    // not touched unless the copy verified.
+    if (emosPlan && emosPlan.ok && emosPlan.preserveDev) {
+      if (!emosRef || emosRef.target !== emosPlan.donorDev) {
+        throw new Error('The escrowed image is not the one from slot A, so it cannot be '
+          + 'copied to slot B. Nothing has been written. Re-run the escrow step.');
+      }
+      let perr = await _writeBootPartition(
+        c, emosPlan.preserveDev, emosRef.bytes, emosRef.md5, 'stock image (copy to slot B)');
+      if (perr) {
+        addLog(`${perr}`, 'error');
+        addLog('Retrying the copy once…', 'warn');
+        perr = await _writeBootPartition(
+          c, emosPlan.preserveDev, emosRef.bytes, emosRef.md5, 'stock image (copy to slot B, retry)');
+      }
+      if (perr) {
+        throw new Error(`${perr}\n\nSlot A has NOT been touched and still boots stock FireOS. `
+          + 'Slot B held no stock image before this, so nothing was lost.');
+      }
+      addLog('Stock FireOS is now kept in slot B.', 'ok');
     }
 
     let err = await _writeBootPartition(
