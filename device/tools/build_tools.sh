@@ -38,7 +38,7 @@ build_module_tool() {
         -v "$(pwd)":/sdk \
         -v "$REPO_ROOT/GoTinyAlsa":/GoTinyAlsa \
         echomuse-compiler \
-        -c "cd /sdk && go build -o build/$name ./tools/$name"
+        -c "cd /sdk && go build $2 -o build/$name ./tools/$name"
 
     echo "Output: $BUILD_DIR/$name"
 }
@@ -46,6 +46,7 @@ build_module_tool() {
 build_tool capture_mics
 build_tool bf_capture
 build_module_tool oww_probe
+build_module_tool mixer_probe "-tags server"   # needs the tinyalsa mixer backend
 
 echo ""
 echo "Deploy:"

@@ -26,6 +26,7 @@ import (
 	internalbuttons "github.com/wilbowes/EchoMuse/internal/bindings/buttons"
 	"github.com/wilbowes/EchoMuse/internal/bindings/jack"
 	"github.com/wilbowes/EchoMuse/internal/bindings/mic"
+	"github.com/wilbowes/EchoMuse/internal/bindings/mixer"
 	"github.com/wilbowes/EchoMuse/internal/bindings/speaker"
 	"github.com/wilbowes/EchoMuse/internal/bluetooth"
 	"github.com/wilbowes/EchoMuse/internal/client"
@@ -350,7 +351,7 @@ func main() {
 		}
 	})
 
-	// Config applied — apply hardware changes via tinymix, AEC params to
+	// Config applied — apply hardware changes to the mixer, AEC params to
 	// the canceller. AEC/BLE read the merged post-Apply snapshot rather than
 	// the (partial) message so unmentioned fields keep their values.
 	controlClient.OnConfigApplied(func(msg config.ConfigMessage) {
@@ -915,7 +916,7 @@ func wifiRSSI() *int {
 
 // ─── Hardware config ──────────────────────────────────────────────────────────
 
-// applyHardwareConfig runs tinymix commands for fields that map to hardware.
+// applyHardwareConfig sets the mixer controls for fields that map to hardware.
 // Called whenever the controller pushes a config message.
 func applyHardwareConfig(msg config.ConfigMessage) {
 	// Non-nil rather than non-zero: 0 is the bottom of each control's own
@@ -925,17 +926,15 @@ func applyHardwareConfig(msg config.ConfigMessage) {
 	// meeting a controller that omits the key behaves as it always did.
 	if msg.AdcDigitalGain != nil {
 		g := strconv.Itoa(*msg.AdcDigitalGain)
-		tinymix("89", g, g)
-		tinymix("107", g, g)
-		tinymix("125", g, g)
-		tinymix("143", g, g)
+		for _, adc := range []string{"A", "B", "C", "D"} {
+			mixer.Set("ADC_"+adc+" Digital Volume Control", g)
+		}
 	}
 	if msg.AdcMicpga != nil {
 		g := strconv.Itoa(*msg.AdcMicpga)
-		tinymix("92", g, g)
-		tinymix("110", g, g)
-		tinymix("128", g, g)
-		tinymix("146", g, g)
+		for _, adc := range []string{"A", "B", "C", "D"} {
+			mixer.Set("ADC_"+adc+" MICPGA Volume Ctrl", g)
+		}
 	}
 }
 
@@ -1103,14 +1102,6 @@ func onWakeCrossing(cc *client.ControlClient, srv *server.Server,
 func applyBleConfig(scanner *bluetooth.Scanner) {
 	snap := config.Get().Snapshot()
 	scanner.SetEnabled(snap.BleProxyEnabled != nil && *snap.BleProxyEnabled)
-}
-
-func tinymix(ctl string, args ...string) {
-	cmdArgs := append([]string{"-D", "0", ctl}, args...)
-	out, err := exec.Command("tinymix", cmdArgs...).CombinedOutput()
-	if err != nil {
-		log.Printf("[tinymix] ctl %s failed: %v — %s", ctl, err, string(out))
-	}
 }
 
 func allLEDs(r, g, b uint8) []led.Led {

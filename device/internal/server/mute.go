@@ -2,10 +2,10 @@ package server
 
 import (
 	"log"
-	"os/exec"
 	"sync"
 
 	internalLed "github.com/wilbowes/EchoMuse/internal/bindings/led"
+	"github.com/wilbowes/EchoMuse/internal/bindings/mixer"
 	"github.com/wilbowes/EchoMuse/pkg/led"
 )
 
@@ -71,23 +71,29 @@ func (m *muteController) Toggle() {
 	}
 }
 
-// adcMuteCtls are the per-chip ADC mute control pairs, all four codecs
+// adcMuteCtls are the per-chip ADC mute controls, all four codecs
 // (A: ch0/ch1 … D: ch6 + unused). C5 hardware fix (2026-07-07): only chip
-// A (105/106) was muted before, leaving chips B–D — including ch6, the mic
-// wake word and STT actually use — physically hot; the mic stream-stop was
-// what made mute effective. Sibling controls confirmed from the full
-// `tinymix -D 0` dump in device/tools/tinymix_controls_output.txt
-// (captured 2026-07-06).
+// A was muted before, leaving chips B–D — including ch6, the mic wake word
+// and STT actually use — physically hot; the mic stream-stop was what made
+// mute effective. By name since 2026-09-17 (#546).
 var adcMuteCtls = []string{
-	"105", "106", // ADC_A
-	"123", "124", // ADC_B
-	"141", "142", // ADC_C
-	"159", "160", // ADC_D
+	"ADC_A Left Mute", "ADC_A Right Mute",
+	"ADC_B Left Mute", "ADC_B Right Mute",
+	"ADC_C Left Mute", "ADC_C Right Mute",
+	"ADC_D Left Mute", "ADC_D Right Mute",
 }
 
+// setAdcMute reports every failure, not just the first per control: this is
+// the hardware half of the mute, and a silent miss here is a hot microphone.
 func setAdcMute(val string) {
+	failed := 0
 	for _, ctl := range adcMuteCtls {
-		exec.Command("tinymix", "-D", "0", ctl, val).Run()
+		if mixer.Set(ctl, val) != nil {
+			failed++
+		}
+	}
+	if failed > 0 {
+		log.Printf("Mute: %d of %d ADC mute controls failed to set %s", failed, len(adcMuteCtls), val)
 	}
 }
 

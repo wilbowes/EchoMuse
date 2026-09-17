@@ -1,12 +1,13 @@
 package server
 
 import (
-	"fmt"
-	"github.com/wilbowes/EchoMuse/pkg/led"
 	"log"
-	"os/exec"
+	"strconv"
 	"sync"
 	"time"
+
+	"github.com/wilbowes/EchoMuse/internal/bindings/mixer"
+	"github.com/wilbowes/EchoMuse/pkg/led"
 )
 
 const (
@@ -105,23 +106,22 @@ func newVolumeController(ledGetter func() led.Controller) *volumeController {
 	return vc
 }
 
-// readFromDevice reads current tinymix level. Returns the midpoint of the
+// readFromDevice reads the current DAC volume. Returns the midpoint of the
 // button band on failure — volumeMax/2 is -32dB on this dB-linear scale,
 // which is quiet enough to read as broken.
 func (vc *volumeController) readFromDevice() int {
 	fallback := (volumeButtonFloor + volumeMax) / 2
-	out, err := exec.Command("tinymix", "-D", "0", "61").Output()
+	v, err := mixer.Get(mixer.PlaybackVolume)
 	if err != nil {
 		log.Printf("Volume read failed: %v", err)
 		return fallback
 	}
-	var l, r int
-	// Output: "PCM Playback Volume: 100 100 (range 0->175)". The control's
-	// own range is 0->175; volumeMax caps us at 127 (unity) — see the
-	// constant. A device that was left above the cap reads back high here
-	// and the next Set() clamps it.
-	if _, err := fmt.Sscanf(string(out), "PCM Playback Volume: %d %d", &l, &r); err != nil {
-		log.Printf("Volume parse failed: %v (output: %s)", err, out)
+	// The control's own range is 0->175; volumeMax caps us at 127 (unity) —
+	// see the constant. A device that was left above the cap reads back high
+	// here and the next Set() clamps it.
+	l, err := strconv.Atoi(v)
+	if err != nil {
+		log.Printf("Volume parse failed: %v", err)
 		return fallback
 	}
 	if l > volumeMax {
@@ -130,7 +130,7 @@ func (vc *volumeController) readFromDevice() int {
 	return l
 }
 
-// Set applies a new volume level (0–volumeMax) and updates tinymix. showRing
+// Set applies a new volume level (0–volumeMax) to the DAC. showRing
 // paints the cyan volume arc for the 2s display window — physical button
 // presses pass true; remote sets (controller command / HA) and the boot-time
 // SeedVolume pass false so the ring doesn't light when nobody is at the
@@ -153,9 +153,8 @@ func (vc *volumeController) Set(level int, showRing bool) {
 	vc.mu.Unlock()
 
 	// Apply to ALSA
-	if err := exec.Command("tinymix", "-D", "0", "61",
-		fmt.Sprintf("%d", level), fmt.Sprintf("%d", level)).Run(); err != nil {
-		log.Printf("tinymix set failed: %v", err)
+	if err := mixer.Set(mixer.PlaybackVolume, strconv.Itoa(level)); err != nil {
+		log.Printf("Volume set failed: %v", err)
 	}
 
 	log.Printf("Volume set to %d/%d", level, volumeMax)

@@ -85,32 +85,6 @@ func TestJackRoutingIsIdempotent(t *testing.T) {
 	}
 }
 
-// tinymix prints enums and integers differently, and the enum form marks the
-// current value in place rather than printing it alone — so a parser that
-// takes "the first token after the colon" reads the wrong entry whenever the
-// current value is not listed first. These are real lines off a device.
-func TestTinymixValueReadsTheCurrentEntry(t *testing.T) {
-	for _, tc := range []struct {
-		name, line, want string
-		ok               bool
-	}{
-		{"enum, current is first", "Ext_Speaker_Amp_Switch:\t>Off\tOn", "Off", true},
-		{"enum, current is NOT first", "Ext_Speaker_Amp_Switch:\tOff\t>On", "On", true},
-		{"enum, three options", "Board Channel Config:\tStereo\tMonoLeft\t>MonoRight", "MonoRight", true},
-		{"int pair with range", "HP Driver Gain Volume: 11 11 (range 0->35)", "11", true},
-		{"int at the floor", "HP Driver Gain Volume: 0 0 (range 0->35)", "0", true},
-		{"no colon", "tinymix: no such control", "", false},
-		{"empty value", "Some Control:", "", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got, ok := tinymixValue(tc.line)
-			if ok != tc.ok || got != tc.want {
-				t.Errorf("got (%q,%v), want (%q,%v)", got, ok, tc.want, tc.ok)
-			}
-		})
-	}
-}
-
 func TestJackRoutingDriftRewritesOnlyWhatMoved(t *testing.T) {
 	// Gain clobbered back to the floor, amp still correct — the exact state
 	// measured after a mediaserver restart with a plug in.

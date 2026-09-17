@@ -46,21 +46,19 @@ ip link set p2p0 down
 # Prevent WiFi suspension
 echo "EchoMuse" > /sys/power/wake_lock
 
+# Mixer controls are named, never numbered: the FireOS 6 kernel shifts ids
+# from ~161 on, so a number can name a different control there (#546).
 # Speaker mixer init
-tinymix -D 0 56 On
-tinymix -D 0 64 1 1
-tinymix -D 0 88 On
-tinymix -D 0 61 100 100
+tinymix -D 0 "Audio_I2S1_Setting" On
+tinymix -D 0 "HP DAC Playback Switch" 1 1
+tinymix -D 0 "MFP Gpio Mute" On
+tinymix -D 0 "PCM Playback Volume" 100 100
 
 # Mic gain — equalised across all four ADCs (A/B/C/D)
-tinymix -D 0 89 88 88
-tinymix -D 0 92 40 40
-tinymix -D 0 107 88 88
-tinymix -D 0 110 40 40
-tinymix -D 0 125 88 88
-tinymix -D 0 128 40 40
-tinymix -D 0 143 88 88
-tinymix -D 0 146 40 40
+for adc in A B C D; do
+    tinymix -D 0 "ADC_$adc Digital Volume Control" 88 88
+    tinymix -D 0 "ADC_$adc MICPGA Volume Ctrl" 40 40
+done
 
 kill $(ps | grep ledcontroller | grep -v grep) 2>/dev/null
 
@@ -141,8 +139,8 @@ sup_log "boot slot=$(readlink /data/local/bin/server 2>/dev/null)"
 # the server is down (between OTA slots was the worst case). Idempotent;
 # the server re-enables the amp in its own startup sequence.
 amp_off() {
-    tinymix -D 0 61 0 0 2>/dev/null
-    tinymix -D 0 5 Off 2>/dev/null
+    tinymix -D 0 "PCM Playback Volume" 0 0 2>/dev/null
+    tinymix -D 0 "Ext_Speaker_Amp_Switch" Off 2>/dev/null
 }
 
 # ── Signal handling ───────────────────────────────────────────────────────────

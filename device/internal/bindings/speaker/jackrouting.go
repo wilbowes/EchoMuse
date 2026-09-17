@@ -1,9 +1,6 @@
 package speaker
 
-import (
-	"strconv"
-	"strings"
-)
+import "github.com/wilbowes/EchoMuse/internal/bindings/mixer"
 
 // Jack routing: the codec state each plug position needs.
 //
@@ -15,12 +12,11 @@ import (
 // driving the same cable, by diffing all 239 mixer controls across an insert
 // on both devices. Stock changed five controls; we changed one.
 
-// Mixer control ids on this board. Named because "62" at a call site is the
-// difference between the internal driver and the jack, and nothing about the
-// number says so.
+// The two controls, by name: the internal driver's amp and the jack's output
+// stage.
 const (
-	ctlSpeakerAmp   = "5"  // Ext_Speaker_Amp_Switch — internal driver's amp
-	ctlHPDriverGain = "62" // HP Driver Gain Volume — the jack's output stage
+	ctlSpeakerAmp   = mixer.SpeakerAmp
+	ctlHPDriverGain = mixer.HPDriverGain
 )
 
 // HP driver gain values, as mixer indices on a 0..35 range that maps to
@@ -47,7 +43,7 @@ const (
 	hpGainJack     = "11"
 )
 
-// mixerWrite is one `tinymix -D 0 <ctl> <args...>` invocation.
+// mixerWrite sets one control, by name.
 type mixerWrite struct {
 	Ctl  string
 	Args []string
@@ -101,49 +97,14 @@ func jackRouting(inserted bool) []mixerWrite {
 // 2026-09-03). So the routing is reconciled instead: read the controls back,
 // and rewrite only the ones that moved.
 
-// tinymixValue extracts the CURRENT value from one `tinymix -D 0 <ctl>` line.
-//
-// Two shapes, because the tool prints enums and integers differently:
-//
-//	Ext_Speaker_Amp_Switch:  >Off  On          → enum, ">" marks current
-//	HP Driver Gain Volume: 11 11 (range 0->35) → int, first field after ":"
-//
-// The enum form is the awkward one: the current value is marked in place
-// rather than printed on its own, so a naive "first token after the colon"
-// reads the wrong entry whenever the current value is not the first option.
-// Returns ok=false for anything unrecognised — a control we cannot READ is not
-// a control we should assume has drifted, since that would rewrite it forever.
-func tinymixValue(out string) (string, bool) {
-	i := strings.Index(out, ":")
-	if i < 0 {
-		return "", false
-	}
-	fields := strings.Fields(out[i+1:])
-	for _, f := range fields {
-		if strings.HasPrefix(f, ">") {
-			return strings.TrimPrefix(f, ">"), true // enum
-		}
-	}
-	if len(fields) > 0 && fields[0] != "" {
-		// Integer form. Only the first channel is compared: both are always
-		// written to the same value, so a difference between them would mean
-		// something outside this file is writing one channel on its own.
-		if _, err := strconv.Atoi(fields[0]); err == nil {
-			return fields[0], true
-		}
-	}
-	return "", false
-}
-
 // jackRoutingDrift returns the writes needed to bring the codec back to the
 // state `inserted` requires, given what the controls currently read.
 //
-// `current` maps control id to the value read back. A control MISSING from the
-// map is skipped rather than rewritten: an unreadable control means the read
-// failed, and "failure to look is not evidence of absence" applies here exactly
-// as it does to the controller's asset reconcile — rewriting on a failed read
-// would spawn two tinymix processes every interval forever on any device whose
-// output we cannot parse.
+// `current` maps control name to the value read back. A control MISSING from
+// the map is skipped rather than rewritten: an unreadable control means the
+// read failed, and "failure to look is not evidence of absence" applies here
+// exactly as it does to the controller's asset reconcile — rewriting on a
+// failed read would rewrite it every interval forever.
 func jackRoutingDrift(inserted bool, current map[string]string) []mixerWrite {
 	var out []mixerWrite
 	for _, w := range jackRouting(inserted) {

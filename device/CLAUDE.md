@@ -663,13 +663,14 @@ after shifts by two. Measured 2026-09-16 on two Dots running emOS side by side:
 | `HPR Output Mixer R_DAC Switch` | 234 | 236 |
 | `ADC_A Left Ip Select ADC_A DIF1_L switch` | 223 | 225 |
 
-`codec.Routes` addresses all ten of its DAPM switches by number — **still true
-on main, this is not yet fixed** — so on every FireOS 6 device all ten land two
-places early: 234 sets `Left Input Mixer IN3_L P Switch` and the DAC is never
-connected to the output mixer (silence), while the eight capture writes set the
-single-ended IN2 inputs when the array is on the differential DIF1 ones.
-Reported as #546 by @jthoward64 and reproduced here on 2026-09-16; setting
-236/239 by hand restored audio on the spare immediately.
+Until 2026-09-17 `codec.Routes` addressed all ten of its DAPM switches by
+number, so on every FireOS 6 device all ten landed two places early: 234 set
+`Left Input Mixer IN3_L P Switch` and the DAC was never connected to the output
+mixer (silence), while the eight capture writes set the single-ended IN2 inputs
+when the array is on the differential DIF1 ones. Reported as #546 by
+@jthoward64 and reproduced here on 2026-09-16. The shift starts after id 160,
+so mute (105–160), volume (61), the amp (5) and mic gain were right on both
+kernels; only the routes were not.
 
 **The failure is SILENT by construction and that is the general lesson.**
 Writing `1` to the wrong control is a perfectly valid write — `tinymix` exits
@@ -679,18 +680,31 @@ same shape as the mute LED being on a different GPIO than Amazon's HAL
 believed, and as `event2` being the volume button on biscuit and a touchscreen
 on checkers: **resolve by NAME, and let a name that is absent be loud.**
 
-The right mechanism is `mixer_get_ctl_by_name`, declared in the NDK sysroot's
-`tinyalsa/mixer.h` and exported by the device's own `/system/lib/libtinyalsa.so`
-— which we already link for PCM. It does the lookup natively, returns NULL for
-a control this board does not have, and costs no process spawns, which matters
-on a boot path where heavy shell commands have been observed inducing mic
-capture stalls against a hard 160ms deadline. Parsing `tinymix`'s text listing
-reaches the same answer and is the worse way to get it; note that where a name
-ends is NOT recoverable from the padding, since the longest names leave a
-single space before the value.
+**Fixed: every mixer write goes through `internal/bindings/mixer`**, which
+calls tinyalsa's `mixer_get_ctl_by_name` — the lookup is native, a control this
+board lacks is an error, and there is no process spawn per write. The
+firmware no longer runs `tinymix` at all (`guard_test.go` fails on
+`exec.Command("tinymix"`), and `start_server.sh` names its controls too
+(`controller/tests/test_mixer_names.py`). Four things to keep:
 
-Changing this path needs a **FireOS 5 device on the bench**, not a green CI
-run: every fielded device is FireOS 5, and this is their audio bring-up.
+- **Call only functions both devices' `libtinyalsa.so` export.** The NDK
+  sysroot header is tinyalsa 2.x and the devices are not; a symbol the device
+  library lacks stops the binary loading, which is a crash-loop and an A/B
+  rollback. Checked 2026-09-17 with `llvm-nm -D` against both libraries; do
+  it again when adding a call.
+- **The names are measured**, present and unique on both kernels and on stock
+  FireOS 5 (32 controls). `device/tools/mixer_probe` reads any list of them
+  through the same code path, for comparing against `tinymix -D 0 <name>`.
+- **`tinymix` accepts names on both kernels' binaries**, quoted, which is what
+  the script relies on.
+- **Verified on the bench 2026-09-17 on both kernels**, with the installed
+  server paused and the routes opened first: the new binary closed all ten,
+  the DAC path registers (`003f`, `0089`, `008c/8d`) returned to their
+  running values, and capture was live (VAD rms 0.0019–0.0023 against the
+  dead-path 0.00035). On EFF (FireOS 5, the fleet's kernel) the full 239-control
+  listing under the new binary matched the old one except a timestamp control.
+  The four mic ADCs (`tlv320aic3101`, `0-0018`..`0-001b`) have no regmap, so
+  capture is proven by signal, not by register.
 
 ## The BLE proxy, and what it costs the device running it
 
@@ -1018,4 +1032,4 @@ including why hashing is worth it when deleting the file defeats it, is in
 
 ## cgo dependency
 
-SpeexDSP C source (AEC) is vendored in `device/internal/aec/`. The compiler Docker image provides the ARM cross-toolchain. If adding new cgo dependencies, they must compile cleanly with the `echomuse-compiler` image against the FireOS 5 sysroot.
+SpeexDSP C source (AEC) is vendored in `device/internal/aec/`. `internal/bindings/mixer` links the device's own `libtinyalsa.so` (see the mixer section for the symbol rule). The compiler Docker image provides the ARM cross-toolchain. If adding new cgo dependencies, they must compile cleanly with the `echomuse-compiler` image against the FireOS 5 sysroot.

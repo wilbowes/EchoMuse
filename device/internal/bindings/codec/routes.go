@@ -35,23 +35,23 @@ package codec
 
 import (
 	"log"
-	"os/exec"
-	"strings"
 	"sync"
+
+	"github.com/wilbowes/EchoMuse/internal/bindings/mixer"
 )
 
-// Write is one `tinymix -D 0 <ctl> <value>` invocation.
+// Write sets one mixer control, found by name.
 type Write struct {
-	Ctl   string
+	Name  string
 	Value string
-	Name  string // the control's mixer name, for the log line and for grep
 }
 
 // Routes is every DAPM switch that must be closed for audio to flow.
 //
-// Control IDs are positional and specific to this board, like the ones in the
-// speaker package's jack routing — the name is carried alongside so a mismatch
-// is greppable rather than a bare number nobody can check.
+// By NAME, never by control id (#546). These were ids until 2026-09-17, and on
+// the FireOS 6 kernel every one of them named a different control: the eight
+// capture writes closed the single-ended IN2 inputs, and the two playback
+// writes hit input-mixer switches. Each was a valid write, so nothing failed.
 //
 // CAPTURE: the microphone array reaches the codec on the DIFFERENTIAL inputs,
 // not the single-ended ones. Nothing routed DIF1 into any of the four ADCs, so
@@ -62,17 +62,17 @@ type Write struct {
 // PLAYBACK: the DAC was not connected to the output mixer, so it powered down
 // with the firmware streaming correctly into it.
 var Routes = []Write{
-	{"170", "1", "ADC_D Right Ip Select ADC_D DIF1_R switch"},
-	{"177", "1", "ADC_D Left Ip Select ADC_D DIF1_L switch"},
-	{"184", "1", "ADC_C Right Ip Select ADC_C DIF1_R switch"},
-	{"191", "1", "ADC_C Left Ip Select ADC_C DIF1_L switch"},
-	{"200", "1", "ADC_B Right Ip Select ADC_B DIF1_R switch"},
-	{"207", "1", "ADC_B Left Ip Select ADC_B DIF1_L switch"},
-	{"216", "1", "ADC_A Right Ip Select ADC_A DIF1_R switch"},
-	{"223", "1", "ADC_A Left Ip Select ADC_A DIF1_L switch"},
+	{"ADC_D Right Ip Select ADC_D DIF1_R switch", "1"},
+	{"ADC_D Left Ip Select ADC_D DIF1_L switch", "1"},
+	{"ADC_C Right Ip Select ADC_C DIF1_R switch", "1"},
+	{"ADC_C Left Ip Select ADC_C DIF1_L switch", "1"},
+	{"ADC_B Right Ip Select ADC_B DIF1_R switch", "1"},
+	{"ADC_B Left Ip Select ADC_B DIF1_L switch", "1"},
+	{"ADC_A Right Ip Select ADC_A DIF1_R switch", "1"},
+	{"ADC_A Left Ip Select ADC_A DIF1_L switch", "1"},
 
-	{"234", "1", "HPR Output Mixer R_DAC Switch"},
-	{"237", "1", "HPL Output Mixer L_DAC Switch"},
+	{"HPR Output Mixer R_DAC Switch", "1"},
+	{"HPL Output Mixer L_DAC Switch", "1"},
 }
 
 var once sync.Once
@@ -81,24 +81,23 @@ var once sync.Once
 //
 // Called from both the microphone and the speaker Init, because either may run
 // first and each needs the routes closed BEFORE it opens its PCM — DAPM decides
-// what to power at stream open. The sync.Once is what makes calling it from
-// both sites free: process spawns are not cheap on this hardware (a heavy shell
-// command was observed inducing mic capture stalls, and the mic pipeline has a
-// hard 160ms deadline), so ten of them must not become twenty.
+// what to power at stream open.
+//
+// A control that does not resolve is now a loud failure rather than a write to
+// whatever happens to hold that id on this kernel.
 func EnsureRoutes() {
 	once.Do(func() {
 		var failed int
 		for _, w := range Routes {
-			out, err := exec.Command("tinymix", "-D", "0", w.Ctl, w.Value).CombinedOutput()
-			if err != nil {
+			if err := mixer.Set(w.Name, w.Value); err != nil {
 				failed++
-				log.Printf("[codec] route ctl %s (%s): %v — %s",
-					w.Ctl, w.Name, err, strings.TrimSpace(string(out)))
 			}
 		}
 		if failed > 0 {
 			log.Printf("[codec] %d of %d DAPM routes failed — audio may be silent",
 				failed, len(Routes))
+		} else {
+			log.Printf("[codec] %d DAPM routes closed", len(Routes))
 		}
 	})
 }

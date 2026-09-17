@@ -98,7 +98,7 @@ func Present() bool {
 //
 // onChange must therefore be idempotent, which SetJackRouting is.
 //
-// onChange runs on this goroutine. It shells out to tinymix, which takes
+// onChange runs on this goroutine. It sets two mixer controls, which takes
 // milliseconds, so there is no handoff here; if it ever grows into anything
 // slower it needs one, because a stalled callback freezes the baseline and
 // every later transition is missed.
