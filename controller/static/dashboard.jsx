@@ -1773,7 +1773,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
               {renaming ? (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                   <input
-                    type="text" value={renameValue} autoFocus
+                    type="text" value={renameValue} autoFocus maxLength={_MAX_LABEL}
                     onChange={e => setRenameValue(e.target.value)}
                     onKeyDown={e => {
                       if (e.key === 'Enter') doRename();
@@ -1853,7 +1853,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
               {row('First seen', relTime(device.first_seen))}
               <div style={{ marginTop: 24, marginBottom: 8 }}>
                 <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: 'var(--text2)', marginBottom: 8 }}>Label</div>
-                <input type="text" value={approveLabel} onChange={e => setApproveLabel(e.target.value)} placeholder="e.g. Kitchen" onKeyDown={e => e.key === 'Enter' && doApprove()}/>
+                <input type="text" value={approveLabel} maxLength={_MAX_LABEL} onChange={e => setApproveLabel(e.target.value)} placeholder="e.g. Kitchen" onKeyDown={e => e.key === 'Enter' && doApprove()}/>
                 <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 11, color: 'var(--muted)', marginTop: 6 }}>
                   Names the device everywhere — the dashboard, and “{approveLabel.trim() || '…'} Voice Assistant” in Home Assistant.
                 </div>
@@ -2853,6 +2853,11 @@ const _MODE_NAME = { twrp: 'TWRP recovery', android: 'Android' };
 // space-between row of user-supplied text uses both; without minWidth 0 a
 // flex child will not shrink below its content, and a long name pushes its
 // neighbour off the row.
+// Longest label the rename and approve boxes accept. Mirrors em_labels.
+// MAX_LABEL_LEN; tests/test_labels.py fails if they disagree. The server
+// refuses a longer one either way — this only stops the typing.
+const _MAX_LABEL = 32;
+
 const _ROW_TEXT = { minWidth: 0, flex: '1 1 auto', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' };
 const _ROW_SIDE = { flexShrink: 0, whiteSpace: 'nowrap', marginLeft: 10 };
 
