@@ -11,7 +11,8 @@
 #            and the DAPM graph while it plays. Diffed against idle, that is
 #            the route the vendor HAL sets up to make sound — the thing a
 #            static profile cannot show.
-#   buttons  logs input events while the operator presses each button.
+#   buttons  names each button in turn and records which input device and
+#            key code it produces — a mapping, not a log to annotate.
 #   mics     (opt-in) stops Android's mediaserver, which holds the mic,
 #            records ~10s while the operator claps on cue, and starts it
 #            again. Pushes one binary to /data/local/tmp and removes it.
@@ -68,7 +69,7 @@ fi
 say ""
 say "This will act on the device:"
 [ $ROUTE = 1 ]   && say "  - press volume up then down (so it plays its chime; volume ends where it started)"
-[ $BUTTONS = 1 ] && say "  - ask you to press each button once, and log what the kernel reports"
+[ $BUTTONS = 1 ] && say "  - ask you to press each button in turn, and record what the kernel reports"
 [ $MICS = 1 ]    && say "  - stop Android's media server for about 15s to record the mics, then start it again"
 say "Nothing is installed. A reboot undoes anything this changes."
 if [ $YES = 0 ]; then
@@ -143,29 +144,84 @@ if [ $ROUTE = 1 ]; then
   fi
 fi
 
-# ── Buttons ───────────────────────────────────────────────────────────────
+# ── Buttons: guided mapping ──────────────────────────────────────────────
+# One button at a time, by name, so the result is a MAPPING (action → which
+# input device, which key code) rather than a stream the operator has to
+# annotate. The device that fired is recorded, not the one that advertises
+# the code: biscuit's "keys" and "mtk-kpd" both claim KEY_VOLUMEDOWN, and the
+# board definition must open the one that actually reports it (#541).
+BUTTON_NAMES="action mute volume_up volume_down"
+BUTTON_WAIT=12
 if [ $BUTTONS = 1 ]; then
   sec "buttons: devices"
   # Came back empty once on VVV and never again; one retry costs nothing.
   devs=$(dev "getevent -pl"); [ -n "$devs" ] || { sleep 1; devs=$(dev "getevent -pl"); }
   echo "${devs:-(getevent -pl returned nothing)}" >> "$P"
-  say ""
-  say "Buttons: press EACH button on the device once, slowly, about 2s apart."
-  say "Write down the order you pressed them in. Recording for 25s…"
-  say "(The action button may wake Alexa and the mute button mutes the mics —"
-  say " press mute a second time at the end to unmute.)"
-  # The first line is getevent's own pid ($$ survives exec), because killing
-  # adb on the host leaves getevent running on the device, and toolbox has no
-  # pkill or killall to find it by name afterwards.
-  $ADB exec-out "${PFX}echo \$\$; exec getevent -lt${SFX}" > "$OUT/getevent.txt" 2>&1 &
+  # /dev/input/eventN → device name, for the mapping table.
+  echo "$devs" | awk '/^add device/{d=$4} /name:/{n=$0; sub(/.*name: */,"",n); print d, n}' > "$OUT/input_names.txt"
+
+  # One getevent for the whole stage. Its first line is its own pid ($$
+  # survives exec): killing adb on the host leaves it running on the device,
+  # and toolbox has no pkill or killall to find it by name afterwards.
+  # adb SHELL, not exec-out: getevent writes through stdio, and on exec-out's
+  # pipe that is block-buffered, so no event reaches the host until 4KB has
+  # piled up. shell gives it a pty and line buffering (and \r, stripped below).
+  EV="$OUT/getevent.txt"
+  $ADB shell "${PFX}echo \$\$; exec getevent -lt${SFX}" > "$EV" 2>&1 &
   gp=$!
-  sleep 25
+  sleep 1
+
+  say ""
+  say "Buttons: the script names one button at a time. Press it once and let go."
+  say "If the device has no such button, wait ${BUTTON_WAIT}s and it moves on."
+  say "(Action may wake Alexa. Mute mutes the mics: you'll be asked to press it again.)"
+  sec "buttons: mapping"
+  printf '%-12s %-20s %-22s %s\n' button device name key >> "$P"
+
+  # Waits for the first key DOWN written after line $1 of the event log and
+  # prints "<device> <key>", or nothing on timeout.
+  next_down() {
+    t=0
+    while [ $t -lt $((BUTTON_WAIT * 4)) ]; do
+      hit=$(tr -d '\r' < "$EV" | sed -n "$(($1 + 1)),\$p" | grep -E 'EV_KEY +[A-Z_0-9]+ +DOWN' | sed -n 1p)
+      if [ -n "$hit" ]; then
+        echo "$hit" | sed -E 's/.*(\/dev\/input\/event[0-9]+): +EV_KEY +([A-Z_0-9]+) +DOWN.*/\1 \2/'
+        return
+      fi
+      t=$((t + 1)); sleep 0.25
+    done
+  }
+
+  for b in $BUTTON_NAMES other; do
+    if [ $b = other ]; then
+      say "  Any other button (on the back, or a power button)? Press it now, or wait."
+    else
+      say "  Press the $(echo $b | tr '_' ' ' | tr 'a-z' 'A-Z') button…"
+    fi
+    mark=$(wc -l < "$EV")
+    got=$(next_down "$mark")
+    if [ -n "$got" ]; then
+      node=${got% *}; key=${got#* }
+      name=$(sed -n "s|^$node ||p" "$OUT/input_names.txt" | sed -n 1p)
+      printf '%-12s %-20s %-22s %s\n' "$b" "$node" "$name" "$key" >> "$P"
+      say "    → $key on $name"
+      sleep 1   # let the release land before the next prompt reads the log
+    else
+      printf '%-12s %s\n' "$b" "(none within ${BUTTON_WAIT}s)" >> "$P"
+      say "    → nothing"
+    fi
+    if [ $b = mute ] && [ -n "$got" ]; then
+      say "  Press MUTE again to unmute (not recorded)…"
+      next_down "$(wc -l < "$EV")" >/dev/null; sleep 1
+    fi
+  done
+
   kill $gp 2>/dev/null || true
-  gpid=$(sed -n 1p "$OUT/getevent.txt" | tr -cd '0-9')
+  gpid=$(sed -n 1p "$EV" | tr -cd '0-9')
   [ -n "$gpid" ] && dev "kill $gpid" >/dev/null
-  sec "buttons: key events (press order as recorded)"
-  tr -d '\r' < "$OUT/getevent.txt" | grep -E 'EV_KEY|EV_SW' >> "$P" || echo "(no key events)" >> "$P"
-  say "Buttons: done. Note in the issue the order you pressed them in."
+  sec "buttons: every key event, as recorded"
+  tr -d '\r' < "$EV" | grep -E 'EV_KEY|EV_SW' >> "$P" || echo "(no key events)" >> "$P"
+  say "Buttons: done."
 fi
 
 # ── Mics ──────────────────────────────────────────────────────────────────

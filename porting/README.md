@@ -54,10 +54,12 @@ It lists what it's about to do and waits for `y`. Stages:
   chime and ends at the volume it started at. While the chime plays it
   snapshots the mixer, codec registers and audio routing. The difference from
   idle is how the stock firmware makes sound.
-- **Buttons.** For 25 seconds, press **each button once, slowly**, and write
-  down the order you pressed them in. Include that order when you post.
-  - The action button may wake Alexa. That's fine.
-  - The mute button mutes the mics. **Press it again at the end** to unmute.
+- **Buttons.** The script names one button at a time: action, mute, volume
+  up, volume down, then "any other". Press the one it names, once. A button
+  the device doesn't have is skipped after 12 seconds. The result is a table
+  of which button produces which key code, and from which input device.
+  - The action button may wake Alexa. That's fine; she times out.
+  - After mute, the script asks you to press it again, to unmute.
 - **Mics (opt-in, `--mics`).** Stops Android's media server, which holds the
   microphones, for about 15 seconds. It records 10 seconds and then starts the
   server again. **Stay quiet until told, then clap once at the front** (the
@@ -94,7 +96,7 @@ analysis, which needs no audio.
 ## What to do with the results
 
 1. Post both `.tar.gz` files (minus `mics.raw` if in doubt) on the device's
-   issue, with your button press order: #527 for the Echo Dot 3, #535 for the
+   issue: #527 for the Echo Dot 3, #535 for the
    Echo 2. For anything else, the Echo Spot included, open a new issue.
 2. We read them and say whether a port looks practical and what's missing.
 3. If it does look practical, the next step is a **test build you run by
@@ -124,7 +126,7 @@ analysis, which needs no audio.
 | Section | Answers |
 |---|---|
 | route: playing | which playback stream opened and in what format; which mixer controls, registers and routing widgets the stock firmware changed to make sound |
-| buttons | each key event, with the input device it came from |
+| buttons: mapping | each button, the key code it produces, and the input device (by name) it came from |
 | mics | the capture format; per channel: dead or live, noise floor, DC offset; duplicate channels; and which mic heard each clap first |
 
 A clap marked **NOT A CLEAN CLAP** caught room noise rather than the clap, and
