@@ -2431,6 +2431,20 @@ def test_the_fireos_flow_escrows_before_it_patches():
         "the FireOS flow must offer the restore on a failed TWRP step")
 
 
+def test_only_a_registered_device_blocks_the_wizard():
+    """
+    The wizard refuses a device already on the controller — but a row with no
+    firmware_ver is not one. ensure_device_token creates it when the TLS token
+    is minted, before the device has ever connected, so matching on the serial
+    alone refused every re-run of a provision that had got that far.
+    """
+    src = _jsx()
+    at = src.index("appears to already be registered")
+    body = src[src.rindex("knownDevices.find(", 0, at):at]
+    assert "d.firmware_ver" in body, (
+        "the already-registered check must ignore rows that never registered")
+
+
 def test_a_restore_ends_the_wizard_run():
     """
     A restore undoes the partition write that every later step builds on, and

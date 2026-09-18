@@ -3928,7 +3928,12 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // device object, and it IS ro.serialno (set at registration time in
     // em_controller.py), not a separate serial/serial_number/id field.
     if (serial && knownDevices && knownDevices.length) {
-      const match = knownDevices.find(d => d.device_id && d.device_id.includes(serial));
+      // A row with no firmware_ver has never registered: ensure_device_token
+      // creates one when the TLS token is minted, before first contact, so a
+      // run that stopped after that step left a row the device never used.
+      // Refusing on it cost a delete-and-retry on every bench run 2026-09-18.
+      const match = knownDevices.find(d => d.device_id && d.device_id.includes(serial)
+                                        && d.firmware_ver);
       if (match) {
         // Close the live ADB session before throwing — otherwise the
         // transport stays open and _lastUsbDevice keeps pointing at it.
