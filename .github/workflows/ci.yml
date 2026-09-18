@@ -103,7 +103,7 @@ jobs:
           node controller/tests/unlock_verdict.test.mjs
           node controller/tests/slot_choice.test.mjs
           node controller/tests/server_binary.test.mjs
-          node controller/tests/base_os_label.test.mjs
+          node controller/tests/device_line.test.mjs
 
   device-tests:
     name: Device Go tests

@@ -233,7 +233,7 @@ function eventAccent(level) {
 
 // ─── Components ───────────────────────────────────────────────────────────────
 
-function Lcd({ label, value, color, size = 16 }) {
+function Lcd({ label, value, color, size = 16, maxChars }) {
   return (
     <div className="em-lcd">
       {label && <div className="em-lcd__label">{label}</div>}
@@ -243,7 +243,11 @@ function Lcd({ label, value, color, size = 16 }) {
           invalid CSS that drops the whole declaration. The glow silently
           disappeared. color-mix takes a var(); 0x88 is 53%. */}
       <div style={{ fontFamily: "'DM Mono',monospace", fontSize: size, color: color || 'var(--lcd-green)', lineHeight: 1,
-                    textShadow: `0 0 8px color-mix(in srgb, ${color || 'var(--lcd-green)'} 53%, transparent)` }}>{value}</div>
+                    textShadow: `0 0 8px color-mix(in srgb, ${color || 'var(--lcd-green)'} 53%, transparent)`,
+                    whiteSpace: 'nowrap' }}
+           title={maxChars && typeof value === 'string' && value.length > maxChars ? value : undefined}>
+        {maxChars && typeof value === 'string' ? _middleEllipsis(value, maxChars, 7) : value}
+      </div>
     </div>
   );
 }
@@ -1281,10 +1285,10 @@ function ConnectivityTab({ device, row }) {
               {networks.map(n => (
                 <div key={n.ssid} onClick={() => !busy && setSsid(n.ssid)}
                   style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'5px 8px', borderRadius:6, cursor: busy ? 'default' : 'pointer', background: ssid === n.ssid ? 'rgba(64,88,120,0.12)' : 'transparent' }}>
-                  <span style={{ fontFamily:mono, fontSize:11, color: ssid === n.ssid ? 'var(--accent)' : 'var(--text)' }}>
+                  <span title={n.ssid} style={{ fontFamily:mono, fontSize:11, color: ssid === n.ssid ? 'var(--accent)' : 'var(--text)', ..._ROW_TEXT }}>
                     {n.ssid}{n.ssid === currentSsid ? '  ← current' : ''}
                   </span>
-                  <span style={{ fontFamily:mono, fontSize:10, color:'var(--muted)' }}>{n.signal} dBm</span>
+                  <span style={{ fontFamily:mono, fontSize:10, color:'var(--muted)', ..._ROW_SIDE }}>{n.signal} dBm</span>
                 </div>
               ))}
             </div>
@@ -1783,21 +1787,23 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
               ) : (
                 <div
                   onClick={() => isAdmin && setRenaming(true)}
-                  title={isAdmin ? 'Click to rename' : undefined}
+                  title={isAdmin ? `${device.label || device.device_id} — click to rename` : (device.label || device.device_id)}
                   style={{
                     fontFamily: "'DM Sans',sans-serif", fontSize: 26, color: 'var(--text)', fontWeight: 600,
                     letterSpacing: '-0.02em', lineHeight: 1, cursor: isAdmin ? 'pointer' : 'default',
                     display: 'inline-block',
                   }}>
-                  {device.label || <span style={{ color: 'var(--muted)', fontSize: 20 }}>{device.device_id.slice(0,8)}…</span>}
+                  {device.label ? _middleEllipsis(device.label, 32) : <span style={{ color: 'var(--muted)', fontSize: 20 }}>{device.device_id.slice(0,8)}…</span>}
                 </div>
               )}
-              <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)', marginTop: 4, letterSpacing: '0.05em' }}>
+              <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)', marginTop: 4, letterSpacing: '0.05em',
+                            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                   title={device.firmware_ver || undefined}>
                 {(() => {
                   const ip = device.ip && device.ip !== '127.0.0.1' ? device.ip : null;
                   const ipStr = device.connected ? (ip || '—') : (ip ? `${ip} (last seen)` : '—');
                   const os = _baseOsLabel(device.baseOs);
-                  return <>{ipStr} · {device.device_id} · {device.firmware_ver || 'unknown'}{os && ` · ${os}`}</>;
+                  return <>{ipStr} · {device.device_id} · {_middleEllipsis(device.firmware_ver, 24, 7) || 'unknown'}{os && ` · ${os}`}</>;
                 })()}
                 {needsUpdate && <span style={{ color: 'var(--warn)', marginLeft: 10 }}>Update available</span>}
               </div>
@@ -2174,11 +2180,11 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
               {/* Firmware state */}
               <Panel label="Firmware">
                 <div style={{ display:'flex', alignItems:'flex-end', justifyContent:'space-between', gap:16, flexWrap:'wrap' }}>
-                  <div style={{ display:'flex', gap:16, alignItems:'flex-end' }}>
-                    <Lcd label="On device"  value={device.firmware_ver || '—'} color={needsUpdate ? 'var(--lcd-amber)' : 'var(--lcd-green)'}/>
-                    <Lcd label="Available"  value={release?.version || '—'} color="var(--lcd-dim)"/>
+                  <div style={{ display:'flex', gap:16, alignItems:'flex-end', flexWrap:'wrap', minWidth:0 }}>
+                    <Lcd label="On device"  value={device.firmware_ver || '—'} maxChars={16} color={needsUpdate ? 'var(--lcd-amber)' : 'var(--lcd-green)'}/>
+                    <Lcd label="Available"  value={release?.version || '—'} maxChars={16} color="var(--lcd-dim)"/>
                     {device.firmware_previous && (
-                      <Lcd label="Rollback slot" value={device.firmware_previous} color="var(--lcd-dim)"/>
+                      <Lcd label="Rollback slot" value={device.firmware_previous} maxChars={16} color="var(--lcd-dim)"/>
                     )}
                   </div>
                   <div style={{ display:'flex', alignItems:'center', gap:12 }}>
@@ -2520,10 +2526,15 @@ function Card({ device, onClick }) {
       onMouseEnter={e => { e.currentTarget.style.boxShadow = '0 8px 28px rgba(0,0,0,0.18),0 1px 0 var(--sheen) inset'; e.currentTarget.style.transform = 'translateY(-1px)'; }}
       onMouseLeave={e => { e.currentTarget.style.boxShadow = '0 4px 16px var(--track),0 1px 0 var(--sheen) inset'; e.currentTarget.style.transform = 'translateY(0)'; }}>
       <div style={{ background: 'linear-gradient(180deg,var(--sunken),var(--sunken))', borderBottom: '1px solid var(--border-hard)', borderRadius: '13px 13px 0 0', padding: '10px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', boxShadow: '0 1px 0 var(--sheen) inset' }}>
-        <span style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 14, color: 'var(--text)', fontWeight: 600, letterSpacing: '-0.01em' }}>
-          {device.label || <span style={{ color: 'var(--muted)', fontSize: 12 }}>{device.device_id.slice(0, 8)}…</span>}
+        {/* minWidth 0 + nowrap on the label and flexShrink 0 on the right-hand
+            side: without them a long label or version pushed its neighbour
+            out of the header. */}
+        <span title={device.label || device.device_id}
+          style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 14, color: 'var(--text)', fontWeight: 600, letterSpacing: '-0.01em',
+                   minWidth: 0, flex: '1 1 auto', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', marginRight: 8 }}>
+          {device.label ? _middleEllipsis(device.label, 22) : <span style={{ color: 'var(--muted)', fontSize: 12 }}>{device.device_id.slice(0, 8)}…</span>}
         </span>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
           {isPending && (
             // Chrome sized this box off the DM Mono line box rather than the
             // glyphs, so 1px symmetric padding rendered visibly bottom-heavy
@@ -2534,8 +2545,9 @@ function Card({ device, onClick }) {
             <div style={{ display: 'inline-flex', alignItems: 'center', background: 'linear-gradient(160deg,var(--lcd-face),var(--lcd-deep))', border: '1px solid var(--lcd-line)', borderRadius: 3, padding: '3px 6px', paddingRight: 'calc(6px - 0.1em)', fontFamily: "'DM Mono',monospace", fontSize: 9, lineHeight: 1, color: 'var(--accent-lit)', letterSpacing: '0.1em' }}>PENDING</div>
           )}
           {!isPending && (device.firmware_ver || device.baseOs) && (
-            <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)' }}>
-              {[device.firmware_ver, _baseOsLabel(device.baseOs)].filter(Boolean).join(' · ')}
+            <div title={[device.firmware_ver, _baseOsLabel(device.baseOs)].filter(Boolean).join(' · ')}
+              style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', whiteSpace: 'nowrap' }}>
+              {[_middleEllipsis(device.firmware_ver, 16, 7), _baseOsLabel(device.baseOs)].filter(Boolean).join(' · ')}
             </div>
           )}
         </div>
@@ -2829,6 +2841,28 @@ const _MODE_NAME = { twrp: 'TWRP recovery', android: 'Android' };
 // FireOS native is FireOS 5 only (the FireOS flow refuses anything newer), so
 // the two answers the device can give map to two labels. Null — old firmware,
 // or a device that has never registered — shows nothing rather than a guess.
+// Shorten TEXT to at most MAX characters by replacing its MIDDLE with "…",
+// keeping the start and the end. Device labels differ at the end as often as
+// the start ("… numbered 01" / "… numbered 02"), and a version's end is its
+// build hash, so a plain trailing ellipsis would make two different things
+// read the same. `tail` is how much of the end to keep. Callers put the full
+// text in a title so nothing is lost, and still guard the container with CSS,
+// since a character count is only an estimate of width in a proportional font.
+// The two halves of a row that must not shunt: the NAME side shrinks and
+// clips, the SIDE (status, signal, version) keeps its width. Every
+// space-between row of user-supplied text uses both; without minWidth 0 a
+// flex child will not shrink below its content, and a long name pushes its
+// neighbour off the row.
+const _ROW_TEXT = { minWidth: 0, flex: '1 1 auto', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' };
+const _ROW_SIDE = { flexShrink: 0, whiteSpace: 'nowrap', marginLeft: 10 };
+
+function _middleEllipsis(text, max, tail) {
+  if (!text || text.length <= max) return text;
+  const keepEnd = Math.min(tail ?? Math.max(2, Math.floor(max / 3)), max - 2);
+  const keepStart = max - 1 - keepEnd;
+  return text.slice(0, keepStart).trimEnd() + '…' + text.slice(text.length - keepEnd).trimStart();
+}
+
 function _baseOsLabel(baseOs) {
   return baseOs === 'emos' ? 'emOS' : baseOs === 'fireos' ? 'FireOS 5' : null;
 }
@@ -3093,10 +3127,10 @@ function WifiPanel({ ready, wifiSsid, setWifiSsid, wifiPsk, setWifiPsk, onScan, 
                 cursor: blocked ? 'not-allowed' : 'pointer',
                 opacity: blocked ? 0.5 : 1,
               }}>
-              <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: wifiSsid === n.ssid ? 'var(--accent)' : 'var(--text)' }}>
+              <span title={n.ssid} style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: wifiSsid === n.ssid ? 'var(--accent)' : 'var(--text)', ..._ROW_TEXT }}>
                 {n.ssid}
               </span>
-              <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)' }}>
+              <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', ..._ROW_SIDE }}>
                 {[n.securityLabel, (n.bands || []).join('+'), `${n.signal} dBm`]
                   .filter(Boolean).join(' · ')}
               </span>
@@ -8099,8 +8133,8 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                 cursor: disabled ? 'default' : 'pointer',
                 transition: 'border-color 0.15s, background 0.15s',
               }}>
-                <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 12, fontWeight: 600, color: 'var(--lcd-line)' }}>{m.label}</div>
-                <div style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)', marginTop: 2 }}>{m.value}</div>
+                <div title={m.label} style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 12, fontWeight: 600, color: 'var(--lcd-line)', ..._ROW_TEXT, display: 'block' }}>{m.label}</div>
+                <div title={m.value} style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)', marginTop: 2, ..._ROW_TEXT, display: 'block' }}>{m.value}</div>
               </div>
             ))}
             {[...customModels, ...(orphanModel ? [orphanModel] : [])].map(m => (
@@ -8109,12 +8143,12 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                   ? 'linear-gradient(160deg,var(--accent-tint),var(--accent-line))'
                   : 'linear-gradient(160deg,var(--raised),var(--surface))',
                 border: `1px solid ${config.owwModel === m.path ? 'var(--accent)' : 'var(--border-soft)'}`,
-                borderRadius: 8, padding: '8px 10px', position: 'relative',
+                borderRadius: 8, padding: '8px 22px 8px 10px', position: 'relative', minWidth: 0,
                 cursor: disabled ? 'default' : 'pointer',
                 transition: 'border-color 0.15s, background 0.15s',
               }}>
-                <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 12, fontWeight: 600, color: 'var(--lcd-line)' }}>{wwModelLabel(m.path)}</div>
-                <div style={{ fontFamily: mono, fontSize: 9, color: m.missing ? 'var(--error)' : 'var(--muted)', marginTop: 2 }}>
+                <div title={wwModelLabel(m.path)} style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 12, fontWeight: 600, color: 'var(--lcd-line)', ..._ROW_TEXT, display: 'block' }}>{wwModelLabel(m.path)}</div>
+                <div title={m.file} style={{ fontFamily: mono, fontSize: 9, color: m.missing ? 'var(--error)' : 'var(--muted)', marginTop: 2, ..._ROW_TEXT, display: 'block' }}>
                   {m.missing ? 'missing file' : `custom · ${m.file}`}
                 </div>
                 {!disabled && !m.missing && config.owwModel !== m.path && (
@@ -8515,15 +8549,15 @@ function DeployAllModal({ release, devices, deployState, onStarted, onDismiss, o
               const s = statusFor(id);
               return (
                 <div key={id} style={{ display: 'flex', justifyContent: 'space-between', fontFamily: mono, fontSize: 11, padding: '5px 0', borderBottom: '1px solid var(--hairline)' }}>
-                  <span style={{ color: 'var(--text2)' }}>{label(byId[id])}</span>
-                  <span style={{ color: s.color }}>{s.text} {byId[id]?.firmware_ver ? `· ${byId[id].firmware_ver}` : ''}</span>
+                  <span title={label(byId[id])} style={{ color: 'var(--text2)', ..._ROW_TEXT }}>{_middleEllipsis(label(byId[id]), 28)}</span>
+                  <span title={byId[id]?.firmware_ver || undefined} style={{ color: s.color, ..._ROW_SIDE }}>{s.text} {byId[id]?.firmware_ver ? `· ${_middleEllipsis(byId[id].firmware_ver, 16, 7)}` : ''}</span>
                 </div>
               );
             })}
             {(view.skipped || []).map(s => (
               <div key={s.device_id} style={{ display: 'flex', justifyContent: 'space-between', fontFamily: mono, fontSize: 11, padding: '5px 0', borderBottom: '1px solid var(--hairline)' }}>
-                <span style={{ color: 'var(--muted)' }}>{label(byId[s.device_id])}</span>
-                <span style={{ color: 'var(--muted)' }}>skipped — {SKIP_REASONS[s.reason] || s.reason}</span>
+                <span title={label(byId[s.device_id])} style={{ color: 'var(--muted)', ..._ROW_TEXT }}>{_middleEllipsis(label(byId[s.device_id]), 28)}</span>
+                <span style={{ color: 'var(--muted)', ..._ROW_SIDE }}>skipped — {SKIP_REASONS[s.reason] || s.reason}</span>
               </div>
             ))}
             {(view.started || []).length === 0 && (view.skipped || []).length === 0 && (
