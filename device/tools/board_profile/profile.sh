@@ -7,7 +7,14 @@
 # layout emOS would have to live in. Output is a directory plus a .tar.gz meant
 # for attaching to a PUBLIC issue, so it is redacted before it is written out.
 #
-#     device/tools/board_profile/profile.sh [-s <adb serial>] [output-dir]
+#     device/tools/board_profile/profile.sh [-s <adb serial>] [-v] [output-dir]
+#
+# -v keeps the CONTENTS of the vendor's audio files (Amazon's mixer paths,
+# audio policy, and the DSP tuning under audio-algorithms). Off by default:
+# the output is meant for a public issue, and posting those redistributes
+# vendor data — the same reason emOS ships an init rather than an image.
+# Without -v each is recorded by path, size and sha256, which is enough to
+# tell two devices' tuning apart. Share a -v run privately.
 #
 # Rules this keeps, each learned on biscuit:
 #   - Nothing is written to the device, nothing is started or stopped. Every
@@ -23,8 +30,14 @@
 #     wpa_supplicant contents, no SSIDs.
 set -eu
 
-SERIAL=""
-if [ "${1:-}" = "-s" ]; then SERIAL="$2"; shift 2; fi
+SERIAL=""; VENDOR=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -s) SERIAL="$2"; shift 2 ;;
+    -v) VENDOR=1; shift ;;
+    *)  break ;;
+  esac
+done
 ADB="adb"
 [ -n "$SERIAL" ] && ADB="adb -s $SERIAL"
 command -v adb >/dev/null || { echo "adb not found on PATH" >&2; exit 1; }
@@ -70,6 +83,7 @@ echo "Profiling $model into $OUT (root: $ROOT)…" >&2
   echo "profile.sh format 1"
   echo "host date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "root: $ROOT"
+  echo "vendor file contents: $([ $VENDOR = 1 ] && echo INCLUDED — do not post publicly || echo not included)"
 } >> "$P"
 [ "$ROOT" = "none" ] && echo "WARNING: no root — partitions, sysfs and mixer reads will be incomplete." >> "$P"
 
@@ -151,12 +165,47 @@ run "for i in /proc/asound/card*/pcm*/info; do echo == \$i; cat \$i; done"
 run "ls -l /dev/snd"
 sec "mixer (tinymix, read only)"
 run "tinymix"
-sec "audio configuration files"
+# Per control, for what the listing leaves out: enum options (> marks the
+# current one) and integer ranges. The count comes from the listing, so the
+# loop needs no grep or wc on the device.
+nctl=$(grep -a '^Number of controls:' "$P" | sed -n '$s/[^0-9]//gp')
+sec "mixer controls in detail (ranges and enum options)"
+if [ -n "$nctl" ]; then
+  dev "i=0; while [ \$i -lt $nctl ]; do echo \"\$i: \$(tinymix \$i)\"; i=\$((i+1)); done" >> "$P"
+else
+  echo "(no control count in the listing)" >> "$P"
+fi
+
+sec "asoc (cards, codecs, DAIs, and the DAPM routing graph)"
+# Each DAPM widget file gives its power state and every path in and out of
+# it: the route map, read from the kernel rather than rediscovered by hand.
+run "cat /sys/kernel/debug/asoc/codecs /sys/kernel/debug/asoc/dais /sys/kernel/debug/asoc/platforms"
+run "for w in /sys/kernel/debug/asoc/*/dapm/* /sys/kernel/debug/asoc/*/*/dapm/*; do [ -f \$w ] && { echo == \$w; cat \$w; }; done"
+sec "codec and PMIC registers (regmap)"
+run "for r in /sys/kernel/debug/regmap/*; do echo == \$r \$(cat \$r/name); cat \$r/registers; done"
+sec "mediatek audio front end registers"
+run "cat /sys/kernel/debug/mtksocaudio"
+run "cat /sys/kernel/debug/mtksocanaaudio"
+sec "open PCM streams (what is running right now)"
+run "for f in /proc/asound/card*/pcm*/sub*/status /proc/asound/card*/pcm*/sub*/hw_params; do echo == \$f; cat \$f; done"
+sec "android audio services"
+run "dumpsys media.audio_flinger"
+run "dumpsys media.audio_policy"
+sec "audio configuration files (vendor)"
 run "ls -l /system/etc /vendor/etc /system/vendor/etc /system/lib/hw /vendor/lib/hw /system/vendor/lib/hw"
 run "ls /system/lib /vendor/lib /system/vendor/lib"
-for f in $(dev "ls /system/etc/*mixer* /system/etc/*audio* /vendor/etc/*mixer* /vendor/etc/*audio* /system/vendor/etc/*mixer* /system/vendor/etc/*audio*" \
-           | grep -E '^/' | grep -E '\.(xml|conf|cfg|txt)$' | sort -u); do
-  devb "cat $f" > "$OUT/files/$(echo "$f" | sed 's|^/||; s|/|_|g')"
+run "ls -lR /system/vendor/etc/audio-algorithms /vendor/etc/audio-algorithms /system/etc/audio-algorithms"
+# Recorded by size and sha256 always; contents kept only with -v (see top).
+if command -v sha256sum >/dev/null; then SHA="sha256sum"; else SHA="shasum -a 256"; fi
+[ $VENDOR = 1 ] && mkdir -p "$OUT/files/vendor"
+echo "size sha256 path" >> "$P"
+for f in $( { dev "ls /system/etc/*mixer* /system/etc/*audio* /vendor/etc/*mixer* /vendor/etc/*audio* /system/vendor/etc/*mixer* /system/vendor/etc/*audio*"
+              dev "ls /system/vendor/etc/audio-algorithms/* /vendor/etc/audio-algorithms/* /system/etc/audio-algorithms/*"; } \
+           | grep -E '^/' | grep -E '\.(xml|conf|cfg|txt|sh|bin)$' | sort -u); do
+  tmp="$OUT/files/.vendor.tmp"
+  devb "cat $f" > "$tmp"
+  echo "$(wc -c < "$tmp" | tr -d ' ') $($SHA "$tmp" | cut -d' ' -f1) $f" >> "$P"
+  if [ $VENDOR = 1 ]; then mv "$tmp" "$OUT/files/vendor/$(echo "$f" | sed 's|^/||; s|/|_|g')"; else rm -f "$tmp"; fi
 done
 
 # ── Buttons, LEDs, sensors ─────────────────────────────────────────────────

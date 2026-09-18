@@ -5,7 +5,7 @@ deciding what supporting it would take. It collects what a new board has to
 resolve by name (#541) and what emOS would need to boot on it.
 
 ```bash
-device/tools/board_profile/profile.sh [-s <adb serial>] [output-dir]
+device/tools/board_profile/profile.sh [-s <adb serial>] [-v] [output-dir]
 ```
 
 Needs `adb` on the host and a rooted device booted into its own OS (TWRP also
@@ -22,6 +22,15 @@ audio config files it found, `/proc/config.gz` if the kernel exposes it, and a
   on read (`/sys/power/wakeup_count`) and hangs.
 - **It does not read the WiFi configuration**, only the names of the files in
   `/data/misc/wifi`.
+
+## Vendor files: hashes by default, contents with `-v`
+
+Amazon's audio files (mixer paths, audio policy, and the DSP tuning under
+`audio-algorithms`: AFE, beamformer coefficients, EQ, MBCL) are recorded by
+path, size and sha256. That's enough to tell whether two devices share a
+tuning. Their **contents** are included only with `-v`, because posting them
+publicly redistributes vendor data. That's the same reason emOS ships an init
+and not an image. Share a `-v` run privately.
 
 ## Redaction
 
@@ -45,7 +54,10 @@ probe lines confirm it.
 |---|---|
 | properties, idme, device tree | which board this is. `device_type_id` identifies it where the device tree only names the SoC |
 | kernel | arch (`uname -m`), modules, and whether the kernel config is readable |
-| alsa, mixer | cards and PCM devices by name, mixer controls by name, the vendor's own routing files |
+| alsa, mixer | cards and PCM devices by name, every mixer control with its value, range and enum options |
+| asoc | codecs, DAIs, and every DAPM widget's state and paths: the routing graph, read from the kernel |
+| registers | codec and PMIC regmap dumps, and MediaTek's audio front end registers |
+| open PCM streams, android audio services | what the vendor HAL has open right now and how AudioFlinger sees it |
 | input devices | button names for `EVIOCGNAME`, never `eventN` numbers |
 | leds, i2c, iio | ring driver, light sensor, anything else on the buses |
 | boot images | slot layout, each image's cmdline, and whether its kernel is MTK-wrapped, gzip, arm64 or arm32 (`00 00 a0 e1` after the MTK header is a 32-bit zImage) |
