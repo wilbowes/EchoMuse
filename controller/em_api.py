@@ -5773,8 +5773,11 @@ def _merge_device(row) -> dict:
         # Which userspace the device booted: "emos", "fireos", or null from
         # firmware that cannot say. Null is not FireOS — the wizard, the
         # support bundle and the payload reconcile all need to tell "Android"
-        # apart from "not asked".
-        "baseOs":          getattr(live, "base_os", None) if live else None,
+        # apart from "not asked". Offline it falls back to the value stored at
+        # its last registration (schema v21), so the dashboard's slug does not
+        # vanish when a device does; a live report always wins.
+        "baseOs":          (getattr(live, "base_os", None) if live else None)
+                           or row["base_os"],
         # The DERIVED answer, not a second copy of the rule. em_platform owns
         # "which payloads mean anything here"; a dashboard that re-derived it
         # from baseOs would be a mirror free to disagree with the server that

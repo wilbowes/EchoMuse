@@ -2431,6 +2431,20 @@ def test_the_fireos_flow_escrows_before_it_patches():
         "the FireOS flow must offer the restore on a failed TWRP step")
 
 
+def test_base_os_survives_the_device_going_offline():
+    """
+    base_os rides the register message and is stored (schema v21). The API
+    used to read it off the live session only, so the dashboard's emOS /
+    FireOS 5 slug would vanish whenever a device went offline — exactly when
+    someone is trying to work out what it was. A live report still wins.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+    at = src.index('"baseOs":')
+    line = src[at:src.index("\n", src.index("\n", at) + 1)]
+    assert 'getattr(live, "base_os", None)' in line, "a live report must come first"
+    assert 'row["base_os"]' in line, "offline, baseOs must fall back to the stored value"
+
+
 def test_only_a_registered_device_blocks_the_wizard():
     """
     The wizard refuses a device already on the controller — but a row with no

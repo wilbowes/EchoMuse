@@ -1796,7 +1796,8 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 {(() => {
                   const ip = device.ip && device.ip !== '127.0.0.1' ? device.ip : null;
                   const ipStr = device.connected ? (ip || '—') : (ip ? `${ip} (last seen)` : '—');
-                  return <>{ipStr} · {device.device_id} · {device.firmware_ver || 'unknown'}</>;
+                  const os = _baseOsLabel(device.baseOs);
+                  return <>{ipStr} · {device.device_id} · {device.firmware_ver || 'unknown'}{os && ` · ${os}`}</>;
                 })()}
                 {needsUpdate && <span style={{ color: 'var(--warn)', marginLeft: 10 }}>Update available</span>}
               </div>
@@ -2532,8 +2533,10 @@ function Card({ device, onClick }) {
             // what made the word look shunted left inside its own badge.
             <div style={{ display: 'inline-flex', alignItems: 'center', background: 'linear-gradient(160deg,var(--lcd-face),var(--lcd-deep))', border: '1px solid var(--lcd-line)', borderRadius: 3, padding: '3px 6px', paddingRight: 'calc(6px - 0.1em)', fontFamily: "'DM Mono',monospace", fontSize: 9, lineHeight: 1, color: 'var(--accent-lit)', letterSpacing: '0.1em' }}>PENDING</div>
           )}
-          {!isPending && device.firmware_ver && (
-            <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)' }}>{device.firmware_ver}</div>
+          {!isPending && (device.firmware_ver || device.baseOs) && (
+            <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)' }}>
+              {[device.firmware_ver, _baseOsLabel(device.baseOs)].filter(Boolean).join(' · ')}
+            </div>
           )}
         </div>
       </div>
@@ -2821,6 +2824,14 @@ function _bannerMode(banner) {
 }
 
 const _MODE_NAME = { twrp: 'TWRP recovery', android: 'Android' };
+
+// The userspace a device runs, as the tile and the detail header show it.
+// FireOS native is FireOS 5 only (the FireOS flow refuses anything newer), so
+// the two answers the device can give map to two labels. Null — old firmware,
+// or a device that has never registered — shows nothing rather than a guess.
+function _baseOsLabel(baseOs) {
+  return baseOs === 'emos' ? 'emOS' : baseOs === 'fireos' ? 'FireOS 5' : null;
+}
 
 const _INIT_RC_APPEND = `
 service mixer /system/bin/sh
