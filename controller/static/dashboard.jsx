@@ -2526,31 +2526,30 @@ function Card({ device, onClick }) {
       onMouseEnter={e => { e.currentTarget.style.boxShadow = '0 8px 28px rgba(0,0,0,0.18),0 1px 0 var(--sheen) inset'; e.currentTarget.style.transform = 'translateY(-1px)'; }}
       onMouseLeave={e => { e.currentTarget.style.boxShadow = '0 4px 16px var(--track),0 1px 0 var(--sheen) inset'; e.currentTarget.style.transform = 'translateY(0)'; }}>
       <div style={{ background: 'linear-gradient(180deg,var(--sunken),var(--sunken))', borderBottom: '1px solid var(--border-hard)', borderRadius: '13px 13px 0 0', padding: '10px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', boxShadow: '0 1px 0 var(--sheen) inset' }}>
-        {/* minWidth 0 + nowrap on the label and flexShrink 0 on the right-hand
-            side: without them a long label or version pushed its neighbour
-            out of the header. */}
-        <span title={device.label || device.device_id}
-          style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 14, color: 'var(--text)', fontWeight: 600, letterSpacing: '-0.01em',
-                   minWidth: 0, flex: '1 1 auto', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', marginRight: 8 }}>
-          {device.label ? _middleEllipsis(device.label, 22) : <span style={{ color: 'var(--muted)', fontSize: 12 }}>{device.device_id.slice(0, 8)}…</span>}
-        </span>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-          {isPending && (
-            // Chrome sized this box off the DM Mono line box rather than the
-            // glyphs, so 1px symmetric padding rendered visibly bottom-heavy
-            // next to the 14px label. inline-flex + lineHeight:1 makes the
-            // height the text's own; the trimmed paddingRight cancels the
-            // trailing letter-space Chrome leaves after the final N, which is
-            // what made the word look shunted left inside its own badge.
-            <div style={{ display: 'inline-flex', alignItems: 'center', background: 'linear-gradient(160deg,var(--lcd-face),var(--lcd-deep))', border: '1px solid var(--lcd-line)', borderRadius: 3, padding: '3px 6px', paddingRight: 'calc(6px - 0.1em)', fontFamily: "'DM Mono',monospace", fontSize: 9, lineHeight: 1, color: 'var(--accent-lit)', letterSpacing: '0.1em' }}>PENDING</div>
-          )}
-          {!isPending && (device.firmware_ver || device.baseOs) && (
+        {/* The NAME owns the header row; firmware · OS sits beneath it. Side by
+            side, a long version squeezed the name down to two letters — and
+            the name is what someone scans the grid for. */}
+        <div style={{ minWidth: 0, flex: '1 1 auto' }}>
+          <div title={device.label || device.device_id}
+            style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 14, color: 'var(--text)', fontWeight: 600, letterSpacing: '-0.01em', ..._ROW_TEXT, display: 'block' }}>
+            {device.label ? _middleEllipsis(device.label, 30) : <span style={{ color: 'var(--muted)', fontSize: 12 }}>{device.device_id.slice(0, 8)}…</span>}
+          </div>
+          {(device.firmware_ver || device.baseOs) && (
             <div title={[device.firmware_ver, _baseOsLabel(device.baseOs)].filter(Boolean).join(' · ')}
-              style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', whiteSpace: 'nowrap' }}>
-              {[_middleEllipsis(device.firmware_ver, 16, 7), _baseOsLabel(device.baseOs)].filter(Boolean).join(' · ')}
+              style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', marginTop: 3, ..._ROW_TEXT, display: 'block' }}>
+              {[_middleEllipsis(device.firmware_ver, 24, 7), _baseOsLabel(device.baseOs)].filter(Boolean).join(' · ')}
             </div>
           )}
         </div>
+        {isPending && (
+          // Chrome sized this box off the DM Mono line box rather than the
+          // glyphs, so 1px symmetric padding rendered visibly bottom-heavy
+          // next to the 14px label. inline-flex + lineHeight:1 makes the
+          // height the text's own; the trimmed paddingRight cancels the
+          // trailing letter-space Chrome leaves after the final N, which is
+          // what made the word look shunted left inside its own badge.
+          <div style={{ display: 'inline-flex', alignItems: 'center', flexShrink: 0, marginLeft: 8, background: 'linear-gradient(160deg,var(--lcd-face),var(--lcd-deep))', border: '1px solid var(--lcd-line)', borderRadius: 3, padding: '3px 6px', paddingRight: 'calc(6px - 0.1em)', fontFamily: "'DM Mono',monospace", fontSize: 9, lineHeight: 1, color: 'var(--accent-lit)', letterSpacing: '0.1em' }}>PENDING</div>
+        )}
       </div>
       <div style={{ display: 'flex', justifyContent: 'center', padding: '20px 0 12px' }}>
         <LedRing state={state} size={120}/>
