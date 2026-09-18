@@ -7,7 +7,7 @@
 # layout emOS would have to live in. Output is a directory plus a .tar.gz meant
 # for attaching to a PUBLIC issue, so it is redacted before it is written out.
 #
-#     device/tools/board_profile/profile.sh [-s <adb serial>] [-v] [output-dir]
+#     porting/profile.sh [-s <adb serial>] [-v] [output-dir]
 #
 # -v keeps the CONTENTS of the vendor's audio files (Amazon's mixer paths,
 # audio policy, and the DSP tuning under audio-algorithms). Off by default:
