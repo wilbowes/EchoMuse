@@ -2893,6 +2893,37 @@ const _SECURITY_LABEL = {
 const _MAGISK_FILENAME = 'Magisk-v17.3.zip';
 const _MAGISK_SHA256    = '18e46b16b25ebe691c282fe311beccd4811cd533848a64e2efbd754fb85efde7';
 
+// Is this an EchoMuse server binary? Checked before the install step pushes
+// anything, because nothing after it would notice: the step verifies the copy
+// by SIZE, so a wrong file installs cleanly, logs "EchoMuse installed", and
+// the device then boots without a server that can register — out of reach of
+// OTA too. Found 2026-09-18 when the escrowed boot image was picked as the
+// custom build on VVV.
+//
+// Two tests: a 32-bit ARM ELF (the header's class byte and e_machine 0x28),
+// and our own module path, which Go compiles in hundreds of times (352 in a
+// v2.15.0-37 build, 335 in the v2.15.0 release, 0 in a boot image). It
+// cannot say the binary will LOAD on this device — that needs running it,
+// and the server has no mode that does only that.
+function _serverBinaryVerdict(bytes) {
+  const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  if (u8.length < 52 || u8[0] !== 0x7f || u8[1] !== 0x45 || u8[2] !== 0x4c || u8[3] !== 0x46) {
+    const head = new TextDecoder('latin1').decode(u8.slice(0, 8)).replace(/[^\x20-\x7e]/g, '.');
+    return { ok: false, reason: `That file is not a program at all (it starts "${head}"). `
+      + 'Choose the EchoMuse server binary.' };
+  }
+  const machine = u8[18] | (u8[19] << 8);
+  if (u8[4] !== 1 || machine !== 0x28) {
+    return { ok: false, reason: 'That is a program, but not a 32-bit ARM one, so it cannot run '
+      + 'on an Echo. Choose the EchoMuse server binary built for the device.' };
+  }
+  if (!new TextDecoder('latin1').decode(u8).includes('github.com/wilbowes/EchoMuse/')) {
+    return { ok: false, reason: 'That is an ARM program, but not an EchoMuse server. '
+      + 'Choose the EchoMuse server binary.' };
+  }
+  return { ok: true, reason: '' };
+}
+
 async function _sha256Hex(buf) {
   const digest = await crypto.subtle.digest('SHA-256', buf);
   return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
@@ -5398,6 +5429,8 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       addLog(`Pushing ${file.name} to /sdcard/server_new…`);
       buf = await file.arrayBuffer();
     }
+    const verdict = _serverBinaryVerdict(buf);
+    if (!verdict.ok) throw new Error(`${verdict.reason} Nothing has been installed.`);
     await c.push('/sdcard/server_new', new Uint8Array(buf),
       pct => setProgress({ label: 'Uploading binary', pct }));
     setProgress(null);
