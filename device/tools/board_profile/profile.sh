@@ -95,6 +95,30 @@ sec "device tree"
 printf 'model: ' >> "$P"; dev "cat /proc/device-tree/model" | tr '\0' ' ' >> "$P"; echo >> "$P"
 printf 'compatible: ' >> "$P"; dev "cat /proc/device-tree/compatible" | tr '\0' ' ' >> "$P"; echo >> "$P"
 
+# The whole device tree. No /sys/firmware/fdt on these kernels, so it comes
+# as the /proc/device-tree directory (world-readable; ~1 minute over adb).
+# With dtc on the host it becomes readable source plus a summary of every
+# node with a compatible string; /chosen carries the cmdline, serial included,
+# so the raw copy is only kept when there is no dts to redact instead.
+sec "device tree nodes (enabled, by compatible)"
+echo "pulling the device tree (about a minute)…" >&2
+$ADB pull /proc/device-tree "$OUT/files/device-tree" >/dev/null 2>&1 || true
+if command -v dtc >/dev/null && [ -d "$OUT/files/device-tree" ]; then
+  dtc -q -I fs -O dts -o "$OUT/files/device-tree.dts" "$OUT/files/device-tree" 2>/dev/null || true
+fi
+if [ -s "$OUT/files/device-tree.dts" ]; then
+  rm -rf "$OUT/files/device-tree"
+  awk '
+    /{$/ { d++; n[d]=$1; c[d]=""; st[d]=""; next }
+    /compatible =/ { v=$0; sub(/.*compatible = /,"",v); gsub(/[";]/,"",v); gsub(/\\0/,",",v); c[d]=v }
+    /status =/ { v=$0; sub(/.*status = /,"",v); gsub(/[";]/,"",v); st[d]=v }
+    /^[ \t]*};/ { if (c[d] != "" && st[d] !~ /^disable/) { p=""; for (i=2;i<=d;i++) p=p "/" n[i]; printf "%-8s %-44s %s\n", (st[d]=="" ? "-" : st[d]), c[d], p } d-- }
+  ' "$OUT/files/device-tree.dts" | sort -k2 >> "$P"
+else
+  echo "(no dtc on this host: raw tree kept in files/device-tree, /chosen removed)" >> "$P"
+  rm -rf "$OUT/files/device-tree/chosen"
+fi
+
 # ── Kernel and CPU ─────────────────────────────────────────────────────────
 sec "kernel"
 run "cat /proc/version"
@@ -152,6 +176,40 @@ sec "display and camera (Spot)"
 run "ls -l /sys/class/graphics /sys/class/drm /sys/class/video4linux /sys/class/backlight"
 run "cat /sys/class/graphics/fb0/virtual_size"
 run "for v in /sys/class/video4linux/*; do echo \$v \$(cat \$v/name); done"
+
+sec "thermal (zones with trip points, and every cooling device)"
+# What throttles, at what temperature, and what the vendor wired to heat —
+# on biscuit that includes an audio cooler (thermal-audio) and a budget.
+run "for z in /sys/class/thermal/thermal_zone*; do echo == \$z \$(cat \$z/type) temp=\$(cat \$z/temp) mode=\$(cat \$z/mode); for t in \$z/trip_point_*_temp; do [ -e \$t ] && echo \"  \$t \$(cat \$t)\"; done; done"
+run "for c in /sys/class/thermal/cooling_device*; do echo \$c \$(cat \$c/type) cur=\$(cat \$c/cur_state) max=\$(cat \$c/max_state); done"
+sec "other hardware classes"
+run "ls /sys/class"
+run "for h in /sys/class/hwmon/*; do echo \$h \$(cat \$h/name); done"
+run "for r in /sys/class/regulator/*; do echo \$r \$(cat \$r/name) \$(cat \$r/microvolts); done"
+run "for p in /sys/class/power_supply/*; do echo \$p type=\$(cat \$p/type) online=\$(cat \$p/online); done"
+run "for s in /sys/class/switch/*; do echo \$s \$(cat \$s/name) state=\$(cat \$s/state); done"
+run "ls -l /sys/class/rtc /sys/class/watchdog /sys/class/pwm /sys/class/timed_output /sys/class/lirc /sys/class/rc /dev/watchdog"
+run "cat /proc/misc"
+sec "what actually probed (interrupts and memory map)"
+# The device tree declares second-sourced parts that are not fitted (biscuit
+# lists two light sensors, one per batch). A driver with a live interrupt, or
+# a probe line in the kernel log below, is what is really on the board.
+run "cat /proc/interrupts"
+run "cat /proc/iomem"
+sec "debugfs (listings, gpio, eMMC health)"
+run "ls /sys/kernel/debug /sys/kernel/debug/regmap"
+run "cat /sys/kernel/debug/gpio"
+# EXT_CSD bytes 267-269: pre-EOL and the two life-time estimates (0x01 = 0-10%
+# used ... 0x0b = beyond rated life). Parsed below from the hex dump.
+extcsd=$(dev "cat /sys/kernel/debug/mmc0/mmc0:0001/ext_csd" | tr -cd '0-9a-fA-F')
+if [ ${#extcsd} -ge 540 ]; then
+  b() { echo "$extcsd" | cut -c$(($1 * 2 + 1))-$(($1 * 2 + 2)); }
+  echo "eMMC ext_csd: pre_eol=0x$(b 267) life_a=0x$(b 268) life_b=0x$(b 269) rev=0x$(b 192)" >> "$P"
+else
+  echo "eMMC ext_csd: not readable" >> "$P"
+fi
+sec "android sensor list"
+run "dumpsys sensorservice"
 
 # ── Radios ─────────────────────────────────────────────────────────────────
 sec "network interfaces (addresses masked)"
