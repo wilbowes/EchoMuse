@@ -6544,15 +6544,27 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // unexplained failure when someone types a name from memory.
   async function scanWifiConsole(con) {
     if (!con) throw new Error('No serial console — re-run the Reboot and Watch step.');
-    const started = await con.run('wpa_cli -p /data/misc/wifi/sockets -i wlan0 scan');
-    if (!/OK/.test(started)) {
+    const wpa = 'wpa_cli -p /data/misc/wifi/sockets -i wlan0';
+    // Early in the boot the supplicant is not answering yet, so wait for it
+    // rather than fail a click the operator could not have known was early.
+    for (let i = 0; i < 20 && !/PONG/.test(await con.run(`${wpa} ping`)); i++) {
+      if (i === 0) addLog('Waiting for the WiFi radio to come up…');
+      await new Promise(r => setTimeout(r, 1000));
+    }
+    const started = await con.run(`${wpa} scan`);
+    // FAIL-BUSY is a scan ALREADY running — typically the supplicant looking
+    // for a saved network by itself — not a failure: its results are as good
+    // as ours. Seen on the spare 2026-09-18, where the first click failed and
+    // the second worked.
+    if (/FAIL-BUSY/.test(started)) {
+      addLog('A scan is already running — using its results.');
+    } else if (!/OK/.test(started)) {
       throw new Error(`wpa_cli would not start a scan (said "${started.trim() || 'nothing'}").`);
     }
     // A scan takes a few seconds; asking too early returns the previous
     // results or none at all.
     await new Promise(r => setTimeout(r, 4000));
-    const raw = await con.run(
-      'wpa_cli -p /data/misc/wifi/sockets -i wlan0 scan_results', 20000);
+    const raw = await con.run(`${wpa} scan_results`, 20000);
     const nets = parseScanResults(raw);
     if (!nets.length) {
       addLog('The scan returned no networks. The radio is up — try again, or '
