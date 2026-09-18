@@ -732,14 +732,21 @@ to restore INTO A, not a slot to switch to. The wizard therefore always writes
 emOS to A and keeps stock in B, copying it there first when A held the only
 one.
 
-**Our cmdline patch DESTROYS the original arguments rather than appending
-them.** `runPatchBoot` zeroes bytes 64-576 of the header and writes 51 bytes,
-so slot A's cmdline is exactly `bootopt=64S3,32N2,64N2
-androidboot.selinux=permissive` and everything FireOS shipped is gone. The
-device boots regardless - LK supplies `root=`, `androidboot.hardware` and the
-rest, and the kernel defaults cover what is left - so this has been true for
-the life of the wizard with nothing to show for it. Slot B is the only reason
-it is visible at all.
+**The cmdline patch preserves the original arguments.** `runPatchBoot` appends
+`androidboot.selinux=permissive` to the existing NUL-terminated field if absent.
+It does not replace FireOS's `bootopt`, `rootwait`, `init`, build-variant or
+verity arguments, and it refuses to patch if the combined value cannot fit
+while retaining a terminator. It replaces each existing
+`androidboot.selinux=enforce` token in place with
+`androidboot.selinux=permissive`, preserving all other argument bytes and
+whitespace. Other unknown SELinux values are refused. Appending a duplicate
+cannot safely override the first value. The wizard validates the actual field
+even when the unpack log contains `permissive`; it skips rewriting the cmdline
+only when the bounded transformation leaves the image unchanged.
+Earlier wizard versions zeroed bytes 64-576 and wrote only 51 bytes; the device
+happened to boot because LK supplied `root=`,
+`androidboot.hardware` and the rest, and the kernel defaults covered what was
+left. Slot B was the only reason the loss was visible.
 
 **The patch itself is NOT inert, and the ordering is why.** LK splices the
 image's cmdline into the middle of its own and then appends
@@ -758,13 +765,16 @@ init, and a write-once property gives the opposite precedence to the one a
 kernel parameter would. Both tokens on the cmdline with the device reading
 permissive IS the measurement that settles it.
 
-Appending rather than replacing is therefore the fix, and it has to keep that
-property: append `androidboot.selinux=permissive` to whatever cmdline the
-image already carries, so it still lands ahead of LK's `enforce`. 215 bytes
-plus 31 against a 512-byte field, so it fits. It needs a hardware test, since
-an argument that is currently absent and unmissed may matter on a device that
-is not this one - and do NOT copy slot B's cmdline as a template: its `bootopt`
-third field is `32N2` against slot A's `64N2`, so it is a different build.
+When the image has no SELinux argument, appending preserves that ordering: the
+image's permissive value still lands ahead of LK's `enforce`. When the image
+already carries `androidboot.selinux=enforce`, replacing that token in place
+sets the first image-owned value correctly without discarding any other
+argument. The observed 215-byte field plus the appended argument fits within
+512 bytes. The byte-level behavior is covered by a Node regression test, but
+the revised image still needs a hardware boot test, since an argument that is
+currently absent and unmissed may matter on another device. Do NOT copy slot
+B's cmdline as a template: its `bootopt` third field is `32N2` against slot A's
+`64N2`, so it is a different build.
 
 **`misc` (`p8`) holds a boot-control block, and it is empty.** 4KB of zeros
 with one record at offset **0x360**:

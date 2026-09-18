@@ -76,24 +76,28 @@ check("prefers the booted slot over a hardcoded system_a",
       script.includes('ro.boot.slot_suffix') && script.includes('"system$SLOT"'));
 
 // Fault 2. FireOS 6 is system-as-root: the tree is a /system DIRECTORY inside
-// the partition, so mounting it at /system puts the file one level down.
-// FireOS 5 keeps it at the partition root. Both have to work, and preferring
-// the nested path only when it exists is what makes one script serve both.
-check("reads the nested FireOS 6 path", script.includes("/system/system/build.prop"));
-check("still reads the flat FireOS 5 path", /B=\/system\/build\.prop/.test(script));
+// the partition, so the file is one level down from wherever the partition is
+// mounted. FireOS 5 keeps it at the partition root. Both have to work.
+check("reads the nested FireOS 6 path", script.includes('$M/system/build.prop'));
+check("still reads the flat FireOS 5 path", script.includes('B="$M/build.prop"'));
 check("prefers nested only when present, rather than assuming either",
-      /\[ -f \/system\/system\/build\.prop \] && B=\/system\/system\/build\.prop/
-        .test(script));
+      script.includes('[ -f "$M/system/build.prop" ] && B="$M/system/build.prop"'));
 check("greps the resolved path, not a literal", /"\$B"/.test(script));
 check("reports which path it used, so a transcript says which layout was seen",
-      script.includes('echo "PROP=$B"'));
+      script.includes('echo "PROP=$B"') && script.includes('echo "MNT=$M"'));
 
-// The read must leave the mount table as it found it — the flows that follow
-// write partitions, and an unexpected /system mount is not a state to hand
-// them. It also must not unmount something it did not mount.
-check("mounts read-only", script.includes("mount -o ro"));
-check("leaves an existing mount alone", script.includes('WAS=$(mount | grep " /system " )')
-      && /\[ -z "\$WAS" \] && umount \/system/.test(script));
+// Fault 3. TWRP 3.7 (amonet v2) makes /system a SYMLINK to
+// /system_root/system, which does not exist until something is mounted, so
+// mounting on /system failed with ENOENT and the read came back empty on every
+// v2 device — measured on the spare 2026-09-17. Mount on a private directory
+// instead, and never on /system.
+check("never mounts on /system", !/mount[^|;]*\s\/system(\s|"|;|$)/.test(script));
+check("mounts read-only on a private directory",
+      script.includes('mount -o ro "$S" "$M"') && script.includes("M=/tmp/em_sysread"));
+check("reads an existing mount in place instead of mounting twice",
+      script.includes('mount | sed -n "s|^$S on'));
+check("unmounts only what it mounted", script.includes('[ -n "$OWN" ] && { umount "$M"'));
+check("a failed mount is reported, not silent", script.includes('|| echo "MOUNTFAIL"'));
 
 // The sentinel is how readFireosBuild tells "ran and found nothing" from
 // "never ran". Without it a shell that died early parses as a clean read.

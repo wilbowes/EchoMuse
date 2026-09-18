@@ -3068,3 +3068,84 @@ FireOS 6's system-as-root layout, so it is either an empty `ro.boot.slot_suffix`
 in TWRP resolving `system_a` on a device that booted B, or the mount not
 happening. The consequence is that the Android release and board checks both
 silently skip on v2.
+
+## 2026-09-17 — the codec by name, emOS's missing policy, and a bootloader that only starts slot A
+
+Five merges (#557, #558, #559, #561, #564), one PR waiting on a hardware run
+(#563), no release. Both bench Echos run a local build of main
+(`v2.15.0-37-gd5e9456`).
+
+**Releases, as settled tonight.** A device `v*` tag goes straight to the GA
+fleet through OTA, so firmware is soaked as a LOCAL build on the bench first.
+And any EA cut is a GA release candidate. The agreed order: local build on the
+bench (done), new `start_server.sh` plus a reboot on both kernels (done), the
+wizard blockers (#563, #564, #463/#455, #468), then ea.7 as RC1 with a ~7-day
+soak on both kernels, then firmware and GA.
+
+**#546 fixed properly (#557).** Every mixer control is now reached by name
+through tinyalsa's `mixer_get_ctl_by_name` (`internal/bindings/mixer`), and
+the firmware no longer spawns `tinymix` at all. The id shift on the FireOS 6
+kernel starts after control 160, so only the ten route switches were ever
+wrong; mute, volume, amp and mic gain were right on both kernels, which
+corrects the 16th's reading. The cgo half calls only functions both devices'
+`libtinyalsa.so` export — the NDK header is tinyalsa 2.x, and a symbol the
+device lacks would stop the binary loading. Bench test on both kernels with the
+installed server paused and the routes opened first: all ten closed, the DAC
+path registers came back, mic live; on EFF the full 239-control listing under
+the new binary matched the old one except a timestamp control.
+
+**emOS was running the kernel's compiled-in policy, not stock's (#558).**
+Diffed kernel state between stock FireOS 5 (71VVV) and emOS on both kernels.
+Not missing: the watchdog threads, `panic_on_oops`, thermal protection as such.
+Different: the FireOS 6 kernel scales cores at 50/30% (why the spare sat on
+four), and the kernel's thermal defaults are STRICTER than stock — CPU throttle
+from 65°C against 84°C, the board sensor from 50.25°C against 56.5°C. Stock's
+values come from `/system/etc/.tp/thermal.conf` (MediaTek's obfuscated `.mtc`:
+each character minus its position mod 10) and Amazon's plaintext
+`thermal.policy.conf`. `pkg/board` identifies the board by idme
+`device_type_id` (the device tree says only `MT8163`; idme values end in a
+NUL, which the first hardware run tripped over and correctly refused on), and
+`server platform-init`, run by `start_server.sh` on emOS only, applies stock's
+values after resolving every zone and cooler by name. An unknown board keeps
+the kernel defaults. emOS uses ~45MB of 493MB, so zram and the VM tunables
+were left alone.
+
+**Crash logs are collected (#559).** emOS saved `last_kmsg` every boot and
+nothing read it. The controller now checks it on connect, reports a boot that
+did not end in `reboot: Restarting system` as a `kernel` error event, and marks
+the copy seen on the device. MediaTek prints a call trace on every restart, and
+C95's crash left no panic line, so "clean" has to be the positive test. All
+four saved logs on the bench are ordinary reboots.
+
+**#544 is the bootloader, not the image.** amonet v2's LK on biscuit starts
+`boot_a` whatever the BCB says; the BCB changes `androidboot.slot_suffix` and
+nothing else. Proven on the spare: BCB set B-active, reboot, the emOS image in
+`boot_a` came up reporting `_b` (BCB restored after). kaeru hands normal boots
+to the stock `get_boot_part()`, so its source could not settle it. The 09-14
+rule — write the slot that is not stock — worked only where stock sat in B.
+#563 always targets A and copies stock A→B first when A holds the only copy.
+It also fixes the escrow reading the slot LK *reported* booting rather than the
+one holding stock.
+
+**The v2 `build.prop` failure (#564).** TWRP 3.7 makes `/system` a symlink to
+`/system_root/system`, which does not exist until mounted, so the wizard's
+mount on `/system` failed with ENOENT and its script still printed the
+sentinel. Every v2 device read as "build unknown" and the release and board
+checks skipped. Now mounted on a private `/tmp` directory; verified in TWRP on
+the spare, not on v1's TWRP 3.2.3.
+
+**A lesson paid for.** `/init recovery` on EFF (amonet v1) did not come up as a
+USB-visible TWRP and needed Wil to power-cycle it. On the v2 spare the same
+command reaches TWRP with adb in about a minute. Do not send a v1 device to
+recovery without someone at it.
+
+**Also:** #235 was already fixed by #249 in August — a stale note put it back
+on the blocker list. Filed #560 (an emOS `emos-svc` start/stop; note
+`/init <word>` reboots into boot mode `<word>` today) and #562 (the ADC digital
+gain reads 88 on a control reporting range 0–64, identically on stock).
+
+**Still open:** the spare's keepalive drops and "wake word fell behind"
+warnings (none since 12:19, several coincided with console use, two overnight
+did not); `wifi_tx_thro` 302/258 on emOS against 0 on stock; the new
+`start_server.sh` has not been through a reboot on a FireOS device running
+EchoMuse — the bench has none.
