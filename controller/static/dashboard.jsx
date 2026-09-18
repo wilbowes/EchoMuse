@@ -4004,6 +4004,53 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // able to read by-name is not evidence of danger, and refusing on it would
   // block any device whose TWRP lays that directory out differently — the same
   // reading the OTA free-space check applies to an unreadable df.
+  // Android boot image v0-v2 stores a 512-byte, NUL-terminated cmdline at
+  // bytes 64..575. The wizard only owns the SELinux argument: replace an
+  // existing enforce token in place, or append permissive if absent, keeping
+  // every other argument and all bytes outside the field untouched.
+  function patchBootCmdline(bootImg) {
+    // Keep the field bounds and terminator rules aligned with em_emos_build.pack
+    // and emos/mkboot.py (whose byte-for-byte parity is tested by test_agrees_with_mkboot).
+    // This wizard additionally replaces enforce: the first occurrence wins.
+    const fieldStart = 64;
+    const fieldEnd = 576;
+    if (!bootImg || bootImg.length < fieldEnd) {
+      throw new Error(
+        `Boot image is too short for its cmdline field (${bootImg?.length || 0} bytes).`);
+    }
+
+    const field = bootImg.slice(fieldStart, fieldEnd);
+    const used = field.indexOf(0);
+    if (used < 0) throw new Error('Boot cmdline has no NUL terminator in its field.');
+    // Map each byte to one character so unrelated, even non-UTF-8, bytes are
+    // copied exactly rather than replaced by the text decoder.
+    const existing = String.fromCharCode(...field.slice(0, used));
+    const argument = 'androidboot.selinux=permissive';
+    let found = false;
+    let cmdline = existing.replace(/(^|[ \t\r\n\v\f])androidboot\.selinux=([^ \t\r\n\v\f]*)/g,
+      (token, space, value) => {
+        if (value !== 'enforce' && value !== 'permissive') {
+          throw new Error('Boot cmdline already specifies a conflicting androidboot.selinux value.');
+        }
+        found = true;
+        return space + argument;
+      });
+    if (!found) {
+      const needsSpace = used > 0 && !/[ \t\r\n\v\f]/.test(existing.at(-1));
+      cmdline += `${needsSpace ? ' ' : ''}${argument}`;
+    }
+    // Keep one byte for the terminator; never truncate a FireOS argument.
+    if (cmdline.length >= field.length) {
+      throw new Error(
+        `Boot cmdline is too long to set ${argument} without truncating FireOS arguments.`);
+    }
+
+    const patched = new Uint8Array(bootImg);
+    patched.set(Uint8Array.from(cmdline, char => char.charCodeAt(0)), fieldStart);
+    patched[fieldStart + cmdline.length] = 0;
+    return patched;
+  }
+
   // Two unlock generations put the boot partition in two different places.
   //
   // amonet v1 INVERTS the by-name map under TWRP: the bare boot_a points at
@@ -4281,28 +4328,21 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     addLog(`Escrowed ${boot.target} as it is now, md5 ${md5}. A copy has been downloaded `
          + 'to your computer. KEEP IT — from TWRP it puts this partition back as it was.', 'warn');
 
-    // Check the CURRENT cmdline before touching anything — magiskboot's
-    // own unpack log already echoes CMDLINE [...] for the unmodified
-    // image, so use that as the source of truth instead of re-deriving
-    // it from the manual byte-offset patch logic. If a previous wizard
-    // run already flipped SELinux to permissive, re-running the blind
-    // overwrite is unnecessary risk (another write to a device with no
-    // real recovery path if it goes wrong) for zero benefit.
+    // Validate and transform the actual field even when magiskboot's log
+    // contains "permissive": it may be a substring or follow an enforce token.
+    // Only skip the write if the bounded patch leaves the image unchanged.
+    const patched = patchBootCmdline(bootImg);
+    const cmdlineAlreadyPermissive = patched.every((byte, i) => byte === bootImg[i]);
+    // Unpack the current image for its ramdisk; the log remains diagnostic.
     addLog('Checking current boot image cmdline…');
     const probeOut = await c.shell('cd /tmp/work && /tmp/bin/magiskboot unpack boot.img 2>&1');
     addLog(probeOut || '(done)');
-    const cmdlineAlreadyPermissive = probeOut.includes('androidboot.selinux=permissive');
 
     let workImg = 'boot.img';
     if (cmdlineAlreadyPermissive) {
       addLog('cmdline already has androidboot.selinux=permissive — skipping cmdline patch.', 'warn');
     } else {
       addLog('Patching cmdline for SELinux permissive…');
-      const patched = new Uint8Array(bootImg);
-      const newCmd  = new TextEncoder().encode('bootopt=64S3,32N2,64N2 androidboot.selinux=permissive');
-      patched.fill(0, 64, 576);
-      patched.set(newCmd, 64);
-
       addLog('Pushing patched image…');
       await c.push('/tmp/work/boot_patched.img', patched, pct => setProgress({ label: 'Pushing boot image', pct }));
       setProgress(null);
