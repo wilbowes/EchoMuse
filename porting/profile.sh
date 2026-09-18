@@ -117,6 +117,11 @@ printf 'compatible: ' >> "$P"; dev "cat /proc/device-tree/compatible" | tr '\0' 
 sec "device tree nodes (enabled, by compatible)"
 echo "pulling the device tree (about a minute)…" >&2
 $ADB pull /proc/device-tree "$OUT/files/device-tree" >/dev/null 2>&1 || true
+# Some boards publish Amazon's idme block in the device tree too: the Dot 3
+# carries /idme with the serial, both MACs and mac_sec. idme is read above
+# through an allowlist, so the tree's copy goes before anything is built from
+# it, dts or raw. Found in a public attachment on #527, 2026-09-18.
+rm -rf "$OUT/files/device-tree/idme" "$OUT/files/device-tree/chosen"
 if command -v dtc >/dev/null && [ -d "$OUT/files/device-tree" ]; then
   dtc -q -I fs -O dts -o "$OUT/files/device-tree.dts" "$OUT/files/device-tree" 2>/dev/null || true
 fi
@@ -129,8 +134,7 @@ if [ -s "$OUT/files/device-tree.dts" ]; then
     /^[ \t]*};/ { if (c[d] != "" && st[d] !~ /^disable/) { p=""; for (i=2;i<=d;i++) p=p "/" n[i]; printf "%-8s %-44s %s\n", (st[d]=="" ? "-" : st[d]), c[d], p } d-- }
   ' "$OUT/files/device-tree.dts" | sort -k2 >> "$P"
 else
-  echo "(no dtc on this host: raw tree kept in files/device-tree, /chosen removed)" >> "$P"
-  rm -rf "$OUT/files/device-tree/chosen"
+  echo "(no dtc on this host: raw tree kept in files/device-tree, without /chosen and /idme)" >> "$P"
 fi
 
 # ── Kernel and CPU ─────────────────────────────────────────────────────────
@@ -327,10 +331,11 @@ dev "dmesg" | grep -v -iE 'ssid|associat|password|psk' >> "$P" || true
 # The serial is replaced wherever it appears — cmdline, dmesg, file contents.
 serial=$(dev "getprop ro.serialno" | tr -cd 'A-Za-z0-9')
 [ -n "$serial" ] || serial=$(dev "getprop ro.boot.serialno" | tr -cd 'A-Za-z0-9')
-for f in "$P" "$OUT"/files/*; do
+# The raw device tree is many small files; the serial is scrubbed from them too.
+for f in "$P" "$OUT"/files/* $(find "$OUT/files/device-tree" -type f 2>/dev/null); do
   case "$f" in *.gz) continue ;; esac
   [ -f "$f" ] || continue
-  sed -E \
+  LC_ALL=C sed -E \
     -e "${serial:+s/$serial/<serial>/g}" \
     -e 's/([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}/<mac>/g' \
     -e 's/\b([0-9]{1,3}\.){3}[0-9]{1,3}\b/<ipv4>/g' \
@@ -338,6 +343,15 @@ for f in "$P" "$OUT"/files/*; do
     "$f" > "$f.tmp" && mv "$f.tmp" "$f"
 done
 
+# Last line of defence. Masking only catches what it knows to look for, and a
+# board once published its whole idme block through the device tree. If the
+# device's own serial survives anywhere, the archive is not made at all.
+if [ -n "$serial" ] && LC_ALL=C grep -a -r -l "$serial" "$OUT" >/dev/null 2>&1; then
+  echo "STOPPED: the device serial is still present in:" >&2
+  LC_ALL=C grep -a -r -l "$serial" "$OUT" >&2
+  echo "No archive was made. Please report this on #527 instead of posting the files." >&2
+  exit 1
+fi
 tar -czf "$OUT.tar.gz" -C "$(dirname "$OUT")" "$(basename "$OUT")"
 echo "Done: $OUT.tar.gz" >&2
 echo "Read profile.txt before posting it — redaction masks what it knows to look for." >&2
