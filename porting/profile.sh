@@ -323,7 +323,12 @@ done
 
 # ── What Android is running ────────────────────────────────────────────────
 sec "processes"
-run "ps"
+# Android 7's toybox ps lists only the current session without -A, and
+# FireOS 5's toolbox ps treats -A as a name filter — so take whichever is
+# longer. The first Dot 3 profile came back with three processes.
+printf '$ ps -A || ps\n' >> "$P"
+psA=$(dev "ps -A"); ps0=$(dev "ps")
+if [ "$(echo "$psA" | wc -l)" -gt "$(echo "$ps0" | wc -l)" ]; then echo "$psA" >> "$P"; else echo "$ps0" >> "$P"; fi
 sec "kernel log (filtered)"
 dev "dmesg" | grep -v -iE 'ssid|associat|password|psk' >> "$P" || true
 

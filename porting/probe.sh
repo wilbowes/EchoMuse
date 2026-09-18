@@ -13,7 +13,8 @@
 #            static profile cannot show.
 #   buttons  names each button in turn and records which input device and
 #            key code it produces — a mapping, not a log to annotate.
-#   mics     (opt-in) stops Android's mediaserver, which holds the mic,
+#   mics     (opt-in) stops the init service holding the mic (mediaserver
+#            on FireOS 5; one of Amazon's daemons on the Dot 3),
 #            records ~10s while the operator claps on cue, and starts it
 #            again. Pushes one binary to /data/local/tmp and removes it.
 #
@@ -70,7 +71,7 @@ say ""
 say "This will act on the device:"
 [ $ROUTE = 1 ]   && say "  - press volume up then down (so it plays its chime; volume ends where it started)"
 [ $BUTTONS = 1 ] && say "  - ask you to press each button in turn, and record what the kernel reports"
-[ $MICS = 1 ]    && say "  - stop Android's media server for about 15s to record the mics, then start it again"
+[ $MICS = 1 ]    && say "  - stop the service holding the mics for about 15s to record them, then start it again"
 say "Nothing is installed. A reboot undoes anything this changes."
 if [ $YES = 0 ]; then
   printf 'Continue? [y/N] ' >&2; read -r ans; case "$ans" in y|Y|yes) ;; *) exit 0 ;; esac
@@ -242,11 +243,23 @@ if [ $MICS = 1 ]; then
     ownername=$(dev "cat /proc/$owner/cmdline" | tr '\0' ' ')
     { echo "capture: $cap (card $card device $pcmdev) held by pid $owner: $ownername"; echo "$hw"; } >> "$P"
 
-    case "$ownername" in *mediaserver*) ;; *)
-      echo "held by something other than mediaserver — not stopping it" >> "$P"
-      say "Mics: the mic is held by '$ownername', not mediaserver. Not touching it."
-      cap="" ;;
-    esac
+    # Which init service to stop so the mic is free, and to start again after.
+    # FireOS 5 is mediaserver ("media"). Android 7 moved audio out of it, and
+    # the Dot 3 has no Android audio stack at all — its mic belongs to one of
+    # Amazon's own daemons — so the holder is looked up by pid in init's own
+    # record (init.svc_debug_pid.<name>, Android 7+) rather than guessed.
+    svc=""
+    case "$ownername" in *mediaserver*) svc=media ;; esac
+    if [ -z "$svc" ] && [ -n "$owner" ]; then
+      svc=$(dev "getprop" | sed -n "s/^\[init\.svc_debug_pid\.\([^]]*\)\]: \[$owner\]\$/\1/p" | sed -n 1p)
+    fi
+    if [ -z "$svc" ]; then
+      echo "held by '$ownername', which is no init service we can stop and restart — not touching it" >> "$P"
+      say "Mics: the mic is held by '$ownername', which is not an init service. Not touching it."
+      cap=""
+    else
+      echo "holder is init service '$svc'" >> "$P"
+    fi
   fi
 
   if [ -n "$cap" ]; then
@@ -260,13 +273,14 @@ if [ $MICS = 1 ]; then
       say "Mics: this device records $fmt, which stock tinycap can't. Re-run with"
       say "      --capture <pcm_capture binary> (see porting/README.md)."
     else
-      restore() { dev "start media; rm -f /data/local/tmp/em_mic.raw /data/local/tmp/pcm_capture" >/dev/null; }
+      restore() { dev "start $svc; rm -f /data/local/tmp/em_mic.raw /data/local/tmp/pcm_capture" >/dev/null; }
       trap 'restore' EXIT INT TERM
       [ $tool = pcm_capture ] && $ADB push "$CAPTURE" /data/local/tmp/pcm_capture >/dev/null && dev "chmod 755 /data/local/tmp/pcm_capture" >/dev/null
       SECS=10
       say ""
       say "Mics: recording ${SECS}s. Stay QUIET until told to clap."
-      dev "stop media" >/dev/null; sleep 1
+      say "      (stopping '$svc', which holds the mic, until the recording is done)"
+      dev "stop $svc" >/dev/null; sleep 1
       if [ $tool = pcm_capture ]; then
         $ADB exec-out "${PFX}/data/local/tmp/pcm_capture -D $card -d $pcmdev -c $ch -r $rate -f $fmt -t $SECS -o /data/local/tmp/em_mic.raw${SFX}" > "$OUT/capture.log" 2>&1 &
       else
@@ -279,7 +293,7 @@ if [ $MICS = 1 ]; then
       wait $cp || true
       $ADB pull /data/local/tmp/em_mic.raw "$OUT/mics.raw" >/dev/null 2>&1 || true
       restore; trap - EXIT INT TERM
-      say "Mics: done, media server restarted ($(dev "getprop init.svc.media"))."
+      say "Mics: done, '$svc' restarted ($(dev "getprop init.svc.$svc"))."
       cat "$OUT/capture.log" >> "$P"
       raw="$OUT/mics.raw"
       # tinycap writes a WAV; skip its 44-byte header for the analysis.

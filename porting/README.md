@@ -60,9 +60,10 @@ It lists what it's about to do and waits for `y`. Stages:
   of which button produces which key code, and from which input device.
   - The action button may wake Alexa. That's fine; she times out.
   - After mute, the script asks you to press it again, to unmute.
-- **Mics (opt-in, `--mics`).** Stops Android's media server, which holds the
-  microphones, for about 15 seconds. It records 10 seconds and then starts the
-  server again. **Stay quiet until told, then clap once at the front** (the
+- **Mics (opt-in, `--mics`).** Stops the service holding the microphones
+  (Android's media server on FireOS 5, one of Amazon's own services on the
+  Dot 3) for about 15 seconds. It records 10 seconds and then starts that
+  service again. **Stay quiet until told, then clap once at the front** (the
   action button side), **and once at the back**, when the script says.
   - Stock `tinycap` can't record every mic format; the Dot 2's packed 24-bit
     array defeats it. For those devices the recording needs `pcm_capture`,
@@ -77,10 +78,10 @@ analysis, which needs no audio.
 ## Things to be mindful of
 
 - **A reboot undoes everything `probe.sh` changes.** If a stage is
-  interrupted, the media server is restarted on the way out, Ctrl-C included.
+  interrupted, the stopped service is restarted on the way out, Ctrl-C included.
   If sound or the mics seem off afterwards, reboot.
 - **Don't run ALSA tools like `tinypcminfo`, `tinycap` or `tinyplay` yourself
-  while the stock firmware is running.** Opening a device the media server
+  while the stock firmware is running.** Opening a device another service
   holds doesn't fail; it hangs until killed. The scripts avoid it for that
   reason.
 - **Unplug anything in the headphone jack first.** It changes the audio
