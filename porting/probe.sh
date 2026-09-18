@@ -154,11 +154,15 @@ if [ $BUTTONS = 1 ]; then
   say "Write down the order you pressed them in. Recording for 25s…"
   say "(The action button may wake Alexa and the mute button mutes the mics —"
   say " press mute a second time at the end to unmute.)"
-  $ADB exec-out "${PFX}getevent -lt${SFX}" > "$OUT/getevent.txt" 2>&1 &
+  # The first line is getevent's own pid ($$ survives exec), because killing
+  # adb on the host leaves getevent running on the device, and toolbox has no
+  # pkill or killall to find it by name afterwards.
+  $ADB exec-out "${PFX}echo \$\$; exec getevent -lt${SFX}" > "$OUT/getevent.txt" 2>&1 &
   gp=$!
   sleep 25
   kill $gp 2>/dev/null || true
-  dev "pkill getevent; killall getevent" >/dev/null 2>&1 || true
+  gpid=$(sed -n 1p "$OUT/getevent.txt" | tr -cd '0-9')
+  [ -n "$gpid" ] && dev "kill $gpid" >/dev/null
   sec "buttons: key events (press order as recorded)"
   tr -d '\r' < "$OUT/getevent.txt" | grep -E 'EV_KEY|EV_SW' >> "$P" || echo "(no key events)" >> "$P"
   say "Buttons: done. Note in the issue the order you pressed them in."
