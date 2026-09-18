@@ -2431,6 +2431,27 @@ def test_the_fireos_flow_escrows_before_it_patches():
         "the FireOS flow must offer the restore on a failed TWRP step")
 
 
+def test_a_restore_ends_the_wizard_run():
+    """
+    A restore undoes the partition write that every later step builds on, and
+    the wizard cannot step backwards, so carrying on provisions on top of a
+    stock boot image — found on VVV 2026-09-18, sitting on Install Magisk as if
+    Patch Boot had held. A successful restore therefore ends the run: the step
+    controls go, nothing auto-runs, and the operator is told to start again.
+    """
+    src = _jsx()
+    fn = src[src.index("async function restoreEscrowedBoot"):]
+    fn = fn[:fn.index("\n  async function ", 1)]
+    ok = fn.index("Escrowed image restored and verified")
+    assert "setRestored(true)" in fn[ok:], (
+        "setRestored(true) must follow the verified restore, never precede it")
+    assert fn.index("setRestored(true)") > fn.index("_writeBootPartition"), (
+        "the run may only end once the restore has been written and verified")
+    assert "{!restored && (<>" in src, "the step controls must be hidden after a restore"
+    assert "|| running || restored || stepState[step] !== 'pending') return;" in src, (
+        "no step may auto-run after a restore")
+
+
 def test_the_flash_step_verifies_against_the_partition():
     """
     A write that reports implausible throughput went to cache, and a read-back

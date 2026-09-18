@@ -3410,6 +3410,11 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // longer has one — a page reload loses emosRef, which is exactly when the
   // restore is needed. See restoreEscrowedBoot.
   const [restoreFile, setRestoreFile] = useState(null);
+  // A successful restore ENDS the run. It undoes the partition write every
+  // later step depends on, and the wizard cannot step backwards, so carrying
+  // on would provision on top of a stock boot image (tested 2026-09-18: a
+  // FireOS run restored at Magisk sat on step 4 as if Patch Boot had held).
+  const [restored, setRestored] = useState(false);
   // The serial read at step 1. Step 9 needs it to ask whether THIS
   // device has connected, rather than inferring it from the device list
   // having grown.
@@ -6416,6 +6421,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       addLog('Escrowed image restored and verified against the partition. The '
            + 'device will boot exactly as it did before this run. Everything '
            + 'installed on /data is untouched.', 'ok');
+      setRestored(true);
     } catch (e) {
       addLog(`Restore failed: ${e.message}`, 'error');
     } finally {
@@ -6895,7 +6901,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     const alreadyThere = isEmos && step === 1 && adb
                       && _bannerMode(adb.banner) === 'twrp';
     if ((!autoSteps.has(step) && !alreadyThere)
-        || running || stepState[step] !== 'pending') return;
+        || running || restored || stepState[step] !== 'pending') return;
     // The emOS build's default source is the release, so the auto path has to
     // say so — `useLatest` is undefined otherwise and it would ask for a file
     // nobody has chosen.
@@ -6907,7 +6913,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     addLog(`"${STEPS[step].label}" needs an ADB connection and there isn't one — `
          + `the previous step disconnected the device. Reconnect and click Retry.`, 'error');
     markStep(step, 'error');
-  }, [step, running, adb]);
+  }, [step, running, adb, restored]);
 
   const cur    = STEPS[step];
   const isDone = step === STEPS.length - 1 && stepState[step] === 'done';
@@ -7013,6 +7019,18 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
               <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)', lineHeight: 1.6 }}>{cur.desc}</div>
             </div>
 
+            {/* After a restore the run is over: every step control is hidden
+                and this is all that is offered. See `restored`. */}
+            {restored && (
+              <div style={{ margin: '6px 0 10px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: 'var(--ok)', lineHeight: 1.7 }}>
+                  Device restored. Reboot it from TWRP (Reboot → System), then start the wizard again.
+                </div>
+                <div><Pill accent onClick={onClose}>Close</Pill></div>
+              </div>
+            )}
+
+            {!restored && (<>
             {/* WebUSB pre-flight. Shown on step 0 rather than at the first
                 click, because the point is to be read before a device is
                 unboxed — the throw in requestDevice says the same thing to
@@ -7357,6 +7375,8 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                 </div>
               </div>
             )}
+
+            </>)}
 
             {/* Progress bar — accent slate, same as toggles/sliders */}
             {progress && (
