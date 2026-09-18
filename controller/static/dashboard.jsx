@@ -4267,6 +4267,20 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         + `so nothing is being patched or flashed.`);
     }
 
+    // Escrow before anything writes (#468). The emOS flow has always handed the
+    // operator the original; this flow pulled the same bytes into the page and
+    // kept them only in /tmp/work, which is gone after the first reboot — the
+    // moment someone finds they need it. Here rather than as a step of its own
+    // because the image is already in hand, and a new step renumbers every
+    // index this flow hardcodes. emosRef/emosTarget are the restore's inputs in
+    // both flows.
+    const md5 = await _md5Hex(bootImg);
+    setEmosRef({ bytes: bootImg, md5, target: boot.target });
+    setEmosTarget(boot.target);
+    _downloadBytes(bootImg, `echomuse-boot-before-patch-${md5.slice(0, 8)}.img`);
+    addLog(`Escrowed ${boot.target} as it is now, md5 ${md5}. A copy has been downloaded `
+         + 'to your computer. KEEP IT — from TWRP it puts this partition back as it was.', 'warn');
+
     // Check the CURRENT cmdline before touching anything — magiskboot's
     // own unpack log already echoes CMDLINE [...] for the unmodified
     // image, so use that as the source of truth instead of re-deriving
@@ -6295,7 +6309,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       }
       if (!bytes) {
         throw new Error('No escrowed image in this session. Choose the '
-          + 'echomuse-stock-boot-*.img file downloaded at the escrow step.');
+          + 'echomuse-*.img file downloaded at the escrow step.');
       }
       // The same guard the escrow and the patch step apply. Restoring is the
       // one operation nobody will check afterwards, so a file that is not a
@@ -7121,7 +7135,10 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                 operator has nothing else to try. It needs ADB, so it is only
                 useful while the device is still in TWRP; that is exactly the
                 state both failures leave it in. */}
-            {isEmos && (step === 6 || step === 7)
+            {/* FireOS: steps 2-4, the TWRP steps after its escrow (#468). Magisk
+                at step 3 rewrites the boot partition too, so the restore undoes
+                both. Not offered once Android is up — no TWRP, no restore. */}
+            {(isEmos ? (step === 6 || step === 7) : (step >= 2 && step <= 4))
               && stepState[step] === 'error' && !running && (
               <div className="em-inset" style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 8, padding: 10 }}>
                 <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)' }}>
@@ -7132,7 +7149,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                 {!emosRef && (
                   <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--warn)' }}>
                     This session has no escrowed image — choose the
-                    echomuse-stock-boot-*.img downloaded at step 3.
+                    {isEmos ? ' echomuse-stock-boot-*.img' : ' echomuse-boot-before-patch-*.img'} downloaded at step 3.
                   </div>
                 )}
                 <input type="file" accept=".img"

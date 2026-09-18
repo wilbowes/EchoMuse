@@ -2406,6 +2406,31 @@ def test_the_emos_flow_escrows_before_it_flashes():
     assert ids.index("install_oww") < ids.index("flash_emos")
 
 
+def test_the_fireos_flow_escrows_before_it_patches():
+    """
+    #468: the FireOS flow wrote the boot partition with no copy of the original
+    in the operator's hands. The escrow sits inside runPatchBoot, so ordering
+    WITHIN the function is the guard: stored and downloaded before the first
+    shell call that writes a partition. Matched on shell calls rather than on
+    "of=", for the reason the flash test gives.
+    """
+    src = _jsx()
+    fn = src[src.index("async function runPatchBoot"):]
+    fn = fn[:fn.index("\n  async function runInstallMagisk")]
+    writes = [i for i, line in enumerate(fn.splitlines())
+              if "c.shell(" in line and "of=${boot.target}" in line]
+    assert writes, "runPatchBoot's flash was not found; update this test"
+    lines = fn.splitlines()
+    for marker in ("setEmosRef(", "setEmosTarget(", "_downloadBytes("):
+        at = next((i for i, l in enumerate(lines) if marker in l), None)
+        assert at is not None, f"runPatchBoot must escrow via {marker}"
+        assert at < writes[0], f"{marker} must come before the partition write"
+
+    # And the restore is offered on the TWRP steps that follow the escrow.
+    assert "(isEmos ? (step === 6 || step === 7) : (step >= 2 && step <= 4))" in src, (
+        "the FireOS flow must offer the restore on a failed TWRP step")
+
+
 def test_the_flash_step_verifies_against_the_partition():
     """
     A write that reports implausible throughput went to cache, and a read-back
