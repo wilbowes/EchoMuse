@@ -36,9 +36,11 @@ install there.
 - **Not standalone.** You need a working Home Assistant with an
   [Assist pipeline](https://www.home-assistant.io/voice_control/). Home
   Assistant does the speech recognition, the understanding and the voice.
-- **Not plug and play.** The Dot has to be unlocked first, over USB, with a
-  third-party tool. It takes about an hour the first time and carries a real
-  risk to the device.
+- **Not ready out of the box.** The Dot needs a one-time unlock over USB with
+  R0rt1z2's tool first. Follow the instructions and it is straightforward. If
+  a step goes wrong the Dot can end up soft-bricked, and the
+  [XDA thread](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/)
+  covers recovering it.
 - **Not for other Echo models, yet.** Only the Echo Dot 2nd gen works today.
   Ports to the Echo Dot 3, Echo 2 and Echo Show 8 are in progress with
   community help.
@@ -93,6 +95,11 @@ The wizard offers two ways to run EchoMuse on the Dot:
 ## Features
 
 - **Voice turns through Assist**, with the answer played on the Dot.
+- **Wake word on the controller or on the Dot.** By default the controller
+  listens for the wake word. The Dot can do it itself instead: switch it on
+  in the dashboard's wake word settings, for every Dot or just one. If a Dot can't (older firmware, or its wake
+  word model isn't installed yet), the controller takes over, so it never
+  goes deaf.
 - **Barge-in:** say the wake word over a reply to interrupt it.
 - **More than one Dot:** the first to hear the wake word answers and the rest
   stay quiet.
@@ -124,8 +131,10 @@ The wizard offers two ways to run EchoMuse on the Dot:
 - **The mute button is a software mute.** It silences the microphones in the
   audio chip and EchoMuse refuses to listen while it is on, but the Dot 2 has
   no hardware switch that disconnects them.
-- Letting the Dot listen for the wake word itself, so no audio leaves it until
-  then, is planned ([#207](https://github.com/wilbowes/EchoMuse/issues/207)).
+- **Even with wake word on the Dot, the microphone still streams to the
+  controller**, which keeps listening for comparison and for barge-in.
+  Keeping all audio on the Dot until it hears the wake word is the next step
+  ([#207](https://github.com/wilbowes/EchoMuse/issues/207)).
 
 ## Status and known issues
 
