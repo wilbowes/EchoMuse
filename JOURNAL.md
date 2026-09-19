@@ -3352,3 +3352,13 @@ Re-read `/sys/class/tty/ttyACM*/device/../serial` after every reboot.
 
 The wipe shipped **emOS flow only**, default off: on FireOS 5 a data wipe also
 takes f1r30s with it and the wizard does not reinstall it (#269 Part 1).
+
+**Follow-up, same morning.** VVV (FireOS 5.5.5.4 + EchoMuse) also runs country
+`WW` with nothing in `wifi_country_code`, and its WIFI record is byte-identical
+to EFF's — two devices, one default. The FireOS 6 library
+(`/system/vendor/lib/libcustom_nvram.so`) carries the same `stWifiCfgDefault`.
+What stock FireOS with Alexa set up does for country is unknown (no stock unit
+left) and was deliberately not chased. The emOS flow now writes the record at
+Install EchoMuse if it is missing (`ensureWifiNvram`), read from the device's
+own /system by symbol name, so a wiped emOS device runs stock's radio settings
+rather than the driver's fallback. Never overwrites; warns rather than fails.
