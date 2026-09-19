@@ -2536,10 +2536,12 @@ function Card({ device, onClick }) {
           </div>
           {(device.firmware_ver || device.baseOs) && (
             <div title={[device.firmware_ver, _baseOsLabel(device.baseOs), _kernelTitle(device)].filter(Boolean).join(' · ')}
-              style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', marginTop: 3, ..._ROW_TEXT, display: 'block' }}>
+              style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', marginTop: 3, display: 'flex', minWidth: 0 }}>
               {/* The tile is narrow: "emOS (arm64)", and nothing extra for
-                  FireOS. The header and the tooltip carry the version. */}
-              {[_middleEllipsis(device.firmware_ver, 24, 7), _osLabel(device)].filter(Boolean).join(' · ')}
+                  FireOS. The OS never shrinks; the firmware version gives way
+                  to it, since the tooltip and the header both carry it whole. */}
+              {device.firmware_ver && <span style={{ ..._ROW_TEXT, flex: '0 1 auto' }}>{_middleEllipsis(device.firmware_ver, 24, 7)}</span>}
+              {_osLabel(device) && <span style={{ flexShrink: 0, whiteSpace: 'nowrap' }}>{device.firmware_ver ? '\u00a0· ' : ''}{_osLabel(device)}</span>}
             </div>
           )}
         </div>
