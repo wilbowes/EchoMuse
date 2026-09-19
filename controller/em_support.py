@@ -37,9 +37,9 @@ Three rules, in order of how badly they would be missed:
    positional alias would still be one-to-one with a real person.
 
 Log lines are sanitised rather than trusted: they are the richest diagnostic
-in the bundle AND the most likely to contain speech, since turn lines carry
-`text='...'` verbatim. Quoted strings and URLs are stripped, and lines from
-known transcript-bearing sources are dropped entirely.
+in the bundle AND the most likely to contain speech, since `[TURN]` lines
+carry `text='...'` verbatim. Quoted strings and URLs are stripped, and lines
+from known transcript-bearing sources are dropped entirely.
 
 Serials are kept — they identify the user's own hardware to them, and
 without them nothing correlates — but nothing else is.
@@ -134,11 +134,29 @@ _COUNTER_FIELDS = (
 # Log lines whose source is known to carry speech. Dropped whole rather than
 # sanitised: a partial redaction of a line that quotes a transcript is a bet
 # on the regex, and losing the line costs nothing we cannot get elsewhere.
-_LOG_DROP = ("STT result", "text=", "Utterance saved", "stt_text")
+#
+# Markers name the line, not the field. `text=` used to be here for the turn
+# trace, but it also matched the AnnounceRequest line, whose `text=` is a TTS
+# string HA sent us rather than speech, and which is the only record that an
+# announcement arrived at all (#507). That line falls through to _QUOTED.
+_LOG_DROP = (
+    "STT result",
+    "[TURN]",
+    "Utterance saved",
+    "stt_text",
+    "Spoken dismissal",
+)
 
 # Quoted strings and URLs. Turn traces quote transcripts; media URLs carry
-# provider paths and session tokens.
-_QUOTED = re.compile(r"""(['"])(?:(?!\1).)*\1""")
+# provider paths and session tokens. Log lines quote values by repr, so a
+# quote inside the string arrives escaped: the first two forms skip `\.`
+# pairs so `'it\'s "late"'` redacts whole instead of leaking the tail. The
+# plain forms are the fallback for text that is not repr (device shell
+# output, exception text via _scrub), where a value ending in a backslash
+# would otherwise never close.
+_QUOTED = re.compile(
+    r"'(?:[^'\\]|\\.)*'" r'|"(?:[^"\\]|\\.)*"' r"|'[^']*'" r'|"[^"]*"'
+)
 _URL = re.compile(r"""https?://[^\s'"]+""")
 
 # Bare network identifiers in log prose — "Device connected: ... at 10.10.1.60"
@@ -322,7 +340,7 @@ def sanitise_log(lines: list[str], accounts: dict[str, str] | None = None) -> li
     Make controller log lines safe to publish.
 
     Logs are the richest thing in a bundle and the likeliest to contain
-    speech — a turn trace carries `text='...'` verbatim — so they are
+    speech — a `[TURN]` trace carries `text='...'` verbatim — so they are
     filtered, never passed through. Lines from transcript-bearing sources go
     entirely; everything else keeps its structure with quoted strings and
     URLs replaced, since the timings and message types are the diagnostic
