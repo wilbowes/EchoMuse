@@ -147,3 +147,35 @@ def test_the_downgrade_message_names_both_versions(tmp_path, monkeypatch):
     msg = str(e.value)
     assert f"v{latest}" in msg and f"v{latest - 2}" in msg
     assert ".bak" in msg, "should point at the backup it can be restored from"
+
+
+def test_a_stored_wake_threshold_that_cannot_fire_is_lowered(tmp_path):
+    """
+    v24: a 1.0 stored before #549 capped writes stays until the next save, and
+    a device holding it never wakes. The migration lowers it, per device and
+    fleet, through the same clamp the write path uses — and leaves a usable
+    value, and anything it cannot parse, alone.
+    """
+    import json
+    p = _legacy_db(tmp_path, upto=23)
+    c = sqlite3.connect(p)
+    c.execute("UPDATE devices SET config = ? WHERE device_id = 'D'",
+              (json.dumps({"owwThreshold": 1.0, "micGainDb": 24}),))
+    c.execute("INSERT INTO devices (device_id, label, approved, config) "
+              "VALUES ('E', 'Office', 1, ?)", (json.dumps({"owwThreshold": 0.9}),))
+    c.execute("INSERT INTO devices (device_id, label, approved, config) "
+              "VALUES ('F', 'Hall', 1, 'not json')")
+    c.execute("INSERT OR REPLACE INTO system_config (key, value) "
+              "VALUES ('global_device_config', ?)", (json.dumps({"owwThreshold": 1.0}),))
+    c.commit()
+    c.close()
+
+    em_db.init(p)
+    c = sqlite3.connect(p)
+    cfg = {r[0]: r[1] for r in c.execute("SELECT device_id, config FROM devices")}
+    fleet = json.loads(c.execute(
+        "SELECT value FROM system_config WHERE key = 'global_device_config'").fetchone()[0])
+    assert json.loads(cfg["D"]) == {"owwThreshold": em_db.OWW_THRESHOLD_MAX, "micGainDb": 24}
+    assert json.loads(cfg["E"]) == {"owwThreshold": 0.9}
+    assert cfg["F"] == "not json"
+    assert fleet["owwThreshold"] == em_db.OWW_THRESHOLD_MAX

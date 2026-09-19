@@ -965,6 +965,17 @@ MIGRATIONS: list[str] = [
 
     UPDATE system_config SET value = '23' WHERE key = 'schema_version';
     """,
+
+    # ── v24 — a stored wake threshold that can never fire ───────────────────
+    #
+    # #549 caps owwThreshold at OWW_THRESHOLD_MAX on every WRITE, but a 1.0
+    # stored before it — the old Sensitivity slider's strictest notch — stays
+    # in the database until someone saves again, and the device keeps a bar
+    # nothing clears. The work is in _fixup_v24; this entry only moves the
+    # version, so the rule has one copy.
+    """
+    UPDATE system_config SET value = '24' WHERE key = 'schema_version';
+    """,
 ]
 
 # Post-migration fixups that need Python rather than SQL. Keyed by the schema
@@ -1028,7 +1039,39 @@ def _fixup_v19(conn) -> None:
                 f"its entities."
             )
 
-_MIGRATION_FIXUPS = {11: _fixup_v11, 19: _fixup_v19}
+def _fixup_v24(conn) -> None:
+    """
+    Lower any stored owwThreshold above OWW_THRESHOLD_MAX, per device and fleet.
+
+    Through _clamp_wake_threshold, so this and the write path cannot disagree
+    about the ceiling. A config that will not parse is left alone: this repairs
+    one value and has no business rewriting anything it cannot read.
+    """
+    rows = conn.execute("SELECT device_id, config FROM devices").fetchall()
+    for row in rows:
+        try:
+            cfg = json.loads(row["config"] or "{}") or {}
+        except (json.JSONDecodeError, TypeError):
+            continue
+        fixed = _clamp_wake_threshold(cfg, row["device_id"])
+        if fixed is not cfg:
+            conn.execute("UPDATE devices SET config = ? WHERE device_id = ?",
+                         (json.dumps(fixed), row["device_id"]))
+    row = conn.execute(
+        "SELECT value FROM system_config WHERE key = 'global_device_config'").fetchone()
+    if row:
+        try:
+            cfg = json.loads(row["value"] or "{}") or {}
+        except (json.JSONDecodeError, TypeError):
+            return
+        fixed = _clamp_wake_threshold(cfg, "fleet")
+        if fixed is not cfg:
+            conn.execute(
+                "UPDATE system_config SET value = ? WHERE key = 'global_device_config'",
+                (json.dumps(fixed),))
+
+
+_MIGRATION_FIXUPS = {11: _fixup_v11, 19: _fixup_v19, 24: _fixup_v24}
 
 # ─── Connection management ────────────────────────────────────────────────────
 

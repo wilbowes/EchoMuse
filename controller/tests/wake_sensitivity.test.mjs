@@ -155,5 +155,24 @@ assert.ok(/score >= threshold/.test(shadow),
   "shadow.go no longer tests `score >= threshold` — re-check whether the top " +
   "of the Sensitivity range is still reachable on-device");
 
+// ── Barge threshold runs the same way ────────────────────────────────────────
+
+// Every threshold slider on the form reads Precise -> Eager (2026-09-19), so a
+// barge slider back on a plain low -> high track is a regression even though
+// it "works".
+{
+  const m = src.match(/const BARGE_T_MIN = ([\d.]+), BARGE_T_MAX = ([\d.]+), BARGE_T_STEP = ([\d.]+);/);
+  assert.ok(m, "dashboard.jsx no longer defines the barge threshold range constants");
+  const [bMin, bMax, bStep] = m.slice(1).map(Number);
+  const reflect = t => Number((bMin + bMax - t).toFixed(3));
+  for (let v = bMin; v <= bMax + 1e-9; v = Number((v + bStep).toFixed(3))) {
+    assert.ok(Math.abs(reflect(reflect(v)) - v) < 1e-9, `barge reflection is not its own inverse at ${v}`);
+  }
+  assert.ok(/onChange=\{v => set\('bargeInThreshold', reflectBarge\(v\)\)\}/.test(src),
+    "the barge slider must write the REFLECTED track value, so left is precise");
+  assert.ok(/formatValue=\{\(\) => bargeT\.toFixed\(2\)\}/.test(src),
+    "the barge readout must render the stored threshold, not the track position");
+}
+
 console.log(`wake_sensitivity: all ok (${notches.length} notches, ` +
   `${Math.min(...notches)}..${Math.max(...notches)})`);

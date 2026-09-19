@@ -8275,6 +8275,15 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
   // at all. Pin the handle deliberately, and keep the readout on the STORED
   // value so the number stays true until a drag writes one on the track.
   const wakeTrackFor = t => Math.min(WAKE_T_MAX, Math.max(WAKE_T_MIN, reflectT(t)));
+
+  // Barge threshold runs the same way, Precise -> Eager, so every threshold
+  // slider on this form reads alike (Wil, 2026-09-19). Same reflection; the
+  // readout shows the stored value, and the handle is pinned for a value
+  // stored off this track.
+  const BARGE_T_MIN = 0.05, BARGE_T_MAX = 0.9, BARGE_T_STEP = 0.05;
+  const reflectBarge = t => Number((BARGE_T_MIN + BARGE_T_MAX - t).toFixed(3));
+  const bargeT = config.bargeInThreshold ?? 0.25;
+  const bargeTrack = Math.min(BARGE_T_MAX, Math.max(BARGE_T_MIN, reflectBarge(bargeT)));
   const wakeT = config.owwThreshold ?? 0.5;
 
   const bands = config.eqBands ?? [0,0,0,0,0,0,0,0];
@@ -8486,7 +8495,14 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             <div style={{ marginTop: 16, ...inputStyle }}>
               <Toggle label="Speex denoise" sub="cleans audio before scoring — try in noisy rooms" value={config.owwSpeexNs ?? false} onChange={v => set('owwSpeexNs', v)}/>
               <Toggle label="Barge-in" sub="wake word interrupts playback — enable AEC first" value={config.bargeInEnabled ?? false} onChange={v => set('bargeInEnabled', v)}/>
-              <Slider label="Barge threshold" sub="wake confidence needed during playback — raise it if a response cuts itself short" value={config.bargeInThreshold ?? 0.25} min={0.05} max={0.9} step={0.05} onChange={v => set('bargeInThreshold', v)}/>
+              <Slider label="Barge threshold" sub="wake confidence needed during playback — raise it if a response cuts itself short"
+                value={bargeTrack} min={BARGE_T_MIN} max={BARGE_T_MAX} step={BARGE_T_STEP}
+                formatValue={() => bargeT.toFixed(2)}
+                onChange={v => set('bargeInThreshold', reflectBarge(v))}/>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: -12 }}>
+                <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)' }}>Precise</span>
+                <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)' }}>Eager</span>
+              </div>
               <Slider label="Arbitration window" sub="ms that the first Echo to hear you silences the others — no added delay; 0 disables" value={config.wakeArbitrationMs ?? 700} min={0} max={2000} step={50} unit="ms" onChange={v => set('wakeArbitrationMs', v)}/>
               {/* Three modes, so a select rather than a toggle. Each option is
                   offered only when the device says it can do it — capability,
