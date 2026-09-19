@@ -80,6 +80,23 @@ An issue with no milestone is not scheduled, which is not the same as
 unwanted. A `ready` issue outside a milestone is still a fine thing to pick
 up.
 
+## Building from source
+
+The device firmware needs the project's compiler image; ordinary Go
+cross-compilation does not produce a binary that runs on the Echo.
+
+```bash
+git submodule update --init          # GoTinyAlsa (wilbowes fork, carries a leak fix)
+cd device
+docker build -t echomuse-compiler compiler/
+./compile.sh                         # output: build/server
+```
+
+The controller runs from source with Python 3.12
+(`cd controller && pip install -r requirements.txt && python em_controller.py`),
+or `docker compose up --build`. emOS builds with `emos/build.sh`; see
+[emos/README.md](emos/README.md).
+
 ## Before you open a PR
 
 ```bash
