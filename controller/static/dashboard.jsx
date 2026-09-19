@@ -6489,7 +6489,18 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     addLog('The ring fills as the boot progresses. Pick the device\'s serial '
          + 'port when the browser asks — it appears a few seconds in.', 'warn');
 
-    const port = await navigator.serial.requestPort();
+    let port;
+    try {
+      port = await navigator.serial.requestPort();
+    } catch (e) {
+      // Cancelled, or the picker timed out before emOS's port appeared.
+      if (e?.name === 'NotFoundError') {
+        throw new Error('No serial port was chosen. The device is still booting '
+          + 'emOS — click Connect Console once its port shows in the picker '
+          + '(about 30 seconds after the reboot).');
+      }
+      throw e;
+    }
     await port.open({ baudRate: 115200 });
     const con = new _EmosConsole(port, addLog);
     setEmosConsole(con);
@@ -7341,7 +7352,11 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                   not boot is what turns a recoverable one into a case-opening job.
                 </p>
                 <div style={{ marginTop: 12 }}>
-                  <Pill accent onClick={() => runStep(7)}>Reboot and Connect Console</Pill>
+                  {/* Once the reboot has been sent there is no ADB handle and
+                      runRebootAndWatch skips it, so a second click only opens
+                      the port picker — say so. The picker times out if emOS
+                      takes longer to appear than the operator waits. */}
+                  <Pill accent onClick={() => runStep(7)}>{adb ? 'Reboot and Connect Console' : 'Connect Console'}</Pill>
                 </div>
               </div>
             )}
