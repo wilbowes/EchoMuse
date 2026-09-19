@@ -1802,7 +1802,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 {(() => {
                   const ip = device.ip && device.ip !== '127.0.0.1' ? device.ip : null;
                   const ipStr = device.connected ? (ip || '—') : (ip ? `${ip} (last seen)` : '—');
-                  const os = [_baseOsLabel(device.baseOs), _kernelLabel(device)].filter(Boolean).join(' · ');
+                  const os = [_osLabel(device), _kernelLabel(device)].filter(Boolean).join(' · ');
                   return <>{ipStr} · {device.device_id} · {_middleEllipsis(device.firmware_ver, 24, 7) || 'unknown'}{os && ` · ${os}`}</>;
                 })()}
                 {needsUpdate && <span style={{ color: 'var(--warn)', marginLeft: 10 }}>Update available</span>}
@@ -2537,9 +2537,9 @@ function Card({ device, onClick }) {
           {(device.firmware_ver || device.baseOs) && (
             <div title={[device.firmware_ver, _baseOsLabel(device.baseOs), _kernelTitle(device)].filter(Boolean).join(' · ')}
               style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', marginTop: 3, ..._ROW_TEXT, display: 'block' }}>
-              {/* Arch only on the tile, which is narrow; the header and the
-                  tooltip carry the version. */}
-              {[_middleEllipsis(device.firmware_ver, 24, 7), _baseOsLabel(device.baseOs), device.kernelArch].filter(Boolean).join(' · ')}
+              {/* The tile is narrow: "emOS (arm64)", and nothing extra for
+                  FireOS. The header and the tooltip carry the version. */}
+              {[_middleEllipsis(device.firmware_ver, 24, 7), _osLabel(device)].filter(Boolean).join(' · ')}
             </div>
           )}
         </div>
@@ -2873,15 +2873,32 @@ function _baseOsLabel(baseOs) {
   return baseOs === 'emos' ? 'emOS' : baseOs === 'fireos' ? 'FireOS 5' : null;
 }
 
-// The kernel as "<arch> <version>", e.g. "aarch64 3.18.19" or "armv7l 3.18.19"
-// — on biscuit the arch is what separates emOS on FireOS 5's kernel from emOS
-// on FireOS 6's, since both are 3.18.19. The version drops the build suffix
-// ("+", "-gecb8cb46060-dirty"); _kernelTitle keeps it for the tooltip. Null
-// from firmware that does not report it.
+// A short name for the kernel's arch: "arm64", "armv7", "x64". On biscuit it
+// is what separates emOS on FireOS 5's kernel (aarch64) from emOS on FireOS
+// 6's (armv7l); both are 3.18.19. Unrecognised values pass through as-is.
+function _archShort(arch) {
+  if (!arch) return null;
+  if (arch === 'aarch64' || arch === 'arm64') return 'arm64';
+  if (arch === 'x86_64' || arch === 'amd64') return 'x64';
+  if (/^i[3-6]86$/.test(arch)) return 'x86';
+  const m = arch.match(/^armv(\d+)/);
+  return m ? `armv${m[1]}` : arch;
+}
+
+// The OS as shown per device: "emOS (arm64)", "FireOS 5". The arch is only
+// added for emOS, the one base that runs on more than one kernel.
+function _osLabel(d) {
+  const os = _baseOsLabel(d.baseOs);
+  const arch = d.baseOs === 'emos' ? _archShort(d.kernelArch) : null;
+  return os && arch ? `${os} (${arch})` : os;
+}
+
+// "kernel 3.18.19" for the device header, beside _osLabel which already names
+// the arch for emOS. Drops the build suffix ("+", "-gecb8cb46060-dirty");
+// _kernelTitle keeps the full string for the tooltip.
 function _kernelLabel(d) {
-  if (!d.kernelArch) return null;
   const v = (d.kernelRelease || '').split(/[-+]/)[0];
-  return v ? `${d.kernelArch} ${v}` : d.kernelArch;
+  return v ? `kernel ${v}` : null;
 }
 function _kernelTitle(d) {
   return d.kernelArch ? `kernel ${d.kernelArch} ${d.kernelRelease || ''}`.trim() : null;
