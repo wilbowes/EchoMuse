@@ -64,14 +64,20 @@ jobs:
       # The dashboard shows these to whoever is deciding whether to push
       # firmware to a device they rely on, so they have to be written for that
       # person: what changed, what to expect, whether anything is required of
-      # them. GitHub's generated notes are a commit list — useful to us,
-      # useless for that decision — so they are kept, below the real notes.
+      # them. GitHub's generated notes are NOT added: they list every PR merged
+      # in the repo between two v* tags, most of it controller work, with
+      # "New Contributors" credits for changes that are not in the firmware.
       #
-      # A lightweight tag yields an empty body and the release falls back to
-      # the generated list. So: `git tag -a`, always.
+      # A lightweight tag has no annotation, and `%(contents)` then falls
+      # through to the commit message — so it is refused rather than published.
+      # `git tag -a --cleanup=verbatim`, always.
       - name: Release notes from the tag annotation
         run: |
           git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          if [ "$(git cat-file -t "$GITHUB_REF_NAME")" != tag ]; then
+            echo "::error::$GITHUB_REF_NAME is a lightweight tag; it has no release notes. Re-tag with git tag -a."
+            exit 1
+          fi
           git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > /tmp/release-notes.md
           echo "--- notes that will be published ---"
           cat /tmp/release-notes.md
@@ -82,6 +88,6 @@ jobs:
           name: EchoMuse ${{ github.ref_name }}
           files: device/build/server
           body_path: /tmp/release-notes.md
-          generate_release_notes: true
+          generate_release_notes: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

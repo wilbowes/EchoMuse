@@ -275,6 +275,10 @@ jobs:
       - name: Release notes from the tag annotation
         run: |
           git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          if [ "$(git cat-file -t "$GITHUB_REF_NAME")" != tag ]; then
+            echo "::error::$GITHUB_REF_NAME is a lightweight tag; it has no release notes. Re-tag with git tag -a."
+            exit 1
+          fi
           git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > /tmp/emos-notes.md
           echo "--- notes that will be published ---"
           cat /tmp/emos-notes.md
