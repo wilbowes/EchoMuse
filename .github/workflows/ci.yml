@@ -104,6 +104,7 @@ jobs:
           node controller/tests/slot_choice.test.mjs
           node controller/tests/server_binary.test.mjs
           node controller/tests/device_line.test.mjs
+          node controller/tests/wipe_verdict.test.mjs
 
   device-tests:
     name: Device Go tests

@@ -3315,3 +3315,40 @@ look squeezed the tile's name to two letters, so the name now owns the header
 row with firmware · OS beneath it — built into the dev add-on (stopped) and
 not yet seen.
 
+
+## 2026-09-19 — what a TWRP wipe takes, and why it does not matter on biscuit
+
+Wil asked for an optional TWRP wipe at the start of the wizard and, before it
+was built, for an in-depth look at what `twrp wipe data` actually does, since
+he uses it routinely. From TWRP's source (android-8.1 for v1's 3.2.3,
+android-12.1 for v2's 3.7): `wipe data` is `Factory_Reset()`, which deletes
+everything in /data except lost+found, misc/vold and — on data-media builds —
+media/; `wipe cache` formats /cache. So it removes `/data/nvram`, MediaTek's
+home for WiFi/BT config, and emOS never runs the `nvram_daemon` that rebuilds
+it. Wil's own wipes were always followed by a FireOS boot, which rebuilds it.
+
+**On biscuit nothing in /data/nvram is per-device**, measured read-only over
+USB serial on EFF and the spare. The GPT has no `nvram`, `nvdata` or `proinfo`
+partition — the three libnvram restores from — so the stock daemon can only
+write compiled defaults. EFF's `APRDEB/WIFI` is byte-identical to the 512-byte
+symbol `stWifiCfgDefault` in its own `/system/lib/libcustom_nvram.so`, plus a
+trailer `0xAA` and an 8-bit checksum (add on even bytes, xor on odd; n=1 on a
+non-zero file). The MACs and mic/ALS calibration live in `/proc/idme`, a
+partition: wlan0 matched idme's `mac_addr` on both. Both kernels do read
+`/data/nvram/APCFG/APRDEB/WIFI` (country, 5GHz enable, band-edge TX power),
+and the spare — no /data/nvram at all — ran 16h associated on 5GHz. EFF, WITH
+the file, still runs country `WW`: the default's country code is 0, which the
+driver replaces with WW. After a clean reboot of both, the spare (no file)
+reads identically: `/proc/net/wlan/country` WW, firmware 0xa.66, associated at
+5785, and the same `Country:0 is not support. Replaced with WW` at boot.
+Whether the fallback matches `stWifiCfgDefault` in the TX power fields is not
+measured — the driver's NVRAM lines sit below the default log level. If
+parity is ever wanted the file can be regenerated from the device's own
+`/system` by symbol name: data, no vendor code.
+
+A bench trap met on the way: with no udev here, the ACM minors follow USB
+enumeration order, so rebooting two devices swapped ttyACM0 and ttyACM1.
+Re-read `/sys/class/tty/ttyACM*/device/../serial` after every reboot.
+
+The wipe shipped **emOS flow only**, default off: on FireOS 5 a data wipe also
+takes f1r30s with it and the wizard does not reinstall it (#269 Part 1).
