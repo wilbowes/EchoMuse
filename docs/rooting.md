@@ -3,33 +3,13 @@
 > **You do this at your own risk. We accept no responsibility for negative
 > outcomes experienced.**
 
-> **⚠️ Don't install amonet-biscuit v2.0.0 on an Echo that is already running
-> EchoMuse on FireOS 5.** Version 2.0.0 of the unlock (10 September 2026)
-> replaces the Echo's bootloaders, and after that FireOS 5 no longer boots — so
-> a working FireOS 5 device would stop working, and there is no safe way back.
-> The XDA thread now tells unlocked users to update. If your Echo runs EchoMuse
-> on FireOS 5, don't.
->
-> - **Unlocking a new Echo?** Use **amonet-biscuit v1.1.0**, which is still
->   attached to the XDA thread. It is the path this project has the most
->   hardware hours on by a wide margin.
-> - **Already updated to v2.0.0?** **Do not try to go back** by flashing
->   FireOS 5 or an older amonet. v2.0.0 rewrote the preloader, LK and
->   TrustZone, and writing old ones back by hand is how an Echo gets
->   hard-bricked. Your Echo stays on FireOS 6 — and that is no longer a dead
->   end: **emOS runs on FireOS 6's kernel** (first booted on hardware
->   12 September 2026), so use the wizard's **emOS flow**, which accepts a v2
->   device. The FireOS flow cannot work there and will refuse, because it boots
->   the device's own Android 5.
->
->   Two honest caveats on that, because this is your hardware and it is new:
->   it has been booted on **one** Echo so far, and **no Echo unlocked with
->   v2.0.0 has been through the wizard end to end yet**. The wizard's Escrow
->   Boot Image step is the way back from a bad flash — keep that file
->   somewhere other than the device.
+> **Which amonet version?** Either. **v1.1.0** leaves the Echo on FireOS 5,
+> where the wizard offers emOS or FireOS with root. **v2.0.0** moves it to
+> FireOS 6, where the wizard offers emOS. Moving between amonet versions is
+> part of the unlock, which is R0rt1z2's work: follow the XDA thread for it.
 
 EchoMuse needs an Echo Dot Gen 2 that is already unlocked and running
-FireOS 5. Two separate jobs get you there, and they carry very different
+FireOS 5, or FireOS 6 for emOS. Two separate jobs get you there, and they carry very different
 risk.
 
 ## Hardware
@@ -73,9 +53,8 @@ For the unlock itself (R0rt1z2's thread has the authoritative list):
 - **Linux machine** with ADB and fastboot installed — see the note below on macOS
 - Python 3 (for boot image patching and Magisk DB creation)
 - The following files downloaded and ready:
-  - `amonet-biscuit-v1.1.0.zip` — from R0rt1z2's XDA thread. **Not
-    v2.0.0**, which is what the thread now offers first; see the warning at
-    the top of this page.
+  - `amonet-biscuit-v1.1.0.zip` or `v2.0.0` — from R0rt1z2's XDA thread.
+    v2.0.0 means emOS; see the note at the top of this page.
   - `update-kindle-csm_biscuit-272.6.8.0_user_680767620.bin` — FireOS 5 firmware
     (**this exact build** — see below)
   - `f1r30s.zip` — from R0rt1z2's XDA thread. Does four things, not one:
@@ -127,9 +106,7 @@ The persistent unlock, the bootrom exploit and TWRP for this device are
 
 Follow that thread, not this page. We link to it rather than copying it
 because a copy goes out of date without anyone noticing. If the two ever
-disagree, the thread is correct, **with one exception: the version.** Use
-v1.1.0, not v2.0.0. v2.0.0 stops FireOS 5 booting, and EchoMuse needs
-FireOS 5; see the warning at the top of this page.
+disagree, the thread is correct.
 
 **This is the part that can ruin a device.** It runs a bootrom exploit,
 modifies the partition table and wipes userdata. A failure here can leave a
