@@ -129,6 +129,107 @@ RAMOOPS_CMDLINE = (
 # to the partition emOS hardcoded before this existed.
 SYSTEM_CMDLINE_KEY = "emos.system="
 
+# The board this image is built against, stamped onto its own cmdline so
+# init.c can resolve which boards_*.c runtime to use. Mirrors
+# BOARD_CMDLINE_KEY in controller/em_emos_build.py; the parity test in
+# tests/test_emos_build.py pins the two together.
+#
+# Taken from EMOS_BOARD in the environment: build.sh has no opinion on
+# the board because it is a workstation tool with no device to ask, so
+# an explicit override is the only way it gets one. The controller's
+# packer reads the DTB and falls back to BOARD_DEFAULT; the standalone
+# tool here does the same and defaults to "biscuit" when the env var is
+# unset and the DTB has no answer.
+BOARD_CMDLINE_KEY = "emos.board="
+BOARD_DEFAULT = "biscuit"
+
+# FDT parsing, duplicated byte-for-byte from controller/em_emos_build.py.
+# The parity test pins this against the controller's copy; two
+# implementations of one binary format can only be known to agree by
+# running both. Same trade as SYSTEM_CMDLINE_KEY above.
+FDT_MAGIC       = 0xd00dfeed
+FDT_BEGIN_NODE  = 1
+FDT_END_NODE    = 2
+FDT_PROP        = 3
+FDT_NOP         = 4
+FDT_END         = 9
+
+
+def _fdt_compatible(dtb):
+    if len(dtb) < 40 or struct.unpack(">I", dtb[:4])[0] != FDT_MAGIC:
+        return ""
+    # FDT header fields and tokens are big-endian on the wire. Use ">I"
+    # to match what real devices emit; little-endian works for the magic
+    # because 0xd00dfeed reads the same in both byte orders' first byte,
+    # but every other field round-trips byte-swapped.
+    off_struct, off_strings = struct.unpack(">2I", dtb[8:16])
+    if off_struct >= len(dtb) or off_strings >= len(dtb):
+        return ""
+
+    depth = 0
+    p = off_struct
+    compatible = ""
+    while p + 8 <= len(dtb):
+        tok = struct.unpack(">I", dtb[p:p + 4])[0]
+        p += 4
+        if tok == FDT_END:
+            break
+        if tok == FDT_NOP:
+            continue
+        if tok == FDT_BEGIN_NODE:
+            name_start = p
+            name_end = dtb.find(b"\x00", p)
+            if name_end < 0:
+                return ""
+            name_size = ((name_end - name_start) + 1 + 3) & ~3
+            p = name_start + name_size
+            depth += 1
+            continue
+        if tok == FDT_END_NODE:
+            depth -= 1
+            continue
+        if tok == FDT_PROP:
+            if p + 8 > len(dtb):
+                return ""
+            valen, nameoff = struct.unpack(">II", dtb[p:p + 8])
+            p += 8
+            nend = dtb.find(b"\x00", off_strings + nameoff)
+            if nend < 0:
+                return ""
+            name = dtb[off_strings + nameoff:nend].decode(
+                "ascii", errors="replace")
+            if name == "compatible" and depth == 1:
+                if p + valen > len(dtb):
+                    return ""
+                entries = dtb[p:p + valen].split(b"\x00")
+                entries = [e for e in entries if e]
+                if entries:
+                    compatible = entries[-1].decode("ascii", errors="replace")
+            # Align from the start of the value, not from p + valen -- the
+            # latter is already aligned for valen % 4 == 0 and would skip
+            # the mandatory 4 bytes of padding the spec requires.
+            p += (valen + 3) & ~3
+            continue
+        return ""
+    return compatible
+
+
+def reference_board_id(ref):
+    if len(ref) < PAGE or ref[:8] != b"ANDROID!":
+        return ""
+    ksz = struct.unpack("<I", ref[8:12])[0]
+    payload = ref[PAGE:PAGE + ksz][0x200:]
+    i = payload.find(b"\xd0\x0d\xfe\xed")
+    if i < 0:
+        return ""
+    dtb = payload[i:]
+    name = _fdt_compatible(dtb)
+    if name == "mediatek,mt8163-biscuit":
+        return "biscuit"
+    if name:
+        return name.split(",")[-1]
+    return ""
+
 
 def stamp_cmdline_key(cmdline: bytes, key: str, value: str) -> bytes:
     """Set `key=value`, replacing any value already there.
@@ -149,6 +250,10 @@ def main():
     dtb_p = sys.argv[5] if len(sys.argv) > 5 else None
     extra = sys.argv[6] if len(sys.argv) > 6 else RAMOOPS_CMDLINE
     sys_part = os.environ.get("EMOS_SYSTEM_PART", "").strip()
+    # EMOS_BOARD, when set, overrides the DTB sniff. The wizard has a board
+    # in hand from the device; build.sh does not, and lets the DTB answer.
+    # Empty (the default) means "let the packer decide".
+    board_id = os.environ.get("EMOS_BOARD", "").strip()
     ref = open(ref_p, "rb").read()
     dtbs, hf = split_reference(ref)
     if dtb_p:
@@ -175,7 +280,9 @@ def main():
     # which is the first time anything has repacked an emOS image.
     if extra and extra.encode() not in cmdline:
         cmdline = cmdline + b" " + extra.encode()
-    # After the ramoops block, so the stamp is last and most visible in a dump.
+    # After the ramoops block, so the stamps are last and most visible in a
+    # dump. BOARD is stamped last so the order reads ramoops ... emos.system=
+    # ... emos.board=.
     if sys_part:
         if not (sys_part.isdigit() and 1 <= int(sys_part) <= 127):
             raise SystemExit(
@@ -183,6 +290,18 @@ def main():
                 f"(1-127), not {sys_part!r}")
         cmdline = stamp_cmdline_key(cmdline, SYSTEM_CMDLINE_KEY,
                                     f"/dev/block/mmcblk0p{int(sys_part)}")
+    # Resolve the board: env override, then DTB sniff, then BOARD_DEFAULT.
+    # The DTB sniff runs only when no override is set, because an explicit
+    # EMOS_BOARD is the wizard saying "this device, not what the kernel
+    # claims it is". A failed DTB sniff falls through to BOARD_DEFAULT,
+    # which is the value init.c itself defaults to -- so an unstamped image
+    # is consistent end-to-end.
+    resolved_board = board_id or reference_board_id(ref) or BOARD_DEFAULT
+    if not all(0x21 <= ord(c) <= 0x7e for c in resolved_board) or not resolved_board:
+        raise SystemExit(
+            f"the resolved board id must be non-empty printable ASCII, "
+            f"not {resolved_board!r}")
+    cmdline = stamp_cmdline_key(cmdline, BOARD_CMDLINE_KEY, resolved_board)
     if len(cmdline) > 511:
         raise SystemExit(f"cmdline too long for the 512-byte field: {len(cmdline)}")
 
@@ -213,6 +332,7 @@ def main():
     print(f"  kernel load addr  : 0x{hf['kaddr']:08x}")
     print(f"  ramdisk addr      : 0x{hf['raddr']:08x}")
     print(f"  cmdline           : {cmdline.decode(errors='replace')}")
+    print(f"  board             : {resolved_board}")
     print(f"built     : {out_p} ({len(img)} bytes)")
     print(f"  zImage            : {len(zimage)} bytes")
     print(f"  initramfs         : {len(ramdisk)} bytes")

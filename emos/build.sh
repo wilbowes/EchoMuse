@@ -22,6 +22,13 @@
 #
 #   EMOS_SYSTEM_PART=13 ./build.sh boot_a_x.img     # built beside system_a
 #   EMOS_SYSTEM_PART=14 ./build.sh boot_a_x.img     # built beside system_b
+#
+# EMOS_BOARD picks which per-board runtime to link. Today: "biscuit"
+# (default) and "radar". Adding a board is a new boards/<name>.{h,c} and
+# a line in init.c's table -- see controller/CLAUDE.md for the
+# interface. The reference image is the device's OWN boot partition;
+# stamp `emos.board=<name>` onto it by exporting EMOS_BOARD before
+# invoking the script. Default "biscuit" preserves today's behaviour.
 set -e
 
 REF=${1:?usage: build.sh <reference boot_a_x.img> [output.img]}
@@ -75,12 +82,35 @@ esac
 echo "reference kernel is $ARCH: building a matching init"
 CC=${CC:-$NDK/$TRIPLE-clang}
 
+# The board runtime is a separate translation unit so a second board
+# adds boards_<name>.c without touching init.c. EMOS_BOARD selects
+# which one; init.c picks its constants up via the matching header so
+# the same compile rules apply to both translation units. The known
+# boards are the two Amazon MT8163 reference designs emOS has been
+# ported to; a new board is a new boards/<name>.{h,c} pair plus a
+# stamp on the image's cmdline so the kernel hands it the right
+# partition layout.
+EMOS_BOARD=${EMOS_BOARD:-biscuit}
+case "$EMOS_BOARD" in
+    biscuit|radar) ;;
+    *) echo "unknown EMOS_BOARD: $EMOS_BOARD (known: biscuit, radar)" >&2
+       exit 1 ;;
+esac
+BOARD_SRC="$HERE/init/boards/boards_$EMOS_BOARD.c"
+if [ ! -f "$BOARD_SRC" ]; then
+    echo "board runtime not found at $BOARD_SRC" >&2
+    exit 1
+fi
+
 if [ -x "$CC" ]; then
-    "$CC" -static -O2 -Wall -o "$WORK/init" "$HERE/init/init.c"
+    "$CC" -static -O2 -Wall -DEMOS_BOARD="$EMOS_BOARD" -o "$WORK/init" \
+        "$HERE/init/init.c" "$BOARD_SRC"
 else
     echo "building init in the echomuse-compiler image ($CC not found)"
     docker run --rm -v "$HERE":/emos -v "$WORK":/out -w /emos echomuse-compiler \
-        bash -lc "$NDK/$TRIPLE-clang -static -O2 -Wall -o /out/init init/init.c"
+        bash -lc "$NDK/$TRIPLE-clang -static -O2 -Wall \
+            -DEMOS_BOARD=$EMOS_BOARD -o /out/init \
+            init/init.c init/boards/boards_$EMOS_BOARD.c"
 fi
 
 # The ramdisk is init plus the empty mountpoints it needs. Everything else the
@@ -162,7 +192,10 @@ EOF
 ) "$WORK/ramdisk.gz" "$OUT"
 
 echo
-echo "built $OUT — flash with:"
-echo "  dd if=$OUT of=/dev/block/mmcblk0p10   (boot_a_x on biscuit)"
+echo "built $OUT for board=$EMOS_BOARD — flash with:"
+case "$EMOS_BOARD" in
+    radar) echo "  dd if=$OUT of=/dev/block/mmcblk0p10   (boot_a on radar)";;
+    *)     echo "  dd if=$OUT of=/dev/block/mmcblk0p10   (boot_a_x on $EMOS_BOARD)";;
+esac
 echo "recover with:"
 echo "  dd if=$REF of=/dev/block/mmcblk0p10"

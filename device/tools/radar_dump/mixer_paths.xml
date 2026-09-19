@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="ISO-8859-1"?>
+<mixer>
+	<!-- These are the initial mixer settings -->
+	<ctl name="LINEOUT Ext Amp Switch" value="0" />
+	<ctl name="LINEOUT Mux" value="OPEN" />
+	<ctl name="HP Ext Amp Switch" value="0" />
+	<ctl name="HPOUT Mux" value="OPEN" />
+	<ctl name="AIF TX Mux" value="Analog MIC" />
+	<ctl name="Left PGA Mux" value="OPEN" />
+	<ctl name="Right PGA Mux" value="OPEN" />
+	<ctl name="INT ADDA O03_O04 Switch" value="1" />
+	<ctl name="I2S O03_O04 Switch" value="1" />
+	<ctl name="MRG BT O02 Switch" value="1" />
+	<ctl name="PCM0 O02 Switch" value="0" />
+	<ctl name="AIN Mux" value="INT ADC" />
+	<ctl name="DAIBT Mux" value="MRG" />
+	<ctl name="O03 I05 Switch" value="1" />
+	<ctl name="O04 I06 Switch" value="1" />
+	<ctl name="O03 I07 Switch" value="0" />
+	<ctl name="O04 I08 Switch" value="0" />
+	<ctl name="O09 I03 Switch" value="1" />
+	<ctl name="O10 I04 Switch" value="1" />
+	<ctl name="O05 I05 Switch" value="1" />
+	<ctl name="O06 I06 Switch" value="1" />
+	<ctl name="O05 I07 Switch" value="0" />
+	<ctl name="O06 I08 Switch" value="0" />
+	<ctl name="O11 I02 Switch" value="0" />
+	<ctl name="ADC_A Left Ip Select ADC_A DIF1_L switch" value="1" />
+	<ctl name="ADC_A Right Ip Select ADC_A DIF1_R switch" value="1" />
+	<ctl name="ADC_B Left Ip Select ADC_B DIF1_L switch" value="1" />
+	<ctl name="ADC_B Right Ip Select ADC_B DIF1_R switch" value="1" />
+	<ctl name="ADC_A MICPGA Volume Ctrl" value="24" />
+	<ctl name="ADC_B MICPGA Volume Ctrl" value="24" />
+	<ctl name="ADC_A DIF1_L Input Gain" value="0" />
+	<ctl name="ADC_A DIF1_R Input Gain" value="0" />
+	<ctl name="ADC_B DIF1_L Input Gain" value="0" />
+	<ctl name="ADC_B DIF1_R Input Gain" value="0" />
+
+	<!-- These are actual sound device specific mixer settings -->
+	<path name="normal-playback speaker">
+		<ctl name="Audio Amp Playback Volume" value="0" />
+		<ctl name="PCM Playback Volume" value="255" />
+		<ctl name="I2S O03_O04 Switch" value="1" />
+		<ctl name="LINEOUT Mux" value="VOICE_AMP" />
+		<ctl name="HPOUT Mux" value="OPEN" />
+	</path>
+
+	<path name="normal-playback headphone">
+		<ctl name="Audio Amp Playback Volume" value="3" />
+		<ctl name="PCM Playback Volume" value="0" />
+		<ctl name="I2S O03_O04 Switch" value="0" />
+		<ctl name="LINEOUT Mux" value="OPEN" />
+		<ctl name="HPOUT Mux" value="AUDIO_AMP" />
+	</path>
+
+	<path name="normal-playback receiver">
+	</path>
+
+	<path name="normal-playback speaker-and-headphone">
+	</path>
+
+	<path name="normal-playback bt-sco">
+		<ctl name="O00 I07 Switch" value="1" />
+		<ctl name="O01 I08 Switch" value="1" />
+	</path>
+
+	<path name="low-latency-playback speaker">
+	</path>
+
+	<path name="low-latency-playback headphone">
+	</path>
+
+	<path name="low-latency-playback receiver">
+	</path>
+
+	<path name="low-latency-playback speaker-and-headphone">
+	</path>
+
+	<path name="normal-capture builtin-mic">
+	</path>
+
+	<path name="normal-capture headset-mic">
+	</path>
+
+	<path name="normal-capture bt-sco">
+		<ctl name="O13 I00 Switch" value="1" />
+		<ctl name="O14 I01 Switch" value="1" />
+		<ctl name="O11 I10 Switch" value="1" />
+	</path>
+
+	<path name="speaker">
+		<ctl name="LINEOUT Mux" value="VOICE_AMP" />
+	</path>
+
+	<path name="headphone">
+		<ctl name="HPOUT Mux" value="AUDIO_AMP" />
+	</path>
+
+	<path name="receiver">
+	</path>
+
+	<path name="speaker-and-headphone">
+		<path name="speaker" />
+		<path name="headphone" />
+	</path>
+
+	<path name="digital-mic">
+	</path>
+
+	<path name="builtin-mic">
+	</path>
+
+	<path name="back-mic">
+	</path>
+
+	<path name="headset-mic">
+	</path>
+
+</mixer>
