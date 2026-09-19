@@ -2537,7 +2537,7 @@ function Card({ device, onClick }) {
           {(device.firmware_ver || device.baseOs) && (
             <div title={[device.firmware_ver, _baseOsLabel(device.baseOs), _kernelTitle(device)].filter(Boolean).join(' · ')}
               style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', marginTop: 3, display: 'flex', minWidth: 0 }}>
-              {/* The tile is narrow: "emOS (armv8)", and nothing extra for
+              {/* The tile is narrow: "emOS (64-bit)", and nothing extra for
                   FireOS. The OS never shrinks; the firmware version gives way
                   to it, since the tooltip and the header both carry it whole. */}
               {device.firmware_ver && <span style={{ ..._ROW_TEXT, flex: '0 1 auto' }}>{_middleEllipsis(device.firmware_ver, 24, 7)}</span>}
@@ -2875,19 +2875,19 @@ function _baseOsLabel(baseOs) {
   return baseOs === 'emos' ? 'emOS' : baseOs === 'fireos' ? 'FireOS 5' : null;
 }
 
-// A short name for the kernel's arch: "armv8", "armv7", "x64". On biscuit it
+// The kernel's word size from `uname -m`: "64-bit" or "32-bit". On biscuit it
 // is what separates emOS on FireOS 5's kernel (aarch64) from emOS on FireOS
-// 6's (armv7l); both are 3.18.19. Unrecognised values pass through as-is.
+// 6's (armv7l) — same ARMv8 chip, both 3.18.19, one kernel built 32-bit.
+// Bitness rather than the arch name, since that is the difference that means
+// something to an operator. Unrecognised values pass through as-is.
 function _archShort(arch) {
   if (!arch) return null;
-  if (arch === 'aarch64' || arch === 'arm64') return 'armv8';
-  if (arch === 'x86_64' || arch === 'amd64') return 'x64';
-  if (/^i[3-6]86$/.test(arch)) return 'x86';
-  const m = arch.match(/^armv(\d+)/);
-  return m ? `armv${m[1]}` : arch;
+  if (/^(aarch64|arm64|x86_64|amd64)$/.test(arch)) return '64-bit';
+  if (/^(armv\d+l?|arm|i[3-6]86)$/.test(arch)) return '32-bit';
+  return arch;
 }
 
-// The OS as shown per device: "emOS (armv8)", "FireOS 5". The arch is only
+// The OS as shown per device: "emOS (64-bit)", "FireOS 5". The bitness is only
 // added for emOS, the one base that runs on more than one kernel.
 function _osLabel(d) {
   const os = _baseOsLabel(d.baseOs);
