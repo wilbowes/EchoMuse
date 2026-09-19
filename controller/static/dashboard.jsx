@@ -2494,7 +2494,10 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 12, color: 'var(--muted)' }}>No logs</div>
               ) : logs.map((entry, i) => (
                 <div key={i} style={{ display: 'flex', gap: 12, alignItems: 'baseline', padding: '8px 0', borderBottom: '1px solid var(--hairline)' }}>
-                  <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--faint)', minWidth: 60, flexShrink: 0 }}>{new Date(entry.ts).toLocaleTimeString()}</span>
+                  {/* Two-digit hour and a width in ch: the column is monospaced, and
+                      "9:05:01 am" is a character shorter than "11:37:57 am", which
+                      misaligned every row before ten o'clock. */}
+                  <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--faint)', minWidth: '11ch', whiteSpace: 'nowrap', flexShrink: 0 }}>{new Date(entry.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
                   <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: eventAccent(entry.level), textTransform: 'uppercase', letterSpacing: '0.1em', minWidth: 48, flexShrink: 0 }}>{entry.level}</span>
                   <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: entry.source === 'device' ? 'var(--lcd-faint)' : 'var(--accent-deep)', textTransform: 'uppercase', letterSpacing: '0.08em', minWidth: 64, flexShrink: 0 }}>{entry.source}</span>
                   <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: 'var(--text2)' }}>{entry.message}</span>
