@@ -1,254 +1,202 @@
 # EchoMuse
 
-Give your Amazon Echo Dot 2nd Generation a second life as a fully local,
-open-source voice assistant and media player for Home Assistant.
+**Turn an old Amazon Echo Dot (2nd gen) into a local voice assistant for Home Assistant.**
 
-EchoMuse replaces the Alexa firmware with a lightweight Go server and pairs
-it with a Python controller that presents each Dot to Home Assistant as a
-native **ESPHome voice satellite** — no cloud, no custom HA integration to
-install. Say your wake word, talk to [Assist](https://www.home-assistant.io/voice_control/),
-hear the answer through the Dot's speaker. The hardware you already own
-($10 on the second-hand market) does the rest.
+[![CI](https://github.com/wilbowes/EchoMuse/actions/workflows/ci.yml/badge.svg)](https://github.com/wilbowes/EchoMuse/actions/workflows/ci.yml)
+[![Firmware](https://img.shields.io/github/v/release/wilbowes/EchoMuse?filter=v*&label=firmware)](https://github.com/wilbowes/EchoMuse/releases)
+[![emOS](https://img.shields.io/github/v/release/wilbowes/EchoMuse?filter=emos-v*&label=emOS)](https://github.com/wilbowes/EchoMuse/releases)
+[![Controller](https://img.shields.io/github/v/tag/wilbowes/EchoMuse?filter=controller-v*&label=controller)](https://github.com/wilbowes/EchoMuse/pkgs/container/echomuse-controller)
+[![License: MIT](https://img.shields.io/github/license/wilbowes/EchoMuse)](LICENSE)
 
-## What you get
+<!-- Demo video goes here. -->
 
-- **Wake word → Assist → spoken response**, fully local. Wake detection runs
-  on the controller (openwakeword), so models, sensitivity, and improvements
-  never need a firmware update.
-- **Custom wake words** — train your own ("hey biscuit") from synthetic TTS
-  speech with the bundled [`oww_forge/`](oww_forge/README.md) trainer, then
-  install it from the dashboard in one click.
-- **On-device wake word (experimental)** — the Echo can run the wake model
-  itself and report what it *would* have detected, without acting on it, so
-  the two can be compared on identical audio before anything depends on it.
-  Off by default; see [docs/configuration.md](docs/configuration.md).
-- **Barge-in** — say the wake word over the assistant's own reply to cut it
-  off, backed by an on-device echo canceller (vendored speexdsp).
-- **Multi-room done right** — one utterance in earshot of two Echos gets
-  **one** response: detections are pooled and the best-placed device answers.
-- **Music** — each Dot is an HA `media_player` you can actually play things
-  on (media browser, Music Assistant, radio streams), with instant
-  pause/stop. Speaking over music **ducks** it rather than pausing it: the
-  bed drops under the answer and comes back up, so nothing is lost and a
-  non-seekable stream doesn't skip the seconds a turn took.
-- **Bluetooth proxy** — each Echo doubles as an HA Bluetooth advertisement
-  proxy (great with [Bermuda](https://github.com/agittins/bermuda) for room
-  presence).
-- **Sensors and buttons in HA** — most Dots have an ambient light sensor that
-  Amazon's software never exposed; it turns up as a lux sensor, reported
-  immediately when a light goes on rather than on a slow poll. Not every
-  hardware revision has it fitted, and a device without one simply doesn't
-  get the sensor. Holding the action button fires an event you can trigger
-  automations from, while a normal press still starts a voice turn — or fires
-  its own event instead, if you'd rather bind the tap. The hold keeps working
-  with the mic muted, so a Dot muted for privacy is still a button.
-- **Headphones** — plug into the 3.5mm jack and audio moves there, unplug and
-  it comes back, no reboot needed. Two known faults, both open: booting with a
-  plug already inserted is unreliable, and unplugging can stall the microphone
-  for around thirty seconds ([#117](https://github.com/wilbowes/EchoMuse/issues/117),
-  [#141](https://github.com/wilbowes/EchoMuse/issues/141)). Plugging in and out
-  of a running device works.
-- **Fleet dashboard** — provisioning wizard, per-device or global config
-  pushed live (EQ, LED ring scenes, mic tuning), A/B-slot OTA updates with
-  automatic fallback, root shell, logs, and per-turn activity analytics
-  (wake scores, near-misses, latencies, playback underruns). Optionally keep
-  the last few turns' mic audio to play back — the only honest way to judge
-  capture quality and tune gain by ear rather than by inference.
-- **Encrypted device link** — TLS with a controller-generated CA plus
-  per-device tokens; the wizard installs credentials automatically.
-- **No phone-home** — there is no telemetry, no analytics and no install
-  counter. Nobody, including us, can tell how many people run EchoMuse or
-  which features they use, and that is deliberate. The controller's only
-  outbound connection is an hourly check to GitHub's API for a newer
-  release, so the dashboard can tell you one exists — the same exposure as
-  a `git clone`, and how often it happens is yours to set
-  ([docs/configuration.md](docs/configuration.md#what-leaves-your-network)).
+EchoMuse makes a second-hand Echo Dot a voice satellite for
+[Home Assistant](https://www.home-assistant.io/voice_control/): say the wake
+word, ask something, and hear the answer from the Dot. There is no Amazon
+account, no Alexa and no cloud service of ours. The Dot shows up in Home
+Assistant as an ordinary ESPHome voice satellite, so there is nothing extra to
+install there.
 
-The 7-mic array, LED ring, buttons, and speaker are all driven natively:
-onset-ratio beamforming, +24dB pre-truncation mic gain (the stock capture
-path throws away most of the signal), device-local LED animations, mute
-that's genuinely hardware (ADC off, red ring, button LED).
+## At a glance
 
-## How it works
+**What it is**
 
-```
-Echo Dot (Go firmware) ⇄ WebSocket/TLS ⇄ Controller (Python) ⇄ ESPHome native API ⇄ Home Assistant
-```
+- A replacement for the software on an **Echo Dot 2nd generation (2016)**. Its
+  microphones, speaker, LED ring and buttons all work.
+- A **controller** you run on your own network, as a Home Assistant add-on or
+  a Docker container. It detects the wake word, manages your devices and has
+  a web dashboard.
+- A way to reuse hardware that sells second-hand for very little.
 
-The device is deliberately dumb: it captures, beamforms, and streams audio
-continuously, and plays what it's sent. Everything that can drift or
-misjudge — wake scoring, endpointing, noise suppression, EQ, arbitration —
-lives on the controller where it can be observed and updated fleet-wide.
-(The one exception is opt-in and observational: the Echo can *also* score the
-wake word locally and report what it would have detected, which is how we're
-measuring whether that belongs on the device at all.)
-The full tour is in [docs/voice-pipeline.md](docs/voice-pipeline.md).
+**What it isn't**
 
-The two halves version independently, so any pairing of firmware and
-controller has to work. What a device can be asked to do is negotiated by
-**capability**, not by comparing version numbers — see
-[Compatibility](#compatibility).
+- **Not Alexa.** No Alexa skills, shopping, calling, Drop In or Amazon
+  account. The assistant is Home Assistant's Assist, so it can do what your
+  Home Assistant can do.
+- **Not standalone.** You need a working Home Assistant with an
+  [Assist pipeline](https://www.home-assistant.io/voice_control/). Home
+  Assistant does the speech recognition, the understanding and the voice.
+- **Not plug and play.** The Dot has to be unlocked first, over USB, with a
+  third-party tool. It takes about an hour the first time and carries a real
+  risk to the device.
+- **Not for other Echo models, yet.** Only the Echo Dot 2nd gen works today.
+  Ports to the Echo Dot 3, Echo 2 and Echo Show 8 are in progress with
+  community help.
+- **Not affiliated with Amazon.**
 
-This project builds on [EchoGo](https://github.com/Binozo/EchoGo) by Binozo —
-the original SDK that made this hardware accessible.
+## What you need
 
----
+| | |
+|---|---|
+| An Echo Dot 2nd gen | The hardware being repurposed. |
+| Home Assistant | With a working Assist pipeline. |
+| An always-on computer | Runs the controller. The Home Assistant machine itself is fine if it runs add-ons. |
+| A Linux computer (a live USB works) and a micro-USB cable, once | To unlock the Dot. The unlock does not run on macOS. |
+| Chrome or Edge, once | The setup wizard talks to the Dot over USB from the browser. |
 
-## Before you start
+## Getting started
 
-Either version of the amonet-biscuit unlock works. **v1.1.0** leaves the Echo
-on FireOS 5, where both install options are available. **v2.0.0** moves it to
-FireOS 6, where EchoMuse offers emOS. [Rooting](docs/rooting.md) explains the
-difference.
+1. **Unlock the Dot** with R0rt1z2's
+   [amonet-biscuit](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/).
+   Either version works: v1.1.0 leaves it on FireOS 5, v2.0.0 moves it to
+   FireOS 6. The [rooting guide](docs/rooting.md) explains the choice. **You
+   do this at your own risk.**
+2. **Start the controller**, as an add-on:
 
-**New here? Start with the [quickstart](docs/quickstart.md)** — it's the
-guided path from zero to talking to your Dot, and it sends you to the
-rooting guide at the right moment rather than opening with it.
+   [![Add the EchoMuse repository to Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fwilbowes%2FEchoMuse)
 
-Your Echo Dot must be rooted with persistent root. That guide — along with a
-detailed engineering journal of how every subsystem was figured out — is in
-[`SETUP.md`](SETUP.md) for how the hardware works, [`JOURNAL.md`](JOURNAL.md)
-for the build log, and [rooting](docs/rooting.md) to prepare a device — none
-of which is a
-walkthrough.
+   or with Docker:
 
-The short version:
-- Persistent unlock via [amonet-biscuit](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/) (R0rt1z2) — v1.1.0, or v2.0.0 for emOS (see above)
-- FireOS 5 (Android 5.1, API 22)
-- Magisk 17.3
-- Alexa voice stack disabled (the dashboard's debloat step handles this)
+   ```bash
+   mkdir echomuse && cd echomuse
+   curl -O https://raw.githubusercontent.com/wilbowes/EchoMuse/main/controller/docker-compose.deploy.yml
+   curl -o .env https://raw.githubusercontent.com/wilbowes/EchoMuse/main/controller/.env.example
+   docker compose -f docker-compose.deploy.yml up -d
+   ```
+3. **Run the setup wizard** from the dashboard with the Dot plugged in over
+   USB. It installs everything and joins your WiFi. Approve the Dot in the
+   dashboard and Home Assistant discovers it.
 
----
+The [quickstart](docs/quickstart.md) walks through all three.
 
-## Running the controller
+### emOS or FireOS?
 
-The controller (dashboard, wake word detection, Home Assistant integration)
-ships as a prebuilt Docker image:
+The wizard offers two ways to run EchoMuse on the Dot:
 
-```bash
-mkdir echomuse && cd echomuse
-curl -O https://raw.githubusercontent.com/wilbowes/EchoMuse/main/controller/docker-compose.deploy.yml
-curl -o .env https://raw.githubusercontent.com/wilbowes/EchoMuse/main/controller/.env.example
-# Optional: set SERVER_IP to this machine's LAN IP (detected if left empty)
-docker compose -f docker-compose.deploy.yml up -d
-```
+- **emOS** (the default) replaces Amazon's Android with our own small Linux
+  userspace, keeping only the Dot's kernel. It runs on FireOS 5 and FireOS 6
+  devices, and the 3.5mm jack works properly on it. The wizard keeps a copy of
+  your original boot image, and restoring it takes about ten seconds.
+- **FireOS with root** keeps Amazon's Android 5 and runs EchoMuse on top. FireOS
+  5 only. It is the older path, with the most hours behind it.
 
-### Or, as a Home Assistant add-on
+## Features
 
-If Home Assistant runs the Supervisor (HA OS, or Supervised), install this
-repository as an add-on repository and add "EchoMuse" from the Add-on Store
-— no separate Docker host needed.
+- **Voice turns through Assist**, with the answer played on the Dot.
+- **Barge-in:** say the wake word over a reply to interrupt it.
+- **More than one Dot:** the first to hear the wake word answers and the rest
+  stay quiet.
+- **Music:** each Dot is a Home Assistant media player (media browser, Music
+  Assistant, radio). Speaking over music lowers it under the answer rather
+  than pausing it.
+- **Timers and announcements** from Home Assistant.
+- **Custom wake words** you train yourself with [`oww_forge`](oww_forge/README.md)
+  and install from the dashboard.
+- **Extras in Home Assistant:** a Bluetooth proxy per Dot (handy with
+  [Bermuda](https://github.com/agittins/bermuda)), an ambient light sensor on
+  Dots that have one, and the action button as an event you can automate.
+- **A dashboard** for setup, updates, per-device settings (EQ, LED ring, mic
+  tuning), logs and a history of voice turns.
+- **Firmware updates over WiFi**, with automatic rollback if a new version
+  fails to start. emOS itself is updated by re-running the wizard, for now
+  ([#573](https://github.com/wilbowes/EchoMuse/issues/573)).
 
-[![Open your Home Assistant instance and show the add add-on repository dialog with this repository pre-filled.](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fwilbowes%2FEchoMuse)
+## Privacy
 
-Open the dashboard — `http://<SERVER_IP>:8768` for the Docker install, or the
-add-on's **Open Web UI** button / sidebar panel for the add-on install. From
-there the **provisioning
-wizard** takes a stock Dot the rest of the way over USB: root, debloat,
-WiFi, firmware, TLS credentials and the on-device wake word assets. It ends
-by rebooting the Dot, which then finds the controller itself and appears as
-pending for you to approve. Home Assistant discovers each approved device
-automatically via its built-in ESPHome integration.
+- **Nothing leaves your network because of EchoMuse.** The Dot streams its
+  microphone to the controller on your LAN, which listens for the wake word.
+  Only after the wake word is audio passed to Home Assistant, and where it
+  goes from there depends on your Assist pipeline (fully local with Whisper
+  and Piper, or a cloud service if you chose one).
+- **No telemetry.** No analytics, no install counter. The controller only
+  connects out to GitHub, to check for and download releases, and you can set
+  how often it checks ([details](docs/configuration.md#what-leaves-your-network)).
+- **The mute button is a software mute.** It silences the microphones in the
+  audio chip and EchoMuse refuses to listen while it is on, but the Dot 2 has
+  no hardware switch that disconnects them.
+- Letting the Dot listen for the wake word itself, so no audio leaves it until
+  then, is planned ([#207](https://github.com/wilbowes/EchoMuse/issues/207)).
 
-See the [quickstart](docs/quickstart.md) for the full walkthrough and
-[configuration](docs/configuration.md) for every knob explained in plain
-language.
+## Status and known issues
 
-Images are published to `ghcr.io/wilbowes/echomuse-controller` from
-`controller-v*` tags; device firmware binaries are released from plain
-`v*` tags (see Releases).
+EchoMuse is in active development and runs daily on a small fleet. emOS is
+newer than FireOS and has fewer device-hours behind it. Open issues worth
+knowing before you start:
 
----
+- The 3.5mm jack: unplugging can stall the microphone for about 30 seconds ([#117](https://github.com/wilbowes/EchoMuse/issues/117),
+  [#141](https://github.com/wilbowes/EchoMuse/issues/141)).
+- emOS on FireOS 6 cannot join WPA3 networks: the WiFi driver has no support
+  for it. Use WPA2 ([#536](https://github.com/wilbowes/EchoMuse/issues/536)).
+- An announcement during a ringing timer can't be heard
+  ([#373](https://github.com/wilbowes/EchoMuse/issues/373)).
 
-## Building from source
+Everything else is in the [issue tracker](https://github.com/wilbowes/EchoMuse/issues).
 
-The Echo Dot runs FireOS 5 (API 22). A custom Docker build environment is
-required — standard Go cross-compilation won't produce a compatible binary.
+## Getting help
 
-```bash
-git submodule update --init          # GoTinyAlsa (wilbowes fork, carries a leak fix)
-cd device
-docker build -t echomuse-compiler compiler/
-./compile.sh                         # output: build/server
-```
+- **Questions and bugs about EchoMuse go to
+  [our issues](https://github.com/wilbowes/EchoMuse/issues), not to the XDA
+  thread.** The thread is for the unlock only.
+- Check the [FAQ](docs/faq.md) first.
+- Attach a support bundle (Dashboard → Support → Download bundle). It holds
+  the logs and versions we need, with transcripts, recordings and network
+  names removed.
 
-Controller from source: `cd controller && pip install -r requirements.txt
-&& python em_controller.py` (Python 3.12), or `docker compose up --build`.
+## Documentation
 
-Tests run on the host and in CI on every push: `go test ./...` under
-`device/` (pure-Go logic) and `python -m pytest tests/` under `controller/`.
+| | |
+|---|---|
+| [Quickstart](docs/quickstart.md) | From nothing to talking to your Dot. |
+| [Rooting](docs/rooting.md) | Unlocking the Dot, and which amonet version to use. |
+| [Configuration](docs/configuration.md) | Every setting, in plain language. |
+| [FAQ](docs/faq.md) | Common problems and their fixes. |
+| [emOS](emos/README.md) | How our own userspace on the Dot works. |
+| [How the voice pipeline works](docs/voice-pipeline.md) | The path from wake word to answer. |
+| [Device ↔ controller protocol](docs/device-controller-interface.md) | For porting EchoMuse to new hardware. |
+| [Contributing](CONTRIBUTING.md) | Building from source, tests, and how to send changes. |
+| [Engineering journal](JOURNAL.md) | How each part was worked out, including the dead ends. |
 
----
+## How it's built
 
-## Custom wake words
+EchoMuse is written largely with [Claude](https://www.anthropic.com/claude),
+Anthropic's AI model, directed by the maintainer. More than half
+the commits carry a `Co-Authored-By: Claude` line, and replies on our issues
+are signed "Team EchoMuse (powered by Claude)". Nothing about that is hidden.
 
-[`oww_forge/`](oww_forge/README.md) trains openWakeWord models from
-synthetic TTS speech — no voice recordings needed (though you can add real
-ones to sharpen accuracy). It's a standalone Docker batch job with a web
-UI; the output is a small `.onnx` you upload straight from the dashboard's
-Wake word panel, where it appears as a tile next to the stock models.
+## Credits
 
----
+EchoMuse would not exist without:
 
-## Compatibility
+- **R0rt1z2**, for [amonet-biscuit](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/),
+  the unlock that everything here depends on.
+- **Binozo**, for [EchoGo](https://github.com/Binozo/EchoGo), the original SDK
+  for this hardware, and [GoTinyAlsa](https://github.com/Binozo/GoTinyAlsa).
+- **Dragon863**, for [EchoCLI](https://github.com/Dragon863/EchoCLI).
+- **David Scripka**, for [openWakeWord](https://github.com/dscripka/openWakeWord).
+- **Xiph.Org**, for [SpeexDSP](https://gitlab.xiph.org/xiph/speexdsp) (the echo
+  canceller), and **Nils L. Westhausen**, for [DTLN](https://github.com/breizhn/DTLN)
+  (noise suppression).
+- **Home Assistant and ESPHome**, whose open voice stack EchoMuse plugs into.
+- Everyone who has [contributed code](https://github.com/wilbowes/EchoMuse/graphs/contributors),
+  filed issues or tested on their own hardware.
 
-Device firmware (`v*` tags) and the controller (`controller-v*` tags) are
-released independently, so at any moment you may be running new firmware
-against an older controller or the reverse — during a staged rollout, that is
-guaranteed. Two rules keep that safe:
+## Licence
 
-**Features are negotiated by capability, not version.** On connect, a device
-announces what it implements (`mic`, `speaker`, `leds`, `led_anim`, `buttons`,
-`oww_shadow`). The controller asks "does this device say it can?" rather than
-"is its version at least X" — because the latter means encoding release
-history into the controller, and it gets a dev build wrong immediately. A
-control that depends on a capability the device lacks is shown disabled with
-the reason, never as a control that silently does nothing. A test asserts the
-capability strings match across the Go and Python sources, because a typo
-there makes a feature permanently unavailable while looking exactly like
-unsupported hardware.
+EchoMuse is [MIT licensed](LICENSE). It includes third-party components that
+keep their own licences, listed with their copyright notices in
+[NOTICE.md](NOTICE.md). emOS releases also ship busybox (GPL-2.0), with its
+source and licence attached to each release, and wpa_supplicant (BSD).
 
-**Both directions degrade to the old behaviour, never to a wrong answer.**
-Unknown JSON fields and unknown message types are ignored, so neither side
-breaks on data it does not understand. Where a new field records a
-measurement, its absence is stored as *no data* rather than as zero — an old
-device reporting no playback statistics must not read as "zero underruns",
-and one that cannot score wake words locally must not read as "scored and
-missed every time". That distinction is why several columns are nullable and
-why some carry a companion flag saying whether the device was even capable of
-producing them.
-
-## Acknowledgements
-
-- [EchoGo](https://github.com/Binozo/EchoGo) — Binozo
-- [GoTinyAlsa](https://github.com/Binozo/GoTinyAlsa) — Binozo
-- [amonet-biscuit](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/) — R0rt1z2
-- [EchoCLI](https://github.com/Dragon863/EchoCLI) — Dragon863
-- [SpeexDSP](https://gitlab.xiph.org/xiph/speexdsp) — Xiph.Org Foundation (BSD-3-Clause) — vendored echo canceller
-- [DTLN](https://github.com/breizhn/DTLN) — Nils L. Westhausen (MIT) — controller-side noise suppression models
-- [openWakeWord](https://github.com/dscripka/openWakeWord) — David Scripka — wake word models and training pipeline
-
----
-
-## Contributing
-
-Bug reports, fixes and hardware findings are all welcome — see
-[CONTRIBUTING.md](CONTRIBUTING.md). The most useful thing you can send is an
-issue with a support bundle attached (Dashboard → Support → Download bundle);
-it carries the logs, versions and metrics needed to diagnose something
-remotely, with transcripts, recordings and network names excluded.
-
-Before filing, check the [FAQ](docs/faq.md) — it collects the workarounds for
-the things that come up most. If you'd like to test systematically, the
-[UAT guide](docs/uat.md) is a checklist of what to try and how to report it.
-
----
-
-## License
-
-MIT — see [LICENSE](LICENSE).
-
-EchoMuse vendors and links several third-party components, each keeping its own
-licence. They are inventoried in [NOTICE.md](NOTICE.md); note that the device
-binary links two BSD-3-Clause components, whose copyright notices that file
-carries on the binary's behalf.
+Amazon, Echo, Echo Dot, Alexa and FireOS are trademarks of Amazon.com, Inc. or
+its affiliates. EchoMuse is an independent project, not affiliated with or
+endorsed by Amazon.
