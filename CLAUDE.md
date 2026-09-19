@@ -74,6 +74,29 @@ keep `pkg/led`, `pkg/mic`, `pkg/speaker` and `pkg/buttons` honest as
 interfaces, and treat each Android call site as something to isolate. Nothing
 here commits the project to shipping a distro.
 
+## Where a standard exists, conform to it and prove it
+
+**If what we are handling has a known standard or spec, abide by the spec, and
+have a test that proves it** (Wil, 2026-09-19). Look up what the spec ALLOWS,
+and how the tool consuming it behaves — read its source where it matters —
+then write the test from the spec's edges rather than from typical input:
+minimum and maximum lengths, every character class it permits, the forms it
+forbids, and published test vectors where they exist. Where possible, check
+against the real implementation rather than our reading of it.
+
+The worked example is #586. An SSID is 0–32 arbitrary bytes (IEEE 802.11) and
+a WPA2 passphrase is 8–63 printable ASCII characters or 64 hex; our WiFi
+handling was written against the names people happened to test with. All four
+paths that take an SSID were wrong — refusing valid `"` and `\`, trimming
+spaces, writing `Café` back as `Caf\xc3\xa9`, and on emOS putting the SSID
+inside a shell command, where an apostrophe broke it — and nothing failed,
+because every test used plain ASCII. The fix was tested against the IEEE
+802.11i PSK vectors and against our own wpa_supplicant build parsing each form.
+
+A corollary that follows from the same bug: **never interpolate user-supplied
+text into a shell command** (serial console, `adb shell`, `sh -c`). Send hex,
+base64 or a file.
+
 ## Writing to people: bottom line first
 
 Anything a **person** reads leads with the answer and stays short — PR
