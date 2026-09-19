@@ -176,7 +176,7 @@ def test_migrations_are_append_only():
     rather than edited — which is the mistake this guards, and the one that
     broke every stats write and disconnect-looped the fleet when it happened.
     """
-    assert len(db.MIGRATIONS) == 22
+    assert len(db.MIGRATIONS) == 23
     assert "esphome_mac" in db.MIGRATIONS[18]
     assert "esphome_mac" not in db.MIGRATIONS[17]
     # v20 is its own entry and did not get appended onto v19's.
@@ -185,3 +185,6 @@ def test_migrations_are_append_only():
     # v22 likewise: vad_start_ms is a new entry, not an edit to v21's.
     assert "vad_start_ms" in db.MIGRATIONS[21]
     assert "vad_start_ms" not in db.MIGRATIONS[20]
+    # v23: the kernel columns are their own entry too.
+    assert "kernel_arch" in db.MIGRATIONS[22]
+    assert "kernel_arch" not in db.MIGRATIONS[21]

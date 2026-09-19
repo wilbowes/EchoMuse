@@ -55,9 +55,18 @@ message (`device/internal/client/control.go`):
   "version": "<firmware version, from build ldflags>",
   "capabilities": ["mic", "speaker", ...],
   "ip": "<local ip, omitted if 127.0.0.1 or unresolved>",
-  "ambient_light_status": { "...": "..." }
+  "ambient_light_status": { "...": "..." },
+  "base_os": "emos | fireos | unknown",
+  "board": "<pkg/board id, or unknown>",
+  "kernel_arch": "<uname -m, e.g. aarch64>",
+  "kernel_release": "<uname -r, e.g. 3.18.19+>"
 }
 ```
+
+`base_os`, `board` and the two `kernel_*` fields describe the boot and are
+informational: the controller stores and displays them, and gates Android-only
+payloads on `base_os`. The kernel pair is omitted if `uname` fails. A device
+for a new board should send all of them.
 
 `capabilities` is the negotiation signal. The Dot announces ten unconditionally
 plus one conditional (`capabilities()` in `control.go`):

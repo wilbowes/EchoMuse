@@ -3,6 +3,8 @@ package platform
 import (
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -113,5 +115,15 @@ func TestBaseIsStable(t *testing.T) {
 	case EmOS, FireOS, Unknown:
 	default:
 		t.Errorf("Base() = %q, not one of the three defined answers", first)
+	}
+}
+
+func TestKernelReportsTheHost(t *testing.T) {
+	m, r := Kernel()
+	if runtime.GOOS == "linux" && (m == "" || r == "") {
+		t.Fatalf("Kernel() = %q, %q on linux; want both set", m, r)
+	}
+	if strings.ContainsRune(m+r, 0) {
+		t.Fatalf("Kernel() leaked a NUL: %q %q", m, r)
 	}
 }

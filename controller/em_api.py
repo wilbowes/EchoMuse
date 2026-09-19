@@ -5790,6 +5790,12 @@ def _merge_device(row) -> dict:
         # vanish when a device does; a live report always wins.
         "baseOs":          (getattr(live, "base_os", None) if live else None)
                            or row["base_os"],
+        # `uname -m` / `uname -r` from the register message, stored value when
+        # offline (schema v23). Null from firmware that does not send them.
+        "kernelArch":      (getattr(live, "kernel_arch", None) if live else None)
+                           or row["kernel_arch"],
+        "kernelRelease":   (getattr(live, "kernel_release", None) if live else None)
+                           or row["kernel_release"],
         # The DERIVED answer, not a second copy of the rule. em_platform owns
         # "which payloads mean anything here"; a dashboard that re-derived it
         # from baseOs would be a mirror free to disagree with the server that

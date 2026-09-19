@@ -375,6 +375,8 @@ class Device:
         # old to say — which em_platform resolves to Android, leaving the
         # existing fleet exactly as it was.
         self._base_os: str | None = None
+        self.kernel_arch: str | None = None
+        self.kernel_release: str | None = None
 
         self.data_ws: WebSocketServerProtocol | None = None
         # Remaining reconnect grace for the speaker stream in flight. Armed by
@@ -3536,6 +3538,13 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         # device reflashed between FireOS and emOS is the case it has to track.
         if device._base_os:
             db.set_device_base_os(device_id, device._base_os)
+        # The running kernel, so emOS on FireOS 5's 64-bit kernel and FireOS
+        # 6's 32-bit one can be told apart (schema v23). Absent on older
+        # firmware; stored only when reported so a known value is not erased.
+        device.kernel_arch = msg.get("kernel_arch") or None
+        device.kernel_release = msg.get("kernel_release") or None
+        if device.kernel_arch:
+            db.set_device_kernel(device_id, device.kernel_arch, device.kernel_release or "")
         # Link-security telemetry for the dashboard: True when this control
         # connection arrived over the TLS listener.
         device.secure = secure

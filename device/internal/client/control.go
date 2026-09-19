@@ -515,6 +515,14 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 		// Unread by current controllers, so safe to add unnegotiated.
 		"board": board.IDOf(board.Detect("")),
 	}
+	// The running kernel, `uname -m` and `uname -r`. Generic across boards, and
+	// on biscuit the only thing that separates emOS on FireOS 5's 64-bit
+	// kernel from emOS on FireOS 6's 32-bit one. Unread by older controllers,
+	// so safe to add unnegotiated; omitted if uname fails.
+	if m, r := platform.Kernel(); m != "" {
+		reg["kernel_arch"] = m
+		reg["kernel_release"] = r
+	}
 	// Resolved fresh per registration: a cached-at-startup value goes stale
 	// after a WiFi change, and if the process started while the network was
 	// down (e.g. wifi.RecoverIfPending bouncing WiFi) it cached 127.0.0.1

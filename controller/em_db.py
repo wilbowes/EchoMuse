@@ -950,6 +950,21 @@ MIGRATIONS: list[str] = [
 
     UPDATE system_config SET value = '22' WHERE key = 'schema_version';
     """,
+
+    # ── v23 — the kernel each device booted ──────────────────────────────────
+    #
+    # base_os says "emos" and board says "biscuit" whichever kernel emOS runs
+    # on, so the dashboard could not tell FireOS 5's 64-bit kernel (aarch64,
+    # 3.18.19+) from FireOS 6's 32-bit one (armv7l, 3.18.19-g…). The register
+    # message now carries `uname -m` and `uname -r`; stored for the reason
+    # base_os is (v21), so an offline device keeps its label. Generic across
+    # boards. NULL means never reported.
+    """
+    ALTER TABLE devices ADD COLUMN kernel_arch TEXT;
+    ALTER TABLE devices ADD COLUMN kernel_release TEXT;
+
+    UPDATE system_config SET value = '23' WHERE key = 'schema_version';
+    """,
 ]
 
 # Post-migration fixups that need Python rather than SQL. Keyed by the schema
@@ -1464,6 +1479,15 @@ def set_device_base_os(device_id: str, base_os: Optional[str]) -> None:
         conn.execute(
             "UPDATE devices SET base_os = ? WHERE device_id = ?",
             (base_os, device_id),
+        )
+
+
+def set_device_kernel(device_id: str, arch: str, release: str) -> None:
+    """Record the kernel a device booted (`uname -m`, `uname -r`), per register."""
+    with _tx() as conn:
+        conn.execute(
+            "UPDATE devices SET kernel_arch = ?, kernel_release = ? WHERE device_id = ?",
+            (arch, release, device_id),
         )
 
 
