@@ -165,13 +165,13 @@ func TestComposeConfKeepsTheSocketWhereItWas(t *testing.T) {
 	// A constant here would move the socket out from under init's nudge and
 	// em-wifi, and nothing in that failure names composeConf.
 	onBase(t, platform.EmOS, "ctrl_interface="+androidDir+"\n", "")
-	conf := composeConf("net", "12345678")
+	conf := composeConf([]byte("net"), "12345678")
 	if !strings.Contains(conf, "ctrl_interface="+androidDir+"\n") {
 		t.Errorf("composeConf dropped the socket directory in use:\n%s", conf)
 	}
 
 	onBase(t, platform.EmOS, "", "ctrl_interface="+emosDir+"\n")
-	if conf := composeConf("net", "12345678"); !strings.Contains(conf, "ctrl_interface="+emosDir+"\n") {
+	if conf := composeConf([]byte("net"), "12345678"); !strings.Contains(conf, "ctrl_interface="+emosDir+"\n") {
 		t.Errorf("composeConf dropped emOS's socket directory:\n%s", conf)
 	}
 }
@@ -188,7 +188,7 @@ func TestComposeConfOmitsWpsAndP2pOnEmos(t *testing.T) {
 	}
 
 	onBase(t, platform.EmOS, "", "ctrl_interface="+emosDir+"\n")
-	conf := composeConf("net", "12345678")
+	conf := composeConf([]byte("net"), "12345678")
 	for _, f := range unsupported {
 		if strings.Contains(conf, f) {
 			t.Errorf("emos conf carries %q, which our supplicant cannot use:\n%s", f, conf)
@@ -203,7 +203,7 @@ func TestComposeConfOmitsWpsAndP2pOnEmos(t *testing.T) {
 
 	// FireOS keeps the wizard's template; the framework populates those.
 	onBase(t, platform.FireOS, "ctrl_interface="+androidDir+"\n", "")
-	conf = composeConf("net", "12345678")
+	conf = composeConf([]byte("net"), "12345678")
 	for _, f := range unsupported {
 		if !strings.Contains(conf, f) {
 			t.Errorf("fireos conf lost %q from the wizard's template:\n%s", f, conf)
@@ -213,7 +213,7 @@ func TestComposeConfOmitsWpsAndP2pOnEmos(t *testing.T) {
 
 func TestComposeConfOpenNetwork(t *testing.T) {
 	onBase(t, platform.EmOS, "", "ctrl_interface="+emosDir+"\n")
-	conf := composeConf("open", "")
+	conf := composeConf([]byte("open"), "")
 	if !strings.Contains(conf, "key_mgmt=NONE") {
 		t.Errorf("an empty psk must produce an open network:\n%s", conf)
 	}

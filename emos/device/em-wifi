@@ -69,10 +69,42 @@ echo "Scanning..."
 "$CLI" -p "$CTRL" -iwlan0 scan >/dev/null 2>&1
 sleep 4
 
-# Strongest first, one entry per SSID, unnamed networks dropped.
-"$CLI" -p "$CTRL" -iwlan0 scan_results 2>/dev/null \
-  | awk 'NR>1 && $5 != "" { if (!seen[$5]++) printf "%s\t%s\t%s\n", $3, $4, $5 }' \
-  | sort -rn | head -20 > /tmp/em-wifi-list
+# Strongest first, one entry per SSID, hidden (all-zero) and unnamed dropped.
+#
+# An SSID is any 0-32 bytes, so it is carried as HEX from here on and written
+# to the conf that way: nothing in it can then break the conf or this script.
+# scan_results is TAB-separated and prints the SSID through hostap's
+# printf_encode (`"` and `\` escaped, \e \n \r \t, \xNN for anything else
+# outside 0x20-0x7e); ssid_hex() reverses that. Splitting on whitespace
+# instead cut "My Home WiFi" to "My". Mirrors _wpaUnescape in the dashboard
+# and UnescapeSSID in the firmware. Columns out: signal, flags, hex, name as
+# wpa_cli prints it (escapes and all -- it is only shown).
+"$CLI" -p "$CTRL" -iwlan0 scan_results 2>/dev/null | awk '
+    BEGIN { FS = "\t"; for (i = 32; i < 127; i++) ord[sprintf("%c", i)] = i }
+    function ssid_hex(s,    out, i, c, n, h) {
+        out = ""
+        for (i = 1; i <= length(s); i++) {
+            c = substr(s, i, 1)
+            if (c == "\\" && i < length(s)) {
+                n = substr(s, i + 1, 1); h = substr(s, i + 2, 2)
+                if (n == "x" && h ~ /^[0-9a-fA-F][0-9a-fA-F]$/) { out = out tolower(h); i += 3; continue }
+                if (n == "\\") { out = out "5c"; i++; continue }
+                if (n == "\"")  { out = out "22"; i++; continue }
+                if (n == "e")   { out = out "1b"; i++; continue }
+                if (n == "n")   { out = out "0a"; i++; continue }
+                if (n == "r")   { out = out "0d"; i++; continue }
+                if (n == "t")   { out = out "09"; i++; continue }
+            }
+            out = out sprintf("%02x", ord[c])
+        }
+        return out
+    }
+    NR > 1 && NF >= 5 {
+        name = $5; sub(/\r$/, "", name)
+        h = ssid_hex(name)
+        if (h == "" || h ~ /^(00)+$/ || seen[h]++) next
+        printf "%s\t%s\t%s\t%s\n", $3, $4, h, name
+    }' | sort -rn | head -20 > /tmp/em-wifi-list
 
 if [ ! -s /tmp/em-wifi-list ]; then
     echo "No networks found. Is the radio up? See /run/net.log."
@@ -81,7 +113,7 @@ fi
 
 echo ""
 n=0
-while IFS="$(printf '\t')" read -r sig flags ssid; do
+while IFS="$(printf '\t')" read -r sig flags hex ssid; do
     n=$((n + 1))
     case "$flags" in
         *SAE*) note=" (WPA3 - not supported)" ;;
@@ -101,8 +133,9 @@ esac
 
 line=$(sed -n "${choice}p" /tmp/em-wifi-list)
 [ -n "$line" ] || { echo "No such entry."; exit 1; }
-flags=$(echo "$line" | cut -f2)
-ssid=$(echo "$line" | cut -f3)
+flags=$(printf '%s\n' "$line" | cut -f2)
+ssid_hex=$(printf '%s\n' "$line" | cut -f3)
+ssid=$(printf '%s\n' "$line" | cut -f4)
 
 case "$flags" in
     *SAE*)
@@ -114,23 +147,38 @@ esac
 case "$flags" in
     *PSK*)
         printf 'Password for %s: ' "$ssid"
-        read psk
-        [ -n "$psk" ] || { echo "No password given."; exit 1; }
+        # -r: a backslash in a password is a backslash. IFS= keeps leading
+        # and trailing spaces, which a passphrase may have.
+        IFS= read -r psk
+        # WPA2 allows 8-63 printable ASCII characters, or 64 hex digits.
+        if printf '%s' "$psk" | grep -Eq '^[0-9a-fA-F]{64}$'; then
+            psk_line="psk=$psk"
+        elif printf '%s\n' "$psk" | awk '{ exit !(length($0) >= 8 && length($0) <= 63 && $0 !~ /[^ -~]/) }'; then
+            # Quoted, and needing no escaping: wpa_supplicant ends a quoted
+            # passphrase at its LAST double quote, so `"` and `\` inside it
+            # are literal (wpa_config_parse_psk).
+            psk_line="psk=\"$psk\""
+        else
+            echo "A WiFi password is 8-63 printable characters (letters, digits,"
+            echo "spaces and punctuation), or 64 hex digits."
+            exit 1
+        fi
         keymgmt="WPA-PSK" ;;
     *)
-        psk=""
+        psk_line=""
         keymgmt="NONE" ;;
 esac
 
 mkdir -p /data/emos
+# printf '%s', never echo: nothing in a password may be read as an escape.
 {
-    echo "ctrl_interface=$CTRL"
-    echo "update_config=1"
-    echo "network={"
-    echo "        ssid=\"$ssid\""
-    [ -n "$psk" ] && echo "        psk=\"$psk\""
-    echo "        key_mgmt=$keymgmt"
-    echo "}"
+    printf 'ctrl_interface=%s\n' "$CTRL"
+    printf 'update_config=1\n'
+    printf 'network={\n'
+    printf '        ssid=%s\n' "$ssid_hex"
+    [ -n "$psk_line" ] && printf '        %s\n' "$psk_line"
+    printf '        key_mgmt=%s\n' "$keymgmt"
+    printf '}\n'
 } > "$CONF"
 chmod 600 "$CONF"
 echo "Wrote $CONF."

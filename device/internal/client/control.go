@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -75,10 +76,11 @@ type ConfigAppliedCallback func(msg config.ConfigMessage)
 type VolumeSetCallback func(level int)
 type BeamLockCallback func(lock bool)
 
-// WifiChangeCallback receives a wifi_change request. It must return
+// WifiChangeCallback receives a wifi_change request, with the SSID as its exact
+// bytes (see internal/wifi/ssid.go). It must return
 // quickly (the executor runs in its own goroutine) — the control
 // connection is about to drop when the network switches.
-type WifiChangeCallback func(ssid, psk string)
+type WifiChangeCallback func(ssid []byte, psk string)
 
 // ─── ControlClient ────────────────────────────────────────────────────────────
 
@@ -790,13 +792,25 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 			// Safe network switch (see internal/wifi). The executor owns
 			// the whole sequence device-side — this connection is about to
 			// die when the network flips.
+			//
+			// ssid_hex carries the SSID's exact bytes, which is the only way
+			// to name a network whose SSID is not valid UTF-8 (any 0–32
+			// octets are valid). An older controller sends only ssid, whose
+			// UTF-8 bytes are the SSID for every name it could offer. A
+			// malformed ssid_hex becomes an empty SSID, which the change
+			// refuses with a reason rather than guessing.
 			var msg struct {
-				SSID string `json:"ssid"`
-				PSK  string `json:"psk"`
+				SSID    string `json:"ssid"`
+				SSIDHex string `json:"ssid_hex"`
+				PSK     string `json:"psk"`
 			}
 			if err := json.Unmarshal(raw, &msg); err == nil && c.wifiChangeCallback != nil {
+				ssid := []byte(msg.SSID)
+				if msg.SSIDHex != "" {
+					ssid, _ = hex.DecodeString(msg.SSIDHex)
+				}
 				log.Printf("[control] wifi_change received (ssid=%q)", msg.SSID)
-				c.wifiChangeCallback(msg.SSID, msg.PSK)
+				c.wifiChangeCallback(ssid, msg.PSK)
 			}
 
 		case "wifi_commit":

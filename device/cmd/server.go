@@ -411,7 +411,7 @@ func main() {
 	// half-open TCP connection the interface bounce killed, so a single
 	// send is not enough — the very first hardware success vanished that
 	// way while the WS looked connected the whole time.
-	controlClient.OnWifiChange(func(ssid, psk string) {
+	controlClient.OnWifiChange(func(ssid []byte, psk string) {
 		go func() {
 			wifi.Change(ssid, psk, controlClient.IsConnected)
 			for i := 0; i < 30; i++ { // ~5 min, then give up (dashboard TTL is 4)

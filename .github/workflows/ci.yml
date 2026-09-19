@@ -107,6 +107,7 @@ jobs:
           node controller/tests/wipe_verdict.test.mjs
           node controller/tests/wifi_nvram.test.mjs
           node controller/tests/kernel_label.test.mjs
+          node controller/tests/wifi_ssid.test.mjs
           node controller/tests/wake_sensitivity.test.mjs
       - name: Run forge console tests
         run: node oww_forge/tests/console_log.test.mjs

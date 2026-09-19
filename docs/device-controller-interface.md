@@ -139,6 +139,8 @@ absent optional fields take prior/default behaviour.
 | `oww_wake` | score, effective threshold, age | On-device trigger fired (`owwOnDevice=on`); lands in `Device.pending_wake` |
 | `ambient_light` | `value` | Light reading (only if `ambient_light`) |
 | `ble_adverts` | `adverts[]` | Batch from the passive BLE scanner. **Legacy path** — send these on `/data` as `0x06` whenever the controller announced `ble_adverts_data`, and use this message only when it did not (#404) |
+| `wifi_scan_result` | `networks[]` of `{ssid, ssid_hex, signal}`, or `error` | Answer to `wifi_scan` |
+| `wifi_result` | `ok`, `ssid`, `error?` | Outcome of a `wifi_change`, re-sent until `wifi_commit` |
 | `pong` | — | Keepalive reply |
 
 **Controller → Device**
@@ -154,9 +156,17 @@ absent optional fields take prior/default behaviour.
 | `volume_set` | `level` | Set absolute volume |
 | `duck` | `on` | Duck music under a voice turn (turn start/end) |
 | `config` | `ConfigMessage` fields | Push configuration (see below) |
-| `wifi_change` / `wifi_commit` | `ssid`,`psk` / — | Switch WiFi with auto-rollback; commit finalises |
+| `wifi_scan` | — | Scan for networks; answered with `wifi_scan_result` |
+| `wifi_change` / `wifi_commit` | `ssid`, `ssid_hex?`, `psk` / — | Switch WiFi with auto-rollback; commit finalises |
 | `shell_open` / `shell_close` | `pty?` | Ask the device to dial `/shell` (`pty:true` = interactive) / close it |
 | `music_flush` / `speaker_flush` | — | Flush the music / voice buffer (barge-in uses `speaker_flush`) |
+
+**An SSID is 0–32 arbitrary bytes**, so a name alone cannot always address
+one. `ssid` is for display (invalid UTF-8 shown as U+FFFD); `ssid_hex` is the
+exact bytes, reported in each scan result and sent back in `wifi_change` when
+the network came from a scan. A `wifi_change` without it means the UTF-8 of
+`ssid`. `psk` is empty for an open network, 8–63 printable ASCII characters,
+or a raw 64-hex PSK. Firmware that predates `ssid_hex` ignores it.
 
 ## `/data` — binary frames
 

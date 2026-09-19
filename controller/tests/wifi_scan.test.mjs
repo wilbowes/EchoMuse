@@ -49,6 +49,11 @@ const code = [
   liftConst("_SECURITY_LABEL"),
   liftFunction("classifySecurity"),
   liftFunction("securityBlocker"),
+  // The parser decodes SSIDs to their exact bytes (see wifi_ssid.test.mjs).
+  liftFunction("_wpaUnescape"),
+  liftFunction("_bytesHex"),
+  liftFunction("_ssidText"),
+  liftFunction("_ssidProblem"),
   liftFunction("parseScanResults"),
   "export { parseScanResults, classifySecurity, securityBlocker };",
 ].join("\n");

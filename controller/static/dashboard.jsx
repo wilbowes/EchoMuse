@@ -1216,7 +1216,12 @@ function ConnectivityTab({ device, row }) {
   async function doSwitch() {
     setConfirming(false); setSubmitError('');
     try {
-      await API.post(`/api/devices/${device.device_id}/wifi`, { ssid, psk });
+      // ssid_hex names the network by its exact bytes when it came from the
+      // device's scan (firmware that reports them); otherwise the typed name,
+      // whose UTF-8 is the SSID.
+      const seen = (networks || []).find(n => n.ssid === ssid && n.ssid_hex);
+      await API.post(`/api/devices/${device.device_id}/wifi`,
+        seen ? { ssid, ssid_hex: seen.ssid_hex, psk } : { ssid, psk });
       // Pending state arrives via the device_update push event.
     } catch (e) {
       setSubmitError(e.error || e.message || 'Request failed');
@@ -1225,8 +1230,12 @@ function ConnectivityTab({ device, row }) {
 
   const mono  = "'DM Mono',monospace";
   const busy  = !!pending;
-  const valid = ssid && (!psk || (psk.length >= 8 && psk.length <= 63)) &&
-                !/["\\]/.test(ssid) && !/["\\]/.test(psk);
+  const seenNet = (networks || []).find(n => n.ssid === ssid && n.ssid_hex);
+  const inputProblem = ssid
+    ? (_ssidProblem(seenNet ? _hexBytes(seenNet.ssid_hex) : new TextEncoder().encode(ssid))
+       || _pskProblem(psk))
+    : null;
+  const valid = !!ssid && !inputProblem;
 
   return (
     <div style={{ minHeight:'100%', display:'flex', flexDirection:'column', gap:16 }}>
@@ -1327,9 +1336,7 @@ function ConnectivityTab({ device, row }) {
         </div>
         {ssid && !valid && (
           <div style={{ fontFamily:mono, fontSize:10, color:'var(--warn)', marginTop:8 }}>
-            {/["\\]/.test(ssid + psk)
-              ? 'SSID/passphrase cannot contain " or \\ characters.'
-              : 'WPA passphrase must be 8–63 characters (leave blank for an open network).'}
+            {inputProblem}
           </div>
         )}
         {submitError && (
@@ -3008,6 +3015,105 @@ const _wipeVerdict = (out) => {
     .filter(n => n && n !== 'lost+found' && n !== 'recovery');
   return { ok: true, why: '', cacheLeft: cache };
 };
+
+// ── SSIDs and passphrases ───────────────────────────────────────────────────
+//
+// An SSID is 0-32 arbitrary octets (IEEE 802.11): spaces, quotes,
+// backslashes, UTF-8 and bytes that are not text at all are all valid, and
+// all of them must work. So an SSID is handled as BYTES and written to
+// wpa_supplicant as HEX (`ssid=426f6227...`), which it accepts for any SSID
+// and which has nothing in it for a shell or a conf file to misread. The
+// passphrase is written as the 64-hex PSK WPA2 derives from it, for the same
+// reason; the plain passphrase never reaches the device.
+//
+// wpa_cli prints SSIDs through hostap's printf_encode: `"` and `\` are
+// backslash-escaped, ESC/LF/CR/TAB are \e \n \r \t, and any other byte
+// outside 0x20-0x7e is \xNN. _wpaUnescape reverses exactly that. Mirrored in
+// the firmware (internal/wifi/ssid.go) and em_wifi.py.
+function _wpaUnescape(s) {
+  const out = [];
+  const esc = { '\\': 92, '"': 34, e: 27, n: 10, r: 13, t: 9 };
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === '\\' && i + 1 < s.length) {
+      const n = s[i + 1];
+      if (n === 'x' && /^[0-9a-fA-F]{2}$/.test(s.slice(i + 2, i + 4))) {
+        out.push(parseInt(s.slice(i + 2, i + 4), 16));
+        i += 3;
+        continue;
+      }
+      if (esc[n] !== undefined) { out.push(esc[n]); i++; continue; }
+    }
+    const code = s.codePointAt(i);
+    if (code < 0x80) out.push(code);
+    else {
+      // Not something printf_encode produces, but never drop it.
+      const ch = String.fromCodePoint(code);
+      out.push(...new TextEncoder().encode(ch));
+      i += ch.length - 1;
+    }
+  }
+  return Uint8Array.from(out);
+}
+
+function _bytesHex(b) {
+  return Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
+}
+
+function _hexBytes(h) {
+  return Uint8Array.from((h.match(/../g) || []).map(x => parseInt(x, 16)));
+}
+
+// For display only: invalid UTF-8 shows as U+FFFD. Never used to address a
+// network — that is what the bytes are for.
+function _ssidText(b) {
+  return new TextDecoder('utf-8').decode(b);
+}
+
+// Why an SSID cannot be used, or null. Hidden APs advertise all-zero bytes.
+function _ssidProblem(b) {
+  if (!b.length || b.every(x => x === 0)) return 'Choose a network first.';
+  if (b.length > 32) return `That network name is ${b.length} bytes; the limit is 32.`;
+  return null;
+}
+
+// Why a passphrase cannot be used, or null. WPA2-Personal allows 8-63
+// printable ASCII characters, or a raw 64-hex PSK; empty is an open network.
+function _pskProblem(psk) {
+  if (!psk || /^[0-9a-fA-F]{64}$/.test(psk)) return null;
+  if (psk.length < 8 || psk.length > 63) {
+    return `A WiFi password is 8-63 characters (this one is ${psk.length}).`;
+  }
+  if (!/^[\x20-\x7e]+$/.test(psk)) {
+    return 'A WiFi password can only contain printable ASCII characters '
+         + '(letters, digits, spaces and punctuation).';
+  }
+  return null;
+}
+
+// The conf line for an SSID, in the FireOS flow's file. Quoted — the form
+// FireOS's framework has always been given — whenever that can hold it:
+// wpa_supplicant ends a quoted string at its LAST double quote, so `"` and `\\`
+// inside are literal. Hex for control bytes and anything not UTF-8, which a
+// line-based conf cannot carry quoted. Same rule as ssidLine in the firmware;
+// both forms verified against wpa_supplicant 2.10 parsing a real conf.
+function _confSsid(b) {
+  let text = null;
+  try { text = new TextDecoder('utf-8', { fatal: true }).decode(b); } catch { /* not UTF-8 */ }
+  const quotable = text !== null && b.every(x => x >= 0x20 && x !== 0x7f);
+  return quotable ? `ssid="${text}"` : `ssid=${_bytesHex(b)}`;
+}
+
+// The 64-hex PSK for a passphrase: PBKDF2-HMAC-SHA1, the SSID as salt, 4096
+// rounds, 32 bytes (IEEE 802.11i). A 64-hex input is already a PSK.
+async function _wpaPsk(psk, ssidBytes) {
+  if (/^[0-9a-fA-F]{64}$/.test(psk)) return psk.toLowerCase();
+  const key = await crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(psk), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', hash: 'SHA-1', salt: ssidBytes, iterations: 4096 }, key, 256);
+  return _bytesHex(new Uint8Array(bits));
+}
 
 // The bytes of one exported data symbol in a 32-bit little-endian ELF shared
 // library, or null. Used to read MediaTek's compiled WiFi NVRAM default out of
@@ -5049,18 +5155,25 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   function parseScanResults(raw) {
     const networks = [];
     for (const line of (raw || '').split('\n')) {
-      const parts = line.split('\t');
+      // Only a transport CR is stripped, never spaces: they can be part of
+      // an SSID. Tabs inside one arrive escaped, so field 5 is the whole name.
+      const parts = line.replace(/\r$/, '').split('\t');
       if (parts.length < 5) continue;
-      const ssid = parts[4].trim();
-      if (!ssid || ssid === 'SSID') continue;
+      const bytes = _wpaUnescape(parts[4]);
+      if (_ssidProblem(bytes)) continue;               // hidden or empty
+      const ssidHex = _bytesHex(bytes);
+      const ssid = _ssidText(bytes);
       const freq   = parseInt(parts[1], 10);
       const signal = parseInt(parts[2], 10);
+      if (!Number.isFinite(signal)) continue;          // the header line
       const flags  = parts[3] || '';
       const band   = freq >= 4900 ? '5GHz' : (freq > 0 ? '2.4GHz' : '');
 
-      const existing = networks.find(n => n.ssid === ssid);
+      // Keyed by the BYTES, so two names differing only where a display
+      // cannot show it stay two networks.
+      const existing = networks.find(n => n.ssidHex === ssidHex);
       if (!existing) {
-        networks.push({ ssid, signal, freq, flags, bands: band ? [band] : [] });
+        networks.push({ ssid, ssidHex, signal, freq, flags, bands: band ? [band] : [] });
       } else {
         // Same SSID on more than one AP or band. Keep the strongest for the
         // headline numbers, but remember every band it was seen on.
@@ -5115,15 +5228,12 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     return null;
   }
 
-  // Quote a value for safe embedding inside a wpa_supplicant.conf network
-  // block. SSIDs/PSKs containing a literal " or \ would break the file
-  // format — reject rather than mis-escape, since this is config content,
-  // not a shell string.
-  function wpaConfEscape(value) {
-    if (/["\\]/.test(value)) {
-      throw new Error(`Value contains a double-quote or backslash character, which wpa_supplicant.conf cannot represent safely: "${value}"`);
-    }
-    return value;
+  // The exact bytes of the network the operator chose: from the scan when it
+  // came from there (an SSID can hold bytes no display shows), otherwise the
+  // UTF-8 of what they typed, which is the SSID for any name they can type.
+  function ssidBytesFor(name) {
+    const seen = (wifiNetworks || []).find(n => n.ssid === name);
+    return seen ? _hexBytes(seen.ssidHex) : new TextEncoder().encode(name);
   }
 
   // Diagnose a failed association from the device's own view of the air.
@@ -5161,9 +5271,14 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   }
 
   async function runConfigWifi(c, ssid, psk) {
-    if (!ssid) throw new Error('No SSID selected.');
-    wpaConfEscape(ssid);
-    wpaConfEscape(psk);
+    const ssidB = ssidBytesFor(ssid || '');
+    const bad = _ssidProblem(ssidB) || _pskProblem(psk);
+    if (bad) throw new Error(bad);
+    // The file travels base64-encoded, so no shell ever sees these values;
+    // the password is written quoted, as FireOS has always had it —
+    // wpa_supplicant ends a quoted passphrase at its last `"`, and
+    // _pskProblem has already refused control characters.
+    const ssidConf = _confSsid(ssidB);
 
     // What the scan said about this network, if it was picked from the list.
     // A typed SSID that no scan saw is treated as hidden, which needs
@@ -5236,14 +5351,15 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       'external_sim=1',
       'wowlan_triggers=disconnect',
       'network={',
-      `\tssid="${ssid}"`,
+      `\t${ssidConf}`,
       // key_mgmt used to be hardcoded to WPA-PSK, which made an open network
       // unjoinable with no explanation. The device reports NONE among its
       // supported key_mgmt values, so open networks work, they were just
       // never configurable.
       ...(security === 'open'
             ? ['\tkey_mgmt=NONE']
-            : [`\tpsk="${psk}"`, '\tkey_mgmt=WPA-PSK']),
+            : [/^[0-9a-fA-F]{64}$/.test(psk) ? `\tpsk=${psk.toLowerCase()}` : `\tpsk="${psk}"`,
+               '\tkey_mgmt=WPA-PSK']),
       // Without this, wpa_supplicant only ever joins networks that appear in
       // a passive scan, so a hidden SSID never associates and reports nothing
       // more useful than SCANNING.
@@ -5282,8 +5398,8 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // the b64-via-shell-arg path silently mangling content before we ever
     // touch the real config.
     const staged = await c.shell('su -c "cat /tmp/wpa_supplicant.conf"');
-    if (!staged.includes(`ssid="${ssid}"`)) {
-      throw new Error(`Staged config in /tmp does not contain ssid="${ssid}" — write failed before reaching the device. Staged content:\n${staged}`);
+    if (!staged.includes(ssidConf)) {
+      throw new Error(`Staged config in /tmp does not contain ${ssidConf} — write failed before reaching the device. Staged content:\n${staged}`);
     }
 
     await c.shell('su -c "cp /tmp/wpa_supplicant.conf /data/misc/wifi/wpa_supplicant.conf"');
@@ -5293,8 +5409,8 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // Verify the final on-device file too — catches the cp step itself
     // failing or writing to the wrong place.
     const onDevice = await c.shell('su -c "cat /data/misc/wifi/wpa_supplicant.conf"');
-    if (!onDevice.includes(`ssid="${ssid}"`)) {
-      throw new Error(`Config at /data/misc/wifi/wpa_supplicant.conf does not contain ssid="${ssid}" after cp — the write did not take. On-device content:\n${onDevice}`);
+    if (!onDevice.includes(ssidConf)) {
+      throw new Error(`Config at /data/misc/wifi/wpa_supplicant.conf does not contain ${ssidConf} after cp — the write did not take. On-device content:\n${onDevice}`);
     }
     addLog('Config written and verified on device.', 'ok');
 
@@ -5431,7 +5547,8 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
              + 'so it is not on a network. Pick one above and join it.', 'error');
         return;
       }
-      const ssid = (status.match(/^ssid=(.+)$/m) || [])[1];
+      const ssidRaw = (status.match(/^ssid=(.+)$/m) || [])[1];
+      const ssid = ssidRaw ? _ssidText(_wpaUnescape(ssidRaw.replace(/\r$/, ''))) : null;
       const ip   = (await adb.shell(
         "su -c 'ip addr show wlan0 | grep \"inet \" | while read proto addr rest; do echo ${addr%/*}; done'")).trim();
       if (!/\d+\.\d+\.\d+\.\d+/.test(ip)) {
@@ -6892,7 +7009,14 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   async function runEmosWifi() {
     const con = emosConsole;
     if (!con) throw new Error('No serial console — re-run the Reboot and Watch step.');
-    if (!wifiSsid) throw new Error('Choose a network first.');
+    const ssidB = ssidBytesFor(wifiSsid || '');
+    const bad = _ssidProblem(ssidB) || _pskProblem(wifiPsk);
+    if (bad) throw new Error(bad);
+    // Hex only, so nothing the operator typed ever reaches the console's
+    // shell: an SSID or password with a quote in it used to break the command.
+    const ssidHex = _bytesHex(ssidB);
+    const pskHex = wifiPsk ? await _wpaPsk(wifiPsk, ssidB) : '';
+    const hidden = !(wifiNetworks || []).some(n => n.ssidHex === ssidHex);
 
     addLog(`Joining ${wifiSsid}…`);
     // Every call carries -p. wpa_cli defaults to /var/run/wpa_supplicant and
@@ -6907,12 +7031,17 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // this radio reports no SAE, so it genuinely cannot do WPA3 (#82).
     const id = (await con.run('wpa_cli -p /data/misc/wifi/sockets -i wlan0 add_network')).trim().split('\n').pop().trim();
     if (!/^\d+$/.test(id)) throw new Error(`wpa_cli would not add a network (said "${id}").`);
-    await con.run(`wpa_cli -p /data/misc/wifi/sockets -i wlan0 set_network ${id} ssid '"${wifiSsid}"'`);
-    if (wifiPsk) {
-      await con.run(`wpa_cli -p /data/misc/wifi/sockets -i wlan0 set_network ${id} psk '"${wifiPsk}"'`);
-    } else {
-      await con.run(`wpa_cli -p /data/misc/wifi/sockets -i wlan0 set_network ${id} key_mgmt NONE`);
-    }
+    // Every set_network is checked: a refused one used to pass silently and
+    // surface 30s later as "did not associate".
+    const setNet = async (field, value) => {
+      const r = await con.run(`wpa_cli -p /data/misc/wifi/sockets -i wlan0 set_network ${id} ${field} ${value}`);
+      if (!/OK/.test(r)) throw new Error(`wpa_cli refused ${field}: ${r.trim() || 'no answer'}`);
+    };
+    await setNet('ssid', ssidHex);
+    if (pskHex) await setNet('psk', pskHex);
+    else await setNet('key_mgmt', 'NONE');
+    // Not in the last scan: probe for it by name, or it is never found.
+    if (hidden) await setNet('scan_ssid', '1');
     const en = await con.run(`wpa_cli -p /data/misc/wifi/sockets -i wlan0 enable_network ${id}`);
     if (!/OK/.test(en)) throw new Error(`wpa_cli refused to enable the network: ${en.trim()}`);
 

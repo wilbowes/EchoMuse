@@ -69,6 +69,7 @@ import em_pki
 import em_player
 import em_recordings
 import em_volume
+import em_wifi
 import em_scenes
 import em_shadow
 import em_support
@@ -1337,7 +1338,9 @@ async def _post_device_wifi(request: web.Request) -> web.Response:
     """
     POST /api/devices/{id}/wifi — switch the device to a new WiFi network.
 
-    Body: {"ssid": "...", "psk": "..."} (empty/absent psk = open network).
+    Body: {"ssid": "...", "ssid_hex": "...", "psk": "..."} — ssid_hex is
+    optional and names the exact SSID bytes from a scan; empty/absent psk =
+    open network. Rules in em_wifi.
 
     Returns 202 immediately: the device owns the whole switch (associate →
     DHCP → reconnect gates, auto-rollback on any failure — see the device's
@@ -1348,18 +1351,17 @@ async def _post_device_wifi(request: web.Request) -> web.Response:
     device_id = request.match_info["id"]
     body = await _json_body(request)
     ssid = _require_str(body, "ssid")
+    ssid_hex = str(body.get("ssid_hex") or "")
     psk  = str(body.get("psk") or "")
 
     # Mirror the device's own validation so obvious mistakes fail fast
     # with a readable message instead of a full switch/rollback cycle.
-    if any(ch in ssid or ch in psk for ch in ('"', "\\")):
-        return _error("invalid_credentials",
-                      "SSID/passphrase cannot contain double-quote or "
-                      "backslash characters (wpa_supplicant.conf cannot "
-                      "represent them safely)", 400)
-    if psk and not 8 <= len(psk) <= 63:
-        return _error("invalid_credentials",
-                      f"WPA passphrase must be 8–63 characters (got {len(psk)})", 400)
+    try:
+        why = em_wifi.problem(em_wifi.ssid_bytes(ssid, ssid_hex), psk)
+    except ValueError as e:
+        why = str(e)
+    if why:
+        return _error("invalid_credentials", why, 400)
 
     live = _devices.get(device_id)
     if live is None:
@@ -1373,7 +1375,12 @@ async def _post_device_wifi(request: web.Request) -> web.Response:
 
     st["pending"] = {"ssid": ssid, "started_at": time.time()}
     st["last_result"] = None
-    await live.send_control({"type": "wifi_change", "ssid": ssid, "psk": psk})
+    # ssid_hex rides alongside the name. Firmware that predates it ignores
+    # the field and uses the name, which is its behaviour today.
+    change = {"type": "wifi_change", "ssid": ssid, "psk": psk}
+    if ssid_hex:
+        change["ssid_hex"] = ssid_hex
+    await live.send_control(change)
     db.log_device(device_id, "info", "controller", f'WiFi change to "{ssid}" requested')
     await _push_event({"type": "device_update", "device_id": device_id,
                        "state": {"wifi": st}})

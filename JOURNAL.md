@@ -3362,3 +3362,24 @@ left) and was deliberately not chased. The emOS flow now writes the record at
 Install EchoMuse if it is missing (`ensureWifiNvram`), read from the device's
 own /system by symbol name, so a wiped emOS device runs stock's radio settings
 rather than the driver's fallback. Never overwrites; warns rather than fails.
+
+**Evening: every valid SSID, on every path.** Wil asked whether names with
+spaces and special characters were covered. They were not, on any of the four
+paths that take one. The emOS wizard put the SSID and password inside a
+single-quoted shell command on the console, so `Bob's WiFi` broke it (and a
+crafted name could run commands); the FireOS wizard, the controller and the
+firmware all refused `"` and `\`; both scan parsers trimmed spaces and passed
+wpa_cli's `Caf\xc3\xa9` escapes through as the name, which then named a
+different network; and `em-wifi` split scan output on whitespace, cutting "My
+Home WiFi" to "My". An SSID is 0-32 arbitrary bytes, so it is now handled as
+bytes throughout: decoded from printf_encode, carried as `ssid_hex`, compared
+as bytes, and written quoted when wpa_supplicant's quoted form can hold it —
+it reads to the LAST `"` (wpa_config_parse_string, and the same in
+wpa_config_parse_psk), so quotes and backslashes are literal — or as hex when
+not. Over the console only hex is ever sent, so nothing typed reaches a shell;
+the emOS wizard derives the 64-hex PSK in the browser (PBKDF2, checked against
+the IEEE 802.11i vectors). Verified by running the emOS wpa_supplicant 2.10
+build under qemu (in a PID namespace: 32-bit bionic refuses pids above 65535)
+against a conf with each form, which printed the exact bytes back. FireOS's
+older supplicant keeps the quoted form it has always had; hex there is only for
+names quoting cannot carry, and has not been seen on a FireOS device.
