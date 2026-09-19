@@ -295,6 +295,10 @@ jobs:
             emos/build/bb/busybox-*.tar.bz2
             emos/build/bb/busybox-LICENSE
           body_path: /tmp/emos-notes.md
-          generate_release_notes: true
+          # No generated list. GitHub's is every PR merged anywhere in the repo
+          # between two emos-v* tags — controller, docs, firmware — with "New
+          # Contributors" credits for work that is not in emOS (emos-v0.7
+          # credited a wake word cache fix). The tag annotation is the notes.
+          generate_release_notes: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
