@@ -106,6 +106,7 @@ jobs:
           node controller/tests/device_line.test.mjs
           node controller/tests/wipe_verdict.test.mjs
           node controller/tests/wifi_nvram.test.mjs
+          node controller/tests/kernel_label.test.mjs
 
   device-tests:
     name: Device Go tests

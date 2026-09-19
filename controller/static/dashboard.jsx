@@ -2879,14 +2879,19 @@ function _baseOsLabel(baseOs) {
 }
 
 // The kernel's word size from `uname -m`: "64-bit" or "32-bit". On biscuit it
-// is what separates emOS on FireOS 5's kernel (aarch64) from emOS on FireOS
-// 6's (armv7l) — same ARMv8 chip, both 3.18.19, one kernel built 32-bit.
-// Bitness rather than the arch name, since that is the difference that means
-// something to an operator. Unrecognised values pass through as-is.
+// is what separates emOS on FireOS 5's kernel from emOS on FireOS 6's — same
+// ARMv8 chip, both 3.18.19, one kernel built 32-bit.
+//
+// `armv8l` means a 64-bit kernel. The server is a 32-bit program, and an arm64
+// kernel reports COMPAT_UTS_MACHINE ("armv8l") to 32-bit tasks rather than
+// "aarch64"; a 32-bit ARM kernel never reports armv8l (it has no ARMv8
+// architecture level and says armv7l, as the spare does). Measured 2026-09-19:
+// EFF and NF on FireOS 5's arm64 kernel register as armv8l. Unrecognised
+// values pass through as-is.
 function _archShort(arch) {
   if (!arch) return null;
-  if (/^(aarch64|arm64|x86_64|amd64)$/.test(arch)) return '64-bit';
-  if (/^(armv\d+l?|arm|i[3-6]86)$/.test(arch)) return '32-bit';
+  if (/^(aarch64|arm64|armv8l|x86_64|amd64)$/.test(arch)) return '64-bit';
+  if (/^(armv[1-7]l?|arm|i[3-6]86)$/.test(arch)) return '32-bit';
   return arch;
 }
 
