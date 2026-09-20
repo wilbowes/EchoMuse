@@ -3745,6 +3745,10 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   const [wifiPsk, setWifiPsk]   = useState('');
   const [wifiNetworks, setWifiNetworks] = useState([]);
   const [duplicateDeviceId, setDuplicateDeviceId] = useState(null);
+  // The device_id the operator chose to re-provision without deleting. A ref
+  // rather than state: step 0 reads it from an async closure that captured an
+  // earlier render, and nothing renders from it.
+  const keepRecordRef = useRef(null);
   const [progress, setProgress] = useState(null);
   const [latestRelease, setLatestRelease] = useState(null);
   const [checkingRelease, setCheckingRelease] = useState(false);
@@ -4222,9 +4226,20 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       // creates one when the TLS token is minted, before first contact, so a
       // run that stopped after that step left a row the device never used.
       // Refusing on it cost a delete-and-retry on every bench run 2026-09-18.
-      const match = knownDevices.find(d => d.device_id && d.device_id.includes(serial)
-                                        && d.firmware_ver);
-      if (match) {
+      // Re-provisioning a device the controller already knows is SAFE on the
+      // server: ensure_device_token returns the existing row's token and
+      // leaves approval alone, so the device keeps its id, its ESPHome port,
+      // its config and its Home Assistant entities. The stop is here because
+      // it is usually a mistake — and because until emOS can be updated in
+      // place (#573), re-running the wizard is the only upgrade path, which
+      // makes "keep the record" the option most people actually want.
+      const { action, device: match } =
+        duplicateVerdict(knownDevices, serial, keepRecordRef.current);
+      if (action === 'keep') {
+        addLog(`Re-provisioning "${match.label || match.device_id}", keeping its `
+             + `controller record — its port, config and Home Assistant `
+             + `entities are unchanged.`, 'ok');
+      } else if (action === 'stop') {
         // Close the live ADB session before throwing — otherwise the
         // transport stays open and _lastUsbDevice keeps pointing at it.
         // On retry, requestDevice() disconnects the WebUSB interface but
@@ -4467,6 +4482,34 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   //   empty   no ANDROID! magic — nothing bootable there
   //   ours    magic, and our own emos.system= on the cmdline
   //   stock   magic, no stamp — somebody else's, i.e. Amazon's
+  // What step 0 should do about a serial the controller may already know.
+  //
+  // 'proceed' — nobody has this serial, or the row has never registered
+  //   (`firmware_ver` NULL). ensure_device_token creates a row when the TLS
+  //   token is minted, before first contact, so a run that stopped after that
+  //   step leaves one the device never used; refusing on it cost a
+  //   delete-and-retry on every bench run 2026-09-18.
+  // 'keep' — the operator asked to re-provision this exact device without
+  //   deleting it. Safe on the server: ensure_device_token returns the stored
+  //   token and leaves approval alone, so the device keeps its id, its
+  //   ESPHome port, its config and its Home Assistant entities.
+  // 'stop' — a live device, and the operator has not said which they meant.
+  //
+  // Matched on the SERIAL being contained in the device_id, as the registry
+  // does, so a device_id carrying a prefix still resolves.
+  function duplicateVerdict(knownDevices, serial, keepRecordFor) {
+    const device = (knownDevices || []).find(
+      d => d && d.device_id && d.device_id.includes(serial) && d.firmware_ver);
+    if (!device) return { action: 'proceed', device: null };
+    // Compared against the matched device, never against the typed serial: a
+    // stale flag from an earlier device in the same wizard session must not
+    // wave through a different one.
+    if (keepRecordFor && keepRecordFor === device.device_id) {
+      return { action: 'keep', device };
+    }
+    return { action: 'stop', device };
+  }
+
   function classifyBootSlots(probe) {
     const out = { a: { state: 'absent', dev: '' }, b: { state: 'absent', dev: '' },
                   sys: { a: '', b: '' } };
@@ -7849,6 +7892,20 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                   )}
                   {diagnostics && (
                     <Pill small onClick={downloadDiagnostics}>Download diagnostics</Pill>
+                  )}
+                  {/* Offered FIRST, and not `danger`: re-provisioning to pick
+                      up a newer emOS is the ordinary reason to be here, and
+                      keeping the record is what makes it cheap — the device
+                      keeps its port, so Home Assistant keeps its satellite. */}
+                  {step === 0 && duplicateDeviceId && (
+                    <Pill accent onClick={() => {
+                      keepRecordRef.current = duplicateDeviceId;
+                      addLog(`Keeping "${duplicateDeviceId}" on the controller. `
+                           + `Retry the step — the device keeps its port, config `
+                           + `and Home Assistant entities.`, 'ok');
+                      setDuplicateDeviceId(null);
+                      markStep(0, 'pending');
+                    }}>Re-provision, keep its record</Pill>
                   )}
                   {step === 0 && duplicateDeviceId && (
                     <Pill danger onClick={async () => {
