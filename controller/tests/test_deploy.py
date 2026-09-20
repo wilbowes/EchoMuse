@@ -3062,3 +3062,23 @@ def test_the_stale_bundle_check_does_not_refresh_the_displayed_version():
     assert "setStatus" not in block, (
         "the staleness poll must not call setStatus — the header's version "
         "has to keep naming the controller this page was loaded against")
+
+
+def test_the_fireos_flow_refuses_an_emos_boot_image_before_it_writes():
+    """
+    Patching an emOS boot image with Magisk bootloops the device — reported and
+    reproduced on hardware 2026-09-20. Step 1's FireOS 5 check cannot catch it
+    and is not wrong: emOS mounts FireOS's /system, so build.prop reports 5.1.1
+    and the device passes by that test's own logic.
+
+    The ORDERING is the assertion, as it is for the OTA's md5: a refusal that
+    happens after the pull and patch is a refusal that has already spent the
+    device's boot slot.
+    """
+    src = _jsx()
+    fn = src[src.index("async function runPatchBoot"):]
+    fn = fn[:fn.index("\n  async function ", 1)]
+    assert "isOurBootImage(" in fn, (
+        "runPatchBoot must check whose image is in the slot before patching it")
+    assert fn.index("isOurBootImage(") < fn.index("of=/tmp/work/boot.img"), (
+        "the emOS check must precede the pull, or the refusal comes too late")

@@ -4482,6 +4482,25 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   //   empty   no ANDROID! magic — nothing bootable there
   //   ours    magic, and our own emos.system= on the cmdline
   //   stock   magic, no stamp — somebody else's, i.e. Amazon's
+  // Whether a boot image is OURS, judged from its cmdline.
+  //
+  // The same two markers the emOS flow's slot probe uses, and they must stay
+  // in step: `emos.system=` is stamped by the packer but only since 2026-09-14,
+  // so every emOS image built before that carries no stamp at all;
+  // `ramoops.mem_address=0x44400000` has been appended to every image the
+  // packer has ever built. The full ADDRESS rather than the bare key, because
+  // it names the region the vendor device tree reserves for us.
+  //
+  // Here the two ways of being wrong are not equal in the other direction from
+  // the escrow: reading OURS as stock patches an emOS image with Magisk and
+  // bootloops the device, and reading stock as ours only refuses a provision
+  // somebody can retry.
+  function isOurBootImage(cmdline) {
+    const c = cmdline || '';
+    return c.includes('emos.system=')
+        || c.includes('ramoops.mem_address=0x44400000');
+  }
+
   // What step 0 should do about a serial the controller may already know.
   //
   // 'proceed' — nobody has this serial, or the row has never registered
@@ -4715,6 +4734,29 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     const boot = classifyBootTarget(probe);
     if (!boot.ok) throw new Error(boot.reason);
     addLog(`  → ${boot.reason}`, boot.warn ? 'warn' : 'ok');
+
+    // Refuse to Magisk-patch an emOS image.
+    //
+    // Step 1's FireOS 5 check cannot catch this and is not wrong: emOS mounts
+    // FireOS's /system for bionic and tinyalsa, so build.prop reports 5.1.1
+    // and an emOS device passes by that test's own logic. Patching anyway
+    // bootloops it — reported and reproduced on hardware 2026-09-20.
+    addLog('Checking what is in that slot…');
+    const slotCmdline = await c.shell(
+      `dd if=${boot.target} bs=1 skip=64 count=512 2>/dev/null | tr -d "\\000"`);
+    if (isOurBootImage(slotCmdline)) {
+      throw new Error(
+        `${boot.target} holds an emOS boot image, not FireOS. This flow patches `
+        + `it with Magisk, which produces a device that boots in a loop.\n\n`
+        + `Two ways on:\n`
+        + `  • To keep emOS — close this wizard and run the emOS flow instead, `
+        + `which is how an emOS device is provisioned and updated.\n`
+        + `  • To go back to FireOS — restore the stock boot image first (the `
+        + `emOS flow's Restore step writes the escrowed one), then re-run this `
+        + `flow.\n\n`
+        + `Nothing has been written; the device is exactly as you found it.`);
+    }
+    addLog('  → stock boot image', 'ok');
 
     addLog('Pulling boot image from device (10–20s)…');
     // stderr carried through rather than discarded: dd reports its record

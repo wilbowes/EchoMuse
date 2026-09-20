@@ -379,11 +379,16 @@ for (const [original, outcome] of [
   // The escrow (#468) runs before anything writes; its helpers are stubbed
   // and it is recorded in the same list as pushes, so the order is checkable.
   const events = [];
+  // isOurBootImage is injected rather than stubbed: it decides whether this
+  // flow refuses the slot outright, so a stub would test the harness. The real
+  // one is lifted, and these fixtures carry stock cmdlines.
+  const isOurBootImage = eval(`(${liftFunction("isOurBootImage")})`);
   const runPatchBoot = new Function("classifyBootTarget", "patchBootCmdline", "addLog",
     "setProgress", "_INIT_RC_APPEND", "_md5Hex", "setEmosRef", "setEmosTarget",
-    "_downloadBytes", `return async ${liftFunction("runPatchBoot")}`)(
+    "_downloadBytes", "isOurBootImage", `return async ${liftFunction("runPatchBoot")}`)(
       classifyBootTarget, patchBootCmdline, text => logs.push(text), () => {}, "",
-      () => "0".repeat(32), () => events.push("escrow"), () => {}, () => events.push("download"));
+      () => "0".repeat(32), () => events.push("escrow"), () => {}, () => events.push("download"),
+      isOurBootImage);
   let error;
   try { await runPatchBoot(c); } catch (e) { error = e; }
   check("the image is escrowed and downloaded before anything is pushed",
