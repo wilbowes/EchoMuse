@@ -273,14 +273,15 @@ func TestEmosConfIsReadableByTheSupplicantThatReadsIt(t *testing.T) {
 				if !ok || owner != [2]int{aidWifi, aidWifi} {
 					t.Errorf("conf was not handed to AID_WIFI: %v (present=%v)", owner, ok)
 				}
-				// Unreadable through a directory it cannot traverse.
+				// The directory has to allow both traversal and, for
+				// save_config from the wizard's WiFi step, writing.
 				dir, err := os.Stat(filepath.Dir(path))
 				if err != nil {
 					t.Fatalf("stat dir: %v", err)
 				}
-				if dir.Mode().Perm()&0o010 == 0 {
-					t.Errorf("directory mode %#o denies the wifi group traversal",
-						dir.Mode().Perm())
+				if dir.Mode().Perm()&0o070 != 0o070 {
+					t.Errorf("directory mode %#o does not give the wifi group rwx, "+
+						"so save_config cannot rewrite the conf", dir.Mode().Perm())
 				}
 			} else if ok {
 				t.Errorf("root's own supplicant needs no chown, got %v", owner)

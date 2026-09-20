@@ -424,10 +424,12 @@ func writeConf(content string) error {
 		mode, wifiOwned := confMode()
 		dir, dirMode := filepath.Dir(path), os.FileMode(0o700)
 		if wifiOwned {
-			// Traverse for the wifi group, no listing and no writing: the
-			// supplicant only rewrites a conf on SAVE_CONFIG, which nothing
-			// under emOS sends.
-			dirMode = 0o710
+			// Group-writable, like Android's /data/misc/wifi: the supplicant
+			// rewrites the conf in place on SAVE_CONFIG, which the
+			// provisioning wizard's emOS WiFi step sends after joining
+			// (dashboard.jsx, runStep 8). Traverse alone would fail that step
+			// on any device that already has a conf here.
+			dirMode = 0o770
 		}
 		if err := os.MkdirAll(dir, dirMode); err != nil {
 			return fmt.Errorf("mkdir %s: %w", dir, err)
