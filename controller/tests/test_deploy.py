@@ -2451,11 +2451,17 @@ def test_only_a_registered_device_blocks_the_wizard():
     firmware_ver is not one. ensure_device_token creates it when the TLS token
     is minted, before the device has ever connected, so matching on the serial
     alone refused every re-run of a provision that had got that far.
+
+    Located by FUNCTION NAME rather than by scanning back from the error
+    string: the decision moved into duplicateVerdict() so it could be unit
+    tested, and textual adjacency then pointed at nothing. Behaviour is covered
+    by controller/tests/duplicate_device.test.mjs; this pins that the rule is
+    still expressed in the source at all.
     """
     src = _jsx()
-    at = src.index("appears to already be registered")
-    body = src[src.rindex("knownDevices.find(", 0, at):at]
-    assert "d.firmware_ver" in body, (
+    at = src.index("function duplicateVerdict")
+    body = src[at:src.index("\n  }", at)]
+    assert "knownDevices" in body and "d.firmware_ver" in body, (
         "the already-registered check must ignore rows that never registered")
 
 
