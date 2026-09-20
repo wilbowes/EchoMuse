@@ -4751,9 +4751,8 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         + `Two ways on:\n`
         + `  • To keep emOS — close this wizard and run the emOS flow instead, `
         + `which is how an emOS device is provisioned and updated.\n`
-        + `  • To go back to FireOS — restore the stock boot image first (the `
-        + `emOS flow's Restore step writes the escrowed one), then re-run this `
-        + `flow.\n\n`
+        + `  • To go back to FireOS — restore FireOS 5 the way the amonet `
+        + `unlock instructions describe, then re-run this flow.\n\n`
         + `Nothing has been written; the device is exactly as you found it.`);
     }
     addLog('  → stock boot image', 'ok');
