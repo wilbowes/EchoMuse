@@ -221,3 +221,70 @@ func TestComposeConfOpenNetwork(t *testing.T) {
 		t.Errorf("an open network must carry no psk:\n%s", conf)
 	}
 }
+
+// The conf we write on emOS has to be readable by whichever supplicant init
+// will start, and the two run as different users. Writing it root-only on a
+// FireOS 5 image left Amazon's supplicant unable to open it: it exited at
+// startup and the device booted with no network at all (EFF, 2026-09-20).
+func TestEmosConfIsReadableByTheSupplicantThatReadsIt(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		ownSupp   bool // the image carries /sbin/wpa_supplicant
+		wantMode  os.FileMode
+		wantOwned bool // handed to AID_WIFI
+	}{
+		{"FireOS 5 image: Amazon's supplicant, running as wifi", false, 0o660, true},
+		{"FireOS 6 image: emOS's own supplicant, running as root", true, 0o600, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			onBase(t, platform.EmOS, "", "ctrl_interface="+emosDir+"\n")
+
+			supp := filepath.Join(t.TempDir(), "wpa_supplicant")
+			if tc.ownSupp {
+				if err := os.WriteFile(supp, []byte("#!/bin/sh\n"), 0o755); err != nil {
+					t.Fatalf("writing the stub supplicant: %v", err)
+				}
+			}
+			oldSupp, oldChown := emosSuppP, chownFile
+			t.Cleanup(func() { emosSuppP, chownFile = oldSupp, oldChown })
+			emosSuppP = supp
+
+			chowned := map[string][2]int{}
+			chownFile = func(path string, uid, gid int) error {
+				chowned[path] = [2]int{uid, gid}
+				return nil
+			}
+
+			if err := writeConf("network={\n}\n"); err != nil {
+				t.Fatalf("writeConf: %v", err)
+			}
+
+			_, path := confPaths()
+			st, err := os.Stat(path)
+			if err != nil {
+				t.Fatalf("stat %s: %v", path, err)
+			}
+			if got := st.Mode().Perm(); got != tc.wantMode {
+				t.Errorf("conf mode is %#o, want %#o", got, tc.wantMode)
+			}
+
+			owner, ok := chowned[path]
+			if tc.wantOwned {
+				if !ok || owner != [2]int{aidWifi, aidWifi} {
+					t.Errorf("conf was not handed to AID_WIFI: %v (present=%v)", owner, ok)
+				}
+				// Unreadable through a directory it cannot traverse.
+				dir, err := os.Stat(filepath.Dir(path))
+				if err != nil {
+					t.Fatalf("stat dir: %v", err)
+				}
+				if dir.Mode().Perm()&0o010 == 0 {
+					t.Errorf("directory mode %#o denies the wifi group traversal",
+						dir.Mode().Perm())
+				}
+			} else if ok {
+				t.Errorf("root's own supplicant needs no chown, got %v", owner)
+			}
+		})
+	}
+}

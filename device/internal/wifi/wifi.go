@@ -36,8 +36,10 @@
 // Unlike the wizard (ADB shell), this package runs inside the root Go
 // binary, so file writes use plain os.WriteFile — none of the mksh
 // redirect quirks apply. FireOS needs ownership restored to wifi:wifi
-// (AID_WIFI=1010) 0660 or the framework can't read it; emOS has no such user
-// and the file holds a PSK, so 0600.
+// (AID_WIFI=1010) 0660 or the framework can't read it. emOS depends on which
+// supplicant the image carries, since they run as different users — see
+// confMode, and note that 0600 there strands a FireOS 5 device on its next
+// boot.
 //
 // Safety model (the connection to the controller dies mid-change, so the
 // device owns the whole sequence):
@@ -87,8 +89,15 @@ const (
 	iface          = "wlan0"
 
 	// AID_WIFI — fixed uid/gid on Android; the framework reads the conf
-	// as this user.
+	// as this user. Amazon's supplicant runs as it under emOS too, which is
+	// what confMode is about.
 	aidWifi = 1010
+
+	// emOS's own supplicant, present only in images that carry the payload's
+	// WiFi tools. Its presence is what init selects on (first_exec in
+	// emos/init/init.c), so it is also what decides who must be able to read
+	// the conf we write.
+	emosSupp = "/sbin/wpa_supplicant"
 
 	// 20s (the provisioning wizard's window) proved too tight on hardware
 	// for a network the framework hasn't joined before — autojoin's scan
@@ -140,6 +149,11 @@ var (
 	baseOS       = platform.Base
 	androidConfP = androidConf
 	emosConfP    = emosConf
+	emosSuppP    = emosSupp
+	// Indirected so the ownership rules are testable off-target: a test host
+	// is not root and cannot hand a file to AID_WIFI, and the uid it asks for
+	// is the whole assertion.
+	chownFile = os.Chown
 )
 
 func onEmOS() bool { return baseOS() == platform.EmOS }
@@ -380,18 +394,62 @@ func composeConf(ssid []byte, psk string) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
+// confMode says how tightly the conf we write on emOS may be locked down:
+// root-only when emOS's own supplicant will read it, wifi-readable when
+// Amazon's will.
+//
+// The two supplicants run as different users. Ours is started as root; Amazon's
+// drops to AID_WIFI, so a 0600 root conf is one it cannot open — it exits at
+// startup, init leaves a zombie, and the device comes up with NO network and no
+// way in but a cable. Measured on EFF 2026-09-20, after a WiFi change wrote the
+// file and the next boot tried to read it.
+//
+// Selected on the same test init uses (first_exec in emos/init/init.c), rather
+// than on the base OS: a FireOS 5 image carries no /sbin/wpa_supplicant, since
+// the payload's WiFi tools ship only in the ARM32 image, and that is exactly
+// the fleet this stranded. Drop the binary in and both halves switch together.
+func confMode() (mode os.FileMode, wifiOwned bool) {
+	if _, err := os.Stat(emosSuppP); err == nil {
+		return 0o600, false
+	}
+	return 0o660, true
+}
+
 func writeConf(content string) error {
 	_, path := confPaths()
 	if onEmOS() {
-		// 0600: no other user reads it and it holds the PSK. MkdirAll because
-		// /data/emos may not exist on a device never configured here.
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			return fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
+		// No wider than the supplicant that reads it — it holds the PSK.
+		// MkdirAll because /data/emos may not exist on a device never
+		// configured here.
+		mode, wifiOwned := confMode()
+		dir, dirMode := filepath.Dir(path), os.FileMode(0o700)
+		if wifiOwned {
+			// Traverse for the wifi group, no listing and no writing: the
+			// supplicant only rewrites a conf on SAVE_CONFIG, which nothing
+			// under emOS sends.
+			dirMode = 0o710
 		}
-		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		if err := os.MkdirAll(dir, dirMode); err != nil {
+			return fmt.Errorf("mkdir %s: %w", dir, err)
+		}
+		if err := os.WriteFile(path, []byte(content), mode); err != nil {
 			return fmt.Errorf("write %s: %w", path, err)
 		}
-		return os.Chmod(path, 0o600)
+		if wifiOwned {
+			// An existing directory keeps its old mode through MkdirAll, and
+			// every device that has taken a WiFi change already has one at
+			// 0700.
+			if err := os.Chmod(dir, dirMode); err != nil {
+				return fmt.Errorf("chmod %s: %w", dir, err)
+			}
+			if err := chownFile(dir, 0, aidWifi); err != nil {
+				return fmt.Errorf("chown %s: %w", dir, err)
+			}
+			if err := chownFile(path, aidWifi, aidWifi); err != nil {
+				return fmt.Errorf("chown %s: %w", path, err)
+			}
+		}
+		return os.Chmod(path, mode)
 	}
 	// Traverse bit on the dir — 666 here made every file inside
 	// unopenable (provisioning finding).
@@ -399,7 +457,7 @@ func writeConf(content string) error {
 	if err := os.WriteFile(path, []byte(content), 0o660); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
-	if err := os.Chown(path, aidWifi, aidWifi); err != nil {
+	if err := chownFile(path, aidWifi, aidWifi); err != nil {
 		return fmt.Errorf("chown %s: %w", path, err)
 	}
 	return os.Chmod(path, 0o660)
