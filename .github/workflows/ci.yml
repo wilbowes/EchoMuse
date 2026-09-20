@@ -486,12 +486,23 @@ jobs:
       # indistinguishable from a kernel that never started; there is no
       # dynamic loader at PID 1 time, so a link that quietly picks up a shared
       # object is a device that has to be recovered by hand to diagnose.
-      - name: Build the emOS init (aarch64, static)
+      - name: Build the emOS init (aarch64, static, biscuit)
         run: |
           mkdir -p emos/build
+          # init.c picks the board header from -DEMOS_BOARD and the matching
+          # board runtime comes from boards_<name>.c; the link shape is the
+          # same for every board. Today's second board is radar -- the build
+          # below includes both as a smoke test, since a board header that
+          # regresses only fails on the device.
           docker run --rm -v "$PWD/emos":/emos -w /emos echomuse-compiler bash -lc \
             '/opt/android/ndk/21.4.7075529/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang \
-               -static -O2 -Wall -o build/init init/init.c'
+               -static -O2 -Wall -DEMOS_BOARD=biscuit -o build/init.init_biscuit \
+               init/init.c init/boards/boards_biscuit.c'
+          docker run --rm -v "$PWD/emos":/emos -w /emos echomuse-compiler bash -lc \
+            '/opt/android/ndk/21.4.7075529/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang \
+               -static -O2 -Wall -DEMOS_BOARD=radar -o build/init.init_radar \
+               init/init.c init/boards/boards_radar.c'
+          mv build/init.init_biscuit build/init
       - name: Check it is a static aarch64 binary
         # Same reasoning as the firmware check above, plus the static half:
         # both properties are silent when wrong and fatal on the device.
@@ -505,7 +516,9 @@ jobs:
         run: |
           docker run --rm -v "$PWD/emos":/emos -w /emos echomuse-compiler bash -lc \
             '/opt/android/ndk/21.4.7075529/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang \
-               -static -O2 -Wall -o build/init32 init/init.c'
+               -static -O2 -Wall -DEMOS_BOARD=biscuit -o build/init32.init_biscuit \
+               init/init.c init/boards/boards_biscuit.c'
+          mv build/init32.init_biscuit build/init32
       - name: Check it is a static 32-bit ARM binary
         run: |
           file emos/build/init32

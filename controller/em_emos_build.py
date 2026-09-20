@@ -407,6 +407,149 @@ def reference_kernel_arch(ref: bytes) -> str:
     return ""
 
 
+# ── The flattened device tree ────────────────────────────────────────────────
+#
+# reference_board_id() reads `compatible` out of the first DTB in the
+# reference kernel payload. The property is a string list; the most
+# specific entry is LAST by FDT convention, and on the Echo Dot Gen 2
+# it is `mediatek,mt8163-biscuit`. The kernel picks the most specific
+# entry against its own match tables, so the LAST one is the answer
+# we want to stamp.
+#
+# Parsing an FDT in ~70 lines of pure stdlib avoids dragging in dtc,
+# libfdt, or any C extension. The format is documented in the
+# boot.txt in the kernel tree and stable across the 3.x and 4.x
+# versions that ship with the devices emOS supports.
+FDT_MAGIC       = 0xd00dfeed
+FDT_BEGIN_NODE  = 1
+FDT_END_NODE    = 2
+FDT_PROP        = 3
+FDT_NOP         = 4
+FDT_END         = 9
+
+
+def _fdt_compatible(dtb: bytes) -> str:
+    """The last `compatible` string in the FDT root, or empty on no answer.
+
+    A walk that stops at the first depth-zero END_NODE rather than
+    parsing every node: `compatible` lives at the root by FDT
+    convention, so a deeper search would burn cycles for nothing.
+    Anything malformed (truncated header, offset past end, unterminated
+    node name) returns empty rather than raising -- the failure surface
+    is "stamp defaults to biscuit", not "build refuses", which keeps an
+    unusual DTB from blocking a working image.
+
+    Property values in FDT are a 4-byte-aligned byte string; for
+    `compatible`, which is a string list, the bytes are two NUL-
+    separated strings and a trailing NUL. Split, take the LAST entry
+    (the most specific), strip the NUL. """
+    # The packer above searches for the FDT magic by the byte sequence
+    # `b"\\xd0\\x0d\\xfe\\xed"` (the pre-existing search bug, see the
+    # reference_board_id comment). Comparing against the same byte
+    # sequence directly keeps this parser in step with the search,
+    # rather than depending on the byte-order of struct.unpack.
+    if len(dtb) < 40 or dtb[:4] != b"\xd0\x0d\xfe\xed":
+        return ""
+    # FDT header fields are big-endian on the wire per the spec. Use ">I"
+    # rather than "<I" so the parser matches what a real device emits.
+    off_struct, off_strings = struct.unpack(
+        ">2I", dtb[8:16])
+    if off_struct >= len(dtb) or off_strings >= len(dtb):
+        return ""
+
+    # Walk the struct block looking for `compatible` at the root. depth
+    # starts at 0 (outside any node) and BEGIN_NODE increments it; the
+    # root node's properties live at depth 1. We only record properties
+    # at depth 1 because `compatible` is a root property on every
+    # device tree we care about, and a deeper search would burn cycles
+    # for nothing.
+    depth = 0
+    p = off_struct
+    compatible = ""
+    while p + 8 <= len(dtb):
+        # FDT tokens and property-length fields are big-endian too.
+        tok = struct.unpack(">I", dtb[p:p + 4])[0]
+        p += 4
+        if tok == FDT_END:
+            break
+        if tok == FDT_NOP:
+            continue
+        if tok == FDT_BEGIN_NODE:
+            # Node name: NUL-terminated, padded to a multiple of 4 bytes
+            # TOTAL (including the NUL) from the start of the name. The
+            # FDT spec rounds from the START of the field, not from
+            # `name_end + 1`, which matters for empty names: a single NUL
+            # at an aligned position needs three padding bytes, and
+            # rounding from the wrong end loses them.
+            name_start = p
+            name_end = dtb.find(b"\x00", p)
+            if name_end < 0:
+                return ""
+            name_size = ((name_end - name_start) + 1 + 3) & ~3
+            p = name_start + name_size
+            depth += 1
+            continue
+        if tok == FDT_END_NODE:
+            depth -= 1
+            continue
+        if tok == FDT_PROP:
+            if p + 8 > len(dtb):
+                return ""
+            valen, nameoff = struct.unpack(">II", dtb[p:p + 8])
+            p += 8
+            # Property name from the strings block.
+            nend = dtb.find(b"\x00", off_strings + nameoff)
+            if nend < 0:
+                return ""
+            name = dtb[off_strings + nameoff:nend].decode(
+                "ascii", errors="replace")
+            if name == "compatible" and depth == 1:
+                # String list: NUL-separated, last entry is the most
+                # specific. Read valen bytes, split, take the last.
+                if p + valen > len(dtb):
+                    return ""
+                entries = dtb[p:p + valen].split(b"\x00")
+                # Filter empty trailing entries from the split.
+                entries = [e for e in entries if e]
+                if entries:
+                    compatible = entries[-1].decode("ascii", errors="replace")
+            # Align from the start of the value, not from p + valen -- the
+            # latter is already aligned for valen % 4 == 0 and would skip
+            # the mandatory 4 bytes of padding the spec requires.
+            p += (valen + 3) & ~3
+            continue
+        # Unknown token -- bail rather than guess.
+        return ""
+    return compatible
+
+
+def reference_board_id(ref: bytes) -> str:
+    """The DTB-compatible string of the reference, or empty on no answer.
+
+    Mirrors reference_kernel_arch's empty-on-failure rule: a builder
+    that cannot tell which board the device is gets a refusal-or-default
+    surface rather than a wrong guess. The packer falls back to a
+    caller-supplied value (env var, wizard input) on empty, so a
+    missing DTB just means the caller picks the board. """
+    if len(ref) < PAGE or ref[:8] != b"ANDROID!":
+        return ""
+    ksz = struct.unpack("<I", ref[8:12])[0]
+    payload = ref[PAGE:PAGE + ksz][0x200:]
+    i = payload.find(b"\xd0\x0d\xfe\xed")   # first DTB magic ends the zImage
+    if i < 0:
+        return ""
+    dtb = payload[i:]
+    name = _fdt_compatible(dtb)
+    # The most specific FDT entry on biscuit is "mediatek,mt8163-biscuit".
+    # Normalise it to "biscuit" so init.c's BOARD_DEFAULT ("biscuit") is
+    # what the stamp carries. A new board adds one elif here.
+    if name == "mediatek,mt8163-biscuit":
+        return "biscuit"
+    if name:
+        return name.split(",")[-1]   # vendor,family -> family, conservatively
+    return ""
+
+
 # The partition holding the FireOS userspace an image was built beside, stamped
 # onto its own cmdline so emOS can mount the right one — see cmdline_system_part
 # in emos/init/init.c, and emos/init/cmdlinecheck.c, which pins this format.
@@ -415,6 +558,19 @@ def reference_kernel_arch(ref: bytes) -> str:
 # somebody supporting a device gets asked to read out of `od` on the image or
 # `/proc/cmdline` on the device, and "13" alone says nothing.
 SYSTEM_CMDLINE_KEY = "emos.system="
+
+# The board this image is built against, stamped onto its own cmdline so
+# init.c can resolve which boards_*.c runtime and which constants to use.
+# See cmdline_board() in emos/init/init.c, and emos/init/cmdlinecheck.c,
+# which pins this format.
+#
+# Default is "biscuit" — see BOARD_DEFAULT in init.c — so older images
+# built before this stamp existed keep booting against the only board
+# init currently supports. The packer passes an explicit value when it
+# has one (read off the DTB or set via env), so the stamp travels with
+# the image rather than being guessed at each boot.
+BOARD_CMDLINE_KEY = "emos.board="
+BOARD_DEFAULT = "biscuit"
 
 
 def _stamp_cmdline_key(cmdline: bytes, key: str, value: str) -> bytes:
@@ -434,8 +590,15 @@ def _stamp_cmdline_key(cmdline: bytes, key: str, value: str) -> bytes:
 
 
 def pack(parts: dict, zimage: bytes, dtbs: bytes, ramdisk: bytes,
-         extra_cmdline: str = RAMOOPS_CMDLINE, system_part: int = None) -> bytes:
-    """Assemble a boot image from its parts, using the reference's own header."""
+         extra_cmdline: str = RAMOOPS_CMDLINE, system_part: int = None,
+         board_id: str = BOARD_DEFAULT) -> bytes:
+    """Assemble a boot image from its parts, using the reference's own header.
+
+    `board_id` is the value to stamp under emos.board=. Defaults to
+    BOARD_DEFAULT ("biscuit") so an explicit None is not necessary and
+    older callers stay byte-for-byte equivalent. mkboot.py stamps the
+    same default when its env var is unset and its DTB has no answer,
+    which is what the cross-implementation parity test pins against. """
     cmdline = parts["cmdline"]
     # Appended only if it is not already there.
     #
@@ -448,7 +611,9 @@ def pack(parts: dict, zimage: bytes, dtbs: bytes, ramdisk: bytes,
     # which is the first time anything has repacked an emOS image.
     if extra_cmdline and extra_cmdline.encode() not in cmdline:
         cmdline = cmdline + b" " + extra_cmdline.encode()
-    # After the ramoops block, so the stamp is last and most visible in a dump.
+    # After the ramoops block, so the stamps are last and most visible in a
+    # dump. BOARD is stamped last so the order in a hex dump reads
+    # "ramoops ... emos.system= ... emos.board=".
     if system_part is not None:
         if not 1 <= int(system_part) <= 127:
             raise BuildError(
@@ -457,6 +622,15 @@ def pack(parts: dict, zimage: bytes, dtbs: bytes, ramdisk: bytes,
         cmdline = _stamp_cmdline_key(
             cmdline, SYSTEM_CMDLINE_KEY,
             f"/dev/block/mmcblk0p{int(system_part)}")
+    if board_id:
+        # Same printable-ASCII rule as cmdline_board() in init.c -- the
+        # value is a string the kernel prints verbatim, and a corrupt one
+        # is a board id we cannot reason about.
+        if not all(0x21 <= ord(c) <= 0x7e for c in board_id):
+            raise BuildError(
+                f"the board id must be non-empty printable ASCII, "
+                f"not {board_id!r}")
+        cmdline = _stamp_cmdline_key(cmdline, BOARD_CMDLINE_KEY, board_id)
     if len(cmdline) > 511:
         raise BuildError(
             f"the kernel command line is too long for the 512-byte field "
@@ -607,7 +781,8 @@ def init_binary_problems(init_binary: bytes, arch: str = ARCH_ARM64) -> list:
 
 def build_emos_image(reference: bytes, init_binary: bytes, version: str,
                      build_id: str = "", sbin: dict = None,
-                     system_part: int = None) -> dict:
+                     system_part: int = None,
+                     board_id: str = None) -> dict:
     """Build the image, refusing rather than warning at every gate.
 
     Returns the image and what went into it, so the wizard can show the user
@@ -619,7 +794,12 @@ def build_emos_image(reference: bytes, init_binary: bytes, version: str,
     system_a/system_b through TWRP's by-name map, which is the one place those
     names exist. Omitted, the image carries no stamp and emOS falls back to the
     partition it hardcoded before this existed, so older behaviour is kept.
-    """
+
+    `board_id` is the value to stamp under emos.board=. None means "let the
+    packer decide": it tries reference_board_id() against the DTB and falls
+    back to BOARD_DEFAULT ("biscuit") on no match, the same default init.c
+    applies. An explicit value here wins over both -- the wizard passes one
+    when the user has named the device. """
     # Against the REFERENCE's kernel, not a constant: the same function builds
     # for both, and only the user's own image knows which.
     arch = reference_kernel_arch(reference)
@@ -679,8 +859,13 @@ def build_emos_image(reference: bytes, init_binary: bytes, version: str,
             + detail)
 
     ramdisk = build_ramdisk(init_binary, version, build_id, sbin)
+    # Resolve the board id: explicit caller wins, then DTB-compatible
+    # string from the reference, then BOARD_DEFAULT. The DTB sniff is the
+    # honest source for a board we have not been told about by name; the
+    # default keeps older callers (and older images) working.
+    resolved_board = board_id or reference_board_id(reference) or BOARD_DEFAULT
     image = pack(parts, parts["zimage"], parts["dtbs"], ramdisk,
-                 system_part=system_part)
+                 system_part=system_part, board_id=resolved_board)
     return dict(
         image=image,
         md5=hashlib.md5(image).hexdigest(),
@@ -691,6 +876,7 @@ def build_emos_image(reference: bytes, init_binary: bytes, version: str,
         zimage_size=len(parts["zimage"]),
         dtb_size=len(parts["dtbs"]),
         ramdisk_size=len(ramdisk),
+        board_id=resolved_board,
         kernel_addr=parts["kaddr"],
         # Read back out of the image rather than reconstructed, so what the
         # wizard shows is what was actually written. Rebuilding it here meant

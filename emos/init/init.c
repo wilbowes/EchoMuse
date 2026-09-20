@@ -44,60 +44,57 @@
 #include <time.h>
 #include <unistd.h>
 
-#define CACHE     "/dev/block/mmcblk0p15"
+/* The board profile. EMOS_BOARD is set by the build script (build.sh
+ * forwards it as -DEMOS_BOARD=<name>) and the matching header is
+ * included below. A board missing from the case list is a build error;
+ * the default to "biscuit" preserves today's single-board behaviour
+ * for anyone building without an explicit selection.
+ *
+ * For off-target tests (cmdlinecheck, ringsim, ...) this still picks
+ * up biscuit, because the Makefile equivalent is "-DEMOS_BOARD=biscuit"
+ * passed as a default.
+ *
+ * boards_stubs.h provides weak placeholders for the board runtime so
+ * the off-target tests link without boards_<name>.c. */
+#include "boards/boards.h"
+#include "boards/boards_stubs.h"
+
+#ifndef EMOS_BOARD
+#define EMOS_BOARD biscuit
+#endif
+
+/* Stringification is the only portable way to build an include path
+ * from a macro value; token-pasting would give "boards/biscuit" as a
+ * single identifier and choke on the slash. */
+#define EMOS_BOARD_STR2(x) #x
+#define EMOS_BOARD_STR(x)  EMOS_BOARD_STR2(x)
+
+#include EMOS_BOARD_STR(boards/EMOS_BOARD.h)
+
+/* Backwards-compatible aliases. The LED ring constants used to be
+ * defined here directly; they now come from the board header. Renaming
+ * every reference site would be a separate diff; the aliases keep
+ * the diff to this file alone. */
+#define CACHE        BOARD_CACHE_PART
+#define BOOTDEV      BOARD_BOOT_PART
+#ifndef LEDDIR
+#define LEDDIR       BOARD_LED_NODE
+#endif
+#define LED_N        BOARD_LED_COUNT
+#define LED_BOTTOM   BOARD_LED_BOTTOM
+#define LED_DIR      BOARD_LED_DIR
+#define ORBIT_STEP_MS BOARD_ORBIT_STEP_MS
+
 #define USBDIR    "/sys/class/android_usb/android0"
 #define TTY       "/dev/ttyGS0"
 #define TRAIL_OFF 1024
 
 
-/* Every device node this system needs, created by hand.
- *
- * There is no devtmpfs on this kernel — Android's /dev is a tmpfs populated by
- * ueventd from uevents, and we do not run ueventd. Numbers were read off a
- * running FireOS device, never guessed. The firmware resolves input devices by
- * NAME via /proc/bus/input/devices, so the node numbering here only has to
- * make them openable, not meaningful: event2 is the volume button on biscuit
- * and something else entirely on other boards.
- */
-struct node { const char *path; int major, minor; };
-
-static const struct node nodes[] = {
-    { "/dev/input/event0", 13, 64 },   /* ACCDET  */
-    { "/dev/input/event1", 13, 65 },   /* mtk-kpd */
-    { "/dev/input/event2", 13, 66 },   /* keys    */
-
-    { "/dev/snd/controlC0", 116,  2 },
-    { "/dev/snd/seq",       116,  1 },
-    { "/dev/snd/timer",     116, 33 },
-    { "/dev/snd/pcmC0D0p",  116,  3 }, { "/dev/snd/pcmC0D1c",  116,  4 },
-    { "/dev/snd/pcmC0D2p",  116,  5 }, { "/dev/snd/pcmC0D2c",  116,  6 },
-    { "/dev/snd/pcmC0D3p",  116,  7 }, { "/dev/snd/pcmC0D3c",  116,  8 },
-    { "/dev/snd/pcmC0D4p",  116,  9 }, { "/dev/snd/pcmC0D4c",  116, 10 },
-    { "/dev/snd/pcmC0D5p",  116, 11 }, { "/dev/snd/pcmC0D5c",  116, 12 },
-    { "/dev/snd/pcmC0D6p",  116, 13 }, { "/dev/snd/pcmC0D6c",  116, 14 },
-    { "/dev/snd/pcmC0D7p",  116, 15 }, { "/dev/snd/pcmC0D7c",  116, 16 },
-    { "/dev/snd/pcmC0D8p",  116, 17 }, { "/dev/snd/pcmC0D9c",  116, 18 },
-    { "/dev/snd/pcmC0D10p", 116, 19 }, { "/dev/snd/pcmC0D11p", 116, 20 },
-    { "/dev/snd/pcmC0D12c", 116, 21 }, { "/dev/snd/pcmC0D13c", 116, 22 },
-    { "/dev/snd/pcmC0D14p", 116, 23 }, { "/dev/snd/pcmC0D15c", 116, 24 },
-    { "/dev/snd/pcmC0D16c", 116, 25 }, { "/dev/snd/pcmC0D17p", 116, 26 },
-    { "/dev/snd/pcmC0D17c", 116, 27 }, { "/dev/snd/pcmC0D18p", 116, 28 },
-    { "/dev/snd/pcmC0D19p", 116, 29 }, { "/dev/snd/pcmC0D20p", 116, 30 },
-    { "/dev/snd/pcmC0D21p", 116, 31 }, { "/dev/snd/pcmC0D21c", 116, 34 },
-    { "/dev/snd/pcmC0D22p", 116, 35 }, { "/dev/snd/pcmC0D22c", 116, 36 },
-    { "/dev/snd/pcmC0D23p", 116, 37 }, /* speaker */
-    { "/dev/snd/pcmC0D24c", 116, 38 }, /* the 9-channel mic array */
-    { "/dev/snd/pcmC0D25p", 116, 39 },
-
-    /* MediaTek combo chip (WiFi + BT). wmtdetect is registered by the kernel
-     * at boot; the other three chrdevs do not exist until wmt_loader has
-     * detected the chip, but a node is only a pair of numbers, so creating
-     * them up front is harmless and keeps all the numbering in one table. */
-    { "/dev/wmtdetect", 154, 0 },
-    { "/dev/stpwmt",    190, 0 },
-    { "/dev/wmtWifi",   153, 0 },
-    { "/dev/stpbt",     192, 0 },
-};
+/* Every device node this system needs, created by hand. The list lives
+ * in the board header so a different board with different ALSA minors,
+ * a different input-event mapping, or different chrdevs describes its
+ * own enumeration. init.c iterates the table returned by board_nodes()
+ * without knowing which board's table it walks. */
 
 /* ── The boot progress ring ──────────────────────────────────────────────────
  *
@@ -141,16 +138,17 @@ static const struct node nodes[] = {
  * reached into shared memory; it never writes a frame while the child lives.
  */
 /* Overridable so the ring animation can be rendered and checked off-target;
- * see emos/init/ringsim.c. */
+ * see emos/init/ringsim.c. The default comes from the board header; ringsim
+ * overrides it with a tmpfs path so its writes never touch hardware. */
 #ifndef LEDDIR
-#define LEDDIR "/sys/devices/soc/11007000.i2c/i2c-0/0-003f"
+#define LEDDIR       BOARD_LED_NODE
 #endif
-#define LED_N  12
 
 /* Defined further down; declared here so the orbit probe and the stage marks
  * can record into the boot trail and the network log. */
 static void note(const char *fmt, ...);
 static void netlog(const char *fmt, ...);
+static void netlog_line(const char *line);
 static long mono_ms(void);
 
 /* ── The orbit, as measured off EFF on 2026-09-05 ────────────────────────────
@@ -186,10 +184,10 @@ static long mono_ms(void);
  * than position 1, and every arm of the closing sweep was rotated with it, so
  * the two sides met right of 12 o'clock instead of across it. Confirmed from
  * the device — the kernel starts its orbit on physical 0, which is seen as
- * position 2 (Wil, from video, 2026-09-05). */
-#define LED_BOTTOM 11
-#define LED_DIR    1        /* +1: the orbit runs on rising physical index */
-#define ORBIT_STEP_MS 109   /* measured; the wind-in matches this exactly */
+ * position 2 (Wil, from video, 2026-09-05).
+ *
+ * The geometry (LED_BOTTOM, LED_DIR, ORBIT_STEP_MS) is now in the board
+ * header; the orbit-rendering functions below still use the names. */
 /* Sampling the kernel's own frames before we stop it. OFF: it has done its
  * job — the palette and rate above are measured and written down — and it
  * costs ~400ms of every boot plus ten lines of the trail. Turn it back on if
@@ -268,7 +266,7 @@ static void led_write(const unsigned char f[LED_N][3])
     int fd = open(LEDDIR "/frame", O_WRONLY);
     if (fd < 0)
         return;
-    write(fd, hex, sizeof hex);
+    (void)write(fd, hex, sizeof hex);
     close(fd);
 }
 
@@ -560,9 +558,9 @@ static void anim_claim(void)
         usleep(20000);
     }
     int fd = open(LEDDIR "/boot_animation", O_WRONLY);
-    if (fd >= 0) { write(fd, "0", 1); close(fd); }
+    if (fd >= 0) { (void)write(fd, "0", 1); close(fd); }
     fd = open(LEDDIR "/led_current", O_WRONLY);
-    if (fd >= 0) { write(fd, "3", 1); close(fd); }
+    if (fd >= 0) { (void)write(fd, "3", 1); close(fd); }
 }
 
 /* The handover: take the lit ring away, and leave the head behind.
@@ -750,7 +748,10 @@ static void note(const char *fmt, ...);
 static void netlog(const char *fmt, ...);
 static int  readint(const char *path);
 
-#define BOOTDEV   "/dev/block/mmcblk0p10"
+/* BOOTDEV is the board header's BOARD_BOOT_PART -- see the aliases
+ * near the top of this file. The remaining three are emOS-internal
+ * names whose values are stable across every board we know of, so
+ * they stay here rather than moving to a header. */
 #define GOODIMG   "/data/emos/boot-good.img"
 #define BOOTSTATE "/data/emos/boot.state"
 #define MAX_TRIES 3
@@ -804,7 +805,7 @@ static void write_state(int n)
         return;
     char b[16];
     int k = snprintf(b, sizeof b, "%d\n", n);
-    write(fd, b, k);
+    (void)write(fd, b, k);
     fsync(fd);
     close(fd);
 }
@@ -1057,6 +1058,38 @@ static int cmdline_system_part(const char *cmdline)
     return n > 0 ? n : SYSTEM_PART_DEFAULT;
 }
 
+/* The board id named by emos.board= on the cmdline, or BOARD_DEFAULT.
+ *
+ * Mirrors cmdline_system_part's shape because the failure modes are the same:
+ * an unknown id here means init picks a default that probably boots, while a
+ * half-parsed id would silently pick something the device is not. Token
+ * boundary, full printable ASCII, length capped. Anything outside that falls
+ * back rather than being interpreted generously.
+ *
+ * Defaulting to BOARD_DEFAULT ("biscuit") on absence is what makes this a
+ * backwards-compatible stamp: every image built before this field existed
+ * keeps booting exactly as it did, against the only board init currently
+ * supports. Adding a board adds an entry to `boards[]`; it does not change
+ * the default. */
+#define BOARD_DEFAULT "biscuit"
+
+static const char *cmdline_board(const char *cmdline)
+{
+    static char val[64];
+    if (!cmdline_value(cmdline, "emos.board=", val, sizeof val))
+        return BOARD_DEFAULT;
+    /* Same rejection rules serial_copy() applies, but kept inline so a change
+     * to the field format is one diff to one parser rather than two. The id
+     * travels through /proc/cmdline, which the kernel prints verbatim, so a
+     * corrupt one is the kernel's fault — but a board id is the identity of
+     * the binary init links against, and a wrong one is a different .o. */
+    for (size_t i = 0; val[i]; i++) {
+        if (val[i] < 0x21 || val[i] > 0x7e)
+            return BOARD_DEFAULT;
+    }
+    return val;
+}
+
 /* Copy a serial out of `raw` into `out`, trimmed and validated.
  *
  * Stops at the first space, newline or NUL, and REJECTS anything that is not
@@ -1223,7 +1256,30 @@ static void netlog(const char *fmt, ...)
     int fd = netlog_open();
     if (fd < 0)
         return;
-    write(fd, line, n > (int)sizeof line - 1 ? (int)sizeof line - 1 : n);
+    (void)write(fd, line, n > (int)sizeof line - 1 ? (int)sizeof line - 1 : n);
+    close(fd);
+}
+
+/* Single-argument netlog sink. The board runtime calls this through
+ * board_log_fn -- a varargs function pointer cannot forward a va_list
+ * portably, so the board code formats its own lines and passes them
+ * here as one string. Same destination and same timestamp prefix as
+ * netlog() above; only the call shape differs. */
+static void netlog_line(const char *line)
+{
+    if (!line) return;
+    char prefixed[320];
+    int p = snprintf(prefixed, sizeof prefixed, "[%7ld] ", mono_ms());
+    if (p < 0 || p >= (int)sizeof prefixed)
+        p = 0;
+    size_t llen = strlen(line);
+    if (llen >= sizeof prefixed - p)
+        llen = sizeof prefixed - p - 1;
+    memcpy(prefixed + p, line, llen);
+    prefixed[p + llen] = 0;
+    int fd = netlog_open();
+    if (fd < 0) return;
+    (void)write(fd, prefixed, p + llen);
     close(fd);
 }
 
@@ -1466,216 +1522,12 @@ static int ifup(const char *name)
  * Writing "1" to /dev/wmtWifi blocks for ~13s while the chip is powered and the
  * firmware loaded, which is why this runs in its own process.
  */
-/* The combo chip, brought up without Amazon's wmt_loader and wmt_launcher.
- *
- * On FireOS 6 those two do not work in emOS's environment: wmt_loader exits
- * 255, wmt_launcher runs but sits silent, WMT_OPID_HIF_CONF is never posted,
- * the chip never powers on, and the /dev/wmtWifi write returns EIO. They
- * coordinate through Android properties, and emOS has no property service --
- * but building one to satisfy them would make Amazon's userspace MORE
- * load-bearing, which is the wrong direction. So init talks to the kernel
- * driver itself.
- *
- * Everything here comes from MediaTek's GPL source (the conn_soc variant,
- * which is what this kernel is built from) and every number below was checked
- * against the running driver on hardware, 2026-09-12.
- *
- * Two steps, and the second is the whole reason Amazon ships a launcher:
- *
- *   1. SET_PATCH_NAME then SET_STP_MODE. The SET_STP_MODE handler calls
- *      wmt_lib_set_hif() and posts WMT_OPID_HIF_CONF -- the "WMT HIF info
- *      added" line. Its argument is (fm << 4) | stp. A value it does not
- *      recognise is rejected by wmt_lib_set_hif with no hardware touched, so
- *      getting it wrong fails safe.
- *
- *   2. A daemon loop. Powering the chip makes the driver ask USERSPACE to
- *      locate the firmware patches: it posts the string "srh_patch" and
- *      blocks. The answer is SET_PATCH_NUM, then one SET_PATCH_INFO per
- *      patch, then "ok" written back to release it. The driver does not care
- *      who answers -- there is no registration of any kind -- so init answers.
- *      Without this, power-on dies at "patch info perpare fail" and there is
- *      no wlan0.
+/* The combo chip bring-up lives in boards_biscuit.c today, called from
+ * here as board_wifi_up(). The wmt_* functions used to be defined
+ * inline; they were moved out so a different board's wifi-up code can
+ * live in its own boards_*.c file alongside its chrdev table. See
+ * boards/boards.h for the dispatch interface.
  */
-#define WMT_IOC_MAGIC             0xa0
-#define WMT_IOCTL_SET_PATCH_NAME  _IOW(WMT_IOC_MAGIC, 4, char *)
-#define WMT_IOCTL_SET_STP_MODE    _IOW(WMT_IOC_MAGIC, 5, int)
-#define WMT_IOCTL_SET_PATCH_NUM   _IOW(WMT_IOC_MAGIC, 14, int)
-#define WMT_IOCTL_SET_PATCH_INFO  _IOW(WMT_IOC_MAGIC, 15, char *)
-
-/* wmt_dev.h: STP_UART_FULL 1, STP_UART_MAND 2, STP_BTIF_FULL 3, STP_SDIO 4.
- * wmt_core.h: WMT_FM_I2C 1, WMT_FM_COMM 2.
- * biscuit is BTIF -- the driver reports back "hifType 2" for this value. */
-#define WMT_STP_BTIF_FULL 0x3
-#define WMT_FM_COMM       0x2
-#define WMT_HIF_ARG       ((WMT_FM_COMM << 4) | WMT_STP_BTIF_FULL)
-
-#define WMT_PATCH_MAX 8
-
-/* WMT_PATCH_INFO, wmt_lib.h. The layout is fixed by the driver's
- * copy_from_user, so the field order and the 256-byte name are not ours to
- * choose. */
-struct wmt_patch_info {
-    uint32_t seq;
-    uint8_t  addr[4];
-    uint8_t  name[256];
-};
-
-/* The four address bytes the driver splices into WMT_PATCH_P_ADDRESS_CMD.
- *
- * Taken from Amazon's own wmt_launcher, observed live under an LD_PRELOAD
- * ioctl shim on a rooted FireOS 6 (2026-09-12) rather than guessed: it sends
- * 00 00 06 00 for ROMv2_lm_patch_1_0_hdr.bin and 00 00 0e f0 for
- * ROMv2_lm_patch_1_1_hdr.bin. The two live bytes are at header offset 0x1A
- * and the top two are ZERO -- 0x18 is the tail of ucPLat in the 28-byte
- * WMT_PATCH header (ucDateTime[16], u2HwVer, u2SwVer, u4PatchVer, ucPLat[4]),
- * and sending all four from 0x18 puts rubbish in the high half. */
-#define WMT_PATCH_ADDR_OFF 0x1A
-
-static int wmt_patch_addr(const char *path, uint8_t out[4])
-{
-    int fd = open(path, O_RDONLY);
-    if (fd < 0)
-        return -1;
-    uint8_t hdr[WMT_PATCH_ADDR_OFF + 2];
-    ssize_t n = read(fd, hdr, sizeof hdr);
-    close(fd);
-    if (n < (ssize_t)sizeof hdr)
-        return -1;
-    out[0] = 0;
-    out[1] = 0;
-    out[2] = hdr[WMT_PATCH_ADDR_OFF];
-    out[3] = hdr[WMT_PATCH_ADDR_OFF + 1];
-    return 0;
-}
-
-/* Answer one "srh_patch". Returns the number of patches reported. */
-static int wmt_answer_patches(int fd, const char *dir)
-{
-    char names[WMT_PATCH_MAX][256];
-    int n = 0;
-    DIR *d = opendir(dir);
-    struct dirent *de;
-
-    if (!d)
-        return 0;
-    while (n < WMT_PATCH_MAX && (de = readdir(d))) {
-        size_t l = strlen(de->d_name);
-        /* The ROM patches are the *_hdr.bin files; WIFI_RAM_CODE_* and the
-         * .cfg in the same directory are not patches and must not be
-         * counted, or the driver waits for a download that never comes. */
-        if (l > 8 && !strcmp(de->d_name + l - 8, "_hdr.bin"))
-            snprintf(names[n++], sizeof names[0], "%s", de->d_name);
-    }
-    closedir(d);
-    if (!n)
-        return 0;
-
-    /* Download order is the driver's `dowloadSeq`, 1-based. The files sort
-     * into it by name (…_1_0_hdr, …_1_1_hdr), so sort rather than trust
-     * readdir, whose order is the filesystem's and not stable. */
-    for (int i = 0; i < n; i++)
-        for (int j = i + 1; j < n; j++)
-            if (strcmp(names[j], names[i]) < 0) {
-                char t[256];
-                memcpy(t, names[i], sizeof t);
-                memcpy(names[i], names[j], sizeof t);
-                memcpy(names[j], t, sizeof t);
-            }
-
-    if (ioctl(fd, WMT_IOCTL_SET_PATCH_NUM, n) < 0) {
-        netlog("wmt: SET_PATCH_NUM(%d) failed errno=%d\n", n, errno);
-        return 0;
-    }
-    for (int i = 0; i < n; i++) {
-        struct wmt_patch_info pi;
-        char full[512];
-
-        memset(&pi, 0, sizeof pi);
-        /* Download order runs BACKWARDS through the sorted names: Amazon's
-         * launcher gives ROMv2_lm_patch_1_0 seq 2 and ..._1_1 seq 1, so the
-         * higher-numbered file is downloaded first. Observed live; assigning
-         * 1,2 in name order sends them in the wrong order. */
-        pi.seq = n - i;
-        snprintf(full, sizeof full, "%s%s", dir, names[i]);
-        if (wmt_patch_addr(full, pi.addr))
-            netlog("wmt: no header address in %s\n", names[i]);
-        /* FULL PATH, not a bare name. wmt_dev_patch_get does not use
-         * request_firmware -- it filp_open()s this string exactly as given,
-         * from kernel context, so a bare name is opened relative to / and
-         * fails with "load file (…) fail, iRet(-1)". SET_PATCH_NAME does not
-         * get prepended for us. */
-        snprintf((char *)pi.name, sizeof pi.name, "%s", full);
-        if (ioctl(fd, WMT_IOCTL_SET_PATCH_INFO, &pi) < 0)
-            netlog("wmt: SET_PATCH_INFO(%d,%s) failed errno=%d\n",
-                   pi.seq, names[i], errno);
-    }
-    return n;
-}
-
-/* Stand in for wmt_launcher for as long as the chip is up.
- *
- * Never returns. The driver blocks its power-on inside wmt_ctrl_ul_cmd until
- * this answers, so the loop has to outlive the bring-up rather than run once:
- * a chip reset asks again. */
-static void wmt_daemon(int fd, const char *dir)
-{
-    for (;;) {
-        struct pollfd pfd = { .fd = fd, .events = POLLIN };
-        if (poll(&pfd, 1, -1) < 0) {
-            if (errno == EINTR)
-                continue;
-            netlog("wmt: poll failed errno=%d\n", errno);
-            return;
-        }
-        char cmd[64] = { 0 };
-        ssize_t n = read(fd, cmd, sizeof cmd - 1);
-        if (n <= 0)
-            continue;
-        cmd[n] = '\0';
-        if (!strncmp(cmd, "srh_patch", 9)) {
-            int got = wmt_answer_patches(fd, dir);
-            netlog("wmt: srh_patch -> %d patch(es)\n", got);
-            /* Anything but "ok" is read as failure by the driver, so say ok
-             * only when we actually found something. */
-            if (write(fd, got ? "ok" : "fail", got ? 2 : 4) < 0)
-                netlog("wmt: reply failed errno=%d\n", errno);
-        } else {
-            netlog("wmt: unhandled daemon cmd '%s'\n", cmd);
-            if (write(fd, "fail", 4) < 0)
-                netlog("wmt: reply failed errno=%d\n", errno);
-        }
-    }
-}
-
-/* Configure the HIF and fork the daemon. Returns 0 when the HIF took. */
-static int wmt_bringup(const char *patch_dir)
-{
-    int fd = open("/dev/stpwmt", O_RDWR);
-    if (fd < 0) {
-        netlog("wmt: open /dev/stpwmt failed errno=%d\n", errno);
-        return -1;
-    }
-    if (ioctl(fd, WMT_IOCTL_SET_PATCH_NAME, patch_dir) < 0)
-        netlog("wmt: SET_PATCH_NAME failed errno=%d\n", errno);
-
-    int r = ioctl(fd, WMT_IOCTL_SET_STP_MODE, WMT_HIF_ARG);
-    netlog("wmt: SET_STP_MODE(0x%x) rc=%d errno=%d\n",
-           WMT_HIF_ARG, r, r ? errno : 0);
-    if (r < 0) {
-        close(fd);
-        return -1;
-    }
-
-    pid_t p = fork();
-    if (p == 0) {
-        wmt_daemon(fd, patch_dir);
-        _exit(0);
-    }
-    /* The parent keeps its own copy closed: the daemon owns the fd, and the
-     * driver's command state is per-open. */
-    close(fd);
-    return p > 0 ? 0 : -1;
-}
 
 /* Where the WiFi credentials come from, and why it is NOT Android's file.
  *
@@ -1839,14 +1691,17 @@ static void net_main(void)
     waitpid(spawn(loader), &st, 0);
     netlog("wmt_loader status=%d\n", st);
 
-    /* FireOS 6's wmt_launcher does not work here (see wmt_bringup above), so
-     * on that layout emOS configures the HIF and answers patch searches
-     * itself. FireOS 5's 6620_launcher is left alone: it works today on the
-     * fleet, and replacing a working path with an untested one is not a trade
-     * worth making until ours has run on hardware. */
+    /* FireOS 6's wmt_launcher does not work here, so on that layout
+     * emOS configures the HIF and answers patch searches itself.
+     * FireOS 5's 6620_launcher is left alone: it works today on the
+     * fleet, and replacing a working path with an untested one is not
+     * a trade worth making until ours has run on hardware.
+     *
+     * The board-runtime dispatch is in boards_biscuit.c today; the
+     * bring-up is a single function call from init.c's point of view. */
     pid_t launcher = -1;
     if (vendor) {
-        if (wmt_bringup("/system/vendor/firmware/"))
+        if (board_wifi_up("/system/vendor/firmware/"))
             netlog("wmt: bring-up failed, wlan0 will not appear\n");
     } else {
         launcher = spawn(launch);
@@ -2026,7 +1881,7 @@ static void rdstate(const char *tag)
 {
     char st[64] = {0};
     int f = open(USBDIR "/state", O_RDONLY);
-    if (f >= 0) { read(f, st, sizeof st - 1); close(f); }
+    if (f >= 0) { (void)read(f, st, sizeof st - 1); close(f); }
     for (char *c = st; *c; c++) if (*c == '\n') *c = 0;
     note("%s state=%s\n", tag, st);
 }
@@ -2072,6 +1927,35 @@ int main(int argc, char **argv)
 
     if (getpid() != 1)
         return tool_main(argc, argv);
+
+    /* Wire the board-runtime diagnostics sink to netlog_line() so
+     * board_wifi_up() (and any future board-runtime calls) land in
+     * /run/net.log alongside the rest of the network-stage output.
+     * netlog_line is the single-argument form of netlog() -- see
+     * boards/boards.h for why a varargs sink is not portable.
+     *
+     * The off-target tools (#include init.c whole, but never call the
+     * board runtime) leave g_log NULL in their boards_*.c build; the
+     * board code checks before calling. */
+    board_set_log(netlog_line);
+
+    /* Read the cmdline-named board so a support transcript can answer
+     * "what was this device booting as" without re-flashing. The stamp
+     * falls back to BOARD_DEFAULT ("biscuit") for older images and
+     * unknown ids, both of which are the right answers for today's
+     * single-board build. A future build with multiple boards will
+     * resolve the constants below on this string; today the compile-
+     * time selection of boards_biscuit.c is what determines them. */
+    char cmdl[2048] = "";
+    int cfd = open("/proc/cmdline", O_RDONLY);
+    if (cfd >= 0) {
+        ssize_t cn = read(cfd, cmdl, sizeof cmdl - 1);
+        close(cfd);
+        if (cn > 0)
+            cmdl[cn] = 0;
+    }
+    const char *board_id = cmdline_board(cmdl);
+    note("board id=%s\n", board_id);
 
     /* mknod's mode is masked by the umask, so without this every node below
      * comes out 0644 no matter what it asks for — which is how dhcpcd's hook
@@ -2141,11 +2025,25 @@ int main(int argc, char **argv)
     mount("devpts", "/dev/pts", "devpts", 0, NULL);
     mkdir("/dev/input", 0755);
     mkdir("/dev/snd", 0755);
-    for (unsigned i = 0; i < sizeof nodes / sizeof nodes[0]; i++)
-        mknod(nodes[i].path, S_IFCHR | 0600,
-              makedev(nodes[i].major, nodes[i].minor));
+    /* The board chrdev table is resolved by the linked boards_*.c file
+     * (boards_biscuit.c today). Count is returned alongside the pointer
+     * so init.c does not need to know which board's table it walks. */
+    size_t nnodes = 0;
+    const struct board_node *bnodes = board_nodes(&nnodes);
+    for (size_t i = 0; i < nnodes; i++)
+        mknod(bnodes[i].path, S_IFCHR | 0600,
+              makedev(bnodes[i].major, bnodes[i].minor));
 
     umask(022);   /* nodes exist; every child inherits a sane mask from here */
+
+    /* Stop the kernel's LED animation before any userspace writer can
+     * race it. The ring animator's child has not been forked yet, so
+     * there is no other writer; the kernel's sysfs grip is the only
+     * thing animating and the only thing that needs to release. See
+     * boards/boards.h for the why and boards_boards_<name>.c for the
+     * how (each board picks the sysfs attribute that actually gates on
+     * its own kernel build). */
+    board_anim_stop();
 
     snprintf(buf, sizeof buf, "EM64-INIT-OK acm-console\n");
     write_at(0, buf, strlen(buf));
@@ -2164,16 +2062,9 @@ int main(int argc, char **argv)
      * able to damage the Android install we still rely on for recovery. */
     mkdir("/system", 0755);
     /* Which partition, from the stamp the packer put on our own cmdline --
-     * see cmdline_system_part(). Read here rather than at the top of main so
-     * the number appears in the stage line beside the mount it explains. */
-    char cmdl[2048] = "";
-    int cfd = open("/proc/cmdline", O_RDONLY);
-    if (cfd >= 0) {
-        ssize_t cn = read(cfd, cmdl, sizeof cmdl - 1);
-        close(cfd);
-        if (cn > 0)
-            cmdl[cn] = 0;
-    }
+     * see cmdline_system_part(). The cmdline was already read once above
+     * for cmdline_board(); we reuse the same buffer so a second open of
+     * /proc/cmdline does not race against a kernel mid-write. */
     int sysp = cmdline_system_part(cmdl);
     char sysdev[48];
     snprintf(sysdev, sizeof sysdev, "/dev/block/mmcblk0p%d", sysp);
@@ -2258,7 +2149,7 @@ int main(int argc, char **argv)
      * /vendor stays a plain symlink — nothing needs to write there.
      */
     mkdir("/etc", 0755);
-    symlink("/system/vendor", "/vendor");
+    (void)symlink("/system/vendor", "/vendor");
     DIR *ed = opendir("/system/etc");
     if (ed) {
         struct dirent *de;
@@ -2268,7 +2159,7 @@ int main(int argc, char **argv)
             char src[512], dst[512];
             snprintf(src, sizeof src, "/system/etc/%s", de->d_name);
             snprintf(dst, sizeof dst, "/etc/%s", de->d_name);
-            symlink(src, dst);
+            (void)symlink(src, dst);
         }
         closedir(ed);
     }
@@ -2855,7 +2746,7 @@ static void console_gate(void)
             sleep(tries > 8 ? 5 : 2);
 
         const char *p = "\r\nemOS console password: ";
-        write(1, p, strlen(p));
+        (void)write(1, p, strlen(p));
 
         char in[128];
         int n = 0;
@@ -2875,7 +2766,7 @@ static void console_gate(void)
             in[n++] = ch;
         }
         in[n] = 0;
-        write(1, "\r\n", 2);
+        (void)write(1, "\r\n", 2);
 
         pw_hash(salt, saltlen, in, iters, got);
         int ok = 1;
@@ -2887,7 +2778,7 @@ static void console_gate(void)
             break;
 
         const char *no = "wrong\r\n";
-        write(1, no, strlen(no));
+        (void)write(1, no, strlen(no));
     }
 
     if (have_t)
