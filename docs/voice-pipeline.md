@@ -270,6 +270,13 @@ at roughly the same moment a short one would, instead of making you wait for
 the last word to be synthesised before hearing the first. All three stages
 carry their state across chunks, so there's no click at the joins.
 
+Speaking starts when Home Assistant says the reply's first text has arrived
+(its `tts_start_streaming` signal), which with a slow model is well before the
+reply is finished. When HA sends no such signal (a built-in answer, or a TTS
+engine that can't synthesise while text is still coming in), it starts once the
+reply is complete, as before. The 30 seconds the controller waits for the start
+of a reply therefore have to be met by the first words, not the last.
+
 **Caveat:** interrupting a response by voice (**barge-in**) works when
 enabled — say the wake word over the top and the response cuts off — but
 it's off by default and depends on AEC being on and tuned (Stage 3): the

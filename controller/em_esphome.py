@@ -85,6 +85,7 @@ import em_ns
 import em_announce
 import em_recordings
 import em_runbarrier
+import em_earlytts
 import em_speechgate
 import em_wav
 import em_oww_models
@@ -404,6 +405,12 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._tts_audio_url:    Optional[str] = None
         self._tts_audio_data:   Optional[bytes] = None
         self._tts_event         = asyncio.Event()
+        # Early start (em_earlytts): the URL HA announced in RUN_START, whether
+        # this turn is playing from INTENT_PROGRESS rather than TTS_END, and the
+        # flag an HA ERROR sets to end an early fetch HA will never close.
+        self._early_tts_url:    Optional[str] = None
+        self._tts_streamed_early = False
+        self._tts_abort         = asyncio.Event()
         self._conversation_id:  str = ""
         self._trace:            "TurnTrace | None" = None
         # Set on VOICE_ASSISTANT_INTENT_END — the reliable "STT + intent
@@ -992,9 +999,12 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             url = data.get("url", "")
             if url:
                 log.info(f"[{self._log_name}] TTS URL: {url}")
-            if self._trace:
+            if self._trace and self._trace.t_tts_url_ms < 0:
                 self._trace.t_tts_url_ms = self._trace.elapsed_ms()
-            self._tts_audio_url = url
+            if not self._tts_streamed_early:
+                # An early start is already playing its URL, and it is the same
+                # one (ESPHome's firmware does not restart on TTS_END either).
+                self._tts_audio_url = url
             self._tts_event.set()
 
         elif event_type == ET.VOICE_ASSISTANT_RUN_START:
@@ -1006,6 +1016,27 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # `_internal_on_pipeline_event(PipelineEvent(RUN_END))`, so no
             # RUN_START is ever sent. Structural, not a race on timing.
             self._run_started = True
+            self._early_tts_url = em_earlytts.run_start_url(data)
+
+        elif event_type == ET.VOICE_ASSISTANT_INTENT_PROGRESS:
+            # The reply's first text has arrived and HA is feeding it to the TTS
+            # engine. Play the URL from RUN_START now instead of waiting for
+            # TTS_END, which comes after the whole reply (see em_earlytts).
+            if em_earlytts.should_start(
+                progress=data,
+                announced_url=self._early_tts_url,
+                playing_url=self._tts_audio_url,
+                cancelled=self._turn_cancelled,
+            ):
+                log.info(
+                    f"[{self._log_name}] TTS streaming early "
+                    f"(tts_start_streaming): {self._early_tts_url}"
+                )
+                self._tts_audio_url = self._early_tts_url
+                self._tts_streamed_early = True
+                if self._trace and self._trace.t_tts_url_ms < 0:
+                    self._trace.t_tts_url_ms = self._trace.elapsed_ms()
+                self._tts_event.set()
 
         elif event_type == ET.VOICE_ASSISTANT_RUN_END:
             log.info(f"[{self._log_name}] Pipeline run ended")
@@ -1072,6 +1103,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # stream stays parked until the device's own gate closes.
             self._ha_vad_end.set()
             self._tts_event.set()  # unblock turn waiter
+            # An early TTS fetch is still open and HA will not close it.
+            self._tts_abort.set()
 
     # ── Announcement handling ────────────────────────────────────────────
 
@@ -1252,6 +1285,9 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._tts_event.clear()
         self._tts_audio_url         = None
         self._tts_audio_data        = None
+        self._early_tts_url         = None
+        self._tts_streamed_early    = False
+        self._tts_abort.clear()
         self._intent_ended          = False
         self._stt_ended             = False
         # Derived from the trace's own trigger label rather than plumbed
@@ -1426,12 +1462,18 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 try:
                     if trace:
                         trace.t_playback_ms = trace.elapsed_ms()
+                    chunks = _stream_tts_audio(self._tts_audio_url)
+                    if self._tts_streamed_early:
+                        # Same reasoning as _stream_tts_audio wrapping
+                        # _stream_tts_audio_once below: closed explicitly so an
+                        # aborted early stream's pending fetch is cancelled now,
+                        # not whenever the generator is collected.
+                        chunks = em_earlytts.abortable_stream(chunks, self._tts_abort)
                     # Closed explicitly: the player BREAKS out of its loop on
                     # a barge-in, and teardown (ffmpeg's kill) must run then,
                     # not whenever the generator is collected.
-                    async with contextlib.aclosing(_stamp_first_audio(
-                            _stream_tts_audio(self._tts_audio_url))) as chunks:
-                        pcm_bytes = await post_turn_play(chunks)
+                    async with contextlib.aclosing(_stamp_first_audio(chunks)) as stamped:
+                        pcm_bytes = await post_turn_play(stamped)
                 except Exception as e:
                     log.error(f"[{self._log_name}] TTS audio stream failed: {e}")
                     if trace: trace.outcome = "tts_error"
@@ -1439,6 +1481,13 @@ class EchoMuseSatellite(SatelliteServerProtocol):
 
                 if trace:
                     trace.tts_bytes = pcm_bytes or 0
+
+                if self._tts_streamed_early:
+                    # An early stream can end a moment before INTENT_END, which
+                    # carries continue_conversation. Give the event a beat.
+                    await em_earlytts.wait_until(
+                        lambda: self._intent_ended or self._turn_cancelled, 2.0
+                    )
 
                 if self._turn_cancelled or self._turn_end_reason:
                     # #251: cut off mid-response. This used to fall through to
