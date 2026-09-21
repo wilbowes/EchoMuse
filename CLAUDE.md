@@ -245,7 +245,7 @@ Configurable parameters: `consolePassword`, `vadThreshold`, `vadSpeechMs`, `vadS
 ## Build and test quickref
 
 ```bash
-git submodule update --init          # GoTinyAlsa fork — see device/CLAUDE.md
+git submodule update --init          # GoTinyAlsa v1.0.4 — see device/CLAUDE.md
 cd device && ./compile.sh            # needs the echomuse-compiler image
 cd device && go test ./...
 cd controller && python -m pytest tests/   # needs: pytest numpy scipy pyyaml
