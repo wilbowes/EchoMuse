@@ -4647,7 +4647,19 @@ async def main():
         except Exception as e:
             log.error(f"Device-link TLS setup failed — wss listener disabled: {e}")
 
-    azc  = AsyncZeroconf()
+    # Bound to SERVER_IP's own interface, never auto-detected across all of
+    # them. zeroconf's default enumerates every interface on the host and
+    # opens a socket per one, and on a multi-homed box that includes whatever
+    # else is attached — a monitoring VLAN in one deployment, something else
+    # elsewhere. A send on any one of those sockets can fail on its own
+    # (measured: `OSError: [Errno 19] No such device` from a `Monitor*`
+    # interface that carries a real IPv4 address and gets auto-detected like
+    # any other), and that exception surfaces inside the asyncio event loop
+    # rather than being contained to the interface that caused it — stalling
+    # the loop long enough to miss keepalive pings and disconnect the fleet.
+    # SERVER_IP is already the one address every device is told to dial, so
+    # advertising from anywhere else would be a second kind of wrong answer.
+    azc  = AsyncZeroconf(interfaces=[SERVER_IP])
     info = _make_mdns_info(tls_active=tls_ctx is not None)
     await azc.async_register_service(info, allow_name_change=True)
     log.info(
