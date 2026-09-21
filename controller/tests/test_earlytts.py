@@ -15,6 +15,7 @@ the reason recorded in test_stream_teardown.py.
 
 import ast
 import asyncio
+import re
 import sys
 import pathlib
 
@@ -31,8 +32,9 @@ import em_earlytts as early
 URL = "http://ha.local:8123/api/tts_proxy/abc.flac"
 
 
-def start(progress=None, announced=URL, playing=None, cancelled=False):
+def start(progress=None, announced=URL, playing=None, cancelled=False, enabled=True):
     return early.should_start(
+        enabled=enabled,
         progress={"tts_start_streaming": "1"} if progress is None else progress,
         announced_url=announced, playing_url=playing, cancelled=cancelled,
     )
@@ -40,6 +42,11 @@ def start(progress=None, announced=URL, playing=None, cancelled=False):
 
 def test_the_signal_with_an_announced_url_starts_playback():
     assert start() is True
+
+
+def test_nothing_starts_early_while_the_setting_is_off():
+    """streamReply defaults off: a slow backend would pause between sentences."""
+    assert start(enabled=False) is False
 
 
 @pytest.mark.parametrize("progress", [
@@ -329,6 +336,51 @@ def test_continue_conversation_gets_a_beat_after_an_early_stream():
         "after an early stream the turn no longer waits for INTENT_END, which "
         "carries continue_conversation"
     )
+
+
+def test_should_start_is_given_the_per_turn_setting():
+    branch = _branch(_function("_handle_voice_event"), "INTENT_PROGRESS")
+    call = _calls(ast.Module(body=branch.body, type_ignores=[]), "em_earlytts.should_start")[0]
+    given = {kw.arg: ast.unparse(kw.value) for kw in call.keywords}
+    assert given.get("enabled") == "self._stream_reply", (
+        "INTENT_PROGRESS must pass the turn's streamReply setting to should_start")
+
+
+def test_the_setting_is_read_from_the_device_at_the_start_of_each_turn():
+    reset = next(
+        n for n in ast.walk(TREE)
+        if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef)) and _calls(n, "self._tts_event.clear")
+    )
+    reads = [
+        ast.unparse(n.value) for n in ast.walk(reset)
+        if isinstance(n, ast.Assign) and any(ast.unparse(t) == "self._stream_reply" for t in n.targets)
+    ]
+    assert reads and "stream_reply" in reads[0] and "device" in reads[0], (
+        "the turn no longer reads the device's stream_reply setting")
+
+
+# ── the setting: off by default, and carried to the controller's device ─────
+
+def _source(name):
+    return (CONTROLLER / name).read_text()
+
+
+def test_stream_reply_is_off_by_default_in_config_and_on_the_device():
+    assert re.search(r'"streamReply":\s*False,', _source("em_db.py")), (
+        "streamReply must default to False in em_db's default config")
+    assert re.search(r"self\.stream_reply:\s*bool\s*=\s*False", _source("em_controller.py")), (
+        "Device.stream_reply must default to False")
+    assert 'config.get("streamReply", False)' in _source("em_controller.py"), (
+        "the registration mirror must default to False")
+
+
+def test_stream_reply_is_mirrored_on_live_config_saves():
+    assert 'live.stream_reply = bool(effective["streamReply"])' in _source("em_api.py")
+
+
+def test_stream_reply_belongs_to_the_playback_section():
+    import em_config_sections
+    assert "streamReply" in em_config_sections.SECTIONS["playback"]["keys"]
 
 
 def test_every_turn_starts_with_the_early_state_cleared():

@@ -8416,7 +8416,7 @@ const STAGE_MONO = "'DM Mono',monospace";
 // control sitting under a toggle that does not govern it would look fine and
 // be silently wrong.
 const CONFIG_SECTIONS = {
-  "playback": ["eqBands", "eqLoudness", "duckDb", "limiterEnabled", "limiterThreshold", "limiterRelease", "bassGuardEnabled", "bassGuardDb"],
+  "playback": ["eqBands", "eqLoudness", "duckDb", "limiterEnabled", "limiterThreshold", "limiterRelease", "bassGuardEnabled", "bassGuardDb", "streamReply"],
   "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice"],
   "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "aecRefSource", "nsAsr", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
@@ -8796,6 +8796,11 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
           <div>
             <div style={inputStyle}>
               <Toggle label="Speech boost" sub="presence boost for voice" value={config.eqLoudness ?? false} onChange={v => set('eqLoudness', v)}/>
+            </div>
+            <div style={{ marginTop: 8, ...inputStyle }}>
+              <Toggle label="Speak while the reply is written"
+                sub="starts speaking at the first sentence instead of when the whole reply is ready. Faster with a quick model; a slow one may pause between sentences"
+                value={config.streamReply ?? false} onChange={v => set('streamReply', v)}/>
             </div>
             {/* Speaker protection: ONE toggle for the bass guard, and the
                 limiter is not offered at all.

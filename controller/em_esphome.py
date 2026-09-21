@@ -411,6 +411,9 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._early_tts_url:    Optional[str] = None
         self._tts_streamed_early = False
         self._tts_abort         = asyncio.Event()
+        # The device's streamReply setting, read once per turn (off by
+        # default: see em_earlytts for why this is the user's choice).
+        self._stream_reply      = False
         self._conversation_id:  str = ""
         self._trace:            "TurnTrace | None" = None
         # Set on VOICE_ASSISTANT_INTENT_END — the reliable "STT + intent
@@ -1023,6 +1026,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # engine. Play the URL from RUN_START now instead of waiting for
             # TTS_END, which comes after the whole reply (see em_earlytts).
             if em_earlytts.should_start(
+                enabled=self._stream_reply,
                 progress=data,
                 announced_url=self._early_tts_url,
                 playing_url=self._tts_audio_url,
@@ -1288,6 +1292,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._early_tts_url         = None
         self._tts_streamed_early    = False
         self._tts_abort.clear()
+        self._stream_reply          = bool(getattr(device, "stream_reply", False))
         self._intent_ended          = False
         self._stt_ended             = False
         # Derived from the trace's own trigger label rather than plumbed

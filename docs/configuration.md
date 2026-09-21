@@ -95,6 +95,28 @@ little speaker is boomy and dull by default.
 An extra presence bump for spoken responses. Try it if responses sound
 muffled from across the room.
 
+### Speak while the reply is written
+Off by default. When it is off, the Dot starts speaking once Home Assistant
+has the whole reply. When it is on, it starts as soon as Home Assistant has the
+first sentence, so a long reply begins sooner. The gain is the time between the
+first words and the last, less about a second for the first sentence to be
+synthesised, and a short reply gains little.
+
+Home Assistant only offers this when both the conversation agent and the
+text-to-speech engine can stream. If either cannot, the setting has no effect
+and the reply plays when it is complete, as before.
+
+**The catch is speed.** Speech reaches the speaker no faster than it is
+produced. A model that writes more slowly than the reply is spoken (very
+roughly under four tokens a second), or a text-to-speech engine slower than
+realtime, leaves the Dot with nothing to play between sentences. It waits in
+silence and carries on when the next part arrives, so the reply is not lost, but
+it pauses. Try it with a few long replies. If they come out in fits and starts,
+turn it off.
+
+With it on, the 30 seconds the controller waits for a reply to begin only has to
+be met by the first words.
+
 ### Speaker protection
 Keeps bass the driver cannot deliver from muddying everything above it. Leave
 it on.

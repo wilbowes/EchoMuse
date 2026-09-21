@@ -490,6 +490,10 @@ class Device:
         # switching it off stops the next turn being captured, not the one
         # already streaming.
         self.save_utterances: bool = False
+        # streamReply: play a reply from HA's early streaming signal rather than
+        # TTS_END (em_earlytts). Read per turn by em_esphome. Config key:
+        # streamReply. Off by default.
+        self.stream_reply:  bool  = False
         # This turn's captured mic audio, handed from _stream_mic_audio to
         # _persist_turn (which owns the write — it has the rowid the
         # filename is keyed on) and consumed there.
@@ -4034,6 +4038,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         device.oww_speex_ns  = bool(config.get("owwSpeexNs", False))
         device.ns_asr        = bool(config.get("nsAsr", False))
         device.save_utterances = bool(config.get("saveUtterances", False))
+        device.stream_reply = bool(config.get("streamReply", False))
         device.barge_in_enabled = bool(config.get("bargeInEnabled", False))
         device.barge_threshold  = float(config.get("bargeInThreshold", 0.6))
         device.button_single_tap_event = bool(

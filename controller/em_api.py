@@ -1149,6 +1149,8 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
         live.ns_asr = bool(effective["nsAsr"])
     if "saveUtterances" in effective:
         live.save_utterances = bool(effective["saveUtterances"])
+    if "streamReply" in effective:
+        live.stream_reply = bool(effective["streamReply"])
     if "bargeInEnabled" in effective:
         live.barge_in_enabled = bool(effective["bargeInEnabled"])
     if "bargeInThreshold" in effective:

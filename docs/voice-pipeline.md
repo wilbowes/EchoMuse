@@ -270,12 +270,19 @@ at roughly the same moment a short one would, instead of making you wait for
 the last word to be synthesised before hearing the first. All three stages
 carry their state across chunks, so there's no click at the joins.
 
-Speaking starts when Home Assistant says the reply's first text has arrived
-(its `tts_start_streaming` signal), which with a slow model is well before the
-reply is finished. When HA sends no such signal (a built-in answer, or a TTS
-engine that can't synthesise while text is still coming in), it starts once the
-reply is complete, as before. The 30 seconds the controller waits for the start
-of a reply therefore have to be met by the first words, not the last.
+By default speaking starts once Home Assistant has finished the reply. With
+**Speak while the reply is written** turned on (Playback), it starts when HA says
+the reply's first text has arrived (its `tts_start_streaming` signal), which with
+a slow model is well before the reply is finished. HA only sends that signal when
+both the conversation agent and the TTS engine stream; when it does not (a
+built-in answer, or a TTS engine that can't synthesise while text is still coming
+in), speaking starts once the reply is complete either way. With the setting on,
+the 30 seconds the controller waits for the start of a reply have to be met by the
+first words, not the last.
+
+The reply reaches the speaker no faster than it is produced, so a model or a TTS
+engine slower than speech leaves gaps between sentences. That is why the setting
+is off by default.
 
 **Caveat:** interrupting a response by voice (**barge-in**) works when
 enabled — say the wake word over the top and the response cuts off — but

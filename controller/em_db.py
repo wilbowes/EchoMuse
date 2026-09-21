@@ -170,6 +170,13 @@ DEFAULT_DEVICE_CONFIG = {
     # cannot perform. A taste parameter — it wants tuning by ear in a real
     # room, like the LED meter curve, not a firmware push per attempt.
     "duckDb": -18.0,
+    # streamReply: start speaking when Home Assistant says the reply's first
+    # text has arrived (its tts_start_streaming signal) instead of when the whole
+    # reply is done. Default OFF: it is faster when the model and the TTS engine
+    # are quicker than speech, and pauses between sentences when either is
+    # slower, which the controller cannot tell in advance. See em_earlytts.
+    # Controller-side only, read per turn; the device ignores the key.
+    "streamReply":      False,
     "owwModel":         "hey_jarvis_v0.1",
     # Multi-device wake SUPPRESSION window (ms), not a wait. The first
     # device to detect answers immediately; any other device detecting

@@ -23,8 +23,8 @@ every second of generation sits inside the 30s TTS wait in em_esphome.
 ESPHome's own firmware plays from the early signal (esphome/components/
 voice_assistant/voice_assistant.cpp): RUN_START stores `url`; INTENT_PROGRESS
 with `tts_start_streaming == "1"` and a stored url starts the media player and
-clears the stored url; TTS_END then does not start it again. This module makes
-EchoMuse follow the same contract.
+clears the stored url; TTS_END then does not start it again. This module lets
+EchoMuse follow the same contract, when the `streamReply` setting is on.
 
 Measured 2026-09-21 on an Echo Dot, HA 2026.9.3, controller 2.24.1, Wyoming
 TTS (Kokoro) and a streaming conversation agent, one two-paragraph reply
@@ -39,6 +39,24 @@ and `tts-end` at 5.59 s. Short replies gain little, because their text starts
 under a second before they end, and cannot be slower. Local intents and errors
 never send the signal and take the TTS_END path unchanged. The 30s wait now
 has to reach the first text rather than the last.
+
+WHY IT IS A SETTING, AND OFF BY DEFAULT
+---------------------------------------
+Starting early changes when speech begins, and with it what a slow backend
+sounds like. The reply reaches the speaker no faster than it is produced, so
+audio is spoken at the rate of the slowest stage: the model writing the text,
+or the TTS engine synthesising it. The 2026-09-21 measurements above are from
+a local model far faster than speech and a TTS engine several times faster than
+realtime, where nothing runs dry. A model that writes more slowly than the reply
+is spoken (very roughly under 4 tokens a second for prose) or a TTS engine
+slower than realtime leaves the device's buffer empty between sentences. It
+plays silence until more arrives and counts an underrun; the reply is not lost,
+but it pauses. Waiting for TTS_END avoids that on such setups, at the cost of
+the silence before the reply and the 30s limit. Which is better depends on
+the backend, and the controller cannot know the backend, so the choice is the
+user's and the default is the behaviour that existed before. A pure decision
+function takes `enabled` for that reason, and the per-turn value is read from the
+device's `streamReply` setting.
 
 WHY AN ERROR HAS TO END THE FETCH
 ---------------------------------
@@ -77,11 +95,13 @@ def run_start_url(data: dict[str, str]) -> Optional[str]:
     return data.get("url") or None
 
 
-def should_start(*, progress: dict[str, str], announced_url: Optional[str],
+def should_start(*, enabled: bool, progress: dict[str, str], announced_url: Optional[str],
                  playing_url: Optional[str], cancelled: bool) -> bool:
     """
     Whether this INTENT_PROGRESS event releases the announced URL for playback.
 
+    `enabled` is the device's `streamReply` setting for this turn; when it is off
+    the answer is always no and the turn plays from TTS_END as it always did.
     `progress` is the event's name/value data. `announced_url` is what
     `run_start_url` returned for this turn. `playing_url` is the URL the turn has
     already committed to, from an earlier signal or from TTS_END, and a second
@@ -90,7 +110,8 @@ def should_start(*, progress: dict[str, str], announced_url: Optional[str],
     would speak over the barge that cancelled it.
     """
     return (
-        progress.get(START_FIELD) == "1"
+        enabled
+        and progress.get(START_FIELD) == "1"
         and bool(announced_url)
         and not playing_url
         and not cancelled
