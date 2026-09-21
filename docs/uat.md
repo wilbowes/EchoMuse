@@ -231,6 +231,20 @@ noticeably worse.
 **Expect:** Audio moves to the jack.
 **Flag:** Anything beyond the known jack faults in the table above.
 
+### D7 · Speak while the reply is written
+**Do:** Config → Playback → turn on "Speak while the reply is written" and save.
+Ask for something long ("explain in two paragraphs how a refrigerator works").
+Turn it off, save, and ask again.
+**Expect:** With it on, speech starts at the first sentence and the controller
+log shows `TTS streaming early`. With it off, speech starts once the whole reply
+is ready. The words are the same either way, and neither change needs a restart.
+On a model or a TTS engine slower than speech, pauses between sentences with it
+on are expected, which is why it is off by default.
+**Flag:** Speech that never starts or stops part-way with it on; no difference in
+when speech starts between the two settings on a setup where Home Assistant's
+agent and TTS engine both stream; a change that needs a restart. Give the model,
+the TTS engine and the length of the reply.
+
 ---
 
 ## E — Music and ducking

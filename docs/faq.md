@@ -273,6 +273,14 @@ end-of-speech detection sometimes never started and waited out its own
 fifteen-second limit. If it still happens, report it with a support bundle.
 [#485](https://github.com/wilbowes/EchoMuse/issues/485).
 
+### A long answer starts speaking late.
+By default the Dot speaks once Home Assistant has the whole reply, so a long
+answer from a slow model starts late. Turn on **Config → Playback → Speak while
+the reply is written** and it starts at the first sentence instead. It needs a
+conversation agent and a text-to-speech engine that both stream, and a model
+slower than speech may pause between sentences, so if it comes out in fits and
+starts, turn it off again.
+
 ### Long responses cut off part-way.
 Fixed; update the controller. If a long answer still stops early, a support
 bundle with the time it happened is the right report.

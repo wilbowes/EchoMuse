@@ -275,12 +275,12 @@ ledScene, ledListenColor, ledThinkColor,
 meterAttack, meterDecay, meterFloor, meterGamma, meterRef, meterCurve,
 wakeArbitrationMs, duckDb,
 buttonSingleTapEvent, buttonMultiTapMs,
-owwOnDevice, saveUtterances
+owwOnDevice, saveUtterances, streamReply
 ```
 
 Not every field is acted on by the device. The output-chain keys (`limiter*`,
-`bassGuard*`), `eq*`, `saveUtterances`, `wakeArbitrationMs`, and the `button*`
-timing keys are **controller-side** — that processing happens before the audio
+`bassGuard*`), `eq*`, `saveUtterances`, `streamReply`, `wakeArbitrationMs`, and the
+`button*` timing keys are **controller-side** — that processing happens before the audio
 reaches the wire, or is used only for config scoping. `owwOnDevice` is both
 controller-consumed (scoping) and device-acted. A new board only needs to
 implement the keys relevant to hardware it actually has; unknown keys are
