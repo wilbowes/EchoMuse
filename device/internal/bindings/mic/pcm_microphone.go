@@ -145,9 +145,11 @@ func (p *PcmMicrophone) readLoop() {
 			lastReport = now
 		}
 
-		// Copy so each subscriber gets its own slice
-		buf := make([]byte, len(audio))
-		copy(buf, audio)
+		// GetAudioStream hands over a fresh slice per read (GoTinyAlsa #1),
+		// so this can be passed on as-is. Copying here was too late: the
+		// library reused one buffer, and a batch still queued in stream was
+		// overwritten by the next read — repeated or torn audio (#607).
+		buf := audio
 
 		p.mu.Lock()
 		for _, ch := range p.subs {
