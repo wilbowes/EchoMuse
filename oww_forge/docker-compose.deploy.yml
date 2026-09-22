@@ -51,7 +51,7 @@ services:
   forge-ui-cpu:
     <<: *forge-base
     image: ghcr.io/wilbowes/echomuse-forge:latest-cpu
-    container_name: oww-forge-ui
+    container_name: oww-forge-ui-cpu
     command: ["ui"]
     ports:
       - "8769:8769"

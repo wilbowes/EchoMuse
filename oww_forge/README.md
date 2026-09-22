@@ -131,9 +131,12 @@ automatic: if no CUDA device is visible at runtime, torch runs on CPU and
 badge).
 
 - Host **with** the nvidia container runtime: use `forge` / `forge-ui` as-is.
-- Host **without** it: `docker compose run --rm forge-cpu …` (same image, no
-  GPU reservation), or build with `GPU: "0"` for a ~3GB CPU-only image
-  instead of ~10GB.
+- Host **without** it, web UI: `docker compose up -d forge-ui-cpu` (the same
+  service minus the GPU reservation; naming it starts its `cpu` profile). CLI:
+  `docker compose run --rm forge-cpu …`. Both work from the ~10GB CUDA image;
+  build with `GPU=0 docker compose build forge-ui-cpu` for a ~3GB CPU-only
+  image instead. With the published image, the same services are in
+  `docker-compose.deploy.yml` on the `:latest-cpu` tag.
 
 ### Asset sizes
 
