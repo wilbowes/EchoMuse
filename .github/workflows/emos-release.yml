@@ -182,7 +182,7 @@ jobs:
       # qemu + an armv7 Alpine image makes it a NATIVE build, so there is no
       # cross-compilation surface to get wrong. It costs ~8 minutes.
       - name: Set up qemu (for the armv7 busybox build)
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
         with:
           platforms: arm
 
