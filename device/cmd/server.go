@@ -40,9 +40,39 @@ import (
 	"github.com/wilbowes/EchoMuse/pkg/led"
 )
 
+const usage = `usage: server [command]
+
+With no command, runs the EchoMuse device daemon (normally started by
+start_server.sh, which restarts it; do not run a second copy by hand).
+
+  version         print the firmware version and build time
+  platform-init   apply the board's platform settings, for emOS's boot
+  help            this text
+`
+
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "platform-init" {
-		os.Exit(platformInit())
+	// Only a bare invocation runs the daemon. `server --version` used to
+	// start a second instance in the foreground, fighting the supervised one
+	// for the mic and the controller link, so anything unrecognised is
+	// refused rather than ignored.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "platform-init":
+			os.Exit(platformInit())
+		case "version", "--version", "-v":
+			built := "unknown"
+			if sec, err := strconv.ParseInt(client.BuildUnix, 10, 64); err == nil {
+				built = time.Unix(sec, 0).UTC().Format(time.RFC3339)
+			}
+			fmt.Printf("EchoMuse %s (built %s)\n", client.Version, built)
+			os.Exit(0)
+		case "help", "--help", "-h":
+			fmt.Print(usage)
+			os.Exit(0)
+		default:
+			fmt.Fprintf(os.Stderr, "unknown argument %q\n\n%s", os.Args[1], usage)
+			os.Exit(2)
+		}
 	}
 	log.SetOutput(os.Stdout)
 	log.Printf("EchoMuse %s starting", client.Version)
