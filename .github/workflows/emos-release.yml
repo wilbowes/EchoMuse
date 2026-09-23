@@ -267,6 +267,7 @@ jobs:
           /tmp/cmdlinecheck
           cc -O2 -o /tmp/serialcheck emos/init/serialcheck.c
           /tmp/serialcheck
+          sh emos/device/em-wifi-check.sh
 
       # Same rule as the firmware release: the notes come from the ANNOTATED
       # tag, because whoever reads them is deciding whether to reflash a boot

@@ -9,6 +9,48 @@
 # -- see wpa_conf() in init.c. Anything under /data/misc/wifi belongs to
 # whichever OS booted last, and FireOS 6 rewrites it.
 set -u
+
+# What a scan result's security flags let this device join: psk, open, or the
+# reason it cannot (wpa3, eap, owe, wep, other).
+#
+# The flags are wpa_supplicant's own text, and the grammar is fixed by
+# wpa_supplicant_ie_txt() in ctrl_iface.c (hostap 2.10, what emOS builds):
+# `[<proto>-<AKM>+<AKM>...-<cipher>+<cipher>...(-preauth)]`, proto WPA, WPA2,
+# RSN (mesh) or OSEN, then [WEP], [OWE-TRANS], [WPS...], [ESS] as their own
+# brackets. AKMs are EAP, PSK, None, SAE, FT/EAP, FT/PSK, FT/SAE, EAP-SHA256,
+# PSK-SHA256, EAP-SUITE-B(-192), FILS-*, OWE, DPP, OSEN.
+#
+# PSK is decided FIRST because a network may offer several AKMs and we need
+# only one. This used to test SAE first, so a WPA2/WPA3 transition-mode network
+# -- [WPA2-PSK+SAE-CCMP], the default on current UniFi and many other routers --
+# was refused as WPA3, although this radio joins it as WPA2 like any other
+# WPA2 client. The wizard's own scan already got this right (SAE without PSK).
+#
+# A plain PSK AKM only: PSK-SHA256 and FT/PSK are different AKMs the driver
+# does not list (NONE IEEE8021X WPA-EAP WPA-PSK), and the conf below writes
+# key_mgmt=WPA-PSK. They are rewritten first so the token test cannot see a
+# PSK inside them. OWE is matched as an AKM, never as [OWE-TRANS...], which
+# marks the OPEN half of an Enhanced Open transition pair and is joinable.
+#
+# Anything else that is not open -- EAP, OWE, DPP -- used to fall through to
+# key_mgmt=NONE, labelled "(open)", and fail at association saying nothing.
+# emos/device/em-wifi-check.sh drives this function against each form.
+security_of() {
+    f=$(printf '%s' "$1" | sed -e 's/PSK-SHA256/PSKSHA256/g' -e 's#FT/PSK#FTPSK#g')
+    case "$f" in
+        *-PSK-*|*-PSK+*|*+PSK-*|*+PSK+*) echo psk ;;
+        *SAE*)                           echo wpa3 ;;
+        *EAP*)                           echo eap ;;
+        *-OWE-*|*-OWE+*|*+OWE-*|*+OWE+*) echo owe ;;
+        *WEP*)                           echo wep ;;
+        *\[WPA-*|*\[WPA2-*|*\[RSN-*|*\[OSEN-*) echo other ;;
+        *)                               echo open ;;
+    esac
+}
+
+# Sourced by em-wifi-check.sh for security_of alone.
+[ "${EM_WIFI_LIB:-}" = 1 ] && return 0
+
 CONF=/data/emos/wpa.conf
 ANDROID_CONF=/data/misc/wifi/wpa_supplicant.conf
 
@@ -202,11 +244,14 @@ echo ""
 n=0
 while IFS="$(printf '\t')" read -r sig flags hex width ssid; do
     n=$((n + 1))
-    case "$flags" in
-        *SAE*) note=" (WPA3 - not supported)" ;;
-        *PSK*) note="" ;;
-        *WEP*) note=" (WEP - not supported)" ;;
-        *)     note=" (open)" ;;
+    case "$(security_of "$flags")" in
+        psk)  note="" ;;
+        open) note=" (open)" ;;
+        wpa3) note=" (WPA3 - not supported)" ;;
+        eap)  note=" (enterprise - not supported)" ;;
+        owe)  note=" (Enhanced Open - not supported)" ;;
+        wep)  note=" (WEP - not supported)" ;;
+        *)    note=" (not supported)" ;;
     esac
     # Padded by CHARACTER count from awk, never with %-32s, which counts
     # bytes and leaves every non-ASCII name short.
@@ -228,15 +273,22 @@ flags=$(printf '%s\n' "$line" | cut -f2)
 ssid_hex=$(printf '%s\n' "$line" | cut -f3)
 ssid=$(printf '%s\n' "$line" | cut -f5)
 
-case "$flags" in
-    *SAE*)
-        echo "$ssid is WPA3, which this device cannot join. Its driver does"
-        echo "not do SAE and the kernel is too old to let us do it instead."
+security=$(security_of "$flags")
+case "$security" in
+    wpa3)
+        echo "$ssid is WPA3 only, which this device cannot join. Its driver"
+        echo "does not do SAE and the kernel is too old to let us do it instead."
+        echo "A WPA2/WPA3 mixed network works; so does a WPA2 one."
+        exit 1 ;;
+    psk|open) ;;
+    *)
+        echo "$ssid uses security this device cannot join from here ($flags)."
+        echo "It joins WPA2 networks with a password, and open ones."
         exit 1 ;;
 esac
 
-case "$flags" in
-    *PSK*)
+case "$security" in
+    psk)
         printf 'Password for %s: ' "$ssid"
         # -r: a backslash in a password is a backslash. IFS= keeps leading
         # and trailing spaces, which a passphrase may have.
