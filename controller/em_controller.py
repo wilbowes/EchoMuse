@@ -81,6 +81,7 @@ import em_hostip
 import em_linkauth
 import em_pacing
 import em_platform
+import em_tcp
 import em_wsclose
 import em_rttlog
 import em_eq
@@ -269,6 +270,17 @@ WAKE_RESTART_MAX_BACKOFF_S = 60.0   # ceiling; never gives up entirely
 WAKE_RESTART_HEALTHY_S     = 60.0
 
 PING_INTERVAL_SEC = 5.0
+
+# WebSocket keepalive on every device plane. The timeout is how long a ping may
+# go unanswered before the link is declared dead, and 10s was shorter than the
+# loss bursts this link actually has: with the BLE scan running, a Dot loses
+# enough frames that TCP's retransmits alone can outlast it, and the overnight
+# `1011 keepalive ping timeout` closes were exactly that (2026-09-23) — a live
+# device torn down, its HA entities flapping, to rediscover it 5s later. 30s
+# rides those out and still finds a dead Echo within ~50s; the device waits 45s
+# for its own pongs (wsPongWait), so the two ends now disagree less.
+WS_PING_INTERVAL_S = 20
+WS_PING_TIMEOUT_S = 30
 # A sample at or above this counts as an excursion. 200ms is well clear of a
 # healthy hop (Office measures 264ms median for a whole audio round trip
 # including frame batching) while catching the ~1s tail under investigation.
@@ -5065,6 +5077,7 @@ async def handle_shell(ws: WebSocketServerProtocol, path: str, secure: bool = Fa
 
 async def _route(ws: WebSocketServerProtocol, secure: bool):
     path = ws.request.path if hasattr(ws, "request") else getattr(ws, "path", "/")
+    em_tcp.tune(ws.transport.get_extra_info("socket"))
 
     if path == "/control":
         await handle_control(ws, secure)
@@ -5203,8 +5216,8 @@ async def main():
                 router,
                 SERVER_HOST,
                 SERVER_PORT,
-                ping_interval=20,
-                ping_timeout=10,
+                ping_interval=WS_PING_INTERVAL_S,
+                ping_timeout=WS_PING_TIMEOUT_S,
                 max_size=10 * 1024 * 1024,
             ))
             if tls_ctx is not None:
@@ -5213,8 +5226,8 @@ async def main():
                     SERVER_HOST,
                     SERVER_TLS_PORT,
                     ssl=tls_ctx,
-                    ping_interval=20,
-                    ping_timeout=10,
+                    ping_interval=WS_PING_INTERVAL_S,
+                    ping_timeout=WS_PING_TIMEOUT_S,
                     max_size=10 * 1024 * 1024,
                 ))
                 log.info(f"Device-link TLS (wss) listening on {SERVER_HOST}:{SERVER_TLS_PORT}")

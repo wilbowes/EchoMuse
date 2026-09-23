@@ -679,8 +679,8 @@ link is in the code:
    `ReadMessage`
 5. gorilla fires the pong handler only **inside** `ReadMessage`, so a blocked
    device **cannot answer a keepalive ping**
-6. the controller pings every 20s and closes after 10s without a pong
-   (`websockets.serve(ping_interval=20, ping_timeout=10)`)
+6. the controller pinged every 20s and closed after 10s without a pong
+   (`ping_timeout=10` then; `WS_PING_TIMEOUT_S` is 30 since 2026-09-23)
 7. the buffer drains at realtime, so the block outlasts the timeout
 8. `1011 keepalive ping timeout`, mid-response
 
@@ -1132,7 +1132,19 @@ Three things follow, and the third is the one that bites:
   The device is not at fault in either: `[mic] clock: stalls=0` throughout.
 
 The architectural response is #140 (assume 5-10% loss and 1-2s outages;
-`tc netem` test mode). **Do not attribute recording artefacts to this** — TCP
+`tc netem` test mode).
+
+**Most of that loss was the BLE scan** (2026-09-23, `device/CLAUDE.md`, "The
+LE scan costs the WiFi link") — which is also why RSSI never ordered the
+results. The scan now yields while the link carries anything that cannot
+wait. For what remains, both ends run **thin-stream TCP**
+(`TCP_THIN_LINEAR_TIMEOUTS`: a connection with under four segments in flight
+retransmits on a linear timer for six retries instead of doubling), set per
+socket by `em_tcp.tune` in `_route` and by the device's dialer
+(`internal/client/tcptune.go`). HA OS already sets it host-wide; a plain Docker
+host and the Echo's kernel do not. And the keepalive timeout went 10s → 30s
+(`WS_PING_TIMEOUT_S`): the overnight `1011 keepalive ping timeout` closes were
+live devices whose retransmits outlasted 10s. **Do not attribute recording artefacts to this** — TCP
 does not lose data, so a stall delivers late, never never, and cannot punch
 holes in a saved utterance. That mistake was made and corrected on the day.
 

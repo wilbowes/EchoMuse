@@ -87,6 +87,7 @@ func (c linkCreds) dialer() websocket.Dialer {
 	return websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
 		TLSClientConfig:  c.tlsConf,
+		NetDialContext:   netDialer().DialContext,
 	}
 }
 
