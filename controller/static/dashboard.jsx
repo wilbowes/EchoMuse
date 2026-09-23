@@ -8799,7 +8799,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             </div>
             <div style={{ marginTop: 8, ...inputStyle }}>
               <Toggle label="Speak while the reply is written"
-                sub="starts speaking at the first sentence instead of when the whole reply is ready. Faster with a quick model; a slow one may pause between sentences"
+                sub="faster with a quick model; a slow one may pause"
                 value={config.streamReply ?? false} onChange={v => set('streamReply', v)}/>
             </div>
             {/* Speaker protection: ONE toggle for the bass guard, and the
