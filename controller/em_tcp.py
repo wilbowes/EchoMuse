@@ -124,3 +124,79 @@ class LossWindow:
         if rto_max is not None:
             out["tcpRtoMaxMs"] = rto_max
         return out
+
+
+
+# ─── Link quality for the dashboard ──────────────────────────────────────────
+#
+# Signal strength is what the dashboard used to headline, and it was the
+# wrong number: VVV showed full bars at -43dBm while the AP resent 66% of its
+# frames. Loss is what a user hears (choppy replies, slow turns), so quality is
+# graded on loss, and kept per MINUTE so the Status tab can show a link
+# degrading or recovering rather than one averaged figure.
+
+GOOD_BELOW_PCT = 1.0   # a clean link sits at 0
+POOR_FROM_PCT = 5.0
+
+
+def verdict(loss_pct):
+    """'good' / 'fair' / 'poor', or None when there is nothing to grade."""
+    if loss_pct is None:
+        return None
+    if loss_pct < GOOD_BELOW_PCT:
+        return "good"
+    if loss_pct < POOR_FROM_PCT:
+        return "fair"
+    return "poor"
+
+
+class MinuteStrip:
+    """Downlink segments and retransmits bucketed by wall-clock minute.
+
+    Fed once per stats report (~30s) with that report's deltas. A minute with
+    no report, or with no segments to divide by, is None — not measured, which
+    the dashboard shows as grey rather than as a clean minute.
+    """
+
+    def __init__(self, keep_minutes: int = 30):
+        self.keep = keep_minutes
+        self._b: dict[int, list[int]] = {}
+
+    def add(self, now: float, segs, retrans) -> None:
+        if segs is None or retrans is None:
+            return
+        m = int(now // 60)
+        b = self._b.setdefault(m, [0, 0])
+        b[0] += segs
+        b[1] += retrans
+        for k in [k for k in self._b if k <= m - self.keep]:
+            del self._b[k]
+
+    def minutes(self, now: float, n: int | None = None) -> list:
+        """Loss % per minute, oldest first, ending with the current minute."""
+        n = n or self.keep
+        cur = int(now // 60)
+        out = []
+        for m in range(cur - n + 1, cur + 1):
+            b = self._b.get(m)
+            out.append(round(100.0 * b[1] / b[0], 1) if b and b[0] else None)
+        return out
+
+    def loss_pct(self, now: float, over: int = 10):
+        """Loss over the last `over` minutes as one figure, or None."""
+        cur = int(now // 60)
+        segs = retrans = 0
+        for m in range(cur - over + 1, cur + 1):
+            b = self._b.get(m)
+            if b:
+                segs += b[0]
+                retrans += b[1]
+        return round(100.0 * retrans / segs, 1) if segs else None
+
+    def summary(self, now: float) -> dict | None:
+        """What /api/devices carries as linkQuality; None before any data."""
+        strip = self.minutes(now)
+        if all(x is None for x in strip):
+            return None
+        loss = self.loss_pct(now)
+        return {"verdict": verdict(loss), "lossPct": loss, "minutes": strip}

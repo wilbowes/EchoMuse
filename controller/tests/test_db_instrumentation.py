@@ -203,7 +203,8 @@ def test_stats_relay_allowlist_covers_every_device_stat():
 
     # Downlink TCP loss is controller-measured too, via Device.drain_tcp ->
     # em_tcp.LossWindow.drain, and merged into the same dict.
-    assert "**device.drain_tcp()" in ctrl, "drain_tcp is not merged into the stats"
+    assert re.search(r"_tcp = device\.drain_tcp\(\)", ctrl) and "**_tcp}" in ctrl, \
+        "drain_tcp is not merged into the stats"
     tcpsrc = (root / "em_tcp.py").read_text()
     window = re.search(r"class LossWindow.*", tcpsrc, re.S)
     assert window, "could not locate em_tcp.LossWindow"

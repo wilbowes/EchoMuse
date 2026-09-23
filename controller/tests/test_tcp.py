@@ -93,3 +93,37 @@ def test_read_info_reads_a_real_socket(accepted):
     assert info is not None
     segs, retrans, rto_ms = info
     assert segs >= 1 and retrans == 0 and rto_ms >= 200
+
+
+
+# ─── MinuteStrip: loss per minute for the Status tab ────────────────────────
+
+def test_strip_buckets_by_minute_and_grades_loss():
+    st = em_tcp.MinuteStrip(keep_minutes=5)
+    t0 = 60 * 1000                      # a minute boundary
+    st.add(t0 + 5, 1000, 0)             # minute 0: clean
+    st.add(t0 + 35, 1000, 0)
+    st.add(t0 + 65, 1000, 30)           # minute 1: 3% -> fair
+    st.add(t0 + 185, 1000, 80)          # minute 3: 8% -> poor; minute 2 missing
+    assert st.minutes(t0 + 190) == [None, 0.0, 3.0, None, 8.0]
+    s = st.summary(t0 + 190)
+    assert s["verdict"] == "fair" and s["lossPct"] == 2.8   # 110 of 4000 over 10 min
+
+
+def test_strip_forgets_old_minutes_and_unmeasured_is_none():
+    st = em_tcp.MinuteStrip(keep_minutes=3)
+    assert st.summary(1000.0) is None
+    st.add(0, 100, 0)
+    st.add(600, None, None)             # a report with no downlink figure
+    assert st.summary(600.0) is None    # minute 0 has aged out
+    st.add(600, 0, 0)                   # no traffic: nothing to divide by
+    assert st.minutes(600.0)[-1] is None
+
+
+def test_verdict_thresholds():
+    assert em_tcp.verdict(None) is None
+    assert em_tcp.verdict(0.0) == "good"
+    assert em_tcp.verdict(0.99) == "good"
+    assert em_tcp.verdict(1.0) == "fair"
+    assert em_tcp.verdict(4.99) == "fair"
+    assert em_tcp.verdict(5.0) == "poor"

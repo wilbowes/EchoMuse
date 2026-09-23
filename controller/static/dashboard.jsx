@@ -751,6 +751,37 @@ function MicroMeter({ pct, sev }) {
 // deliberately a separate prop rather than a second use of `note`, because
 // `note` is red — routing neutral information through it would make every
 // device look like it was in trouble.
+const LINK_VERDICT = { good: 'Good', fair: 'Fair', poor: 'Poor' };
+
+// One block per minute for the last 30, coloured by that minute's packet loss
+// on the same thresholds as the Link verdict (em_tcp: good < 1%, poor >= 5%).
+// Grey is a minute with no measurement — offline, or not yet reported — which
+// must not read as a clean one. Newest on the right; hover for the figure.
+function LinkStrip({ minutes }) {
+  const n = minutes.length;
+  const now = Math.floor(Date.now() / 60000);
+  const hhmm = m => new Date(m * 60000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+  return (
+    <div style={{ marginTop:10 }}>
+      <div style={{ display:'flex', justifyContent:'space-between', fontFamily:"'DM Mono',monospace",
+                    fontSize:9, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.08em' }}>
+        <span>Link quality · last {n} min</span><span>now</span>
+      </div>
+      <div style={{ display:'flex', gap:2, marginTop:4, height:10 }}>
+        {minutes.map((p, i) => {
+          const sev = p == null ? null : p >= 5 ? 'bad' : p >= 1 ? 'warn' : 'ok';
+          const at = hhmm(now - (n - 1 - i));
+          return (
+            <div key={i} title={p == null ? `${at} · no data` : `${at} · ${p}% loss`}
+                 style={{ flex:'1 1 0', borderRadius:1,
+                          background: sev ? SEV[sev] : 'var(--track)' }}/>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function StatTile({ label, value, unit, sev = 'ok', pct, glyph, note, sub }) {
   const dim = value == null;
   return (
@@ -1900,6 +1931,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
             const cpuText  = s?.cpuPct != null
               ? `${s.cpuPct.toFixed(0)}%` + (s.coresOnline ? ` · ${s.coresOnline}/${s.coresTotal ?? '?'} cores` : '')
               : null;
+            const lq = device.linkQuality;   // loss verdict + per-minute strip (em_tcp)
             // Thermals: mtktscpu is the CPU zone, maxTempC the hottest of all
             // 11 zones (the PMIC and board sensors can run warmer). Amber past
             // 70C, red past 85C — well below this SoC's limits, because the
@@ -2006,13 +2038,20 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                           on screen to say so. Shown as a note rather than its
                           own tile — it qualifies the link reading, it is not
                           a separate health metric. */}
+                      {/* The verdict is graded on packet loss, not signal: VVV
+                          showed full bars at -43dBm while the AP resent 66% of
+                          its frames (2026-09-23). The bars stay — they are what
+                          people read at a glance — and beside the verdict they
+                          separate the causes: Poor with full bars is
+                          interference or the device, not distance. */}
                       <StatTile
-                        label="Link" value={s?.wifiRssi != null ? s.wifiRssi : null} unit="dBm"
-                        sev={s?.wifiRssi == null ? 'ok' : s.wifiRssi > -70 ? 'ok' : s.wifiRssi > -80 ? 'warn' : 'bad'}
-                        pct={s?.wifiRssi == null ? null : Math.max(0, Math.min(100, (s.wifiRssi + 95) / 35 * 100))}
+                        label="Link" value={LINK_VERDICT[lq?.verdict] ?? null}
+                        sev={lq?.verdict === 'poor' ? 'bad' : lq?.verdict === 'fair' ? 'warn' : 'ok'}
+                        pct={lq?.lossPct == null ? null : Math.max(0, 100 - lq.lossPct * 10)}
                         glyph={<SignalBars rssi={s?.wifiRssi ?? null}/>}
-                        sub={[wifiBand(s?.wifiFreqMhz),
-                              s?.linkSpeedMbps ? `${s.linkSpeedMbps} Mbps` : null]
+                        sub={[s?.wifiRssi != null ? `${s.wifiRssi} dBm` : null,
+                              wifiBand(s?.wifiFreqMhz),
+                              lq?.lossPct != null ? `${lq.lossPct}% loss` : null]
                              .filter(Boolean).join(' · ') || null}
                       />
                       {/* Amber past 200ms, red past 1s — the same thresholds the
@@ -2037,6 +2076,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                           : null}
                       />
                     </div>
+                    {lq && <LinkStrip minutes={lq.minutes}/>}
                     {!s && <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', marginTop:8 }}>waiting for device stats…</div>}
                   </Panel>
                 </div>

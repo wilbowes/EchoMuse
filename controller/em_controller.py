@@ -736,6 +736,9 @@ class Device:
         # Downlink loss from the kernel's counters on our own sockets to this
         # device (em_tcp); drained with the RTT window on each stats report.
         self.tcp_loss = em_tcp.LossWindow()
+        # Loss per minute for the last 30, for the Status tab's link quality
+        # — the hourly rollup is too coarse to show a link recovering.
+        self.tcp_minutes = em_tcp.MinuteStrip()
 
     def is_busy(self) -> bool:
         """Whether this device was doing anything when a ping went out."""
@@ -4417,8 +4420,10 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                         # coming through the allowlist above. drain_rtt() takes
                         # and resets the window accumulated since the last
                         # report, so no sample is counted twice.
-                        _metrics = {**device.stats, **device.drain_rtt(),
-                                    **device.drain_tcp()}
+                        _tcp = device.drain_tcp()
+                        device.tcp_minutes.add(time.time(), _tcp.get("tcpDownSegs"),
+                                               _tcp.get("tcpDownRetrans"))
+                        _metrics = {**device.stats, **device.drain_rtt(), **_tcp}
                         def _persist_stats(_id=device_id, _s=_metrics, _shadow=_sh):
                             db.record_device_stats(_id, _s)
                             db.touch_device_seen(_id)

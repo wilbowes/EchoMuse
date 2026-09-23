@@ -58,6 +58,7 @@ import em_auth as auth
 import em_ble_proxy
 import em_config_sections as sections_mod
 import em_console_pw
+import em_tcp
 import em_labels
 import em_crashlog
 import em_emos_build
@@ -5783,6 +5784,12 @@ def _merge_device(row) -> dict:
         # structurally zero on this hardware (the MTK driver populates
         # neither retries nor noise), so this is the only latency signal.
         "rttMs":            getattr(live, "rtt_last_ms", None) if live else None,
+        # Link quality graded on packet loss from TCP's own retransmit
+        # counters (em_tcp.MinuteStrip): a verdict over the last 10 minutes
+        # and loss per minute for the last 30. Loss, not signal strength, is
+        # what a user hears. None until measured, and when offline.
+        "linkQuality":      (live.tcp_minutes.summary(time.time())
+                             if live and getattr(live, "tcp_minutes", None) else None),
         # Volume is persisted device state, not config (see
         # em_config_sections.STATE_KEYS): the live level while connected,
         # otherwise the last one the device reported, so an offline device
