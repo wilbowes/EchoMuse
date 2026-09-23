@@ -667,6 +667,11 @@ Two things to know before enabling:
 - The proxy is **receive-only** (passive scanning). Devices that need an
   active connection to read data (some smart locks, older BLE devices)
   aren't supported — advert-based sensors and presence tracking are.
+- The Dot's WiFi and Bluetooth **share one antenna**, and scanning costs the
+  WiFi link. So the scan **pauses automatically** while the Dot is hearing
+  you, while a reply is arriving, and while its console or an update is
+  running, then resumes; presence tracking loses a few seconds per voice
+  turn.
 
 Diagnostics live on the device's **Status tab** (Bluetooth proxy panel):
 scanner state, advertisements seen, nearby device count, and whether Home

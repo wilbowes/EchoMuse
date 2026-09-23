@@ -3587,3 +3587,78 @@ against main each time. One flake found on the way: the output chain vectors'
 float stats differ in the last bit between CI runners (11.059648197723096
 against 11.0596481977231); the audio is still compared exactly, the stats now
 to 1e-9. Nothing is released yet — an `emos-v*` tag is still owed first.
+
+## 2026-09-23 — the BLE scan was costing the WiFi link, and the link now measures itself
+
+**The recurring RTT stalls, choppy replies and stuttering console were the
+Bluetooth proxy's scan.** Overnight VVV logged idle RTT excursions up to 18s
+and two `1011 keepalive ping timeout` closes, and the controller's sockets to
+both bench Echoes sat at a congestion window of 2 and a 1.1-1.75s RTO, which is
+TCP recovering from loss rather than a slow link. Wil granted view-only UniFi
+access, and the AP's per-client counters settled it: every EchoMuse Dot needed
+**47-96% of its frames resent**, while an Amazon device on VVV's own radio at
+weaker signal needed 0.4%, an LG TV at -72dBm 0.2%, and Sonos 0.5-1.9%. VVV at
+-43dBm was at 66%, so signal strength was never the question. Crossover both
+ways and on both userspaces: proxy off took VVV (FireOS) 126% → 0.1% and 15LE
+(emOS) 168% → 0.2%, ping loss 8% → 0, and the excursions stopped; the Amazon
+device stayed at 0.2% throughout. `device/CLAUDE.md` had concluded "It is not
+RF coexistence" on the strength of stock FireOS driving a Bluetooth speaker —
+a different load — and the July "coex clean" test watched CPU and voice turns,
+never the AP. #139's "RSSI does not order the results" fits too.
+
+**The chip ignores the scan interval and window.** Swept on VVV with the server
+stopped (`tools/ble_probe`, bench-tagged `internal/bluetooth/bench.go`): 320/30,
+1280/120, 1280/30 and 10240/3 caught the same ~1000 adverts in 4 minutes and
+cost the same, and adverts arrive on a fixed 80ms grid whatever is asked. The
+payload is spec-correct and answers status 0. **Bluetooth up and reset but not
+scanning costs nothing** (0.0%), so only the scan does. Amazon's vendor init,
+which we skip, is not the answer: `libbluetooth_mtk.so` sends six vendor
+commands, none of them coexistence, and the likely one — sleep `0xFC7A 03 40 1f
+40 1f 00 04`, read out of `BT_Addr` NVRAM with the struct 4 bytes ahead of the
+file — plus the radio and TX-offset commands changed nothing. The kernel sends
+the chip only `coex_wmt_ant_mode=1`; MediaTek's coex table is compiled out.
+Toggling the scan ourselves showed the damage is proportional to time scanning
+and recovers at once (50% on → 15%, 10% → 3%, against ~37% continuous in that
+session), with adverts falling in the same proportion — a linear trade, so no
+duty cycle keeps Bermuda and frees the link.
+
+**So the scan stops while the link is needed and runs the rest of the time**
+(Wil's call: Bermuda real-time presence is the goal). A 100ms poll derives it
+from live state — a button turn, a private-listening session, a reply still
+arriving (2s stale bound, so a lost EOS cannot hold it), any shell session —
+and yields with one HCI command, the chip left up. Bermuda re-decides every
+1.05s and refuses adverts older than 10s, so a few seconds per turn is inside
+its budget; music does not yield, since it runs for hours. A/B on VVV, ten
+"tell me a joke" each: end of speech to transcript median 3.31 → 2.53s, worst
+12.7 → 3.96s, whole turn worst 17.0 → 10.3s, no underruns either way. Wil on
+the console: "smooth and silky as melted butter". Measured before deciding
+anything about music: 31 minutes with the proxy scanning throughout gave **0
+music underruns** — the worst stall was 3.6s against a 5.5s buffer — so the
+deep-buffer burst design is parked until something says otherwise.
+
+**Both ends of the link now retransmit on a linear timer, and the keepalive
+outlasts a loss burst.** `TCP_THIN_LINEAR_TIMEOUTS` on every device-link socket
+at both ends: HA OS already sets it host-wide, a plain Docker host and the
+Echo's kernel do not. The controller's ping timeout went 10s → 30s; the
+overnight closes were live devices whose retransmits outlasted 10s.
+
+**Loss is measured where it happens** (schema v26). The controller reads
+`TCP_INFO` off its own sockets each stats report (downlink, a rate) and the
+Echo reports its own retransmits (uplink, a count — FireOS 5's 3.18 predates
+`tcpi_segs_out`); all nullable, since an unmeasured window is not a clean link.
+First readings: 15LE, proxy off, 0 of 346; VVV, proxy on, 37 of 1505. The Link
+tile on the Status tab is now graded Good/Fair/Poor on that loss, keeping the
+signal bars Wil likes, with a 30-minute per-minute strip. **Open, and parked
+by Wil:** raw loss is not user experience — at idle the scan runs and loss is
+high while turns are clean — so the grade should come from turns
+(responsiveness, smoothness, listening) with network readings calibrated
+against good and degraded turns and music.
+
+Also today: HA's UniFi integration has failed with a 401 since 09-20, four
+Athom plugs run 170-200% AP resends and a Google Home Mini 15% (Wil's network
+list, for later); every Dot reports the NVRAM default BD address
+`00:00:46:81:63:01`; and a claude.ai review of device CPU was assessed — the
+10s raw-audio memmove in `bufferRaw` is real, int8 quantisation is risky
+against the thin wake margin. VVV moved to the lounge in the evening, onto
+`…7b:e5` channel 40 at -64dBm, for the soak. All of it is on
+`feat/ble-scan-yield`, nothing pushed or released.

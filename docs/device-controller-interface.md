@@ -43,6 +43,17 @@ All three exist in plain (`ws://`) and TLS (`wss://`) form; see
 [Link auth & TLS](#link-auth--tls). The `/shell` plane is not dialled until the
 controller asks for it.
 
+**Keepalive and loss.** The controller sends a WebSocket ping every 20s on each
+plane and closes a connection after **30s** with no pong
+(`WS_PING_TIMEOUT_S`); answer pings promptly, which means never blocking the
+goroutine or thread that reads the socket. Home WiFi loses packets, so a device
+should set **`TCP_THIN_LINEAR_TIMEOUTS`** on its sockets (Linux: retransmit on a
+linear timer while under four segments are in flight, instead of doubling);
+the controller sets it on its end. On a board whose radio shares an antenna
+with Bluetooth, **stop any BLE scan while the link carries a turn, a reply or
+a shell session** — on the Dot a running scan made the AP resend 47-150% of
+frames (see "The LE scan costs the WiFi link" in `device/CLAUDE.md`).
+
 ## Registration and capabilities
 
 Immediately after the `/control` socket opens, the device sends one `register`
@@ -142,6 +153,7 @@ absent optional fields take prior/default behaviour.
 | `listen_state` | `state` (`local`/`stream`/`degraded`), `reason?` | What the device is doing with its wake stream. Sent on every change and after every `ack` |
 | `listen_end` | `session`, `reason` | The device closed a session itself (`ack_timeout`, `max_open`, `muted`, `link`, `stopped`) |
 | `ambient_light` | `value` | Light reading (only if `ambient_light`) |
+| `stats` | hardware and link telemetry (`internal/client/stats.go`, `DeviceStats`) | Every ~30s, plus once on connect. Every field is optional and absence means **not measured**, never zero. `tcpUpRetrans` is the device's own TCP retransmits across its planes since the last report, `tcpUpSegs` the segments sent where the kernel counts them (FireOS 5's 3.18 does not); `ble` carries the scanner's counters, including `yields`/`yieldedMs` for time the scan stood aside for the link |
 | `ble_adverts` | `adverts[]` | Batch from the passive BLE scanner. **Legacy path** — send these on `/data` as `0x06` whenever the controller announced `ble_adverts_data`, and use this message only when it did not (#404) |
 | `wifi_scan_result` | `networks[]` of `{ssid, ssid_hex, signal}`, or `error` | Answer to `wifi_scan` |
 | `wifi_result` | `ok`, `ssid`, `error?` | Outcome of a `wifi_change`, re-sent until `wifi_commit` |

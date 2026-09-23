@@ -1049,6 +1049,7 @@ single written ladder. `docs/audio-states.md` §2 is the nearest thing.
 | `em_runbarrier.py` | Serialising ESPHome pipeline runs across a barge-in, as a pure state machine. The protocol carries **no run identifier**, so the satellite is what keeps two runs from overlapping — see the barge-in rules under the voice backend. Split out for `em_linkauth`'s reason: the suite cannot import `em_esphome` |
 | `em_announce.py` | Running an HA announcement to completion. Owns the two rules that pull against each other — never reply early, always reply — because `VoiceAssistantAnnounceFinished` is HA's completion signal and HA **blocks** on it |
 | `em_wifi.py` | What a WiFi network may be called (0–32 arbitrary bytes, `ssid_hex` on the wire) and what its WPA2 passphrase may be. Mirrors `device/internal/wifi/ssid.go` and the dashboard's `_ssidProblem`/`_pskProblem`; `_post_device_wifi` checks with it so a bad request fails before a device-side switch and rollback |
+| `em_tcp.py` | The device link at the TCP layer: thin-stream retransmission on every accepted device socket (`tune`), `TCP_INFO` reads for downlink loss (`read_info`, `LossWindow`), and the per-minute grade behind the Status tab's Link tile (`MinuteStrip`, `verdict`). Tested against real sockets |
 | `em_linkauth.py` | The device-link auth decision as a pure function. Split out of `em_controller._link_auth_ok` so it is testable: the suite does not import em_controller, so this was security logic with no coverage until it orphaned a device |
 | `em_timers.py` | Voice-assistant timers (#167) — the alarm ring, and the two dismissal matchers that must NOT be one. `is_dismissal` is generous because a missed dismissal leaves the alarm going and HA answering "there are no timers"; `is_dismissal_only` is strict because it suppresses HA's reply, and a false positive there is not a spare stop, it is a lost answer ("turn off the kitchen light" over a ringing alarm). Phrases are stripped longest-first so `turn off` is consumed before the bare `off` strands `turn` |
 | `em_ble_proxy.py` | BLE proxy ESPHome servers — a second, separate ESPHome device per Echo (own port from the shared counter, own mDNS, MAC = serial-derived with the locally-administered bit flipped). Forwards `ble_adverts` control messages from the device's passive scanner (`device/internal/bluetooth`, raw HCI over `/dev/stpbt`; enabling durably disables Android's BT stack) to HA as raw advertisements. Lifecycle = idempotent `reconcile()` driven by `bleProxyEnabled` |
@@ -1157,7 +1158,20 @@ where the kernel fills them. Both sides take deltas per connection and treat a
 first sighting as a baseline (`em_tcp.LossWindow`, `client.LinkLoss`), so a
 reconnect cannot read as a burst; and every column is NULLABLE, because a window
 nothing measured is not a clean link. Exposed by `get_device_metrics` and the
-support bundle; not yet on the dashboard. **Do not attribute recording artefacts to this** — TCP
+support bundle.
+
+**On the Status tab the Link tile is graded on that loss, not on signal
+strength** (`em_tcp.MinuteStrip` → `linkQuality` in `/api/devices`): Good below
+1%, Poor from 5%, over the last 10 minutes, with a 30-block strip of loss per
+minute under the tile row, and grey for a minute nothing measured. RSSI had
+headlined "healthy" on the worst link measured (VVV, full bars at −43dBm, 66%
+AP resends); the signal bars stay beside the verdict, where "Poor with full
+bars" reads as interference rather than distance. **Known gap, parked by Wil
+2026-09-23:** raw loss is not user experience. At idle the scan runs and loss is
+high while turns (scan yielded) are clean, so the strip reads worse than anyone
+hears. The intended replacement grades turns on responsiveness, smoothness and
+listening, and calibrates network readings against them; see JOURNAL
+2026-09-23. **Do not attribute recording artefacts to this** — TCP
 does not lose data, so a stall delivers late, never never, and cannot punch
 holes in a saved utterance. That mistake was made and corrected on the day.
 
