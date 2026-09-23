@@ -777,3 +777,26 @@ def test_home_assistant_display_names_are_redacted():
     assert "Wil Bowes" not in joined
     assert "wil" not in joined.replace("<admin>", "")
     assert joined.count("<admin>") == 2
+
+
+def test_devices_carry_their_userspace_and_kernel():
+    """#621: stored since schema v21/v23, but missing from the allowlist, so
+    #566's bundle could not say which kernel the device booted. A device that
+    never reported them (old firmware) simply has no such key."""
+    reported = Row({
+        "device_id": "G090LF1180130NJG", "approved": 1,
+        "base_os": "emos", "kernel_arch": "armv7l",
+        "kernel_release": "3.18.19-gecb8cb46060-dirty",
+    })
+    old = Row({"device_id": "G090LF1180440EFF", "approved": 1})
+    bundle = S.build(
+        controller_version="v2.24.1", devices=[reported, old],
+        fleet_config={}, schema_version=26, turns=[], metrics=[], counters=[],
+        device_configs={}, live_state={}, controller_log=[], device_log=[],
+    )
+    first, second = bundle["devices"]
+    assert first["base_os"] == "emos"
+    assert first["kernel_arch"] == "armv7l"
+    assert first["kernel_release"] == "3.18.19-gecb8cb46060-dirty"
+    for key in ("base_os", "kernel_arch", "kernel_release"):
+        assert key not in second
