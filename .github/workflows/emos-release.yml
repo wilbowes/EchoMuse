@@ -68,15 +68,22 @@ env:
   ALPINE_ARMV7_DIGEST: >-
     sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
 
+# Read-only unless a job asks for more. The repository's default token is
+# already read-only; this keeps it so if that setting ever changes.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write       # provenance attestation (Sigstore OIDC)
+      attestations: write
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # The same pinned image the firmware is built from, for the reason
       # device/CLAUDE.md gives: it carries the NDK against a 2015 platform we
@@ -182,7 +189,7 @@ jobs:
       # qemu + an armv7 Alpine image makes it a NATIVE build, so there is no
       # cross-compilation surface to get wrong. It costs ~8 minutes.
       - name: Set up qemu (for the armv7 busybox build)
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
         with:
           platforms: arm
 
@@ -284,8 +291,19 @@ jobs:
           echo "--- notes that will be published ---"
           cat /tmp/emos-notes.md
 
+      # Provenance for exactly what is published: this workflow at this commit
+      # built these files. `gh attestation verify <file> --repo wilbowes/EchoMuse`
+      # checks one. Nothing verifies it before a wizard flash yet.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            emos/build/init
+            emos/build/emos-payload.zip
+            emos/build/bb/busybox-*.tar.bz2
+
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           name: emOS ${{ github.ref_name }}
           # The bundle, plus the loose `init` — and that one is NOT redundant.

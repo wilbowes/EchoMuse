@@ -11,15 +11,30 @@ on:
     tags:
       - 'v*'
 
+# Read-only unless a job asks for more. The repository's default token is
+# already read-only; this keeps it so if that setting ever changes.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write       # provenance attestation (Sigstore OIDC)
+      attestations: write
 
     steps:
+      # The tag reaches a shell below, and git allows $ ( ) ; in a tag name.
+      # Every firmware tag ever cut matches this; anything else is refused
+      # before it can be interpolated anywhere.
+      - name: Refuse a malformed tag
+        run: |
+          echo "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || {
+            echo "::error::$GITHUB_REF_NAME is not vX.Y.Z"; exit 1; }
+
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true   # fetches GoTinyAlsa submodule
 
@@ -37,7 +52,7 @@ jobs:
             echomuse-compiler \
             -c "cd /sdk && mkdir -p build && go build \
               -tags server \
-              -ldflags \"-X github.com/wilbowes/EchoMuse/internal/client.Version=${{ github.ref_name }} \
+              -ldflags \"-X github.com/wilbowes/EchoMuse/internal/client.Version=$GITHUB_REF_NAME \
                          -X github.com/wilbowes/EchoMuse/internal/client.BuildUnix=$(date +%s)\" \
               -o build/server \
               ./cmd/"
@@ -58,6 +73,16 @@ jobs:
             exit 1
           fi
           echo "binary carries $GITHUB_REF_NAME"
+
+      # Provenance: a signed statement, logged in Sigstore's public ledger,
+      # that THIS workflow at THIS commit built THIS binary. Check one with
+      #   gh attestation verify server --repo wilbowes/EchoMuse
+      # It does not stop a forged release by itself -- nothing checks it
+      # before OTA yet -- but it makes one detectable after the fact.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: device/build/server
 
       # Release notes come from the ANNOTATED TAG MESSAGE.
       #
@@ -83,7 +108,7 @@ jobs:
           cat /tmp/release-notes.md
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           name: EchoMuse ${{ github.ref_name }}
           files: device/build/server

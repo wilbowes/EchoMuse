@@ -193,6 +193,20 @@ Device firmware, controller and emOS are versioned independently from the same r
 
   The notice is **advisory only and must stay that way** (`tests/test_deploy.py` enforces GET-only + no mutating call in the banner): the controller is the user's container, updated with their own `docker compose pull`. An in-app update would restart the process serving the page, mid-request, with no way to report the outcome. Note a locally-built image defaults `EM_CONTROLLER_VERSION` to `dev`, which resolves to `unknown` and correctly shows nothing — pass `--build-arg EM_CONTROLLER_VERSION=$(git describe --tags --match 'controller-v*')` for a local build that knows what it is. Version comparison lives in `version.py` (`parse`/`compare`) so it is unit-testable without aiohttp; a build between tags parses **equal** to its tag and is ahead, not behind.
 
+**Pipeline hygiene (2026-09-23).** Every action is pinned by commit SHA with
+its version in a trailing comment (`@<sha> # v7.0.1`), which Dependabot's
+github-actions ecosystem keeps current — a mutable tag in a job holding
+`contents: write` or `packages: write` is how a third-party compromise swaps a
+release asset. Every workflow opens with `permissions: contents: read` and
+jobs ask for more. Tag-triggered releases refuse a tag that is not a version
+before it reaches a shell (git allows `$ ( ) ;` in a tag name). The firmware
+`server`, the emOS assets and the controller image carry build-provenance
+attestations (`gh attestation verify`); **nothing checks them before OTA yet**,
+so they make a forged release detectable, not impossible. Base images are
+pinned by index digest. One GitHub account makes every change, so branch and
+tag rules guard against mistakes only, and the token on the dev box can lift
+them.
+
 **The release workflow does NOT build — it re-tags the image the main build
 already published for that commit.** `controller-release.yml` looks for
 `:sha-<short>` and fails with "No image published for this commit" if
