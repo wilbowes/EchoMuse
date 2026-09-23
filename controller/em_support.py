@@ -105,6 +105,8 @@ _METRIC_FIELDS = (
     "cpu_temp_avg", "cpu_temp_max", "max_temp_max",
     "cores_online_last", "cores_online_min", "cores_total",
     "thermal_limit_min",
+    "tcp_down_segs", "tcp_down_retrans", "tcp_down_retrans_pct",
+    "tcp_up_retrans", "tcp_up_retrans_pct", "tcp_rto_max_ms",
 )
 
 # The controller's own resource use. Nothing here is private in itself, but it

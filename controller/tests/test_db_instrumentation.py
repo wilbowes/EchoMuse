@@ -201,6 +201,14 @@ def test_stats_relay_allowlist_covers_every_device_stat():
     assert drain, "could not locate Device.drain_rtt"
     allowlist |= set(re.findall(r'"(\w+)":', drain.group(0)))
 
+    # Downlink TCP loss is controller-measured too, via Device.drain_tcp ->
+    # em_tcp.LossWindow.drain, and merged into the same dict.
+    assert "**device.drain_tcp()" in ctrl, "drain_tcp is not merged into the stats"
+    tcpsrc = (root / "em_tcp.py").read_text()
+    window = re.search(r"class LossWindow.*", tcpsrc, re.S)
+    assert window, "could not locate em_tcp.LossWindow"
+    allowlist |= set(re.findall(r'out\["(\w+)"\]', window.group(0)))
+
     record = re.search(r"def record_device_stats\(.*?\n(?=def )", dbsrc, re.S)
     assert record, "could not locate record_device_stats"
     consumed = set(re.findall(r'stats\.get\("(\w+)"\)', record.group(0)))
@@ -534,3 +542,37 @@ def test_zero_is_stored_as_zero(fresh_db):
     ).fetchone()
     assert row["ble_restarts_last"] == 0
     assert row["ble_hci_errors_last"] == 0
+
+
+# ─── v26 — TCP link loss ─────────────────────────────────────────────────────
+
+def test_tcp_loss_accumulates_and_reports_a_rate(fresh_db):
+    db = fresh_db
+    db.record_device_stats("dev1", {"tcpDownSegs": 1000, "tcpDownRetrans": 50,
+                                    "tcpUpRetrans": 3, "tcpRtoMaxMs": 400})
+    db.record_device_stats("dev1", {"tcpDownSegs": 1000, "tcpDownRetrans": 30,
+                                    "tcpUpRetrans": 1, "tcpRtoMaxMs": 900})
+    m = db.get_device_metrics("dev1", 0)[-1]
+    assert m["tcp_down_segs"] == 2000
+    assert m["tcp_down_retrans"] == 80
+    assert m["tcp_down_retrans_pct"] == 4.0
+    assert m["tcp_up_retrans"] == 4
+    assert m["tcp_up_retrans_pct"] is None   # no segment count from this kernel
+    assert m["tcp_rto_max_ms"] == 900
+
+
+def test_unmeasured_tcp_loss_is_none_not_a_clean_link(fresh_db):
+    # Old firmware sends no uplink figure and a controller that could not read
+    # its socket sends no downlink one: both must stay NULL, because 0 would
+    # claim the link was perfect.
+    db = fresh_db
+    db.record_device_stats("dev1", {"cpuPct": 10})
+    m = db.get_device_metrics("dev1", 0)[-1]
+    for k in ("tcp_down_segs", "tcp_down_retrans", "tcp_down_retrans_pct",
+              "tcp_up_retrans", "tcp_rto_max_ms"):
+        assert m[k] is None, k
+    # A later measured window starts the sum; an unmeasured one leaves it.
+    db.record_device_stats("dev1", {"tcpDownSegs": 100, "tcpDownRetrans": 0})
+    db.record_device_stats("dev1", {"cpuPct": 10})
+    m = db.get_device_metrics("dev1", 0)[-1]
+    assert m["tcp_down_segs"] == 100 and m["tcp_down_retrans_pct"] == 0.0

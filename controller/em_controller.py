@@ -733,6 +733,9 @@ class Device:
         self.rtt_samples_idle    = 0
         # Log-line coalescing only — the counters above are the measurement.
         self.rtt_log = em_rttlog.ExcursionLog(self.device_id)
+        # Downlink loss from the kernel's counters on our own sockets to this
+        # device (em_tcp); drained with the RTT window on each stats report.
+        self.tcp_loss = em_tcp.LossWindow()
 
     def is_busy(self) -> bool:
         """Whether this device was doing anything when a ping went out."""
@@ -814,6 +817,17 @@ class Device:
         self.rtt_excursions = self.rtt_excursions_idle = 0
         self.rtt_samples_idle = 0
         return out
+
+    def drain_tcp(self) -> dict:
+        """Downlink segments and retransmits since the last report, summed over
+        the control and data planes (em_tcp.LossWindow). Empty when neither
+        socket could be read, so it stores as NULL rather than a clean link."""
+        snaps = {}
+        for ws in (self.control_ws, self.data_ws):
+            transport = getattr(ws, "transport", None)
+            if transport is not None:
+                snaps[id(ws)] = em_tcp.read_info(transport.get_extra_info("socket"))
+        return self.tcp_loss.drain(snaps)
 
     async def send_control(self, msg: dict):
         try:
@@ -4333,6 +4347,12 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                             "txErrors":      msg.get("txErrors"),
                             "txDropped":     msg.get("txDropped"),
                             "rxCrcErrors":   msg.get("rxCrcErrors"),
+                            # Uplink loss: the device's own TCP retransmits since
+                            # its last report (tcpUpSegs only where the kernel
+                            # counts segments; FireOS 5's does not). Downlink is
+                            # measured here, in Device.drain_tcp.
+                            "tcpUpRetrans":  msg.get("tcpUpRetrans"),
+                            "tcpUpSegs":     msg.get("tcpUpSegs"),
                             "ble":           msg.get("ble"),
                             # Thermals + CPU topology. coresOnline is not optional
                             # context: cpuPct is a share of ONLINE capacity, so the
@@ -4397,7 +4417,8 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                         # coming through the allowlist above. drain_rtt() takes
                         # and resets the window accumulated since the last
                         # report, so no sample is counted twice.
-                        _metrics = {**device.stats, **device.drain_rtt()}
+                        _metrics = {**device.stats, **device.drain_rtt(),
+                                    **device.drain_tcp()}
                         def _persist_stats(_id=device_id, _s=_metrics, _shadow=_sh):
                             db.record_device_stats(_id, _s)
                             db.touch_device_seen(_id)

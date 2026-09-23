@@ -1144,7 +1144,20 @@ socket by `em_tcp.tune` in `_route` and by the device's dialer
 (`internal/client/tcptune.go`). HA OS already sets it host-wide; a plain Docker
 host and the Echo's kernel do not. And the keepalive timeout went 10s → 30s
 (`WS_PING_TIMEOUT_S`): the overnight `1011 keepalive ping timeout` closes were
-live devices whose retransmits outlasted 10s. **Do not attribute recording artefacts to this** — TCP
+live devices whose retransmits outlasted 10s.
+
+**Link loss is now measured where it happens: TCP's own retransmit counters
+(schema v26).** The RF counters are structurally zero and RTT is a symptom, so
+the cause went unseen for months. `Device.drain_tcp` reads `TCP_INFO` off the
+controller's control and data sockets each stats report — segments and
+retransmits, so DOWNLINK loss is a rate (`tcp_down_retrans_pct`) — and the
+device reports its own retransmits (`tcpUpRetrans`) as UPLINK loss. FireOS 5's
+kernel predates `tcpi_segs_out`, so uplink is a count there, with segments only
+where the kernel fills them. Both sides take deltas per connection and treat a
+first sighting as a baseline (`em_tcp.LossWindow`, `client.LinkLoss`), so a
+reconnect cannot read as a burst; and every column is NULLABLE, because a window
+nothing measured is not a clean link. Exposed by `get_device_metrics` and the
+support bundle; not yet on the dashboard. **Do not attribute recording artefacts to this** — TCP
 does not lose data, so a stall delivers late, never never, and cannot punch
 holes in a saved utterance. That mistake was made and corrected on the day.
 

@@ -692,11 +692,22 @@ func main() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		tick := 0
+		// Drained only here, on this one goroutine, so LinkLoss needs no lock;
+		// the on-connect snapshot above simply leaves the fields unset.
+		var upLoss client.LinkLoss
 		for range ticker.C {
 			st := collectStats()
 			st.Ble = bleScanner.Stats()
 			st.OwwShadow = shadowStats(dataClient)
 			st.AecRef = canceller.RefSource()
+			var snaps []client.TCPSnap
+			if sn, ok := controlClient.TCPSnapshot(); ok {
+				snaps = append(snaps, sn)
+			}
+			if sn, ok := dataClient.TCPSnapshot(); ok {
+				snaps = append(snaps, sn)
+			}
+			st.TcpUpRetrans, st.TcpUpSegs = upLoss.Drain(snaps...)
 			controlClient.SendStats(st)
 			if tick%10 == 0 {
 				var ms runtime.MemStats

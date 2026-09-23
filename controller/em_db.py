@@ -996,6 +996,25 @@ MIGRATIONS: list[str] = [
     """
     UPDATE system_config SET value = '25' WHERE key = 'schema_version';
     """,
+
+    # ── v26 — link loss from the kernel's TCP counters ──────────────────────
+    #
+    # The BLE scan made the AP resend 47-150% of frames to a Dot for months
+    # and nothing here could see it (2026-09-23): the MTK RF counters are
+    # structurally zero and RTT shows only the symptom. TCP counts its own
+    # retransmits. Down = the controller's sockets to the device (segments +
+    # retransmits, so a rate); up = the device's own retransmits (a count;
+    # segments only where its kernel reports them). All NULLABLE: an hour
+    # nothing measured must not read as a clean link.
+    """
+    ALTER TABLE device_metrics ADD COLUMN tcp_down_segs_sum    INTEGER;
+    ALTER TABLE device_metrics ADD COLUMN tcp_down_retrans_sum INTEGER;
+    ALTER TABLE device_metrics ADD COLUMN tcp_up_segs_sum      INTEGER;
+    ALTER TABLE device_metrics ADD COLUMN tcp_up_retrans_sum   INTEGER;
+    ALTER TABLE device_metrics ADD COLUMN tcp_rto_max_ms       INTEGER;
+
+    UPDATE system_config SET value = '26' WHERE key = 'schema_version';
+    """,
 ]
 
 # Post-migration fixups that need Python rather than SQL. Keyed by the schema
@@ -2408,6 +2427,18 @@ def record_device_stats(device_id: str, stats: dict) -> None:
     _ble       = stats.get("ble") or {}
     ble_restarts = _ble.get("restarts")
     ble_hci_err  = _ble.get("hciErrors")
+
+    # TCP link loss (v26). Down is controller-measured (Device.drain_tcp),
+    # up is relayed from the device. Every one may be absent, and absent is
+    # NULL: a window nothing measured is not a clean link.
+    def _opt_int(key):
+        v = stats.get(key)
+        return int(v) if v is not None else None
+    tcp_down_segs    = _opt_int("tcpDownSegs")
+    tcp_down_retrans = _opt_int("tcpDownRetrans")
+    tcp_up_segs      = _opt_int("tcpUpSegs")
+    tcp_up_retrans   = _opt_int("tcpUpRetrans")
+    tcp_rto_max      = _opt_int("tcpRtoMaxMs")
     with _tx() as conn:
         conn.execute(
             """
@@ -2423,12 +2454,15 @@ def record_device_stats(device_id: str, stats: dict) -> None:
                 cpu_temp_sum, cpu_temp_samples, cpu_temp_max, max_temp_max,
                 cores_online_last, cores_online_min, cores_total,
                 thermal_limit_min,
-                ble_restarts_last, ble_hci_errors_last
+                ble_restarts_last, ble_hci_errors_last,
+                tcp_down_segs_sum, tcp_down_retrans_sum,
+                tcp_up_segs_sum, tcp_up_retrans_sum, tcp_rto_max_ms
             ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                       ?, ?, ?, ?, ?, ?, ?, ?, ?,
                       ?, ?, ?, ?, ?, ?, ?,
                       ?, ?, ?, ?, ?, ?, ?, ?,
-                      ?, ?)
+                      ?, ?,
+                      ?, ?, ?, ?, ?)
             ON CONFLICT (device_id, hour_ts) DO UPDATE SET
                 samples          = samples + 1,
                 cpu_sum          = cpu_sum + excluded.cpu_sum,
@@ -2507,7 +2541,24 @@ def record_device_stats(device_id: str, stats: dict) -> None:
                 ble_restarts_last   = COALESCE(excluded.ble_restarts_last,
                                                ble_restarts_last),
                 ble_hci_errors_last = COALESCE(excluded.ble_hci_errors_last,
-                                               ble_hci_errors_last)
+                                               ble_hci_errors_last),
+                -- TCP loss sums treat NULL as "not measured": a NULL window
+                -- leaves the sum alone, and the first measured one starts it.
+                tcp_down_segs_sum    = CASE WHEN excluded.tcp_down_segs_sum IS NULL
+                    THEN tcp_down_segs_sum
+                    ELSE COALESCE(tcp_down_segs_sum, 0) + excluded.tcp_down_segs_sum END,
+                tcp_down_retrans_sum = CASE WHEN excluded.tcp_down_retrans_sum IS NULL
+                    THEN tcp_down_retrans_sum
+                    ELSE COALESCE(tcp_down_retrans_sum, 0) + excluded.tcp_down_retrans_sum END,
+                tcp_up_segs_sum      = CASE WHEN excluded.tcp_up_segs_sum IS NULL
+                    THEN tcp_up_segs_sum
+                    ELSE COALESCE(tcp_up_segs_sum, 0) + excluded.tcp_up_segs_sum END,
+                tcp_up_retrans_sum   = CASE WHEN excluded.tcp_up_retrans_sum IS NULL
+                    THEN tcp_up_retrans_sum
+                    ELSE COALESCE(tcp_up_retrans_sum, 0) + excluded.tcp_up_retrans_sum END,
+                tcp_rto_max_ms       = CASE WHEN excluded.tcp_rto_max_ms IS NULL
+                    THEN tcp_rto_max_ms
+                    ELSE MAX(COALESCE(tcp_rto_max_ms, 0), excluded.tcp_rto_max_ms) END
             """,
             (
                 device_id, hour_ts,
@@ -2550,6 +2601,8 @@ def record_device_stats(device_id: str, stats: dict) -> None:
                 # be wrong here in a way it is not for the gauges above.
                 int(ble_restarts) if ble_restarts is not None else None,
                 int(ble_hci_err) if ble_hci_err is not None else None,
+                tcp_down_segs, tcp_down_retrans,
+                tcp_up_segs, tcp_up_retrans, tcp_rto_max,
             ),
         )
         conn.execute(
@@ -2632,6 +2685,20 @@ def get_device_metrics(device_id: str, since: float) -> list[dict]:
                 round(100.0 * (r["rtt_excursions"] - r["rtt_excursions_idle"])
                       / (r["rtt_samples"] - r["rtt_samples_idle"]), 1)
                 if (r["rtt_samples"] - r["rtt_samples_idle"]) else None),
+            # TCP link loss (v26) — the CAUSE the RTT excursions are a symptom
+            # of. Down is a rate (the controller counts its segments); up is a
+            # count unless the device's kernel reports segments. None means
+            # not measured, never a clean link.
+            "tcp_down_segs":        r["tcp_down_segs_sum"],
+            "tcp_down_retrans":     r["tcp_down_retrans_sum"],
+            "tcp_down_retrans_pct": (
+                round(100.0 * r["tcp_down_retrans_sum"] / r["tcp_down_segs_sum"], 2)
+                if r["tcp_down_segs_sum"] else None),
+            "tcp_up_retrans":       r["tcp_up_retrans_sum"],
+            "tcp_up_retrans_pct": (
+                round(100.0 * r["tcp_up_retrans_sum"] / r["tcp_up_segs_sum"], 2)
+                if r["tcp_up_segs_sum"] and r["tcp_up_retrans_sum"] is not None else None),
+            "tcp_rto_max_ms":       r["tcp_rto_max_ms"],
         })
     return out
 
