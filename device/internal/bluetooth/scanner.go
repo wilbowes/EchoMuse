@@ -45,6 +45,8 @@ type Stats struct {
 	AdvertsSent uint64 `json:"advertsSent"`
 	UniqueAddrs int    `json:"uniqueAddrs"`
 	HciErrors   uint64 `json:"hciErrors"`
+	Yields      uint64 `json:"yields"`
+	YieldedMs   uint64 `json:"yieldedMs"`
 	Restarts    uint64 `json:"restarts"`
 	BdAddr      string `json:"bdAddr,omitempty"`
 }
@@ -76,6 +78,8 @@ type Scanner struct {
 	hciErrors   atomic.Uint64
 	restarts    atomic.Uint64
 	scanning    atomic.Bool
+	yields      atomic.Uint64 // times the scan stopped for the link
+	yieldedMs   atomic.Uint64 // total time it spent stopped
 	bdAddrMu    sync.Mutex
 	bdAddr      string
 	uniqueMu    sync.Mutex
@@ -84,15 +88,45 @@ type Scanner struct {
 	// gate decides which adverts are worth the control plane (#404)
 	gate *emitGate
 
+	// yieldWant is whether the link needs the air; yieldSig wakes the
+	// session loop to act on it. See Yield.
+	yieldWant atomic.Bool
+	yieldSig  chan struct{}
+
 	bluedroidDisabled bool
 }
 
 func NewScanner(onBatch BatchCallback) *Scanner {
 	return &Scanner{
-		onBatch: onBatch,
-		unique:  make(map[string]time.Time),
-		pending: make(map[string]Advert),
-		gate:    newEmitGate(),
+		onBatch:  onBatch,
+		unique:   make(map[string]time.Time),
+		pending:  make(map[string]Advert),
+		gate:     newEmitGate(),
+		yieldSig: make(chan struct{}, 1),
+	}
+}
+
+// Yield stops the LE scan while the WiFi link is needed, and restarts it
+// when it is not. Cheap and idempotent; call it as often as convenient.
+//
+// The chip shares one antenna between WiFi and Bluetooth, and while it scans
+// the AP has to resend 40-150% of frames to this device, against 0.2% for
+// other devices on the same radio (measured by crossover, 2026-09-23). Those
+// losses are the RTT stalls and choppy replies. The scan interval and window
+// do not help — the chip ignores them — but disabling the scan restores the
+// link at once, and a controller that is up but not scanning costs nothing.
+// So the scan runs whenever nothing needs the link, which keeps Bermuda fed,
+// and stops for the seconds that something does.
+//
+// Only the scan stops: /dev/stpbt stays open and the chip stays initialised,
+// so resuming is one HCI command, not a firmware reload.
+func (s *Scanner) Yield(yield bool) {
+	if s.yieldWant.Swap(yield) == yield {
+		return
+	}
+	select {
+	case s.yieldSig <- struct{}{}:
+	default:
 	}
 }
 
@@ -150,6 +184,8 @@ func (s *Scanner) Stats() Stats {
 		AdvertsSent: s.advertsSent.Load(),
 		UniqueAddrs: uniqueCount,
 		HciErrors:   s.hciErrors.Load(),
+		Yields:      s.yields.Load(),
+		YieldedMs:   s.yieldedMs.Load(),
 		Restarts:    s.restarts.Load(),
 		BdAddr:      bdAddr,
 	}
@@ -257,10 +293,37 @@ func (s *Scanner) session(stopCh chan struct{}) error {
 	if _, err := sendCmd(opLESetScanParams, scanParams(intervalMs, windowMs)); err != nil {
 		return err
 	}
-	// filter_duplicates=0 — every advert is forwarded so the controller/HA
-	// (Bermuda) sees continuous RSSI updates.
-	if _, err := sendCmd(opLESetScanEnable, []byte{0x01, 0x00}); err != nil {
-		return err
+	// scanOn is the chip's actual state; s.scanning says the session is up,
+	// which is what the dashboard's "Scanning" means — a scan paused for a
+	// turn is not a stopped scanner.
+	var yieldedAt time.Time
+	scanOn := false
+	setScan := func(on bool) error {
+		en := byte(0x00)
+		if on {
+			en = 0x01
+		}
+		// filter_duplicates=0 — every advert is forwarded so the controller/HA
+		// (Bermuda) sees continuous RSSI updates.
+		if _, err := sendCmd(opLESetScanEnable, []byte{en, 0x00}); err != nil {
+			return err
+		}
+		scanOn = on
+		if on && !yieldedAt.IsZero() {
+			s.yieldedMs.Add(uint64(time.Since(yieldedAt).Milliseconds()))
+			yieldedAt = time.Time{}
+		} else if !on {
+			s.yields.Add(1)
+			yieldedAt = time.Now()
+		}
+		return nil
+	}
+	// A session that starts while the link is busy (the watchdog re-init,
+	// or the proxy being enabled mid-turn) holds the scan until it is not.
+	if !s.yieldWant.Load() {
+		if err := setScan(true); err != nil {
+			return err
+		}
 	}
 	s.scanning.Store(true)
 	defer s.scanning.Store(false)
@@ -274,16 +337,39 @@ func (s *Scanner) session(stopCh chan struct{}) error {
 	pruneTicker := time.NewTicker(emitEntryTTL / 5)
 	defer pruneTicker.Stop()
 	defer s.flush()
+	// The watchdog only runs while scanning: a yielded scan is silent by
+	// design, and re-initialising it would restart the scan mid-turn.
 	watchdog := time.NewTimer(watchdogQuiet)
 	defer watchdog.Stop()
+	disarm := func() {
+		if !watchdog.Stop() {
+			select {
+			case <-watchdog.C:
+			default:
+			}
+		}
+	}
+	if !scanOn {
+		disarm()
+	}
 
 	for {
 		select {
-		case pkt := <-events:
-			if !watchdog.Stop() {
-				<-watchdog.C
+		case <-s.yieldSig:
+			if want := !s.yieldWant.Load(); want != scanOn {
+				if err := setScan(want); err != nil {
+					return err
+				}
+				disarm()
+				if want {
+					watchdog.Reset(watchdogQuiet)
+				}
 			}
-			watchdog.Reset(watchdogQuiet)
+		case pkt := <-events:
+			if scanOn {
+				disarm()
+				watchdog.Reset(watchdogQuiet)
+			}
 			if adverts := parseAdvReports(pkt); len(adverts) > 0 {
 				if s.ingest(adverts) {
 					// Keep the total flush rate at or below the plain tick.

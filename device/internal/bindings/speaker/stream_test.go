@@ -207,3 +207,26 @@ func TestNothingPlayedIsNotAudible(t *testing.T) {
 		t.Fatal("a plane that never played must not hold the barge bar down")
 	}
 }
+
+// arriving is what the BLE scanner yields for: a reply still coming in over
+// the wire. It must end at the EOS, and must also end when the periods stop
+// without one — an EOS lost with the link would otherwise hold the scan off
+// until the next reply, which is a proxy gone quiet for no reason.
+func TestArrivingSpansTheWireAndNeverOutlivesIt(t *testing.T) {
+	s, _ := newTestStream(64)
+	now := time.Now()
+	if s.arriving(now, 2*time.Second) {
+		t.Fatal("nothing has arrived yet")
+	}
+	pumpN(t, s, 3)
+	if !s.arriving(time.Now(), 2*time.Second) {
+		t.Fatal("a stream mid-flight is arriving")
+	}
+	if s.arriving(time.Now().Add(3*time.Second), 2*time.Second) {
+		t.Fatal("no period for longer than stale: the EOS was lost, stop yielding")
+	}
+	s.endStream()
+	if s.arriving(time.Now(), 2*time.Second) {
+		t.Fatal("the EOS ends it, even while the buffer plays on")
+	}
+}

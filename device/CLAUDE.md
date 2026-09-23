@@ -794,9 +794,65 @@ suspected** (#404). Crossover on two Dots on one desk, same room as the AP,
 24h against its neighbour's 2**, worst 20049ms against 4792ms, and 5
 keepalive timeouts against 0. Moving the proxy to the other device moved the
 fault within minutes and reproduced the same *rate* — 2.64/min against
-2.49/min — on different hardware. It is not RF coexistence: stock FireOS
-drove a Bluetooth speaker while streaming over WiFi, so the combo chip does
-both. It is our own traffic.
+2.49/min — on different hardware. This section used to conclude "It is not
+RF coexistence", on the grounds that stock FireOS drove a Bluetooth speaker
+while streaming over WiFi. **That was wrong, and the next section is what
+replaced it** — the traffic below was real, but most of the fault was the scan
+itself.
+
+### The LE scan costs the WiFi link, and the scan YIELDS for it (2026-09-23)
+
+Measured AP-side, from UniFi's per-client counters, which nobody had looked at:
+while a Dot scans, the AP resends **47-150% of the frames it sends that Dot**,
+against **0.2-0.4%** for other Amazon devices and an LG TV on the SAME radio
+at weaker signal (VVV at -43dBm: 66%; an Amazon device at -53dBm: 0.4%).
+Crossover both ways and on both userspaces: VVV (FireOS) 126% → 0.1% with the
+proxy off, 15LE (emOS) 168% → 0.2%, ping loss 8% → 0, RTT excursions gone. The
+frames that exhaust the AP's retries are lost, and TCP backing off over them
+is the multi-second "RTT", the choppy reply and the stuttering console.
+Absolute rates depend on the traffic (146% under server traffic, ~37%
+ping-only), so compare within one session only.
+
+What the bench (`tools/ble_probe`, `-tags bench` for `internal/bluetooth/bench.go`)
+established, so nobody repeats it:
+
+- **The chip ignores the scan interval and window.** 320/30, 1280/120, 1280/30
+  and 10240/3 caught the same adverts (~1000 in 4 min) and cost the same;
+  adverts arrive on a fixed 80ms grid whatever is asked. The payload is
+  spec-correct (Core Vol 4 Part E 7.8.10) and answers status 0.
+- **Bluetooth powered, reset and NOT scanning costs nothing** (0.0%). Only
+  the scan does.
+- **Amazon's vendor init does not fix it.** `libbluetooth_mtk.so` sends six
+  vendor commands, none of them coexistence; the likely one, sleep `0xFC7A`
+  `03 40 1f 40 1f 00 04` (from `/data/nvram/APCFG/APRDEB/BT_Addr`, struct
+  offset = file offset + 4), plus radio `0xFC79` and `0xFC93`, made no
+  difference. The kernel sends the chip only `coex_wmt_ant_mode` (1, shared
+  antenna); the rest of MediaTek's coex table is compiled out
+  (`CFG_SUBSYS_COEX_NEED 0`).
+- **Damage is proportional to time scanning and recovers at once.** Toggling
+  the scan from our side: 50% on → 15%, 25% → 7-18%, 10% → 3%, against ~37%
+  continuous in the same session. Adverts fall in the same proportion, so
+  there is no ratio that keeps Bermuda and frees the link.
+- Every Dot reports BD address `00:00:46:81:63:01`, the NVRAM default.
+
+**So the scan runs whenever nothing needs the link and stops while something
+does** — `Scanner.Yield`, driven by a 100ms poll in `cmd/server.go` over a
+button turn streaming, a private-listening session open, a voice reply still
+arriving (`PcmSpeaker.VoiceArriving`, which also ends 2s after the last period
+so a lost EOS cannot hold it), and any shell session (console, OTA, asset
+pushes). Polled rather than set and cleared at each edge, so no missed "done"
+can leave the proxy quiet. Only the scan stops — `/dev/stpbt` stays open, so
+resuming is one HCI command — and the silence watchdog is disarmed while
+yielded, or it would re-initialise the chip mid-turn. `scanning` in the stats
+still means "session up"; `yields`/`yieldedMs` count the pauses.
+
+Why this shape: Bermuda (source, 2026-07) re-decides areas every 1.05s,
+refuses adverts older than 10s for an area contest and calls a device away
+after 30s, and even a continuous scan gave nearby devices a fresh advert in
+only 35-77% of its cycles. A voice turn's few seconds fit that; music does
+not (hours), so music does NOT yield, and a controller-scoring device's
+always-on stream does not count as a turn. Remaining idle loss (pings,
+keepalives) is for TCP tolerance to absorb, not the scanner.
 
 **The mechanism was our own traffic on the liveness channel.**
 `SendBleAdverts` wrote to the CONTROL WebSocket through `writeJSON`, which
@@ -869,9 +925,8 @@ arrival waits at most one tick, which nothing downstream can perceive.
 
 **Two things that look like the fix and are not:**
 
-- **Lowering the scan duty cycle.** 320ms/30ms is exactly
-  `esp32_ble_tracker`'s default, which is what every Bermuda deployment is
-  tuned against. Fine as a one-off diagnostic, wrong as a shipped value.
+- **Lowering the scan duty cycle.** The chip ignores it (above). 320/30 stays
+  because it is `esp32_ble_tracker`'s default, not because it does anything.
 - **`filter_duplicates=1` at the chip.** It suppresses identical
   advertisements — but RSSI is the field that varies and the field Bermuda
   consumes, so the chip filter discards the signal and keeps the noise.
@@ -896,8 +951,9 @@ Four things to know before picking this up:
   "reopening re-initialises the radio WiFi shares" text in `em_ble_proxy`'s
   warning is a hypothesis printed as a fact, and it produced a confident
   wrong call on the night — the timestamps rule it out. Fix that wording.
-- **It is not RF coexistence.** Stock FireOS drove a Bluetooth speaker while
-  streaming over WiFi.
+- **Coexistence costs the link while scanning** (see "The LE scan costs the
+  WiFi link"), so "not RF coexistence" no longer holds as a general
+  statement. Whether it explains these resets is untested.
 - **Memory pressure from the gate's table is RULED OUT — do not re-derive
   it.** The theory was that a 250ms buffer became a 5-minute retained table
   and cost GC pauses. The table is ~300 entries at ~200 bytes (privacy

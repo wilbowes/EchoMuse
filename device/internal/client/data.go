@@ -490,6 +490,13 @@ func (d *DataClient) OpenListen(crossAt time.Time) (session uint32, ok bool) {
 	return d.listenGate.Open(crossAt, time.Now())
 }
 
+// ListenOpen reports whether a private-listening session is streaming the
+// user's words to the controller.
+func (d *DataClient) ListenOpen() bool {
+	_, open := d.listenGate.IsOpen()
+	return open
+}
+
 // AckListen and CloseListen apply the controller's listen_ack / listen_close.
 // Both ignore a session that is not the open one.
 func (d *DataClient) AckListen(session uint32) bool   { return d.listenGate.Ack(session) }

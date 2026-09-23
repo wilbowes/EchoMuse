@@ -572,6 +572,14 @@ func (p *PcmSpeaker) VoiceAudible(hold time.Duration) bool {
 	return p.voice.playedWithin(time.Now(), hold)
 }
 
+// VoiceArriving reports whether a voice reply is still arriving on the wire —
+// the part of playback that needs the link, as against playing out of the
+// buffer. The BLE scanner yields for it (bluetooth.Scanner.Yield). Music is
+// left out: it streams for hours, and yielding for it would starve Bermuda.
+func (p *PcmSpeaker) VoiceArriving() bool {
+	return p.voice.arriving(time.Now(), 2*time.Second)
+}
+
 // MusicAudible is VoiceAudible for the music plane.
 func (p *PcmSpeaker) MusicAudible(hold time.Duration) bool {
 	return p.music.playedWithin(time.Now(), hold)

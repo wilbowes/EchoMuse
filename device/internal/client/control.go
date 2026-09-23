@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -144,7 +145,15 @@ type ControlClient struct {
 	// shellCancel cancels a running shell session when shell_close is received.
 	shellCancel context.CancelFunc
 	shellMu     sync.Mutex
+	// shellsLive counts running shell sessions — the dashboard console and
+	// the controller's programmatic ones (OTA, asset pushes) alike.
+	shellsLive atomic.Int32
 }
+
+// ShellActive reports whether any shell session is running. Typing in the
+// console is a round trip per keystroke and a transfer is bulk, and both
+// stutter while the BLE scan runs, so the scanner yields for them.
+func (c *ControlClient) ShellActive() bool { return c.shellsLive.Load() > 0 }
 
 func NewControlClient(
 	deviceID string,
@@ -931,6 +940,8 @@ const (
 // pipe used by programmatic sessions. If PTY allocation fails, the
 // session falls back to the pipe so a shell is always available.
 func (c *ControlClient) runShellSession(ctx context.Context, baseURL string, pty bool) {
+	c.shellsLive.Add(1)
+	defer c.shellsLive.Add(-1)
 	var master, slave *os.File
 	if pty {
 		var err error

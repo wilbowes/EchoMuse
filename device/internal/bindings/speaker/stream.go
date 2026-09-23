@@ -67,6 +67,8 @@ type audioStream struct {
 	// endStream — both on the WS read goroutine). Read by flush to decide
 	// whether to arm discarding.
 	active bool
+	// lastWireNs is when pump last received a period, for arriving().
+	lastWireNs atomic.Int64
 	// discarding, when set, makes pump drop incoming periods until the
 	// stream's EOS arrives. Armed by flush when a stream is mid-flight:
 	// draining the channel alone is not enough, because the rest of the
@@ -137,6 +139,7 @@ func (s *audioStream) pump(period []byte, wireBytes int) (bool, error) {
 	s.mu.Unlock()
 
 	now := time.Now().UnixNano()
+	s.lastWireNs.Store(now)
 	if newStream {
 		s.recvFirstNs.Store(now)
 		s.recvMaxGapNs.Store(0)
@@ -168,6 +171,16 @@ func (s *audioStream) pump(period []byte, wireBytes int) (bool, error) {
 // Measured after this was briefly wrong: a 2800ms response reported complete
 // after 15 periods (640ms), which ended the turn, cleared the ring and
 // released the duck while the device was still holding most of the audio.
+// arriving reports whether a stream is still coming in over the wire: begun
+// and not yet ended. A stream whose EOS was lost with the link would read as
+// arriving forever, so it also needs a period within stale.
+func (s *audioStream) arriving(now time.Time, stale time.Duration) bool {
+	s.mu.Lock()
+	active := s.active
+	s.mu.Unlock()
+	return active && now.UnixNano()-s.lastWireNs.Load() < stale.Nanoseconds()
+}
+
 func (s *audioStream) endStream() {
 	s.mu.Lock()
 	s.active = false
