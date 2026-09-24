@@ -1833,7 +1833,7 @@ def test_a_device_with_no_ha_stands_down_before_it_can_claim():
     """
     Detection order is a PROXIMITY proxy: the nearest Echo crosses threshold
     first whether or not HA has ever dialled its satellite port. So an
-    unlinked device must stand down before `_wake_arbiter.claim`, or it wins
+    unlinked device must stand down before `_claim_wake`, or it wins
     on nearness, silences the device that could have answered, and then dies
     no_ha — nothing answers, and the one that was ready is the one that went
     dark.
@@ -1845,7 +1845,7 @@ def test_a_device_with_no_ha_stands_down_before_it_can_claim():
     src = (CONTROLLER / "em_controller.py").read_text()
     body = src[src.index("async def wake_word_listener"):]
     serves = body.index("can_serve_turn")
-    claim  = body.index("_wake_arbiter.claim")
+    claim  = body.index("await _claim_wake(")
     assert serves < claim, (
         "the capability check must come BEFORE the arbitration claim — "
         "after it, the unlinked device has already taken the window"
@@ -2069,14 +2069,14 @@ def test_a_barge_in_is_arbitrated_like_any_other_wake():
     body = src[src.index("async def _barge_watcher"):]
     body = body[:body.index("\nasync def ", 1)]
 
-    assert "_wake_arbiter.claim" in body, (
+    assert "await _claim_wake(" in body, (
         "the barge watcher must arbitrate — without it a second Echo answers "
         "the same interrupting utterance"
     )
     # Same ordering rule as the wake path: a device that cannot finish a turn
     # must not take the window first.
     serves = body.index("can_serve_turn")
-    claim  = body.index("_wake_arbiter.claim")
+    claim  = body.index("await _claim_wake(")
     assert serves < claim, (
         "can_serve_turn must precede the claim, or an unlinked device takes "
         "the window and then dies no_ha"

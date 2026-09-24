@@ -197,3 +197,83 @@ def test_mixed_fleet_timed_at_scoring_answered_twice():
     """What stamping the claim at the end of inference did: the delay read
     as a separate utterance and the second Echo answered too."""
     assert _mixed_pair(date_by_capture=False) == "lounge"
+
+
+# ── a mixed fleet holds its claims (contest) ────────────────────────────────
+
+HOLD = 0.1
+
+
+def test_contest_without_hold_is_claim():
+    """A fleet that detects one way does not wait."""
+    async def main():
+        arb = WakeArbiter()
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        won = await arb.contest("office", WINDOW, hold_s=0)
+        second = await arb.contest("lounge", WINDOW, hold_s=0)
+        return won, second, loop.time() - t0
+    won, second, elapsed = run(main())
+    assert (won, second) == ("office", "office")
+    assert elapsed < 0.01
+
+
+def test_contest_grants_the_claim_heard_first():
+    """The 2026-09-24 case: the far Echo detects on the device and arrives
+    16ms ahead of the near one, which was scored here and heard earlier."""
+    async def main():
+        arb = WakeArbiter()
+        t = asyncio.get_running_loop().time()
+        far = asyncio.create_task(
+            arb.contest("vvv", WINDOW, heard_at=t - 0.078, slack_s=3.0, hold_s=HOLD))
+        await asyncio.sleep(0.016)
+        near = asyncio.create_task(
+            arb.contest("15le", WINDOW, heard_at=t - 0.110, slack_s=3.0, hold_s=HOLD))
+        return await far, await near
+    assert run(main()) == ("15le", "15le")
+
+
+def test_contest_waits_only_until_hold_after_hearing():
+    """The hold runs from when the audio was HEARD, so a claim that already
+    spent most of it in flight waits only for the rest."""
+    async def main():
+        arb = WakeArbiter()
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        await arb.contest("office", WINDOW, heard_at=t0 - 0.08, hold_s=HOLD)
+        return loop.time() - t0
+    elapsed = run(main())
+    assert 0.01 < elapsed < 0.06
+
+
+def test_contest_solo_claim_wins_after_the_hold():
+    async def main():
+        arb = WakeArbiter()
+        t = asyncio.get_running_loop().time()
+        return await arb.contest("office", WINDOW, heard_at=t, hold_s=HOLD)
+    assert run(main()) == "office"
+
+
+def test_claim_after_the_contest_meets_the_granted_winner():
+    """Never revoked: a claim heard earlier but arriving after the decision
+    still cedes."""
+    async def main():
+        arb = WakeArbiter()
+        t = asyncio.get_running_loop().time()
+        first = await arb.contest("office", WINDOW, heard_at=t, slack_s=3.0, hold_s=HOLD)
+        late = await arb.contest("lounge", WINDOW, heard_at=t - 0.05, slack_s=3.0, hold_s=HOLD)
+        return first, late
+    assert run(main()) == ("office", "office")
+
+
+def test_contest_separate_utterance_opens_its_own():
+    """A claim heard outside the open contest's window is another utterance:
+    it neither joins nor loses, and deciding one contest leaves the other."""
+    async def main():
+        arb = WakeArbiter()
+        t = asyncio.get_running_loop().time()
+        a = asyncio.create_task(arb.contest("office", WINDOW, heard_at=t, hold_s=HOLD))
+        await asyncio.sleep(0)
+        b = asyncio.create_task(arb.contest("lounge", WINDOW, heard_at=t - 0.5, hold_s=HOLD))
+        return await a, await b
+    assert run(main()) == ("office", "lounge")

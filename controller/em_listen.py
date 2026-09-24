@@ -61,6 +61,20 @@ CLOSED_MEMORY = 32
 # Echo's ack timeout, after which a late private wake's session is gone.
 MAX_ARB_SLACK_S = 3.0
 
+# How long after a wake was HEARD its claim is held on a MIXED fleet, some
+# Echoes detecting on the device and some scored here (em_arbiter.contest).
+# The two paths reach the arbiter at different speeds, so it must wait long
+# enough for a claim heard earlier on the slower path to arrive. Measured
+# 2026-09-24: an on-device wake arrived 78ms after capture; a stream-scored
+# one 85ms in transit plus 16ms to score, and the stream moves in 80ms
+# frames, a barge-in needing two. 250ms covers that with a frame to spare.
+# A fleet that detects one way races on equal terms and never waits.
+MIXED_HOLD_S = 0.25
+
+DETECT_DEVICE     = "device"
+DETECT_CONTROLLER = "controller"
+DETECT_UNKNOWN    = "unknown"
+
 
 # ── State ────────────────────────────────────────────────────────────────────
 
@@ -121,6 +135,28 @@ def resolve(configured: str, capabilities, reported: str | None,
         # module exists to prevent.
         return ListenView(STATE_UNKNOWN, True, "switching to private listening")
     return ListenView(STATE_UNKNOWN, None, "waiting for the Echo to report")
+
+
+def detector(view: ListenView, trigger_capable: bool) -> str | None:
+    """Where an Echo's wake word is detected, for arbitration; None if it
+    cannot wake at all. Not knowing yet is its own answer, so a fleet with
+    one undecided Echo holds its claims rather than guessing it is uniform."""
+    if view.state == STATE_DEGRADED:
+        return None
+    if view.state == STATE_LOCAL:
+        return DETECT_DEVICE
+    if view.state == STATE_LEGACY:
+        # "on" against firmware that cannot act is scored here (em_shadow).
+        return DETECT_DEVICE if trigger_capable else DETECT_CONTROLLER
+    if view.state in (STATE_CONTROLLER, STATE_DIAGNOSTIC):
+        return DETECT_CONTROLLER
+    return DETECT_UNKNOWN
+
+
+def arbitration_hold(detectors) -> float:
+    """MIXED_HOLD_S when the Echoes that can claim detect in more than one
+    place, else 0 (Wil, 2026-09-24)."""
+    return MIXED_HOLD_S if len({d for d in detectors if d is not None}) > 1 else 0.0
 
 
 def fleet_summary(views) -> dict:

@@ -300,3 +300,28 @@ def test_parse_wake_carries_the_capture_instant():
     assert ev["captured_mono"] == 123456
     old = L.parse_wake({"type": "oww_wake", "session": 3, "score": 0.9}, 7.0)
     assert old["captured_mono"] is None
+
+
+# ── detection path and the mixed-fleet hold (em_arbiter.contest) ─────────────
+
+def test_detector_by_state():
+    V = L.ListenView
+    assert L.detector(V(L.STATE_LOCAL, False), True) == "device"
+    assert L.detector(V(L.STATE_CONTROLLER, True), True) == "controller"
+    assert L.detector(V(L.STATE_DIAGNOSTIC, True), True) == "controller"
+    assert L.detector(V(L.STATE_LEGACY, True), True) == "device"
+    assert L.detector(V(L.STATE_LEGACY, True), False) == "controller"
+    assert L.detector(V(L.STATE_DEGRADED, False), True) is None
+    assert L.detector(V(L.STATE_UNKNOWN, None), True) == "unknown"
+
+
+def test_hold_only_on_a_mixed_fleet():
+    hold = L.arbitration_hold
+    assert hold([]) == 0
+    assert hold(["device", "device"]) == 0
+    assert hold(["controller", "controller", None]) == 0
+    assert hold(["device", "controller"]) == L.MIXED_HOLD_S
+    # An undecided Echo is not assumed to match the rest.
+    assert hold(["device", "unknown"]) == L.MIXED_HOLD_S
+    # A degraded Echo cannot claim, so it does not make the fleet mixed.
+    assert hold(["device", None]) == 0

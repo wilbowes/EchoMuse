@@ -211,6 +211,21 @@ not by when it arrived. 3 s is the Echo's ack timeout; a private wake later
 than that has already closed its session, and the controller ignores a wake
 for a session the Echo has closed.
 
+**A mixed fleet waits; a uniform one does not.** When some Echoes detect the
+wake word themselves and others are scored by the controller, the two paths
+reach the arbiter at different speeds, so the first claim to arrive is not
+the first heard: on 2026-09-24 an Echo 10 m away, detecting on the device,
+arrived 16 ms ahead of one a metre from the speaker that the controller was
+scoring, and took the turn. So on a mixed fleet the first claim is held until
+250 ms after it was heard (`MIXED_HOLD_S`, less whatever it already spent in
+flight), every claim heard within the window by then is collected, and the
+one heard **earliest** wins. Nothing is revoked: no one holds the turn until
+the hold ends. A fleet that detects one way races on equal terms and grants
+the first arrival at once, as above. An Echo whose mode is not yet known
+counts as different, so the fleet holds rather than guesses. A barge-in
+during playback fires on the second of two frames and is dated from the
+first.
+
 The wake log line reports, for a controller-scored wake, how long after
 arrival it was scored and how long its frame spent in transit.
 

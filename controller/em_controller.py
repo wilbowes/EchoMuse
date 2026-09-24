@@ -1687,6 +1687,7 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
     # normal wake threshold (see docstring).
     threshold = device.barge_threshold  # refined per-frame by phase below
     prev_score = 0.0  # previous frame's score — both phases need two
+    prev_heard = None  # when that frame was captured, to date a two-frame barge
     buf = bytearray()
     # Observability: the watcher used to log only on detection, which made a
     # failed barge-in attempt indistinguishable from "no frames arrived at
@@ -1708,6 +1709,7 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                 buf.clear()
                 prev_score = 0.0  # sentinel = stream discontinuity; frames
                 # across it are not consecutive for either two-frame rule
+                prev_heard = None
                 continue
             buf.extend(payload)
             heard = em_listen.captured(payload, loop.time())
@@ -1744,7 +1746,12 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                         f"{warmup.progress()} chunks since reset"
                     )
                     fired = False
+                # A playback barge fires on the second of two frames; the
+                # utterance was heard at the first.
+                fired_heard = (prev_heard if in_playback and prev_heard is not None
+                               else heard)
                 prev_score = score
+                prev_heard = heard
                 if score > peak:
                     peak = score
                     if score >= 0.1:
@@ -1796,14 +1803,9 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                     serves = esphome.can_serve_turn(device.device_id)
                     won_by = device.device_id
                     if serves and device.wake_arb_ms > 0 and len(_devices) > 1:
-                        won_by = _wake_arbiter.claim(
-                            device.device_id, device.wake_arb_ms / 1000.0,
-                            # Capture time already carries the link's
-                            # least delay; its smoothed RTT would count it
-                            # twice, inflated by every retransmit.
-                            heard_at=heard,
-                            slack_s=_arbitration_slack(),
-                        )
+                        # Capture time already carries the link's least
+                        # delay; its smoothed RTT would count it twice.
+                        won_by = await _claim_wake(device, fired_heard)
                     device.barge_ceded = (not serves) or won_by != device.device_id
                     if device.barge_ceded:
                         log.info(
@@ -2946,6 +2948,30 @@ def _arbitration_slack() -> float:
     return em_listen.MAX_ARB_SLACK_S
 
 
+def _arbitration_hold() -> float:
+    """Hold claims only on a mixed fleet; see em_listen.MIXED_HOLD_S. Only
+    Echoes that could claim count: one with no HA stands down first."""
+    return em_listen.arbitration_hold(
+        em_listen.detector(d.listen_view, d.oww_trigger_capable)
+        for d in list(_devices.values()) if esphome.can_serve_turn(d.device_id)
+    )
+
+
+async def _claim_wake(device: "Device", heard_at: float | None) -> str:
+    """Claim the utterance for `device`; returns the winner's id."""
+    hold = _arbitration_hold()
+    won_by = await _wake_arbiter.contest(
+        device.device_id, device.wake_arb_ms / 1000.0,
+        heard_at=heard_at, slack_s=_arbitration_slack(), hold_s=hold,
+    )
+    if hold > 0:
+        now = asyncio.get_event_loop().time()
+        ago = (now - heard_at) * 1000.0 if heard_at is not None else 0.0
+        log.info(f"[{device.device_id}] arbitration (mixed fleet, held "
+                 f"{hold * 1000:.0f}ms): heard {ago:.0f}ms ago, won by {won_by}")
+    return won_by
+
+
 def _wake_dating(device: Device, ev: dict) -> tuple[float, str]:
     """When a device wake was heard, and how that was worked out.
 
@@ -3010,10 +3036,7 @@ async def _private_wake_turn(device: Device, ev: dict) -> None:
     serves = esphome.can_serve_turn(device.device_id)
     won_by = device.device_id
     if serves and device.wake_arb_ms > 0 and len(_devices) > 1:
-        won_by = _wake_arbiter.claim(
-            device.device_id, device.wake_arb_ms / 1000.0,
-            heard_at=_wake_heard_at(device, ev), slack_s=_arbitration_slack(),
-        )
+        won_by = await _claim_wake(device, _wake_heard_at(device, ev))
     if not serves or won_by != device.device_id:
         wake_info = device.last_wake
         device.last_wake = None
@@ -3078,10 +3101,7 @@ async def _private_barge(device: Device, ev: dict) -> None:
     serves = esphome.can_serve_turn(device.device_id)
     won_by = device.device_id
     if serves and device.wake_arb_ms > 0 and len(_devices) > 1:
-        won_by = _wake_arbiter.claim(
-            device.device_id, device.wake_arb_ms / 1000.0,
-            heard_at=_wake_heard_at(device, ev), slack_s=_arbitration_slack(),
-        )
+        won_by = await _claim_wake(device, _wake_heard_at(device, ev))
     device.barge_ceded = (not serves) or won_by != device.device_id
     if device.barge_ceded:
         await device.listen_close(session, "ceded")
@@ -3600,10 +3620,9 @@ async def _stream_listen(device: Device):
                         serves = esphome.can_serve_turn(device.device_id)
                         won_by = device.device_id
                         if serves and device.wake_arb_ms > 0 and len(_devices) > 1:
-                            # Synchronous — the winner starts its turn on
-                            # this same tick. The old version awaited the
-                            # full window on EVERY wake (~364ms measured)
-                            # even when no other device was contending.
+                            # No wait unless the fleet is mixed (Echoes
+                            # detecting in different places): then the claim
+                            # is held MIXED_HOLD_S from when it was heard.
                             # Capture time, not arrival (docs/listening.md):
                             # a device wake reports its age; ours dates from
                             # when its frame was captured (CaptureClock).
@@ -3615,12 +3634,7 @@ async def _stream_listen(device: Device):
                             else:
                                 # Already includes the link's least delay.
                                 heard_at = heard
-                            won_by = _wake_arbiter.claim(
-                                device.device_id,
-                                device.wake_arb_ms / 1000.0,
-                                heard_at=heard_at,
-                                slack_s=_arbitration_slack(),
-                            )
+                            won_by = await _claim_wake(device, heard_at)
                         if not serves or won_by != device.device_id:
                             wake_info = device.last_wake
                             device.oww_paused.clear()
