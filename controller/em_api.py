@@ -2727,9 +2727,13 @@ async def _sync_controller_endpoints(live, device_id: str) -> None:
     if want is None:
         if has_file and managed:
             await asyncio.sleep(1.0)
-            await _shell_run(live, f"rm -f {path}")
-            await _push_log_event(device_id, "info", "controller",
-                                  "Controller address list removed — mDNS only from the next reconnect")
+            res = await _shell_run(live, f"rm -f {path}; [ -e {path} ] || echo {_SHELL_OK}")
+            if _SHELL_OK in res:
+                await _push_log_event(device_id, "info", "controller",
+                                      "Controller address list removed — mDNS only from the next reconnect")
+            else:
+                await _push_log_event(device_id, "warn", "controller",
+                                      "Controller address list not removed")
         return
     if em_endpoints.md5(want) in out:
         return
