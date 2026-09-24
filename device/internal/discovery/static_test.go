@@ -120,3 +120,27 @@ func TestConfiguredEndpointsAbsentFile(t *testing.T) {
 		t.Fatalf("configuredEndpointsFromPath() = %#v, want nil", got)
 	}
 }
+
+// testdata/controller_managed.json is written by the controller's own
+// renderer (controller/em_endpoints.py), and controller/tests/test_endpoints.py
+// fails if the two drift. This is the check that the file the controller
+// pushes is one this parser accepts, with mDNS left on.
+func TestConfiguredEndpointsFromTheController(t *testing.T) {
+	got, err := configuredEndpointsFromPath(filepath.Join("testdata", "controller_managed.json"))
+	if err != nil {
+		t.Fatalf("controller-written file refused: %v", err)
+	}
+	if !got.MDNS {
+		t.Fatal("a controller-written file must leave the mDNS fallback on")
+	}
+	want := []string{"10.20.40.110:8767", "[fe80::1]:9000", "controller.example.internal.:8767"}
+	tls := []int{8770, 0, 8770}
+	if len(got.Endpoints) != len(want) {
+		t.Fatalf("got %d endpoints, want %d", len(got.Endpoints), len(want))
+	}
+	for i, ep := range got.Endpoints {
+		if ep.Addr != want[i] || ep.TLSPort != tls[i] {
+			t.Errorf("endpoint %d = %s tls %d, want %s tls %d", i, ep.Addr, ep.TLSPort, want[i], tls[i])
+		}
+	}
+}

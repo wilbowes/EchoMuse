@@ -71,6 +71,7 @@ import em_player
 import em_recordings
 import em_volume
 import em_wifi
+import em_endpoints
 import em_scenes
 import em_shadow
 import em_support
@@ -170,6 +171,16 @@ _tls_dir: str | None = None
 def set_tls_dir(tls_dir: str) -> None:
     global _tls_dir
     _tls_dir = tls_dir
+
+
+# This controller's own address and device ports: the defaults for an entry
+# in controllerEndpoints, and what the dashboard offers to fill in.
+# tls_port is 0 when the wss listener is not running.
+_link = {"ip": "", "port": 8767, "tls_port": 0}
+
+
+def set_link_ports(ip: str, port: int, tls_port: int) -> None:
+    _link.update(ip=ip or "", port=port, tls_port=tls_port)
 
 # Set of connected /api/events WebSocket clients.
 _event_clients: set[web.WebSocketResponse] = set()
@@ -419,6 +430,7 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/provision/oww_assets",    _get_provision_oww_manifest)
     app.router.add_get("/api/provision/oww_asset/{name}", _get_provision_oww_asset)
     app.router.add_post("/api/provision/tls_credentials", _post_provision_tls_credentials)
+    app.router.add_get("/api/provision/controller_endpoints", _get_provision_controller_endpoints)
     app.router.add_post("/api/provision/diagnostics",     _post_provision_diagnostics)
     app.router.add_get("/api/provision/emos_init",     _get_provision_emos_init)
     app.router.add_post("/api/provision/emos_image",   _post_provision_emos_image)
@@ -2686,6 +2698,54 @@ async def _sync_start_script(live, device_id: str) -> None:
     await asyncio.sleep(1.0)
 
 
+def _controller_endpoints_file() -> bytes | None:
+    cfg = db.get_global_device_config()
+    return em_endpoints.file_bytes(cfg.get("controllerEndpoints") or [])
+
+
+async def _sync_controller_endpoints(live, device_id: str) -> None:
+    """
+    Make the device's controller.json match the fleet's controllerEndpoints.
+
+    Takes effect at the device's next dial: firmware re-reads the file every
+    attempt (#166), so nothing is bounced. An empty setting removes only a
+    file this controller wrote (em_endpoints.MANAGED_KEY); a hand-written one
+    is for a device that cannot use mDNS and is left alone.
+    """
+    path = em_endpoints.DEVICE_PATH
+    want = _controller_endpoints_file()
+    out = await _shell_run(
+        live, f"mkdir -p {DEVICE_TLS_DIR}; busybox md5sum {path} 2>/dev/null; "
+              f"busybox grep -c '\"{em_endpoints.MANAGED_KEY}\"' {path} 2>/dev/null; "
+              f"echo {_SHELL_OK}")
+    if _SHELL_OK not in out:
+        log.info(f"[api] [{device_id}] controller address: no answer from the "
+                 f"device — leaving it alone")
+        return
+    has_file = re.search(r"\b[0-9a-f]{32}\s", out) is not None
+    managed = re.search(r"(?m)^[1-9]\d*$", out) is not None
+    if want is None:
+        if has_file and managed:
+            await asyncio.sleep(1.0)
+            await _shell_run(live, f"rm -f {path}")
+            await _push_log_event(device_id, "info", "controller",
+                                  "Controller address list removed — mDNS only from the next reconnect")
+        return
+    if em_endpoints.md5(want) in out:
+        return
+    if has_file and not managed:
+        await _push_log_event(device_id, "info", "controller",
+                              "Replacing a hand-written controller.json with the fleet's address list")
+    await asyncio.sleep(1.0)
+    res = await _stream_file_to_device(live, want, path, mode="644")
+    if res:
+        await _push_log_event(device_id, "info", "controller",
+                              "Controller address list updated — used from the next reconnect")
+    else:
+        await _push_log_event(device_id, "warn", "controller",
+                              f"Controller address list not written: {res}")
+
+
 # Magisk service.d location of the boot-time debloat script. Installed by the
 # provisioning wizard; synced from here afterwards.
 DEBLOAT_SCRIPT_PATH = "/sbin/.core/img/.core/service.d/echomuse-debloat.sh"
@@ -3206,6 +3266,25 @@ async def _post_provision_tls_credentials(request: web.Request) -> web.Response:
 
 
 @auth.require_admin
+async def _get_provision_controller_endpoints(request: web.Request) -> web.Response:
+    """
+    GET /api/provision/controller_endpoints
+
+    The fleet's controller.json for the wizard to write over adb, or null
+    when the list is empty — the wizard then removes only a file an earlier
+    controller wrote (em_endpoints.MANAGED_KEY).
+    """
+    loop = asyncio.get_event_loop()
+    data = await loop.run_in_executor(None, _controller_endpoints_file)
+    return _ok({
+        "content":     data.decode("ascii") if data else None,
+        "md5":         em_endpoints.md5(data) if data else None,
+        "path":        em_endpoints.DEVICE_PATH,
+        "managed_key": em_endpoints.MANAGED_KEY,
+    })
+
+
+@auth.require_admin
 async def _post_secure_link(request: web.Request) -> web.Response:
     """
     POST /api/devices/{id}/secure_link
@@ -3335,6 +3414,9 @@ async def _get_system_status(request: web.Request) -> web.Response:
 
     return _ok({
         "controller_version": CONTROLLER_VERSION,
+        # This controller's device address and ports — what a new entry in
+        # the controller address list starts from.
+        "link": dict(_link),
         # The mtime stamped onto the dashboard bundle's URL by
         # _serve_dashboard, so a running page can tell whether the JavaScript
         # it is executing is still the JavaScript this controller serves.
@@ -3575,6 +3657,13 @@ async def _post_global_config(request: web.Request) -> web.Response:
     _resolve_console_pw(config, stored)
     if (err := _validate_console_timeout(config)):
         return _error("bad_console_timeout", err, 400)
+    endpoints_before = stored.get("controllerEndpoints") or []
+    if "controllerEndpoints" in config:
+        eps, err = em_endpoints.normalise(
+            config["controllerEndpoints"], _link["port"], _link["tls_port"])
+        if err:
+            return _error("bad_controller_endpoints", f"Controller address list {err}.", 400)
+        config["controllerEndpoints"] = eps
     dropped = _dropped_keys(config, stored)
     if dropped and not explicit_replace:
         return _error(
@@ -3599,6 +3688,14 @@ async def _post_global_config(request: web.Request) -> web.Response:
 
     if pushed:
         log.info(f"[api] Global config pushed to {len(pushed)} device(s): {pushed}")
+
+    if (config.get("controllerEndpoints") or []) != endpoints_before:
+        # Connected devices get the file now; the rest on their next connect,
+        # which must not be skipped by a reconcile stamp from before the change.
+        _last_reconcile.clear()
+        for device_id, live in list(_devices.items()):
+            task = asyncio.create_task(_sync_controller_endpoints(live, device_id))
+            task.add_done_callback(_log_task_exception_api)
 
     # Reconcile BT proxies for every approved device — offline ones included
     # (proxy mDNS/port lifecycle is independent of the device connection,
@@ -4342,6 +4439,7 @@ async def reconcile_on_connect(device_id: str, live) -> None:
     steps = [
         ("oww assets", lambda: reconcile_oww_assets(device_id, live)),
         ("start script", lambda: _sync_start_script(live, device_id)),
+        ("controller address", lambda: _sync_controller_endpoints(live, device_id)),
     ]
     # The debloat payload is Android-only: a pm-hide list and a Magisk
     # service.d script. emOS has neither a package manager nor Magisk, so

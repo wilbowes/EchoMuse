@@ -580,6 +580,62 @@ function PasswordField({ label, sub, isSet, onChange, disabled = false }) {
   );
 }
 
+// The controller address list (controllerEndpoints): addresses an Echo dials
+// in order before falling back to mDNS. Fleet-only, so the per-device view
+// shows it read-only. Ports keep digits only as typed, NumberField's rule; an
+// empty port is sent as absent and the controller fills in its own.
+function ControllerEndpointsField({ value, onChange, readOnly = false }) {
+  const [link, setLink] = useState(null);
+  useEffect(() => {
+    if (readOnly) return;
+    API.get('/api/system/status').then(s => setLink(s.link || null)).catch(() => {});
+  }, [readOnly]);
+  const rows = Array.isArray(value) ? value : [];
+  const mono = "'DM Mono',monospace";
+  const put = (i, k, v) => onChange(rows.map((r, j) => j === i ? { ...r, [k]: v } : r));
+  const digits = v => { const d = String(v).replace(/\D/g, '').slice(0, 5); return d === '' ? '' : Number(d); };
+  const add = () => onChange([...rows, {
+    host: rows.length === 0 && link ? link.ip : '',
+    port: link ? link.port : 8767,
+    tlsPort: link ? link.tls_port : 8770,
+  }]);
+  const input = { fontFamily: mono, fontSize: 11, color: 'var(--text)',
+                  border: '1px solid var(--border-hard)', minWidth: 0 };
+  return (
+    <div style={{ marginBottom: 20, minWidth: 0 }}>
+      <div style={{ fontFamily: mono, fontSize: 11, color: readOnly ? 'var(--muted)' : 'var(--text2)', marginBottom: 6 }}>
+        Controller address
+      </div>
+      <div style={{ fontFamily: mono, fontSize: 10, color: 'var(--muted)', lineHeight: 1.6, marginBottom: 8 }}>
+        {readOnly
+          ? 'set for the whole fleet on the fleet Config tab'
+          : 'for Echos that cannot find this controller by mDNS — a VLAN or a tunnel. Tried in order, then mDNS. Written to connected Echos on save, the rest when they reconnect; used from the next reconnect. Needs firmware v2.16.0 or later.'}
+      </div>
+      {rows.length === 0 && (
+        <div style={{ fontFamily: mono, fontSize: 10, color: 'var(--muted)', marginBottom: 8 }}>none — mDNS only</div>
+      )}
+      {rows.map((r, i) => (
+        <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 6 }}>
+          <input type="text" autoComplete="off" spellCheck="false" placeholder="IP or hostname"
+            value={r.host ?? ''} disabled={readOnly} className="em-inset"
+            onChange={e => put(i, 'host', e.target.value)}
+            style={{ ...input, flex: '3 1 160px' }}/>
+          <input type="text" inputMode="numeric" placeholder="port" title="port"
+            value={r.port ?? ''} disabled={readOnly} className="em-inset"
+            onChange={e => put(i, 'port', digits(e.target.value))}
+            style={{ ...input, flex: '1 1 60px' }}/>
+          <input type="text" inputMode="numeric" placeholder="TLS port" title="TLS port (0 = plain)"
+            value={r.tlsPort ?? ''} disabled={readOnly} className="em-inset"
+            onChange={e => put(i, 'tlsPort', digits(e.target.value))}
+            style={{ ...input, flex: '1 1 60px' }}/>
+          {!readOnly && <Pill small danger onClick={() => onChange(rows.filter((_, j) => j !== i))}>Remove</Pill>}
+        </div>
+      ))}
+      {!readOnly && rows.length < 8 && <Pill small onClick={add}>Add address</Pill>}
+    </div>
+  );
+}
+
 // A segmented choice, for settings with more than two states. Written as
 // buttons rather than a native <select> so the unavailable options stay
 // VISIBLE and disabled: the capability rule is that a device lacking a feature
@@ -6376,6 +6432,34 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       }
     }
 
+    // The fleet's controller address list (Config → Advanced), written as it
+    // stands now. With none set, only a file an earlier EchoMuse controller
+    // wrote is removed: a hand-written controller.json belongs to a device
+    // that cannot use mDNS, and deleting it would strand that device.
+    const epResp = await fetch(ingressPath('/api/provision/controller_endpoints'), {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!epResp.ok) {
+      throw new Error(`Controller returned ${epResp.status} fetching the controller address list.`);
+    }
+    const ep = await epResp.json();
+    if (ep.content) {
+      addLog('Writing the controller address list…');
+      await c.push('/sdcard/em-controller.json', new TextEncoder().encode(ep.content));
+      await c.shell(`su -c 'mkdir -p /data/local/etc/echomuse && cp /sdcard/em-controller.json ${ep.path} && chmod 644 ${ep.path}; rm -f /sdcard/em-controller.json'`);
+      const epTools = await deviceTools(c);
+      const epGot = (await c.shell(`su -c '${epTools.md5sum} ${ep.path}' 2>/dev/null`)).trim().split(/\s+/)[0];
+      if (epGot !== ep.md5) {
+        throw new Error(`Controller address list install verification failed — ${ep.path} reads `
+          + `${epGot || 'unreadable'}, expected ${ep.md5}.`);
+      }
+      addLog('Controller address list installed — tried before mDNS.', 'ok');
+    } else {
+      const epOut = (await c.shell(
+        `su -c 'c=$(cat ${ep.path} 2>/dev/null); case "$c" in *\\"${ep.managed_key}\\"*) rm -f ${ep.path} && echo REMOVED;; esac'`)).trim();
+      if (/REMOVED/.test(epOut)) addLog('  removed a controller address list left by an earlier controller');
+    }
+
     // A wpa_supplicant.conf that at least declares a control socket, written
     // only if the device does not already have one.
     //
@@ -8720,7 +8804,7 @@ const CONFIG_SECTIONS = {
   "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice", "wakeSound", "wakeSoundLevel"],
   "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "aecRefSource", "nsAsr", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
-  "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs", "consolePassword", "consoleTimeoutMin"],
+  "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs", "consolePassword", "consoleTimeoutMin", "controllerEndpoints"],
   "bluetooth": ["bleProxyEnabled"]
 };
 
@@ -9461,7 +9545,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
       {/* 05 ADVANCED — button-turn internals: processing + speech gate */}
       <Stage n="05" title="Advanced"
         chips={<><ScopeChip tone="device">Device</ScopeChip><ScopeChip>Button turns only</ScopeChip></>}
-        desc="Everything here affects only bounded button-press turns — except the action button setting, which decides whether a tap starts one at all. Wake-word turns stream continuously — Home Assistant's VAD endpoints them, and the controller closes accidental wakes after 5s of silence relative to the room's measured noise floor — so none of these settings touch the wake path."
+        desc="Everything here affects only bounded button-press turns — except the action button setting, which decides whether a tap starts one at all, and the USB console and controller address, which are not about turns. Wake-word turns stream continuously — Home Assistant's VAD endpoints them, and the controller closes accidental wakes after 5s of silence relative to the room's measured noise floor — so none of these settings touch the wake path."
         scope={scopeEl('advanced')} dim={secStyle('advanced')}>
         {subHeader('Action button', true)}
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px', ...inputStyle }}>
@@ -9499,6 +9583,12 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             min={0} max={90} unit="min"
             disabled={!emosFleet}
             onChange={v => set('consoleTimeoutMin', v)}/>
+        </div>
+        {subHeader('Controller address')}
+        <div style={{ ...inputStyle }}>
+          <ControllerEndpointsField readOnly={scoped || disabled}
+            value={config.controllerEndpoints}
+            onChange={v => onChange('controllerEndpoints', v)}/>
         </div>
         {subHeader('Turn processing')}
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px', ...inputStyle }}>

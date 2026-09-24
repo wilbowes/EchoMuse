@@ -5304,6 +5304,7 @@ async def main():
                 api.set_tls_dir(tls_dir)
         except Exception as e:
             log.error(f"Device-link TLS setup failed — wss listener disabled: {e}")
+    api.set_link_ports(SERVER_IP, SERVER_PORT, SERVER_TLS_PORT if tls_ctx else 0)
 
     azc  = AsyncZeroconf()
     info = _make_mdns_info(tls_active=tls_ctx is not None)

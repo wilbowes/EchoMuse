@@ -289,3 +289,18 @@ def test_the_echo_reference_override_is_scoped_and_offered():
 
     jsx = DASHBOARD.read_text()
     assert "aecRefSource" in jsx, "the dashboard must offer the control"
+
+
+def test_fleet_keys_are_shown_in_a_section_but_never_overridden():
+    import em_config_sections as cs
+    for key in cs.FLEET_KEYS:
+        assert any(key in s["keys"] for s in cs.SECTIONS.values())
+        assert key not in cs.keys_for(cs.SECTION_IDS)
+
+
+def test_a_device_value_for_a_fleet_key_never_wins():
+    import em_config_sections as cs
+    fleet = {"controllerEndpoints": [{"host": "10.0.0.1", "port": 8767, "tlsPort": 8770}]}
+    device = {"controllerEndpoints": []}
+    eff = cs.merge(fleet, device, list(cs.SECTION_IDS))
+    assert eff["controllerEndpoints"] == fleet["controllerEndpoints"]

@@ -322,6 +322,11 @@ DEFAULT_DEVICE_CONFIG = {
     #
     # emOS only, like the password beside it.
     "consoleTimeoutMin": 0,
+    # controllerEndpoints: addresses an Echo dials before mDNS, in order —
+    # [{host, port, tlsPort}]. Fleet-only (em_config_sections.FLEET_KEYS);
+    # delivered as a file, not by the config push (em_endpoints). Empty =
+    # mDNS alone, which is how every fleet worked before it.
+    "controllerEndpoints": [],
 }
 
 # The highest wake threshold that can ever fire, enforced on every config

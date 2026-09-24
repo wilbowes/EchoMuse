@@ -714,33 +714,40 @@ about two minutes for the device to drop off and come back.
 ### Static controller endpoint
 
 Devices normally find the controller with link-local mDNS. If a device
-reaches the controller through a routed tunnel or an isolated VLAN where
-mDNS cannot cross, create `/data/local/etc/echomuse/controller.json` on the
-device with an ordered list of endpoints:
+reaches the controller through a routed tunnel or an isolated VLAN where mDNS
+cannot cross, list the controller's address under **Config → Advanced →
+Controller address**. It applies to the whole fleet, with no per-device
+override:
+
+- Each entry is an IP address or a host name, with the device port and the
+  encrypted (TLS) port. They start as this controller's own; a TLS port of `0`
+  means that address has no encrypted listener.
+- Echos try the addresses in order, twice each, then look for the controller
+  by mDNS once before starting again. A wrong address therefore slows a
+  reconnect down; it cannot leave an Echo unable to find its controller.
+- Saving writes the list to every connected Echo straight away; the rest get
+  it when they next connect. An Echo uses it from its next reconnect, with no
+  restart. The provisioning wizard writes it to a new Echo as it stands when
+  the wizard runs.
+- Needs firmware v2.16.0 or later. Older firmware ignores it and uses mDNS.
+
+The list lands on the device as `/data/local/etc/echomuse/controller.json`,
+which the firmware re-reads on every reconnect attempt. You can still write
+that file by hand, for example to turn the mDNS fallback off for a test fleet
+that must never reach another controller:
 
 ```json
 {
   "endpoints": [
     {"host": "10.20.40.110", "port": 8767, "tls_port": 8770},
-    {"host": "10.20.40.111", "port": 8767, "tls_port": 8770},
     {"host": "controller.example.internal", "port": 8767, "tls_port": 8770}
-  ]
+  ],
+  "mdns": false
 }
 ```
 
-A static address, a backup address and a DNS name all behave identically —
-list them in whatever order you want tried first. When this file is present
-and valid, the device skips mDNS and dials the first endpoint, even while
-it's initially unreachable, so a device-local tunnel can finish starting
-without leaving EchoMuse stranded in the mDNS retry loop. If an endpoint
-stays unreachable, the device falls through to the next one in the list on
-the following retry rather than pinning to a stale address; each `tls_port`
-may be `0` when that controller's encrypted device listener is disabled.
-
-The file is re-read on every reconnect attempt, so editing it (or removing
-it, to restore automatic mDNS discovery) takes effect on the device's next
-retry — no restart needed, which matters most on exactly the device this
-feature is for: one that can't currently reach its controller.
+The controller leaves a hand-written file alone while the dashboard list is
+empty. Once you set a list, it replaces the file on every Echo.
 
 ---
 
