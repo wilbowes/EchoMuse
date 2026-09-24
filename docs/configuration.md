@@ -746,8 +746,12 @@ that must never reach another controller:
 }
 ```
 
-The controller leaves a hand-written file alone while the dashboard list is
-empty. Once you set a list, it replaces the file on every Echo.
+The dashboard list wins. While it is empty the controller leaves a
+hand-written file alone; once you set a list, it replaces the file on every
+Echo, including any hand edits. The provisioning wizard goes further: it
+writes the list as set, and with none set it removes any `controller.json`
+the device already has, so a device from a previous setup cannot carry
+another controller's addresses.
 
 ---
 

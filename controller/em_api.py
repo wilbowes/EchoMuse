@@ -2703,14 +2703,16 @@ def _controller_endpoints_file() -> bytes | None:
     return em_endpoints.file_bytes(cfg.get("controllerEndpoints") or [])
 
 
-async def _sync_controller_endpoints(live, device_id: str) -> None:
+async def _sync_controller_endpoints(live, device_id: str) -> bool:
     """
     Make the device's controller.json match the fleet's controllerEndpoints.
 
     Takes effect at the device's next dial: firmware re-reads the file every
     attempt (#166), so nothing is bounced. An empty setting removes only a
-    file this controller wrote (em_endpoints.MANAGED_KEY); a hand-written one
-    is for a device that cannot use mDNS and is left alone.
+    file this controller wrote (em_endpoints.MANAGED_KEY): #166 documented
+    hand-writing one for devices that cannot use mDNS, and deleting it on
+    upgrade would strand them. A set list replaces any file. Returns whether
+    the device now matches.
     """
     path = em_endpoints.DEVICE_PATH
     want = _controller_endpoints_file()
@@ -2721,7 +2723,7 @@ async def _sync_controller_endpoints(live, device_id: str) -> None:
     if _SHELL_OK not in out:
         log.info(f"[api] [{device_id}] controller address: no answer from the "
                  f"device — leaving it alone")
-        return
+        return False
     has_file = re.search(r"\b[0-9a-f]{32}\s", out) is not None
     managed = re.search(r"(?m)^[1-9]\d*$", out) is not None
     if want is None:
@@ -2734,9 +2736,10 @@ async def _sync_controller_endpoints(live, device_id: str) -> None:
             else:
                 await _push_log_event(device_id, "warn", "controller",
                                       "Controller address list not removed")
-        return
+                return False
+        return True
     if em_endpoints.md5(want) in out:
-        return
+        return True
     if has_file and not managed:
         await _push_log_event(device_id, "info", "controller",
                               "Replacing a hand-written controller.json with the fleet's address list")
@@ -2745,9 +2748,23 @@ async def _sync_controller_endpoints(live, device_id: str) -> None:
     if res:
         await _push_log_event(device_id, "info", "controller",
                               "Controller address list updated — used from the next reconnect")
-    else:
-        await _push_log_event(device_id, "warn", "controller",
-                              f"Controller address list not written: {res}")
+        return True
+    await _push_log_event(device_id, "warn", "controller",
+                          f"Controller address list not written: {res}")
+    return False
+
+
+# A push on save that fails is tried once more after this long, rather than
+# leaving the device on its old list until it next reconnects.
+ENDPOINTS_RETRY_S = 30.0
+
+
+async def _push_controller_endpoints(live, device_id: str) -> None:
+    if await _sync_controller_endpoints(live, device_id):
+        return
+    await asyncio.sleep(ENDPOINTS_RETRY_S)
+    if _devices.get(device_id) is live:
+        await _sync_controller_endpoints(live, device_id)
 
 
 # Magisk service.d location of the boot-time debloat script. Installed by the
@@ -3275,8 +3292,9 @@ async def _get_provision_controller_endpoints(request: web.Request) -> web.Respo
     GET /api/provision/controller_endpoints
 
     The fleet's controller.json for the wizard to write over adb, or null
-    when the list is empty — the wizard then removes only a file an earlier
-    controller wrote (em_endpoints.MANAGED_KEY).
+    when the list is empty — the wizard then removes whatever file is there.
+    At provisioning this controller is the source of truth; the fleet sync is
+    more careful (_sync_controller_endpoints).
     """
     loop = asyncio.get_event_loop()
     data = await loop.run_in_executor(None, _controller_endpoints_file)
@@ -3284,7 +3302,6 @@ async def _get_provision_controller_endpoints(request: web.Request) -> web.Respo
         "content":     data.decode("ascii") if data else None,
         "md5":         em_endpoints.md5(data) if data else None,
         "path":        em_endpoints.DEVICE_PATH,
-        "managed_key": em_endpoints.MANAGED_KEY,
     })
 
 
@@ -3698,7 +3715,7 @@ async def _post_global_config(request: web.Request) -> web.Response:
         # which must not be skipped by a reconcile stamp from before the change.
         _last_reconcile.clear()
         for device_id, live in list(_devices.items()):
-            task = asyncio.create_task(_sync_controller_endpoints(live, device_id))
+            task = asyncio.create_task(_push_controller_endpoints(live, device_id))
             task.add_done_callback(_log_task_exception_api)
 
     # Reconcile BT proxies for every approved device — offline ones included

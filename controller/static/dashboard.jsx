@@ -6433,9 +6433,11 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     }
 
     // The fleet's controller address list (Config → Advanced), written as it
-    // stands now. With none set, only a file an earlier EchoMuse controller
-    // wrote is removed: a hand-written controller.json belongs to a device
-    // that cannot use mDNS, and deleting it would strand that device.
+    // stands now. The provisioning controller is the source of truth (Wil,
+    // 2026-09-24): with no list set, ANY controller.json is removed, hand
+    // written or not. emOS keeps /data across a re-provision, so a file from a
+    // previous deployment survives to here, and one with "mdns": false and a
+    // dead address leaves the device unable to find this controller at all.
     const epResp = await fetch(ingressPath('/api/provision/controller_endpoints'), {
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -6455,9 +6457,13 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       }
       addLog('Controller address list installed — tried before mDNS.', 'ok');
     } else {
+      const old = (await c.shell(`su -c 'cat ${ep.path}' 2>/dev/null`)).trim();
       const epOut = (await c.shell(
-        `su -c 'c=$(cat ${ep.path} 2>/dev/null); case "$c" in *\\"${ep.managed_key}\\"*) rm -f ${ep.path} && echo REMOVED;; esac'`)).trim();
-      if (/REMOVED/.test(epOut)) addLog('  removed a controller address list left by an earlier controller');
+        `su -c 'rm -f ${ep.path}; [ -e ${ep.path} ] || echo GONE'`)).trim();
+      if (!/GONE/.test(epOut)) {
+        throw new Error(`Could not remove ${ep.path} — it would send this device to another controller's addresses.`);
+      }
+      if (old.startsWith('{')) addLog(`  removed a controller address list from a previous setup: ${old}`, 'warn');
     }
 
     // A wpa_supplicant.conf that at least declares a control socket, written

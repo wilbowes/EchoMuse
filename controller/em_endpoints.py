@@ -15,11 +15,13 @@ Three rules:
 - **mDNS stays on.** The file never carries `"mdns": false`, so a wrong
   address costs a slower reconnect, never a stranded Echo. `mdns:false` is
   for a pinned test fleet and stays a hand edit.
-- **The controller only removes a file it wrote.** #166 documented writing
+- **The fleet sync only removes a file it wrote.** #166 documented writing
   controller.json by hand, for exactly the routed and tunnelled devices that
   cannot use mDNS; deleting one of those because this setting is empty would
   strand the device it exists for. Files written here carry MANAGED_KEY,
-  which the firmware's JSON decoder ignores.
+  which the firmware's JSON decoder ignores. The provisioning wizard is the
+  exception: there this controller is the source of truth, and any file is
+  replaced or removed.
 - **Hosts are checked against what the device can dial**: an IPv4 or IPv6
   literal, or a DNS name to RFC 1123 (labels of 1-63 letters, digits and
   hyphens, no leading or trailing hyphen, 253 characters in all). A dotted
