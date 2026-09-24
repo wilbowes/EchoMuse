@@ -203,6 +203,12 @@ func (s *Server) VolumeLevel() int {
 	return s.volume.Get()
 }
 
+// SetVolumeApply wires what applies the volume to the audio (the speaker's
+// software volume) and applies the current level immediately.
+func (s *Server) SetVolumeApply(fn func(level int)) {
+	s.volume.SetApply(fn)
+}
+
 // SetVolumeChangeCallback wires a callback invoked when volume changes.
 // The callback receives the new level (0–volumeMax).
 func (s *Server) SetVolumeChangeCallback(cb func(level int)) {

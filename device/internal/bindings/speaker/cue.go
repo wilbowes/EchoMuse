@@ -17,9 +17,9 @@ import (
 // discarded by a barge-in flush, both of which are wrong for a confirmation
 // that the device is listening.
 //
-// It is mixed BEFORE the output chain, so when the device runs the chain the
-// cue is EQ'd and limited with everything else and cannot push the sum into
-// clipping on top of loud music. The sum saturates either way.
+// It is mixed AFTER the output chain and the software volume, so its level is
+// its own whatever the user's volume, and the sum saturates rather than wraps
+// if it lands on loud audio.
 
 type cueState struct {
 	mu  sync.Mutex

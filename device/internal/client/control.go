@@ -864,9 +864,9 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 			}
 
 		case "play_cue":
-			// A cue requested by the controller (#120). Only the
-			// controller-detected wake path uses it; a device that hears its
-			// own wake plays the cue from onWakeCrossing.
+			// A cue requested by the controller (#120): the wake sound for a
+			// wake outside a private-listening session, sent once it has won
+			// arbitration.
 			var cueMsg struct {
 				Cue string `json:"cue"`
 			}

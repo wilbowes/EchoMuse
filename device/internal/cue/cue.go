@@ -43,11 +43,6 @@ const (
 	// phase discontinuity at the pitch change is also audible as a tick.
 	gapMS = 25.0
 
-	// PeakDBFS is deliberately modest. This is a confirmation, not an alert:
-	// it has to carry across a room without startling someone standing next
-	// to it, and it plays while the user is already speaking.
-	PeakDBFS = -10.0
-
 	// Raised-cosine edges. A sine burst that starts or stops at full
 	// amplitude is a step, and a step is a click — the same discontinuity
 	// the output chain's crossfade exists to avoid, arrived at from the
@@ -55,11 +50,38 @@ const (
 	edgeMS = 4.0
 )
 
-// WakeCue renders the cue at the given sample rate, in S16 units (±32768) to
-// match everything else on the speaker path.
-func WakeCue(sampleRate int) []float64 {
+// The wake sound's three levels, as set by `wakeSoundLevel`.
+const (
+	LevelQuiet  = "quiet"
+	LevelMedium = "medium"
+	LevelLoud   = "loud"
+)
+
+// Levels lists them quietest first.
+var Levels = []string{LevelQuiet, LevelMedium, LevelLoud}
+
+// LevelDBFS is a level's peak in dBFS; anything unrecognised is medium.
+//
+// ABSOLUTE levels: the cue is mixed after the software volume, with the DAC
+// at unity, so these are what reaches the speaker whatever the volume. For
+// scale, the first cue peaked at -10dBFS before a typical volume of 85
+// (-21dB), about -31dBFS here, and was heard as understated (Wil,
+// 2026-09-24). Starting points, 10dB apart, to be set by ear.
+func LevelDBFS(level string) float64 {
+	switch level {
+	case LevelQuiet:
+		return -30
+	case LevelLoud:
+		return -10
+	}
+	return -20
+}
+
+// WakeCue renders the cue at the given sample rate and peak level, in S16
+// units (±32768) to match everything else on the speaker path.
+func WakeCue(sampleRate int, peakDBFS float64) []float64 {
 	fs := float64(sampleRate)
-	amp := math.Pow(10, PeakDBFS/20.0) * 32768.0
+	amp := math.Pow(10, peakDBFS/20.0) * 32768.0
 
 	bing := note(fs, BingHz, bingMS, amp)
 	gap := int(fs * gapMS / 1000.0)

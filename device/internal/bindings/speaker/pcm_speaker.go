@@ -134,8 +134,11 @@ type PcmSpeaker struct {
 	statsMu sync.Mutex
 	statsCb func(StreamStats)
 
-	// cue is a one-shot the device plays itself — the wake confirmation
-	// (#120). See cue.go.
+	// vol is the user's volume, applied to the PCM (swvolume.go); the DAC
+	// is held at unity. cue is a one-shot the device plays itself — the wake
+	// sound (#120), see cue.go — mixed in AFTER vol, so it plays at its own
+	// level whatever the volume.
+	vol softVolume
 	cue cueState
 }
 
@@ -213,7 +216,7 @@ func (p *PcmSpeaker) Init() error {
 	time.Sleep(100 * time.Millisecond)     // silence reaches the DAC (~2 periods)
 	mixer.Set(mixer.SpeakerAmp, "On")      // enable amp onto a clocked, silent DAC
 	time.Sleep(50 * time.Millisecond)      // let amp settle
-	mixer.Set(mixer.PlaybackVolume, "100") // unmute
+	mixer.Set(mixer.PlaybackVolume, dacUnity) // unmute: volume is applied in software
 
 	log.Println("PcmSpeaker initialised — silence stream running")
 	return nil
@@ -413,15 +416,17 @@ func (p *PcmSpeaker) silenceLoop() {
 				out, process = p.chainBuf, true
 			}
 		}
-		// The cue sums in before the chain, so it is shaped and limited with
-		// everything else.
-		if cued := p.mixCue(out); cued != nil {
-			out, process = cued, true
-		}
 		if process {
 			if applied := p.chain.Process(out); applied != nil {
 				log.Printf("[speaker] output chain: %s", applied)
 			}
+			p.vol.apply(out)
+		} else {
+			p.vol.settle()
+		}
+		// After the volume, so the cue is the same loudness at any volume.
+		if cued := p.mixCue(out); cued != nil {
+			out = cued
 		}
 
 		// Taps see the MIXED output, which is what the speaker actually
@@ -625,6 +630,16 @@ func (p *PcmSpeaker) Flush() { p.voice.flush() }
 // throw away the buffered audio that makes ducking instant, and on a
 // non-seekable stream that audio cannot be recovered.
 func (p *PcmSpeaker) FlushMusic() { p.music.flush() }
+
+// dacUnity is the DAC digital volume's 0dB index. The DAC stays here while
+// audio is live and the user's volume is applied to the PCM (swvolume.go);
+// Init and Close still use the control to mute around amp and stream
+// changes.
+const dacUnity = "127"
+
+// SetVolume sets the playback volume as a device level (0..127, 0.5dB per
+// step, unity at 127). Takes effect from the next period, ramped across it.
+func (p *PcmSpeaker) SetVolume(level int) { p.vol.set(VolumeGain(level)) }
 
 // Close shuts the speaker down in the reverse of Init's bring-up: mute,
 // amp off, then tear the stream down. Muting first makes the PCM-close

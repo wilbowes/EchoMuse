@@ -2,43 +2,21 @@ package server
 
 import (
 	"log"
-	"strconv"
 	"sync"
 	"time"
 
-	"github.com/wilbowes/EchoMuse/internal/bindings/mixer"
 	"github.com/wilbowes/EchoMuse/pkg/led"
 )
 
 const (
 	volumeMin = 0
 
-	// volumeMax is the codec's UNITY gain, not the top of the mixer control's
-	// range. tinymix ctl 61 is the tlv320aic32x4 DAC digital volume: 176
-	// steps of 0.5dB spanning -63.5dB..+24dB, with 0dB at index 127. The 48
-	// steps above 127 apply POSITIVE digital gain to already near-full-scale
-	// PCM, which saturates inside the DAC.
-	//
-	// Measured on hardware 2026-08-13 (1kHz at -6dBFS, recorded through the
-	// mic array): THD 1.5% at 127, 2.3% at 136, 65% at 153, 89% at 170 — with
-	// the output level FLAT from 153 upward, because it had already stopped
-	// being able to get louder. Third harmonic rose to -1.1dB relative to the
-	// fundamental, i.e. very nearly a square wave. The control run that
-	// isolates it: index 170 with the source scaled down to land at the same
-	// acoustic level reads 1.1%, clean — so the codec's gain stage is fine
-	// and it is purely source x gain exceeding full scale.
-	//
-	// Stock FireOS never writes this control at all: it appears in no
-	// /system binary and not once in /system/etc/audio_device.xml, which
-	// leaves the DAC at its 0dB reset default and takes user volume from
-	// AudioFlinger's software attenuation instead. That is why native Alexa
-	// has no such distortion, and why matching it means capping here.
-	//
-	// Do not raise this. The lost headroom cannot be bought back from
-	// Ext_Amp_Gain either — that control is inert on this board (measured
-	// 0.0dB of effect across its whole 6/12/18/24dB range, while still
-	// reading its new value back). "HP Driver Gain Volume" (ctl 62) is the
-	// stage that does work, if more output is ever wanted.
+	// volumeMax is unity gain. The level keeps the DAC control's law (0.5dB
+	// per step, 0dB at 127) though the volume is now applied in software
+	// (speaker/swvolume.go), so levels mean what they always did. Above 127
+	// the DAC applied positive gain to near-full-scale PCM and saturated —
+	// measured 2026-08-13 at 65% THD by index 153, 89% by 170 — which is why
+	// the scale stops here; device/CLAUDE.md, Volume, has the measurement.
 	volumeMax = 127
 
 	// volumeButtonFloor is the bottom of the band the PHYSICAL buttons
@@ -55,6 +33,10 @@ const (
 	// volumeStep is 4dB per press: 10 presses to cross the button band.
 	volumeStep    = 8
 	volumeLEDSecs = 2 // how long to show volume ring
+
+	// volumeBoot is the level before the controller seeds the stored one:
+	// what Init used to leave the DAC at, and so what this read back.
+	volumeBoot = 100
 	numLEDs       = 12
 )
 
@@ -66,6 +48,7 @@ type volumeController struct {
 	displayActive  bool        // volume arc currently on the ring — see DisplayActive
 	isMuted        func() bool // set after construction to avoid circular dependency
 	onVolumeChange func(int)   // set after construction; called after every Set()
+	apply          func(int)   // applies a level to the audio; see SetApply
 	// onDisplayExpire, when set, replaces the default clear-to-black at the
 	// end of the display window: the server wires it to repaint the ring
 	// from its stored controller state, so a volume press mid-turn hands
@@ -99,38 +82,26 @@ func (vc *volumeController) SetOnVolumeChange(cb func(int)) {
 func newVolumeController(ledGetter func() led.Controller) *volumeController {
 	vc := &volumeController{
 		ledCtrl: ledGetter,
+		level:   volumeBoot,
 	}
-	// Read initial volume from tinymix
-	vc.level = vc.readFromDevice()
 	log.Printf("Volume controller initialised at %d/%d", vc.level, volumeMax)
 	return vc
 }
 
-// readFromDevice reads the current DAC volume. Returns the midpoint of the
-// button band on failure — volumeMax/2 is -32dB on this dB-linear scale,
-// which is quiet enough to read as broken.
-func (vc *volumeController) readFromDevice() int {
-	fallback := (volumeButtonFloor + volumeMax) / 2
-	v, err := mixer.Get(mixer.PlaybackVolume)
-	if err != nil {
-		log.Printf("Volume read failed: %v", err)
-		return fallback
+// SetApply wires what actually changes the loudness — the speaker's software
+// volume — and applies the current level at once, since the speaker starts
+// silent until told.
+func (vc *volumeController) SetApply(fn func(int)) {
+	vc.mu.Lock()
+	vc.apply = fn
+	level := vc.level
+	vc.mu.Unlock()
+	if fn != nil {
+		fn(level)
 	}
-	// The control's own range is 0->175; volumeMax caps us at 127 (unity) —
-	// see the constant. A device that was left above the cap reads back high
-	// here and the next Set() clamps it.
-	l, err := strconv.Atoi(v)
-	if err != nil {
-		log.Printf("Volume parse failed: %v", err)
-		return fallback
-	}
-	if l > volumeMax {
-		l = volumeMax
-	}
-	return l
 }
 
-// Set applies a new volume level (0–volumeMax) to the DAC. showRing
+// Set applies a new volume level (0–volumeMax). showRing
 // paints the cyan volume arc for the 2s display window — physical button
 // presses pass true; remote sets (controller command / HA) and the boot-time
 // SeedVolume pass false so the ring doesn't light when nobody is at the
@@ -150,11 +121,11 @@ func (vc *volumeController) Set(level int, showRing bool) {
 	// wiring completes (SubscribeToButton starts the evdev goroutines
 	// first).
 	cb := vc.onVolumeChange
+	apply := vc.apply
 	vc.mu.Unlock()
 
-	// Apply to ALSA
-	if err := mixer.Set(mixer.PlaybackVolume, strconv.Itoa(level)); err != nil {
-		log.Printf("Volume set failed: %v", err)
+	if apply != nil {
+		apply(level)
 	}
 
 	log.Printf("Volume set to %d/%d", level, volumeMax)

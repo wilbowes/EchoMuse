@@ -160,48 +160,6 @@ type Canceller struct {
 	// once-a-second attenuation line.
 	hwFrames  uint64
 	hwMissing uint64
-
-	// Playback gain the hardware reference has NOT been through, as a linear
-	// scalar (1.0 = the codec's unity gain, index 127). Measured on hardware:
-	// the loopback is tapped upstream of the DAC volume control, so it holds
-	// full scale whatever the user's volume — 0.431574 at index 127 against
-	// 0.431560 at index 60, across a commanded 33.5dB cut.
-	//
-	// Left uncorrected, every volume change is a step in the echo path gain
-	// that the adaptive filter can only discover by re-converging, and the
-	// field log shows exactly that: cancellation collapsed to -1.7dB
-	// immediately after a change and took 3-4 seconds to climb back, over
-	// and over (2026-08-29). We are not obliged to guess it — the device
-	// SETS this volume, so it knows the scalar precisely.
-	refScale    float64
-	scaleWarned bool // one-shot guard for the unscaled-reference log
-}
-
-// SetPlaybackLevel tells the canceller the DAC volume index the reference has
-// not been through, so the hardware reference can be scaled to match what the
-// speaker is actually emitting.
-//
-// The control is 0.5dB per step with unity at 127 (see Volume in
-// device/CLAUDE.md), so the scalar is 10^((level-127)/40).
-//
-// SOFTWARE-TAP FRAMES ARE DELIBERATELY LEFT ALONE. That tap is pre-volume
-// too, but its ring holds audio written BEFORE the change, so scaling it by
-// the current level would apply the correction to the wrong samples — and
-// keeping it untouched preserves the baseline the hardware path is being
-// compared against.
-func (c *Canceller) SetPlaybackLevel(level int) {
-	if level < 0 {
-		level = 0
-	}
-	scale := math.Pow(10, float64(level-127)/40.0)
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if scale == c.refScale {
-		return
-	}
-	c.refScale = scale
-	log.Printf("[aec] playback level %d → reference scale %.4f (%.1fdB)",
-		level, scale, 20*math.Log10(math.Max(scale, 1e-9)))
 }
 
 // SetHardwareRef selects the far-end source. True takes it from ch8 of the
@@ -518,39 +476,11 @@ func (c *Canceller) process(mono, hwref []byte) []byte {
 			// Same frame, same clock — a straight copy, no ring, no delay
 			// bookkeeping. This is the whole point of #385.
 			hsub := hwref[off : off+FrameSize*2]
-			// Unity if nobody has told us the volume yet. That should not
-			// happen — cmd/server.go seeds the level from the device's own
-			// tinymix reading as it wires the callback, before the control
-			// client dials — but unity is the least-wrong guess, since a
-			// zero reference cancels nothing and looks identical to a
-			// working AEC with nothing playing.
-			//
-			// It is warned about because it is not free: the device boots
-			// at whatever level the previous run left in tinymix, and if
-			// that is (say) index 60, an unscaled reference is 33dB hot and
-			// cancellation collapses exactly as it did in round one.
-			scale := c.refScale
-			if scale <= 0 {
-				scale = 1.0
-				if !c.scaleWarned {
-					c.scaleWarned = true
-					log.Printf("[aec] no playback level yet — hardware " +
-						"reference running unscaled; cancellation will be " +
-						"poor at any volume below unity")
-				}
-			}
+			// The reference is the bytes written to ALSA, and the volume is
+			// applied to those bytes before the write (speaker/swvolume.go),
+			// so it is already what the speaker emits — no scalar.
 			for i := 0; i < FrameSize; i++ {
-				v := float64(int16(binary.LittleEndian.Uint16(hsub[i*2:]))) * scale
-				// The scalar only ever attenuates (level <= 127 by
-				// DEVICE_VOLUME_MAX), so this cannot clip in practice —
-				// clamped anyway because a future ceiling change must not
-				// silently wrap the reference to full-scale opposite sign.
-				if v > 32767 {
-					v = 32767
-				} else if v < -32768 {
-					v = -32768
-				}
-				ref[i] = int16(v)
+				ref[i] = int16(binary.LittleEndian.Uint16(hsub[i*2:]))
 			}
 			c.hwFrames++
 		} else {

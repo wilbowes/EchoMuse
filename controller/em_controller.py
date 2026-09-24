@@ -3684,12 +3684,11 @@ async def _stream_listen(device: Device):
                         # this distinguishes the two sources in the Activity
                         # tab and in queries without any of them changing.
                         label = "wakeword-dev" if source == "device" else "wakeword"
-                        # Wake sound (#120) on the controller-detected path.
-                        # An Echo that detected its own wake already played it
-                        # from onWakeCrossing; this one lands an RTT late, which
-                        # beats a toggle that does nothing on owwOnDevice="off".
-                        if source != "device" and getattr(device, "wake_sound", False) \
-                                and device.wake_cue_capable:
+                        # Wake sound (#120), only now that the wake has won
+                        # arbitration: a ceded or HA-less wake `continue`d above
+                        # and stays silent. A private-listening wake gets its
+                        # sound from listen_ack instead, on the Echo.
+                        if getattr(device, "wake_sound", False) and device.wake_cue_capable:
                             await device.play_cue("wake")
                         await _run_voice_locked(device, trigger_label=f"{label}({score:.3f})", is_wakeword=True)
                         # Back to ch6 omni for wake listening. Belt-and-braces

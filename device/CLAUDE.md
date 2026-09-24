@@ -116,19 +116,17 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
   rather than a user preference, and it exists so the two paths can be A/B'd on
   one device without a controller round trip.
 
-  **The reference is scaled by the device's own volume, and this is what made
-  it work.** The tap is pre-volume, so left alone every volume change is a step
-  in the echo path gain that the filter can only find by re-converging. First
-  hardware run, 2026-08-29: cancellation collapsed to **−1.7dB** immediately
-  after a change and took 3–4s to recover, over and over, while `ref` sat at
-  4000–8000 through a `mic` swing of 1263→16766. We are not obliged to guess
-  the scalar — the device SETS that volume — so `SetPlaybackLevel` feeds it
-  from the existing volume-change callback and the reference is multiplied by
-  `10^((level−127)/40)`, the control's own 0.5dB-per-step law. Worth **32.7dB**
-  of residual in the frames after a change, in the test that reproduces it.
-  Software-tap frames are deliberately NOT scaled: that ring holds audio
-  written before the change, so the correction would land on the wrong
-  samples, and leaving it alone preserves the baseline being compared against.
+  **The reference needs no volume scaling, because the volume is applied
+  before it.** Until 2026-09-24 the volume was the DAC's own digital control,
+  downstream of the loopback, so every volume change was an echo-path gain
+  step the filter could only find by re-converging — cancellation collapsed
+  to −1.7dB after a change and took 3–4s to recover (2026-08-29), fixed then
+  by multiplying the reference by `10^((level−127)/40)`. Volume is now applied
+  to the PCM in the speaker's write loop (`speaker/swvolume.go`) with the DAC
+  held at unity, so the loopback and the software tap both carry post-volume
+  audio and the scalar is gone. The saved echo path is unaffected: it was
+  learned against a reference already scaled to the same level. **Do not
+  reintroduce a scalar** — it would apply the volume twice.
 
   **Unity gain on the extraction, non-negotiably.** Mic channels get
   `micGainDb` (+24dB default) applied pre-truncation because speech sits at
@@ -148,14 +146,12 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
   capture-stall trim all exist to approximate. Anyone rebuilding this path
   should start there rather than tuning the delay further.
 
-  Two bounds. It is **pre-volume** (unchanged across a commanded 33.5dB cut),
-  so it does not track loudness and the adaptive filter must find that gain
-  itself — no worse than the current tap, which is also pre-volume. And it does
-  not represent the acoustic echo once the DAC clips: at index 170 the mic's
-  loudest component is the *seventh* harmonic while the reference stays a clean
-  fundamental. Unreachable in shipping firmware, because `DEVICE_VOLUME_MAX`
-  caps the control at 127 for the distortion reason under Volume — but it is a
-  hard reason never to raise that ceiling.
+  Two bounds. It is **pre-DAC** (unchanged across a commanded 33.5dB DAC cut,
+  which is why moving the volume into software made it post-volume). And it
+  does not represent the acoustic echo once the DAC clips: at index 170 the
+  mic's loudest component is the *seventh* harmonic while the reference stays
+  a clean fundamental. Unreachable in shipping firmware, since the DAC is held
+  at unity (127) — but it is a hard reason never to raise that.
 - **Barge-in** (controller-side `_barge_watcher`) — wake word spoken during TTS cancels playback (device does a stateful `speaker_flush`: drains buffer + discards until stream EOS, since the rest of the stream is typically still in TCP buffers; controller-side, both `stream_speaker` and the post-playback drain sleep race `cancel_event`). `bargeInThreshold` is used as-is and sits *below* `owwThreshold` by design (0.05–0.10): echo at the mic is ~25dB louder than the person, so speech-over-TTS scores are depressed (~0.3–0.5 observed), while converged self-echo scores 0.002–0.003. **A barge must abort HA's run before starting the interrupting turn** — see the voice backend section in `controller/CLAUDE.md`
 - **AGC** (`internal/processor/`) — lock_mic turns only; release is frozen during silence (RMS speech flag), preventing noise floor amplification. (Device-side RNNoise NS was removed 2026-07-12 — noise suppression is controller-side now: `em_ns.py`/DTLN on the ASR-bound stream, per-device `nsAsr` flag)
 - **VAD** (lock_mic turns only) runs on pre-NS/AGC audio; opens gate after `VAD_SPEECH_MS` of speech, closes after `VAD_SILENCE_MS` of silence, then sends an end-of-speech sentinel
@@ -1040,6 +1036,20 @@ this SoC offers** — below `coresTotal` means the governor is already capping
 capacity, which bites well before any temperature reading looks alarming.
 
 ## Volume / mute persistence
+
+**Volume is applied in software, and the DAC stays at unity (2026-09-24).**
+`PcmSpeaker.SetVolume` scales each period after the output chain, ramped
+across one period so a change never lands as a step; the DAC's
+`PCM Playback Volume` sits at 127 while audio is live and is only used to
+mute around amp and stream changes. That is stock FireOS's arrangement
+(AudioFlinger attenuates, the DAC is never written). It was done so the wake
+sound (#120), mixed in AFTER the volume, plays at its own level whatever the
+volume — with the volume in the DAC nothing we write can escape it. The level
+keeps the control's law (0.5dB per step, unity at 127), so the controller, HA
+and stored `startupVolume` values are unchanged; level 0 is now true silence
+rather than −63.5dB. The speaker is silent until told a volume, and the
+volume controller applies its level the moment it is wired (`SetVolumeApply`),
+starting from 100, which is where Init used to leave the DAC.
 
 **The scale stops at the codec's unity gain, and that ceiling is load-bearing.**
 tinymix ctl 61 is the tlv320aic32x4 DAC *digital* volume: 176 steps of 0.5dB

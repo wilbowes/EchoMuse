@@ -15,7 +15,7 @@ const rate = 48000
 // a click — the same discontinuity the output chain's crossfade exists to
 // remove, reached from the other direction.
 func TestNoDiscontinuities(t *testing.T) {
-	c := WakeCue(rate)
+	c := WakeCue(rate, LevelDBFS(LevelMedium))
 	if len(c) == 0 {
 		t.Fatal("empty cue")
 	}
@@ -56,7 +56,7 @@ func TestTheCueRises(t *testing.T) {
 	}
 	// Measure it rather than trusting the constants: the second half must
 	// have more energy above the midpoint frequency than the first.
-	c := WakeCue(rate)
+	c := WakeCue(rate, LevelDBFS(LevelMedium))
 	mid := (BingHz + BongHz) / 2
 	first := dominantHz(c[:len(c)/3], rate)
 	last := dominantHz(c[len(c)*2/3:], rate)
@@ -84,31 +84,38 @@ func dominantHz(x []float64, fs float64) float64 {
 	return bestHz
 }
 
-// The level is a deliberate choice: audible across a room, not startling
-// beside the device, and playing while the user is already speaking.
-func TestPeakLevel(t *testing.T) {
-	c := WakeCue(rate)
-	peak := 0.0
-	for _, v := range c {
-		peak = math.Max(peak, math.Abs(v))
+// Each level peaks where it says, loud never clips, and the levels are
+// distinct and in order — a preset that plays the same as its neighbour is a
+// setting that does nothing.
+func TestPeakLevels(t *testing.T) {
+	prev := math.Inf(-1)
+	for _, lv := range Levels {
+		c := WakeCue(rate, LevelDBFS(lv))
+		peak := 0.0
+		for _, v := range c {
+			peak = math.Max(peak, math.Abs(v))
+		}
+		want := math.Pow(10, LevelDBFS(lv)/20.0) * 32768.0
+		if peak > want*1.02 || peak < want*0.8 {
+			t.Errorf("%s: peak %.0f, want about %.0f (%.1f dBFS)", lv, peak, want, LevelDBFS(lv))
+		}
+		if peak > 32767 {
+			t.Fatalf("%s clips", lv)
+		}
+		if peak <= prev*1.5 {
+			t.Errorf("%s is not clearly louder than the level below it", lv)
+		}
+		prev = peak
 	}
-	wantPeak := math.Pow(10, PeakDBFS/20.0) * 32768.0
-	if peak > wantPeak*1.02 {
-		t.Errorf("peak %.0f exceeds the intended %.0f (%.1f dBFS)", peak, wantPeak, PeakDBFS)
-	}
-	if peak < wantPeak*0.8 {
-		t.Errorf("peak %.0f is well under the intended %.0f — the envelope is "+
-			"eating more than it should", peak, wantPeak)
-	}
-	if peak > 32767 {
-		t.Fatal("cue clips")
+	if LevelDBFS("nonsense") != LevelDBFS(LevelMedium) || LevelDBFS("") != LevelDBFS(LevelMedium) {
+		t.Error("an unknown level must play as medium")
 	}
 }
 
 // DurationMS is what the mic path uses to know which frames to exclude from
 // the wake scorer and the ASR stream, so it must match what is rendered.
 func TestDurationMatchesTheRender(t *testing.T) {
-	c := WakeCue(rate)
+	c := WakeCue(rate, LevelDBFS(LevelMedium))
 	got := float64(len(c)) / rate * 1000
 	if math.Abs(got-DurationMS()) > 1.0 {
 		t.Errorf("rendered %.1fms, DurationMS() says %.1fms — the mic path "+
@@ -120,7 +127,7 @@ func TestDurationMatchesTheRender(t *testing.T) {
 // speaker package and this one should not assume it.
 func TestRendersAtOtherRates(t *testing.T) {
 	for _, fs := range []int{16000, 44100, 48000} {
-		c := WakeCue(fs)
+		c := WakeCue(fs, LevelDBFS(LevelMedium))
 		got := float64(len(c)) / float64(fs) * 1000
 		if math.Abs(got-DurationMS()) > 1.5 {
 			t.Errorf("%dHz: rendered %.1fms, want %.1fms", fs, got, DurationMS())
@@ -137,7 +144,7 @@ func TestAudition(t *testing.T) {
 	if path == "" {
 		t.Skip("set EM_CUE_WAV to render a WAV for listening")
 	}
-	c := WakeCue(rate)
+	c := WakeCue(rate, LevelDBFS(LevelMedium))
 	if err := writeWAV(path, c, rate); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}

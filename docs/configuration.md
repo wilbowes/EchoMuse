@@ -303,11 +303,14 @@ there first as an accessibility option: without it the ring is the only sign
 the Echo is listening, which is no help from the next room or to someone who
 cannot see it.
 
-The Echo generates the tone itself. With **Wake word detection** set to *On
-this Echo* it plays the moment the wake word is heard; *On the controller*
-it plays about one network round trip later. Every Echo that hears you
-plays it, including one that then stands down for another (see
-**Arbitration window**). Needs firmware that announces `wake_cue`; on older
+**Wake sound level** sets it to Quiet, Medium or Loud. The level is the
+same whatever the Echo's volume is set to, so a turned-down Echo still
+confirms it heard you.
+
+Only the Echo that answers plays it: one that stands down for another (see
+**Arbitration window**), or that has no Home Assistant behind it, stays
+silent. That means the Echo waits to hear back from the controller first,
+one network round trip. Needs firmware that announces `wake_cue`; on older
 firmware the toggle is disabled and says so.
 
 ### Sensitivity (Precise ↔ Eager)

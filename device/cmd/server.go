@@ -218,7 +218,13 @@ func main() {
 	controlClient.OnListen(func(kind string, session uint32) {
 		switch kind {
 		case "listen_ack":
-			dataClient.AckListen(session)
+			// The wake sound waits for the ack: it means this Echo won
+			// arbitration and has something to talk to, so one that cedes
+			// (or has no HA) stays silent. Costs one RTT against playing it
+			// at the crossing.
+			if dataClient.AckListen(session) {
+				playWakeCue(pcmSpeaker)
+			}
 		case "listen_close":
 			// A session the controller closes before confirming a duck is a
 			// wake it did not take (ceded, or refused): un-duck the music.
@@ -499,18 +505,15 @@ func main() {
 		syncListenState(dataClient, controlClient, false)
 	})
 
-	// Audible cue on request (#120). Only the controller-detected wake path
-	// uses this; a device that hears its own wake word plays it from
-	// onWakeCrossing without a round trip.
+	// Wake sound on request (#120), for wakes outside a private-listening
+	// session; the controller sends it only once the wake has won
+	// arbitration. A session's wake sound plays on its listen_ack instead.
 	controlClient.OnPlayCue(func(name string) {
 		if name != "wake" {
 			log.Printf("[cue] unknown cue %q — ignored", name)
 			return
 		}
-		if !config.Get().WakeSoundEnabled() {
-			return
-		}
-		pcmSpeaker.PlayCue(wakeCue)
+		playWakeCue(pcmSpeaker)
 	})
 
 	// Speaker flush — barge-in: cut buffered TTS the moment the controller
@@ -629,30 +632,20 @@ func main() {
 		}
 	})
 
+	// Volume is applied in software by the speaker; the DAC stays at unity.
+	// The hardware echo reference is the bytes written to ALSA, so it is
+	// post-volume by construction and the canceller needs no scalar.
+	if pcmSpeaker != nil {
+		s.SetVolumeApply(pcmSpeaker.SetVolume)
+	}
 	// Volume change — notify controller so HA entity and dashboard reflect it.
 	// Fires on every Set() call: physical button press or future volume_set command.
 	s.SetVolumeChangeCallback(func(level int) {
 		controlClient.SendVolumeState(level)
-		// The hardware echo reference is tapped upstream of the DAC volume
-		// control, so it holds full scale whatever the user sets. Tell the
-		// canceller the scalar it cannot see, or every volume change is an
-		// echo-path gain step the adaptive filter can only find by
-		// re-converging — measured on 2026-08-29 as cancellation dropping to
-		// -1.7dB after a change and taking 3-4s to recover, repeatedly.
-		canceller.SetPlaybackLevel(level)
 	})
-	// Seed it from where the device actually is, right now. The callback
-	// above only fires on a CHANGE, and the two things that would produce
-	// one at startup both have holes: SeedVolume is skipped entirely when
-	// the controller pushes startupVolume=0 (a device it has no record
-	// for), and Set() is a no-op-shaped path nothing guarantees runs. Miss
-	// it and refScale stays 0 — read as unity — while the codec sits at
-	// whatever level the previous run left behind, which is round one's
-	// 33dB-hot reference reappearing on a device nobody touched.
-	canceller.SetPlaybackLevel(s.VolumeLevel())
 
 	// Volume set from controller (HA MediaPlayerCommandRequest forwarded down).
-	// Calls Set() which applies tinymix, updates LEDs, and fires the change
+	// Calls Set() which applies the volume, updates LEDs, and fires the change
 	// callback above — so SendVolumeState fires automatically, closing the loop.
 	controlClient.OnVolumeSet(func(level int) {
 		s.SetVolume(level)
@@ -1242,9 +1235,30 @@ func actsOnCrossings(mode string) string {
 	return "reporting only, not triggering"
 }
 
-// wakeCue is rendered once: rendering on the wake path would put ~12k sin()
-// calls between hearing the wake word and confirming it.
-var wakeCue = cue.WakeCue(speakerRate)
+// wakeCues holds the cue at each level, rendered once: rendering on the wake
+// path would put ~12k sin() calls between hearing the wake word and
+// confirming it.
+var wakeCues = func() map[string][]float64 {
+	m := make(map[string][]float64, len(cue.Levels))
+	for _, lv := range cue.Levels {
+		m[lv] = cue.WakeCue(speakerRate, cue.LevelDBFS(lv))
+	}
+	return m
+}()
+
+// playWakeCue plays the wake sound at its configured level, if it is on.
+// Anything unrecognised plays medium.
+func playWakeCue(spk *speaker.PcmSpeaker) {
+	on, level := config.Get().WakeSoundSetting()
+	if !on || spk == nil {
+		return
+	}
+	c, ok := wakeCues[level]
+	if !ok {
+		c = wakeCues[cue.LevelMedium]
+	}
+	spk.PlayCue(c)
+}
 
 // speakerRate mirrors the speaker binding's rate, declared here so this file
 // still builds on a host, where the //go:build server binding does not.
@@ -1298,13 +1312,6 @@ func onWakeCrossing(cc *client.ControlClient, dc *client.DataClient,
 			return
 		}
 		log.Printf("[listen] wake %.3f opened session %d", score, session)
-	}
-	// The cue plays before the wake is reported: a confirmation that lands
-	// an RTT later, after the user has started speaking, is worse than none
-	// (#139). A crossing inside an open session returned above, so words
-	// in a session never chime.
-	if spk != nil && config.Get().WakeSoundEnabled() {
-		spk.PlayCue(wakeCue)
 	}
 	// #263: light the listening ring NOW, from the one place that already
 	// knows the wake happened. The crossing used to travel to the controller

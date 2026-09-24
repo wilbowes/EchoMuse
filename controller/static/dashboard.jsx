@@ -8717,7 +8717,7 @@ const STAGE_MONO = "'DM Mono',monospace";
 // be silently wrong.
 const CONFIG_SECTIONS = {
   "playback": ["eqBands", "eqLoudness", "duckDb", "limiterEnabled", "limiterThreshold", "limiterRelease", "bassGuardEnabled", "bassGuardDb", "streamReply"],
-  "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice", "wakeSound"],
+  "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice", "wakeSound", "wakeSoundLevel"],
   "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "aecRefSource", "nsAsr", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
   "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs", "consolePassword", "consoleTimeoutMin"],
@@ -9244,6 +9244,16 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                 disabled={!wakeCueCapable}
                 value={config.wakeSound ?? false}
                 onChange={v => set('wakeSound', v)}/>
+              {wakeCueCapable && (config.wakeSound ?? false) && (
+                <Select label="Wake sound level"
+                  value={config.wakeSoundLevel ?? 'medium'}
+                  options={[
+                    { value: 'quiet',  label: 'Quiet' },
+                    { value: 'medium', label: 'Medium' },
+                    { value: 'loud',   label: 'Loud' },
+                  ]}
+                  onChange={v => set('wakeSoundLevel', v)}/>
+              )}
               {/* Where the wake word is detected (docs/listening.md). Two
                   choices; "shadow" is a developer diagnostic, set through the
                   API and shown here only on an Echo already in it, labelled as
