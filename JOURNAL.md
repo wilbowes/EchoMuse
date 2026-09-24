@@ -3663,6 +3663,80 @@ against the thin wake margin. VVV moved to the lounge in the evening, onto
 `…7b:e5` channel 40 at -64dBm, for the soak. All of it is on
 `feat/ble-scan-yield`, nothing pushed or released.
 
+## 2026-09-24 — the wake sound, the volume moved into software, and a mixed fleet arbitrated by ear
+
+**The wake sound (#120) had been built in August and never merged.** It was
+committed onto `sendspin-design` (#271, still open) and sat there; the device
+side, the controller side and the dashboard toggle all existed. Ported to its
+own branch (#638), and heard on 15LE for the first time.
+
+**"Understated even with the volume up", and it "should be separate from the
+actual volume level."** That could not be done while the volume was the DAC's
+own digital control: ctl 61 scales everything written to ALSA, so the cue can
+only escape it by boosting itself, and the headroom runs out as the volume
+drops (50% is −32dB). Three options were costed — compensate in the cue
+(steady only down to ~60–70% volume), move the volume into software, or
+briefly raise the DAC around the cue (jumps whatever else is playing) — and
+Wil chose the second: "build it right from the start". The DAC now sits at
+127, and `PcmSpeaker.SetVolume` scales each period after the output chain,
+ramped across the period. It is how stock FireOS always did it, which is why
+native Alexa never had the distortion above unity that capped our scale at
+127. The level keeps the control's law, so nothing above the device changed;
+0 became true silence. The AEC's reference scalar went with it: the Ch7/Ch8
+loopback carries the bytes written to ALSA, so the reference is post-volume
+by construction and the scalar would have applied the volume twice. The cue
+mixes in after the volume at −30/−20/−10dBFS (Quiet/Medium/Loud). On 15LE:
+DAC at 127, volume seeded 85 in software, barge-in still working after a
+volume change. Not yet checked: that a volume change is click-free, and the
+levels by ear across more than one sitting.
+
+**"If it cedes, it shouldn't make the noise."** Arbitration is decided on the
+controller, so the Echo cannot know at its crossing. The cue now plays on the
+session's `listen_ack` or on `play_cue`, both sent only to a winner: one round
+trip later, and right about who answers. The barge-in path had never sent the
+cue at all; it now does, after the flush, when the barge wins.
+
+**A 10m Echo took a barge-in from a 1m one by 16ms.** 14:30:53: VVV (lounge,
+detecting on the device) arrived at `.328`; 15LE (a metre away, scored by the
+controller, needing two frames over the barge bar) at `.344`. The arbiter
+grants the first arrival and never revokes, so 15LE stopped mid-sentence —
+correctly: the user spoke over it — and VVV opened a turn nobody was
+addressing and timed out. The two detection paths reach the arbiter at
+different speeds, so on a mixed fleet arrival order is pipeline order, not
+distance. Wil's rule (#639): **a mixed fleet holds its claims long enough for
+every claim to arrive; a uniform one races on equal terms and never waits.**
+`em_arbiter.contest()` holds until 250ms after the first claim was HEARD and
+grants the earliest heard; nothing is revoked because nobody holds the turn
+until it is decided. Barge-ins are now dated from the first of their two
+frames. Two contested barges afterwards, 15LE won both, heard 176ms and 235ms
+ahead of VVV; the hold cost 15LE's claims 53–159ms and VVV's ~10ms. Neither
+was a close race, so the case that failed has not been re-run. One bias
+noted: a barge is dated from a frame over 0.25, VVV's wake from its crossing
+at 0.50, and a lower bar is crossed earlier in the word — the talking Echo
+gets a head start that has nothing to do with distance.
+
+**Next on arbitration: log each claim's level.** Received level is a real
+distance cue (1m against 10m is 20dB by inverse square; perhaps 6–12dB in a
+reverberant room) where July's SNR comparison was not, because SNR divides by
+a noise floor that varies more than the speech does. Agreed as step 1, its
+own PR: the Echo reports the wake segment's post-AEC level with its gain
+removed, the controller measures the same for wakes it scores, and both are
+logged against capture time. Nothing decides on it until a week of contested
+wakes says it should.
+
+**Getting firmware onto 15LE.** `controller/tools/ota.py` returns 403 on the
+add-on: the API accepts only the HA ingress gateway, which is right and is
+not worth weakening for a dev tool. 15LE is on emOS and on USB serial here, so
+the binary went over its console instead — busybox `wget` from this box into
+the inactive slot, md5 checked on the device, symlink flipped, server
+restarted — which needs no credentials and leaves slot A as the rollback.
+
+**The overnight soak (feat/ble-scan-yield on VVV, lounge):** 18.5h, no
+disconnects, no restarts, 0 underruns; but 4 of 12 replies had 1.0–1.6s
+gaps where the office A/B had none, with no lounge baseline to say whether
+that is the room or the build. VVV went back to the build without the yield
+at 13:15 for a baseline night. Findings belong to that PR when it opens.
+
 ## 2026-09-25 — the yield measured against a baseline, and no lever left on the chip
 
 **Stopping the scan while the link is needed is worth keeping.** VVV ran the
