@@ -1338,7 +1338,12 @@ func onWakeCrossing(cc *client.ControlClient, dc *client.DataClient,
 		localDuck.Start(config.Get().DuckDb)
 	}
 	barge := spk != nil && spk.VoiceAudible(wakeword.ScoreSpan)
-	cc.SendOwwWake(score, crossed, at, session, dc.ListenFloor(), barge)
+	level, peak, ok := dc.WakeLevel(at)
+	var lv *client.WakeLevel
+	if ok {
+		lv = &client.WakeLevel{Level: level, Peak: peak}
+	}
+	cc.SendOwwWake(score, crossed, at, session, dc.ListenFloor(), barge, lv)
 }
 
 // syncListenState resolves what the device does with its wake stream and

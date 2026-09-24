@@ -150,7 +150,7 @@ absent optional fields take prior/default behaviour.
 | `mute_state` | `muted` | Mute toggled (mute is device-sovereign — see `device/CLAUDE.md`) |
 | `volume_state` | `level` | Volume changed; controller persists it as `startupVolume` |
 | `oww_shadow_cross` | score/threshold/age fields | Shadow-mode wake crossing (report only) |
-| `oww_wake` | `score`, `threshold`, `ageMs`, `capturedMono`; under private listening also `session`, `floor`, `barge` | On-device trigger fired (`owwOnDevice=on`). With `session` it opened a private-listening session whose audio follows as `0x07` ([listening.md](listening.md)); without, it lands in `Device.pending_wake` and the continuous stream carries the audio |
+| `oww_wake` | `score`, `threshold`, `ageMs`, `capturedMono`; `level`, `peak` when the crossing frame is still buffered; under private listening also `session`, `floor`, `barge` | On-device trigger fired (`owwOnDevice=on`). With `session` it opened a private-listening session whose audio follows as `0x07` ([listening.md](listening.md)); without, it lands in `Device.pending_wake` and the continuous stream carries the audio. `level`/`peak` are the wake word's loudness in dBFS with `micGainDb` removed, over the 2.0s ending at the crossing frame (definition: `controller/em_wakelevel.py`); logged, not acted on |
 | `listen_state` | `state` (`local`/`stream`/`degraded`), `reason?` | What the device is doing with its wake stream. Sent on every change and after every `ack` |
 | `listen_end` | `session`, `reason` | The device closed a session itself (`ack_timeout`, `max_open`, `muted`, `link`, `stopped`) |
 | `ambient_light` | `value` | Light reading (only if `ambient_light`) |

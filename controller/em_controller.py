@@ -93,6 +93,7 @@ import em_oww_warmup
 import em_barge
 import em_arbiter
 import em_listen
+import em_wakelevel
 import em_button
 import em_tap_burst
 import em_esphome as esphome
@@ -602,6 +603,10 @@ class Device:
         # and diagnostics (near-miss logs). Asymmetric tracker: follows drops
         # quickly, rises slowly, so speech doesn't drag the floor up.
         self.noise_floor: float = 0.0
+        # The wake stream's recent frame levels and the mic gain to remove
+        # from them: see em_wakelevel.
+        self.wake_levels = em_wakelevel.LevelRing()
+        self.mic_gain_db: float = 24.0
 
         # Barge-in (§3.2): wake word interrupts the thinking phase or TTS
         # playback. Controller-side feature — with it enabled the mic keeps
@@ -1702,6 +1707,7 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
     # echo (over-suppression / divergence during double-talk).
     rms_sum = 0.0
     rms_max = 0.0
+    levels = em_wakelevel.LevelRing()
     try:
         while True:
             payload = await device.voice_queue.get()
@@ -1710,6 +1716,7 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                 prev_score = 0.0  # sentinel = stream discontinuity; frames
                 # across it are not consecutive for either two-frame rule
                 prev_heard = None
+                levels.clear()
                 continue
             buf.extend(payload)
             heard = em_listen.captured(payload, loop.time())
@@ -1720,6 +1727,7 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                 rms = float(np.sqrt(np.mean((samples.astype(np.float64) / 32768.0) ** 2)))
                 rms_sum += rms
                 rms_max  = max(rms_max, rms)
+                levels.push(rms)
                 prediction = await loop.run_in_executor(None, model.predict, samples)
                 score = prediction.get(barge_pred_key, 0.0)
                 frames += 1
@@ -1805,7 +1813,8 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                     if serves and device.wake_arb_ms > 0 and len(_devices) > 1:
                         # Capture time already carries the link's least
                         # delay; its smoothed RTT would count it twice.
-                        won_by = await _claim_wake(device, fired_heard)
+                        won_by = await _claim_wake(
+                            device, fired_heard, levels.measure(device.mic_gain_db))
                     device.barge_ceded = (not serves) or won_by != device.device_id
                     if device.barge_ceded:
                         log.info(
@@ -2957,19 +2966,37 @@ def _arbitration_hold() -> float:
     )
 
 
-async def _claim_wake(device: "Device", heard_at: float | None) -> str:
-    """Claim the utterance for `device`; returns the winner's id."""
+async def _claim_wake(device: "Device", heard_at: float | None,
+                      level: tuple[float, float] | None = None,
+                      by: str = "controller") -> str:
+    """Claim the utterance for `device`; returns the winner's id.
+
+    `level` is the wake's (level, peak) in dBFS, logged with its capture time
+    so contested wakes can be paired across Echos later; see em_wakelevel.
+    """
     hold = _arbitration_hold()
     won_by = await _wake_arbiter.contest(
         device.device_id, device.wake_arb_ms / 1000.0,
         heard_at=heard_at, slack_s=_arbitration_slack(), hold_s=hold,
     )
+    now = asyncio.get_event_loop().time()
     if hold > 0:
-        now = asyncio.get_event_loop().time()
         ago = (now - heard_at) * 1000.0 if heard_at is not None else 0.0
         log.info(f"[{device.device_id}] arbitration (mixed fleet, held "
                  f"{hold * 1000:.0f}ms): heard {ago:.0f}ms ago, won by {won_by}")
+    if level is not None:
+        heard_wall = time.time() - (now - (heard_at if heard_at is not None else now))
+        db.log_device(device.device_id, "info", "controller", em_wakelevel.log_line(
+            level[0], level[1], device.noise_floor, device.mic_gain_db,
+            heard_wall, by))
     return won_by
+
+
+def _device_level(ev: dict) -> tuple[float, float] | None:
+    """The level an Echo measured for its own wake, if its firmware sends one."""
+    if ev.get("level") is None or ev.get("peak") is None:
+        return None
+    return ev["level"], ev["peak"]
 
 
 def _wake_dating(device: Device, ev: dict) -> tuple[float, str]:
@@ -3036,7 +3063,8 @@ async def _private_wake_turn(device: Device, ev: dict) -> None:
     serves = esphome.can_serve_turn(device.device_id)
     won_by = device.device_id
     if serves and device.wake_arb_ms > 0 and len(_devices) > 1:
-        won_by = await _claim_wake(device, _wake_heard_at(device, ev))
+        won_by = await _claim_wake(device, _wake_heard_at(device, ev),
+                                   _device_level(ev), by="device")
     if not serves or won_by != device.device_id:
         wake_info = device.last_wake
         device.last_wake = None
@@ -3101,7 +3129,8 @@ async def _private_barge(device: Device, ev: dict) -> None:
     serves = esphome.can_serve_turn(device.device_id)
     won_by = device.device_id
     if serves and device.wake_arb_ms > 0 and len(_devices) > 1:
-        won_by = await _claim_wake(device, _wake_heard_at(device, ev))
+        won_by = await _claim_wake(device, _wake_heard_at(device, ev),
+                                   _device_level(ev), by="device")
     device.barge_ceded = (not serves) or won_by != device.device_id
     if device.barge_ceded:
         await device.listen_close(session, "ceded")
@@ -3330,6 +3359,7 @@ async def _stream_listen(device: Device):
             # stream boundary.
             if payload is None or isinstance(payload, str):
                 buf.clear()
+                device.wake_levels.clear()
                 continue
 
             if device.oww_paused.is_set():
@@ -3337,6 +3367,7 @@ async def _stream_listen(device: Device):
 
             if device.muted:
                 buf.clear()
+                device.wake_levels.clear()
                 continue
 
             buf.extend(payload)
@@ -3372,6 +3403,7 @@ async def _stream_listen(device: Device):
                     device.noise_floor += 0.3 * (rms - device.noise_floor)
                 else:
                     device.noise_floor += 0.008 * (rms - device.noise_floor)
+                device.wake_levels.push(rms)
 
                 prediction = await loop.run_in_executor(
                     None, model.predict, samples
@@ -3634,7 +3666,9 @@ async def _stream_listen(device: Device):
                             else:
                                 # Already includes the link's least delay.
                                 heard_at = heard
-                            won_by = await _claim_wake(device, heard_at)
+                            won_by = await _claim_wake(
+                                device, heard_at,
+                                device.wake_levels.measure(device.mic_gain_db))
                         if not serves or won_by != device.device_id:
                             wake_info = device.last_wake
                             device.oww_paused.clear()
@@ -4106,6 +4140,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         device.oww_threshold = float(config.get("owwThreshold", OWW_THRESHOLD))
         device.oww_model     = config.get("owwModel", f"{OWW_MODEL}_v0.1")
         device.wake_arb_ms   = int(config.get("wakeArbitrationMs", 300))
+        device.mic_gain_db   = float(config.get("micGainDb", 24))
         device.oww_speex_ns  = bool(config.get("owwSpeexNs", False))
         device.ns_asr        = bool(config.get("nsAsr", False))
         device.save_utterances = bool(config.get("saveUtterances", False))

@@ -1168,6 +1168,8 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
     # it is the one where the setting would otherwise silently do nothing.
     if "wakeSound" in effective:
         live.wake_sound = bool(effective["wakeSound"])
+    if "micGainDb" in effective:
+        live.mic_gain_db = float(effective["micGainDb"])
     if "owwOnDevice" in effective:
         # Resolved against the CAPABILITY, not taken at face value: "on"
         # against firmware that cannot trigger would stop this controller

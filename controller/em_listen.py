@@ -475,6 +475,9 @@ def parse_wake(msg: dict, arrived: float) -> dict | None:
         "threshold": _num("threshold"),
         "age_ms":    int(max(0.0, age)),
         "floor":     _num("floor"),
+        # dBFS, mic gain removed (em_wakelevel); absent on older firmware.
+        "level":     _num("level"),
+        "peak":      _num("peak"),
         "barge":     bool(msg.get("barge")),
         "arrived":   arrived,
     }

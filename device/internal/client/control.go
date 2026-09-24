@@ -1319,8 +1319,11 @@ func (c *ControlClient) SendOwwShadowCross(score float32, ageMs int64) {
 // measured when the message is built, so time the message then spends in
 // flight is invisible to it; capturedMono is not, once the controller has
 // mapped the clock from ping replies.
+//
+// level is how loud the wake word was here (wakelevel.go), nil if its frames
+// had already left the ring; the controller logs it with the capture time.
 func (c *ControlClient) SendOwwWake(score, threshold float32, capturedAt time.Time,
-	session uint32, floor float64, barge bool) {
+	session uint32, floor float64, barge bool, level *WakeLevel) {
 	msg := map[string]interface{}{
 		"type":         "oww_wake",
 		"score":        score,
@@ -1332,6 +1335,10 @@ func (c *ControlClient) SendOwwWake(score, threshold float32, capturedAt time.Ti
 		msg["session"] = session
 		msg["floor"] = floor
 		msg["barge"] = barge
+	}
+	if level != nil {
+		msg["level"] = level.Level
+		msg["peak"] = level.Peak
 	}
 	_ = c.writeJSON(msg)
 }
