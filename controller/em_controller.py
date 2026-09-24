@@ -1846,6 +1846,12 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                         # (pipeline_refused, 5 of 5 attempts, 2026-08-17).
                         esphome.cancel_voice_turn(
                             device.device_id, abort_ha=True, reason="barged")
+                    # Wake sound for a barge that won, after the flush so it
+                    # is not heard over the reply it interrupts. A private
+                    # Echo plays its own on the barge session's listen_ack.
+                    if not device.barge_ceded and getattr(device, "wake_sound", False) \
+                            and device.wake_cue_capable:
+                        await device.play_cue("wake")
                     return
     finally:
         rms_mean = rms_sum / frames if frames else 0.0
