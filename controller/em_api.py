@@ -1019,6 +1019,7 @@ async def _patch_device(request: web.Request) -> web.Response:
     device_id = request.match_info["id"]
     body  = await _json_body(request)
     label = _require_label(body)
+    await _require_unique_label(label, device_id)
 
     loop = asyncio.get_event_loop()
     row = await loop.run_in_executor(None, db.get_device, device_id)
@@ -1112,6 +1113,7 @@ async def _post_approve(request: web.Request) -> web.Response:
     device_id = request.match_info["id"]
     body   = await _json_body(request)
     label  = _require_label(body)
+    await _require_unique_label(label, device_id)
     config = body.get("config")  # optional
 
     loop = asyncio.get_event_loop()
@@ -5815,6 +5817,23 @@ def _require_label(body: dict) -> str:
             body=json.dumps({"error": err, "code": "invalid_label"}),
         )
     return label
+
+
+async def _require_unique_label(label: str, device_id: str) -> None:
+    """A 409 if another Echo already has this name (em_labels.duplicate_of).
+
+    A hard refusal rather than a warning: two Echos with one name cannot be
+    told apart in the dashboard, and Home Assistant quietly suffixes the
+    second one's entity_ids with _2.
+    """
+    rows = await asyncio.get_event_loop().run_in_executor(None, db.get_all_devices)
+    other = em_labels.duplicate_of(label, ((r["device_id"], r["label"]) for r in rows), device_id)
+    if other is not None:
+        raise web.HTTPConflict(
+            content_type="application/json",
+            body=json.dumps({"error": f'Another Echo is already called "{other}".',
+                             "code": "duplicate_label"}),
+        )
 
 
 def _require_str(body: dict, key: str) -> str:

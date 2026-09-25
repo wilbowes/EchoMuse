@@ -28,6 +28,7 @@ of ordinary emoji sequences. A label made of nothing else still fails the
 letter-or-number rule.
 """
 
+import re
 import unicodedata
 
 MAX_LABEL_LEN = 32
@@ -53,3 +54,29 @@ def check_label(value) -> tuple:
     if not any(c.isalnum() for c in label):
         return None, "Label needs at least one letter or number."
     return label, None
+
+
+def label_key(label: str) -> str:
+    """What two labels are compared on to decide they are the same name.
+
+    NFKC folds compatibility forms (fullwidth "Ｋｉｔｃｈｅｎ" is "Kitchen"),
+    casefold is Unicode's case-insensitive form ("KÜCHE" and "küche", and
+    "Straße" and "STRASSE"), and runs of whitespace collapse to one space, so
+    "Kitchen  1" and "Kitchen 1" are the same name. What a person would read
+    as the same name is the same name.
+    """
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", label).casefold()).strip()
+
+
+def duplicate_of(label: str, devices, device_id: str):
+    """The label of another device that `label` would duplicate, or None.
+
+    `devices` is (device_id, label) pairs; `device_id` is the device being
+    named, which is left out so an Echo can be renamed to a new spelling of
+    its own name. A device with no label yet (pending) duplicates nothing.
+    """
+    key = label_key(label)
+    for other_id, other in devices:
+        if other_id != device_id and other and label_key(other) == key:
+            return other
+    return None

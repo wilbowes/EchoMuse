@@ -103,3 +103,45 @@ def test_an_accepted_label_fits_the_mdns_txt_record():
     label, err = em_labels.check_label(widest)
     assert err is None
     assert len(f"friendly_name={label} Voice Assistant".encode()) <= 255
+
+
+# ── Duplicates: a hard no ───────────────────────────────────────────────────
+
+FLEET = [("A", "Kitchen"), ("B", "Lounge"), ("C", None), ("D", "Straße")]
+
+
+def test_the_same_name_in_any_case_or_width_is_a_duplicate():
+    for s in ("Kitchen", "kitchen", "KITCHEN", "Ｋｉｔｃｈｅｎ", "kItChEn"):
+        assert em_labels.duplicate_of(s, FLEET, "NEW") == "Kitchen", s
+
+
+def test_whitespace_inside_a_name_is_compared_collapsed():
+    fleet = [("A", "Kitchen 1")]
+    for s in ("Kitchen  1", "Kitchen 1", "Kitchen　1"):
+        assert em_labels.duplicate_of(s, fleet, "NEW") == "Kitchen 1", repr(s)
+
+
+def test_full_case_folding_not_just_lower():
+    # casefold, not lower: "ß" folds to "ss".
+    assert em_labels.duplicate_of("STRASSE", FLEET, "NEW") == "Straße"
+
+
+def test_different_names_are_not_duplicates():
+    for s in ("Kitchen 2", "Kitchens", "Küche", "Lounge Room", "Bedroom"):
+        assert em_labels.duplicate_of(s, FLEET, "NEW") is None, s
+
+
+def test_renaming_an_echo_to_its_own_name_is_allowed():
+    assert em_labels.duplicate_of("KITCHEN", FLEET, "A") is None
+
+
+def test_a_pending_echo_with_no_label_duplicates_nothing():
+    assert em_labels.duplicate_of("Anything", [("C", None), ("E", "")], "NEW") is None
+
+
+def test_both_label_endpoints_refuse_duplicates():
+    api = (CONTROLLER / "em_api.py").read_text()
+    for handler in ("async def _patch_device", "async def _post_approve"):
+        body = api[api.index(handler):]
+        body = body[:body.index("\n@", 1)]
+        assert "await _require_unique_label(label, device_id)" in body, handler
