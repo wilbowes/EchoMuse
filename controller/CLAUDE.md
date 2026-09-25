@@ -1699,6 +1699,27 @@ throughout — so the rules below are all one rule seen from different angles.
   An `_x` alias on a device claiming v2 therefore means the restore did not
   run or did not take, which is #598 — refuse it, because the bare name there
   really is the payload. `unlock_verdict.test.mjs`.
+- **Before the escrow reads anything for the build, the unlock, the recovery,
+  both system partitions and every stock kernel must be READ and must agree
+  on one FireOS generation** (`donorVerdict`, #619). amonet 2 = expdb holds
+  its bootloader + TWRP 3.7.0 + the v2 partition layout + FireOS 6 (7.1,
+  system-as-root) in BOTH system slots + 32-bit stock kernels; amonet 1 is
+  the mirror (3.2.3, root layout, 5.1.1, 64-bit). Every file emOS runs from
+  `/system` must be non-empty (`_emosSystemFiles`, pinned against `init.c`).
+  #619 was amonet 2 with a FireOS 6 flash that never finished: expdb and TWRP
+  said amonet 2, `boot_b` and `system_b` said FireOS 5, and every check
+  passed because each looked at one thing — the builder correctly matched a
+  64-bit init to the FireOS 5 kernel it was given, and amonet 2's bootloader
+  boot-looped on it. **This inverts `_unlockVerdict`'s rule on purpose**:
+  there, an unreadable probe is not evidence, because step 0 only chooses a
+  flow and must not refuse a working device; here, before the first read that
+  feeds a write, anything unreadable REFUSES (Wil, 2026-09-25: "be really
+  strict about what we need, rather than assuming a certain state"). The
+  kernel check reads 64KB per stock slot and applies
+  `reference_kernel_arch`'s own rule, so the gate and the builder cannot
+  disagree — verified against real FireOS 5 and 6 images. It checks the image
+  KEPT in slot B too: a way back that cannot boot is not one.
+  `donor_gate.test.mjs`.
 - **`_STEP_MODE` is enforced at every step, not only on Reconnect.** It existed
   and was correct and was consulted in one place, where a mismatch logged a
   line and left Retry enabled. In Android `/dev/block/other-boot` is amonet's

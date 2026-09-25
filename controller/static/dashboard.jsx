@@ -4187,8 +4187,8 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       // ever run this wizard, which was written when that was true and kept
       // asserting it to every operator afterwards.
       addLog(`Unlocked with amonet-biscuit v2.0.0 or later `
-           + `(${unlock.evidence.join('; ')}) — FireOS 6. Building a 32-bit `
-           + `image to match its kernel.`, 'warn');
+           + `(${unlock.evidence.join('; ')}) — expecting FireOS 6 in both slots. `
+           + `The Escrow Boot Image step checks that before anything is written.`, 'warn');
       addLog('The Escrow Boot Image step is the way back — keep that file.', 'warn');
     }
     // Which releases each flow can work with. FireOS 6 is Android 7.1, and there
@@ -4628,6 +4628,191 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
              reason: `emOS goes in slot A, the slot this bootloader starts; ${kept}; `
                    + `built from slot ${donor.toUpperCase()} against system_${donor} `
                    + `(p${sysPart})` };
+  }
+
+  // ── Is this Echo in a state emOS can be built from? (#619) ────────────────
+  //
+  // The unlock, the recovery, both system partitions and every stock kernel
+  // must agree on ONE FireOS generation, and each fact must be READ, not
+  // inferred. #619 was amonet 2 with a FireOS 6 flash that never finished:
+  // expdb and TWRP said amonet 2, boot_b and system_b still held FireOS 5, and
+  // the wizard built a consistent FireOS 5 image that amonet 2's bootloader
+  // cannot boot. Every check it had passed, because each looked at one thing.
+  //
+  // Stricter than _unlockVerdict on purpose. That decides which FLOW a device
+  // takes at step 0, where "no evidence" must not refuse a working device.
+  // This runs before the first read that feeds a write, and here a fact that
+  // cannot be read is a refusal: the cost is a retry, and the alternative is
+  // a boot loop that needs recovery over USB.
+
+  // What emOS runs from Amazon's userspace, relative to the tree root (the
+  // partition root on FireOS 5, <partition>/system on FireOS 6). Taken from
+  // emos/init/init.c and checked against 15LE (FireOS 6.5.7.4) and C95
+  // (FireOS 5.5.5.4), 2026-09-25. e2fsck checks /data on every boot. FireOS 6
+  // runs emOS's own supplicant and udhcpc, so Amazon's are only needed on 5;
+  // busybox and wpa_cli are fallbacks behind emOS's own in /sbin, so they are
+  // not required. wmt_launcher and 6620_launcher are how init tells the two
+  // layouts apart. donor_gate.test.mjs pins every binary here against init.c.
+  function _emosSystemFiles() {
+    return {
+      5: ['bin/sh', 'bin/linker', 'bin/e2fsck', 'bin/wmt_loader', 'bin/6620_launcher',
+          'bin/wpa_supplicant', 'bin/dhcpcd',
+          'etc/firmware/WIFI_RAM_CODE_8163', 'etc/firmware/WMT_SOC.cfg'],
+      6: ['bin/sh', 'bin/linker', 'bin/e2fsck', 'vendor/bin/wmt_loader', 'vendor/bin/wmt_launcher',
+          'vendor/firmware/WIFI_RAM_CODE_8163', 'vendor/firmware/WMT_SOC.cfg'],
+    };
+  }
+
+  // One read-only pass: the unlock evidence again (step 0's copy may be from
+  // before a replug), then BOTH system partitions, each mounted privately
+  // read-only as _sysreadScript does and for its reasons. Every required file
+  // is checked for both generations; the verdict decides which list applies.
+  // `-s`: an empty file is as useless as a missing one.
+  function _donorProbeScript(files) {
+    const all = [...new Set([...files[5], ...files[6]])].join(' ');
+    return (
+      'P=""; for d in /dev/block/platform/*/by-name /dev/block/by-name; do '
+      + '[ -z "$P" ] && [ -e "$d/expdb" ] && P="$d/expdb"; done; '
+      + 'echo "EXPDB=$([ -n "$P" ] && dd if="$P" bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d \' \\n\')"; '
+      + 'T=$(getprop ro.twrp.version); '
+      + '[ -z "$T" ] && T=$(grep -m1 -o \'Starting TWRP [0-9][^ ]*\' /tmp/recovery.log 2>/dev/null | sed \'s/^Starting TWRP //\'); '
+      + 'echo "TWRP=$T"; '
+      + 'for x in a b; do S=""; '
+      + 'for d in /dev/block/platform/*/by-name /dev/block/by-name; do '
+      + '[ -z "$S" ] && [ -e "$d/system_$x" ] && S=$(readlink -f "$d/system_$x"); done; '
+      + 'echo "SYS_${x}_node=$S"; [ -b "$S" ] || continue; '
+      + 'M=$(mount | sed -n "s|^$S on \\([^ ]*\\) .*|\\1|p" | sed -n 1p); OWN=""; '
+      + 'if [ -z "$M" ]; then M=/tmp/em_donor_$x; mkdir -p "$M"; OWN=1; '
+      + 'if ! mount -o ro "$S" "$M" 2>/dev/null; then echo "SYS_${x}_mount=fail"; rmdir "$M" 2>/dev/null; continue; fi; fi; '
+      + 'echo "SYS_${x}_mount=ok"; '
+      + 'if [ -f "$M/system/build.prop" ]; then L=nested; R="$M/system"; '
+      + 'elif [ -f "$M/build.prop" ]; then L=root; R="$M"; else L=none; R="$M"; fi; '
+      + 'echo "SYS_${x}_layout=$L"; '
+      + 'for k in release name incremental; do '
+      + 'echo "SYS_${x}_$k=$(grep -m1 "^ro.build.version.$k=" "$R/build.prop" 2>/dev/null | cut -d= -f2-)"; done; '
+      + `for f in ${all}; do if [ -s "$R/$f" ]; then echo "FILE_$x $f yes"; else echo "FILE_$x $f no"; fi; done; `
+      + '[ -n "$OWN" ] && { umount "$M" 2>/dev/null; rmdir "$M" 2>/dev/null; }; '
+      + 'done; echo _DONORPROBE_OK');
+  }
+
+  function parseDonorProbe(out) {
+    const text = out || '';
+    const pick = k => ((text.match(new RegExp('^' + k + '=(.*)$', 'm')) || [])[1] || '').trim();
+    const sys = {};
+    for (const x of ['a', 'b']) {
+      const files = {};
+      for (const m of text.matchAll(new RegExp(`^FILE_${x} (\\S+) (yes|no)$`, 'gm'))) files[m[1]] = m[2];
+      sys[x] = { node: pick(`SYS_${x}_node`), mount: pick(`SYS_${x}_mount`),
+                 layout: pick(`SYS_${x}_layout`), release: pick(`SYS_${x}_release`),
+                 name: pick(`SYS_${x}_name`), build: pick(`SYS_${x}_incremental`), files };
+    }
+    return { complete: text.includes('_DONORPROBE_OK'),
+             expdb: pick('EXPDB').toLowerCase(), twrp: pick('TWRP'), sys };
+  }
+
+  // The kernel's architecture from the head of a boot image — the builder's
+  // own rule (em_emos_build.reference_kernel_arch), so the gate and the build
+  // cannot disagree: an ARM zImage carries 0x016f2818 at 0x24; an AArch64
+  // kernel is gzip whose Image carries "ARM\x64" at 0x38. '' when neither can
+  // be shown, which the verdict refuses.
+  async function _kernelArchOf(bytes) {
+    if (!bytes || bytes.length < 64) return '';
+    if (new TextDecoder().decode(bytes.subarray(0, 8)) !== 'ANDROID!') return '';
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const page = dv.getUint32(36, true);
+    const k = page + 0x200;
+    if (!page || k + 0x40 > bytes.length) return '';
+    if (dv.getUint32(page, true) !== 0x58881688) return '';
+    if (dv.getUint32(k + 0x24, true) === 0x016f2818) return 'arm';
+    if (bytes[k] !== 0x1f || bytes[k + 1] !== 0x8b) return '';
+    // Only the first 0x40 bytes of the Image are needed, from a stream that is
+    // cut off: read until there are enough, then drop the rest.
+    let head = new Uint8Array(0);
+    try {
+      const ds = new DecompressionStream('gzip');
+      const w = ds.writable.getWriter();
+      w.write(bytes.subarray(k)).catch(() => {});
+      w.close().catch(() => {});
+      const r = ds.readable.getReader();
+      while (head.length < 0x40) {
+        const { value, done } = await r.read();
+        if (done) break;
+        const t = new Uint8Array(head.length + value.length);
+        t.set(head); t.set(value, head.length); head = t;
+      }
+      r.cancel().catch(() => {});
+    } catch { /* a truncated stream that yielded nothing proves nothing */ }
+    return head.length >= 0x3c && head[0x38] === 0x41 && head[0x39] === 0x52
+        && head[0x3a] === 0x4d && head[0x3b] === 0x64 ? 'arm64' : '';
+  }
+
+  // The decision. `layout` is classifyBootTarget's ('v1'|'v2'); `heads` is
+  // every STOCK boot image the plan reads or keeps, as {name, arch}.
+  function donorVerdict({ probe, layout, heads, files }) {
+    const why = [], seen = [];
+    if (!probe || !probe.complete) {
+      return { ok: false, gen: 0, confirmed: seen, reason:
+        'The check of this Echo\'s partitions did not finish, so nothing about it can be '
+        + 'trusted yet. Nothing has been written. Check the cable and try this step again.' };
+    }
+    const v2Boot = probe.expdb === '88168858';
+    const tw = probe.twrp;
+    let gen = 0;
+    if (!probe.expdb) {
+      why.push('the expdb partition could not be read, so the unlock cannot be identified');
+    } else if (!tw) {
+      why.push('the TWRP version could not be read');
+    } else if (v2Boot && /^3\.7\.0(?![0-9])/.test(tw) && layout === 'v2') {
+      gen = 6;
+    } else if (!v2Boot && /^3\.2\.3(?![0-9])/.test(tw) && layout === 'v1') {
+      gen = 5;
+    } else {
+      why.push(`the unlock does not add up: expdb ${v2Boot ? 'holds' : 'does not hold'} `
+        + `amonet 2's bootloader, TWRP is ${tw}, and the boot partitions are laid out `
+        + `for amonet ${layout === 'v2' ? 2 : 1} (amonet 1 means TWRP 3.2.3 and FireOS 5; `
+        + 'amonet 2 means TWRP 3.7.0 and FireOS 6)');
+    }
+    if (gen) {
+      seen.push(`amonet ${gen === 6 ? 2 : 1}: expdb ${v2Boot ? 'holds' : 'does not hold'} `
+              + `amonet 2's bootloader, TWRP ${tw}`);
+      const want = gen === 6
+        ? { layout: 'nested', release: '7.', arch: 'arm', label: 'FireOS 6' }
+        : { layout: 'root', release: '5.', arch: 'arm64', label: 'FireOS 5' };
+      const other = gen === 6 ? 'FireOS 5' : 'FireOS 6';
+      for (const x of ['a', 'b']) {
+        const s = probe.sys[x];
+        const what = s.name || (s.release ? `Android ${s.release}` : 'an unreadable build');
+        if (!s.node) why.push(`system_${x} does not exist`);
+        else if (s.mount !== 'ok') why.push(`system_${x} would not mount read-only`);
+        else if (s.layout === 'none' || !s.release) why.push(`system_${x} has no readable build.prop`);
+        else if (s.layout !== want.layout || !s.release.startsWith(want.release)) {
+          why.push(`system_${x} holds ${what}, which is ${other}, not ${want.label}`);
+        } else {
+          const missing = files[gen].filter(f => s.files[f] !== 'yes');
+          if (missing.length) why.push(`system_${x} (${what}) is missing ${missing.join(', ')}`);
+          else seen.push(`system_${x}: ${what}${s.build ? ` (${s.build})` : ''}, `
+                       + `all ${files[gen].length} files emOS uses present`);
+        }
+      }
+      if (!heads || !heads.length) why.push('there is no stock boot image to build from');
+      for (const h of heads || []) {
+        if (!h.arch) why.push(`the kernel in ${h.name} could not be identified as 32- or 64-bit`);
+        else if (h.arch !== want.arch) {
+          why.push(`${h.name} holds a ${h.arch === 'arm' ? '32-bit (FireOS 6)' : '64-bit (FireOS 5)'} `
+                 + `kernel, not ${want.label}'s`);
+        } else seen.push(`${h.name}: ${want.label} kernel (${h.arch === 'arm' ? '32' : '64'}-bit)`);
+      }
+    }
+    if (!why.length) return { ok: true, gen, confirmed: seen };
+    const fix = gen === 6
+      ? ' amonet 2 needs FireOS 6 in BOTH slots. If the FireOS 6 flash from the unlock '
+        + 'instructions did not complete for both, finish it, then run this step again.'
+      : gen === 5
+        ? ' amonet 1 needs FireOS 5 in both slots and a FireOS 5 kernel to build from.'
+        : ' Check that the amonet unlock completed.';
+    return { ok: false, gen, confirmed: seen, reason:
+      `This Echo is not in a state emOS can be built from: ${why.join('; ')}. `
+      + `Nothing has been written.${fix}` };
   }
 
   function classifyBootTarget(probe) {
@@ -6432,14 +6617,36 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // v1 is left alone. Its `other-boot` alias already names the slot that is
     // not running, which is the same answer this arrives at, and it has no BCB
     // to point afterwards.
-    let plan = null;
+    let plan = null, slots = null;
     if (boot.layout === 'v2') {
-      const slots = classifyBootSlots(probe);
+      slots = classifyBootSlots(probe);
       addLog(`  slot A: ${slots.a.state}, slot B: ${slots.b.state}`);
       plan = chooseBootSlots(slots, (probe.match(/SUFFIX=(\S*)/) || [])[1] || '');
       if (!plan.ok) throw new Error(plan.reason);
       addLog(`  → ${plan.reason}`, 'ok');
     }
+
+    // THE UNLOCK, THE RECOVERY, BOTH SYSTEMS AND EVERY STOCK KERNEL MUST AGREE
+    // before anything is read for the build (#619) — see donorVerdict. Every
+    // stock image is checked, not only the donor: on v2 the one left in B is
+    // the way back, and a way back that cannot boot is not one.
+    addLog('Checking this Echo is in a state emOS can be built from…');
+    const files = _emosSystemFiles();
+    const donorProbe = parseDonorProbe(await c.shell(_donorProbeScript(files)));
+    const toCheck = plan
+      ? ['a', 'b'].filter(x => slots[x].state === 'stock')
+                  .map(x => ({ name: `boot_${x}`, dev: slots[x].dev }))
+      : [{ name: 'the boot image', dev: boot.target }];
+    const heads = [];
+    for (const t of toCheck) {
+      await c.shell(`dd if=${t.dev} of=/tmp/em_head.img bs=65536 count=1 2>/dev/null`);
+      const head = await c.pull('/tmp/em_head.img');
+      await c.shell('rm -f /tmp/em_head.img');
+      heads.push({ name: t.name, arch: await _kernelArchOf(head) });
+    }
+    const gate = donorVerdict({ probe: donorProbe, layout: boot.layout, heads, files });
+    for (const line of gate.confirmed) addLog(`  ✓ ${line}`, 'ok');
+    if (!gate.ok) throw new Error(gate.reason);
     setEmosPlan(plan);
     // The ESCROW and the build reference come from the donor; the flash goes to
     // the target. They are deliberately different partitions now.
