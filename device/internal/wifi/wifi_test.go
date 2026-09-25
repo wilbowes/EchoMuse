@@ -289,3 +289,19 @@ func TestEmosConfIsReadableByTheSupplicantThatReadsIt(t *testing.T) {
 		})
 	}
 }
+
+// #632: an Echo that never ran FireOS has no /data/local/tmp, because only
+// Android's init.rc creates it, and the marker write refused every WiFi change.
+func TestMarkerIsWrittenWhenItsDirectoryIsMissing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data", "local", "tmp", "echomuse_wifi_pending")
+	if err := writeMarker(path, []byte(`{"new_ssid":"x"}`)); err != nil {
+		t.Fatalf("writeMarker into a missing directory: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != `{"new_ssid":"x"}` {
+		t.Fatalf("marker not written: %q, %v", got, err)
+	}
+	if err := writeMarker(path, []byte("again")); err != nil {
+		t.Fatalf("writeMarker into an existing directory: %v", err)
+	}
+}
