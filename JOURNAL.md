@@ -3662,3 +3662,30 @@ list, for later); every Dot reports the NVRAM default BD address
 against the thin wake margin. VVV moved to the lounge in the evening, onto
 `…7b:e5` channel 40 at -64dBm, for the soak. All of it is on
 `feat/ble-scan-yield`, nothing pushed or released.
+
+## 2026-09-25 — the yield measured against a baseline, and no lever left on the chip
+
+**Stopping the scan while the link is needed is worth keeping.** VVV ran the
+no-yield bench build (`v2.16.0-35-g360e3a4-bench`, slot A) from 13:15 09-24 to
+09:58 09-25 in the lounge, against the yield build's night before. Mid-reply
+gaps over 1s: **4 of 5 replies without the yield (1.3-3.1s), 4 of 12 with it
+(worst 1.6s).** Small samples, a clear direction, and the soak was stopped
+early because the remaining idle hours could not add turns. Idle AP resends
+were the same on both builds (84-125%/h), as they must be: the yield acts only
+during turns, and the idle cost is untouched.
+
+**The chip has nothing left to tune.** The Dot 2 has two antennas on the board
+fed from one source (Wil, from FCC ID 2AHSE-2045 and teardowns), so
+`coex_wmt_ant_mode=1` in `WMT_SOC.cfg` is correct, and every other WMT coex
+setting is compiled out (`CFG_SUBSYS_COEX_NEED 0`). WiFi power save, which
+might have let the AP buffer frames while the radio listens for BLE instead of
+resending them, **cannot be turned on**: 15LE (emOS, FireOS 6 kernel) runs CAM,
+and a set of either PS mode through `SIOCSIWPOWER` logs `Set Wi-Fi PS mode to
+CAM (0)`. The value arrives intact — a pre-scaled 2000000 is rejected as
+unsupported, so there is no WEXT < 21 scaling — and is replaced inside
+`wlanoidSet802dot11PowerSaveProfile`, where the FireOS 5 GPL source forces CAM
+for three Amazon projects under sanitised names. The driver is built in, so
+changing that means our own kernel. 2.4GHz was considered and rejected: the
+shared-antenna cost is band-independent, and 2.4 adds overlap with advertising
+channels 37 and 38 and slower frames. What remains is sending fewer idle
+frames — the advert flush at 250ms against Bermuda's 1.05s cycle.
