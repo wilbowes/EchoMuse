@@ -3737,6 +3737,82 @@ gaps where the office A/B had none, with no lounge baseline to say whether
 that is the room or the build. VVV went back to the build without the yield
 at 13:15 for a baseline night. Findings belong to that PR when it opens.
 
+### Evening: level logging, a controller address for the fleet, and the link that encrypts itself
+
+**Level logging (step 1) is built, and half of it is live.** `feat/wake-level`
+(7ee26cf, off #639): one definition in two languages — `em_wakelevel.py` and
+`wakelevel.go`, held together by a shared test vector — of how loud a wake was
+at the Echo that heard it: per-80ms-frame RMS of the wake stream with
+`micGainDb` removed, over the 25 frames ending at the crossing frame, as an
+energy mean (`level`) and loudest frame (`peak`) in dBFS. The Echo sends its
+own on `oww_wake`; the controller measures wakes it scores. Every claim writes
+one `device_logs` line with capture time to the millisecond, which is what
+pairs one utterance across Echos. The ADC's analogue gain is not removed. The
+controller half went onto the dev add-on at 21:37; VVV's firmware must not
+change until the baseline soak ends, so VVV logs no levels before then.
+
+**The static controller address (#166) now has a setting, and it is proven end
+to end.** #166 taught the firmware to read an ordered endpoint list from
+`controller.json`; nothing wrote it except a person with a shell. Wil's shape:
+one fleet-wide setting (Config → Advanced), written by the wizard at
+provisioning and pushed on change. It reaches the device as the FILE over the
+shell plane, not on the config push, so every v2.16.0 device takes it with no
+firmware change. Ordered list, mDNS fallback always on and not exposed (Wil),
+so a typo costs a slower reconnect and never a stranded Echo. On 15LE: the list
+written and md5-verified on save; the server restarted, and it dialled
+`Static endpoint 1/2 … 10.10.1.81:8767` and registered first time over wss;
+with a dead address (10.10.1.249) it timed out twice (10s each, 5s apart),
+took its one mDNS attempt and registered 31s after the first dial — the 30–40s
+the firmware's constants predicted; cleared, the file was confirmed gone over
+serial.
+
+**Which files the controller may delete took two answers.** #166's docs told
+people to hand-write `controller.json`, for exactly the routed devices that
+cannot use mDNS, so the fleet sync deleting one because the setting is empty
+would strand the device it exists for on upgrade: files the controller writes
+carry `managed_by`, and the sync removes only those. At PROVISIONING Wil ruled
+the other way — "the provisioning controller is the source of truth, we
+shouldn't be trusting anything else" — and the wizard removes any file when the
+list is empty. That one matters most on emOS, which keeps `/data` across a
+re-provision: a file from a previous setup with `"mdns": false` and a dead
+address would leave the device unable to find this controller, and the wizard
+waiting on a registration that never comes.
+
+**15LE had been running plain ws since it was provisioned, and it was the
+wizard's fault.** The wizard read the serial from `getprop ro.serialno`, and
+under amonet 2.x the kernel cmdline is cut at 1024 bytes before LK's
+`androidboot.serialno` — 15LE's `/proc/cmdline` is exactly 1024 bytes with no
+serial. Empty serial, so the credential step "skipped TLS" with a warning, on
+every amonet 2.x device. The firmware already read `/proc/idme/serial` first;
+the wizard now does too, and fails the step instead of skipping it.
+
+**The Secure link button is gone; the link encrypts itself.** It was the
+August rollout's deliberate manual step and nothing automated it afterwards.
+A device that connects plain to a TLS controller is now given credentials and
+reconnected once idle, at most once per device per 6h so firmware without TLS
+is not bounced in a loop. Wil's follow-up changed the firmware too: a device
+with credentials used to dial only wss, so a regenerated CA stranded it even on
+a controller that accepts plain. After three TLS failures in a row (certificate
+or handshake — never a timeout, or every controller restart would downgrade the
+fleet) it now dials plain once and is re-issued credentials over it. The ack
+carries `require_tls`; a device trusts it only from a wss ack, remembers it,
+and never falls back while it is set, so a `REQUIRE_DEVICE_TLS=1` fleet cannot
+be talked into plain by anyone. The first version of the test that proves the
+failure detection passed for the wrong reason: every `httptest` TLS server
+shares one certificate, so the "wrong CA" was the right one and the dial failed
+at the WebSocket upgrade instead. It now mints its own CA.
+
+**State at close.** Nothing pushed. Branches: `feat/wake-level`,
+`feat/controller-address`, `feat/auto-secure-link`; the dev add-on runs
+`dev/yield+wake+level+addr` (08163f4). Two gaps in the baseline soak to leave
+out of the counts, 20:44–20:48 (HA host reboot) and 21:36–21:38 (add-on
+rebuild); 15LE's BLE proxy on from 20:48, on a different AP from VVV.
+
+*Landed in the journal on 2026-09-25 evening, after it had sat on a local
+branch. Since written: level logging merged as #646 and the controller address
+as #647. The self-encrypting link and the wizard's idme serial read are still
+on `feat/auto-secure-link`, NOT merged, waiting on hardware tests.*
+
 ## 2026-09-25 — the yield measured against a baseline, and no lever left on the chip
 
 **Stopping the scan while the link is needed is worth keeping.** VVV ran the
