@@ -4663,23 +4663,30 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     };
   }
 
-  // One read-only pass: the unlock evidence again (step 0's copy may be from
-  // before a replug), then BOTH system partitions, each mounted privately
-  // read-only as _sysreadScript does and for its reasons. Every required file
-  // is checked for both generations; the verdict decides which list applies.
-  // `-s`: an empty file is as useless as a missing one.
+  // One read-only pass: where expdb is (its bytes are pulled and read in the
+  // browser, never through `od`), the TWRP version, then BOTH system
+  // partitions, each mounted privately read-only as _sysreadScript does and for
+  // its reasons. Every required file is checked for both generations; the
+  // verdict decides which list applies. `-s`: an empty file is as useless as a
+  // missing one.
+  //
+  // Partitions are found by the kernel's own GPT name (PARTNAME in sysfs)
+  // first, and TWRP's by-name map only as a fallback. amonet 1's TWRP 3.2.3
+  // read expdb as unreadable through the by-name + `od` path on C95
+  // (2026-09-25), and the kernel publishes the GPT names whatever a recovery
+  // does with its links.
   function _donorProbeScript(files) {
     const all = [...new Set([...files[5], ...files[6]])].join(' ');
     return (
-      'P=""; for d in /dev/block/platform/*/by-name /dev/block/by-name; do '
-      + '[ -z "$P" ] && [ -e "$d/expdb" ] && P="$d/expdb"; done; '
-      + 'echo "EXPDB=$([ -n "$P" ] && dd if="$P" bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d \' \\n\')"; '
+      'part() { for u in /sys/block/mmcblk0/mmcblk0p*/uevent; do '
+      + 'if grep -qx "PARTNAME=$1" "$u" 2>/dev/null; then d=${u%/uevent}; echo "/dev/block/${d##*/}"; return; fi; done; '
+      + 'for d in /dev/block/platform/*/by-name /dev/block/by-name; do '
+      + 'if [ -e "$d/$1" ]; then readlink -f "$d/$1"; return; fi; done; }; '
+      + 'echo "EXPDBDEV=$(part expdb)"; '
       + 'T=$(getprop ro.twrp.version); '
       + '[ -z "$T" ] && T=$(grep -m1 -o \'Starting TWRP [0-9][^ ]*\' /tmp/recovery.log 2>/dev/null | sed \'s/^Starting TWRP //\'); '
       + 'echo "TWRP=$T"; '
-      + 'for x in a b; do S=""; '
-      + 'for d in /dev/block/platform/*/by-name /dev/block/by-name; do '
-      + '[ -z "$S" ] && [ -e "$d/system_$x" ] && S=$(readlink -f "$d/system_$x"); done; '
+      + 'for x in a b; do S=$(part system_$x); '
       + 'echo "SYS_${x}_node=$S"; [ -b "$S" ] || continue; '
       + 'M=$(mount | sed -n "s|^$S on \\([^ ]*\\) .*|\\1|p" | sed -n 1p); OWN=""; '
       + 'if [ -z "$M" ]; then M=/tmp/em_donor_$x; mkdir -p "$M"; OWN=1; '
@@ -4706,7 +4713,8 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                  layout: pick(`SYS_${x}_layout`), release: pick(`SYS_${x}_release`),
                  name: pick(`SYS_${x}_name`), build: pick(`SYS_${x}_incremental`), files };
     }
-    return { complete: text.includes('_DONORPROBE_OK'),
+    // `expdb` is filled in by the caller from bytes it pulls off expdbDev.
+    return { complete: text.includes('_DONORPROBE_OK'), expdbDev: pick('EXPDBDEV'),
              expdb: pick('EXPDB').toLowerCase(), twrp: pick('TWRP'), sys };
   }
 
@@ -4757,11 +4765,13 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     }
     const v2Boot = probe.expdb === '88168858';
     const tw = probe.twrp;
-    let gen = 0;
+    let gen = 0, unreadable = false;
     if (!probe.expdb) {
-      why.push('the expdb partition could not be read, so the unlock cannot be identified');
+      unreadable = true;
+      why.push('the wizard could not read the expdb partition, so it cannot tell amonet 1 from amonet 2');
     } else if (!tw) {
-      why.push('the TWRP version could not be read');
+      unreadable = true;
+      why.push('the wizard could not read the TWRP version');
     } else if (v2Boot && /^3\.7\.0(?![0-9])/.test(tw) && layout === 'v2') {
       gen = 6;
     } else if (!v2Boot && /^3\.2\.3(?![0-9])/.test(tw) && layout === 'v1') {
@@ -4809,7 +4819,13 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         + 'instructions did not complete for both, finish it, then run this step again.'
       : gen === 5
         ? ' amonet 1 needs FireOS 5 in both slots and a FireOS 5 kernel to build from.'
-        : ' Check that the amonet unlock completed.';
+        : unreadable
+          ? ' The Echo is unlocked, since it is in TWRP; this is the wizard failing to read it. '
+            + 'Try this step again, and if it repeats, use Download diagnostics and attach the '
+            + 'file to an issue.'
+          : ' EchoMuse only builds for amonet 1 with TWRP 3.2.3 and FireOS 5, or amonet 2 with '
+            + 'TWRP 3.7.0 and FireOS 6. A TWRP or amonet updated by hand would explain this; '
+            + 'please open an issue with Download diagnostics attached.';
     return { ok: false, gen, confirmed: seen, reason:
       `This Echo is not in a state emOS can be built from: ${why.join('; ')}. `
       + `Nothing has been written.${fix}` };
@@ -6633,6 +6649,16 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     addLog('Checking this Echo is in a state emOS can be built from…');
     const files = _emosSystemFiles();
     const donorProbe = parseDonorProbe(await c.shell(_donorProbeScript(files)));
+    // expdb's first four bytes, read here rather than with `od` on the device.
+    if (donorProbe.expdbDev) {
+      await c.shell(`dd if=${donorProbe.expdbDev} of=/tmp/em_expdb.bin bs=4 count=1 2>/dev/null`);
+      const e = await c.pull('/tmp/em_expdb.bin');
+      await c.shell('rm -f /tmp/em_expdb.bin');
+      if (e && e.length >= 4) {
+        donorProbe.expdb = [...e.subarray(0, 4)].map(b => b.toString(16).padStart(2, '0')).join('');
+      }
+    }
+    addLog(`  expdb (${donorProbe.expdbDev || 'not found'}): ${donorProbe.expdb || 'unreadable'}`);
     const toCheck = plan
       ? ['a', 'b'].filter(x => slots[x].state === 'stock')
                   .map(x => ({ name: `boot_${x}`, dev: slots[x].dev }))

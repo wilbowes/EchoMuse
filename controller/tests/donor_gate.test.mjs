@@ -83,8 +83,15 @@ const FILES = _emosSystemFiles();
 // ── the probe script ────────────────────────────────────────────────────────
 {
   const s = _donorProbeScript(FILES);
-  check("looks in both by-name directories",
+  check("finds partitions by the kernel's GPT name first",
+        s.includes("/sys/block/mmcblk0/mmcblk0p*/uevent") && s.includes('PARTNAME=$1')
+        && s.indexOf("PARTNAME=") < s.indexOf("/dev/block/by-name"));
+  check("falls back to both by-name directories",
         s.includes("/dev/block/platform/*/by-name") && s.includes("/dev/block/by-name"));
+  check("never needs od on the device (TWRP 3.2.3 read expdb as unreadable through it)",
+        !s.includes(" od "));
+  check("resolves expdb and both system partitions through the same lookup",
+        s.includes("$(part expdb)") && s.includes("$(part system_$x)"));
   check("reads BOTH system partitions", s.includes("for x in a b"));
   check("mounts read-only", s.includes("mount -o ro"));
   check("tests files are non-empty, not merely present", s.includes('[ -s "$R/$f" ]'));
@@ -124,6 +131,8 @@ function probe({ expdb = "88168858", twrp = "3.7.0_9-0", a = FOS6, b = FOS6, don
 {
   const p = probe({});
   check("parses the unlock evidence", p.expdb === "88168858" && p.twrp === "3.7.0_9-0");
+  check("parses where expdb is", parseDonorProbe("EXPDBDEV=/dev/block/mmcblk0p7\n").expdbDev
+        === "/dev/block/mmcblk0p7");
   check("parses a system slot", p.sys.a.layout === "nested" && p.sys.a.release === "7.1.2"
         && p.sys.a.files["vendor/bin/wmt_loader"] === "yes");
   check("a probe without its sentinel is incomplete", !probe({ done: false }).complete);
@@ -214,7 +223,14 @@ const armB = [{ name: "boot_b", arch: "arm" }];
   check("TWRP 3.7.10 is not 3.7.0", !v(probe({ twrp: "3.7.10" }), "v2", armB).ok);
 }
 {
-  check("expdb unreadable: refused", !v(probe({ expdb: "" }), "v2", armB).ok);
+  const ru = v(probe({ expdb: "" }), "v2", armB);
+  check("expdb unreadable: refused", !ru.ok);
+  check("an unreadable fact is reported as the wizard's failure, not the unlock's",
+        ru.reason.includes("could not read the expdb") && ru.reason.includes("Try this step again")
+        && !/unlock completed/.test(ru.reason));
+  const rd = v(probe({ twrp: "3.2.3-0" }), "v2", armB);
+  check("a disagreement names the combinations that are built for",
+        rd.reason.includes("amonet 1 with TWRP 3.2.3") && rd.reason.includes("amonet 2 with TWRP 3.7.0"));
   check("TWRP unreadable: refused", !v(probe({ twrp: "" }), "v2", armB).ok);
   check("kernel unidentified: refused",
         !v(probe({}), "v2", [{ name: "boot_b", arch: "" }]).ok);
