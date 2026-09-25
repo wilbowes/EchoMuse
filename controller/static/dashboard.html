@@ -42,17 +42,18 @@
       --border:      #b8b4ac;
       --border-soft: #c0bdb6;
       --border-hard: #b0aca4;
+      --field-line: #777268;
 
       /* Text */
       --text:   #1e1c18;
       --text2:  #4a4844;
-      --muted:  #8a8680;
-      --faint:  #a8a49c;
+      --muted:  #575450;
+      --faint:  #767269;
 
       /* Semantic state — one value each */
-      --ok:     #286040;
-      --warn:   #c0601a;
-      --error:  #9a3020;
+      --ok:     #285e3f;
+      --warn:   #854212;
+      --error:  #973020;
       --error-deep: #782020;
       --on-error:   #f0d8d8;
 
@@ -61,8 +62,8 @@
       --notice-line: #3a3220;
 
       /* Accent */
-      --accent:      #405878;
-      --accent-hi:   #6080a8;
+      --accent:      #3e5675;
+      --accent-hi:   #4d698c;
       --accent-deep: #304860;
       --accent-lit:  #8ab0d0;
       --accent-tint: #dde8f4;
@@ -104,22 +105,23 @@
       --border:      #343a2b;
       --border-soft: #2c3124;
       --border-hard: #414736;
+      --field-line: #7f8b69;
 
       --text:   #ddd9d1;
       --text2:  #b2ada4;
-      --muted:  #83807a;
-      --faint:  #6d6a64;
+      --muted:  #aaa8a4;
+      --faint:  #8a867f;
 
-      --ok:     #6fa877;
-      --warn:   #d08a3a;
-      --error:  #cf7a68;
-      --error-deep: #8f4436;
+      --ok:     #82b489;
+      --warn:   #d79b56;
+      --error:  #da978a;
+      --error-deep: #c16a5a;
       --on-error:   #2a1512;
 
       --notice-bg:   linear-gradient(160deg,#2a2718,#1b1810);
       --notice-line: #3f3722;
 
-      --accent:      #7397bd;
+      --accent:      #8caac9;
       --accent-hi:   #8fb0d0;
       --accent-deep: #4a6a8c;
       --accent-lit:  #a8c8e4;
@@ -181,9 +183,13 @@
       background: linear-gradient(180deg, var(--accent-hi), var(--accent));
       border-color: var(--accent-deep); color: var(--accent-tint);
     }
+    /* Hover keeps the resting fill and adds a ring: a lighter fill dropped
+       the glyph under WCAG AA in light mode, and the themes would need
+       opposite fixes (dark mode puts dark ink on this accent). */
     .em-iconbtn--accent:hover:not(:disabled) {
-      background: linear-gradient(180deg, var(--accent-lit), var(--accent-hi));
+      background: linear-gradient(180deg, var(--accent-hi), var(--accent));
       border-color: var(--accent-deep); color: var(--accent-tint);
+      box-shadow: 0 0 0 2px var(--accent-line);
     }
     /* Busy state. An icon-only button has no room for "Checking…", so the
        glyph itself carries the progress. */

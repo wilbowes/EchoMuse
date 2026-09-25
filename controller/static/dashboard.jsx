@@ -487,7 +487,7 @@ function NumberField({ label, sub, value, min = 0, max = 100, unit = '',
           }}
           className="em-inset"
           style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, width: 84, minWidth: 0,
-                   color: 'var(--text)', border: '1px solid var(--border-hard)',
+                   color: 'var(--text)', border: '1px solid var(--field-line)',
                    opacity: disabled ? 0.45 : 1 }}/>
         {unit && <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)' }}>{unit}</span>}
       </div>
@@ -565,7 +565,7 @@ function PasswordField({ label, sub, isSet, onChange, disabled = false }) {
             onChange={e => { setText(e.target.value); onChange(e.target.value); }}
             className="em-inset"
             style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, flex: '1 1 180px', minWidth: 0,
-                     color: 'var(--text)', border: '1px solid var(--border-hard)' }}/>
+                     color: 'var(--text)', border: '1px solid var(--field-line)' }}/>
           <Pill small onClick={() => { onChange('__unchanged__'); stop(); }}>Cancel</Pill>
         </div>
       ) : (
@@ -600,7 +600,7 @@ function ControllerEndpointsField({ value, onChange, readOnly = false }) {
     tlsPort: link ? link.tls_port : 8770,
   }]);
   const input = { fontFamily: mono, fontSize: 11, color: 'var(--text)',
-                  border: '1px solid var(--border-hard)', minWidth: 0 };
+                  border: '1px solid var(--field-line)', minWidth: 0 };
   return (
     <div style={{ marginBottom: 20, minWidth: 0 }}>
       <div style={{ fontFamily: mono, fontSize: 11, color: readOnly ? 'var(--muted)' : 'var(--text2)', marginBottom: 6 }}>
@@ -10037,7 +10037,7 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
                         className="em-inset"
                         style={{ fontFamily:"'DM Mono',monospace", fontSize:11, width:'100%',
                                  boxSizing:'border-box', color:'var(--text)',
-                                 border:'1px solid var(--border-hard)' }}/>
+                                 border:'1px solid var(--field-line)' }}/>
                     </div>
 
                     {Object.keys(sysEdit).length > 0 && (
