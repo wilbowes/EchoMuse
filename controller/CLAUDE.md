@@ -2023,6 +2023,21 @@ the no-speech timeout deliberately does NOT enter it, since nothing was said.
 Note `em_player` must **not** set `device.speaking` for music — it makes the
 wake loop drop frames, deafening the device for the length of a song.
 
+## Device labels (`em_labels.py`)
+
+A label becomes the dashboard name and Home Assistant's "<label> Voice
+Assistant"; HA slugifies that for every entity_id and accepts any Unicode, so
+the limits are ours. `check_label` (rename and approve): 32 code points after
+trimming; refuses control characters (Cc), lone surrogates (Cs — json.loads
+takes them and the mDNS TXT encode would raise), and labels with no letter or
+number (an emoji-only label slugs to plain `voice_assistant`). Cf stays
+allowed, since ZWJ is part of ordinary emoji. **A duplicate is a hard no**
+(#650, Wil 2026-09-25): `label_key` compares NFKC + casefold + collapsed
+whitespace, so `KITCHEN`, fullwidth `Ｋｉｔｃｈｅｎ` and `Kitchen ` all clash;
+renaming an Echo to a new spelling of its own name is allowed. Stored labels
+are never rewritten — only setting one is checked. Tests are written from the
+edges (#649).
+
 ## Dashboard styling and theming
 
 `dashboard.jsx` is inline-styled, which for a long time meant its colours
@@ -2075,6 +2090,41 @@ while a value lives at the call site.**
   inline styles cannot express `:hover` or `:focus-visible` at all, so until
   the class layer existed the dashboard had **no keyboard focus ring
   anywhere**.
+- **Colours meet WCAG 2.2 AA, and `tests/test_contrast.py` proves it** (#652,
+  2026-09-25): 4.5:1 for text, 3:1 for control edges, states and focus. The
+  test computes WCAG's own ratio from `dashboard.html` in both themes — every
+  text token on every surface, at BOTH ends of every gradient, with the
+  translucent tints (`--hairline`) composited over the panel beneath first.
+  Those two are what a flat pairwise check misses, and both were live bugs.
+  When a colour moves, move it to the smallest value that passes and keep the
+  hue; the test tells you which.
+- **Surfaces that are dark in both themes redefine the text tokens.**
+  `.em-lcd, .em-inset, .em-console, .em-ctrl-update, .em-on-dark` set
+  `--text/--text2/--muted/--ok/--warn/--error/--accent` to the DARK theme's
+  values whatever the page theme is. A light-theme `--warn` is tuned for a
+  light panel and measured 1.9:1 on the LCD; before the rule, `em-inset`
+  inputs painted `--text` dark-on-dark at 1.1:1. An inline LCD panel must carry
+  `className="em-on-dark"` to join. Something light nested inside one sets its
+  own colours. The test holds the rule's values equal to the dark theme's.
+- **A device state's NAME is `deviceState().lcd`, never `.dot`.** `dot` is
+  the LED's exact simulated colour and stays literal; written as text on an
+  LCD it gave muted red 2.3:1. `lcd` is a `--lcd-<state>` token, the same hue
+  lifted to pass — including against the readout's own glow, which lightens
+  the panel behind the glyphs by about 12% of the way to the text colour
+  (`_glow` in the test).
+- **Never dim text with `opacity`, and never write text in a rule colour**
+  (`--border-hard`, `--lcd-faint`, `--lcd-line`): each took real labels to
+  1.2-1.9:1. `body` has `color: var(--text)`, because uncoloured text
+  otherwise falls back to black — invisible on the dark theme.
+- **How to audit it for real**: layer the branch onto the published image
+  (as CI's boot job does), `DB_PATH` on a scratch dir, publish the dashboard
+  port on `127.0.0.1` only, seed devices through `em_db` after `em_db.init()`,
+  build `dashboard.js` with esbuild 0.20.2, and run axe-core in Chromium. Three
+  traps: axe calls text on a gradient UNDECIDED rather than failing it (flatten
+  each gradient to its first and then its last stop and run twice); `.em-pill`
+  animates, so disable transitions or axe reads a button mid-fade; and with a
+  modal open, scope axe to `.em-modal` or it reports the page behind the
+  backdrop. Axe will not judge SVG text or overlapping text — measure those.
 - **Slider or NumberField is a question about the SETTING, not the layout.**
   A slider is right where the value is tuned by ear against a real room — the
   LED meter response, `duckDb` — and you drag, listen, and the number is

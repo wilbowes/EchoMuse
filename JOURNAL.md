@@ -3773,3 +3773,84 @@ considered and rejected: the
 shared-antenna cost is band-independent, and 2.4 adds overlap with advertising
 channels 37 and 38 and slower frames. What remains is sending fewer idle
 frames — the advert flush at 250ms against Bermuda's 1.05s cycle.
+
+## 2026-09-25 (evening) — the wizard redesigned as a mockup, and the dashboard brought to WCAG AA
+
+**The provisioning wizard is being redesigned as an installer, and the design
+is settled in a clickable mockup before any of it is built.** Wil's brief: next,
+next, next pages a non-technical person can follow, with pictures of what the
+ring is doing and which button to hold. The mockup is a claude.ai artifact
+(https://claude.ai/artifact/BnBQ41kfkYGSRo483NWYPp); nothing in `dashboard.jsx`
+has changed. It uses the dashboard's own tokens and fonts and redraws the
+login page's Echo (vol+ at 12, action at 3, vol- at 6, mute at 9, cable at 12),
+with every ring animation taken from `init.c` or from Wil. The decisions, page
+by page:
+
+- **Welcome forks Set up / Fix**, Set up selected. Setup is eight steps: before
+  you start, choose (named "EchoMuse on emOS" / "EchoMuse on FireOS 5", erase
+  visible), name it, start in recovery mode, backup, install, first start, WiFi.
+- **Start in TWRP from the outset.** A looping animation teaches it: hold mute,
+  plug in, cyan alternating (amonet 1); else hold volume up, plug in, solid white
+  (amonet 2). One browser device list instead of two, and no wait for Android.
+  Once connected the ring shown is that Echo's own, read from expdb. If neither
+  ring appears the next check is that the Echo was unlocked at all; if it is in
+  the list but will not connect, `adb kill-server` and, on Linux, ModemManager.
+- **First start** shows the bootloader's solid dark blue, the kernel orbit,
+  emOS filling the ring, then the pair at the BOTTOM throbbing. `rooting.md`
+  said "top" (#648). Connect appears only once the fill starts, because the
+  serial port does not exist before then.
+- **The name comes first**, with suggestions from a pool of 12 minus names in
+  use, and none once all 12 are taken. It needed input rules, which became
+  server rules (#649, #650: see controller/CLAUDE.md "Device labels").
+- **No Back or Cancel once the Echo has been written**; "Stop here" with a
+  confirmation after. Five failure pages, each saying what the ring means and
+  what to do, drawn from init.c's own failure rings.
+- **The backup is to be kept on the controller as well as downloaded**, which
+  reverses `em_api.py`'s "NOTHING IS STORED". The rules: one per serial, the
+  FIRST stock copy is never replaced (a re-provision of an emOS Echo would
+  otherwise overwrite the only real undo), deleted only on request, never in a
+  support bundle. Agreed, NOT BUILT.
+- **Repair is ring-first.** Fix asks what the ring is doing, as pictures, in
+  rooting.md's vocabulary. WiFi and controller fixes boot the Echo normally and
+  work over the emOS console, where its own radio can scan and
+  `controller.json` can be written; nothing touches the boot partition.
+  Red/orbit goes to recovery mode, then Reinstall (keeps /data, so it rejoins
+  WiFi by itself) or put Amazon's software back from the kept backup. Amber
+  gets "leave it".
+- **The finish page is "Setup complete"**: close the wizard, approve it in the
+  dashboard, add it to Home Assistant, then try the wake word, which does
+  nothing until HA has it. The ring shows the white pending-approval pulse.
+- The log is a flyout from the corner of the step list rather than a drawer in
+  the page, and the wizard is one fixed size, 690px, that nothing open or shut
+  may grow.
+
+Open before building: the FireOS 5 flow (its step 0 checks FireOS in Android,
+so starting in TWRP means reading `/system` there), repair for an Echo still on
+FireOS (no console), and restoring an Echo set up before the controller kept
+backups (falls back to the downloaded file).
+
+**The dashboard now meets WCAG 2.2 AA contrast, and a test proves it (#652).**
+Wil asked for it after the mockup did. The palette measured pairwise said
+`--muted` failed in both themes (2.2-3.9:1) along with light `--warn`, `--faint`
+and every input edge; the first fix moved each to its smallest passing value.
+Then it was checked against the running dashboard, and that changed the answer
+twice. The PR's source, layered onto the published image in a throwaway
+controller on a seeded database, audited with axe-core in Chromium, found **657
+failing text elements on main**. It also showed the first fix had made one thing
+worse: LCD readouts, the console and the update banner are dark in both themes
+but painted text in `--warn`/`--muted`, now tuned darker for light panels, at
+about 2:1. Those surfaces now take the dark theme's text colours whatever the
+page theme is. The same audit found three things that were effectively
+invisible on main: dark text on the dark number inputs in Settings → System,
+wake word names, and uncoloured text falling back to black in the dark theme.
+It also found device state names written in the LED's own colour (muted red
+2.3:1), and text dimmed with opacity. After: **0 failing text elements** on the
+audited views in both themes. `test_contrast.py` computes WCAG's ratio at both
+ends of every gradient, with tints composited, on the dark surfaces, and for the
+LCD state names including their glow. Each rule was mutation-checked. The
+lesson for next time is the order: a pairwise check of tokens is necessary and
+not sufficient, because the failures that mattered were about WHERE a token is
+painted.
+
+Also shipped: the login page's volume buttons show + and − as printed on the
+device (#651).
