@@ -833,6 +833,17 @@ established, so nobody repeats it:
   the scan from our side: 50% on → 15%, 25% → 7-18%, 10% → 3%, against ~37%
   continuous in the same session. Adverts fall in the same proportion, so
   there is no ratio that keeps Bermuda and frees the link.
+- **The antenna really is shared, so `coex_wmt_ant_mode=1` is right.** Two
+  antennas on the board, both fed from one source (FCC ID 2AHSE-2045 photos).
+- **WiFi power save does not help, and Amazon forces it off anyway.** The
+  driver replaces any power-save request with CAM for `"biscuit"` by name
+  (FireOS 6 GPL source, `wlan_oid.c:7216`). With that line removed in a kernel
+  built from Amazon's source, fast and max power save left AP resends where CAM
+  had them, and max multiplied control-link RTT excursions 4-6x (JOURNAL
+  2026-09-25). Do not rebuild the kernel to try it again.
+- **2.4GHz is worse, not better**: the shared-antenna cost is band-independent,
+  and 2.4 adds overlap with advertising channels 37/38 and slower frames — and
+  Amazon's driver caps 2.4GHz Block Ack at 2 frames on biscuit.
 - Every Dot reports BD address `00:00:46:81:63:01`, the NVRAM default.
 
 **So the scan runs whenever nothing needs the link and stops while something

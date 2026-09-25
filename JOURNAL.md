@@ -3683,9 +3683,19 @@ resending them, **cannot be turned on**: 15LE (emOS, FireOS 6 kernel) runs CAM,
 and a set of either PS mode through `SIOCSIWPOWER` logs `Set Wi-Fi PS mode to
 CAM (0)`. The value arrives intact — a pre-scaled 2000000 is rejected as
 unsupported, so there is no WEXT < 21 scaling — and is replaced inside
-`wlanoidSet802dot11PowerSaveProfile`, where the FireOS 5 GPL source forces CAM
-for three Amazon projects under sanitised names. The driver is built in, so
-changing that means our own kernel. 2.4GHz was considered and rejected: the
+`wlanoidSet802dot11PowerSaveProfile`, where Amazon's FireOS 6 GPL source
+(Echo_Dot_src-6.5.7.1, `wlan_oid.c:7216`) forces CAM for `"biscuit"` by name.
+The driver is built in, so we built our own kernel to find out whether it
+mattered: that source, TECHO5 Dot's recipe (AOSP arm-eabi-4.8), 15LE's own
+config, the one line removed, device trees byte-identical to 15LE's, flashed
+with Wil present. **Power save does not help.** In 20-minute idle blocks with
+the scan on, AP resends were cam 10.2/26.7%, fast 15.8/17.9%, max 10.6/13.0% —
+the spread within a mode exceeds the gap between modes — and max power save
+took control-link RTT excursions from ~10 to 55-65 per 10 minutes, while C95
+beside it on a stock kernel stayed at 5-21. That latency is the likely reason
+Amazon forced CAM. The kit is in `/root/em-diag/kernel-ps-2026-09-25` on the
+dev box; 15LE still boots it until its escrow is restored. 2.4GHz was
+considered and rejected: the
 shared-antenna cost is band-independent, and 2.4 adds overlap with advertising
 channels 37 and 38 and slower frames. What remains is sending fewer idle
 frames — the advert flush at 250ms against Bermuda's 1.05s cycle.
