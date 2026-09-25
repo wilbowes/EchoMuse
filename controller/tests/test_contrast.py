@@ -120,3 +120,88 @@ def test_the_ratio_matches_wcags_own_examples():
     assert round(ratio((0, 0, 0), (255, 255, 255)), 2) == 21.0
     assert round(ratio(_rgb("#767676"), (255, 255, 255)), 2) == 4.54
     assert ratio(_rgb("#777777"), (255, 255, 255)) < 4.5
+
+
+# ── Surfaces that are dark in both themes ─────────────────────────────────────
+# The LCD readouts, insets, console and update banner. Text inside them reads
+# the dark theme's token values whatever the page theme is (the `.em-lcd, ...`
+# rule in dashboard.html); in the light theme the page's own --warn and
+# --muted measured 1.9-2.2:1 there.
+
+JSX = HTML.parent / "dashboard.jsx"
+_DARK_RULE = ".em-lcd, .em-inset, .em-console, .em-ctrl-update, .em-on-dark {"
+
+
+def _dark_rule() -> dict[str, str]:
+    html = HTML.read_text()
+    start = html.index(_DARK_RULE)
+    return dict(re.findall(r"(--[\w-]+):\s*(#[0-9a-fA-F]{6})", html[start:html.index("}", start)]))
+
+
+def _dark_surfaces(t: dict[str, str]) -> dict[str, tuple]:
+    out = {k: _rgb(t[f"--{k}"]) for k in ("lcd-face", "lcd-bg", "lcd-deep")}
+    for i, stop in enumerate(re.findall(r"#[0-9a-fA-F]{6}", t["--notice-bg"] if "--notice-bg" in t else "")):
+        out[f"notice-bg stop {i}"] = _rgb(stop)
+    return out
+
+
+def test_the_dark_surface_rule_is_the_dark_theme():
+    rule = _dark_rule()
+    assert rule, "dashboard.html must keep the dark-surface token rule"
+    drift = {k: (v, DARK[k]) for k, v in rule.items() if DARK[k].lower() != v.lower()}
+    assert not drift, f"dark-surface values differ from the dark theme: {drift}"
+
+
+def _notice(theme):
+    html = HTML.read_text()
+    sel = ':root, :root[data-theme="light"] {' if theme == "light" else ':root[data-theme="dark"] {'
+    start = html.index(sel)
+    block = html[start:html.index("}", start)]
+    return dict(re.findall(r"(--notice-bg):\s*([^;]+);", block))
+
+
+@pytest.mark.parametrize("theme", THEMES)
+@pytest.mark.parametrize("token", TEXT_TOKENS)
+def test_text_tokens_meet_4_5_on_dark_surfaces(theme, token):
+    t = {**THEMES[theme], **_notice(theme)}
+    fg = _rgb(_dark_rule()[f"--{token}"])
+    bad = {n: round(ratio(fg, bg), 2) for n, bg in _dark_surfaces(t).items() if ratio(fg, bg) < TEXT}
+    assert not bad, f"--{token} inside a dark surface ({theme}) under {TEXT}:1 on {bad}"
+
+
+@pytest.mark.parametrize("theme", THEMES)
+@pytest.mark.parametrize("token", ["lcd-green", "lcd-amber", "lcd-dim", "accent-lit"])
+def test_lcd_text_colours_meet_4_5(theme, token):
+    t = THEMES[theme]
+    fg = _rgb(t[f"--{token}"])
+    panels = {n: bg for n, bg in _dark_surfaces(t).items() if not n.startswith("notice")}
+    panels.update({f"glow over {n}": _glow(bg, fg) for n, bg in list(panels.items())})
+    bad = {n: round(ratio(fg, bg), 2) for n, bg in panels.items() if ratio(fg, bg) < TEXT}
+    assert not bad, f"--{token} ({theme}) under {TEXT}:1 on {bad}"
+
+
+def _glow(surface, fg, share=0.12):
+    """An LCD readout's text glows (a text-shadow in its own colour), which
+    lightens the panel directly behind the glyphs. axe-core measured it at
+    about 12% of the way to the text colour, 2026-09-25."""
+    return tuple(s + (f - s) * share for s, f in zip(surface, fg))
+
+
+def test_device_state_names_are_legible_on_the_lcd():
+    # deviceState's `dot` is the LED's simulated colour and stays exact; `lcd`
+    # is what the state's NAME is written in on an LCD readout.
+    states = re.findall(r"key: '(\w+)',[^}]*?lcd: 'var\((--[\w-]+)\)'", JSX.read_text())
+    assert len(states) >= 7, "every deviceState entry needs an lcd colour token"
+    for theme, t in THEMES.items():
+        for key, token in states:
+            lcd = t[token]
+            fg = _rgb(lcd)
+            panels = [bg for n, bg in _dark_surfaces(t).items() if not n.startswith("notice")]
+            worst = min(ratio(fg, bg) for bg in panels + [_glow(bg, fg) for bg in panels])
+            assert worst >= TEXT, f"{key} lcd {lcd} ({theme}) {worst:.2f}:1"
+
+
+def test_uncoloured_text_uses_the_theme_text_colour():
+    # Without it, text that sets no colour of its own falls back to black,
+    # which is 1.2:1 on the dark theme.
+    assert re.search(r"html, body \{[^}]*color: var\(--text\)", HTML.read_text())

@@ -218,13 +218,13 @@ function _emitDeviceLog(deviceId, entry) {
 }
 
 function deviceState(d) {
-  if (!d.approved)  return { key: 'pending',   label: 'Pending',   color: 'var(--accent-hi)', dot: '#8ab0d0' };
-  if (!d.connected) return { key: 'offline',   label: 'Offline',   color: 'var(--warn)', dot: '#d4703a' };
-  if (d.muted)      return { key: 'muted',     label: 'Muted',     color: 'var(--error)', dot: '#c04040' };
-  if (d.speaking)   return { key: 'speaking',  label: 'Speaking',  color: 'var(--accent)', dot: '#4080d0' };
-  if (d.thinking)   return { key: 'thinking',  label: 'Thinking',  color: 'var(--warn)', dot: '#a08020' };
-  if (d.listening)  return { key: 'listening', label: 'Listening', color: 'var(--ok)', dot: '#40906a' };
-  return               { key: 'idle',      label: 'Idle',      color: 'var(--muted)', dot: '#aaaaaa' };
+  if (!d.approved)  return { key: 'pending',   label: 'Pending',   color: 'var(--accent-hi)', dot: '#8ab0d0', lcd: 'var(--accent-lit)' };
+  if (!d.connected) return { key: 'offline',   label: 'Offline',   color: 'var(--warn)', dot: '#d4703a', lcd: 'var(--lcd-offline)' };
+  if (d.muted)      return { key: 'muted',     label: 'Muted',     color: 'var(--error)', dot: '#c04040', lcd: 'var(--lcd-muted)' };
+  if (d.speaking)   return { key: 'speaking',  label: 'Speaking',  color: 'var(--accent)', dot: '#4080d0', lcd: 'var(--lcd-speaking)' };
+  if (d.thinking)   return { key: 'thinking',  label: 'Thinking',  color: 'var(--warn)', dot: '#a08020', lcd: 'var(--lcd-thinking)' };
+  if (d.listening)  return { key: 'listening', label: 'Listening', color: 'var(--ok)', dot: '#40906a', lcd: 'var(--lcd-listening)' };
+  return               { key: 'idle',      label: 'Idle',      color: 'var(--muted)', dot: '#aaaaaa', lcd: 'var(--lcd-dim)' };
 }
 
 function eventAccent(level) {
@@ -737,11 +737,11 @@ function EqCurve({ bands, fs = 22050 }) {
         style={{filter:'drop-shadow(0 0 4px rgba(64,88,120,0.4))'}}/>
       {dbTicks.filter(d=>d!==0).map(db => (
         <text key={db} x={PL+2} y={yOf(db)+4}
-          style={{fontFamily:"'DM Mono',monospace",fontSize:6,fill:'rgba(0,0,0,0.28)'}}>{db>0?'+':''}{db}</text>
+          style={{fontFamily:"'DM Mono',monospace",fontSize:6,fill:'var(--muted)'}}>{db>0?'+':''}{db}</text>
       ))}
       {fTicks.map(({f,label}) => (
         <text key={f} x={xOf(f)} y={H-4} textAnchor="middle"
-          style={{fontFamily:"'DM Mono',monospace",fontSize:6,fill:'rgba(0,0,0,0.28)'}}>{label}</text>
+          style={{fontFamily:"'DM Mono',monospace",fontSize:6,fill:'var(--muted)'}}>{label}</text>
       ))}
     </svg>
   );
@@ -1903,8 +1903,8 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
               </div>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <div style={{ background: 'linear-gradient(160deg,var(--lcd-face),var(--lcd-deep))', border: '1px solid var(--lcd-line)', borderRadius: 6, padding: '5px 12px', boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.5)' }}>
-                <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: state.dot, textShadow: `0 0 8px ${state.dot}88`, letterSpacing: '0.05em' }}>{state.label.toUpperCase()}</span>
+              <div className="em-on-dark" style={{ background: 'linear-gradient(160deg,var(--lcd-face),var(--lcd-deep))', border: '1px solid var(--lcd-line)', borderRadius: 6, padding: '5px 12px', boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.5)' }}>
+                <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: state.lcd, textShadow: `0 0 8px ${state.dot}88`, letterSpacing: '0.05em' }}>{state.label.toUpperCase()}</span>
               </div>
               {isAdmin && !confirmDelete && (
                 <CircleButton onClick={() => setConfirmDelete(true)} title="Delete device" color="var(--error)">🗑</CircleButton>
@@ -2187,7 +2187,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     recordingsOn={cfgEff.saveUtterances}
                     nearMisses={device.owwNearMisses}
                     stateLabel={state.label.toUpperCase()}
-                    stateColor={state.dot}
+                    stateColor={state.lcd}
                     isAdmin={isAdmin}
                   />
                 </Panel>
@@ -2580,7 +2580,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                   when a deploy starts */}
               <div className="em-inset" style={{ '--em-inset-pad':'14px', fontFamily:"'DM Mono',monospace", fontSize:12, minHeight:96, flex:1 }}>
                 {pushLog.length === 0 && !pushing && (
-                  <span style={{ color:'var(--lcd-faint)' }}>— no deploy activity this session —</span>
+                  <span style={{ color:'var(--lcd-dim)' }}>— no deploy activity this session —</span>
                 )}
                 {pushLog.map((line, i) => (
                   <div key={i} style={{
@@ -2592,7 +2592,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     textShadow: line.startsWith('✓') ? '0 0 8px rgba(140,200,100,0.4)' : 'none',
                   }}>{line}</div>
                 ))}
-                {pushing && <span style={{ color:'var(--lcd-faint)' }}>▌</span>}
+                {pushing && <span style={{ color:'var(--lcd-dim)' }}>▌</span>}
               </div>
             </div>
           )}
@@ -2612,7 +2612,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                       misaligned every row before ten o'clock. */}
                   <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--faint)', minWidth: '11ch', whiteSpace: 'nowrap', flexShrink: 0 }}>{new Date(entry.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
                   <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: eventAccent(entry.level), textTransform: 'uppercase', letterSpacing: '0.1em', minWidth: 48, flexShrink: 0 }}>{entry.level}</span>
-                  <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: entry.source === 'device' ? 'var(--lcd-faint)' : 'var(--accent-deep)', textTransform: 'uppercase', letterSpacing: '0.08em', minWidth: 64, flexShrink: 0 }}>{entry.source}</span>
+                  <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: entry.source === 'device' ? 'var(--lcd-dim)' : 'var(--accent-deep)', textTransform: 'uppercase', letterSpacing: '0.08em', minWidth: 64, flexShrink: 0 }}>{entry.source}</span>
                   <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: 'var(--text2)' }}>{entry.message}</span>
                 </div>
               ))}
@@ -2631,7 +2631,7 @@ function Card({ device, onClick }) {
   const isPending = !device.approved;
 
   return (
-    <div onClick={onClick} style={{ background: 'linear-gradient(160deg,var(--card),var(--bg))', border: '1px solid var(--border)', borderRadius: 14, cursor: 'pointer', boxShadow: '0 4px 16px var(--track),0 1px 0 var(--sheen) inset', transition: 'box-shadow 0.15s,transform 0.1s', userSelect: 'none', opacity: isPending ? 0.85 : 1 }}
+    <div onClick={onClick} style={{ background: 'linear-gradient(160deg,var(--card),var(--bg))', border: '1px solid var(--border)', borderRadius: 14, cursor: 'pointer', boxShadow: '0 4px 16px var(--track),0 1px 0 var(--sheen) inset', transition: 'box-shadow 0.15s,transform 0.1s', userSelect: 'none' }}
       onMouseEnter={e => { e.currentTarget.style.boxShadow = '0 8px 28px rgba(0,0,0,0.18),0 1px 0 var(--sheen) inset'; e.currentTarget.style.transform = 'translateY(-1px)'; }}
       onMouseLeave={e => { e.currentTarget.style.boxShadow = '0 4px 16px var(--track),0 1px 0 var(--sheen) inset'; e.currentTarget.style.transform = 'translateY(0)'; }}>
       <div style={{ background: 'linear-gradient(180deg,var(--sunken),var(--sunken))', borderBottom: '1px solid var(--border-hard)', borderRadius: '13px 13px 0 0', padding: '10px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', boxShadow: '0 1px 0 var(--sheen) inset' }}>
@@ -2661,7 +2661,7 @@ function Card({ device, onClick }) {
           // height the text's own; the trimmed paddingRight cancels the
           // trailing letter-space Chrome leaves after the final N, which is
           // what made the word look shunted left inside its own badge.
-          <div style={{ display: 'inline-flex', alignItems: 'center', flexShrink: 0, marginLeft: 8, background: 'linear-gradient(160deg,var(--lcd-face),var(--lcd-deep))', border: '1px solid var(--lcd-line)', borderRadius: 3, padding: '3px 6px', paddingRight: 'calc(6px - 0.1em)', fontFamily: "'DM Mono',monospace", fontSize: 9, lineHeight: 1, color: 'var(--accent-lit)', letterSpacing: '0.1em' }}>PENDING</div>
+          <div className="em-on-dark" style={{ display: 'inline-flex', alignItems: 'center', flexShrink: 0, marginLeft: 8, background: 'linear-gradient(160deg,var(--lcd-face),var(--lcd-deep))', border: '1px solid var(--lcd-line)', borderRadius: 3, padding: '3px 6px', paddingRight: 'calc(6px - 0.1em)', fontFamily: "'DM Mono',monospace", fontSize: 9, lineHeight: 1, color: 'var(--accent-lit)', letterSpacing: '0.1em' }}>PENDING</div>
         )}
       </div>
       <div style={{ display: 'flex', justifyContent: 'center', padding: '20px 0 12px' }}>
@@ -2669,7 +2669,7 @@ function Card({ device, onClick }) {
       </div>
       <div style={{ padding: '0 16px 16px' }}>
         <div className="em-inset" style={{ '--em-inset-radius':'6px', '--em-inset-pad':'7px 12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: state.dot, letterSpacing: '0.12em', textShadow: `0 0 8px ${state.dot}88` }}>{state.label.toUpperCase()}</span>
+          <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: state.lcd, letterSpacing: '0.12em', textShadow: `0 0 8px ${state.dot}88` }}>{state.label.toUpperCase()}</span>
           <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--lcd-dim)', letterSpacing: '0.08em' }}>{(() => {
             const ip = device.ip && device.ip !== '127.0.0.1' ? device.ip : null;
             return device.connected ? (ip || '—') : (ip ? `${ip} ↑` : '—');
@@ -2847,17 +2847,17 @@ function AddDeviceTile({ onClick }) {
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       style={{
-        border: `2px dashed ${hover ? 'var(--text2)' : 'var(--border-hard)'}`,
+        border: `2px dashed ${hover ? 'var(--text2)' : 'var(--field-line)'}`,
         // 12 -> 14 to match Card's corner. minHeight is only the floor for an
         // empty fleet; with any device present the grid row sets the height.
         borderRadius: 14, minHeight: 244, display: 'flex', flexDirection: 'column',
         alignItems: 'center', justifyContent: 'center', gap: 8, cursor: 'pointer',
-        transition: 'border-color 0.15s, opacity 0.15s', opacity: hover ? 1 : 0.6,
+        transition: 'border-color 0.15s',
         userSelect: 'none',
       }}
     >
-      <div style={{ fontSize: 28, color: hover ? 'var(--text2)' : 'var(--border-hard)', lineHeight: 1 }}>+</div>
-      <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: hover ? 'var(--text2)' : 'var(--border-hard)', letterSpacing: '0.12em', textTransform: 'uppercase' }}>Provision Device</div>
+      <div style={{ fontSize: 28, color: hover ? 'var(--text2)' : 'var(--muted)', lineHeight: 1 }}>+</div>
+      <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: hover ? 'var(--text2)' : 'var(--muted)', letterSpacing: '0.12em', textTransform: 'uppercase' }}>Provision Device</div>
     </div>
   );
 }
@@ -8585,7 +8585,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
               style={{ flex: 1, minHeight: 0, marginTop: 10 }}
             >
               {log.length === 0
-                ? <span style={{ color: 'var(--lcd-faint)' }}>— no output yet —</span>
+                ? <span style={{ color: 'var(--lcd-dim)' }}>— no output yet —</span>
                 : log.map((e, i) => (
                   <div key={i} className={_wizardLogClass(e.msg, e.type)}>
                     {e.msg}
@@ -8677,18 +8677,20 @@ function DeviceDiagram({ activeMics, patternType }) {
       <circle cx="0" cy="0" r="82" fill="url(#dcfgr)" clipPath="url(#dcfsc)"/>
       <circle cx="0" cy="0" r="82" fill="none" stroke="rgba(255,255,255,0.04)" strokeWidth="1"/>
 
-      {/* Buttons */}
+      {/* Buttons. The printed marks are the device's own grey (the login page
+          draws them the same), not a theme token: --sheen is 5% white in the dark
+          theme, which left them invisible there. */}
       <circle cx="0"   cy="-44" r="15" fill="url(#dcfbg)" stroke="rgba(255,255,255,0.05)" strokeWidth="0.5"/>
-      <text x="0" y="-39" textAnchor="middle" fontSize="15" fill="var(--sheen)" fontFamily="sans-serif" fontWeight="300">+</text>
+      <text x="0" y="-39" textAnchor="middle" fontSize="15" fill="#b0b0b0" fontFamily="sans-serif" fontWeight="300">+</text>
       <circle cx="44"  cy="0"   r="15" fill="url(#dcfbg)" stroke="rgba(255,255,255,0.05)" strokeWidth="0.5"/>
-      <circle cx="44"  cy="0"   r="4.5" fill="var(--sheen)"/>
+      <circle cx="44"  cy="0"   r="4.5" fill="#b0b0b0"/>
       <circle cx="0"   cy="44"  r="15" fill="url(#dcfbg)" stroke="rgba(255,255,255,0.05)" strokeWidth="0.5"/>
-      <text x="0" y="50" textAnchor="middle" fontSize="15" fill="var(--sheen)" fontFamily="sans-serif" fontWeight="300">−</text>
+      <text x="0" y="50" textAnchor="middle" fontSize="15" fill="#b0b0b0" fontFamily="sans-serif" fontWeight="300">−</text>
       <circle cx="-44" cy="0"   r="15" fill="url(#dcfbg)" stroke="rgba(255,255,255,0.05)" strokeWidth="0.5"/>
       <g transform="translate(-44,0)">
-        <rect x="-3.5" y="-7.5" width="7" height="10" rx="3.5" fill="var(--sheen)"/>
-        <path d="M-6,1.5 Q-6,8 0,8 Q6,8 6,1.5" fill="none" stroke="var(--sheen)" strokeWidth="1.5" strokeLinecap="round"/>
-        <line x1="0" y1="8" x2="0" y2="11" stroke="var(--sheen)" strokeWidth="1.5" strokeLinecap="round"/>
+        <rect x="-3.5" y="-7.5" width="7" height="10" rx="3.5" fill="#b0b0b0"/>
+        <path d="M-6,1.5 Q-6,8 0,8 Q6,8 6,1.5" fill="none" stroke="#b0b0b0" strokeWidth="1.5" strokeLinecap="round"/>
+        <line x1="0" y1="8" x2="0" y2="11" stroke="#b0b0b0" strokeWidth="1.5" strokeLinecap="round"/>
       </g>
 
       {/* Centre mic */}
@@ -9265,8 +9267,8 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                 cursor: disabled ? 'default' : 'pointer',
                 transition: 'border-color 0.15s, background 0.15s',
               }}>
-                <div title={m.label} style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 12, fontWeight: 600, color: 'var(--lcd-line)', ..._ROW_TEXT, display: 'block' }}>{m.label}</div>
-                <div title={m.value} style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)', marginTop: 2, ..._ROW_TEXT, display: 'block' }}>{m.value}</div>
+                <div title={m.label} style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 12, fontWeight: 600, color: 'var(--text)', ..._ROW_TEXT, display: 'block' }}>{m.label}</div>
+                <div title={m.value} style={{ fontFamily: mono, fontSize: 9, color: 'var(--text2)', marginTop: 2, ..._ROW_TEXT, display: 'block' }}>{m.value}</div>
               </div>
             ))}
             {[...customModels, ...(orphanModel ? [orphanModel] : [])].map(m => (
@@ -9279,7 +9281,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                 cursor: disabled ? 'default' : 'pointer',
                 transition: 'border-color 0.15s, background 0.15s',
               }}>
-                <div title={wwModelLabel(m.path)} style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 12, fontWeight: 600, color: 'var(--lcd-line)', ..._ROW_TEXT, display: 'block' }}>{wwModelLabel(m.path)}</div>
+                <div title={wwModelLabel(m.path)} style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 12, fontWeight: 600, color: 'var(--text)', ..._ROW_TEXT, display: 'block' }}>{wwModelLabel(m.path)}</div>
                 <div title={m.file} style={{ fontFamily: mono, fontSize: 9, color: m.missing ? 'var(--error)' : 'var(--muted)', marginTop: 2, ..._ROW_TEXT, display: 'block' }}>
                   {m.missing ? 'missing file' : `custom · ${m.file}`}
                 </div>
@@ -9482,7 +9484,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                 cursor: disabled ? 'default' : 'pointer',
                 transition: 'border-color 0.15s, background 0.15s',
               }}>
-                <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 12, fontWeight: 600, color: 'var(--lcd-line)' }}>{sc.label}</div>
+                <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 12, fontWeight: 600, color: 'var(--text)' }}>{sc.label}</div>
                 <div style={{ display: 'flex', gap: 3, marginTop: 4 }}>
                   {(sc.value === 'custom'
                     ? [config.ledListenColor ?? '#00b400', config.ledThinkColor ?? '#00c800']
@@ -10586,7 +10588,7 @@ function App() {
       {/* Pending devices */}
       {pending.length > 0 && (
         <>
-          <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--accent-hi)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 14 }}>
+          <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--accent)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 14 }}>
             Pending Approval · {pending.length}
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(190px,1fr))', gap: 12, marginBottom: 36 }}>

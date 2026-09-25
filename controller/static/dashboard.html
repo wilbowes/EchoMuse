@@ -74,12 +74,19 @@
          read as a lit panel set into the surface. */
       --lcd-bg:    #1e2219;
       --lcd-green: #9aba80;
-      --lcd-amber: #c8a040;
-      --lcd-dim:   #7a9a68;
+      --lcd-amber: #c8a141;
+      --lcd-dim:   #95ae86;
       --lcd-line:  #1a1c18;
       --lcd-face:  #2a2e28;
       --lcd-deep:  #1c1f18;
       --lcd-faint: #3a4a30;
+      /* A device state's NAME on an LCD readout: the LED colour lifted to
+         4.5:1. The LED itself keeps its exact colour (deviceState.dot). */
+      --lcd-offline: #df956b;
+      --lcd-muted: #dc9393;
+      --lcd-speaking: #7eaadf;
+      --lcd-thinking: #c9a128;
+      --lcd-listening: #5db88d;
 
       /* Shadows. Tokenised because a drop shadow tuned for a light ground
          reads as a black smear on a dark one. */
@@ -133,12 +140,17 @@
          own border. */
       --lcd-bg:    #12150e;
       --lcd-green: #9aba80;
-      --lcd-amber: #c8a040;
-      --lcd-dim:   #7a9a68;
+      --lcd-amber: #c8a141;
+      --lcd-dim:   #95ae86;
       --lcd-line:  #0c0e08;
       --lcd-face:  #1e2219;
       --lcd-deep:  #14170f;
       --lcd-faint: #3a4a30;
+      --lcd-offline: #df956b;
+      --lcd-muted: #dc9393;
+      --lcd-speaking: #7eaadf;
+      --lcd-thinking: #c9a128;
+      --lcd-listening: #5db88d;
 
       --shadow-card:  0 4px 16px rgba(0,0,0,0.45), 0 1px 0 rgba(255,255,255,0.05) inset;
       --shadow-hover: 0 8px 28px rgba(0,0,0,0.6),  0 1px 0 rgba(255,255,255,0.05) inset;
@@ -148,7 +160,7 @@
       --track:        rgba(0,0,0,0.35);
     }
 
-    html, body { height: 100%; background: var(--bg); }
+    html, body { height: 100%; background: var(--bg); color: var(--text); }
     /* No transition on the toggle itself — a 200ms cross-fade of an
        entire dense dashboard reads as a glitch, not a flourish. */
 
@@ -261,6 +273,16 @@
       border-radius: var(--em-inset-radius, 8px);
       padding: var(--em-inset-pad, 12px 18px);
       box-shadow: inset 0 2px 6px rgba(0,0,0,0.5);
+    }
+
+    /* Surfaces that are dark in BOTH themes. Text tokens inside them take the
+       dark theme's values, whatever the page theme is: a light-theme token is
+       tuned for a light panel and fails WCAG AA on these. test_contrast.py
+       holds these values equal to the dark theme's. Anything light nested
+       inside one (a pill, say) must set its own colours. */
+    .em-lcd, .em-inset, .em-console, .em-ctrl-update, .em-on-dark {
+      --text: #ddd9d1; --text2: #b2ada4; --muted: #aaa8a4; --faint: #8a867f;
+      --ok: #82b489; --warn: #d79b56; --error: #da978a; --accent: #8caac9;
     }
 
     /* Scrolling log/transcript output. */
