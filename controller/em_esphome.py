@@ -2611,7 +2611,10 @@ async def start_esphome_servers(
     """
     global _azc
 
-    _azc = AsyncZeroconf()
+    # See em_controller.main()'s AsyncZeroconf call for why this is pinned to
+    # SERVER_IP's own interface rather than left to auto-detect every one on
+    # the host.
+    _azc = AsyncZeroconf(interfaces=[SERVER_IP])
     loop = asyncio.get_event_loop()
 
     all_devices = await loop.run_in_executor(None, db.get_all_devices)
