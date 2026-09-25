@@ -270,7 +270,7 @@ The light ring says which case you are in:
 | Ring | What it means | What to do |
 |---|---|---|
 | Filling, then white, then fading | Up and on the network | Nothing — done, about 30 seconds |
-| Two lit segments at the top, throbbing | Waiting for the network | Nothing — this is most of the boot |
+| Two lit segments at the bottom, throbbing | Waiting for the network | Nothing — this is most of the boot |
 | Solid amber | emOS is restoring its own last known-good image | **Leave it.** It reboots itself |
 | Red, stopped | A boot stage failed | Recoverable — go to TWRP and restore |
 | One segment orbiting a full blue ring, for more than a minute | emOS never started | Go to TWRP and restore |
