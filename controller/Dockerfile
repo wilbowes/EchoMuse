@@ -125,6 +125,7 @@ COPY em_listen.py .
 COPY em_wakelevel.py .
 COPY em_endpoints.py .
 COPY em_button.py .
+COPY em_wakeword.py .
 COPY em_tap_burst.py .
 COPY em_player.py .
 COPY em_config_sections.py .

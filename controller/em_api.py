@@ -5923,6 +5923,10 @@ def _merge_device(row) -> dict:
         "connected":        live is not None,
         "speaking":         live.speaking  if live else False,
         "muted":            getattr(live, "muted",     False) if live else False,
+        # NOT live state, so not defaulted like its neighbours: whether HA's
+        # wake word picker has detection on is stored (#286), so an offline
+        # device reports what HA last set rather than a guess.
+        "wake_word":        db.get_wake_word_enabled(device_id),
         "listening":        getattr(live, "listening", False) if live else False,
         "thinking":         getattr(live, "thinking",  False) if live else False,
         "stats":            live.stats if live else None,

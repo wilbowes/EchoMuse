@@ -390,6 +390,44 @@ comes back as pending.
 ### I re-added a device and its voice port is missing.
 Same fix, same answer: update the controller.
 
+### Can Home Assistant stop a device listening, or tell whether it is muted?
+Yes to both. They are two separate controls for two unrelated things.
+
+**Wake word** is the dropdown Home Assistant puts on every voice satellite,
+under Configuration. Set it to **No wake word** and the device stops waking,
+which covers "don't listen while the TV is on" or "only answer when the
+motion sensor sees someone". Pick the wake word again to turn it back on. In
+an automation, use `select.select_option` with option `no_wake_word`, or with
+the wake word's name as the dropdown shows it. The choice survives a
+controller restart, and it has no effect on which wake word the device uses,
+which is still set in the EchoMuse dashboard.
+
+What "off" means depends on where the wake word is detected (see
+[Listening](listening.md)):
+
+- **Detected on this Echo** (the default): the Echo still hears its wake word
+  and opens a session, and the controller closes it straight away, so no turn
+  starts. Until that close arrives, usually a fraction of a second and never
+  more than 3 seconds, the Echo sends what follows the wake word. Firmware
+  that stops the Echo scoring at all is on the way.
+- **Detected on the controller**: the Echo stops streaming its microphone.
+
+It never turns off the microphone itself, so an HA-initiated
+`start_conversation` or `ask_question` still listens, just as it does under
+the mute button. The dropdown also has a **Wake word 2** entry; choosing the
+wake word in either one turns detection on.
+
+**Microphone Muted** (`binary_sensor`) reports the physical mute button and
+is read-only. The button belongs to the device: the firmware mutes all four
+microphone chips and refuses to stream, with or without a controller, so the
+controller can only report it. Check it before `assist_satellite.ask_question`.
+A muted device runs the question and captures nothing, and HA waits on the
+answer with no timeout.
+
+**The two are independent.** Pressing mute leaves the wake word where Home
+Assistant put it, in both directions. Neither shows on the LED ring, so an
+automation is free to drive the ring however it likes.
+
 ### My device changed its Home Assistant entity IDs.
 That happens whenever a device is deleted and re-added — HA keys entities on
 identity, and a re-added device is a new one. There's no way to carry the old
