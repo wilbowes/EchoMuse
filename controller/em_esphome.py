@@ -94,6 +94,7 @@ import em_player
 import em_timers
 import em_turnclock
 import em_volume
+import em_led_light
 
 # ── VAD sentinels ──────────────────────────────────────────────────────────────
 # Queue items marking end-of-speech in mic_queue/voice_queue, in place of
@@ -366,6 +367,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         # Strong references to in-flight timer-event tasks (see the
         # VoiceAssistantTimerEventResponse branch).
         self._timer_tasks: set = set()
+        self._light_tasks: set = set()
 
         def _log_timer_task_error(task, _dev=device_id) -> None:
             """Surface a failed timer-event task instead of losing it to GC."""
@@ -528,6 +530,41 @@ class EchoMuseSatellite(SatelliteServerProtocol):
     def _ambient_lux_capable(self) -> bool:
         return self._device_has("ambient_light")
 
+    @property
+    def _led_light_enabled(self) -> bool:
+        # Raw LED frames have no device-side expiry. Older firmware keeps its
+        # existing status LEDs without advertising an unsafe ambient light.
+        return self._device_has("leds") and self._device_has("led_anim")
+
+    async def _light_command(self, msg):
+        server = self._owning_server
+        if server.get_satellite() is not self:
+            return
+        try:
+            if msg.has_color_mode and msg.color_mode != api_pb2.COLOR_MODE_RGB:
+                raise ValueError("Only RGB mode is supported")
+            if msg.has_flash_length and msg.flash_length:
+                raise ValueError("Flash is not supported; use the Pulse effect")
+            changes = {}
+            if msg.has_state:
+                changes["state"] = msg.state
+            for field in ("brightness", "color_brightness", "effect"):
+                if getattr(msg, "has_" + field):
+                    changes[field] = getattr(msg, field)
+            if msg.has_rgb:
+                changes.update((field, getattr(msg, field))
+                               for field in ("red", "green", "blue"))
+            # As with ESPHome's immediate outputs, transition requests apply
+            # immediately. No controller-side animation frames are streamed.
+            await server.light.command(**changes)
+        except (ValueError, RuntimeError, OSError) as exc:
+            log.warning("[%s] LED ring command rejected: %s", self._log_name, exc)
+        except Exception:
+            log.exception("[%s] LED ring write failed", self._log_name)
+        # Includes rejected commands, so HA returns to the accepted setting.
+        if server.get_satellite() is self:
+            self._send_one(server.light_state_msg())
+
     def _voice_assistant_flags(self) -> int:
         """
         Feature flags for DeviceInfoResponse, gated on what the device has.
@@ -634,6 +671,13 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     device_class="illuminance",
                     state_class=1,   # STATE_CLASS_MEASUREMENT
                 )
+            if self._led_light_enabled:
+                yield api_pb2.ListEntitiesLightResponse(
+                    key=em_led_light.LIGHT_KEY, object_id="led_ring", name="LED Ring",
+                    supported_color_modes=[api_pb2.COLOR_MODE_RGB],
+                    legacy_supports_brightness=True, legacy_supports_rgb=True,
+                    icon="mdi:circle-outline", effects=em_led_light.EFFECTS,
+                )
             yield api_pb2.ListEntitiesDoneResponse()
             return
 
@@ -641,6 +685,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                              api_pb2.SubscribeHomeAssistantStatesRequest)):
             log.debug(f"[{self._log_name}] {type(msg).__name__} from {self.peer}")
             yield self._media_state_msg()
+            if self._led_light_enabled:
+                yield self._owning_server.light_state_msg()
             return
 
         if isinstance(msg, api_pb2.SubscribeVoiceAssistantRequest):
@@ -699,6 +745,15 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     f"— not applied; this device's wake word is set in the "
                     f"EchoMuse dashboard and stays {self.oww_model_id}"
                 )
+            yield _HANDLED
+            return
+
+        if isinstance(msg, api_pb2.LightCommandRequest):
+            if (self._led_light_enabled and msg.key == em_led_light.LIGHT_KEY
+                    and msg.device_id == 0):
+                task = asyncio.create_task(self._light_command(msg))
+                self._light_tasks.add(task)
+                task.add_done_callback(self._light_tasks.discard)
             yield _HANDLED
             return
 
@@ -2403,6 +2458,7 @@ class DeviceESPhomeServer:
         # every volume_state message from the device. Read by the satellite
         # for MediaPlayerStateResponse rather than hardcoding 1.0.
         self.volume: float = 1.0
+        self.light = em_led_light.RingLight(on_change=self._publish_light_state)
         # Injected by device_connected() — async callable(pcm_bytes) for
         # standalone announce playback (setup wizard, push TTS) when no
         # voice turn is active.
@@ -2445,6 +2501,17 @@ class DeviceESPhomeServer:
     def get_satellite(self) -> Optional[EchoMuseSatellite]:
         """Return the active HA connection's satellite instance, or None."""
         return self._active_satellite
+
+    def light_state_msg(self):
+        return api_pb2.LightStateResponse(
+            key=em_led_light.LIGHT_KEY, color_mode=api_pb2.COLOR_MODE_RGB,
+            **vars(self.light.state),
+        )
+
+    def _publish_light_state(self, _state) -> None:
+        satellite = self.get_satellite()
+        if satellite is not None and satellite._led_light_enabled:
+            satellite._send_one(self.light_state_msg())
 
     def set_volume(self, volume: float) -> None:
         """Update stored volume (0.0–1.0) from a device volume_state report."""
@@ -2524,12 +2591,16 @@ class DeviceESPhomeServer:
             owning_server=self,
         )
         self._active_satellite = satellite
+        self.light.set_connected(True)
         log.info(f"[esphome.{self.device_id[-8:]}] HA connected on port {self.port}")
         return satellite
 
     def _on_satellite_disconnected(self, satellite: EchoMuseSatellite) -> None:
+        for task in satellite._light_tasks:
+            task.cancel()
         if self._active_satellite is satellite:
             self._active_satellite = None
+            self.light.set_connected(False)
             log.info(f"[esphome.{self.device_id[-8:]}] HA disconnected")
 
     async def start(self, host: str) -> None:
@@ -2537,6 +2608,11 @@ class DeviceESPhomeServer:
         log.info(f"[esphome.{self.device_id[-8:]}] Listening on {host}:{self.port}")
 
     async def stop(self) -> None:
+        self.light.release()
+        self.light.sender = None
+        if self._active_satellite is not None:
+            for task in self._active_satellite._light_tasks:
+                task.cancel()
         # Detach state up front so a device reconnect during the await below
         # sees _server is None and starts a fresh listener, instead of
         # trusting a listener that close() has already shut down.
@@ -3179,6 +3255,8 @@ async def device_connected(
     ring_alarm=None,
     stop_alarm=None,
     start_conversation=None,
+    send_led_ring_animation=None,
+    led_ring_ready=None,
 ) -> None:
     """
     Called by em_controller.handle_control() when an Echo Dot connects.
@@ -3201,6 +3279,9 @@ async def device_connected(
     ring (chime + LED pulse). Provided by the controller as closures over the
     Device object, since ringing drives device speaker/mic/LEDs.
 
+    send_led_ring_animation: async callable(anim) — writes an idle led_anim spec.
+    led_ring_ready: callable() — true only outside voice, timer and mute states.
+
     start_conversation: async callable() — runs one voice turn with no wake
     word, for HA's announce-then-listen (`assist_satellite.start_conversation`
     and `ask_question`). Same reasoning: it drives the mic, the ring and the
@@ -3219,6 +3300,11 @@ async def device_connected(
         if row is None or not row["approved"]:
             return
         server = await _register_device_server(device_id, row["label"])
+    server.light.sender = send_led_ring_animation
+    server.light.ready = led_ring_ready or (lambda: True)
+    server.light.release()
+    server.light.set_connected(server.get_satellite() is not None)
+    server._publish_light_state(server.light.state)
     server._standalone_play = standalone_play
     server._send_volume_set = send_volume_set
     server._ring_alarm = ring_alarm
@@ -3242,6 +3328,8 @@ async def device_disconnected(device_id: str) -> None:
     server = _servers.get(device_id)
     if server is None:
         return
+    server.light.sender = None
+    server.light.release()
     if server._server is None:
         log.debug(f"[esphome.{device_id[-8:]}] device_disconnected: port already down")
         return
@@ -3255,6 +3343,19 @@ async def device_disconnected(device_id: str) -> None:
     server._start_conversation = None
     await server.stop()
     log.info(f"[esphome.{device_id[-8:]}] ESPHome port {server.port} down (device disconnected)")
+
+
+def suspend_manual_light(device_id: str) -> None:
+    """Status LEDs temporarily own the ring; HA continues to show desired state."""
+    server = _servers.get(device_id)
+    if server is not None:
+        server.light.suspend()
+
+
+def resume_manual_light(device_id: str, delay: float = 0) -> None:
+    server = _servers.get(device_id)
+    if server is not None:
+        server.light.schedule_restore(delay)
 
 
 def set_device_capabilities(device_id: str, caps: list[str]) -> None:

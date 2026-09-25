@@ -387,6 +387,14 @@ jobs:
               sys.exit(1)
           print("all modules imported")
           '
+      - name: LED ring protocol and voice integration
+        run: |
+          docker run --rm --entrypoint python3 \
+            -e SERVER_IP=127.0.0.1 -e PYTHONDONTWRITEBYTECODE=1 \
+            -e PYTHONPATH=/repo/controller \
+            -v "$PWD":/repo:ro -w /repo/controller \
+            echomuse-controller:ci \
+            -m unittest discover -s integration_tests -p test_led_light.py -v
       # Importing proves the file parses and its module-level code runs.
       # It does NOT prove the thing starts: the asyncio setup, the mDNS
       # advertisement, the PKI generation and the ESPHome listeners all

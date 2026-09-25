@@ -138,6 +138,7 @@ COPY em_firmware.py .
 COPY em_announce.py .
 COPY em_runbarrier.py .
 COPY em_volume.py .
+COPY em_led_light.py .
 COPY em_wifi.py .
 COPY em_timers.py .
 COPY version.py .

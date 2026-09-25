@@ -50,7 +50,11 @@ expiry.
 | 3 | **Link state** | Orange sine pulse (disconnected) / white slow pulse (pending approval) | Until link resolves | Device-local | `cmd/server.go:161,174` |
 | 4 | **Turn / media animation** | `solid` · `spin` · `rotate` · `pulse` · `meter` · `off`, scene-coloured | Until replaced or `ttlSec` expires (30s listening / 135s spinner / per-response for the meter) | Controller-specified, device-rendered | `animator.go:53` |
 | 5 | **Direction overlay** | Base ring colour brightened toward white at the beam angle | While listening ring is up | Device-local, requires `listeningLEDs` | `server.go:269` |
-| 6 | **Idle** | All off | — | — | — |
+| 6 | **HA idle indicator** | RGB light with device-rendered effects | 60s device TTL, renewed by the controller every 30s while on and HA is connected; interrupted by status indications | HA requests, firmware renders and expires | `em_led_light.py` |
+| 7 | **Idle** | All off | — | — | — |
+
+For the HA light's effects, lifetime and automation examples, see
+[Home Assistant LED ring indicator](ha-led-ring.md).
 
 ### Suppression rules [today]
 

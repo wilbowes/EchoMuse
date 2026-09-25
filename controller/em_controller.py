@@ -96,6 +96,7 @@ import em_listen
 import em_wakelevel
 import em_button
 import em_tap_burst
+import em_led_light
 import em_esphome as esphome
 import em_ble_proxy
 import em_oww_models
@@ -905,6 +906,7 @@ class Device:
         # that heuristic breaks for every non-green scene, so newer
         # firmware trusts this flag when present and old firmware just
         # ignores the extra key.
+        esphome.suspend_manual_light(self.device_id)
         msg = {"type": "leds", "leds": leds}
         if listening is not None:
             msg["listening"] = listening
@@ -1099,6 +1101,7 @@ class Device:
         can no longer make the spinner judder, and a dead controller can't
         leave the ring lit.
         """
+        esphome.suspend_manual_light(self.device_id)
         await self.send_control({"type": "led_anim", "anim": anim})
 
     async def ping(self):
@@ -1509,6 +1512,10 @@ async def leds_off(device: Device):
         await device.send_led_anim({"pattern": "off"})
     else:
         await device.set_leds(_make_leds(0, 0, 0))
+    # The restore task waits for voice_lock/timer/mute to release the ring.
+    # A new status frame cancels it, so barge/continuation cannot be repainted
+    # by an old turn's cleanup.
+    esphome.resume_manual_light(device.device_id)
 
 
 # Turn outcomes that get a distinguishing ring cue at turn end. Everything
@@ -1571,6 +1578,7 @@ async def _leds_turn_end(device: Device):
                 # so this is a hold, not a repaint.
                 await asyncio.sleep(NO_HA_HOLD_S)
             await device.send_led_anim(anim)
+            esphome.resume_manual_light(device.device_id, delay=anim.get("ttlSec", 1) + 0.05)
             return
     await leds_off(device)
 
@@ -2768,6 +2776,9 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown",
                     break
 
     finally:
+        # Also cover an exception before the normal cleanup callback. An
+        # already-scheduled outcome cue keeps its original restore deadline.
+        esphome.resume_manual_light(device.device_id)
         # Drain voice_queue BEFORE clearing oww_paused. If we clear first,
         # handle_data immediately starts routing new frames to mic_queue —
         # correct. But voice_queue still contains frames that arrived during
@@ -4289,6 +4300,9 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             ring_alarm=_ring_alarm,
             stop_alarm=_stop_alarm,
             start_conversation=_start_conversation,
+            send_led_ring_animation=lambda anim: em_led_light.send_animation_to_device(device, anim),
+            led_ring_ready=lambda: not (
+                device.voice_lock.locked() or device.timer_alarm_ringing or device.muted),
         )
         # The ESPHome server object caches the OWW model from server
         # creation — refresh it from the config we just loaded so HA's
@@ -4366,6 +4380,10 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
 
                     elif msg_type == "mute_state":
                         device.muted = msg.get("muted", False)
+                        if device.muted:
+                            esphome.suspend_manual_light(device_id)
+                        else:
+                            esphome.resume_manual_light(device_id)
                         if device.muted and device.voice_lock.locked():
                             # Mute during an active turn terminates it — same
                             # cancel as the dot button, plus speaker_flush so
