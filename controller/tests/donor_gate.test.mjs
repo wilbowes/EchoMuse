@@ -190,6 +190,23 @@ const armB = [{ name: "boot_b", arch: "arm" }];
   check("amonet 1, FireOS 5 in both slots, 64-bit kernel: accepted", r.ok && r.gen === 5);
 }
 {
+  // C95, 2026-09-25: amonet 1, FireOS 5 in system_a, FireOS 6 in system_b. The
+  // image mounts system_a only, so system_b is reported and cannot block.
+  const v1 = (a, b) => v(probe({ expdb: "00000000", twrp: "3.2.3-0", a, b }), "v1",
+                         [{ name: "the boot image", arch: "arm64" }]);
+  const r = v1(FOS5, FOS6);
+  check("C95: amonet 1 with FireOS 6 in the unused system_b is accepted", r.ok && r.gen === 5);
+  check("C95: system_b is reported as a warning", r.notes.some(n =>
+        n.includes("system_b holds Fire OS 6.5.7.4") && n.includes("not a reason to stop")));
+  check("C95: system_a is what it confirmed", r.confirmed.some(l => l.startsWith("system_a:")));
+  check("amonet 1 with FireOS 6 in system_a (what it mounts): refused", !v1(FOS6, FOS5).ok);
+  const moved = v1({ ...FOS5, node: "/dev/block/mmcblk0p14" }, FOS5);
+  check("amonet 1 whose system_a is not mmcblk0p13: refused",
+        !moved.ok && moved.reason.includes("mounts /dev/block/mmcblk0p13"));
+  check("amonet 1, system_b missing entirely: accepted, noted",
+        v1(FOS5, { ...FOS5, node: "" }).ok);
+}
+{
   // #619 as reported: boot_a had already been written by an earlier attempt,
   // so boot_b was the only stock image, and it and system_b were FireOS 5.
   const r = v(probe({ b: FOS5 }), "v2", [{ name: "boot_b", arch: "arm64" }]);

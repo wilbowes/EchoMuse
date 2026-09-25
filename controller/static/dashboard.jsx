@@ -4756,10 +4756,22 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
 
   // The decision. `layout` is classifyBootTarget's ('v1'|'v2'); `heads` is
   // every STOCK boot image the plan reads or keeps, as {name, arch}.
+  //
+  // Which system partitions must pass is decided by one question, asked the
+  // same way on every device: which ones does the image, or its way back,
+  // actually depend on? Those refuse; any other is reported as a warning and
+  // cannot block, so a device's outcome never depends on a slot it does not
+  // use.
+  //   amonet 2: BOTH. The slot plan may build from either, and the stock
+  //     image kept in B boots against system_b (#619).
+  //   amonet 1: system_a, which must be mmcblk0p13 — an amonet 1 image
+  //     carries no emos.system= stamp, so emOS mounts SYSTEM_PART_DEFAULT
+  //     (emos/init/init.c). C95 on 2026-09-25 had FireOS 6 in system_b beside
+  //     a working FireOS 5 system_a; that is a warning, not a refusal.
   function donorVerdict({ probe, layout, heads, files }) {
-    const why = [], seen = [];
+    const why = [], seen = [], notes = [];
     if (!probe || !probe.complete) {
-      return { ok: false, gen: 0, confirmed: seen, reason:
+      return { ok: false, gen: 0, confirmed: seen, notes, reason:
         'The check of this Echo\'s partitions did not finish, so nothing about it can be '
         + 'trusted yet. Nothing has been written. Check the cable and try this step again.' };
     }
@@ -4789,19 +4801,32 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         ? { layout: 'nested', release: '7.', arch: 'arm', label: 'FireOS 6' }
         : { layout: 'root', release: '5.', arch: 'arm64', label: 'FireOS 5' };
       const other = gen === 6 ? 'FireOS 5' : 'FireOS 6';
+      const needed = gen === 6 ? ['a', 'b'] : ['a'];
       for (const x of ['a', 'b']) {
         const s = probe.sys[x];
         const what = s.name || (s.release ? `Android ${s.release}` : 'an unreadable build');
-        if (!s.node) why.push(`system_${x} does not exist`);
-        else if (s.mount !== 'ok') why.push(`system_${x} would not mount read-only`);
-        else if (s.layout === 'none' || !s.release) why.push(`system_${x} has no readable build.prop`);
+        let problem = '';
+        if (!s.node) problem = `system_${x} does not exist`;
+        else if (s.mount !== 'ok') problem = `system_${x} would not mount read-only`;
+        else if (s.layout === 'none' || !s.release) problem = `system_${x} has no readable build.prop`;
         else if (s.layout !== want.layout || !s.release.startsWith(want.release)) {
-          why.push(`system_${x} holds ${what}, which is ${other}, not ${want.label}`);
+          problem = `system_${x} holds ${what}, which is ${other}, not ${want.label}`;
         } else {
           const missing = files[gen].filter(f => s.files[f] !== 'yes');
-          if (missing.length) why.push(`system_${x} (${what}) is missing ${missing.join(', ')}`);
-          else seen.push(`system_${x}: ${what}${s.build ? ` (${s.build})` : ''}, `
-                       + `all ${files[gen].length} files emOS uses present`);
+          if (missing.length) problem = `system_${x} (${what}) is missing ${missing.join(', ')}`;
+        }
+        if (!problem && gen === 5 && x === 'a' && s.node !== '/dev/block/mmcblk0p13') {
+          problem = `system_a is ${s.node}, but an amonet 1 image mounts /dev/block/mmcblk0p13`;
+        }
+        if (!needed.includes(x)) {
+          notes.push(problem
+            ? `${problem} — this image does not use system_${x}, so it is not a reason to stop`
+            : `system_${x}: ${what}, not used by this image`);
+        } else if (problem) {
+          why.push(problem);
+        } else {
+          seen.push(`system_${x}: ${what}${s.build ? ` (${s.build})` : ''}, `
+                  + `all ${files[gen].length} files emOS uses present`);
         }
       }
       if (!heads || !heads.length) why.push('there is no stock boot image to build from');
@@ -4813,12 +4838,12 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         } else seen.push(`${h.name}: ${want.label} kernel (${h.arch === 'arm' ? '32' : '64'}-bit)`);
       }
     }
-    if (!why.length) return { ok: true, gen, confirmed: seen };
+    if (!why.length) return { ok: true, gen, confirmed: seen, notes };
     const fix = gen === 6
       ? ' amonet 2 needs FireOS 6 in BOTH slots. If the FireOS 6 flash from the unlock '
         + 'instructions did not complete for both, finish it, then run this step again.'
       : gen === 5
-        ? ' amonet 1 needs FireOS 5 in both slots and a FireOS 5 kernel to build from.'
+        ? ' amonet 1 needs FireOS 5 in system_a (mmcblk0p13) and a FireOS 5 kernel to build from.'
         : unreadable
           ? ' The Echo is unlocked, since it is in TWRP; this is the wizard failing to read it. '
             + 'Try this step again, and if it repeats, use Download diagnostics and attach the '
@@ -4826,7 +4851,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
           : ' EchoMuse only builds for amonet 1 with TWRP 3.2.3 and FireOS 5, or amonet 2 with '
             + 'TWRP 3.7.0 and FireOS 6. A TWRP or amonet updated by hand would explain this; '
             + 'please open an issue with Download diagnostics attached.';
-    return { ok: false, gen, confirmed: seen, reason:
+    return { ok: false, gen, confirmed: seen, notes, reason:
       `This Echo is not in a state emOS can be built from: ${why.join('; ')}. `
       + `Nothing has been written.${fix}` };
   }
@@ -6672,6 +6697,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     }
     const gate = donorVerdict({ probe: donorProbe, layout: boot.layout, heads, files });
     for (const line of gate.confirmed) addLog(`  ✓ ${line}`, 'ok');
+    for (const line of gate.notes) addLog(`  ${line}`, 'warn');
     if (!gate.ok) throw new Error(gate.reason);
     setEmosPlan(plan);
     // The ESCROW and the build reference come from the donor; the flash goes to

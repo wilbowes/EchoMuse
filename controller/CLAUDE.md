@@ -1700,11 +1700,23 @@ throughout — so the rules below are all one rule seen from different angles.
   run or did not take, which is #598 — refuse it, because the bare name there
   really is the payload. `unlock_verdict.test.mjs`.
 - **Before the escrow reads anything for the build, the unlock, the recovery,
-  both system partitions and every stock kernel must be READ and must agree
-  on one FireOS generation** (`donorVerdict`, #619). amonet 2 = expdb holds
-  its bootloader + TWRP 3.7.0 + the v2 partition layout + FireOS 6 (7.1,
-  system-as-root) in BOTH system slots + 32-bit stock kernels; amonet 1 is
-  the mirror (3.2.3, root layout, 5.1.1, 64-bit). Every file emOS runs from
+  the system partitions the image depends on and every stock kernel must be
+  READ and must agree on one FireOS generation** (`donorVerdict`, #619).
+  amonet 2 = expdb holds its bootloader + TWRP 3.7.0 + the v2 partition layout
+  + FireOS 6 (7.1, system-as-root) in BOTH system slots + 32-bit stock
+  kernels; amonet 1 = expdb without it (`00000000` on C95) + TWRP 3.2.3 + the
+  v1 layout + FireOS 5 (5.1.1, root layout) in `system_a` at `mmcblk0p13` +
+  a 64-bit kernel. **Which system slots must pass is one question asked the
+  same way everywhere — does the image, or its way back, depend on it?** Both
+  do on amonet 2 (the plan builds from either slot, and the stock image kept
+  in B boots against `system_b`); only `system_a` does on amonet 1, whose image
+  carries no `emos.system=` and so mounts `SYSTEM_PART_DEFAULT` (13). Any other
+  slot is logged as a warning and cannot block: C95 had FireOS 6 in `system_b`
+  beside a working FireOS 5 `system_a`, and refusing it would have made the
+  outcome depend on a partition emOS never touches. Partitions are found by the
+  kernel's GPT name (`PARTNAME` in sysfs) before TWRP's by-name map, and
+  expdb's bytes are read in the browser, because amonet 1's TWRP 3.2.3 read
+  expdb as unreadable through by-name + `od`. Every file emOS runs from
   `/system` must be non-empty (`_emosSystemFiles`, pinned against `init.c`).
   #619 was amonet 2 with a FireOS 6 flash that never finished: expdb and TWRP
   said amonet 2, `boot_b` and `system_b` said FireOS 5, and every check
