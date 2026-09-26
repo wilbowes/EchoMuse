@@ -4070,12 +4070,17 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             log.info(f"[control] {device_id}: pairing approved — admitting to issue credentials")
 
         if not await _link_auth_ok(ws, device_id, secure, "control"):
+            # Said before closing, so the device can show "hold the button to
+            # pair" rather than "no controller" (firmware with `pairing`;
+            # older firmware ignores it). A pairing device is told pending.
+            reply = {"type": "refused"}
             if pairing:
                 await api.notify_pair_request(device_id, "plain")
-                try:
-                    await ws.send(json.dumps({"type": "pending", "pairing": True}))
-                except Exception:
-                    pass
+                reply = {"type": "pending", "pairing": True}
+            try:
+                await ws.send(json.dumps(reply))
+            except Exception:
+                pass
             await ws.close()
             return
         ip           = msg.get("ip", str(remote[0]))

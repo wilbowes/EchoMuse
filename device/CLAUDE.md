@@ -1131,6 +1131,13 @@ Playback ring clearing waits for the device's `playback_stats` (`device.playback
   is two minutes and closes early when the credential files change — the
   approval installs new ones and bounces the link, and a redial still
   carrying `pairing` would raise a second request for a device already paired.
+  **Three link rings, and they must stay three.** Orange pulse: no controller
+  answered. Orange with odd and even LEDs alternating: a controller answered
+  and refused this device (`errRefused`: a certificate our CA did not sign, or
+  the controller's `refused` message), which the owner fixes by holding the
+  button. White pulse: pending approval. The first two looked identical until
+  2026-09-26, so a device that needed pairing looked like one waiting for its
+  network. Run keeps whichever held state it is in across redials (`held`).
 - **Mute ring** (solid red) is device-sovereign — enforced since v2.7.8: controller LED writes are recorded but not painted while muted. Needed because muting now terminates an active turn (controller cancels + `speaker_flush` on `mute_state`), so the cancelled turn's LED cleanup arrives after the red ring is up.
 - **Volume arc** owns the ring for its 2s display window against *animations* — they repaint ~every 100ms and would otherwise stomp the arc within one frame. It does **not** outrank a deliberate action-button press: a dot release calls `CancelVolumeDisplay()`, which drops the hold so the listening frame paints (it deliberately does not repaint — the controller's frame lands within an RTT, and clearing to black would put a dark gap between the two). The arc is protection from repaint churn, not from the user. On expiry the ring repaints the latest `baseLEDs` frame (`onDisplayExpire` → `paintBaseLEDs`), handing back mid-animation. The arc shows only for physical volume button presses (v2.9.5): remote sets and the boot-time volume seed apply silently (`volumeController.Set` showRing flag). The mute-button LED is sysfs gpio444, active-high — not the gpio445 in Amazon's `libled_hal.so`, whose constant is off by one and whose pad is muxed away (stock drives the pin via the `/dev/mtgpio` ioctl; see `mute_button.go`).
 

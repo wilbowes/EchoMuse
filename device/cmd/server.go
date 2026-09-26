@@ -439,6 +439,25 @@ func main() {
 		go pulseWhite(pulseCtx, s)
 	})
 
+	// Refused — a controller answered and would not accept this device's
+	// credentials. Orange like disconnected, since it is a link problem, but
+	// alternating odd and even LEDs, so it reads differently: this one the
+	// owner can fix, by holding the action button 5 s to pair.
+	controlClient.OnRefused(func() {
+		s.StopAnim()
+		if pulseKind == "refused" {
+			return
+		}
+		if pulseCancel != nil {
+			pulseCancel()
+		}
+		pulseCtx, cancel := context.WithCancel(ctx)
+		pulseCancel = cancel
+		pulseKind = "refused"
+		s.SetLinkDown(true)
+		go pulseRefused(pulseCtx, s)
+	})
+
 	// Connected — stop pulse, report current mute state, restore ring or hand
 	// back to direction arc depending on mute state.
 	controlClient.OnConnected(func() {
@@ -1429,6 +1448,39 @@ func pulseOrange(ctx context.Context, s *server.Server) {
 			t := pulsePhase(start, period)
 			br := minBr + (maxBr-minBr)*(0.5+0.5*math.Sin(2*math.Pi*t))
 			s.SetLEDs(allLEDs(uint8(255*br), uint8(40*br), 0), nil)
+		}
+	}
+}
+
+// pulseRefused — orange, odd and even LEDs crossfading against each other,
+// while a controller refuses this device's credentials. Same colour as
+// pulseOrange (a link problem), different shape (one the owner can fix).
+func pulseRefused(ctx context.Context, s *server.Server) {
+	const (
+		minBr  = 0.03
+		maxBr  = 0.6
+		period = 1200 * time.Millisecond
+		stepMs = 50
+	)
+	ticker := time.NewTicker(stepMs * time.Millisecond)
+	defer ticker.Stop()
+	start := time.Now()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			a := 0.5 + 0.5*math.Sin(2*math.Pi*pulsePhase(start, period))
+			leds := allLEDs(0, 0, 0)
+			for i := range leds {
+				w := a
+				if i%2 == 1 {
+					w = 1 - a
+				}
+				br := minBr + (maxBr-minBr)*w
+				leds[i].R, leds[i].G = uint8(255*br), uint8(40*br)
+			}
+			s.SetLEDs(leds, nil)
 		}
 	}
 }

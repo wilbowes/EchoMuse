@@ -136,3 +136,11 @@ def test_secure_link_is_gone():
     src = (CONTROLLER / "em_api.py").read_text()
     assert "/secure_link" not in src and "_post_secure_link" not in src
     assert "secure_link" not in (CONTROLLER / "static" / "dashboard.jsx").read_text()
+
+
+def test_a_refused_device_is_told_so_before_the_close():
+    # Otherwise it can only show "no controller", when holding the button
+    # would fix it.
+    fn = _fn(_tree("em_controller.py"), "handle_control")
+    src = ast.unparse(fn)
+    assert "'type': 'refused'" in src

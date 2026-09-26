@@ -2,6 +2,10 @@ package client
 
 import (
 	"crypto/tls"
+	"crypto/x509"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"sync/atomic"
 	"testing"
@@ -139,5 +143,31 @@ func TestPairHold(t *testing.T) {
 	time.Sleep(60 * time.Millisecond)
 	if fired.Load() != 1 {
 		t.Fatal("a released press fired later")
+	}
+}
+
+// "Refused" must mean a controller answered with a certificate our CA did not
+// sign — never an unreachable one, which is the ordinary disconnected state.
+func TestRefusedByTLS(t *testing.T) {
+	srv := httptest.NewTLSServer(http.NotFoundHandler())
+	defer srv.Close()
+	// A pool without the server's CA: what a device holding another
+	// controller's CA sees.
+	creds := linkCreds{tlsConf: &tls.Config{
+		RootCAs:    x509.NewCertPool(),
+		ServerName: "example.com",
+	}}
+	d := creds.dialer()
+	_, _, err := d.Dial("wss://"+srv.Listener.Addr().String()+"/control", nil)
+	if err == nil || !refusedByTLS(err) {
+		t.Fatalf("a certificate from another CA is a refusal: %v", err)
+	}
+
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	addr := ln.Addr().String()
+	ln.Close()
+	_, _, err = d.Dial("wss://"+addr+"/control", nil)
+	if err == nil || refusedByTLS(err) {
+		t.Fatalf("nothing listening is not a refusal: %v", err)
 	}
 }

@@ -168,6 +168,7 @@ absent optional fields take prior/default behaviour.
 | `type` | Payload | Meaning |
 |--------|---------|---------|
 | `ack` | `device_id`, `features[]` | Registration accepted. `features` is the CONTROLLER's capability list — the mirror of the device's own, and read the same way: a feature that is absent is one the controller cannot do. Absent entirely on controllers before 2.23.0. Current: `ble_adverts_data`, `listen_session`, `output_chain` |
+| `refused` | — | Not admitted: link auth refused this device's credentials (a wrong token, or a token it has stopped presenting). Sent before the close; firmware with `pairing` shows the refused ring, which tells the owner to hold the action button to pair. A device also treats a TLS certificate its CA did not sign as refused. Older firmware ignores it |
 | `pending` | `pairing?` | Not admitted: the device is unapproved, or with `pairing:true` its pairing request is recorded and waiting for an admin. Keep redialling within the window; an approval admits the next dial |
 | `leds` | `leds[]`, `listening?` | One LED frame; `listening:true` marks the listening ring so the direction overlay keys off it |
 | `led_anim` | `{pattern, colors, periodMs, ttlSec}` | Local animation spec; sent only if `led_anim` |

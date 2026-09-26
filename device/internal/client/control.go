@@ -2,9 +2,11 @@ package client
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -112,6 +114,7 @@ type ControlClient struct {
 	disconnectedCallback  StateCallback
 	connectedCallback     StateCallback
 	pendingCallback       StateCallback
+	refusedCallback       StateCallback
 	configAppliedCallback ConfigAppliedCallback
 	playCueCallback       func(string)
 	volumeSetCallback     VolumeSetCallback
@@ -179,6 +182,7 @@ func (c *ControlClient) OnListen(cb ListenCallback)               { c.listenCall
 func (c *ControlClient) OnDisconnected(cb StateCallback)          { c.disconnectedCallback = cb }
 func (c *ControlClient) OnConnected(cb StateCallback)             { c.connectedCallback = cb }
 func (c *ControlClient) OnPending(cb StateCallback)               { c.pendingCallback = cb }
+func (c *ControlClient) OnRefused(cb StateCallback)               { c.refusedCallback = cb }
 func (c *ControlClient) OnConfigApplied(cb ConfigAppliedCallback) { c.configAppliedCallback = cb }
 func (c *ControlClient) OnPlayCue(cb func(string))                { c.playCueCallback = cb }
 func (c *ControlClient) OnVolumeSet(cb VolumeSetCallback)         { c.volumeSetCallback = cb }
@@ -199,6 +203,20 @@ func (c *ControlClient) IsConnected() bool {
 }
 
 var errPending = fmt.Errorf("pending approval")
+
+// errRefused: a controller answered and would not accept this device's
+// credentials — its certificate is not signed by our CA, or it sent
+// `refused`. Distinct from "no controller" because the owner can fix it, by
+// holding the action button to pair (pairing.go), and the ring says so.
+var errRefused = fmt.Errorf("controller refused this device's credentials")
+
+// refusedByTLS reports whether a dial failed on certificate verification,
+// i.e. something answered on the TLS port with a certificate our CA did not
+// sign. Every other dial failure is "no controller".
+func refusedByTLS(err error) bool {
+	var v *tls.CertificateVerificationError
+	return errors.As(err, &v)
+}
 
 // maxStaticAttempts is how many consecutive dial failures one configured
 // endpoint gets before Run moves to the next target in the pass. 1 would
@@ -257,12 +275,13 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 	targetIdx := 0
 	targetAttempts := 0
 	passNum := 0
-	// pending: the last dial reached a controller that holds this device
-	// for approval. The ring stays on the white pulse across the redial;
-	// the orange "disconnected" pulse at the top of each attempt used to cut
-	// in for a moment every retry, read as a red/orange flicker. A dial that
-	// actually fails shows orange from the failure branch below.
-	pending := false
+	// held: the last dial reached a controller that holds this device
+	// pending approval, or refuses its credentials. The ring stays on that
+	// state's own pulse across the redial; the orange "disconnected" pulse at
+	// the top of each attempt used to cut in for a moment every retry, read
+	// as a red/orange flicker. A dial that actually fails shows orange from
+	// the failure branch below.
+	held := false
 
 	for {
 		if ctx.Err() != nil {
@@ -315,7 +334,7 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 				targetIdx, targetAttempts = 0, 0
 			}
 
-			if targetIdx == 0 && targetAttempts == 0 && !pending && c.disconnectedCallback != nil {
+			if targetIdx == 0 && targetAttempts == 0 && !held && c.disconnectedCallback != nil {
 				// Once per full pass, not once per target: otherwise the
 				// ring goes orange during every routine controller restart,
 				// which is one endpoint failing, not an outage.
@@ -342,7 +361,7 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 				}
 			}
 		} else {
-			if !pending && c.disconnectedCallback != nil {
+			if !held && c.disconnectedCallback != nil {
 				c.disconnectedCallback()
 			}
 
@@ -397,8 +416,9 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 			err = dialErr
 		}
 
-		wasPending := pending
-		pending = err == errPending
+		wasHeld := held
+		refused := errors.Is(err, errRefused)
+		held = err == errPending || refused
 		switch err {
 		case errPending:
 			// A pairing request is repeated by redialling, and the controller
@@ -466,12 +486,14 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 			if err != nil {
 				log.Printf("[control] Connection lost: %v — reconnecting in %s", err, wait)
 			}
-			if (!usingStatic || wasPending) && c.disconnectedCallback != nil {
+			if refused && c.refusedCallback != nil {
+				c.refusedCallback()
+			} else if (!usingStatic || wasHeld) && c.disconnectedCallback != nil {
 				// The static path already showed this once at the top of
 				// the pass; re-showing it here on every single target would
 				// reintroduce the per-endpoint flashing the pass-level check
-				// above exists to avoid. Except straight after pending,
-				// which skipped the pass-level one.
+				// above exists to avoid. Except straight after a held
+				// state, which skipped the pass-level one.
 				c.disconnectedCallback()
 			}
 			select {
@@ -533,6 +555,9 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 		}
 	}
 	if err != nil {
+		if refusedByTLS(err) {
+			return false, fmt.Errorf("%w: %v", errRefused, err)
+		}
 		return false, err
 	}
 	defer conn.Close()
@@ -623,6 +648,8 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 	switch first.Type {
 	case "pending":
 		return false, errPending
+	case "refused":
+		return false, errRefused
 	case "ack":
 		// The controller tells us what IT can do here. Recorded before conn
 		// is published, so a caller reading it can never see a stale set
