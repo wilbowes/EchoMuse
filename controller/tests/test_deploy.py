@@ -2631,7 +2631,13 @@ def test_the_emos_and_firmware_release_namespaces_cannot_select_each_other():
     src = (CONTROLLER / "em_api.py").read_text()
 
     fw = _strip_prose(_fn_body(src, "_fetch_latest_release"))
-    assert 'startswith("v")' in fw and '"server"' in fw, \
+    assert "_choose_firmware_release(" in fw, \
+        "the firmware poll must select through version.choose_firmware_release"
+    vsrc = (CONTROLLER / "version.py").read_text()
+    node = next(n for n in ast.parse(vsrc).body
+                if isinstance(n, ast.FunctionDef) and n.name == "choose_firmware_release")
+    chooser = _strip_prose(ast.get_source_segment(vsrc, node))
+    assert 'startswith("v")' in chooser and '"server"' in chooser, \
         "the firmware poll must select on a v* tag AND a server asset"
 
     emos = _strip_prose(_fn_body(src, "_fetch_latest_emos_release"))
