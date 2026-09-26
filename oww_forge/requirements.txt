@@ -18,7 +18,7 @@ deep-phonemizer==0.0.19
 piper-phonemize==1.1.0
 webrtcvad==2.0.10
 # torch.onnx.export needs the onnx package at model-save time
-onnx==1.17.0
+onnx==1.21.0
 # asset downloads + audio IO
 huggingface_hub>=0.19
 soundfile
