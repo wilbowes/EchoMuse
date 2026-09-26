@@ -1484,7 +1484,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   const fileInputRef = useRef(null);
   const [turns, setTurns] = useState([]);
   const state = deviceState(device);
-  const needsUpdate = device.firmware_ver && release?.version && device.firmware_ver !== release.version;
+  const needsUpdate = !!device.firmware_update;
 
   const TABS = device.approved
     ? (isAdmin ? ['status', 'activity', 'config', 'console', 'updates', 'logs'] : ['status', 'activity', 'config', 'logs'])
@@ -9647,7 +9647,7 @@ function DeployAllModal({ release, devices, deployState, onStarted, onDismiss, o
   const target = view?.version || release?.version;
   const byId = Object.fromEntries(devices.map(d => [d.device_id, d]));
   const eligible = devices.filter(d =>
-    d.approved && d.connected && d.firmware_ver !== release?.version);
+    d.approved && d.connected && d.firmware_update);
 
   const SKIP_REASONS = {
     not_approved:       'not approved',
@@ -10379,7 +10379,7 @@ function App() {
   const online   = devices.filter(d => d.connected).length;
   const approved = devices.filter(d => d.approved);
   const pending  = devices.filter(d => !d.approved);
-  const updates  = approved.filter(d => d.firmware_ver && release?.version && d.firmware_ver !== release.version).length;
+  const updates  = approved.filter(d => d.firmware_update).length;
   const active   = approved.filter(d => d.speaking || d.listening || d.thinking).length;
 
   const selectedDevice = selected ? devices.find(d => d.device_id === selected) : null;

@@ -5,6 +5,11 @@ name: Device Release (firmware binary)
 # system, so this scheme must not change. Controller releases use
 # controller-v* tags (see controller-release.yml), which don't match this
 # glob and create no GitHub Release, so OTA's release polling never sees them.
+#
+# Early Access firmware is vX.Y.Z-ea.N, published as a GitHub PRERELEASE.
+# Every GA controller since 2.22.0 skips prereleases when it chooses firmware,
+# so an EA build can never reach the GA fleet; EA and dev controllers include
+# them (em_api._fetch_latest_release, version.firmware_key).
 
 on:
   push:
@@ -30,8 +35,17 @@ jobs:
       # before it can be interpolated anywhere.
       - name: Refuse a malformed tag
         run: |
-          echo "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || {
-            echo "::error::$GITHUB_REF_NAME is not vX.Y.Z"; exit 1; }
+          echo "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-ea\.[0-9]+)?$' || {
+            echo "::error::$GITHUB_REF_NAME is not vX.Y.Z or vX.Y.Z-ea.N"; exit 1; }
+
+      # An EA tag is published as a prerelease, which GA controllers skip.
+      - name: Channel
+        id: channel
+        run: |
+          case "$GITHUB_REF_NAME" in
+            *-ea.*) echo "prerelease=true"  >> "$GITHUB_OUTPUT" ;;
+            *)      echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
 
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -114,5 +128,6 @@ jobs:
           files: device/build/server
           body_path: /tmp/release-notes.md
           generate_release_notes: false
+          prerelease: ${{ steps.channel.outputs.prerelease }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

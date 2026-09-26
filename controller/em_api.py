@@ -80,6 +80,9 @@ import em_support
 from version import VERSION as CONTROLLER_VERSION
 from version import compare as _compare_versions
 from version import parse as _parse_version
+from version import choose_firmware_release as _choose_firmware_release
+from version import firmware_update as _firmware_update
+from version import offers_ea_firmware as _offers_ea_firmware
 
 log = logging.getLogger("echomuse.api")
 
@@ -3523,8 +3526,7 @@ async def _get_system_status(request: web.Request) -> web.Response:
             if _controller_cache.get("available") else None,
         "updates_available": sum(
             1 for r in all_rows
-            if r["firmware_ver"] and release
-            and r["firmware_ver"] != release["version"]
+            if release and _firmware_update(r["firmware_ver"], release["version"])
         ),
     })
 
@@ -3997,35 +3999,16 @@ async def _fetch_latest_release(force: bool = False) -> Optional[dict]:
                     return None
                 releases = await resp.json()
 
-        # Newest device firmware release: plain v* tag (controller releases
-        # use controller-v* and ship no binary), published, with the compiled
-        # `server` asset attached. The list is newest-first.
-        tag = None
-        binary = None
-        # Initialised explicitly: it is only assigned inside the loop, and
-        # while the `binary is None` return below happens to cover that today,
-        # relying on one guard to protect another variable is how a later edit
-        # introduces a NameError on a path nobody runs in testing.
-        release: dict = {}
-        for data in releases:
-            if data.get("draft") or data.get("prerelease"):
-                continue
-            candidate_tag = data.get("tag_name", "")
-            if not candidate_tag.startswith("v"):
-                continue
-            candidate_binary = next(
-                (a for a in data.get("assets", []) if a.get("name") == "server"),
-                None,
-            )
-            if candidate_binary is None:
-                continue
-            tag, binary = candidate_tag, candidate_binary
-            release = data
-            break
-
-        if binary is None:
+        # Newest device firmware release this controller may offer: a GA
+        # controller only GA (vX.Y.Z), an EA or dev controller EA
+        # (vX.Y.Z-ea.N, published as a prerelease) too. Controller releases
+        # use controller-v* and ship no binary.
+        release = _choose_firmware_release(releases, _offers_ea_firmware())
+        if release is None:
             log.warning("[api] No device firmware release with a 'server' asset found")
             return None
+        tag = release["tag_name"]
+        binary = next(a for a in release["assets"] if a.get("name") == "server")
 
         download_url = binary["browser_download_url"]
 
@@ -5936,6 +5919,11 @@ def _merge_device(row) -> dict:
         "ip":                 row["ip"],
         "firmware_ver":       row["firmware_ver"],
         "firmware_previous":  row["firmware_previous"],
+        # Whether the offered release is newer than what this device runs,
+        # by version rather than string (EA firmware on a GA controller is
+        # ahead of the GA release, not behind it).
+        "firmware_update":    _firmware_update(row["firmware_ver"],
+                                               _release_cache.get("version")),
         "first_seen":         row["first_seen"],
         "last_seen":          row["last_seen"],
         "config":             json.loads(row["config"] or "{}"),
