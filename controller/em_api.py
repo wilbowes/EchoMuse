@@ -1063,6 +1063,8 @@ async def _delete_device(request: web.Request) -> web.Response:
     # right, so it must not inherit the deleted row's debounce and skip its
     # first reconcile — the bounce below has it redialling within seconds.
     forget_reconcile(device_id)
+    # A refusal belongs to the deleted row; the device comes back as pending.
+    clear_link_refused(device_id)
     # ...and the device is told to redial, or it never notices it was deleted.
     # Link auth is decided once, at register time, so a connected device keeps
     # running on the socket it already has: it vanishes from the dashboard and
@@ -5912,6 +5914,20 @@ def _row_sections(row) -> list:
         return []
 
 
+# device_id -> {"reason", "at"}: the last link refusal for a device on record,
+# until it next registers. In memory on purpose: a refused device retries every
+# few seconds, so a restarted controller has it back within one retry.
+_link_refusals: dict[str, dict] = {}
+
+
+def note_link_refused(device_id: str, reason: str) -> None:
+    _link_refusals[device_id] = {"reason": reason, "at": time.time()}
+
+
+def clear_link_refused(device_id: str) -> None:
+    _link_refusals.pop(device_id, None)
+
+
 def _merge_device(row) -> dict:
     """
     Merge a DB device row with live in-memory state.
@@ -5980,6 +5996,8 @@ def _merge_device(row) -> dict:
         # current control connection came in over the TLS listener (live).
         "linkTokenIssued":  bool(row["token"]) if "token" in row.keys() else False,
         "linkTls":          getattr(live, "secure", False) if live else False,
+        # Why the controller is turning this device away, while it is.
+        "linkRefused":      _link_refusals.get(device_id),
         # Q4 fix (2026-07-05 review): near-miss counter — same lifecycle as
         # the rest of this "Live" section (resets on reconnect, since it
         # lives on the per-connection Device object, not the DB row).

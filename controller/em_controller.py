@@ -3964,17 +3964,31 @@ async def _link_auth_ok(
         pass
 
     loop = asyncio.get_event_loop()
-    expected = await loop.run_in_executor(None, db.get_device_token, device_id)
+    expected, confirmed = await loop.run_in_executor(
+        None, db.get_device_link_auth, device_id)
 
     verdict = em_linkauth.decide(
         presented=presented,
         expected=expected,
+        confirmed=confirmed,
         secure=secure,
         require_tls=REQUIRE_DEVICE_TLS,
     )
     if not verdict.ok:
         log.warning(f"[{plane}] {device_id}: {verdict.reason} — rejecting")
+        # Only for a device with a row and a token, so ids nobody issued
+        # cannot grow the map. The dashboard shows it on the Link row.
+        if expected:
+            api.note_link_refused(device_id, verdict.reason)
         return False
+    if presented and expected and not confirmed:
+        # First sight of the device holding its token: from now on it must.
+        if await loop.run_in_executor(
+                None, db.confirm_device_token, device_id, presented):
+            log.info(f"[{plane}] {device_id}: link token confirmed — "
+                     f"a connection without it will be refused from now on")
+    if plane == "control":
+        api.clear_link_refused(device_id)
     if verdict.stale_token:
         # Allowed, but worth seeing in the log: almost always a device that was
         # deleted and has come back carrying the credential from its previous
@@ -3984,6 +3998,23 @@ async def _link_auth_ok(
             f"Treating as an unregistered device; it will need approval."
         )
     return True
+
+
+def _peer_ip(ws) -> str | None:
+    try:
+        return ws.remote_address[0]
+    except (AttributeError, TypeError, IndexError):
+        return None
+
+
+def _not_from_control(device: "Device", ws, secure: bool) -> str | None:
+    """Why a /data or /shell connection is not the device's own, or None."""
+    return em_linkauth.follows_control(
+        control_peer=_peer_ip(device.control_ws),
+        control_secure=bool(getattr(device, "secure", False)),
+        peer=_peer_ip(ws),
+        secure=secure,
+    )
 
 
 async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
@@ -4965,6 +4996,13 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
             await ws.close()
             return
 
+        why = _not_from_control(device, ws, secure)
+        if why:
+            log.warning(f"[data] {device_id}: {why} — rejecting")
+            device = None   # the finally must not treat the live device as ours
+            await ws.close()
+            return
+
         device.data_ws = ws
         # #299: a fresh connection has by definition sent nothing yet — the
         # no-frames watchdog gives it FRESH_CONN_GRACE_S before treating
@@ -5119,6 +5157,13 @@ async def handle_shell(ws: WebSocketServerProtocol, path: str, secure: bool = Fa
         return
 
     if not await _link_auth_ok(ws, device_id, secure, "shell"):
+        await ws.close()
+        return
+
+    live = _devices.get(device_id)
+    why = "device is not connected" if live is None else _not_from_control(live, ws, secure)
+    if why:
+        log.warning(f"[shell] {device_id}: {why} — rejecting")
         await ws.close()
         return
 

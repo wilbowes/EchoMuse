@@ -1025,6 +1025,17 @@ MIGRATIONS: list[str] = [
 
     UPDATE system_config SET value = '26' WHERE key = 'schema_version';
     """,
+    # v27 — when the device first presented its current link token. Set once,
+    # at a register whose X-EM-Token matched; from then a connection claiming
+    # this device without the token is refused (em_linkauth rule 2). NULL means
+    # never presented, which keeps the rollout rule: a row minted before the
+    # credential files reach the device must not lock it out. Cleared whenever
+    # the token changes, so it always describes the CURRENT token.
+    """
+    ALTER TABLE devices ADD COLUMN token_confirmed_at INTEGER;
+
+    UPDATE system_config SET value = '27' WHERE key = 'schema_version';
+    """,
 ]
 
 # Post-migration fixups that need Python rather than SQL. Keyed by the schema
@@ -1535,6 +1546,32 @@ def get_device_token(device_id: str) -> Optional[str]:
     return row["token"] if row and row["token"] else None
 
 
+def get_device_link_auth(device_id: str) -> tuple[Optional[str], bool]:
+    """(token or None, whether the device has presented that token)."""
+    row = _q1("SELECT token, token_confirmed_at FROM devices WHERE device_id = ?",
+              (device_id,))
+    if not row or not row["token"]:
+        return None, False
+    return row["token"], row["token_confirmed_at"] is not None
+
+
+def confirm_device_token(device_id: str, token: str) -> bool:
+    """
+    Record that the device presented `token`, if it is still the stored one
+    and nothing was recorded yet. True when this call recorded it.
+
+    Conditional on the token so a presentation checked against a token that
+    has since been replaced cannot confirm the replacement.
+    """
+    with _tx() as conn:
+        cur = conn.execute(
+            "UPDATE devices SET token_confirmed_at = ? "
+            "WHERE device_id = ? AND token = ? AND token_confirmed_at IS NULL",
+            (_now(), device_id, token),
+        )
+        return cur.rowcount == 1
+
+
 def ensure_device_token(device_id: str) -> str:
     """
     Return the device's link-auth token, minting one if absent.
@@ -1562,7 +1599,7 @@ def ensure_device_token(device_id: str) -> str:
             (device_id, now, now, json.dumps(DEFAULT_DEVICE_CONFIG)),
         )
         conn.execute(
-            "UPDATE devices SET token = ? WHERE device_id = ?",
+            "UPDATE devices SET token = ?, token_confirmed_at = NULL WHERE device_id = ?",
             (token, device_id),
         )
     log.info(f"[db] Link token minted for {device_id}")
@@ -1573,7 +1610,8 @@ def clear_device_token(device_id: str) -> None:
     """Revoke a device's link token (next credential push mints a new one)."""
     with _tx() as conn:
         conn.execute(
-            "UPDATE devices SET token = NULL WHERE device_id = ?", (device_id,)
+            "UPDATE devices SET token = NULL, token_confirmed_at = NULL WHERE device_id = ?",
+            (device_id,)
         )
 
 

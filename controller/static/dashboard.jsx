@@ -2058,8 +2058,17 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     {row('Volume', device.volume != null
                          ? `${Math.round(device.volume * 100)}%`
                          : (s?.volumePct != null ? `${s.volumePct}%` : '—'))}
-                    {row('Link', device.connected ? (device.linkTls ? 'wss (TLS)' : 'plain ws') : '—',
-                         device.connected ? (device.linkTls ? 'var(--ok)' : 'var(--warn)') : undefined)}
+                    {/* An offline Echo the controller is turning away says why,
+                        in the row that describes its link rather than a new one. */}
+                    {row('Link', device.connected
+                           ? (device.linkTls ? 'wss (TLS)' : 'plain ws')
+                           : device.linkRefused
+                             ? <span title="Remove this Echo and approve it again to pair it.">
+                                 {`Refused: ${device.linkRefused.reason}`}
+                               </span>
+                             : '—',
+                         device.connected ? (device.linkTls ? 'var(--ok)' : 'var(--warn)')
+                           : device.linkRefused ? 'var(--error)' : undefined)}
                     {row('Config', (() => {
                       const n = (device.config_sections ?? []).length;
                       const total = Object.keys(CONFIG_SECTIONS).length;

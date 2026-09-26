@@ -176,7 +176,10 @@ def test_migrations_are_append_only():
     rather than edited — which is the mistake this guards, and the one that
     broke every stats write and disconnect-looped the fleet when it happened.
     """
-    assert len(db.MIGRATIONS) == 26
+    assert len(db.MIGRATIONS) == 27
+    # v27 is its own entry (token_confirmed_at), not appended onto v26.
+    assert "token_confirmed_at" in db.MIGRATIONS[26]
+    assert "token_confirmed_at" not in db.MIGRATIONS[25]
     assert "esphome_mac" in db.MIGRATIONS[18]
     assert "esphome_mac" not in db.MIGRATIONS[17]
     # v20 is its own entry and did not get appended onto v19's.

@@ -315,10 +315,16 @@ ignored, which is the correct degrade.
   pre-NTP and a device that cannot connect cannot fix its clock. A new board
   inherits this — do not "normalise" either half.
 - Enforcement is `em_linkauth.decide` (`controller/em_linkauth.py`): a wrong
-  token always rejects; a stored token with none presented is allowed (the
-  credential push itself rides the plain plane); a token for a device with
-  nothing on record is ignored, not rejected. `REQUIRE_DEVICE_TLS=1` makes
-  TLS+token mandatory.
+  token always rejects; a stored token with none presented is allowed only
+  until the device has presented it once (the credential push itself rides
+  the plain plane), and refused after that; a token for a device with nothing
+  on record is ignored, not rejected. `REQUIRE_DEVICE_TLS=1` makes TLS+token
+  mandatory. **A device binary must send its token on all three planes**, or
+  it is refused on the ones that lack it once the controller has seen it.
+- `/data` and `/shell` are admitted only from the address, and with the
+  scheme, of the device's live `/control` connection
+  (`em_linkauth.follows_control`), so a real device must dial all three from
+  one address.
 
 ## What the device binary owns
 
