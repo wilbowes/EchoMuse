@@ -149,6 +149,8 @@ func NewServer(buttonController buttons.Controller, microphone mic.Microphone, s
 			server.mute.showMuteLEDs()
 			setMuteButtonLED(true)
 		}
+		// Amazon's privacy driver boots unmuted whatever we restored.
+		server.mute.reconcilePrivacySoon()
 	}()
 
 	return server

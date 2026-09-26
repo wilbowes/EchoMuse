@@ -1123,6 +1123,16 @@ Playback ring clearing waits for the device's `playback_stats` (`device.playback
   live**: the ADC mute is hardware and its button LED is a GPIO, so it is the
   one control that works with no controller at all — and making it inert would
   hand back a live mic on reconnect, since mute is persisted in `state.json`.
+- **On a FireOS 6 kernel the mute button LED is Amazon's, not ours.** Its
+  `amz_privacy` driver (`amz_priv.c`) owns gpio444, toggles its own state on
+  every mute release, can be put INTO privacy from software
+  (`privacy_trigger`) but never out, and always boots unmuted. So after a
+  reboot while muted the two ran opposite for good, including a lit button
+  over a live mic (15LE, 2026-09-26). `internal/bindings/led/privacy.go`
+  finds it by name; `server/privacy.go` reconciles after every press and at
+  boot, and every disagreement resolves to muted. FireOS 5's kernel has no
+  such driver and we drive gpio444 ourselves. Never read its
+  `power_button_state`: it blocked the console.
 - **Mute ring** (solid red) is device-sovereign — enforced since v2.7.8: controller LED writes are recorded but not painted while muted. Needed because muting now terminates an active turn (controller cancels + `speaker_flush` on `mute_state`), so the cancelled turn's LED cleanup arrives after the red ring is up.
 - **Volume arc** owns the ring for its 2s display window against *animations* — they repaint ~every 100ms and would otherwise stomp the arc within one frame. It does **not** outrank a deliberate action-button press: a dot release calls `CancelVolumeDisplay()`, which drops the hold so the listening frame paints (it deliberately does not repaint — the controller's frame lands within an RTT, and clearing to black would put a dark gap between the two). The arc is protection from repaint churn, not from the user. On expiry the ring repaints the latest `baseLEDs` frame (`onDisplayExpire` → `paintBaseLEDs`), handing back mid-animation. The arc shows only for physical volume button presses (v2.9.5): remote sets and the boot-time volume seed apply silently (`volumeController.Set` showRing flag). The mute-button LED is sysfs gpio444, active-high — not the gpio445 in Amazon's `libled_hal.so`, whose constant is off by one and whose pad is muxed away (stock drives the pin via the `/dev/mtgpio` ioctl; see `mute_button.go`).
 
