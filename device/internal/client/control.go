@@ -149,6 +149,9 @@ type ControlClient struct {
 	// shellsLive counts running shell sessions — the dashboard console and
 	// the controller's programmatic ones (OTA, asset pushes) alike.
 	shellsLive atomic.Int32
+
+	// pair is the pairing window opened by a held action button (pairing.go).
+	pair *pairState
 }
 
 // ShellActive reports whether any shell session is running. Typing in the
@@ -167,6 +170,7 @@ func NewControlClient(
 		ledCallback:      ledCallback,
 		micStartCallback: micStartCallback,
 		micStopCallback:  micStopCallback,
+		pair:             newPairState(),
 	}
 }
 
@@ -346,8 +350,8 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 			server = c.lastKnownServer()
 			if server != nil && server.TLSPort == 0 && loadLinkCreds().tlsConf != nil {
 				// CA installed but the cached endpoint predates the
-				// controller's TLS listener (e.g. controller upgraded, or a
-				// Secure-link push just landed, mid-run). One fresh browse so
+				// controller's TLS listener (e.g. controller upgraded, or an
+				// approval just installed credentials, mid-run). One fresh browse so
 				// the tls_port TXT is picked up; keep the cached endpoint if
 				// mDNS fails — after a WiFi change the controller can sit on
 				// another subnet where multicast doesn't reach.
@@ -389,7 +393,13 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 
 		switch err {
 		case errPending:
-			log.Printf("[control] Device pending approval — retrying in 30s")
+			// A pairing request is repeated by redialling, and the controller
+			// forgets one 30s after its last repeat.
+			wait := 30 * time.Second
+			if c.Pairing() {
+				wait = pairRepeat
+			}
+			log.Printf("[control] Device pending approval — retrying in %s", wait)
 			if usingStatic {
 				// The endpoint answered, and registration itself worked —
 				// pending-approval is success for discovery purposes.
@@ -403,7 +413,8 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(30 * time.Second):
+			case <-c.pair.kick:
+			case <-time.After(wait):
 			}
 		default:
 			if usingStatic {
@@ -451,6 +462,7 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
+			case <-c.pair.kick:
 			case <-time.After(wait):
 			}
 		}
@@ -474,26 +486,37 @@ const staticHealthyDuration = 30 * time.Second
 func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInfo, data *DataClient) (bool, error) {
 	var connectedAt time.Time
 
-	// Credentials are re-read on every dial: a "Secure link" push from the
-	// controller lands mid-run, and the very next reconnect should pick it
-	// up without a restart.
+	// Credentials are re-read on every dial: an approval installs them
+	// mid-run, and the very next reconnect should pick them up without a
+	// restart.
 	creds := loadLinkCreds()
-	baseURL := "ws://" + server.Addr
-	if creds.tlsConf != nil {
-		if server.TLSPort > 0 {
-			baseURL = "wss://" + net.JoinHostPort(server.Host, strconv.Itoa(server.TLSPort))
-		} else {
-			// CA on disk but controller has no TLS listener (or a pre-TLS
-			// controller). Deliberate fallback during rollout — flipping
-			// REQUIRE_DEVICE_TLS controller-side is what eventually closes
-			// this downgrade path.
-			log.Printf("[control] CA installed but controller advertises no tls_port — dialling plain ws")
-		}
+	pairing := c.Pairing()
+	plan := dialPlan(creds.tlsConf != nil, server.TLSPort, pairing)
+	if len(plan) == 0 {
+		// A CA and no TLS listener: plain would be a downgrade (pairing.go).
+		return false, fmt.Errorf("CA installed but %s advertises no tls_port — not dialling plain; hold the action button 5s to pair", server.Addr)
 	}
 
-	log.Printf("[control] Connecting to %s", baseURL)
-	dialer := creds.dialer()
-	conn, _, err := dialer.DialContext(ctx, baseURL+"/control", creds.header())
+	var conn *websocket.Conn
+	var baseURL string
+	var attempt dialAttempt
+	var err error
+	for i, a := range plan {
+		baseURL = "ws://" + server.Addr
+		if a.tls {
+			baseURL = "wss://" + net.JoinHostPort(server.Host, strconv.Itoa(server.TLSPort))
+		}
+		log.Printf("[control] Connecting to %s", baseURL)
+		dialer := creds.dialer()
+		conn, _, err = dialer.DialContext(ctx, baseURL+"/control", creds.headerFor(baseURL))
+		if err == nil {
+			attempt = a
+			break
+		}
+		if i < len(plan)-1 {
+			log.Printf("[control] %s failed: %v — pairing, trying plain", baseURL, err)
+		}
+	}
 	if err != nil {
 		return false, err
 	}
@@ -551,6 +574,11 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 	// on biscuit the only thing that separates emOS on FireOS 5's 64-bit
 	// kernel from emOS on FireOS 6's 32-bit one. Unread by older controllers,
 	// so safe to add unnegotiated; omitted if uname fails.
+	// Asking to pair (pairing.go). On a plain dial the controller refuses
+	// the connection but records the request; after an approval it admits it.
+	if attempt.pairing {
+		reg["pairing"] = true
+	}
 	if m, r := platform.Kernel(); m != "" {
 		reg["kernel_arch"] = m
 		reg["kernel_release"] = r
@@ -973,7 +1001,7 @@ func (c *ControlClient) runShellSession(ctx context.Context, baseURL string, pty
 
 	creds := loadLinkCreds()
 	dialer := creds.dialer()
-	conn, _, err := dialer.DialContext(ctx, shellURL, creds.header())
+	conn, _, err := dialer.DialContext(ctx, shellURL, creds.headerFor(baseURL))
 	if err != nil {
 		log.Printf("[shell] Failed to connect to controller: %v", err)
 		if master != nil {
@@ -1148,9 +1176,13 @@ func capabilities() []string {
 	// "wake_cue": this firmware can play its own wake confirmation (#120).
 	// Without it the dashboard shows the toggle disabled, since a switch that
 	// saves and makes no sound fails the person it exists for.
+	//
+	// "pairing": this firmware asks to pair itself when its owner holds the
+	// action button 5 s (pairing.go). Without it the controller offers the
+	// admin a Pair action instead, since the device cannot ask.
 	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons",
 		"oww_shadow", "oww_trigger", "button_hold", "audio_mix",
-		"aec_hw_ref", "oww_local_only", "output_chain", "wake_cue"}
+		"aec_hw_ref", "oww_local_only", "output_chain", "wake_cue", "pairing"}
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}

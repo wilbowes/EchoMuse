@@ -303,9 +303,19 @@ func main() {
 		}
 	}()
 
+	// A 5 s hold of the action button asks to pair (client/pairing.go).
+	pairHold := client.NewPairHold(controlClient.StartPairing)
+
 	// Button events — forward to controller via control plane
 	_, err = buttonController.SubscribeToButton(func(event pkgbuttons.ButtonClickEvent) {
 		log.Printf("Button event: clickType=%d down=%v", event.ClickType, event.Down)
+		// Ahead of the link-down gate: a device that cannot connect is the one
+		// that most needs to ask. The release ending a pairing hold is not
+		// forwarded, so it does not also reach HA as a long press.
+		if event.ClickType == pkgbuttons.DotClick && pairHold.Event(event.Down) {
+			log.Println("[cmd] action button release ended a pairing hold — not forwarded")
+			return
+		}
 		// Inert without a controller session: the dot cannot start a turn
 		// with nothing to send it to, and the ring flash CancelVolumeDisplay
 		// produces would acknowledge a press that achieves nothing. Dropped

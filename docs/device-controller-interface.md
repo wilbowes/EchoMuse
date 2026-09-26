@@ -68,7 +68,7 @@ message (`device/internal/client/control.go`):
   "ip": "<local ip, omitted if 127.0.0.1 or unresolved>",
   "ambient_light_status": { "...": "..." },
   "base_os": "emos | fireos | unknown",
-  "pairing": true,  // only during a pairing window, on a plain dial (capability `pairing`)
+  "pairing": true,  // only during a pairing window (capability `pairing`)
   "board": "<pkg/board id, or unknown>",
   "kernel_arch": "<uname -m, e.g. aarch64>",
   "kernel_release": "<uname -r, e.g. 3.18.19+>"
@@ -99,7 +99,7 @@ plus one conditional (`capabilities()` in `control.go`):
 | `output_chain` | always | Can run the speaker output chain (EQ → bass guard → limiter) itself, at the ALSA write, from the config keys `eqBands`, `eqLoudness`, `limiter*`, `bassGuard*`. Runs it only when the controller's `ack` carries `output_chain` too, which is the controller saying it has stopped processing: either half alone keeps the old path, so audio is never shaped twice |
 | `wake_cue` | always | Can generate its own wake sound, at `wakeSoundLevel`, independent of volume. Plays it when `wakeSound` is on and a wake has WON: on `listen_ack` for a private-listening session, or on `play_cue` otherwise — never at the crossing, so a ceded wake is silent |
 | `ambient_light` | only if the sensor is actually readable (`als.Present()`) | Reports light readings |
-| `pairing` | always | Asks to pair itself when its owner holds the action button 5 s: a `pair_request` on a live link, or, when wss cannot connect, plain dials carrying `"pairing": true` for the 2-minute window. Without it the controller offers the admin a **Pair** action instead, since the device cannot ask |
+| `pairing` | always | Asks to pair itself when its owner holds the action button 5 s: a `pair_request` every 5 s on a live link, or otherwise registers with `"pairing": true` on every dial for the 2-minute window, falling back to plain (without its token) when wss cannot connect. The window closes early once new credentials land, so the redial they cause does not ask again. Without it the controller offers the admin a **Pair** action instead, since the device cannot ask |
 
 **`aec_hw_ref` is a capability with a runtime companion, and both are needed.**
 The capability says the firmware knows *how* to use a hardware echo reference.
@@ -310,10 +310,13 @@ ignored, which is the correct degrade.
 - All three planes carry an `X-EM-Token` header, read from the device's
   credential file on **every dial** (`device/internal/client/tlscreds.go`), so
   a pushed credential takes effect on the next reconnect without a restart.
-- TLS is selected when the device has a CA on disk **and** the controller
-  advertises a `tls_port` mDNS TXT record → dial `wss://`. CA present but no TXT
-  → plain with a warning (deliberate rollout fallback). The server identity is
-  the fixed DNS SAN `echomuse-controller`, never an IP.
+  A device holding a CA **never** sends its token on a plain dial.
+- A device with a CA on disk dials **only** `wss://`, at the `tls_port` from
+  mDNS TXT or its endpoint file; with no `tls_port` it does not dial at all.
+  The one exception is a pairing window (`pairing`, below): wss first, then
+  plain without the token, both registering with `"pairing": true`. A device
+  with no CA dials plain. The server identity is the fixed DNS SAN
+  `echomuse-controller`, never an IP.
 - Certs are backdated/long-lived **and** the device clamps its verification
   clock to the firmware build time, because an Echo boots with a bogus clock
   pre-NTP and a device that cannot connect cannot fix its clock. A new board

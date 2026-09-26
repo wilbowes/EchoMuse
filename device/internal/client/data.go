@@ -751,7 +751,7 @@ func (d *DataClient) Run(ctx context.Context) error {
 func (d *DataClient) connect(ctx context.Context, baseURL string) error {
 	creds := loadLinkCreds()
 	dialer := creds.dialer()
-	conn, _, err := dialer.DialContext(ctx, baseURL+"/data", creds.header())
+	conn, _, err := dialer.DialContext(ctx, baseURL+"/data", creds.headerFor(baseURL))
 	if err != nil {
 		return err
 	}

@@ -14,8 +14,8 @@ import (
 )
 
 // Device-link TLS credentials — pushed by the controller (provisioning
-// wizard over adb, or the dashboard "Secure link" action over the shell
-// plane). Paths are coupled with controller/em_api.py DEVICE_TLS_DIR.
+// wizard over adb, or an admin's approval over the shell plane; see
+// pairing.go). Paths are coupled with controller/em_api.py DEVICE_TLS_DIR.
 //
 //	ca.pem — the controller CA the device pins (chain verification uses
 //	         ONLY this pool; system roots are irrelevant)
@@ -71,11 +71,13 @@ func loadLinkCreds() linkCreds {
 	return creds
 }
 
-// header returns the WS handshake headers for a dial: the link token if
-// one is installed, empty otherwise.
-func (c linkCreds) header() http.Header {
+// headerFor returns the WS handshake headers for a dial to baseURL: the link
+// token if one is installed, except on a plain dial by a device that holds a
+// CA. Such a device dials plain only to ask to pair (pairing.go), and sending
+// the token there would hand it to whatever answered.
+func (c linkCreds) headerFor(baseURL string) http.Header {
 	h := http.Header{}
-	if c.token != "" {
+	if c.token != "" && !(c.tlsConf != nil && strings.HasPrefix(baseURL, "ws://")) {
 		h.Set("X-EM-Token", c.token)
 	}
 	return h
