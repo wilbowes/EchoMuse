@@ -303,8 +303,13 @@ func main() {
 		}
 	}()
 
-	// A 5 s hold of the action button asks to pair (client/pairing.go).
-	pairHold := client.NewPairHold(controlClient.StartPairing)
+	// A 5 s hold of the action button asks to pair (client/pairing.go). The
+	// white flash says the hold registered: on a connected device nothing
+	// else changes on the ring until an admin approves.
+	pairHold := client.NewPairHold(func() {
+		s.Flash(150, 150, 150, 400*time.Millisecond)
+		controlClient.StartPairing()
+	})
 
 	// Button events — forward to controller via control plane
 	_, err = buttonController.SubscribeToButton(func(event pkgbuttons.ButtonClickEvent) {

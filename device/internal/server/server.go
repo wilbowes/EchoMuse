@@ -55,6 +55,10 @@ type Server struct {
 	// compound decision with anything else it guards. See SetLinkDown.
 	linkDown atomic.Bool
 
+	// flash holds the ring for a one-shot acknowledgement (flash.go).
+	flash   flashState
+	flashMu sync.Mutex
+
 	// audioLevel holds the live speaker RMS as float64 bits — written by
 	// the speaker's ALSA pump via SetAudioLevel, read by the meter anim.
 	audioLevel atomic.Uint64
@@ -339,8 +343,9 @@ func (s *Server) SetDirectionLEDs(angleDeg float64) {
 		return
 	}
 	// Same paint suppressions as SetLEDs: the volume arc owns the ring for
-	// its display window, and the mute ring is device-sovereign.
-	if s.volume.DisplayActive() || s.mute.IsMuted() {
+	// its display window, the mute ring is device-sovereign, and a flash
+	// holds it briefly.
+	if s.volume.DisplayActive() || s.mute.IsMuted() || s.flashActive() {
 		return
 	}
 
@@ -447,7 +452,7 @@ func (s *Server) SetLEDs(leds []led.Led, listeningHint *bool) {
 	}
 	s.listeningLEDs = listeningRing
 	s.baseLEDsMu.Unlock()
-	if suppressPaint(s.volume.DisplayActive(), s.mute.IsMuted(), s.LinkDown()) {
+	if s.flashActive() || suppressPaint(s.volume.DisplayActive(), s.mute.IsMuted(), s.LinkDown()) {
 		return
 	}
 	s.paintBaseLEDs()
