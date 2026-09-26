@@ -257,6 +257,12 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 	targetIdx := 0
 	targetAttempts := 0
 	passNum := 0
+	// pending: the last dial reached a controller that holds this device
+	// for approval. The ring stays on the white pulse across the redial;
+	// the orange "disconnected" pulse at the top of each attempt used to cut
+	// in for a moment every retry, read as a red/orange flicker. A dial that
+	// actually fails shows orange from the failure branch below.
+	pending := false
 
 	for {
 		if ctx.Err() != nil {
@@ -309,7 +315,7 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 				targetIdx, targetAttempts = 0, 0
 			}
 
-			if targetIdx == 0 && targetAttempts == 0 && c.disconnectedCallback != nil {
+			if targetIdx == 0 && targetAttempts == 0 && !pending && c.disconnectedCallback != nil {
 				// Once per full pass, not once per target: otherwise the
 				// ring goes orange during every routine controller restart,
 				// which is one endpoint failing, not an outage.
@@ -336,7 +342,7 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 				}
 			}
 		} else {
-			if c.disconnectedCallback != nil {
+			if !pending && c.disconnectedCallback != nil {
 				c.disconnectedCallback()
 			}
 
@@ -391,6 +397,8 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 			err = dialErr
 		}
 
+		wasPending := pending
+		pending = err == errPending
 		switch err {
 		case errPending:
 			// A pairing request is repeated by redialling, and the controller
@@ -458,11 +466,12 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 			if err != nil {
 				log.Printf("[control] Connection lost: %v — reconnecting in %s", err, wait)
 			}
-			if !usingStatic && c.disconnectedCallback != nil {
+			if (!usingStatic || wasPending) && c.disconnectedCallback != nil {
 				// The static path already showed this once at the top of
 				// the pass; re-showing it here on every single target would
 				// reintroduce the per-endpoint flashing the pass-level check
-				// above exists to avoid.
+				// above exists to avoid. Except straight after pending,
+				// which skipped the pass-level one.
 				c.disconnectedCallback()
 			}
 			select {
