@@ -59,6 +59,7 @@ import em_ble_proxy
 import em_broadcast
 import em_config_sections as sections_mod
 import em_config_types
+import em_tasks
 import em_console_pw
 import em_tcp
 import em_labels
@@ -1175,7 +1176,7 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
     if pending_model:
         # The device is still on its previous wake word, still scoring
         # locally, still answering. Install, then switch.
-        asyncio.create_task(_install_then_switch(device_id, pending_model))
+        em_tasks.spawn(_install_then_switch(device_id, pending_model))
     if "owwSpeexNs" in effective:
         live.oww_speex_ns = bool(effective["owwSpeexNs"])
     if "nsAsr" in effective:
@@ -1599,7 +1600,7 @@ async def _post_device_update(request: web.Request) -> web.Response:
 
     if upload_token:
         _pending_uploads.pop(upload_token, None)
-    asyncio.create_task(_run_update(device_id, release, binary_override))
+    em_tasks.spawn(_run_update(device_id, release, binary_override))
     return _ok({"status": "started", "version": release["version"]}, status=202)
 
 
@@ -1629,7 +1630,7 @@ async def _post_device_rollback(request: web.Request) -> web.Response:
     if device_id in _updates_in_progress or device_id in _updates_queued:
         return _error("update_in_progress", "An update is already in progress", 409)
 
-    asyncio.create_task(_run_rollback(device_id, row["firmware_previous"]))
+    em_tasks.spawn(_run_rollback(device_id, row["firmware_previous"]))
     return _ok({"status": "started", "rolling_back_to": row["firmware_previous"]}, status=202)
 
 
@@ -1668,7 +1669,7 @@ async def _post_upload_binary(request: web.Request) -> web.Response:
         async def _expire():
             await asyncio.sleep(600)
             _pending_uploads.pop(token, None)
-        asyncio.create_task(_expire())
+        em_tasks.spawn(_expire())
 
         # The version rides back so the dashboard can say what was uploaded,
         # and warn against a device already running it BEFORE the operator
@@ -3116,7 +3117,7 @@ async def _post_deploy_all(request: web.Request) -> web.Response:
             skipped.append({"device_id": device_id, "reason": "update_in_progress"})
             continue
 
-        asyncio.create_task(_run_update(device_id, release, binary_override))
+        em_tasks.spawn(_run_update(device_id, release, binary_override))
         started.append(device_id)
 
     return _ok({
@@ -3351,8 +3352,7 @@ async def _post_secure_link(request: web.Request) -> web.Response:
     if live is None:
         return _error("device_offline", f"Device not connected: {device_id}", 409)
 
-    task = asyncio.create_task(_run_secure_link(device_id))
-    task.add_done_callback(_log_task_exception_api)
+    em_tasks.spawn(_run_secure_link(device_id))
     return _ok({"started": True})
 
 
@@ -3394,17 +3394,8 @@ async def _post_debloat(request: web.Request) -> web.Response:
     # acquire and release the session in their own finally, which is why
     # _sync_start_script does not either. Releasing it from out here could close
     # a session a concurrent caller had opened.
-    task = asyncio.create_task(_sync_debloat(live, device_id))
-    task.add_done_callback(_log_task_exception_api)
+    em_tasks.spawn(_sync_debloat(live, device_id))
     return _ok({"started": True})
-
-
-def _log_task_exception_api(task: asyncio.Task) -> None:
-    if task.cancelled():
-        return
-    exc = task.exception()
-    if exc is not None:
-        log.error(f"[api] Unhandled exception in background task: {exc}", exc_info=exc)
 
 
 async def _run_secure_link(device_id: str) -> None:
@@ -3745,8 +3736,7 @@ async def _post_global_config(request: web.Request) -> web.Response:
         # which must not be skipped by a reconcile stamp from before the change.
         _last_reconcile.clear()
         for device_id, live in list(_devices.items()):
-            task = asyncio.create_task(_push_controller_endpoints(live, device_id))
-            task.add_done_callback(_log_task_exception_api)
+            em_tasks.spawn(_push_controller_endpoints(live, device_id))
 
     # Reconcile BT proxies for every approved device — offline ones included
     # (proxy mDNS/port lifecycle is independent of the device connection,
@@ -5779,7 +5769,7 @@ async def notify_device_connected(device_id: str, version: str | None = None) ->
             except Exception as e:
                 log.warning(f"[api] supervisor log fetch failed for {_id}: {e}")
 
-        asyncio.create_task(_collect_soon())
+        em_tasks.spawn(_collect_soon())
 
 
 async def notify_device_disconnected(device_id: str) -> None:

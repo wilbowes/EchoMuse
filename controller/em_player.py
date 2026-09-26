@@ -222,47 +222,51 @@ def reported_state(device_id: str) -> str:
 
 async def play(device_id: str, url: str) -> None:
     s = _session(device_id)
-    if s.owned_by_turn:
-        # The common collision: "play some jazz" runs the intent BEFORE Home
-        # Assistant generates the spoken reply, so this can land while the TTS
-        # is still coming and put music on the same 0x02 plane as the response.
-        s.pending = ("play", url)
-        await s.push_intent(PLAYING)
-        return
-    await s.play(url)
+    async with s._command_lock:
+        if s.owned_by_turn:
+            # The common collision: "play some jazz" runs the intent BEFORE Home
+            # Assistant generates the spoken reply, so this can land while the TTS
+            # is still coming and put music on the same 0x02 plane as the response.
+            s.pending = ("play", url)
+            await s.push_intent(PLAYING)
+            return
+        await s.play(url)
 
 
 async def pause(device_id: str) -> None:
     """Pause from the USER (HA / Music Assistant / the media_player entity)."""
     s = _session(device_id)
-    if s.owned_by_turn:
-        # Already paused on the wire by interrupt(); record that the user now
-        # OWNS the paused state so the turn's end does not undo it.
-        s.pending = ("pause", None)
-        # Push it: until now HA was told PLAYING (see reported_state), because
-        # our own interrupt-pause must not read as the user's. Now that they
-        # have asked, the entity should say so without waiting for turn end.
-        await s.push_intent(PAUSED)
-        return
-    await s.pause()
+    async with s._command_lock:
+        if s.owned_by_turn:
+            # Already paused on the wire by interrupt(); record that the user now
+            # OWNS the paused state so the turn's end does not undo it.
+            s.pending = ("pause", None)
+            # Push it: until now HA was told PLAYING (see reported_state), because
+            # our own interrupt-pause must not read as the user's. Now that they
+            # have asked, the entity should say so without waiting for turn end.
+            await s.push_intent(PAUSED)
+            return
+        await s.pause()
 
 
 async def resume(device_id: str) -> None:
     s = _session(device_id)
-    if s.owned_by_turn:
-        s.pending = ("resume", None)
-        await s.push_intent(PLAYING)
-        return
-    await s.resume()
+    async with s._command_lock:
+        if s.owned_by_turn:
+            s.pending = ("resume", None)
+            await s.push_intent(PLAYING)
+            return
+        await s.resume()
 
 
 async def stop(device_id: str) -> None:
     s = _session(device_id)
-    if s.owned_by_turn:
-        s.pending = ("stop", None)
-        await s.push_intent(IDLE)
-        return
-    await s.stop()
+    async with s._command_lock:
+        if s.owned_by_turn:
+            s.pending = ("stop", None)
+            await s.push_intent(IDLE)
+            return
+        await s.stop()
 
 
 async def interrupt(device_id: str) -> None:
@@ -406,6 +410,14 @@ class MediaSession:
         self.device_id = device_id
         self.state = IDLE
         self.url: str | None = None
+        # Serialises the user's commands (play/pause/resume/stop below). Each
+        # arrives as its own task and yields partway — play() awaits stop(),
+        # which sends a flush before tearing the feed down — so without it a
+        # pause landing in that window was lost and the new track played.
+        # asyncio.Lock wakes waiters in order, so commands apply as sent.
+        # interrupt()/resume_interrupted() stay outside it: their bookkeeping
+        # is synchronous, and a wake must not queue behind a slow flush.
+        self._command_lock = asyncio.Lock()
         # A voice turn or announcement owns the speaker right now, so
         # playback commands are recorded rather than put on the wire.
         self.owned_by_turn = False

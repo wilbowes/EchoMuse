@@ -25,7 +25,7 @@ def test_teardown_is_deferred_not_immediate():
     src = (CONTROLLER / "em_controller.py").read_text()
     start = src.index('log.info(f"[control] Device disconnected')
     seg = src[start:start + 1200]
-    task_call = seg.index("asyncio.create_task(")
+    task_call = seg.index("em_tasks.spawn(")
     sync_path = seg[:task_call]
     for call in ("esphome.device_disconnected",
                  "em_ble_proxy.device_disconnected",
