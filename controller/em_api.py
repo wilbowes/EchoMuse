@@ -56,7 +56,9 @@ import websockets
 import em_db as db
 import em_auth as auth
 import em_ble_proxy
+import em_broadcast
 import em_config_sections as sections_mod
+import em_config_types
 import em_console_pw
 import em_tcp
 import em_labels
@@ -1129,6 +1131,21 @@ async def _post_approve(request: web.Request) -> web.Response:
     return _ok({"device_id": device_id, "label": label})
 
 
+def _well_typed(device_id: str, config: dict) -> dict:
+    """
+    `config` without stored values of the wrong type, for a push to a device.
+
+    One mistyped field fails the device's whole decode, and the conversions in
+    _apply_live_config raise on it; a dropped key reads as absent at both ends.
+    Every full-config push in this module goes through here.
+    """
+    config, bad = em_config_types.drop_invalid(config)
+    if bad:
+        log.warning(f"[api] {device_id}: stored config has values of the wrong "
+                    f"type, not sent: {', '.join(bad)}")
+    return config
+
+
 async def _apply_live_config(device_id: str, live, effective: dict) -> None:
     """
     Push an effective config to a connected device and refresh the
@@ -1144,6 +1161,7 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
     One key is held back: a NEW `owwModel` is not sent to a device that scores
     locally until the classifier is actually on it — see _hold_back_oww_model.
     """
+    effective = _well_typed(device_id, effective)
     effective, pending_model = _hold_back_oww_model(live, effective)
     await live.send_control({"type": "config", **effective})
     if "owwThreshold" in effective:
@@ -1322,6 +1340,14 @@ async def _post_device_config(request: web.Request) -> web.Response:
     # config untouched, not half-applied with the bad key rejected later.
     if (err := _validate_console_timeout(body)):
         return _error("bad_console_timeout", err, 400)
+    # Judged against what the device has in force now, so re-sending a value
+    # it already has is never refused (em_config_types.problems).
+    before = await loop.run_in_executor(
+        None, db.get_effective_device_config, device_id
+    )
+    if (bad := em_config_types.problems(
+            {k: v for k, v in body.items() if k in in_scope}, before)):
+        return _error("bad_config_value", "; ".join(bad), 400)
 
     # Apply scoping first: set_device_config_sections prunes the values of
     # any section no longer overridden, so what follows writes into an
@@ -3680,6 +3706,8 @@ async def _post_global_config(request: web.Request) -> web.Response:
     _resolve_console_pw(config, stored)
     if (err := _validate_console_timeout(config)):
         return _error("bad_console_timeout", err, 400)
+    if (bad := em_config_types.problems(config, stored)):
+        return _error("bad_config_value", "; ".join(bad), 400)
     endpoints_before = stored.get("controllerEndpoints") or []
     if "controllerEndpoints" in config:
         eps, err = em_endpoints.normalise(
@@ -3761,9 +3789,11 @@ async def _post_change_password(request: web.Request) -> web.Response:
         return _error("invalid_credentials", "Current password is incorrect", 401)
 
     new_hash = await auth.hash_password_async(new_password)
-    await loop.run_in_executor(None, db.update_user_password, user["id"], new_hash)
+    revoked = await loop.run_in_executor(
+        None, lambda: db.update_user_password(
+            user["id"], new_hash, keep_session=user["token"]))
     log.info(f"[api] Password changed for user: {user['username']}")
-    return _ok({"ok": True})
+    return _ok({"ok": True, "sessions_ended": revoked})
 
 
 # ─── Live events WebSocket ────────────────────────────────────────────────────
@@ -3818,14 +3848,7 @@ async def _push_event(event: dict) -> None:
     """
     if not _event_clients:
         return
-    payload = json.dumps(event)
-    dead = set()
-    for ws in _event_clients:
-        try:
-            await ws.send_str(payload)
-        except Exception:
-            dead.add(ws)
-    _event_clients.difference_update(dead)
+    await em_broadcast.broadcast(_event_clients, json.dumps(event))
 
 
 async def _push_log_event(
@@ -4148,6 +4171,7 @@ async def _fetch_controller_release(force: bool = False) -> Optional[dict]:
         return _controller_cache or None
 
 
+@auth.require_auth
 async def _get_controller_release(request: web.Request) -> web.Response:
     """GET /api/releases/controller"""
     data = await _fetch_controller_release()
@@ -4327,7 +4351,7 @@ async def _install_then_switch(device_id: str, model: str) -> None:
                  f"— dropping the switch to {model}")
         return
 
-    await live.send_control({"type": "config", **effective})
+    await live.send_control({"type": "config", **_well_typed(device_id, effective)})
     live.oww_model = model
     import em_esphome
     await em_esphome.update_oww_model(device_id, model)
@@ -4597,7 +4621,7 @@ async def reconcile_oww_assets(device_id: str, live) -> None:
     if action == "deaf":
         # The device builds its scorer from the config push, so it needs telling
         # the model is now there — same mechanism _install_then_switch relies on.
-        await live.send_control({"type": "config", **effective})
+        await live.send_control({"type": "config", **_well_typed(device_id, effective)})
         await _push_log_event(
             device_id, "info", "controller",
             f"Wake word model {missing} installed — listening for its wake word again"
@@ -4723,6 +4747,7 @@ async def _sync_oww_assets_locked(live, device_id: str, progress=None) -> dict:
     return {"ok": True, "pushed": pushed, "pruned": plan.prune, "problems": problems}
 
 
+@auth.require_auth
 async def _get_oww_assets(request: web.Request) -> web.Response:
     """GET /api/devices/{id}/oww_assets — what is installed, and what is needed."""
     device_id = request.match_info["id"]

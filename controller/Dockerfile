@@ -115,7 +115,9 @@ COPY em_wsclose.py .
 COPY em_rttlog.py .
 COPY em_esphome.py .
 COPY em_ble_health.py .
+COPY em_config_types.py .
 COPY em_ble_proxy.py .
+COPY em_broadcast.py .
 COPY em_oww_assets.py  ./
 COPY em_oww_models.py .
 COPY em_oww_metadata.py .

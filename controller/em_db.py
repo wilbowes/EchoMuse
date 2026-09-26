@@ -2796,9 +2796,15 @@ def set_user_role(user_id: int, role: str) -> None:
         conn.execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
 
 
-def update_user_password(user_id: int, new_hash: str) -> None:
+def update_user_password(user_id: int, new_hash: str, *,
+                         keep_session: Optional[str]) -> int:
     """
-    Update the password hash for a user.
+    Update the password hash for a user and end their other sessions.
+
+    A password change is how someone locks out a session they did not start,
+    so every session but `keep_session` (the one making the change) is
+    deleted in the same transaction. Required rather than defaulted so a new
+    caller has to say which session survives. Returns the number revoked.
 
     new_hash must already be bcrypt-hashed — this function does not hash
     passwords itself. Raises ValueError if the user is not found.
@@ -2810,7 +2816,13 @@ def update_user_password(user_id: int, new_hash: str) -> None:
         )
         if cur.rowcount == 0:
             raise ValueError(f"User not found: {user_id}")
-    log.info(f"[db] Password updated for user id={user_id}")
+        revoked = conn.execute(
+            "DELETE FROM sessions WHERE user_id = ? AND token IS NOT ?",
+            (user_id, keep_session),
+        ).rowcount
+    log.info(f"[db] Password updated for user id={user_id}, "
+             f"{revoked} other session(s) ended")
+    return revoked
 
 
 def get_all_users() -> list[sqlite3.Row]:
