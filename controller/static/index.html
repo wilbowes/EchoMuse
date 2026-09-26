@@ -363,9 +363,13 @@
     const DIM   = '#3a4a30';
     const RED   = '#c04040';
 
+    // textContent, never innerHTML: `text` includes server error strings.
     function setLcd(text, color) {
-      lcd.innerHTML =
-        `<span style="color:${color};text-shadow:0 0 10px ${color}44">${text}</span>`;
+      const span = document.createElement('span');
+      span.style.color = color;
+      span.style.textShadow = `0 0 10px ${color}44`;
+      span.textContent = text;
+      lcd.replaceChildren(span);
     }
 
     function setRing(color) { ring.setAttribute('stroke', color); }

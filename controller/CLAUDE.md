@@ -1102,6 +1102,23 @@ the only thing that could have carried them.
 deliberate exemption, because it is device state and a later push must not
 stomp a volume changed by hand.
 
+**Every config value has a JSON type, and `em_config_types.KINDS` is it.**
+Values used to be stored exactly as the API received them. The device decodes
+the push into `ConfigMessage` and applies it only if `json.Unmarshal` returns
+no error, so one mistyped field — `"0.5"`, `30.0` for an `int`, `NaN` —
+dropped the WHOLE push silently (measured against Go's decoder). At
+registration `float("abc")` raised after the device was added, so it
+redialled into the same failure for good; and `bool("false")` is True, which
+for `saveUtterances` means recording. Both config POSTs now refuse a value of
+the wrong type with `bad_config_value`, judging only values the write CHANGES
+so a read-modify-write carrying a value stored before the check still saves.
+Every full-config push drops stored bad values first (`drop_invalid` at
+registration, `_well_typed` for the three pushes in `em_api`), and a dropped
+key reads as absent at both ends. `tests/test_config_types.py` holds `KINDS`
+against `config.go`, makes every `DEFAULT_DEVICE_CONFIG` key either listed or
+named as read defensively elsewhere, and fails if a push skips the filter —
+so **a new config key needs its type added there**.
+
 ## Persistent activity stats
 
 Every voice turn is persisted to SQLite at completion (`turns` table, `db.insert_turn` from `em_esphome`): trigger, wake model/score/threshold, room noise floor at detection, outcome, STT text, stage latencies, and playback underruns.

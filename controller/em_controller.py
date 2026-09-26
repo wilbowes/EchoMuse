@@ -79,6 +79,7 @@ import em_api as api
 import em_pki
 import em_hostip
 import em_linkauth
+import em_config_types
 import em_pacing
 import em_platform
 import em_tcp
@@ -4136,6 +4137,12 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         config = await loop.run_in_executor(
             None, db.get_effective_device_config, device_id
         )
+        # A stored value of the wrong type fails the device's whole decode and
+        # the conversions below; dropped, it reads as absent at both ends.
+        config, bad_keys = em_config_types.drop_invalid(config)
+        if bad_keys:
+            log.warning(f"[control] {device_id}: stored config has values of "
+                        f"the wrong type, not sent: {', '.join(bad_keys)}")
         await device.send_control({"type": "config", **config})
         device.oww_threshold = float(config.get("owwThreshold", OWW_THRESHOLD))
         device.oww_model     = config.get("owwModel", f"{OWW_MODEL}_v0.1")

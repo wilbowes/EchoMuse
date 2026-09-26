@@ -22,6 +22,24 @@ func withStateFile(t *testing.T, content string) {
 	t.Cleanup(func() { statePath = old })
 }
 
+// startWatch runs Watch and returns a channel closed when it has returned. A
+// cleanup cancels it and waits, and runs before withStateFile's (cleanups are
+// LIFO), so Watch can never read statePath while it is being restored.
+func startWatch(t *testing.T, onChange func(bool)) (done <-chan struct{}) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := make(chan struct{})
+	go func() {
+		defer close(ch)
+		Watch(ctx, onChange)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-ch
+	})
+	return ch
+}
+
 func TestStateValues(t *testing.T) {
 	// 0 none, 1 headset (with mic), 2 headphone — the three accdet reports.
 	// Both 1 and 2 are "something is plugged in" as far as the speaker amp is
@@ -95,9 +113,8 @@ func TestWatchReportsTheStateItStartsIn(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			withStateFile(t, tc.content)
 
-			ctx, cancel := context.WithCancel(context.Background())
 			got := make(chan bool, 1)
-			go Watch(ctx, func(inserted bool) {
+			startWatch(t, func(inserted bool) {
 				select {
 				case got <- inserted:
 				default:
@@ -112,7 +129,6 @@ func TestWatchReportsTheStateItStartsIn(t *testing.T) {
 			case <-time.After(2 * time.Second):
 				t.Error("Watch never reported its initial state")
 			}
-			cancel()
 		})
 	}
 }
@@ -124,14 +140,19 @@ func TestWatchDispatchesNothingWithoutADetectSwitch(t *testing.T) {
 	withStateFile(t, "0")
 	statePath = filepath.Join(t.TempDir(), "absent")
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	called := make(chan bool, 1)
-	go Watch(ctx, func(inserted bool) { called <- inserted })
+	done := startWatch(t, func(inserted bool) { called <- inserted })
 
+	// With no switch Watch returns at once, so wait for that rather than for
+	// a timeout that can only prove nothing happened yet.
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Watch kept running on a device with no detect switch")
+	}
 	select {
 	case <-called:
 		t.Error("dispatched a jack position on a device with no detect switch")
-	case <-time.After(300 * time.Millisecond):
+	default:
 	}
 }

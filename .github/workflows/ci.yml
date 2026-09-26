@@ -117,6 +117,7 @@ jobs:
           node controller/tests/kernel_label.test.mjs
           node controller/tests/wifi_ssid.test.mjs
           node controller/tests/wake_sensitivity.test.mjs
+          node controller/tests/login_lcd.test.mjs
       - name: Run forge console tests
         run: node oww_forge/tests/console_log.test.mjs
 
@@ -135,9 +136,12 @@ jobs:
       # (device builds pass -tags server) — listing cmd on a host platform
       # fails package setup. Wildcards skip tag-excluded packages, so
       # internal/... + pkg/... covers every host-testable package.
+      # -race: the firmware is goroutines sharing state (mic fan-out, the
+      # listen gate, the speaker pump), and a race there is silent until it
+      # is audible. The first run found one, in a test (jack_test.go).
       - name: Run go test
         working-directory: device
-        run: go test ./internal/... ./pkg/...
+        run: go test -race ./internal/... ./pkg/...
 
   python-deps-audit:
     name: Python dependency audit
