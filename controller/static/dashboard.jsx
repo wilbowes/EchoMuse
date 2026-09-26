@@ -10378,7 +10378,9 @@ function App() {
 
   const online   = devices.filter(d => d.connected).length;
   const approved = devices.filter(d => d.approved);
-  const pending  = devices.filter(d => !d.approved);
+  // Connected at least once: a row the wizard made for a device that has not
+  // yet dialled in is not asking for anything (#453).
+  const pending  = devices.filter(d => !d.approved && d.last_seen != null);
   const updates  = approved.filter(d => d.firmware_ver && release?.version && d.firmware_ver !== release.version).length;
   const active   = approved.filter(d => d.speaking || d.listening || d.thinking).length;
 

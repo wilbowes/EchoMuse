@@ -1425,7 +1425,8 @@ def get_all_devices() -> list[sqlite3.Row]:
 def get_pending_devices() -> list[sqlite3.Row]:
     """Return devices that have connected but not yet been approved."""
     return _q(
-        "SELECT * FROM devices WHERE approved = 0 ORDER BY first_seen ASC"
+        "SELECT * FROM devices WHERE approved = 0 AND last_seen IS NOT NULL "
+        "ORDER BY first_seen ASC"
     )
 
 
@@ -1491,18 +1492,21 @@ def upsert_device_seen(
     """
     Update ip, firmware_ver, and last_seen for a known device on each connection.
 
-    Does not touch approval status, label, or config.
+    Does not touch approval status, label, or config. Sets first_seen on the
+    first connection of a row the provisioning wizard created (#453).
     """
+    now = _now()
     with _tx() as conn:
         conn.execute(
             """
             UPDATE devices
             SET ip           = ?,
                 firmware_ver = ?,
+                first_seen   = COALESCE(first_seen, ?),
                 last_seen    = ?
             WHERE device_id = ?
             """,
-            (ip, version, _now(), device_id),
+            (ip, version, now, now, device_id),
         )
 
 
@@ -1550,16 +1554,18 @@ def ensure_device_token(device_id: str) -> str:
         return existing
 
     token = secrets.token_urlsafe(32)
-    now = _now()
     with _tx() as conn:
+        # first_seen/last_seen stay NULL: this device has never connected,
+        # and NULL is what tells a row the wizard made from one awaiting
+        # approval (#453). upsert_device_seen fills them on first contact.
         conn.execute(
             """
             INSERT INTO devices
                 (device_id, label, approved, ip, firmware_ver, first_seen, last_seen, config)
-            VALUES (?, NULL, 0, NULL, NULL, ?, ?, ?)
+            VALUES (?, NULL, 0, NULL, NULL, NULL, NULL, ?)
             ON CONFLICT(device_id) DO NOTHING
             """,
-            (device_id, now, now, json.dumps(DEFAULT_DEVICE_CONFIG)),
+            (device_id, json.dumps(DEFAULT_DEVICE_CONFIG)),
         )
         conn.execute(
             "UPDATE devices SET token = ? WHERE device_id = ?",
