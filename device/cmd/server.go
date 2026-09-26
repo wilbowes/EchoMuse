@@ -303,9 +303,24 @@ func main() {
 		}
 	}()
 
+	// A 5 s hold of the action button asks to pair (client/pairing.go). The
+	// white flash says the hold registered: on a connected device nothing
+	// else changes on the ring until an admin approves.
+	pairHold := client.NewPairHold(func() {
+		s.Flash(150, 150, 150, 400*time.Millisecond)
+		controlClient.StartPairing()
+	})
+
 	// Button events — forward to controller via control plane
 	_, err = buttonController.SubscribeToButton(func(event pkgbuttons.ButtonClickEvent) {
 		log.Printf("Button event: clickType=%d down=%v", event.ClickType, event.Down)
+		// Ahead of the link-down gate: a device that cannot connect is the one
+		// that most needs to ask. The release ending a pairing hold is not
+		// forwarded, so it does not also reach HA as a long press.
+		if event.ClickType == pkgbuttons.DotClick && pairHold.Event(event.Down) {
+			log.Println("[cmd] action button release ended a pairing hold — not forwarded")
+			return
+		}
 		// Inert without a controller session: the dot cannot start a turn
 		// with nothing to send it to, and the ring flash CancelVolumeDisplay
 		// produces would acknowledge a press that achieves nothing. Dropped
@@ -422,6 +437,25 @@ func main() {
 		// buttons do nothing.
 		s.SetLinkDown(true)
 		go pulseWhite(pulseCtx, s)
+	})
+
+	// Refused — a controller answered and would not accept this device's
+	// credentials. Orange like disconnected, since it is a link problem, but
+	// alternating odd and even LEDs, so it reads differently: this one the
+	// owner can fix, by holding the action button 5 s to pair.
+	controlClient.OnRefused(func() {
+		s.StopAnim()
+		if pulseKind == "refused" {
+			return
+		}
+		if pulseCancel != nil {
+			pulseCancel()
+		}
+		pulseCtx, cancel := context.WithCancel(ctx)
+		pulseCancel = cancel
+		pulseKind = "refused"
+		s.SetLinkDown(true)
+		go pulseRefused(pulseCtx, s)
 	})
 
 	// Connected — stop pulse, report current mute state, restore ring or hand
@@ -1414,6 +1448,39 @@ func pulseOrange(ctx context.Context, s *server.Server) {
 			t := pulsePhase(start, period)
 			br := minBr + (maxBr-minBr)*(0.5+0.5*math.Sin(2*math.Pi*t))
 			s.SetLEDs(allLEDs(uint8(255*br), uint8(40*br), 0), nil)
+		}
+	}
+}
+
+// pulseRefused — orange, odd and even LEDs crossfading against each other,
+// while a controller refuses this device's credentials. Same colour as
+// pulseOrange (a link problem), different shape (one the owner can fix).
+func pulseRefused(ctx context.Context, s *server.Server) {
+	const (
+		minBr  = 0.03
+		maxBr  = 0.6
+		period = 1200 * time.Millisecond
+		stepMs = 50
+	)
+	ticker := time.NewTicker(stepMs * time.Millisecond)
+	defer ticker.Stop()
+	start := time.Now()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			a := 0.5 + 0.5*math.Sin(2*math.Pi*pulsePhase(start, period))
+			leds := allLEDs(0, 0, 0)
+			for i := range leds {
+				w := a
+				if i%2 == 1 {
+					w = 1 - a
+				}
+				br := minBr + (maxBr-minBr)*w
+				leds[i].R, leds[i].G = uint8(255*br), uint8(40*br)
+			}
+			s.SetLEDs(leds, nil)
 		}
 	}
 }

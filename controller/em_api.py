@@ -35,6 +35,7 @@ import asyncio
 import hashlib
 import html as _html
 import json
+import secrets
 import logging
 import os
 import platform
@@ -68,6 +69,7 @@ import em_firmware
 import em_ingressauth
 import em_oww_assets
 import em_oww_models
+import em_pairing
 import em_pki
 import em_player
 import em_recordings
@@ -436,7 +438,7 @@ async def create_app() -> web.Application:
     app.router.add_post("/api/provision/diagnostics",     _post_provision_diagnostics)
     app.router.add_get("/api/provision/emos_init",     _get_provision_emos_init)
     app.router.add_post("/api/provision/emos_image",   _post_provision_emos_image)
-    app.router.add_post("/api/devices/{id}/secure_link",  _post_secure_link)
+    app.router.add_post("/api/devices/{id}/pair",         _post_pair)
     app.router.add_post("/api/devices/{id}/debloat",      _post_debloat)
 
     # Live events WebSocket
@@ -1063,6 +1065,9 @@ async def _delete_device(request: web.Request) -> web.Response:
     # right, so it must not inherit the deleted row's debounce and skip its
     # first reconcile — the bounce below has it redialling within seconds.
     forget_reconcile(device_id)
+    # A refusal belongs to the deleted row; the device comes back as pending.
+    clear_link_refused(device_id)
+    em_pairing.forget(device_id)
     # ...and the device is told to redial, or it never notices it was deleted.
     # Link auth is decided once, at register time, so a connected device keeps
     # running on the socket it already has: it vanishes from the dashboard and
@@ -1126,6 +1131,9 @@ async def _post_approve(request: web.Request) -> web.Response:
         return _error("already_approved", "Device is already approved", 409)
 
     await loop.run_in_executor(None, db.approve_device, device_id, label, config)
+    # Approval is the one human decision: it also issues link credentials when
+    # the device next connects without them (em_pairing).
+    em_pairing.approve(device_id)
     await _push_event({"type": "device_approved", "device_id": device_id,
                        "label": label})
     return _ok({"device_id": device_id, "label": label})
@@ -3334,26 +3342,36 @@ async def _get_provision_controller_endpoints(request: web.Request) -> web.Respo
 
 
 @auth.require_admin
-async def _post_secure_link(request: web.Request) -> web.Response:
+async def _post_pair(request: web.Request) -> web.Response:
     """
-    POST /api/devices/{id}/secure_link
+    POST /api/devices/{id}/pair — approve a pairing request. ADMIN ONLY.
 
-    Fleet path for already-provisioned devices: pushes ca.pem + token to
-    the device over the (still-plain) shell plane, then bounces the
-    control connection so the device redials — over wss, now that the CA
-    file exists. Requires the device to be connected.
+    Only answers a request the device made (its owner held the action button),
+    so a click cannot hand credentials to whatever happens to hold a device's
+    connection. A connected device is issued them now; one that could not
+    connect is issued them when it next dials within its window.
     """
     if _tls_dir is None:
         return _error("tls_unavailable",
                       "Device-link TLS is not active on this controller", 503)
     device_id = request.match_info["id"]
     live = _devices.get(device_id)
-    if live is None:
-        return _error("device_offline", f"Device not connected: {device_id}", 409)
-
-    task = asyncio.create_task(_run_secure_link(device_id))
-    task.add_done_callback(_log_task_exception_api)
-    return _ok({"started": True})
+    # Firmware without `pairing` cannot ask, so for a connected device whose
+    # link is plain the admin's click is the request. It goes away as devices
+    # update; firmware that CAN ask must, so the button on the device is
+    # always part of it there.
+    can_ask = live is None or getattr(live, "pairing_capable", False)
+    admin_started = (not can_ask) and not getattr(live, "secure", False)
+    if em_pairing.pending_request(device_id) is None and not admin_started:
+        return _error("no_pair_request",
+                      "This Echo has not asked to pair. Hold its action button "
+                      "for 5 seconds, then approve it here.", 409)
+    em_pairing.approve(device_id)
+    if live is not None:
+        task = asyncio.create_task(_issue_credentials(device_id))
+        task.add_done_callback(_log_task_exception_api)
+    log.info(f"[api] {request['user']['username']} approved pairing for {device_id}")
+    return _ok({"approved": True, "connected": live is not None})
 
 
 @auth.require_admin
@@ -3407,16 +3425,28 @@ def _log_task_exception_api(task: asyncio.Task) -> None:
         log.error(f"[api] Unhandled exception in background task: {exc}", exc_info=exc)
 
 
-async def _run_secure_link(device_id: str) -> None:
-    """Background task: install TLS credentials on a live device."""
+async def _issue_credentials(device_id: str) -> None:
+    """
+    Background task: give a live, approved device a fresh token and the CA.
+
+    Called only behind an admin approval (em_pairing): this writes the token
+    to whatever holds the device's connection, so it must never run for a
+    connection nobody vouched for. The token is ROTATED, not reused, so a token
+    that may have leaked before is dead the moment this runs, and the new one
+    starts unconfirmed.
+    """
     loop = asyncio.get_event_loop()
     live = _devices.get(device_id)
-    if live is None:
+    if live is None or _tls_dir is None:
         return
     try:
         await _push_log_event(device_id, "info", "controller",
-                              "Secure link: pushing TLS credentials")
-        token = await loop.run_in_executor(None, db.ensure_device_token, device_id)
+                              "Pairing: installing link credentials")
+        # Minted here and stored only once the device has it. The push rides
+        # the shell plane, which the device dials with its CURRENT token, so
+        # storing the new one first refused the push on any device that was
+        # connected over wss (found on 15LE, 2026-09-26).
+        token = secrets.token_urlsafe(32)
         ca    = em_pki.ca_pem(_tls_dir)
 
         await _shell_run(live, f"mkdir -p {DEVICE_TLS_DIR}")
@@ -3430,12 +3460,14 @@ async def _run_secure_link(device_id: str) -> None:
                 live, token.encode("ascii"), f"{DEVICE_TLS_DIR}/token", mode="600")
         if not ok:
             await _push_log_event(device_id, "error", "controller",
-                                  f"Secure link: credential transfer failed: {ok}")
+                                  f"Pairing: credential transfer failed: {ok}")
             return
 
+        await loop.run_in_executor(None, db.set_device_token, device_id, token)
+        em_pairing.done(device_id)
         await _push_log_event(
             device_id, "info", "controller",
-            "Secure link: credentials installed — bouncing connection to switch to wss")
+            "Pairing: credentials installed — reconnecting over TLS")
         # The Go client reloads credentials on every dial, so a reconnect
         # is enough to move to the TLS listener.
         try:
@@ -3443,9 +3475,9 @@ async def _run_secure_link(device_id: str) -> None:
         except Exception:
             pass
     except Exception as e:
-        log.exception(f"[api] Secure link failed for {device_id}: {e}")
+        log.exception(f"[api] Issuing credentials failed for {device_id}: {e}")
         await _push_log_event(device_id, "error", "controller",
-                              f"Secure link failed: {e}")
+                              f"Pairing failed: {e}")
 
 
 # ─── System ───────────────────────────────────────────────────────────────────
@@ -5787,6 +5819,15 @@ async def notify_device_disconnected(device_id: str) -> None:
     await _push_event({"type": "device_disconnected", "device_id": device_id})
 
 
+async def notify_pair_request(device_id: str, via: str) -> None:
+    """A device asked to pair; the dashboard offers Approve pairing."""
+    if em_pairing.request(device_id, via):
+        log.info(f"[api] {device_id} asked to pair ({via})")
+        await _push_log_event(device_id, "info", "controller",
+                              "Asked to pair — approve it in the dashboard")
+        await _push_event({"type": "device_pair_request", "device_id": device_id})
+
+
 async def notify_device_pending(device_id: str, ip: str) -> None:
     """Called by em_controller when an unapproved device attempts connection."""
     await _push_event({
@@ -5912,6 +5953,20 @@ def _row_sections(row) -> list:
         return []
 
 
+# device_id -> {"reason", "at"}: the last link refusal for a device on record,
+# until it next registers. In memory on purpose: a refused device retries every
+# few seconds, so a restarted controller has it back within one retry.
+_link_refusals: dict[str, dict] = {}
+
+
+def note_link_refused(device_id: str, reason: str) -> None:
+    _link_refusals[device_id] = {"reason": reason, "at": time.time()}
+
+
+def clear_link_refused(device_id: str) -> None:
+    _link_refusals.pop(device_id, None)
+
+
 def _merge_device(row) -> dict:
     """
     Merge a DB device row with live in-memory state.
@@ -5980,6 +6035,10 @@ def _merge_device(row) -> dict:
         # current control connection came in over the TLS listener (live).
         "linkTokenIssued":  bool(row["token"]) if "token" in row.keys() else False,
         "linkTls":          getattr(live, "secure", False) if live else False,
+        # Why the controller is turning this device away, while it is.
+        "linkRefused":      _link_refusals.get(device_id),
+        # The device's owner held its button and it is waiting for Approve.
+        "pairRequest":      em_pairing.pending_request(device_id),
         # Q4 fix (2026-07-05 review): near-miss counter — same lifecycle as
         # the rest of this "Live" section (resets on reconnect, since it
         # lives on the per-connection Device object, not the DB row).
@@ -5996,6 +6055,9 @@ def _merge_device(row) -> dict:
         # without being able to act on it, and offering those "on" produces a
         # device that never answers.
         "owwTriggerCapable": getattr(live, "oww_trigger_capable", False) if live else False,
+        # Firmware that asks to pair itself (the owner holds the button); for
+        # older firmware on a plain link the dashboard offers Pair instead.
+        "pairingCapable":   getattr(live, "pairing_capable", False) if live else False,
         # What this Echo is actually doing with its microphone
         # (docs/listening.md, em_listen.resolve) — the one source for every
         # privacy statement the dashboard makes. `streams` is true, false, or

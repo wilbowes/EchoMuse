@@ -1471,7 +1471,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   const [renameSaving, setRenameSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [securing, setSecuring] = useState(false);
+  const [pairing, setPairing] = useState(false);
   const [debloating, setDebloating] = useState(false);
   const [assets, setAssets] = useState(null);
   const [installing, setInstalling] = useState(false);
@@ -1584,16 +1584,15 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
     setSaving(false);
   }
 
-  async function doSecureLink() {
-    // Pushes CA + link token over the shell plane, then the controller
-    // bounces the connection; the device redials over wss. The "Link" row
-    // flips to wss (TLS) on the next device-list refresh after reconnect.
-    setSecuring(true);
+  async function doPair() {
+    // Answers the device's own request (its owner held the action button).
+    // The controller issues a fresh token and the CA, and the device
+    // reconnects over wss; the row clears on the next refresh.
+    setPairing(true);
     try {
-      await API.post(`/api/devices/${device.device_id}/secure_link`, {});
-    } catch(e) { alert(e.error || 'Secure link failed'); }
-    // Leave the button disabled briefly — transfer + reconnect takes ~10s.
-    setTimeout(() => setSecuring(false), 15000);
+      await API.post(`/api/devices/${device.device_id}/pair`, {});
+    } catch(e) { alert(e.error || 'Pairing failed'); }
+    setTimeout(() => setPairing(false), 15000);
   }
 
   async function doDebloat() {
@@ -2058,17 +2057,32 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     {row('Volume', device.volume != null
                          ? `${Math.round(device.volume * 100)}%`
                          : (s?.volumePct != null ? `${s.volumePct}%` : '—'))}
-                    {row('Link', device.connected ? (device.linkTls ? 'wss (TLS)' : 'plain ws') : '—',
-                         device.connected ? (device.linkTls ? 'var(--ok)' : 'var(--warn)') : undefined)}
+                    {/* An offline Echo the controller is turning away says why,
+                        in the row that describes its link rather than a new one. */}
+                    {row('Link', device.connected
+                           ? (device.linkTls ? 'wss (TLS)' : 'plain ws')
+                           : device.linkRefused
+                             ? <span title="Remove this Echo and approve it again to pair it.">
+                                 {`Refused: ${device.linkRefused.reason}`}
+                               </span>
+                             : '—',
+                         device.connected ? (device.linkTls ? 'var(--ok)' : 'var(--warn)')
+                           : device.linkRefused ? 'var(--error)' : undefined)}
                     {row('Config', (() => {
                       const n = (device.config_sections ?? []).length;
                       const total = Object.keys(CONFIG_SECTIONS).length;
                       return n === 0 ? 'Fleet' : `Local override (${n} of ${total})`;
                     })())}
-                    {isAdmin && device.connected && !device.linkTls && (
-                      <div style={{ marginTop: 8 }}>
-                        <Pill small accent disabled={securing} onClick={doSecureLink}>
-                          {securing ? 'Securing…' : 'Secure link'}
+                    {isAdmin && (device.pairRequest
+                        || (device.connected && !device.linkTls && !device.pairingCapable)) && (
+                      <div style={{ marginTop: 8, display: 'grid', gap: 6, justifyItems: 'start' }}>
+                        <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+                          {device.pairRequest
+                            ? 'Wants to pair. Approve only if you just held its button.'
+                            : 'Not paired. Its firmware cannot ask, so pair it from here.'}
+                        </span>
+                        <Pill small accent disabled={pairing} onClick={doPair}>
+                          {pairing ? 'Pairing…' : device.pairRequest ? 'Approve pairing' : 'Pair'}
                         </Pill>
                       </div>
                     )}
@@ -2654,14 +2668,14 @@ function Card({ device, onClick }) {
             </div>
           )}
         </div>
-        {isPending && (
+        {(isPending || device.pairRequest) && (
           // Chrome sized this box off the DM Mono line box rather than the
           // glyphs, so 1px symmetric padding rendered visibly bottom-heavy
           // next to the 14px label. inline-flex + lineHeight:1 makes the
           // height the text's own; the trimmed paddingRight cancels the
           // trailing letter-space Chrome leaves after the final N, which is
           // what made the word look shunted left inside its own badge.
-          <div className="em-on-dark" style={{ display: 'inline-flex', alignItems: 'center', flexShrink: 0, marginLeft: 8, background: 'linear-gradient(160deg,var(--lcd-face),var(--lcd-deep))', border: '1px solid var(--lcd-line)', borderRadius: 3, padding: '3px 6px', paddingRight: 'calc(6px - 0.1em)', fontFamily: "'DM Mono',monospace", fontSize: 9, lineHeight: 1, color: 'var(--accent-lit)', letterSpacing: '0.1em' }}>PENDING</div>
+          <div className="em-on-dark" style={{ display: 'inline-flex', alignItems: 'center', flexShrink: 0, marginLeft: 8, background: 'linear-gradient(160deg,var(--lcd-face),var(--lcd-deep))', border: '1px solid var(--lcd-line)', borderRadius: 3, padding: '3px 6px', paddingRight: 'calc(6px - 0.1em)', fontFamily: "'DM Mono',monospace", fontSize: 9, lineHeight: 1, color: 'var(--accent-lit)', letterSpacing: '0.1em' }}>{isPending ? 'PENDING' : 'PAIRING'}</div>
         )}
       </div>
       <div style={{ display: 'flex', justifyContent: 'center', padding: '20px 0 12px' }}>
@@ -6404,7 +6418,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // serial (a pending device row is created if needed; approval flow is
     // unchanged). A 503 means this controller has no TLS listener
     // (cryptography package missing) — provision proceeds plain, and the
-    // dashboard "Secure link" action can retrofit credentials later.
+    // device can be paired later.
     addLog('Fetching device-link TLS credentials…');
     const serial = (await c.shell('getprop ro.serialno')).trim();
     if (!serial) {
@@ -10318,6 +10332,7 @@ function App() {
           setCtrlRelease(msg);
           break;
         case 'device_pending':
+        case 'device_pair_request':
           API.get('/api/devices').then(setDevices).catch(() => {});
           break;
         case 'device_deleted':

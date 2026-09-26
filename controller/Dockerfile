@@ -120,6 +120,7 @@ COPY em_ble_proxy.py .
 COPY em_broadcast.py .
 COPY em_oww_assets.py  ./
 COPY em_oww_models.py .
+COPY em_pairing.py .
 COPY em_oww_metadata.py .
 COPY em_oww_warmup.py .
 COPY em_arbiter.py .

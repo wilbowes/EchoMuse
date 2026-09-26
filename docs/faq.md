@@ -456,8 +456,10 @@ paths. It's plain JSON — [open it first](support-bundle.md) rather than take
 our word for it.
 
 ### Is the link between device and controller encrypted?
-It can be, and should be. Device → **Status** → press **Secure link** if the
-Link row reads `plain ws`. **The ESPHome connection to Home Assistant is
+Yes, once the Echo is paired. Approving a new Echo pairs it. An Echo already
+on `plain ws` (its Status tab Link row) pairs when you hold its action button
+for 5 seconds and then approve it in the dashboard; on firmware too old to ask,
+the Status tab offers **Pair** instead. **The ESPHome connection to Home Assistant is
 still plaintext**, including mic audio —
 [#341](https://github.com/wilbowes/EchoMuse/issues/341).
 

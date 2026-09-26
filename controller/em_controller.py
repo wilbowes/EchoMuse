@@ -58,6 +58,7 @@ Device WebSocket protocol:
 import asyncio
 import collections
 import contextlib
+import hmac
 import json
 import logging
 import os
@@ -79,6 +80,7 @@ import em_api as api
 import em_pki
 import em_hostip
 import em_linkauth
+import em_pairing
 import em_config_types
 import em_pacing
 import em_platform
@@ -984,6 +986,15 @@ class Device:
         drives whether a missing per-turn score is a real miss.
         """
         return "oww_shadow" in (self.capabilities or [])
+
+    @property
+    def pairing_capable(self) -> bool:
+        """
+        Whether this firmware asks to pair itself (action button held, then a
+        pair_request or a plain dial with `pairing`). Without it an admin
+        starts pairing from the dashboard, since the device cannot ask.
+        """
+        return "pairing" in (self.capabilities or [])
 
     @property
     def wake_cue_capable(self) -> bool:
@@ -3964,17 +3975,31 @@ async def _link_auth_ok(
         pass
 
     loop = asyncio.get_event_loop()
-    expected = await loop.run_in_executor(None, db.get_device_token, device_id)
+    expected, confirmed = await loop.run_in_executor(
+        None, db.get_device_link_auth, device_id)
 
     verdict = em_linkauth.decide(
         presented=presented,
         expected=expected,
+        confirmed=confirmed,
         secure=secure,
         require_tls=REQUIRE_DEVICE_TLS,
     )
     if not verdict.ok:
         log.warning(f"[{plane}] {device_id}: {verdict.reason} — rejecting")
+        # Only for a device with a row and a token, so ids nobody issued
+        # cannot grow the map. The dashboard shows it on the Link row.
+        if expected:
+            api.note_link_refused(device_id, verdict.reason)
         return False
+    if presented and expected and not confirmed:
+        # First sight of the device holding its token: from now on it must.
+        if await loop.run_in_executor(
+                None, db.confirm_device_token, device_id, presented):
+            log.info(f"[{plane}] {device_id}: link token confirmed — "
+                     f"a connection without it will be refused from now on")
+    if plane == "control":
+        api.clear_link_refused(device_id)
     if verdict.stale_token:
         # Allowed, but worth seeing in the log: almost always a device that was
         # deleted and has come back carrying the credential from its previous
@@ -3984,6 +4009,34 @@ async def _link_auth_ok(
             f"Treating as an unregistered device; it will need approval."
         )
     return True
+
+
+async def _presented_its_token(ws, device_id: str) -> bool:
+    """Whether this connection's X-EM-Token is the device's stored token."""
+    try:
+        presented = ws.request.headers.get("X-EM-Token")
+    except AttributeError:
+        return False
+    expected = await asyncio.get_event_loop().run_in_executor(
+        None, db.get_device_token, device_id)
+    return bool(presented and expected and hmac.compare_digest(presented, expected))
+
+
+def _peer_ip(ws) -> str | None:
+    try:
+        return ws.remote_address[0]
+    except (AttributeError, TypeError, IndexError):
+        return None
+
+
+def _not_from_control(device: "Device", ws, secure: bool) -> str | None:
+    """Why a /data or /shell connection is not the device's own, or None."""
+    return em_linkauth.follows_control(
+        control_peer=_peer_ip(device.control_ws),
+        control_secure=bool(getattr(device, "secure", False)),
+        peer=_peer_ip(ws),
+        secure=secure,
+    )
 
 
 async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
@@ -4005,15 +4058,35 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             return
 
         device_id    = msg["device_id"]
+        # Sent by firmware whose owner held the action button (em_pairing).
+        pairing      = bool(msg.get("pairing"))
+        loop         = asyncio.get_event_loop()
+
+        if pairing and em_pairing.approved(device_id):
+            # An admin approved this pairing. Rotate first: with no token on
+            # record the device is admitted by em_linkauth's existing rules,
+            # and _issue_credentials mints its new one below.
+            await loop.run_in_executor(None, db.clear_device_token, device_id)
+            log.info(f"[control] {device_id}: pairing approved — admitting to issue credentials")
 
         if not await _link_auth_ok(ws, device_id, secure, "control"):
+            # Said before closing, so the device can show "hold the button to
+            # pair" rather than "no controller" (firmware with `pairing`;
+            # older firmware ignores it). A pairing device is told pending.
+            reply = {"type": "refused"}
+            if pairing:
+                await api.notify_pair_request(device_id, "plain")
+                reply = {"type": "pending", "pairing": True}
+            try:
+                await ws.send(json.dumps(reply))
+            except Exception:
+                pass
             await ws.close()
             return
         ip           = msg.get("ip", str(remote[0]))
         version      = msg.get("version")
         capabilities = msg.get("capabilities", [])
 
-        loop         = asyncio.get_event_loop()
         approval_mode = db.get_config("device_approval", DEVICE_APPROVAL)
         row          = await loop.run_in_executor(None, db.get_device, device_id)
 
@@ -4175,6 +4248,18 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         asyncio.create_task(
             api.reconcile_on_connect(device_id, device)
         ).add_done_callback(_log_task_exception)
+        # An approval (a new device, or an approved pairing) issues link
+        # credentials unless this connection already has working ones.
+        if em_pairing.approved(device_id):
+            if secure and await _presented_its_token(ws, device_id):
+                em_pairing.done(device_id)
+            else:
+                asyncio.create_task(
+                    api._issue_credentials(device_id)
+                ).add_done_callback(_log_task_exception)
+        elif pairing:
+            # Connected (no credentials yet, or plain) and asking: offer it.
+            await api.notify_pair_request(device_id, "link")
         device.eq_bands      = config.get("eqBands", [0.0] * 8)
         device.eq_loudness   = bool(config.get("eqLoudness", False))
         device.bass_guard_enabled = bool(config.get("bassGuardEnabled", True))
@@ -4799,6 +4884,11 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                         # loop; _push_log_event does it in an executor.
                         await api._push_log_event(device_id, level, "device", message)
 
+                    elif msg_type == "pair_request":
+                        # The owner held the action button on a connected
+                        # device; an admin issues credentials with Approve.
+                        await api.notify_pair_request(device_id, "link")
+
                     elif msg_type == "pong":
                         # Solicited pong (carries our sequence id) -> an RTT
                         # sample. Unsolicited keepalive pongs have no id and are
@@ -4965,6 +5055,13 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
             await ws.close()
             return
 
+        why = _not_from_control(device, ws, secure)
+        if why:
+            log.warning(f"[data] {device_id}: {why} — rejecting")
+            device = None   # the finally must not treat the live device as ours
+            await ws.close()
+            return
+
         device.data_ws = ws
         # #299: a fresh connection has by definition sent nothing yet — the
         # no-frames watchdog gives it FRESH_CONN_GRACE_S before treating
@@ -5119,6 +5216,13 @@ async def handle_shell(ws: WebSocketServerProtocol, path: str, secure: bool = Fa
         return
 
     if not await _link_auth_ok(ws, device_id, secure, "shell"):
+        await ws.close()
+        return
+
+    live = _devices.get(device_id)
+    why = "device is not connected" if live is None else _not_from_control(live, ws, secure)
+    if why:
+        log.warning(f"[shell] {device_id}: {why} — rejecting")
         await ws.close()
         return
 
