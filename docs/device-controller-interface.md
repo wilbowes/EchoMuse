@@ -68,6 +68,7 @@ message (`device/internal/client/control.go`):
   "ip": "<local ip, omitted if 127.0.0.1 or unresolved>",
   "ambient_light_status": { "...": "..." },
   "base_os": "emos | fireos | unknown",
+  "pairing": true,  // only during a pairing window, on a plain dial (capability `pairing`)
   "board": "<pkg/board id, or unknown>",
   "kernel_arch": "<uname -m, e.g. aarch64>",
   "kernel_release": "<uname -r, e.g. 3.18.19+>"
@@ -98,6 +99,7 @@ plus one conditional (`capabilities()` in `control.go`):
 | `output_chain` | always | Can run the speaker output chain (EQ → bass guard → limiter) itself, at the ALSA write, from the config keys `eqBands`, `eqLoudness`, `limiter*`, `bassGuard*`. Runs it only when the controller's `ack` carries `output_chain` too, which is the controller saying it has stopped processing: either half alone keeps the old path, so audio is never shaped twice |
 | `wake_cue` | always | Can generate its own wake sound, at `wakeSoundLevel`, independent of volume. Plays it when `wakeSound` is on and a wake has WON: on `listen_ack` for a private-listening session, or on `play_cue` otherwise — never at the crossing, so a ceded wake is silent |
 | `ambient_light` | only if the sensor is actually readable (`als.Present()`) | Reports light readings |
+| `pairing` | always | Asks to pair itself when its owner holds the action button 5 s: a `pair_request` on a live link, or, when wss cannot connect, plain dials carrying `"pairing": true` for the 2-minute window. Without it the controller offers the admin a **Pair** action instead, since the device cannot ask |
 
 **`aec_hw_ref` is a capability with a runtime companion, and both are needed.**
 The capability says the firmware knows *how* to use a hardware echo reference.
@@ -158,6 +160,7 @@ absent optional fields take prior/default behaviour.
 | `ble_adverts` | `adverts[]` | Batch from the passive BLE scanner. **Legacy path** — send these on `/data` as `0x06` whenever the controller announced `ble_adverts_data`, and use this message only when it did not (#404) |
 | `wifi_scan_result` | `networks[]` of `{ssid, ssid_hex, signal}`, or `error` | Answer to `wifi_scan` |
 | `wifi_result` | `ok`, `ssid`, `error?` | Outcome of a `wifi_change`, re-sent until `wifi_commit` |
+| `pair_request` | — | The owner held the action button on a connected device (only if `pairing`). The controller shows **Approve pairing**; approval issues a rotated token and the CA over the shell plane, then bounces the link |
 | `pong` | `id`, `mono` when answering a `ping` that carried an `id` | Keepalive reply. `id` echoes the ping's; `mono` is the device's monotonic clock in ms (any fixed origin), which the controller maps onto its own to date `capturedMono`. Unsolicited keepalive pongs carry neither |
 
 **Controller → Device**
@@ -165,6 +168,7 @@ absent optional fields take prior/default behaviour.
 | `type` | Payload | Meaning |
 |--------|---------|---------|
 | `ack` | `device_id`, `features[]` | Registration accepted. `features` is the CONTROLLER's capability list — the mirror of the device's own, and read the same way: a feature that is absent is one the controller cannot do. Absent entirely on controllers before 2.23.0. Current: `ble_adverts_data`, `listen_session`, `output_chain` |
+| `pending` | `pairing?` | Not admitted: the device is unapproved, or with `pairing:true` its pairing request is recorded and waiting for an admin. Keep redialling within the window; an approval admits the next dial |
 | `leds` | `leds[]`, `listening?` | One LED frame; `listening:true` marks the listening ring so the direction overlay keys off it |
 | `led_anim` | `{pattern, colors, periodMs, ttlSec}` | Local animation spec; sent only if `led_anim` |
 | `mic_start` | `lock_mic?` | Start mic stream. `lock_mic:false`/absent = always-on ungated wake stream; `true` = bounded, VAD-gated turn |

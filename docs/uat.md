@@ -357,11 +357,14 @@ the end. See [led-ring-states.md](led-ring-states.md).
 
 ## I — Security and the device link
 
-### I1 · Secure link
-**Do:** Device → Status. If Link reads `plain ws`, press **Secure link**.
+### I1 · Pairing
+**Do:** Device → Status. If Link reads `plain ws`, hold the Echo's action
+button for 5 seconds, then press **Approve pairing** (on older firmware,
+press **Pair**).
 **Expect:** The device reconnects within a few seconds and Link reads
 `wss (TLS)`.
 **Flag:** A device that goes offline and stays there. (It should redial.)
+Approve pairing appearing without anyone holding the button.
 
 ### I2 · Credentials survive a reboot
 **Do:** Reboot a TLS device.

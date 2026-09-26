@@ -546,7 +546,7 @@ MIGRATIONS: list[str] = [
     # token: shared secret the device presents in the X-EM-Token header on
     # all three WebSocket planes (/control, /data, /shell). Minted by
     # ensure_device_token() when credentials are first pushed (provisioning
-    # wizard or the dashboard "Secure link" action) and stored on the device
+    # wizard, or an approval: em_pairing) and stored on the device
     # at /data/local/etc/echomuse/token. NULL = no credentials issued yet —
     # such devices connect unauthenticated (legacy posture) until
     # REQUIRE_DEVICE_TLS=1 flips the controller to enforcing.

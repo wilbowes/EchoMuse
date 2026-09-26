@@ -21,9 +21,9 @@ Design constraints (see CLAUDE.md "TLS device link"):
   time to the firmware build time. Do not "fix" the validity window to
   something conventional — a device that can't connect can't sync time.
 - Everything is generated lazily on first use and reused forever after.
-  Deleting TLS_DIR rotates the CA; devices then need a fresh credential
-  push (dashboard "Secure link" action) before they can reconnect over
-  TLS.
+  Deleting TLS_DIR rotates the CA; devices then need to be paired again
+  (em_pairing: hold the action button, approve) before they can reconnect
+  over TLS.
 """
 
 from __future__ import annotations
