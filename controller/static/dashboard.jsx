@@ -2147,7 +2147,10 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                       <div className="em-grid2" style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'0 24px' }}>
                         <div>
                           {row('Scanner', b ? (b.scanning ? 'Scanning' : 'Stopped') : '—', b?.scanning ? 'var(--ok)' : undefined)}
-                          {row('Adverts seen', b ? String(b.advertsSeen ?? 0) : '—')}
+                          {/* The controller's count, from the same instant as
+                              Forwarded to HA; the device's own counts from
+                              its boot (#410). */}
+                          {row('Adverts seen', bp.advertsSeen != null ? String(bp.advertsSeen) : '—')}
                           {row('Nearby devices (5 min)', b ? String(b.uniqueAddrs ?? 0) : '—')}
                           {row('BT address', b?.bdAddr || '—')}
                         </div>

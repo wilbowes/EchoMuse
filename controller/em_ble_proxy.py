@@ -162,6 +162,8 @@ class DeviceBleProxyServer:
         self.adverts_received = 0   # batches' adverts arriving from the device
         self.adverts_forwarded = 0  # actually sent to a subscribed HA
         self.adverts_seen = 0       # device-reported cumulative counter (stats)
+        # Baseline so seen and forwarded count from the same instant (#410).
+        self.seen_base: Optional[int] = None
         # Transport health, device-reported and cumulative since ITS process
         # start. Kept so update_stats can warn on a RISE rather than on a
         # non-zero value — the counters never fall on their own, so warning
@@ -420,7 +422,11 @@ def update_stats(device_id: str, ble_stats: dict) -> None:
     proxy = _proxies.get(device_id)
     if proxy is None or not isinstance(ble_stats, dict):
         return
-    proxy.adverts_seen = int(ble_stats.get("advertsSeen") or 0)
+    raw = int(ble_stats.get("advertsSeen") or 0)
+    rb = em_ble_health.rebase_seen(proxy.seen_base, proxy.adverts_seen, raw)
+    proxy.seen_base, proxy.adverts_seen = rb.base, rb.last
+    if rb.reset_forwarded:
+        proxy.adverts_forwarded = 0
 
     # Transport resets. Worth a warning of their own because /dev/stpbt is
     # NOT a Bluetooth-only device: it is the MT8163's combo radio behind
@@ -455,6 +461,9 @@ def get_status(device_id: str) -> Optional[dict]:
         "haSubscribed":     bool(satellite is not None and satellite.subscribed),
         "advertsReceived":  proxy.adverts_received,
         "advertsForwarded": proxy.adverts_forwarded,
+        # Seen since the same instant as advertsForwarded (#410).
+        "advertsSeen":      (proxy.adverts_seen - proxy.seen_base
+                             if proxy.seen_base is not None else None),
         # Transport resets, surfaced because a non-zero value here is the
         # first thing to check against an unexplained link drop on this
         # device — see update_stats for why a BLE restart can take WiFi out.
