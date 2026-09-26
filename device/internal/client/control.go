@@ -743,6 +743,7 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 			if err := json.Unmarshal(raw, &msg); err == nil {
 				cfg := config.Get()
 				cfg.Apply(msg)
+				config.RecordReceived(raw)
 				// Persisted here rather than through OnConfigApplied,
 				// because emOS's init reads the file and the firmware only
 				// ever writes it — there is no in-process consumer for a
@@ -779,6 +780,10 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 					snap.VadThreshold, snap.OwwThreshold)
 				if c.configAppliedCallback != nil {
 					c.configAppliedCallback(msg)
+				}
+				// After the callback, so anything it applies is in the report.
+				if err := cfg.WriteReport(); err != nil {
+					log.Printf("[control] config report: %v", err)
 				}
 			}
 

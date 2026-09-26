@@ -407,6 +407,7 @@ function Slider({ label, sub, value, min, max, step = 1, unit = '', formatValue,
       {/* A control whose feature the device lacks is shown disabled WITH the
           reason (in sub), never as one that silently does nothing. */}
       <input type="range" min={min} max={max} step={step} value={value} disabled={disabled}
+        aria-label={typeof label === 'string' ? label : undefined}
         style={{ width: '100%', opacity: disabled ? 0.45 : 1 }}
         onChange={e => onChange(Number(e.target.value))} />
     </div>
@@ -473,6 +474,7 @@ function NumberField({ label, sub, value, min = 0, max = 100, unit = '',
             on. inputMode brings up the numeric keypad regardless. */}
         <input type="text" inputMode="numeric" autoComplete="off"
           value={text} disabled={disabled}
+          aria-label={typeof label === 'string' ? label : undefined}
           onFocus={() => setEditing(true)}
           onChange={e => { const d = digits(e.target.value); setText(d); commit(d); }}
           onBlur={e => {
@@ -515,7 +517,19 @@ function Toggle({ label, sub, value, onChange, disabled = false }) {
         <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: disabled ? 'var(--muted)' : 'var(--text2)' }}>{label}</span>
         {sub && <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)', marginLeft: 8 }}>{sub}</span>}
       </div>
-      <div onClick={() => { if (!disabled) onChange(!value); }} style={{
+      {/* A switch to assistive tech and the keyboard, not only to a mouse:
+          role, state, focus and Space/Enter. Also what release UAT finds it
+          by (tools/uat). */}
+      <div role="switch" aria-checked={!!value} aria-disabled={disabled || undefined}
+        aria-label={typeof label === 'string' ? label : undefined}
+        tabIndex={disabled ? -1 : 0}
+        onClick={() => { if (!disabled) onChange(!value); }}
+        onKeyDown={e => {
+          if (disabled || (e.key !== ' ' && e.key !== 'Enter')) return;
+          e.preventDefault();
+          onChange(!value);
+        }}
+        style={{
         width: 36, height: 20, borderRadius: 10, cursor: disabled ? 'default' : 'pointer',
         position: 'relative', flexShrink: 0, opacity: disabled ? 0.45 : 1,
         background: value ? 'var(--accent)' : 'var(--muted)',
@@ -647,10 +661,12 @@ function Select({ label, sub, value, options, onChange }) {
       <div style={{ marginBottom: 7, minWidth: 0 }}>
         <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: 'var(--text2)' }}>{label}</span>
       </div>
-      <div style={{ display: 'flex', gap: 6, minWidth: 0 }}>
+      <div role="radiogroup" aria-label={typeof label === 'string' ? label : undefined}
+        style={{ display: 'flex', gap: 6, minWidth: 0 }}>
         {options.map(o => (
           <button
             key={o.value}
+            role="radio" aria-checked={o.value === value}
             className={'em-pill em-pill--small' + (o.value === value ? ' em-pill--accent' : '')}
             disabled={!!o.disabled}
             style={{ flex: 1, minWidth: 0 }}
@@ -8785,6 +8801,7 @@ function EqSliders({ bands, onChange, disabled }) {
               stays in the untransformed axis, so only clicks land).
               orient="vertical" covers older Firefox. */}
           <input type="range" min={-12} max={12} step={1} value={g} orient="vertical"
+            aria-label={`EQ ${FREQ_LABELS[i]} Hz`}
             onChange={e => { const nb = [...bands]; nb[i] = Number(e.target.value); onChange(nb); }}
             style={{ writingMode: 'vertical-lr', direction: 'rtl', WebkitAppearance: 'slider-vertical', width: 20, height: 76, cursor: 'pointer' }}/>
           <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 8, color: 'var(--muted)', marginTop: 2 }}>{FREQ_LABELS[i]}</div>
@@ -8913,13 +8930,15 @@ function Stage({ n, title, chips, desc, children, scope, dim }) {
 function StageAdvanced({ open, onToggle, disabledStyle, children }) {
   return (
     <div style={{ marginTop: 14, borderTop: '1px solid var(--hairline)', paddingTop: 10 }}>
-      <div onClick={onToggle} style={{
+      {/* A button, so the keyboard and assistive tech can open it too. */}
+      <button type="button" onClick={onToggle} aria-expanded={!!open} style={{
         fontFamily: STAGE_MONO, fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase',
         letterSpacing: '0.15em', cursor: 'pointer', userSelect: 'none',
         display: 'flex', alignItems: 'center', gap: 6,
+        background: 'none', border: 'none', padding: 0,
       }}>
-        <span>{open ? '▾' : '▸'}</span> Advanced
-      </div>
+        <span aria-hidden="true">{open ? '▾' : '▸'}</span> Advanced
+      </button>
       {open && <div style={{ marginTop: 14, ...disabledStyle }}>{children}</div>}
     </div>
   );
@@ -10034,6 +10053,7 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
                         you run a fork.
                       </div>
                       <input type="text" autoComplete="off" spellCheck="false"
+                        aria-label="GitHub repository"
                         value={sysVal('github_repo', 'wilbowes/EchoMuse')}
                         onChange={e => setSysVal('github_repo', e.target.value)}
                         className="em-inset"
@@ -10099,13 +10119,14 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
             <div style={{ maxWidth: 360 }}>
               <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.15em', marginBottom:20 }}>Change Password · {username}</div>
               {[
-                ['Current password', curPw, setCurPw],
-                ['New password',     newPw, setNewPw],
-                ['Confirm new',      confirmPw, setConfirmPw],
-              ].map(([label, val, setter]) => (
+                ['Current password', curPw, setCurPw, 'current-password'],
+                ['New password',     newPw, setNewPw, 'new-password'],
+                ['Confirm new',      confirmPw, setConfirmPw, 'new-password'],
+              ].map(([label, val, setter, purpose]) => (
                 <div key={label} style={{ marginBottom:16 }}>
                   <div style={{ fontFamily:"'DM Mono',monospace", fontSize:11, color:'var(--text2)', marginBottom:6 }}>{label}</div>
                   <input type="password" value={val} onChange={e => setter(e.target.value)}
+                    aria-label={label} autoComplete={purpose}
                     style={{ width:'100%', boxSizing:'border-box' }}/>
                 </div>
               ))}
