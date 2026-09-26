@@ -80,6 +80,7 @@ import em_pki
 import em_hostip
 import em_linkauth
 import em_config_types
+import em_tasks
 import em_pacing
 import em_platform
 import em_tcp
@@ -1917,6 +1918,9 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
     # can overlap a turn's playback, and try/finally because a cancelled turn
     # that leaked it would block the ring for the life of the process.
     device.speaker_busy += 1
+    # Created inside the try, torn down in the finally; None until then, so an
+    # error in the EQ step does not turn the finally into a NameError.
+    playback_ev = cancel_task = done_task = stream_task = timeout_task = None
     try:
         _t_eq0 = asyncio.get_event_loop().time()
         speaker_pcm = await asyncio.get_event_loop().run_in_executor(None, _prepare_pcm)
@@ -1980,7 +1984,6 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
                     [done_task, cancel_task, timeout_task],
                     return_when=asyncio.FIRST_COMPLETED,
                 )
-                timeout_task.cancel()
                 if device.cancel_event.is_set():
                     log.info(f"[{device.device_id}] Cancelled during playback drain")
                 elif done_task.done():
@@ -1996,10 +1999,25 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
                         f"[{device.device_id}] Playback completion timed out after "
                         f"{timeout:.1f}s with no playback_stats — clearing ring anyway"
                     )
-
-        cancel_task.cancel()
-        done_task.cancel()
     finally:
+        # Every helper task ends here, on every exit. These cancels used to sit
+        # at the end of the try, so a playback that was itself cancelled (a
+        # barge-in, a dismissed timer chime) left two Event.wait() tasks
+        # pending: the one on playback_ev surfaced as "Task was destroyed but
+        # it is pending!" once the Event was dropped (dev add-on, 2026-09-25),
+        # and the one on cancel_event, which lives as long as the device, never
+        # surfaced at all. The stream task kept sending too. Same teardown as
+        # _run_streaming_post_turn_playback, minus the await: nothing here may
+        # stand between a cancellation and the speaker_busy release below.
+        # A cancelled task is scheduled to run its cancellation, so the loop
+        # holds it until it finishes; no reference is needed.
+        for t in (cancel_task, done_task, stream_task, timeout_task):
+            if t is None:
+                continue
+            if not t.done():
+                t.cancel()
+            elif not t.cancelled() and (exc := t.exception()) is not None:
+                log.warning(f"[{device.device_id}] playback helper failed: {exc!r}")
         device.speaker_busy -= 1
         # Retire the waiter whether or not the device ever reported. A
         # cancelled playback — barge-in, mute, a device that dropped — never
@@ -2881,7 +2899,7 @@ def _supervise_wake_listener(device: "Device", failures: int = 0) -> asyncio.Tas
                 f"[{device.device_id}] wake word listener has now failed "
                 f"{n} times in a row — retrying in {delay:.0f}s"
             )
-        asyncio.get_event_loop().create_task(_later())
+        em_tasks.spawn(_later())
 
     started = asyncio.get_event_loop().time()
     t = asyncio.create_task(wake_word_listener(device))
@@ -3911,12 +3929,9 @@ async def handle_button_event(device: Device, event: dict):
                 # stop/start pair can no longer leak a second stream).
                 await device.mic_stop()
                 await device.mic_start()
-            # M1 fix (2026-07-05 review): keep a reference and log exceptions
-            # instead of a bare fire-and-forget create_task() — previously
-            # any exception raised in this task vanished silently with no
-            # log line, standard asyncio fire-and-forget hygiene issue.
-            _btn_task = asyncio.create_task(_button_voice_turn())
-            _btn_task.add_done_callback(_log_task_exception)
+            # Held and logged by em_tasks. The M1 fix (2026-07-05) logged
+            # exceptions but kept its reference in a local that died on return.
+            em_tasks.spawn(_button_voice_turn())
 
 
 # ─── Control plane handler ────────────────────────────────────────────────────
@@ -4172,9 +4187,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         # the device actually has — see api.reconcile_on_connect for why the
         # arrival is the trigger. Background: shell round trips and possibly a
         # multi-megabyte push, none of which the handshake should wait on.
-        asyncio.create_task(
-            api.reconcile_on_connect(device_id, device)
-        ).add_done_callback(_log_task_exception)
+        em_tasks.spawn(api.reconcile_on_connect(device_id, device))
         device.eq_bands      = config.get("eqBands", [0.0] * 8)
         device.eq_loudness   = bool(config.get("eqLoudness", False))
         device.bass_guard_enabled = bool(config.get("bassGuardEnabled", True))
@@ -4893,9 +4906,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                 # to deregister the HA entities, drop the BLE proxy and kill
                 # the media session, then rebuild all of it when the device
                 # returned on its own.
-                asyncio.create_task(
-                    _release_device_services(device)
-                ).add_done_callback(_log_task_exception)
+                em_tasks.spawn(_release_device_services(device))
 
 
 async def _release_device_services(device) -> None:
