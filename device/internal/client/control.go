@@ -449,6 +449,12 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 			if usingStatic {
 				wait = staticRetryDelay(passNum)
 			}
+			// A pairing device asks by redialling, and the controller forgets
+			// a request 30s after its last repeat; the static backoff reaches
+			// 60s.
+			if c.Pairing() {
+				wait = pairRepeat
+			}
 			if err != nil {
 				log.Printf("[control] Connection lost: %v — reconnecting in %s", err, wait)
 			}
