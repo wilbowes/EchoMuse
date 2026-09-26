@@ -59,6 +59,7 @@ import em_ble_proxy
 import em_broadcast
 import em_config_sections as sections_mod
 import em_config_types
+import em_dbwriter
 import em_console_pw
 import em_tcp
 import em_labels
@@ -1438,7 +1439,8 @@ async def _post_device_wifi(request: web.Request) -> web.Response:
     if ssid_hex:
         change["ssid_hex"] = ssid_hex
     await live.send_control(change)
-    db.log_device(device_id, "info", "controller", f'WiFi change to "{ssid}" requested')
+    em_dbwriter.submit(db.log_device, device_id, "info", "controller",
+                       f'WiFi change to "{ssid}" requested')
     await _push_event({"type": "device_update", "device_id": device_id,
                        "state": {"wifi": st}})
     return _ok({"device_id": device_id, "ssid": ssid, "status": "switching"},
@@ -3859,9 +3861,12 @@ async def _push_log_event(
 ) -> None:
     """
     Persist a controller-generated log entry and push it to event clients.
+
+    The write is queued (em_dbwriter), not awaited: this is called inline from
+    each device's control handler for every relayed log line, and awaiting the
+    write held that device's pongs and wake events behind it.
     """
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, db.log_device, device_id, level, source, message)
+    em_dbwriter.submit(db.log_device, device_id, level, source, message)
     await _push_event({
         "type":      "device_log",
         "device_id": device_id,
