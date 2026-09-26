@@ -1606,6 +1606,16 @@ def ensure_device_token(device_id: str) -> str:
     return token
 
 
+def set_device_token(device_id: str, token: str) -> None:
+    """Store a token already delivered to the device; it starts unconfirmed."""
+    with _tx() as conn:
+        conn.execute(
+            "UPDATE devices SET token = ?, token_confirmed_at = NULL WHERE device_id = ?",
+            (token, device_id),
+        )
+    log.info(f"[db] Link token replaced for {device_id}")
+
+
 def clear_device_token(device_id: str) -> None:
     """Revoke a device's link token (next credential push mints a new one)."""
     with _tx() as conn:

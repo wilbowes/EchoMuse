@@ -35,6 +35,7 @@ import asyncio
 import hashlib
 import html as _html
 import json
+import secrets
 import logging
 import os
 import platform
@@ -3441,8 +3442,11 @@ async def _issue_credentials(device_id: str) -> None:
     try:
         await _push_log_event(device_id, "info", "controller",
                               "Pairing: installing link credentials")
-        await loop.run_in_executor(None, db.clear_device_token, device_id)
-        token = await loop.run_in_executor(None, db.ensure_device_token, device_id)
+        # Minted here and stored only once the device has it. The push rides
+        # the shell plane, which the device dials with its CURRENT token, so
+        # storing the new one first refused the push on any device that was
+        # connected over wss (found on 15LE, 2026-09-26).
+        token = secrets.token_urlsafe(32)
         ca    = em_pki.ca_pem(_tls_dir)
 
         await _shell_run(live, f"mkdir -p {DEVICE_TLS_DIR}")
@@ -3459,6 +3463,7 @@ async def _issue_credentials(device_id: str) -> None:
                                   f"Pairing: credential transfer failed: {ok}")
             return
 
+        await loop.run_in_executor(None, db.set_device_token, device_id, token)
         em_pairing.done(device_id)
         await _push_log_event(
             device_id, "info", "controller",

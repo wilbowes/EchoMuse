@@ -94,12 +94,19 @@ def test_a_refused_pairing_dial_is_recorded():
     assert any(isinstance(c.args[1], ast.Constant) and c.args[1].value == "plain" for c in notes)
 
 
-def test_issuing_rotates_the_token_and_closes_the_pairing():
+def test_issuing_rotates_the_token_and_stores_it_only_once_delivered():
+    # The push rides the shell plane, which the device dials with its CURRENT
+    # token. Storing the new one first refused the push on every device
+    # connected over wss (15LE, 2026-09-26).
     fn = _fn(_tree("em_api.py"), "_issue_credentials")
-    execs = [c for c in _calls(fn, "run_in_executor")]
-    order = [n for c in execs for n in ("clear_device_token", "ensure_device_token")
-             if n in _names_in_call(c)]
-    assert order[:2] == ["clear_device_token", "ensure_device_token"]
+    assert _calls(fn, "token_urlsafe"), "a fresh token, never the stored one"
+    assert not [c for c in _calls(fn, "run_in_executor")
+                if "ensure_device_token" in _names_in_call(c)]
+    stores = [c for c in _calls(fn, "run_in_executor")
+              if "set_device_token" in _names_in_call(c)]
+    pushes = _calls(fn, "_stream_file_to_device")
+    assert stores and pushes
+    assert min(c.lineno for c in stores) > max(c.lineno for c in pushes)
     assert _calls(fn, "done")
 
 
