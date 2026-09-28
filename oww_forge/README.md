@@ -42,18 +42,22 @@ docker compose up -d --build forge-ui
 # → http://<host>:8769
 ```
 
-The UI covers the whole flow: asset download with live progress, wake-word
-creation, build with a streaming log console, Google-TTS mix-in, wav-upload
-testing, and `.onnx` download. One job runs at a time (training saturates
-the machine anyway); state is derived from disk on every poll, so it
-survives container restarts. While a build runs, the card's stepper shows
+The UI covers the whole flow, laid out like the dashboard's provisioning
+wizard: your wake words and setup in a rail on the left, and each wake word
+walked through **Train → Try it → Improve → Use it** — asset download, creation
+with a spoken preview of each spelling, build with per-stage progress and time
+left, a microphone or file test scored against the wake threshold, the three
+accuracy levers, and the `.onnx` download with the steps to add it to
+EchoMuse. The job log is a flyout (**Show log**). One job runs at a time
+(training saturates the machine anyway); state is derived from disk on every
+poll, so it survives container restarts. While a build runs, the Train step shows
 how far the current stage is: clips generated, feature files finished, or
 training steps parsed from the log across all three of `train.py`'s
 sequences. Light and dark follow the dashboard, sharing
 its `em-theme` setting. No auth — LAN tool.
 
-A run can be **stopped** from the console bar, its settings changed under
-*training settings*, and started again. Stopping keeps everything already
+A run can be **stopped** from the Train step or the log, its settings changed
+under *Training settings*, and started again. Stopping keeps everything already
 produced: clip generation is resumable and both later steps check what
 exists, so the loop is stop, adjust, train again rather than start over. The
 stop kills the whole process group, because `forge.py` is only the parent —
@@ -127,8 +131,8 @@ The default image builds **CUDA 12.8 torch 2.7.1**, which supports Blackwell
 cards (RTX 50xx, sm_120) as well as older generations — note that
 notebook-era torch 2.1/cu121 cannot drive an RTX 5060 Ti at all. Fallback is
 automatic: if no CUDA device is visible at runtime, torch runs on CPU and
-`forge.py build` logs which device it's using (the UI shows it in the header
-badge).
+`forge.py build` logs which device it's using (the UI shows it at the foot
+of the rail).
 
 - Host **with** the nvidia container runtime: use `forge` / `forge-ui` as-is.
 - Host **without** it, web UI: `docker compose up -d forge-ui-cpu` (the same
@@ -178,8 +182,8 @@ US vowel, not a British "clar-ra". Three levers, in increasing strength:
    single-spelling `hey_clara`, 0.43 vs 0.52 on the augmented test set) —
    if a variant model feels deaf, add real recordings and retrain, or lower
    the device's `owwThreshold` a notch.
-2. **Piper voices in another accent or language** (local, free) — the
-   `+ Accents & languages` button, or `forge.py piper-voices <name>
+2. **Piper voices in another accent or language** (local, free) — **Improve →
+   Add voices with your accent** in the UI, or `forge.py piper-voices <name>
    --language en_GB`. Piper publishes voices in **55 languages** and the
    catalogue is read at runtime, so this is not an English-only lever.
    Where a language has a multi-speaker voice it is chosen automatically,
@@ -193,7 +197,7 @@ US vowel, not a British "clar-ra". Three levers, in increasing strength:
 3. **Google TTS mix-in** — defaults to `en-US,en-GB,en-AU` voices, so a
    `google-tts` pass before build adds genuinely British/Australian
    synthetic speakers (`--languages en-GB,en-AU` to skip the US ones).
-4. **Real recordings** (best) — the UI's "+ Recordings…" button (or dropping
+4. **Real recordings** (best) — the UI's **Improve → Add your own recordings** (or dropping
    16kHz wavs into `positive_train/`) adds actual samples of you and the
    kids to the training set; any phone recording format works (ffmpeg
    converts). Even 20–50 real clips measurably pull the model toward the
@@ -212,9 +216,9 @@ the accent lever above, so the first press downloads one.
 
 ### Testing a built model
 
-Three ways: the UI's **🎤 Record test** (browser mic → score; needs
-HTTPS or localhost for mic permission), **Test file…** (upload any audio
-file), or `forge.py test <name> --wav <files-or-dir>`. Scores near 1.0 on
+Three ways: the UI's **Try it → Record** (browser mic → score; needs
+HTTPS or localhost for mic permission, and the page says so when it has
+neither), **Test a recording…** (upload any audio file), or `forge.py test <name> --wav <files-or-dir>`. Scores near 1.0 on
 your voice and near 0.0 on ordinary speech are what you want; the
 controller's default threshold is ~0.5.
 
@@ -240,8 +244,8 @@ a **permanent** refusal (Chirp rejects `pitch`, for instance, and is then
 asked without it), never for a transient one; and the working request shape
 is remembered per voice, which removes about a third of the API calls.
 
-Setup, from the web UI: **Google voices** on the left, then upload (or paste)
-the JSON key and press **Test connection**. The key is written to
+Setup, from the web UI: **Google voices** under Setup in the rail, then upload (or
+paste) the JSON key and press **Save key**, which tests the connection. The key is written to
 `./data/google-credentials.json` with mode 600 and picked up by the next job
 with no container restart, so the compose mapping is no longer something you
 have to arrange yourself. Test connection is worth pressing: the usual
