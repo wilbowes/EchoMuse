@@ -74,6 +74,18 @@ RUN sed -i 's/torch.load(checkpoint_path, map_location=device)/torch.load(checkp
       /usr/local/lib/python3.11/site-packages/dp/model/model.py \
     && grep -q "weights_only=False" /usr/local/lib/python3.11/site-packages/dp/model/model.py
 
+# ...and it is no longer reached at all. data.py downloaded DeepPhonemizer's
+# en_us_cmudict_forward.pt on first use from an S3 bucket that answers 403
+# (2026-09-28, no mirror found), saved the 278-byte error page AS the model,
+# and so failed every later run too; and the download lived in the
+# container, so recreating the container lost a copy that had worked.
+# forge_g2p answers the same question from espeak-ng, already here for
+# Piper. The patch asserts both edits landed, so an upstream change fails the
+# build rather than quietly reviving the download.
+COPY forge_g2p.py /opt/openwakeword/openwakeword/forge_g2p.py
+COPY patch_oww_g2p.py /tmp/patch_oww_g2p.py
+RUN python /tmp/patch_oww_g2p.py /opt/openwakeword/openwakeword/data.py && rm /tmp/patch_oww_g2p.py
+
 COPY forge.py model_metadata.py google_tts.py forge_web.py forge_progress.py piper_voices.py config.template.yml /opt/forge/
 COPY static/ /opt/forge/static/
 
