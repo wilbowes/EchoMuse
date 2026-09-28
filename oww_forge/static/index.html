@@ -141,6 +141,8 @@
   .mhead { padding: 22px 32px 0; }
   .mhead h2 { font-size: 24px; font-weight: 600; letter-spacing: -.01em; margin: 4px 0 6px;
     overflow-wrap: anywhere; outline: none; }
+  .titlerow { display: flex; align-items: center; gap: 10px 14px; flex-wrap: wrap; }
+  .titlerow .tools { display: flex; gap: 6px; margin-left: auto; }
   .phrases { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 4px; }
   .say { display: inline-flex; align-items: center; gap: 6px; font: 13px 'DM Sans', sans-serif;
     min-height: 28px; padding: 3px 12px 3px 10px; border-radius: 14px; border: 1px solid var(--field-line);
@@ -340,6 +342,21 @@
   </aside>
 </div>
 <div class="sr" id="live" aria-live="polite"></div>
+<dialog id="renameDlg" aria-labelledby="rnTitle">
+  <form id="rnForm">
+    <h2 id="rnTitle">Rename</h2>
+    <div class="field" style="margin-top:8px">
+      <label for="rnInput">New name</label>
+      <input type="text" id="rnInput" autocomplete="off" spellcheck="false" maxlength="64" aria-describedby="rnHint rnErr">
+      <div class="hint" id="rnHint">Also the file name EchoMuse shows. A copy already added to EchoMuse keeps its old name.</div>
+      <div class="hint" id="rnErr" role="alert" style="color:var(--error)"></div>
+    </div>
+    <div class="row">
+      <button class="em-pill" type="button" id="rnCancel">Cancel</button>
+      <button class="em-pill em-pill--accent" type="submit">Rename</button>
+    </div>
+  </form>
+</dialog>
 <dialog id="confirm" aria-labelledby="cfTitle" aria-describedby="cfBody">
   <form method="dialog">
     <h2 id="cfTitle"></h2>
@@ -360,6 +377,11 @@ let voices = null;                // /api/voices, fetched when first needed
 const verdicts = {};              // per wake word: the last try-it result, kept across re-renders
 const flashes = {};               // per wake word and page: the last confirmation, kept the same way
 const rates = {};                 // per wake word: progress samples, for time left
+/* The new-word form outlives the page: leaving it to check something (the
+   Google key, say) and coming back must not mean typing it all again. */
+const DRAFT0 = {phrase: '', name: '', samples: '30000', steps: '50000'};
+let draft = (() => { try { return {...DRAFT0, ...JSON.parse(sessionStorage.getItem('forge-draft') || '{}')}; } catch { return {...DRAFT0}; } })();
+function saveDraft() { try { sessionStorage.setItem('forge-draft', JSON.stringify(draft)); } catch {} }
 
 const THRESHOLD = 0.5;            // the Echo's default wake threshold
 const STAGES = [                  // build stage, what it is called here, what it does
@@ -455,7 +477,8 @@ function timeLeft(w) {
 /* ── Routing: #/new, #/data, #/google, #/w/<name>/<step> ──────────────── */
 function route() {
   const parts = location.hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
-  if (parts[0] === 'w' && parts[1] && state && wwByName(parts[1])) {
+  if (parts[0] === 'w' && parts[1] && state && !wwByName(parts[1])) return {page: 'missing', name: parts[1]};
+  if (parts[0] === 'w' && parts[1] && state) {
     const w = wwByName(parts[1]);
     const step = STEPS.some(s => s[0] === parts[2]) ? parts[2] : (w.model_built ? 'try' : 'train');
     return {page: 'ww', name: parts[1], step};
@@ -493,14 +516,16 @@ function renderRail(r) {
 
 function renderMachine() {
   const g = state.gpu || {};
-  $('machine').className = 'machine' + (g.available ? ' gpu' : '');
-  $('machine').lastElementChild.textContent = g.available ? `GPU · ${g.device}` : 'No GPU: training is slower';
+  const lost = state.job && state.job.cpu_fallback;
+  $('machine').className = 'machine' + (g.available && !lost ? ' gpu' : '');
+  $('machine').lastElementChild.textContent = lost ? 'GPU not reachable: restart the forge'
+    : g.available ? `GPU · ${g.device}` : 'No GPU: training is slower';
 }
 
 /* ── Pages ────────────────────────────────────────────────────────────── */
-function frame({eyebrow, title, head = '', body, foot = ''}) {
+function frame({eyebrow, title, head = '', body, foot = '', tools = ''}) {
   return `<div class="mhead"><div class="em-label">${esc(eyebrow)}</div>
-    <h2 id="title" tabindex="-1">${esc(title)}</h2>${head}</div>
+    <div class="titlerow"><h2 id="title" tabindex="-1">${esc(title)}</h2>${tools}</div>${head}</div>
     <div class="mbody">${body}</div>
     <div class="foot">${foot}</div>`;
 }
@@ -582,6 +607,16 @@ function pageGoogle() {
     foot: `<span class="sp"></span>${g.valid ? '' : `<button class="em-pill em-pill--accent" type="button" data-act="gsave">Save key</button>`}`});
 }
 
+/* Mirrors forge.default_name: the first spelling, slugified. */
+function defaultName(phrase) {
+  const first = (phrase || '').split(',').map(p => p.trim()).find(Boolean) || '';
+  return first.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+}
+function pageMissing(r) {
+  return frame({eyebrow: 'Wake word', title: 'Not found',
+    body: `<p class="lead">There's no wake word called “${esc(r.name)}”. It may have been renamed or deleted.</p>`,
+    foot: `<span class="sp"></span><a class="em-pill em-pill--accent" href="#/new">New wake word</a>`});
+}
 function pageNew() {
   return frame({eyebrow: 'New wake word', title: 'What should your Echo answer to?',
     body: `
@@ -590,7 +625,7 @@ function pageNew() {
       <div class="field">
         <label for="newPhrase">Wake phrase</label>
         <input class="big" type="text" id="newPhrase" autocomplete="off" spellcheck="false"
-          placeholder="hey verona" aria-describedby="phraseHint">
+          placeholder="hey verona" aria-describedby="phraseHint" value="${esc(draft.phrase)}">
         <div class="hint" id="phraseHint">Three or four syllables work best. Avoid words people say all the time.</div>
       </div>
       <div class="row">
@@ -601,20 +636,30 @@ function pageNew() {
         <p>The built-in voices are American. Add how your household says it as another spelling, separated by a comma:
           <code>hey clara, hey clarra</code>. One wake word listens for every spelling. Press <b>Hear it</b> to check each one.</p>
       </details>
-      <details class="more"><summary>Advanced settings</summary>
-        <div class="field"><label for="newName">Name</label>
-          <input type="text" id="newName" placeholder="Made from the phrase" autocomplete="off"></div>
+      <div class="field">
+        <label for="newName">Name</label>
+        <input type="text" id="newName" autocomplete="off" maxlength="64" value="${esc(draft.name)}"
+          placeholder="${esc(defaultName(draft.phrase) || 'Made from the phrase')}" aria-describedby="nameHint">
+        <div class="hint" id="nameHint">What it's called here and in EchoMuse. You can rename it later.</div>
+      </div>
+      <details class="more"${draft.samples !== DRAFT0.samples || draft.steps !== DRAFT0.steps ? ' open' : ''}><summary>Advanced settings</summary>
         <div class="fields2">
           <div class="field"><label for="newSamples">Example voices</label>
-            <input type="text" inputmode="numeric" id="newSamples" value="30000"></div>
+            <input type="text" inputmode="numeric" id="newSamples" value="${esc(draft.samples)}"></div>
           <div class="field"><label for="newSteps">Training steps</label>
-            <input type="text" inputmode="numeric" id="newSteps" value="50000"></div>
+            <input type="text" inputmode="numeric" id="newSteps" value="${esc(draft.steps)}"></div>
         </div>
         <p class="hint">More of either takes longer. The defaults suit most phrases.</p>
       </details>`,
     foot: `<span class="sp"></span><button class="em-pill em-pill--accent em-pill--big" type="button" data-act="create">Create</button>`});
 }
 
+function wwTools(w) {
+  const dis = jobFor(w.name) ? ` disabled title="Stop the job running for it first"` : '';
+  return `<div class="tools">
+    <button class="em-pill em-pill--small" type="button" data-act="rename"${dis}>Rename</button>
+    <button class="em-pill em-pill--small" type="button" data-act="del"${dis}>Delete</button></div>`;
+}
 function wwHead(w, r) {
   const n = STEPS.findIndex(s => s[0] === r.step);
   const done = {train: w.model_built};
@@ -646,13 +691,22 @@ function pageTrain(w) {
       <button class="link" type="button" data-act="log">Show the log</button></div>`;
   else if (w.model_built) status = `<div class="status ok"><i></i>Trained ${esc(fmtWhen(w.model_mtime))}. Retrain only after you change something in Improve.</div>`;
   else if (w.clips_train > 0) status = `<div class="status still"><i></i>Stopped part-way. Continue picks up where it left off; nothing is lost.</div>`;
-  else status = `<p class="lead">Training takes a while, longer without a GPU. You can close this page and come back.</p>`;
+  else status = `<p class="lead">Training takes a while, longer without a GPU. You can close this page and come back.</p>
+      <section class="card" aria-labelledby="c-before" style="max-width:640px">
+        <h3 id="c-before">Before you train: voices with your accent</h3>
+        <p>The built-in voices are American. If your household sounds different, add voices with your accent
+          or Google voices first, so the first training already knows how you say it. Optional.</p>
+        <div class="row"><a class="em-pill em-pill--small" href="${href('w', w.name, 'improve')}">Add voices first</a></div>
+      </section>`;
+  const cpu = mine && state.job.cpu_fallback ? `<div class="warnbox"><span class="ic" aria-hidden="true">!</span><div>
+      <b>Training on the CPU.</b> The forge can't reach the GPU, so this will take many hours. Stop it, restart the
+      forge's container (<code>docker restart oww-forge-ui</code>), then press Continue training. Nothing made so far is lost.</div></div>` : '';
   const blocked = !dataReady() ? `<div class="warnbox"><span class="ic" aria-hidden="true">!</span><div>Training needs the
       <a href="#/data">voice data</a>, and it isn't downloaded yet.</div></div>`
     : busy() && !mine ? `<p>${esc(busyReason())}</p>` : '';
   const label = w.model_built ? 'Retrain' : w.clips_train > 0 ? 'Continue training' : 'Start training';
-  return frame({eyebrow: 'Wake word', title: w.name, head: wwHead(w, {step: 'train'}),
-    body: `${status}<ul class="checklist">${list}</ul>${blocked}
+  return frame({eyebrow: 'Wake word', title: w.name, tools: wwTools(w), head: wwHead(w, {step: 'train'}),
+    body: `${cpu}${status}<ul class="checklist">${list}</ul>${blocked}
       <details class="more" data-keep="train-settings"><summary>Training settings</summary>
         ${settingsFields(w)}
         <div aria-live="polite">${flashHtml(w.name, 'train')}</div>
@@ -674,7 +728,7 @@ function settingsFields(w) {
 }
 
 function needsModel(w, r, what, extra = '') {
-  return frame({eyebrow: 'Wake word', title: w.name, head: wwHead(w, r),
+  return frame({eyebrow: 'Wake word', title: w.name, tools: wwTools(w), head: wwHead(w, r),
     body: `<div class="status still"><i></i>Train it first, then ${what}.</div>${extra}`,
     foot: `<span class="sp"></span><a class="em-pill em-pill--accent" href="${href('w', w.name, 'train')}">Go to Train</a>`});
 }
@@ -683,7 +737,7 @@ function pageTry(w) {
   if (!w.model_built) return needsModel(w, {step: 'try'}, 'you can try it');
   const secure = window.isSecureContext && navigator.mediaDevices;
   const v = verdicts[w.name];
-  return frame({eyebrow: 'Wake word', title: w.name, head: wwHead(w, {step: 'try'}),
+  return frame({eyebrow: 'Wake word', title: w.name, tools: wwTools(w), head: wwHead(w, {step: 'try'}),
     body: `
       <p class="lead">Say the phrase the way you would to the Echo, from about where you'd stand.</p>
       ${secure ? `<div class="row" style="gap:18px">
@@ -726,9 +780,10 @@ function pageImprove(w) {
   const langs = voices ? voices.filter(l => l.max_speakers > 1 || l.language.startsWith('en_'))
     .map(l => `<option value="${esc(l.language)}"${l.language === 'en_GB' ? ' selected' : ''}>${esc(l.label)} · ${l.max_speakers} speaker${l.max_speakers === 1 ? '' : 's'}</option>`).join('')
     : '<option value="en_GB">English (Great Britain)</option>';
-  return frame({eyebrow: 'Wake word', title: w.name, head: wwHead(w, {step: 'improve'}),
+  return frame({eyebrow: 'Wake word', title: w.name, tools: wwTools(w), head: wwHead(w, {step: 'improve'}),
     body: `
-      <p class="lead">Each of these adds to what it learns from. Retrain afterwards to use them.</p>
+      <p class="lead">${w.model_built ? 'Each of these adds to what it learns from. Retrain afterwards to use them.'
+        : 'Add any of these before you train, and the first training uses them.'}</p>
       ${busy() ? `<p>${esc(busyReason())}</p>` : ''}
       <div id="impStatus" aria-live="polite">${flashHtml(w.name, 'improve')}</div>
       <h3>It doesn't hear us</h3>
@@ -771,19 +826,13 @@ function pageImprove(w) {
           Add anything you hear it wake on by mistake.</div>
       </div>
       <div class="row"><button class="em-pill em-pill--small" type="button" data-act="savenegs" ${dis}>Save</button></div>`,
-    foot: `<span class="sp"></span><button class="em-pill em-pill--accent" type="button" data-act="build" ${busy() || !dataReady() ? 'disabled' : ''}>Retrain with these</button>`});
+    foot: `<span class="sp"></span><button class="em-pill em-pill--accent" type="button" data-act="build" ${busy() || !dataReady() ? 'disabled' : ''}>${w.model_built ? 'Retrain with these' : w.clips_train > 0 ? 'Continue training' : 'Start training'}</button>`});
 }
 
-function deleteSection(w) {
-  return `<details class="more"><summary>Delete this wake word</summary>
-        <p>Deletes its training data and model from the forge. A copy already added to EchoMuse keeps working.</p>
-        <button class="em-pill em-pill--danger em-pill--small" type="button" data-act="del" ${jobFor(w.name) ? 'disabled' : ''}>Delete ${esc(w.name)}</button>
-      </details>`;
-}
 function pageUse(w) {
-  if (!w.model_built) return needsModel(w, {step: 'use'}, 'you can use it', deleteSection(w));
+  if (!w.model_built) return needsModel(w, {step: 'use'}, 'you can use it');
   const file = `${w.name}.onnx`;
-  return frame({eyebrow: 'Wake word', title: w.name, head: wwHead(w, {step: 'use'}),
+  return frame({eyebrow: 'Wake word', title: w.name, tools: wwTools(w), head: wwHead(w, {step: 'use'}),
     body: `
       <p class="lead">Add it to EchoMuse, then pick it as the wake word.</p>
       <ol class="checklist">
@@ -793,8 +842,7 @@ function pageUse(w) {
         ${step('3', '', 'Click <b>+ Custom model</b> and choose the file you downloaded.')}
         ${step('4', '', `Select it, then say “${esc(w.phrases[w.phrases.length - 1])}” to an Echo.`,
           'If it misses you, go to Improve, add recordings, retrain, and upload the new file the same way.')}
-      </ol>
-      ${deleteSection(w)}`,
+      </ol>`,
     foot: `<a class="em-pill" href="${href('w', w.name, 'try')}">Back</a><span class="sp"></span>`});
 }
 
@@ -808,6 +856,7 @@ function view(r) {
     location.replace(href('w', state.wakewords[0].name));
     return null;
   }
+  if (r.page === 'missing') return pageMissing(r);
   return {home: pageHome, data: pageData, google: pageGoogle, new: pageNew}[r.page]();
 }
 
@@ -996,6 +1045,7 @@ const ACTIONS = {
     if (!phrase) { notice('Type the wake phrase first, for example “hey verona”.'); $('newPhrase').focus(); return; }
     const r = await post('/api/wakewords', {phrase, name: $('newName').value.trim(),
       samples: num('newSamples'), steps: num('newSteps')});
+    draft = {...DRAFT0}; saveDraft();
     await refresh();
     location.hash = href('w', r.name, 'train');
   },
@@ -1010,17 +1060,17 @@ const ACTIONS = {
   async savenegs(btn, name) {
     await api(`/api/wakewords/${enc(name)}`, {method: 'PATCH', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({custom_negative_phrases: $('f-neg').value})});
-    impStatus('ok', 'Saved. Retrain to use them.'); refresh();
+    impStatus('ok', wwByName(name)?.model_built ? 'Saved. Retrain to use them.' : 'Saved. Training will use them.'); refresh();
   },
   async piper(btn, name) {
     await post(`/api/wakewords/${enc(name)}/piper-voices`, {language: $('pLang').value, samples: +num('pN') || 4000});
-    impStatus('', 'Adding voices. Retrain when that finishes.'); refresh();
+    impStatus('', 'Adding voices. Train when that finishes.'); refresh();
   },
   async gtts(btn, name) {
     const langs = [...document.querySelectorAll('input[name=gl]:checked')].map(i => i.value);
     if (!langs.length) { notice('Pick at least one accent.'); return; }
     await post(`/api/wakewords/${enc(name)}/google-tts`, {languages: langs.join(','), samples: +num('gN') || 2000});
-    impStatus('', 'Adding Google voices. Retrain when that finishes.'); refresh();
+    impStatus('', 'Adding Google voices. Train when that finishes.'); refresh();
   },
   async del(btn, name) {
     if (!await confirmDialog(`Delete ${name}?`, 'This deletes its training data and model from the forge. It can’t be undone.', 'Delete', true)) return;
@@ -1029,6 +1079,25 @@ const ACTIONS = {
     await refresh(); location.hash = '#/';
   },
   mic(btn, name) { toggleMic(btn, name); },
+  rename(btn, name) {
+    const d = $('renameDlg'), step = route().step;
+    $('rnTitle').textContent = `Rename ${name}`; $('rnInput').value = name; $('rnErr').textContent = '';
+    d.showModal(); $('rnInput').select();
+    $('rnForm').onsubmit = async e => {
+      e.preventDefault();
+      const to = $('rnInput').value.trim();
+      if (!to || to === name) { d.close(); return; }
+      const r = await fetch(`/api/wakewords/${enc(name)}/rename`, {method: 'POST',
+        headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name: to})});
+      if (!r.ok) { $('rnErr').textContent = await r.text(); $('rnInput').focus(); return; }
+      for (const k of Object.keys(flashes)) if (k.startsWith(name + '/')) { flashes[to + k.slice(name.length)] = flashes[k]; delete flashes[k]; }
+      if (verdicts[name]) { verdicts[to] = verdicts[name]; delete verdicts[name]; }
+      d.close();
+      await refresh();
+      location.hash = href('w', to, step || 'train');
+      announce(`Renamed to ${to}.`);
+    };
+  },
   async gsave() {
     const file = $('gFile').files[0], pasted = $('gPaste').value.trim();
     if (!file && !pasted) { notice('Choose the key file, or paste its contents.'); return; }
@@ -1082,6 +1151,12 @@ $('view').addEventListener('change', async e => {
       (r.errors.length ? ` ${r.errors.length} couldn't be read.` : '') + ' Retrain to use them.');
   } catch { impStatus('', ''); }
 });
+const DRAFT_FIELDS = {newPhrase: 'phrase', newName: 'name', newSamples: 'samples', newSteps: 'steps'};
+$('view').addEventListener('input', e => {
+  const k = DRAFT_FIELDS[e.target.id]; if (!k) return;
+  draft[k] = e.target.value; saveDraft();
+  if (k === 'phrase') $('newName').placeholder = defaultName(draft.phrase) || 'Made from the phrase';
+});
 $('view').addEventListener('keydown', e => {
   if (e.key === 'Enter' && e.target.id === 'newPhrase') ACTIONS.create().catch(() => {});
 });
@@ -1091,6 +1166,7 @@ async function stopJob() {
   await api('/api/job/cancel', {method: 'POST'});
   refresh();
 }
+$('rnCancel').onclick = () => $('renameDlg').close();
 $('cancelJob').onclick = () => stopJob().catch(() => {});
 
 function openLog() {

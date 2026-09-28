@@ -70,6 +70,67 @@ def slugify(phrase: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", phrase.lower()).strip("_")
 
 
+def default_name(phrase: str) -> str:
+    """The name `new` gives a phrase with no --name: its FIRST spelling.
+    The web UI asks this rather than slugifying the whole field, which
+    included every comma-separated spelling and so named a word that did
+    not exist (the page then fell back to the top of the list)."""
+    first = next((p.strip() for p in phrase.split(",") if p.strip()), "")
+    return slugify(first)
+
+
+NAME_MAX = 64
+
+
+def check_name(name: str) -> str:
+    """A wake word's name is a directory, a clips directory and the .onnx
+    file's stem (openWakeWord keys predictions by that stem), so it has to be
+    a safe single path component. Spaces and punctuation are fine; a path
+    separator, a leading dot or a control character is not."""
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("the name is empty")
+    if len(name) > NAME_MAX:
+        raise ValueError(f"the name is longer than {NAME_MAX} characters")
+    if "/" in name or "\\" in name or name.startswith("."):
+        raise ValueError("the name can't contain / or \\ or start with a dot")
+    if any(ord(c) < 32 or ord(c) == 127 for c in name):
+        raise ValueError("the name can't contain control characters")
+    return name
+
+
+def rename_wakeword(old: str, new: str) -> None:
+    """Move every file that carries the name, and the two config lines that
+    record it. Callers make sure no job is using the word."""
+    new = check_name(new)
+    src, dest = WAKEWORDS / old, WAKEWORDS / new
+    if not (src / "config.yml").exists():
+        raise FileNotFoundError(f"no such wake word: {old}")
+    if new == old:
+        return
+    if dest.exists() or (MODELS / f"{new}.onnx").exists():
+        raise FileExistsError(f"a wake word called {new} already exists")
+    # Inside first, while the directory still has its old name: the clips
+    # and features (<dir>/<name>/) and train.py's own copy of the model.
+    if (src / old).is_dir():
+        (src / old).rename(src / new)
+    if (src / f"{old}.onnx").exists():
+        (src / f"{old}.onnx").rename(src / f"{new}.onnx")
+    # Edit the two lines in place, as the settings PATCH does, so the
+    # template's comments survive.
+    cfg = src / "config.yml"
+    lines = cfg.read_text().splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        if line.startswith("model_name:"):
+            lines[i] = f'model_name: "{new}"\n'
+        elif line.startswith("output_dir:"):
+            lines[i] = f'output_dir: "{dest}"\n'
+    cfg.write_text("".join(lines))
+    src.rename(dest)
+    if (MODELS / f"{old}.onnx").exists():
+        (MODELS / f"{old}.onnx").rename(MODELS / f"{new}.onnx")
+
+
 def download(url: str, dest: Path) -> None:
     """Plain HTTP download with a .part temp file so interrupts don't leave
     a truncated file that idempotency checks would then treat as complete."""
@@ -258,7 +319,10 @@ def cmd_new(args) -> None:
     phrases = [p.strip().lower() for p in args.phrase.split(",") if p.strip()]
     if not phrases:
         sys.exit("empty phrase")
-    name = args.name or slugify(phrases[0])
+    try:
+        name = check_name(args.name or slugify(phrases[0]))
+    except ValueError as e:
+        sys.exit(str(e))
     ww_dir = WAKEWORDS / name
     cfg_path = ww_dir / "config.yml"
     if cfg_path.exists() and not args.force:
