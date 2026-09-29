@@ -6953,6 +6953,28 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // Returns 0 when the header does not parse or the arithmetic lands outside the
   // buffer, meaning "send the whole thing" — a size optimisation must never be
   // the reason a build cannot happen.
+  // fetch() with a deadline covering the whole exchange, body included. Rejects
+  // with name 'TimeoutError' when it passes.
+  async function fetchWithDeadline(url, options, ms) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), ms);
+    try {
+      const resp = await fetch(url, { ...options, signal: ctl.signal });
+      const body = await resp.arrayBuffer();
+      return new Response(body, { status: resp.status, statusText: resp.statusText,
+                                  headers: resp.headers });
+    } catch (e) {
+      if (ctl.signal.aborted) {
+        const err = new Error(`no answer within ${Math.round(ms / 1000)}s`);
+        err.name = 'TimeoutError';
+        throw err;
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   function _bootImageLength(bytes) {
     if (!bytes || bytes.length < 2048) return 0;
     if (new TextDecoder().decode(bytes.slice(0, 8)) !== 'ANDROID!') return 0;
@@ -6968,6 +6990,12 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
 
   // Step 5 — build. The controller does the packing; see em_emos_build.py for
   // why it is there and not here.
+
+  // The build POST had no deadline, so a request that never came back (#689)
+  // left the step spinning with nothing to say where it stopped. The
+  // controller's own worst case is ~130s (release lookup 10s, payload download
+  // 120s), plus the 9MB upload on a slow link.
+  const EMOS_BUILD_DEADLINE_MS = 5 * 60 * 1000;
   async function runBuildEmos(useLatest) {
     if (!emosRef) {
       throw new Error('No escrowed boot image — run the Escrow Boot Image step first.');
@@ -7057,11 +7085,27 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     if (emosPlan && emosPlan.ok && emosPlan.systemPart) {
       fd.append('system_part', String(emosPlan.systemPart));
     }
-    const resp = await fetch(ingressPath('/api/provision/emos_image'), {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-      body: fd,
-    });
+    const started = Date.now();
+    const ticker = setInterval(() => {
+      addLog(`  still waiting for the controller (${Math.round((Date.now() - started) / 1000)}s)…`);
+    }, 30000);
+    let resp;
+    try {
+      resp = await fetchWithDeadline(ingressPath('/api/provision/emos_image'), {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: fd,
+      }, EMOS_BUILD_DEADLINE_MS);
+    } catch (e) {
+      if (e.name === 'TimeoutError') {
+        throw new Error('The controller did not answer within 5 minutes. Nothing has '
+          + 'been written to the Echo. Its log shows whether the image arrived: look '
+          + 'for "emOS image" or "Fetching binary".');
+      }
+      throw e;
+    } finally {
+      clearInterval(ticker);
+    }
     if (!resp.ok) {
       // The build refuses rather than warns, and every refusal names something
       // the operator can act on — surface it rather than the status code.
