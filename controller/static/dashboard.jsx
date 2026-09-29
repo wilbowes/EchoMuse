@@ -2713,12 +2713,19 @@ function Card({ device, onClick }) {
         <LedRing state={state} size={120}/>
       </div>
       <div style={{ padding: '0 16px 16px' }}>
-        <div className="em-inset" style={{ '--em-inset-radius':'6px', '--em-inset-pad':'7px 12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: state.lcd, letterSpacing: '0.12em', textShadow: `0 0 8px ${state.dot}88` }}>{state.label.toUpperCase()}</span>
-          <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--lcd-dim)', letterSpacing: '0.08em' }}>{(() => {
+        {/* At the 190px minimum card width a long state (OFFLINE, LISTENING)
+            and a full IP do not fit on one line, and wrapping only when they
+            collide left cards in one row with footers of different heights.
+            So the IP always has its own line. */}
+        <div className="em-inset" style={{ '--em-inset-radius':'6px', '--em-inset-pad':'7px 12px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3 }}>
+          <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: state.lcd, letterSpacing: '0.12em', textShadow: `0 0 8px ${state.dot}88`, whiteSpace: 'nowrap' }}>{state.label.toUpperCase()}</span>
+          {(() => {
             const ip = device.ip && device.ip !== '127.0.0.1' ? device.ip : null;
-            return device.connected ? (ip || '—') : (ip ? `${ip} ↑` : '—');
-          })()}</span>
+            return (
+              <span title={!device.connected && ip ? 'Last known address' : undefined}
+                    style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--lcd-dim)', letterSpacing: '0.08em', whiteSpace: 'nowrap' }}>{ip || '—'}</span>
+            );
+          })()}
         </div>
       </div>
     </div>
