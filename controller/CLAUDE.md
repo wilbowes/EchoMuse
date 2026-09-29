@@ -916,7 +916,11 @@ holds the matchers and constants; `start_timer_alarm` / `stop_timer_alarm` /
 `_ring_timer_alarm` in `em_controller.py` drive it. Bursts are gated on
 `device.speaker_busy`, dismissal sends `speaker_flush` (or the ring plays out of
 ~5.5s of device buffer after it has been stopped), and an unanswered ring stops
-at `MAX_RING_S` = 120s.
+at `MAX_RING_S` = 15 minutes, Voice PE's cap. It was 120s until 2026-09-29:
+a timer rings for as long as it needs to, and one that stops early can be
+missed (Wil, declining #667's shorter setting). A longer ring leaves #373's
+announcement collision open for longer, which is one more reason that fix is
+owed.
 
 **The ring asks before writing the plane; the announcement does not, and that
 is #373.** `_ring_timer_alarm` gates every burst on `speaker_busy` because two
@@ -945,7 +949,7 @@ rather than yielding. An alarm-specific duck depth is wanted rather than
 borrowing `duckDb`, which was tuned for a music bed under speech.
 
 **Do not "fix" the announcement by blocking it for the whole ring** — HA blocks
-on the announce call holding `_is_announcing`, and a 120s `MAX_RING_S` would
+on the announce call holding `_is_announcing`, and a 15-minute `MAX_RING_S` would
 fail every other announcement to that satellite. Waiting for the BURST in
 flight is a different thing: the chime is 1.68s of every 2.3s, and real
 responses measure 1.6–2.6s of audio, so a capped wait is seconds rather than

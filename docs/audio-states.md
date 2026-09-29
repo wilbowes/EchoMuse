@@ -59,7 +59,7 @@ underneath on its own plane and is ducked rather than displaced.
 |---|---|---|---|---|
 | 1 | Voice turn (wake word or button) | voice | `em_player.interrupt()` — **unconditional**, even with nothing playing | `resume_interrupted()` at turn end |
 | 2 | HA announcement | voice | same `interrupt()` path | announcement playback completes |
-| 3 | Timer alarm ring | voice | `start_timer_alarm()`, bursts gated on `speaker_busy` | dismissal (button / spoken / CANCELLED) or `MAX_RING_S` = 120s | **[today]** |
+| 3 | Timer alarm ring | voice | `start_timer_alarm()`, bursts gated on `speaker_busy` | dismissal (button / spoken / CANCELLED) or `MAX_RING_S` = 15 min (Voice PE's) | **[today]** |
 | 4 | Media / music | music | `em_player.play()` | `stop()` / `pause()` / device gone |
 
 **Ownership is taken unconditionally, and that is deliberate** — not an
@@ -154,7 +154,7 @@ the whole reason the second plane exists.
 | T2 | a turn or announcement is playing | burst held off while `device.speaker_busy` is non-zero | [today] |
 | T3 | wake word heard over the ring | alert ducked by `DUCK_DB` for `DUCK_HOLD_S` = 12s so the command reaches STT | [today] |
 | T4 | dismissal (button, transcript, or `CANCELLED`) | ring stops, `speaker_flush` | [today] |
-| T5 | nobody answers | stops at `MAX_RING_S` = 120s | [today] |
+| T5 | nobody answers | stops at `MAX_RING_S` = 15 min | [today] |
 
 `speaker_busy` is a counter rather than a flag because an announcement can
 overlap a turn's playback, and it is held in a `try/finally` because a
@@ -191,7 +191,7 @@ process.
 
   The announcement waits for a response to finish and queues behind other
   announcements, with a cap. Blocking it for the whole ring is still wrong —
-  HA holds `_is_announcing` and 120s of `MAX_RING_S` would fail every other
+  HA holds `_is_announcing` and 15 minutes of `MAX_RING_S` would fail every other
   announcement — but that is the UNBOUNDED wait. Waiting for the burst in
   flight is under two seconds, and reading the warning as forbidding both is
   why this sat open.

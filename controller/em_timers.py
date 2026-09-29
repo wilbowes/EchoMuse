@@ -66,8 +66,11 @@ ALARM_SOUND_FILE = os.path.join(
 # sound than every other one is harder to support than a build that says so.
 
 # Safety cap: how long a finished timer keeps ringing if nobody dismisses it.
-# HA leaves a finished timer ringing indefinitely; the room should not.
-MAX_RING_S  = 120.0
+# HA leaves a finished timer ringing indefinitely; the room should not. 15
+# minutes is Voice PE's (`delay: 15min` then disable_repeat): a timer rings for
+# as long as it needs to, and one that stops early is one that can be missed
+# (Wil, 2026-09-29, declining #667's shorter setting). It was 120s.
+MAX_RING_S  = 900.0
 # Silence the orchestrator inserts between looped bursts (seconds).
 BURST_GAP_S = 0.6
 
@@ -77,7 +80,7 @@ BURST_GAP_S = 0.6
 DUCK_DB = -18.0
 # How long the duck holds with no turn taking over. A wake word that starts no
 # turn (a false accept on the chime itself) must not leave the alarm quiet for
-# the rest of its 120s cap — the ring is a safety feature.
+# the rest of its ring — the ring is a safety feature.
 DUCK_HOLD_S = 12.0
 
 # LED cue while ringing — a distinct pulse, not one of the reserved status
@@ -284,7 +287,7 @@ def attenuate(pcm: bytes, gain_db: float) -> bytes:
     count = len(pcm) // 2
     # An odd trailing byte cannot be a whole sample, so it is dropped rather
     # than crashing frombuffer. Vectorised because this runs over every burst
-    # of a ring that can last 120s — numpy is already a controller dependency.
+    # of a ring that can last 15 minutes — numpy is already a controller dependency.
     samples = np.frombuffer(pcm[: count * 2], dtype="<i2")
     scaled  = np.clip(np.rint(samples * gain), -32768, 32767).astype("<i2")
     return scaled.tobytes()
