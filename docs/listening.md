@@ -67,6 +67,20 @@ session, and the Echo goes back to listening locally.
   to the controller and on to Home Assistant's speech-to-text, wherever the
   user configured that to run.
 
+## Wake word off from Home Assistant
+
+Home Assistant's **Wake word** picker on an Echo's device page turns its wake
+word off ("No wake word") and back on. Off, a wake word never starts a turn;
+the microphone stays live, so the button and a question Home Assistant asks
+(`ask_question`, `start_conversation`) still work.
+
+On an Echo listening privately, off reaches the Echo itself (`wakeWordEnabled`,
+capability `wake_word_off`) and it stops at the crossing, so it sends
+nothing. Firmware without that capability would still open a session and send
+audio before the controller could close it, so off is **refused** for it and
+the picker snaps back. An Echo streaming to the controller is stopped by the
+controller.
+
 ## States an Echo can be in
 
 The controller resolves one of these per Echo (`em_listen.resolve`) and the

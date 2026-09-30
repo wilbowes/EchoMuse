@@ -42,6 +42,11 @@ type Device struct {
 	// barge-in look like an on-device miss.
 	BargeInEnabled   bool
 	BargeInThreshold float64
+	// WakeWordEnabled is Home Assistant's wake word picker (#286): false is
+	// "No wake word". A crossing then never opens a session or starts a
+	// turn, so a privately listening Echo sends nothing; the button still
+	// works. Not stored: the controller pushes it on every connect.
+	WakeWordEnabled bool
 	// DuckDb is how far MUSIC is attenuated while a voice turn plays over
 	// it, in dB (negative = quieter). Config rather than a constant because
 	// it is a taste parameter that needs iterating in a real room, the same
@@ -179,6 +184,7 @@ func (d *Device) loadDefaults() {
 	d.OwwModel = envStr("OWW_MODEL", "hey_jarvis_v0.1")
 	d.OwwOnDevice = normaliseOnDevice(envStr("OWW_ON_DEVICE", OnDeviceOff))
 	d.BargeInThreshold = envFloat("BARGE_IN_THRESHOLD", 0.05)
+	d.WakeWordEnabled = true
 	d.DuckDb = envFloat("DUCK_DB", -18)
 	d.WakeSound = envBool("WAKE_SOUND", false)
 	d.WakeSoundLevel = envStr("WAKE_SOUND_LEVEL", "medium")
@@ -237,6 +243,9 @@ func (d *Device) Apply(msg ConfigMessage) {
 	if msg.BargeInEnabled != nil {
 		d.BargeInEnabled = *msg.BargeInEnabled
 	}
+	if msg.WakeWordEnabled != nil {
+		d.WakeWordEnabled = *msg.WakeWordEnabled
+	}
 	if msg.BargeInThreshold > 0 {
 		d.BargeInThreshold = msg.BargeInThreshold
 	}
@@ -292,6 +301,13 @@ func (d *Device) Apply(msg ConfigMessage) {
 		d.ListeningAnim = msg.ListeningAnim
 	}
 	applyOutput(&d.Output, msg)
+}
+
+// WakeWordOn reports whether a wake word crossing may start a turn (#286).
+func (d *Device) WakeWordOn() bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.WakeWordEnabled
 }
 
 // WakeSoundSetting reports whether the wake sound is on, and at what level.
@@ -352,6 +368,7 @@ func (d *Device) Snapshot() ConfigMessage {
 	// Same reason as beamformingEnabled above: copy, never point into the
 	// mutex-guarded struct.
 	bargeInEnabled := d.BargeInEnabled
+	wakeWordEnabled := d.WakeWordEnabled
 	agcEnabled := true
 	if d.AgcEnabled != nil {
 		agcEnabled = *d.AgcEnabled
@@ -377,6 +394,7 @@ func (d *Device) Snapshot() ConfigMessage {
 		OwwOnDevice:        d.OwwOnDevice,
 		BargeInEnabled:     &bargeInEnabled,
 		BargeInThreshold:   d.BargeInThreshold,
+		WakeWordEnabled:    &wakeWordEnabled,
 		StartupVolume:      d.StartupVolume,
 		AdcDigitalGain:     &adcDigitalGain,
 		AdcMicpga:          &adcMicpga,
@@ -438,6 +456,8 @@ type ConfigMessage struct {
 	// FireOS, which uses adbd.
 	ConsoleTimeoutMin  *int     `json:"consoleTimeoutMin,omitempty"`
 	BargeInEnabled     *bool    `json:"bargeInEnabled,omitempty"`
+	// A pointer because false ("No wake word") is the value that matters.
+	WakeWordEnabled    *bool    `json:"wakeWordEnabled,omitempty"`
 	BargeInThreshold   float64  `json:"bargeInThreshold,omitempty"`
 	DuckDb             *float64 `json:"duckDb,omitempty"`
 	BeamAngle          *float64 `json:"beamAngle,omitempty"`

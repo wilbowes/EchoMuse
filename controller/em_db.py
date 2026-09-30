@@ -1740,6 +1740,45 @@ def get_device_config(device_id: str) -> dict:
         return dict(DEFAULT_DEVICE_CONFIG)
 
 
+# Devices HA's wake word picker has turned off (#286). Stored because HA
+# never sends the picker's state back. Not a config key: a dashboard save
+# would overwrite it with whatever that page last loaded.
+_WAKE_WORD_OFF_KEY = "wake_word_off"
+
+
+def _wake_word_off_ids(conn: sqlite3.Connection) -> list[str]:
+    row = conn.execute(
+        "SELECT value FROM system_config WHERE key = ?", (_WAKE_WORD_OFF_KEY,)
+    ).fetchone()
+    if row is None or not row["value"]:
+        return []
+    try:
+        ids = json.loads(row["value"])
+    except (json.JSONDecodeError, TypeError):
+        log.warning("[db] Invalid wake_word_off JSON — treating every device as on")
+        return []
+    return [i for i in ids if isinstance(i, str)] if isinstance(ids, list) else []
+
+
+def get_wake_word_enabled(device_id: str) -> bool:
+    """Whether HA's picker leaves this device's wake word on. Default on."""
+    assert _conn is not None, "db.init() has not been called"
+    with _db_lock:
+        return device_id not in _wake_word_off_ids(_conn)
+
+
+def set_wake_word_enabled(device_id: str, enabled: bool) -> None:
+    """Record HA's picker choice for this device. Read-modify-write in one tx."""
+    with _tx() as conn:
+        ids = [i for i in _wake_word_off_ids(conn) if i != device_id]
+        if not enabled:
+            ids.append(device_id)
+        conn.execute(
+            "INSERT OR REPLACE INTO system_config (key, value) VALUES (?, ?)",
+            (_WAKE_WORD_OFF_KEY, json.dumps(sorted(ids))),
+        )
+
+
 def get_global_device_config() -> dict:
     """
     Return the fleet-wide default device config.
@@ -1937,6 +1976,8 @@ def delete_device(device_id: str) -> None:
     with _tx() as conn:
         conn.execute("DELETE FROM device_logs WHERE device_id = ?", (device_id,))
         conn.execute("DELETE FROM devices WHERE device_id = ?", (device_id,))
+    # A re-added device is new to HA, so it starts listening.
+    set_wake_word_enabled(device_id, True)
     try:
         removed = em_recordings.delete_device(device_id)
         if removed:

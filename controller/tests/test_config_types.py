@@ -30,8 +30,10 @@ UNLISTED = {
 }
 
 # ConfigMessage fields that are not config values.
+# wakeWordEnabled is HA's picker state (em_wakeword), stored and sent apart
+# from device config.
 NOT_CONFIG = {"type", "hasBeamforming", "listeningAnim",
-              "consolePassword", "consoleTimeoutMin"}
+              "consolePassword", "consoleTimeoutMin", "wakeWordEnabled"}
 
 GO_KIND = {"int": T.INT, "float64": T.FLOAT, "bool": T.BOOL,
            "string": T.STR, "[]float64": T.FLOAT_LIST}

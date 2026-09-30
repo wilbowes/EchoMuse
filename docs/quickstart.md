@@ -178,6 +178,12 @@ The device appears in HA as **`<name> Voice Assistant`** (e.g. "Lounge
 Voice Assistant"), with Model "Echo Dot Gen 2 (biscuit)" — the Bluetooth
 proxy, if enabled, shows up separately as `<name> BT Proxy`.
 
+Each device also has a **media player**, an **Action Button** event
+(hold-capable firmware), an **Ambient Light** sensor (where fitted) and a
+read-only **Microphone Muted** sensor. HA's **Wake word** dropdown turns
+detection off and on. See
+[the FAQ](faq.md#can-home-assistant-stop-a-device-listening-or-tell-whether-its-microphone-is-muted).
+
 > **Auto-discovery:** if Home Assistant runs on the **same subnet** as the
 > controller, devices should also pop up automatically as discovered
 > "echomuse-…" entries (fixed in v2.7.5 — earlier versions advertised

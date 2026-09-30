@@ -390,6 +390,28 @@ comes back as pending.
 ### I re-added a device and its voice port is missing.
 Same fix, same answer: update the controller.
 
+### Can Home Assistant stop a device listening, or tell whether its microphone is muted?
+Yes to both, with two separate controls.
+
+**Wake word** is the dropdown Home Assistant puts on every voice satellite.
+**No wake word** stops the device waking; picking the wake word turns it back
+on (either dropdown, including **Wake word 2**). In an automation, use
+`select.select_option` with `no_wake_word` or the wake word's name. The choice
+survives a controller restart. The microphone stays on, so
+`start_conversation` and `ask_question` still listen. On the default
+[Listening](listening.md) mode the Echo still hears its wake word and the
+controller closes that session at once. Until the close arrives (usually a
+fraction of a second, never more than 3 seconds) the Echo sends what follows
+the wake word.
+
+**Microphone Muted** (`binary_sensor`) is the physical mute button, read-only,
+because only the button can unmute it. Check it before
+`assist_satellite.ask_question`: a muted device captures nothing, and HA waits
+for an answer with no timeout.
+
+The two are independent: the button never changes the wake word setting. The
+media player's **mute** is different again. It silences the speaker only.
+
 ### My device changed its Home Assistant entity IDs.
 That happens whenever a device is deleted and re-added — HA keys entities on
 identity, and a re-added device is a new one. There's no way to carry the old

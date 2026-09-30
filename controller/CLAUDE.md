@@ -513,13 +513,27 @@ playing nothing. With two devices it reads as a routing fault, because the
 other device is fine. An announcement is a new action and nothing that set that
 flag earlier has a claim on it.
 
-**`VoiceAssistantSetConfiguration` is handled but not applied.** It is HA
-writing a wake-word choice back to us. We advertise one model with
-`max_active_wake_words=1`, so the dropdown offers our model plus "no wake
-word" and there is nothing to switch between; an empty list means "deafen
-this satellite", which is a real request we do not implement and log at
-warning rather than drop. Applying it, and offering a choice worth making,
-both wait on #112.
+**`VoiceAssistantSetConfiguration` turns the wake word off and on (#286,
+#552).** We advertise one model with `max_active_wake_words=1`, so HA's
+picker is an on/off per Echo: "No wake word" is off, our model is on; WHICH
+model stays a dashboard setting (#112). HA sends the union of its two
+pickers, reads the config back straight after writing it (so state is set
+before the handler returns), and never re-sends its restored choice, so the
+controller stores it per device in `system_config` (`em_db.get_wake_word_enabled`)
+rather than in device config, where a dashboard save would write a stale
+copy back. The policy is `em_wakeword.py`; the mic mute button and the
+picker never move each other.
+
+**Off has to reach the Echo when it listens privately.** It detects its own
+wake word and opens a session before the controller can close it, so firmware
+announcing `wake_word_off` gets `wakeWordEnabled` (a pointer; false is the
+value that matters) on connect and on every change, and stops at the crossing.
+Older firmware reporting `listen_state=local` has off DECLINED
+(`em_wakeword.decline_off`) and HA's re-read snaps the picker back: accepting
+it would show "No wake word" while each wake still sent up to 3s of audio.
+An Echo streaming to the controller is stopped with `mic_stop`. The
+`listen_close(wake_off)` in `_private_wake_turn` stays as a backstop for the
+moment between boot and the first push.
 
 ### HA entities beyond the voice satellite
 

@@ -1224,12 +1224,17 @@ func capabilities() []string {
 	// Without it the dashboard shows the toggle disabled, since a switch that
 	// saves and makes no sound fails the person it exists for.
 	//
+	// "wake_word_off": this firmware honours wakeWordEnabled=false (#286),
+	// so a crossing opens no session. Without it the controller declines
+	// HA's "No wake word" for a privately listening Echo, which would
+	// otherwise keep sending audio on every wake until the close arrived.
+	//
 	// "pairing": this firmware asks to pair itself when its owner holds the
 	// action button 5 s (pairing.go). Without it the controller offers the
 	// admin a Pair action instead, since the device cannot ask.
 	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons",
 		"oww_shadow", "oww_trigger", "button_hold", "audio_mix",
-		"aec_hw_ref", "oww_local_only", "output_chain", "wake_cue", "pairing"}
+		"aec_hw_ref", "oww_local_only", "output_chain", "wake_cue", "pairing", "wake_word_off"}
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}

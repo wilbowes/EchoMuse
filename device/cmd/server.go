@@ -1341,6 +1341,11 @@ func onWakeCrossing(cc *client.ControlClient, dc *client.DataClient,
 		log.Printf("[shadow] wake %.3f suppressed — muted", score)
 		return
 	}
+	if !config.Get().WakeWordOn() {
+		cc.SendOwwShadowCross(score, ageMs)
+		log.Printf("[shadow] wake %.3f suppressed — wake word off", score)
+		return
+	}
 	var session uint32
 	if dc.ListenState() == client.ListenLocal {
 		var ok bool
