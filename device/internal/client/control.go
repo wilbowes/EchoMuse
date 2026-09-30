@@ -1227,9 +1227,13 @@ func capabilities() []string {
 	// "pairing": this firmware asks to pair itself when its owner holds the
 	// action button 5 s (pairing.go). Without it the controller offers the
 	// admin a Pair action instead, since the device cannot ask.
+	//
+	// "music_buffer": this firmware reports its music buffer level
+	// (SendMusicBuffer) once the controller's ack carries the same feature.
 	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons",
 		"oww_shadow", "oww_trigger", "button_hold", "audio_mix",
-		"aec_hw_ref", "oww_local_only", "output_chain", "wake_cue", "pairing"}
+		"aec_hw_ref", "oww_local_only", "output_chain", "wake_cue", "pairing",
+		"music_buffer"}
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}
@@ -1484,6 +1488,27 @@ const FeatureListenSession = "listen_session"
 // audio UNPROCESSED and leaves EQ, bass guard and limiter to the device.
 // Absent, the controller is still processing and the device must not.
 const FeatureOutputChain = "output_chain"
+
+// FeatureMusicBuffer is announced by a controller that paces the music feed
+// from this device's buffer reports. Without it the reports would be ignored,
+// so they are not sent.
+const FeatureMusicBuffer = "music_buffer"
+
+// SendMusicBuffer reports how much music is buffered (leadMs) and how many
+// music payload bytes have arrived on the current data connection (recv).
+//
+// The controller cannot know the buffer from its own side: frames lost with
+// a dropped connection still count as sent, and the device's audio clock
+// drifts from the controller's. With recv it can tell how much is still in
+// transit, since it counts what it wrote to the same connection, so the
+// buffer is lead + in transit - time since the report.
+func (c *ControlClient) SendMusicBuffer(leadMs int64, recv uint64) {
+	_ = c.writeJSON(map[string]interface{}{
+		"type":    "music_buffer",
+		"lead_ms": leadMs,
+		"recv":    recv,
+	})
+}
 
 // SendBleAdverts forwards a batch of BLE advertisements to the controller
 // (bluetooth_proxy path). adverts is marshalled as-is — []bluetooth.Advert,

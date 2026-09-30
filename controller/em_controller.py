@@ -78,6 +78,7 @@ import em_db as db
 import em_auth as auth
 import em_api as api
 import em_pki
+import em_music_pace
 import em_hostip
 import em_linkauth
 import em_pairing
@@ -351,7 +352,11 @@ BLE_ADVERTS_TYPE   = 0x06
 # announced the same capability, and leaves EQ, bass guard and limiter to it.
 # The device runs its chain only when it sees this, so neither half alone
 # changes anything and the two can never both process the same audio.
-CONTROLLER_FEATURES = ["ble_adverts_data", "listen_session", "output_chain"]
+#
+# "music_buffer": this controller paces the music feed from the device's own
+# buffer reports (em_music_pace), so a device sends them only when it sees this.
+CONTROLLER_FEATURES = ["ble_adverts_data", "listen_session", "output_chain",
+                       "music_buffer"]
 SPEAKER_FRAME_TYPE = 0x02
 SPEAKER_EOS_TYPE   = 0x03
 MIC_HEADER_LEN     = 3   # [type][seq_hi][seq_lo]
@@ -415,6 +420,8 @@ class Device:
         self.kernel_release: str | None = None
 
         self.data_ws: WebSocketServerProtocol | None = None
+        # The device's music buffer, from its music_buffer reports.
+        self.music_pace = em_music_pace.MusicPace()
         # Remaining reconnect grace for the speaker stream in flight. Armed by
         # begin_data_stream(); spent down by send_data so the whole stream
         # shares one budget rather than each frame having its own.
@@ -898,10 +905,14 @@ class Device:
                     f"stream's remaining frames silently"
                 )
             return
+        ws = self.data_ws
         try:
-            await self.data_ws.send(data)
+            await ws.send(data)
         except Exception as e:
             log.warning(f"[{self.device_id}] Data send failed: {e}")
+            return
+        if data and data[0] == em_player.MUSIC_FRAME_TYPE:
+            self.music_pace.on_send(ws, len(data) - 1)
 
     async def set_leds(self, leds: list, listening: bool | None = None):
         # The optional listening flag tells the device explicitly that this
@@ -918,6 +929,11 @@ class Device:
     @property
     def led_anim_capable(self) -> bool:
         return "led_anim" in (self.capabilities or [])
+
+    @property
+    def music_buffer_capable(self) -> bool:
+        """Whether this firmware reports its music buffer (music_buffer)."""
+        return "music_buffer" in (self.capabilities or [])
 
     @property
     def audio_mix_capable(self) -> bool:
@@ -4920,6 +4936,11 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                         # The owner held the action button on a connected
                         # device; an admin issues credentials with Approve.
                         await api.notify_pair_request(device_id, "link")
+
+                    elif msg_type == "music_buffer":
+                        device.music_pace.on_report(
+                            device.data_ws, msg.get("lead_ms"), msg.get("recv"),
+                            asyncio.get_event_loop().time())
 
                     elif msg_type == "pong":
                         # Solicited pong (carries our sequence id) -> an RTT

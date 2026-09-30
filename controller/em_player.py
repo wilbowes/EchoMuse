@@ -840,8 +840,17 @@ class MediaSession:
                 # lowers the lead mid-stream so the response gets the wire,
                 # and that has to take effect on the next frame rather than
                 # the next track.
+                #
+                # From the device's own buffer report when it sends one
+                # (em_music_pace); the clock estimate is the fallback, and it
+                # is wrong after any loss, so the buffer never refills.
                 lead = self.lead_s
-                ahead = sent / BYTES_PER_SEC - (loop.time() - seg_start)
+                ahead = None
+                pace = getattr(device, "music_pace", None)
+                if pace is not None:
+                    ahead = pace.buffered_s(loop.time(), BYTES_PER_SEC)
+                if ahead is None:
+                    ahead = sent / BYTES_PER_SEC - (loop.time() - seg_start)
                 if ahead > lead:
                     await asyncio.sleep(ahead - lead)
                 await device.send_data(

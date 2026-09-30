@@ -315,6 +315,19 @@ func main() {
 		controlClient.StartPairing()
 	})
 
+	// Music buffer report, once a second while music arrives, so the
+	// controller paces the feed from the real buffer (see SendMusicBuffer).
+	go func() {
+		t := time.NewTicker(time.Second)
+		defer t.Stop()
+		for range t.C {
+			if controlClient.HasFeature(client.FeatureMusicBuffer) && pcmSpeaker.MusicArriving() {
+				controlClient.SendMusicBuffer(pcmSpeaker.MusicLead().Milliseconds(),
+					dataClient.MusicRecvBytes())
+			}
+		}
+	}()
+
 	// Button events — forward to controller via control plane
 	_, err = buttonController.SubscribeToButton(func(event pkgbuttons.ButtonClickEvent) {
 		log.Printf("Button event: clickType=%d down=%v", event.ClickType, event.Down)

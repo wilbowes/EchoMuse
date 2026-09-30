@@ -97,6 +97,7 @@ COPY em_eq.py .
 COPY em_limiter.py .
 COPY em_mbc.py .
 COPY em_output_mute.py .
+COPY em_music_pace.py .
 COPY em_scenes.py .
 COPY em_support.py .
 COPY em_shadow.py .

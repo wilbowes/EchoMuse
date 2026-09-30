@@ -176,6 +176,10 @@ type DataClient struct {
 	mic      mic.Subscribable
 	spk      speaker.Speaker
 
+	// Music payload bytes received on the current connection, for the
+	// buffer report (ControlClient.SendMusicBuffer).
+	musicRecv atomic.Uint64
+
 	readyCh chan string
 
 	micMu     sync.Mutex
@@ -686,6 +690,9 @@ func (d *DataClient) StopMic() {
 }
 
 // TurnStreamActive reports whether a bounded (lockMic) turn is streaming.
+// MusicRecvBytes is the music payload received on the current connection.
+func (d *DataClient) MusicRecvBytes() uint64 { return d.musicRecv.Load() }
+
 func (d *DataClient) TurnStreamActive() bool {
 	d.micMu.Lock()
 	defer d.micMu.Unlock()
@@ -772,6 +779,7 @@ func (d *DataClient) connect(ctx context.Context, baseURL string) error {
 		return err
 	}
 	log.Printf("[data] Identified as %s", d.deviceID)
+	d.musicRecv.Store(0) // per connection, as the controller counts it
 
 	d.connMu.Lock()
 	d.conn = conn
@@ -889,6 +897,9 @@ func (d *DataClient) connect(ctx context.Context, baseURL string) error {
 				d.spk.EndStream()
 			}
 		case frameTypeMusic:
+			// Counted on arrival, before the pump can block, and whether or
+			// not a flush discards it: the controller counts what it wrote.
+			d.musicRecv.Add(uint64(len(data) - 1))
 			if len(data) > 1 && d.spk != nil {
 				if err := d.spk.PumpMusic(data[1:]); err != nil {
 					log.Printf("[data] PumpMusic error: %v", err)

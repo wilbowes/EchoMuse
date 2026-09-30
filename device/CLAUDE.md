@@ -865,10 +865,12 @@ earlier rule and it failed: on VVV with Music Assistant, 23 RTT excursions
 over 250ms in 2.7 min (worst 2.1s) and 15+ audible dropouts, none with the
 proxy off. Music Assistant hands an HA media player a flow stream at 1.03x
 real time after a 3s burst, so the buffer never holds more than ~5s and cannot
-ride out a 2s stall. **Known gap:** the controller paces music from a clock
-estimate, not from the device's buffer, so after a real dropout the buffer
-stays low for the rest of that stream and the 2.5s floor keeps the scan off
-until it ends. The fix is a device-reported buffer level. A controller-scoring
+ride out a 2s stall. After a real dropout the buffer refills only at that
+1.03x, and only because the controller paces from the device's own
+`music_buffer` report (`em_music_pace`): paced from its old clock estimate it
+never refilled at all, and the 2.5s floor then kept the scan off for the rest
+of the stream. Against a controller without `music_buffer` that is still what
+happens. A controller-scoring
 device's always-on stream does not count as a turn. Remaining idle loss
 (pings, keepalives) is for TCP tolerance to absorb, not the scanner.
 
