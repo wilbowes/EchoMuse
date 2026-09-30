@@ -4006,3 +4006,30 @@ Line out: the jack follows the speaker volume (stock does the same); a
 remembered per-output volume is agreed, not built. #669 (one channel silent with
 clicking on line out) is probably stock's `Right Channel Only`, which we never
 copied.
+
+## 2026-09-30 (evening) — Sendspin heard on an Echo, and emOS's firewall found twice
+
+**Sendspin played on 15LE** (emOS 32-bit, PR #701 build, Music Assistant
+2.10.4): paired by token, and Wil confirmed play, ducking under a voice reply,
+seek, volume from both ends, pause/resume and discovery. Sync against a second
+player, the correction rate, CPU with on-device wake word, voice "stop" over
+music and a link drop are still to do.
+
+**The dev add-on had been building an hour-old backup.** A copy made before
+the update sat in `/addons` with the same slug, and Supervisor built from it:
+every rebuild "worked" and the dashboard had no Sendspin section. The only
+sign was `ha apps info` still reporting the old version, which had been
+written off as stale metadata. Backups now go outside `/addons`.
+
+**emOS drops inbound connections, and the player is the first listener.** It
+logged "listening on :8928" while every connection from Music Assistant timed
+out, and Music Assistant never listed the player — it looked like discovery
+failing. The interop harness runs the player in Docker and never met the
+filter. Fix (`internal/firewall`): the firmware inserts an ACCEPT for 8928
+before advertising and removes it on every stop, so an Echo with Sendspin off
+is still outbound-only. Verified after a clean reboot (the rule appeared, Music
+Assistant reconnected paired in the same second) and on disable (rule gone,
+port dead).
+
+While here: IPv6 was never filtered on emOS built beside FireOS 6 (no
+`ip6tables` on its system partition). Fixed separately, #702.

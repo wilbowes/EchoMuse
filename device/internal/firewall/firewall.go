@@ -9,8 +9,8 @@
 // listener runs, so an Echo with nothing enabled stays outbound-only.
 //
 // FireOS has no filter and needs no rule; adding one there is harmless.
-// ip6tables is absent on some emOS builds, and a missing binary is not an
-// error: there is no filter for it to be missing from.
+// ip6tables is absent on emOS built beside FireOS 6's system, and a missing
+// binary is not an error: init switches IPv6 off there instead (#702).
 package firewall
 
 import (

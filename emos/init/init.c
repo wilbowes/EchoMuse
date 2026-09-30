@@ -1409,6 +1409,10 @@ static void write_resolv_conf(void)
  * ships no rules whatsoever, so this is emOS being stricter than the thing it
  * replaces rather than catching up to it.
  *
+ * A listener the user turns on opens its own port for as long as it runs:
+ * the firmware's Sendspin player does (device/internal/firewall), so an Echo
+ * with nothing enabled is still outbound-only.
+ *
  * Order matters: every ACCEPT is installed before the policy flips to DROP, so
  * the window where everything is dropped never exists. And it runs before
  * ifup, so the interface is never up without the policy.

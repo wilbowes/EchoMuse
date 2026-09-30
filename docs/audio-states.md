@@ -203,7 +203,7 @@ The alternative — the controller runs the client and re-streams over `0x04`
 
 | Piece | Implementation | Verified against |
 |---|---|---|
-| Connection | Server-initiated: the device listens on 8928 at `/sendspin` and advertises `_sendspin._tcp` (zeroconf). It never dials out, as the spec requires of an advertising client | aiosendspin 9.1.1 `connect_to_client` |
+| Connection | Server-initiated: the device listens on 8928 at `/sendspin` and advertises `_sendspin._tcp` (zeroconf). It never dials out, as the spec requires of an advertising client. On emOS, whose init drops inbound connections, the firmware opens 8928 in the filter before advertising and closes it when the player stops (`internal/firewall`) | aiosendspin 9.1.1 `connect_to_client`; 15LE |
 | Encryption | Noise `KKpsk2`, `25519_ChaChaPoly_SHA256`, device as responder (`flynn/noise`). The PSK is chosen between the two handshake messages, after message 1 names it | 9.1.1, both first handshake and in-band re-handshake |
 | Identity | X25519 keypair in `/data/local/etc/echomuse/sendspin.json`; its public key is the `client_id`. Losing the file unpairs the device from every server | spec vectors |
 | Pairing | The Pairing PSK method only (the one a client must offer): the dashboard shows the `SP:0…` token, the user pastes it into Music Assistant. Unpaired access is a setting, off by default | 9.1.1 `initiate_pairing`; spec token vector |
@@ -218,6 +218,14 @@ worst sync error **225µs** with the DAC 560ppm off (spec floor 1ms, target
 0.5ms), measured on the server's own clock rather than self-reported; volume
 on the spec's curve; a seek; HA taking the plane; reconnect under the stored
 PSK; unpaired access off and on.
+
+**On hardware, 2026-09-30** (15LE, emOS 32-bit, Music Assistant 2.10.4):
+paired by token; play, duck under a voice reply, seek, volume from both ends,
+pause/resume, and discovery with no address entered. The first attempt found
+emOS's inbound filter: the player advertised and logged "listening" while
+every connection timed out, and Music Assistant never listed it. Sync against
+a second player, the correction rate and CPU under on-device wake word are
+still to measure.
 
 CPU: 3.68% of one core for FLAC decode and ChaCha20-Poly1305 (PR #271's bench
 on a Dot). The time filter and scheduler are small; not yet measured on
