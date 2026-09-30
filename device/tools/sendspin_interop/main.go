@@ -93,7 +93,6 @@ func main() {
 	nominal := time.Duration(frames) * time.Second / 48000
 	period := time.Duration(float64(nominal) * (1 - *ppm/1e6))
 	out := make([]byte, frames*4)
-	oc := sendspin.NewOutputClock(nominal)
 	start := time.Now()
 	k := 0
 	status := time.NewTicker(time.Second)
@@ -117,7 +116,7 @@ func main() {
 		dac := start.Add(time.Duration(k) * period).Add(*latency)
 		time.Sleep(time.Until(dac.Add(-*latency)))
 		measured := dac.Add(time.Duration((rand.Float64()*2 - 1) * float64(*noise)))
-		if c.Fill(out, oc.Observe(measured)) {
+		if c.Fill(out, measured) {
 			// Where the first frame truly lands, on the server's clock.
 			raw := rawUs() + dac.Sub(time.Now()).Microseconds()
 			var rms float64

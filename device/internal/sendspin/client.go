@@ -43,6 +43,7 @@ type Client struct {
 	cfg    Config
 	store  *store
 	player *player
+	oc     *OutputClock // the speaker goroutine's alone, via Fill
 
 	mu         sync.Mutex
 	admitted   *session
@@ -241,14 +242,22 @@ func (c *Client) applySettings(p playerSettings) {
 }
 
 // Fill is the speaker's pull: one stereo period whose first frame reaches the
-// DAC at playAt. False when there is nothing to play at that moment.
+// DAC at playAt, as MEASURED — it is smoothed here (OutputClock), so the
+// caller passes its raw reading. False when there is nothing to play then.
+// Called from one goroutine only.
 func (c *Client) Fill(out []byte, playAt time.Time) bool {
-	return c.player.Fill(out, playAt)
+	if c.oc == nil {
+		c.oc = NewOutputClock(time.Duration(len(out)/4) * time.Second / outRate)
+	}
+	return c.player.Fill(out, c.oc.Observe(playAt))
 }
 
 // Active reports whether Sendspin has audio queued: the speaker's cue that
 // the music plane is taken.
 func (c *Client) Active() bool { return c.player.active() }
+
+// Buffered is how much audio is queued and not yet played.
+func (c *Client) Buffered() time.Duration { return c.player.buffered() }
 
 func (c *Client) hello() clientHello {
 	return clientHello{

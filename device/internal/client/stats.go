@@ -67,6 +67,9 @@ type DeviceStats struct {
 	// old to report it", and "off" collapsing into that would tell the
 	// dashboard a disarmed AEC is an unknown one.
 	AecRef string `json:"aecRef"`
+	// Sendspin is the player's status (sendspin.Status), nil when it is off.
+	// No secrets: the pairing token is asked for separately.
+	Sendspin interface{} `json:"sendspin,omitempty"`
 	// The base OS deliberately does NOT ride this message — it is a static
 	// property of the boot and goes out once, on registration (control.go).
 	// It was here first and that was the bug: the payload reconcile asks for
@@ -104,5 +107,6 @@ func (c *ControlClient) SendStats(s DeviceStats) {
 		"coresTotal":       s.CoresTotal,
 		"thermalCoreLimit": s.ThermalCoreLimit,
 		"aecRef":           s.AecRef,
+		"sendspin":         s.Sendspin,
 	})
 }

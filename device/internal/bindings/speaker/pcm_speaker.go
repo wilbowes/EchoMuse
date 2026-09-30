@@ -140,6 +140,74 @@ type PcmSpeaker struct {
 	// level whatever the volume.
 	vol softVolume
 	cue cueState
+
+	// src is a second producer for the music plane (Sendspin, #89): a pull
+	// source, consulted only while the 0x04 plane has nothing, so Home
+	// Assistant's music always wins the plane (decided 2026-08-22). It is
+	// pulled rather than pushed because it must place audio in TIME, and
+	// only this loop knows when the period it is building reaches the DAC.
+	src       atomic.Pointer[sourceBox]
+	srcBuf    []byte
+	srcLastNs atomic.Int64 // last period the source played
+}
+
+// MusicSource is a pull producer for the music plane. Fill writes one stereo
+// S16LE period whose first frame reaches the DAC at playAt (as measured;
+// the source smooths it), reporting false when it has nothing due. Active
+// says whether it has anything queued at all, so an idle source costs no
+// status read.
+type MusicSource interface {
+	Active() bool
+	Fill(out []byte, playAt time.Time) bool
+}
+
+type sourceBox struct{ s MusicSource }
+
+// SetMusicSource installs (or, with nil, removes) the music plane's pull
+// producer.
+func (p *PcmSpeaker) SetMusicSource(s MusicSource) {
+	if s == nil {
+		p.src.Store(nil)
+		return
+	}
+	p.src.Store(&sourceBox{s})
+}
+
+// pullSource asks the source for this period. The DAC time is measured
+// here: the frames ALSA holds ahead of the DAC, read the instant before the
+// period is built, since every one of them plays before its first frame.
+func (p *PcmSpeaker) pullSource() []byte {
+	box := p.src.Load()
+	if box == nil || !box.s.Active() {
+		return nil
+	}
+	b, err := os.ReadFile(statusPath(cardNr, deviceNr))
+	now := time.Now()
+	if err != nil {
+		return nil
+	}
+	d, ok := pcmDelay(string(b))
+	if !ok {
+		return nil
+	}
+	if !box.s.Fill(p.srcBuf, now.Add(time.Duration(d)*time.Second/48000)) {
+		return nil
+	}
+	p.srcLastNs.Store(now.UnixNano())
+	return p.srcBuf
+}
+
+// SourceAudible is MusicAudible for the pull source alone.
+func (p *PcmSpeaker) SourceAudible(hold time.Duration) bool {
+	last := p.srcLastNs.Load()
+	return last > 0 && time.Now().UnixNano()-last < int64(hold)
+}
+
+// MusicPlaneBusy reports whether the 0x04 plane has music in it at all —
+// arriving, queued or playing. While it does, the pull source must stand
+// aside: Home Assistant wins.
+func (p *PcmSpeaker) MusicPlaneBusy() bool {
+	return p.music.isActive() || len(p.music.ch) > 0 || p.MusicArriving()
 }
 
 // OnStreamStats registers a per-stream stats callback, reported once when a
@@ -160,6 +228,7 @@ func NewPcmSpeaker(echoTap func([]byte), levelTap func(rms float64)) (*PcmSpeake
 		levelTap: levelTap,
 		chain:    outchain.New(48000),
 		chainBuf: make([]byte, periodBytes),
+		srcBuf:   make([]byte, periodBytes),
 	}
 	s.voice = newAudioStream(audioChanDepth, s.deadCh)
 	s.music = newAudioStream(audioChanDepth, s.deadCh)
@@ -397,6 +466,9 @@ func (p *PcmSpeaker) silenceLoop() {
 		} else if p.music.playing {
 			p.report(p.music.drained(), "music")
 		}
+		if music == nil && !p.music.playing && !p.music.isActive() {
+			music = p.pullSource()
+		}
 
 		// The ring's level must be measured BEFORE mixing: Mix sums into the
 		// voice buffer in place, so afterwards there is no voice-only signal
@@ -605,9 +677,9 @@ func (p *PcmSpeaker) MusicLead() time.Duration {
 	return time.Duration(len(p.music.ch)) * periodSize * time.Second / 48000
 }
 
-// MusicAudible is VoiceAudible for the music plane.
+// MusicAudible is VoiceAudible for the music plane, from either producer.
 func (p *PcmSpeaker) MusicAudible(hold time.Duration) bool {
-	return p.music.playedWithin(time.Now(), hold)
+	return p.music.playedWithin(time.Now(), hold) || p.SourceAudible(max(hold, 100*time.Millisecond))
 }
 
 // EndStream marks the in-flight voice stream complete (0x03). Always arrives

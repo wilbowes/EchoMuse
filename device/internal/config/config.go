@@ -136,6 +136,17 @@ type Device struct {
 	// pointer typed so false is expressible over the wire. Default off.
 	BleProxyEnabled *bool
 
+	// Sendspin player (internal/sendspin, #89). Both default off: the player
+	// opens a listening port and an mDNS record, so it runs only where
+	// someone asked for it. Unpaired lets an approved but unpaired server
+	// play; pairing needs only the device's token pasted into the server.
+	SendspinEnabled  *bool
+	SendspinUnpaired *bool
+	// SendspinName is what Music Assistant lists the player as: the
+	// device's label on the dashboard, which the firmware does not otherwise
+	// know. Empty falls back to one built from the serial.
+	SendspinName string
+
 	// ListeningAnim carries the controller's current listening-ring
 	// animation spec, raw JSON in the led_anim shape, so the device can
 	// light it locally at its OWN wake crossing (#263) instead of waiting
@@ -201,6 +212,8 @@ func (d *Device) loadDefaults() {
 	d.AecRefSource = normaliseAecRef(envStr("EM_AEC_HW_REF", AecRefAuto))
 	bleProxyEnabled := envBool("BLE_PROXY_ENABLED", false)
 	d.BleProxyEnabled = &bleProxyEnabled
+	sendspinEnabled, sendspinUnpaired := false, false
+	d.SendspinEnabled, d.SendspinUnpaired = &sendspinEnabled, &sendspinUnpaired
 	d.Output = outchain.DefaultParams()
 }
 
@@ -288,6 +301,15 @@ func (d *Device) Apply(msg ConfigMessage) {
 	if msg.BleProxyEnabled != nil {
 		d.BleProxyEnabled = msg.BleProxyEnabled
 	}
+	if msg.SendspinEnabled != nil {
+		d.SendspinEnabled = msg.SendspinEnabled
+	}
+	if msg.SendspinUnpaired != nil {
+		d.SendspinUnpaired = msg.SendspinUnpaired
+	}
+	if msg.SendspinName != "" {
+		d.SendspinName = msg.SendspinName
+	}
 	if msg.ListeningAnim != nil {
 		d.ListeningAnim = msg.ListeningAnim
 	}
@@ -368,6 +390,8 @@ func (d *Device) Snapshot() ConfigMessage {
 	if d.BleProxyEnabled != nil {
 		bleProxyEnabled = *d.BleProxyEnabled
 	}
+	sendspinEnabled := d.SendspinEnabled != nil && *d.SendspinEnabled
+	sendspinUnpaired := d.SendspinUnpaired != nil && *d.SendspinUnpaired
 	return ConfigMessage{
 		VadThreshold:       d.VadThreshold,
 		VadSpeechMs:        d.VadSpeechMs,
@@ -389,6 +413,9 @@ func (d *Device) Snapshot() ConfigMessage {
 		AecTailMs:          d.AecTailMs,
 		AecRefSource:       d.AecRefSource,
 		BleProxyEnabled:    &bleProxyEnabled,
+		SendspinEnabled:    &sendspinEnabled,
+		SendspinUnpaired:   &sendspinUnpaired,
+		SendspinName:       d.SendspinName,
 		ListeningAnim:      d.ListeningAnim,
 	}
 }
@@ -449,6 +476,9 @@ type ConfigMessage struct {
 	AecTailMs          int      `json:"aecTailMs,omitempty"`
 	AecRefSource       string   `json:"aecRefSource,omitempty"`
 	BleProxyEnabled    *bool    `json:"bleProxyEnabled,omitempty"`
+	SendspinEnabled    *bool    `json:"sendspinEnabled,omitempty"`
+	SendspinUnpaired   *bool    `json:"sendspinUnpaired,omitempty"`
+	SendspinName       string   `json:"sendspinName,omitempty"`
 	// WakeSound: a pointer so "off" is distinguishable from absent.
 	WakeSound      *bool  `json:"wakeSound,omitempty"`
 	WakeSoundLevel string `json:"wakeSoundLevel,omitempty"`

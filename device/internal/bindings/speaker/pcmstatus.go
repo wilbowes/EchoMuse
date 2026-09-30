@@ -67,3 +67,33 @@ func pcmOwner(status string) int {
 	}
 	return 0
 }
+
+// pcmDelay reads the frames queued ahead of the DAC from a RUNNING
+// substream's status: the ALSA buffer not yet played plus the driver's own
+// FIFO. Reading the file makes the kernel sync hw_ptr from the DMA position
+// first, and that position is real rather than period bookkeeping (measured
+// 2026-08-10: sub-period steps, 47973 fps against 48000), which is what lets
+// Sendspin place a period to well under a millisecond.
+//
+// ok is false for anything but a running stream with a readable delay: a
+// guess here would schedule audio against a clock that is not there.
+func pcmDelay(status string) (frames int, ok bool) {
+	running := false
+	for _, line := range strings.Split(status, "\n") {
+		key, val, found := strings.Cut(line, ":")
+		if !found {
+			continue
+		}
+		switch strings.TrimSpace(key) {
+		case "state":
+			running = strings.TrimSpace(val) == "RUNNING"
+		case "delay":
+			n, err := strconv.Atoi(strings.TrimSpace(val))
+			if err != nil || n < 0 {
+				return 0, false
+			}
+			frames, ok = n, true
+		}
+	}
+	return frames, ok && running
+}

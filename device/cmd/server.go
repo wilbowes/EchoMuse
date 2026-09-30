@@ -298,7 +298,12 @@ func main() {
 		defer t.Stop()
 		duty := bluetooth.NewMusicDuty()
 		for now := range t.C {
-			music := duty.Yield(now, pcmSpeaker.MusicArriving(), pcmSpeaker.MusicLead())
+			// Synced music (Sendspin) is music too: it streams for hours
+			// and has its own buffer, so it gets the same bursts.
+			ssOn, ssLead := sendspinMusic()
+			music := duty.Yield(now, pcmSpeaker.MusicArriving() || ssOn,
+				max(pcmSpeaker.MusicLead(), ssLead))
+			sendspinPoll(pcmSpeaker)
 			bleScanner.Yield(music ||
 				dataClient.TurnStreamActive() ||
 				dataClient.ListenOpen() ||
@@ -508,6 +513,7 @@ func main() {
 			st.Ble = bleScanner.Stats()
 			st.OwwShadow = shadowStats(dataClient)
 			st.AecRef = canceller.RefSource()
+			st.Sendspin = sendspinStatus()
 			controlClient.SendStats(st)
 		}()
 		// Deliver any unacknowledged WiFi change outcome (including the
@@ -539,6 +545,7 @@ func main() {
 		}
 		applyAecConfig(canceller, dataClient)
 		applyBleConfig(bleScanner)
+		applySendspinConfig(pcmSpeaker, controlClient, deviceID)
 		applyShadowConfig(dataClient, controlClient, pcmSpeaker, s)
 		syncListenState(dataClient, controlClient, false)
 	})
@@ -553,6 +560,8 @@ func main() {
 		}
 		playWakeCue(pcmSpeaker)
 	})
+
+	controlClient.OnSendspinToken(sendspinToken)
 
 	// Speaker flush — barge-in: cut buffered TTS the moment the controller
 	// hears the wake word during playback.
@@ -754,6 +763,7 @@ func main() {
 				snaps = append(snaps, sn)
 			}
 			st.TcpUpRetrans, st.TcpUpSegs = upLoss.Drain(snaps...)
+			st.Sendspin = sendspinStatus()
 			controlClient.SendStats(st)
 			if tick%10 == 0 {
 				var ms runtime.MemStats
@@ -788,6 +798,11 @@ func main() {
 	sig := <-sigCh
 	log.Printf("Received %v — shutting down (muting output, amp off)", sig)
 	bleScanner.SetEnabled(false) // scan off + /dev/stpbt closed so the chip idles
+	// "restart", not "shutdown": this is an OTA or a supervisor restart far
+	// more often than a power-off, and restart asks the server to redial.
+	if c := sendspinPlayer(); c != nil {
+		c.Stop("restart")
+	}
 	pcmSpeaker.Close()
 	os.Exit(0)
 }

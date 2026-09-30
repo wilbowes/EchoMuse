@@ -117,6 +117,7 @@ type ControlClient struct {
 	refusedCallback       StateCallback
 	configAppliedCallback ConfigAppliedCallback
 	playCueCallback       func(string)
+	sendspinTokenCallback func() map[string]any
 	volumeSetCallback     VolumeSetCallback
 	beamLockCallback      BeamLockCallback
 	speakerFlushCallback  StateCallback
@@ -193,6 +194,21 @@ func (c *ControlClient) OnDuck(cb func(on bool))                  { c.duckCallba
 func (c *ControlClient) OnWifiChange(cb WifiChangeCallback)       { c.wifiChangeCallback = cb }
 func (c *ControlClient) OnWifiCommit(cb StateCallback)            { c.wifiCommitCallback = cb }
 func (c *ControlClient) OnWifiScan(cb StateCallback)              { c.wifiScanCallback = cb }
+
+// OnSendspinToken answers the controller's request for the Sendspin pairing
+// token, which the dashboard shows for pasting into Music Assistant. Asked
+// for on demand rather than reported, because it is a secret: it never rides
+// the stats report, which lands in support bundles. The callback returns nil
+// when the player is off.
+func (c *ControlClient) OnSendspinToken(cb func() map[string]any) { c.sendspinTokenCallback = cb }
+
+// SendSendspinStatus reports the Sendspin player's state as it changes. The
+// stats tick carries it too; this is what makes the dashboard follow a
+// pairing or a stream starting without a 30s wait. Unknown message types are
+// ignored by older controllers.
+func (c *ControlClient) SendSendspinStatus(status any) error {
+	return c.writeJSON(map[string]any{"type": "sendspin_status", "status": status})
+}
 
 // IsConnected reports whether the control WebSocket is registered and
 // live — the wifi change executor's "controller reachable" gate.
@@ -949,6 +965,17 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 				c.playCueCallback(cueMsg.Cue)
 			}
 
+		case "sendspin_token_request":
+			var reply map[string]any
+			if c.sendspinTokenCallback != nil {
+				reply = c.sendspinTokenCallback()
+			}
+			if reply == nil {
+				reply = map[string]any{"error": "sendspin is off"}
+			}
+			reply["type"] = "sendspin_token"
+			c.writeJSON(reply)
+
 		case "speaker_flush":
 			// Barge-in: controller detected the wake word during TTS
 			// playback and wants the buffered audio cut immediately.
@@ -1227,9 +1254,14 @@ func capabilities() []string {
 	// "pairing": this firmware asks to pair itself when its owner holds the
 	// action button 5 s (pairing.go). Without it the controller offers the
 	// admin a Pair action instead, since the device cannot ask.
+	//
+	// "sendspin": this firmware can be a Sendspin player (internal/sendspin),
+	// switched by sendspinEnabled. Whether it is running, and paired, is the
+	// sendspin status, for the aec_hw_ref reason.
 	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons",
 		"oww_shadow", "oww_trigger", "button_hold", "audio_mix",
-		"aec_hw_ref", "oww_local_only", "output_chain", "wake_cue", "pairing"}
+		"aec_hw_ref", "oww_local_only", "output_chain", "wake_cue", "pairing",
+		"sendspin"}
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}
