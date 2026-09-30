@@ -36,10 +36,15 @@ type session struct {
 	ws     *websocket.Conn
 	remote string
 
-	sendMu     sync.Mutex
-	tr         *transport
-	exchanging bool // re-handshake in flight: nothing else may be sent
-	closed     bool
+	sendMu sync.Mutex
+	tr     *transport
+	// quiet holds back everything but the exchange itself: from the start
+	// of a pairing or re-handshake until the server/activate that ends it.
+	// The server reads that stretch as a strict sequence, and a client/time
+	// arriving inside it fails the pairing (9.1.1, measured by the interop
+	// test).
+	quiet  bool
+	closed bool
 
 	filter *timeFilter
 
@@ -51,6 +56,7 @@ type session struct {
 	activities   map[string]bool
 	pairingIndex int
 	stagedPSK    []byte
+	awaitHello   bool // re-keyed; 9.1.1 re-sends server/hello next
 	dec          *decoder
 	streaming    bool
 
@@ -59,7 +65,8 @@ type session struct {
 	serverName string
 	psk        resolvedPSK
 	roles      []string
-	sentAvail  *bool
+	stateSent  bool // a client/state has gone out on this connection
+	stateDue   bool // one is owed, held until the clock converges
 	group      groupUpdate
 	lastAudio  time.Time
 }
@@ -144,7 +151,8 @@ func (s *session) run() {
 var errGoodbye = errors.New("sendspin: goodbye sent")
 
 func (s *session) dispatch(env envelope) error {
-	if !s.activated && env.Type != "server/activate" && env.Type != "noise/handshake" {
+	if !s.activated && env.Type != "server/activate" && env.Type != "noise/handshake" &&
+		!(env.Type == "server/hello" && s.awaitHello) {
 		return fmt.Errorf("%w: %s before server/activate", errProtocol, env.Type)
 	}
 	switch env.Type {
@@ -211,6 +219,13 @@ func (s *session) dispatch(env envelope) error {
 		s.stagedPSK = nil
 	case "noise/handshake":
 		return s.rehandshake(env.Payload)
+	case "server/hello":
+		// 9.1.1 redoes the hello exchange after every re-handshake; the
+		// spec says neither hello is re-sent. Answer it when it comes.
+		if s.awaitHello {
+			s.awaitHello = false
+			return s.sendJSON("client/hello", s.c.hello(), true)
+		}
 	}
 	return nil
 }
@@ -311,7 +326,7 @@ func (s *session) onActivate(a serverActivate) error {
 	wasPlayer := s.playerRole()
 	s.mu.Lock()
 	s.roles = roles
-	reported := s.sentAvail != nil
+	reported := s.stateSent
 	s.mu.Unlock()
 	if wasPlayer && !s.playerRole() {
 		s.endStream()
@@ -324,8 +339,20 @@ func (s *session) onActivate(a serverActivate) error {
 		s.pairingIndex++
 		return s.onPairing(a.Pairing)
 	}
+	if s.setQuiet(false) && s.playerRole() {
+		s.sendState() // the exchange suppressed it; bring the server up to date
+	}
 	s.c.changed()
 	return nil
+}
+
+// setQuiet sets the exchange state, reporting whether it changed.
+func (s *session) setQuiet(q bool) bool {
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	was := s.quiet
+	s.quiet = q
+	return was != q
 }
 
 // onPairing runs the Pairing PSK flow, the one method the device offers: the
@@ -333,17 +360,18 @@ func (s *session) onActivate(a serverActivate) error {
 // authenticated both sides, and the device mints the long-term PSK.
 func (s *session) onPairing(p *activatePairing) error {
 	if p == nil || p.Method != methodPSK || s.psk.cat != catPairing {
-		return s.send("pair/abort", pairAbort{Reason: "method_not_supported"})
+		return s.sendJSON("pair/abort", pairAbort{Reason: "method_not_supported"}, true)
 	}
 	psk, err := randomPSK()
 	if err != nil {
 		return err
 	}
 	s.stagedPSK = psk
-	if err := s.send("client/pair-init", pairInit{PairingIndex: s.pairingIndex}); err != nil {
-		return err
-	}
-	return s.send("client/pair-finalize", pairFinalize{LongTermPSK: b64u(psk)})
+	s.setQuiet(true)
+	// 9.1.1: the Pairing PSK flow is client/pair-finalize alone. The current
+	// spec puts a client/pair-init before it, which 9.1.1 rejects as out of
+	// sequence and fails the pairing.
+	return s.sendJSON("client/pair-finalize", pairFinalize{LongTermPSK: b64u(psk)}, true)
 }
 
 func (s *session) playerRole() bool {
@@ -367,23 +395,33 @@ func (s *session) isAdmitted() bool { return s.c.isAdmitted(s) }
 
 // ── player ──────────────────────────────────────────────────────────────────
 
-func (s *session) available() bool {
-	return s.filter.synchronized() && !s.c.external()
-}
+// available is what client/state reports. It means only "Home Assistant
+// has not taken the music plane": 9.1.1 reads false as an external source
+// and moves the device out of its group, so it must never be sent merely
+// because the clock is still converging. The spec's rule — never true before
+// the clock has converged — is kept by holding the first report until it
+// has (sendState), about 0.4s after activation against 9.1.1's 5s allowance.
+func (s *session) available() bool { return !s.c.external() }
 
-// sendState reports availability and the player's state. Called on
-// activation, when the clock first converges, and when anything in it moves.
+// sendState reports availability and the player's state: on activation, on
+// a command, when HA takes or releases the music plane. Held while the clock
+// has not converged, and sent from onTime once it has.
 func (s *session) sendState() {
 	if !s.playerRole() {
 		return
 	}
+	if !s.filter.synchronized() {
+		s.mu.Lock()
+		s.stateDue = true
+		s.mu.Unlock()
+		return
+	}
 	set := s.c.store.settings()
-	av := s.available()
 	s.mu.Lock()
-	s.sentAvail = &av
+	s.stateSent, s.stateDue = true, false
 	s.mu.Unlock()
 	s.send("client/state", clientState{
-		Available: av,
+		Available: s.available(),
 		Player: &playerState{
 			Volume:            set.Volume,
 			Muted:             set.Muted,
@@ -410,9 +448,9 @@ func (s *session) onTime(t serverTime) {
 	delay := float64((now-t.ClientTransmitted)-(t.ServerTransmitted-t.ServerReceived)) / 2
 	s.filter.update(pyRound(offset), pyRound(delay), now)
 	s.mu.Lock()
-	stale := s.sentAvail != nil && *s.sentAvail != s.available()
+	due := s.stateDue
 	s.mu.Unlock()
-	if stale {
+	if due && s.filter.synchronized() {
 		s.sendState()
 	}
 }
@@ -522,7 +560,7 @@ func (s *session) sendJSON(typ string, payload any, force bool) error {
 	if s.closed {
 		return errors.New("sendspin: session closed")
 	}
-	if s.exchanging && !force {
+	if s.quiet && !force {
 		return nil
 	}
 	ct, err := s.tr.encrypt(append([]byte{msgJSON}, b...))
@@ -534,7 +572,8 @@ func (s *session) sendJSON(typ string, payload any, force bool) error {
 }
 
 func (s *session) goodbye(reason string) error {
-	s.send("client/goodbye", clientGoodbye{Reason: reason})
+	// A goodbye goes out even mid-exchange: it precedes the close.
+	s.sendJSON("client/goodbye", clientGoodbye{Reason: reason}, true)
 	log.Printf("[sendspin] goodbye to %q: %s", s.name(), reason)
 	return errGoodbye
 }
@@ -703,9 +742,7 @@ func (s *session) respond(env envelope, serverPub, prologue []byte) (*transport,
 // everything after it under the new ones.
 func (s *session) rehandshake(payload json.RawMessage) error {
 	serverPub, _ := peerKey(s.serverID)
-	s.sendMu.Lock()
-	s.exchanging = true
-	s.sendMu.Unlock()
+	s.setQuiet(true)
 
 	tr, h, psk, msg2, err := s.respond(envelope{Type: "noise/handshake", Payload: payload}, serverPub, s.h)
 	if err != nil {
@@ -715,8 +752,9 @@ func (s *session) rehandshake(payload json.RawMessage) error {
 		return err
 	}
 	s.sendMu.Lock()
-	s.tr, s.exchanging = tr, false
+	s.tr = tr // stays quiet until the server/activate that follows
 	s.sendMu.Unlock()
+	s.awaitHello = true
 	s.mu.Lock()
 	s.psk = psk
 	s.mu.Unlock()

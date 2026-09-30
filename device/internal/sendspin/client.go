@@ -149,7 +149,7 @@ func (c *Client) Stop(reason string) {
 	}
 	c.mu.Unlock()
 	for _, s := range all {
-		s.send("client/goodbye", clientGoodbye{Reason: reason})
+		s.sendJSON("client/goodbye", clientGoodbye{Reason: reason}, true)
 		s.ws.Close()
 	}
 	if c.mdns != nil {
@@ -179,7 +179,7 @@ func (c *Client) SetUnpaired(on bool) {
 	}
 	c.mu.Unlock()
 	for _, s := range all {
-		s.send("client/goodbye", clientGoodbye{Reason: "restart"})
+		s.sendJSON("client/goodbye", clientGoodbye{Reason: "restart"}, true)
 		s.ws.Close()
 	}
 }

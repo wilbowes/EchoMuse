@@ -102,10 +102,6 @@ type clientGoodbye struct {
 	Reason string `json:"reason"`
 }
 
-type pairInit struct {
-	PairingIndex int `json:"pairing_index"`
-}
-
 type pairFinalize struct {
 	LongTermPSK string `json:"long_term_psk"`
 }

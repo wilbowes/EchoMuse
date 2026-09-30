@@ -161,3 +161,40 @@ func TestReassemblerRefusesMalformedSequences(t *testing.T) {
 		}
 	}
 }
+
+// The activity sets each PSK permits (messaging.md, server/activate). A
+// paired server may declare playback; an unpaired one only with unpaired
+// access on; pairing only before the device holds a long-term record.
+func TestActivitySetsAllowedPerPSK(t *testing.T) {
+	set := func(xs ...string) map[string]bool {
+		m := map[string]bool{}
+		for _, x := range xs {
+			m[x] = true
+		}
+		return m
+	}
+	cases := []struct {
+		cat      pskCategory
+		acts     map[string]bool
+		unpaired bool
+		want     bool
+	}{
+		{catLongTerm, set(), false, true},
+		{catLongTerm, set(actPlayback), false, true},
+		{catLongTerm, set(actPairing), false, false},
+		{catSentinel, set(), false, true},
+		{catSentinel, set(actPairing), false, true},
+		{catSentinel, set(actPlayback), false, false},
+		{catSentinel, set(actPlayback), true, true},
+		{catPairing, set(actPlayback, actPairing), false, false},
+		{catPairing, set(actPlayback, actPairing), true, true},
+	}
+	for _, c := range cases {
+		if got := allowed(c.cat, c.acts, c.unpaired); got != c.want {
+			t.Errorf("%s %v unpaired=%v: got %v", c.cat, actKey(c.acts), c.unpaired, got)
+		}
+	}
+	if rank(set(actPlayback, actPairing)) <= rank(set(actPairing)) || rank(set(actPairing)) <= rank(set()) {
+		t.Error("admission must rank playback over pairing over nothing")
+	}
+}
