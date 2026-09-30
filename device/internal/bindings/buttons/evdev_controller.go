@@ -20,6 +20,7 @@ type MuteCallback func()
 
 type EvDevController struct {
 	volumeCallback func(direction string)
+	volumeEdge     func(direction string, down bool) bool
 	muteCallback   func()
 }
 
@@ -31,6 +32,10 @@ func (e *EvDevController) SetVolumeCallback(cb func(direction string)) {
 
 // SetMuteCallback registers a function to be called on mute button events.
 // Must be called before SubscribeToButton.
+func (e *EvDevController) SetVolumeEdgeCallback(cb func(direction string, down bool) bool) {
+	e.volumeEdge = cb
+}
+
 func (e *EvDevController) SetMuteCallback(cb func()) {
 	e.muteCallback = cb
 }
@@ -111,16 +116,22 @@ func (e *EvDevController) SubscribeToButton(callback buttons.ButtonClickCallback
 			beforeDown = down
 
 			// Intercept volume events on volume device
-			if btn.Type == buttons.VolumeButton && !down {
+			var direction string
+			if btn.Type == buttons.VolumeButton {
 				switch clickType {
 				case buttons.VolumeUpClick:
-					if e.volumeCallback != nil {
-						e.volumeCallback("up")
-					}
+					direction = "up"
 				case buttons.VolumeDownClick:
-					if e.volumeCallback != nil {
-						e.volumeCallback("down")
-					}
+					direction = "down"
+				}
+			}
+			consumed := false
+			if direction != "" && e.volumeEdge != nil {
+				consumed = e.volumeEdge(direction, down)
+			}
+			if btn.Type == buttons.VolumeButton && !down {
+				if direction != "" && !consumed && e.volumeCallback != nil {
+					e.volumeCallback(direction)
 				}
 				continue
 			}

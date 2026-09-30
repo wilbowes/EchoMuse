@@ -144,3 +144,19 @@ def test_a_refused_device_is_told_so_before_the_close():
     fn = _fn(_tree("em_controller.py"), "handle_control")
     src = ast.unparse(fn)
     assert "'type': 'refused'" in src
+
+
+# ── What the owner is told to hold ───────────────────────────────────────────
+
+def test_gesture_names_the_combination_for_firmware_that_takes_it():
+    assert "volume-up" in P.gesture(["pairing", "pair_combo"])
+
+
+def test_gesture_names_the_action_button_for_v2_17_0():
+    g = P.gesture(["pairing"])
+    assert "action button" in g and "volume" not in g
+
+
+def test_gesture_names_both_when_the_firmware_is_unknown():
+    g = P.gesture(None)
+    assert "volume-up" in g and "v2.17.0" in g

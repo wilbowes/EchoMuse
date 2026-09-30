@@ -97,9 +97,10 @@ plus one conditional (`capabilities()` in `control.go`):
 | `oww_local_only` | always | Can listen **privately**: score its own wake word and send nothing until it fires. Whether it is doing so is `listen_state` — see [listening.md](listening.md) |
 | `aec_hw_ref` | always | Can take the AEC far-end reference from a playback loopback in the mic capture itself, and falls back to the software tap at the ALSA write when the board has none |
 | `output_chain` | always | Can run the speaker output chain (EQ → bass guard → limiter) itself, at the ALSA write, from the config keys `eqBands`, `eqLoudness`, `limiter*`, `bassGuard*`. Runs it only when the controller's `ack` carries `output_chain` too, which is the controller saying it has stopped processing: either half alone keeps the old path, so audio is never shaped twice |
+| `pair_combo` | always | The pairing gesture is the action and volume-up buttons held together for 5 s, so a long action press stays Home Assistant's `long` event. Both releases that end it are swallowed: no long press, no volume step. Wording only: the controller names the gesture from it (`em_pairing.gesture`); v2.17.0 announces `pairing` without it and takes the action button alone |
 | `wake_cue` | always | Can generate its own wake sound, at `wakeSoundLevel`, independent of volume. Plays it when `wakeSound` is on and a wake has WON: on `listen_ack` for a private-listening session, or on `play_cue` otherwise — never at the crossing, so a ceded wake is silent |
 | `ambient_light` | only if the sensor is actually readable (`als.Present()`) | Reports light readings |
-| `pairing` | always | Asks to pair itself when its owner holds the action button 5 s: a `pair_request` every 5 s on a live link, or otherwise registers with `"pairing": true` on every dial for the 2-minute window, falling back to plain (without its token) when wss cannot connect. The window closes early once new credentials land, so the redial they cause does not ask again. Without it the controller offers the admin a **Pair** action instead, since the device cannot ask |
+| `pairing` | always | Asks to pair itself when its owner holds the pairing gesture 5 s (action + volume-up with `pair_combo`, the action button alone without): a `pair_request` every 5 s on a live link, or otherwise registers with `"pairing": true` on every dial for the 2-minute window, falling back to plain (without its token) when wss cannot connect. The window closes early once new credentials land, so the redial they cause does not ask again. Without it the controller offers the admin a **Pair** action instead, since the device cannot ask |
 
 **`aec_hw_ref` is a capability with a runtime companion, and both are needed.**
 The capability says the firmware knows *how* to use a hardware echo reference.
@@ -160,7 +161,7 @@ absent optional fields take prior/default behaviour.
 | `ble_adverts` | `adverts[]` | Batch from the passive BLE scanner. **Legacy path** — send these on `/data` as `0x06` whenever the controller announced `ble_adverts_data`, and use this message only when it did not (#404) |
 | `wifi_scan_result` | `networks[]` of `{ssid, ssid_hex, signal}`, or `error` | Answer to `wifi_scan` |
 | `wifi_result` | `ok`, `ssid`, `error?` | Outcome of a `wifi_change`, re-sent until `wifi_commit` |
-| `pair_request` | — | The owner held the action button on a connected device (only if `pairing`). The controller shows **Approve pairing**; approval issues a rotated token and the CA over the shell plane, then bounces the link |
+| `pair_request` | — | The owner held the pairing gesture on a connected device (only if `pairing`). The controller shows **Approve pairing**; approval issues a rotated token and the CA over the shell plane, then bounces the link |
 | `pong` | `id`, `mono` when answering a `ping` that carried an `id` | Keepalive reply. `id` echoes the ping's; `mono` is the device's monotonic clock in ms (any fixed origin), which the controller maps onto its own to date `capturedMono`. Unsolicited keepalive pongs carry neither |
 
 **Controller → Device**
@@ -168,7 +169,7 @@ absent optional fields take prior/default behaviour.
 | `type` | Payload | Meaning |
 |--------|---------|---------|
 | `ack` | `device_id`, `features[]` | Registration accepted. `features` is the CONTROLLER's capability list — the mirror of the device's own, and read the same way: a feature that is absent is one the controller cannot do. Absent entirely on controllers before 2.23.0. Current: `ble_adverts_data`, `listen_session`, `output_chain` |
-| `refused` | — | Not admitted: link auth refused this device's credentials (a wrong token, or a token it has stopped presenting). Sent before the close; firmware with `pairing` shows the refused ring, which tells the owner to hold the action button to pair. A device also treats a TLS certificate its CA did not sign as refused. Older firmware ignores it |
+| `refused` | — | Not admitted: link auth refused this device's credentials (a wrong token, or a token it has stopped presenting). Sent before the close; firmware with `pairing` shows the refused ring, which tells the owner to hold the pairing gesture. A device also treats a TLS certificate its CA did not sign as refused. Older firmware ignores it |
 | `pending` | `pairing?` | Not admitted: the device is unapproved, or with `pairing:true` its pairing request is recorded and waiting for an admin. Keep redialling within the window; an approval admits the next dial |
 | `leds` | `leds[]`, `listening?` | One LED frame; `listening:true` marks the listening ring so the direction overlay keys off it |
 | `led_anim` | `{pattern, colors, periodMs, ttlSec}` | Local animation spec; sent only if `led_anim` |

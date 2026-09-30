@@ -1227,9 +1227,13 @@ func capabilities() []string {
 	// "pairing": this firmware asks to pair itself when its owner holds the
 	// action button 5 s (pairing.go). Without it the controller offers the
 	// admin a Pair action instead, since the device cannot ask.
+	//
+	// "pair_combo": the request takes the action and volume-up buttons held
+	// together, not the action button alone as v2.17.0 did. Only wording
+	// depends on it: the controller tells the owner which to hold.
 	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons",
 		"oww_shadow", "oww_trigger", "button_hold", "audio_mix",
-		"aec_hw_ref", "oww_local_only", "output_chain", "wake_cue", "pairing"}
+		"aec_hw_ref", "oww_local_only", "output_chain", "wake_cue", "pairing", "pair_combo"}
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}

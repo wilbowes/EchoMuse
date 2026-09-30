@@ -3352,7 +3352,7 @@ async def _post_pair(request: web.Request) -> web.Response:
     """
     POST /api/devices/{id}/pair — approve a pairing request. ADMIN ONLY.
 
-    Only answers a request the device made (its owner held the action button),
+    Only answers a request the device made (its owner held the pairing buttons),
     so a click cannot hand credentials to whatever happens to hold a device's
     connection. A connected device is issued them now; one that could not
     connect is issued them when it next dials within its window.
@@ -3370,8 +3370,9 @@ async def _post_pair(request: web.Request) -> web.Response:
     admin_started = (not can_ask) and not getattr(live, "secure", False)
     if em_pairing.pending_request(device_id) is None and not admin_started:
         return _error("no_pair_request",
-                      "This Echo has not asked to pair. Hold its action button "
-                      "for 5 seconds, then approve it here.", 409)
+                      "This Echo has not asked to pair. "
+                      + em_pairing.gesture(live.capabilities if live else None)
+                      + ", then approve it here.", 409)
     em_pairing.approve(device_id)
     if live is not None:
         em_tasks.spawn(_issue_credentials(device_id))

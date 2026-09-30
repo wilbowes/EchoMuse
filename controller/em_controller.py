@@ -992,7 +992,7 @@ class Device:
     @property
     def pairing_capable(self) -> bool:
         """
-        Whether this firmware asks to pair itself (action button held, then a
+        Whether this firmware asks to pair itself (buttons held, then a
         pair_request or a plain dial with `pairing`). Without it an admin
         starts pairing from the dashboard, since the device cannot ask.
         """

@@ -3,7 +3,8 @@ Pairing an Echo: who has asked, and who an admin has approved.
 
 A device holding link credentials dials only wss. When those stop working (a
 regenerated CA, a move to a new controller) or it never had any, the owner
-holds its action button: the device opens a two-minute pairing window, asks
+holds its action and volume-up buttons for 5 s (action alone on v2.17.0,
+see `gesture`): the device opens a two-minute pairing window, asks
 over whatever connection it can make, and an admin approves it in the
 dashboard. The approval is what issues credentials: a fresh token and the CA,
 pushed over that connection (em_api._issue_credentials). Approving a NEW
@@ -31,6 +32,22 @@ REQUEST_TTL_S = 30.0
 # How long an approval waits for the device to take it: the rest of the
 # device's two-minute window, with slack for someone reading the dashboard.
 APPROVAL_TTL_S = 180.0
+
+
+def gesture(capabilities) -> str:
+    """
+    What the owner holds to ask, for the firmware we know about. v2.17.0
+    took the action button alone; `pair_combo` firmware takes action and
+    volume-up together, so a long press meant for Home Assistant does not
+    ask to pair. Unknown firmware (offline) gets both.
+    """
+    if capabilities is None:
+        return ("Hold its action and volume-up buttons together for 5 seconds "
+                "(the action button alone on firmware v2.17.0)")
+    if "pair_combo" in capabilities:
+        return "Hold its action and volume-up buttons together for 5 seconds"
+    return "Hold its action button for 5 seconds"
+
 
 _requests: dict[str, dict] = {}
 _approvals: dict[str, float] = {}

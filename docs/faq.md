@@ -457,8 +457,9 @@ our word for it.
 
 ### Is the link between device and controller encrypted?
 Yes, once the Echo is paired. Approving a new Echo pairs it. An Echo already
-on `plain ws` (its Status tab Link row) pairs when you hold its action button
-for 5 seconds and then approve it in the dashboard; on firmware too old to ask,
+on `plain ws` (its Status tab Link row) pairs when you hold its action and volume-up
+buttons together for 5 seconds (the action button alone on firmware v2.17.0)
+and then approve it in the dashboard; on firmware too old to ask,
 the Status tab offers **Pair** instead. **The ESPHome connection to Home Assistant is
 still plaintext**, including mic audio —
 [#341](https://github.com/wilbowes/EchoMuse/issues/341).

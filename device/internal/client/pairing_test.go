@@ -113,36 +113,60 @@ func TestPairHold(t *testing.T) {
 	var fired atomic.Int32
 	h := NewPairHold(func() { fired.Add(1) })
 	h.hold = 30 * time.Millisecond
+	wait := func() { time.Sleep(60 * time.Millisecond) }
 
-	// A tap: forwarded, nothing fires.
-	if h.Event(true) || h.Event(false) {
-		t.Fatal("a tap was swallowed")
+	// The action button alone, however long: Home Assistant's long press,
+	// never pairing.
+	if h.Action(true) {
+		t.Fatal("an action press was swallowed")
 	}
-	time.Sleep(60 * time.Millisecond)
+	wait()
+	if h.Action(false) || fired.Load() != 0 {
+		t.Fatal("the action button alone started pairing")
+	}
+
+	// Volume-up alone: a volume step, never pairing.
+	h.VolumeUp(true)
+	wait()
+	if h.VolumeUp(false) || fired.Load() != 0 {
+		t.Fatal("volume-up alone started pairing")
+	}
+
+	// Both, released early: nothing fires and both releases pass through.
+	h.Action(true)
+	h.VolumeUp(true)
+	if h.VolumeUp(false) || h.Action(false) {
+		t.Fatal("a short combination swallowed a release")
+	}
+	wait()
 	if fired.Load() != 0 {
-		t.Fatal("a tap started pairing")
+		t.Fatal("a released combination fired later")
 	}
 
-	// A hold: the press is forwarded, pairing starts once, the release is
-	// swallowed.
-	if h.Event(true) {
-		t.Fatal("the press of a hold was swallowed")
+	// Both held, in either order: fires once, and both releases are
+	// swallowed so it is neither a long press nor a volume step.
+	h.VolumeUp(true)
+	if h.Action(true) {
+		t.Fatal("the press completing the combination was swallowed")
 	}
-	time.Sleep(60 * time.Millisecond)
+	wait()
 	if fired.Load() != 1 {
 		t.Fatalf("fired %d times, want 1", fired.Load())
 	}
-	if !h.Event(false) {
-		t.Fatal("the release ending a pairing hold was forwarded")
+	if !h.Action(false) {
+		t.Fatal("the action release ending a pairing hold was forwarded")
+	}
+	if !h.VolumeUp(false) {
+		t.Fatal("the volume-up release ending a pairing hold stepped the volume")
 	}
 
-	// The next tap is a tap again.
-	if h.Event(true) || h.Event(false) {
-		t.Fatal("a tap after a hold was swallowed")
+	// Afterwards each button is itself again.
+	if h.Action(true) || h.Action(false) || h.VolumeUp(true) || h.VolumeUp(false) {
+		t.Fatal("a press after a pairing hold was swallowed")
 	}
-	time.Sleep(60 * time.Millisecond)
+	wait()
 	if fired.Load() != 1 {
-		t.Fatal("a released press fired later")
+		t.Fatal("pairing fired again")
 	}
 }
 

@@ -307,12 +307,23 @@ func main() {
 		}
 	}()
 
-	// A 5 s hold of the action button asks to pair (client/pairing.go). The
+	// Action and volume-up held together for 5 s ask to pair
+	// (client/pairing.go). The
 	// white flash says the hold registered: on a connected device nothing
 	// else changes on the ring until an admin approves.
 	pairHold := client.NewPairHold(func() {
 		s.Flash(150, 150, 150, 400*time.Millisecond)
 		controlClient.StartPairing()
+	})
+	buttonController.SetVolumeEdgeCallback(func(direction string, down bool) bool {
+		if direction != "up" {
+			return false
+		}
+		if pairHold.VolumeUp(down) {
+			log.Println("[cmd] volume-up release ended a pairing hold — no volume step")
+			return true
+		}
+		return false
 	})
 
 	// Button events — forward to controller via control plane
@@ -321,7 +332,7 @@ func main() {
 		// Ahead of the link-down gate: a device that cannot connect is the one
 		// that most needs to ask. The release ending a pairing hold is not
 		// forwarded, so it does not also reach HA as a long press.
-		if event.ClickType == pkgbuttons.DotClick && pairHold.Event(event.Down) {
+		if event.ClickType == pkgbuttons.DotClick && pairHold.Action(event.Down) {
 			log.Println("[cmd] action button release ended a pairing hold — not forwarded")
 			return
 		}

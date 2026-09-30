@@ -10,7 +10,7 @@ import (
 )
 
 // Pairing is how an Echo asks to be (re)issued link credentials: its owner
-// holds the action button for PairHoldDuration, the device opens a window of
+// holds the action and volume-up buttons for PairHoldDuration, the device opens a window of
 // pairWindow, and an admin's Approve in the dashboard issues a fresh token
 // and the CA (controller/em_pairing.py, Wil 2026-09-26).
 //
@@ -160,26 +160,41 @@ func dialPlan(hasCA bool, tlsPort int, pairing bool) []dialAttempt {
 	return plan
 }
 
-// PairHold turns a long hold of the action button into StartPairing. It sits
-// in front of the link-down gate in cmd, since the device that most needs it
-// is the one that cannot connect.
+// PairHold turns the action and volume-up buttons held together into
+// StartPairing. It sits in front of the link-down gate in cmd, since the
+// device that most needs it is the one that cannot connect.
+//
+// A combination rather than the action button alone (Wil, 2026-09-29): a
+// long action press is Home Assistant's `long` event, so a hold that ran on
+// past 5 s asked to pair instead. v2.17.0 shipped the single-button hold.
 type PairHold struct {
-	mu    sync.Mutex
-	hold  time.Duration
-	fire  func()
-	timer *time.Timer
-	gen   uint64 // bumped on every press and release; a stale timer is ignored
-	fired bool
+	mu     sync.Mutex
+	hold   time.Duration
+	fire   func()
+	timer  *time.Timer
+	gen    uint64 // bumped on every edge; a stale timer is ignored
+	action bool   // held now
+	volUp  bool
+	// Set when the combination fired: the release of each is then swallowed,
+	// so the action button is not also a long press and volume-up not also
+	// a step.
+	eatAction bool
+	eatVolUp  bool
 }
 
 func NewPairHold(fire func()) *PairHold {
 	return &PairHold{hold: PairHoldDuration, fire: fire}
 }
 
-// Event takes each action-button edge and reports whether to swallow it. The
-// press is never swallowed (the controller ignores presses); the release that
-// ends a pairing hold is, so the hold is not also sent to HA as a long press.
-func (h *PairHold) Event(down bool) bool {
+// Action takes each action-button edge and reports whether to swallow it.
+func (h *PairHold) Action(down bool) bool { return h.edge(&h.action, &h.eatAction, down) }
+
+// VolumeUp takes each volume-up edge and reports whether to swallow it.
+func (h *PairHold) VolumeUp(down bool) bool { return h.edge(&h.volUp, &h.eatVolUp, down) }
+
+// A press is never swallowed (the controller ignores presses); only the
+// releases that end a combination that fired.
+func (h *PairHold) edge(held, eat *bool, down bool) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.gen++
@@ -187,22 +202,25 @@ func (h *PairHold) Event(down bool) bool {
 		h.timer.Stop()
 		h.timer = nil
 	}
+	*held = down
 	if down {
-		h.fired = false
-		gen := h.gen
-		h.timer = time.AfterFunc(h.hold, func() {
-			h.mu.Lock()
-			if h.gen != gen {
+		*eat = false
+		if h.action && h.volUp {
+			gen := h.gen
+			h.timer = time.AfterFunc(h.hold, func() {
+				h.mu.Lock()
+				if h.gen != gen {
+					h.mu.Unlock()
+					return
+				}
+				h.eatAction, h.eatVolUp = true, true
 				h.mu.Unlock()
-				return
-			}
-			h.fired = true
-			h.mu.Unlock()
-			h.fire()
-		})
+				h.fire()
+			})
+		}
 		return false
 	}
-	swallow := h.fired
-	h.fired = false
+	swallow := *eat
+	*eat = false
 	return swallow
 }
