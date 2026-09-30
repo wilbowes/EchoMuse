@@ -4006,3 +4006,15 @@ Line out: the jack follows the speaker volume (stock does the same); a
 remembered per-output volume is agreed, not built. #669 (one channel silent with
 clicking on line out) is probably stock's `Right Channel Only`, which we never
 copied.
+
+## 2026-09-30 (night) — IPv6 was never filtered on emOS built beside FireOS 6
+
+init's firewall loop runs `iptables` and `ip6tables`, and FireOS 6's system
+partition has no `ip6tables`, so on 15LE the IPv6 half failed silently and
+wlan0 took inbound IPv6 unfiltered. C95 (FireOS 5 system) was filtered. Found
+while opening a port for the Sendspin player. init now switches IPv6 off
+wherever the IPv6 DROP policy is not in place; nothing uses IPv6 (the
+controller link and mDNS are IPv4, and grandcat/zeroconf fails only when both
+stacks are missing). Run by hand on 15LE: IPv6 gone, firmware re-found the
+controller over mDNS; on C95 the check keeps IPv6. Reaches devices with the
+next emOS release.
