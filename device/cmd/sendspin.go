@@ -8,13 +8,16 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/bindings/speaker"
 	"github.com/wilbowes/EchoMuse/internal/client"
 	"github.com/wilbowes/EchoMuse/internal/config"
+	"github.com/wilbowes/EchoMuse/internal/firewall"
 	"github.com/wilbowes/EchoMuse/internal/sendspin"
 	"github.com/wilbowes/EchoMuse/pkg/board"
 )
 
 // The Sendspin player's lifecycle (internal/sendspin, #89). Off by default,
 // switched by sendspinEnabled on the config push: it listens on a port and
-// advertises over mDNS, so it runs only where someone asked for it.
+// advertises over mDNS, so it runs only where someone asked for it. emOS
+// drops inbound connections, so the port is opened in the filter while the
+// player runs and closed when it stops.
 
 // sendspinStore is beside the TLS credentials and state.json, on /data, so it
 // survives OTA slot flips. It holds the device's Sendspin identity: losing it
@@ -68,6 +71,7 @@ func sendspinLinkDown(spk *speaker.PcmSpeaker) {
 	spk.SetMusicSource(nil)
 	ss.c.Stop("restart")
 	ss.c = nil
+	firewall.Close(sendspin.DefaultPort)
 	log.Printf("[sendspin] player stopped: controller link down")
 }
 
@@ -97,6 +101,8 @@ func applySendspinConfig(spk *speaker.PcmSpeaker, cc *client.ControlClient, vol 
 		log.Printf("[sendspin] player stopped (%s)", reason)
 	}
 	if !on {
+		// Also clears a rule left by a firmware that died with the player on.
+		firewall.Close(sendspin.DefaultPort)
 		cc.SendSendspinStatus(nil)
 		return
 	}
@@ -113,9 +119,16 @@ func applySendspinConfig(spk *speaker.PcmSpeaker, cc *client.ControlClient, vol 
 			// Before Start: a server can connect and command the volume at once.
 			c.OnVolume(func(pct int) { vol.SetVolume(pctToLevel(pct)) })
 			c.SetVolume(levelToPct(vol.VolumeLevel()))
+			// Open before Start advertises: Music Assistant dials when the
+			// record appears and may not retry a timeout. Logged, not
+			// fatal: FireOS has no filter to open.
+			if ferr := firewall.Open(sendspin.DefaultPort); ferr != nil {
+				log.Printf("[sendspin] could not open port %d: %v", sendspin.DefaultPort, ferr)
+			}
 			err = c.Start()
 		}
 		if err != nil {
+			firewall.Close(sendspin.DefaultPort)
 			log.Printf("[sendspin] player not started: %v", err)
 			cc.SendSendspinStatus(map[string]string{"state": "error", "error": err.Error()})
 			return
