@@ -54,6 +54,11 @@ type Client struct {
 	unpaired   bool
 	onChange   func()
 	onSettings func(playerSettings)
+	// onVolume, when set, makes the server's volume the DEVICE's volume:
+	// commands go to it rather than to a gain on synced music alone, and the
+	// device reports its level back through SetVolume. One volume, whoever
+	// moves it (Wil, 2026-09-30).
+	onVolume func(v int)
 
 	srv  *http.Server
 	mdns *zeroconf.Server
@@ -78,7 +83,7 @@ func New(cfg Config) (*Client, error) {
 	}
 	c.player = newPlayer(newTimeFilter())
 	set := st.settings()
-	c.player.setGain(set.Volume, set.Muted)
+	c.player.setGain(set.Volume, set.Muted) // until OnVolume hands it to the device
 	c.player.setDelay(set.StaticDelayMs)
 	return c, nil
 }
@@ -240,9 +245,56 @@ func (c *Client) OnSettings(f func(volume int, muted bool, delayMs int)) {
 	c.mu.Unlock()
 }
 
+// OnVolume hands volume commands to the device (see onVolume). Set before
+// Start.
+func (c *Client) OnVolume(f func(v int)) {
+	c.mu.Lock()
+	c.onVolume = f
+	c.mu.Unlock()
+	set := c.store.settings()
+	c.player.setGain(c.gainVolume(set.Volume), set.Muted)
+}
+
+// SetVolume reports the device's volume (0-100) when it changes by any
+// route: its buttons, Home Assistant, or a command this client passed on.
+// Sent to the server only when it differs from what it last heard.
+func (c *Client) SetVolume(v int) {
+	set := c.store.settings()
+	if set.Volume == v {
+		return
+	}
+	set.Volume = v
+	c.store.setSettings(set)
+	c.mu.Lock()
+	s := c.admitted
+	c.mu.Unlock()
+	if s != nil {
+		s.sendState()
+	}
+	c.changed()
+}
+
+// gainVolume is the volume the player itself applies: none when the device
+// owns the volume, since the device applies it to everything it plays.
+func (c *Client) gainVolume(v int) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.onVolume != nil {
+		return 100
+	}
+	return v
+}
+
 func (c *Client) applySettings(p playerSettings) {
+	prev := c.store.settings()
 	c.store.setSettings(p)
-	c.player.setGain(p.Volume, p.Muted)
+	c.mu.Lock()
+	vf := c.onVolume
+	c.mu.Unlock()
+	if vf != nil && p.Volume != prev.Volume {
+		vf(p.Volume)
+	}
+	c.player.setGain(c.gainVolume(p.Volume), p.Muted)
 	c.player.setDelay(p.StaticDelayMs)
 	c.mu.Lock()
 	f := c.onSettings

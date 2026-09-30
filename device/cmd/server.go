@@ -427,6 +427,7 @@ func main() {
 		// buttons go inert. Set BEFORE the pulse starts, or its first frames
 		// are swallowed by the mute suppression on a muted device.
 		s.SetLinkDown(true)
+		sendspinLinkDown(pcmSpeaker)
 		go pulseOrange(pulseCtx, s)
 	})
 
@@ -445,6 +446,7 @@ func main() {
 		// nothing above this device, so the white pulse owns the ring and the
 		// buttons do nothing.
 		s.SetLinkDown(true)
+		sendspinLinkDown(pcmSpeaker)
 		go pulseWhite(pulseCtx, s)
 	})
 
@@ -464,6 +466,7 @@ func main() {
 		pulseCancel = cancel
 		pulseKind = "refused"
 		s.SetLinkDown(true)
+		sendspinLinkDown(pcmSpeaker)
 		go pulseRefused(pulseCtx, s)
 	})
 
@@ -545,7 +548,7 @@ func main() {
 		}
 		applyAecConfig(canceller, dataClient)
 		applyBleConfig(bleScanner)
-		applySendspinConfig(pcmSpeaker, controlClient, deviceID)
+		applySendspinConfig(pcmSpeaker, controlClient, s, deviceID)
 		applyShadowConfig(dataClient, controlClient, pcmSpeaker, s)
 		syncListenState(dataClient, controlClient, false)
 	})
@@ -689,6 +692,7 @@ func main() {
 	// Fires on every Set() call: physical button press or future volume_set command.
 	s.SetVolumeChangeCallback(func(level int) {
 		controlClient.SendVolumeState(level)
+		sendspinVolumeChanged(level)
 	})
 
 	// Volume set from controller (HA MediaPlayerCommandRequest forwarded down).

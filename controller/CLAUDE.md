@@ -929,6 +929,10 @@ controller's whole part is four things, and none of them is audio:
   so synced music is ducked like `0x04` music. HA's own music still wins the
   plane; that rule is enforced on the device.
 
+Volume is unified on the device (a server's volume IS the Echo's volume, and
+flows back to HA through the ordinary `volume_state`), and the player runs
+only while the controller link is up — both decided 2026-09-30.
+
 The output chain covers synced music only on the device path: behind a
 controller that does not announce `output_chain`, Sendspin audio is unshaped,
 because it never reaches this process.

@@ -33,10 +33,49 @@ func sendspinPlayer() *sendspin.Client {
 	return ss.c
 }
 
+// deviceVolume is the Echo's one volume: the level HA and the buttons move,
+// 0..127 with unity at 127. Server volume is mapped onto it with the same
+// proportion as HA's percentage (controller em_volume), so the same volume
+// reads the same number in Music Assistant and in Home Assistant.
+type deviceVolume interface {
+	VolumeLevel() int
+	SetVolume(level int)
+}
+
+const volumeMax = 127
+
+func levelToPct(level int) int { return sendspin.LevelToPercent(level, volumeMax) }
+func pctToLevel(pct int) int   { return sendspin.PercentToLevel(pct, volumeMax) }
+
+// sendspinVolumeChanged tells the player the device's volume moved, by any
+// route. Wired into the volume change callback.
+func sendspinVolumeChanged(level int) {
+	if c := sendspinPlayer(); c != nil {
+		c.SetVolume(levelToPct(level))
+	}
+}
+
+// sendspinLinkDown stops the player when the controller link goes: EchoMuse
+// is one system, and an Echo whose ring says it is disconnected should not
+// be playing music (Wil, 2026-09-30). "restart" asks Music Assistant to
+// redial, and the next config push after the link returns starts it again.
+func sendspinLinkDown(spk *speaker.PcmSpeaker) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	if ss.c == nil {
+		return
+	}
+	spk.SetMusicSource(nil)
+	ss.c.Stop("restart")
+	ss.c = nil
+	log.Printf("[sendspin] player stopped: controller link down")
+}
+
 // applySendspinConfig starts, stops or updates the player to match config.
 // A rename restarts it: the name is in the mDNS record and in client/hello,
-// and neither is re-sent on a live connection.
-func applySendspinConfig(spk *speaker.PcmSpeaker, cc *client.ControlClient, deviceID string) {
+// and neither is re-sent on a live connection. It runs only on a config
+// push, so only with the controller link up.
+func applySendspinConfig(spk *speaker.PcmSpeaker, cc *client.ControlClient, vol deviceVolume, deviceID string) {
 	snap := config.Get().Snapshot()
 	on := snap.SendspinEnabled != nil && *snap.SendspinEnabled
 	unpaired := snap.SendspinUnpaired != nil && *snap.SendspinUnpaired
@@ -71,6 +110,9 @@ func applySendspinConfig(spk *speaker.PcmSpeaker, cc *client.ControlClient, devi
 			Unpaired:  unpaired,
 		})
 		if err == nil {
+			// Before Start: a server can connect and command the volume at once.
+			c.OnVolume(func(pct int) { vol.SetVolume(pctToLevel(pct)) })
+			c.SetVolume(levelToPct(vol.VolumeLevel()))
 			err = c.Start()
 		}
 		if err != nil {

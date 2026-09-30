@@ -236,6 +236,20 @@ hardware.
 protocol agrees: a server must not rejoin a client that went unavailable. The
 person restarts the group. The cost of being wrong is one tap.
 
+**One volume** (Wil, 2026-09-30). A server's volume command sets the Echo's
+own volume, the one HA and the buttons move, mapped 0-100 onto 0..127 by the
+same proportion as HA's percentage; every change by any route is reported
+back, so Music Assistant's slider follows. The synced music itself then plays
+at unity, and the level is applied once, by the speaker's software volume.
+The server's mute stays a mute of synced music only: the Echo's mute button
+is the microphone.
+
+**It follows the controller link** (Wil, 2026-09-30): EchoMuse is one system,
+and an Echo whose ring says it is disconnected should not be playing. The
+player stops (goodbye `restart`) whenever the ring shows the link down —
+disconnected, pending or refused — and starts on the next config push. The
+interop test confirms Music Assistant redials by itself after that goodbye.
+
 Not built: telling Home Assistant's media player entity that the Echo is
 playing synced music (S1's "controller told"). It shows idle meanwhile.
 

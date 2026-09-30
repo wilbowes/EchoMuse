@@ -223,6 +223,19 @@ async def scenario_pair_and_play() -> None:
         server.get_client(cid).role("player@v1").set_volume(100)
         await client.wait("settings", 5, lambda e: e["volume"] == 100)
 
+        # The other direction: the Echo's own volume moves (a button, HA) and
+        # the server hears it, so Music Assistant's slider follows.
+        await client.command("volume 30")
+        await until(lambda: server.get_client(cid).role("player@v1").volume == 30, 5,
+                    "server never heard the device's volume change")
+        print("   device volume 30: server shows 30")
+        # Back to 100: it persists, and without a device volume this harness
+        # applies it as gain, which would scale the sawtooth the sync check
+        # reads sample positions from.
+        await client.command("volume 100")
+        await until(lambda: server.get_client(cid).role("player@v1").volume == 100, 5,
+                    "volume did not return to 100")
+
         # stream/clear (a seek): the buffer empties and play resumes in sync.
         st.clear()
         n2 = len(client.events)
@@ -243,6 +256,14 @@ async def scenario_pair_and_play() -> None:
         await client.command("external off")
         await until(lambda: server.get_client(cid).available, 5, "client never came back")
         st.stop()
+
+        # The controller link drops and returns: the player says goodbye
+        # "restart" and comes back on the same port. The server must redial by
+        # itself — the firmware relies on it.
+        await client.command("relink")
+        await client.wait("relinked", 10)
+        await until(lambda: player_available(server, cid), 30, "server never redialled after a restart goodbye")
+        print("   player restarted (link down/up): server redialled on its own")
 
         # Reconnect: the long-term PSK must carry the session with no pairing.
         server.disconnect_from_client(URL)

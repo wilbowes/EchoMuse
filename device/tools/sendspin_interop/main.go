@@ -22,6 +22,7 @@ import (
 	"math/rand"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -50,10 +51,11 @@ func main() {
 	noise := flag.Duration("noise", time.Millisecond, "± error in measuring the DAC position")
 	flag.Parse()
 
-	c, err := sendspin.New(sendspin.Config{
+	cfg := sendspin.Config{
 		StorePath: *store, Name: "Interop Echo", Instance: "interop-echo",
 		Port: *port, Product: "interop", Version: "test", Unpaired: *unpaired,
-	})
+	}
+	c, err := sendspin.New(cfg)
 	if err != nil {
 		emit(map[string]any{"event": "error", "error": err.Error()})
 		os.Exit(1)
@@ -66,6 +68,8 @@ func main() {
 		os.Exit(1)
 	}
 	emit(map[string]any{"event": "ready", "clientId": c.ClientID(), "token": c.PairingToken()})
+	var cur atomic.Pointer[sendspin.Client]
+	cur.Store(c)
 
 	// stdin carries commands from run.sh: "external on|off", "quit".
 	quit := make(chan struct{})
@@ -73,10 +77,34 @@ func main() {
 		sc := bufio.NewScanner(os.Stdin)
 		for sc.Scan() {
 			switch sc.Text() {
+			case "relink":
+				// The controller link dropping and returning: the firmware
+				// stops the player with goodbye "restart", then starts a new
+				// one on the next config push. The server must redial.
+				old := cur.Load()
+				old.Stop("restart")
+				time.Sleep(3 * time.Second)
+				n, err := sendspin.New(cfg)
+				if err == nil {
+					err = n.Start()
+				}
+				if err != nil {
+					emit(map[string]any{"event": "error", "error": err.Error()})
+					continue
+				}
+				cur.Store(n)
+				emit(map[string]any{"event": "relinked"})
 			case "external on":
-				c.SetExternal(true)
+				cur.Load().SetExternal(true)
 			case "external off":
-				c.SetExternal(false)
+				cur.Load().SetExternal(false)
+			default:
+				// "volume N": the device's own volume moved (a button, HA).
+				var v int
+				if _, err := fmt.Sscanf(sc.Text(), "volume %d", &v); err == nil {
+					cur.Load().SetVolume(v)
+					continue
+				}
 			case "quit":
 				close(quit)
 				return
@@ -99,14 +127,14 @@ func main() {
 	for {
 		select {
 		case <-quit:
-			c.Stop("shutdown")
+			cur.Load().Stop("shutdown")
 			emit(map[string]any{"event": "stopped"})
 			return
 		case <-sig:
-			c.Stop("shutdown")
+			cur.Load().Stop("shutdown")
 			return
 		case <-status.C:
-			b, _ := json.Marshal(c.Status())
+			b, _ := json.Marshal(cur.Load().Status())
 			var st map[string]any
 			json.Unmarshal(b, &st)
 			st["event"] = "status"
@@ -116,7 +144,7 @@ func main() {
 		dac := start.Add(time.Duration(k) * period).Add(*latency)
 		time.Sleep(time.Until(dac.Add(-*latency)))
 		measured := dac.Add(time.Duration((rand.Float64()*2 - 1) * float64(*noise)))
-		if c.Fill(out, measured) {
+		if cur.Load().Fill(out, measured) {
 			// Where the first frame truly lands, on the server's clock.
 			raw := rawUs() + dac.Sub(time.Now()).Microseconds()
 			var rms float64

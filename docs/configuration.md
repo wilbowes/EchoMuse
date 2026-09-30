@@ -725,8 +725,13 @@ Things to know:
   itself. Start the group again from Music Assistant.
 - **Voice still ducks the music.** A wake word lowers synced music exactly as
   it lowers other music, and the other speakers in the group carry on.
-- **Two volumes.** Music Assistant's volume for the player and the Echo's own
-  volume both apply. The Echo's buttons still set the overall level.
+- **One volume.** Music Assistant's volume slider for the Echo is the Echo's
+  own volume: moving it moves Home Assistant's slider too, and the Echo's
+  buttons move both. Music Assistant's mute silences only the synced music;
+  the Echo's mute button still mutes the microphone.
+- **It needs the controller.** When the Echo loses its controller (the ring
+  pulses orange) it stops playing and leaves its group, and Music Assistant
+  reconnects it once the link is back.
 - **Mono.** The Echo asks for one channel, which is what its speaker plays.
 - The player listens on port **8928** and advertises itself over mDNS as
   `_sendspin._tcp`. The connection is encrypted.
