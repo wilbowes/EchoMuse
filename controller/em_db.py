@@ -232,6 +232,14 @@ DEFAULT_DEVICE_CONFIG = {
     # Android Bluetooth stack on the device (required — /dev/stpbt is
     # single-owner) and brings up a second ESPHome listener + mDNS entry.
     "bleProxyEnabled":  False,
+    # sendspinEnabled: the device runs a Sendspin player (#89) that Music
+    # Assistant connects to directly for synchronised multi-room audio.
+    # Default off: it opens a listening port and an mDNS record on the Echo.
+    # sendspinUnpaired lets a server the MA operator approved play without
+    # pairing; off by default, since pairing is one paste of the device's
+    # token and without it anyone on the LAN can claim to be a server.
+    "sendspinEnabled":  False,
+    "sendspinUnpaired": False,
     # beamformingEnabled: True — ch6 (centre/omni) hears the wake word, then
     # the turn locks to the best perimeter mic. The flag ONLY gates Lock():
     # unlocked is always ch6 and the wake path never locks, so the wake

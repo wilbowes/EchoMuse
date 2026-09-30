@@ -87,6 +87,23 @@ def test_shadow_capability_is_surfaced_to_the_dashboard():
         "the dashboard must gate the on-device toggle on the capability"
 
 
+def test_sendspin_is_gated_on_its_capability_and_its_token_stays_private():
+    """
+    Sendspin (#89) is off on firmware without a player, so the toggle must be
+    disabled with the reason there. The pairing token carries the device's
+    pairing key: it is fetched on request and must never ride the stats relay
+    or a dashboard event, which land in support bundles and every open tab.
+    """
+    assert "sendspin" in device_capabilities()
+    assert "sendspinCapable" in API.read_text()
+    jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
+    assert "disabled={!sendspinCapable}" in jsx
+    ctrl = CONTROLLER.read_text()
+    handler = ctrl.split('elif msg_type == "sendspin_token":', 1)[1].split("elif msg_type", 1)[0]
+    assert "log." not in handler and "_push_event" not in handler, \
+        "the sendspin_token handler must hand the token to its waiter and nothing else"
+
+
 def test_triggering_is_a_separate_capability_from_scoring():
     """
     Shadow shipped first, so there is firmware in the field that scores the

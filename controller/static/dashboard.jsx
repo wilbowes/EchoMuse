@@ -2290,6 +2290,10 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 localCapable={!device.connected || !!device.owwLocalCapable}
                 listen={device.connected ? device.listen : null}
                 wakeCueCapable={!device.connected || !!device.wakeCueCapable}
+                sendspinCapable={!device.connected || !!device.sendspinCapable}
+                sendspinPanel={device.connected && device.sendspinCapable
+                  ? <SendspinPairing deviceId={device.device_id} status={device.sendspin} isAdmin={isAdmin}/>
+                  : null}
                 mixCapable={!device.connected || !!device.audioMixCapable}
                 holdCapable={!device.connected || !!device.buttonHoldCapable}
                 hwEchoRef={device.connected && device.aecRef === 'hw'}
@@ -8900,14 +8904,15 @@ const CONFIG_SECTIONS = {
   "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "aecRefSource", "nsAsr", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
   "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs", "consolePassword", "consoleTimeoutMin", "controllerEndpoints"],
-  "bluetooth": ["bleProxyEnabled"]
+  "bluetooth": ["bleProxyEnabled"],
+  "sendspin": ["sendspinEnabled", "sendspinUnpaired"]
 };
 
 // Display labels for the section ids, and the reverse key -> section index
 // that lets a write be gated by the section owning the key it touches.
 const SECTION_LABELS = {
   playback: 'Playback', wakeword: 'Wake word', microphones: 'Microphones',
-  ring: 'Ring', advanced: 'Advanced', bluetooth: 'Bluetooth',
+  ring: 'Ring', advanced: 'Advanced', bluetooth: 'Bluetooth', sendspin: 'Sendspin',
 };
 const KEY_SECTION = {};
 Object.entries(CONFIG_SECTIONS).forEach(([sid, keys]) => {
@@ -9055,7 +9060,8 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                             holdCapable = true, triggerCapable = true,
                             localCapable = true, listen = null,
                             hwEchoRef = false, hwRefCapable = true,
-                            emosFleet = true, wakeCueCapable = true }) {
+                            emosFleet = true, wakeCueCapable = true,
+                            sendspinCapable = true, sendspinPanel = null }) {
   // emosFleet defaults TRUE for the same reason the capability props above do,
   // and for one more: it gates the console password, which is emOS-only, and
   // disabling a setting because we do not KNOW the fleet has an emOS device
@@ -9708,6 +9714,86 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
           <Toggle label="Bluetooth proxy" sub="passive BLE scan → HA (Bermuda, BLE sensors)" value={config.bleProxyEnabled ?? false} onChange={v => set('bleProxyEnabled', v)}/>
         </div>
       </Stage>
+
+      {/* 07 SENDSPIN */}
+      <Stage n="07" title="Sendspin"
+        chips={<ScopeChip tone="device">Device</ScopeChip>}
+        desc="Makes the Echo a Sendspin player, so Music Assistant can group it with other speakers and play to all of them in sync. Music Assistant connects to the Echo directly. Music from Home Assistant still takes priority and leaves the group. Early Access."
+        scope={scopeEl('sendspin')} dim={secStyle('sendspin')}>
+        <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px', ...inputStyle }}>
+          <Toggle label="Sendspin player"
+            sub={sendspinCapable ? 'Music Assistant finds it on the network' : 'needs newer firmware on this Echo'}
+            disabled={!sendspinCapable}
+            value={config.sendspinEnabled ?? false}
+            onChange={v => set('sendspinEnabled', v)}/>
+          <Toggle label="Play without pairing"
+            sub="any server Music Assistant approves; less secure"
+            disabled={!sendspinCapable || !(config.sendspinEnabled ?? false)}
+            value={config.sendspinUnpaired ?? false}
+            onChange={v => set('sendspinUnpaired', v)}/>
+        </div>
+        {(config.sendspinEnabled ?? false) && sendspinPanel}
+      </Stage>
+    </div>
+  );
+}
+
+// SendspinPairing: one Echo's player status, and the pairing token to paste
+// into Music Assistant (Settings → Players → the Echo → Pair with token). The
+// token is fetched from the Echo on request and never kept: it carries the
+// Echo's pairing key.
+function SendspinPairing({ deviceId, status, isAdmin }) {
+  const mono = "'DM Mono',monospace";
+  const [token, setToken] = useState(null);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const show = async () => {
+    setBusy(true); setError('');
+    try {
+      const r = await API.get(`/api/devices/${deviceId}/sendspin/token`);
+      setToken(r.token);
+    } catch (e) {
+      setError(e.error || e.message || 'Could not get the token');
+    } finally {
+      setBusy(false);
+    }
+  };
+  const copy = () => {
+    navigator.clipboard.writeText(token).then(() => setCopied(true)).catch(() => {});
+  };
+
+  let line = 'Starting';
+  if (status) {
+    switch (status.state) {
+      case 'listening': line = 'Waiting for Music Assistant'; break;
+      case 'connected': line = `Connected to ${status.server}`; break;
+      case 'playing':   line = status.group ? `Playing in ${status.group}` : 'Playing'; break;
+      case 'busy':      line = 'Home Assistant is playing, so it left its group'; break;
+      case 'error':     line = `Not running: ${status.error}`; break;
+      default:          line = status.state || 'Starting';
+    }
+    if ((status.state === 'connected' || status.state === 'playing') && !status.paired) line += ' · unpaired';
+  }
+  const paired = status && status.pairedWith > 0
+    ? `paired with ${status.pairedWith} server${status.pairedWith === 1 ? '' : 's'}` : 'not paired';
+
+  return (
+    <div style={{ fontFamily: mono, fontSize: 11, color: 'var(--text2)', display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div>{line} <span style={{ color: 'var(--muted)' }}>· {paired}</span></div>
+      {isAdmin && !token && (
+        <div><Pill small disabled={busy} onClick={show}>{busy ? 'Asking the Echo…' : 'Show pairing token'}</Pill></div>
+      )}
+      {token && (
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', minWidth: 0 }}>
+          <span style={{ wordBreak: 'break-all', userSelect: 'all' }}>{token}</span>
+          <Pill small onClick={copy}>{copied ? 'Copied' : 'Copy'}</Pill>
+          <Pill small onClick={() => { setToken(null); setCopied(false); }}>Hide</Pill>
+        </div>
+      )}
+      {token && <div style={{ color: 'var(--muted)', fontSize: 10 }}>In Music Assistant, pair this player with the token. Anyone with it can pair with this Echo.</div>}
+      {error && <div style={{ color: 'var(--error)' }}>{error}</div>}
     </div>
   );
 }

@@ -908,6 +908,31 @@ with no way for the user to tell which they had.
     **`DATA_RECONNECT_GRACE_S`** (3s) rides out a brief data-plane drop instead of discarding the rest of the audio (#28). The budget is per STREAM, armed by `begin_data_stream()` and spent down by `send_data` — **never per frame**: `send_data` runs once per audio period, so a per-frame wait makes a genuinely-gone device stall every remaining frame in turn, draining a stream for hours while holding the voice lock.
 4. **Speaker** — the wire carries **mono** 48kHz; `_fetch_tts_audio` decodes at the wire rate (the satellite declares `supported_formats` 48k/mono/FLAC so HA transcodes at source when it can; ffmpeg resamples otherwise — no numpy resample step anymore). The device duplicates L=R at the ALSA write (stereo ALSA config is an I2S/codec constraint, not a wire one). Device buffers ~5.5s (`audioChanDepth`) and holds playback until ~1s is queued or EOS arrives (`primePeriods`) — WiFi-stall protection for marginal links
 
+## Sendspin: the music plane's second producer never crosses the controller
+
+Music Assistant connects to the Echo's Sendspin player directly (#89,
+`device/internal/sendspin`, design in `docs/audio-states.md` §6). The
+controller's whole part is four things, and none of them is audio:
+
+- **Config**: `sendspinEnabled` / `sendspinUnpaired` in their own `sendspin`
+  section, both default off; `sendspinName` is the device LABEL, added to the
+  registration push and sent alone by `_patch_device` on a rename, never stored.
+- **Status**: `sendspin_status` on change and `sendspin` on the stats tick,
+  held as `Device.sendspin` and surfaced in `/api/devices`.
+- **The pairing token** is fetched from the device per request
+  (`GET /api/devices/{id}/sendspin/token`, admin) and handed to that one
+  request. **Never log it, store it or put it in an event**: it carries the
+  device's pairing key, and events reach every open tab and support bundles.
+  `test_capabilities.py` pins that the handler does nothing else with it.
+- **Ducking needs nothing new.** `interrupt()` sends `duck on` on every turn to
+  an `audio_mix` device whether or not the controller thinks music is playing,
+  so synced music is ducked like `0x04` music. HA's own music still wins the
+  plane; that rule is enforced on the device.
+
+The output chain covers synced music only on the device path: behind a
+controller that does not announce `output_chain`, Sendspin audio is unshaped,
+because it never reaches this process.
+
 ## Timers, and owners are COUNTED not flagged
 
 Voice-assistant timers (#167, @bluescreen10) make the alarm ring a **fourth

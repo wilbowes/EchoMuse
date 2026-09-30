@@ -34,7 +34,7 @@ opens with the device's **network (WiFi)** settings at the top — always
 per-device, never inherited from the fleet — followed by the
 fleet-inheritable sections, in order of how often you'll realistically touch
 them: **Playback**, **Wake word**, **Microphones**, **Ring**, **Advanced**,
-**Bluetooth**.
+**Bluetooth**, **Sendspin**.
 
 The **CPU** meter shows the core count beside the percentage — "27% · 2/4
 cores". The Dot has four CPU cores and parks the ones it isn't using, and the
@@ -693,6 +693,45 @@ Two things to know before enabling:
 Diagnostics live on the device's **Status tab** (Bluetooth proxy panel):
 scanner state, advertisements seen, nearby device count, and whether Home
 Assistant is connected and receiving.
+
+## 07 — Sendspin (Early Access)
+
+**Sendspin player** makes the Echo a [Sendspin](https://github.com/Sendspin/spec)
+player, so Music Assistant can put it in a group with other speakers and play
+to all of them in sync. Music Assistant connects to the Echo directly; the
+controller only turns the player on and shows its status.
+
+To set it up:
+
+1. Turn on **Sendspin player** for the Echo. Music Assistant finds it on the
+   network within a few seconds, listed under the Echo's name.
+2. Press **Show pairing token** under the switch, then **Copy**.
+3. In Music Assistant, open the player and pair it with the token.
+
+The token pairs the Echo with a server, so treat it like a password. Anyone
+who has it can pair with that Echo. Pairing is remembered on both sides, so it
+is a one-time step per Music Assistant install.
+
+**Play without pairing** skips the token: any server that Music Assistant's
+operator approves can play. It is off by default, because without pairing the
+Echo cannot tell a real server from anything else on your network claiming to
+be one.
+
+Things to know:
+
+- **Music from Home Assistant wins.** Asking the Echo for music by voice, or
+  playing to its Home Assistant media player, takes the speaker. The Echo
+  leaves its Sendspin group, and Music Assistant does not put it back by
+  itself. Start the group again from Music Assistant.
+- **Voice still ducks the music.** A wake word lowers synced music exactly as
+  it lowers other music, and the other speakers in the group carry on.
+- **Two volumes.** Music Assistant's volume for the player and the Echo's own
+  volume both apply. The Echo's buttons still set the overall level.
+- **Mono.** The Echo asks for one channel, which is what its speaker plays.
+- The player listens on port **8928** and advertises itself over mDNS as
+  `_sendspin._tcp`. The connection is encrypted.
+- Decoding and decryption cost about 4% of one CPU core while playing,
+  measured on a Dot.
 
 ---
 

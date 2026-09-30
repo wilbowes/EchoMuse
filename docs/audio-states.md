@@ -17,12 +17,13 @@ on the mixing path, so a device that pauses instead of ducking has overlapping
 owners with no duck depth, and collapsing them would be correct everywhere
 except on exactly those devices.
 
-Still open: #262 (music deferred until a turn ends), #243 (whether the output
-chain belongs device-side at all), and the state map the alarm is owed as a
-fourth owner.
+Still open: #262 (music deferred until a turn ends) and the state map the
+alarm is owed as a fourth owner. Sendspin (section 6) adds a second producer
+for the music plane without adding an owner.
 
 Status markers match the LED doc: **[today]** is shipped behaviour verified in
-code, **[proposed]** is designed or in review and not merged.
+code, **[proposed]** is designed or in review and not merged, **[built]** is
+written, tested and merged but not yet heard on hardware.
 
 ---
 
@@ -163,16 +164,139 @@ process.
 
 ---
 
-## 6. Open questions
+## 6. Sendspin — a second producer for the music plane **[built — EA, not yet heard on hardware]**
+
+Synchronised multi-room playback via the Open Home Foundation's Sendspin
+protocol, which Music Assistant speaks natively. Placement decided 2026-08-22
+(Wil): **the player runs on the device and Music Assistant talks to it
+directly**, not through the controller. Designed in PR #271, built
+2026-09-30 as `device/internal/sendspin`, switched per Echo by
+`sendspinEnabled`, shipped as Early Access firmware first.
+
+### 6.1 It is a second producer, not a third plane
+
+Sendspin carries what the music plane already carries — Music Assistant
+audio — by a different route:
+
+```
+0x04       MA → HA → controller (em_player) → 0x04 → device music plane
+sendspin   MA ─────────────────────────────────────→ device music plane
+```
+
+So no new frame type, no new mixer input, no new row in the ownership ladder.
+The duck, the saturating mix, the output chain and software volume apply to
+it unchanged, because it enters at the same `Mixer.Mix` input as `0x04`.
+
+The one difference is timing, and it decided the shape. `0x04` is
+push-and-play-in-order: the device plays each period when the one before it
+is done, and nothing on the plane carries a timestamp. Sendspin is useless
+without placing every sample at a moment the server chose. So the player is
+a **pull source** (`PcmSpeaker.SetMusicSource`): each period, the write loop
+reads the substream's ALSA `delay`, works out when the period it is building
+will reach the DAC, and asks the player for the audio due then. Only that
+loop knows the answer; a push into the existing buffer would lose it.
+
+The alternative — the controller runs the client and re-streams over `0x04`
+— was rejected on the same grounds: the timestamps cannot survive that hop.
+
+### 6.2 What the device implements
+
+| Piece | Implementation | Verified against |
+|---|---|---|
+| Connection | Server-initiated: the device listens on 8928 at `/sendspin` and advertises `_sendspin._tcp` (zeroconf). It never dials out, as the spec requires of an advertising client | aiosendspin 9.1.1 `connect_to_client` |
+| Encryption | Noise `KKpsk2`, `25519_ChaChaPoly_SHA256`, device as responder (`flynn/noise`). The PSK is chosen between the two handshake messages, after message 1 names it | 9.1.1, both first handshake and in-band re-handshake |
+| Identity | X25519 keypair in `/data/local/etc/echomuse/sendspin.json`; its public key is the `client_id`. Losing the file unpairs the device from every server | spec vectors |
+| Pairing | The Pairing PSK method only (the one a client must offer): the dashboard shows the `SP:0…` token, the user pastes it into Music Assistant. Unpaired access is a setting, off by default | 9.1.1 `initiate_pairing`; spec token vector |
+| Clock | The spec's 2-D Kalman time filter, ported line for line | aiosendspin's own filter, to the microsecond over 300 steps |
+| Codec | FLAC only, 48kHz 16-bit **mono** — one format, so the server resamples and downmixes and the device never switches output mid-stream | aiosendspin's own FLAC encoder, bit-exact |
+| DAC position | `OutputClock`: an alpha-beta tracker over the per-period ALSA delay reading — least-squares at first, narrowing to fixed gains | host test, ±2ms noise |
+| Correction | The spec's suggested strategy: whole-frame drops/repeats, ≤8 per 2048-frame period (0.39%, under the 0.5% cap); a one-shot resync past 5ms | host test, DAC ±600ppm |
+
+**Interop, 2026-09-30** (`device/tools/sendspin_interop`, against the library
+Music Assistant ships): pairing by token and the re-key to the long-term PSK;
+worst sync error **225µs** with the DAC 560ppm off (spec floor 1ms, target
+0.5ms), measured on the server's own clock rather than self-reported; volume
+on the spec's curve; a seek; HA taking the plane; reconnect under the stored
+PSK; unpaired access off and on.
+
+CPU: 3.68% of one core for FLAC decode and ChaCha20-Poly1305 (PR #271's bench
+on a Dot). The time filter and scheduler are small; not yet measured on
+hardware.
+
+### 6.3 Ownership and arbitration
+
+| # | Precondition | Action | Status |
+|---|---|---|---|
+| S1 | Sendspin session starts | player queues audio; the write loop pulls it while `0x04` is empty | [built] |
+| S2 | voice turn during Sendspin playback | unchanged — local duck at the wake crossing, then the controller's `duck on` (sent on every turn to `audio_mix` devices, whether or not it thinks music is playing) | [built] |
+| S3 | controller sends `0x04` while a Sendspin session plays | **HA wins** (Wil, 2026-08-22). The `0x04` plane is consulted first, so HA's audio takes the speaker at once; within 100ms the player reports `available: false`, clears its buffer, and the server moves it out of its group | [built] |
+| S4 | Sendspin stream ends or clears | buffer cleared; `stream/clear` resyncs in place | [built] |
+
+**No rejoin when the HA-routed music ends** (Wil, 2026-08-22), and the
+protocol agrees: a server must not rejoin a client that went unavailable. The
+person restarts the group. The cost of being wrong is one tap.
+
+Not built: telling Home Assistant's media player entity that the Echo is
+playing synced music (S1's "controller told"). It shows idle meanwhile.
+
+### 6.4 Where aiosendspin 9.1.1 and the spec disagree
+
+The device has to work with the library Music Assistant runs, and in several
+places that is not what the spec (main, 2026-09-17) says. The device sends
+9.1.1's form and accepts both wherever the two can be told apart:
+
+- **Fragments**: 9.1.1 uses type bytes 2 ("more") and 3 ("end"); the spec a
+  type 1 with a flags byte. Both are accepted; the device never sends one.
+- **Audio chunk header**: 9 bytes in 9.1.1, 13 in the spec (adds
+  `send_ahead`). Told apart by where the FLAC frame sync sits — one reason
+  the device advertises FLAC only.
+- **`supported_pair_methods`**: a list in 9.1.1, an object in the spec.
+  9.1.1 rejects the object, so the list is sent.
+- **Pairing PSK flow**: `client/pair-finalize` alone in 9.1.1; the spec puts
+  `client/pair-init` first, which 9.1.1 rejects as out of sequence.
+- **After a re-handshake** 9.1.1 re-sends `server/hello` and waits for a new
+  `client/hello`; the spec says neither is re-sent. The device answers one if
+  it comes, and says nothing else (no `client/time`) from the start of the
+  exchange until the `server/activate` that ends it — a stray message there
+  fails the pairing.
+- **`available: false`** means "an external source has the speaker" to 9.1.1,
+  which ungroups the client. The spec also says never to report `true` before
+  the clock converges. Both hold by delaying the first `client/state` until it
+  has (~0.4s, inside 9.1.1's 5s allowance).
+- **Delay field**: `static_delay_ms` / `set_static_delay` in 9.1.1,
+  `output_delay_ms` / `set_output_delay` in the spec. Both commands accepted.
+
+When Music Assistant moves to a newer aiosendspin, re-run the interop harness
+against it first: the list-shaped `supported_pair_methods` and the pairing
+sequence are the two that cannot be sent both ways.
+
+### 6.5 What is not yet known
+
+- **The ALSA delay's real noise on hardware.** The tracker was sized for
+  ±2ms; `hw_ptr` was measured moving in sub-period steps (2026-08-10), so it
+  is probably finer. First thing to read off a device: the player's
+  `corrections` rate with a steady stream.
+- **Sync across two Echoes, and against another brand's player.** Every Echo
+  shares the same fixed DAC latency, so Echoes agree with each other; another
+  player needs `static_delay_ms` set by ear.
+- **32-bit ARM.** Every tested Sendspin platform is 64-bit. Nothing in the
+  protocol depends on word size, and the firmware builds, but no Dot has
+  played it yet.
+
+---
+
+## 7. Open questions
 
 - **Q1 — should music be allowed to start during a turn, on its own plane?**
   Today `play/resume/pause/stop` record intent and do not touch the wire while
   a turn owns the speaker, so a stream started from a phone sits silent until
   the answer finishes (#262). Now that music has its own plane, the reason for
   the blanket rule is weaker than when it was written. Undecided.
-- **Q2 — where does the output chain belong?** EQ, limiter and bass guard all
-  run controller-side today, on the voice plane, before the audio reaches the
-  wire (#243). Music does not go through them at all.
+- ~~**Q2 — where does the output chain belong?**~~ **Answered: on the
+  device**, at the ALSA write, whenever both halves announce `output_chain`
+  (#243). It runs on the mix, so synced music passes through it too; behind a
+  controller without `output_chain`, Sendspin music is not shaped at all,
+  since it never crosses the controller.
 - **Q4 — DECIDED 2026-09-07: the alarm never waits, the announcement does
   (#373).** Both write `0x02` today and only `_ring_timer_alarm` asks first,
   which is backwards: a timer must go off exactly when it ends, so the writer
@@ -212,7 +336,7 @@ process.
 
 ---
 
-## 7. Invariants — do not break
+## 8. Invariants — do not break
 
 1. **Voice is never attenuated by the duck.** Only the music plane carries
    `duckTarget`.
@@ -221,3 +345,9 @@ process.
 4. **Playback completion comes from the device**, not from a duration estimate.
 5. **`speaker_busy` is released in a `finally`.** [today]
 6. **Frame types are direction-scoped.** `0x04`/`0x05` are not free to reuse.
+7. **The music plane has exactly one producer at a time, and HA wins.**
+   The write loop pulls the Sendspin player only while `0x04` is empty, and
+   the player reports itself taken while `0x04` has anything in it. Summing
+   the two would be two unrelated streams at once. Invariant 2 gains a second
+   reason here: flushing music for a voice turn would drop audio a
+   synchronised group is counting on and force a resync.

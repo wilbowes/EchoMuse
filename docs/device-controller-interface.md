@@ -99,6 +99,7 @@ plus one conditional (`capabilities()` in `control.go`):
 | `output_chain` | always | Can run the speaker output chain (EQ → bass guard → limiter) itself, at the ALSA write, from the config keys `eqBands`, `eqLoudness`, `limiter*`, `bassGuard*`. Runs it only when the controller's `ack` carries `output_chain` too, which is the controller saying it has stopped processing: either half alone keeps the old path, so audio is never shaped twice |
 | `wake_cue` | always | Can generate its own wake sound, at `wakeSoundLevel`, independent of volume. Plays it when `wakeSound` is on and a wake has WON: on `listen_ack` for a private-listening session, or on `play_cue` otherwise — never at the crossing, so a ceded wake is silent |
 | `ambient_light` | only if the sensor is actually readable (`als.Present()`) | Reports light readings |
+| `sendspin` | always | Can be a Sendspin player (#89) for synchronised multi-room audio from Music Assistant, run when `sendspinEnabled` is on. Music Assistant connects to the device directly (port 8928, advertised as `_sendspin._tcp`); nothing of the session crosses the controller. Whether it is running, connected or paired is the `sendspin` status |
 | `pairing` | always | Asks to pair itself when its owner holds the action button 5 s: a `pair_request` every 5 s on a live link, or otherwise registers with `"pairing": true` on every dial for the 2-minute window, falling back to plain (without its token) when wss cannot connect. The window closes early once new credentials land, so the redial they cause does not ask again. Without it the controller offers the admin a **Pair** action instead, since the device cannot ask |
 
 **`aec_hw_ref` is a capability with a runtime companion, and both are needed.**
@@ -161,6 +162,8 @@ absent optional fields take prior/default behaviour.
 | `wifi_scan_result` | `networks[]` of `{ssid, ssid_hex, signal}`, or `error` | Answer to `wifi_scan` |
 | `wifi_result` | `ok`, `ssid`, `error?` | Outcome of a `wifi_change`, re-sent until `wifi_commit` |
 | `pair_request` | — | The owner held the action button on a connected device (only if `pairing`). The controller shows **Approve pairing**; approval issues a rotated token and the CA over the shell plane, then bounces the link |
+| `sendspin_status` | `status` (`sendspin.Status`), or null when the player stopped | The Sendspin player's state as it changes: `state` (`listening`, `connected`, `playing`, `busy` while Home Assistant holds the music plane, `error`), `server`, `paired`, `pairedWith`, `group`, `synced`, `syncErrUs`, `bufferedMs`, player counters. No secrets. The `stats` report carries the same object as `sendspin` |
+| `sendspin_token` | `token`, `clientId`, or `error` | Answer to `sendspin_token_request`. The token (`SP:0…`) carries the device's Sendspin pairing key: the controller hands it to the one waiting request and never logs or stores it |
 | `pong` | `id`, `mono` when answering a `ping` that carried an `id` | Keepalive reply. `id` echoes the ping's; `mono` is the device's monotonic clock in ms (any fixed origin), which the controller maps onto its own to date `capturedMono`. Unsolicited keepalive pongs carry neither |
 
 **Controller → Device**
@@ -185,6 +188,7 @@ absent optional fields take prior/default behaviour.
 | `shell_open` / `shell_close` | `pty?` | Ask the device to dial `/shell` (`pty:true` = interactive) / close it |
 | `play_cue` | `cue` | Play a cue the device generates itself. Only `"wake"` today, sent when `wakeSound` is on and a wake outside a private-listening session has won arbitration; unknown names are ignored |
 | `music_flush` / `speaker_flush` | — | Flush the music / voice buffer (barge-in uses `speaker_flush`) |
+| `sendspin_token_request` | — | Ask for the Sendspin pairing token, for the dashboard to show on an admin's request; answered with `sendspin_token` |
 
 **An SSID is 0–32 arbitrary bytes**, so a name alone cannot always address
 one. `ssid` is for display (invalid UTF-8 shown as U+FFFD); `ssid_hex` is the
@@ -288,6 +292,7 @@ beamAngle, beamformingEnabled,
 aecEnabled, aecDelayMs, aecTailMs, agcEnabled, nsAsr,
 bargeInEnabled, bargeInThreshold,
 bleProxyEnabled,
+sendspinEnabled, sendspinUnpaired, sendspinName,
 eqBands, eqLoudness, limiterEnabled, limiterThreshold, limiterRelease,
 bassGuardEnabled, bassGuardDb,
 ledScene, ledListenColor, ledThinkColor,
@@ -302,7 +307,10 @@ Not every field is acted on by the device. The output-chain keys (`limiter*`,
 `bassGuard*`), `eq*`, `saveUtterances`, `streamReply`, `wakeArbitrationMs`, and the
 `button*` timing keys are **controller-side** — that processing happens before the audio
 reaches the wire, or is used only for config scoping. `owwOnDevice` is both
-controller-consumed (scoping) and device-acted. A new board only needs to
+controller-consumed (scoping) and device-acted. `sendspinName` is not a
+stored setting: it is the device's label, added to the push at registration
+and sent alone on a rename, because Music Assistant lists the player by it. A
+new board only needs to
 implement the keys relevant to hardware it actually has; unknown keys are
 ignored, which is the correct degrade.
 

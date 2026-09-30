@@ -125,13 +125,14 @@ def test_normalise_is_canonically_ordered():
 def test_summarise_reads_naturally():
     assert cs.summarise([]) == "Fleet"
     assert cs.summarise(["ring"]).startswith("Local override")
-    assert "1 of 6" in cs.summarise(["ring"])
-    assert "6 of 6" in cs.summarise(list(cs.SECTION_IDS))
+    n = len(cs.SECTION_IDS)
+    assert f"1 of {n}" in cs.summarise(["ring"])
+    assert f"{n} of {n}" in cs.summarise(list(cs.SECTION_IDS))
 
 
 # ─── Migration equivalence ───────────────────────────────────────────────────
 
-@pytest.mark.parametrize("use_global,expected", [(1, 0), (0, 6)])
+@pytest.mark.parametrize("use_global,expected", [(1, 0), (0, len(cs.SECTION_IDS))])
 def test_v8_backfill_is_lossless(tmp_path, use_global, expected):
     """
     The v8 migration must leave every device's effective config unchanged:

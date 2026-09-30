@@ -404,6 +404,11 @@ class Device:
         self.ip           = ip
         self.capabilities = capabilities
         self.control_ws   = control_ws
+        # The Sendspin player's status (#89), from sendspin_status and the
+        # stats tick; None while the player is off or on firmware without it.
+        self.sendspin: dict | None = None
+        # An outstanding sendspin_token_request, answered by sendspin_token.
+        self.sendspin_token_waiter: asyncio.Future | None = None
         # Set from the register message; None on firmware that predates it.
         self.ambient_light_status: dict | None = None
         # Which userspace the device booted, from its register message.
@@ -997,6 +1002,14 @@ class Device:
         starts pairing from the dashboard, since the device cannot ask.
         """
         return "pairing" in (self.capabilities or [])
+
+    @property
+    def sendspin_capable(self) -> bool:
+        """
+        Whether this firmware can be a Sendspin player (#89). The dashboard
+        shows the section disabled with the reason without it.
+        """
+        return "sendspin" in (self.capabilities or [])
 
     @property
     def wake_cue_capable(self) -> bool:
@@ -4235,6 +4248,12 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         if bad_keys:
             log.warning(f"[control] {device_id}: stored config has values of "
                         f"the wrong type, not sent: {', '.join(bad_keys)}")
+        # The Sendspin player advertises itself to Music Assistant under the
+        # device's label, which the firmware does not otherwise know. Carried
+        # on the same push, so the player starts under the right name rather
+        # than restarting a moment later; a rename sends it alone.
+        if device.sendspin_capable and row["label"]:
+            config = {**config, "sendspinName": row["label"]}
         await device.send_control({"type": "config", **config})
         device.oww_threshold = float(config.get("owwThreshold", OWW_THRESHOLD))
         device.oww_model     = config.get("owwModel", f"{OWW_MODEL}_v0.1")
@@ -4534,6 +4553,8 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                         esphome.update_device_volume(device_id, device.volume)
 
                     elif msg_type == "stats":
+                        if "sendspin" in msg:
+                            device.sendspin = msg.get("sendspin")
                         device.stats = {
                             "cpuPct":        msg.get("cpuPct"),
                             "memUsedMb":     msg.get("memUsedMb"),
@@ -4658,8 +4679,26 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                                 # dashboard's Bluetooth panel stays live without
                                 # a full device refresh.
                                 "bleProxy": em_ble_proxy.get_status(device_id),
+                                "sendspin": device.sendspin,
                             },
                         })
+
+                    elif msg_type == "sendspin_status":
+                        # The player's state as it changes (pairing, a stream
+                        # starting); the stats tick carries it too.
+                        device.sendspin = msg.get("status")
+                        await api._push_event({
+                            "type": "device_update", "device_id": device_id,
+                            "state": {"sendspin": device.sendspin},
+                        })
+
+                    elif msg_type == "sendspin_token":
+                        # The answer to sendspin_token_request. A secret: it
+                        # goes to the one waiting request and nowhere else,
+                        # never a log line or an event.
+                        waiter = device.sendspin_token_waiter
+                        if waiter is not None and not waiter.done():
+                            waiter.set_result(msg)
 
                     elif msg_type == "wifi_result":
                         # Outcome of a wifi_change. The device re-sends this

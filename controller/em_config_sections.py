@@ -70,6 +70,10 @@ SECTIONS: dict[str, dict] = {
         "label": "Bluetooth",
         "keys": ["bleProxyEnabled"],
     },
+    "sendspin": {
+        "label": "Sendspin",
+        "keys": ["sendspinEnabled", "sendspinUnpaired"],
+    },
 }
 
 # Keys that live in the config dict but are NOT user-facing settings, and so
