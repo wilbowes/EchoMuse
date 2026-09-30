@@ -20,6 +20,7 @@ const (
 	DefaultPort = 8928
 	Path        = "/sendspin"
 	serviceType = "_sendspin._tcp"
+	maxSessions = 4
 )
 
 // Config is what the device supplies. Everything else is Sendspin's own.
@@ -118,6 +119,17 @@ func (c *Client) Start() error {
 		CheckOrigin: func(*http.Request) bool { return true },
 	}
 	mux.HandleFunc(Path, func(w http.ResponseWriter, r *http.Request) {
+		// A cap on open connections: anything on the LAN can open one and
+		// hold it for the 30s handshake window, and each costs a goroutine
+		// and buffers. The spec lets a client refuse past a cap. Four covers
+		// a playback server, a pairing one and a displacement in flight.
+		c.mu.Lock()
+		full := len(c.sessions) >= maxSessions
+		c.mu.Unlock()
+		if full {
+			http.Error(w, "busy", http.StatusServiceUnavailable)
+			return
+		}
 		ws, err := up.Upgrade(w, r, nil)
 		if err != nil {
 			return

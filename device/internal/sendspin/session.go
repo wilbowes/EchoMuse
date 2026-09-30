@@ -153,7 +153,9 @@ var errGoodbye = errors.New("sendspin: goodbye sent")
 func (s *session) dispatch(env envelope) error {
 	if !s.activated && env.Type != "server/activate" && env.Type != "noise/handshake" &&
 		!(env.Type == "server/hello" && s.awaitHello) {
-		return fmt.Errorf("%w: %s before server/activate", errProtocol, env.Type)
+		// A server may not send this yet. Ignored rather than fatal: the
+		// cost of tolerating it is nothing, of closing a working link a lot.
+		return nil
 	}
 	switch env.Type {
 	case "server/activate":
