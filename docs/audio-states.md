@@ -233,6 +233,10 @@ the first two minutes after a restart, then settled. Stopping the controller
 stopped both players in the same second, the port closed, and both resumed
 ~20s after it returned, with Music Assistant restarting playback itself. The
 firmware logs `[sendspin] playing:` once a minute with these counts.
+A stereo pair works with the mono-only player: set one Echo to the left
+channel and the other to the right in Music Assistant, and it selects each
+player's channel before encoding, so each Echo receives its own side as mono
+(confirmed by ear with a left/right test track).
 
 CPU: 3.68% of one core for FLAC decode and ChaCha20-Poly1305 (PR #271's bench
 on a Dot). On hardware, playing and paused measured the same within noise
