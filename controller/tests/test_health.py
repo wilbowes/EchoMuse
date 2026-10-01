@@ -55,35 +55,61 @@ def test_unplanned_boots_are_warnings():
     assert em_health.boot_summary(None) is None
 
 
+def test_wear_values_keep_only_well_typed_readings():
+    e = {"rev": 7, "preEol": 1, "lifeA": 1, "lifeB": 2, "name": "FJ25AB", "date": "08/2017"}
+    assert em_health.wear_values(e) == (7, 1, 1, 2, "FJ25AB", "08/2017", None)
+    assert em_health.wear_values({"rev": "7", "lifeA": True, "name": ""}) is None
+    assert em_health.wear_values(None) is None
+    assert em_health.wear_values({"rev": 7, "lifeA": False}) == (7, None, None, None, None, None, None)
+
+
 def _db(tmp_path):
     em_db.init(str(tmp_path / "em.db"))
     em_db._conn.execute("INSERT INTO devices (device_id, label, approved) VALUES ('D', 'x', 1)")
     em_db._conn.commit()
 
 
-def test_one_row_per_boot_keeping_the_first_reading(tmp_path):
+def _count(table):
+    return em_db._conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+
+
+def test_one_boot_row_per_boot_keeping_the_first(tmp_path):
     _db(tmp_path)
-    e = {"rev": 7, "preEol": 1, "lifeA": 1, "lifeB": 2, "name": "FJ25AB", "date": "08/2017"}
-    em_db.record_boot("D", "boot-1", "v2.17.0", "power_key", e)
-    em_db.record_boot("D", "boot-1", "v2.17.0", "power_key", {**e, "lifeB": 9})  # a redial
-    b = em_db.latest_boot("D")
-    assert (b["boot_reason"], b["emmc_life_b"], b["emmc_name"]) == ("power_key", 2, "FJ25AB")
-    assert em_db._conn.execute("SELECT COUNT(*) FROM device_boots").fetchone()[0] == 1
-    assert em_db.latest_boots()["D"]["boot_id"] == "boot-1"
+    em_db.record_boot("D", "boot-1", "v2.17.0", "power_key")
+    em_db.record_boot("D", "boot-1", "v2.17.0", "wdt_by_pass_pwk")  # a redial
+    assert _count("device_boots") == 1
+    assert em_db.latest_health()["D"]["boot_reason"] == "power_key"
+    em_db.record_boot("D", "boot-2", None, "")
+    assert _count("device_boots") == 2
 
 
-def test_bad_or_missing_readings_store_as_null(tmp_path):
+# A device that never reboots must still build a history: wear is per DAY,
+# and the latest reading of a day replaces the earlier one.
+def test_wear_is_one_row_per_day_with_the_latest_reading(tmp_path):
     _db(tmp_path)
-    em_db.record_boot("D", "boot-1", None, "", {"rev": "7", "lifeA": True, "name": ""})
-    b = em_db.latest_boot("D")
-    assert b["boot_reason"] is None and b["emmc_rev"] is None
-    assert b["emmc_life_a"] is None and b["emmc_name"] is None
-    em_db.record_boot("D", "boot-2", None, None, None)
-    assert em_db._conn.execute("SELECT COUNT(*) FROM device_boots").fetchone()[0] == 2
+    em_db.record_wear("D", "2026-10-01", (7, 1, 1, 1, "FJ25AB", "08/2017", None))
+    em_db.record_wear("D", "2026-10-01", (7, 1, 1, 2, "FJ25AB", "08/2017", None))
+    em_db.record_wear("D", "2026-10-02", (7, 1, 2, 2, "FJ25AB", "08/2017", None))
+    assert _count("device_wear") == 2
+    rows = em_db._conn.execute(
+        "SELECT day, emmc_life_a, emmc_life_b FROM device_wear ORDER BY day").fetchall()
+    assert [tuple(r) for r in rows] == [("2026-10-01", 1, 2), ("2026-10-02", 2, 2)]
+    h = em_db.latest_health()["D"]
+    assert (h["day"], h["emmc_life_a"]) == ("2026-10-02", 2)
+    assert em_health.emmc_summary(h) == {"text": "10–20% used · normal", "level": "ok"}
 
 
-def test_deleting_a_device_removes_its_boots(tmp_path):
+def test_health_merges_boot_and_wear(tmp_path):
     _db(tmp_path)
-    em_db.record_boot("D", "boot-1", None, "power_key", None)
+    em_db.record_boot("D", "boot-1", "v2.17.0", "power_key")
+    em_db.record_wear("D", "2026-10-01", (7, 1, 1, 1, None, None, None))
+    h = em_db.latest_health()["D"]
+    assert h["boot_reason"] == "power_key" and h["emmc_rev"] == 7 and h["boot_at"]
+
+
+def test_deleting_a_device_removes_its_boots_and_wear(tmp_path):
+    _db(tmp_path)
+    em_db.record_boot("D", "boot-1", None, "power_key")
+    em_db.record_wear("D", "2026-10-01", (7, 1, 1, 1, None, None, None))
     em_db.delete_device("D")
-    assert em_db._conn.execute("SELECT COUNT(*) FROM device_boots").fetchone()[0] == 0
+    assert _count("device_boots") == 0 and _count("device_wear") == 0

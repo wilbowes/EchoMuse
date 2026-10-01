@@ -67,3 +67,22 @@ def boot_summary(reason: str | None) -> dict | None:
     low = reason.lower()
     level = "warn" if any(k in low for k in _UNPLANNED) else "ok"
     return {"text": reason, "level": level}
+
+
+def wear_values(emmc) -> tuple | None:
+    """The device's eMMC report as the stored columns, or None if it carries
+    nothing usable. Anything not of the expected type stores as NULL."""
+    if not isinstance(emmc, dict):
+        return None
+
+    def num(k):
+        v = emmc.get(k)
+        return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+    def txt(k):
+        v = emmc.get(k)
+        return v if isinstance(v, str) and v else None
+
+    vals = (num("rev"), num("preEol"), num("lifeA"), num("lifeB"),
+            txt("name"), txt("date"), txt("manfid"))
+    return vals if any(v is not None for v in vals) else None

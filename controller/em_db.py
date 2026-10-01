@@ -1044,13 +1044,14 @@ MIGRATIONS: list[str] = [
 
     UPDATE system_config SET value = '27' WHERE key = 'schema_version';
     """,
-    # v28 — one row per BOOT, from the register message: how it started and
-    # the eMMC's own wear report (JEDEC EXT_CSD). Keyed on the kernel's boot_id
-    # because a device re-registers on every redial, and a wear value that
-    # steps once a decade is only readable as a history. Every reading is
-    # NULLABLE: firmware that sends none, a FireOS 6 kernel whose cmdline has
-    # lost the boot reason, and a part below EXT_CSD rev 7 must not read as a
-    # healthy zero.
+    # v28 — boot-time health. One row per BOOT for how it started, keyed on
+    # the kernel's boot_id because a device re-registers on every redial; and
+    # one row per device per DAY for the eMMC's own wear report (JEDEC
+    # EXT_CSD), because a device can run for months without rebooting and a
+    # value that steps once every few years is only readable as a history.
+    # Every reading is NULLABLE: firmware that sends none, a FireOS 6 kernel
+    # whose cmdline has lost the boot reason, and a part below EXT_CSD rev 7
+    # must not read as a healthy zero.
     """
     CREATE TABLE IF NOT EXISTS device_boots (
         device_id     TEXT    NOT NULL REFERENCES devices(device_id),
@@ -1058,6 +1059,13 @@ MIGRATIONS: list[str] = [
         first_seen    INTEGER NOT NULL,
         firmware_ver  TEXT,
         boot_reason   TEXT,
+        PRIMARY KEY (device_id, boot_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS device_wear (
+        device_id     TEXT    NOT NULL REFERENCES devices(device_id),
+        day           TEXT    NOT NULL,
+        updated_at    INTEGER NOT NULL,
         emmc_rev      INTEGER,
         emmc_pre_eol  INTEGER,
         emmc_life_a   INTEGER,
@@ -1065,7 +1073,7 @@ MIGRATIONS: list[str] = [
         emmc_name     TEXT,
         emmc_date     TEXT,
         emmc_manfid   TEXT,
-        PRIMARY KEY (device_id, boot_id)
+        PRIMARY KEY (device_id, day)
     );
 
     UPDATE system_config SET value = '28' WHERE key = 'schema_version';
@@ -1699,49 +1707,54 @@ def set_device_kernel(device_id: str, arch: str, release: str) -> None:
 
 
 def record_boot(device_id: str, boot_id: str, firmware_ver: Optional[str],
-                boot_reason: Optional[str], emmc: Optional[dict]) -> None:
+                boot_reason: Optional[str]) -> None:
     """
     Record a boot from its register message, once: later registrations in the
     same boot (every redial) are ignored, so the row keeps the first reading.
     """
-    e = emmc if isinstance(emmc, dict) else {}
-
-    def num(k):
-        v = e.get(k)
-        return v if isinstance(v, int) and not isinstance(v, bool) else None
-
-    def txt(k):
-        v = e.get(k)
-        return v if isinstance(v, str) and v else None
-
     with _tx() as conn:
         conn.execute(
             """INSERT OR IGNORE INTO device_boots
-               (device_id, boot_id, first_seen, firmware_ver, boot_reason,
-                emmc_rev, emmc_pre_eol, emmc_life_a, emmc_life_b,
-                emmc_name, emmc_date, emmc_manfid)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (device_id, boot_id, int(time.time()), firmware_ver, boot_reason or None,
-             num("rev"), num("preEol"), num("lifeA"), num("lifeB"),
-             txt("name"), txt("date"), txt("manfid")),
+               (device_id, boot_id, first_seen, firmware_ver, boot_reason)
+               VALUES (?, ?, ?, ?, ?)""",
+            (device_id, boot_id, int(time.time()), firmware_ver, boot_reason or None),
         )
 
 
-def latest_boot(device_id: str) -> Optional[dict]:
-    """The device's most recent recorded boot, or None."""
-    rows = _q("SELECT * FROM device_boots WHERE device_id = ? "
-              "ORDER BY first_seen DESC, rowid DESC LIMIT 1", (device_id,))
-    return dict(rows[0]) if rows else None
+def record_wear(device_id: str, day: str, values: tuple) -> None:
+    """Upsert the day's eMMC reading: the latest reading of the day wins."""
+    with _tx() as conn:
+        conn.execute(
+            """INSERT INTO device_wear
+               (device_id, day, updated_at, emmc_rev, emmc_pre_eol, emmc_life_a,
+                emmc_life_b, emmc_name, emmc_date, emmc_manfid)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(device_id, day) DO UPDATE SET
+                 updated_at = excluded.updated_at,
+                 emmc_rev = excluded.emmc_rev, emmc_pre_eol = excluded.emmc_pre_eol,
+                 emmc_life_a = excluded.emmc_life_a, emmc_life_b = excluded.emmc_life_b,
+                 emmc_name = excluded.emmc_name, emmc_date = excluded.emmc_date,
+                 emmc_manfid = excluded.emmc_manfid""",
+            (device_id, day, int(time.time()), *values),
+        )
 
 
-def latest_boots() -> dict[str, dict]:
-    """Each device's most recent recorded boot, keyed by device_id: one query
-    for the device list rather than one per device per poll."""
-    rows = _q("""SELECT b.* FROM device_boots b
-                 JOIN (SELECT device_id, MAX(first_seen) AS t FROM device_boots
-                       GROUP BY device_id) m
-                   ON b.device_id = m.device_id AND b.first_seen = m.t""")
-    return {r["device_id"]: dict(r) for r in rows}
+def latest_health() -> dict[str, dict]:
+    """Each device's latest boot and latest wear reading merged into one dict,
+    keyed by device_id: one pass for the device list, not a query per device."""
+    out: dict[str, dict] = {}
+    for r in _q("""SELECT b.device_id, b.first_seen AS boot_at, b.boot_reason, b.firmware_ver
+                   FROM device_boots b
+                   JOIN (SELECT device_id, MAX(first_seen) AS t FROM device_boots
+                         GROUP BY device_id) m
+                     ON b.device_id = m.device_id AND b.first_seen = m.t"""):
+        out.setdefault(r["device_id"], {}).update(dict(r))
+    for r in _q("""SELECT w.* FROM device_wear w
+                   JOIN (SELECT device_id, MAX(day) AS d FROM device_wear
+                         GROUP BY device_id) m
+                     ON w.device_id = m.device_id AND w.day = m.d"""):
+        out.setdefault(r["device_id"], {}).update(dict(r))
+    return out
 
 
 def fleet_base_os() -> set[str]:
@@ -2017,6 +2030,7 @@ def delete_device(device_id: str) -> None:
     with _tx() as conn:
         conn.execute("DELETE FROM device_logs WHERE device_id = ?", (device_id,))
         conn.execute("DELETE FROM device_boots WHERE device_id = ?", (device_id,))
+        conn.execute("DELETE FROM device_wear WHERE device_id = ?", (device_id,))
         conn.execute("DELETE FROM devices WHERE device_id = ?", (device_id,))
     try:
         removed = em_recordings.delete_device(device_id)

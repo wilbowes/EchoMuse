@@ -842,6 +842,16 @@ func shadowStats(dc *client.DataClient) interface{} {
 	}
 }
 
+// emmcForStats is the eMMC wear for the stats tick, read at most every six
+// hours. An untyped nil when unreadable, so the field is null rather than a
+// typed nil the controller would have to tell apart.
+func emmcForStats() interface{} {
+	if e := platform.EmmcCached(6 * time.Hour); e != nil {
+		return e
+	}
+	return nil
+}
+
 func collectStats() client.DeviceStats {
 	cpuPct := cpuPercent()
 	memUsed, memTotal := memStats()
@@ -872,6 +882,7 @@ func collectStats() client.DeviceStats {
 		TxErrors:         txErr,
 		TxDropped:        txDrop,
 		RxCrcErrors:      rxCrc,
+		Emmc:             emmcForStats(),
 	}
 }
 

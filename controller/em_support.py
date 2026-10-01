@@ -398,9 +398,9 @@ def redact_stats(stats: Any) -> dict | None:
     return {k: stats[k] for k in _STATS_FIELDS if k in stats}
 
 
-# The latest boot row (schema v28), by name for the allowlist's reason.
+# The latest boot and wear rows (schema v28), by name for the allowlist's reason.
 _BOOT_FIELDS = (
-    "first_seen", "firmware_ver", "boot_reason", "emmc_rev", "emmc_pre_eol",
+    "boot_at", "firmware_ver", "boot_reason", "day", "emmc_rev", "emmc_pre_eol",
     "emmc_life_a", "emmc_life_b", "emmc_name", "emmc_date", "emmc_manfid",
 )
 

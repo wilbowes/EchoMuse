@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 )
 
 // Boot-time facts about the hardware's health, reported once per registration.
@@ -62,6 +64,24 @@ func ReadEmmc(root string) *Emmc {
 		return e
 	}
 	return nil
+}
+
+var emmcCache struct {
+	sync.Mutex
+	at time.Time
+	v  *Emmc
+}
+
+// EmmcCached is ReadEmmc on the live system, re-read once the last reading is
+// older than maxAge. A failed read is cached too, so a board without debugfs
+// does not retry on every stats tick.
+func EmmcCached(maxAge time.Duration) *Emmc {
+	emmcCache.Lock()
+	defer emmcCache.Unlock()
+	if emmcCache.at.IsZero() || time.Since(emmcCache.at) >= maxAge {
+		emmcCache.v, emmcCache.at = ReadEmmc(""), time.Now()
+	}
+	return emmcCache.v
 }
 
 // parseExtCSD decodes the kernel's hex dump of the 512-byte register. A dump

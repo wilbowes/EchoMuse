@@ -753,8 +753,8 @@ async def _get_devices(request: web.Request) -> web.Response:
     """GET /api/devices — all devices, live state merged with DB."""
     loop = asyncio.get_event_loop()
     rows = await loop.run_in_executor(None, db.get_all_devices)
-    boots = await loop.run_in_executor(None, db.latest_boots)
-    return _ok([_merge_device(row, boots.get(row["device_id"])) for row in rows])
+    health = await loop.run_in_executor(None, db.latest_health)
+    return _ok([_merge_device(row, health.get(row["device_id"])) for row in rows])
 
 
 @auth.require_auth
@@ -5586,7 +5586,7 @@ async def _get_support_bundle(request: web.Request) -> web.Response:
     turns, metrics, counters = [], [], []
     device_configs, live_state, logs = {}, {}, []
 
-    boots = await loop.run_in_executor(None, db.latest_boots)
+    health = await loop.run_in_executor(None, db.latest_health)
     for row in rows:
         did = row["device_id"]
         device_configs[did] = await loop.run_in_executor(
@@ -5612,7 +5612,7 @@ async def _get_support_bundle(request: web.Request) -> web.Response:
             "stats":        em_support.redact_stats(live.stats if live else None),
             # Latest boot's reason and eMMC wear (schema v28): hardware
             # facts, nothing about the owner.
-            "boot":         em_support.redact_boot(boots.get(did)),
+            "boot":         em_support.redact_boot(health.get(did)),
         }
         turns += await loop.run_in_executor(None, db.get_turns, did, 50, since)
         # get_device_metrics resolves its own rows and does NOT carry the
@@ -6001,7 +6001,8 @@ def _health_json(boot: dict | None) -> dict | None:
     return {
         "emmc":       em_health.emmc_summary(boot),
         "bootReason": em_health.boot_summary(boot.get("boot_reason")),
-        "bootAt":     boot.get("first_seen"),
+        "bootAt":     boot.get("boot_at"),
+        "wearDay":    boot.get("day"),
         "emmcPart":   " ".join(x for x in (boot.get("emmc_name"), boot.get("emmc_date")) if x) or None,
     }
 
