@@ -147,7 +147,24 @@ func applySendspinConfig(spk *speaker.PcmSpeaker, cc *client.ControlClient, vol 
 func sendspinPoll(spk *speaker.PcmSpeaker) {
 	if c := sendspinPlayer(); c != nil {
 		c.SetExternal(spk.MusicPlaneBusy())
+		if c.Active() && time.Since(sendspinLoggedAt) >= time.Minute {
+			sendspinLoggedAt = time.Now()
+			logSendspinStats(c.Status())
+		}
 	}
+}
+
+// sendspinLoggedAt paces the playing-stats log line. Only sendspinPoll's
+// ticker goroutine touches it.
+var sendspinLoggedAt time.Time
+
+// logSendspinStats puts the sync numbers in the device log once a minute
+// while playing. The counts run from the stream's start, so a rate is the
+// difference between two lines.
+func logSendspinStats(st sendspin.Status) {
+	p := st.Player
+	log.Printf("[sendspin] playing: synced=%v syncErr=%dus buffered=%dms snaps=%d corrections=%d underruns=%d lateDrops=%d lastErr=%dus",
+		st.Synced, st.SyncErrUs, st.BufferedMs, p.Snaps, p.Corrections, p.Underruns, p.LateDrops, p.LastErrorUs)
 }
 
 // sendspinMusic is the player's share of what the BLE duty cycle weighs:
