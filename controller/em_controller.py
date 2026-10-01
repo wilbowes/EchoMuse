@@ -417,6 +417,9 @@ class Device:
         # existing fleet exactly as it was.
         self._base_os: str | None = None
         self.kernel_arch: str | None = None
+        # From the register message (schema v28): see em_health.
+        self.boot_reason: str | None = None
+        self.emmc: dict | None = None
         self.kernel_release: str | None = None
 
         self.data_ws: WebSocketServerProtocol | None = None
@@ -4195,6 +4198,14 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         device.kernel_release = msg.get("kernel_release") or None
         if device.kernel_arch:
             em_dbwriter.submit(db.set_device_kernel, device_id, device.kernel_arch, device.kernel_release or "")
+        # How this boot started and the eMMC's wear (schema v28), one row per
+        # boot_id: a device re-registers on every redial. Held live too, so
+        # the dashboard shows them without a query. Absent on older firmware.
+        device.boot_reason = msg.get("boot_reason") or None
+        device.emmc = msg.get("emmc") if isinstance(msg.get("emmc"), dict) else None
+        if isinstance(msg.get("boot_id"), str) and msg["boot_id"]:
+            em_dbwriter.submit(db.record_boot, device_id, msg["boot_id"],
+                               msg.get("version"), device.boot_reason, device.emmc)
         # Link-security telemetry for the dashboard: True when this control
         # connection arrived over the TLS listener.
         device.secure = secure

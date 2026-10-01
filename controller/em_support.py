@@ -398,6 +398,20 @@ def redact_stats(stats: Any) -> dict | None:
     return {k: stats[k] for k in _STATS_FIELDS if k in stats}
 
 
+# The latest boot row (schema v28), by name for the allowlist's reason.
+_BOOT_FIELDS = (
+    "first_seen", "firmware_ver", "boot_reason", "emmc_rev", "emmc_pre_eol",
+    "emmc_life_a", "emmc_life_b", "emmc_name", "emmc_date", "emmc_manfid",
+)
+
+
+def redact_boot(boot: Any) -> dict | None:
+    """Project a device's latest boot row onto the allowlist."""
+    if not isinstance(boot, dict):
+        return None
+    return {k: boot[k] for k in _BOOT_FIELDS if k in boot}
+
+
 def redact_config(config: dict) -> dict:
     """
     Drop anything credential-shaped from a device/fleet config.

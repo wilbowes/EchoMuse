@@ -56,6 +56,7 @@ from aiohttp import web
 import websockets
 
 import em_db as db
+import em_health
 import em_auth as auth
 import em_ble_proxy
 import em_broadcast
@@ -752,7 +753,8 @@ async def _get_devices(request: web.Request) -> web.Response:
     """GET /api/devices — all devices, live state merged with DB."""
     loop = asyncio.get_event_loop()
     rows = await loop.run_in_executor(None, db.get_all_devices)
-    return _ok([_merge_device(row) for row in rows])
+    boots = await loop.run_in_executor(None, db.latest_boots)
+    return _ok([_merge_device(row, boots.get(row["device_id"])) for row in rows])
 
 
 @auth.require_auth
@@ -5584,6 +5586,7 @@ async def _get_support_bundle(request: web.Request) -> web.Response:
     turns, metrics, counters = [], [], []
     device_configs, live_state, logs = {}, {}, []
 
+    boots = await loop.run_in_executor(None, db.latest_boots)
     for row in rows:
         did = row["device_id"]
         device_configs[did] = await loop.run_in_executor(
@@ -5607,6 +5610,9 @@ async def _get_support_bundle(request: web.Request) -> web.Response:
             "volume":       getattr(live, "volume", None) if live else None,
             "media_state":  em_player.state(did),
             "stats":        em_support.redact_stats(live.stats if live else None),
+            # Latest boot's reason and eMMC wear (schema v28): hardware
+            # facts, nothing about the owner.
+            "boot":         em_support.redact_boot(boots.get(did)),
         }
         turns += await loop.run_in_executor(None, db.get_turns, did, 50, since)
         # get_device_metrics resolves its own rows and does NOT carry the
@@ -5989,7 +5995,18 @@ def clear_link_refused(device_id: str) -> None:
     _link_refusals.pop(device_id, None)
 
 
-def _merge_device(row) -> dict:
+def _health_json(boot: dict | None) -> dict | None:
+    if not boot:
+        return None
+    return {
+        "emmc":       em_health.emmc_summary(boot),
+        "bootReason": em_health.boot_summary(boot.get("boot_reason")),
+        "bootAt":     boot.get("first_seen"),
+        "emmcPart":   " ".join(x for x in (boot.get("emmc_name"), boot.get("emmc_date")) if x) or None,
+    }
+
+
+def _merge_device(row, boot: dict | None = None) -> dict:
     """
     Merge a DB device row with live in-memory state.
 
@@ -6120,6 +6137,10 @@ def _merge_device(row) -> dict:
                            or row["kernel_arch"],
         "kernelRelease":   (getattr(live, "kernel_release", None) if live else None)
                            or row["kernel_release"],
+        # Flash wear and how the current boot started (schema v28, em_health):
+        # the stored last boot, so it survives the device going offline. Null
+        # from firmware that does not report them.
+        "health":          _health_json(boot),
         # The DERIVED answer, not a second copy of the rule. em_platform owns
         # "which payloads mean anything here"; a dashboard that re-derived it
         # from baseOs would be a mirror free to disagree with the server that

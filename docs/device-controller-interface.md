@@ -71,7 +71,11 @@ message (`device/internal/client/control.go`):
   "pairing": true,  // only during a pairing window (capability `pairing`)
   "board": "<pkg/board id, or unknown>",
   "kernel_arch": "<uname -m, e.g. aarch64>",
-  "kernel_release": "<uname -r, e.g. 3.18.19+>"
+  "kernel_release": "<uname -r, e.g. 3.18.19+>",
+  "boot_id": "<the kernel's /proc/sys/kernel/random/boot_id>",
+  "boot_reason": "<androidboot.bootreason, e.g. power_key, wdt_by_pass_pwk>",
+  "emmc": { "rev": 7, "preEol": 1, "lifeA": 1, "lifeB": 2,
+            "name": "FJ25AB", "date": "08/2017", "manfid": "0x000015" }
 }
 ```
 
@@ -79,6 +83,17 @@ message (`device/internal/client/control.go`):
 informational: the controller stores and displays them, and gates Android-only
 payloads on `base_os`. The kernel pair is omitted if `uname` fails. A device
 for a new board should send all of them.
+
+`boot_id`, `boot_reason` and `emmc` are boot-time health, each omitted when it
+cannot be read. The controller keeps one row per `boot_id` (a device
+re-registers on every redial) and shows the wear and the reason on the Status
+tab. `emmc` carries the eMMC's own EXT_CSD bytes (JEDEC JESD84-B51): `rev` is
+EXT_CSD_REV [192], and below 7 the other three mean nothing; `preEol` is
+PRE_EOL_INFO [267] (1 normal, 2 warning, 3 urgent); `lifeA`/`lifeB` are
+DEVICE_LIFE_TIME_EST_TYP_A/B [268]/[269] (1–10 in 10% steps, 11 past rated
+life). Find the eMMC by type (`/sys/bus/mmc/devices/*/type` = `MMC`), not by
+number. `boot_reason` comes from the kernel cmdline and is absent where the
+cmdline is truncated before it, as on biscuit's FireOS 6 kernel.
 
 `capabilities` is the negotiation signal. The Dot announces twelve unconditionally
 plus one conditional (`capabilities()` in `control.go`):

@@ -1044,6 +1044,32 @@ MIGRATIONS: list[str] = [
 
     UPDATE system_config SET value = '27' WHERE key = 'schema_version';
     """,
+    # v28 — one row per BOOT, from the register message: how it started and
+    # the eMMC's own wear report (JEDEC EXT_CSD). Keyed on the kernel's boot_id
+    # because a device re-registers on every redial, and a wear value that
+    # steps once a decade is only readable as a history. Every reading is
+    # NULLABLE: firmware that sends none, a FireOS 6 kernel whose cmdline has
+    # lost the boot reason, and a part below EXT_CSD rev 7 must not read as a
+    # healthy zero.
+    """
+    CREATE TABLE IF NOT EXISTS device_boots (
+        device_id     TEXT    NOT NULL REFERENCES devices(device_id),
+        boot_id       TEXT    NOT NULL,
+        first_seen    INTEGER NOT NULL,
+        firmware_ver  TEXT,
+        boot_reason   TEXT,
+        emmc_rev      INTEGER,
+        emmc_pre_eol  INTEGER,
+        emmc_life_a   INTEGER,
+        emmc_life_b   INTEGER,
+        emmc_name     TEXT,
+        emmc_date     TEXT,
+        emmc_manfid   TEXT,
+        PRIMARY KEY (device_id, boot_id)
+    );
+
+    UPDATE system_config SET value = '28' WHERE key = 'schema_version';
+    """,
 ]
 
 # Post-migration fixups that need Python rather than SQL. Keyed by the schema
@@ -1672,6 +1698,52 @@ def set_device_kernel(device_id: str, arch: str, release: str) -> None:
         )
 
 
+def record_boot(device_id: str, boot_id: str, firmware_ver: Optional[str],
+                boot_reason: Optional[str], emmc: Optional[dict]) -> None:
+    """
+    Record a boot from its register message, once: later registrations in the
+    same boot (every redial) are ignored, so the row keeps the first reading.
+    """
+    e = emmc if isinstance(emmc, dict) else {}
+
+    def num(k):
+        v = e.get(k)
+        return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+    def txt(k):
+        v = e.get(k)
+        return v if isinstance(v, str) and v else None
+
+    with _tx() as conn:
+        conn.execute(
+            """INSERT OR IGNORE INTO device_boots
+               (device_id, boot_id, first_seen, firmware_ver, boot_reason,
+                emmc_rev, emmc_pre_eol, emmc_life_a, emmc_life_b,
+                emmc_name, emmc_date, emmc_manfid)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (device_id, boot_id, int(time.time()), firmware_ver, boot_reason or None,
+             num("rev"), num("preEol"), num("lifeA"), num("lifeB"),
+             txt("name"), txt("date"), txt("manfid")),
+        )
+
+
+def latest_boot(device_id: str) -> Optional[dict]:
+    """The device's most recent recorded boot, or None."""
+    rows = _q("SELECT * FROM device_boots WHERE device_id = ? "
+              "ORDER BY first_seen DESC, rowid DESC LIMIT 1", (device_id,))
+    return dict(rows[0]) if rows else None
+
+
+def latest_boots() -> dict[str, dict]:
+    """Each device's most recent recorded boot, keyed by device_id: one query
+    for the device list rather than one per device per poll."""
+    rows = _q("""SELECT b.* FROM device_boots b
+                 JOIN (SELECT device_id, MAX(first_seen) AS t FROM device_boots
+                       GROUP BY device_id) m
+                   ON b.device_id = m.device_id AND b.first_seen = m.t""")
+    return {r["device_id"]: dict(r) for r in rows}
+
+
 def fleet_base_os() -> set[str]:
     """
     Every base_os the fleet has reported, as a set.
@@ -1944,6 +2016,7 @@ def delete_device(device_id: str) -> None:
     """
     with _tx() as conn:
         conn.execute("DELETE FROM device_logs WHERE device_id = ?", (device_id,))
+        conn.execute("DELETE FROM device_boots WHERE device_id = ?", (device_id,))
         conn.execute("DELETE FROM devices WHERE device_id = ?", (device_id,))
     try:
         removed = em_recordings.delete_device(device_id)

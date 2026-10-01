@@ -639,6 +639,19 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 		reg["kernel_arch"] = m
 		reg["kernel_release"] = r
 	}
+	// Flash wear and how this boot started (platform/health.go): static for
+	// the boot, so here and not on the stats tick. boot_id lets the controller
+	// keep one row per boot rather than per redial. Each is omitted when
+	// unreadable, which older controllers ignore and newer ones store as NULL.
+	if id := platform.BootID(""); id != "" {
+		reg["boot_id"] = id
+	}
+	if r := platform.BootReason(""); r != "" {
+		reg["boot_reason"] = r
+	}
+	if e := platform.ReadEmmc(""); e != nil {
+		reg["emmc"] = e
+	}
 	// Resolved fresh per registration: a cached-at-startup value goes stale
 	// after a WiFi change, and if the process started while the network was
 	// down (e.g. wifi.RecoverIfPending bouncing WiFi) it cached 127.0.0.1

@@ -196,6 +196,12 @@ function uptime(s) {
   return `${m}m`;
 }
 
+// A health level from the controller (ok / warn / error) as a row colour.
+function _levelColor(level) {
+  return level === 'error' ? 'var(--error)' : level === 'warn' ? 'var(--warn)'
+       : level === 'ok' ? 'var(--ok)' : undefined;
+}
+
 function relTime(ts) {
   if (!ts) return '—';
   const d = Date.now() - ts * 1000;
@@ -2094,6 +2100,18 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                              : '—',
                          device.connected ? (device.linkTls ? 'var(--ok)' : 'var(--warn)')
                            : device.linkRefused ? 'var(--error)' : undefined)}
+                    {/* The eMMC's own wear report and how the current boot
+                        started (schema v28). A watchdog or panic boot is the
+                        sign of a hang nobody saw. Both are absent on firmware
+                        that does not report them, and say so. */}
+                    {row('Flash wear', device.health?.emmc
+                           ? <span title={device.health.emmcPart || undefined}>{device.health.emmc.text}</span>
+                           : '—',
+                         _levelColor(device.health?.emmc?.level))}
+                    {row('Last boot', device.health?.bootAt
+                           ? [device.health.bootReason?.text, relTime(device.health.bootAt)].filter(Boolean).join(' · ')
+                           : '—',
+                         _levelColor(device.health?.bootReason?.level))}
                     {row('Config', (() => {
                       const n = (device.config_sections ?? []).length;
                       const total = Object.keys(CONFIG_SECTIONS).length;
