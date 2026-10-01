@@ -86,8 +86,10 @@ for a new board should send all of them.
 
 `boot_id`, `boot_reason` and `emmc` are boot-time health, each omitted when it
 cannot be read. The controller keeps one row per `boot_id` (a device
-re-registers on every redial) and shows the wear and the reason on the Status
-tab. `emmc` carries the eMMC's own EXT_CSD bytes (JEDEC JESD84-B51): `rev` is
+re-registers on every redial) for the reason, and one row per day for the
+wear, which the device also sends on the `stats` tick, re-read every six
+hours, because a device can run for months without rebooting. Both show on
+the Status tab. `emmc` carries the eMMC's own EXT_CSD bytes (JEDEC JESD84-B51): `rev` is
 EXT_CSD_REV [192], and below 7 the other three mean nothing; `preEol` is
 PRE_EOL_INFO [267] (1 normal, 2 warning, 3 urgent); `lifeA`/`lifeB` are
 DEVICE_LIFE_TIME_EST_TYP_A/B [268]/[269] (1–10 in 10% steps, 11 past rated
