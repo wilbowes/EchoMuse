@@ -223,13 +223,20 @@ PSK; unpaired access off and on.
 paired by token; play, duck under a voice reply, seek, volume from both ends,
 pause/resume, and discovery with no address entered. The first attempt found
 emOS's inbound filter: the player advertised and logged "listening" while
-every connection timed out, and Music Assistant never listed it. Sync against
-a second player, the correction rate and CPU under on-device wake word are
-still to measure.
+every connection timed out, and Music Assistant never listed it.
+
+**On hardware, 2026-10-01** (15LE emOS 32-bit and C95 emOS 64-bit, grouped in
+Music Assistant, on-device wake word on both): in sync by ear with one Echo at
+each ear; self-reported sync error 0.1–0.4ms, no underruns or late drops,
+~9s buffered. Corrections settle at 2–7 a minute; 15LE ran ~300 a minute for
+the first two minutes after a restart, then settled. Stopping the controller
+stopped both players in the same second, the port closed, and both resumed
+~20s after it returned, with Music Assistant restarting playback itself. The
+firmware logs `[sendspin] playing:` once a minute with these counts.
 
 CPU: 3.68% of one core for FLAC decode and ChaCha20-Poly1305 (PR #271's bench
-on a Dot). The time filter and scheduler are small; not yet measured on
-hardware.
+on a Dot). On hardware, playing and paused measured the same within noise
+(/proc ticks over 10s), so the player's cost is below what that resolves.
 
 ### 6.3 Ownership and arbitration
 
@@ -294,16 +301,16 @@ sequence are the two that cannot be sent both ways.
 
 ### 6.5 What is not yet known
 
-- **The ALSA delay's real noise on hardware.** The tracker was sized for
-  ±2ms; `hw_ptr` was measured moving in sub-period steps (2026-08-10), so it
-  is probably finer. First thing to read off a device: the player's
-  `corrections` rate with a steady stream.
-- **Sync across two Echoes, and against another brand's player.** Every Echo
-  shares the same fixed DAC latency, so Echoes agree with each other; another
-  player needs `static_delay_ms` set by ear.
-- **32-bit ARM.** Every tested Sendspin platform is 64-bit. Nothing in the
-  protocol depends on word size, and the firmware builds, but no Dot has
-  played it yet.
+- **Whether a correction is audible.** A correction is a hard splice: up to
+  8 frames dropped, or one sample held for up to 8, with no crossfade. An
+  occasional faint crackle was heard on 2026-10-01 and not attributed — it
+  may be the speaker. The test is a steady sine, captured off the hardware
+  echo reference (ch8, what the DAC is fed) and lined up against the
+  corrections; the fix if it is them is a 1–2ms crossfade across each splice,
+  not resampling.
+- **Sync against another brand's player.** Every Echo shares the same fixed
+  DAC latency, so Echoes agree with each other; another player needs
+  `static_delay_ms` set by ear.
 
 ---
 
