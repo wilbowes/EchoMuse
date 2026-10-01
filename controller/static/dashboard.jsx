@@ -9009,7 +9009,7 @@ function ScopeToggle({ local, onChange, disabled }) {
   );
 }
 
-function Stage({ n, title, chips, desc, children, scope, dim }) {
+function Stage({ n, title, chips, desc, children, scope, dim, after }) {
   return (
     <Panel>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 6, flexWrap: 'wrap' }}>
@@ -9023,6 +9023,9 @@ function Stage({ n, title, chips, desc, children, scope, dim }) {
       {/* dim: a section following the fleet is shown read-only rather than
           hidden, so you can still see what it is inheriting. */}
       <div style={dim}>{children}</div>
+      {/* after: per-device actions that are not config, so a fleet scope
+          that makes the section read-only must not lock them out. */}
+      {after}
     </Panel>
   );
 }
@@ -9744,7 +9747,8 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
       <Stage n="07" title="Sendspin"
         chips={<ScopeChip tone="device">Device</ScopeChip>}
         desc="Makes the Echo a Sendspin player, so Music Assistant can group it with other speakers and play to all of them in sync. Music Assistant connects to the Echo directly. Music from Home Assistant still takes priority and leaves the group. Early Access."
-        scope={scopeEl('sendspin')} dim={secStyle('sendspin')}>
+        scope={scopeEl('sendspin')} dim={secStyle('sendspin')}
+        after={(config.sendspinEnabled ?? false) ? sendspinPanel : null}>
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px', ...inputStyle }}>
           <Toggle label="Sendspin player"
             sub={sendspinCapable ? 'Music Assistant finds it on the network' : 'needs newer firmware on this Echo'}
@@ -9757,7 +9761,6 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             value={config.sendspinUnpaired ?? false}
             onChange={v => set('sendspinUnpaired', v)}/>
         </div>
-        {(config.sendspinEnabled ?? false) && sendspinPanel}
       </Stage>
     </div>
   );
