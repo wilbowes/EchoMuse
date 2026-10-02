@@ -305,13 +305,17 @@ sequence are the two that cannot be sent both ways.
 
 ### 6.5 What is not yet known
 
-- **Whether a correction is audible.** A correction is a hard splice: up to
-  8 frames dropped, or one sample held for up to 8, with no crossfade. An
-  occasional faint crackle was heard on 2026-10-01 and not attributed — it
-  may be the speaker. The test is a steady sine, captured off the hardware
-  echo reference (ch8, what the DAC is fed) and lined up against the
-  corrections; the fix if it is them is a 1–2ms crossfade across each splice,
-  not resampling.
+- **The crackle was not the corrections (settled 2026-10-02, #707).** It was
+  tinyalsa's `pcm_write` dropping the rest of a write a signal interrupted —
+  ~15 an hour per Echo, on every playback path — fixed by blocking signals
+  around the write (GoTinyAlsa fork, #711). The same dropped audio was what
+  made the tracker's "early readings" and the correction bursts; with it
+  fixed and the tracker gated (#710), corrections hold at 2–3 a minute and
+  the worst minute overnight was 9. A correction is still a hard splice; a
+  crossfade is only worth doing if one is ever heard.
+- **3–10 tracker resets an hour remain**, an early jump past 20ms with every
+  write whole, about 3× as often on FireOS 6's kernel. Harmless at that rate;
+  unexplained.
 - **Sync against another brand's player.** Every Echo shares the same fixed
   DAC latency, so Echoes agree with each other; another player needs
   `static_delay_ms` set by ear.

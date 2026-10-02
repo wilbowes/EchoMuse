@@ -4090,3 +4090,41 @@ and real stereo over the jack (#273) are separate.
 Also today: PR #696's wake-sample capture stores the previous session's tail
 as "wake" audio under private listening (its pre-roll is fed only by session
 frames) — changes requested.
+
+## 2026-10-01 (night) to 10-02 — the clicks were dropped writes, not sync
+
+**The Sendspin correction bursts traced through three wrong suspects to a
+bug in every playback path.** In order, each ruled out by its own log line:
+the time filter (smooth through a burst in the quietest-sync minute); BLE
+(the A/B with it off on one Echo showed both bursting); ALSA's position
+report (`hw_ptr` against the kernel's own `tstamp` is within ±8 frames,
+16-frame steps — the "1024-frame granularity" theory was wrong, and said so
+on #707).
+
+**What the pointers showed:** at every tracker reset, `appl_ptr` had moved
+1024 + 16..864 frames between reads instead of 2048. Each mixed period is
+written as two 1024-frame chunks; the second was cut short and the rest of
+it never written. tinyalsa's `pcm_write` ignores the partial count a
+signal-interrupted WRITEI ioctl returns and reports success. ~15 an hour per
+Echo, up to 21ms of audio each — the "occasional crackle" Wil heard — on the
+write that voice and HA music use too. Fix: block every signal on the
+calling thread for the length of `pcm_write` (wilbowes/GoTinyAlsa#2, pinned
+by #711). An hour after: 0 partial writes on both; overnight soak 0 in ~16
+device-hours.
+
+**Defence kept anyway (#710):** `OutputClock` gates readings over 3ms from
+prediction (one 18ms reading inside the 20ms reset had swung its rate
+estimate to −1022ppm), and `pullSource` reads the clock on both sides of the
+status read. Interop worst sync 203µs. Diagnostics stay as per-minute log
+lines (`[sendspin] sync:`, `[sendspin] dac:`, `[speaker] dac step`).
+
+**Still open:** 3–10 tracker resets an hour with a different signature (a
+jump past 20ms, writes whole), ~3× more on FireOS 6. Harmless at 2–8
+corrections a minute.
+
+Also: eMMC wear is now recorded daily and boot reason per boot (#709, schema
+v28); Sendspin's stereo pair works through Music Assistant's channel setting
+(#274 closed); wake-sample capture (#696) merged after its stale pre-roll was
+fixed; #705's centre mic confirmed dead by the beamforming-off test, so a
+fallback mic is real work; DHCP broadcast flag for FireOS 6 emOS merged (#714)
+and needs an emOS release.
