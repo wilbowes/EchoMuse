@@ -4829,6 +4829,15 @@ async def _on_playback_stats(device: Device, msg: dict) -> None:
             f"in {periods} periods"
             f"{f' (turn {turn_id})' if turn_id else ''}"
         )
+    if pstats.get("spannedReconnect"):
+        # The device's arrival timers measured its data connection's outage,
+        # not this stream; the timings are stored NULL rather than the zeros
+        # it sent (em_playback_stats). Logged because the outage is the
+        # finding and the turn's own row no longer carries the evidence.
+        log.info(
+            f"[{device_id}] Playback stats span a data reconnect — "
+            f"delivery timings not measurable for this stream (#307)"
+        )
 
 
 async def _on_oww_shadow_cross(device: Device, msg: dict) -> None:

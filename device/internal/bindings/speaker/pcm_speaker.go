@@ -935,6 +935,15 @@ func (p *PcmSpeaker) AbandonStreams(linkLost time.Time) {
 // click/pop than it saves.
 func (p *PcmSpeaker) Flush() { p.voice.flush() }
 
+// NoteDataLinkGap marks the voice plane's in-flight stream as having arrived
+// across an outage in the data connection (#307).
+//
+// The MUSIC plane is deliberately not marked: its report never leaves the
+// device (report() returns early for anything but the voice plane), so the
+// flag has no consumer there — and that plane can be fed by the Sendspin pull
+// source, which never crosses the data plane at all.
+func (p *PcmSpeaker) NoteDataLinkGap() { p.voice.NoteDataLinkGap() }
+
 // FlushMusic stops music the same way. This is now reserved for the user
 // GENUINELY stopping or pausing playback: a voice turn ducks instead, which
 // is the whole point of holding the two planes apart. Flushing here would
