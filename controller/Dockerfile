@@ -196,6 +196,7 @@ COPY em_button.py .
 COPY em_wakeword.py .
 COPY em_tap_burst.py .
 COPY em_player.py .
+COPY em_playback_stats.py .
 COPY em_config_sections.py .
 COPY em_console_pw.py .
 COPY em_labels.py .
