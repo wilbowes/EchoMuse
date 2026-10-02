@@ -11,6 +11,7 @@ walkthroughs welcome.
 | [Listening and privacy](listening.md) | Exactly when audio leaves an Echo: detecting the wake word on the Echo (the default) or on the controller, what each Echo's status means, and what it is honest to claim. Also the specification the code is held to. |
 | [The Voice Pipeline, Explained](voice-pipeline.md) | How your voice travels from the microphones to Home Assistant and back, stage by stage, with the benefits and caveats of each design choice. |
 | [FAQ](faq.md) | Quick answers and workarounds for the things that come up most — rooting refusals, wizard failures, update problems, wake word tuning, privacy. Check here before filing. |
+| [Home Assistant LED ring](ha-led-ring.md) | RGB notifications and native effects on the idle ring, with a 60-second timeout and automation examples. |
 | [User Acceptance Testing](uat.md) | A checklist for confirming EchoMuse does what it claims on your hardware, and how to report what doesn't. Includes the known faults not worth re-filing. |
 | [Moving to the Home Assistant add-on](migrate-to-addon.md) | Migrating an existing Docker install to the add-on without losing your devices, settings or Home Assistant entities. Read the part about `tls/` before you start. |
 
