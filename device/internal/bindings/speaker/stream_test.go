@@ -175,6 +175,106 @@ func TestMinDepthIgnoresTheTailOfAStream(t *testing.T) {
 	}
 }
 
+// The discontinuity the arrival clock cannot describe (#307). Field data
+// 2026-08-23: a stream carrying four seconds of audio reported primeWaitMs
+// 351813 because the data connection dropped while it was priming, so
+// first-frame and first-played were either side of a five-minute outage. The
+// timings are the artefact; the flag is the fact.
+func TestAStreamThatSpansADataReconnectReportsTheFlagAndNoTimings(t *testing.T) {
+	s, _ := newTestStream(64)
+	pumpN(t, s, 2)
+	// The link comes back mid-stream.
+	s.NoteDataLinkGap()
+	pumpN(t, s, 2)
+	s.endStream()
+	s.ready(24)
+	s.take()
+	st := s.drained()
+	if st == nil {
+		t.Fatal("an ended stream must still report")
+	}
+	if !st.SpannedReconnect {
+		t.Fatal("a stream that arrived across a data-link gap must say so")
+	}
+	if st.PrimeWaitMs != 0 || st.RecvSpanMs != 0 || st.MaxGapMs != 0 {
+		t.Fatalf("timings measured the outage, not the stream: %+v", st)
+	}
+	// The counts are of things that happened and survive the flag — a
+	// mid-stream outage genuinely drains the buffer, and that drain is the
+	// stutter the margin exists to predict.
+	if st.Periods != 1 || st.BytesRecv != 4 {
+		t.Errorf("counts must survive the flag, got periods=%d bytes=%d", st.Periods, st.BytesRecv)
+	}
+}
+
+// The flag has to describe a STREAM, not the link: one outage must not flag
+// every response that follows it.
+func TestTheFlagDoesNotCarryIntoTheNextStream(t *testing.T) {
+	s, _ := newTestStream(64)
+	pumpN(t, s, 2)
+	s.NoteDataLinkGap()
+	pumpN(t, s, 2)
+	s.endStream()
+	s.ready(24)
+	s.take()
+	if st := s.drained(); st == nil || !st.SpannedReconnect {
+		t.Fatal("precondition: the first stream is flagged")
+	}
+
+	// A reconnect with nothing in flight cannot have spanned one.
+	s.NoteDataLinkGap()
+	pumpN(t, s, 30)
+	s.endStream()
+	s.ready(24)
+	s.take()
+	st := s.drained()
+	if st == nil {
+		t.Fatal("precondition: the second stream reports")
+	}
+	if st.SpannedReconnect {
+		t.Error("a stream that started after the reconnect did not span it")
+	}
+}
+
+// The flag has to be cleared by the NEXT stream's own first frame, and the
+// arrival clock with it — otherwise the row after an outage reports the
+// counters from before it, which is how the gap reached recv_span_ms in the
+// first place.
+func TestTheNextStreamRestartsTheArrivalClock(t *testing.T) {
+	s, _ := newTestStream(64)
+	pumpN(t, s, 2)
+	s.NoteDataLinkGap()
+	pumpN(t, s, 2)
+	s.endStream()
+	s.ready(24)
+	s.take()
+	s.drained()
+
+	pumpN(t, s, 30)
+	if s.recvBytes.Load() != 30 {
+		t.Fatalf("bytes must count this stream only, got %d", s.recvBytes.Load())
+	}
+	// A real gap between this stream's own frames, so a MaxGapMs that survived
+	// from before the outage would be distinguishable from this stream's.
+	if _, err := s.pump([]byte{99}, 1); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	pumpN(t, s, 30)
+	s.endStream()
+	s.ready(24)
+	for s.ready(24) {
+		s.take()
+	}
+	st := s.drained()
+	if st.SpannedReconnect {
+		t.Error("an unflagged stream must not report the flag")
+	}
+	if st.MaxGapMs < 5 {
+		t.Errorf("this stream's own gap must be measured, got %dms", st.MaxGapMs)
+	}
+}
+
 func TestAudibleUntilTheLastPeriodHasPlayed(t *testing.T) {
 	// A reply arrives far faster than it plays (recvSpan 112ms for ~3s,
 	// 2026-09-22). isActive clears at EOS, which dropped the barge bar for

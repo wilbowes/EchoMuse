@@ -175,7 +175,8 @@ absent optional fields take prior/default behaviour.
 | `listen_state` | `state` (`local`/`stream`/`degraded`), `reason?` | What the device is doing with its wake stream. Sent on every change and after every `ack` |
 | `listen_end` | `session`, `reason` | The device closed a session itself (`ack_timeout`, `max_open`, `muted`, `link`, `stopped`) |
 | `ambient_light` | `value` | Light reading (only if `ambient_light`) |
-| `stats` | hardware and link telemetry (`internal/client/stats.go`, `DeviceStats`) | Every ~30s, plus once on connect. Every field is optional and absence means **not measured**, never zero. `tcpUpRetrans` is the device's own TCP retransmits across its planes since the last report, `tcpUpSegs` the segments sent where the kernel counts them (FireOS 5's 3.18 does not); `ble` carries the scanner's counters, including `yields`/`yieldedMs` for time the scan stood aside for the link |
+| `stats` | hardware and link telemetry (`internal/client/stats.go`, `DeviceStats`) | Every ~30s, plus once on connect. Every field is optional and absence means **not measured**, never zero. `tcpUpRetrans` is the device's own TCP retransmits across its planes since the last report, `tcpUpSegs` the segments sent where the kernel counts them (FireOS 5's 3.18 does not); `ble` carries the scanner's counters, including `yields`/`yieldedMs` for time the scan stood aside for the link; `jack` carries the plug position and the codec controls that follow from it (see below) |
+| `playback_stats` | `periods`, `underruns`; `stats` = `periods`, `underruns`, `minDepth`, `primeWaitMs`, `recvSpanMs`, `maxGapMs`, `bytesRecv`, `spannedReconnect?`; `barge` = `{peak, bar, frames}?` | One report per completed voice stream, sent once its audio channel has drained after EOS — the real end of audio, not an estimate from the socket write. `periods`/`underruns` are duplicated at the top level for controllers older than the nested `stats`. `minDepth` is the margin number (periods left in the device buffer mid-stream), the three `*Ms` fields the arrival timings, and they describe DELIVERY margin: underruns are a rare binary event, so what shows degradation first is how close it came. **`spannedReconnect` means the data connection dropped while this stream was in flight, so the three timings measured the outage rather than the playback** — they are sent as `0` and the controller stores them as NULL. `periods`/`underruns`/`minDepth`/`bytesRecv` survive the flag because they are counts of what happened, not clocks. Absent from firmware older than v2.9.6, which sends only the top-level pair |
 | `ble_adverts` | `adverts[]` | Batch from the passive BLE scanner. **Legacy path** — send these on `/data` as `0x06` whenever the controller announced `ble_adverts_data`, and use this message only when it did not (#404) |
 | `wifi_scan_result` | `networks[]` of `{ssid, ssid_hex, signal}`, or `error` | Answer to `wifi_scan` |
 | `wifi_result` | `ok`, `ssid`, `error?` | Outcome of a `wifi_change`, re-sent until `wifi_commit` |
@@ -214,6 +215,28 @@ exact bytes, reported in each scan result and sent back in `wifi_change` when
 the network came from a scan. A `wifi_change` without it means the UTF-8 of
 `ssid`. `psk` is empty for an open network, 8–63 printable ASCII characters,
 or a raw 64-hex PSK. Firmware that predates `ssid_hex` ignores it.
+
+### `jack` on the stats report
+
+The 3.5mm jack's plug position and the codec state that follows from it:
+`inserted` (`/sys/class/switch/h2w`), `speakerAmp` (`Ext_Speaker_Amp_Switch`),
+`driverGain` (`HP Driver Gain Volume`), `dacL`/`dacR` (the `HPL`/`HPR` output
+mixer `L_DAC`/`R_DAC` switches) and `driftReapplies`, the running count of
+routing controls the device has had to rewrite because something else moved
+them.
+
+Two things a controller must know. **Every value is read back off the mixer,
+not the value the device last wrote** — Android's audio HAL rewrites this codec
+underneath a running device, so a report of the firmware's own intentions
+describes a state that left minutes ago. And **every field is nullable, and
+null means not measurable**: a board with no accdet switch reports
+`inserted: null` rather than `false`, because `false` is a real reading (an
+empty jack) and is the answer a support bundle must not invent. `driverGain`
+takes the same care — `0` is the floor of that control's range and is exactly
+the fault worth seeing, so a flat `0` must not stand in for a read that
+failed. `driftReapplies` counts since the device booted, so a value climbing
+across ticks is the signal that another writer is winning. Absent entirely
+from firmware too old to report it.
 
 ## `/data` — binary frames
 

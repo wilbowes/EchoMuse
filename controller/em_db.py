@@ -31,6 +31,7 @@ from contextlib import contextmanager
 from typing import Optional
 
 import em_config_sections
+import em_playback_stats
 import em_recordings
 import em_wake_samples
 
@@ -1118,6 +1119,40 @@ MIGRATIONS: list[str] = [
     ALTER TABLE devices ADD COLUMN emos_build TEXT;
 
     UPDATE system_config SET value = '30' WHERE key = 'schema_version';
+    """,
+
+    # ── v31 — playback stats that spanned a data reconnect ──────────────────
+    #
+    # The delivery-margin fields (prime_wait_ms, recv_span_ms, max_gap_ms) are
+    # arrival-clock measurements: first frame to last, first frame to first
+    # period played, worst gap between arrivals. A data connection that drops
+    # mid-stream leaves all three describing the outage instead of the audio,
+    # and the device cannot tell them apart from a genuinely terrible link —
+    # so it says so, and this is where that lands.
+    #
+    # Found on field data 2026-08-23 (#307): one turn in a support bundle
+    # reported prime_wait_ms 351813 on a stream carrying 188416 bytes — 5.9
+    # minutes to prime four seconds of audio, with underruns 0 and min_depth 24
+    # saying the buffer never came close to starving. Its neighbours on the
+    # same device were 47–1366. That is not a degraded average, it destroys
+    # one: a single such row swamps every good one, and alerting on max_gap_ms
+    # fires on the artefact rather than on the fault.
+    #
+    # NULLABLE and never 0: a stream that cannot be measured must not read as a
+    # stream measured at zero. The device sends the three timings as 0 when it
+    # flags the row, and set_turn_playback turns that into NULL — so the row
+    # survives (the turn did happen) while its timings stay out of any
+    # aggregate. The controller cannot do this: only the device knows its
+    # connection dropped, and guessing from the numbers would corrupt exactly
+    # the rows this rescues.
+    #
+    # The counts beside them — periods, underruns, min_depth, bytes_recv — are
+    # deliberately NOT nulled. A mid-stream outage genuinely drains the buffer,
+    # and that drain is the audible stutter the margin exists to predict.
+    """
+    ALTER TABLE turns ADD COLUMN spanned_reconnect INTEGER;
+
+    UPDATE system_config SET value = '31' WHERE key = 'schema_version';
     """,
 ]
 
@@ -2425,6 +2460,11 @@ _TURN_COLUMNS = {
     "recv_span_ms":     "recv_span_ms",
     "max_gap_ms":       "max_gap_ms",
     "bytes_recv":       "bytes_recv",
+    # v31 — the device's data connection dropped while this stream was in
+    # flight, so the three arrival timings above measured the outage. 1 = it
+    # did, NULL = the device did not say (firmware predating the flag, or an
+    # ordinary stream). The timings are stored NULL when it is 1.
+    "spanned_reconnect": "spanned_reconnect",
     "send_ms":          "send_ms",
     "delivery_ms":      "delivery_ms",
     "eq_ms":            "eq_ms",
@@ -2499,18 +2539,22 @@ def set_turn_playback(turn_id: int, periods: int, underruns: int,
     stats carries the v7 delivery-margin fields when the firmware sends them
     (>= v2.9.6); older firmware reports only periods/underruns and the extra
     columns stay NULL, which reads as "never reported" rather than zero.
+
+    What a stream that spanned a data reconnect stores as is em_playback_stats'
+    decision, shared with the other writer (em_esphome._persist_turn) so the
+    two cannot disagree about which rows are measurable.
     """
-    stats = stats or {}
+    m = em_playback_stats.margin_fields(stats or {})
     with _tx() as conn:
         conn.execute(
             "UPDATE turns SET playback_periods = ?, underruns = ?, "
             "min_depth = ?, prime_wait_ms = ?, recv_span_ms = ?, "
-            "max_gap_ms = ?, bytes_recv = ? WHERE id = ?",
+            "max_gap_ms = ?, bytes_recv = ?, spanned_reconnect = ? "
+            "WHERE id = ?",
             (
                 periods, underruns,
-                stats.get("minDepth"), stats.get("primeWaitMs"),
-                stats.get("recvSpanMs"), stats.get("maxGapMs"),
-                stats.get("bytesRecv"),
+                m["min_depth"], m["prime_wait_ms"], m["recv_span_ms"],
+                m["max_gap_ms"], m["bytes_recv"], m["spanned_reconnect"],
                 turn_id,
             ),
         )
