@@ -1886,6 +1886,54 @@ def test_the_no_ha_cue_does_not_depend_on_another_device_losing():
     )
 
 
+def test_a_barge_that_stands_down_for_no_ha_leaves_the_same_trace_as_a_wake():
+    """
+    #417. `barge_ceded` covered two reasons and only the arbitration loss was
+    handled, so talking over an answer during an HA outage produced silence,
+    no cue and nothing in the Activity tab — indistinguishable from a device
+    that heard nothing. The wake path's stand-down records and cues; both barge
+    paths must not decide differently about it.
+
+    The cue is not painted here: `cleanup_esphome` owns the ring and ends on
+    `_leds_turn_end`, which reads the outcome `record_dropped_wake` leaves
+    behind — and `_leds_turn_end` suppresses its cue while `barge_detected` is
+    set, because a barge normally re-enters a turn. This one does not, so the
+    flag is cleared, and the record has to land before anything can unwind the
+    turn and run that cleanup.
+
+    Source-shape because the suite cannot import em_controller, and the
+    decision itself is already covered by `em_barge.cede` — what is not
+    covered is whether the watcher acts on it.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    for name in ("_barge_watcher", "_private_barge"):
+        fn = _fn_body(src, name)
+        assert "em_barge.cede(" in fn, f"{name} must use the shared decision"
+        assert "(not serves) or won_by !=" not in fn, (
+            f"{name} has the decision inlined again — two copies of a "
+            f"stand-down rule can disagree about what leaves a record"
+        )
+        tail = fn[fn.index("em_barge.cede("):]
+        assert "verdict.no_ha:" in tail, (
+            f"{name} must branch on the no-HA reason separately from losing "
+            f"arbitration"
+        )
+        no_ha = tail[tail.index("verdict.no_ha:"):]
+        assert "record_dropped_wake" in no_ha, (
+            f"{name}: a barge with no trace is a device that heard nothing"
+        )
+        assert "device.barge_detected = False" in no_ha, (
+            f"{name}: without this the turn's own cleanup blacks the ring "
+            f"instead of cueing it"
+        )
+        unwind = tail.index("cancel_event.set()")
+        record = no_ha.index("record_dropped_wake")
+        assert record < unwind, (
+            f"{name}: the row must be written before the turn can unwind, or "
+            f"the cleanup reaches for an outcome that is not there yet"
+        )
+
+
 def test_every_outcome_cue_names_a_scene_key_that_exists():
     """
     `device.led_scene.get(key)` falls through to a dark ring when the key is

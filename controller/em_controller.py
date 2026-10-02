@@ -1859,7 +1859,11 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                         # delay; its smoothed RTT would count it twice.
                         won_by = await _claim_wake(
                             device, fired_heard, levels.measure(device.mic_gain_db))
-                    device.barge_ceded = (not serves) or won_by != device.device_id
+                    verdict = em_barge.cede(
+                        serves=serves, won_by=won_by,
+                        device_id=device.device_id, score=score,
+                    )
+                    device.barge_ceded = verdict.ceded
                     if device.barge_ceded:
                         log.info(
                             f"[{device.device_id}] Barge-in ceded to "
@@ -1876,13 +1880,39 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
 
                     # Wake detail for the interrupting turn's persistent
                     # record — popped when the turn loop re-enters
-                    # trigger_voice_turn with trigger "barge-in".
+                    # trigger_voice_turn with trigger "barge-in". Set BEFORE
+                    # the no_ha branch below, which records this one instead.
                     device.last_wake = {
                         "model":       barge_pred_key,
                         "score":       round(float(score), 4),
                         "threshold":   float(threshold),
                         "noise_floor": round(device.noise_floor, 5),
                     }
+                    if verdict.no_ha:
+                        # The same stand-down the wake listener gets for the
+                        # same reason (#417), for the same two reasons: a barge
+                        # with no trace is indistinguishable from a device that
+                        # heard nothing, so an HA outage stays invisible in the
+                        # activity history; and the cue reports the DEVICE's
+                        # state rather than how the turn ended.
+                        #
+                        # Before anything below can unwind the turn. Two things
+                        # depend on that ordering: the row has to be written
+                        # before the turn's cleanup reaches for the outcome it
+                        # leaves behind, and cleanup_esphome owns the ring and
+                        # ends on _leds_turn_end — so the cue is its to paint,
+                        # not this block's. Painted from here it would be
+                        # blacked out milliseconds later.
+                        wake_info = device.last_wake
+                        device.last_wake = None
+                        await esphome.record_dropped_wake(
+                            device, verdict.trigger_label, wake_info)
+                        # Cleared so that cleanup will cue at all:
+                        # _leds_turn_end suppresses the cue while
+                        # barge_detected is set, because a barge re-enters a
+                        # turn and repaints the ring. This one does not
+                        # re-enter — there is nothing behind it to answer.
+                        device.barge_detected = False
                     device.cancel_event.set()
                     if in_playback:
                         await device.send_control({"type": "speaker_flush"})
@@ -3192,7 +3222,11 @@ async def _private_barge(device: Device, ev: dict) -> None:
     if serves and device.wake_arb_ms > 0 and len(_devices) > 1:
         won_by = await _claim_wake(device, _wake_heard_at(device, ev),
                                    _device_level(ev), by="device")
-    device.barge_ceded = (not serves) or won_by != device.device_id
+    verdict = em_barge.cede(
+        serves=serves, won_by=won_by,
+        device_id=device.device_id, score=score,
+    )
+    device.barge_ceded = verdict.ceded
     if device.barge_ceded:
         await device.listen_close(session, "ceded")
         log.info(f"[{device.device_id}] Barge-in ceded to "
@@ -3213,6 +3247,22 @@ async def _private_barge(device: Device, ev: dict) -> None:
         "threshold":   float(threshold),
         "noise_floor": round(device.noise_floor, 5),
     }
+    if verdict.no_ha:
+        # Same stand-down as the stream barge watcher (#417) and the same two
+        # reasons: no trace at all leaves an outage invisible, and the cue
+        # reports the DEVICE's state rather than the turn's outcome. Before
+        # anything below can unwind the turn — the row has to land first, and
+        # cleanup_esphome owns the ring and paints the cue from the outcome
+        # this leaves behind.
+        wake_info = device.last_wake
+        device.last_wake = None
+        await esphome.record_dropped_wake(
+            device, verdict.trigger_label, wake_info)
+        # Cleared so that cleanup will cue at all: _leds_turn_end suppresses
+        # the cue while barge_detected is set, because a barge re-enters a
+        # turn and repaints the ring. This one does not re-enter — nothing
+        # behind it can answer.
+        device.barge_detected = False
     device.cancel_event.set()
     if in_playback:
         await device.send_control({"type": "speaker_flush"})

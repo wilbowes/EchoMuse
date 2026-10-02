@@ -1,10 +1,16 @@
 """
-When a wake-word score during a response counts as a barge-in.
+When a wake-word score during a response counts as a barge-in, and what the
+barge gives up when it cannot be had.
 
-This decision shipped untested and wrong, and the failure was invisible until
-responses got long: the playback branch fired on ONE 80ms frame at a bar ten
-times below the wake threshold, while scoring the device's own speech. Asking
-for a story cut it off mid-sentence twice in a row (2026-08-20).
+The first decision shipped untested and wrong, and the failure was invisible
+until responses got long: the playback branch fired on ONE 80ms frame at a bar
+ten times below the wake threshold, while scoring the device's own speech.
+Asking for a story cut it off mid-sentence twice in a row (2026-08-20).
+
+`cede` covers the two reasons a barge-in gives up the turn — another Echo won
+the utterance, or there is no pipeline behind this one — which #414 collapsed
+into one flag and only the first of which was handled the way the wake path
+handles it (#417).
 """
 
 import sys, pathlib
@@ -112,3 +118,63 @@ def test_a_decision_that_did_not_fire_carries_no_reason():
     """So a caller cannot log a justification for something that never fired."""
     assert playback(0.9, prev=0.0).note == ""
     assert thinking(0.0).note == ""
+
+
+# ── Giving up the turn: two reasons, only one of them is an event ───────────
+
+def cede(serves=True, won_by="test-device", device="test-device", score=0.412):
+    return em_barge.cede(serves=serves, won_by=won_by, device_id=device,
+                         score=score)
+
+
+def test_no_ha_cedes_and_records():
+    """The half the wake path already did, and the barge path did not (#417)."""
+    d = cede(serves=False)
+    assert d.ceded is True
+    assert d.no_ha is True
+    assert d.trigger_label == "barge-in(0.412)"
+
+
+def test_losing_arbitration_cedes_without_a_record():
+    """
+    Something in the house is answering the utterance. A record would put a
+    second "wake heard" in the history for a turn the neighbour is running,
+    and a cue would report a race nobody asked about.
+    """
+    d = cede(serves=True, won_by="other-device")
+    assert d.ceded is True
+    assert d.no_ha is False
+    assert d.trigger_label == ""
+
+
+def test_the_winner_takes_the_turn():
+    d = cede()
+    assert d.ceded is False
+    assert d.no_ha is False
+    assert d.trigger_label == ""
+
+
+def test_a_missing_pipeline_outranks_a_claim_the_caller_should_never_have_taken():
+    """
+    `can_serve_turn` is read before the claim, so a device with nothing behind
+    it never takes a window away from one that could answer. The arbiter is
+    not trusted for that here either: if a caller passes a win anyway, the
+    missing pipeline is still the reason, and the reason that gets recorded.
+    """
+    d = cede(serves=False, won_by="test-device")
+    assert d.no_ha is True
+    assert d.trigger_label.startswith("barge-in(")
+
+
+def test_the_recorded_label_reads_as_a_barge_and_not_a_wake_word():
+    """
+    Readers key on the trigger's "wakeword" PREFIX: `wake_word_phrase` sent to
+    HA, and `_persist_turn`'s on-device shadow block, both test
+    `startswith("wakeword")`, and the wake statistics in the Activity tab are
+    read the same way. A borrowed prefix would file a barge inside the
+    wake-word numbers and name a wake word this turn never sent to HA —
+    "barge-in" is what a barge turn already records as.
+    """
+    label = cede(serves=False).trigger_label
+    assert not label.startswith("wakeword")
+    assert label.split("(")[0] == "barge-in"
