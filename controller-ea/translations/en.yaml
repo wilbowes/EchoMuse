@@ -5,6 +5,25 @@ configuration:
     description: >-
       Network address the controller listens on. Leave this as 0.0.0.0
       to listen on all container interfaces.
+  server_port:
+    name: Device port
+    description: >-
+      The port Echo devices connect to for the control, audio and shell
+      connections. Changing it moves the port every device dials; the new
+      port is advertised over mDNS, so devices pick it up when they
+      reconnect. Change this only if something else on this host already
+      uses port 8767.
+  server_tls_port:
+    name: Encrypted device port
+    description: >-
+      The wss (TLS) port used by devices that hold pushed credentials. Set
+      it to 0 to switch the encrypted listener off. Devices choose wss from
+      the network advertisement (mDNS) rather than from the "Require
+      encrypted device connections" setting below, so a device holding a
+      certificate from a previous controller dials wss, fails verification,
+      and cannot connect at all. Turning this off stops the wss port being
+      advertised, which is the way back from that state: such a device falls
+      back to an unencrypted connection and takes fresh credentials.
   server_ip:
     name: Controller LAN IP address
     description: >-

@@ -1253,6 +1253,96 @@ def test_addon_options_are_wired_end_to_end():
         f"{sorted(mapped - options)}")
 
 
+# The .env.example variables that deliberately have no add-on option, each
+# carrying its reason. A bare list of names would rot the same way the option
+# table did — a variable nobody can account for looks exactly like one nobody
+# wanted, and the audit runs once.
+FIXED_IN_THE_ADDON = {
+    # config.yaml's `environment:` block pins this to /data/…, the add-on's own
+    # persistent storage. A user option could point the database anywhere,
+    # including somewhere that does not survive a restart.
+    "DB_PATH": "pinned to /data in config.yaml's environment: block",
+    # Must equal config.yaml's ingress_port (8768): Supervisor proxies the
+    # dashboard to that port, so any other value leaves ingress with nothing
+    # to forward to.
+    "API_PORT": "must equal config.yaml's ingress_port or ingress breaks",
+}
+
+
+def _env_example_vars() -> set[str]:
+    """
+    Every variable .env.example actually DEFINES. The file carries commented
+    examples too (`EM_EXTRA_CA_CERT=/certs/internal-ca.crt` in a block
+    describing docker-compose), and a commented line is not a variable the
+    controller offers.
+    """
+    defined = set()
+    for line in (CONTROLLER / ".env.example").read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        name, sep, _value = line.partition("=")
+        if sep and re.fullmatch(r"[A-Z][A-Z0-9_]*", name):
+            defined.add(name)
+    return defined
+
+
+def test_every_env_var_reaches_the_addon_or_states_why_not():
+    """
+    The other half of test_addon_options_are_wired_end_to_end, which starts
+    from config.yaml and so cannot see a variable that never became an option.
+    This starts from .env.example — the list of settings a container user can
+    change — and demands each one be reachable under the add-on or carry a
+    stated reason it is fixed there.
+
+    The audit this replaces was a reading of CLAUDE.md, and it is exactly the
+    kind of check that rots: a missing option is invisible, because a setting
+    nobody wanted and a setting nobody added look the same from the outside.
+    SERVER_TLS_PORT sat that way for the life of the add-on — 0 disables the
+    wss listener, which is the documented recovery for a device that dials wss
+    and cannot verify, and no add-on user could reach it (#163).
+    """
+    start = (CONTROLLER / "em_start.py").read_text()
+    block = re.search(r"OPTION_ENV_VARS\s*=\s*\{(.*?)\}", start, re.S)
+    assert block, "em_start.py no longer defines OPTION_ENV_VARS"
+    pairs = dict(re.findall(r'"(\w+)"\s*:\s*"(\w+)"', block.group(1)))
+
+    # The inversion, and the reason this is not a one-liner: .env.example
+    # names the ENV VAR while OPTION_ENV_VARS maps OPTION -> ENV VAR, so it is
+    # the VALUES that answer "can an add-on user set this". Reading the keys
+    # instead would see `server_tls_port`, report SERVER_TLS_PORT as
+    # unreachable, and be silenced by listing it as fixed — the vacuous pass.
+    reachable = set(pairs.values())
+    defined = _env_example_vars()
+
+    unreachable = defined - reachable - set(FIXED_IN_THE_ADDON)
+    assert not unreachable, (
+        f".env.example variables with no add-on option: "
+        f"{sorted(unreachable)} — settable on the standalone container and "
+        f"unreachable under the add-on, which is the divergence #163 was "
+        f"about. Add an option (options + schema + translations/en.yaml + "
+        f"em_start.py's OPTION_ENV_VARS) or a reason in FIXED_IN_THE_ADDON.")
+
+    # The other direction, and the one OPTION_ENV_VARS' own keys cannot catch:
+    # an option mapped to an env var em_controller never reads is accepted,
+    # stored and displayed, and does nothing. That is the same quiet failure
+    # as a missing option, from the far end of the table.
+    unreadable = reachable - defined
+    assert not unreadable, (
+        f"OPTION_ENV_VARS values that .env.example does not define: "
+        f"{sorted(unreadable)} — em_controller.py reads no such env var, so "
+        f"the option would be stored and ignored")
+
+    for name, reason in FIXED_IN_THE_ADDON.items():
+        assert len(reason.split()) >= 4, (
+            f"FIXED_IN_THE_ADDON[{name!r}] needs a reason a reader can act "
+            f"on, not a placeholder")
+        assert name in defined, (
+            f"FIXED_IN_THE_ADDON lists {name}, which .env.example no longer "
+            f"defines — either the exclusion is stale or the file changed and "
+            f"this one needs re-deciding")
+
+
 def test_debug_env_var_is_not_truthy_for_zero():
     """
     em_start.py renders a false bool option as the STRING "0", and every
