@@ -777,6 +777,15 @@ func (d *DataClient) connect(ctx context.Context, baseURL string) error {
 	d.conn = conn
 	d.connMu.Unlock()
 
+	// The data plane is up. Anything the speaker still has in flight came in
+	// across a gap in the wire — its per-stream arrival timers would measure
+	// that outage rather than the playback, which is how a 4-second stream
+	// ended up reporting 5.9 minutes to prime (#307). Only this end knows the
+	// connection was lost, so it is the only place the fact exists.
+	if d.spk != nil {
+		d.spk.NoteDataLinkGap()
+	}
+
 	// Exit cleanup is ownership-guarded (2026-07-16): the control client
 	// cancels this connection's context and spawns a replacement data.Run on
 	// every control reconnect, so by the time this defer runs a replacement

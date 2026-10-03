@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/wilbowes/EchoMuse/internal/bindings/codec"
+	"github.com/wilbowes/EchoMuse/internal/bindings/jack"
 	"github.com/wilbowes/EchoMuse/internal/bindings/mixer"
 	"github.com/wilbowes/EchoMuse/internal/outchain"
 
@@ -73,6 +74,14 @@ type PcmSpeaker struct {
 	jackMu       sync.Mutex
 	jackInserted bool
 	jackKnown    bool
+	// jackDriftReapplies counts the control corrections the reconcile loop has
+	// had to make since the process started. Atomic because the stats tick
+	// reads it from another goroutine. It is reported rather than only logged
+	// because it separates "the HAL is fighting us" from "nothing is
+	// happening" — identical from the outside, opposite investigations — and a
+	// CLIMBING count is the evidence, which one log line at the moment of
+	// correction cannot show on its own.
+	jackDriftReapplies atomic.Int64
 	// deadCh is closed by silenceLoop on any exit so a pump call can return
 	// an error rather than block indefinitely waiting for a dead consumer.
 	deadCh chan struct{}
@@ -408,7 +417,7 @@ func (p *PcmSpeaker) ReconcileJackRouting() int {
 	}
 
 	current := map[string]string{}
-	for _, ctl := range []string{ctlSpeakerAmp, ctlHPDriverGain} {
+	for _, ctl := range jackControls {
 		if v, err := mixer.Get(ctl); err == nil {
 			current[ctl] = v
 		} // a failed read is not evidence of drift
@@ -422,6 +431,43 @@ func (p *PcmSpeaker) ReconcileJackRouting() int {
 	return len(drift)
 }
 
+// JackState reads the plug position and the controls that follow from it back
+// off the hardware, for the periodic stats report (#621).
+//
+// Four ioctls on the stats tick's cadence, which is nothing next to the two
+// the reconcile loop already spends every 30s — and it must be a READ, not the
+// value this firmware last wrote: Android's audio HAL rewrites the codec
+// underneath us, so a report of our own intentions would describe a state the
+// codec left minutes ago.
+//
+// Nil is never returned: a device with no accdet switch and a device whose
+// mixer cannot be read both report an object whose fields are absent, which is
+// the distinction the support bundle needs. A device that cannot answer at all
+// is not one reading "nothing plugged in".
+func (p *PcmSpeaker) JackState() *JackReport {
+	detect, detectOK := jack.State()
+	current := map[string]string{}
+	for _, ctl := range jackReadBack {
+		if v, err := mixer.Get(ctl); err == nil {
+			current[ctl] = v
+		}
+	}
+	return jackReport(detect, detectOK, current, p.jackDriftReapplies.Load())
+}
+
+// NoteDataLinkGap marks the voice plane's in-flight stream as having arrived
+// across an outage in the data connection. See Speaker.NoteDataLinkGap.
+//
+// The MUSIC plane is deliberately not marked, and that is not an oversight:
+// its report never leaves the device (report() returns early for anything but
+// the voice plane), so the flag has no consumer there — and the plane can be
+// fed by the Sendspin pull source, which never crosses the data plane at all.
+// Its arrival clock is then never measured rather than measured across a gap,
+// so "spanned a reconnect" would be a false reason on the one reader it has.
+func (p *PcmSpeaker) NoteDataLinkGap() {
+	p.voice.NoteDataLinkGap()
+}
+
 // WatchJackRouting re-applies the routing for as long as ctx lives.
 //
 // Runs regardless of plug position: the HAL's rewrite is not specific to the
@@ -429,18 +475,19 @@ func (p *PcmSpeaker) ReconcileJackRouting() int {
 func (p *PcmSpeaker) WatchJackRouting(ctx context.Context) {
 	t := time.NewTicker(JackReconcileInterval)
 	defer t.Stop()
-	var corrected int
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 			if n := p.ReconcileJackRouting(); n > 0 {
-				corrected += n
+				total := p.jackDriftReapplies.Add(int64(n))
 				// Logged per event rather than counted silently: the RATE is
 				// the diagnostic, and it is the only place the HAL's
-				// interference is visible at all.
-				log.Printf("[speaker] jack routing drifted — %d control(s) rewritten (total %d)", n, corrected)
+				// interference is visible at all. The running total also
+				// rides the stats report, because a single event says the
+				// HAL is awake and only the trend says it is winning.
+				log.Printf("[speaker] jack routing drifted — %d control(s) rewritten (total %d)", n, total)
 			}
 		}
 	}

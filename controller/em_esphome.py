@@ -90,6 +90,7 @@ import em_speechgate
 import em_wav
 import em_oww_models
 import em_oww_metadata
+import em_playback_stats
 import em_player
 import em_tasks
 import em_timers
@@ -2949,14 +2950,14 @@ async def _persist_turn(device, turn_record: dict) -> None:
         turn_record["playback_periods"] = pending[1]
         turn_record["underruns"]        = pending[2]
         # v7 delivery detail (tuple len 5 from firmware >= v2.9.6; older
-        # stashes are 3-tuples and simply carry none of this).
+        # stashes are 3-tuples and simply carry none of this). The values
+        # themselves are em_playback_stats' decision — the same one
+        # set_turn_playback applies on the other path, so a stream that spanned
+        # a data reconnect stores its arrival timings as NULL rather than the
+        # device's zeros here and as real numbers there (#307).
         if len(pending) >= 5:
             pstats = pending[3] or {}
-            turn_record["min_depth"]     = pstats.get("minDepth")
-            turn_record["prime_wait_ms"] = pstats.get("primeWaitMs")
-            turn_record["recv_span_ms"]  = pstats.get("recvSpanMs")
-            turn_record["max_gap_ms"]    = pstats.get("maxGapMs")
-            turn_record["bytes_recv"]    = pstats.get("bytesRecv")
+            turn_record.update(em_playback_stats.margin_fields(pstats))
             if pending[4] is not None and pending[4] >= 0:
                 turn_record["delivery_ms"] = pending[4]
             turn_record["send_ms"] = device.playback_send_ms
