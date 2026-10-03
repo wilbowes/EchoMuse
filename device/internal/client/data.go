@@ -1169,6 +1169,9 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 				d.beam.Unlock()
 			}
 
+			if snap.WakeMic != nil {
+				d.beam.SetWakeMic(*snap.WakeMic)
+			}
 			mono, angle := d.beam.Process(raw, beamAngle, gainLin)
 			clipped := d.beam.ClippedSamples()
 

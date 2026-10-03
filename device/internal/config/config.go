@@ -93,6 +93,12 @@ type Device struct {
 	BeamAngle          float64
 	BeamformingEnabled bool
 
+	// WakeMic picks the mic the unlocked path (wake word listening, and
+	// turns with beamforming off) reads. 0 = the centre mic, the default and
+	// right for nearly every unit; 1-6 = perimeter mic MK1-MK6. An escape
+	// hatch for a dead centre mic (#705), not a tuning knob.
+	WakeMic int
+
 	// AGC toggle — pointer typed so false is expressible over the wire.
 	// Defaults true; applies to bounded lockMic turn streams only (forced
 	// off on the always-on wake stream). RNNoise NS was removed 2026-07-12 —
@@ -200,6 +206,7 @@ func (d *Device) loadDefaults() {
 	d.MicGainDb = clampMicGainDb(envInt("MIC_GAIN_DB", 24))
 	d.BeamAngle = envFloat("BEAM_ANGLE", -1)
 	d.BeamformingEnabled = envBool("BEAMFORMING_ENABLED", true)
+	d.WakeMic = clampWakeMic(envInt("WAKE_MIC", 0))
 	agcEnabled := envBool("AGC_ENABLED", true)
 	d.AgcEnabled = &agcEnabled
 	// true to match em_db.DEFAULT_DEVICE_CONFIG, which now defaults AEC on
@@ -287,6 +294,9 @@ func (d *Device) Apply(msg ConfigMessage) {
 	}
 	if msg.BeamformingEnabled != nil {
 		d.BeamformingEnabled = *msg.BeamformingEnabled
+	}
+	if msg.WakeMic != nil {
+		d.WakeMic = clampWakeMic(*msg.WakeMic)
 	}
 	if msg.AgcEnabled != nil {
 		d.AgcEnabled = msg.AgcEnabled
@@ -379,6 +389,7 @@ func (d *Device) Snapshot() ConfigMessage {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	beamAngle := d.BeamAngle
+	wakeMic := d.WakeMic
 	// C4 fix (2026-07-05 review): previously &d.BeamformingEnabled leaked a
 	// pointer into the live mutex-guarded struct — the caller (streamMic,
 	// every period) dereferences it after RUnlock, racing with Apply()
@@ -422,6 +433,7 @@ func (d *Device) Snapshot() ConfigMessage {
 		AdcMicpga:          &adcMicpga,
 		MicGainDb:          &micGainDb,
 		BeamAngle:          &beamAngle,
+		WakeMic:            &wakeMic,
 		BeamformingEnabled: &beamformingEnabled,
 		AgcEnabled:         &agcEnabled,
 		AecEnabled:         &aecEnabled,
@@ -486,6 +498,7 @@ type ConfigMessage struct {
 	BeamAngle          *float64 `json:"beamAngle,omitempty"`
 	BeamformingEnabled *bool    `json:"beamformingEnabled,omitempty"`
 	HasBeamforming     bool     `json:"hasBeamforming,omitempty"`
+	WakeMic            *int     `json:"wakeMic,omitempty"`
 	AgcEnabled         *bool    `json:"agcEnabled,omitempty"`
 	AecEnabled         *bool    `json:"aecEnabled,omitempty"`
 	AecDelayMs         *int     `json:"aecDelayMs,omitempty"`
@@ -617,4 +630,14 @@ func envStr(key string, def string) string {
 		return v
 	}
 	return def
+}
+
+// clampWakeMic keeps an out-of-range value on the centre mic (0) rather than
+// guessing a perimeter mic: the centre is the default for a reason, and a
+// typo should land there.
+func clampWakeMic(v int) int {
+	if v < 0 || v > 6 {
+		return 0
+	}
+	return v
 }

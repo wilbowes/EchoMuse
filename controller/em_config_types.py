@@ -51,6 +51,7 @@ KINDS: dict[str, str] = {
     "bargeInThreshold": FLOAT,
     "duckDb": FLOAT,
     "beamAngle": FLOAT,
+    "wakeMic": INT,
     "beamformingEnabled": BOOL,
     "agcEnabled": BOOL,
     "aecEnabled": BOOL,

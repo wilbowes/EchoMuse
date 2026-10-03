@@ -263,6 +263,9 @@ DEFAULT_DEVICE_CONFIG = {
     # behind it and False is the one that has not been run in months.
     "beamformingEnabled": True,
     "beamAngle":        -1,
+    # wakeMic: which mic the wake word listens on. 0 = centre (default),
+    # 1-6 = perimeter MK1-MK6. For a dead centre mic only (#705).
+    "wakeMic":          0,
     "eqBands":          [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     "eqLoudness":       False,
     # Output limiter. On by default: the EQ chain hard-clipped anything it

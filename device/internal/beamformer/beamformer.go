@@ -141,6 +141,11 @@ type Beamformer struct {
 	historyIdx    int
 	historyCount  int
 
+	// wakeMic selects the unlocked output: 0 = centre (ch6), 1-6 = MK1-MK6
+	// (ch0-5). Set from the streaming goroutine that calls Process, so it
+	// needs no lock.
+	wakeMic int
+
 	// lockedChannel is the ALSA channel selected at gate open.
 	// -1 means unlocked (use live best-direction selection).
 	lockedChannel int
@@ -290,6 +295,23 @@ func (b *Beamformer) burstRatio(di int) float64 {
 	return burst / baseline
 }
 
+// SetWakeMic picks the mic the unlocked path reads: 0 = centre, 1-6 = MK1-MK6.
+// Anything else keeps the centre. Call from the goroutine that calls Process.
+func (b *Beamformer) SetWakeMic(m int) {
+	if m < 0 || m > nDirections {
+		m = 0
+	}
+	b.wakeMic = m
+}
+
+// omniChannel is the ALSA channel the unlocked path reads.
+func (b *Beamformer) omniChannel() int {
+	if b.wakeMic >= 1 && b.wakeMic <= nDirections {
+		return directionToChannel[b.wakeMic-1]
+	}
+	return centreCh
+}
+
 // Unlock releases the locked mic selection.
 // Call when the VAD gate closes (voice turn ends).
 func (b *Beamformer) Unlock() {
@@ -322,7 +344,7 @@ func (b *Beamformer) Unlock() {
 // 12 o'clock), or -1 when unlocked.
 func (b *Beamformer) Process(raw []byte, steerAngle float64, gain float64) (mono []byte, angle float64) {
 	if len(raw) < periodFrames*frameSize {
-		return b.extractChannel(raw, centreCh, gain), -1
+		return b.extractChannel(raw, b.omniChannel(), gain), -1
 	}
 
 	// Always decode and update smoothers — direction estimation runs
@@ -363,7 +385,7 @@ func (b *Beamformer) Process(raw []byte, steerAngle float64, gain float64) (mono
 	// Unlocked: always ch6 (omni). Covers OWW listening and disabled-beamforming
 	// voice turns. No directional bias, no channel splices.
 	if b.lockedChannel < 0 {
-		return b.extractChannel(raw, centreCh, gain), -1
+		return b.extractChannel(raw, b.omniChannel(), gain), -1
 	}
 
 	// Locked — select output channel and reported angle.

@@ -181,3 +181,13 @@ func TestEchoRefRejectsShortBuffer(t *testing.T) {
 		t.Fatal("a short period must report no reference, not a partial one")
 	}
 }
+
+func TestWakeMicSelectsUnlockedChannel(t *testing.T) {
+	b := New()
+	for _, c := range []struct{ mic, want int }{{0, centreCh}, {1, 0}, {3, 2}, {6, 5}, {7, centreCh}, {-1, centreCh}} {
+		b.SetWakeMic(c.mic)
+		if got := b.omniChannel(); got != c.want {
+			t.Errorf("wakeMic %d: channel %d, want %d", c.mic, got, c.want)
+		}
+	}
+}
