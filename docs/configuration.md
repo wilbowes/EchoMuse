@@ -591,6 +591,14 @@ can't wipe it the instant it appears — but **pressing the action button
 cancels it immediately**, so adjusting the volume and then talking to the
 device still shows you the listening ring straight away.
 
+**Remote volume arc** is an opt-in accessibility setting. When enabled, a
+volume change from Home Assistant, an automation, the EchoMuse dashboard, or
+another remote player shows that same cyan arc. It is off by default because
+remote changes can otherwise make the ring light unexpectedly. Physical
+volume buttons always show the arc. Setting volume to zero (including Home
+Assistant mute), repeating the current level, and restoring the saved volume
+at boot never do. Older firmware shows the setting disabled until updated.
+
 ### How a turn ends
 The ring tells you *why* a conversation stopped, using rhythm rather than
 colour (red, orange and cyan already mean mute, no-controller and volume):

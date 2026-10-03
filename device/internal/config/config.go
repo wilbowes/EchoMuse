@@ -58,6 +58,12 @@ type Device struct {
 	// WakeSoundLevel is "quiet", "medium" or "loud" (internal/cue).
 	WakeSoundLevel string
 
+	// RemoteVolumeArc shows the cyan volume arc when a live remote command
+	// changes the volume. Physical buttons always show it; the boot-time
+	// volume restore never does. Off by default because an unprompted ring was
+	// found distracting, but useful as an opt-in accessibility setting (#634).
+	RemoteVolumeArc bool
+
 	// OwwOnDevice selects on-device wake word scoring: "off", "shadow" or
 	// "on".
 	//
@@ -195,6 +201,7 @@ func (d *Device) loadDefaults() {
 	d.DuckDb = envFloat("DUCK_DB", -18)
 	d.WakeSound = envBool("WAKE_SOUND", false)
 	d.WakeSoundLevel = envStr("WAKE_SOUND_LEVEL", "medium")
+	d.RemoteVolumeArc = envBool("REMOTE_VOLUME_ARC", false)
 	d.AdcDigitalGain = envInt("ADC_DIGITAL_GAIN", 88)
 	d.AdcMicpga = envInt("ADC_MICPGA", 40)
 	d.MicGainDb = clampMicGainDb(envInt("MIC_GAIN_DB", 24))
@@ -270,6 +277,9 @@ func (d *Device) Apply(msg ConfigMessage) {
 	if msg.VolumeButtonSound != nil {
 		d.VolumeButtonSound = *msg.VolumeButtonSound
 	}
+	if msg.RemoteVolumeArc != nil {
+		d.RemoteVolumeArc = *msg.RemoteVolumeArc
+	}
 	if msg.StartupVolume > 0 {
 		d.StartupVolume = msg.StartupVolume
 	}
@@ -335,6 +345,14 @@ func (d *Device) VolumeButtonSoundEnabled() bool {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return d.VolumeButtonSound
+}
+
+// RemoteVolumeArcEnabled reports whether live remote volume changes should
+// show the same cyan level arc as the physical buttons.
+func (d *Device) RemoteVolumeArcEnabled() bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.RemoteVolumeArc
 }
 
 // applyOutput merges the output-chain keys. Every one of them has a
@@ -407,6 +425,7 @@ func (d *Device) Snapshot() ConfigMessage {
 	volumeButtonSound := d.VolumeButtonSound
 	sendspinEnabled := d.SendspinEnabled != nil && *d.SendspinEnabled
 	sendspinUnpaired := d.SendspinUnpaired != nil && *d.SendspinUnpaired
+	remoteVolumeArc := d.RemoteVolumeArc
 	return ConfigMessage{
 		VadThreshold:       d.VadThreshold,
 		VadSpeechMs:        d.VadSpeechMs,
@@ -432,6 +451,7 @@ func (d *Device) Snapshot() ConfigMessage {
 		SendspinEnabled:    &sendspinEnabled,
 		SendspinUnpaired:   &sendspinUnpaired,
 		SendspinName:       d.SendspinName,
+		RemoteVolumeArc:    &remoteVolumeArc,
 		ListeningAnim:      d.ListeningAnim,
 	}
 }
@@ -500,6 +520,8 @@ type ConfigMessage struct {
 	WakeSoundLevel string `json:"wakeSoundLevel,omitempty"`
 	// VolumeButtonSound: a pointer so "off" is distinguishable from absent.
 	VolumeButtonSound *bool `json:"volumeButtonSound,omitempty"`
+	// RemoteVolumeArc: a pointer so "off" is distinguishable from absent.
+	RemoteVolumeArc *bool `json:"remoteVolumeArc,omitempty"`
 
 	// Output chain (internal/outchain). Pointers because zero is a real
 	// setting for every one of them; see applyOutput.

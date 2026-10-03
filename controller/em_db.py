@@ -282,6 +282,10 @@ DEFAULT_DEVICE_CONFIG = {
     "ledScene":         "standard",
     "ledListenColor":   "#00b400",
     "ledThinkColor":    "#00c800",
+    # Opt-in accessibility feedback for volume changes made from HA, the
+    # dashboard, automations, or another remote source. Physical buttons show
+    # the cyan arc regardless; mute and boot restore stay silent.
+    "remoteVolumeArc":  False,
     # Playback "meter" ring response curve — how hard the ring throbs with
     # the speaker level. Device-side defaults live in animator.go
     # (meterDefaults) and these mirror them; both are clamped independently.

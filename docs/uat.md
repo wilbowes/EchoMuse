@@ -204,13 +204,17 @@ set to **On this Echo** and the other to **On the controller**.
 ### D1 · Volume
 **Do:** Enable Volume button sound. Change volume with the device's own
 buttons while idle, press Volume Up twice more after reaching maximum, then
-change it from HA; repeat both while music is playing.
+change it from HA; repeat both while music is playing. In Config → Ring,
+enable **Remote volume arc** and repeat the remote changes, including setting
+volume to zero; then send the current non-zero level again and reboot.
 **Expect:** The level agrees and survives a reboot. An idle physical-button
 change plays a short, low beep with a quick decay at the new volume, and each
-extra Volume Up press at maximum replays it; HA and active playback stay
-silent.
-**Flag:** A tone from a remote change or over playback, or no tone from an
-idle physical-button change or an extra Volume Up press at maximum.
+extra Volume Up press at maximum replays it; remote changes and active playback
+do not play the tone. Physical buttons always show the cyan arc. Changed,
+non-zero remote levels show it only while the setting is on; volume zero,
+repeated levels, and boot restoration stay silent.
+**Flag:** Any volume disagreement, an unexpected tone, or an arc for a muted,
+duplicate, or boot-restored volume.
 
 ### D2 · Speech is intelligible at low volume
 **Do:** Set volume to ~20%, ask something with a long answer.

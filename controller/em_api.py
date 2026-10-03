@@ -6562,6 +6562,7 @@ def _merge_device(row, boot: dict | None = None) -> dict:
         "listen":          _listen_json(live) if live else None,
         "wakeCueCapable": getattr(live, "wake_cue_capable", False) if live else False,
         "volumeCueCapable": getattr(live, "volume_cue_capable", False) if live else False,
+        "remoteVolumeArcCapable": getattr(live, "remote_volume_arc_capable", False) if live else False,
         # Sendspin player (#89): whether the firmware has one, and its status
         # (no secrets; the pairing token is its own request).
         "sendspinCapable": getattr(live, "sendspin_capable", False) if live else False,

@@ -137,6 +137,15 @@ def test_triggering_is_a_separate_capability_from_scoring():
         "the dashboard must gate the 'On device' option on the capability"
 
 
+def test_remote_volume_arc_is_capability_gated():
+    """Old firmware must not be offered a toggle it cannot honour."""
+    assert "remote_volume_arc" in device_capabilities()
+    assert "remote_volume_arc_capable" in CONTROLLER.read_text()
+    assert "remoteVolumeArcCapable" in API.read_text()
+    jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
+    assert "disabled={!remoteVolumeArcCapable}" in jsx
+
+
 def test_the_toggle_control_actually_honours_disabled():
     """
     "Disabled WITH the reason, never a control that silently does nothing" is

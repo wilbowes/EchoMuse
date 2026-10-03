@@ -1054,6 +1054,11 @@ class Device:
         return "volume_cue" in (self.capabilities or [])
 
     @property
+    def remote_volume_arc_capable(self) -> bool:
+        """Whether remote volume changes can show the cyan level arc (#634)."""
+        return "remote_volume_arc" in (self.capabilities or [])
+
+    @property
     def oww_trigger_capable(self) -> bool:
         """
         Whether this firmware can ACT on its own wake detection.
