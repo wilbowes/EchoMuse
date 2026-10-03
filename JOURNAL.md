@@ -4192,3 +4192,117 @@ No manual roll-back button and no emOS in the fleet update yet. GA users get
 the panel with the next controller release; until then 0.10 installs by
 wizard. C95 and 15LE are on the `ota1` test build and will be offered 0.10.
 The 09-17 kernel-state diff (VM tunables, no zram) is still unaddressed.
+
+## 2026-10-03 — a contributor batch read diff by diff, the mic array measured, and why a bare wake name fails
+
+**Nine PRs from one contributor, and what reading every diff found.** @forming
+opened #720–727 in 46 minutes on 10-02 against `ready` issues, then #729. All
+were CI-green and none had been run. #725 (the Link row reads
+`linkTokenIssued`, which the API had sent all along and the dashboard never
+read) was correct and is merged. The rest:
+
+- **#723** reads the preseeded `magisk.db` back with `wc -c < file`, and its
+  verdict looks for `DB=<n>`. The probe never prints that prefix, so the step
+  would fail on every device. Its test passes because the fake device prints
+  `DB=`.
+- **#720** exposes `SERVER_TLS_PORT` to the add-on and describes 0 as the way
+  back for a device with a stale CA. That was true when #163 was written
+  (08-13) and stopped being true in firmware v2.17.0, where a device holding a
+  CA will not dial plain: 0 now takes every credentialed Echo offline until
+  each is re-paired. The PR implemented our stale issue faithfully. #163 is
+  rewritten.
+- **#724** records a barge-in that stands down for no HA, and intends a cue.
+  Traced, not run: the watcher's `record_dropped_wake` sets
+  `last_turn_outcome = "no_ha"`, the interrupted turn then persists and
+  overwrites it with `barged`, and `_leds_turn_end` finds no cue for that. The
+  button's stand-down a few hundred lines below is the shape to copy, in the
+  loop's ceded branch.
+- **#722** adds `LOG_LEVELS`; its parser refuses any name without a dot, so
+  its own documented `echomuse=DEBUG` is rejected.
+- **#721** waits for a playback callback that the 08-27 log on #219 had
+  already ruled out for that fault. Declined.
+- **#726** (delete warning) and **#729** (playback stats across a reconnect,
+  jack state, schema v31) are sound in design. #729 needs a run on our
+  Echoes, which is still owed.
+
+Three of the `ready` issues they picked were stale on our side (#163, half of
+#590, #219's hypothesis). One reply on #725 set the working pattern: one or two
+at a time, plan on the issue first, say what was run and on what. Wil's rule
+from 10-02 is the measure: AI-assisted work is welcome, an unattended run down
+the label is not, and it is judged on engagement rather than authorship.
+@evy0311's #713 (opt-in remote volume arc) and #716 (response level) are the
+contrast: each carries a finding from their own hardware, and #716's
+wide-precision path exists because the simple gain clipped on a real device.
+Both need a rebase and one small fix.
+
+**#712 is the second mixed amonet layout.** v2's bootloader and TWRP with v1's
+partition table: `boot_a_x`/`boot_b_x` on p10/p11, bare names on p17/p18. A
+TWRP FireOS install does not rewrite the GPT, so the reflash advice already on
+the issue will not clear the `_x` names. 15LE in TWRP gave the healthy picture
+to compare against: `lk_a`, `lk_b`, `tee`, `tee1`, `tee2` and `preloader`
+point at `/tmp/ota-decoy/` with the real partitions under `_real`, bare
+`boot_*` are left writable, and p17/p18 do not exist. That suggests v2's
+bootloader simply boots the bare name, so the wizard's v2 path may be safe on
+the mixed layout; the reporter has been asked for a read-only probe.
+`/dev/block/by-name` is a symlink there, so `ls -l` needs the trailing slash.
+
+**Hardware health and calibration became two issues.** #730 (@shawnsi, a
+manual `wakeMic` for a dead centre mic, #705) is the interim; Wil wants health
+checks, self-healing and visible degradation (#731), and a device that tunes
+itself for its room at setup and after a move, guided, startable from the
+dashboard or a button combination (#732). About fifteen of the fifty-odd
+settings depend on the room and fall into four groups with a fixed order:
+capture gain, echo cancelling, detection thresholds, playback against
+listening. A gain change invalidates everything after it.
+
+**The mic array, measured on C95.** Wil said "hey jarvis" from four positions,
+plus a silent take, recorded raw on all channels with `capture_mics` and scored
+per channel offline. 26 utterances:
+
+- every mic passed 24–26 of 26 at 0.5 (centre: 24; best of seven: 26);
+- the level spread between mics for one utterance is about 1 dB, 1.8 at most,
+  and 0.8 dB in the silent room. The array is 72 mm wide; no mic is nearer;
+- two marginal utterances scored 0.24–0.97 across mics at the same loudness,
+  and the centre missed both.
+
+So a unified wake/speech path buys redundancy and nothing in SNR, and
+level-against-the-median is a workable health test. Over all 35 triples,
+any-1-of-3 caught 25–26 with the worst mic's idle noise (0.15 average), and
+at-least-2-of-3 caught 24–26 with idle 0.06, where one mic can neither block
+nor cause a wake.
+
+**The costs, on the same Echo with the firmware stopped.** One wake scorer is
+38% of a core (29 ms per 80 ms frame); three at once are 38% each with none
+late. Seven echo cancellers at the 64 ms hardware-reference tail are 6.04 ms
+per 32 ms period, 19% of a core. Cancellers are affordable on every mic; the
+scorers are what need rationing. Wil's reminder set the order: #229's per-mic
+echo cancelling before selection comes first, since scoring several mics and
+choosing between them during playback both need a clean signal from each.
+
+**Why a bare wake name fails in a multi-phrase model.** Wil's "verona" is
+weaker than "hey verona", and a contributor's "hanako" does not fire beside
+hi/hello/hey hanako. He suspected a VAD opening on the first word. There is no
+VAD in front of wake scoring on either side. openWakeWord builds adversarial
+negatives per target phrase from partial phrases and kept input words, and
+only removes texts equal to that phrase, so "hey verona" emits "verona".
+Counted over 20k: "hanako" is the single most common negative text (4.1%),
+"verona" 2.7%. The fix filters any negative containing a target phrase and is
+on `fix/forge-bare-name-negatives`; a retrain with the original positives was
+running at the close.
+
+**emOS 0.10 installed from the release.** C95 and 15LE went from the `ota1`
+test build to the published `emos-v0.10` from the panel: 1m53s and 1m36s,
+confirmed 67s and 42s after the restart, partition and `boot-good.img` equal
+to the image sent on both.
+
+**Mistakes of mine today.** I told Wil #712 was unanswered from the issue list
+without reading it; he had replied the day before. I reported 24 of 26
+utterances at ≥0.9 on all mics where the count was 23, caught by recounting
+before it was posted. I built the patched forge image without `GPU=1` and the
+retrain ran on six CPU cores until Wil asked whether it was using the GPU; the
+log's first line said so. A benchmark run cost C95 a second 30 seconds offline
+because my filter dropped the result lines.
+
+**Still open:** the #729 hardware run; the rest of the `ready` sweep; the
+controller release that gives GA users the emOS panel; the Verona comparison
+and the forge PR; #731's first build (per-mic cancelling ahead of selection).
