@@ -228,9 +228,16 @@ const fnBody = (name) => {
     const logs = [];
     let error = null;
     const c = {
-      async shell(command) {
+      // The answer is built by RUNNING the probe's own format rather than
+        // by repeating what _preseedVerdict wants to read. A stub that
+        // hardcodes `DB=` tests the verdict against itself and stays green
+        // while the real command prints something else — which is exactly
+        // how the first version shipped a step that refused every device.
+        async shell(command) {
         if (!command.includes("_DBCHK")) return "";
-        return (onDevice === null ? "" : `DB=${onDevice}\n`) + (ran ? "_DBCHK" : "");
+        const m = command.match(/DB=\$\(wc -c/);
+        if (!m) throw new Error("probe no longer emits the DB= label the verdict parses");
+        return (onDevice === null ? "DB=\n" : `DB=${onDevice}\n`) + (ran ? "_DBCHK" : "");
       },
       async push() {},
     };

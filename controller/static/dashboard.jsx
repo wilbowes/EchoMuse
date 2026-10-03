@@ -5700,7 +5700,12 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // a 0-byte destination with the chmod still applied. Intermittent, and
     // magiskd answers it by refusing every su — which reads as a broken root,
     // on a device that is provisioned correctly in every other respect.
-    const dbProbe = await c.shell('wc -c < /data/adb/magisk.db 2>/dev/null; echo _DBCHK');
+    // Labelled, for the same reason MAGISKBOOT=yes is: the verdict looks for
+    // `DB=<n>` by name, and a bare `wc -c` prints the number alone — which
+    // reads as a probe that could not measure anything, so a correctly
+    // installed database would be refused on every device.
+    const dbProbe = await c.shell(
+      'echo "DB=$(wc -c < /data/adb/magisk.db 2>/dev/null)"; echo _DBCHK');
     const seeded = _preseedVerdict(dbProbe, dbBytes.length);
     if (!seeded.ok) throw new Error(seeded.why);
     addLog('magisk.db installed.', 'ok');
