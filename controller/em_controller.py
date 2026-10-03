@@ -660,6 +660,12 @@ class Device:
         # barge_ceded says this device must not run the interrupting turn.
         # Folding them into one flag is how both devices answered.
         self.barge_ceded      = False
+        # (trigger_label, wake_detail) when the barge that stood down had no
+        # pipeline behind it, else None. Carried from _barge_watcher /
+        # _private_barge to the turn loop's ceded branch, which is where the
+        # row and the cue are written — see the comment there for why not at
+        # the point the barge fired.
+        self.barge_no_ha      = None
 
         # Recent voice-turn traces (dicts derived from TurnTrace at emit
         # time in em_esphome) — powers the Status tab's observability panel.
@@ -1881,7 +1887,8 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                     # Wake detail for the interrupting turn's persistent
                     # record — popped when the turn loop re-enters
                     # trigger_voice_turn with trigger "barge-in". Set BEFORE
-                    # the no_ha branch below, which records this one instead.
+                    # the no_ha branch below, which carries this one off
+                    # instead.
                     device.last_wake = {
                         "model":       barge_pred_key,
                         "score":       round(float(score), 4),
@@ -1896,23 +1903,22 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                         # activity history; and the cue reports the DEVICE's
                         # state rather than how the turn ended.
                         #
-                        # Before anything below can unwind the turn. Two things
-                        # depend on that ordering: the row has to be written
-                        # before the turn's cleanup reaches for the outcome it
-                        # leaves behind, and cleanup_esphome owns the ring and
-                        # ends on _leds_turn_end — so the cue is its to paint,
-                        # not this block's. Painted from here it would be
-                        # blacked out milliseconds later.
-                        wake_info = device.last_wake
+                        # Only CARRIED here. The turn loop's ceded branch is
+                        # where it is recorded, because this block runs before
+                        # anything below can unwind the turn: the interrupted
+                        # turn's own _persist_turn then overwrites the outcome
+                        # with "barged", and _leds_turn_end — which
+                        # cleanup_esphome ends on, and which owns the ring —
+                        # reads that. Recording here meant the row was right
+                        # and the cue never fired.
+                        #
+                        # So: barge_detected stays SET (the loop's branch
+                        # needs it, and needs barge_ceded and cancel_event to
+                        # survive to it), and the reason travels beside the wake
+                        # detail for the branch to consume.
+                        device.barge_no_ha = (verdict.trigger_label,
+                                              device.last_wake)
                         device.last_wake = None
-                        await esphome.record_dropped_wake(
-                            device, verdict.trigger_label, wake_info)
-                        # Cleared so that cleanup will cue at all:
-                        # _leds_turn_end suppresses the cue while
-                        # barge_detected is set, because a barge re-enters a
-                        # turn and repaints the ring. This one does not
-                        # re-enter — there is nothing behind it to answer.
-                        device.barge_detected = False
                     device.cancel_event.set()
                     if in_playback:
                         await device.send_control({"type": "speaker_flush"})
@@ -2776,10 +2782,29 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown",
                     # cancelled and that stays cancelled — the user spoke over
                     # this device and it must stop talking regardless of who
                     # answers. What it must NOT do is run the turn as well.
+                    #
+                    # The no-HA half records and cues HERE, not where the barge
+                    # fired (#417). By now the interrupted turn has persisted
+                    # and left last_turn_outcome as "barged", and
+                    # _leds_turn_end reads exactly that — so recording earlier
+                    # wrote a row nobody could see and a cue for an outcome
+                    # that no longer existed. The watcher only carries the
+                    # reason across.
+                    no_ha = device.barge_no_ha
                     device.barge_detected = False
                     device.barge_ceded    = False
+                    device.barge_no_ha    = None
                     device.cancel_event.clear()
                     device.last_wake = None
+                    if no_ha:
+                        # As the button's stand-down does a few hundred lines
+                        # down: the listening ring is already lit from turn
+                        # start, so this is a hold rather than a repaint, and
+                        # barge_detected must be clear for the cue to survive
+                        # _leds_turn_end's own guard.
+                        await leds_listening(device)
+                        await esphome.record_dropped_wake(device, *no_ha)
+                        await _leds_turn_end(device)
                     break
 
                 if device.barge_detected:
@@ -3250,19 +3275,14 @@ async def _private_barge(device: Device, ev: dict) -> None:
     if verdict.no_ha:
         # Same stand-down as the stream barge watcher (#417) and the same two
         # reasons: no trace at all leaves an outage invisible, and the cue
-        # reports the DEVICE's state rather than the turn's outcome. Before
-        # anything below can unwind the turn — the row has to land first, and
-        # cleanup_esphome owns the ring and paints the cue from the outcome
-        # this leaves behind.
-        wake_info = device.last_wake
+        # reports the DEVICE's state rather than the turn's outcome.
+        #
+        # Carried, not recorded — see the same note in _barge_watcher. This
+        # path runs before the interrupted turn unwinds, so a row written here
+        # is overwritten by its _persist_turn before the ring reads it. The
+        # loop's ceded branch is where it lands.
+        device.barge_no_ha = (verdict.trigger_label, device.last_wake)
         device.last_wake = None
-        await esphome.record_dropped_wake(
-            device, verdict.trigger_label, wake_info)
-        # Cleared so that cleanup will cue at all: _leds_turn_end suppresses
-        # the cue while barge_detected is set, because a barge re-enters a
-        # turn and repaints the ring. This one does not re-enter — nothing
-        # behind it can answer.
-        device.barge_detected = False
     device.cancel_event.set()
     if in_playback:
         await device.send_control({"type": "speaker_flush"})

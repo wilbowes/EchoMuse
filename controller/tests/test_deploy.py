@@ -1894,16 +1894,17 @@ def test_a_barge_that_stands_down_for_no_ha_leaves_the_same_trace_as_a_wake():
     that heard nothing. The wake path's stand-down records and cues; both barge
     paths must not decide differently about it.
 
-    The cue is not painted here: `cleanup_esphome` owns the ring and ends on
-    `_leds_turn_end`, which reads the outcome `record_dropped_wake` leaves
-    behind — and `_leds_turn_end` suppresses its cue while `barge_detected` is
-    set, because a barge normally re-enters a turn. This one does not, so the
-    flag is cleared, and the record has to land before anything can unwind the
-    turn and run that cleanup.
+    The record and the cue are NOT written where the barge fires. That block
+    runs before anything can unwind the turn, so the interrupted turn's own
+    `_persist_turn` overwrites `last_turn_outcome` with "barged" before the
+    ring reads it, and clearing `barge_detected` there skips the turn loop's
+    ceded branch — leaving `barge_ceded` and `cancel_event` set into the next
+    turn. So the watcher only CARRIES the reason across, and the loop's ceded
+    branch records it, by then with nothing left to overwrite it.
 
     Source-shape because the suite cannot import em_controller, and the
     decision itself is already covered by `em_barge.cede` — what is not
-    covered is whether the watcher acts on it.
+    covered is whether the watcher acts on it, and where.
     """
     src = (CONTROLLER / "em_controller.py").read_text()
     for name in ("_barge_watcher", "_private_barge"):
@@ -1919,18 +1920,16 @@ def test_a_barge_that_stands_down_for_no_ha_leaves_the_same_trace_as_a_wake():
             f"arbitration"
         )
         no_ha = tail[tail.index("verdict.no_ha:"):]
-        assert "record_dropped_wake" in no_ha, (
-            f"{name}: a barge with no trace is a device that heard nothing"
+        assert "device.barge_no_ha" in no_ha, (
+            f"{name}: the no-HA reason must reach the turn loop's ceded branch"
         )
-        assert "device.barge_detected = False" in no_ha, (
-            f"{name}: without this the turn's own cleanup blacks the ring "
-            f"instead of cueing it"
+        assert "record_dropped_wake" not in no_ha, (
+            f"{name}: recorded here, the row is overwritten by the interrupted "
+            f"turn's _persist_turn before _leds_turn_end can read it"
         )
-        unwind = tail.index("cancel_event.set()")
-        record = no_ha.index("record_dropped_wake")
-        assert record < unwind, (
-            f"{name}: the row must be written before the turn can unwind, or "
-            f"the cleanup reaches for an outcome that is not there yet"
+        assert "device.barge_detected = False" not in no_ha, (
+            f"{name}: clearing this skips the ceded branch, so barge_ceded and "
+            f"cancel_event survive into the next turn"
         )
 
 
@@ -2154,6 +2153,34 @@ def test_a_ceded_barge_still_stops_playback_but_takes_no_turn():
     assert "break" in branch, (
         "a ceded barge must leave the turn loop rather than fall through "
         "into the interrupting turn"
+    )
+
+
+def test_the_no_ha_barge_records_where_nothing_overwrites_it():
+    """
+    The no-HA stand-down is the one barge outcome that must leave a row and a
+    cue, and both are written in the ceded branch for a reason that is only
+    visible as an ordering: the interrupted turn persists `barged` AFTER the
+    barge fires, so a row written at the point of the barge is overwritten
+    before the ring reads it. The branch also has to clear `barge_detected`
+    first, because `_leds_turn_end` suppresses its own cue while it is set.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    ceded = src.index("device.barge_detected and device.barge_ceded")
+    start = src.index("Barge-in: starting interrupting turn")
+    branch = src[ceded:start]
+    for call in ("leds_listening(device)", "record_dropped_wake(",
+                 "_leds_turn_end(device)"):
+        assert call in branch, f"the no-HA stand-down needs {call}"
+    assert branch.index("device.barge_detected = False") < \
+           branch.index("record_dropped_wake("), (
+        "the flag must be clear before the cue is painted, or "
+        "_leds_turn_end suppresses it"
+    )
+    cleanup = src.index("await cleanup_esphome()")
+    assert cleanup < ceded, (
+        "the record must come after the interrupted turn's cleanup has "
+        "persisted its own outcome, or that outcome overwrites this one"
     )
 
 
