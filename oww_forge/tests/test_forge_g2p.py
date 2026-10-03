@@ -20,7 +20,7 @@ CASES = [
     ("mˈɛʒɚ", "M EH ZH ER"),                  # measure
     ("dʒˈʌdʒ", "JH AH JH"),                   # judge
     ("sˈɪŋɪŋ", "S IH NG IH NG"),              # singing
-    ("hænˈɑːkoʊ", "HH AE N AA K OW"),         # hanako (not in CMUdict)
+    ("mɪɹˈɑːkoʊ", "M IH R AA K OW"),          # mirako: made up, not captured
     ("vəɹˈoʊnə", "V AH R OW N AH"),           # verona
     ("wˈɜːkɚ", "W ER K ER"),                  # worker
 ]

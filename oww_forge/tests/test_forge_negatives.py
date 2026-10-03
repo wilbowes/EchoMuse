@@ -12,7 +12,7 @@ import forge_negatives  # noqa: E402
 import patch_oww_negatives  # noqa: E402
 
 VERONA = ["hey verona", "verona"]
-HANAKO = ["hi hanako", "hello hanako", "hey hanako", "hanako"]
+MIRAKO = ["hi mirako", "hello mirako", "hey mirako", "mirako"]
 
 
 @pytest.mark.parametrize("targets,text", [
@@ -20,8 +20,8 @@ HANAKO = ["hi hanako", "hello hanako", "hey hanako", "hanako"]
     (VERONA, "verona hey"),      # contains it
     (VERONA, "Verona"),
     (VERONA, "  verona  hey "),
-    (HANAKO, "hanako"),          # the most common negative of all, 4.1%
-    (HANAKO, "hanako hello"),
+    (MIRAKO, "mirako"),          # three longer phrases each emit it
+    (MIRAKO, "mirako hello"),
     (["hey verona"], "oh hey verona there"),
 ])
 def test_a_negative_containing_a_target_is_dropped(targets, text):
@@ -32,8 +32,8 @@ def test_a_negative_containing_a_target_is_dropped(targets, text):
     (VERONA, "hey"),             # half of a phrase is a fair negative
     (VERONA, "verina"),          # a near miss is the point of these
     (VERONA, "misbehaved"),
-    (HANAKO, "panaco"),
-    (HANAKO, "hello"),
+    (MIRAKO, "mirado"),
+    (MIRAKO, "hello"),
     (["hey verona"], "verona"),  # not a target here, so upstream's intent stands
     (["hey verona"], "verona hey"),
     (["verona"], "veronas"),     # whole words only

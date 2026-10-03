@@ -1,7 +1,7 @@
 """ARPAbet phonemes for words the CMU dictionary does not have, from espeak.
 
 openWakeWord's generate_adversarial_texts needs phonemes for an
-out-of-dictionary word ("hanako", "clarra") to find real words that sound
+out-of-dictionary word ("clarra") to find real words that sound
 like it, which become negatives. It got them from DeepPhonemizer's
 en_us_cmudict_forward.pt, downloaded at first use from an S3 bucket that
 answers 403 since 2026 and has no mirror we could find (the Hugging Face

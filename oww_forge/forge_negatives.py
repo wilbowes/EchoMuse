@@ -5,8 +5,7 @@ kept input words, and only removes texts equal to THAT phrase. Train "hey
 verona" beside "verona" and the first emits "verona" (and "verona hey") as
 negatives: the bare name becomes a positive and one of the most common
 negatives at once, and stops firing. Counted over 20k texts, 2026-10-03:
-"hanako" was the most common negative of all for hi/hello/hey hanako + hanako
-(4.1%), "verona" 2.7%.
+"verona" was 2.7% of them.
 
 Copied into the openwakeword package by the Dockerfile; train.py calls it
 through patch_oww_negatives."""

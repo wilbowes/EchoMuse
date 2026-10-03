@@ -4280,13 +4280,12 @@ echo cancelling before selection comes first, since scoring several mics and
 choosing between them during playback both need a clean signal from each.
 
 **Why a bare wake name fails in a multi-phrase model.** Wil's "verona" is
-weaker than "hey verona", and a contributor's "hanako" does not fire beside
-hi/hello/hey hanako. He suspected a VAD opening on the first word. There is no
+weaker than "hey verona", and a contributor's bare name does not fire at all
+beside its greeting phrases. He suspected a VAD opening on the first word. There is no
 VAD in front of wake scoring on either side. openWakeWord builds adversarial
 negatives per target phrase from partial phrases and kept input words, and
 only removes texts equal to that phrase, so "hey verona" emits "verona".
-Counted over 20k: "hanako" is the single most common negative text (4.1%),
-"verona" 2.7%. The fix filters any negative containing a target phrase and is
+Counted over 20k: "verona" is 2.7% of the negative texts. The fix filters any negative containing a target phrase and is
 on `fix/forge-bare-name-negatives`; a retrain with the original positives was
 running at the close.
 
