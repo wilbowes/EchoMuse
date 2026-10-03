@@ -114,14 +114,21 @@ jobs:
           docker run --rm -v "${{ github.workspace }}/emos":/emos -w /emos \
             echomuse-compiler bash -lc \
             "/opt/android/ndk/21.4.7075529/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang \
-               -static -O2 -Wall -o build/init init/init.c"
+               -static -O2 -Wall -DEMOS_BOARD=biscuit -o build/init init/init.c init/boards/boards_biscuit.c"
 
       - name: Compile init32 (armv7a, for FireOS 6)
         run: |
           docker run --rm -v "${{ github.workspace }}/emos":/emos -w /emos \
             echomuse-compiler bash -lc \
             "/opt/android/ndk/21.4.7075529/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang \
-               -static -O2 -Wall -o build/init32 init/init.c"
+               -static -O2 -Wall -DEMOS_BOARD=biscuit -o build/init32 init/init.c init/boards/boards_biscuit.c"
+
+      - name: Compile init32-radar (armv7a, Radar FireOS 6)
+        run: |
+          docker run --rm -v "${{ github.workspace }}/emos":/emos -w /emos \
+            echomuse-compiler bash -lc \
+            "/opt/android/ndk/21.4.7075529/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang \
+               -static -O2 -Wall -DEMOS_BOARD=radar -o build/init32-radar init/init.c init/boards/boards_radar.c"
 
       - name: Verify both are static, and are the architecture each claims
         # Each is silent when wrong and fatal on the device, and CI only checks
@@ -135,10 +142,15 @@ jobs:
             echo "::error::init is not an aarch64 binary"; exit 1; }
           file emos/build/init32 | grep -q "32-bit LSB executable, ARM" || {
             echo "::error::init32 is not a 32-bit ARM binary"; exit 1; }
-          for f in init init32; do
+          for f in init init32 init32-radar; do
             file "emos/build/$f" | grep -q "statically linked" || {
               echo "::error::$f is not statically linked"; exit 1; }
           done
+          file emos/build/init32-radar | grep -q "32-bit LSB executable, ARM" || {
+            echo "::error::init32-radar is not a 32-bit ARM binary"; exit 1; }
+          if cmp -s emos/build/init32 emos/build/init32-radar; then
+            echo "::error::Biscuit and Radar init binaries are identical"; exit 1
+          fi
           if cmp -s emos/build/init emos/build/init32; then
             echo "::error::init and init32 are identical — one triple built both"
             exit 1
@@ -253,7 +265,7 @@ jobs:
         run: |
           python3 emos/tools/make-payload-bundle.py "$GITHUB_REF_NAME" \
             emos/build/emos-payload.zip \
-            emos/build/init emos/build/init32 \
+            emos/build/init emos/build/init32 emos/build/init32-radar \
             emos/build/wpa/wpa_supplicant emos/build/wpa/wpa_cli \
             emos/build/wpa/em-wifi emos/build/bb/busybox
 

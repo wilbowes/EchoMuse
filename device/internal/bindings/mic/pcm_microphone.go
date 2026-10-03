@@ -10,10 +10,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wilbowes/EchoMuse/internal/bindings/codec"
-	pkgmic "github.com/wilbowes/EchoMuse/pkg/mic"
 	"github.com/Binozo/GoTinyAlsa/pkg/pcm"
 	"github.com/Binozo/GoTinyAlsa/pkg/tinyalsa"
+	"github.com/wilbowes/EchoMuse/internal/bindings/codec"
+	pkgmic "github.com/wilbowes/EchoMuse/pkg/mic"
 )
 
 const cardNr = 0
@@ -36,6 +36,8 @@ type PcmMicrophone struct {
 // the permanent ALSA read loop.
 func NewMicrophone() (*PcmMicrophone, error) {
 	device := tinyalsa.NewDevice(cardNr, deviceNr, pcm.Config{
+		// PCM24 carries nine transport channels on both biscuit and Radar,
+		// regardless of the number of active physical microphones.
 		Channels:    9,
 		SampleRate:  16000,
 		PeriodSize:  512,

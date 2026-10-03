@@ -44,3 +44,5 @@ tls/
 
 # speaker_profile generates its test signals; generate_signals.py is the source
 device/tools/speaker_profile/*.wav
+/emos/busybox-1.38.0
+emos/busybox-1.38.0.tar.bz2

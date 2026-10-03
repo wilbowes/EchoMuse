@@ -43,6 +43,27 @@ static void check(const char *what, const char *cmdline, int want)
     }
 }
 
+/* cmdline_board() returns a pointer to a string (possibly BOARD_DEFAULT,
+ * possibly a static buffer of the parsed id), not an integer. A separate
+ * helper keeps the system-part test above unchanged while covering the
+ * board-id parser with the same ok/FAIL shape.
+ *
+ * strcmp() rather than pointer equality because the parser may return a
+ * pointer into its own buffer, not a pointer to a string literal -- and
+ * even when both sides ARE literals, what the test asserts is "the id
+ * reads as this name", which is value equality. */
+static void check_str(const char *what, const char *cmdline, const char *want)
+{
+    const char *got = cmdline_board(cmdline);
+    if (got && !strcmp(got, want)) {
+        printf("ok    %-46s -> %s\n", what, got);
+    } else {
+        printf("FAIL  %-46s -> %s, wanted %s\n", what,
+               got ? got : "(null)", want ? want : "(null)");
+        fails++;
+    }
+}
+
 int main(void)
 {
     const int D = SYSTEM_PART_DEFAULT;
@@ -93,6 +114,79 @@ int main(void)
      * range test above is ever tightened past them. */
     check("system_a", "ro emos.system=/dev/block/mmcblk0p13", 13);
     check("system_b", "ro emos.system=/dev/block/mmcblk0p14", 14);
+
+    /* ── cmdline_board() ────────────────────────────────────────────────────
+     *
+     * Same shape as the system-part parser: stamp recognised, stamp absent,
+     * stamp malformed, stamp that names a board we have never heard of. The
+     * last case falls back to the default rather than refusing — an unknown
+     * id is the device we have not built support for yet, and a refusal is a
+     * device that cannot be brought up to ask.
+     *
+     * The default value is BOARD_DEFAULT ("biscuit"), pinned by the constant
+     * rather than by string equality here, so renaming it changes one line
+     * rather than every test case. */
+    const char *BD = BOARD_DEFAULT;
+
+    printf("\n--- cmdline_board() ---\n");
+
+    /* Absent: an image built before this stamp existed keeps booting as it
+     * did, against the only board init currently knows. */
+    check_str("absent -- an older image", "bootopt=64S3 ro init=/init", BD);
+    check_str("empty cmdline", "", BD);
+
+    /* Stamped: the board id travels verbatim from the packer to init. */
+    check_str("stamped, biscuit",
+              "bootopt=64S3 ro init=/init emos.board=biscuit", "biscuit");
+    check_str("stamped, radar",
+              "bootopt=64S3 ro init=/init emos.board=radar", "radar");
+    check_str("stamped first",
+              "emos.board=donut bootopt=64S3 ro", "donut");
+    check_str("stamped in the middle",
+              "ro emos.board=echo3 init=/init", "echo3");
+    check_str("trailing newline, as /proc/cmdline gives it",
+              "ro emos.board=biscuit\n", "biscuit");
+    check_str("stamped alongside emos.system=",
+              "ro emos.system=/dev/block/mmcblk0p14 emos.board=biscuit",
+              "biscuit");
+    /* The packer's full stamp: both keys appear in the order it writes
+     * them, on a real device's cmdline. */
+    check_str("full packer stamp",
+              "bootopt=64S3 ramoops.dump_oops=1 "
+              "emos.system=/dev/block/mmcblk0p13 emos.board=radar",
+              "radar");
+
+    /* Token boundary: a longer key merely ENDING in ours cannot answer. */
+    check_str("a longer key ending in ours",
+              "ro xemos.board=biscuit", BD);
+    check_str("our key as a value of something else",
+              "ro other=emos.board=biscuit", BD);
+
+    /* Anything we do not recognise falls back rather than being interpreted
+     * generously -- an id from a builder we do not know is not a licence to
+     * guess. The fallback keeps the device bootable for diagnosis, which is
+     * what "unknown" buys elsewhere in this file. */
+    check_str("unknown id", "ro emos.board=donut-v2", "donut-v2");
+    check_str("unknown id is left intact, not defaulted",
+              "ro emos.board=somethingwehavenot", "somethingwehavenot");
+
+    /* Reject anything that is not printable ASCII. A board id is a string the
+     * packer stamps and init selects on, and a non-printable value here is
+     * corruption rather than intent. */
+    check_str("non-printable at the end", "ro emos.board=biscuit\x01", BD);
+    /* A bare space in the value would END the token, so this is not a
+     * useful test of non-printable rejection (the parser would simply
+     * see a shorter value). A \x01 mid-token survives tokenisation, so
+     * the parser's printable-ASCII check actually fires. */
+    check_str("non-printable mid-value", "ro emos.board=bis\x01cuit", BD);
+    check_str("the key with an empty value", "ro emos.board=", BD);
+    check_str("the key with no '='", "ro emos.board", BD);
+    /* A bare substring search would return 'biscuit' here too — the test
+     * names the failure so a future refactor cannot re-introduce it. */
+    check_str("value longer than the buffer",
+              "ro emos.board=" /* pad out to 65 chars */
+              "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz"
+              "abcdefghijklmnop", BD);
 
     printf("\n%s\n", fails ? "FAILED" : "all ok");
     return fails ? 1 : 0;
