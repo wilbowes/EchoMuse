@@ -140,6 +140,13 @@ type PcmSpeaker struct {
 	// level whatever the volume.
 	vol softVolume
 	cue cueState
+	// response is a relative gain on the voice plane before it is mixed with
+	// music. The device volume still runs on the completed mix below, so the
+	// buttons remain authoritative; response caps itself against vol so their
+	// combined gain never exceeds unity (#636).
+	response      responseGain
+	responseMix   []float64
+	responseGains []float64
 
 	// src is a second producer for the music plane (Sendspin, #89): a pull
 	// source, consulted only while the 0x04 plane has nothing, so Home
@@ -235,18 +242,22 @@ func (p *PcmSpeaker) OnStreamStats(cb func(StreamStats)) {
 
 func NewPcmSpeaker(echoTap func([]byte), levelTap func(rms float64)) (*PcmSpeaker, error) {
 	s := &PcmSpeaker{
-		stopCh:   make(chan struct{}),
-		deadCh:   make(chan struct{}),
-		echoTap:  echoTap,
-		levelTap: levelTap,
-		chain:    outchain.New(48000),
-		chainBuf: make([]byte, periodBytes),
-		srcBuf:   make([]byte, periodBytes),
+		stopCh:        make(chan struct{}),
+		deadCh:        make(chan struct{}),
+		echoTap:       echoTap,
+		levelTap:      levelTap,
+		chain:         outchain.New(48000),
+		chainBuf:      make([]byte, periodBytes),
+		srcBuf:        make([]byte, periodBytes),
+		responseMix:   make([]float64, periodSize*2),
+		responseGains: make([]float64, periodSize),
 	}
 	s.voice = newAudioStream(audioChanDepth, s.deadCh)
 	s.music = newAudioStream(audioChanDepth, s.deadCh)
 	s.duckTarget.Store(unityGain)
 	s.mixer.SetGainImmediate(unityGain)
+	s.response.setDB(0)
+	s.response.cur = 1
 	if err := s.Init(); err != nil {
 		return nil, err
 	}
@@ -483,6 +494,25 @@ func (p *PcmSpeaker) silenceLoop() {
 			music = p.pullSource()
 		}
 
+		var response responsePeriod
+		hasResponse := voice != nil
+		var responseGains []float64
+		wideResponse := false
+		if hasResponse {
+			// One atomic read for the whole response period. Response gain is
+			// capped against this target and the same target is applied below,
+			// so a volume command arriving between those stages cannot briefly
+			// drive their product above unity.
+			volumeTarget := p.vol.targetGain()
+			response = p.response.begin(&p.vol, len(voice)/4, volumeTarget)
+			responseGains = p.responseGains[:len(voice)/4]
+			response.fillGains(responseGains)
+			wideResponse = response.boosted(responseGains)
+			response.finish(responseGains)
+		} else {
+			p.response.settle(&p.vol)
+		}
+
 		// The ring's level must be measured BEFORE mixing: Mix sums into the
 		// voice buffer in place, so afterwards there is no voice-only signal
 		// left to measure.
@@ -491,23 +521,33 @@ func (p *PcmSpeaker) silenceLoop() {
 			level = periodRMS(voice)
 		}
 
-		out := p.mixer.Mix(voice, music, p.duckTarget.Load())
-		process := out != nil
-		if out == nil {
-			out = silencePeriod
-			if !p.chain.Idle() {
-				// Filter tails still ringing out of the last audio.
-				copy(p.chainBuf, silencePeriod)
-				out, process = p.chainBuf, true
-			}
-		}
-		if process {
-			if applied := p.chain.Process(out); applied != nil {
+		var out []byte
+		if wideResponse {
+			wide := p.mixer.MixResponse(p.responseMix, voice, music, p.duckTarget.Load(), responseGains)
+			if applied := p.chain.ProcessFloat(wide, responseGains); applied != nil {
 				log.Printf("[speaker] output chain: %s", applied)
 			}
-			p.vol.apply(out)
+			out = voice
+			p.vol.applyFloat(wide, out, response.volumeTarget)
 		} else {
-			p.vol.settle()
+			out = p.mixer.Mix(voice, music, p.duckTarget.Load())
+			process := out != nil
+			if out == nil {
+				out = silencePeriod
+				if !p.chain.Idle() {
+					// Filter tails still ringing out of the last audio.
+					copy(p.chainBuf, silencePeriod)
+					out, process = p.chainBuf, true
+				}
+			}
+			if process {
+				if applied := p.chain.Process(out); applied != nil {
+					log.Printf("[speaker] output chain: %s", applied)
+				}
+				p.vol.apply(out)
+			} else {
+				p.vol.settle()
+			}
 		}
 		// After the volume, so the cue is the same loudness at any volume.
 		if cued := p.mixCue(out); cued != nil {
@@ -736,6 +776,11 @@ const dacUnity = "127"
 // SetVolume sets the playback volume as a device level (0..127, 0.5dB per
 // step, unity at 127). Takes effect from the next period, ramped across it.
 func (p *PcmSpeaker) SetVolume(level int) { p.vol.set(VolumeGain(level)) }
+
+// SetResponseGainDB sets the gain applied only to the voice plane, before it is
+// mixed with music. It is relative to the device volume and dynamically capped
+// so the combined gain cannot exceed unity.
+func (p *PcmSpeaker) SetResponseGainDB(db float64) { p.response.setDB(db) }
 
 // Close shuts the speaker down in the reverse of Init's bring-up: mute,
 // amp off, then tear the stream down. Muting first makes the PCM-close

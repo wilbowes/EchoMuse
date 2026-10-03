@@ -182,6 +182,47 @@ func TestMatchesControllerChain(t *testing.T) {
 	}
 }
 
+func TestWidePeriodKeepsChainStateInNormalisedDomain(t *testing.T) {
+	reference, switched := New(48000), New(48000)
+	reference.SetActive(true)
+	switched.SetActive(true)
+
+	for chunk := 0; chunk < 3; chunk++ {
+		mono := make([]int16, 512)
+		for i := range mono {
+			n := chunk*len(mono) + i
+			mono[i] = int16(12000 * math.Sin(2*math.Pi*80*float64(n)/48000))
+		}
+		want := stereo(mono)
+		reference.Process(want)
+
+		if chunk == 1 {
+			const scale = 4.0
+			wide := make([]float64, len(mono)*2)
+			scales := make([]float64, len(mono))
+			for i, sample := range mono {
+				wide[i*2], wide[i*2+1] = float64(sample)*scale, float64(sample)*scale
+				scales[i] = scale
+			}
+			switched.ProcessFloat(wide, scales)
+			for i := range mono {
+				got := wide[i*2] / scale
+				expected := float64(int16(binary.LittleEndian.Uint16(want[i*4:])))
+				if math.Abs(got-expected) > 1 {
+					t.Fatalf("wide frame %d: normalised %.3f, want %.3f", i, got, expected)
+				}
+			}
+			continue
+		}
+
+		got := stereo(mono)
+		switched.Process(got)
+		if string(got) != string(want) {
+			t.Fatalf("ordinary chunk %d changed across wide-period transition", chunk)
+		}
+	}
+}
+
 // BenchmarkPeriod is one 2048-frame period through the whole chain, shaped
 // EQ plus speech boost, guard and limiter all on — the most work it can do.
 // A period is 42.7ms of audio; ns/op against that is the realtime share.

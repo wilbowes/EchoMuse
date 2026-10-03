@@ -182,6 +182,10 @@ DEFAULT_DEVICE_CONFIG = {
     # cannot perform. A taste parameter — it wants tuning by ear in a real
     # room, like the LED meter curve, not a firmware push per attempt.
     "duckDb": -18.0,
+    # Voice-response gain relative to the device volume. Firmware maps
+    # low / medium / high to 0 / +6 / +12dB before mixing with music, then
+    # tapers the boost near maximum so combined gain never exceeds unity.
+    "responseLevel":   "low",
     # streamReply: start speaking when Home Assistant says the reply's first
     # text has arrived (its tts_start_streaming signal) instead of when the whole
     # reply is done. Default OFF: it is faster when the model and the TTS engine

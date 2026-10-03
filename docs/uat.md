@@ -234,12 +234,21 @@ something bass-heavy loud.
 noticeably worse.
 **Flag:** No difference with them on or off.
 
-### D6 · The headphone jack
+### D6 · Response level
+**Do:** At about 30% device volume, ask the same question at Low, Medium, and
+High response level. Repeat near maximum volume.
+**Expect:** Voice gets progressively louder at 30% without changing music or
+the device volume. Near maximum, the differences shrink; at maximum they are
+the same. No setting clips or adds a volume-ring animation.
+**Flag:** Music or device volume moving; no difference at 30%; distortion; or
+a boost that remains at maximum.
+
+### D7 · The headphone jack
 **Do:** Plug into the 3.5mm jack.
 **Expect:** Audio moves to the jack.
 **Flag:** Anything beyond the known jack faults in the table above.
 
-### D7 · Speak while the reply is written
+### D8 · Speak while the reply is written
 **Do:** Config → Playback → turn on "Speak while the reply is written" and save.
 Ask for something long ("explain in two paragraphs how a refrigerator works").
 Turn it off, save, and ask again.

@@ -161,16 +161,7 @@ func (c *Chain) Idle() bool {
 // The first return is non-nil only when a queued SetParams changed the chain
 // on this period, so the caller can log what the audio is now going through.
 func (c *Chain) Process(buf []byte) (applied *Params) {
-	if p, changed := c.takePending(); changed {
-		applied = &p
-	}
-	active := c.active.Load()
-	if active != c.running {
-		// Entering or leaving: the chain's state belongs to audio it last
-		// saw, which is not the audio arriving now. Start clean.
-		c.reset()
-		c.running = active
-	}
+	applied, active := c.beginProcess()
 	if !active {
 		return applied
 	}
@@ -216,6 +207,67 @@ func (c *Chain) Process(buf []byte) (applied *Params) {
 		c.idle = false
 	}
 	return applied
+}
+
+// ProcessFloat is Process for a wide-precision interleaved stereo period.
+// fullScales contains one full-scale multiplier per frame. Samples are
+// normalised into the chain's ordinary S16 signal domain and returned to the
+// wide domain afterward. Keeping the chain's state normalised makes switching
+// between ordinary and boosted periods seamless, while the caller retains
+// headroom until the later master-volume stage.
+func (c *Chain) ProcessFloat(buf []float64, fullScales []float64) (applied *Params) {
+	applied, active := c.beginProcess()
+	if !active {
+		return applied
+	}
+
+	frames := len(buf) / 2
+	silentIn, silentOut := true, true
+	for i := 0; i < frames; i++ {
+		l, r := buf[i*2], buf[i*2+1]
+		if l != 0 || r != 0 {
+			silentIn = false
+		}
+		scale := 1.0
+		if i < len(fullScales) && fullScales[i] > 0 {
+			scale = fullScales[i]
+		}
+		x := (l + r) / (2 * scale)
+		x = c.eq.step(x)
+		x = c.guard.step(x)
+		x = c.lim.step(x)
+		if x > ceiling {
+			x = ceiling
+		} else if x < -fullScale {
+			x = -fullScale
+		}
+		x *= scale
+		if math.Abs(x) >= 1 {
+			silentOut = false
+		}
+		buf[i*2], buf[i*2+1] = x, x
+	}
+	if silentIn && silentOut {
+		c.reset()
+		c.idle = true
+	} else {
+		c.idle = false
+	}
+	return applied
+}
+
+func (c *Chain) beginProcess() (applied *Params, active bool) {
+	if p, changed := c.takePending(); changed {
+		applied = &p
+	}
+	active = c.active.Load()
+	if active != c.running {
+		// Entering or leaving: the chain's state belongs to audio it last
+		// saw, which is not the audio arriving now. Start clean.
+		c.reset()
+		c.running = active
+	}
+	return applied, active
 }
 
 func (c *Chain) reset() {

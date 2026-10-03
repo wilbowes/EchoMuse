@@ -100,6 +100,16 @@ def test_volume_cue_capability_is_surfaced_to_the_dashboard():
         "the dashboard must gate the volume button sound on the capability"
 
 
+def test_response_level_is_gated_on_its_capability():
+    assert "response_level" in device_capabilities()
+    assert "response_level_capable" in CONTROLLER.read_text()
+    assert "responseLevelCapable" in API.read_text()
+    jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
+    assert "disabled={!responseLevelCapable}" in jsx
+    select = re.search(r"function Select\(\{(.*?)\n\}", jsx, re.S)
+    assert select and "disabled" in select.group(1)
+
+
 def test_sendspin_is_gated_on_its_capability_and_its_token_stays_private():
     """
     Sendspin (#89) is off on firmware without a player, so the toggle must be

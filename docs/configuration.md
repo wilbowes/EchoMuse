@@ -96,6 +96,17 @@ little speaker is boomy and dull by default.
 An extra presence bump for spoken responses. Try it if responses sound
 muffled from across the room.
 
+### Response level
+Sets spoken responses relative to the device's normal volume: **Low** keeps
+the existing level, **Medium** adds 6dB, and **High** adds 12dB. The volume
+buttons still move both media and responses together; this setting only makes
+voice louder within that range. Near maximum volume the extra boost tapers
+away, reaching none at maximum, so it cannot drive the output above full
+scale. The wake sound remains independent and uses Wake sound level.
+
+Older firmware cannot apply this gain. Its control is disabled for those
+devices and explains that newer firmware is required.
+
 ### Speak while the reply is written
 Off by default. When it is off, the Dot starts speaking once Home Assistant
 has the whole reply. When it is on, it starts as soon as Home Assistant has the

@@ -127,6 +127,11 @@ silence, not degraded behaviour.
 | V4 | user command during the turn | recorded as `pending`; **overrides** our auto-resume | last write wins | — | [today] |
 | V5 | duck released before the response finishes | — | **lifts early, competes with the tail** | — | **bug, #261** |
 
+Before the V1 mix, firmware applies `responseLevel` only to the voice plane:
+Low / Medium / High request 0 / +6 / +12dB above device volume. The effective
+boost is capped against the live device-volume ramp, so the combined gain
+cannot exceed unity and converges to no boost at maximum volume.
+
 **V5 is #261 and is unexplained.** `em_player` logs only the failure paths
 (`duck failed` / `unduck failed`), so a duck that is sent, applied, and then
 released early is completely silent in the log. Add the log line before
