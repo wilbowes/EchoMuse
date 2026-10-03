@@ -3409,6 +3409,83 @@ const _wipeVerdict = (out) => {
   return { ok: true, why: '', cacheLeft: cache };
 };
 
+// Did the extract leave a magiskboot the rest of the step can run? `unzip`
+// exiting non-zero proves nothing by itself and its OUTPUT was never read:
+// /sdcard/f1r30s.zip missing answers "can't open", the step logs that line
+// and carries on, and the flow then patches nothing — no magiskboot, no
+// init.csm.project.rc entry — leaving a device that runs perfectly from
+// `sh /data/local/bin/start_server.sh` and is dead after every reboot. Nothing
+// downstream fails when magiskboot is missing, because every magiskboot call
+// below logs its own output and ignores it. So the probe prints:
+//
+//   MAGISKBOOT=yes  — present and executable
+//   _MBCHK          — the probe ran to the end
+//
+// Two answers are being kept apart and neither of them is "yes": a check that
+// could not run must not read as a pass, which is what `_CLEARCHK` and
+// `_WIPECHK` exist for.
+const _magiskbootVerdict = (out = '') => {
+  if (!out || !out.includes('_MBCHK')) {
+    return { ok: false, why:
+      'The check after the extract produced no output at all, so it never ran — '
+      + 'this says nothing about whether the archive unpacked.' };
+  }
+  if (!/^MAGISKBOOT=yes$/m.test(out)) {
+    return { ok: false, why:
+      'unzip did not leave an executable magiskboot at /tmp/bin/magiskboot. '
+      + 'Nothing has been patched or flashed. Check that /sdcard/f1r30s.zip is '
+      + 'on the device and retry this step.' };
+  }
+  return { ok: true, why: '' };
+};
+
+// Is the magisk.db on the device the one the controller served? Measured at 0
+// bytes where it was 36864, with the controller healthy and magiskd then
+// refusing every su ("sqlite3_exec: no such table: policies"). `cp` returning
+// 0 says the copy happened, not what it copied: push() returns without
+// draining — busybox cat on TWRP never closes stdout, so the next shell
+// command is the sequencing — and a cp that runs before cat has flushed
+// leaves a 0-byte source, a 0-byte destination, chmod still applied and
+// nothing anywhere saying so. Intermittent, and the same inputs succeed on a
+// retry, which is what makes it worth reading back rather than re-running.
+//
+//   DB=<bytes>  — the size of the INSTALLED file, read off the device
+//   _DBCHK      — the probe ran to the end
+//
+// `wc -c < file` rather than reading the bytes back: it is one applet in a
+// recovery that already has unzip, dd and cpio, and the number is the thing
+// being asserted. A probe that answered nothing is never a match — "we could
+// not measure this" and "this is zero" are different facts and only one of
+// them is the reported bug.
+const _preseedVerdict = (out = '', want) => {
+  if (!out || !out.includes('_DBCHK')) {
+    return { ok: false, why:
+      'The check after installing magisk.db produced no output at all, so it '
+      + 'never ran — this says nothing about what is on the device.' };
+  }
+  const got = ((out.match(/^DB=(\d+)/m) || [])[1] || '');
+  if (!got) {
+    return { ok: false, why:
+      'Could not read the size of /data/adb/magisk.db on the device, so there '
+      + 'is no evidence the copy landed. Retry this step; if it keeps failing, '
+      + 'check free space on /data.' };
+  }
+  if (!want) {
+    return { ok: false, why:
+      'The controller served a 0-byte magisk.db, which is exactly the file that '
+      + 'makes magiskd refuse every su. Nothing has been installed; retry the '
+      + 'step, and report it if the controller keeps serving an empty file.' };
+  }
+  if (+got !== want) {
+    return { ok: false, why:
+      `magisk.db is ${got} bytes on the device, expected ${want}. The push or `
+      + 'the copy did not land, so magiskd will reject every su request with '
+      + '"no such table: policies" until it does. Retry this step — nothing '
+      + 'else has been changed.' };
+  }
+  return { ok: true, why: '' };
+};
+
 // ── SSIDs and passphrases ───────────────────────────────────────────────────
 //
 // An SSID is 0-32 arbitrary octets (IEEE 802.11): spaces, quotes,
@@ -5384,6 +5461,17 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     const unzipOut = await c.shell('unzip -o /sdcard/f1r30s.zip bin/magiskboot -d /tmp/ 2>&1');
     addLog(unzipOut || '(done)');
     await c.shell('chmod 755 /tmp/bin/magiskboot');
+    // Read the extract back rather than trusting it (#268). `unzip` on a
+    // missing archive prints "can't open" and exits non-zero, and this step
+    // used to log that line and carry on — after which nothing below fails,
+    // because every magiskboot call here logs its own output and ignores it.
+    // The device then patches no ramdisk and comes up dead after every reboot,
+    // having worked perfectly under `sh /data/local/bin/start_server.sh`.
+    const bootProbe = await c.shell(
+      '[ -x /tmp/bin/magiskboot ] && echo MAGISKBOOT=yes; echo _MBCHK');
+    const magiskboot = _magiskbootVerdict(bootProbe);
+    if (!magiskboot.ok) throw new Error(`${magiskboot.why}\n\nunzip said:\n${unzipOut || '(nothing)'}`);
+    addLog('magiskboot extracted.', 'ok');
 
     addLog('Checking which partition the boot image lives in…');
     const probe = await c.shell(
@@ -5605,6 +5693,21 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     addLog(`magisk.db: ${dbBytes.length} bytes`);
     await c.push('/tmp/magisk_preseed.db', dbBytes);
     await c.shell('cp /tmp/magisk_preseed.db /data/adb/magisk.db && chmod 600 /data/adb/magisk.db');
+    // Read the installed size back off the device (#267). The && above proves cp
+    // returned 0, which says nothing about the bytes it copied: push() returns
+    // without draining, so if the sequencing the transport relies on does not
+    // hold on this run, cp reads the file before cat has flushed it and leaves
+    // a 0-byte destination with the chmod still applied. Intermittent, and
+    // magiskd answers it by refusing every su — which reads as a broken root,
+    // on a device that is provisioned correctly in every other respect.
+    // Labelled, for the same reason MAGISKBOOT=yes is: the verdict looks for
+    // `DB=<n>` by name, and a bare `wc -c` prints the number alone — which
+    // reads as a probe that could not measure anything, so a correctly
+    // installed database would be refused on every device.
+    const dbProbe = await c.shell(
+      'echo "DB=$(wc -c < /data/adb/magisk.db 2>/dev/null)"; echo _DBCHK');
+    const seeded = _preseedVerdict(dbProbe, dbBytes.length);
+    if (!seeded.ok) throw new Error(seeded.why);
     addLog('magisk.db installed.', 'ok');
   }
 
