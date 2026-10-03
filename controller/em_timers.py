@@ -14,8 +14,14 @@ reason as em_button / em_shadow / em_turnclock — the controller test suite
 imports it without pulling in aiohttp/openwakeword:
 
   * TimerRegistry reduces the event stream into "is a finished timer waiting
-    to be dismissed?" and reports the ring transitions (start / stop) that
-    the async orchestrator in em_controller acts on.
+    to be dismissed?" and "what is the soonest running timer's remaining
+    time?" and reports the ring transitions (start / stop) that the async
+    orchestrator in em_controller acts on. Remaining time is kept as a
+    deadline converted from HA's seconds_left at arrival, so the display
+    does not depend on HA's event cadence (see running_countdown).
+  * The countdown_* helpers turn a (remaining, total) pair into the shrinking
+    amber arc the ring shows while a timer runs, and decide when the
+    countdown may own the ring at all.
   * attenuate() ducks the alert while someone speaks over it. The alert audio
     itself is the bundled Home Assistant Voice PE sound (ALARM_SOUND_FILE),
     decoded by em_controller — it is already 48kHz mono, the format the device
@@ -31,7 +37,9 @@ cleared and the ring stops; a safety cap bounds a ring nobody ever answers.
 
 from __future__ import annotations
 
+import math
 import os
+import time
 
 import numpy as np
 
@@ -102,36 +110,54 @@ class TimerRegistry:
     Not thread-safe; drive it from a single asyncio task (the satellite's
     message handler). A timer is keyed by HA's timer_id and is either
     "running" or "finished"; the registry is "ringing" while any finished
-    timer has not been dismissed.
+    timer has not been dismissed. A running timer also carries its total and
+    a monotonic deadline, so the ring can show a countdown without ever
+    asking HA again (see running_countdown).
     """
 
-    def __init__(self) -> None:
-        # timer_id -> "running" | "finished"
-        self._timers: dict[str, str] = {}
+    def __init__(self, clock=time.monotonic) -> None:
+        # timer_id -> (state, total_seconds, deadline)
+        #
+        # The deadline is converted from HA's seconds_left the moment an
+        # event arrives, against the injected clock. HA's UPDATED cadence is
+        # then only a drift correction. If the events stop arriving the arc
+        # keeps moving on the injected clock, and an UPDATED that does
+        # arrive rewrites the deadline. Constructor-injected like
+        # em_turnclock so the tests can drive time.
+        self._timers: dict[str, tuple[str, float, float]] = {}
+        self._clock = clock
 
     @property
     def ringing(self) -> bool:
-        return any(state == "finished" for state in self._timers.values())
+        return any(state == "finished" for state, _t, _d in self._timers.values())
 
-    def apply(self, event_type: int, timer_id: str = "") -> str:
+    def apply(self, event_type: int, timer_id: str = "",
+             total_seconds: float = 0, seconds_left: float = 0) -> str:
         """
         Fold one event into the registry.
 
         Returns RING_START when this event begins a ring (first finished timer
         after a quiet registry), RING_STOP when it ends one (the last finished
         timer was dismissed/cancelled), or RING_NONE otherwise.
+
+        total_seconds/seconds_left default to 0 so existing callers that
+        only care about the ring transition keep working; the countdown
+        simply sees those timers as unknown-length and skips them.
         """
         was = self.ringing
 
         if event_type == TIMER_FINISHED:
-            self._timers[timer_id] = "finished"
+            # No deadline kept. The alarm owns the ring from here, so the
+            # countdown never sees a finished timer.
+            self._timers[timer_id] = ("finished", 0.0, 0.0)
         elif event_type == TIMER_CANCELLED:
             # A CANCELLED for a still-running timer must NOT affect the ring,
             # and a CANCELLED for a finished one is exactly how a spoken "stop"
             # dismisses it — pop covers both.
             self._timers.pop(timer_id, None)
         elif event_type in (TIMER_STARTED, TIMER_UPDATED):
-            self._timers[timer_id] = "running"
+            self._timers[timer_id] = ("running", float(total_seconds),
+                                      self._clock() + float(seconds_left))
         # Unknown event types are ignored (degrade to old behaviour).
 
         now = self.ringing
@@ -143,15 +169,148 @@ class TimerRegistry:
 
     def clear(self) -> bool:
         """
-        Drop all timers (local dismissal). Returns whether it was ringing —
-        so a caller can tell "I stopped an alarm" from "nothing was ringing".
+        Drop FINISHED timers (local dismissal), keeping running ones.
+        Returns whether it was ringing, so a caller can tell "I stopped an
+        alarm" from "nothing was ringing".
+
+        It used to clear everything, which was harmless while the registry
+        only fed the ring decision. With a countdown it is not. A dismissal
+        would strand every other live timer (no deadline held, nothing to
+        paint) until HA next mentioned them, and HA only mentions a timer
+        at its own events. Both clear_timers call sites mean exactly "drop
+        the finished ones".
         """
         was = self.ringing
-        self._timers.clear()
+        for timer_id in [tid for tid, (state, _t, _d) in self._timers.items()
+                         if state == "finished"]:
+            self._timers.pop(timer_id)
         return was
+
+    def running_countdown(self, now: float | None = None) -> "tuple[float, float] | None":
+        """
+        (remaining, total) for the soonest-finishing RUNNING timer, or None.
+
+        None when nothing is running, when total <= 0 (its length is unknown,
+        so no arc can be sized), or when remaining <= 0 (FINISHED is on its
+        way and a timer that has run out has nothing left to count down;
+        holding the last LED until the event lands is the caller's job).
+        """
+        if now is None:
+            now = self._clock()
+        best: "tuple[float, float, float] | None" = None  # (deadline, remaining, total)
+        for state, total, deadline in self._timers.values():
+            if state != "running" or total <= 0:
+                continue
+            remaining = deadline - now
+            if remaining <= 0:
+                continue
+            if best is None or deadline < best[0]:
+                best = (deadline, remaining, total)
+        return (best[1], best[2]) if best else None
 
     def active_count(self) -> int:
         return len(self._timers)
+
+
+# ── Countdown ring ────────────────────────────────────────────────────────────
+# While an HA timer runs, the ring shows a shrinking amber arc on the Echo the
+# timer was set from. Controller-only. The arc is an ordinary `solid` led_anim
+# spec with per-LED colours, which every led_anim device (v2.9+) already
+# renders (paletteFrame, device/internal/server/animator.go). The countdown is
+# a static arc where the alarm is a pulse, so no new pattern was needed and
+# the reserved status colours (red=mute, orange=link, cyan=volume) are
+# untouched; the amber is the established timer amber from TIMER_ANIM above.
+
+COUNTDOWN_NUM_LEDS = 12  # pinned against em_scenes.NUM_LEDS and the Go count
+
+# (255, 170, 0), the TIMER_ANIM amber, reused from the pulse rather than
+# restated as a new colour.
+_COUNTDOWN_COLOR = [255, 170, 0]
+
+
+def countdown_lit(remaining: float, total: float,
+                 num_leds: int = COUNTDOWN_NUM_LEDS) -> int:
+    """
+    How many LEDs the arc lights. The rule is ceil(num_leds * remaining /
+    total), floor 1.
+
+    A live timer does not read as "off". The last LED holds until FINISHED
+    takes the ring. 0 only answers "nothing to show" (remaining or total
+    non-positive), which running_countdown already excludes before this is
+    called. Clamped at the top for the drift case where a clock correction
+    leaves remaining above total.
+    """
+    if total <= 0 or remaining <= 0:
+        return 0
+    return max(1, min(num_leds, math.ceil(num_leds * remaining / total)))
+
+
+def countdown_anim(remaining: float, total: float) -> dict:
+    """
+    The arc as a led_anim spec. It lights LEDs 0..lit-1 amber with the rest
+    black, in the same orientation as the volume arc
+    (device/internal/server/volume.go). Not `listening: true`; the direction
+    overlay belongs to listening.
+
+    ttlSec = ceil(remaining) + 15, the dead-man every other spec carries. A
+    controller that dies mid-countdown leaves the ring self-clearing a
+    quarter-minute after the countdown itself would have ended.
+    """
+    lit = countdown_lit(remaining, total)
+    colors = [list(_COUNTDOWN_COLOR)] * lit + [[0, 0, 0]] * (COUNTDOWN_NUM_LEDS - lit)
+    return {
+        "pattern": "solid",
+        "colors":  colors,
+        "ttlSec":  max(15, math.ceil(remaining) + 15),
+    }
+
+
+def countdown_step_delta(remaining: float, total: float,
+                         num_leds: int = COUNTDOWN_NUM_LEDS) -> float:
+    """
+    Seconds until `lit` next decrements.
+
+    The repaint sleeper waits on this rather than polling. The LED count
+    only changes at multiples of total/num_leds of remaining, so waking
+    just past each boundary (the caller adds its own margin) keeps the arc
+    honest with one paint per visible change. Once one LED is left the next
+    change is expiry, so the answer is the remaining time itself.
+    """
+    lit = countdown_lit(remaining, total, num_leds)
+    if lit <= 1:
+        return max(0.0, remaining)
+    return remaining - (lit - 1) * total / num_leds
+
+
+def countdown_should_paint(capable: bool, enabled: bool, has_running: bool,
+                           alarm_ringing: bool, turn_active: bool) -> bool:
+    """
+    Whether the countdown may own the ring right now. Pure, like em_button.decide.
+
+    Off for firmware that cannot render a led_anim arc, for a device with the
+    kill switch off (timerRing), with nothing running, while an alarm owns
+    the ring (alarm = pulse, and the pulse outranks the arc), and while a
+    voice turn owns it (listening/spin/meter replace it by the animator's
+    generation counter, and painting now would stamp over the ring
+    mid-reply).
+    """
+    return bool(capable and enabled and has_running
+                and not alarm_ringing and not turn_active)
+
+
+def countdown_may_clear(was_shown: bool, paint: bool,
+                        alarm_ringing: bool, turn_active: bool) -> bool:
+    """
+    Whether the ring may be sent `off`.
+
+    Only when we own it (we are the one that showed it) and nobody else is
+    painting. Never stomp a live listening/meter ring or an alarm pulse.
+    When `paint` is true the countdown repaints rather than clears, so this
+    is the else-branch's guard, and it fails safe. An owner we forgot about
+    keeps its ring, and a countdown arc we never showed has nothing to
+    clear.
+    """
+    return bool(was_shown and not paint and not alarm_ringing and not turn_active)
 
 
 # ── Spoken dismissal ────────────────────────────────────────────────────────

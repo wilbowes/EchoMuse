@@ -5,6 +5,7 @@ to ring. These pin the ring-transition reducer (which is what the async
 orchestrator in em_controller keys off), the spoken-dismissal matcher, and the
 duck applied to the alert while someone speaks over it.
 """
+import math
 import struct
 import pytest
 
@@ -79,6 +80,202 @@ def test_clear_reports_whether_it_was_ringing():
     assert reg.clear() is True
     assert reg.ringing is False
     assert reg.active_count() == 0
+
+
+# ── Countdown registry, clock-injected ───────────────────────────────────────
+# The ring shows a live timer's remaining time, and it must keep doing that
+# when HA's UPDATED events stop arriving. The deadline is converted from
+# seconds_left at arrival and the injected clock counts the seconds from
+# there. An UPDATED is a drift correction, not a heartbeat the display
+# depends on.
+
+class _Clock:
+    def __init__(self, start: float = 1000.0):
+        self.t = start
+
+    def __call__(self) -> float:
+        return self.t
+
+
+def _clocked():
+    clock = _Clock()
+    return t.TimerRegistry(clock=clock), clock
+
+
+def test_registry_tracks_a_running_countdown():
+    reg, clock = _clocked()
+    reg.apply(t.TIMER_STARTED, "a", total_seconds=300, seconds_left=300)
+    rem, tot = reg.running_countdown()
+    assert (rem, tot) == (300.0, 300.0)
+    clock.t += 60
+    rem, tot = reg.running_countdown()
+    assert tot == 300.0
+    assert abs(rem - 240.0) < 1e-6
+
+
+def test_updated_corrects_the_deadline_and_absence_does_not_break_it():
+    reg, clock = _clocked()
+    reg.apply(t.TIMER_STARTED, "a", total_seconds=300, seconds_left=300)
+    clock.t += 100
+    reg.apply(t.TIMER_UPDATED, "a", total_seconds=300, seconds_left=100)
+    clock.t += 5
+    rem, _tot = reg.running_countdown()
+    assert abs(rem - 95.0) < 1e-6
+
+
+def test_finished_timers_are_not_counted_down():
+    # The alarm owns a finished timer; the countdown shows running ones only.
+    reg, _ = _clocked()
+    reg.apply(t.TIMER_STARTED, "a", total_seconds=60, seconds_left=60)
+    reg.apply(t.TIMER_FINISHED, "a")
+    assert reg.running_countdown() is None
+
+
+def test_soonest_running_timer_wins_then_the_next_takes_over():
+    reg, _ = _clocked()
+    reg.apply(t.TIMER_STARTED, "long", total_seconds=600, seconds_left=600)
+    reg.apply(t.TIMER_STARTED, "short", total_seconds=60, seconds_left=60)
+    _rem, tot = reg.running_countdown()
+    assert tot == 60
+    reg.apply(t.TIMER_CANCELLED, "short")
+    _rem, tot = reg.running_countdown()
+    assert tot == 600
+
+
+def test_unknown_length_or_expired_running_timer_is_none():
+    # With total <= 0 nothing was sent with it, so no arc can be sized.
+    # With remaining <= 0 FINISHED is on its way and there is nothing left
+    # to count down.
+    reg, clock = _clocked()
+    reg.apply(t.TIMER_STARTED, "zero-total", total_seconds=0, seconds_left=0)
+    assert reg.running_countdown() is None
+    reg.apply(t.TIMER_STARTED, "b", total_seconds=5, seconds_left=5)
+    clock.t += 5
+    assert reg.running_countdown() is None
+
+
+def test_clear_drops_finished_but_keeps_running():
+    # Clearing is dismissal of the alarm. Cancelling it must not strand
+    # every other live timer. With the registry now feeding the countdown
+    # too, a clear-everything would black their arcs until HA next
+    # mentioned them.
+    reg, _ = _clocked()
+    reg.apply(t.TIMER_STARTED, "a", total_seconds=300, seconds_left=300)
+    reg.apply(t.TIMER_FINISHED, "b")
+    assert reg.clear() is True
+    assert reg.ringing is False
+    rem, tot = reg.running_countdown()
+    assert tot == 300.0 and abs(rem - 300.0) < 1e-6
+    assert reg.active_count() == 1
+
+
+def test_clear_of_a_quiet_registry_keeps_running_timers_too():
+    reg, _ = _clocked()
+    reg.apply(t.TIMER_STARTED, "a", total_seconds=60, seconds_left=60)
+    assert reg.clear() is False
+    assert reg.active_count() == 1
+
+
+# ── Countdown geometry and eligibility ───────────────────────────────────────
+
+def test_countdown_lit_edges():
+    assert t.countdown_lit(300, 300) == 12            # full ring
+    assert t.countdown_lit(299.9, 300) == 12          # ceil holds full
+    assert t.countdown_lit(11 * 300 / 12, 300) == 11  # exactly on a boundary
+    assert t.countdown_lit(0.01, 300) == 1            # a live timer is never off
+    assert t.countdown_lit(0, 300) == 0               # nothing to show
+    assert t.countdown_lit(-5, 300) == 0
+    assert t.countdown_lit(400, 300) == 12            # drift above total clamps
+
+
+def test_countdown_anim_shape():
+    anim = t.countdown_anim(300, 300)
+    assert anim["pattern"] == "solid"
+    assert len(anim["colors"]) == t.COUNTDOWN_NUM_LEDS
+    assert all(c == [255, 170, 0] for c in anim["colors"])
+    assert "listening" not in anim  # no direction overlay, it is not listening
+    assert anim["ttlSec"] >= math.ceil(300) + 15      # dead-man covers the run
+
+
+def test_countdown_anim_ttls_are_dead_mans():
+    # A controller that dies mid-countdown leaves the ring self-clearing a
+    # quarter-minute after the countdown itself would have ended.
+    assert t.countdown_anim(7, 7)["ttlSec"] >= 7 + 15
+    assert t.countdown_anim(0.5, 300)["ttlSec"] >= 15
+
+
+def test_countdown_anim_orientation_matches_the_volume_arc():
+    # lit LEDs are ids 0..lit-1, the same orientation the device's volume
+    # arc uses (device/internal/server/volume.go), so both arcs drain from
+    # the same end of the ring.
+    anim = t.countdown_anim(95, 120)  # ceil(12 * 95/120) = 10
+    assert anim["colors"][:10] == [[255, 170, 0]] * 10
+    assert anim["colors"][10:] == [[0, 0, 0]] * 2
+
+
+def _walk_down(total: float, margin: float):
+    """Simulate the stepper by sleeping delta + margin and reading the new
+    LED count."""
+    rem, lits = total, []
+    while rem > 0:
+        delta = t.countdown_step_delta(rem, total)
+        assert delta > 0, "a non-positive delta would spin the stepper"
+        rem -= delta + margin
+        lits.append(t.countdown_lit(rem, total))
+    return lits
+
+
+def test_step_delta_lands_just_past_each_boundary_120s():
+    # A 120 s timer loses one LED every 10 s; each wake lands past the next
+    # boundary so the count drops by exactly one, all the way to expiry.
+    assert _walk_down(120.0, 0.2) == list(range(11, -1, -1))
+
+
+def test_step_delta_lands_just_past_each_boundary_7s():
+    # A 7 s timer steps every 7/12 s. The margin is what clears the
+    # boundary. Computed exactly onto it, floating point can ceil back to
+    # the same LED count and the stepper repaints nothing forever.
+    lits = _walk_down(7.0, 0.2)
+    assert lits[0] == 11
+    assert all(a >= b for a, b in zip(lits, lits[1:]))  # monotone down
+    assert lits[-1] == 0
+
+
+def test_step_delta_at_one_led_is_the_remaining_time():
+    # With one LED left the next change is expiry, not a boundary.
+    assert t.countdown_step_delta(2.5, 120) == 2.5
+
+
+def test_countdown_should_paint_truth_table():
+    ok = dict(capable=True, enabled=True, has_running=True,
+              alarm_ringing=False, turn_active=False)
+    assert t.countdown_should_paint(**ok) is True
+    assert t.countdown_should_paint(**{**ok, "capable": False}) is False
+    assert t.countdown_should_paint(**{**ok, "enabled": False}) is False
+    assert t.countdown_should_paint(**{**ok, "has_running": False}) is False
+    assert t.countdown_should_paint(**{**ok, "alarm_ringing": True}) is False
+    assert t.countdown_should_paint(**{**ok, "turn_active": True}) is False
+
+
+def test_countdown_may_clear_never_stomps_a_live_ring():
+    assert t.countdown_may_clear(True, False, False, False) is True
+    # A ring we never showed is not ours to black. Mute red, volume cyan
+    # and link orange are device-sourced.
+    assert t.countdown_may_clear(False, False, False, False) is False
+    assert t.countdown_may_clear(True, True, False, False) is False   # repaints
+    assert t.countdown_may_clear(True, False, True, False) is False   # alarm
+    assert t.countdown_may_clear(True, False, False, True) is False   # turn
+
+
+def test_countdown_num_leds_matches_the_ring_everywhere_else():
+    # 12 is a fact about the hardware, stated in three languages now; the
+    # Go count is what the device actually paints.
+    import em_scenes
+    assert t.COUNTDOWN_NUM_LEDS == em_scenes.NUM_LEDS
+    from pathlib import Path
+    go = (Path(__file__).resolve().parents[2]
+          / "device" / "internal" / "server" / "volume.go").read_text()
+    assert "numLEDs    = 12" in go or "numLEDs = 12" in go
 
 
 # ── Spoken dismissal ─────────────────────────────────────────────────────────

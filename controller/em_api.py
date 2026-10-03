@@ -1397,6 +1397,8 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
         live.bass_guard_enabled = bool(effective["bassGuardEnabled"])
     if "bassGuardDb" in effective:
         live.bass_guard_db = float(effective["bassGuardDb"])
+    if "timerRing" in effective:
+        live.timer_ring = bool(effective["timerRing"])
     live.led_scene = em_scenes.resolve(effective)
     # #263: keep the device's cached listening animation in step when the
     # scene changes live, same push as at registration. Without it the ring
@@ -1408,6 +1410,16 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
                  "listeningAnim": live.led_scene["listening_anim"]})
         except Exception:
             pass  # device offline — next connect re-sends it
+    # Re-decide the timer-countdown arc now, so flipping `timerRing` takes
+    # effect on the save rather than at the next reconnect. Reached through
+    # the running controller module rather than `import em_controller`, which
+    # under the add-on would load a second, never-initialised copy (#306).
+    _ctrl = _running_controller_module()
+    if _ctrl is not None and hasattr(_ctrl, "sync_timer_countdown"):
+        try:
+            await _ctrl.sync_timer_countdown(live)
+        except Exception:
+            pass  # device offline; next connect re-syncs
 
 
 @auth.require_auth

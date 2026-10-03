@@ -289,8 +289,10 @@ Give the Activity outcome for the second turn.
 
 ### F1 · A timer rings
 **Do:** "Set a timer for one minute."
-**Expect:** The device rings at one minute.
-**Flag:** No ring, or a ring on the wrong device.
+**Expect:** The ring shows a shrinking amber arc while it counts, one LED
+going dark roughly every 5 s, and the device rings at one minute.
+**Flag:** No ring, a ring on the wrong device, no arc, or an arc on a
+device you didn't set it from.
 
 ### F2 · Stopping the ring
 **Do:** While it rings, tell it to stop.
@@ -310,6 +312,20 @@ completes. **This combination is new and is exactly what we want tested.**
 **Expect:** The alarm is heard over the music, then music returns to full
 level.
 **Flag:** Music that stays ducked, or an alarm you can't hear.
+
+### F5 · The countdown arc yields and returns
+**Do:** Set a 5-minute timer; while the amber arc counts, do a wake-word
+turn and let the reply finish. Then set two timers (1 min and 5 min); when
+the short one fires, dismiss it. Finally cancel everything.
+**Expect:** The conversation ring replaces the arc during the turn and the
+arc is back within ~1.5 s of the reply ending. The two timers show the
+1-minute one; when it is dismissed, the 5-minute arc resumes. Cancel the
+last one and the ring goes dark. If you can kill the controller mid-count,
+the ring self-clears within (time left + 15 s) and the device falls back to
+its usual link behaviour.
+**Flag:** An arc stamped over the listening ring, one that never comes back
+after a turn or a dismissal, two arcs arguing on one Echo, or a ring left
+lit after the controller died.
 
 ---
 

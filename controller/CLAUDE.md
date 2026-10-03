@@ -1014,6 +1014,46 @@ here, from the transcript HA already sends, rather than waiting for a CANCELLED
 that structurally will not come. The registry's CANCELLED path stays for the
 cases HA *does* answer.
 
+**A RUNNING timer paints a shrinking amber arc — the countdown — on the Echo it
+was set from** (`timerRing`, default on, Config → Ring; docs/audio-states.md
+§5.3 T0). Controller-only: the arc is an ordinary `led_anim` `solid` spec with
+per-LED colours (`em_timers.countdown_anim`), which every `led_anim` device
+(v2.9+) already renders — no firmware change, no new capability, no wire
+message. Four rules carry it:
+
+- **Never depend on HA's event cadence.** `TimerRegistry` stores
+  `(state, total, deadline)` with `deadline = clock() + seconds_left` at
+  arrival, clock constructor-injected like `em_turnclock`; an `UPDATED`
+  corrects drift, and its absence never breaks the display.
+  `esphome.get_timer_countdown` is the single source of truth — the
+  controller stepper reads through it every repaint and mirrors no timer
+  state of its own. `TimerRegistry.clear()` now drops **finished entries
+  only**: it used to clear everything, which was harmless while the registry
+  fed only the ring decision, and would strand every other live timer's arc
+  after a dismissal until HA next spoke about them.
+- **The countdown yields the ring, never stamps on it.** A live turn
+  (`voice_lock` / `speaker_busy`) and the alarm's pulse own the ring first
+  (`em_timers.countdown_should_paint`, pure like `em_button.decide`), and
+  `off` goes only through `countdown_may_clear` — mute red, volume cyan and
+  link orange are device-sourced and survive a controller that merely lost
+  track. Sync hooks exist at every owner transition (`on_timer_event`'s
+  injected `_sync_countdown`, the `_stop_alarm` closure,
+  `_ring_timer_alarm`'s finally, `_leds_turn_end` *after* the outcome cue's
+  TTL, registration, and `_apply_live_config`), each pinched by
+  `tests/test_deploy.py`; a missing hook does not raise, it shows an arc
+  that lies or never returns.
+- **Every push carries the dead-man** `ttlSec = ceil(remaining)+15`, so a
+  controller that dies mid-countdown leaves the ring self-clear a
+  quarter-minute after the countdown itself would have ended — the same
+  contract every other spec holds to.
+- **The stepper sleeps to the next LED boundary** (~`total/12` s plus a
+  margin, `countdown_step_delta`), not on a per-second tick: the arc only
+  changes at twelfths, and the margin is what guarantees the wake lands
+  *past* the boundary — onto it exactly, floating point can ceil back to the
+  same LED count and repaint nothing forever (pinned for 120 s and 7 s
+  timers). The task rides `Device.timer_countdown_task`, cancel-and-replaced
+  by each sync, per `tests/test_tasks.py`.
+
 **Two dismissal matchers, and they must not be collapsed into one.**
 `is_dismissal` is deliberately generous, because a missed dismissal leaves the
 alarm ringing and HA answering "there are no timers", which is far worse than
@@ -1091,7 +1131,7 @@ single written ladder. `docs/audio-states.md` §2 is the nearest thing.
 | `em_tasks.py` | `spawn` for background tasks nothing awaits: held in a set until done, exception logged when it happens. **No `asyncio.create_task` result is discarded** in em_api/em_controller/em_esphome, and every task wrapping an `Event.wait()` is torn down in a `finally` of the function that made it (`tests/test_tasks.py`, by AST). The second rule is the one that bit: `_run_post_turn_playback` cancelled its helpers at the end of its `try`, so a cancelled playback left two `Event.wait()` tasks pending — "Task was destroyed but it is pending!" on the dev add-on 2026-09-25, reproduced against 2.23.0 |
 | `em_linkauth.py` | The device-link auth decision as a pure function. Split out of `em_controller._link_auth_ok` so it is testable: the suite does not import em_controller, so this was security logic with no coverage until it orphaned a device |
 | `em_output_mute.py` | HA's media-player mute (#675, #678): mute sends volume 0 and remembers the level, unmute restores it; a volume from HA unmutes at it; the device's 0 echoing back is never persisted as `startupVolume`; volume-up on the Echo while muted restores the old level + one button step (8) rather than the button floor; a reconnect while muted re-sends 0. Controller-side so it works on every firmware. Pure, tested, with a source guard that mute is handled wherever `VOLUME_MUTE` is advertised |
-| `em_timers.py` | Voice-assistant timers (#167) — the alarm ring, and the two dismissal matchers that must NOT be one. `is_dismissal` is generous because a missed dismissal leaves the alarm going and HA answering "there are no timers"; `is_dismissal_only` is strict because it suppresses HA's reply, and a false positive there is not a spare stop, it is a lost answer ("turn off the kitchen light" over a ringing alarm). Phrases are stripped longest-first so `turn off` is consumed before the bare `off` strands `turn` |
+| `em_timers.py` | Voice-assistant timers (#167) — the alarm ring, the countdown arc geometry (`countdown_lit`/`countdown_anim`/`countdown_step_delta`) and its ownership decisions (`countdown_should_paint`/`countdown_may_clear`), and the two dismissal matchers that must NOT be one. `is_dismissal` is generous because a missed dismissal leaves the alarm going and HA answering "there are no timers"; `is_dismissal_only` is strict because it suppresses HA's reply, and a false positive there is not a spare stop, it is a lost answer ("turn off the kitchen light" over a ringing alarm). Phrases are stripped longest-first so `turn off` is consumed before the bare `off` strands `turn`. `TimerRegistry` keeps `(state, total, deadline)` for running timers — remaining is computed from a constructor-injected clock, never from HA's event cadence — and `clear()` drops finished entries only, keeping live timers' arcs alive |
 | `em_ble_proxy.py` | BLE proxy ESPHome servers — a second, separate ESPHome device per Echo (own port from the shared counter, own mDNS, MAC = serial-derived with the locally-administered bit flipped). Forwards `ble_adverts` control messages from the device's passive scanner (`device/internal/bluetooth`, raw HCI over `/dev/stpbt`; enabling durably disables Android's BT stack) to HA as raw advertisements. Lifecycle = idempotent `reconcile()` driven by `bleProxyEnabled` |
 | `esphome/` | ESPHome native API protocol layer (framing, handshake, vendored protobufs) |
 

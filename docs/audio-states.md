@@ -151,6 +151,12 @@ the whole reason the second plane exists.
 
 | # | Precondition | Action | Status |
 |---|---|---|---|
+| T0a | HA sends `TIMER_STARTED` / `TIMER_UPDATED` | registry stores `(state, total, deadline = clock() + seconds_left)`; if `timerRing` (on by default) and the device is `led_anim_capable`, the amber arc lights on the Echo the timer lives on, `lit = ceil(12 × remaining / total)` LEDs from `0..lit-1` | [today] |
+| T0b | arc counting down | a per-device stepper wakes at each LED boundary (every ~`total/12` s + margin), re-reads remaining from the registry, and repaints. HA's events only correct drift; the display counts against the deadline | [today] |
+| T0c | a voice turn is live (`voice_lock` or `speaker_busy`) | the countdown yields the ring (listening/spin/meter win by the animator's generation counter); it returns after the turn-end cue has played out (1 s TTL, plus the `no_ha` hold for that outcome) | [today] |
+| T0d | the alarm is ringing | the pulse owns the ring. On stop or dismissal (including `MAX_RING_S` auto-stop, which sends no event) the arc returns for any other live timer | [today] |
+| T0e | the last running timer is CANCELLED | `led_anim off`, but only if no turn and no alarm is painting (`countdown_may_clear` guards this) | [today] |
+| T0f | every arc push | carries the dead-man `ttlSec = ceil(remaining) + 15`. A controller that dies mid-countdown leaves the ring self-clear a quarter-minute after the countdown itself would have ended | [today] |
 | T1 | HA sends `TIMER_FINISHED` | ring starts: looped bursts + amber LED pulse if `led_anim_capable` | [today] |
 | T2 | a turn or announcement is playing | burst held off while `device.speaker_busy` is non-zero | [today] |
 | T3 | wake word heard over the ring | alert ducked by `DUCK_DB` for `DUCK_HOLD_S` = 12s so the command reaches STT | [today] |

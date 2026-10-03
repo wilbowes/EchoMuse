@@ -9201,7 +9201,7 @@ const CONFIG_SECTIONS = {
   "playback": ["eqBands", "eqLoudness", "duckDb", "limiterEnabled", "limiterThreshold", "limiterRelease", "bassGuardEnabled", "bassGuardDb", "streamReply", "volumeButtonSound"],
   "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice", "wakeSound", "wakeSoundLevel", "wakeClipCapture", "wakeClipMinScore"],
   "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "aecRefSource", "nsAsr", "saveUtterances"],
-  "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
+  "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve", "timerRing"],
   "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs", "consolePassword", "consoleTimeoutMin", "controllerEndpoints"],
   "bluetooth": ["bleProxyEnabled"],
   "sendspin": ["sendspinEnabled", "sendspinUnpaired"]
@@ -9935,6 +9935,12 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
               </div>
             </div>
           )}
+        </div>
+        <div style={{ marginTop: 4, ...inputStyle }}>
+          <Toggle label="Timer countdown"
+            sub="a running Home Assistant timer drains an amber arc on the Echo it was set from; a live conversation or a ringing timer takes the ring first"
+            value={config.timerRing ?? true}
+            onChange={v => set('timerRing', v)}/>
         </div>
         <StageAdvanced open={advRing} onToggle={() => setAdvRing(o => !o)} disabledStyle={inputStyle}>
           <div style={{ fontFamily: mono, fontSize: 10, color: 'var(--text2)', lineHeight: 1.6, marginBottom: 12 }}>

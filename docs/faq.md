@@ -378,6 +378,8 @@ Barge-in** if it isn't already.
 
 ### Does it do timers?
 Yes — ask for one the way you'd expect, and it rings on the Echo itself.
+While it counts down, that Echo shows a shrinking amber arc; turn it off
+under **Config → Ring**.
 Stopping one no longer leaves the Echo deaf. **Stopping a ringing timer by
 voice can still be unreliable**, because the chime competes with what you say.
 Report what you said and what happened; the wording people actually use is the

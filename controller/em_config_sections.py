@@ -52,6 +52,7 @@ SECTIONS: dict[str, dict] = {
             "ledScene", "ledListenColor", "ledThinkColor",
             "meterAttack", "meterDecay", "meterFloor",
             "meterGamma", "meterRef", "meterCurve",
+            "timerRing",
         ],
     },
     "advanced": {

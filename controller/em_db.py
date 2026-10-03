@@ -294,6 +294,14 @@ DEFAULT_DEVICE_CONFIG = {
     "meterGamma":       2.2,   # >1 expands the dark end so the swing reads
     "meterRef":         0.22,  # speaker RMS mapped to full brightness
     "meterCurve":       0.7,   # <1 lifts quiet consonants
+    # timerRing: show a shrinking amber arc on the Echo a Home Assistant
+    # timer was set from, one LED darkening per twelfth of the remaining
+    # time (em_timers, docs/audio-states.md). Controller-only. The arc is
+    # an ordinary led_anim spec, so every led_anim device renders it and
+    # older firmware ignores the key like every other it has never seen.
+    # On by default like every ring behaviour; the off switch is for someone
+    # who wants the ring dark unless the Echo is answering them.
+    "timerRing":        True,
     # agcEnabled: automatic gain control (lockMic/button turn streams only).
     # Disable to hear raw mic levels. (nsEnabled/RNNoise removed 2026-07-12
     # with the device-side RNNoise code — a stale nsEnabled key in stored
