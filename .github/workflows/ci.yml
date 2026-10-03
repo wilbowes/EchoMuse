@@ -22,14 +22,32 @@ jobs:
       # The tests cover pure-logic modules only — numpy/scipy for the EQ
       # math, nothing that pulls in openwakeword/onnxruntime (which would
       # cost minutes of install for zero coverage).
+      #
+      # The five below are the whole reason em_api.py and em_esphome.py read
+      # 0% coverage until 2026-10-03, and they are NOT optional additions:
+      # every one is already pinned in requirements.txt and already present in
+      # the published image, so this job was installing a fraction of the
+      # runtime while three modules — 5,846 statements between them — were
+      # unreachable by any test that executes code. They are also all small
+      # wheels; the whole set costs seconds next to numpy/scipy. openwakeword
+      # is deliberately NOT here (it drags in onnxruntime and scikit-learn,
+      # minutes of install) and em_controller is reached with a sys.modules
+      # stub instead — see tests/conftest.py.
+      #
+      # pytest-cov is here because nothing measured coverage until now: this
+      # job ran with no --cov and no gate, so the number could move in either
+      # direction unnoticed. Report-only; see .coveragerc for the baseline.
       - name: Install test dependencies
         # pyyaml is for the add-on config parity tests (test_channels.py):
         # config.yaml is genuinely YAML and hand-parsing it to compare
         # options and schema would be fragile in exactly the way that test
         # exists to prevent. Pure Python and dependency-free — nothing like
         # pulling openwakeword or aiohttp in here, which is what the
-        # minimal-test-env rule is actually about.
-        run: pip install pytest numpy scipy pyyaml
+        # minimal-test-env rule is actually about. aiohttp IS here now, so
+        # that comment's example needs reading as history: the rule's reason
+        # was install cost, and the cost turned out not to be what it was
+        # assumed to be.
+        run: pip install pytest pytest-cov numpy scipy pyyaml aiohttp websockets bcrypt zeroconf protobuf
       # test_emos_update_flow.py runs the emOS update's device commands in a
       # real shell, with busybox as the device has it. Without one the test
       # would skip, so it fails under CI instead — a skipped check of what is
@@ -38,7 +56,7 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq busybox
       - name: Run pytest
         working-directory: controller
-        run: python -m pytest tests/ -v
+        run: python -m pytest tests/ -v --cov --cov-report=term
 
   forge-metadata-tests:
     name: ONNX metadata round trip
@@ -148,9 +166,20 @@ jobs:
       # -race: the firmware is goroutines sharing state (mic fan-out, the
       # listen gate, the speaker pump), and a race there is silent until it
       # is audible. The first run found one, in a test (jack_test.go).
+      #
+      # -coverprofile: nothing measured Go coverage until this either, for
+      # the same reason the Python side did not — a job that runs tests and
+      # reports nothing about how much of the code they reach cannot tell a
+      # change that improved coverage from one that quietly reduced it. The
+      # baseline this replaces was 0%: no package in ./internal/... or
+      # ./pkg/... was ever asked. Report-only; `go tool cover -func` prints
+      # the per-function figure this job has never shown.
       - name: Run go test
         working-directory: device
-        run: go test -race ./internal/... ./pkg/...
+        run: go test -race -coverprofile=coverage.out ./internal/... ./pkg/...
+      - name: Report coverage
+        working-directory: device
+        run: go tool cover -func=coverage.out | tail -30
 
   python-deps-audit:
     name: Python dependency audit
@@ -469,6 +498,19 @@ jobs:
       - name: Build compiler image
         run: docker build -t echomuse-compiler device/compiler/
       - name: Build firmware
+        # The `go vet -tags server ./cmd/...` runs in the same container, and it
+        # exists because cmd/ was outside EVERY Go job until now — go test, go
+        # vet and govulncheck all skipped its 2,076 lines, main() included.
+        # JOURNAL.md records a watcher goroutine there capturing a controlClient
+        # the constructor had not assigned yet: valid Go, and invisible to a
+        # host `go vet`, because cmd/ IMPORTS internal/bindings/mic whose every
+        # file is //go:build server. That is an import-level exclusion, so the
+        # wildcards the other jobs use cannot skip it — the package genuinely
+        # fails to set up without the tag, which is why `go vet ./cmd/...` on a
+        # host fails with "build constraints exclude all Go files". Running it
+        # here is both the only place it works and the more useful place, since
+        # this vets cmd/ in the configuration the firmware ships in rather than
+        # against a host platform the device never runs on.
         run: |
           docker run --rm --entrypoint bash \
             -e CGO_LDFLAGS="-Wl,--hash-style=both" \
@@ -476,7 +518,7 @@ jobs:
             -v "$PWD/device":/sdk \
             -v "$PWD/GoTinyAlsa":/GoTinyAlsa \
             echomuse-compiler \
-            -c "cd /sdk && go build -tags server -o build/server ./cmd/"
+            -c "cd /sdk && go vet -tags server ./cmd/... && go build -tags server -o build/server ./cmd/"
       - name: Check it is an ARM binary
         # A build that silently produced a host binary would pass the step
         # above and ship something the hardware cannot run.
