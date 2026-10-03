@@ -216,6 +216,7 @@ Mute is the reference implementation of principle 5, and its behaviour is
 | C5 | Any `led_anim` / `leds` | MUTED or VOL-DISPLAY | **Recorded into `baseLEDs`, not painted** | [today] |
 | C6 | Legacy `leds` frame | any unsuppressed | Atomically replaces any running animation (generation counter) | [today] |
 | C7 | No replacement within `ttlSec` | animation running | Dead-man clears the ring — protects against a controller that died mid-turn | [today] |
+| C8 | `led_anim` timer-countdown arc (`solid`, per-LED colours, amber `(255,170,0)` on `0..lit-1` and black on the rest, `ttlSec = ceil(remaining)+15`) | any unsuppressed | Shrinking amber arc for a running Home Assistant timer, draining in the same direction as the layer-1 volume arc. Not a new rung on the ladder. It is controller-sourced like the cue anims, generation-counted against every turn repaint, and yields the ring to the alarm's pulse and to any live turn at the source (`em_timers.countdown_should_paint`). The kill switch is `timerRing` (Config → Ring) | [today] |
 
 ### 4.5 Audio / link lifecycle
 

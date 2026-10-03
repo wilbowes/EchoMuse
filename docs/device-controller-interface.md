@@ -318,13 +318,19 @@ meterAttack, meterDecay, meterFloor, meterGamma, meterRef, meterCurve,
 wakeArbitrationMs, duckDb,
 buttonSingleTapEvent, buttonMultiTapMs,
 owwOnDevice, saveUtterances, streamReply,
-wakeSound, wakeSoundLevel, volumeButtonSound
+wakeSound, wakeSoundLevel, volumeButtonSound,
+timerRing
 ```
 
 Not every field is acted on by the device. The output-chain keys (`limiter*`,
-`bassGuard*`), `eq*`, `saveUtterances`, `streamReply`, `wakeArbitrationMs`, and the
+`bassGuard*`), `eq*`, `saveUtterances`, `streamReply`, `timerRing`, `wakeArbitrationMs`, and the
 `button*` timing keys are **controller-side** — that processing happens before the audio
-reaches the wire, or is used only for config scoping. `owwOnDevice` is both
+reaches the wire, or is used only for config scoping. `timerRing` is the
+kill switch for the controller's timer-countdown arc (docs/audio-states.md
+§5.3 T0); the arc itself is an ordinary `led_anim` `solid` spec a
+`led_anim` device already understands, so no message, pattern or
+capability was added and a device that has never heard of `timerRing`
+ignores the key. `owwOnDevice` is both
 controller-consumed (scoping) and device-acted. `sendspinName` is not a
 stored setting: it is the device's label, added to the push at registration
 and sent alone on a rename, because Music Assistant lists the player by it. A

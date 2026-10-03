@@ -2458,6 +2458,12 @@ class DeviceESPhomeServer:
         # callable() each; None when no device is connected.
         self._ring_alarm = None
         self._stop_alarm = None
+        # Injected by device_connected(). An async callable() that
+        # re-decides the timer-countdown ring after any timer event. A stop
+        # syncs through the _stop_alarm closure instead. Lives in
+        # em_controller for _ring_alarm's reason. The arc is a led_anim push
+        # at the Device.
+        self._sync_countdown = None
         # Injected by device_connected() — async callable() that runs one
         # voice turn nobody spoke a wake word for, for HA's announce-then-
         # listen. In em_controller for _standalone_play's reason: it drives the
@@ -2509,7 +2515,9 @@ class DeviceESPhomeServer:
         HA discards a timer when it finishes, so a spoken dismissal is
         recognised from the transcript instead (em_timers.is_dismissal).
         """
-        transition = self._timers.apply(event_type, timer_id)
+        transition = self._timers.apply(event_type, timer_id,
+                                        total_seconds=total_seconds,
+                                        seconds_left=seconds_left)
         ev_name = {
             em_timers.TIMER_STARTED:   "started",
             em_timers.TIMER_UPDATED:   "updated",
@@ -2525,6 +2533,12 @@ class DeviceESPhomeServer:
             await self._ring_alarm()
         elif transition == em_timers.RING_STOP and self._stop_alarm is not None:
             await self._stop_alarm()
+        # Every event moves the countdown. A start adds an arc, an updated
+        # corrects its deadline, a cancel may end it, and a FINISHED hands
+        # the ring to the alarm. The sync is idempotent and never stomps the
+        # turn or alarm ring; see em_timers.countdown_should_paint.
+        if self._sync_countdown is not None:
+            await self._sync_countdown()
 
     async def dismiss_timer_alarm(self) -> bool:
         """
@@ -3220,6 +3234,7 @@ async def device_connected(
     ring_alarm=None,
     stop_alarm=None,
     start_conversation=None,
+    sync_countdown=None,
 ) -> None:
     """
     Called by em_controller.handle_control() when an Echo Dot connects.
@@ -3361,6 +3376,21 @@ def clear_timers(device_id: str) -> None:
     server = _servers.get(device_id)
     if server is not None:
         server._timers.clear()
+
+
+def get_timer_countdown(device_id: str) -> "tuple[float, float] | None":
+    """
+    (remaining, total) for the soonest-finishing RUNNING timer on this
+    device, or None.
+
+    The single source of truth for the countdown arc. The em_controller
+    orchestrator reads through here on every repaint and mirrors no timer
+    state, so there is no second copy to drift when HA corrects a deadline.
+    """
+    server = _servers.get(device_id)
+    if server is None:
+        return None
+    return server._timers.running_countdown()
 
 
 async def dismiss_timer_alarm(device_id: str) -> bool:

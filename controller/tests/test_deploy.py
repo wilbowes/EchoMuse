@@ -3066,3 +3066,88 @@ def test_asset_installs_queue_behind_the_ota_lock():
                if name not in ("_sync_oww_assets", "_sync_oww_assets_locked")
                and "_sync_oww_assets_locked(" in ast.unparse(fn)]
     assert not callers, f"unlocked asset sync called from {callers}"
+
+
+# ── Timer countdown ring hooks ───────────────────────────────────────────────
+# The countdown arc is re-decided (sync_timer_countdown) at every transition
+# of ring ownership. That is a timer event, a turn end, an alarm stop, a
+# registration, and a config save. A missing hook fails quietly, never with
+# an exception. Either the arc lies (stale after `timerRing` is switched off,
+# until the next reconnect, the exact failure test_config_mirrors exists
+# for), or it never returns after its owner yielded the ring.
+
+def test_the_timer_countdown_syncs_at_every_owner_transition():
+    src = (CONTROLLER / "em_controller.py").read_text()
+    esph = (CONTROLLER / "em_esphome.py").read_text()
+
+    # 1. HA timer events, via the injected closure wired at connect, and the
+    #    stop closure too (a local dismissal never produces an event).
+    assert "sync_countdown=_sync_countdown" in src, (
+        "on_timer_event has no injected countdown hook at connect")
+    assert "await sync_timer_countdown(_d)" in _fn_body(src, "_sync_countdown")
+    assert "await sync_timer_countdown(_d)" in _fn_body(src, "_stop_alarm")
+    assert "await self._sync_countdown()" in _fn_body(esph, "on_timer_event")
+
+    # 2. The ring loop's own exits. MAX_RING auto-stop has no event, and a
+    #    mid-burst dismissal ends inside the task.
+    assert "await sync_timer_countdown(device)" in _fn_body(src, "_ring_timer_alarm")
+
+    # 3. Turn end, after the cue has played out (the arc's newer generation
+    #    would supersede the 1s cue instantly).
+    turn_end = _fn_body(src, "_leds_turn_end")
+    assert "spawn(sync_timer_countdown(" in turn_end
+    assert "COUNTDOWN_CUE_TTL_S + COUNTDOWN_CUE_MARGIN_S" in turn_end, (
+        "the post-cue sync must wait the cue's TTL out, not paint over it")
+
+    # 4. Registration. A device rebooting mid-countdown gets its arc back.
+    assert "await sync_timer_countdown(device)" in _fn_body(src, "handle_control")
+
+    # 5. A live config save. The kill switch acts on save, not at reconnect.
+    #    Resolved through the running controller module, never a re-import
+    #    that would load a second, uninitialised copy (#306).
+    api = (CONTROLLER / "em_api.py").read_text()
+    live = _fn_body(api, "_apply_live_config")
+    assert "sync_timer_countdown(live)" in live
+    assert "_running_controller_module()" in live
+
+    # Teardown cancels the stepper with the connection, beside the alarm.
+    assert "device.timer_countdown_task.cancel()" in src
+
+
+def test_the_countdown_stepper_is_held_on_the_device_not_dropped():
+    """
+    A bare create_task is banned by test_tasks (asyncio keeps only a weak
+    reference; the exception never surfaces). Here the slot carries a second
+    duty. Sync cancels-and-replaces through it, which is what keeps a late
+    step from painting over the decision the newest event made.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    fn = _fn_body(src, "sync_timer_countdown")
+    assert "step = asyncio.create_task(_timer_countdown_steps(device))" in fn
+    assert "device.timer_countdown_task = step" in fn
+    assert "add_done_callback(_step_done)" in fn
+
+
+def test_the_countdown_never_blacks_a_ring_it_does_not_own():
+    """
+    `off` is sent only through countdown_may_clear, so a mute-red, volume-
+    cyan or link-orange ring, and a live listening ring, survive a countdown
+    that merely lost track of them. The unguarded send is the bug.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    fn = _fn_body(src, "sync_timer_countdown")
+    assert "countdown_may_clear" in fn, (
+        "the countdown must ask before sending `off`, never stomp a turn")
+
+
+def test_timer_events_carry_their_durations_to_the_registry():
+    """
+    The countdown reads (total, remaining) out of the registry, and the
+    registry only knows them because on_timer_event passes HA's fields
+    through. Dropping one silently degrades the arc to "nothing running".
+    """
+    esph = (CONTROLLER / "em_esphome.py").read_text()
+    fn = _fn_body(esph, "on_timer_event")
+    assert "total_seconds=total_seconds" in fn
+    assert "seconds_left=seconds_left" in fn
+    assert "get_timer_countdown" in esph

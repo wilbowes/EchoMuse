@@ -478,6 +478,22 @@ class Device:
         # — must not leave the alarm quiet for the rest of its 120s cap.
         self.timer_alarm_duck_t: float = 0.0
 
+        # Timer-countdown ring (em_timers.countdown_*), the shrinking amber
+        # arc a running HA timer paints; the alarm above covers finished
+        # ones. The stepper task that decrements it; None when no arc is
+        # being stepped. Held on the Device because a bare create_task whose
+        # result is dropped is banned by tests/test_tasks, and sync
+        # cancels-and-replaces through this slot on every event.
+        self.timer_countdown_task: "asyncio.Task | None" = None
+        # Whether the ring currently shows our arc. The guard that keeps the
+        # countdown from sending `off` across a ring it never owned. Mute
+        # red, volume cyan and link orange are device-sourced and must
+        # survive a controller that merely lost track.
+        self.countdown_shown: bool = False
+        # Kill switch mirror for the countdown arc (per-device config,
+        # `timerRing`). Default on, like every other ring setting.
+        self.timer_ring: bool = True
+
         # How many playbacks are streaming-or-draining on the speaker plane.
         # NOT the same thing as `speaking`, which clears as soon as the socket
         # writes finish — those complete near-instantly however slow the link
@@ -1631,8 +1647,17 @@ async def _leds_turn_end(device: Device):
                 # so this is a hold, not a repaint.
                 await asyncio.sleep(NO_HA_HOLD_S)
             await device.send_led_anim(anim)
+            # The countdown returns after the cue has played out. The arc
+            # carries a newer generation and would supersede the cue
+            # instantly, hiding the outcome it signals. The no_ha hold above
+            # was before the cue, so both outcomes wait the same TTL +
+            # margin from here. Spawned, because test_tasks bans a bare
+            # create_task and this must not hold the caller.
+            em_tasks.spawn(sync_timer_countdown(
+                device, delay=COUNTDOWN_CUE_TTL_S + COUNTDOWN_CUE_MARGIN_S))
             return
     await leds_off(device)
+    em_tasks.spawn(sync_timer_countdown(device))
 
 
 async def leds_listening(device: Device):
@@ -2160,6 +2185,130 @@ async def stop_timer_alarm(device: Device) -> bool:
     return True
 
 
+# ── Timer countdown ───────────────────────────────────────────────────────────
+# The alarm above covers a finished timer; this is the running one, a
+# shrinking amber arc on the Echo the timer was set from, one LED darkening
+# per twelfth of the total. Controller-only, because the arc is an ordinary
+# `solid` led_anim spec every led_anim device already renders. The geometry,
+# the dead-man sizing and the ownership decisions are pure, in em_timers;
+# what lives here is the pushing and the ring-ownership handoff.
+
+# Woken slightly past each LED boundary rather than exactly on it. A wake
+# that lands a little early recomputes the same LED count and buys a pointless
+# extra paint. The stepper re-reads remaining from the registry every wake,
+# and the registry holds a deadline rather than a countdown, so this margin
+# is the only scheduling the display relies on.
+COUNTDOWN_STEP_MARGIN_S = 0.2
+
+# The cue anims _leds_turn_end plays carry a 1s TTL; the countdown returns
+# only after one has fully played out, so a repaint (whose generation counter
+# would win) does not erase the outcome cue before it has been seen.
+COUNTDOWN_CUE_TTL_S = 1.0
+COUNTDOWN_CUE_MARGIN_S = 0.3
+
+
+async def sync_timer_countdown(device: Device, *, delay: float = 0.0) -> None:
+    """
+    Re-decide what this device's ring should show for its running timers.
+
+    The single entry point every hook calls. That is a timer event (via the
+    closure injected into the satellite), a turn end, an alarm stop, a
+    registration, and a config apply. It cancels-and-replaces the running
+    stepper (same idiom as start_timer_alarm, latest call wins), waits out
+    any cue, then either paints the arc and re-arms the stepper, or, if the
+    countdown owned the ring and no longer should, hands it back with `off`
+    when no turn and no alarm is painting.
+
+    Safe on a closing socket. The control send can raise once the device is
+    gone, so a failed paint is treated as not-shown and the next sync (or a
+    reconnect) retries.
+    """
+    task = device.timer_countdown_task
+    device.timer_countdown_task = None
+    if task is not None and not task.done():
+        task.cancel()
+    if delay > 0:
+        await asyncio.sleep(delay)
+
+    info = esphome.get_timer_countdown(device.device_id)
+    alarm = device.timer_alarm_task is not None and not device.timer_alarm_task.done()
+    turn_active = device.voice_lock.locked() or device.speaker_busy > 0
+    paint = em_timers.countdown_should_paint(
+        device.led_anim_capable, device.timer_ring, info is not None,
+        alarm, turn_active)
+
+    if paint and info is not None:
+        device.countdown_shown = True
+        try:
+            await device.send_led_anim(em_timers.countdown_anim(*info))
+        except Exception as e:
+            log.debug(f"[{device.device_id}] Countdown paint failed: {e!r}")
+            device.countdown_shown = False
+            return
+        step = asyncio.create_task(_timer_countdown_steps(device))
+        device.timer_countdown_task = step
+
+        def _step_done(t: asyncio.Task) -> None:
+            # A stepper that dies must say so, per _ring_done's reasoning.
+            # The only other symptom is an arc frozen at one LED count,
+            # indistinguishable from a timer nobody cancelled.
+            if device.timer_countdown_task is t:
+                device.timer_countdown_task = None
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                log.error(
+                    f"[{device.device_id}] Timer countdown stepper failed: "
+                    f"{exc!r}", exc_info=exc)
+
+        step.add_done_callback(_step_done)
+        return
+
+    if em_timers.countdown_may_clear(device.countdown_shown, paint,
+                                     alarm, turn_active):
+        try:
+            await leds_off(device)
+        except Exception as e:
+            log.debug(f"[{device.device_id}] Countdown clear failed: {e!r}")
+    device.countdown_shown = False
+
+
+async def _timer_countdown_steps(device: Device) -> None:
+    """
+    Decrement the countdown arc as its timer drains.
+
+    Sleep to the next LED boundary, RE-READ the countdown (never trust a
+    locally held `remaining`. An UPDATED event may have corrected the
+    deadline, a cancel may have removed the timer, and the next soonest may
+    have taken its place), and repaint. Exit when the countdown no longer
+    owns the ring or has nothing to show. Every one of those transitions has
+    its own sync hook, and the hook re-arms this task, so standing down here
+    loses nothing.
+    """
+    while True:
+        info = esphome.get_timer_countdown(device.device_id)
+        if info is None:
+            return
+        remaining, total = info
+        await asyncio.sleep(em_timers.countdown_step_delta(remaining, total)
+                            + COUNTDOWN_STEP_MARGIN_S)
+        info = esphome.get_timer_countdown(device.device_id)
+        alarm = (device.timer_alarm_task is not None
+                 and not device.timer_alarm_task.done())
+        turn_active = device.voice_lock.locked() or device.speaker_busy > 0
+        if not em_timers.countdown_should_paint(
+                device.led_anim_capable, device.timer_ring,
+                info is not None, alarm, turn_active):
+            return  # a sync hook re-arms us when its owner is done
+        try:
+            await device.send_led_anim(em_timers.countdown_anim(*info))
+        except Exception as e:
+            log.debug(f"[{device.device_id}] Countdown step failed: {e!r}")
+            device.countdown_shown = False
+            return
+
+
 _alarm_pcm_cache: "bytes | None" = None
 
 
@@ -2313,6 +2462,11 @@ async def _ring_timer_alarm(device: Device) -> None:
         await device.mic_start()
         await em_player.resume_interrupted(device.device_id)
         await leds_off(device)
+        # Alarm over, whether by MAX_RING auto-stop, mid-burst dismissal, or
+        # a burst that played out. If any other timer is still running, its
+        # countdown takes the ring back here; this is the only hook for the
+        # auto-stop path, which produces no on_timer_event.
+        await sync_timer_countdown(device)
 
 
 async def _meter_at_playback_start(pcm_chunks, on_start):
@@ -4361,6 +4515,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             "limiterThreshold", em_limiter.DEFAULT_THRESHOLD_DB))
         device.limiter_release   = float(config.get(
             "limiterRelease", em_limiter.DEFAULT_RELEASE_MS))
+        device.timer_ring        = bool(config.get("timerRing", True))
         device.led_scene     = em_scenes.resolve(config)
         # #263: hand the device its current listening animation so a wake it
         # detected ITSELF can light the ring immediately, instead of waiting
@@ -4381,6 +4536,10 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         log.info(f"[control] Config pushed to {device_id} (volume={device.volume:.3f})")
 
         await leds_off(device)
+        # A device that reboots mid-countdown gets its arc back. It is
+        # re-painted from the registry, which survives the reconnect (the HA
+        # events for these timers went to the satellite).
+        await sync_timer_countdown(device)
         await api.notify_device_connected(device_id)
         _device_ref = device
         async def _standalone_play(pcm_bytes: bytes, _d=_device_ref) -> bool:
@@ -4418,6 +4577,13 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             await start_timer_alarm(_d)
         async def _stop_alarm(_d=_device_ref) -> None:
             await stop_timer_alarm(_d)
+            # Alarm over, so the arc comes back. This closure is the only
+            # hook the local dismissal paths (dot tap, spoken "stop") have.
+            # They never produce an on_timer_event, so nothing else would
+            # bring the countdown back for any timer still running.
+            await sync_timer_countdown(_d)
+        async def _sync_countdown(_d=_device_ref) -> None:
+            await sync_timer_countdown(_d)
         async def _start_conversation(_d=_device_ref) -> None:
             # HA has finished asking; the answer is whatever is said next.
             # Same shape as the button turn — a deliberate act with no wake
@@ -4472,6 +4638,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             ring_alarm=_ring_alarm,
             stop_alarm=_stop_alarm,
             start_conversation=_start_conversation,
+            sync_countdown=_sync_countdown,
         )
         # A device boots at its stored startupVolume, which an output mute
         # never overwrites — so a mute from before this connection has to be
@@ -5099,6 +5266,10 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             if device.timer_alarm_task is not None:
                 device.timer_alarm_task.cancel()
                 device.timer_alarm_task = None
+            if device.timer_countdown_task is not None:
+                device.timer_countdown_task.cancel()
+                device.timer_countdown_task = None
+            device.countdown_shown = False
             if _devices.get(device.device_id) is not device:
                 # A replacement connection has already registered for this
                 # device_id — this socket is stale. Tearing down shared
