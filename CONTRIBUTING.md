@@ -100,16 +100,35 @@ or `docker compose up --build`. emOS builds with `emos/build.sh`; see
 ## Before you open a PR
 
 ```bash
-cd controller && python -m pytest tests/    # needs pytest numpy scipy pyyaml
+cd controller && python -m pytest tests/    # needs pytest pytest-cov numpy scipy pyyaml aiohttp websockets bcrypt zeroconf protobuf
 cd device && go test ./... && go vet ./...
 ```
 
-Both run in CI on every push. **Please add a test if your change is pure
-logic** — the controller suite deliberately cannot import `em_controller` or
-`em_esphome` (they pull in aiohttp, zeroconf and openwakeword), so decisions
-that need coverage get extracted into their own module: see `em_button`,
-`em_linkauth`, `em_turnclock`, `em_barge`. Following that pattern is the
-single easiest way to get a change reviewed quickly.
+Both run in CI on every push, both **report coverage**, and the controller
+baseline is recorded in `controller/.coveragerc`.
+
+**Please add a test for anything you can reach.** That instruction was narrower
+until 2026-10-03 — "if your change is pure logic" — because the suite could not
+import `em_controller` or `em_esphome`. It now can: installing `aiohttp`,
+`websockets`, `bcrypt`, `zeroconf` and `protobuf` (all already in
+`requirements.txt`, all seconds to install) makes `em_api` and `em_esphome`
+importable, and `tests/_oww_stub.py` reaches `em_controller` behind a stub for
+`openwakeword`.
+
+Worth knowing why that mattered, because it is the failure mode this rule was
+protecting against and it is easy to walk into: **17% of the suite (218 of 1,634
+functions) executed no controller code at all** — they read the source as text
+and asserted on substrings. `em_api.py` measured 0.0%. A test that reads the
+source proves something about the *text*, which is not what runs; prefer calling
+the function. Extracting a decision into a pure module (`em_button`,
+`em_linkauth`, `em_turnclock`, `em_barge`) is still the easiest thing to review
+and still worth doing — it is now an option rather than a workaround.
+
+A source-scraping guard is legitimate when the code genuinely cannot be
+imported, and then it should say so in a comment. Strip comments *and*
+docstrings before asserting on source text — a guard that searches for what it
+forbids will find the prose explaining the prohibition, which this project
+produces more of than anything else, and that has happened three times here.
 
 Hardware-dependent code is not testable on the host and nobody expects you to
 fake it. Say what you tested it on.
