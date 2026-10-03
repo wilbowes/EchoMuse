@@ -99,6 +99,27 @@ def test_clear_reports_whether_it_was_ringing():
     "that's enough",
     "ok ok",
     "I'm up",
+    # German: the transcript arrives in the pipeline's language, so the
+    # matcher has to know more than English (measured 2026-10-03 — 'Stopp.'
+    # over a ringing chime matched nothing and the chime rang on).
+    "Stopp.",
+    "stopp",
+    "Hör auf!",
+    "hoer auf",
+    "aufhören",
+    "Halt!",
+    "Aus!",
+    "Ruhe!",
+    "Stille",
+    "Leise!",
+    "Genug!",
+    "Es reicht!",
+    "Jetzt reicht's!",
+    "Schon gut",
+    "Sei still",
+    "Abbrechen",
+    "Beenden",
+    "Ende",
 ])
 def test_dismissal_phrases_are_recognised(text):
     assert t.is_dismissal(text) is True
@@ -112,6 +133,11 @@ def test_dismissal_phrases_are_recognised(text):
     "how much time is left",
     "turn on the kitchen light",
     "play some jazz",
+    # German commands must still reach HA.
+    "Stelle einen Timer auf fünf Minuten",
+    "Wie viel Zeit ist noch?",
+    "Mach die Musik an",
+    "Spiel etwas Jazz",
 ])
 def test_non_dismissals_reach_ha(text):
     # A real command spoken over a ringing alarm must still go to HA — the
@@ -124,6 +150,13 @@ def test_dismissal_matches_whole_words_only():
     # on substrings would eat ordinary commands.
     assert t.is_dismissal("start the stopwatch") is False
     assert t.is_dismissal("what's on offer") is False
+
+
+def test_german_dismissal_matches_whole_words_only():
+    # Same trap in German: "Stoppuhr" (stopwatch) must not match "stopp", and
+    # "Haltestelle" (stop, as in a bus stop) must not match "halt".
+    assert t.is_dismissal("Starte die Stoppuhr") is False
+    assert t.is_dismissal("Wann kommt der Bus an der Haltestelle?") is False
 
 
 # ── Dismissal-only: which utterances also lose HA's reply ────────────────────
@@ -145,6 +178,15 @@ def test_dismissal_matches_whole_words_only():
     "ok ok",
     "I'm up",
     "okay okay, stop",
+    # German pure dismissals lose HA's reply too — the whole point of the
+    # German group, because HA's answer in this case is always the useless
+    # "there are no timers".
+    "Stopp",
+    "Stopp bitte",
+    "Stopp den Timer",
+    "Stopp den Wecker jetzt",
+    "Hör auf",
+    "Ruhe jetzt",
 ])
 def test_pure_dismissals_suppress_the_reply(text):
     assert t.is_dismissal_only(text) is True
@@ -156,6 +198,10 @@ def test_pure_dismissals_suppress_the_reply(text):
     "quiet the bedroom fan",
     "turn off the lights downstairs",
     "cancel my 7am alarm on the phone",
+    # A German command that happens to contain a dismissal word keeps its
+    # reply: "Mach das Licht aus" is a command, not a dismissal.
+    "Mach das Licht aus",
+    "Stopp die Musik",
 ])
 def test_commands_carrying_a_dismissal_keep_their_reply(text):
     # These stop the ring — the generous match is right about that — but HA

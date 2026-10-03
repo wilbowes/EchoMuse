@@ -168,9 +168,22 @@ class TimerRegistry:
 # HA that does send one (or a cancel of a still-running timer) is still handled
 # — this is the case HA structurally cannot answer.
 _DISMISS_WORDS = (
+    # English
     "stop", "cancel", "dismiss", "silence", "quiet", "enough",
     "shut up", "turn it off", "turn off", "shut it off", "off",
     "okay okay", "ok ok", "alright already", "im up",
+    # German. The transcript arrives in the pipeline's language and this
+    # matcher is the only place that sees it, so an English-only list means a
+    # satellite in a German home can only be dismissed by the button: measured
+    # 2026-10-03 on 2.25.0, 'Stopp.' over a ringing chime reached the
+    # controller with the ring up (STT result: 'Stopp.') and matched nothing,
+    # so the chime rang on through the turn and HA answered "there are no
+    # timers" — the exact dead end this module exists to avoid. "stopp" is the
+    # German spelling STT produces, so 'stop' never matches it.
+    "stopp", "aufhören", "aufhoeren", "hör auf", "hoer auf", "halt",
+    "abbrechen", "beenden", "ende", "aus", "ruhe", "stille", "still",
+    "leise", "genug", "es reicht", "jetzt reichts", "schon gut",
+    "sei still",
 )
 
 # Words that can pad a dismissal without making it a command: articles, the
@@ -182,6 +195,12 @@ _FILLER_WORDS = frozenset({
     "just", "already", "im",
     "alarm", "alarms", "timer", "timers", "ringing", "sound", "noise", "thing",
     "ok", "okay", "yeah", "yes", "alright", "thanks", "thank", "you", "hey",
+    # German, same job: "Stopp den Timer bitte" is a dismissal and nothing
+    # else, so HA's reply stays suppressed; "mach das Licht aus" is not, and
+    # keeps its confirmation.
+    "der", "die", "das", "den", "dem", "es", "mir", "bitte", "jetzt", "mal",
+    "doch", "schon", "ja", "nein", "danke",
+    "wecker", "klingel", "klingelton", "ton", "geräusch", "laerm", "lärm",
 })
 
 # Longest phrases first, so "turn off" is consumed before the bare "off" can
