@@ -4305,3 +4305,113 @@ because my filter dropped the result lines.
 **Still open:** the #729 hardware run; the rest of the `ready` sweep; the
 controller release that gives GA users the emOS panel; the Verona comparison
 and the forge PR; #731's first build (per-mic cancelling ahead of selection).
+
+## 2026-10-03, evening — Bluetooth connections from probe to a real Home Assistant, and a mistake about other people's data
+
+**The forge fix shipped.** The Verona retrain finished: bare "verona" detected
+at 0.5 went 56.5% → 75.5% on 400 fresh synthetic clips (median peak 0.59 →
+0.92), "hey verona" 99.8% → 100%, and Wil confirmed it at a device. #734
+merged, `forge-v1.1.0` published (CUDA amd64, CPU multi-arch), reported
+upstream as dscripka/openWakeWord#354. A contributor's four-phrase model was
+retrained the same way and its bare name went from almost never firing to
+firing most of the time.
+
+**I published a contributor's wake word and the numbers measured on it**, in a
+commit message, a PR description, the release notes, forge comments and tests,
+and this journal — and had it in the draft upstream report when Wil stopped
+it: "that's someone else's data". The phrase was shared to get a fault looked
+at. Cleaned: both PR descriptions, the tag re-cut on the same commit with new
+notes, the tracked files (#738). Not cleanable without rewriting main: the
+commit messages of #734 and #686. The rule now: before anything is committed,
+posted or tagged, check it for other people's data and use our own or a
+made-up example.
+
+**GoTinyAlsa's write fix went upstream** as Binozo/GoTinyAlsa#3. #608 had been
+told on 10-01 to repin to a commit that predates it; corrected on the PR.
+
+**#656 step 0, on VVV.** `ble_probe` grew a connect mode (#735). The MT6627
+holds LE connections from raw HCI: three at once (only three connectable peers
+were in range, so the limit is not established), MTU exchange and reads with 0
+failures in 1,119. Unlike the scan interval and window, **the chip honours the
+connection interval** — a read took 49ms at 30ms and 999.7ms at 500ms. AP
+resends to VVV over two minutes each: idle 0.1%, one link 3.4–7.7%, two links
+11.4%, scan alone 155.2%, link plus scan 82.1%. HCI version 6 (4.0), LE
+features 0x01, LE Read Buffer Size 0/0 (LE shares the BR/EDR buffers).
+
+**A link costs scan coverage, and the interval decides how much** — the
+opposite of the WiFi result. Scan alone caught 46 adverts in 40s; beside one
+link at 30ms, 11; at 200ms, 25; at 1s, 30. So a link runs at 30ms while used
+and is moved to 500ms after 5s idle with LE Connection Update, which the chip
+accepted (Wil took the recommendation over a fixed slow interval).
+
+**The build (draft #743).** Device: ATT client and GATT discovery from the Core
+Spec; one shared HCI reader, because the scanner's inline command wait threw
+away everything else that arrived and the scan is toggled several times a
+minute; a connection manager for three links with a random static address
+(every Dot reports the same public one); a JSON bridge on a new `0x08`
+data-plane frame, negotiated both ways as `ble_connect`. Controller: the
+ESPHome server turned out to be plaintext only, so Wil's rule that connections
+need encryption meant writing ESPHome's Noise (NNpsk0) responder and framing;
+`em_ble_gatt` maps Home Assistant's Bluetooth messages onto the bridge;
+`bleProxyConnections` (default off), a per-device key (schema v31), the toggle
+with the key under it. Decisions, all Wil's: three slots, the fast/slow
+interval, encryption required rather than warned about, the toggle on the
+Bluetooth panel.
+
+**What only the real implementations found.** The Noise handshake matched
+cacophony's published vector first time, and `aioesphomeapi` connected with the
+right key and refused the wrong one and none. Then three bugs that every test
+of mine had passed:
+- *Order.* A result wakes its task a loop step later, so "write ok" followed by
+  "disconnected" reached Home Assistant reversed, and its client fails a write
+  it is still waiting on when the link drops. Events are now queued behind
+  results.
+- *Encryption removed.* A plaintext port closed silently on a keyed client,
+  which the client reports as a dead device and retries for ever. ESPHome's
+  firmware answers with a plaintext indicator; so do we now, and the client
+  raises the error Home Assistant uses to offer to drop the key. Found by
+  Wil asking what happens to someone who turns connections off again.
+- *Slots.* On the first real run Home Assistant took the key, adverts flowed,
+  and nothing ever connected: it had been told 0 of 0 free, because the Echo
+  reports its slots the moment the setting reaches it, which is before the
+  controller has rebuilt the proxy that should hear it.
+
+**And one that no test ran at all.** The new dashboard panel used a `mono`
+variable every other component defines for itself. Switching the toggle on
+blanked the page on the dev add-on. Nothing in CI checks the dashboard for
+undefined names.
+
+**The real run, as far as it got.** Dev add-on on the branch (schema v31,
+backup taken), VVV on the branch firmware and re-paired. Saving the setting
+created the key and rebuilt VVV's proxy encrypted; Home Assistant's plaintext
+attempts were refused, it asked for the key, and reconnected 27s later. The
+other two dev Echoes' passive proxies stayed plaintext and connected
+throughout, which is the answer to "are existing users forced onto a key": no.
+Home Assistant now sees 3 of 3 slots. **No connection has been made through it
+yet** — the Oral-B integration connects rarely, and four Athom plugs are
+connectable proxies it may prefer.
+
+**Against a phone.** Wil's phone as an nRF Connect peripheral: eleven services
+discovered by the production code, reads, a write read back on a fresh
+connection, indications received. iOS answers Insufficient Authentication on
+its own protected services, as it should with no pairing.
+
+**Other things looked at.** VVV had not been connected to the dev controller
+since at least 10-01: its stored CA does not match, cause not found. Verona
+answered once in Italian because the STT transcribed the utterance as Italian,
+not because of the wake model. A Bluetooth speaker would need Classic
+(pairing, L2CAP channels, AVDTP, SBC); the stock kernel has no Bluetooth
+subsystem, so BlueZ means owning a kernel, and the recommendation is our own
+stack, after this. A cross-browser run of the Config tab (Chromium, Firefox,
+WebKit, two widths) rendered the same 72 controls in all six; the likelier
+cause of "controls missing" reports is fleet-scoped sections dimmed to 45%.
+
+**Mistakes of mine.** The contributor data above. The undefined variable. A
+`pkill -f` whose pattern matched its own shell. A log watch that stopped on an
+unrelated line. I read 9 adverts in 30s as a scan fault before measuring that a
+link costs coverage. And I told Wil VVV was "still to be re-paired" for hours
+without finding out why it had fallen off.
+
+**Still open:** a connection through the proxy from Home Assistant; the
+dashboard undefined-name check; #743's v31 against #729's; #720, #723 and #724
+each waiting on a check of ours; the debloat `shell_run` error on VVV at 21:57.
