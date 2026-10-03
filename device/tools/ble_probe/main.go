@@ -15,6 +15,12 @@
 // /dev/stpbt is single-owner. Build with device/tools/build_tools.sh, then:
 //
 //	ble_probe -interval 320 -window 30 -seconds 240
+//
+// With -tags bench it is also #656's feasibility probe: -list finds a
+// connectable peer, -connect holds links to one or more and reads Device Name.
+//
+//	ble_probe -list 15
+//	ble_probe -connect AA:BB:CC:DD:EE:FF/1 -conn-interval 30 -hold 240
 package main
 
 import (
@@ -40,7 +46,22 @@ func main() {
 	burstOn := flag.Int("burst-on", 0, "raw mode: scan on for this many ms per burst (with -burst-off)")
 	burstOff := flag.Int("burst-off", 0, "raw mode: scan off for this many ms between bursts")
 	trace := flag.String("trace", "", "raw mode: write 'ms addr rssi' per advert to this file")
+	list := flag.Int("list", 0, "scan actively for this many seconds and list what is connectable (-tags bench)")
+	connect := flag.String("connect", "", "GATT probe (-tags bench): peers as addr/type, comma-separated; type 0 public, 1 random")
+	connInterval := flag.Int("conn-interval", 30, "GATT probe: connection interval to ask for, ms")
+	hold := flag.Int("hold", 60, "GATT probe: seconds to hold the links")
+	readEvery := flag.Int("read-every", 0, "GATT probe: re-read Device Name this often while holding, ms (0 = idle)")
+	holdScan := flag.Bool("hold-scan", false, "GATT probe: passive scan while holding")
 	flag.Parse()
+
+	if *list > 0 {
+		runList(*list)
+		return
+	}
+	if *connect != "" {
+		runGatt(*connect, *connInterval, *hold, *readEvery, *holdScan)
+		return
+	}
 
 	if *raw {
 		runRaw(*interval, *window, *seconds, *scan, *vendor, *burstOn, *burstOff, *trace)
