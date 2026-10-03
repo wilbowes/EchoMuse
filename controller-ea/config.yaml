@@ -72,6 +72,19 @@ map:
 
 options:
   server_host: "0.0.0.0"
+  # The plain device-link port, and the one this service advertises over
+  # mDNS. Changing it moves the port every Echo dials; the advertisement
+  # carries the new number, so devices re-learn it on their next reconnect.
+  # Nothing else on the host may already hold it.
+  server_port: 8767
+  # The wss listener, advertised as the mDNS `tls_port` record. Change it
+  # only for a clash with another service on this host; nothing else on the
+  # host may hold it. 0 disables it — which no setting needs, and which is
+  # why this option exists only so the number can move: since firmware
+  # v2.17.0 a device holding a CA refuses to dial plain, so setting this to 0
+  # takes every credentialed Echo offline until each is re-paired (action
+  # button held 5 s, then approved here).
+  server_tls_port: 8770
   server_ip: ""
   mdns_name: "echomuse"
   esphome_project_version: "2.0.0"
@@ -93,6 +106,11 @@ options:
   extra_ca_cert: ""
 schema:
   server_host: "str"
+  server_port: "int(1,65535)"
+  # 0 is allowed and is the documented way to free the port for something
+  # else. It is a deliberate outage on v2.17.0+ firmware — see the option
+  # above — so it is a last resort rather than a repair.
+  server_tls_port: "int(0,65535)"
   server_ip: "str"
   mdns_name: "match(^[a-z0-9][a-z0-9-]{0,62}$)"
   esphome_project_version: "str"
