@@ -63,10 +63,21 @@ Tests only cover pure-Go logic — hardware-dependent code is not testable on th
 **Run controller tests (host):**
 ```bash
 cd controller
-python -m pytest tests/        # needs: pytest numpy scipy pyyaml — not the full requirements.txt
+python -m pytest tests/
 ```
+Needs: `pytest pytest-cov numpy scipy pyyaml aiohttp websockets bcrypt zeroconf protobuf`.
 
-Controller tests cover the pure-logic modules only (`em_eq`, `em_limiter`, `em_mbc`, `em_scenes`, `em_oww_models`, `em_oww_warmup`, `version`, `em_hostip`, `em_ingressauth`, and the decision modules — `em_linkauth`, `em_button`, `em_shadow`, `em_turnclock`, `em_runbarrier`, `em_announce`) — keep it that way unless you're prepared to pull openwakeword/aiohttp into the test environment. Both suites (plus `go vet`) run in CI on every push/PR (`.github/workflows/ci.yml`).
+**That list grew on 2026-10-03 and the old rule was the wrong way round.** It used to read "the pure-logic modules only … keep it that way unless you're prepared to pull openwakeword/aiohttp into the test environment" — stated as a preference for purity, when what it actually encoded was *what would install*. The five added packages were all already pinned in `requirements.txt` and already in the published image, and the whole set costs seconds. With them, `em_api.py` (2,463 statements) and `em_esphome.py` (1,212) became **importable** rather than only readable as source text, and `em_controller.py` (2,181) became reachable behind a stub.
+
+Which matters because of what "reachable" was worth before: **218 of the suite's 1,634 test functions — 17% — executed no controller code at all.** They read `em_api.py`/`em_controller.py`/`em_esphome.py` as text and asserted on substrings, AST shapes or `src.index()` ordering. `test_deploy.py` was 111 functions, 102 of them scraping, and imported nothing from the module it was about. `em_api.py` measured **0.0%**. That is not coverage, and no amount of it adds up.
+
+Measured source coverage went **36.1% → 46.2%** (`controller/.coveragerc` records the baseline and the omit patterns). The three big modules went 0.0/0.0/1.4% → 16.0/16.0/14.8%.
+
+**openwakeword is still deliberately not installed** — it drags in onnxruntime and scikit-learn, minutes per CI run for a suite that scores no audio. `em_controller` imports `from openwakeword.model import Model` at module level, so `tests/_oww_stub.py` stubs it, opt-in per test rather than in `conftest.py`: four existing tests call `pytest.importorskip("openwakeword")` to skip when the real package is absent, and a global stub satisfies that check, so they stop skipping and fail on the missing `MODELS` table.
+
+So the rule now is not "pure logic only" but **reachability is not testability**. `em_api` imports at 46% coverage and still has 2,068 unexecuted statements; "importable" only means a test *can* drive it. The honest statement of what is untested is the coverage number, not a green suite. A source-scraping guard stays legitimate when the code is genuinely unreachable — that is now a deliberate choice per test rather than a default forced by an import error, and it should say so in a comment when used.
+
+Both suites report coverage in CI (report-only, no gate — the baseline was unknown until this was added, so a gate would have gone red on the run that introduced it). Both suites plus `go vet` run on every push/PR (`.github/workflows/ci.yml`).
 
 **Release:** pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds the binary in the compiler image and attaches it to a GitHub release. **Tag with `git tag -a --cleanup=verbatim`** — the annotation message becomes the release body (`body_path` from `git tag -l --format='%(contents)'`), which is what the dashboard shows next to an available update. Write it for the person deciding whether to push firmware to a device they depend on: what changed, what to expect, anything required of them. GitHub's generated commit list is still appended below it. A lightweight tag yields an empty body and falls back to that list, which is a worse experience, not a broken one.
 
