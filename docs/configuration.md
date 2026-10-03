@@ -716,14 +716,46 @@ Two things to know before enabling:
   Android's stack** (it survives reboots). Nothing EchoMuse uses needs
   Android Bluetooth — but stock-style Bluetooth speaker pairing stops being
   possible on that device.
-- The proxy is **receive-only** (passive scanning). Devices that need an
-  active connection to read data (some smart locks, older BLE devices)
-  aren't supported — advert-based sensors and presence tracking are.
+- On its own the proxy is **receive-only** (passive scanning). Devices that
+  need a connection to read data or take commands need **Allow connections**
+  as well, below.
 - The Dot's WiFi and Bluetooth **share one antenna**, and scanning costs the
   WiFi link. So the scan **pauses automatically** while the Dot is hearing
   you, while a reply is arriving, and while its console or an update is
   running, then resumes; presence tracking loses a few seconds per voice
   turn.
+
+**Allow connections** — lets Home Assistant connect to Bluetooth devices
+through the Dot: smart locks, SwitchBot, anything that needs more than its
+advertisements. Off by default. It needs **Bluetooth proxy** on, and firmware
+that supports it (the toggle says so when it does not).
+
+Turning it on changes one thing you have to act on: **the proxy's Home
+Assistant connection becomes encrypted, and Home Assistant will ask for an
+encryption key.** Save the setting, press **Show encryption key** under the
+toggle (admin only), and paste it into Home Assistant when the `<label> BT
+Proxy` device asks to be reconfigured. Until you do, that proxy stops
+delivering advertisements too, because Home Assistant cannot connect to it.
+The key stays the same for that Dot from then on.
+
+The key is required, with no option to skip it: a connection can operate
+whatever is at the other end, and without it anything on your network could
+use the proxy to do so. Treat the key like a password. Turning connections
+off again makes the proxy unencrypted and ends any open connection.
+
+Limits to know:
+
+- **Three connections per Dot** at a time.
+- **No pairing.** Devices that require Bluetooth pairing (bonding) will
+  refuse; most locks and SwitchBot devices encrypt in their own app layer
+  and do not need it.
+- **A held connection costs presence tracking.** The scan shares the radio
+  with the connection: the Dot catches roughly half as many advertisements
+  while a connection is open. A connection goes to a slower rhythm after
+  five seconds idle to keep that cost down, so the first command after a
+  quiet spell takes about a second.
+- Connections end when the Dot loses its controller, and Home Assistant
+  reconnects them.
 
 Diagnostics live on the device's **Status tab** (Bluetooth proxy panel):
 scanner state, advertisements seen, nearby device count, and whether Home

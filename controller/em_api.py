@@ -419,6 +419,7 @@ async def create_app() -> web.Application:
     app.router.add_post("/api/devices/{id}/approve",      _post_approve)
     app.router.add_get("/api/devices/{id}/config",        _get_device_config)
     app.router.add_get("/api/devices/{id}/sendspin/token", _get_sendspin_token)
+    app.router.add_get("/api/devices/{id}/ble_proxy/key", _get_ble_proxy_key)
     app.router.add_post("/api/devices/{id}/config",       _post_device_config)
     app.router.add_get("/api/devices/{id}/logs",          _get_device_logs)
     app.router.add_get("/api/devices/{id}/turns",         _get_device_turns)
@@ -1147,6 +1148,29 @@ async def _patch_device(request: web.Request) -> web.Response:
 # file read and one message on the control plane; seconds of slack are for
 # this fleet's link stalls, not for the work.
 SENDSPIN_TOKEN_TIMEOUT_S = 8
+
+
+@auth.require_admin
+async def _get_ble_proxy_key(request: web.Request) -> web.Response:
+    """GET /api/devices/{id}/ble_proxy/key — the encryption key Home Assistant
+    asks for when it adds or re-authenticates this Echo's Bluetooth proxy.
+
+    Handed to the one request and nothing else: never logged, never put in an
+    event (events reach every open tab and support bundles). It is all that
+    stands between the LAN and whatever the proxy can connect to. Admin only
+    for the same reason. There is a key only while connections are on —
+    a passive proxy is unencrypted and has nothing to show.
+    """
+    device_id = request.match_info["id"]
+    status = em_ble_proxy.get_status(device_id)
+    if status is None or not status.get("connections"):
+        return _error("connections_off",
+                      "Turn on Bluetooth connections for this Echo first", 409)
+    key = await asyncio.get_event_loop().run_in_executor(
+        None, db.ensure_ble_proxy_key, device_id)
+    if not key:
+        return _error("not_found", "Unknown device", 404)
+    return _ok({"key": key})
 
 
 @auth.require_admin
@@ -6565,6 +6589,7 @@ def _merge_device(row, boot: dict | None = None) -> dict:
         # Sendspin player (#89): whether the firmware has one, and its status
         # (no secrets; the pairing token is its own request).
         "sendspinCapable": getattr(live, "sendspin_capable", False) if live else False,
+        "bleConnectCapable": getattr(live, "ble_connect_capable", False) if live else False,
         "sendspin":        getattr(live, "sendspin", None) if live else None,
         "audioMixCapable": getattr(live, "audio_mix_capable", False) if live else False,
         # Gates the AEC delay slider, which only means anything on the

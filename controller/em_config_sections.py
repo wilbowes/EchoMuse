@@ -70,7 +70,7 @@ SECTIONS: dict[str, dict] = {
     },
     "bluetooth": {
         "label": "Bluetooth",
-        "keys": ["bleProxyEnabled"],
+        "keys": ["bleProxyEnabled", "bleProxyConnections"],
     },
     "sendspin": {
         "label": "Sendspin",

@@ -119,6 +119,7 @@ plus one conditional (`capabilities()` in `control.go`):
 | `ambient_light` | only if the sensor is actually readable (`als.Present()`) | Reports light readings |
 | `sendspin` | always | Can be a Sendspin player (#89) for synchronised multi-room audio from Music Assistant, run when `sendspinEnabled` is on. Music Assistant connects to the device directly (port 8928, advertised as `_sendspin._tcp`); nothing of the session crosses the controller. Whether it is running, connected or paired is the `sendspin` status |
 | `pairing` | always | Asks to pair itself when its owner holds the action button 5 s: a `pair_request` every 5 s on a live link, or otherwise registers with `"pairing": true` on every dial for the 2-minute window, falling back to plain (without its token) when wss cannot connect. The window closes early once new credentials land, so the redial they cause does not ask again. Without it the controller offers the admin a **Pair** action instead, since the device cannot ask |
+| `ble_connect` | always | Can hold Bluetooth LE connections for the controller and speak GATT over them (#656): up to three links, requests and results as `0x08` frames on `/data`. Acts only while `bleProxyEnabled` and `bleProxyConnections` are both on, and only against a controller announcing `ble_connect` back |
 
 **`aec_hw_ref` is a capability with a runtime companion, and both are needed.**
 The capability says the firmware knows *how* to use a hardware echo reference.
@@ -188,7 +189,7 @@ absent optional fields take prior/default behaviour.
 
 | `type` | Payload | Meaning |
 |--------|---------|---------|
-| `ack` | `device_id`, `features[]` | Registration accepted. `features` is the CONTROLLER's capability list — the mirror of the device's own, and read the same way: a feature that is absent is one the controller cannot do. Absent entirely on controllers before 2.23.0. Current: `ble_adverts_data`, `listen_session`, `output_chain` |
+| `ack` | `device_id`, `features[]` | Registration accepted. `features` is the CONTROLLER's capability list — the mirror of the device's own, and read the same way: a feature that is absent is one the controller cannot do. Absent entirely on controllers before 2.23.0. Current: `ble_adverts_data`, `listen_session`, `output_chain`, `ble_connect` |
 | `refused` | — | Not admitted: link auth refused this device's credentials (a wrong token, or a token it has stopped presenting). Sent before the close; firmware with `pairing` shows the refused ring, which tells the owner to hold the action button to pair. A device also treats a TLS certificate its CA did not sign as refused. Older firmware ignores it |
 | `pending` | `pairing?` | Not admitted: the device is unapproved, or with `pairing:true` its pairing request is recorded and waiting for an admin. Keep redialling within the window; an approval admits the next dial |
 | `leds` | `leds[]`, `listening?` | One LED frame; `listening:true` marks the listening ring so the direction overlay keys off it |
@@ -230,6 +231,7 @@ board implementer must not read a single global table.
 | `0x03` | speaker EOS | End of voice stream |
 | `0x04` | music | Music PCM chunk on its own plane — **only if `audio_mix`** |
 | `0x05` | music EOS | End of music stream — **only if `audio_mix`** |
+| `0x08` | ble gatt | One JSON request of the Bluetooth connection bridge — **only if the device announced `ble_connect`** |
 
 **Device → Controller (capture)**
 
@@ -240,6 +242,7 @@ board implementer must not read a single global table.
 | `0x05` | no-speech-timeout | Bounded turn: no speech ever detected before the timeout |
 | `0x06` | ble adverts | Batch of scanned BLE advertisements — **only if the controller announced `ble_adverts_data`** |
 | `0x07` | session audio | `[0x07][session u32 BE][seq u16 BE][PCM]` — private-listening audio, **only if the controller announced `listen_session`** |
+| `0x08` | ble gatt | One JSON result or event of the Bluetooth connection bridge — **only if the controller announced `ble_connect`** |
 
 `0x04`/`0x05` are safe to reuse because playback frames only ever flow to the
 device and capture frames only ever flow from it. The two capture sentinels are
@@ -291,6 +294,69 @@ Two sender-side rules, neither of which the controller can enforce for you:
   when the link is already in trouble, which is what this frame exists to
   avoid.
 
+### `0x08` — Bluetooth connections (GATT)
+
+The one frame code used in both directions. The payload is one UTF-8 JSON
+object. The device is a GATT **client**: it connects out to peripherals for
+Home Assistant, and holds at most three links (`limit` below says how many).
+
+**Negotiated both ways.** The device sends nothing unless the controller's
+`ack` carried `ble_connect`; the controller sends nothing unless the device
+announced it. Connections also need `bleProxyEnabled` and
+`bleProxyConnections` on — the links live inside the scan session.
+
+Controller → device. Every request carries a `req` number the result echoes.
+Addresses are `aa:bb:cc:dd:ee:ff`; `addr_type` is 0 public, 1 random.
+
+| `t` | Fields | Result adds |
+|-----|--------|-------------|
+| `connect` | `addr`, `addr_type` | `mtu` |
+| `disconnect` | `addr` | — (already gone is `ok`) |
+| `services` | `addr` | `services[]`: `uuid`, `start`, `end`, `chars[]`: `uuid`, `handle` (declaration), `value_handle`, `props`, `descs[]`: `uuid`, `handle` |
+| `read` | `addr`, `handle` | `value` (base64; a long value is followed to its end) |
+| `write` | `addr`, `handle`, `value` (base64), `response` | — |
+| `slots` | — | answered by a `slots` event carrying the `req` |
+
+Device → controller.
+
+| `t` | Fields | Meaning |
+|-----|--------|---------|
+| `result` | `req`, `ok`, and on failure `error`, `att?`, `detail?` | The answer to one request |
+| `notify` | `addr`, `handle`, `value` (base64), `ind` | A notification, or an indication (`ind:true`, already confirmed to the peer) |
+| `disconnected` | `addr`, `reason` | A link ended, whoever ended it. `reason` is the HCI code (`0x08` supervision timeout, `0x13` the peer, `0x16` us) |
+| `slots` | `free`, `limit`, `addrs[]` | Sent whenever it changes. `free` is 0 while connections are switched off |
+
+`error` is one of: `disabled` (the setting is off), `no_slots`, `timeout` (the
+peer did not answer a connect within 20s), `already_connected`,
+`not_connected`, `disconnected` (the link dropped mid-request), `att` (the
+peer refused; `att` carries its ATT error code, e.g. 5 for insufficient
+authentication), `att_timeout` (no answer in 30s, after which the link is
+dropped, as the ATT specification requires), `too_long` (a write over
+MTU−3 bytes), `not_running` (the scan session is down), `busy`, `bad_request`,
+`failed` (`detail` says what, for a log).
+
+Rules a device must keep:
+
+- **Requests for one peer run in the order they arrived.** Home Assistant
+  writes a command and then reads its result. Different peers must not wait
+  for each other: a connect can take 20s.
+- **UUIDs are the full 128-bit form**, lowercase with hyphens, whatever
+  length the peer used.
+- **Uuids, handles and values are the peer's own and are passed on as given.**
+  The device does not subscribe on the controller's behalf: enabling a
+  notification is a `write` of the CCCD descriptor like any other, and every
+  notification that arrives is forwarded.
+- **There is no pairing.** A peer's Security Request is answered with Pairing
+  Not Supported, and attributes that need it fail with `att` 5.
+- **Drop every link when the control connection goes.** A result has nowhere
+  to go, and a peripheral's connection slot is better freed than held.
+- **Do not hold these frames back for a turn**, unlike `0x06`. A result is
+  owed to a request.
+- A link is made at a 30ms connection interval and moved to 500ms after 5s
+  without a request, because the interval decides how much of the scan
+  survives beside it (24% of adverts at 30ms, about 56% at 500ms, measured on
+  biscuit). A board with separate radios need not do this.
+
 ## Config push — `ConfigMessage`
 
 The controller sends `config` on connect and on any per-device config change.
@@ -309,7 +375,7 @@ startupVolume,
 beamAngle, beamformingEnabled,
 aecEnabled, aecDelayMs, aecTailMs, agcEnabled, nsAsr,
 bargeInEnabled, bargeInThreshold,
-bleProxyEnabled,
+bleProxyEnabled, bleProxyConnections,
 sendspinEnabled, sendspinUnpaired, sendspinName,
 eqBands, eqLoudness, limiterEnabled, limiterThreshold, limiterRelease,
 bassGuardEnabled, bassGuardDb,

@@ -28,6 +28,23 @@ real BD address is diagnostics-only (device stats), NOT identity: it isn't
 known until the scanner first runs, and flipping identity after HA has
 discovered the proxy would orphan the HA device entry.
 
+Connections (#656): with bleProxyConnections on, and firmware announcing
+`ble_connect`, the proxy also offers Home Assistant active connections —
+em_ble_gatt holds that logic. Two things change with it, both at listener
+creation, so toggling the setting rebuilds the proxy:
+
+  - THE PORT REQUIRES AN ENCRYPTION KEY. A connection can operate the device
+    at the other end (a lock), and this port has no other authentication, so
+    connections are never offered on a plaintext listener. There is no
+    setting for "connections without encryption" and there must not be one
+    (Wil, 2026-10-03). The key is per device, assigned once, kept in the
+    database and handed to the dashboard only on an admin's request.
+  - The feature flags Home Assistant reads once at connect gain
+    ACTIVE_CONNECTIONS, REMOTE_CACHING and CACHE_CLEARING.
+
+A passive proxy is unchanged: plaintext, and nothing for Home Assistant to
+re-enter.
+
 Entities: one diagnostic sensor (total adverts seen). HA's ESPHome
 integration was observed to silently ignore zero-entity devices (see
 esphome/feature_flags.py MediaPlayerEntityFeature docstring), and a
@@ -35,8 +52,9 @@ monotonic advert counter is genuinely useful (rate via HA derivative).
 """
 
 import asyncio
+import base64
 import logging
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from zeroconf import ServiceInfo
 
@@ -45,7 +63,9 @@ from esphome.satellite_server import SatelliteServerProtocol, serve, _HANDLED
 from esphome.feature_flags import BluetoothProxyFeature
 from esphome.vendor import api_pb2
 
+import em_ble_gatt
 import em_ble_health
+import em_tasks
 
 log = logging.getLogger("echomuse.bleproxy")
 
@@ -53,6 +73,16 @@ BT_PROXY_FLAGS = int(
     BluetoothProxyFeature.PASSIVE_SCAN
     | BluetoothProxyFeature.RAW_ADVERTISEMENTS
 )
+
+# With connections on. PAIRING is deliberately absent: the Echo does not pair.
+BT_PROXY_FLAGS_ACTIVE = int(
+    BT_PROXY_FLAGS
+    | BluetoothProxyFeature.ACTIVE_CONNECTIONS
+    | BluetoothProxyFeature.REMOTE_CACHING
+    | BluetoothProxyFeature.CACHE_CLEARING
+)
+
+NOISE_PROTOCOL = "Noise_NNpsk0_25519_ChaChaPoly_SHA256"
 
 ADVERTS_SENSOR_KEY = 1
 
@@ -77,8 +107,26 @@ class BluetoothProxySatellite(SatelliteServerProtocol):
         # only encodes/sends while HA is actually subscribed.
         self.subscribed = False
         self._states_subscribed = False
+        # Connections: an encrypted listener and the Bluetooth handlers, or
+        # neither. Decided by the server when this connection is accepted.
+        self._gatt: Optional[em_ble_gatt.GattProxy] = None
+        if owning_server.connections:
+            self.set_encryption(owning_server.key, self.server_name,
+                                mac_address.replace(":", "").lower())
+            self._gatt = em_ble_gatt.GattProxy(
+                owning_server.link, api_pb2, self._send_many, em_tasks.spawn,
+                log_name=self._log_name)
+
+    def close_gatt(self) -> None:
+        if self._gatt is not None:
+            self._gatt.close()
+            self._gatt = None
 
     def handle_message(self, msg):
+        if self._gatt is not None and self._gatt.handle(msg):
+            yield _HANDLED
+            return
+
         if isinstance(msg, api_pb2.DeviceInfoRequest):
             yield api_pb2.DeviceInfoResponse(
                 uses_password=False,
@@ -92,7 +140,9 @@ class BluetoothProxySatellite(SatelliteServerProtocol):
                 # the part after it as the device Model.
                 project_name=f"EchoMuse.{_device_model()}",
                 project_version=_project_version(),
-                bluetooth_proxy_feature_flags=BT_PROXY_FLAGS,
+                bluetooth_proxy_feature_flags=(
+                    BT_PROXY_FLAGS_ACTIVE if self._gatt is not None else BT_PROXY_FLAGS),
+                api_encryption_supported=self._gatt is not None,
             )
             return
 
@@ -150,11 +200,17 @@ class BluetoothProxySatellite(SatelliteServerProtocol):
 class DeviceBleProxyServer:
     """TCP listener + mDNS identity for one device's BT proxy (single-claimant)."""
 
-    def __init__(self, device_id: str, label: str, mac_address: str, port: int) -> None:
+    def __init__(self, device_id: str, label: str, mac_address: str, port: int,
+                 key: Optional[bytes] = None) -> None:
         self.device_id   = device_id
         self.label       = label
         self.mac_address = mac_address
         self.port        = port
+        # Connections are on exactly when there is a key: the listener is
+        # then encrypted and the Bluetooth handlers exist.
+        self.key         = key
+        self.connections = key is not None
+        self.link        = em_ble_gatt.GattLink(self._send_gatt)
         self._server: Optional[asyncio.AbstractServer] = None
         self._active_satellite: Optional[BluetoothProxySatellite] = None
         self._mdns_info: Optional[ServiceInfo] = None
@@ -170,6 +226,10 @@ class DeviceBleProxyServer:
         # on non-zero would repeat the same reset every 30s forever.
         self.hci_restarts = 0
         self.hci_errors   = 0
+
+    async def _send_gatt(self, payload: bytes) -> bool:
+        sender = _gatt_sender
+        return sender is not None and await sender(self.device_id, payload)
 
     def _protocol_factory(self):
         if self._active_satellite is not None:
@@ -189,6 +249,8 @@ class DeviceBleProxyServer:
         return satellite
 
     def _on_satellite_disconnected(self, satellite) -> None:
+        # Its links go with it: nothing is left to use them.
+        satellite.close_gatt()
         if self._active_satellite is satellite:
             self._active_satellite = None
             log.info(f"[bleproxy.{self.device_id[-8:]}] HA disconnected")
@@ -211,6 +273,7 @@ class DeviceBleProxyServer:
         server, self._server = self._server, None
         satellite, self._active_satellite = self._active_satellite, None
         if satellite is not None:
+            satellite.close_gatt()
             satellite.close()
         if server:
             server.close()
@@ -222,7 +285,16 @@ class DeviceBleProxyServer:
 
 _proxies: dict[str, DeviceBleProxyServer] = {}
 _online: set[str] = set()   # device_ids with a live /control connection
+_can_connect: set[str] = set()   # of those, the ones announcing `ble_connect`
 _host: str = "0.0.0.0"
+# Writes one connection-bridge message to a device's data plane. Set by
+# em_controller, which owns the sockets; this module must not import it.
+_gatt_sender: Optional[Callable[[str, bytes], Awaitable[bool]]] = None
+
+
+def set_gatt_sender(sender: Callable[[str, bytes], Awaitable[bool]]) -> None:
+    global _gatt_sender
+    _gatt_sender = sender
 
 
 def _project_version() -> str:
@@ -248,16 +320,19 @@ def _proxy_mac(device_id: str) -> str:
     return f"{first:02X}{mac[2:]}"
 
 
-def _make_mdns_info(device_id: str, label: str, port: int) -> ServiceInfo:
+def _make_mdns_info(device_id: str, label: str, port: int,
+                    encrypted: bool = False) -> ServiceInfo:
     from em_esphome import SERVER_IP
     import socket
     svc_name = f"echomuse-{device_id[-12:].lower()}-bt"
+    extra = {"api_encryption": NOISE_PROTOCOL} if encrypted else {}
     return ServiceInfo(
         "_esphomelib._tcp.local.",
         f"{svc_name}._esphomelib._tcp.local.",
         addresses=[socket.inet_aton(SERVER_IP)],
         port=port,
         properties={
+            **extra,
             "version": _project_version(),
             "friendly_name": f"{label} BT Proxy",
             # mac TXT is MANDATORY for HA discovery (mdns_missing_mac) and
@@ -290,11 +365,13 @@ async def reconcile(device_id: str) -> None:
     loop = asyncio.get_event_loop()
     row = await loop.run_in_executor(None, db.get_device, device_id)
     enabled = False
+    wants_connections = False
     label = device_id[-8:]
     if row is not None and row["approved"]:
         label = row["label"] or f"EchoMuse {device_id[-8:]}"
         cfg = await loop.run_in_executor(None, db.get_effective_device_config, device_id)
         enabled = bool(cfg.get("bleProxyEnabled", False))
+        wants_connections = enabled and bool(cfg.get("bleProxyConnections", False))
 
     proxy = _proxies.get(device_id)
 
@@ -303,6 +380,22 @@ async def reconcile(device_id: str) -> None:
             await _teardown(device_id, proxy)
         return
 
+    # Connections need firmware that can make them. A device that is offline
+    # keeps what it last had, so its proxy does not flip to plaintext and
+    # back every time it reconnects: Home Assistant would be asked for the
+    # key again each time.
+    if device_id in _online:
+        connections = wants_connections and device_id in _can_connect
+    else:
+        connections = wants_connections and (proxy is None or proxy.connections)
+    if proxy is not None and proxy.connections != connections:
+        # Encryption and the feature flags are fixed when a listener is
+        # made, and Home Assistant reads the flags once per connection.
+        log.info(f"[{device_id}] BT proxy connections "
+                 f"{'on' if connections else 'off'} — rebuilding the proxy")
+        await _teardown(device_id, proxy)
+        proxy = None
+
     if proxy is None:
         # BLE port is the voice satellite port + offset (paired, deterministic).
         port = await loop.run_in_executor(None, db.ensure_ble_proxy_port, device_id)
@@ -310,11 +403,18 @@ async def reconcile(device_id: str) -> None:
             log.warning(f"[{device_id}] BLE proxy enabled but device has no "
                         f"ESPHome voice port yet — deferring until it does")
             return
-        proxy = DeviceBleProxyServer(device_id, label, _proxy_mac(device_id), port)
+        key = None
+        if connections:
+            stored = await loop.run_in_executor(None, db.ensure_ble_proxy_key, device_id)
+            key = base64.b64decode(stored) if stored else None
+            if key is None or len(key) != 32:
+                log.error(f"[{device_id}] no usable BT proxy key — connections stay off")
+                key = None
+        proxy = DeviceBleProxyServer(device_id, label, _proxy_mac(device_id), port, key)
         _proxies[device_id] = proxy
         azc = _azc()
         if azc is not None:
-            mdns_info = _make_mdns_info(device_id, label, port)
+            mdns_info = _make_mdns_info(device_id, label, port, encrypted=proxy.connections)
             try:
                 await azc.async_register_service(mdns_info, allow_name_change=True)
                 proxy._mdns_info = mdns_info
@@ -326,6 +426,14 @@ async def reconcile(device_id: str) -> None:
     # Listener tracks device presence, same as the voice satellite's port.
     if device_id in _online:
         await proxy.start(_host)
+        if proxy.connections and proxy.link.limit == 0:
+            # A proxy made just now has an empty link, and the device's own
+            # report of its slots was addressed to the one this replaced (it
+            # sends it the moment the setting reaches it, which is before the
+            # rebuild). Without asking again Home Assistant is told 0 of 0
+            # and never routes a connection here — found on the first real
+            # run, 2026-10-03.
+            em_tasks.spawn(sync_slots(device_id))
     else:
         await proxy.stop()
 
@@ -364,9 +472,13 @@ async def stop_ble_proxy_servers() -> None:
     _proxies.clear()
 
 
-async def device_connected(device_id: str) -> None:
+async def device_connected(device_id: str, ble_connect: bool = False) -> None:
     """Called by em_controller when the physical device connects."""
     _online.add(device_id)
+    if ble_connect:
+        _can_connect.add(device_id)
+    else:
+        _can_connect.discard(device_id)
     proxy = _proxies.get(device_id)
     if proxy is not None:
         await proxy.start(_host)
@@ -375,9 +487,31 @@ async def device_connected(device_id: str) -> None:
 async def device_disconnected(device_id: str) -> None:
     """Called by em_controller when the physical device disconnects."""
     _online.discard(device_id)
+    _can_connect.discard(device_id)
     proxy = _proxies.get(device_id)
     if proxy is not None:
+        # The device drops its links when the controller goes; say so to
+        # Home Assistant before the listener closes under it.
+        proxy.link.reset()
         await proxy.stop()
+
+
+def gatt_from_device(device_id: str, payload: bytes) -> None:
+    """One connection-bridge message off a device's data plane."""
+    proxy = _proxies.get(device_id)
+    if proxy is not None and proxy.connections:
+        proxy.link.feed(payload)
+
+
+async def sync_slots(device_id: str) -> None:
+    """Ask a newly connected device what it holds, so the slot count is its own."""
+    proxy = _proxies.get(device_id)
+    if proxy is None or not proxy.connections:
+        return
+    try:
+        await proxy.link.request("slots", timeout=10.0)
+    except em_ble_gatt.GattError as e:
+        log.info(f"[bleproxy.{device_id[-8:]}] slot query: {e}")
 
 
 # ─── Data path ───────────────────────────────────────────────────────────────
@@ -469,4 +603,11 @@ def get_status(device_id: str) -> Optional[dict]:
         # device — see update_stats for why a BLE restart can take WiFi out.
         "hciRestarts":      proxy.hci_restarts,
         "hciErrors":        proxy.hci_errors,
+        # Connections (#656). `encrypted` is what the port requires, which is
+        # what the dashboard has to tell the operator about.
+        "connections":      proxy.connections,
+        "encrypted":        proxy.connections,
+        "slotsFree":        proxy.link.free if proxy.connections else None,
+        "slotsLimit":       proxy.link.limit if proxy.connections else None,
+        "connected":        len(proxy.link.addrs) if proxy.connections else None,
     }

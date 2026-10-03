@@ -20,6 +20,8 @@ Usage:
     db.log_device(device_id, "info", "device", "Connected")
 """
 
+import secrets
+import base64
 import hashlib
 import json
 import logging
@@ -239,6 +241,13 @@ DEFAULT_DEVICE_CONFIG = {
     # Android Bluetooth stack on the device (required — /dev/stpbt is
     # single-owner) and brings up a second ESPHome listener + mDNS entry.
     "bleProxyEnabled":  False,
+    # bleProxyConnections: Home Assistant may open Bluetooth connections
+    # through the proxy (#656) — locks, SwitchBot, anything that needs more
+    # than adverts. Default off, and it needs bleProxyEnabled. Switching it on
+    # makes that proxy's ESPHome port require an encryption key
+    # (em_ble_proxy): a connection can operate the device at the other end,
+    # and the port had no authentication.
+    "bleProxyConnections": False,
     # sendspinEnabled: the device runs a Sendspin player (#89) that Music
     # Assistant connects to directly for synchronised multi-room audio.
     # Default off: it opens a listening port and an mDNS record on the Echo.
@@ -1118,6 +1127,16 @@ MIGRATIONS: list[str] = [
     ALTER TABLE devices ADD COLUMN emos_build TEXT;
 
     UPDATE system_config SET value = '30' WHERE key = 'schema_version';
+    """,
+
+    # v31 — the API encryption key for a device's Bluetooth proxy (#656).
+    # Home Assistant is given it once, as the ESPHome device's "encryption
+    # key". NULL until connections are first switched on for that device; a
+    # passive proxy stays unencrypted and needs none.
+    """
+    ALTER TABLE devices ADD COLUMN ble_proxy_key TEXT;
+
+    UPDATE system_config SET value = '31' WHERE key = 'schema_version';
     """,
 ]
 
@@ -2299,6 +2318,32 @@ def ensure_ble_proxy_port(device_id: str) -> Optional[int]:
             )
             log.info(f"[db] BLE proxy port set: {device_id} → {port}")
     return port
+
+
+def ensure_ble_proxy_key(device_id: str) -> Optional[str]:
+    """
+    Return this device's Bluetooth proxy encryption key (base64 of 32 random
+    bytes, the form Home Assistant asks for), creating it on first call.
+    Assigned once and kept: Home Assistant stores it, so a key that changed
+    would lock its config entry out. None if the device is unknown.
+
+    Never log it. It is what stands between the LAN and whatever the proxy
+    can connect to.
+    """
+    with _tx() as conn:
+        row = conn.execute(
+            "SELECT ble_proxy_key FROM devices WHERE device_id = ?", (device_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        if row["ble_proxy_key"]:
+            return row["ble_proxy_key"]
+        key = base64.b64encode(secrets.token_bytes(32)).decode()
+        conn.execute(
+            "UPDATE devices SET ble_proxy_key = ? WHERE device_id = ?", (key, device_id),
+        )
+        log.info(f"[db] BLE proxy encryption key created for {device_id}")
+    return key
 
 
 def free_ble_proxy_port(device_id: str) -> None:

@@ -66,6 +66,13 @@ const (
 	// drop audio for a session it has already closed. Only sent against a
 	// controller announcing listen_session; see docs/listening.md.
 	frameTypeListen = byte(0x07)
+	// frameTypeBleGatt carries one JSON message of the Bluetooth connection
+	// bridge (#656, internal/bluetooth/bridge.go), in EITHER direction:
+	// requests down, results and events up. On this plane for the reason the
+	// adverts are — the control plane is where liveness is measured, and a
+	// notifying peripheral can be chatty. Only used when the device announces
+	// `ble_connect` and the controller announces it back.
+	frameTypeBleGatt = byte(0x08)
 )
 
 // Listen states, reported to the controller as listen_state. See
@@ -175,6 +182,8 @@ type DataClient struct {
 	deviceID string
 	mic      mic.Subscribable
 	spk      speaker.Speaker
+
+	bleGattCallback func([]byte)
 
 	readyCh chan string
 
@@ -629,6 +638,32 @@ func (d *DataClient) SendBleAdverts(payload []byte) bool {
 	return true
 }
 
+// OnBleGatt registers the receiver for ble-gatt frames from the controller.
+// It is called on the data plane's read loop and must not block.
+func (d *DataClient) OnBleGatt(cb func([]byte)) { d.bleGattCallback = cb }
+
+// SendBleGatt writes one bridge message to the controller. Unlike an advert
+// batch it never yields to a turn: a result is owed to a request, and a
+// dropped one leaves Home Assistant waiting out its own timeout. It is a few
+// hundred bytes.
+func (d *DataClient) SendBleGatt(payload []byte) bool {
+	d.connMu.Lock()
+	defer d.connMu.Unlock()
+	if d.conn == nil {
+		return false
+	}
+	frame := make([]byte, 1+len(payload))
+	frame[0] = frameTypeBleGatt
+	copy(frame[1:], payload)
+	d.conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
+	if err := d.conn.WriteMessage(websocket.BinaryMessage, frame); err != nil {
+		log.Printf("[data] ble gatt: send error: %v", err)
+		d.conn.Close()
+		return false
+	}
+	return true
+}
+
 func (d *DataClient) StartMic(lockMic bool) {
 	d.micMu.Lock()
 	defer d.micMu.Unlock()
@@ -898,6 +933,10 @@ func (d *DataClient) connect(ctx context.Context, baseURL string) error {
 			log.Println("[data] Music: end of stream")
 			if d.spk != nil {
 				d.spk.EndMusicStream()
+			}
+		case frameTypeBleGatt:
+			if cb := d.bleGattCallback; cb != nil && len(data) > 1 {
+				cb(append([]byte(nil), data[1:]...))
 			}
 		default:
 			log.Printf("[data] Unknown binary frame type: 0x%02x", data[0])

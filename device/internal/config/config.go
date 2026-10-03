@@ -136,6 +136,10 @@ type Device struct {
 	// BLE proxy (passive scan over /dev/stpbt, internal/bluetooth) —
 	// pointer typed so false is expressible over the wire. Default off.
 	BleProxyEnabled *bool
+	// Whether Home Assistant may open connections through the proxy (#656).
+	// Separate from the scan, and default off: a connection can operate the
+	// device at the other end.
+	BleProxyConnections *bool
 
 	// Sendspin player (internal/sendspin, #89). Both default off: the player
 	// opens a listening port and an mDNS record, so it runs only where
@@ -306,6 +310,9 @@ func (d *Device) Apply(msg ConfigMessage) {
 	if msg.BleProxyEnabled != nil {
 		d.BleProxyEnabled = msg.BleProxyEnabled
 	}
+	if msg.BleProxyConnections != nil {
+		d.BleProxyConnections = msg.BleProxyConnections
+	}
 	if msg.SendspinEnabled != nil {
 		d.SendspinEnabled = msg.SendspinEnabled
 	}
@@ -404,35 +411,37 @@ func (d *Device) Snapshot() ConfigMessage {
 	if d.BleProxyEnabled != nil {
 		bleProxyEnabled = *d.BleProxyEnabled
 	}
+	bleProxyConnections := d.BleProxyConnections != nil && *d.BleProxyConnections
 	volumeButtonSound := d.VolumeButtonSound
 	sendspinEnabled := d.SendspinEnabled != nil && *d.SendspinEnabled
 	sendspinUnpaired := d.SendspinUnpaired != nil && *d.SendspinUnpaired
 	return ConfigMessage{
-		VadThreshold:       d.VadThreshold,
-		VadSpeechMs:        d.VadSpeechMs,
-		VadSilenceMs:       d.VadSilenceMs,
-		OwwThreshold:       d.OwwThreshold,
-		OwwModel:           d.OwwModel,
-		OwwOnDevice:        d.OwwOnDevice,
-		BargeInEnabled:     &bargeInEnabled,
-		BargeInThreshold:   d.BargeInThreshold,
-		StartupVolume:      d.StartupVolume,
-		VolumeButtonSound:  &volumeButtonSound,
-		AdcDigitalGain:     &adcDigitalGain,
-		AdcMicpga:          &adcMicpga,
-		MicGainDb:          &micGainDb,
-		BeamAngle:          &beamAngle,
-		BeamformingEnabled: &beamformingEnabled,
-		AgcEnabled:         &agcEnabled,
-		AecEnabled:         &aecEnabled,
-		AecDelayMs:         &aecDelayMs,
-		AecTailMs:          d.AecTailMs,
-		AecRefSource:       d.AecRefSource,
-		BleProxyEnabled:    &bleProxyEnabled,
-		SendspinEnabled:    &sendspinEnabled,
-		SendspinUnpaired:   &sendspinUnpaired,
-		SendspinName:       d.SendspinName,
-		ListeningAnim:      d.ListeningAnim,
+		VadThreshold:        d.VadThreshold,
+		VadSpeechMs:         d.VadSpeechMs,
+		VadSilenceMs:        d.VadSilenceMs,
+		OwwThreshold:        d.OwwThreshold,
+		OwwModel:            d.OwwModel,
+		OwwOnDevice:         d.OwwOnDevice,
+		BargeInEnabled:      &bargeInEnabled,
+		BargeInThreshold:    d.BargeInThreshold,
+		StartupVolume:       d.StartupVolume,
+		VolumeButtonSound:   &volumeButtonSound,
+		AdcDigitalGain:      &adcDigitalGain,
+		AdcMicpga:           &adcMicpga,
+		MicGainDb:           &micGainDb,
+		BeamAngle:           &beamAngle,
+		BeamformingEnabled:  &beamformingEnabled,
+		AgcEnabled:          &agcEnabled,
+		AecEnabled:          &aecEnabled,
+		AecDelayMs:          &aecDelayMs,
+		AecTailMs:           d.AecTailMs,
+		AecRefSource:        d.AecRefSource,
+		BleProxyEnabled:     &bleProxyEnabled,
+		BleProxyConnections: &bleProxyConnections,
+		SendspinEnabled:     &sendspinEnabled,
+		SendspinUnpaired:    &sendspinUnpaired,
+		SendspinName:        d.SendspinName,
+		ListeningAnim:       d.ListeningAnim,
 	}
 }
 
@@ -479,22 +488,23 @@ type ConfigMessage struct {
 	//
 	// Written to disk for init like the password above, and ignored on
 	// FireOS, which uses adbd.
-	ConsoleTimeoutMin  *int     `json:"consoleTimeoutMin,omitempty"`
-	BargeInEnabled     *bool    `json:"bargeInEnabled,omitempty"`
-	BargeInThreshold   float64  `json:"bargeInThreshold,omitempty"`
-	DuckDb             *float64 `json:"duckDb,omitempty"`
-	BeamAngle          *float64 `json:"beamAngle,omitempty"`
-	BeamformingEnabled *bool    `json:"beamformingEnabled,omitempty"`
-	HasBeamforming     bool     `json:"hasBeamforming,omitempty"`
-	AgcEnabled         *bool    `json:"agcEnabled,omitempty"`
-	AecEnabled         *bool    `json:"aecEnabled,omitempty"`
-	AecDelayMs         *int     `json:"aecDelayMs,omitempty"`
-	AecTailMs          int      `json:"aecTailMs,omitempty"`
-	AecRefSource       string   `json:"aecRefSource,omitempty"`
-	BleProxyEnabled    *bool    `json:"bleProxyEnabled,omitempty"`
-	SendspinEnabled    *bool    `json:"sendspinEnabled,omitempty"`
-	SendspinUnpaired   *bool    `json:"sendspinUnpaired,omitempty"`
-	SendspinName       string   `json:"sendspinName,omitempty"`
+	ConsoleTimeoutMin   *int     `json:"consoleTimeoutMin,omitempty"`
+	BargeInEnabled      *bool    `json:"bargeInEnabled,omitempty"`
+	BargeInThreshold    float64  `json:"bargeInThreshold,omitempty"`
+	DuckDb              *float64 `json:"duckDb,omitempty"`
+	BeamAngle           *float64 `json:"beamAngle,omitempty"`
+	BeamformingEnabled  *bool    `json:"beamformingEnabled,omitempty"`
+	HasBeamforming      bool     `json:"hasBeamforming,omitempty"`
+	AgcEnabled          *bool    `json:"agcEnabled,omitempty"`
+	AecEnabled          *bool    `json:"aecEnabled,omitempty"`
+	AecDelayMs          *int     `json:"aecDelayMs,omitempty"`
+	AecTailMs           int      `json:"aecTailMs,omitempty"`
+	AecRefSource        string   `json:"aecRefSource,omitempty"`
+	BleProxyEnabled     *bool    `json:"bleProxyEnabled,omitempty"`
+	BleProxyConnections *bool    `json:"bleProxyConnections,omitempty"`
+	SendspinEnabled     *bool    `json:"sendspinEnabled,omitempty"`
+	SendspinUnpaired    *bool    `json:"sendspinUnpaired,omitempty"`
+	SendspinName        string   `json:"sendspinName,omitempty"`
 	// WakeSound: a pointer so "off" is distinguishable from absent.
 	WakeSound      *bool  `json:"wakeSound,omitempty"`
 	WakeSoundLevel string `json:"wakeSoundLevel,omitempty"`

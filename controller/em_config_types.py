@@ -58,6 +58,7 @@ KINDS: dict[str, str] = {
     "aecTailMs": INT,
     "aecRefSource": STR,
     "bleProxyEnabled": BOOL,
+    "bleProxyConnections": BOOL,
     "sendspinEnabled": BOOL,
     "sendspinUnpaired": BOOL,
     "wakeSound": BOOL,

@@ -29,7 +29,7 @@ jobs:
         # exists to prevent. Pure Python and dependency-free — nothing like
         # pulling openwakeword or aiohttp in here, which is what the
         # minimal-test-env rule is actually about.
-        run: pip install pytest numpy scipy pyyaml
+        run: pip install pytest numpy scipy pyyaml cryptography
       # test_emos_update_flow.py runs the emOS update's device commands in a
       # real shell, with busybox as the device has it. Without one the test
       # would skip, so it fails under CI instead — a skipped check of what is

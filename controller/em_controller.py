@@ -100,6 +100,7 @@ import em_oww_warmup
 import em_barge
 import em_arbiter
 import em_listen
+import em_ble_gatt
 import em_wakelevel
 import em_button
 import em_tap_burst
@@ -369,7 +370,14 @@ BLE_ADVERTS_TYPE   = 0x06
 # announced the same capability, and leaves EQ, bass guard and limiter to it.
 # The device runs its chain only when it sees this, so neither half alone
 # changes anything and the two can never both process the same audio.
-CONTROLLER_FEATURES = ["ble_adverts_data", "listen_session", "output_chain"]
+#
+# "ble_connect": this controller drives Bluetooth LE connections through a
+# device that announced the same capability (#656), as BLE_GATT_TYPE frames in
+# both directions. A message on a new frame code is negotiated both ways for
+# the usual reason: sent to a side that does not read it, it vanishes.
+CONTROLLER_FEATURES = ["ble_adverts_data", "listen_session", "output_chain",
+                       "ble_connect"]
+BLE_GATT_TYPE      = em_ble_gatt.FRAME_BLE_GATT
 SPEAKER_FRAME_TYPE = 0x02
 SPEAKER_EOS_TYPE   = 0x03
 MIC_HEADER_LEN     = 3   # [type][seq_hi][seq_lo]
@@ -936,6 +944,22 @@ class Device:
         except Exception as e:
             log.warning(f"[{self.device_id}] Data send failed: {e}")
 
+    async def send_gatt(self, payload: bytes) -> bool:
+        """
+        One Bluetooth connection-bridge message to the device (#656). Returns
+        False when there is no data connection: unlike a speaker stream there
+        is nothing to ride out, the request fails and Home Assistant is told.
+        """
+        ws = self.data_ws
+        if ws is None or not self.ble_connect_capable:
+            return False
+        try:
+            await ws.send(bytes((BLE_GATT_TYPE,)) + payload)
+            return True
+        except Exception as e:
+            log.warning(f"[{self.device_id}] ble gatt send failed: {e}")
+            return False
+
     async def set_leds(self, leds: list, listening: bool | None = None):
         # The optional listening flag tells the device explicitly that this
         # frame is the listening ring (enables its direction overlay).
@@ -1030,6 +1054,15 @@ class Device:
         starts pairing from the dashboard, since the device cannot ask.
         """
         return "pairing" in (self.capabilities or [])
+
+    @property
+    def ble_connect_capable(self) -> bool:
+        """
+        Whether this firmware can hold Bluetooth LE connections for Home
+        Assistant (#656). Without it the proxy stays passive and the setting
+        is shown disabled with the reason.
+        """
+        return "ble_connect" in (self.capabilities or [])
 
     @property
     def sendspin_capable(self) -> bool:
@@ -1412,6 +1445,12 @@ class Device:
 # The live device registry — keyed by device_id (ro.serialno).
 # em_api receives a reference to this dict at startup.
 _devices: dict[str, Device] = {}
+
+
+async def _send_gatt(device_id: str, payload: bytes) -> bool:
+    """em_ble_proxy's way to a device's data plane, by id."""
+    device = _devices.get(device_id)
+    return device is not None and await device.send_gatt(payload)
 
 # OWW model caches — keyed by device_id ALONE (#512).
 #
@@ -4487,7 +4526,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         # BT proxy: mark the device online (brings its proxy listener up if
         # enabled) and reconcile against current config — covers devices
         # approved or toggled while they were offline.
-        await em_ble_proxy.device_connected(device_id)
+        await em_ble_proxy.device_connected(device_id, device.ble_connect_capable)
         await em_ble_proxy.reconcile(device_id)
 
         # ── Main message loop ─────────────────────────────────────────────
@@ -5253,6 +5292,9 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
             return
 
         device.data_ws = ws
+        # The connection bridge rides this plane: ask what the device holds
+        # now that there is somewhere for the answer to arrive.
+        em_tasks.spawn(em_ble_proxy.sync_slots(device.device_id))
         # #299: a fresh connection has by definition sent nothing yet — the
         # no-frames watchdog gives it FRESH_CONN_GRACE_S before treating
         # the silence as a zombie stream.
@@ -5288,6 +5330,9 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
                     em_ble_proxy.forward_adverts(
                         device.device_id, body.get("adverts") or []
                     )
+                    continue
+                if raw and raw[0] == BLE_GATT_TYPE:
+                    em_ble_proxy.gatt_from_device(device.device_id, raw[1:])
                     continue
                 if raw and raw[0] == em_listen.FRAME_TYPE:
                     # Private-listening session audio. The router holds it
@@ -5657,6 +5702,7 @@ async def main():
 
             await esphome.start_esphome_servers(_devices, SERVER_HOST)
             # After the voice satellites — BT proxies reuse their zeroconf.
+            em_ble_proxy.set_gatt_sender(_send_gatt)
             await em_ble_proxy.start_ble_proxy_servers(SERVER_HOST)
 
             log.info("EchoMuse Controller ready — waiting for devices")

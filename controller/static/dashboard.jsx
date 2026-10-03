@@ -2460,6 +2460,10 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 sendspinPanel={device.connected && device.sendspinCapable
                   ? <SendspinPairing deviceId={device.device_id} status={device.sendspin} isAdmin={isAdmin}/>
                   : null}
+                bleConnectCapable={!device.connected || !!device.bleConnectCapable}
+                blePanel={device.connected && device.bleConnectCapable
+                  ? <BleProxyKey deviceId={device.device_id} status={device.bleProxy} isAdmin={isAdmin}/>
+                  : null}
                 mixCapable={!device.connected || !!device.audioMixCapable}
                 holdCapable={!device.connected || !!device.buttonHoldCapable}
                 hwEchoRef={device.connected && device.aecRef === 'hw'}
@@ -9203,7 +9207,7 @@ const CONFIG_SECTIONS = {
   "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "aecRefSource", "nsAsr", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
   "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs", "consolePassword", "consoleTimeoutMin", "controllerEndpoints"],
-  "bluetooth": ["bleProxyEnabled"],
+  "bluetooth": ["bleProxyEnabled", "bleProxyConnections"],
   "sendspin": ["sendspinEnabled", "sendspinUnpaired"]
 };
 
@@ -9364,7 +9368,8 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                             hwEchoRef = false, hwRefCapable = true,
                             emosFleet = true, wakeCueCapable = true,
                             volumeCueCapable = true, sendspinCapable = true,
-                            sendspinPanel = null }) {
+                            sendspinPanel = null, bleConnectCapable = true,
+                            blePanel = null }) {
   // emosFleet defaults TRUE for the same reason the capability props above do,
   // and for one more: it gates the console password, which is emOS-only, and
   // disabling a setting because we do not KNOW the fleet has an emOS device
@@ -10030,9 +10035,15 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
       <Stage n="06" title="Bluetooth"
         chips={<><ScopeChip tone="device">Device</ScopeChip><ScopeChip tone="controller">Controller</ScopeChip></>}
         desc="Turns the device into a Home Assistant Bluetooth proxy: it passively listens for BLE advertisements (presence beacons, temperature sensors) and forwards them to HA as a separate ESPHome device — independent of the voice assistant. Enabling permanently switches the Dot's Bluetooth chip away from Android's stack (Bluetooth speaker pairing, never used by EchoMuse, stops being possible)."
-        scope={scopeEl('bluetooth')} dim={secStyle('bluetooth')}>
+        scope={scopeEl('bluetooth')} dim={secStyle('bluetooth')}
+        after={(config.bleProxyConnections ?? false) ? blePanel : null}>
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px', ...inputStyle }}>
           <Toggle label="Bluetooth proxy" sub="passive BLE scan → HA (Bermuda, BLE sensors)" value={config.bleProxyEnabled ?? false} onChange={v => set('bleProxyEnabled', v)}/>
+          <Toggle label="Allow connections"
+            sub={bleConnectCapable ? 'proxy goes offline in HA until you enter its key' : 'needs newer firmware on this Echo'}
+            disabled={!bleConnectCapable || !(config.bleProxyEnabled ?? false)}
+            value={config.bleProxyConnections ?? false}
+            onChange={v => set('bleProxyConnections', v)}/>
         </div>
       </Stage>
 
@@ -10055,6 +10066,59 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             onChange={v => set('sendspinUnpaired', v)}/>
         </div>
       </Stage>
+    </div>
+  );
+}
+
+// BleProxyKey: one Echo's Bluetooth connection slots, and the encryption key
+// Home Assistant asks for once connections are on (the proxy's port requires
+// it from then). Fetched on request and never kept, like the Sendspin token.
+function BleProxyKey({ deviceId, status, isAdmin }) {
+  const mono = "'DM Mono',monospace";
+  const [key, setKey] = useState(null);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const show = async () => {
+    setBusy(true); setError('');
+    try {
+      const r = await API.get(`/api/devices/${deviceId}/ble_proxy/key`);
+      setKey(r.key);
+    } catch (e) {
+      setError(e.error || e.message || 'Could not get the key');
+    } finally {
+      setBusy(false);
+    }
+  };
+  const copy = () => {
+    navigator.clipboard.writeText(key).then(() => setCopied(true)).catch(() => {});
+  };
+
+  const on = !!(status && status.connections);
+  let line = 'Save to turn connections on';
+  if (on) {
+    line = status.slotsLimit
+      ? `${status.slotsFree} of ${status.slotsLimit} connections free`
+      : 'Waiting for the Echo';
+    if (!status.haConnected) line += ' · Home Assistant not connected';
+  }
+
+  return (
+    <div style={{ fontFamily: mono, fontSize: 11, color: 'var(--text2)', display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div>{line}</div>
+      {on && isAdmin && !key && (
+        <div><Pill small disabled={busy} onClick={show}>{busy ? 'Fetching…' : 'Show encryption key'}</Pill></div>
+      )}
+      {key && (
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', minWidth: 0 }}>
+          <span style={{ wordBreak: 'break-all', userSelect: 'all' }}>{key}</span>
+          <Pill small onClick={copy}>{copied ? 'Copied' : 'Copy'}</Pill>
+          <Pill small onClick={() => { setKey(null); setCopied(false); }}>Hide</Pill>
+        </div>
+      )}
+      {key && <div style={{ color: 'var(--muted)', fontSize: 10 }}>Home Assistant asks for this on the BT Proxy device. Anyone with it can use this Echo's connections.</div>}
+      {error && <div style={{ color: 'var(--error)' }}>{error}</div>}
     </div>
   );
 }

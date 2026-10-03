@@ -1271,13 +1271,19 @@ func capabilities() []string {
 	// action button 5 s (pairing.go). Without it the controller offers the
 	// admin a Pair action instead, since the device cannot ask.
 	//
+	// "ble_connect": this firmware can hold Bluetooth LE connections for the
+	// controller and speak GATT over them (#656), exchanging requests and
+	// results as ble-gatt frames on the data plane. It does so only against
+	// a controller announcing the same feature, and only while
+	// bleProxyConnections is on.
+	//
 	// "sendspin": this firmware can be a Sendspin player (internal/sendspin),
 	// switched by sendspinEnabled. Whether it is running, and paired, is the
 	// sendspin status, for the aec_hw_ref reason.
 	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons",
 		"oww_shadow", "oww_trigger", "button_hold", "audio_mix",
 		"aec_hw_ref", "oww_local_only", "output_chain", "wake_cue", "volume_cue", "pairing",
-		"sendspin"}
+		"sendspin", "ble_connect"}
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}
@@ -1519,6 +1525,12 @@ func (c *ControlClient) HasFeature(name string) bool {
 // controller ignores unknown frame types and would drop every advert in
 // silence.
 const FeatureBleAdvertsData = "ble_adverts_data"
+
+// FeatureBleConnect is announced by a controller that drives Bluetooth LE
+// connections through this device (frameTypeBleGatt both ways). Without it
+// nothing is sent: an older controller ignores the frame, and a result nobody
+// reads is a connection held for nobody.
+const FeatureBleConnect = "ble_connect"
 
 // FeatureListenSession is announced by a controller that understands
 // private-listening sessions: listen_state, session-tagged oww_wake, the

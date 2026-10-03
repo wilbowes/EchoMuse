@@ -295,7 +295,22 @@ func main() {
 		}
 		controlClient.SendBleAdverts(batch)
 	})
-	applyBleConfig(bleScanner)
+	// Connections for Home Assistant's active proxy (#656). Every Dot reports
+	// the same public Bluetooth address, so links use a random static one
+	// derived from the serial. The bridge speaks only to a controller that
+	// announced ble_connect; to any other, results would be frames it ignores.
+	bleScanner.Conns().SetOwnAddress(bluetooth.StaticRandomAddr(deviceID))
+	bleBridge := bluetooth.NewBridge(bleScanner.Conns(), func(msg []byte) {
+		if controlClient.HasFeature(client.FeatureBleConnect) {
+			dataClient.SendBleGatt(msg)
+		}
+	})
+	dataClient.OnBleGatt(func(msg []byte) {
+		if controlClient.HasFeature(client.FeatureBleConnect) {
+			bleBridge.Handle(msg)
+		}
+	})
+	applyBleConfig(bleScanner, bleBridge)
 
 	// The BLE scan costs this device's WiFi dearly (see Scanner.Yield), so it
 	// stops whenever the link carries something that cannot wait: the user's
@@ -419,6 +434,9 @@ func main() {
 	go pcmSpeaker.WatchJackRouting(ctx)
 
 	controlClient.OnDisconnected(func() {
+		// A Bluetooth link's results have nowhere to go now, and a
+		// controller that comes back starts from no links.
+		bleBridge.DropAll()
 		// Stop any device-local animation: the controller that owned it is
 		// gone, and the pulse below would otherwise fight its ticker. Safe to
 		// repeat — StopAnim only bumps the animator generation, and the pulse
@@ -558,7 +576,7 @@ func main() {
 			s.SeedVolume(msg.StartupVolume)
 		}
 		applyAecConfig(canceller, dataClient)
-		applyBleConfig(bleScanner)
+		applyBleConfig(bleScanner, bleBridge)
 		applySendspinConfig(pcmSpeaker, controlClient, s, deviceID)
 		applyShadowConfig(dataClient, controlClient, pcmSpeaker, s)
 		syncListenState(dataClient, controlClient, false)
@@ -1454,9 +1472,12 @@ func syncListenState(dc *client.DataClient, cc *client.ControlClient, force bool
 	}
 }
 
-func applyBleConfig(scanner *bluetooth.Scanner) {
+func applyBleConfig(scanner *bluetooth.Scanner, bridge *bluetooth.Bridge) {
 	snap := config.Get().Snapshot()
-	scanner.SetEnabled(snap.BleProxyEnabled != nil && *snap.BleProxyEnabled)
+	proxy := snap.BleProxyEnabled != nil && *snap.BleProxyEnabled
+	scanner.SetEnabled(proxy)
+	// Connections live inside the scan session, so they need the proxy on.
+	bridge.SetEnabled(proxy && snap.BleProxyConnections != nil && *snap.BleProxyConnections)
 }
 
 func allLEDs(r, g, b uint8) []led.Led {

@@ -15,6 +15,12 @@
 // /dev/stpbt is single-owner. Build with device/tools/build_tools.sh, then:
 //
 //	ble_probe -interval 320 -window 30 -seconds 240
+//
+// With -tags bench it is also #656's feasibility probe: -list finds a
+// connectable peer, -connect holds links to one or more and reads Device Name.
+//
+//	ble_probe -list 15
+//	ble_probe -connect AA:BB:CC:DD:EE:FF/1 -conn-interval 30 -hold 240
 package main
 
 import (
@@ -40,7 +46,30 @@ func main() {
 	burstOn := flag.Int("burst-on", 0, "raw mode: scan on for this many ms per burst (with -burst-off)")
 	burstOff := flag.Int("burst-off", 0, "raw mode: scan off for this many ms between bursts")
 	trace := flag.String("trace", "", "raw mode: write 'ms addr rssi' per advert to this file")
+	list := flag.Int("list", 0, "scan actively for this many seconds and list what is connectable (-tags bench)")
+	connect := flag.String("connect", "", "GATT probe (-tags bench): peers as addr/type, comma-separated; type 0 public, 1 random")
+	connInterval := flag.Int("conn-interval", 30, "GATT probe: connection interval to ask for, ms")
+	hold := flag.Int("hold", 60, "GATT probe: seconds to hold the links")
+	readEvery := flag.Int("read-every", 0, "GATT probe: re-read Device Name this often while holding, ms (0 = idle)")
+	holdScan := flag.Bool("hold-scan", false, "GATT probe: passive scan while holding")
+	discover := flag.Bool("discover", false, "GATT probe: discover the peer's services and read what is readable")
+	notify := flag.Bool("notify", false, "GATT probe: with -discover, subscribe to notifications")
+	write := flag.String("write", "", "GATT probe: with -discover, uuid-substring:hex to write")
+	host := flag.String("host", "", "connect through the firmware's own scanner and connection manager: addr/type[,addr/type]; uses -hold and -write")
 	flag.Parse()
+
+	if *host != "" {
+		runHost(*host, *hold, *write)
+		return
+	}
+	if *list > 0 {
+		runList(*list)
+		return
+	}
+	if *connect != "" {
+		runGatt(*connect, *connInterval, *hold, *readEvery, *holdScan, *discover, *notify, *write)
+		return
+	}
 
 	if *raw {
 		runRaw(*interval, *window, *seconds, *scan, *vendor, *burstOn, *burstOff, *trace)
