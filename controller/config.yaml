@@ -63,13 +63,13 @@ options:
   # carries the new number, so devices re-learn it on their next reconnect.
   # Nothing else on the host may already hold it.
   server_port: 8767
-  # The wss listener, advertised as the mDNS `tls_port` record. 0 disables
-  # it, which is the whole reason this option exists: devices take wss from
-  # that record rather than from `require_device_tls`, so a device holding a
-  # CA from a previous controller dials wss, fails verification, and cannot
-  # connect at all — and no other setting can express that state. Dropping
-  # the advertisement is the way back: the device falls back to plain, and
-  # fresh credentials can be pushed over the plain shell plane.
+  # The wss listener, advertised as the mDNS `tls_port` record. Change it
+  # only for a clash with another service on this host; nothing else on the
+  # host may hold it. 0 disables it — which no setting needs, and which is
+  # why this option exists only so the number can move: since firmware
+  # v2.17.0 a device holding a CA refuses to dial plain, so setting this to 0
+  # takes every credentialed Echo offline until each is re-paired (action
+  # button held 5 s, then approved here).
   server_tls_port: 8770
   server_ip: ""
   mdns_name: "echomuse"
@@ -93,8 +93,9 @@ options:
 schema:
   server_host: "str"
   server_port: "int(1,65535)"
-  # The lower bound is 0 and must stay 0 — see the option above. 1 would
-  # make the escape hatch unreachable from the one deployment that needs it.
+  # 0 is allowed and is the documented way to free the port for something
+  # else. It is a deliberate outage on v2.17.0+ firmware — see the option
+  # above — so it is a last resort rather than a repair.
   server_tls_port: "int(0,65535)"
   server_ip: "str"
   mdns_name: "match(^[a-z0-9][a-z0-9-]{0,62}$)"

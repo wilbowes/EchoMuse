@@ -1298,9 +1298,9 @@ def test_every_env_var_reaches_the_addon_or_states_why_not():
     The audit this replaces was a reading of CLAUDE.md, and it is exactly the
     kind of check that rots: a missing option is invisible, because a setting
     nobody wanted and a setting nobody added look the same from the outside.
-    SERVER_TLS_PORT sat that way for the life of the add-on — 0 disables the
-    wss listener, which is the documented recovery for a device that dials wss
-    and cannot verify, and no add-on user could reach it (#163).
+    SERVER_TLS_PORT sat that way for the life of the add-on: 8770 is the wss
+    port, it is advertised to devices, and no add-on user could move it or see
+    it was taken (#163).
     """
     start = (CONTROLLER / "em_start.py").read_text()
     block = re.search(r"OPTION_ENV_VARS\s*=\s*\{(.*?)\}", start, re.S)

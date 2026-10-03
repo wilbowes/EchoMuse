@@ -16,14 +16,12 @@ configuration:
   server_tls_port:
     name: Encrypted device port
     description: >-
-      The wss (TLS) port used by devices that hold pushed credentials. Set
-      it to 0 to switch the encrypted listener off. Devices choose wss from
-      the network advertisement (mDNS) rather than from the "Require
-      encrypted device connections" setting below, so a device holding a
-      certificate from a previous controller dials wss, fails verification,
-      and cannot connect at all. Turning this off stops the wss port being
-      advertised, which is the way back from that state: such a device falls
-      back to an unencrypted connection and takes fresh credentials.
+      The wss (TLS) port used by devices that hold pushed credentials,
+      advertised to them over the network. Change it only if another service
+      on this host already uses it. Setting it to 0 switches the encrypted
+      listener off, which on firmware v2.17.0 and later takes every
+      credentialed device offline until each one is re-paired: hold the
+      device's action button for 5 seconds, then approve it here.
   server_ip:
     name: Controller LAN IP address
     description: >-
