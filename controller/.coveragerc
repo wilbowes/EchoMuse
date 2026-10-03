@@ -1,0 +1,60 @@
+# Coverage measurement for the controller test suite.
+#
+# WHY THIS FILE EXISTS: neither half of this project measured coverage until
+# 2026-10-03. `python -m pytest tests/ -v` ran in CI with no --cov, no
+# pytest-cov dependency and no gate, so coverage could not go up or down
+# without anyone being able to tell. This is the measurement, and it is
+# REPORT-ONLY on purpose: the baseline recorded below was measured before
+# anything was added, so a gate would have gone red on the run that introduced
+# it. A gate is a separate decision, once the number has been seen move.
+#
+# BASELINE at the time of writing (2026-10-03, commit 48e94ef), measured with
+# the omit patterns below in force — this is the number CI reports and the one
+# to compare against:
+#
+#   10,980 statements, 7,019 missed, 36.1%   <- BEFORE
+#
+# (12,410 / 31.9% before the vendored protobuf was omitted. The denominator
+# matters: it is why the figure to beat is 36.1% and not 31.9%.)
+#
+# and where it stands after the work this file was added for:
+#
+#   11,045 statements, 5,939 missed, 46.2%
+#
+# The three modules that had no executed lines at all:
+#
+#                  before   after
+#   em_api.py        0.0%   16.0%    2,463 stmts
+#   em_controller.py 0.0%   16.0%    2,181 stmts
+#   em_esphome.py    1.4%   14.8%    1,212 stmts
+#
+# What moved them was one CI install line. Those modules were not untested
+# because nobody wrote tests; they were untested because the suite could not
+# import them, and their only "coverage" was source text being read and asserted
+# on -- 218 of the suite's test functions, 17% of the total, executing no
+# controller code. See tests/conftest.py for what the environment now installs
+# and why openwakeword is still excluded.
+#
+# These are a floor, not a target. "Importable" is not "tested": em_api still
+# has 2,068 statements no test executes, and the honest statement of what is
+# untested is this number rather than a passing suite.
+
+[run]
+# Only first-party code counts. tests/ is measuring the tests; esphome/vendor
+# is generated protobuf vendored from aioesphomeapi, which is 1,412 statements
+# of machine-written descriptor tables that no test can meaningfully execute.
+# Counting it would put a ceiling on the achievable percentage for no reason.
+source = .
+omit =
+    tests/*
+    esphome/vendor/*
+    */__pycache__/*
+
+[report]
+# The three modules above are in the report at 0% deliberately. Omitting
+# zero-coverage files is coverage.py's default and it is exactly wrong here:
+# the whole finding is that they are invisible, so hiding them would hide the
+# number the file exists to track.
+skip_empty = true
+show_missing = false
+precision = 1
