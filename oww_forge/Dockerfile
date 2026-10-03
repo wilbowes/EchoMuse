@@ -86,6 +86,16 @@ COPY forge_g2p.py /opt/openwakeword/openwakeword/forge_g2p.py
 COPY patch_oww_g2p.py /tmp/patch_oww_g2p.py
 RUN python /tmp/patch_oww_g2p.py /opt/openwakeword/openwakeword/data.py && rm /tmp/patch_oww_g2p.py
 
+# train.py builds adversarial negatives one target phrase at a time and only
+# removes texts equal to that phrase, so "hey verona" emits "verona" as a
+# negative even when "verona" is a target too. The bare name then trains as
+# positive and negative at once and stops firing (2026-10-03). forge_negatives
+# drops any negative containing a target phrase; the patch asserts both call
+# sites were found.
+COPY forge_negatives.py /opt/openwakeword/openwakeword/forge_negatives.py
+COPY patch_oww_negatives.py /tmp/patch_oww_negatives.py
+RUN python /tmp/patch_oww_negatives.py /opt/openwakeword/openwakeword/train.py && rm /tmp/patch_oww_negatives.py
+
 COPY forge.py model_metadata.py google_tts.py forge_web.py forge_progress.py piper_voices.py config.template.yml /opt/forge/
 COPY static/ /opt/forge/static/
 

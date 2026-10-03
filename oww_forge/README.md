@@ -33,6 +33,9 @@ one-line patch for its `--convert_to_tflite` argparse bug — string default
 piper-sample-generator @ `v2.0.0` (the last release with the flat layout
 openWakeWord's `train.py` imports from — don't bump casually; its
 `torch.load` is patched for torch ≥ 2.6's `weights_only` default flip).
+`train.py` is also patched so that no adversarial negative contains one of
+your target phrases: unpatched, training "hey verona" beside "verona" makes
+"verona" a negative as well, and the bare name stops firing.
 
 ## Quickstart — web UI
 
