@@ -26,6 +26,18 @@ controller image with this tree mounted over /app:
     docker run --rm -v "$PWD":/app -w /app --entrypoint sh \\
       ghcr.io/wilbowes/echomuse-controller:<tag> -c \\
       'pip install -q aioesphomeapi && python tools/gatt_client_check.py --real-proxy'
+
+With --live the client is pointed at a RUNNING controller's proxy for one
+Echo, so the whole path is real: this client, the controller, the Echo and a
+Bluetooth device near it. It is how a connection is forced through a chosen
+Echo, which Home Assistant offers no way to do (it picks the proxy itself).
+The proxy takes one client at a time, so disable Home Assistant's entry for
+that proxy while this runs. With no address it lists the connectable devices
+the Echo hears for 15s and exits.
+
+    docker run --rm --network host -v "$PWD":/c -w /c python:3.12 sh -c \\
+      'pip install -q aioesphomeapi && python tools/gatt_client_check.py \\
+         --live <controller host> <proxy port> <key, base64> [AA:BB:CC:DD:EE:FF]'
 """
 import asyncio
 import base64
@@ -244,7 +256,95 @@ async def client(key: bytes) -> int:
     return failed
 
 
+DEVICE_NAME = "00002a00-0000-1000-8000-00805f9b34fb"
+
+
+async def live(host: str, port: int, psk: str, address: str | None) -> int:
+    import aioesphomeapi
+    from aioesphomeapi import BluetoothProxyFeature
+
+    failed = 0
+
+    def check(label, ok, detail=""):
+        nonlocal failed
+        print("PASS" if ok else "FAIL", label, detail)
+        failed += not ok
+
+    c = aioesphomeapi.APIClient(host, port, None, noise_psk=psk)
+    await c.connect(login=True)
+    info = await c.device_info()
+    flags = info.bluetooth_proxy_feature_flags_compat(c.api_version)
+    print(f"proxy: {info.name} ({info.mac_address}), firmware {info.esphome_version}")
+    check("feature flags offer connections",
+          bool(flags & BluetoothProxyFeature.ACTIVE_CONNECTIONS), hex(flags))
+
+    slots = []
+    c.subscribe_bluetooth_connections_free(lambda *a: slots.append(a))
+
+    # What the Echo hears, with the address type each device advertises: a
+    # connect needs the type, and a random address asked for as public fails.
+    heard = {}
+
+    def on_adverts(resp):
+        for a in resp.advertisements:
+            heard[a.address] = (a.address_type, a.rssi)
+
+    stop = c.subscribe_bluetooth_le_raw_advertisements(on_adverts)
+    want = int(address.replace(":", ""), 16) if address else None
+    for _ in range(150):
+        await asyncio.sleep(0.1)
+        if want is not None and want in heard:
+            break
+    if want is None:
+        stop()
+        for addr, (kind, rssi) in sorted(heard.items(), key=lambda kv: -kv[1][1]):
+            mac = ":".join(f"{addr:012X}"[i:i + 2] for i in range(0, 12, 2))
+            print(f"  {mac}  {'random' if kind else 'public'}  {rssi}dBm")
+        print(f"{len(heard)} devices heard in 15s; pass one as the address")
+        await c.disconnect(force=True)
+        return 0
+    check("the Echo hears the device", want in heard, f"{len(heard)} others heard")
+    kind = heard.get(want, (1, 0))[0]
+    stop()
+
+    states = []
+    t0 = asyncio.get_running_loop().time()
+    unsub = await c.bluetooth_device_connect(
+        want, lambda connected, mtu, error: states.append((connected, mtu, error)),
+        feature_flags=flags, has_cache=False, address_type=kind, timeout=30)
+    took = asyncio.get_running_loop().time() - t0
+    connected = bool(states) and states[0][0]
+    check("connect", connected, f"{states} in {took:.1f}s")
+    if connected:
+        services = (await c.bluetooth_gatt_get_services(want)).services
+        chars = [ch for s in services for ch in s.characteristics]
+        check("services", len(services) > 0,
+              f"{len(services)} services, {len(chars)} characteristics")
+        for s in services:
+            print("   ", s.uuid, [ch.uuid[4:8] if ch.uuid.endswith("-0000-1000-8000-00805f9b34fb")
+                                  else ch.uuid for ch in s.characteristics])
+        name = next((ch for ch in chars if ch.uuid == DEVICE_NAME), None)
+        if name is not None:
+            try:
+                value = bytes(await c.bluetooth_gatt_read(want, name.handle))
+                check("read Device Name", True, repr(value))
+            except Exception as e:  # the peer may refuse; report what it said
+                check("read Device Name", False, repr(e))
+        await c.bluetooth_device_disconnect(want)
+        await asyncio.sleep(0.5)
+        check("disconnect", len(states) == 2 and not states[1][0], states)
+    unsub()
+    print("slot reports:", [s[:2] for s in slots])
+    check("free slots were reported", len(slots) >= 1, "")
+    await c.disconnect(force=True)
+    return failed
+
+
 if __name__ == "__main__":
+    if len(sys.argv) >= 5 and sys.argv[1] == "--live":
+        sys.exit(1 if asyncio.run(live(
+            sys.argv[2], int(sys.argv[3]), sys.argv[4],
+            sys.argv[5] if len(sys.argv) > 5 else None)) else 0)
     if len(sys.argv) >= 3 and sys.argv[1] == "--serve":
         serve(sys.argv[2], real_proxy="--real-proxy" in sys.argv)
         sys.exit(0)
