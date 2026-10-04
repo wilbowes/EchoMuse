@@ -117,6 +117,7 @@ func main() {
 
 	// Which board this is, and where each part the bindings open was found
 	// (#541). A part found by its old number instead of by name says so here.
+	var boardReport sync.Once
 	layout := board.CurrentLayout()
 	if layout.Board == nil {
 		log.Printf("[board] not identified — using biscuit's layout")
@@ -527,6 +528,17 @@ func main() {
 	// Connected — stop pulse, report current mute state, restore ring or hand
 	// back to direction arc depending on mute state.
 	controlClient.OnConnected(func() {
+		// A part opened by its old number, or not found at all, is reported
+		// once per process: it is how a kernel that names something
+		// differently is learned about from the field (#541).
+		boardReport.Do(func() {
+			if layout.Board == nil {
+				controlClient.SendLog("warn", "[board] not identified — using biscuit's layout")
+			}
+			for _, p := range layout.Problems {
+				controlClient.SendLog("warn", "[board] "+p)
+			}
+		})
 		if pulseCancel != nil {
 			pulseCancel()
 			pulseCancel = nil

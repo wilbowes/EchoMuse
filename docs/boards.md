@@ -183,6 +183,25 @@ stock system do not go in the repository.
 batches: some Dot 2s have a different light sensor on a different bus. Say
 how many units a value was read from.
 
+## What reaches the controller
+
+A part that was not found by name is reported to the controller once per
+start, as a warning in the device's log on the dashboard: `[board] dot keys:
+no input device named "mtk-kpd"; using /dev/input/event1 as on every unit
+measured`. A device no board matched reports `[board] not identified`. If you
+see either on a Dot 2, please open an issue with the output of `server board`.
+
+## Credits
+
+What this page says about boards other than the Dot 2 comes from people who
+put the firmware on their own hardware and wrote down what they found:
+
+- **Echo Dot 3rd gen:** @shortgame11 (the first working port, and the
+  findings about the amplifier, its clock and GPIO 444), @technotiger
+  (profile and probe runs).
+- **Echo 2nd gen:** @vithurshanselvarajah and @jcsnider.
+- **Echo Show 5:** @imduffy15.
+
 ## Where the Dot 2's values came from
 
 Names were read from three units on 2026-10-04: one on stock FireOS 5, one on

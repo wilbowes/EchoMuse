@@ -106,6 +106,10 @@ type Layout struct {
 
 	// Notes has one line per part saying how it was found, for the log.
 	Notes []string
+	// Problems is the subset of Notes for parts NOT found by name: opened by
+	// their old number, or not available. Sent to the controller, because the
+	// device's own log is RAM-backed and nobody reads it on a working Echo.
+	Problems []string
 }
 
 // Resolve finds each part of hw beneath root ("" on a device).
@@ -116,14 +120,18 @@ func Resolve(root string, b *Board) *Layout {
 	}
 	l := &Layout{Board: b, MuteLEDGPIO: hw.MuteLEDGPIO, LightSensor: hw.LightSensor, HCI: hw.HCI}
 	note := func(part, want, got string, err error) {
+		var line string
 		switch {
 		case err == nil:
 			l.Notes = append(l.Notes, fmt.Sprintf("%s: %q at %s", part, want, got))
+			return
 		case got != "":
-			l.Notes = append(l.Notes, fmt.Sprintf("%s: %v; using %s as on every unit measured", part, err, got))
+			line = fmt.Sprintf("%s: %v; using %s as on every unit measured", part, err, got)
 		default:
-			l.Notes = append(l.Notes, fmt.Sprintf("%s: %v; not available", part, err))
+			line = fmt.Sprintf("%s: %v; not available", part, err)
 		}
+		l.Notes = append(l.Notes, line)
+		l.Problems = append(l.Problems, line)
 	}
 	input := func(part string, in Input) string {
 		p, err := InputEvent(root, in.Name)

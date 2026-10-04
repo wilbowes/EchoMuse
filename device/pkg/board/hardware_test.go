@@ -37,10 +37,8 @@ func TestBiscuitResolvesToTheNumbersItAlwaysUsed(t *testing.T) {
 	if l.LightSensor != (LightSensor{"tsl2540", "als_lux"}) || l.HCI != "/dev/stpbt" {
 		t.Errorf("light sensor %+v, hci %q", l.LightSensor, l.HCI)
 	}
-	for _, n := range l.Notes {
-		if strings.Contains(n, "using") || strings.Contains(n, "not available") {
-			t.Errorf("a part was not found by name on the fixture: %s", n)
-		}
+	if len(l.Problems) != 0 {
+		t.Errorf("parts not found by name on the fixture: %v", l.Problems)
 	}
 }
 
@@ -82,8 +80,8 @@ func TestBiscuitFallsBackToItsNumbersAndSaysSo(t *testing.T) {
 		l.Playback == nil || *l.Playback != (PCMAddr{0, 23}) {
 		t.Errorf("fallback layout wrong: %+v", l)
 	}
-	if len(l.Notes) != 5 {
-		t.Fatalf("want a note per part, got %d", len(l.Notes))
+	if len(l.Notes) != 5 || len(l.Problems) != 5 {
+		t.Fatalf("want a note and a problem per part, got %d and %d", len(l.Notes), len(l.Problems))
 	}
 	for _, n := range l.Notes {
 		if !strings.Contains(n, "as on every unit measured") {
