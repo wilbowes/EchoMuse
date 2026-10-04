@@ -29,18 +29,43 @@ class FakeProc:
     """Stands in for the ffmpeg subprocess: N periods of PCM, then EOF
     (or never-ending if endless=True, for pause-mid-play tests)."""
 
-    def __init__(self, periods: int, endless: bool = False):
+    def __init__(self, periods: int, endless: bool = False, gap: float = 0.0):
         self.stdout = asyncio.StreamReader()
         self.returncode = None
         self.killed = False
-        for i in range(periods):
-            self.stdout.feed_data(bytes([i % 251] * SPEAKER_BYTES))
-        if not endless:
-            self.stdout.feed_eof()
+        self._periods = periods
+        self._gap = gap
+        if gap:
+            # A source that keeps producing, paced. endless=True pre-fills the
+            # reader, so a feed drains it and then parks in readexactly until
+            # something cancels it — which is right for a test that pauses
+            # mid-play, and useless for one that needs the feed to still be
+            # iterating later. gap>0 is a source that never runs dry.
+            self._pump = asyncio.create_task(self._feed_slowly())
+        else:
+            for i in range(periods):
+                self.stdout.feed_data(bytes([i % 251] * SPEAKER_BYTES))
+            if not endless:
+                self.stdout.feed_eof()
+
+    async def _feed_slowly(self):
+        try:
+            for i in range(self._periods):
+                await asyncio.sleep(self._gap)
+                self.stdout.feed_data(bytes([i % 251] * SPEAKER_BYTES))
+        except asyncio.CancelledError:
+            raise
+        finally:
+            # Only EOF on a stream that was never endless, matching the
+            # eager path: an endless one stays open for the test to cancel.
+            self.killed = True
 
     def kill(self):
         self.killed = True
         self.returncode = -9
+        pump = getattr(self, "_pump", None)
+        if pump is not None and not pump.done():
+            pump.cancel()
 
     async def wait(self):
         # Mirrors asyncio.subprocess.Process.wait so the double stays
@@ -51,10 +76,11 @@ class FakeProc:
 class StubSession(MediaSession):
     """MediaSession with the decoder stubbed out; records spawn calls."""
 
-    def __init__(self, device_id, periods=3, endless=False):
+    def __init__(self, device_id, periods=3, endless=False, gap=0.0):
         super().__init__(device_id)
         self._periods = periods
         self._endless = endless
+        self._gap = gap
         self.spawns: list[float] = []   # position_s per spawn
         self.spawn_urls: list[str | None] = []
         self.procs: list[FakeProc] = []
@@ -62,7 +88,7 @@ class StubSession(MediaSession):
     async def _spawn_decoder(self, url, position_s):
         self.spawns.append(position_s)
         self.spawn_urls.append(url)
-        proc = FakeProc(self._periods, self._endless)
+        proc = FakeProc(self._periods, self._endless, self._gap)
         self.procs.append(proc)
         return proc
 

@@ -64,3 +64,43 @@ def test_the_stale_connection_guard_survives():
     # the message wraps across two f-string lines — match the fragments
     assert "replacement is active" in src and "services up" in src, \
         "the out-of-order stale guard is still needed alongside the grace"
+
+
+def _handle_data_src() -> str:
+    src = (CONTROLLER / "em_controller.py").read_text()
+    start = src.index("replaced = device.data_ws")
+    return src[start:start + 1600]
+
+
+def test_a_replacing_data_connection_closes_the_one_it_replaces():
+    """
+    #751: a device that reconnects registers the new socket before the
+    controller notices the old one is dead, so the old one used to be
+    abandoned rather than closed — it then lived until WS_PING_TIMEOUT_S
+    reaped it, holding a handler task and a half-open TCP connection.
+    """
+    seg = _handle_data_src()
+    # The reference must be taken BEFORE the assignment replaces it, or the
+    # socket to close is the new one.
+    assert seg.index("replaced = device.data_ws") < seg.index("device.data_ws = ws")
+    assert "replaced.close()" in seg, "the replaced socket is never closed"
+    # Closing is a no-op when there is nothing to replace, and never closes
+    # the socket that just arrived.
+    assert "replaced is not None and replaced is not ws" in seg
+
+
+def test_the_replaced_socket_is_closed_off_the_registration_path():
+    """
+    The peer is already beyond reach by the time we get here — a device only
+    reconnects once its old socket is dead — so the close handshake cannot be
+    waited on, and the new socket must be wired up before anything is awaited.
+    """
+    seg = _handle_data_src()
+    assert "em_tasks.spawn(" in seg and "replaced.close()" in seg, \
+        "the close must be spawned, not awaited inline on the registration path"
+    assert "device.data_ready.set()" in seg, \
+        "the replacement must be live before the old socket is reaped"
+    assert "em_player.device_gone" not in seg, \
+        ("a replacement must NOT abandon the playback session — a stream is "
+         "allowed to ride out the bounce on the new socket (em_player re-"
+         "resolves the device per chunk)")
