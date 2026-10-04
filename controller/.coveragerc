@@ -1,0 +1,20 @@
+# Coverage for the controller suite. Report-only: there is no gate.
+#
+# Baseline when this was added (#739, 2026-10-03), with the omits below:
+#   10,980 statements, 7,019 missed, 36.1%
+# em_api.py and em_controller.py were at 0% and em_esphome.py at 1.4%,
+# because the test job did not install what they import.
+
+[run]
+# First-party code only. esphome/vendor is generated protobuf vendored from
+# aioesphomeapi.
+source = .
+omit =
+    tests/*
+    esphome/vendor/*
+    */__pycache__/*
+
+[report]
+skip_empty = true
+show_missing = false
+precision = 1

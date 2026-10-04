@@ -19,17 +19,17 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      # The tests cover pure-logic modules only — numpy/scipy for the EQ
-      # math, nothing that pulls in openwakeword/onnxruntime (which would
-      # cost minutes of install for zero coverage).
+      # The controller's own imports (aiohttp, websockets, bcrypt, zeroconf,
+      # protobuf) are installed so tests can import em_api and em_controller
+      # and run them (#739). openwakeword is not: it pulls onnxruntime and
+      # scikit-learn, minutes of install, and tests stub it instead.
+      # pyyaml is for the add-on config parity tests (test_channels.py).
+      #
+      # -c requirements.txt holds each package to the version the image
+      # ships, so the suite cannot pass against a library we do not run, and
+      # a Dependabot bump there reaches this job with no second edit.
       - name: Install test dependencies
-        # pyyaml is for the add-on config parity tests (test_channels.py):
-        # config.yaml is genuinely YAML and hand-parsing it to compare
-        # options and schema would be fragile in exactly the way that test
-        # exists to prevent. Pure Python and dependency-free — nothing like
-        # pulling openwakeword or aiohttp in here, which is what the
-        # minimal-test-env rule is actually about.
-        run: pip install pytest numpy scipy pyyaml cryptography
+        run: pip install -c controller/requirements.txt pytest pytest-cov numpy scipy pyyaml aiohttp websockets bcrypt zeroconf protobuf cryptography
       # test_emos_update_flow.py runs the emOS update's device commands in a
       # real shell, with busybox as the device has it. Without one the test
       # would skip, so it fails under CI instead — a skipped check of what is
@@ -38,7 +38,7 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq busybox
       - name: Run pytest
         working-directory: controller
-        run: python -m pytest tests/ -v
+        run: python -m pytest tests/ -v --cov --cov-report=term
 
   forge-metadata-tests:
     name: ONNX metadata round trip
@@ -149,9 +149,14 @@ jobs:
       # -race: the firmware is goroutines sharing state (mic fan-out, the
       # listen gate, the speaker pump), and a race there is silent until it
       # is audible. The first run found one, in a test (jack_test.go).
+      #
+      # -coverprofile: report-only, printed by the next step (#739).
       - name: Run go test
         working-directory: device
-        run: go test -race ./internal/... ./pkg/...
+        run: go test -race -coverprofile=coverage.out ./internal/... ./pkg/...
+      - name: Report coverage
+        working-directory: device
+        run: go tool cover -func=coverage.out | tail -30
 
   python-deps-audit:
     name: Python dependency audit
@@ -470,6 +475,10 @@ jobs:
       - name: Build compiler image
         run: docker build -t echomuse-compiler device/compiler/
       - name: Build firmware
+        # go vet runs here because cmd/ imports internal/bindings/mic, whose
+        # every file is //go:build server: on a host `go vet ./cmd/...` fails
+        # with "build constraints exclude all Go files", so cmd/ was outside
+        # every other Go job (#739).
         run: |
           docker run --rm --entrypoint bash \
             -e CGO_LDFLAGS="-Wl,--hash-style=both" \
@@ -477,7 +486,7 @@ jobs:
             -v "$PWD/device":/sdk \
             -v "$PWD/GoTinyAlsa":/GoTinyAlsa \
             echomuse-compiler \
-            -c "cd /sdk && go build -tags server -o build/server ./cmd/"
+            -c "cd /sdk && go vet -tags server ./cmd/... && go build -tags server -o build/server ./cmd/"
       - name: Check it is an ARM binary
         # A build that silently produced a host binary would pass the step
         # above and ship something the hardware cannot run.

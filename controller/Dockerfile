@@ -4,9 +4,15 @@
 # its dependencies never reach the controller image; only the model is copied.
 # Input and output are both pinned by sha256: the output is what devices run,
 # and it is the file measured on VVV. MIT licensed.
+#
+# numpy is pinned here too, to requirements.txt's 2.3.5 (#496): onnx pulls the
+# newest numpy, 2.4+ needs x86-64-v2, and this stage RUNS it — so a local
+# add-on build on a kvm64 host died here ("NumPy was built with baseline
+# optimizations: (X86_V2)"), while CI's v2-capable runners never saw it. The
+# output hash is unchanged with 2.3.5 (checked on linux/amd64).
 FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9 AS silero
 COPY tools/silero_typed.py /tmp/
-RUN pip install --no-cache-dir --root-user-action=ignore onnx==1.20.1 && \
+RUN pip install --no-cache-dir --root-user-action=ignore onnx==1.20.1 numpy==2.3.5 && \
     python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/silero_vad.onnx', '/tmp/in.onnx')" && \
     echo "a35ebf52fd3ce5f1469b2a36158dba761bc47b973ea3382b3186ca15b1f5af28  /tmp/in.onnx" | sha256sum -c - && \
     python /tmp/silero_typed.py /tmp/in.onnx /silero_vad.onnx && \

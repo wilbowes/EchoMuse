@@ -52,6 +52,7 @@ from urllib.parse import urlsplit
 import em_eq
 import em_limiter
 import em_mbc
+import em_tasks
 
 log = logging.getLogger("echomuse.player")
 # Under `echomuse.` on purpose (#378). It was the bare name "player", which
@@ -167,6 +168,10 @@ def known_unseekable(url: str) -> bool:
         return bool(_MA_FLOW_PATH.match(urlsplit(url).path))
     except ValueError:
         return False
+
+# How long stopping a feed waits for its EOS to be sent before releasing the
+# player (see the feed's finally). The send itself is never abandoned.
+EOS_WAIT_S = 2.0
 
 # How many ffmpeg stderr lines to keep for the failure log. -loglevel error
 # means anything that IS on stderr is meaningful; five lines covers every
@@ -915,9 +920,26 @@ class MediaSession:
             if not eos_sent:
                 # The flush discard stays armed until it sees this stream's
                 # EOS — same contract as barge-in aborting stream_speaker.
+                #
+                # Bounded wait, never a dropped EOS. stop()/pause() await this
+                # finally while holding the command lock, and a device that
+                # lost power mid-stream leaves its data socket half-open: the
+                # send never returns, every later play/pause queues behind
+                # the lock, and Home Assistant shows `playing` until the
+                # add-on restarts (observed 2026-10-04 after a power cut).
+                # Past EOS_WAIT_S the send carries on in the background —
+                # its frame is already written ahead of the next stream's on
+                # a live socket, so a slow link still gets it in order —
+                # and the lock is released.
+                eos = em_tasks.spawn(device.send_data(bytes([eos_type])),
+                                     name=f"eos-{self.device_id}")
                 try:
-                    await asyncio.shield(
-                        device.send_data(bytes([eos_type])))
+                    await asyncio.wait_for(asyncio.shield(eos), EOS_WAIT_S)
+                except asyncio.TimeoutError:
+                    log.warning(
+                        f"[{self.device_id}] Media EOS not delivered within "
+                        f"{EOS_WAIT_S:.0f}s — link stalled or dead; "
+                        f"releasing the player and leaving it to finish")
                 except BaseException:
                     pass
             if proc is not None and proc.returncode is None:
