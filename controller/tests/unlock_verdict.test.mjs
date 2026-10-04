@@ -57,6 +57,8 @@ check("v1 in Android: only the release is known",
 check("every probe failed: nothing is evidence",
   !v2({ release: "", expdb: "", twrp: "" }));
 check("no arguments at all is not evidence either", !v2({}));
+check("v1 in TWRP 3.7.0_9-bboe2, which dot_firmware.py installs on v1",
+  !v2({ release: "5.1.1", expdb: "00000000", twrp: "3.7.0_9-bboe2" }));
 check("expdb holding something other than an LK header is not evidence",
   !v2({ release: "5.1.1", expdb: "ffffffff", twrp: "3.2.3-0" }));
 
@@ -69,6 +71,8 @@ check("TWRP 3.7 is v2", v2({ twrp: "3.7.0_9-0" }));
 check("TWRP 3.10 is compared as a number, not a string", v2({ twrp: "3.10.0" }));
 check("TWRP 4.0 is v2", v2({ twrp: "4.0.0" }));
 check("TWRP 3.6 is not v2", !v2({ twrp: "3.6.2_9-0" }));
+check("a bboe TWRP does not hide v2's expdb",
+  v2({ expdb: "88168858", twrp: "3.7.0_9-bboe2" }));
 check("FireOS 6 on /system (Android 7.1) is v2", v2({ release: "7.1.2" }));
 
 // ── The refusal names what it found ──

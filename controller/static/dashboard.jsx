@@ -3396,6 +3396,9 @@ service echomuse /data/local/bin/start_server.sh
 //             v1 leaves expdb alone. Checked in recovery only: it needs root.
 //   twrp    — the TWRP version. v2 installs 3.7.0_9-0, v1 ships 3.2.3-0.
 //             Compared numerically, so 3.10 is not read as older than 3.7.
+//             3.7.0_9-bboeN is the exception: overdub's dot_firmware.py
+//             installs it on v1 in place of 3.2.3, and its 64-bit kernel
+//             boots only on v1's LK, so it is never evidence of v2.
 //   release — the Android release that MATTERS: getprop in Android, but
 //             /system's build.prop in recovery, because TWRP answers getprop
 //             with its own ramdisk. FireOS 6 is Android 7.1; v1 boots only
@@ -3404,7 +3407,9 @@ const _unlockVerdict = ({ release = '', expdb = '', twrp = '' }) => {
   const evidence = [];
   if (expdb.toLowerCase() === '88168858') evidence.push('a bootloader image in expdb');
   const tv = twrp.match(/(\d+)\.(\d+)/);
-  if (tv && (+tv[1] > 3 || (+tv[1] === 3 && +tv[2] >= 7))) evidence.push(`TWRP ${twrp}`);
+  if (tv && (+tv[1] > 3 || (+tv[1] === 3 && +tv[2] >= 7)) && !/^3\.7\.0_9-bboe\d+$/.test(twrp)) {
+    evidence.push(`TWRP ${twrp}`);
+  }
   const major = parseInt(release, 10);
   if (major >= 6) evidence.push(`Android ${release}, which is FireOS 6`);
   return { v2: evidence.length > 0, evidence };
@@ -5221,14 +5226,14 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     } else if (!tw) {
       unreadable = true;
       why.push('the wizard could not read the TWRP version');
-    } else if (v2Boot && /^3\.7\.0(?![0-9])/.test(tw) && layout === 'v2') {
+    } else if (v2Boot && /^3\.7\.0(?![0-9])(?!_9-bboe)/.test(tw) && layout === 'v2') {
       gen = 6;
-    } else if (!v2Boot && /^3\.2\.3(?![0-9])/.test(tw) && layout === 'v1') {
+    } else if (!v2Boot && /^3\.2\.3(?![0-9])|^3\.7\.0_9-bboe\d+$/.test(tw) && layout === 'v1') {
       gen = 5;
     } else {
       why.push(`the unlock does not add up: expdb ${v2Boot ? 'holds' : 'does not hold'} `
         + `amonet 2's bootloader, TWRP is ${tw}, and the boot partitions are laid out `
-        + `for amonet ${layout === 'v2' ? 2 : 1} (amonet 1 means TWRP 3.2.3 and FireOS 5; `
+        + `for amonet ${layout === 'v2' ? 2 : 1} (amonet 1 means TWRP 3.2.3 or 3.7.0_9-bboe and FireOS 5; `
         + 'amonet 2 means TWRP 3.7.0 and FireOS 6)');
     }
     if (gen) {

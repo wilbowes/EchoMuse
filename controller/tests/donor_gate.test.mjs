@@ -190,6 +190,16 @@ const armB = [{ name: "boot_b", arch: "arm" }];
   check("amonet 1, FireOS 5 in both slots, 64-bit kernel: accepted", r.ok && r.gen === 5);
 }
 {
+  const bboe = (twrp, layout = "v1") => v(probe({ expdb: "00000000", twrp, a: FOS5, b: FOS5 }),
+                                          layout, [{ name: "the boot image", arch: "arm64" }]);
+  check("amonet 1 with dot_firmware.py's TWRP 3.7.0_9-bboe2: accepted",
+        bboe("3.7.0_9-bboe2").ok && bboe("3.7.0_9-bboe2").gen === 5);
+  check("a bboe TWRP on a v2 partition layout: refused", !bboe("3.7.0_9-bboe2", "v2").ok);
+  check("a bboe TWRP with amonet 2's expdb: refused",
+        !v(probe({ twrp: "3.7.0_9-bboe2" }), "v2", armB).ok);
+  check("v2's own TWRP 3.7.0_9-0 on amonet 1: still refused", !bboe("3.7.0_9-0").ok);
+}
+{
   // C95, 2026-09-25: amonet 1, FireOS 5 in system_a, FireOS 6 in system_b. The
   // image mounts system_a only, so system_b is reported and cannot block.
   const v1 = (a, b) => v(probe({ expdb: "00000000", twrp: "3.2.3-0", a, b }), "v1",
