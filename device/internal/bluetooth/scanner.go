@@ -10,11 +10,15 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/wilbowes/EchoMuse/pkg/board"
 )
 
-const (
-	devPath = "/dev/stpbt"
+// devPath is the Bluetooth controller's raw HCI device, which the board
+// states (pkg/board; biscuit: MediaTek's /dev/stpbt). "" when it has none.
+func devPath() string { return board.CurrentLayout().HCI }
 
+const (
 	cmdTimeout   = 3 * time.Second
 	retryBackoff = 5 * time.Second
 
@@ -67,6 +71,8 @@ type Scanner struct {
 	enabled bool
 	stopCh  chan struct{} // closes to stop the current run loop
 	doneCh  chan struct{} // closed by the run loop on exit
+	// noDeviceOnce logs, once, that the board has no HCI device to open.
+	noDeviceOnce sync.Once
 
 	// batch buffer — coalesced per (address+payload) so repeat broadcasts of
 	// identical data collapse to one advert carrying the latest RSSI.
@@ -169,6 +175,14 @@ func (s *Scanner) SetEnabled(enabled bool) {
 	if enabled == s.enabled {
 		return
 	}
+	if enabled && devPath() == "" {
+		// Nothing to open, and a session that can never start would retry
+		// and log every few seconds for the life of the process.
+		s.noDeviceOnce.Do(func() {
+			log.Println("[ble] this board states no Bluetooth device — proxy not started")
+		})
+		return
+	}
 	s.enabled = enabled
 	if enabled {
 		s.stopCh = make(chan struct{})
@@ -244,9 +258,9 @@ func (s *Scanner) session(stopCh chan struct{}) error {
 	s.ensureBluedroidDisabled()
 
 	// Opening triggers WMT BT function-on + firmware patch download.
-	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
+	f, err := os.OpenFile(devPath(), os.O_RDWR, 0)
 	if err != nil {
-		return fmt.Errorf("open %s: %w", devPath, err)
+		return fmt.Errorf("open %s: %w", devPath(), err)
 	}
 	defer f.Close()
 	return s.serve(f, stopCh)

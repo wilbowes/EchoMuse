@@ -31,6 +31,20 @@ type Hardware struct {
 	// /proc/asound/pcm lists.
 	Capture  PCM
 	Playback PCM
+	// LightSensor is the ambient light sensor. A zero value means the board
+	// has none.
+	LightSensor LightSensor
+	// HCI is the Bluetooth controller's raw HCI character device, "" when
+	// the board has none the firmware can drive. A node of the same name
+	// can exist on a board whose radio is not behind it, so this is stated
+	// per board and never assumed.
+	HCI string
+}
+
+// LightSensor is an ambient light sensor on the i2c bus.
+type LightSensor struct {
+	Driver string // the client's sysfs `name`
+	Attr   string // the attribute, in the client's directory, that reads lux
 }
 
 // Input is an evdev device.
@@ -63,6 +77,9 @@ var biscuitHardware = &Hardware{
 	MuteLEDGPIO: "444",
 	Capture:     PCM{Name: "TLV320AIC3101 Capture", Fallback: &PCMAddr{0, 24}},
 	Playback:    PCM{Name: "TLV320AIC3204 Playback", Fallback: &PCMAddr{0, 23}},
+	LightSensor: LightSensor{Driver: "tsl2540", Attr: "als_lux"},
+	// MediaTek's combo-chip (WMT) Bluetooth node.
+	HCI: "/dev/stpbt",
 }
 
 // Layout is a board's Hardware resolved on the running device: what the
@@ -80,6 +97,12 @@ type Layout struct {
 	MuteLEDGPIO string
 	Capture     *PCMAddr // nil when not found
 	Playback    *PCMAddr
+	// LightSensor and HCI are the board's own statements, not resolved here:
+	// the sensor is looked for by internal/bindings/als, which retries, and
+	// the HCI device is opened by internal/bluetooth only when the proxy is
+	// switched on.
+	LightSensor LightSensor
+	HCI         string
 
 	// Notes has one line per part saying how it was found, for the log.
 	Notes []string
@@ -91,7 +114,7 @@ func Resolve(root string, b *Board) *Layout {
 	if b != nil && b.Hardware != nil {
 		hw = b.Hardware
 	}
-	l := &Layout{Board: b, MuteLEDGPIO: hw.MuteLEDGPIO}
+	l := &Layout{Board: b, MuteLEDGPIO: hw.MuteLEDGPIO, LightSensor: hw.LightSensor, HCI: hw.HCI}
 	note := func(part, want, got string, err error) {
 		switch {
 		case err == nil:

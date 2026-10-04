@@ -43,9 +43,9 @@ type BenchOptions struct {
 // scans, and holds the controller up for Duration. The caller must ensure
 // nothing else owns /dev/stpbt.
 func BenchSession(o BenchOptions) error {
-	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
+	f, err := os.OpenFile(devPath(), os.O_RDWR, 0)
 	if err != nil {
-		return fmt.Errorf("open %s: %w", devPath, err)
+		return fmt.Errorf("open %s: %w", devPath(), err)
 	}
 	defer f.Close()
 

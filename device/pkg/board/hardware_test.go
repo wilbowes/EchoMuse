@@ -34,6 +34,9 @@ func TestBiscuitResolvesToTheNumbersItAlwaysUsed(t *testing.T) {
 	if l.MuteLEDGPIO != "444" {
 		t.Errorf("mute LED gpio %q", l.MuteLEDGPIO)
 	}
+	if l.LightSensor != (LightSensor{"tsl2540", "als_lux"}) || l.HCI != "/dev/stpbt" {
+		t.Errorf("light sensor %+v, hci %q", l.LightSensor, l.HCI)
+	}
 	for _, n := range l.Notes {
 		if strings.Contains(n, "using") || strings.Contains(n, "not available") {
 			t.Errorf("a part was not found by name on the fixture: %s", n)
@@ -116,6 +119,9 @@ func TestNoFallbackMeansNotAvailable(t *testing.T) {
 	}
 	if l.MuteLEDGPIO != "" {
 		t.Errorf("mute LED gpio %q on a board that states none", l.MuteLEDGPIO)
+	}
+	if l.LightSensor != (LightSensor{}) || l.HCI != "" {
+		t.Errorf("light sensor %+v and hci %q on a board that states neither", l.LightSensor, l.HCI)
 	}
 	if !strings.HasSuffix(l.LEDRing, "0-003f") {
 		t.Errorf("the ring is the same chip and should resolve: %q", l.LEDRing)
