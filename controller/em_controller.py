@@ -4668,6 +4668,12 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                             # allowlist: it is a state, not a metric, and
                             # the hourly rollup averages numbers.
                             "aecRef":        msg.get("aecRef"),
+                            # The 3.5mm jack's plug position and the codec
+                            # controls that follow from it, read back off the
+                            # hardware (#621). Also a state, not a metric, and
+                            # absent entirely from firmware too old to report
+                            # it — so a bundle can say the device had none.
+                            "jack":          msg.get("jack"),
                         }
                         # Shadow summary → hourly rollup. Present only while the
                         # device is scoring, so its presence is also the "was it
@@ -4875,6 +4881,18 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                                 f"[{device_id}] Playback underruns: {underruns} "
                                 f"in {periods} periods"
                                 f"{f' (turn {turn_id})' if turn_id else ''}"
+                            )
+                        if pstats.get("spannedReconnect"):
+                            # The device's arrival timers measured its data
+                            # connection's outage, not this stream, and the
+                            # timings are stored NULL rather than the zeros it
+                            # sent (em_playback_stats). Logged because the
+                            # outage is the finding and the turn's own row no
+                            # longer carries the evidence of it.
+                            log.info(
+                                f"[{device_id}] Playback stats span a data "
+                                f"reconnect — delivery timings not measurable "
+                                f"for this stream (#307)"
                             )
 
                     elif msg_type == "oww_shadow_cross":

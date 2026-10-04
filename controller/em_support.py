@@ -84,7 +84,7 @@ _TURN_FIELDS = (
     "noise_floor", "outcome", "total_ms", "vad_start_ms", "vad_end_ms", "stt_ms",
     "tts_url_ms", "tts_fetch_ms", "playback_ms", "send_ms", "delivery_ms",
     "eq_ms", "underruns", "min_depth", "prime_wait_ms", "recv_span_ms",
-    "max_gap_ms", "bytes_recv",
+    "max_gap_ms", "bytes_recv", "spanned_reconnect",
 )
 
 # Hourly device metrics, named as `db.get_device_metrics` RETURNS them, not as
@@ -131,6 +131,11 @@ _STATS_FIELDS = (
     "wifiRssi", "linkSpeedMbps", "wifiFreqMhz", "txBytes", "rxBytes",
     "cpuTempC", "maxTempC", "coresOnline", "coresTotal", "thermalCoreLimit",
     "ambientLux", "owwShadow",
+    # jack is the 3.5mm plug position and the codec controls that follow from
+    # it (#621), read back off the device's hardware. A state, not a metric,
+    # and every field inside it nullable — so what a bundle needs from it is
+    # there being, not its shape.
+    "jack",
 )
 
 _COUNTER_FIELDS = (

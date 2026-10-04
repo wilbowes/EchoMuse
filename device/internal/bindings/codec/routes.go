@@ -46,6 +46,15 @@ type Write struct {
 	Value string
 }
 
+// The two playback routes in Routes, named so a caller that needs to READ them
+// back has one copy of the string. A DAPM route left open is silence rather
+// than an error — the DAC powers down and playback still reports a perfectly
+// clean stream — so its state is worth reporting (#587, #621).
+const (
+	HPLDacSwitch = "HPL Output Mixer L_DAC Switch"
+	HPRDacSwitch = "HPR Output Mixer R_DAC Switch"
+)
+
 // Routes is every DAPM switch that must be closed for audio to flow.
 //
 // By NAME, never by control id (#546). These were ids until 2026-09-17, and on
@@ -71,8 +80,8 @@ var Routes = []Write{
 	{"ADC_A Right Ip Select ADC_A DIF1_R switch", "1"},
 	{"ADC_A Left Ip Select ADC_A DIF1_L switch", "1"},
 
-	{"HPR Output Mixer R_DAC Switch", "1"},
-	{"HPL Output Mixer L_DAC Switch", "1"},
+	{HPRDacSwitch, "1"},
+	{HPLDacSwitch, "1"},
 }
 
 var once sync.Once

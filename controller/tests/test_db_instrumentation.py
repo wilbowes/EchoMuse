@@ -59,7 +59,8 @@ def test_migrates_to_v7(fresh_db):
 def test_turns_has_delivery_columns(fresh_db):
     cols = _cols("turns")
     for c in ("min_depth", "prime_wait_ms", "recv_span_ms", "max_gap_ms",
-              "bytes_recv", "send_ms", "delivery_ms", "eq_ms"):
+              "bytes_recv", "send_ms", "delivery_ms", "eq_ms",
+              "spanned_reconnect"):
         assert c in cols, f"turns.{c} missing"
 
 
@@ -103,6 +104,54 @@ def test_set_turn_playback_without_stats_leaves_nulls(fresh_db):
     assert row["playback_periods"] == 50
     assert row["min_depth"] is None
     assert row["recv_span_ms"] is None
+
+
+def test_a_reconnect_spanning_stream_keeps_the_row_and_drops_the_timings(fresh_db):
+    """
+    #307, end to end through the writer. The field data: prime_wait_ms 351813
+    (5.9 minutes) on a stream carrying 188416 bytes, with underruns 0 and
+    min_depth 24 saying it never came close to starving. The row is worth
+    keeping and the timings are not worth having.
+    """
+    turn_id = _mk_turn(fresh_db)
+    db.set_turn_playback(turn_id, periods=74, underruns=0, stats={
+        "minDepth": 24, "primeWaitMs": 0, "recvSpanMs": 0, "maxGapMs": 0,
+        "bytesRecv": 188416, "spannedReconnect": True,
+    })
+    row = db._q1("SELECT * FROM turns WHERE id = ?", (turn_id,))
+    assert row["spanned_reconnect"] == 1
+    assert row["playback_periods"] == 74
+    assert row["underruns"] == 0
+    assert row["prime_wait_ms"] is None
+    assert row["recv_span_ms"] is None
+    assert row["max_gap_ms"] is None
+    assert row["min_depth"] == 24
+
+
+def test_an_unflagged_stream_is_not_marked(fresh_db):
+    """NULL means the device did not say, which for pre-v30 firmware is every
+    ordinary turn — so the flag must not be written as 0."""
+    turn_id = _mk_turn(fresh_db)
+    db.set_turn_playback(turn_id, periods=50, underruns=0, stats={
+        "minDepth": 24, "primeWaitMs": 310, "recvSpanMs": 4200,
+        "maxGapMs": 120, "bytesRecv": 188416,
+    })
+    row = db._q1("SELECT * FROM turns WHERE id = ?", (turn_id,))
+    assert row["spanned_reconnect"] is None
+    assert row["prime_wait_ms"] == 310
+
+
+def test_the_flagged_stream_still_returns_through_the_turn_read_api(fresh_db):
+    """The support bundle reads turns back through get_turns, not the table,
+    so a column missing from the reader is a column missing from the bundle."""
+    _mk_turn(fresh_db)
+    db.set_turn_playback(1, periods=74, underruns=0, stats={
+        "minDepth": 24, "primeWaitMs": 0, "recvSpanMs": 0, "maxGapMs": 0,
+        "spannedReconnect": True,
+    })
+    turn = db.get_turns("dev1", limit=5)[0]
+    assert turn["spanned_reconnect"] == 1
+    assert turn["max_gap_ms"] is None
 
 
 def test_set_turn_delivery(fresh_db):

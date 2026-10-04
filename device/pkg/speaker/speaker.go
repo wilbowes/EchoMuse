@@ -9,6 +9,13 @@ type Speaker interface {
 	EndStream()
 	// Flush discards queued-but-unplayed audio immediately (barge-in).
 	Flush()
+	// NoteDataLinkGap records that the device's data connection to the
+	// controller has just been re-established. Anything still in flight crossed
+	// a gap in the wire, so its per-stream arrival timings would measure that
+	// outage rather than the playback (#307). The data client owns this fact;
+	// the driver has no way to know it, and guessing from the clock would
+	// corrupt exactly the rows the flag exists to rescue.
+	NoteDataLinkGap()
 
 	// ── music plane ───────────────────────────────────────────────────────
 	// A second, independent stream, mixed with the voice plane at the ALSA
