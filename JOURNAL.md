@@ -4415,3 +4415,100 @@ without finding out why it had fallen off.
 **Still open:** a connection through the proxy from Home Assistant; the
 dashboard undefined-name check; #743's v31 against #729's; #720, #723 and #724
 each waiting on a check of ours; the debloat `shell_run` error on VVV at 21:57.
+
+## 2026-10-04 — Bluetooth connections proven, a timer rule with no language in it, boards found by name, and an Early Access
+
+**What shipped.** Controller `2.26.0-ea.1` and firmware `v2.18.0-ea.1`, both
+tagged on `1b85d17`. Merged on the way: #743 (Bluetooth connections), #759
+(timers), #760 (board framework), #761 (release prep), and from contributors
+#739, #749, #750 plus the journal #745 and the CI follow-up #752. #748 is
+approved and waits on a jack run of ours. #735 and #737 closed.
+
+**Bluetooth connections (#743) got its two missing pieces of evidence.**
+Home Assistant offers no way to choose which proxy it connects through, so
+`gatt_client_check.py --live` points HA's own `aioesphomeapi` client at a
+running proxy: against VVV on the dev add-on it connected to three real
+devices (two Macs and a Watch), MTU 247, five services, Device Name read,
+disconnect, slots 3 → 2 → 3. One connect took 10.7s against 1.0s and 1.4s,
+unexplained. Then HA itself: with the four other proxies' entries disabled,
+the Oral-B integration connected through VVV the moment the brush was switched
+on (first attempt 0x3e, retry connected, held 5s) and the Battery entity read
+96%. A passive scan never sees a phone's name, which is in the scan response,
+so the phone could not be picked out of the listing; the tool prints service
+UUIDs for that reason.
+
+Two things the merge needed. The branch had fallen behind main and GitHub ran
+no checks at all on a conflicting PR, which reads as "no checks reported"
+rather than as a failure. And `dashboard_globals.test.mjs`, written that
+evening to catch a name defined nowhere in `dashboard.jsx`, passed locally on
+a Babel file that is gitignored: the image compiles with esbuild and never had
+Babel. CI now fetches `@babel/standalone` 7.22.5 by sha256 for that one test.
+
+**Timers: the wake word and then anything spoken (#759).** #737 offered
+German stop words. Wil did not want a list per language, and Voice PE's rule
+(the wake word alone stops it) has a cost he named from habit: on other
+assistants the wake pauses the alarm and the words after it decide, so a false
+wake never silences one. The rule built is that: a wake heard while any timer
+rings holds every ring silent, speech stops them, four seconds of silence lets
+them resume. It asks whether someone spoke (the speech gate's Silero, two
+consecutive frames after the preroll that carries the wake word's own tail)
+and never what. The stop-word matchers, the reply suppression and the 18dB
+duck are gone. Wil's steer while it was being built: "easy to support and
+consistent in design", which is why the old paths were removed rather than
+kept beside the new one.
+
+On three Echoes it stopped on speech every time, usually through a different
+Echo than the one ringing, which is the arbitration case that broke the old
+rule on 08-28. Two changes came from Wil using it: the listening ring now
+lights on the Echo that took the wake and on the ringing one, and it stays lit
+until he has finished speaking (five quiet frames), because a ring that went
+dark two frames into "be quiet" looked cut off.
+
+**A timer that was acknowledged and never started.** Three requests on VVV
+got "OK. I have started a 10 second timer." and no timer event. I first said
+every repeat on one Echo failed; C95's second timer then worked, so that was
+wrong. HA's debug view showed the LLM agent answering with no local intent
+handling, inside one conversation that had run since VVV's first timer, and
+after eight quiet minutes the same sentence worked. Wil was not convinced
+before the recovery. It is written into controller/CLAUDE.md as the first
+thing to check, not as proven.
+
+**Boards (#760, #541).** The question was whether we could start a firmware
+that detects its hardware, given what the Dot 3 and Echo 2 ports had found.
+Wil's position: recognise that work in full, build it ourselves so it is
+built on our terms, emOS as the target on every board. Reading both ports'
+diffs first: radar looks like biscuit with an amp board (Wil's theory; same
+SoC, ring, PCM layout, and biscuit turns out to have the same four ADCs), and
+the Dot 3 needs behaviour as well as data. The Dot 3's `device_type_id` was
+already in a snapshot a contributor posted on #527.
+
+What was built is the seam only, with biscuit registered: `Hardware` profiles
+in `pkg/board`, `Resolve`, the bindings switched over, a guard test, `server
+board`, and `docs/boards.md`. Names were read from VVV, 15LE and C95 and are
+identical. It ran as the live firmware on all three. Wil then asked the right
+question about putting it in the EA: where could it fail? Only in the fallback
+path, which no unit of ours takes, and that showed the gap: a fallback was
+logged where nobody would see it. The firmware now sends it to the controller.
+
+**The EA.** Wil moved UAT to GA only, which removed the reason to wait. Notes
+per component; the tags kept their headings; `:latest` still equals `:2.25.0`.
+
+**Other things.** #739 installed its test dependencies unpinned; #752
+constrains them with `-c controller/requirements.txt`. An idea parked for
+later: a webOS port. A scan of issues before the EA found #689 (adoption hangs
+on the add-on, the reporter answered two days ago) and #747 (an Echo scoring
+0.994 ceded to one across the house at 0.484: arbitration takes the earliest
+heard and ignores score). A contributor opened five more PRs after being asked
+for one or two at a time, and answered a user on #712 as if for the project;
+Wil is handling it.
+
+**Mistakes of mine.** The Babel file above. The repeat-fails pattern stated
+before a counter-example arrived. A PR description that said all three Echoes
+had every check when two had some, corrected before merge. "Radar has eight
+mics in a square", taken from a contributor's notes and wrong; Wil knew the
+hardware. Leaning on Home Assistant's HAL to make radar simpler, when the
+target is emOS. And asking for "merge 743" often enough to be teased for it.
+
+**Still open:** #689; a decision on #747; #736 needs a closing reply; #753
+unread; the jack run for #748; telling the port contributors the plan; the
+dev rig is on pre-merge builds, not the released artifacts.

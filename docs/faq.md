@@ -378,10 +378,16 @@ Barge-in** if it isn't already.
 
 ### Does it do timers?
 Yes — ask for one the way you'd expect, and it rings on the Echo itself.
-Stopping one no longer leaves the Echo deaf. **Stopping a ringing timer by
-voice can still be unreliable**, because the chime competes with what you say.
-Report what you said and what happened; the wording people actually use is the
-useful part.
+
+To stop it, press the action button, or say the wake word and then anything
+at all ("stop", "be quiet", in any language). The wake word pauses the ring
+and lights the listening ring; if you say nothing for four seconds the ring
+resumes. Any Echo that hears you can stop a timer ringing on another. A
+command spoken over a ringing timer stops the timer and is not sent to Home
+Assistant, so say it again once it is quiet.
+
+That is controller 2.26.0 (Early Access from 2.26.0-ea.1). Before it, a
+ringing timer stopped only on an English stop word such as "stop" or "cancel".
 
 ---
 

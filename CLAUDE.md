@@ -47,9 +47,10 @@ Three consequences for reviewing a change:
   is unavoidable, isolate it rather than spread it.
 - **Resolve hardware by NAME, not by number.** `event2` is the volume button
   on biscuit and the *touchscreen* on checkers; opening the wrong one succeeds
-  silently and leaves the buttons dead. The same rule already applies to i2c
-  (`als.resolve()` matches `tsl2540` by name, since `0-0039` is an
-  enumeration accident).
+  silently and leaves the buttons dead. Since 2026-10-04 this is how the
+  firmware works (#541): each board states its parts in `pkg/board`, the
+  bindings open what was found, and a test fails on a number anywhere else.
+  `device/CLAUDE.md` → "Boards", and `docs/boards.md` for porters.
 - **A change that makes a vendor blob load-bearing is going the wrong way**,
   and needs to justify itself as a terminal opt-in for one platform rather
   than as the path forward. PR #168 (native AFE) is the **worked example,
@@ -193,6 +194,11 @@ Device firmware, controller and emOS are versioned independently from the same r
 - **Controller**: `controller-v*` tags (e.g. `controller-v2.8.0`) → `controller-release.yml` → Docker image pushed to `ghcr.io/wilbowes/echomuse-controller` (`X.Y.Z` + `latest`, CPU-only, **multi-arch: linux/amd64 + linux/arm64** — it said amd64 here until 2026-08-13, long after arm64 shipped). **No GitHub Release is created** — the OTA system's release polling (`em_api._fetch_latest_release`) filters for `v*` tags with a `server` asset, but controller releases stay out of the releases list entirely by design. **Tag controller releases with `git tag -a --cleanup=verbatim` too**: with no Release behind them, the annotation is the *only* copy of the notes, and it is what the dashboard's controller-update notice displays (`em_api._fetch_controller_release` reads it via `git/matching-refs` + the tag object). A lightweight controller tag ships an image nobody can read a changelog for. Pick the newest tag by **parsed version, never list order** — the refs API sorts lexically and returns `controller-v2.9.0` *after* `controller-v2.10.0`.
 
   The notice is **advisory only and must stay that way** (`tests/test_deploy.py` enforces GET-only + no mutating call in the banner): the controller is the user's container, updated with their own `docker compose pull`. An in-app update would restart the process serving the page, mid-request, with no way to report the outcome. Note a locally-built image defaults `EM_CONTROLLER_VERSION` to `dev`, which resolves to `unknown` and correctly shows nothing — pass `--build-arg EM_CONTROLLER_VERSION=$(git describe --tags --match 'controller-v*')` for a local build that knows what it is. Version comparison lives in `version.py` (`parse`/`compare`) so it is unit-testable without aiohttp; a build between tags parses **equal** to its tag and is ahead, not behind.
+
+**UAT gates GA, not Early Access** (Wil, 2026-10-04). The dashboard-control
+run and its report (`tools/uat`, `docs/uat-results/`) are done on a GA
+candidate; an EA is cut from a green main without it, since finding faults is
+what the EA is for. 2.26.0-ea.1 / v2.18.0-ea.1 was the first cut that way.
 
 **Pipeline hygiene (2026-09-23).** Every action is pinned by commit SHA with
 its version in a trailing comment (`@<sha> # v7.0.1`), which Dependabot's

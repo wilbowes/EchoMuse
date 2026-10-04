@@ -169,7 +169,8 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
 | `internal/client/data.go` | WebSocket client to controller `/data` — mic streaming, speaker playback |
 | `internal/server/` | Local state machine: mute, volume, LED mode priority |
 | `internal/config/config.go` | Global runtime config; env var defaults, overridden by controller push |
-| `internal/bindings/` | Hardware drivers: mic PCM, speaker PCM, LED I2C, button evdev |
+| `internal/bindings/` | Hardware drivers: mic PCM, speaker PCM, LED I2C, button evdev. None of them names hardware by number: each opens what `pkg/board` resolved (see "Boards" below) |
+| `pkg/board/` | Which board this is (idme `device_type_id`), where its parts are BY NAME (`Hardware`), the lookup (`Resolve`), and the emOS thermal tuning. `guard_test.go` fails on an event number, i2c bus address, pcm path or `NewDevice` with literal numbers anywhere outside this package |
 | `internal/wakeword/` | openWakeWord streaming feature pipeline (mel ring → 76-frame windows → embedding ring → classifier). Pure Go: inference sits behind the `Inferer` interface so the buffering is host-testable with no ONNX/cgo. Validated tensor-for-tensor against Python via a golden fixture (`testdata/`, regenerate with `gen_fixture.py`) |
 | `internal/wakeword/ort/` | The `Inferer` implementation: ONNX Runtime via cgo. The library is **dlopen'd at runtime, never linked** (only the MIT C header is vendored) so a device without it boots normally and falls back to controller-side wake word — verified by the ARM binary needing only libdl/liblog/libc with zero undefined `Ort*` symbols. `DefaultOptions` (1 thread, XNNPACK, `allow_spinning=0`) is the measured optimum: 37.7% of one core against 243% for ORT's defaults. Don't "fix" the thread count — more threads lowers latency and *raises* CPU, the wrong trade for duty-cycled work |
 | `internal/wakeword/shadow/` | On-device scoring that reports but never acts (see "On-device wake word"). `Push` must never block: inference runs on its own goroutine and drops frames when behind |
@@ -182,6 +183,52 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
 | `internal/wifi/` | Safe WiFi network change with auto-rollback (wifi_change/wifi_commit/wifi_scan control messages; pending-marker recovery at startup). Reload path is `svc wifi disable/enable` ONLY — see package comment for the hardware-proven constraints. **An SSID is 0–32 arbitrary BYTES and is handled as bytes** (`ssid.go`): decoded from wpa_cli's printf_encode, carried as `ssid_hex`, compared as bytes, and written quoted when wpa_supplicant's quoted form can hold it (it reads to the LAST `"`, so quotes and backslashes are literal) or as hex when not. Until 2026-09-19 every path refused `"` and `\`, trimmed spaces, and wrote escaped text back as a different network — and the emOS wizard put SSIDs into a shell command |
 | `internal/bluetooth/` | BLE proxy — raw HCI passive scan over `/dev/stpbt` (single-owner, so Android's Bluedroid is durably `pm disable`d first), parsed into adverts and forwarded to the controller. `emit.go` decides which of them are worth sending; see "The BLE proxy" below, and read it before changing the scan cadence or the filtering |
 | `pkg/led/`, `pkg/mic/`, `pkg/speaker/`, `pkg/buttons/` | Hardware abstractions (interfaces) |
+
+## Boards: hardware is found by name (#541, 2026-10-04)
+
+**`docs/boards.md` is the guide for anyone trying a new board; this is what
+must stay true.** A board states its parts in `pkg/board/hardware.go`: the two
+input devices, the ring's i2c driver, the mic and speaker PCM stream names,
+the light sensor and its lux attribute, the mute LED GPIO and the Bluetooth
+HCI device. `board.Resolve` finds them (`/proc/bus/input/devices`,
+`/proc/asound/pcm`, `/sys/bus/i2c/devices/*/name`) once per process, and the
+bindings open `board.CurrentLayout()`. Only biscuit is registered.
+
+- **Biscuit keeps its old numbers as a FALLBACK, and a new board must not get
+  one.** The fallback exists so a FireOS build that names a part differently
+  behaves as before; it is used only when the name is absent, logged, and sent
+  to the controller once per start as a `[board]` warning
+  (`Layout.Problems`), because the device's own log is RAM-backed and nobody
+  reads it on a working Echo. No unit we own takes that path: it is covered
+  by tests only, and the EA is how we learn whether any unit does.
+- **An unidentified device gets biscuit's layout**, as every build before
+  this assumed. That includes gpio444, so a new board is ADDED before the
+  firmware is run on it. On the Dot 3 that pin is an audio clock, and
+  exporting it silences the speaker until reboot.
+- **Ambiguous is refused, never first-match.** Biscuit has four
+  `tlv320aic3101` ADCs; a name that matches twice does not identify a part.
+- **Match input devices by NAME, not by key capability.** Both of biscuit's
+  claim `KEY_VOLUMEDOWN`; only `keys` sends it.
+- **The Bluetooth node is stated, never probed.** `/dev/stpbt` exists on the
+  Dot 3 too, where the radio is an MT7668 over SDIO.
+- **`server board`** prints the layout and changes nothing, so it runs beside
+  the supervised server: push the binary to a temp path and run it before
+  installing a build that changes any of this.
+
+Names were read on 2026-10-04 from VVV (FireOS 5.5.5.4), 15LE (emOS, FireOS 6
+32-bit kernel) and C95 (emOS, FireOS 5 64-bit kernel): `mtk-kpd` on event1,
+`keys` on event2, `is31fl3236` at 0-003f, `TLV320AIC3204 Playback` 0-23,
+`TLV320AIC3101 Capture` 0-24, identical on all three. VVV's output is the
+fixture `pkg/board/testdata/biscuit-fireos5/`.
+
+**Still biscuit's, inside the drivers:** the 9-channel S24 capture layout,
+`codec.Routes`, the amp switch and DAC unity, the jack tables, start-up
+ordering and the Android `stop <service>` names. They move into `Hardware`
+with the first second board. What the two existing ports need, from reading
+their diffs (nothing verified on hardware of ours): radar is close to biscuit (same SoC, ring, PCM layout and four
+ADCs; a speaker amp with a mute GPIO and a 117-byte filter); the Dot 3 needs
+behaviour as well as data (a 48kHz capture opened before the mic, no amp
+switch, unity at 255, 4-channel S32 capture, a different radio).
 
 ## Private listening (the default since 2026-09-21)
 

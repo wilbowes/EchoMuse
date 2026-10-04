@@ -1038,8 +1038,27 @@ reaches Home Assistant. Three things to keep:
 
 The accepted cost: a command spoken over a ringing timer stops the timer and
 is not sent to HA. Without the Silero model the wake alone stops the ring,
-since an alarm that cannot be stopped by voice is the worse failure. **Not yet
-run on hardware.**
+since an alarm that cannot be stopped by voice is the worse failure.
+
+**Run on three Echoes, 2026-10-04:** wake plus speech stopped the ring every
+time, including when a different Echo took the wake (15LE stopped VVV's and
+C95's) and when the ringing Echo listened for itself; wake alone resumed after
+four seconds with a peak speech probability of 0.02-0.26. The listening ring
+lights on the Echo that took the wake AND on each ringing one, and stays up
+until `DismissListen.finished` (five quiet frames, or `DISMISS_TAIL_S`): the
+ring stops at the first word, but going dark mid-sentence read as being cut
+off. Stopping an alarm darkens its Echo (`stop_timer_alarm`'s finally), so the
+listening ring is sent again after the dismissal. The wiring in em_controller
+has no unit test.
+
+**A "timer that never started" is usually Home Assistant's LLM, not us.** On
+the same evening three requests on one Echo got "OK. I have started a 10
+second timer." and no timer event at all. HA's debug view showed the
+conversation agent was the LLM (`processed_locally: false`,
+`prefer_local_intents: false`) inside one conversation that had lasted since
+that Echo's first timer; after eight quiet minutes the same sentence worked.
+Our side logs every timer event before acting on it (`on_timer_event`), so no
+log line means no event arrived. Check HA's pipeline debug before our code.
 
 **Overlapping owners are COUNTED, and this is the bug class the two fixes
 share.** `ducked` was one boolean per session, so a barge-in turn or an
