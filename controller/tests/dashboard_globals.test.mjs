@@ -7,19 +7,32 @@
 // component first renders, which blanks the whole page. An undefined `mono`
 // in the Bluetooth key panel did that on the dev add-on (2026-10-03).
 //
-// Compiled with the same vendored Babel the image uses; its scope analysis
-// lists every reference with no binding. A new browser API has to be added
-// to KNOWN, which is the point: the list is what the page depends on.
+// The image compiles the file with esbuild, which reports no such thing, so
+// this parses it with @babel/standalone, whose scope analysis lists every
+// reference with no binding. Babel is not in the repo: CI fetches 7.22.5,
+// pinned by sha256, and passes its path as BABEL_STANDALONE. To run it here:
+//
+//     curl -sfLo /tmp/babel.min.js \
+//       https://cdn.jsdelivr.net/npm/@babel/standalone@7.22.5/babel.min.js
+//     BABEL_STANDALONE=/tmp/babel.min.js node controller/tests/dashboard_globals.test.mjs
+//
+// A new browser API has to be added to KNOWN, which is the point: the list
+// is what the page depends on.
 
 import { createRequire } from "node:module";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import assert from "node:assert";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const STATIC = join(HERE, "..", "static");
-const Babel = createRequire(import.meta.url)(join(STATIC, "vendor", "babel.min.js"));
+// A missing Babel fails rather than skips: a check that did not run is not
+// a pass.
+const BABEL = process.env.BABEL_STANDALONE || join(STATIC, "vendor", "babel.min.js");
+assert.ok(existsSync(BABEL),
+  `@babel/standalone not found at ${BABEL}; see the top of this file`);
+const Babel = createRequire(import.meta.url)(BABEL);
 
 const KNOWN = new Set(`
   AbortController Array Audio Blob Boolean DataView Date DecompressionStream

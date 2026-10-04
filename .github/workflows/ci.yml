@@ -127,7 +127,15 @@ jobs:
           node controller/tests/wake_sensitivity.test.mjs
           node controller/tests/login_lcd.test.mjs
           node controller/tests/delete_ha_warning.test.mjs
-          node controller/tests/dashboard_globals.test.mjs
+      # The one dashboard test that needs a parser: esbuild compiles a name
+      # that is defined nowhere without complaint, and the page then throws
+      # when that component renders. Pinned by sha256, like every other
+      # fetched build input.
+      - name: Check dashboard.jsx for undefined names
+        run: |
+          curl -sfL -o /tmp/babel.min.js https://cdn.jsdelivr.net/npm/@babel/standalone@7.22.5/babel.min.js
+          echo "ee17810b11af1c9b97ac2d85752b9f73b9ba37d9f50ba6312e0709013ebeec6e  /tmp/babel.min.js" | sha256sum -c -
+          BABEL_STANDALONE=/tmp/babel.min.js node controller/tests/dashboard_globals.test.mjs
       - name: Run forge console tests
         run: node oww_forge/tests/console_log.test.mjs
 
