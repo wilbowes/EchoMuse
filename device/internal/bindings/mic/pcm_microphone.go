@@ -11,13 +11,11 @@ import (
 	"time"
 
 	"github.com/wilbowes/EchoMuse/internal/bindings/codec"
+	"github.com/wilbowes/EchoMuse/pkg/board"
 	pkgmic "github.com/wilbowes/EchoMuse/pkg/mic"
 	"github.com/Binozo/GoTinyAlsa/pkg/pcm"
 	"github.com/Binozo/GoTinyAlsa/pkg/tinyalsa"
 )
-
-const cardNr = 0
-const deviceNr = 24
 
 // rawTap receives every raw 9-channel batch, and is nil in release builds.
 // Only rawtap_bench.go sets it (build tag bench): it records the mics to
@@ -35,7 +33,12 @@ type PcmMicrophone struct {
 // NewMicrophone returns the pre-configured microphone alsa device and starts
 // the permanent ALSA read loop.
 func NewMicrophone() (*PcmMicrophone, error) {
-	device := tinyalsa.NewDevice(cardNr, deviceNr, pcm.Config{
+	// The capture PCM is found by name (pkg/board), never by device number.
+	capture := board.CurrentLayout().Capture
+	if capture == nil {
+		return nil, errors.New("mic: capture PCM not found on this board")
+	}
+	device := tinyalsa.NewDevice(capture.Card, capture.Device, pcm.Config{
 		Channels:    9,
 		SampleRate:  16000,
 		PeriodSize:  512,

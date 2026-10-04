@@ -68,11 +68,12 @@ func TestPcmOwner(t *testing.T) {
 }
 
 func TestStatusPathMatchesTheDeviceWeOpen(t *testing.T) {
-	// Pins the path against the card/device constants. The speaker is device
-	// 23 and the mic is 24; checking pcm0p (Android's own) reads "closed" and
-	// proves nothing, which cost a wrong conclusion during the #80 hunt.
+	// The status file must be the PLAYBACK substream of the PCM the speaker
+	// opens (biscuit: card 0 device 23, pinned in pkg/board's tests). Checking
+	// pcm0p (Android's own) reads "closed" and proves nothing, which cost a
+	// wrong conclusion during the #80 hunt.
 	want := "/proc/asound/card0/pcm23p/sub0/status"
-	if got := statusPath(cardNr, deviceNr); got != want {
+	if got := statusPath(0, 23); got != want {
 		t.Fatalf("statusPath = %q, want %q", got, want)
 	}
 }

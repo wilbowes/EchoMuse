@@ -102,6 +102,18 @@ func main() {
 	// deadline makes it worth doing.
 	applyCoreFloor()
 
+	// Which board this is, and where each part the bindings open was found
+	// (#541). A part found by its old number instead of by name says so here.
+	layout := board.CurrentLayout()
+	if layout.Board == nil {
+		log.Printf("[board] not identified — using biscuit's layout")
+	} else {
+		log.Printf("[board] %s", layout.Board.ID)
+	}
+	for _, n := range layout.Notes {
+		log.Printf("[board] %s", n)
+	}
+
 	buttonController, err := internalbuttons.NewButtonController()
 	if err != nil {
 		log.Fatalf("Failed to initialize Button controller: %v", err)

@@ -3,14 +3,13 @@ package buttons
 import (
 	"context"
 	"errors"
-	"time"
-	"github.com/wilbowes/EchoMuse/pkg/buttons"
-	evdev "github.com/gvalkov/golang-evdev"
 	"os/exec"
-)
+	"time"
 
-const dotButton = "/dev/input/event1"
-const volumeButton = "/dev/input/event2"
+	evdev "github.com/gvalkov/golang-evdev"
+	"github.com/wilbowes/EchoMuse/pkg/board"
+	"github.com/wilbowes/EchoMuse/pkg/buttons"
+)
 
 // VolumeCallback is called on volume button release with direction "up" or "down".
 type VolumeCallback func(direction string)
@@ -47,13 +46,19 @@ func (e *EvDevController) SubscribeToButton(callback buttons.ButtonClickCallback
 		return nil, errors.New("callback can't be nil")
 	}
 
+	// The input devices are found by name (pkg/board): eventN is enumeration
+	// order, and the wrong device opens without error and reads nothing.
+	layout := board.CurrentLayout()
+	if layout.DotKeys == "" || layout.VolumeKeys == "" {
+		return nil, errors.New("buttons: input devices not found on this board")
+	}
 	dotBtn := e.GetDotButton()
 	volBtn := e.GetVolumeButton()
-	dotDevice, err := evdev.Open(dotButton)
+	dotDevice, err := evdev.Open(layout.DotKeys)
 	if err != nil {
 		return nil, err
 	}
-	volDevice, err := evdev.Open(volumeButton)
+	volDevice, err := evdev.Open(layout.VolumeKeys)
 	if err != nil {
 		return nil, err
 	}

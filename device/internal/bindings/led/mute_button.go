@@ -3,6 +3,8 @@ package led
 import (
 	"fmt"
 	"os"
+
+	"github.com/wilbowes/EchoMuse/pkg/board"
 )
 
 // Mute-button LED — the discrete red LED under the mic-off button, separate
@@ -16,12 +18,18 @@ import (
 // MSDC2_DAT1 and writes to gpio445 reach nothing (v2.9.4 and earlier drove
 // it; the button never lit). Stock itself bypasses sysfs via the /dev/mtgpio
 // ioctl, which is why the HAL constant never had to agree with gpiolib.
-const (
-	muteButtonGPIO      = "444"
-	gpioExportPath      = "/sys/class/gpio/export"
-	muteButtonDirPath   = "/sys/class/gpio/gpio" + muteButtonGPIO + "/direction"
-	muteButtonValuePath = "/sys/class/gpio/gpio" + muteButtonGPIO + "/value"
-)
+//
+// That number is biscuit's (board.Hardware.MuteLEDGPIO). On a board with
+// another gpiochip base the same number is a different SoC pin, and exporting
+// a pin that is in use as something else takes it away from that function, so
+// a board that states no GPIO has no mute LED driven.
+const gpioExportPath = "/sys/class/gpio/export"
+
+func muteButtonGPIO() string { return board.CurrentLayout().MuteLEDGPIO }
+
+func muteButtonPath(attr string) string {
+	return "/sys/class/gpio/gpio" + muteButtonGPIO() + "/" + attr
+}
 
 // InitMuteButtonLED exports the GPIO if needed, forces output direction,
 // and switches the LED off (the process starts unmuted; a crash while
@@ -33,12 +41,16 @@ func InitMuteButtonLED() error {
 	if PrivacyDriver() {
 		return nil
 	}
-	if _, err := os.Stat(muteButtonValuePath); os.IsNotExist(err) {
-		if err := os.WriteFile(gpioExportPath, []byte(muteButtonGPIO), 0644); err != nil {
-			return fmt.Errorf("mute button LED: export gpio%s: %w", muteButtonGPIO, err)
+	gpio := muteButtonGPIO()
+	if gpio == "" {
+		return nil
+	}
+	if _, err := os.Stat(muteButtonPath("value")); os.IsNotExist(err) {
+		if err := os.WriteFile(gpioExportPath, []byte(gpio), 0644); err != nil {
+			return fmt.Errorf("mute button LED: export gpio%s: %w", gpio, err)
 		}
 	}
-	if err := os.WriteFile(muteButtonDirPath, []byte("out"), 0644); err != nil {
+	if err := os.WriteFile(muteButtonPath("direction"), []byte("out"), 0644); err != nil {
 		return fmt.Errorf("mute button LED: set direction: %w", err)
 	}
 	return SetMuteButtonLED(false)
@@ -60,11 +72,14 @@ func SetMuteButtonLED(on bool) error {
 		}
 		return EnterPrivacy()
 	}
+	if muteButtonGPIO() == "" {
+		return nil
+	}
 	v := []byte("0")
 	if on {
 		v = []byte("1")
 	}
-	if err := os.WriteFile(muteButtonValuePath, v, 0644); err != nil {
+	if err := os.WriteFile(muteButtonPath("value"), v, 0644); err != nil {
 		return fmt.Errorf("mute button LED: write value: %w", err)
 	}
 	return nil

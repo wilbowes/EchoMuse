@@ -1,0 +1,26 @@
+00-00: MultiMedia1_PLayback mt-soc-codec-tx-dai-0 :  : playback 1
+00-01: MultiMedia1_Capture mt-soc-codec-rx-dai-1 :  : capture 1
+00-02: Voice_MD1_PLayback mt-soc-codec-voicemd1-dai-2 :  : playback 1 : capture 1
+00-03: HMDI_PLayback mt-soc-hdmi-dummy-dai-codec-3 :  : playback 1 : capture 1
+00-04: ULDL_Loopback mt-soc-codec-uldlloopback-dai-4 :  : playback 1 : capture 1
+00-05: I2S0_PLayback mt-soc-i2s0-dummy-dai-codec-5 :  : playback 1 : capture 1
+00-06: MRGRX_PLayback mt-soc-mrgrx-dai-codec-6 :  : playback 1 : capture 1
+00-07: MRGRX_CAPTURE mt-soc-mrgrx-dummy-dai-codec-7 :  : playback 1 : capture 1
+00-08: I2S0DL1_PLayback mt-soc-codec-I2s0tx-dai-8 :  : playback 1
+00-09: DL1_AWB_Record mt-soc-codec-dl1awb-dai-9 :  : capture 1
+00-10: Voice_MD1_BT_Playback mt-soc-codec-voicemd1-bt-dai-10 :  : playback 1
+00-11: VOIP_Call_BT_Playback mt-soc-codec-voipcall-btout-dai-11 :  : playback 1
+00-12: VOIP_Call_BT_Capture mt-soc-codec-voipcall-btin-dai-12 :  : capture 1
+00-13: TDM_Debug_Record mt-soc-tdmrx-dai-codec-13 :  : capture 1
+00-14: FM_MRGTX_Playback mt-soc-fmmrg2tx-dummy-dai-codec-14 :  : playback 1
+00-15: MultiMediaData2_Capture mt-soc-codec-rx-dai2-15 :  : capture 1
+00-16: I2S0AWB_Capture mt-soc-codec-i2s0awb-dai-16 :  : capture 1
+00-17: Voice_MD2_PLayback mt-soc-codec-voicemd2-dai-17 :  : playback 1 : capture 1
+00-18: MultiMedia_Routing mt-soc-dummy-dai-codec-18 :  : playback 1
+00-19: Voice_MD2_BT_Playback mt-soc-codec-voicemd2-bt-dai-19 :  : playback 1
+00-20: HP_IMPEDANCE_Playback mt-soc-codec-hp-impedance-dai-20 :  : playback 1
+00-21: FM_I2S_Playback mt-soc-fm-i2s-dai-codec-21 :  : playback 1 : capture 1
+00-22: FM_I2S_Capture mt-soc-fm-i2s-dummy-dai-codec-22 :  : playback 1 : capture 1
+00-23: TLV320AIC3204 Playback tlv320aic32x4-hifi-23 :  : playback 1
+00-24: TLV320AIC3101 Capture tlv320aic3101-codec-24 :  : capture 1
+00-25: I2S1_Playback mt-soc-dummy-dai-codec-25 :  : playback 1

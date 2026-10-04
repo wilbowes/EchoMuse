@@ -26,6 +26,8 @@ type Board struct {
 	DeviceTypeID string
 	// Tuning is the platform policy applied at boot on emOS. Nil means none.
 	Tuning *Tuning
+	// Hardware is where this board's parts are found. See hardware.go.
+	Hardware *Hardware
 }
 
 // Biscuit is the Echo Dot 2nd gen (MT8163). The same id was read off devices
@@ -34,6 +36,7 @@ var Biscuit = &Board{
 	ID:           "biscuit",
 	DeviceTypeID: "A3S5BH2HU6VAYF",
 	Tuning:       biscuitTuning,
+	Hardware:     biscuitHardware,
 }
 
 // Known is every board the firmware can identify.
