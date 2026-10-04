@@ -438,9 +438,9 @@ func (s *gattSession) connect(t GattTarget, intervalMs int) error {
 // still up.
 func GattProbe(o GattOptions) (GattResult, error) {
 	var res GattResult
-	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
+	f, err := os.OpenFile(devPath(), os.O_RDWR, 0)
 	if err != nil {
-		return res, fmt.Errorf("open %s: %w", devPath, err)
+		return res, fmt.Errorf("open %s: %w", devPath(), err)
 	}
 	defer f.Close()
 
@@ -586,9 +586,9 @@ type Seen struct {
 // target and its address type can be picked. Active, to collect the names
 // that only a scan response carries.
 func ScanList(d time.Duration, logf func(format string, args ...any)) ([]Seen, error) {
-	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
+	f, err := os.OpenFile(devPath(), os.O_RDWR, 0)
 	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", devPath, err)
+		return nil, fmt.Errorf("open %s: %w", devPath(), err)
 	}
 	defer f.Close()
 	s := &gattSession{f: f, events: make(chan []byte, 1024), logf: logf}
