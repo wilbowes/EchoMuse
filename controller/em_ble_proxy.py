@@ -511,7 +511,9 @@ async def sync_slots(device_id: str) -> None:
     try:
         await proxy.link.request("slots", timeout=10.0)
     except em_ble_gatt.GattError as e:
-        log.info(f"[bleproxy.{device_id[-8:]}] slot query: {e}")
+        # An Echo that is not connected yet is the ordinary case at startup.
+        level = logging.DEBUG if e.code == "not_running" else logging.INFO
+        log.log(level, f"[bleproxy.{device_id[-8:]}] slot query: {e}")
 
 
 # ─── Data path ───────────────────────────────────────────────────────────────

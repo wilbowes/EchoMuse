@@ -127,6 +127,7 @@ jobs:
           node controller/tests/wake_sensitivity.test.mjs
           node controller/tests/login_lcd.test.mjs
           node controller/tests/delete_ha_warning.test.mjs
+          node controller/tests/dashboard_globals.test.mjs
       - name: Run forge console tests
         run: node oww_forge/tests/console_log.test.mjs
 

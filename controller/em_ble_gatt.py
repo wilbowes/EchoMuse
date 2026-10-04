@@ -311,7 +311,9 @@ class GattProxy:
         try:
             await self.link.request("slots", timeout=10.0)
         except GattError as e:
-            log.info(f"[{self._log_name}] slot query: {e}")
+            # An Echo that is not connected yet is the ordinary case at startup.
+            level = logging.DEBUG if e.code == "not_running" else logging.INFO
+            log.log(level, f"[{self._log_name}] slot query: {e}")
 
     async def _quiet_disconnect(self, addr: str) -> None:
         try:
