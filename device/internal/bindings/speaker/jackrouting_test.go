@@ -8,8 +8,8 @@ import "testing"
 
 func TestJackRoutingMutesInternalDriverWhenSomethingIsPluggedIn(t *testing.T) {
 	got := jackRouting(true)
-	if len(got) != 2 {
-		t.Fatalf("want 2 writes, got %d: %+v", len(got), got)
+	if len(got) != 3 {
+		t.Fatalf("want 3 writes, got %d: %+v", len(got), got)
 	}
 	if got[0].Ctl != ctlSpeakerAmp || got[0].Args[0] != "Off" {
 		t.Errorf("internal amp must be Off with a plug in, got ctl %s = %v", got[0].Ctl, got[0].Args)
@@ -82,6 +82,46 @@ func TestJackRoutingIsIdempotent(t *testing.T) {
 				t.Errorf("inserted=%v: write %d differs between calls", inserted, i)
 			}
 		}
+	}
+}
+
+// The jack's other missing piece: with the gain at stock's value the line out
+// was still 20-30dB under stock until MediaTek's DAC mux went On (measured
+// 2026-09-29, stock against emOS on one Dot). Removal restores Off, the state
+// the internal driver has always played with on emOS.
+func TestJackRoutingSetsTheDacMuxForThePlugPosition(t *testing.T) {
+	for _, tc := range []struct {
+		inserted bool
+		want     string
+	}{{true, "On"}, {false, "Off"}} {
+		var got *mixerWrite
+		for _, w := range jackRouting(tc.inserted) {
+			if w.Ctl == ctlDacMux {
+				got = &w
+			}
+		}
+		if got == nil {
+			t.Fatalf("inserted=%v: %s not written — the jack plays 20-30dB down without it", tc.inserted, ctlDacMux)
+		}
+		if len(got.Args) != 1 || got.Args[0] != tc.want {
+			t.Errorf("inserted=%v: %s = %v, want %s", tc.inserted, ctlDacMux, got.Args, tc.want)
+		}
+	}
+	if ctlDacMux != "Audio_DacMux_Setting" {
+		t.Errorf("control name %q is not the one measured", ctlDacMux)
+	}
+}
+
+// Reboots and the HAL both leave the mux Off, so the reconcile has to put it
+// back like the gain.
+func TestJackRoutingDriftRestoresTheDacMux(t *testing.T) {
+	drift := jackRoutingDrift(true, map[string]string{
+		ctlSpeakerAmp:   "Off",
+		ctlHPDriverGain: hpGainJack,
+		ctlDacMux:       "Off",
+	})
+	if len(drift) != 1 || drift[0].Ctl != ctlDacMux || drift[0].Args[0] != "On" {
+		t.Fatalf("want only the mux rewritten On, got %+v", drift)
 	}
 }
 

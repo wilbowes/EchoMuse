@@ -94,6 +94,13 @@ type clientState struct {
 	Player    *playerState `json:"player,omitempty"`
 }
 
+// streamRequestFormat asks the server to change the stream's format. Every
+// field of the player request is optional in the spec; all four are sent, so
+// the request names one entry of supported_formats exactly.
+type streamRequestFormat struct {
+	Player *audioFormat `json:"player"`
+}
+
 type clientTime struct {
 	ClientTransmitted int64 `json:"client_transmitted"`
 }

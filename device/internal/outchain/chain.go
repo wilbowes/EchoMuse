@@ -68,11 +68,19 @@ func (p Params) String() string {
 // THEN the limiter catches what is left. Limiting first would spend gain
 // reduction on bass about to be thrown away.
 //
-// The processing is MONO: L and R are averaged, processed once and written
-// back to both. The wire is mono and toStereo duplicates it, so the average
-// is exact on everything this device plays; stereo output is not supported
-// on this hardware (device/CLAUDE.md), and processing two identical channels
-// would double the cost for nothing.
+// Dual-mono audio — everything the controller sends, since its wire is mono
+// and toStereo duplicates it — is processed ONCE: L and R are averaged, which
+// is exact when they are equal, and written back to both. Processing two
+// identical channels would double the cost for nothing.
+//
+// Stereo audio (Sendspin with a plug in the jack, #273) is processed per
+// channel: EQ on each, and the bass guard and limiter LINKED, one gain from
+// the louder side applied to both, so limiting never moves the image. The
+// chain switches on the first period whose channels differ, seeding the
+// right channel's state from the left's, which is what it would have held on
+// the dual-mono audio before; it goes back to mono processing only when it
+// resets on silence. With L == R the stereo path computes exactly what the
+// mono one does, so the switch itself is inaudible.
 //
 // Process runs on the ALSA write goroutine only. SetParams and SetActive may
 // be called from anywhere; they take effect at the next period.
@@ -87,10 +95,12 @@ type Chain struct {
 	// Owned by the ALSA goroutine.
 	params  Params
 	eq      eq
+	eqR     eq // the right channel's, in stereo
 	guard   *bassGuard
 	lim     *limiter
 	idle    bool // state is all zero and input is silence
 	running bool // active on the previous period
+	stereo  bool // processing L and R apart, since a period differed
 }
 
 // New builds a chain at the given sample rate, inactive, with DefaultParams.
@@ -99,6 +109,7 @@ func New(sampleRate int) *Chain {
 	c := &Chain{
 		fs:    fs,
 		eq:    eq{fs: fs},
+		eqR:   eq{fs: fs},
 		guard: newBassGuard(fs),
 		lim:   newLimiter(fs),
 		idle:  true,
@@ -127,6 +138,7 @@ func (c *Chain) SetParams(p Params) {
 func (c *Chain) apply(p Params) {
 	c.params = p
 	c.eq.set(p.Bands, p.Loudness)
+	c.eqR.set(p.Bands, p.Loudness)
 	c.guard.enabled = p.GuardEnabled
 	c.guard.floorDb = math.Min(p.GuardDb, 0)
 	c.lim.enabled = p.LimiterEnabled
@@ -175,6 +187,13 @@ func (c *Chain) Process(buf []byte) (applied *Params) {
 		return applied
 	}
 
+	if !c.stereo && !dualMono(buf) {
+		c.eqR = c.eq.clone()
+		c.guard.split()
+		c.lim.split()
+		c.stereo = true
+	}
+
 	frames := len(buf) / 4
 	silentIn, silentOut := true, true
 	for i := 0; i < frames; i++ {
@@ -184,20 +203,27 @@ func (c *Chain) Process(buf []byte) (applied *Params) {
 		if l != 0 || r != 0 {
 			silentIn = false
 		}
+
+		if c.stereo {
+			xl, xr := c.eq.step(float64(l)), c.eqR.step(float64(r))
+			xl, xr = c.guard.stepStereo(xl, xr)
+			xl, xr = c.lim.stepStereo(xl, xr)
+			sl, sr := toS16(xl), toS16(xr)
+			if sl != 0 || sr != 0 {
+				silentOut = false
+			}
+			buf[off], buf[off+1] = byte(uint16(sl)), byte(uint16(sl)>>8)
+			buf[off+2], buf[off+3] = byte(uint16(sr)), byte(uint16(sr)>>8)
+			continue
+		}
+
 		x := (float64(l) + float64(r)) / 2
 
 		x = c.eq.step(x)
 		x = c.guard.step(x)
 		x = c.lim.step(x)
 
-		// Backstop, then truncation toward zero — np.clip(...).astype(int16)
-		// in the reference.
-		if x > ceiling {
-			x = ceiling
-		} else if x < -fullScale {
-			x = -fullScale
-		}
-		s := int16(x)
+		s := toS16(x)
 		if s != 0 {
 			silentOut = false
 		}
@@ -218,8 +244,31 @@ func (c *Chain) Process(buf []byte) (applied *Params) {
 	return applied
 }
 
+// toS16 is the backstop, then truncation toward zero —
+// np.clip(...).astype(int16) in the reference.
+func toS16(x float64) int16 {
+	if x > ceiling {
+		x = ceiling
+	} else if x < -fullScale {
+		x = -fullScale
+	}
+	return int16(x)
+}
+
+// dualMono reports whether every frame of a stereo S16_LE period has L == R.
+func dualMono(buf []byte) bool {
+	for off := 0; off+3 < len(buf); off += 4 {
+		if buf[off] != buf[off+2] || buf[off+1] != buf[off+3] {
+			return false
+		}
+	}
+	return true
+}
+
 func (c *Chain) reset() {
 	c.eq.reset()
+	c.eqR.reset()
+	c.stereo = false
 	c.guard.reset()
 	c.lim.reset()
 	c.idle = true

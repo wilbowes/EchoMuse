@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wilbowes/EchoMuse/internal/bindings/jack"
 	"github.com/wilbowes/EchoMuse/internal/bindings/speaker"
 	"github.com/wilbowes/EchoMuse/internal/client"
 	"github.com/wilbowes/EchoMuse/internal/config"
@@ -119,6 +120,9 @@ func applySendspinConfig(spk *speaker.PcmSpeaker, cc *client.ControlClient, vol 
 			// Before Start: a server can connect and command the volume at once.
 			c.OnVolume(func(pct int) { vol.SetVolume(pctToLevel(pct)) })
 			c.SetVolume(levelToPct(vol.VolumeLevel()))
+			// Before Start too: the first client/hello lists formats in
+			// the order the plug position prefers (#273).
+			c.SetStereo(jack.Inserted())
 			// Open before Start advertises: Music Assistant dials when the
 			// record appears and may not retry a timeout. Logged, not
 			// fatal: FireOS has no filter to open.

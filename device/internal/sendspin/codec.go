@@ -11,20 +11,31 @@ import (
 	"github.com/mewkiz/flac/frame"
 )
 
-// The one format the device asks for. A single rate and channel count, so the
-// server resamples and downmixes for us: MA does it per client anyway, and a
-// player that lists one format never has to switch output mid-stream. Mono
-// because the speaker is mono and the wire then carries half the bytes.
+// The formats the device asks for: one rate and depth, so the server resamples
+// for us (MA does it per client anyway). Mono is preferred, because the
+// internal speaker is mono and the wire then carries half the bytes; stereo is
+// preferred instead while a plug is in the jack, where the second channel is
+// real (#273). Either way the decoder hands the player stereo frames, so a
+// mid-stream switch (stream/request-format) needs nothing from the player.
 //
 // FLAC only. The spec requires a player to list flac or pcm; FLAC is ~40% of
 // PCM's bitrate for 3.28% of a core (PR #271), on links measured at 4.6-7.1%
 // loss. The audio-chunk header check in chunkPayload also leans on FLAC's
 // sync code, which PCM does not have.
 const (
-	outRate     = 48000
-	outChannels = 1
-	outBits     = 16
+	outRate = 48000
+	outBits = 16
 )
+
+// formats is supported_formats in priority order, first preferred.
+func formats(stereo bool) []audioFormat {
+	mono := audioFormat{Codec: "flac", Channels: 1, SampleRate: outRate, BitDepth: outBits}
+	st := audioFormat{Codec: "flac", Channels: 2, SampleRate: outRate, BitDepth: outBits}
+	if stereo {
+		return []audioFormat{st, mono}
+	}
+	return []audioFormat{mono, st}
+}
 
 // streamFormat is what a stream/start said the chunks are.
 type streamFormat struct {
@@ -35,7 +46,8 @@ type streamFormat struct {
 	Header     string `json:"codec_header,omitempty"`
 }
 
-// decoder turns one chunk of the current format into mono S16 at outRate.
+// decoder turns one chunk of the current format into interleaved stereo S16
+// (L, R per frame) at outRate.
 type decoder struct {
 	f streamFormat
 }
@@ -61,19 +73,20 @@ func newDecoder(f streamFormat) (*decoder, error) {
 	return &decoder{f: f}, nil
 }
 
-// decode appends the chunk's samples to dst as mono. A stereo stream (which
-// the device never asks for, but a server may send) is averaged.
+// decode appends the chunk's frames to dst as interleaved stereo. A mono
+// stream is written to both channels.
 func (d *decoder) decode(dst []int16, payload []byte) ([]int16, error) {
 	if d.f.Codec == "pcm" {
 		n := len(payload) / 2 / d.f.Channels
 		for i := 0; i < n; i++ {
 			if d.f.Channels == 1 {
-				dst = append(dst, int16(binary.LittleEndian.Uint16(payload[i*2:])))
+				s := int16(binary.LittleEndian.Uint16(payload[i*2:]))
+				dst = append(dst, s, s)
 				continue
 			}
-			l := int32(int16(binary.LittleEndian.Uint16(payload[i*4:])))
-			r := int32(int16(binary.LittleEndian.Uint16(payload[i*4+2:])))
-			dst = append(dst, int16((l+r)/2))
+			l := int16(binary.LittleEndian.Uint16(payload[i*4:]))
+			r := int16(binary.LittleEndian.Uint16(payload[i*4+2:]))
+			dst = append(dst, l, r)
 		}
 		return dst, nil
 	}
@@ -94,13 +107,13 @@ func (d *decoder) decode(dst []int16, payload []byte) ([]int16, error) {
 		n := len(fr.Subframes[0].Samples)
 		if len(fr.Subframes) == 1 {
 			for _, s := range fr.Subframes[0].Samples[:n] {
-				dst = append(dst, int16(s))
+				dst = append(dst, int16(s), int16(s))
 			}
 			continue
 		}
 		l, rr := fr.Subframes[0].Samples, fr.Subframes[1].Samples
 		for i := 0; i < n; i++ {
-			dst = append(dst, int16((l[i]+rr[i])/2))
+			dst = append(dst, int16(l[i]), int16(rr[i]))
 		}
 	}
 	return dst, nil

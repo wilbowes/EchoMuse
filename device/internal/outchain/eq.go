@@ -70,6 +70,12 @@ func (e *eq) step(x float64) float64 {
 	return x
 }
 
+// clone is a second EQ in the same state, for the right channel when the
+// chain goes stereo.
+func (e *eq) clone() eq {
+	return eq{fs: e.fs, sections: append([]biquad(nil), e.sections...)}
+}
+
 func (e *eq) reset() {
 	for i := range e.sections {
 		e.sections[i].reset()

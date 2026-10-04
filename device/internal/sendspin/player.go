@@ -30,9 +30,12 @@ const (
 )
 
 type chunk struct {
-	ts  int64 // server µs of the first sample
-	pcm []int16
+	ts  int64   // server µs of the first frame
+	pcm []int16 // interleaved stereo: L, R per frame
 }
+
+// frames is the chunk's length in stereo frames.
+func (c chunk) frames() int { return len(c.pcm) / 2 }
 
 // player holds decoded audio and hands it to the speaker at the right time.
 //
@@ -43,7 +46,7 @@ type chunk struct {
 type player struct {
 	mu      sync.Mutex
 	q       []chunk
-	off     int // samples consumed from q[0]
+	off     int // frames consumed from q[0]
 	playing bool
 
 	filter  *timeFilter
@@ -139,7 +142,7 @@ func (p *player) buffered() time.Duration {
 	defer p.mu.Unlock()
 	n := -p.off
 	for _, c := range p.q {
-		n += len(c.pcm)
+		n += c.frames()
 	}
 	return time.Duration(n) * time.Second / outRate
 }
@@ -210,12 +213,13 @@ func (p *player) Fill(out []byte, playAt time.Time) bool {
 
 	i := 0
 	for ; i < lead; i++ {
-		put(out, i, 0)
+		put(out, i, 0, 0)
 	}
 	if repeat > 0 {
-		s := p.q[0].pcm[p.off]
-		for r := 0; r < repeat && i < frames; r++ {
-			put(out, i, scale(s, gainAt(i)))
+		l, r := p.q[0].pcm[2*p.off], p.q[0].pcm[2*p.off+1]
+		for k := 0; k < repeat && i < frames; k++ {
+			g := gainAt(i)
+			put(out, i, scale(l, g), scale(r, g))
 			i++
 		}
 	}
@@ -224,16 +228,18 @@ func (p *player) Fill(out []byte, playAt time.Time) bool {
 			// Ran dry mid-period: the rest is silence, and the next Fill
 			// resyncs from scratch.
 			for ; i < frames; i++ {
-				put(out, i, 0)
+				put(out, i, 0, 0)
 			}
 			p.playing = false
 			p.st.Underruns++
 			break
 		}
 		c := p.q[0].pcm
-		n := min(len(c)-p.off, frames-i)
+		n := min(p.q[0].frames()-p.off, frames-i)
 		for k := 0; k < n; k++ {
-			put(out, i+k, scale(c[p.off+k], gainAt(i+k)))
+			g := gainAt(i + k)
+			j := 2 * (p.off + k)
+			put(out, i+k, scale(c[j], g), scale(c[j+1], g))
 		}
 		i += n
 		p.advanceLocked(n)
@@ -248,11 +254,11 @@ func (p *player) localTimeLocked() int64 {
 	return p.filter.clientTime(ts) - p.delayUs
 }
 
-// dropLocked discards n samples, reporting false if the queue ran out first.
+// dropLocked discards n frames, reporting false if the queue ran out first.
 func (p *player) dropLocked(n int) bool {
 	for n > 0 && len(p.q) > 0 {
-		k := min(len(p.q[0].pcm)-p.off, n)
-		if k == len(p.q[0].pcm)-p.off && p.off == 0 {
+		k := min(p.q[0].frames()-p.off, n)
+		if k == p.q[0].frames()-p.off && p.off == 0 {
 			p.st.LateDrops++
 		}
 		p.advanceLocked(k)
@@ -263,8 +269,8 @@ func (p *player) dropLocked(n int) bool {
 
 func (p *player) advanceLocked(n int) {
 	p.off += n
-	for len(p.q) > 0 && p.off >= len(p.q[0].pcm) {
-		p.off -= len(p.q[0].pcm)
+	for len(p.q) > 0 && p.off >= p.q[0].frames() {
+		p.off -= p.q[0].frames()
 		p.q[0].pcm = nil
 		p.q = p.q[1:]
 	}
@@ -277,9 +283,9 @@ func scale(s int16, g int32) int16 {
 	return int16((int32(s) * g) >> 15)
 }
 
-// put writes one mono sample to both channels of stereo frame i.
-func put(out []byte, i int, s int16) {
-	u := uint16(s)
-	out[i*4], out[i*4+1] = byte(u), byte(u>>8)
-	out[i*4+2], out[i*4+3] = byte(u), byte(u>>8)
+// put writes stereo frame i.
+func put(out []byte, i int, l, r int16) {
+	ul, ur := uint16(l), uint16(r)
+	out[i*4], out[i*4+1] = byte(ul), byte(ul>>8)
+	out[i*4+2], out[i*4+3] = byte(ur), byte(ur>>8)
 }

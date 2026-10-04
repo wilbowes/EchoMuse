@@ -12,11 +12,30 @@ import "github.com/wilbowes/EchoMuse/internal/bindings/mixer"
 // driving the same cable, by diffing all 239 mixer controls across an insert
 // on both devices. Stock changed five controls; we changed one.
 
-// The two controls, by name: the internal driver's amp and the jack's output
-// stage.
+// The controls, by name: the internal driver's amp, the jack's output stage,
+// and MediaTek's DAC mux.
 const (
 	ctlSpeakerAmp   = mixer.SpeakerAmp
 	ctlHPDriverGain = mixer.HPDriverGain
+	ctlDacMux       = mixer.DacMux
+)
+
+// Audio_DacMux_Setting is the jack's second missing piece. MEASURED 2026-09-29
+// by capturing stock FireOS 5.5.5.4 and emOS on the same Dot, cable and amp,
+// both playing on pcm23p: the TI codec matched stock to within 6 of ~6000
+// registers and HP Driver Gain was 11 on both, yet the jack still sat 20-30dB
+// under stock's level. Of the mixer controls that differed during playback,
+// this MediaTek one is the one that matters: Off on emOS, On on stock, and
+// writing On restored full line level at once (Ignore Ramp Up alone did
+// nothing). AudDrv_GPIO logs `pinctrl_lookup_state extamp-dacmux-* fail -19`
+// at boot on BOTH, so that log line does not mean the control is dead.
+//
+// Stock also leaves it On with nothing plugged in. That has not been measured
+// against the internal driver here, so removal puts it back Off, which is what
+// every emOS device has played the internal speaker with until now.
+const (
+	dacMuxJack     = "On"
+	dacMuxInternal = "Off"
 )
 
 // HP driver gain values, as mixer indices on a 0..35 range that maps to
@@ -73,12 +92,14 @@ func jackRouting(inserted bool) []mixerWrite {
 		return []mixerWrite{
 			{Ctl: ctlSpeakerAmp, Args: []string{"Off"}},
 			{Ctl: ctlHPDriverGain, Args: []string{hpGainJack, hpGainJack}},
+			{Ctl: ctlDacMux, Args: []string{dacMuxJack}},
 		}
 	}
 	// Nothing in the jack: the internal driver is the only output there is.
 	return []mixerWrite{
 		{Ctl: ctlSpeakerAmp, Args: []string{"On"}},
 		{Ctl: ctlHPDriverGain, Args: []string{hpGainInternal, hpGainInternal}},
+		{Ctl: ctlDacMux, Args: []string{dacMuxInternal}},
 	}
 }
 

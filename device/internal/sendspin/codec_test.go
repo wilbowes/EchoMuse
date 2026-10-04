@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"slices"
 	"testing"
 )
 
@@ -13,7 +14,17 @@ import (
 // what Music Assistant streams with. FLAC is lossless, so the decode must be
 // bit-exact against the PCM that went in.
 func TestFlacChunksFromTheServerEncoderDecodeBitExact(t *testing.T) {
-	raw, err := os.ReadFile("testdata/flac_chunks.json")
+	t.Run("mono", func(t *testing.T) { flacBitExact(t, "testdata/flac_chunks.json", 1) })
+	// #273: two different channels, so the encoder uses its inter-channel
+	// modes (gen_flac_stereo.py) and the decode must undo each of them.
+	t.Run("stereo", func(t *testing.T) { flacBitExact(t, "testdata/flac_chunks_stereo.json", 2) })
+}
+
+// flacBitExact decodes a fixture and holds it to the PCM that went in. The
+// decoder always yields stereo frames, so a mono fixture is expected on both
+// channels.
+func flacBitExact(t *testing.T, path string, channels int) {
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,7 +39,7 @@ func TestFlacChunksFromTheServerEncoderDecodeBitExact(t *testing.T) {
 	if err := json.Unmarshal(raw, &fx); err != nil {
 		t.Fatal(err)
 	}
-	d, err := newDecoder(streamFormat{Codec: "flac", SampleRate: 48000, Channels: 1, BitDepth: 16, Header: fx.Header})
+	d, err := newDecoder(streamFormat{Codec: "flac", SampleRate: 48000, Channels: channels, BitDepth: 16, Header: fx.Header})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,18 +54,24 @@ func TestFlacChunksFromTheServerEncoderDecodeBitExact(t *testing.T) {
 		}
 	}
 	pcm, _ := base64.StdEncoding.DecodeString(fx.PCM)
-	want := len(pcm) / 2
+	want := len(pcm) / 2 / channels // frames
 	// The encoder pads its last frame out to the block size on flush.
-	if len(got) < want || len(got) > want+4608 {
-		t.Fatalf("decoded %d samples from %d in", len(got), want)
+	if len(got)%2 != 0 || len(got)/2 < want || len(got)/2 > want+4608 {
+		t.Fatalf("decoded %d samples (%d frames) from %d frames in", len(got), len(got)/2, want)
 	}
-	for i, s := range got {
-		w := int16(0)
+	for i := 0; i < len(got)/2; i++ {
+		var wl, wr int16
 		if i < want {
-			w = int16(binary.LittleEndian.Uint16(pcm[i*2:]))
+			if channels == 1 {
+				wl = int16(binary.LittleEndian.Uint16(pcm[i*2:]))
+				wr = wl
+			} else {
+				wl = int16(binary.LittleEndian.Uint16(pcm[i*4:]))
+				wr = int16(binary.LittleEndian.Uint16(pcm[i*4+2:]))
+			}
 		}
-		if s != w {
-			t.Fatalf("sample %d: got %d, want %d", i, s, w)
+		if got[2*i] != wl || got[2*i+1] != wr {
+			t.Fatalf("frame %d: got (%d, %d), want (%d, %d)", i, got[2*i], got[2*i+1], wl, wr)
 		}
 	}
 }
@@ -96,14 +113,50 @@ func TestDecoderRefusesFormatsTheDeviceDidNotAskFor(t *testing.T) {
 	}
 }
 
-func TestPCMStereoIsDownmixed(t *testing.T) {
+func TestPCMStereoKeepsBothChannels(t *testing.T) {
 	d, err := newDecoder(streamFormat{Codec: "pcm", SampleRate: 48000, Channels: 2, BitDepth: 16})
 	if err != nil {
 		t.Fatal(err)
 	}
 	in := []byte{0x10, 0x27, 0xF0, 0xD8, 0x00, 0x10, 0x00, 0x30} // (10000,-10000), (4096,12288)
 	got, _ := d.decode(nil, in)
-	if len(got) != 2 || got[0] != 0 || got[1] != 8192 {
-		t.Errorf("got %v, want [0 8192]", got)
+	if want := []int16{10000, -10000, 4096, 12288}; !slices.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestPCMMonoIsPlayedOnBothChannels(t *testing.T) {
+	d, err := newDecoder(streamFormat{Codec: "pcm", SampleRate: 48000, Channels: 1, BitDepth: 16})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := d.decode(nil, []byte{0x10, 0x27, 0xF0, 0xD8}) // 10000, -10000
+	if want := []int16{10000, 10000, -10000, -10000}; !slices.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// supported_formats is in priority order, first preferred (spec; aiosendspin
+// picks compatible[0]). Mono first unless a plug is in, and both listed
+// either way, because stream/request-format may only name a listed format.
+func TestHelloPrefersStereoOnlyWithAPlugIn(t *testing.T) {
+	c := &Client{}
+	for _, tc := range []struct {
+		plug       bool
+		first, alt int
+	}{{false, 1, 2}, {true, 2, 1}} {
+		c.SetStereo(tc.plug)
+		f := c.hello().PlayerSupport.SupportedFormats
+		if len(f) != 2 || f[0].Channels != tc.first || f[1].Channels != tc.alt {
+			t.Errorf("plug %v: formats %+v, want %dch then %dch", tc.plug, f, tc.first, tc.alt)
+		}
+		for _, x := range f {
+			if x.Codec != "flac" || x.SampleRate != outRate || x.BitDepth != outBits {
+				t.Errorf("plug %v: format %+v is not one the decoder takes", tc.plug, x)
+			}
+			if _, err := newDecoder(streamFormat{Codec: x.Codec, SampleRate: x.SampleRate, Channels: x.Channels, BitDepth: x.BitDepth}); err != nil {
+				t.Errorf("plug %v: advertised %+v but the decoder refuses it: %v", tc.plug, x, err)
+			}
+		}
 	}
 }

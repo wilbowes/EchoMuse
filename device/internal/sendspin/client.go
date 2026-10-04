@@ -53,6 +53,7 @@ type Client struct {
 	sessions   map[*session]bool
 	extBusy    bool
 	unpaired   bool
+	stereo     bool // a plug is in the jack: stereo is the preferred format
 	onChange   func()
 	onSettings func(playerSettings)
 	// onVolume, when set, makes the server's volume the DEVICE's volume:
@@ -207,6 +208,38 @@ func (c *Client) unpairedAccess() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.unpaired
+}
+
+// SetStereo is set while a plug is in the jack (#273). The internal speaker
+// is mono, so mono is preferred and the wire carries half the bytes; with a
+// plug in, the second channel is real. A change is told to every connected
+// server with stream/request-format, which renegotiates a stream mid-play;
+// a new connection reads it from client/hello.
+func (c *Client) SetStereo(on bool) {
+	c.mu.Lock()
+	if c.stereo == on {
+		c.mu.Unlock()
+		return
+	}
+	c.stereo = on
+	var all []*session
+	for s := range c.sessions {
+		all = append(all, s)
+	}
+	c.mu.Unlock()
+	f := formats(on)[0]
+	log.Printf("[sendspin] preferred format: %dch", f.Channels)
+	for _, s := range all {
+		if s.playerRole() {
+			s.send("stream/request-format", streamRequestFormat{Player: &f})
+		}
+	}
+}
+
+func (c *Client) stereoPreferred() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.stereo
 }
 
 // SetExternal is set while something other than Sendspin owns the music
@@ -364,7 +397,7 @@ func (c *Client) hello() clientHello {
 			SoftwareVersion: c.cfg.Version,
 		},
 		PlayerSupport: &playerSupport{
-			SupportedFormats:  []audioFormat{{Codec: "flac", Channels: outChannels, SampleRate: outRate, BitDepth: outBits}},
+			SupportedFormats:  formats(c.stereoPreferred()),
 			BufferCapacity:    bufferCapacity,
 			SupportedCommands: []string{"volume", "mute"},
 		},
@@ -374,9 +407,11 @@ func (c *Client) hello() clientHello {
 }
 
 // bufferCapacity caps the compressed bytes a server may have outstanding.
-// Sized as 6s of the same audio as PCM, so FLAC's ~2:1 buys more time rather
-// than more memory: roughly 12s of mono decoded, ~1.1MB.
-const bufferCapacity = 6 * outRate * outChannels * outBits / 8
+// Sized as 6s of the same audio as stereo PCM, so FLAC's ~2:1 buys more time
+// rather than more memory: roughly 12s of stereo decoded, ~2.3MB. One figure
+// for both formats, because hello is sent once per connection and the format
+// can change after it.
+const bufferCapacity = 6 * outRate * 2 * outBits / 8
 
 // ── admission ──────────────────────────────────────────────────────────────
 //

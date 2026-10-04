@@ -408,7 +408,7 @@ func (p *PcmSpeaker) ReconcileJackRouting() int {
 	}
 
 	current := map[string]string{}
-	for _, ctl := range []string{ctlSpeakerAmp, ctlHPDriverGain} {
+	for _, ctl := range []string{ctlSpeakerAmp, ctlHPDriverGain, ctlDacMux} {
 		if v, err := mixer.Get(ctl); err == nil {
 			current[ctl] = v
 		} // a failed read is not evidence of drift

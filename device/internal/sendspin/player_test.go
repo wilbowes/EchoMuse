@@ -17,11 +17,14 @@ func syncedFilter(offset int64) *timeFilter {
 	return f
 }
 
-// ramp is audio whose every sample says where it came from.
+// ramp is n stereo frames whose every frame says where it came from: the
+// left channel counts up, the right is its negative, so a frame that loses
+// its pairing or a channel that moves shows.
 func ramp(start, n int) []int16 {
-	s := make([]int16, n)
-	for i := range s {
-		s[i] = int16((start + i) % 30000)
+	s := make([]int16, 2*n)
+	for i := 0; i < n; i++ {
+		v := int16((start + i) % 30000)
+		s[2*i], s[2*i+1] = v, -v
 	}
 	return s
 }
@@ -29,6 +32,18 @@ func ramp(start, n int) []int16 {
 func at(us int64) time.Time { return epoch.Add(time.Duration(us) * time.Microsecond) }
 
 func sample(out []byte, i int) int16 { return int16(binary.LittleEndian.Uint16(out[i*4:])) }
+
+func sampleR(out []byte, i int) int16 { return int16(binary.LittleEndian.Uint16(out[i*4+2:])) }
+
+// pairsHold checks that every frame of out still has R == -L, as ramp made it.
+func pairsHold(t *testing.T, out []byte) {
+	t.Helper()
+	for i := 0; i < len(out)/4; i++ {
+		if sampleR(out, i) != -sample(out, i) {
+			t.Fatalf("frame %d: L %d R %d, the channels came apart", i, sample(out, i), sampleR(out, i))
+		}
+	}
+}
 
 func newTestPlayer(offset int64) *player {
 	p := newPlayer(syncedFilter(offset))
@@ -56,6 +71,7 @@ func TestFirstPeriodLandsOnTheSampleDueAtThatInstant(t *testing.T) {
 		if !p.Fill(out, at(tc.playAtUs)) {
 			t.Fatalf("%s: nothing played", tc.name)
 		}
+		pairsHold(t, out)
 		for i := 0; i < tc.lead; i++ {
 			if sample(out, i) != 0 {
 				t.Fatalf("%s: frame %d not silent", tc.name, i)
@@ -89,6 +105,8 @@ func TestDriftIsCorrectedWithSmallStepsWithinOneMillisecond(t *testing.T) {
 			if !p.Fill(out, at(int64(playAt))) {
 				t.Fatalf("ppm %v period %d: ran dry", ppm, k)
 			}
+			// Drops and repeats move whole frames, never one channel.
+			pairsHold(t, out)
 			// Continuity: consecutive periods join with at most a step.
 			if prevOut >= 0 {
 				if d := int(sample(out, 0)) - int(prevOut); d < 0 || d > 1+maxStepFrames {
@@ -174,7 +192,7 @@ func TestVolumeFollowsThePerceptualCurve(t *testing.T) {
 	}
 	// Applied with a ramp across the period: no step at the boundary.
 	p := newPlayer(syncedFilter(0))
-	full := make([]int16, 48000)
+	full := make([]int16, 2*48000)
 	for i := range full {
 		full[i] = 20000
 	}
