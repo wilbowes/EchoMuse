@@ -401,9 +401,6 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         # different things to find in the stats, and recording all of them
         # as "cancelled" loses the distinction the field is read for.
         self._turn_end_reason: Optional[str] = None
-        # Set when this turn's transcript dismissed a ringing alarm locally —
-        # suppresses HA's "there are no timers" reply for that turn.
-        self._dismissed_alarm   = False
         self._tts_audio_url:    Optional[str] = None
         self._tts_audio_data:   Optional[bytes] = None
         self._tts_event         = asyncio.Event()
@@ -995,30 +992,6 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             if self._trace:
                 self._trace.stt_text = text
                 self._trace.t_stt_ms = self._trace.elapsed_ms()
-            # Spoken dismissal of a RINGING alarm is ours to handle: HA has
-            # already discarded the timer by the time it fires, so it would
-            # answer "there are no timers" (see em_timers.is_dismissal). Acted
-            # on here, at the transcript, rather than waiting for a CANCELLED
-            # that structurally cannot arrive.
-            srv = self._owning_server
-            if (srv is not None and srv.timer_ringing
-                    and em_timers.is_dismissal(text)):
-                # Stopping the ring is the generous match; suppressing HA's
-                # reply is NOT. "Turn off the kitchen light" is a dismissal by
-                # the rule above and also a real command HA answers, so the
-                # reply is only swallowed when the utterance is nothing but a
-                # dismissal (em_timers.is_dismissal_only).
-                self._dismissed_alarm = em_timers.is_dismissal_only(text)
-                log.info(
-                    f"[{self._log_name}] Spoken dismissal {text!r} — "
-                    f"stopping alarm locally"
-                    + ("" if self._dismissed_alarm
-                       else "; utterance carries a command, HA's reply stands")
-                )
-                task = asyncio.create_task(srv.dismiss_timer_alarm())
-                self._timer_tasks.add(task)
-                task.add_done_callback(self._timer_tasks.discard)
-                task.add_done_callback(self._log_timer_task_error)
             if self._on_stt_end and not self._turn_cancelled:
                 em_tasks.spawn(self._on_stt_end(text))
 
@@ -1323,7 +1296,6 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._turn_active           = True
         self._turn_cancelled        = False
         self._turn_end_reason       = None
-        self._dismissed_alarm       = False
         self._tts_event.clear()
         self._tts_audio_url         = None
         self._tts_audio_data        = None
@@ -1466,18 +1438,6 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 why = self._turn_end_reason or "cancelled"
                 log.info(f"[{self._log_name}] Turn {why} while waiting for TTS")
                 if trace: trace.outcome = why
-                return
-
-            if self._dismissed_alarm:
-                # We stopped the alarm ourselves off the transcript. HA does
-                # not know the timer existed any more, so its reply is "there
-                # are no timers" — playing it would contradict the alarm that
-                # just stopped, and the silence IS the confirmation.
-                log.info(
-                    f"[{self._log_name}] Alarm dismissed locally — "
-                    f"suppressing HA's reply"
-                )
-                if trace: trace.outcome = "alarm_dismissed"
                 return
 
             if self._tts_audio_url:
@@ -2506,8 +2466,8 @@ class DeviceESPhomeServer:
         begins a ring calls the injected orchestrator. A CANCELLED can still
         end a ring — the registry handles it, and an HA that behaves that way
         keeps working — but do not rely on one arriving for a RINGING alarm:
-        HA discards a timer when it finishes, so a spoken dismissal is
-        recognised from the transcript instead (em_timers.is_dismissal).
+        HA discards a timer when it finishes, so stopping one by voice is
+        decided on the controller (em_timers.DismissListen).
         """
         transition = self._timers.apply(event_type, timer_id)
         ev_name = {

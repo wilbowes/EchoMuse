@@ -153,8 +153,8 @@ the whole reason the second plane exists.
 |---|---|---|---|
 | T1 | HA sends `TIMER_FINISHED` | ring starts: looped bursts + amber LED pulse if `led_anim_capable` | [today] |
 | T2 | a turn or announcement is playing | burst held off while `device.speaker_busy` is non-zero | [today] |
-| T3 | wake word heard over the ring | alert ducked by `DUCK_DB` for `DUCK_HOLD_S` = 12s so the command reaches STT | [today] |
-| T4 | dismissal (button, transcript, or `CANCELLED`) | ring stops, `speaker_flush` | [today] |
+| T3 | wake word heard while any Echo rings | every ring held silent (flush) for up to `DISMISS_LISTEN_S` + 2s while the controller listens for speech; no turn starts | [today] |
+| T4 | dismissal (button, speech after the wake word, or `CANCELLED`) | ring stops, `speaker_flush`; with no speech the hold is released and the ring resumes | [today] |
 | T5 | nobody answers | stops at `MAX_RING_S` = 15 min | [today] |
 
 `speaker_busy` is a counter rather than a flag because an announcement can

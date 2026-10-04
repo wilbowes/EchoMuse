@@ -16,15 +16,18 @@ imports it without pulling in aiohttp/openwakeword:
   * TimerRegistry reduces the event stream into "is a finished timer waiting
     to be dismissed?" and reports the ring transitions (start / stop) that
     the async orchestrator in em_controller acts on.
-  * attenuate() ducks the alert while someone speaks over it. The alert audio
-    itself is the bundled Home Assistant Voice PE sound (ALARM_SOUND_FILE),
-    decoded by em_controller — it is already 48kHz mono, the format the device
-    speaker plane expects, so the alert needs no firmware support.
+  * DismissListen decides whether someone spoke after a wake word heard
+    while a timer rings, which is what stops it by voice.
+
+The alert audio is the bundled Home Assistant Voice PE sound
+(ALARM_SOUND_FILE), decoded by em_controller — it is already 48kHz mono, the
+format the device speaker plane expects, so the alert needs no firmware
+support.
 
 Dismissal of a RINGING alarm is always local, because HA discards a timer the
-moment it finishes and can no longer cancel it: a dot-button tap, or a spoken
-dismissal recognised from the transcript (is_dismissal, below). A CANCELLED
-event still dismisses too — HA sends one when a timer is cancelled while it is
+moment it finishes and can no longer cancel it: a dot-button tap, or the wake
+word followed by anything spoken (DismissListen, below). A CANCELLED event
+still dismisses too — HA sends one when a timer is cancelled while it is
 still counting down — so the registry handles both. Either way the registry is
 cleared and the ring stops; a safety cap bounds a ring nobody ever answers.
 """
@@ -32,8 +35,6 @@ cleared and the ring stops; a safety cap bounds a ring nobody ever answers.
 from __future__ import annotations
 
 import os
-
-import numpy as np
 
 # ── ESPHome VoiceAssistantTimerEvent values ─────────────────────────────────
 # Mirrors the api_pb2.VoiceAssistantTimerEvent enum. Reproduced as plain ints
@@ -73,15 +74,6 @@ ALARM_SOUND_FILE = os.path.join(
 MAX_RING_S  = 900.0
 # Silence the orchestrator inserts between looped bursts (seconds).
 BURST_GAP_S = 0.6
-
-# How far the chime is attenuated once a wake word has been heard over it, so
-# the command that follows ("dismiss") reaches STT over the alarm rather than
-# under it. Matches the playback duckDb default — same job, same taste call.
-DUCK_DB = -18.0
-# How long the duck holds with no turn taking over. A wake word that starts no
-# turn (a false accept on the chime itself) must not leave the alarm quiet for
-# the rest of its ring — the ring is a safety feature.
-DUCK_HOLD_S = 12.0
 
 # LED cue while ringing — a distinct pulse, not one of the reserved status
 # colours (red=mute, orange=link, cyan=volume). Amber pulse reads as an alert
@@ -154,140 +146,63 @@ class TimerRegistry:
         return len(self._timers)
 
 
-# ── Spoken dismissal ────────────────────────────────────────────────────────
+# ── Stopping a ringing timer by voice ───────────────────────────────────────
 # HA DISCARDS a timer the moment it finishes: cancelling works while one is
 # counting down, but once it fires HA's timer manager no longer knows about it
-# and answers "there are no timers" to a spoken stop (measured 2026-08-13 —
-# 'Stop.' and 'Cancel the timer.' both reached HA correctly over the ringing
-# chime and neither produced a CANCELLED event). That is HA's design, not a
-# fault: it hands ringing to the satellite and expects the satellite to own
-# dismissal, which is how HA's own Voice PE behaves.
+# and answers "there are no timers" to a spoken stop (measured 2026-08-13).
+# That is HA's design: it hands ringing to the satellite and expects the
+# satellite to own dismissal, as its own Voice PE does.
 #
-# So the dismissal is recognised HERE, from the transcript HA already sends us,
-# and applied locally. The registry's CANCELLED-while-finished path stays — an
-# HA that does send one (or a cancel of a still-running timer) is still handled
-# — this is the case HA structurally cannot answer.
-_DISMISS_WORDS = (
-    "stop", "cancel", "dismiss", "silence", "quiet", "enough",
-    "shut up", "turn it off", "turn off", "shut it off", "off",
-    "okay okay", "ok ok", "alright already", "im up",
-)
+# The rule (Wil, 2026-10-04): a wake word heard while any timer rings PAUSES
+# the ring, anything spoken after it STOPS the ring, and silence lets it
+# resume. Only whether someone spoke is asked, never what they said, so it
+# works in every language and "<wake word>, stop timer" behaves as people
+# expect from other assistants. A wake alone does not stop it: a false wake
+# would then silence an alarm nobody answered.
+#
+# It replaced a list of English stop words matched against the transcript
+# (#167). That needed a list per language (#737), and the chime garbled the
+# transcript it depended on. The cost of this rule is that a command spoken
+# over a ringing timer stops the timer and is not sent to Home Assistant.
 
-# Words that can pad a dismissal without making it a command: articles, the
-# nouns a person uses for the thing that is ringing, and ordinary politeness.
-# Used ONLY by is_dismissal_only — the generous matcher above does not care
-# what else is in the sentence.
-_FILLER_WORDS = frozenset({
-    "a", "the", "this", "that", "thats", "it", "its", "please", "now",
-    "just", "already", "im",
-    "alarm", "alarms", "timer", "timers", "ringing", "sound", "noise", "thing",
-    "ok", "okay", "yeah", "yes", "alright", "thanks", "thank", "you", "hey",
-})
-
-# Longest phrases first, so "turn off" is consumed before the bare "off" can
-# leave "turn" behind as an unexplained word.
-_DISMISS_PHRASES = tuple(sorted(
-    _DISMISS_WORDS, key=lambda w: (-len(w.split()), -len(w))
-))
+# How long after the wake to wait for speech before the ring resumes.
+DISMISS_LISTEN_S = 4.0
+# Consecutive 80ms frames at or above the speech probability that count as
+# someone speaking. Two (160ms) is shorter than any word and longer than a
+# click.
+DISMISS_SPEECH_FRAMES = 2
+# em_speechgate's operating point for the same detector: speech measured
+# 0.72-1.00 and non-speech 0.02-0.03 on our recordings.
+DISMISS_SPEECH_PROB = 0.5
 
 
-def _normalise(text: str) -> str:
+class DismissListen:
     """
-    Space-padded, punctuation-free lowercase, so a match is whole-word.
+    Whether someone spoke in the frames after a wake word.
 
-    Apostrophes are DROPPED rather than turned into spaces (so "I'm" is one
-    word, not "i m"), in both the straight and curly forms since STT emits
-    either.
+    Fed one speech probability per 80ms frame, in order. The first
+    `preroll_frames` are ignored: they carry the tail of the wake word
+    itself, which is speech and must not count as the answer.
     """
-    if not text:
-        return ""
-    lowered = text.lower().replace("'", "").replace("’", "")
-    cleaned = "".join(c if c.isalnum() or c.isspace() else " " for c in lowered)
-    joined  = " ".join(cleaned.split())
-    return f" {joined} " if joined else ""
 
+    def __init__(self, preroll_frames: int,
+                 speech_frames: int = DISMISS_SPEECH_FRAMES,
+                 threshold: float = DISMISS_SPEECH_PROB) -> None:
+        self._skip = max(0, preroll_frames)
+        self._need = max(1, speech_frames)
+        self._threshold = threshold
+        self._run = 0
+        self.frames = 0
+        self.peak = 0.0
+        self.spoke = False
 
-def is_dismissal(text: str) -> bool:
-    """
-    Whether an utterance spoken OVER a ringing alarm means "make it stop".
-
-    Deliberately generous, because it is only ever consulted while an alarm is
-    actually ringing — in that context almost anything a person says is about
-    the alarm, and the cost of a miss (the alarm keeps going and HA answers
-    "there are no timers") is worse than the cost of a false positive (an
-    alarm stops that was going to be stopped seconds later anyway).
-
-    It is NOT generous enough to eat a real command, though: "set a timer for
-    five minutes" while one rings must still reach HA, which is why this
-    matches words rather than simply treating every utterance as a dismissal.
-
-    Use this to STOP THE RING and nothing else. Suppressing HA's spoken reply
-    needs is_dismissal_only — see there for why the two cannot be the same
-    question.
-    """
-    padded = _normalise(text)
-    if not padded:
-        return False
-    return any(f" {w} " in padded for w in _DISMISS_PHRASES)
-
-
-def is_dismissal_only(text: str) -> bool:
-    """
-    Whether the utterance is a dismissal AND NOTHING ELSE.
-
-    The generosity above is right for stopping the ring and wrong for
-    swallowing HA's reply, and those rode on one match until 2026-08-21.
-    "Turn off the kitchen light" spoken over an alarm is a dismissal by the
-    rule above — reasonably, since the alarm should stop — but it is also a
-    real command that HA answers. Suppressing that answer left the light
-    switched off and the user with silence, unable to tell whether anything
-    had happened. A false positive here is not a spare stop; it is a lost
-    reply.
-
-    So the reply is only suppressed when what remains after removing every
-    dismissal phrase is filler: articles, a word for the thing that is
-    ringing, politeness. Anything else — a room, a device, a noun this module
-    has never heard of — means HA has something to say and must be allowed to
-    say it, while the ring still stops.
-    """
-    padded = _normalise(text)
-    if not padded:
-        return False
-
-    matched = False
-    changed = True
-    while changed:
-        changed = False
-        for w in _DISMISS_PHRASES:
-            needle = f" {w} "
-            if needle in padded:
-                # Replace with a single space so the surrounding word
-                # boundaries survive — " stop stop " must lose both.
-                padded  = padded.replace(needle, " ", 1)
-                matched = changed = True
-                break
-
-    if not matched:
-        return False
-    return all(word in _FILLER_WORDS for word in padded.split())
-
-
-def attenuate(pcm: bytes, gain_db: float) -> bytes:
-    """
-    Scale S16_LE PCM by gain_db (<= 0 — a duck never boosts).
-
-    Ducks the alert while a wake word is heard over it, so the command that
-    follows reaches STT over the alarm rather than under it. Positive gain is
-    clamped to 0 rather than amplifying: the alert is already mastered near
-    full scale, so a boost would clip.
-    """
-    if gain_db >= 0.0 or not pcm:
-        return pcm
-    gain  = 10.0 ** (gain_db / 20.0)
-    count = len(pcm) // 2
-    # An odd trailing byte cannot be a whole sample, so it is dropped rather
-    # than crashing frombuffer. Vectorised because this runs over every burst
-    # of a ring that can last 15 minutes — numpy is already a controller dependency.
-    samples = np.frombuffer(pcm[: count * 2], dtype="<i2")
-    scaled  = np.clip(np.rint(samples * gain), -32768, 32767).astype("<i2")
-    return scaled.tobytes()
+    def push(self, prob: float) -> bool:
+        """Take one frame's probability; returns whether speech was heard."""
+        self.frames += 1
+        if self.spoke or self.frames <= self._skip:
+            return self.spoke
+        self.peak = max(self.peak, prob)
+        self._run = self._run + 1 if prob >= self._threshold else 0
+        if self._run >= self._need:
+            self.spoke = True
+        return self.spoke

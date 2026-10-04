@@ -1009,22 +1009,37 @@ went **permanently deaf** after a mid-chime dismissal. Roughly three dismissals
 in four hit it, the chime being 1.68s of every 2.3s.
 
 **HA hands ringing to the satellite and expects the satellite to own dismissal**
-— the same shape its own Voice PE hardware has. So the dismissal is recognised
-here, from the transcript HA already sends, rather than waiting for a CANCELLED
-that structurally will not come. The registry's CANCELLED path stays for the
-cases HA *does* answer.
+— the same shape its own Voice PE hardware has. The registry's CANCELLED path
+stays for the cases HA *does* answer.
 
-**Two dismissal matchers, and they must not be collapsed into one.**
-`is_dismissal` is deliberately generous, because a missed dismissal leaves the
-alarm ringing and HA answering "there are no timers", which is far worse than
-an extra stop. `is_dismissal_only` is strict, because it suppresses HA's reply
-— and a false positive there is not a spare stop, it is a **lost answer**.
-"Turn off the kitchen light" over a ringing alarm is a dismissal by the
-generous rule (correctly — the alarm should stop) and also a real command HA
-answers; suppressing that left the light off and the user unable to tell
-whether anything had happened. Note it is the `off` variant that breaks, not
-`on`. Phrases are stripped **longest-first** so `turn off` is consumed before
-the bare `off` strands `turn` as an unexplained word.
+**By voice, a ringing timer stops on the wake word followed by anything
+spoken** (Wil, 2026-10-04; `em_timers.DismissListen`,
+`em_controller._dismiss_by_speech`). The wake holds every ringing alarm in the
+fleet silent (`_hold_alarms`: a flush, and a DEADLINE on
+`timer_alarm_hold_t`, never a flag, so a wake that goes nowhere cannot leave
+an alarm silent); `_run_voice_locked` then runs the dismissal listen INSTEAD
+of a turn, scoring the session's frames with the speech gate's Silero for
+`DISMISS_LISTEN_S`. Two consecutive speech frames after the preroll stop the
+ring everywhere; silence releases the hold and the ring resumes. Nothing
+reaches Home Assistant. Three things to keep:
+
+- **It asks whether someone spoke, never what they said.** It replaced an
+  English stop-word list matched against the transcript (#167), which needed a
+  list per language (#737 was German) and depended on a transcript the chime
+  garbled. Do not add words back.
+- **A wake alone must not stop it** (Voice PE's rule, considered and
+  declined): while audio plays the wake bar is the lower barge bar, so a false
+  wake is likeliest exactly while a timer rings, and it would silence an alarm
+  nobody answered. The preroll frames are skipped for the same reason — they
+  carry the wake word's own tail, which is speech.
+- **Fleet-wide, because arbitration can hand the wake to an Echo that is not
+  ringing** (measured 2026-08-28: the ringing device scored 0.794 and ceded to
+  a quiet one at 0.501).
+
+The accepted cost: a command spoken over a ringing timer stops the timer and
+is not sent to HA. Without the Silero model the wake alone stops the ring,
+since an alarm that cannot be stopped by voice is the worse failure. **Not yet
+run on hardware.**
 
 **Overlapping owners are COUNTED, and this is the bug class the two fixes
 share.** `ducked` was one boolean per session, so a barge-in turn or an
@@ -1091,7 +1106,7 @@ single written ladder. `docs/audio-states.md` §2 is the nearest thing.
 | `em_tasks.py` | `spawn` for background tasks nothing awaits: held in a set until done, exception logged when it happens. **No `asyncio.create_task` result is discarded** in em_api/em_controller/em_esphome, and every task wrapping an `Event.wait()` is torn down in a `finally` of the function that made it (`tests/test_tasks.py`, by AST). The second rule is the one that bit: `_run_post_turn_playback` cancelled its helpers at the end of its `try`, so a cancelled playback left two `Event.wait()` tasks pending — "Task was destroyed but it is pending!" on the dev add-on 2026-09-25, reproduced against 2.23.0 |
 | `em_linkauth.py` | The device-link auth decision as a pure function. Split out of `em_controller._link_auth_ok` so it is testable: the suite does not import em_controller, so this was security logic with no coverage until it orphaned a device |
 | `em_output_mute.py` | HA's media-player mute (#675, #678): mute sends volume 0 and remembers the level, unmute restores it; a volume from HA unmutes at it; the device's 0 echoing back is never persisted as `startupVolume`; volume-up on the Echo while muted restores the old level + one button step (8) rather than the button floor; a reconnect while muted re-sends 0. Controller-side so it works on every firmware. Pure, tested, with a source guard that mute is handled wherever `VOLUME_MUTE` is advertised |
-| `em_timers.py` | Voice-assistant timers (#167) — the alarm ring, and the two dismissal matchers that must NOT be one. `is_dismissal` is generous because a missed dismissal leaves the alarm going and HA answering "there are no timers"; `is_dismissal_only` is strict because it suppresses HA's reply, and a false positive there is not a spare stop, it is a lost answer ("turn off the kitchen light" over a ringing alarm). Phrases are stripped longest-first so `turn off` is consumed before the bare `off` strands `turn` |
+| `em_timers.py` | Voice-assistant timers (#167) — the timer registry, the alarm sound, and `DismissListen`: whether someone spoke after a wake word heard while a timer rings, which is what stops it by voice. It asks whether, never what, so there is no word list and no language |
 | `em_ble_proxy.py` | BLE proxy ESPHome servers — a second, separate ESPHome device per Echo (own port from the shared counter, own mDNS, MAC = serial-derived with the locally-administered bit flipped). Forwards `ble_adverts` control messages from the device's passive scanner (`device/internal/bluetooth`, raw HCI over `/dev/stpbt`; enabling durably disables Android's BT stack) to HA as raw advertisements. Lifecycle = idempotent `reconcile()` driven by `bleProxyEnabled` | **Connections never go out on a plaintext port** (Wil, 2026-10-03): with `bleProxyConnections` on and firmware announcing `ble_connect`, the proxy is rebuilt with a per-device key (`devices.ble_proxy_key`, schema v31, assign-once), its listener requires it, and only then do the `em_ble_gatt` handlers and the ACTIVE_CONNECTIONS flags exist — one fact (`key is not None`) decides all three, pinned by `tests/test_ble_proxy_rules.py`. The key reaches the dashboard through one admin GET and nothing else, like the Sendspin token. Turning it on makes HA ask for the key (reauth) and the proxy delivers nothing until it has it; an offline device keeps its last mode so a reconnect does not flip the port and make HA ask again |
 | `em_ble_gatt.py` | Bluetooth CONNECTIONS through an Echo (#656). `GattLink` is one Echo's bridge (the `0x08` data-plane JSON: request ids, results, slots); `GattProxy` maps one Home Assistant connection's ESPHome Bluetooth messages onto it. Takes the protobuf module as an argument, so the suite needs none. Rules that are Home Assistant's, each confirmed against its real client: the characteristic handle is the VALUE handle; a write without response is never answered with an error (errors match on address+handle and would fail the next request); a disconnect gets exactly one `connected=false`; HA writes the CCCD itself. **Events are queued behind results**, because a result wakes its task a loop step later and "write ok, then disconnected" otherwise reaches HA reversed |
 | `esphome/` | ESPHome native API protocol layer (framing, handshake, vendored protobufs). `noise.py` + the encrypted half of `frame_protocol.py` are ESPHome's API encryption, responder side, used ONLY by a Bluetooth proxy with connections on. `noise.py` is held to a published vector; `tools/noise_client_check.py` and `tools/gatt_client_check.py` run `aioesphomeapi` itself against a listener (two processes: its `api.proto` collides with our vendored one). Run both after touching either file |

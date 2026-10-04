@@ -109,6 +109,7 @@ import em_ble_proxy
 import em_oww_models
 import em_player
 import em_volume
+import em_speechgate
 import em_timers
 import em_loglevel
 
@@ -479,12 +480,12 @@ class Device:
         # Timer-alarm ring task (em_timers). None when no timer is ringing;
         # a live Task while a finished HA timer is alerting on this device.
         self.timer_alarm_task: "asyncio.Task | None" = None
-        # Monotonic deadline until which the ringing chime plays attenuated,
-        # armed when a wake word is heard OVER the alarm so the command that
-        # follows it ("dismiss") is not buried. A deadline rather than a flag:
-        # a wake word that starts no turn — a false accept on the chime itself
-        # — must not leave the alarm quiet for the rest of its 120s cap.
-        self.timer_alarm_duck_t: float = 0.0
+        # Monotonic deadline until which the ring is held SILENT, armed when
+        # a wake word is heard while it rings so whatever is said next can be
+        # heard (em_timers.DismissListen). A deadline, never a flag: a wake
+        # that leads nowhere (ceded, stale, a false accept on the chime) must
+        # not leave an alarm silent for the rest of its ring.
+        self.timer_alarm_hold_t: float = 0.0
 
         # How many playbacks are streaming-or-draining on the speaker plane.
         # NOT the same thing as `speaking`, which clears as soon as the socket
@@ -1011,20 +1012,10 @@ class Device:
         """A finished timer is alerting on this device right now."""
         return self.timer_alarm_task is not None and not self.timer_alarm_task.done()
 
-    def duck_timer_alarm(self) -> None:
-        """
-        A wake word was heard over the ringing chime — attenuate it so the
-        command that follows reaches STT over the alarm, not under it.
-        """
-        self.timer_alarm_duck_t = (
-            asyncio.get_event_loop().time() + em_timers.DUCK_HOLD_S
-        )
-
-    def ducked_alarm_pcm(self, full: bytes, ducked: bytes) -> bytes:
-        """Pick the burst to play now, per the duck deadline."""
-        if self.timer_alarm_duck_t > asyncio.get_event_loop().time():
-            return ducked
-        return full
+    @property
+    def timer_alarm_held(self) -> bool:
+        """The ring is paused for someone who has just said the wake word."""
+        return self.timer_alarm_hold_t > asyncio.get_event_loop().time()
 
     @property
     def button_hold_capable(self) -> bool:
@@ -2155,9 +2146,9 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
 # dismissed or a safety cap fires. Controller-side and firmware-free.
 #
 # Three ways to dismiss, and all three are LOCAL, because HA discards a timer
-# the moment it finishes and cannot cancel one that is already ringing
-# (em_timers.is_dismissal): a dot-button tap, a spoken dismissal recognised
-# from the transcript, or HA cancelling a still-RUNNING timer before it fires.
+# the moment it finishes and cannot cancel one that is already ringing: a
+# dot-button tap, the wake word followed by anything spoken
+# (_dismiss_by_speech), or HA cancelling a still-RUNNING timer before it fires.
 
 async def start_timer_alarm(device: Device) -> None:
     if device.timer_alarm_task is not None and not device.timer_alarm_task.done():
@@ -2197,6 +2188,85 @@ async def stop_timer_alarm(device: Device) -> bool:
     except asyncio.CancelledError:
         pass
     return True
+
+
+def _ringing_devices() -> "list[Device]":
+    return [d for d in _devices.values() if d.timer_alarm_ringing]
+
+
+# A hold outlives the listen it is for by this much, so a ring cannot resume
+# between the last frame scored and the verdict being acted on.
+_ALARM_HOLD_MARGIN_S = 2.0
+
+
+async def _hold_alarms() -> None:
+    """
+    Silence every ringing alarm for the length of a dismissal listen.
+
+    Fleet-wide: which Echo wins a wake is decided by arbitration, and the one
+    that is ringing can lose it, so the wake is taken to be about whatever is
+    ringing. The burst in flight is flushed, since the rest of it is already
+    queued on the device. The hold is a deadline (see timer_alarm_hold_t).
+    """
+    until = (asyncio.get_event_loop().time()
+             + em_timers.DISMISS_LISTEN_S + _ALARM_HOLD_MARGIN_S)
+    for d in _ringing_devices():
+        first = not d.timer_alarm_held
+        d.timer_alarm_hold_t = until
+        if first:
+            d.cancel_event.set()
+            await d.send_control({"type": "speaker_flush"})
+
+
+def _release_alarm_holds() -> None:
+    """Nobody spoke: the rings resume on their next loop."""
+    for d in _ringing_devices():
+        d.timer_alarm_hold_t = 0.0
+        # Set by the hold to cut the burst short; left set it would end the
+        # ring as a dismissal.
+        d.cancel_event.clear()
+
+
+async def _dismiss_by_speech(device: Device) -> None:
+    """
+    A wake word was heard while a timer rings: stop the ring if anyone
+    speaks, and let it resume if nobody does (em_timers, "Stopping a ringing
+    timer by voice"). Runs in place of the voice turn, so nothing reaches
+    Home Assistant; the caller's cleanup closes the listening session.
+    """
+    await _hold_alarms()
+    vad = em_speechgate.new_turn()
+    listen = em_timers.DismissListen(esphome.VOICE_PREROLL_DISCARD)
+    # Without the detector there is no way to ask whether anyone spoke, and
+    # an alarm that cannot be stopped by voice is the worse failure.
+    spoke = vad is None
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + em_timers.DISMISS_LISTEN_S
+    while not spoke:
+        left = deadline - loop.time()
+        if left <= 0:
+            break
+        try:
+            frame = await asyncio.wait_for(device.voice_queue.get(), timeout=left)
+        except asyncio.TimeoutError:
+            break
+        spoke = listen.push(vad.prob(frame))
+
+    if spoke:
+        stopped = [d.device_id for d in _ringing_devices()]
+        for device_id in stopped:
+            await esphome.dismiss_timer_alarm(device_id)
+        how = ("no speech detector" if vad is None
+               else f"speech after {listen.frames * 80}ms")
+        log.info(f"[{device.device_id}] Timer alarm stopped by voice "
+                 f"({how}; ringing on {', '.join(stopped) or 'nothing'})")
+        em_dbwriter.submit(db.log_device, device.device_id, "info", "controller",
+                           "Timer alarm stopped by voice")
+    else:
+        _release_alarm_holds()
+        log.info(f"[{device.device_id}] Wake over a ringing timer, nobody spoke "
+                 f"({listen.frames} frames, peak {listen.peak:.2f}) — ring resumes")
+    await leds_off(device)
 
 
 _alarm_pcm_cache: "bytes | None" = None
@@ -2279,12 +2349,12 @@ async def _ring_timer_alarm(device: Device) -> None:
     Loop the alarm chime until cancelled or MAX_RING_S elapses.
 
     Takes the speaker like an announcement (interrupt media, restore after),
-    but deliberately LEAVES THE MIC RUNNING: a spoken dismissal has to be heard
+    but deliberately LEAVES THE MIC RUNNING: the wake word has to be heard
     over the chime, which is the same problem as barge-in over TTS and is
     solved the same way — the device's AEC subtracts its own speaker output and
     the wake word is scored at bargeInThreshold (wake_word_listener). A
-    detection ducks the chime (Device.duck_timer_alarm) so the command after
-    the wake word reaches STT over the alarm rather than under it.
+    detection holds the ring silent (_hold_alarms) while _dismiss_by_speech
+    listens for whether anyone speaks.
     """
     pcm = await _alarm_burst_pcm()
     if not pcm:
@@ -2293,7 +2363,6 @@ async def _ring_timer_alarm(device: Device) -> None:
         # CANCELLED try to stop a ring that never started.
         esphome.clear_timers(device.device_id)
         return
-    pcm_duck = em_timers.attenuate(pcm, em_timers.DUCK_DB)
     if await _wait_for_turn_audio(device):
         log.info(
             f"[{device.device_id}] Timer alarm — waited for the in-flight "
@@ -2313,7 +2382,10 @@ async def _ring_timer_alarm(device: Device) -> None:
             # writes finish while the device is still playing the response out
             # of its buffer — the ring bursting into that gap is exactly the
             # overlap this guard is for.
-            if device.speaker_busy:
+            #
+            # Held: a wake word was heard, and the ring stays silent until
+            # the hold is released or runs out (_hold_alarms).
+            if device.speaker_busy or device.timer_alarm_held:
                 await asyncio.sleep(0.1)
                 continue
             in_turn = device.voice_lock.locked()
@@ -2329,7 +2401,9 @@ async def _ring_timer_alarm(device: Device) -> None:
                 # listening ring the moment the user starts speaking.
                 if device.led_anim_capable:
                     await device.send_led_anim(dict(em_timers.TIMER_ANIM))
-            await _run_post_turn_playback(device, device.ducked_alarm_pcm(pcm, pcm_duck))
+            await _run_post_turn_playback(device, pcm)
+            if device.timer_alarm_held:
+                continue  # cut short by a hold, which is not a dismissal
             if device.cancel_event.is_set():
                 break  # dismissed mid-burst
             await asyncio.sleep(em_timers.BURST_GAP_S)
@@ -2346,7 +2420,7 @@ async def _ring_timer_alarm(device: Device) -> None:
         raise
     finally:
         device.timer_alarm_task   = None
-        device.timer_alarm_duck_t = 0.0
+        device.timer_alarm_hold_t = 0.0
         # The mic was never stopped, but a turn taken over the chime may have
         # left it routed — the same defensive restart the turn path ends with.
         await device.mic_start()
@@ -2566,6 +2640,9 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown",
     await em_player.interrupt(device.device_id)
     try:
         async with device.voice_lock:
+            if is_wakeword and _ringing_devices():
+                await _dismiss_by_speech(device)
+                return
             log.info(f"[{device.device_id}] Voice turn starting (esphome mode)")
             device.listening = True
             await leds_listening(device)
@@ -3157,7 +3234,6 @@ async def _private_wake_turn(device: Device, ev: dict) -> None:
         # The controller cannot measure the floor from a stream it does not
         # get; the Echo tracks it the same way and sends it with the wake.
         device.noise_floor = float(ev["floor"])
-    ringing = device.timer_alarm_ringing
     log.info(
         f"[{device.device_id}] Wake word detected (source=device, private, "
         f"session={session}, score={score:.3f}, threshold={threshold:.3f}, "
@@ -3165,9 +3241,10 @@ async def _private_wake_turn(device: Device, ev: dict) -> None:
     )
     em_dbwriter.submit(db.log_device, device.device_id, "info", "device",
                   f"Wake word detected (score={score:.3f}, device)")
-    if ringing:
-        device.duck_timer_alarm()
     device.cancel_event.clear()
+    if _ringing_devices():
+        # After the clear: the hold sets this event to cut the burst short.
+        await _hold_alarms()
     device.last_wake_mono = em_shadow.now() - age_s
     device.last_wake = {
         "model":       em_oww_models.prediction_key(device.oww_model),
@@ -3675,16 +3752,13 @@ async def _stream_listen(device: Device):
                         device.device_id, "info", "device",
                         f"Wake word detected (score={score:.3f}, {source})"
                     )
-                    if ringing:
-                        # Duck the chime for the command that follows the wake
-                        # word. Done here rather than at turn start so it takes
-                        # effect on the very next burst — the user is already
-                        # speaking "…dismiss" by the time the turn is set up.
-                        device.duck_timer_alarm()
-                        log.info(
-                            f"[{device.device_id}] Wake over ringing alarm — "
-                            f"ducking chime {em_timers.DUCK_DB:.0f}dB"
-                        )
+                    if _ringing_devices():
+                        # Silence the ring now rather than at turn start: the
+                        # person is already speaking by the time the turn is
+                        # set up.
+                        await _hold_alarms()
+                        log.info(f"[{device.device_id}] Wake over a ringing "
+                                 f"timer — ring held")
                     if not device.voice_lock.locked():
                         # P0-1: do NOT send mic_stop/mic_start_turn.
                         # The stream stays running continuously. Flipping
