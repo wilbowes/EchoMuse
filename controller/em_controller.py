@@ -2235,6 +2235,13 @@ async def _dismiss_by_speech(device: Device) -> None:
     Home Assistant; the caller's cleanup closes the listening session.
     """
     await _hold_alarms()
+    # The listening ring on the Echo that took the wake AND on every Echo that
+    # is ringing: the person is looking at the one making the noise, which
+    # arbitration may not have picked, and a ring that only goes quiet does
+    # not say it is waiting to be told.
+    lit = {d.device_id: d for d in [device, *_ringing_devices()]}
+    for d in lit.values():
+        await leds_listening(d)
     vad = em_speechgate.new_turn()
     listen = em_timers.DismissListen(esphome.VOICE_PREROLL_DISCARD)
     # Without the detector there is no way to ask whether anyone spoke, and
@@ -2266,7 +2273,10 @@ async def _dismiss_by_speech(device: Device) -> None:
         _release_alarm_holds()
         log.info(f"[{device.device_id}] Wake over a ringing timer, nobody spoke "
                  f"({listen.frames} frames, peak {listen.peak:.2f}) — ring resumes")
-    await leds_off(device)
+    # Dark everywhere: stopped, that is the confirmation; resuming, each ring
+    # repaints its own pulse with its next burst.
+    for d in lit.values():
+        await leds_off(d)
 
 
 _alarm_pcm_cache: "bytes | None" = None
