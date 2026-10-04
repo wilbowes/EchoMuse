@@ -285,9 +285,31 @@ async def live(host: str, port: int, psk: str, address: str | None) -> int:
     # connect needs the type, and a random address asked for as public fails.
     heard = {}
 
+    names = {}
+
+    def local_name(data: bytes) -> str:
+        # AD structures: length, type, value. 0x08/0x09 are the local name
+        # and 0x02/0x03 the 16-bit service UUIDs. A passive scan never sees
+        # the scan response, where a phone puts its name, so the services
+        # are often the only way to tell which device is which.
+        i, out = 0, []
+        while i + 1 < len(data) and data[i]:
+            n, kind = data[i], data[i + 1]
+            value = data[i + 2:i + 1 + n]
+            if kind in (0x08, 0x09):
+                out.append(value.decode("utf-8", "replace"))
+            elif kind in (0x02, 0x03):
+                out += [f"svc {value[j + 1]:02x}{value[j]:02x}"
+                        for j in range(0, len(value) - 1, 2)]
+            i += 1 + n
+        return " ".join(out)
+
     def on_adverts(resp):
         for a in resp.advertisements:
             heard[a.address] = (a.address_type, a.rssi)
+            name = local_name(bytes(a.data))
+            if name:
+                names[a.address] = name
 
     stop = c.subscribe_bluetooth_le_raw_advertisements(on_adverts)
     want = int(address.replace(":", ""), 16) if address else None
@@ -299,7 +321,7 @@ async def live(host: str, port: int, psk: str, address: str | None) -> int:
         stop()
         for addr, (kind, rssi) in sorted(heard.items(), key=lambda kv: -kv[1][1]):
             mac = ":".join(f"{addr:012X}"[i:i + 2] for i in range(0, 12, 2))
-            print(f"  {mac}  {'random' if kind else 'public'}  {rssi}dBm")
+            print(f"  {mac}  {'random' if kind else 'public'}  {rssi}dBm  {names.get(addr, '')}")
         print(f"{len(heard)} devices heard in 15s; pass one as the address")
         await c.disconnect(force=True)
         return 0
