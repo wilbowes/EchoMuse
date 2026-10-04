@@ -174,6 +174,12 @@ DISMISS_SPEECH_FRAMES = 2
 # em_speechgate's operating point for the same detector: speech measured
 # 0.72-1.00 and non-speech 0.02-0.03 on our recordings.
 DISMISS_SPEECH_PROB = 0.5
+# The ring stops the moment speech is heard, but the listening ring stays lit
+# until the person has finished, so it looks listened to rather than cut off
+# (Wil, 2026-10-04). Finished is this many quiet frames in a row (400ms, a
+# pause between sentences), or DISMISS_TAIL_S at the longest.
+DISMISS_END_FRAMES = 5
+DISMISS_TAIL_S = 4.0
 
 
 class DismissListen:
@@ -187,20 +193,30 @@ class DismissListen:
 
     def __init__(self, preroll_frames: int,
                  speech_frames: int = DISMISS_SPEECH_FRAMES,
-                 threshold: float = DISMISS_SPEECH_PROB) -> None:
+                 threshold: float = DISMISS_SPEECH_PROB,
+                 end_frames: int = DISMISS_END_FRAMES) -> None:
         self._skip = max(0, preroll_frames)
         self._need = max(1, speech_frames)
+        self._end = max(1, end_frames)
         self._threshold = threshold
         self._run = 0
+        self._quiet = 0
         self.frames = 0
         self.peak = 0.0
         self.spoke = False
+        # Speech was heard and has since stopped.
+        self.finished = False
 
     def push(self, prob: float) -> bool:
         """Take one frame's probability; returns whether speech was heard."""
         self.frames += 1
-        if self.spoke or self.frames <= self._skip:
-            return self.spoke
+        if self.frames <= self._skip:
+            return False
+        if self.spoke:
+            self._quiet = self._quiet + 1 if prob < self._threshold else 0
+            if self._quiet >= self._end:
+                self.finished = True
+            return True
         self.peak = max(self.peak, prob)
         self._run = self._run + 1 if prob >= self._threshold else 0
         if self._run >= self._need:

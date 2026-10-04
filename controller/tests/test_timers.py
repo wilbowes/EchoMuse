@@ -137,6 +137,33 @@ def test_the_verdict_latches():
     assert _feed(listen, [SPEECH, SPEECH, QUIET, QUIET]) == [False, True, True, True]
 
 
+def test_finished_is_speech_followed_by_a_pause():
+    # The ring stops at `spoke`; the listening ring stays lit until
+    # `finished`, so the person is not cut off mid-sentence.
+    listen = t.DismissListen(preroll_frames=0, end_frames=5)
+    _feed(listen, [SPEECH, SPEECH])
+    assert listen.spoke and not listen.finished
+    _feed(listen, [SPEECH] * 10 + [QUIET] * 4)
+    assert not listen.finished, "four quiet frames is a breath, not the end"
+    listen.push(QUIET)
+    assert listen.finished
+
+
+def test_a_pause_shorter_than_the_end_does_not_finish():
+    # "Verona ... be quiet": a gap between words restarts the count.
+    listen = t.DismissListen(preroll_frames=0, end_frames=5)
+    _feed(listen, [SPEECH, SPEECH] + [QUIET] * 4 + [SPEECH] + [QUIET] * 4)
+    assert not listen.finished
+    listen.push(QUIET)
+    assert listen.finished
+
+
+def test_silence_alone_never_finishes():
+    listen = t.DismissListen(preroll_frames=0)
+    _feed(listen, [QUIET] * 100)
+    assert not listen.spoke and not listen.finished
+
+
 def test_peak_reports_the_loudest_frame_after_the_preroll():
     # Logged when nobody spoke, to tell a quiet room from a near miss.
     listen = t.DismissListen(preroll_frames=2)

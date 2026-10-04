@@ -2269,6 +2269,22 @@ async def _dismiss_by_speech(device: Device) -> None:
                  f"({how}; ringing on {', '.join(stopped) or 'nothing'})")
         em_dbwriter.submit(db.log_device, device.device_id, "info", "controller",
                            "Timer alarm stopped by voice")
+        if vad is not None:
+            # The ring is already silent. Keep the listening ring up until the
+            # person has finished speaking; stopping an alarm darkens its
+            # Echo, so it is lit again first.
+            for d in lit.values():
+                await leds_listening(d)
+            tail = loop.time() + em_timers.DISMISS_TAIL_S
+            while not listen.finished:
+                left = tail - loop.time()
+                if left <= 0:
+                    break
+                try:
+                    frame = await asyncio.wait_for(device.voice_queue.get(), timeout=left)
+                except asyncio.TimeoutError:
+                    break
+                listen.push(vad.prob(frame))
     else:
         _release_alarm_holds()
         log.info(f"[{device.device_id}] Wake over a ringing timer, nobody spoke "
