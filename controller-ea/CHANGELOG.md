@@ -1,10 +1,46 @@
 # Changelog
 
-## Unreleased
+## 2.26.0-ea.1 (Early Access)
 
-**Update emOS from the dashboard (#573).** An Echo on emOS gets an emOS panel on its Updates tab. The controller rebuilds the Echo's own image around the new release, checks it at every step, and the Echo restores the previous image by itself if the new one does not reach the controller. Works on amonet 1 and 2. Needs emOS 0.10 or later as the release to install; keep the Echo powered while it updates. Schema v30 records each Echo's emOS version.
+Bluetooth connections, emOS updates from the dashboard, and a timer you can stop in any language. Pair with firmware v2.18.0-ea.1, which this controller offers.
 
-**Collect labelled wake-word examples.** Config → Wake word can now save score candidates above a tunable floor and every detector hit. Activity plays the clips and lets an admin label them as wake word, not wake word or unsure. Capture is opt-in, clips stay on the controller, and each Echo retains at most 50 — except a labelled clip, which also copies into a permanent, uncapped archive on disk, organised by label. Schema v29 adds the clip review records.
+### New
+
+- **Bluetooth connections through an Echo (#656).** Home Assistant can now connect to Bluetooth devices through an Echo's proxy; until now the proxy only passed on their adverts. Off by default: turn on "Allow connections" under Config → Bluetooth. Turning it on encrypts that proxy's port, so it goes offline in Home Assistant until you enter the key shown under the toggle. Three connections per Echo. Devices that need pairing are refused. Needs firmware v2.18.0-ea.1.
+- **Sendspin player.** Music Assistant can play to Echoes directly, in sync across rooms. Turn it on per Echo under Config → Sendspin, then pair it from Music Assistant with the token shown there. Needs firmware v2.18.0-ea.1.
+- **Update emOS from the dashboard (#573).** An Echo on emOS gets an emOS panel on its Updates tab. The controller rebuilds the Echo's own image around the new release, checks it at every step, and the Echo restores the previous image by itself if the new one does not reach the controller. Works on amonet 1 and 2. Needs emOS 0.10 or later as the release to install; keep the Echo powered while it updates. Schema v30 records each Echo's emOS version.
+- **Collect labelled wake-word examples.** Config → Wake word can now save score candidates above a tunable floor and every detector hit. Activity plays the clips and lets an admin label them as wake word, not wake word or unsure. Capture is opt-in, clips stay on the controller, and each Echo retains at most 50 — except a labelled clip, which also copies into a permanent, uncapped archive on disk, organised by label. Schema v29 adds the clip review records.
+- **Stop a ringing timer in any language (#736).** Say the wake word and then anything at all. The wake word pauses the ring; anything spoken stops it, on whichever Echo is ringing; if nothing is said for four seconds the ring resumes. The English stop-word list is gone. A command spoken over a ringing timer stops the timer and is not sent to Home Assistant.
+
+### Improved
+
+- A finished timer rings for up to 15 minutes, as Home Assistant's Voice PE does; it was 2 minutes (#694).
+- A physical volume button plays a short tone at the new level when nothing else is playing; Config → Playback → "Volume button sound" turns it off (#637). Needs firmware v2.18.0-ea.1.
+- `LOG_LEVELS` sets the log level per area, for example `echomuse.player=DEBUG` (#378).
+- Each Echo reports its flash wear and why it last booted (#709).
+- The Link row shows `wss (TLS) · no token` in amber for an Echo that is encrypted but has not been issued a token (#725).
+- Deleting an Echo says what it leaves behind in Home Assistant (#726).
+- The wizard gives the emOS image build a deadline and says while it is waiting (#692).
+
+### Fixed
+
+- After a power cut mid-stream, Home Assistant showed the Echo as playing and ignored play and pause until the controller restarted (#749).
+- The Sendspin pairing token could not be reached under fleet scope (#715).
+- A local add-on build failed on CPUs without x86-64-v2 (#750).
+
+### Known issues
+
+- With Echoes in different rooms, the one that answers is the one that heard the wake word first, which is not always the nearest (#747).
+- Adopting a Dot from the Home Assistant add-on can hang at "Sending the escrowed image" (#689).
+- Bluetooth connections: one connection in testing took 10 seconds to establish; the others took about one.
+
+### Before you update
+
+**This release migrates the database (schema v28–v31).** A backup is written beside it first. An older controller will not start on the migrated database, so going back means restoring that backup.
+
+### Thanks
+
+@MikeFez (wake-word samples, #696), @evy0311 (volume tone, #699), @sascha-hemi (#749, #750), @forming (#722, #725, #726), @DaSonOfPoseidon (asked for Bluetooth connections, #656), @Nils3311 (the German timer report, #736) and @rolandsteinmeyer (#496).
 
 ## 2.25.0
 
