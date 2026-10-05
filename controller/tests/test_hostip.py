@@ -103,3 +103,43 @@ def test_the_warning_never_changes_the_answer():
     # because refusing would break anyone deliberately running that way.
     assert em_hostip.resolve("", "172.17.0.2") == ("172.17.0.2", "detected")
     assert em_hostip.resolve("172.17.0.2", None) == ("172.17.0.2", "configured")
+
+
+# ── mDNS on SERVER_IP's interface alone (#604) ──────────────────────────────
+
+class _Responder:
+    def __init__(self, interfaces=None):
+        self.interfaces = interfaces
+
+
+def test_mdns_binds_to_the_one_address():
+    r = em_hostip.bind_mdns(_Responder, "10.0.0.5")
+    assert r.interfaces == ["10.0.0.5"]
+
+
+def test_an_address_this_host_does_not_have_falls_back_to_every_interface():
+    """zeroconf 0.151 raises OSError(ENODEV) for an address that is not local
+    and ValueError for one that is not an address. Either used to stop the
+    controller at startup."""
+    for exc in (OSError(19, "No such device"), ValueError("not an address")):
+        calls = []
+
+        def make(interfaces=None, _exc=exc):
+            calls.append(interfaces)
+            if interfaces is not None:
+                raise _exc
+            return "every-interface"
+
+        assert em_hostip.bind_mdns(make, "10.99.99.99") == "every-interface"
+        assert calls == [["10.99.99.99"], None]
+
+
+def test_any_other_failure_is_not_swallowed():
+    def make(interfaces=None):
+        raise RuntimeError("something else")
+
+    try:
+        em_hostip.bind_mdns(make, "10.0.0.5")
+    except RuntimeError:
+        return
+    raise AssertionError("a failure that is not about the address must surface")

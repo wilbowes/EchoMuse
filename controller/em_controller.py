@@ -5971,7 +5971,7 @@ async def main():
     # the loop long enough to miss keepalive pings and disconnect the fleet.
     # SERVER_IP is already the one address every device is told to dial, so
     # advertising from anywhere else would be a second kind of wrong answer.
-    azc  = AsyncZeroconf(interfaces=[SERVER_IP])
+    azc  = em_hostip.bind_mdns(AsyncZeroconf, SERVER_IP)
     info = _make_mdns_info(tls_active=tls_ctx is not None)
     await azc.async_register_service(info, allow_name_change=True)
     log.info(

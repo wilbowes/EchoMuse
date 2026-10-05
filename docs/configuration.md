@@ -892,7 +892,7 @@ These are set once, on the server, and need a controller restart to change:
 
 | Setting | What it is |
 |---|---|
-| `SERVER_IP` | The controller computer's LAN IP — what devices are told to connect to. Leave it empty to detect it from this host; the controller refuses to start rather than advertise an address it had to guess at, and warns if the detected one looks like a container bridge. |
+| `SERVER_IP` | The controller computer's LAN IP — what devices are told to connect to. Leave it empty to detect it from this host; the controller refuses to start rather than advertise an address it had to guess at, and warns if the detected one looks like a container bridge. mDNS is advertised on this address's interface only, so Home Assistant has to be on the same network to discover the Echoes; if the address is not one of this host's, the controller says so in its log and advertises on every interface. |
 | `OWW_MODEL` / `OWW_THRESHOLD` | Startup defaults for wake word/sensitivity — the dashboard values override these. |
 | `DEVICE_APPROVAL` | `strict` (you approve every new device — recommended) or `auto`. |
 | `SERVER_TLS_PORT` | Encrypted device link (wss) port — default 8770, `0` disables. Devices switch to it automatically once they hold credentials: from the wizard, from approving a new device, or from pairing (hold the Echo's action button 5 s, then **Approve pairing**). |
