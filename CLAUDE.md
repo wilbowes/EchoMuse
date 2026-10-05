@@ -10,6 +10,26 @@ EchoMuse repurposes Amazon Echo Dot Gen 2 (FireOS 5 / Android 5.1, codename "bis
 - **`controller/`** — Python asyncio WebSocket server that manages devices, runs wake word detection, and proxies to a voice pipeline
 - **`oww_forge/`** — standalone Docker batch trainer for custom openWakeWord models (synthetic TTS positives → augmentation → classifier head → `.onnx`). Not part of the controller; see `oww_forge/README.md`. **Published as an image** since 2026-08-20 (`forge-v*` tags → `forge-release.yml` → `ghcr.io/wilbowes/echomuse-forge`, CUDA on amd64 as `:latest` and CPU multi-arch as `:latest-cpu`) — prefer it to a local build, because the pins below are only preserved by a published artifact. Upstream pins in its Dockerfile are load-bearing (piper-sample-generator v2.0.0 flat layout; openWakeWord SHA with a `--convert_to_tflite` argparse patch). **Extra voices come from `piper_voices.py`, and its catalogue is FETCHED, never hardcoded** — 55 languages, ranked by speaker count, because a baked-in list of English voices makes every other language a code change; the same module backs the phrase preview. `google_tts.py` is rate-limited by Google at any real concurrency, so it retries transient failures and only retires a voice on a permanent refusal. Models install via the dashboard (Config → Wake word → "+ Custom model" → `/api/oww_models/upload`) into `oww_models/` beside the SQLite DB; `owwModel` stores the file path for custom models. openwakeword keys predictions by filename *stem*, never the path — always score via `em_oww_models.prediction_key`
 
+## Who this file is for
+
+It is checked in so that how the project is run can be seen (Wil, 2026-10-05),
+and it is written for the maintainers' own sessions. If you are preparing a
+contribution, or are an assistant working for someone who is:
+
+- **The engineering rules apply to you**: capability negotiation, hardware by
+  name, conforming to a spec and proving it, the listening rules.
+- **The voice rules do not.** "Writing to people" and the
+  `— Team EchoMuse (powered by Claude)` sign-off are for replies made on the
+  project's behalf. Post as yourself. Never sign as Team EchoMuse, and never
+  tell a user what the project will do.
+- **Leave this file and the two directory-scoped ones out of your pull
+  request.** We update them after a merge.
+
+Written down because an assistant took the whole file as its own
+instructions: five pull requests on 2026-10-04 were signed as the project,
+a support reply on #712 read as an official answer, and #763 then rewrote the
+sign-off rule itself.
+
 ## Where the detail lives
 
 This file holds what is true across both halves. The depth sits in two
