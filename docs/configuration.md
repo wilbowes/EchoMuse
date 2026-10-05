@@ -571,6 +571,11 @@ delete the files from the controller's `data/recordings/` folder.
 A turn recorded a while ago may show no buttons — that just means its
 recording has aged past the last 10 and the turn history has outlived it.
 
+**Wake word microphone** — which of the seven microphones listens for the
+wake word. **Centre** is right for nearly every Echo. MK1 to MK6 are the six
+around the edge, for an Echo whose centre microphone has failed and no longer
+wakes. Older firmware ignores it, and shows the control disabled.
+
 ---
 
 ## 04 — Ring
@@ -610,6 +615,18 @@ remote changes can otherwise make the ring light unexpectedly. Physical
 volume buttons always show the arc. Setting volume to zero (including Home
 Assistant mute), repeating the current level, and restoring the saved volume
 at boot never do. Older firmware shows the setting disabled until updated.
+
+### Remote volume arc
+The physical volume buttons always show the cyan level arc. With this on,
+the arc also shows for about two seconds when the volume is changed from
+somewhere else: Home Assistant, Music Assistant, an automation. Off by
+default. It never shows for volume zero (which is how Home Assistant mutes),
+for a repeat of the current level, or when the level is restored at start-up.
+Older firmware cannot do this, and shows the switch disabled.
+
+The arc and Home Assistant's slider do not agree about what "half" is: 50%
+from Home Assistant lights about a quarter of the ring. That is
+[#783](https://github.com/wilbowes/EchoMuse/issues/783).
 
 ### How a turn ends
 The ring tells you *why* a conversation stopped, using rhythm rather than
@@ -893,6 +910,7 @@ These are set once, on the server, and need a controller restart to change:
 | Setting | What it is |
 |---|---|
 | `SERVER_IP` | The controller computer's LAN IP — what devices are told to connect to. Leave it empty to detect it from this host; the controller refuses to start rather than advertise an address it had to guess at, and warns if the detected one looks like a container bridge. mDNS is advertised on this address's interface only, so Home Assistant has to be on the same network to discover the Echoes; if the address is not one of this host's, the controller says so in its log and advertises on every interface. |
+| `DB_PATH` | Where the database is kept. The device certificates and recordings are stored beside it. The published image defaults to `/app/data/echomuse.db`, the folder the compose files mount, so it survives an update with or without a `.env`. Bare-metal installs should set it. |
 | `OWW_MODEL` / `OWW_THRESHOLD` | Startup defaults for wake word/sensitivity — the dashboard values override these. |
 | `DEVICE_APPROVAL` | `strict` (you approve every new device — recommended) or `auto`. |
 | `SERVER_TLS_PORT` | Encrypted device link (wss) port — default 8770, `0` disables. Devices switch to it automatically once they hold credentials: from the wizard, from approving a new device, or from pairing (hold the Echo's action button 5 s, then **Approve pairing**). |

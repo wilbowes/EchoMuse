@@ -81,6 +81,14 @@ audio before the controller could close it, so off is **refused** for it and
 the picker snaps back. An Echo streaming to the controller is stopped by the
 controller.
 
+Off behaves the same wherever the wake word is detected (#778). The wake word
+neither starts a turn nor interrupts a reply; a turn Home Assistant or the
+button starts still listens, and so does a follow-up question. And nothing is
+streamed while it is off: if audio arrives from an Echo whose wake word is
+off, the controller stops that stream. That case was found on hardware, when
+an Echo switched from listening privately to "On the controller" kept a
+stream running for 31 seconds under "No wake word".
+
 ## States an Echo can be in
 
 The controller resolves one of these per Echo (`em_listen.resolve`) and the

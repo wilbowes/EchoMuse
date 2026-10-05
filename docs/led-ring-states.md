@@ -357,9 +357,12 @@ which flashes the wrong state for one RTT whenever the press was a cancel.
 `{mu, gen}` (`animator.go:45`) — no pattern — so this needs the current pattern
 recorded alongside the generation. Roughly three lines.
 
-*Correctness today is exact:* neither `em_player` nor the announcement path
-paints the ring (announcements call `_run_post_turn_playback` directly, which
-has no LED calls), so "ring shows a turn state" ⟺ "a voice turn is active".
+*This equivalence stopped holding on 2026-10-05.* It used to be exact:
+neither `em_player` nor the announcement path painted the ring, so "ring
+shows a turn state" ⟺ "a voice turn is active". Since #780 an announcement,
+and the opening message of a conversation Home Assistant starts, show the
+playback meter while no voice turn is running. Option A would now read a
+press during an announcement as a cancel.
 
 *The risk is a future foot-gun, not a present bug.* The equivalence is an
 implicit contract. The day music playback gains a meter ring — a very natural

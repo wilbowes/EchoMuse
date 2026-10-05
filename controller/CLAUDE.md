@@ -535,6 +535,41 @@ An Echo streaming to the controller is stopped with `mic_stop`. The
 `listen_close(wake_off)` in `_private_wake_turn` stays as a backstop for the
 moment between boot and the first push.
 
+**Off is the same in both listening modes, and `em_wakeword` is where that is
+held** (Wil, 2026-10-05, #778: "the two options must be functionally
+identical"). #552 was run on hardware only with the wake word on the Echo.
+Three things followed, all from running the other mode:
+
+- `wake_allowed` is asked for wakes AND barges, and takes no argument for
+  where the wake word is detected, so the modes cannot branch on it. The Echo
+  applies the same rule itself at `onWakeCrossing`, before a session can open.
+  The barge check on the controller is a safeguard only: with the wake word
+  off every turn is started by HA or the button on a bounded turn stream that
+  ends at end of speech, so the barge watcher has no audio to score.
+- A follow-up takes a turn stream whenever there is no wake stream to reuse
+  (`follow_up_needs_turn_stream`): a private Echo, or one scored here with the
+  wake word off. Before, the controller-scored follow-up reused a stream that
+  was down, through a `mic_start` that is skipped while off, and ended
+  `no_speech`.
+- **Nothing streams while off**, and `_stream_listen` enforces it
+  (`stray_stream`): audio arriving unmuted with the wake word off gets a
+  `mic_stop`, at most once per 2s. A private Echo restarts its own local
+  stream after a turn that ended itself (`turnEndedItself`), harmless there;
+  switched to "On the controller" it became a network stream nobody stopped,
+  31s on 15LE, with the controller silently dropping the frames.
+
+**A stored off is not revisited when firmware goes backwards (#776).** An Echo
+stored as off that reconnects on firmware without `wake_word_off` still opens
+a session per wake, closed by the `listen_close(wake_off)` backstop. Clearing
+it needs HA's connection bounced too, since HA does not re-read the picker on
+its own.
+
+**Announcements show the playback meter (#780).** `_standalone_play` raises
+the same `meter_anim` a reply gets, for the clip's known length, and clears it
+after; not while a voice turn or a ringing timer owns the ring
+(`em_scenes.announcement_ring`). Until then the opening message of a
+`start_conversation` played with the ring dark.
+
 ### HA entities beyond the voice satellite
 
 Both are advertised **only when the device declares the capability** — an
@@ -659,6 +694,21 @@ Two guards sit in front of that, both tested by reintroducing the bug:
   superset — and "mostly" is the problem, because the failure then surfaces
   as odd behaviour elsewhere, exactly when someone has rolled an image back
   and is already troubleshooting.
+
+**The image defaults `DB_PATH` to the mounted folder (#785).** The code's
+default is the relative `echomuse.db`, which in the image is `/app`, outside
+the `./data:/app/data` volume: with no `.env`, the database, the device-link
+CA (`em_pki` derives its directory from DB_PATH's parent) and the recordings
+were lost on every recreate. The Dockerfile now sets
+`DB_PATH=/app/data/echomuse.db` and creates the directory. A warning banner
+for the unset case was declined (#755): the fix removes the fault.
+
+**mDNS is advertised on SERVER_IP's interface alone (#604).** zeroconf's
+default opens a socket per host interface, and a send failing on one mDNS
+never needed stalled the event loop. Both responders are built by
+`em_hostip.bind_mdns`, which falls back to every interface, with a warning,
+when SERVER_IP is not an address on the host (zeroconf raises OSError ENODEV
+or ValueError at construction).
 
 ## Controller audio pipeline
 
@@ -2171,6 +2221,15 @@ It is an allowlist twice over: an unlisted probe name is dropped whole, and
 the key/value probes have their keys listed too. `tests/test_support.py` pins
 the JS probe list against the Python allowlist. Drift there is silent, since
 a probe collected and dropped looks identical to one never asked for.
+
+**The emOS serial steps have no ADB, so they ask over the console (#773).**
+`_EMOS_PROBES` holds one probe, `net_log`: the tail of `/run/net.log`, the
+only place the supplicant and the DHCP client write. Chosen by step, not by
+whether an ADB handle is still held. Its redaction is `_probe_net_log`, not
+`_scrub` alone: wpa_supplicant quotes an SSID without escaping an apostrophe,
+so the quote-matching rule turned `SSID 'Bob's WiFi'` into `<redacted>s
+WiFi'`. Each line is cut where a name starts, and two tails are kept because
+they are the diagnosis (the channel, and `reason=WRONG_KEY`).
 
 Scan results are the real tension: the flags and frequency ARE the diagnosis
 (`[SAE-CCMP]` is the whole answer to #82) while the names locate someone's

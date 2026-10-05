@@ -4512,3 +4512,89 @@ target is emOS. And asking for "merge 743" often enough to be teased for it.
 **Still open:** #689; a decision on #747; #736 needs a closing reply; #753
 unread; the jack run for #748; telling the port contributors the plan; the
 dev rig is on pre-merge builds, not the released artifacts.
+
+## 2026-10-05 — an Early Access day one, "No wake word" in both modes, and a contributor batch sorted
+
+**The EA after 19 hours.** Controller `2.26.0-ea.1` took 1NF to firmware
+`v2.18.0-ea.1` and emOS 0.10 over the network, both confirmed. 20 turns, no
+errors. Idle RTT excursions 13.5 per 10 minutes against 11.8 on the previous
+build, so no change. One fault, from the log: an update to ONE Echo stalls the
+event loop 7.6s (firmware, 12.5MB) and 9.6s (emOS image). #770. Updates were
+serialised on 2026-09-02 after three at once stalled it 11.1s; that stopped
+them stacking and left the single transfer as slow as it was. The cause is
+not confirmed.
+
+**Home Assistant's "No wake word" (#552, #778).** #552 was run on 15LE with
+the wake word on the Echo: three wakes heard (0.95, 0.85, 0.97) and
+suppressed on the device, on again and it answered, and C95 on older firmware
+declined it. Wil then asked whether it behaved the same with the wake word on
+the controller: "the two options must be functionally identical". It had
+never been run. Reading the other path, then running it, found:
+
+- a follow-up question got no microphone in controller-scored mode, because
+  it reused a wake stream that was down; fixed, three follow-ups then heard;
+- **an Echo streamed the room for 31 seconds under "No wake word"** after
+  being switched from private listening to the controller, because a private
+  Echo restarts its own local stream after a turn and nothing stopped it once
+  it was a network stream. The controller dropped the frames, so nothing
+  showed. It now stops any stream that arrives while off: under a second on
+  the re-run;
+- a claim of mine that was wrong: that the wake word would interrupt a reply
+  in controller-scored mode. With the wake word off the barge watcher has no
+  audio to score (0 frames over a 60s reply).
+
+**@forming's thirteen.** Closed #763 (it rewrote CLAUDE.md to forbid the
+sign-off, on a count that missed every reply we post), #758 (firmware never
+compiled) and #755 (a banner for a fault a one-line default fixes: #785).
+Merged #757, #740, #741, #742 and #724, the last after a hardware run in both
+listening modes. One claim per test PR was checked by reintroducing the bug:
+both held. #754 and #720 went back. Their assistant had been reading
+CLAUDE.md as its own instructions, signing as the project; Wil keeps the file
+in the repo for transparency, and it now says who it is for (#786).
+
+**Also merged.** From contributors, each after a run on 15LE: #713 (remote
+volume arc), #716 (response level; at 100% it distorts equally with and
+without the boost, zero clipped samples), #730 (wake word microphone; we
+added the capability and the chooser), #604 (mDNS on SERVER_IP's interface;
+we added the fallback), #768 (a TWRP the wizard refused). Ours: #773 (a
+failed emOS WiFi step captures `/run/net.log`), #780 (announcements show the
+ring a reply does), #787, #788, #789.
+
+**Arbitration (#747).** The reporter's bundle held twelve wakes heard by
+several Echoes. The loudest Echo was the same one every time, by 11 to 26dB;
+first-to-hear picked it in eight; the wrong picks were 54 to 164ms apart,
+inside the scorer's 80ms frames. Wil: loudness as well as time, as planned on
+09-24. Built as draft #790: hold every contest 250ms, the Echo 6dB louder
+than every other wins, else the first to hear. Not on hardware yet. It does
+not fix the reported wake itself (heard over playback) or a weak microphone
+(#731).
+
+**Things measured that turned out otherwise.**
+- WiFi power-save on FireOS 6 (#631, #767): `set_power_mode 0` changed
+  nothing on 15LE, 1.9ms before and after. `device/CLAUDE.md` already said
+  the driver forces it off; Wil remembered, I had not looked.
+- The trailing silence in a TTS clip: I told Wil 0.44s and built #781 to
+  trim it. That was the MP3 from another endpoint. The WAV the Echo plays
+  ends on 0.19s, so the change did nothing on hardware, and the log's byte
+  count said so. #781 is parked.
+
+**Mistakes of mine.** Merging main into #552 in a second worktree with
+`git add -A` staged that worktree's stale GoTinyAlsa checkout and moved the
+pointer back on main, undoing #711 for 45 minutes (#777). Merging #787 with
+one check still running, because a watch timed out and the next command ran
+anyway. Triggering volume changes Wil had to watch without telling him first.
+Putting the wake word microphone in the general Advanced panel when the
+Microphones panel has its own (#789).
+
+**Raised.** #770, #771 (HA sensor and button for a ringing timer), #772 (dim
+the mute indicator by ambient light), #776 (a stored "No wake word" on
+firmware that cannot honour it), #782 (a one-word answer at the listening
+ring was missed; the speech detector peaked 0.40 against 0.50), #783 (the
+volume scale: 50% from Home Assistant is a quarter of the ring, and stock's
+table has never been read).
+
+**Still open:** the hardware run for #790; the jack test for #748 and #700;
+#753 unreviewed; #723 needs a wizard run; #729 and #756; #781 parked; the
+ring-to-microphone lag behind #782 unmeasured; two users on #683 who cannot
+find the wake sound setting.
+
