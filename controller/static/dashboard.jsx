@@ -4358,15 +4358,24 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     boot_target:   'readlink -f /dev/block/other-boot 2>&1',
   };
 
-  async function collectProvisionDiagnostics(c, stepIdx, err) {
+  // The emOS serial steps have no ADB, so they ask over the console instead.
+  // net.log is the only place the supplicant and the DHCP client write, and
+  // "associated, still no address" (#767) cannot be told apart from a wrong
+  // password without it. The ntpd line repeats every nine minutes for as long
+  // as the device has no time server and would fill the tail.
+  const _EMOS_PROBES = {
+    net_log:       "grep -v '^ntpd: timed out' /run/net.log | tail -n 200",
+  };
+
+  async function collectProvisionDiagnostics(run, probeList, stepIdx, err) {
     const probes = {};
-    for (const [name, cmd] of Object.entries(_PROVISION_PROBES)) {
+    for (const [name, cmd] of Object.entries(probeList)) {
       try {
         // Bounded per probe. The device has just failed something and may be
         // half gone; without this, one unanswered command hangs the whole
         // collection and the operator gets nothing at all.
         probes[name] = await Promise.race([
-          c.shell(cmd),
+          run(cmd),
           new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 8000)),
         ]);
       } catch (e) {
@@ -4386,7 +4395,11 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // adbRef, not adb: this runs from runStep's catch, in the same async
     // callback that connected.
     const c = adbRef.current;
-    if (!c) {
+    // On the emOS serial steps adbd is gone and the console is the only way
+    // in. Decided by the step, not by whether an ADB handle is still held: a
+    // stale one would spend 8s per probe timing out and never ask the console.
+    const con = (isEmos && _EMOS_SERIAL_STEPS.has(stepIdx)) ? emosConsole : null;
+    if (!con && !c) {
       // No connection means no probes, and a button that downloads a file
       // containing nothing but the error would be worse than no button.
       addLog('No ADB connection, so device state could not be captured.', 'warn');
@@ -4394,7 +4407,9 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     }
     addLog('Capturing device state for diagnostics…');
     try {
-      setDiagnostics(await collectProvisionDiagnostics(c, stepIdx, err));
+      setDiagnostics(con
+        ? await collectProvisionDiagnostics(cmd => con.run(cmd, 8000), _EMOS_PROBES, stepIdx, err)
+        : await collectProvisionDiagnostics(cmd => c.shell(cmd), _PROVISION_PROBES, stepIdx, err));
       addLog('Device state captured — "Download diagnostics" below.', 'ok');
     } catch (e) {
       // Never let the diagnostic path bury the real failure.

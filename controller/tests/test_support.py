@@ -708,6 +708,83 @@ def test_a_probe_with_an_unexpected_shape_still_gets_scrubbed():
     assert "aa:bb:cc:dd:ee:ff" not in json.dumps(d)
 
 
+def _wpa_ssid_txt(ssid: bytes) -> str:
+    """wpa_supplicant 2.10's printf_encode, which is how it prints an SSID."""
+    out = ""
+    for c in ssid:
+        if c == 0x22:   out += '\\"'
+        elif c == 0x5c: out += "\\\\"
+        elif c == 0x1b: out += "\\e"
+        elif c == 0x0a: out += "\\n"
+        elif c == 0x0d: out += "\\r"
+        elif c == 0x09: out += "\\t"
+        elif 32 <= c <= 126: out += chr(c)
+        else: out += f"\\x{c:02x}"
+    return out
+
+
+# An SSID is 0-32 arbitrary bytes (IEEE 802.11). Each of these is a name the
+# quote-matching scrub gets wrong or a form the cut has to survive.
+_NET_LOG_SSIDS = [
+    b"Neptune-Media",
+    b"Bob's WiFi",                       # an apostrophe is NOT escaped
+    b'Say "hi"',
+    b"back\\slash",
+    b"Caf\xc3\xa9",
+    b"a' freq=2412 MHz) b",              # looks like the line's own tail
+    b'x" auth_failures=1 duration=10 reason=FAKE',
+    b"ssid",
+    b" lead and trail ",
+    b"10.10.1.188 aa:bb:cc:dd:ee:ff",
+    b"W" * 32,
+    b"",
+]
+
+
+def test_the_network_log_keeps_the_diagnosis_and_loses_every_name():
+    """
+    The lines are wpa_supplicant 2.10's own formats, read from its source,
+    with each name printed the way it prints one.
+    """
+    for raw in _NET_LOG_SSIDS:
+        name = _wpa_ssid_txt(raw)
+        log = "\n".join([
+            "[   7365] stage 11 reached",
+            f"wlan0: Trying to associate with SSID '{name}'",
+            f"wlan0: SME: Trying to authenticate with 76:ac:b9:a6:9b:22 (SSID='{name}' freq=5785 MHz)",
+            f"wlan0: Trying to associate with 76:ac:b9:a6:9b:22 (SSID='{name}' freq=5785 MHz)",
+            f'wlan0: CTRL-EVENT-SSID-TEMP-DISABLED id=0 ssid="{name}" auth_failures=2 duration=20 reason=WRONG_KEY',
+            f'wlan0: CTRL-EVENT-SSID-REENABLED id=0 ssid="{name}"',
+            f"wlan0: connected to Access Point `{name}'",
+            "wlan0: CTRL-EVENT-CONNECTED - Connection to 76:ac:b9:a6:9b:22 completed [id=0 id_str=]",
+            "udhcpc: broadcasting discover",
+            "udhcpc: lease of 10.10.1.91 obtained from 10.10.1.1, lease time 86400",
+        ])
+        got = _diag(probes={"net_log": log})["probes"]["net_log"]
+        # The same nine lines whatever the name was: nothing of it survives,
+        # and the channel, the refusal reason and the lease do.
+        assert got == [
+            "[   7365] stage 11 reached",
+            "wlan0: Trying to associate with <network>",
+            "wlan0: SME: Trying to authenticate with <mac> (<network> freq=5785 MHz)",
+            "wlan0: Trying to associate with <mac> (<network> freq=5785 MHz)",
+            "wlan0: CTRL-EVENT-SSID-TEMP-DISABLED id=0 <network> "
+            "auth_failures=2 duration=20 reason=WRONG_KEY",
+            "wlan0: CTRL-EVENT-SSID-REENABLED id=0 <network>",
+            "wlan0: connected to <network>",
+            "wlan0: CTRL-EVENT-CONNECTED - Connection to <mac> completed [id=0 id_str=]",
+            "udhcpc: broadcasting discover",
+            "udhcpc: lease of <ip> obtained from <ip>, lease time 86400",
+        ], f"{raw!r}"
+
+
+def test_the_network_log_is_capped():
+    """The wizard tails it; the cap holds if something else posts."""
+    got = _diag(probes={"net_log": "\n".join(f"line {i}" for i in range(1000))})
+    assert len(got["probes"]["net_log"]) == S._NET_LOG_LINES
+    assert got["probes"]["net_log"][-1] == "line 999"
+
+
 def test_the_error_and_transcript_are_scrubbed_not_trusted():
     """
     Both are ours, but our error strings interpolate device output often
@@ -748,9 +825,12 @@ def test_the_wizard_probe_list_matches_the_allowlist():
     """
     jsx = (Path(__file__).resolve().parent.parent
            / "static" / "dashboard.jsx").read_text()
-    block = re.search(r"const _PROVISION_PROBES = \{(.*?)\n  \};", jsx, re.S)
-    assert block, "dashboard.jsx no longer defines _PROVISION_PROBES"
-    in_jsx = set(re.findall(r"^\s*([a-z_]+):", block.group(1), re.M))
+    in_jsx = set()
+    # Two lists: one asked over ADB, one over the emOS serial console.
+    for const in ("_PROVISION_PROBES", "_EMOS_PROBES"):
+        block = re.search(rf"const {const} = \{{(.*?)\n  \}};", jsx, re.S)
+        assert block, f"dashboard.jsx no longer defines {const}"
+        in_jsx |= set(re.findall(r"^\s*([a-z_]+):", block.group(1), re.M))
     in_py = set(S._PROVISION_PROBES)
 
     assert not (in_jsx - in_py), (

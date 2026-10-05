@@ -566,7 +566,12 @@ _PROVISION_PROBES = (
     "packages",       # how many of the disable/hide lists are still visible
     "data_property",  # filenames only
     "boot_target",    # what /dev/block/other-boot resolves to (TWRP steps)
+    "net_log",        # tail of /run/net.log, over the emOS serial console
 )
+
+# How many lines of the network log survive. The wizard already tails it; this
+# is the limit that holds if something else posts.
+_NET_LOG_LINES = 200
 
 _INIT_SVC = re.compile(r"^\[init\.svc\.[a-z0-9_.-]+\]:\s*\[[a-z]+\]$", re.I)
 
@@ -652,6 +657,45 @@ def _probe_services(text: str) -> list[str]:
             if _INIT_SVC.match(ln.strip())]
 
 
+# Where a network name starts in a line of /run/net.log. Every message
+# wpa_supplicant 2.10 prints an SSID in at its default log level carries the
+# word (read from its source: "Trying to associate with SSID '%s'",
+# "(SSID='%s' freq=%d MHz)", `ssid="%s"`); the other two are dhcpcd's and the
+# mesh join line, which do not. An event NAME containing the word
+# (CTRL-EVENT-SSID-TEMP-DISABLED) is not where a name starts, and `bssid` is
+# a MAC, which _scrub takes.
+_NET_LOG_NAME = re.compile(
+    r"(?<![a-z])ssid(?![-\w])|access point|joining mesh", re.I)
+
+# What follows the name in the two messages where the tail is the diagnosis:
+# the channel, and why a network was disabled (reason=WRONG_KEY is a wrong
+# password). Anchored at the END of the line, so a name containing the same
+# text cannot stand in for it.
+_NET_LOG_TAIL = re.compile(
+    r"(freq=\d+ MHz\)|auth_failures=\d+ duration=\d+ reason=[A-Z_]+)$")
+
+
+def _probe_net_log(text: str) -> list[str]:
+    """
+    emOS's network log with the network names cut out.
+
+    `_scrub` alone is not enough here. It redacts quoted strings, and
+    wpa_supplicant quotes an SSID without escaping an apostrophe inside it
+    (`printf_encode` escapes `"` and `\\` only), so `SSID 'Bob's WiFi'` would
+    lose `'Bob'` and keep the rest. An SSID is 0-32 arbitrary bytes, so the
+    line is cut where the name starts instead of at whatever looks like its
+    end.
+    """
+    out = []
+    for ln in (text or "").splitlines()[-_NET_LOG_LINES:]:
+        m = _NET_LOG_NAME.search(ln)
+        if m:
+            tail = _NET_LOG_TAIL.search(ln)
+            ln = ln[:m.start()] + "<network>" + (f" {tail.group(1)}" if tail else "")
+        out.extend(_scrub(ln))
+    return out
+
+
 def build_provision_diagnostics(
     *,
     step: str,
@@ -703,6 +747,8 @@ def build_provision_diagnostics(
             value = _probe_wpa_scan(text, selected_ssid)
         elif name == "services":
             value = _probe_services(text)
+        elif name == "net_log":
+            value = _probe_net_log(text)
         else:
             value = _scrub(text)
         out["probes"][name] = value
