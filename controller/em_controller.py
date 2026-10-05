@@ -657,6 +657,9 @@ class Device:
         # from them: see em_wakelevel.
         self.wake_levels = em_wakelevel.LevelRing()
         self.mic_gain_db: float = 24.0
+        # (MICPGA, digital gain): the gain a wake's level reading still
+        # contains. Echoes that differ here are not compared by loudness.
+        self.adc_gains: tuple = (40, 88)
 
         # Barge-in (§3.2): wake word interrupts the thinking phase or TTS
         # playback. Controller-side feature — with it enabled the mic keeps
@@ -1952,7 +1955,8 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                         # Capture time already carries the link's least
                         # delay; its smoothed RTT would count it twice.
                         won_by = await _claim_wake(
-                            device, fired_heard, levels.measure(device.mic_gain_db))
+                            device, fired_heard, levels.measure(device.mic_gain_db),
+                            over_playback=True)
                     verdict = em_barge.cede(
                         serves=serves, won_by=won_by,
                         device_id=device.device_id, score=score,
@@ -3276,8 +3280,8 @@ def _arbitration_slack() -> float:
 
 
 def _arbitration_hold() -> float:
-    """Hold claims only on a mixed fleet; see em_listen.MIXED_HOLD_S. Only
-    Echoes that could claim count: one with no HA stands down first."""
+    """Hold claims whenever two or more Echoes could claim; see
+    em_listen.ARB_HOLD_S. One with no HA stands down first, so does not count."""
     return em_listen.arbitration_hold(
         em_listen.detector(d.listen_view, d.oww_trigger_capable)
         for d in list(_devices.values()) if esphome.can_serve_turn(d.device_id)
@@ -3286,22 +3290,29 @@ def _arbitration_hold() -> float:
 
 async def _claim_wake(device: "Device", heard_at: float | None,
                       level: tuple[float, float] | None = None,
-                      by: str = "controller") -> str:
+                      by: str = "controller",
+                      over_playback: bool = False) -> str:
     """Claim the utterance for `device`; returns the winner's id.
 
-    `level` is the wake's (level, peak) in dBFS, logged with its capture time
-    so contested wakes can be paired across Echos later; see em_wakelevel.
+    `level` is the wake's (level, peak) in dBFS. Its peak is what the arbiter
+    compares across Echoes (em_arbiter.pick), and it is logged with its
+    capture time so contested wakes can be paired later; see em_wakelevel.
+    `over_playback` says this Echo heard the wake over its own speaker, which
+    the reading then contains, so the contest is decided on time.
     """
     hold = _arbitration_hold()
     won_by = await _wake_arbiter.contest(
         device.device_id, device.wake_arb_ms / 1000.0,
         heard_at=heard_at, slack_s=_arbitration_slack(), hold_s=hold,
+        peak=level[1] if level is not None else None,
+        gains=device.adc_gains, over_playback=over_playback,
     )
     now = asyncio.get_event_loop().time()
     if hold > 0:
         ago = (now - heard_at) * 1000.0 if heard_at is not None else 0.0
-        log.info(f"[{device.device_id}] arbitration (mixed fleet, held "
-                 f"{hold * 1000:.0f}ms): heard {ago:.0f}ms ago, won by {won_by}")
+        log.info(f"[{device.device_id}] arbitration (held {hold * 1000:.0f}ms): "
+                 f"heard {ago:.0f}ms ago, won by {won_by} "
+                 f"({_wake_arbiter.last_why})")
     if level is not None:
         heard_wall = time.time() - (now - (heard_at if heard_at is not None else now))
         em_dbwriter.submit(db.log_device, device.device_id, "info", "controller", em_wakelevel.log_line(
@@ -3387,7 +3398,8 @@ async def _private_wake_turn(device: Device, ev: dict) -> None:
     won_by = device.device_id
     if serves and device.wake_arb_ms > 0 and len(_devices) > 1:
         won_by = await _claim_wake(device, _wake_heard_at(device, ev),
-                                   _device_level(ev), by="device")
+                                   _device_level(ev), by="device",
+                                   over_playback=bool(ev.get("barge")))
     if not serves or won_by != device.device_id:
         wake_info = device.last_wake
         device.last_wake = None
@@ -3453,7 +3465,8 @@ async def _private_barge(device: Device, ev: dict) -> None:
     won_by = device.device_id
     if serves and device.wake_arb_ms > 0 and len(_devices) > 1:
         won_by = await _claim_wake(device, _wake_heard_at(device, ev),
-                                   _device_level(ev), by="device")
+                                   _device_level(ev), by="device",
+                                   over_playback=True)
     verdict = em_barge.cede(
         serves=serves, won_by=won_by,
         device_id=device.device_id, score=score,
@@ -4009,9 +4022,8 @@ async def _stream_listen(device: Device):
                         serves = esphome.can_serve_turn(device.device_id)
                         won_by = device.device_id
                         if serves and device.wake_arb_ms > 0 and len(_devices) > 1:
-                            # No wait unless the fleet is mixed (Echoes
-                            # detecting in different places): then the claim
-                            # is held MIXED_HOLD_S from when it was heard.
+                            # Held ARB_HOLD_S from when it was heard, so
+                            # every Echo that heard it is counted.
                             # Capture time, not arrival (docs/listening.md):
                             # a device wake reports its age; ours dates from
                             # when its frame was captured (CaptureClock).
@@ -4025,7 +4037,8 @@ async def _stream_listen(device: Device):
                                 heard_at = heard
                             won_by = await _claim_wake(
                                 device, heard_at,
-                                device.wake_levels.measure(device.mic_gain_db))
+                                device.wake_levels.measure(device.mic_gain_db),
+                                over_playback=bool(ringing or device.speaking))
                         if not serves or won_by != device.device_id:
                             wake_info = device.last_wake
                             device.oww_paused.clear()
@@ -4580,6 +4593,8 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         device.oww_model     = config.get("owwModel", f"{OWW_MODEL}_v0.1")
         device.wake_arb_ms   = int(config.get("wakeArbitrationMs", 300))
         device.mic_gain_db   = float(config.get("micGainDb", 24))
+        device.adc_gains     = (int(config.get("adcMicpga", 40)),
+                                int(config.get("adcDigitalGain", 88)))
         device.oww_speex_ns  = bool(config.get("owwSpeexNs", False))
         device.ns_asr        = bool(config.get("nsAsr", False))
         device.save_utterances = bool(config.get("saveUtterances", False))

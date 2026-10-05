@@ -65,6 +65,31 @@ utterance until the contest is decided. A fleet whose Echoes all detect the
 same way races on equal terms, so it does not wait — `contest()` with
 `hold_s=0` is exactly `claim()`.
 
+**Every contest is held, and the clearly loudest Echo wins it** (Wil,
+2026-10-05, #747). First-to-hear turned out to be decided by timing noise at
+close range: the scorer works in 80ms frames, and in one house's twelve
+contested wakes the nearest Echo heard the word 54 to 164ms AFTER the winner
+in four of them, while being 11 to 26dB louder than every other Echo in all
+twelve. So whenever two or more Echoes can claim, the first claim is held
+`hold_s` from when it was heard, and `pick()` chooses: an Echo at least
+`LOUDER_MARGIN_DB` louder than every other takes the turn; otherwise the
+earliest heard does, as before.
+
+Loudness is `peak` from em_wakelevel: post-AEC, AGC never runs on the wake
+stream, and the mic gain setting is divided out. It only overrides time when
+it can be trusted, and falls back to earliest-heard when any claim has no
+level (older firmware), when a claim was heard over that Echo's own playback
+(the reading includes the reply or the music), or when the Echoes' MICPGA and
+digital gain settings differ (those are not divided out). A weak microphone
+is NOT caught here: it reads quiet and would lose to a louder Echo further
+away. The answer to that is the per-Echo check against its other six mics
+(#731), not a wider margin.
+
+This is not the best-SNR-after-a-wait design removed on 2026-07-20. That one
+waited on every wake in every fleet and ranked by a ratio that could not tell
+Echoes apart (0.9/1.15/0.93). This one measures something that separates them
+by 11dB or more, and keeps time as the answer whenever it does not.
+
 Pure asyncio, no imports from the rest of the controller — unit-tested
 in tests/test_arbiter.py.
 """
@@ -72,6 +97,48 @@ in tests/test_arbiter.py.
 from __future__ import annotations
 
 import asyncio
+from typing import NamedTuple
+
+# How much louder than every other claimant an Echo must be for loudness to
+# override capture time. Healthy units have not been measured against each
+# other yet; this is a starting point, well under the 11dB smallest lead in
+# the data that prompted it.
+LOUDER_MARGIN_DB = 6.0
+
+
+class Claim(NamedTuple):
+    heard: float
+    device_id: str
+    # em_wakelevel's peak for this wake, dBFS; None when the Echo sent none.
+    peak: float | None = None
+    # The gain settings the reading still contains (MICPGA, digital gain).
+    gains: tuple | None = None
+    # Heard over this Echo's own speaker output.
+    over_playback: bool = False
+
+
+def pick(claims: list, margin_db: float = LOUDER_MARGIN_DB) -> tuple:
+    """
+    (winner, why) among claims for one utterance.
+
+    The Echo at least `margin_db` louder than every other wins. Without a
+    clear, trustworthy lead the earliest heard wins, and a tie on time goes
+    to the claim that arrived first. `why` is for the log line.
+    """
+    earliest = min(claims, key=lambda c: c.heard)
+    if len(claims) < 2:
+        return earliest, "only claim"
+    if any(c.peak is None for c in claims):
+        return earliest, "earliest heard; a level is missing"
+    if any(c.over_playback for c in claims):
+        return earliest, "earliest heard; one was heard over playback"
+    if len({c.gains for c in claims}) > 1:
+        return earliest, "earliest heard; gain settings differ"
+    ranked = sorted(claims, key=lambda c: c.peak, reverse=True)
+    lead = ranked[0].peak - ranked[1].peak
+    if lead >= margin_db:
+        return ranked[0], f"loudest by {lead:.0f}dB"
+    return earliest, f"earliest heard; levels within {lead:.0f}dB"
 
 
 class WakeArbiter:
@@ -87,9 +154,10 @@ class WakeArbiter:
         self._winner: str | None = None
         self._heard_at: float = 0.0
         # The open contest, if a held claim is waiting: the heard time that
-        # opened it, the claims so far as (heard_at, device_id), and the
-        # future every claimant awaits.
+        # opened it, the Claims so far, and the future every claimant awaits.
         self._contest: tuple[float, list, asyncio.Future] | None = None
+        # Why the last contest went the way it did, for the caller's log.
+        self.last_why: str = ""
 
     def claim(self, device_id: str, window_s: float,
               heard_at: float | None = None, slack_s: float = 0.0) -> str:
@@ -124,10 +192,13 @@ class WakeArbiter:
 
     async def contest(self, device_id: str, window_s: float,
                       heard_at: float | None = None, slack_s: float = 0.0,
-                      hold_s: float = 0.0) -> str:
+                      hold_s: float = 0.0, peak: float | None = None,
+                      gains: tuple | None = None, over_playback: bool = False,
+                      margin_db: float = LOUDER_MARGIN_DB) -> str:
         """
-        claim(), but on a mixed fleet the winner is the claim HEARD first
-        rather than the one that arrived first. See the module docstring.
+        claim(), held so that every Echo that heard the utterance is counted
+        and `pick()` chooses among them: the clearly loudest, else the one
+        that HEARD it first. See the module docstring.
 
         Waits until `hold_s` after the first claim of the utterance was heard
         (less any time it already spent getting here), then returns the
@@ -143,7 +214,7 @@ class WakeArbiter:
         if self._contest is not None:
             opened, entries, decided = self._contest
             if abs(heard - opened) < window_s:
-                entries.append((heard, device_id))
+                entries.append(Claim(heard, device_id, peak, gains, over_playback))
                 return await asyncio.shield(decided)
 
         # No contest to join. A granted winner still holds this utterance.
@@ -152,17 +223,17 @@ class WakeArbiter:
                 and now - self._heard_at < window_s + max(0.0, slack_s)):
             return self._winner
 
-        entries = [(heard, device_id)]
+        entries = [Claim(heard, device_id, peak, gains, over_playback)]
         decided: asyncio.Future = loop.create_future()
         self._contest = (heard, entries, decided)
         try:
             await asyncio.sleep(max(0.0, heard + hold_s - now))
         finally:
-            # Earliest heard wins; a tie goes to the claim that arrived first.
-            won_heard, winner = min(entries, key=lambda e: e[0])
+            won, self.last_why = pick(entries, margin_db)
+            winner = won.device_id
             if self._contest is not None and self._contest[2] is decided:
                 self._contest = None
-            self._winner, self._heard_at = winner, won_heard
+            self._winner, self._heard_at = winner, won.heard
             if not decided.done():
                 decided.set_result(winner)
         return winner

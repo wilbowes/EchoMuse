@@ -9886,7 +9886,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                 <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)' }}>Precise</span>
                 <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)' }}>Eager</span>
               </div>
-              <Slider label="Arbitration window" sub="ms that the first Echo to hear you silences the others — no added delay; 0 disables" value={config.wakeArbitrationMs ?? 700} min={0} max={2000} step={50} unit="ms" onChange={v => set('wakeArbitrationMs', v)}/>
+              <Slider label="Arbitration window" sub="ms within which Echoes that hear you count as one request, and one answers; 0 disables" value={config.wakeArbitrationMs ?? 700} min={0} max={2000} step={50} unit="ms" onChange={v => set('wakeArbitrationMs', v)}/>
               <Toggle label="Save wake-word samples"
                 sub={onDeviceMode(config) === 'off'
                   ? 'saves clips for review in Activity'

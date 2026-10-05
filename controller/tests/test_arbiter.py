@@ -277,3 +277,137 @@ def test_contest_separate_utterance_opens_its_own():
         b = asyncio.create_task(arb.contest("lounge", WINDOW, heard_at=t - 0.5, hold_s=HOLD))
         return await a, await b
     assert run(main()) == ("office", "lounge")
+
+
+# ── Loudness, and when it is allowed to decide (#747) ───────────────────────
+
+from em_arbiter import Claim, pick, LOUDER_MARGIN_DB
+
+
+def _who(claims, **kw):
+    won, why = pick(claims, **kw)
+    return won.device_id, why
+
+
+def test_the_clearly_loudest_wins_over_the_first_to_hear():
+    """The reported case: the first to hear scraped in and was far quieter."""
+    claims = [Claim(0.000, "far", -73.0), Claim(0.036, "mid", -72.0),
+              Claim(0.078, "near", -48.0)]
+    who, why = _who(claims)
+    assert who == "near" and why == "loudest by 24dB"
+
+
+def test_without_a_clear_lead_the_first_to_hear_wins():
+    """Loudness is the noisy measure when two Echoes are about as loud."""
+    claims = [Claim(0.000, "a", -55.0), Claim(0.060, "b", -52.0)]
+    who, why = _who(claims)
+    assert who == "a" and why == "earliest heard; levels within 3dB"
+
+
+def test_the_margin_is_met_at_exactly_its_value():
+    at = [Claim(0.0, "a", -60.0), Claim(0.05, "b", -60.0 + LOUDER_MARGIN_DB)]
+    under = [Claim(0.0, "a", -60.0), Claim(0.05, "b", -60.0 + LOUDER_MARGIN_DB - 0.1)]
+    assert _who(at)[0] == "b"
+    assert _who(under)[0] == "a"
+
+
+def test_the_lead_is_over_the_second_loudest_not_the_first_to_hear():
+    """Two loud Echoes close together are a close call, whoever heard first."""
+    claims = [Claim(0.000, "far", -75.0), Claim(0.040, "x", -50.0),
+              Claim(0.050, "y", -52.0)]
+    assert _who(claims)[0] == "far"
+
+
+def test_a_missing_level_sends_the_whole_contest_back_to_time():
+    """Older firmware sends none, and half a comparison is not one."""
+    claims = [Claim(0.000, "old", None), Claim(0.050, "new", -40.0)]
+    who, why = _who(claims)
+    assert who == "old" and "level is missing" in why
+
+
+def test_a_wake_heard_over_playback_is_decided_on_time():
+    """Its reading contains the reply or the music the Echo is playing."""
+    claims = [Claim(0.000, "quiet", -70.0),
+              Claim(0.050, "playing", -45.0, over_playback=True)]
+    who, why = _who(claims)
+    assert who == "quiet" and "over playback" in why
+
+
+def test_different_gain_settings_are_not_compared():
+    """MICPGA and digital gain are still inside the reading."""
+    claims = [Claim(0.000, "a", -70.0, gains=(40, 88)),
+              Claim(0.050, "b", -45.0, gains=(59, 88))]
+    who, why = _who(claims)
+    assert who == "a" and "gain settings differ" in why
+    same = [c._replace(gains=(40, 88)) for c in claims]
+    assert _who(same)[0] == "b"
+
+
+def test_one_claim_is_its_own_answer():
+    assert _who([Claim(0.0, "only", None)]) == ("only", "only claim")
+
+
+def test_a_tie_on_time_goes_to_the_claim_that_arrived_first():
+    claims = [Claim(0.0, "first", -55.0), Claim(0.0, "second", -55.0)]
+    assert _who(claims)[0] == "first"
+
+
+# Twelve wakes one house heard on several Echoes at once (#747), as numbers
+# only: (ms after the first to hear, peak dBFS) per Echo, and the index of the
+# Echo that was loudest by 11dB or more every time. First-to-hear chose it in
+# eight. None was heard over playback except where marked, which stays on time.
+_HOUSE = [
+    ([(0, -66), (54, -56), (194, -68)], 1),
+    ([(0, -55), (89, -67), (129, -67), (369, -80)], 0),
+    ([(0, -69), (75, -51)], 1),
+    ([(0, -54), (87, -70), (134, -74)], 0),
+    ([(0, -53), (87, -72)], 0),
+    ([(0, -46), (67, -66), (296, -75)], 0),
+    ([(0, -47), (63, -69), (134, -73)], 0),
+    ([(0, -55), (84, -66), (133, -72)], 0),
+    ([(0, -50), (233, -71)], 0),
+    ([(0, -69), (164, -57)], 1),
+    ([(0, -53), (144, -69)], 0),
+]
+
+
+def test_the_house_that_reported_it_gets_the_nearest_echo_every_time():
+    for heard, nearest in _HOUSE:
+        claims = [Claim(ms / 1000.0, str(i), float(pk)) for i, (ms, pk) in enumerate(heard)]
+        who, why = _who(claims)
+        assert who == str(nearest), (heard, why)
+    # Under first-to-hear, three of these went to the wrong Echo.
+    assert sum(1 for _, nearest in _HOUSE if nearest != 0) == 3
+
+
+def test_the_one_heard_over_playback_is_left_to_time_for_now():
+    """The reported wake itself: the nearest Echo was playing, so its reading
+    is not trusted yet and the first to hear still wins. Known, not fixed."""
+    claims = [Claim(0.000, "0", -73.0), Claim(0.036, "1", -72.0),
+              Claim(0.078, "2", -48.0, over_playback=True), Claim(0.312, "3", -66.0)]
+    assert _who(claims)[0] == "0"
+
+
+def test_a_held_contest_gives_the_turn_to_the_loudest():
+    async def main():
+        arb = WakeArbiter()
+        t = asyncio.get_running_loop().time()
+        far = asyncio.create_task(arb.contest(
+            "far", WINDOW, heard_at=t, slack_s=3.0, hold_s=HOLD, peak=-70.0))
+        await asyncio.sleep(0.05)
+        near = asyncio.create_task(arb.contest(
+            "near", WINDOW, heard_at=t + 0.05, slack_s=3.0, hold_s=HOLD, peak=-50.0))
+        return await far, await near, arb.last_why
+    assert run(main()) == ("near", "near", "loudest by 20dB")
+
+
+def test_a_held_contest_without_levels_still_goes_to_the_first_to_hear():
+    async def main():
+        arb = WakeArbiter()
+        t = asyncio.get_running_loop().time()
+        a = asyncio.create_task(arb.contest("a", WINDOW, heard_at=t, hold_s=HOLD))
+        await asyncio.sleep(0.03)
+        b = asyncio.create_task(arb.contest("b", WINDOW, heard_at=t + 0.03, hold_s=HOLD))
+        return await a, await b
+    assert run(main()) == ("a", "a")
+

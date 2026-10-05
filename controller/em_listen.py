@@ -61,15 +61,19 @@ CLOSED_MEMORY = 32
 # Echo's ack timeout, after which a late private wake's session is gone.
 MAX_ARB_SLACK_S = 3.0
 
-# How long after a wake was HEARD its claim is held on a MIXED fleet, some
-# Echoes detecting on the device and some scored here (em_arbiter.contest).
-# The two paths reach the arbiter at different speeds, so it must wait long
-# enough for a claim heard earlier on the slower path to arrive. Measured
-# 2026-09-24: an on-device wake arrived 78ms after capture; a stream-scored
-# one 85ms in transit plus 16ms to score, and the stream moves in 80ms
-# frames, a barge-in needing two. 250ms covers that with a frame to spare.
-# A fleet that detects one way races on equal terms and never waits.
-MIXED_HOLD_S = 0.25
+# How long after a wake was HEARD its claim is held, whenever two or more
+# Echoes can claim (em_arbiter.contest). Long enough for every Echo that heard
+# the utterance to be counted before one is chosen. Measured 2026-09-24: an
+# on-device wake arrived 78ms after capture; a stream-scored one 85ms in
+# transit plus 16ms to score, and the stream moves in 80ms frames. In #747's
+# data the nearest Echo's claim was heard up to 164ms after the first.
+# 250ms covers both with a frame to spare.
+#
+# Until 2026-10-05 only a MIXED fleet held, because only there did the two
+# detection paths reach the arbiter at different speeds. Choosing by loudness
+# needs every claim in hand, so every fleet of two or more now holds.
+ARB_HOLD_S = 0.25
+MIXED_HOLD_S = ARB_HOLD_S   # the name it had while only mixed fleets held
 
 DETECT_DEVICE     = "device"
 DETECT_CONTROLLER = "controller"
@@ -154,9 +158,11 @@ def detector(view: ListenView, trigger_capable: bool) -> str | None:
 
 
 def arbitration_hold(detectors) -> float:
-    """MIXED_HOLD_S when the Echoes that can claim detect in more than one
-    place, else 0 (Wil, 2026-09-24)."""
-    return MIXED_HOLD_S if len({d for d in detectors if d is not None}) > 1 else 0.0
+    """ARB_HOLD_S when two or more Echoes can claim, else 0. `detectors` has
+    one entry per Echo, None for one that cannot claim (degraded). How each
+    detects no longer matters (Wil, 2026-10-05), only that there is someone
+    to wait for."""
+    return ARB_HOLD_S if sum(1 for d in detectors if d is not None) > 1 else 0.0
 
 
 def fleet_summary(views) -> dict:

@@ -300,15 +300,15 @@ you change the wake word.
 
 ### Arbitration window
 With more than one Echo, saying the wake word in earshot of two of them
-used to start two competing conversations. Now the **first device to hear
-you answers immediately**, and any other device detecting the same word
-within this window (default 700ms) quietly stands down.
+used to start two competing conversations. Now **one answers**: the Echo
+that heard you clearly loudest, or, when none stands out, the one that heard
+you first. Any other Echo that heard the same word within this window
+(default 700ms) quietly stands down.
 
-There is **no latency cost**: the winner claims the turn on the spot rather
-than waiting out the window, so a solo wake is exactly as fast as it was
-before. The window only decides how long afterwards a second device counts
-as "the same utterance". `0` disables it, and it never applies when only
-one device is online.
+Choosing takes a moment. With two or more Echoes online, a wake waits up to a
+quarter of a second so that every Echo that heard it is counted. With one
+Echo there is no wait. The window itself only decides how long afterwards a
+second Echo counts as "the same utterance". `0` disables arbitration.
 
 An earlier version instead waited out the window and gave the turn to
 whichever device heard you *best*. That was dropped: it taxed every wake by

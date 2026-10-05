@@ -1386,6 +1386,11 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
         live.wake_sound = bool(effective["wakeSound"])
     if "micGainDb" in effective:
         live.mic_gain_db = float(effective["micGainDb"])
+    # What a wake's level reading still contains; see em_arbiter.pick.
+    if "adcMicpga" in effective:
+        live.adc_gains = (int(effective["adcMicpga"]), live.adc_gains[1])
+    if "adcDigitalGain" in effective:
+        live.adc_gains = (live.adc_gains[0], int(effective["adcDigitalGain"]))
     if "owwOnDevice" in effective:
         # Resolved against the CAPABILITY, not taken at face value: "on"
         # against firmware that cannot trigger would stop this controller
