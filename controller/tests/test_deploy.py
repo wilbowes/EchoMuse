@@ -3066,3 +3066,25 @@ def test_asset_installs_queue_behind_the_ota_lock():
                if name not in ("_sync_oww_assets", "_sync_oww_assets_locked")
                and "_sync_oww_assets_locked(" in ast.unparse(fn)]
     assert not callers, f"unlocked asset sync called from {callers}"
+
+
+def test_the_image_keeps_its_data_on_the_mounted_directory():
+    """
+    #629: with no .env, DB_PATH fell back to the relative "echomuse.db", which
+    in the image is /app, outside the ./data:/app/data volume. The database,
+    the device-link CA and the recordings were lost on every recreate.
+
+    Read from the Dockerfile's instructions, not its comments.
+    """
+    root = Path(__file__).resolve().parent.parent
+    instructions = [ln.strip() for ln in (root / "Dockerfile").read_text().splitlines()
+                    if ln.strip() and not ln.lstrip().startswith("#")]
+    assert "ENV DB_PATH=/app/data/echomuse.db" in instructions
+    # sqlite will not create the directory, and without a volume nothing else does.
+    assert any(ln.startswith("RUN mkdir -p") and "/app/data" in ln.split()
+               for ln in instructions)
+    # The directory the default points at is the one both compose files mount.
+    for compose in ("docker-compose.yml", "docker-compose.deploy.yml"):
+        assert ":/app/data" in (root / compose).read_text(), compose
+    # The add-on keeps its own path, which has to win over the image's.
+    assert 'DB_PATH: "/data/echomuse.db"' in (root / "config.yaml").read_text()

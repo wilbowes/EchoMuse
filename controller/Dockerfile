@@ -197,9 +197,14 @@ COPY --from=silero /silero_vad.onnx /app/models/oww_runtime/silero_vad.onnx
 COPY static/ ./static/
 # Compile JSX dashboard with esbuild
 RUN EARCH="$(dpkg --print-architecture)" && case "$EARCH" in amd64) EPKG=linux-x64 ;; arm64) EPKG=linux-arm64 ;; *) echo "unsupported arch: $EARCH" >&2; exit 1 ;; esac && curl -sfL -o /tmp/esbuild.tar.gz "https://registry.npmjs.org/@esbuild/${EPKG}/-/${EPKG}-0.20.2.tgz" &&     tar -xz -C /tmp -f /tmp/esbuild.tar.gz &&     install -m755 /tmp/package/bin/esbuild /usr/local/bin/esbuild &&     esbuild /app/static/dashboard.jsx       --bundle=false       --jsx=transform       --jsx-factory=React.createElement       --jsx-fragment=React.Fragment       --outfile=/app/static/dashboard.js &&     rm -rf /tmp/esbuild.tar.gz /tmp/package /usr/local/bin/esbuild
-# Database persisted via volume mount
-# docker run -v ~/EchoMuse/controller/data:/app/data ...
-# Set DB_PATH=/app/data/echomuse.db in environment
+# The database, the device-link certificates and the recordings all sit beside
+# DB_PATH, so it defaults to the directory the compose files mount (#629).
+# The code's own default is the relative "echomuse.db", which in this image is
+# /app: with no .env everything was written inside the container and lost on
+# every recreate, certificates included, so every Echo needed pairing again.
+# The add-on sets its own DB_PATH (/data), which overrides this.
+ENV DB_PATH=/app/data/echomuse.db
+RUN mkdir -p /app/data
 COPY em_cacerts.py .
 COPY em_start.py .
 # em_start.py bridges /data/options.json (Home Assistant add-on config) into
