@@ -5,36 +5,47 @@ on:
     branches: [main]
   pull_request:
 
+# Read-only unless a job asks for more. The repository's default token is
+# already read-only; this keeps it so if that setting ever changes.
+permissions:
+  contents: read
+
 jobs:
   controller-tests:
     name: Controller unit tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      # The tests cover pure-logic modules only — numpy/scipy for the EQ
-      # math, nothing that pulls in openwakeword/onnxruntime (which would
-      # cost minutes of install for zero coverage).
+      # The controller's own imports (aiohttp, websockets, bcrypt, zeroconf,
+      # protobuf) are installed so tests can import em_api and em_controller
+      # and run them (#739). openwakeword is not: it pulls onnxruntime and
+      # scikit-learn, minutes of install, and tests stub it instead.
+      # pyyaml is for the add-on config parity tests (test_channels.py).
+      #
+      # -c requirements.txt holds each package to the version the image
+      # ships, so the suite cannot pass against a library we do not run, and
+      # a Dependabot bump there reaches this job with no second edit.
       - name: Install test dependencies
-        # pyyaml is for the add-on config parity tests (test_channels.py):
-        # config.yaml is genuinely YAML and hand-parsing it to compare
-        # options and schema would be fragile in exactly the way that test
-        # exists to prevent. Pure Python and dependency-free — nothing like
-        # pulling openwakeword or aiohttp in here, which is what the
-        # minimal-test-env rule is actually about.
-        run: pip install pytest numpy scipy pyyaml
+        run: pip install -c controller/requirements.txt pytest pytest-cov numpy scipy pyyaml aiohttp websockets bcrypt zeroconf protobuf cryptography
+      # test_emos_update_flow.py runs the emOS update's device commands in a
+      # real shell, with busybox as the device has it. Without one the test
+      # would skip, so it fails under CI instead — a skipped check of what is
+      # written to a boot partition is not a pass.
+      - name: busybox, for the emOS update's device commands
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq busybox
       - name: Run pytest
         working-directory: controller
-        run: python -m pytest tests/ -v
+        run: python -m pytest tests/ -v --cov --cov-report=term
 
   forge-metadata-tests:
     name: ONNX metadata round trip
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       # Keep runtime/model dependencies out of the lightweight controller suite.
@@ -45,8 +56,8 @@ jobs:
     name: Controller lint (undefined names)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: Install pyflakes
@@ -83,7 +94,7 @@ jobs:
     name: Dashboard logic tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # No setup-node step: ubuntu-latest ships a node, and this test needs
       # nothing beyond the standard library. The dashboard is otherwise
       # untested by construction — it compiles to a single classic script
@@ -103,14 +114,28 @@ jobs:
           node controller/tests/unlock_verdict.test.mjs
           node controller/tests/slot_choice.test.mjs
           node controller/tests/server_binary.test.mjs
+          node controller/tests/fetch_deadline.test.mjs
           node controller/tests/duplicate_device.test.mjs
           node controller/tests/our_boot_image.test.mjs
+          node controller/tests/donor_gate.test.mjs
           node controller/tests/device_line.test.mjs
+          node controller/tests/link_row.test.mjs
           node controller/tests/wipe_verdict.test.mjs
           node controller/tests/wifi_nvram.test.mjs
           node controller/tests/kernel_label.test.mjs
           node controller/tests/wifi_ssid.test.mjs
           node controller/tests/wake_sensitivity.test.mjs
+          node controller/tests/login_lcd.test.mjs
+          node controller/tests/delete_ha_warning.test.mjs
+      # The one dashboard test that needs a parser: esbuild compiles a name
+      # that is defined nowhere without complaint, and the page then throws
+      # when that component renders. Pinned by sha256, like every other
+      # fetched build input.
+      - name: Check dashboard.jsx for undefined names
+        run: |
+          curl -sfL -o /tmp/babel.min.js https://cdn.jsdelivr.net/npm/@babel/standalone@7.22.5/babel.min.js
+          echo "ee17810b11af1c9b97ac2d85752b9f73b9ba37d9f50ba6312e0709013ebeec6e  /tmp/babel.min.js" | sha256sum -c -
+          BABEL_STANDALONE=/tmp/babel.min.js node controller/tests/dashboard_globals.test.mjs
       - name: Run forge console tests
         run: node oww_forge/tests/console_log.test.mjs
 
@@ -118,10 +143,10 @@ jobs:
     name: Device Go tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true  # GoTinyAlsa replace directive in device/go.mod
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: device/go.mod
           cache-dependency-path: device/go.sum
@@ -129,16 +154,24 @@ jobs:
       # (device builds pass -tags server) — listing cmd on a host platform
       # fails package setup. Wildcards skip tag-excluded packages, so
       # internal/... + pkg/... covers every host-testable package.
+      # -race: the firmware is goroutines sharing state (mic fan-out, the
+      # listen gate, the speaker pump), and a race there is silent until it
+      # is audible. The first run found one, in a test (jack_test.go).
+      #
+      # -coverprofile: report-only, printed by the next step (#739).
       - name: Run go test
         working-directory: device
-        run: go test ./internal/... ./pkg/...
+        run: go test -race -coverprofile=coverage.out ./internal/... ./pkg/...
+      - name: Report coverage
+        working-directory: device
+        run: go tool cover -func=coverage.out | tail -30
 
   python-deps-audit:
     name: Python dependency audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: Install pip-audit
@@ -167,10 +200,10 @@ jobs:
     name: Device Go vulnerability check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: device/go.mod
           cache-dependency-path: device/go.sum
@@ -211,7 +244,7 @@ jobs:
     name: Controller image builds
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0  # the diff below needs the base commit
       # Plain git rather than a paths-filter action: this decides whether a
@@ -238,7 +271,7 @@ jobs:
           fi
       - name: Set up Docker Buildx
         if: steps.changed.outputs.build == 'true'
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       # Why this job exists: NOTHING else builds this image on a PR.
       # controller-build.yml runs on push to main only, and the test jobs
       # above pin themselves to python-version 3.12 regardless of what the
@@ -268,7 +301,7 @@ jobs:
       # state a branch protection rule cannot tell apart from "not finished".
       - name: Build the controller image
         if: steps.changed.outputs.build == 'true'
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: controller
           push: false
@@ -294,7 +327,7 @@ jobs:
     name: Controller modules import and the controller boots
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # WHY THIS EXISTS: the two largest files in the controller have no
       # test that so much as imports them. controller/CLAUDE.md records the
       # constraint honestly — the suite cannot import em_controller or
@@ -429,7 +462,7 @@ jobs:
     name: Device and emOS builds (pinned compiler)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true  # GoTinyAlsa replace directive in device/go.mod
       # THE ONLY JOB THAT EXERCISES THE COMPILER THE FIRMWARE ACTUALLY SHIPS
@@ -450,6 +483,10 @@ jobs:
       - name: Build compiler image
         run: docker build -t echomuse-compiler device/compiler/
       - name: Build firmware
+        # go vet runs here because cmd/ imports internal/bindings/mic, whose
+        # every file is //go:build server: on a host `go vet ./cmd/...` fails
+        # with "build constraints exclude all Go files", so cmd/ was outside
+        # every other Go job (#739).
         run: |
           docker run --rm --entrypoint bash \
             -e CGO_LDFLAGS="-Wl,--hash-style=both" \
@@ -457,7 +494,7 @@ jobs:
             -v "$PWD/device":/sdk \
             -v "$PWD/GoTinyAlsa":/GoTinyAlsa \
             echomuse-compiler \
-            -c "cd /sdk && go build -tags server -o build/server ./cmd/"
+            -c "cd /sdk && go vet -tags server ./cmd/... && go build -tags server -o build/server ./cmd/"
       - name: Check it is an ARM binary
         # A build that silently produced a host binary would pass the step
         # above and ship something the hardware cannot run.
@@ -520,7 +557,7 @@ jobs:
     name: emOS init checks (ring and password)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # WHY THIS EXISTS: emos/ is ~1,900 lines of C that until now nothing in
       # CI compiled, let alone ran. It is also the code with the longest
       # feedback loop in the project — a change reaches a verdict only by
@@ -569,6 +606,25 @@ jobs:
           /tmp/cmdlinecheck
           cc -O2 -o /tmp/serialcheck emos/init/serialcheck.c
           /tmp/serialcheck
+      # The trial mark is written by the controller and read by init, and it
+      # decides whether an image updated over the network is rolled back. Read
+      # as absent, a broken image is promoted; a leftover read as live rolls a
+      # healthy one back. Neither says why on the device.
+      - name: An updated image is on trial exactly when the controller says so
+        run: |
+          cc -O2 -o /tmp/trialcheck emos/init/trialcheck.c
+          /tmp/trialcheck
+      # em-wifi decides from wpa_supplicant's scan flags which networks it
+      # offers. Tested SAE before PSK, it refused every WPA2/WPA3 transition-
+      # mode network as WPA3 -- the default on current routers -- and sent
+      # EAP and OWE networks to key_mgmt=NONE as "(open)". Sources the script
+      # itself, under mksh -- /system/bin/sh on both FireOS versions, which is
+      # what the #! names -- and under dash.
+      - name: em-wifi reads every security flag wpa_supplicant prints
+        run: |
+          sudo apt-get install -y -qq mksh >/dev/null
+          mksh emos/device/em-wifi-check.sh
+          sh emos/device/em-wifi-check.sh
       # The C hashes a password by hand — init is a static binary with no
       # crypto library — and the controller hashes it in Python. Nothing but
       # equal output proves they agree, and the failure mode is a device
@@ -632,10 +688,10 @@ jobs:
     name: Device go vet
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: device/go.mod
           cache-dependency-path: device/go.sum

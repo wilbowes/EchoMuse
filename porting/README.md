@@ -6,6 +6,10 @@ device's issue, and we can judge what support would take.
 
 They don't make the device work with EchoMuse. They collect what a port needs.
 
+How the firmware uses that information is in
+[docs/boards.md](../docs/boards.md): how it detects a board and finds each
+part by name, which files describe a new board, and what to watch for.
+
 | Script | What it does | Changes anything? |
 |---|---|---|
 | `profile.sh` | Hardware inventory: device tree, audio chips and mixer, buttons, LEDs, sensors, thermal, storage, boot layout | **No.** Read-only |

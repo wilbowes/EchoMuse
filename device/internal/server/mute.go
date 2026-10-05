@@ -69,6 +69,7 @@ func (m *muteController) Toggle() {
 	if cb != nil {
 		cb(muted)
 	}
+	m.reconcilePrivacySoon()
 }
 
 // adcMuteCtls are the per-chip ADC mute controls, all four codecs

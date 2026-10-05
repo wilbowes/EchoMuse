@@ -2,6 +2,7 @@ package client
 
 import (
 	"testing"
+	"time"
 
 	"github.com/wilbowes/EchoMuse/internal/aec"
 )
@@ -99,5 +100,31 @@ func TestTheLockFlagSurvivesForTheRestore(t *testing.T) {
 	d.micMu.Unlock()
 	if got {
 		t.Fatal("a later unlocked request must replace the remembered flag")
+	}
+}
+
+// A follow-up turn nobody answers ends on the device's own no-speech timeout.
+// Its instruction must be spent, or the next reconnect restores a turn stream
+// that times out again — and the device must be handed back to listening,
+// since under private listening nothing else does it. VVV, 2026-09-22.
+func TestATurnThatEndsItselfIsNotRestoredAndHandsBack(t *testing.T) {
+	d := newTestClient(t)
+	handedBack := make(chan struct{}, 1)
+	d.OnTurnEnded(func() { handedBack <- struct{}{} })
+
+	d.StartMic(true) // the follow-up turn
+	d.turnEndedItself()
+
+	if want, _ := micIntent(d); want {
+		t.Fatal("a finished turn must not stay the standing instruction")
+	}
+	d.resumeMic()
+	if _, active := micIntent(d); active {
+		t.Fatal("a reconnect restored a turn that had already ended")
+	}
+	select {
+	case <-handedBack:
+	case <-time.After(time.Second):
+		t.Fatal("nothing was told the turn ended, so nothing hands back")
 	}
 }

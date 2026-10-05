@@ -3,6 +3,8 @@ package led
 import (
 	"fmt"
 	"os"
+
+	"github.com/wilbowes/EchoMuse/pkg/board"
 )
 
 // Mute-button LED — the discrete red LED under the mic-off button, separate
@@ -16,23 +18,39 @@ import (
 // MSDC2_DAT1 and writes to gpio445 reach nothing (v2.9.4 and earlier drove
 // it; the button never lit). Stock itself bypasses sysfs via the /dev/mtgpio
 // ioctl, which is why the HAL constant never had to agree with gpiolib.
-const (
-	muteButtonGPIO      = "444"
-	gpioExportPath      = "/sys/class/gpio/export"
-	muteButtonDirPath   = "/sys/class/gpio/gpio" + muteButtonGPIO + "/direction"
-	muteButtonValuePath = "/sys/class/gpio/gpio" + muteButtonGPIO + "/value"
-)
+//
+// That number is biscuit's (board.Hardware.MuteLEDGPIO). On a board with
+// another gpiochip base the same number is a different SoC pin, and exporting
+// a pin that is in use as something else takes it away from that function, so
+// a board that states no GPIO has no mute LED driven.
+const gpioExportPath = "/sys/class/gpio/export"
+
+func muteButtonGPIO() string { return board.CurrentLayout().MuteLEDGPIO }
+
+func muteButtonPath(attr string) string {
+	return "/sys/class/gpio/gpio" + muteButtonGPIO() + "/" + attr
+}
 
 // InitMuteButtonLED exports the GPIO if needed, forces output direction,
 // and switches the LED off (the process starts unmuted; a crash while
 // muted must not leave a stale red button on restart).
+//
+// On a kernel with Amazon's privacy driver the LED is the driver's
+// (privacy.go), so there is nothing to export.
 func InitMuteButtonLED() error {
-	if _, err := os.Stat(muteButtonValuePath); os.IsNotExist(err) {
-		if err := os.WriteFile(gpioExportPath, []byte(muteButtonGPIO), 0644); err != nil {
-			return fmt.Errorf("mute button LED: export gpio%s: %w", muteButtonGPIO, err)
+	if PrivacyDriver() {
+		return nil
+	}
+	gpio := muteButtonGPIO()
+	if gpio == "" {
+		return nil
+	}
+	if _, err := os.Stat(muteButtonPath("value")); os.IsNotExist(err) {
+		if err := os.WriteFile(gpioExportPath, []byte(gpio), 0644); err != nil {
+			return fmt.Errorf("mute button LED: export gpio%s: %w", gpio, err)
 		}
 	}
-	if err := os.WriteFile(muteButtonDirPath, []byte("out"), 0644); err != nil {
+	if err := os.WriteFile(muteButtonPath("direction"), []byte("out"), 0644); err != nil {
 		return fmt.Errorf("mute button LED: set direction: %w", err)
 	}
 	return SetMuteButtonLED(false)
@@ -40,12 +58,28 @@ func InitMuteButtonLED() error {
 
 // SetMuteButtonLED switches the red LED under the mic-off button.
 // Active-high (see package comment): 1 = on, 0 = off.
+//
+// Under the privacy driver, on puts the driver in its muted state, and off
+// does nothing: the button that unmuted us has already taken the driver out,
+// and nothing else can.
 func SetMuteButtonLED(on bool) error {
+	if PrivacyDriver() {
+		if !on {
+			return nil
+		}
+		if muted, err := PrivacyMuted(); err == nil && muted {
+			return nil
+		}
+		return EnterPrivacy()
+	}
+	if muteButtonGPIO() == "" {
+		return nil
+	}
 	v := []byte("0")
 	if on {
 		v = []byte("1")
 	}
-	if err := os.WriteFile(muteButtonValuePath, v, 0644); err != nil {
+	if err := os.WriteFile(muteButtonPath("value"), v, 0644); err != nil {
 		return fmt.Errorf("mute button LED: write value: %w", err)
 	}
 	return nil

@@ -1,5 +1,141 @@
 # Changelog
 
+## 2.26.0-ea.1 (Early Access)
+
+Bluetooth connections, emOS updates from the dashboard, and a timer you can stop in any language. Pair with firmware v2.18.0-ea.1, which this controller offers.
+
+### New
+
+- **Bluetooth connections through an Echo (#656).** Home Assistant can now connect to Bluetooth devices through an Echo's proxy; until now the proxy only passed on their adverts. Off by default: turn on "Allow connections" under Config → Bluetooth. Turning it on encrypts that proxy's port, so it goes offline in Home Assistant until you enter the key shown under the toggle. Three connections per Echo. Devices that need pairing are refused. Needs firmware v2.18.0-ea.1.
+- **Sendspin player.** Music Assistant can play to Echoes directly, in sync across rooms. Turn it on per Echo under Config → Sendspin, then pair it from Music Assistant with the token shown there. Needs firmware v2.18.0-ea.1.
+- **Update emOS from the dashboard (#573).** An Echo on emOS gets an emOS panel on its Updates tab. The controller rebuilds the Echo's own image around the new release, checks it at every step, and the Echo restores the previous image by itself if the new one does not reach the controller. Works on amonet 1 and 2. Needs emOS 0.10 or later as the release to install; keep the Echo powered while it updates. Schema v30 records each Echo's emOS version.
+- **Collect labelled wake-word examples.** Config → Wake word can now save score candidates above a tunable floor and every detector hit. Activity plays the clips and lets an admin label them as wake word, not wake word or unsure. Capture is opt-in, clips stay on the controller, and each Echo retains at most 50 — except a labelled clip, which also copies into a permanent, uncapped archive on disk, organised by label. Schema v29 adds the clip review records.
+- **Stop a ringing timer in any language (#736).** Say the wake word and then anything at all. The wake word pauses the ring; anything spoken stops it, on whichever Echo is ringing; if nothing is said for four seconds the ring resumes. The English stop-word list is gone. A command spoken over a ringing timer stops the timer and is not sent to Home Assistant.
+
+### Improved
+
+- A finished timer rings for up to 15 minutes, as Home Assistant's Voice PE does; it was 2 minutes (#694).
+- A physical volume button plays a short tone at the new level when nothing else is playing; Config → Playback → "Volume button sound" turns it off (#637). Needs firmware v2.18.0-ea.1.
+- `LOG_LEVELS` sets the log level per area, for example `echomuse.player=DEBUG` (#378).
+- Each Echo reports its flash wear and why it last booted (#709).
+- The Link row shows `wss (TLS) · no token` in amber for an Echo that is encrypted but has not been issued a token (#725).
+- Deleting an Echo says what it leaves behind in Home Assistant (#726).
+- The wizard gives the emOS image build a deadline and says while it is waiting (#692).
+
+### Fixed
+
+- After a power cut mid-stream, Home Assistant showed the Echo as playing and ignored play and pause until the controller restarted (#749).
+- The Sendspin pairing token could not be reached under fleet scope (#715).
+- A local add-on build failed on CPUs without x86-64-v2 (#750).
+
+### Known issues
+
+- With Echoes in different rooms, the one that answers is the one that heard the wake word first, which is not always the nearest (#747).
+- Adopting a Dot from the Home Assistant add-on can hang at "Sending the escrowed image" (#689).
+- Bluetooth connections: one connection in testing took 10 seconds to establish; the others took about one.
+
+### Before you update
+
+**This release migrates the database (schema v28–v31).** A backup is written beside it first. An older controller will not start on the migrated database, so going back means restoring that backup.
+
+### Thanks
+
+@MikeFez (wake-word samples, #696), @evy0311 (volume tone, #699), @sascha-hemi (#749, #750), @forming (#722, #725, #726), @DaSonOfPoseidon (asked for Bluetooth connections, #656), @Nils3311 (the German timer report, #736) and @rolandsteinmeyer (#496).
+
+## 2.25.0
+
+Private listening, pairing from the Echo, and mute that works. Pair with firmware v2.17.0, which this controller offers.
+
+### New
+
+- **Private listening.** An Echo can detect its own wake word and send nothing until it hears it, then only what you say. Existing installs keep listening on the controller; to switch an Echo, set Config → Wake word → Wake word detection to "On this Echo". New installs start there. Needs firmware v2.17.0. Spec: docs/listening.md.
+- **Pairing replaces the Secure link button.** Hold an Echo's action button for 5 seconds and approve it on the dashboard; it gets its link credentials. Once an Echo has used them, a connection without them is refused, and the Echo's Link row says why. Older firmware is paired from the dashboard with **Pair**.
+- **Mute from Home Assistant and Music Assistant** silences the Echo, and unmute brings the volume back (#641).
+- **Wake sound.** An optional tone when an Echo hears its wake word, at its own level, for anyone who can't see the ring (#120). Needs firmware v2.17.0.
+- **One controller address for the whole fleet.** Config → Advanced sets an ordered list that the wizard writes and every Echo tries before mDNS (#647).
+
+### Improved
+
+- With several Echoes, the one that heard you first answers, judged by when each captured the wake word rather than when its message arrived (#639).
+- EQ, bass guard and limiter move onto the Echo when its firmware supports it, so a change is heard at once (#243).
+- "Speak while the reply is written" starts the answer at its first words instead of its last; off by default (#606).
+- Long answers no longer go silent for up to 2 seconds between sentences.
+- A wake with nobody speaking after it no longer sends background music to Home Assistant, which answered questions nobody asked.
+- Music Assistant resumes in about 2 seconds, down from 7.
+- Settings → System holds update checks, device approval, session expiry and the release repository, which had no controls before.
+- The dashboard's colours meet WCAG 2.2 AA in both themes (#652).
+- Before building emOS the wizard checks that the Echo's unlock, recovery, systems and kernels agree on one FireOS generation (#619).
+- Support bundles include each Echo's userspace and kernel (#626) and keep the line that records an announcement (#565).
+- Link loss is recorded per Echo from the kernel's TCP counters.
+
+### Fixed
+
+- The controller stalled every Echo's audio for up to 400ms on each wake it scored and on database writes (#658).
+- Two dashboard routes answered without signing in; they now require a session (#657).
+- Volume up on a muted Echo jumped to the button's floor; it now unmutes a step above where it was (#678).
+- Two Echoes could share a name, and names could hold control characters or no letter or number (#649, #650).
+- A device credentialed by the wizard showed as waiting for approval before it had ever connected (#453).
+- The Bluetooth proxy's seen and forwarded counts started from different moments (#410).
+- An Echo missing its wake word model moved to the controller's wake word; it now keeps its mode and answers the button.
+- Wizard steps could hide their own buttons (#676).
+- Playback helpers were left running after a turn (#659).
+
+### Known issues
+
+- Music can drop out when a voice turn ducks it (#671).
+- "Hey jarvis" wakes falsely over music.
+- A follow-up question can start with a pop in the recording (#682).
+
+### Thanks
+
+- @MikeFez for "Speak while the reply is written" (#606).
+- @costajohnt for keeping announcements in support bundles (#565).
+- @remy for asking for mute (#641), and @tvories for the wake sound (#120).
+- @evy0311 for the boot-loop report behind the wizard's new checks (#619).
+- @NicFragale, whose static endpoints (#166) the fleet address list builds on.
+
+**This release migrates the database (schema v25–v27).** A backup is written beside it first. An older controller will not start on the migrated database, so going back means restoring that backup.
+
+Soaked for 24 hours on four Echoes with no errors logged. [UAT report](https://github.com/wilbowes/EchoMuse/blob/main/docs/uat-results/2.25.0-ea.1.md).
+
+## 2.25.0-ea.1 (Early Access)
+
+**Pairing replaces the Secure link button.** Hold an Echo's action button for
+5 seconds and approve it on the dashboard; it gets its link credentials. Once an
+Echo has used them, a connection without them is refused. A refused Echo shows
+orange with alternating lights: hold the button and approve it again. The hold
+needs firmware v2.17.0-ea.1; older firmware is approved from the dashboard.
+
+**Music keeps playing with the Bluetooth proxy on.** The proxy's scan stalled
+the Echo's WiFi and music dropped out. It now scans in short bursts while music
+plays, and Bermuda still sees your devices. Needs firmware v2.17.0-ea.1.
+
+**Home Assistant's mute button works.** Mute silences the Echo and unmute brings
+the volume back. Volume up on the Echo while muted unmutes a step above where it
+was.
+
+**Music Assistant resumes in about 2 seconds**, down from 7.
+
+**On FireOS 6 kernels the mute light stays in step with the mute**, including
+after a reboot.
+
+**Early Access firmware.** An Early Access controller offers Early Access
+firmware (vX.Y.Z-ea.N). A GA controller never offers it.
+
+Also: the controller no longer waits on database writes; a setting changed
+while a save is still going is no longer lost; the provisioning wizard's
+buttons stay on screen.
+
+Known issues: music can drop out when a voice turn ducks it (the fix is in the
+next Early Access); "hey jarvis" wakes falsely over music; re-running the
+wizard to upgrade emOS also reinstalls GA firmware.
+
+**This release migrates the database (schema v27).** A backup is written beside
+it first. An older controller will not start on the migrated database, so going
+back means restoring that backup.
+
+Tested on three Echoes before release: [UAT report](https://github.com/wilbowes/EchoMuse/blob/main/docs/uat-results/2.25.0-ea.1.md).
+
 ## 2.24.1
 
 **Re-provision a device without losing it.** The wizard recognised a device the

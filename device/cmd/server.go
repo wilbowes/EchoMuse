@@ -31,18 +31,64 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/bluetooth"
 	"github.com/wilbowes/EchoMuse/internal/client"
 	"github.com/wilbowes/EchoMuse/internal/config"
+	"github.com/wilbowes/EchoMuse/internal/cue"
+	"github.com/wilbowes/EchoMuse/internal/listen"
 	"github.com/wilbowes/EchoMuse/internal/platform"
 	"github.com/wilbowes/EchoMuse/internal/server"
+	"github.com/wilbowes/EchoMuse/internal/wakeword"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/shadow"
 	"github.com/wilbowes/EchoMuse/internal/wifi"
-	pkgbuttons "github.com/wilbowes/EchoMuse/pkg/buttons"
 	"github.com/wilbowes/EchoMuse/pkg/board"
+	pkgbuttons "github.com/wilbowes/EchoMuse/pkg/buttons"
 	"github.com/wilbowes/EchoMuse/pkg/led"
 )
 
+const usage = `usage: server [command]
+
+With no command, runs the EchoMuse device daemon (normally started by
+start_server.sh, which restarts it; do not run a second copy by hand).
+
+  version         print the firmware version and build time
+  platform-init   apply the board's platform settings, for emOS's boot
+  board           print the board and where each part was found; changes nothing
+  help            this text
+`
+
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "platform-init" {
-		os.Exit(platformInit())
+	// Only a bare invocation runs the daemon. `server --version` used to
+	// start a second instance in the foreground, fighting the supervised one
+	// for the mic and the controller link, so anything unrecognised is
+	// refused rather than ignored.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "platform-init":
+			os.Exit(platformInit())
+		case "board":
+			// Read-only, so it is safe beside a running server: what a
+			// tester on a new board pastes back (#541).
+			layout := board.CurrentLayout()
+			fmt.Printf("board: %s\n", board.IDOf(layout.Board))
+			for _, n := range layout.Notes {
+				fmt.Println(n)
+			}
+			fmt.Printf("mute led gpio: %q\n", layout.MuteLEDGPIO)
+			fmt.Printf("light sensor: %q (%s)\n", layout.LightSensor.Driver, layout.LightSensor.Attr)
+			fmt.Printf("bluetooth hci: %q\n", layout.HCI)
+			os.Exit(0)
+		case "version", "--version", "-v":
+			built := "unknown"
+			if sec, err := strconv.ParseInt(client.BuildUnix, 10, 64); err == nil {
+				built = time.Unix(sec, 0).UTC().Format(time.RFC3339)
+			}
+			fmt.Printf("EchoMuse %s (built %s)\n", client.Version, built)
+			os.Exit(0)
+		case "help", "--help", "-h":
+			fmt.Print(usage)
+			os.Exit(0)
+		default:
+			fmt.Fprintf(os.Stderr, "unknown argument %q\n\n%s", os.Args[1], usage)
+			os.Exit(2)
+		}
 	}
 	log.SetOutput(os.Stdout)
 	log.Printf("EchoMuse %s starting", client.Version)
@@ -68,6 +114,19 @@ func main() {
 	// every start — see applyCoreFloor for why the mic pipeline's 160ms
 	// deadline makes it worth doing.
 	applyCoreFloor()
+
+	// Which board this is, and where each part the bindings open was found
+	// (#541). A part found by its old number instead of by name says so here.
+	var boardReport sync.Once
+	layout := board.CurrentLayout()
+	if layout.Board == nil {
+		log.Printf("[board] not identified — using biscuit's layout")
+	} else {
+		log.Printf("[board] %s", layout.Board.ID)
+	}
+	for _, n := range layout.Notes {
+		log.Printf("[board] %s", n)
+	}
 
 	buttonController, err := internalbuttons.NewButtonController()
 	if err != nil {
@@ -100,6 +159,10 @@ func main() {
 	s := server.NewServer(buttonController, microphone, pcmSpeaker)
 	srvPtr.Store(s)
 
+	// Local duck at the device's own wake crossing, confirmed or released by
+	// the controller's duck message (OnDuck below).
+	localDuck = speaker.NewLocalDuck(pcmSpeaker.SetDuck, speaker.LocalDuckHold)
+
 	buttonController.SetVolumeCallback(func(direction string) {
 		// Inert without a controller: nothing is playing to be louder or
 		// quieter, and showing the arc would acknowledge a device that
@@ -108,10 +171,21 @@ func main() {
 			log.Println("[cmd] volume button ignored — no controller session")
 			return
 		}
+		changed := false
 		if direction == "up" {
-			s.VolumeStepUp()
+			changed = s.VolumeStepUp()
 		} else {
-			s.VolumeStepDown()
+			changed = s.VolumeStepDown()
+		}
+		// The cue is for the person pressing the physical button. Remote
+		// volume changes stay silent, and active voice/music already provides
+		// the audible reference this setting exists to supply while idle.
+		const playbackTail = 100 * time.Millisecond
+		if cue.VolumeButtonPreviewDue(direction, changed, s.VolumeAtMax()) &&
+			config.Get().VolumeButtonSoundEnabled() &&
+			!pcmSpeaker.VoiceAudible(playbackTail) &&
+			!pcmSpeaker.MusicAudible(playbackTail) {
+			playVolumeCue(pcmSpeaker, s.VolumeLevel())
 		}
 	})
 	buttonController.SetMuteCallback(func() {
@@ -121,7 +195,8 @@ func main() {
 	ctx := context.Background()
 
 	dataClient := client.NewDataClient(deviceID, microphone, pcmSpeaker, canceller)
-	applyAecConfig(canceller, dataClient) // arm from env defaults before any config push
+	canceller.SetStatePath(aec.DefaultStatePath) // saved echo path: loaded on the hardware reference
+	applyAecConfig(canceller, dataClient)        // arm from env defaults before any config push
 
 	// Direction callback — update LED ring to show estimated source angle
 	dataClient.OnDirectionChanged(func(angle float64) {
@@ -143,10 +218,73 @@ func main() {
 				log.Println("[cmd] mic_start from controller rejected — device is muted")
 				return
 			}
+			// Under private listening the wake stream belongs to the device
+			// (see the mic_stop callback), so a button turn's lock_mic must
+			// REPLACE it rather than being refused as "already active".
+			if lockMic && dataClient.ListenState() != client.ListenStream &&
+				!dataClient.TurnStreamActive() {
+				dataClient.StopMic()
+			}
 			dataClient.StartMic(lockMic)
 		},
-		func() { dataClient.StopMic() },
+		func() {
+			// Under private listening the wake stream sends nothing, and it
+			// is what hears a barge-in over the reply, so the controller's
+			// mic_stop ends a button or follow-up turn but never the local
+			// listening. A turn's end hands straight back to it.
+			//
+			// Nor does it touch a SESSION: those end only by id
+			// (listen_close). mic_stop carries none, so one crossing a
+			// barge-in's oww_wake on the wire would close the new session
+			// the controller is about to take.
+			if dataClient.ListenState() != client.ListenStream {
+				if dataClient.TurnStreamActive() {
+					dataClient.StopMic()
+					if !s.IsMuted() {
+						dataClient.StartMic(false)
+					}
+				}
+				return
+			}
+			dataClient.StopMic()
+		},
 	)
+
+	// Private-listening sessions (docs/listening.md). The gate ignores any id
+	// that is not the open session, so a late message cannot touch a new one.
+	controlClient.OnListen(func(kind string, session uint32) {
+		switch kind {
+		case "listen_ack":
+			// The wake sound waits for the ack: it means this Echo won
+			// arbitration and has something to talk to, so one that cedes
+			// (or has no HA) stays silent. Costs one RTT against playing it
+			// at the crossing.
+			if dataClient.AckListen(session) {
+				playWakeCue(pcmSpeaker)
+			}
+		case "listen_close":
+			// A session the controller closes before confirming a duck is a
+			// wake it did not take (ceded, or refused): un-duck the music.
+			localDuck.Cancel()
+			if dataClient.CloseListen(session) {
+				log.Printf("[listen] session %d closed by the controller", session)
+			}
+		}
+	})
+	// A turn the device ended itself (no speech) hands back to the wake
+	// stream here: nothing else will, under private listening. In stream
+	// mode the controller restarts the stream itself, as it always has.
+	dataClient.OnTurnEnded(func() {
+		if s.IsMuted() || dataClient.ListenState() == client.ListenStream {
+			return
+		}
+		log.Println("[data] turn ended on the device — back to the wake stream")
+		dataClient.StartMic(false)
+	})
+	dataClient.OnListenEnd(func(e listen.End) {
+		localDuck.Cancel()
+		controlClient.SendListenEnd(e.Session, string(e.Reason))
+	})
 
 	// Device-rendered ring animations (led_anim) — the animation engine
 	// runs on the device's own ticker, immune to controller/WiFi jitter.
@@ -183,11 +321,67 @@ func main() {
 		}
 		controlClient.SendBleAdverts(batch)
 	})
-	applyBleConfig(bleScanner)
+	// Connections for Home Assistant's active proxy (#656). Every Dot reports
+	// the same public Bluetooth address, so links use a random static one
+	// derived from the serial. The bridge speaks only to a controller that
+	// announced ble_connect; to any other, results would be frames it ignores.
+	bleScanner.Conns().SetOwnAddress(bluetooth.StaticRandomAddr(deviceID))
+	bleBridge := bluetooth.NewBridge(bleScanner.Conns(), func(msg []byte) {
+		if controlClient.HasFeature(client.FeatureBleConnect) {
+			dataClient.SendBleGatt(msg)
+		}
+	})
+	dataClient.OnBleGatt(func(msg []byte) {
+		if controlClient.HasFeature(client.FeatureBleConnect) {
+			bleBridge.Handle(msg)
+		}
+	})
+	applyBleConfig(bleScanner, bleBridge)
+
+	// The BLE scan costs this device's WiFi dearly (see Scanner.Yield), so it
+	// stops whenever the link carries something that cannot wait: the user's
+	// words going up (a button turn, or a private-listening session), a reply
+	// coming down, or a shell session (the console, OTA and asset pushes).
+	// Polled rather than signalled at each edge: the answer is recomputed from
+	// live state every tick, so no missed "done" can leave the proxy silent.
+	// Music gets bursts rather than a yield (bluetooth.MusicDuty).
+	go func() {
+		t := time.NewTicker(100 * time.Millisecond)
+		defer t.Stop()
+		duty := bluetooth.NewMusicDuty()
+		for now := range t.C {
+			// Synced music (Sendspin) is music too: it streams for hours
+			// and has its own buffer, so it gets the same bursts.
+			ssOn, ssLead := sendspinMusic()
+			music := duty.Yield(now, pcmSpeaker.MusicArriving() || ssOn,
+				max(pcmSpeaker.MusicLead(), ssLead))
+			sendspinPoll(pcmSpeaker)
+			bleScanner.Yield(music ||
+				dataClient.TurnStreamActive() ||
+				dataClient.ListenOpen() ||
+				pcmSpeaker.VoiceArriving() ||
+				controlClient.ShellActive())
+		}
+	}()
+
+	// A 5 s hold of the action button asks to pair (client/pairing.go). The
+	// white flash says the hold registered: on a connected device nothing
+	// else changes on the ring until an admin approves.
+	pairHold := client.NewPairHold(func() {
+		s.Flash(150, 150, 150, 400*time.Millisecond)
+		controlClient.StartPairing()
+	})
 
 	// Button events — forward to controller via control plane
 	_, err = buttonController.SubscribeToButton(func(event pkgbuttons.ButtonClickEvent) {
 		log.Printf("Button event: clickType=%d down=%v", event.ClickType, event.Down)
+		// Ahead of the link-down gate: a device that cannot connect is the one
+		// that most needs to ask. The release ending a pairing hold is not
+		// forwarded, so it does not also reach HA as a long press.
+		if event.ClickType == pkgbuttons.DotClick && pairHold.Event(event.Down) {
+			log.Println("[cmd] action button release ended a pairing hold — not forwarded")
+			return
+		}
 		// Inert without a controller session: the dot cannot start a turn
 		// with nothing to send it to, and the ring flash CancelVolumeDisplay
 		// produces would acknowledge a press that achieves nothing. Dropped
@@ -266,6 +460,9 @@ func main() {
 	go pcmSpeaker.WatchJackRouting(ctx)
 
 	controlClient.OnDisconnected(func() {
+		// A Bluetooth link's results have nowhere to go now, and a
+		// controller that comes back starts from no links.
+		bleBridge.DropAll()
 		// Stop any device-local animation: the controller that owned it is
 		// gone, and the pulse below would otherwise fight its ticker. Safe to
 		// repeat — StopAnim only bumps the animator generation, and the pulse
@@ -285,6 +482,7 @@ func main() {
 		// buttons go inert. Set BEFORE the pulse starts, or its first frames
 		// are swallowed by the mute suppression on a muted device.
 		s.SetLinkDown(true)
+		sendspinLinkDown(pcmSpeaker)
 		go pulseOrange(pulseCtx, s)
 	})
 
@@ -303,17 +501,52 @@ func main() {
 		// nothing above this device, so the white pulse owns the ring and the
 		// buttons do nothing.
 		s.SetLinkDown(true)
+		sendspinLinkDown(pcmSpeaker)
 		go pulseWhite(pulseCtx, s)
+	})
+
+	// Refused — a controller answered and would not accept this device's
+	// credentials. Orange like disconnected, since it is a link problem, but
+	// alternating odd and even LEDs, so it reads differently: this one the
+	// owner can fix, by holding the action button 5 s to pair.
+	controlClient.OnRefused(func() {
+		s.StopAnim()
+		if pulseKind == "refused" {
+			return
+		}
+		if pulseCancel != nil {
+			pulseCancel()
+		}
+		pulseCtx, cancel := context.WithCancel(ctx)
+		pulseCancel = cancel
+		pulseKind = "refused"
+		s.SetLinkDown(true)
+		sendspinLinkDown(pcmSpeaker)
+		go pulseRefused(pulseCtx, s)
 	})
 
 	// Connected — stop pulse, report current mute state, restore ring or hand
 	// back to direction arc depending on mute state.
 	controlClient.OnConnected(func() {
+		// A part opened by its old number, or not found at all, is reported
+		// once per process: it is how a kernel that names something
+		// differently is learned about from the field (#541).
+		boardReport.Do(func() {
+			if layout.Board == nil {
+				controlClient.SendLog("warn", "[board] not identified — using biscuit's layout")
+			}
+			for _, p := range layout.Problems {
+				controlClient.SendLog("warn", "[board] "+p)
+			}
+		})
 		if pulseCancel != nil {
 			pulseCancel()
 			pulseCancel = nil
 		}
 		pulseKind = ""
+		// Who runs the output chain is decided by THIS controller's ack, and
+		// settled before any of its audio can arrive.
+		pcmSpeaker.SetOutputChainActive(controlClient.HasFeature(client.FeatureOutputChain))
 		// Session restored: the ring goes back to the controller, the mute
 		// ring reasserts below if it applies, and the buttons work again.
 		s.SetLinkDown(false)
@@ -327,6 +560,10 @@ func main() {
 		// change callback sends the report instead.
 		muted := s.IsMuted()
 		controlClient.SendMuteState(muted)
+		// The features just arrived on the ack, and a restarted controller
+		// has no record of what this device is doing — so resolve and report
+		// unconditionally.
+		syncListenState(dataClient, controlClient, true)
 		if s.VolumeSeeded() {
 			controlClient.SendVolumeState(s.VolumeLevel())
 		}
@@ -345,6 +582,7 @@ func main() {
 			st.Ble = bleScanner.Stats()
 			st.OwwShadow = shadowStats(dataClient)
 			st.AecRef = canceller.RefSource()
+			st.Sendspin = sendspinStatus()
 			controlClient.SendStats(st)
 		}()
 		// Deliver any unacknowledged WiFi change outcome (including the
@@ -361,6 +599,13 @@ func main() {
 	// the (partial) message so unmentioned fields keep their values.
 	controlClient.OnConfigApplied(func(msg config.ConfigMessage) {
 		applyHardwareConfig(msg)
+		s.SetRemoteVolumeArc(config.Get().RemoteVolumeArcEnabled())
+		pcmSpeaker.SetResponseGainDB(config.Get().ResponseGainDB())
+		// The merged config, not the partial message, for the reason given
+		// above. Active is re-read from the ack on every push: a reconnect
+		// can land on a controller that does not hand the chain over.
+		pcmSpeaker.SetOutputChain(config.Get().OutputChain())
+		pcmSpeaker.SetOutputChainActive(controlClient.HasFeature(client.FeatureOutputChain))
 		// startupVolume is the controller's persisted record of this
 		// device's volume (updated on every volume_state report) — restore
 		// it through the Server, not a raw tinymix write: SeedVolume keeps
@@ -370,9 +615,24 @@ func main() {
 			s.SeedVolume(msg.StartupVolume)
 		}
 		applyAecConfig(canceller, dataClient)
-		applyBleConfig(bleScanner)
+		applyBleConfig(bleScanner, bleBridge)
+		applySendspinConfig(pcmSpeaker, controlClient, s, deviceID)
 		applyShadowConfig(dataClient, controlClient, pcmSpeaker, s)
+		syncListenState(dataClient, controlClient, false)
 	})
+
+	// Wake sound on request (#120), for wakes outside a private-listening
+	// session; the controller sends it only once the wake has won
+	// arbitration. A session's wake sound plays on its listen_ack instead.
+	controlClient.OnPlayCue(func(name string) {
+		if name != "wake" {
+			log.Printf("[cue] unknown cue %q — ignored", name)
+			return
+		}
+		playWakeCue(pcmSpeaker)
+	})
+
+	controlClient.OnSendspinToken(sendspinToken)
 
 	// Speaker flush — barge-in: cut buffered TTS the moment the controller
 	// hears the wake word during playback.
@@ -390,6 +650,7 @@ func main() {
 	// The depth is read at duck time rather than latched, so a config change
 	// takes effect on the next turn without a restart.
 	controlClient.OnDuck(func(on bool) {
+		localDuck.Confirm()
 		if on {
 			pcmSpeaker.SetDuck(config.Get().DuckDb)
 		} else {
@@ -400,7 +661,17 @@ func main() {
 	// Per-stream playback stats — underrun/period counts reported upstream
 	// once per completed TTS stream, persisted against the voice turn.
 	pcmSpeaker.OnStreamStats(func(st speaker.StreamStats) {
-		controlClient.SendPlaybackStats(st.Periods, st.Underruns, st)
+		// How close the Echo came to hearing a barge-in over this stream.
+		// Under private listening nothing else can say: the controller
+		// hears no audio during a reply.
+		var barge map[string]interface{}
+		if sc := dataClient.ShadowScorer(); sc != nil {
+			peak, bar, frames := sc.TakeBargeWindow()
+			barge = map[string]interface{}{"peak": peak, "bar": bar, "frames": frames}
+			log.Printf("[listen] over playback: %d frames at the barge bar %.2f, peak %.3f",
+				frames, bar, peak)
+		}
+		controlClient.SendPlaybackStats(st.Periods, st.Underruns, st, barge)
 	})
 
 	// WiFi change — the executor owns the whole switch/rollback sequence
@@ -466,6 +737,9 @@ func main() {
 	s.SetMuteChangeCallback(func(muted bool) {
 		controlClient.SendMuteState(muted)
 		if muted {
+			// Reported as muted rather than as the stream stopping, which
+			// StopMic would otherwise record.
+			dataClient.CloseAnyListen(listen.ReasonMuted)
 			dataClient.StopMic()
 		} else {
 			// Restore the permanent OWW listening stream on unmute — no
@@ -476,30 +750,21 @@ func main() {
 		}
 	})
 
+	// Volume is applied in software by the speaker; the DAC stays at unity.
+	// The hardware echo reference is the bytes written to ALSA, so it is
+	// post-volume by construction and the canceller needs no scalar.
+	if pcmSpeaker != nil {
+		s.SetVolumeApply(pcmSpeaker.SetVolume)
+	}
 	// Volume change — notify controller so HA entity and dashboard reflect it.
 	// Fires on every Set() call: physical button press or future volume_set command.
 	s.SetVolumeChangeCallback(func(level int) {
 		controlClient.SendVolumeState(level)
-		// The hardware echo reference is tapped upstream of the DAC volume
-		// control, so it holds full scale whatever the user sets. Tell the
-		// canceller the scalar it cannot see, or every volume change is an
-		// echo-path gain step the adaptive filter can only find by
-		// re-converging — measured on 2026-08-29 as cancellation dropping to
-		// -1.7dB after a change and taking 3-4s to recover, repeatedly.
-		canceller.SetPlaybackLevel(level)
+		sendspinVolumeChanged(level)
 	})
-	// Seed it from where the device actually is, right now. The callback
-	// above only fires on a CHANGE, and the two things that would produce
-	// one at startup both have holes: SeedVolume is skipped entirely when
-	// the controller pushes startupVolume=0 (a device it has no record
-	// for), and Set() is a no-op-shaped path nothing guarantees runs. Miss
-	// it and refScale stays 0 — read as unity — while the codec sits at
-	// whatever level the previous run left behind, which is round one's
-	// 33dB-hot reference reappearing on a device nobody touched.
-	canceller.SetPlaybackLevel(s.VolumeLevel())
 
 	// Volume set from controller (HA MediaPlayerCommandRequest forwarded down).
-	// Calls Set() which applies tinymix, updates LEDs, and fires the change
+	// Calls Set() which applies the volume, updates LEDs, and fires the change
 	// callback above — so SendVolumeState fires automatically, closing the loop.
 	controlClient.OnVolumeSet(func(level int) {
 		s.SetVolume(level)
@@ -554,11 +819,23 @@ func main() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		tick := 0
+		// Drained only here, on this one goroutine, so LinkLoss needs no lock;
+		// the on-connect snapshot above simply leaves the fields unset.
+		var upLoss client.LinkLoss
 		for range ticker.C {
 			st := collectStats()
 			st.Ble = bleScanner.Stats()
 			st.OwwShadow = shadowStats(dataClient)
 			st.AecRef = canceller.RefSource()
+			var snaps []client.TCPSnap
+			if sn, ok := controlClient.TCPSnapshot(); ok {
+				snaps = append(snaps, sn)
+			}
+			if sn, ok := dataClient.TCPSnapshot(); ok {
+				snaps = append(snaps, sn)
+			}
+			st.TcpUpRetrans, st.TcpUpSegs = upLoss.Drain(snaps...)
+			st.Sendspin = sendspinStatus()
 			controlClient.SendStats(st)
 			if tick%10 == 0 {
 				var ms runtime.MemStats
@@ -593,6 +870,11 @@ func main() {
 	sig := <-sigCh
 	log.Printf("Received %v — shutting down (muting output, amp off)", sig)
 	bleScanner.SetEnabled(false) // scan off + /dev/stpbt closed so the chip idles
+	// "restart", not "shutdown": this is an OTA or a supervisor restart far
+	// more often than a power-off, and restart asks the server to redial.
+	if c := sendspinPlayer(); c != nil {
+		c.Stop("restart")
+	}
 	pcmSpeaker.Close()
 	os.Exit(0)
 }
@@ -628,6 +910,16 @@ func shadowStats(dc *client.DataClient) interface{} {
 	}
 }
 
+// emmcForStats is the eMMC wear for the stats tick, read at most every six
+// hours. An untyped nil when unreadable, so the field is null rather than a
+// typed nil the controller would have to tell apart.
+func emmcForStats() interface{} {
+	if e := platform.EmmcCached(6 * time.Hour); e != nil {
+		return e
+	}
+	return nil
+}
+
 func collectStats() client.DeviceStats {
 	cpuPct := cpuPercent()
 	memUsed, memTotal := memStats()
@@ -658,6 +950,7 @@ func collectStats() client.DeviceStats {
 		TxErrors:         txErr,
 		TxDropped:        txDrop,
 		RxCrcErrors:      rxCrc,
+		Emmc:             emmcForStats(),
 	}
 }
 
@@ -1003,7 +1296,7 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 	if sc := dc.ShadowScorer(); sc != nil && shadowState.model == model {
 		sc.SetThreshold(threshold)
 		if snap.BargeInEnabled != nil && *snap.BargeInEnabled && spk != nil {
-			sc.SetBargeThreshold(float32(snap.BargeInThreshold), spk.IsStreaming)
+			sc.SetBargeThreshold(float32(snap.BargeInThreshold), speakerPlaying(spk))
 		} else {
 			sc.SetBargeThreshold(0, nil)
 		}
@@ -1019,7 +1312,7 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 	// both and rebuilding it would reload a 12MB runtime and open a fresh
 	// ~1.28s not-ready window every time someone changed their mind.
 	sc, err := shadow.Open(model, threshold, func(score, crossed float32, at time.Time) {
-		onWakeCrossing(cc, srv, score, crossed, at)
+		onWakeCrossing(cc, dc, spk, srv, score, crossed, at)
 	})
 	if err != nil {
 		if msg := err.Error(); msg != shadowState.lastErr {
@@ -1034,13 +1327,39 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 	// streaming its wake bar drops to bargeInThreshold, and a device scoring
 	// against the normal threshold would disagree on every barge-in.
 	if snap.BargeInEnabled != nil && *snap.BargeInEnabled && spk != nil {
-		sc.SetBargeThreshold(float32(snap.BargeInThreshold), spk.IsStreaming)
+		sc.SetBargeThreshold(float32(snap.BargeInThreshold), speakerPlaying(spk))
+	}
+	if spk != nil && benchScorer != nil {
+		benchScorer(sc, spk)
 	}
 	dc.SetShadowScorer(sc)
 	shadowState.mode, shadowState.model, shadowState.lastErr = mode, model, ""
-	log.Printf("[shadow] on-device wake word scoring (%s, threshold %.2f) — %s",
-		sc.Info(), threshold, actsOnCrossings(mode))
+	bargeNote := "barge-in off"
+	if snap.BargeInEnabled != nil && *snap.BargeInEnabled {
+		bargeNote = fmt.Sprintf("barge-in bar %.2f", snap.BargeInThreshold)
+	}
+	log.Printf("[shadow] on-device wake word scoring (%s, threshold %.2f, %s) — %s",
+		sc.Info(), threshold, bargeNote, actsOnCrossings(mode))
 }
+
+// speakerPlaying is when the wake bar drops to bargeInThreshold: a response,
+// an alarm (both on the voice plane) or music. The controller has always
+// scored wake-over-music at the barge bar when barge-in is enabled, and this
+// is only ever installed when it is; a device that listens privately has to
+// apply the rule itself, since the controller no longer hears the stream.
+//
+// "Playing" runs until the speaker has been quiet for wakeword.ScoreSpan:
+// a wake word spoken in the last second of a reply is scored in frames whose
+// window still holds the reply's echo, so it needs the lower bar too.
+func speakerPlaying(spk *speaker.PcmSpeaker) func() bool {
+	return func() bool {
+		return spk.VoiceAudible(wakeword.ScoreSpan) || spk.MusicAudible(wakeword.ScoreSpan)
+	}
+}
+
+// benchScorer instruments a newly opened scorer; set only in bench builds
+// (trace_bench.go), nil in release.
+var benchScorer func(*shadow.Scorer, *speaker.PcmSpeaker)
 
 // actsOnCrossings describes what a crossing will DO, for the log line. The
 // distinction is the whole difference between the two live modes and is not
@@ -1051,6 +1370,45 @@ func actsOnCrossings(mode string) string {
 	}
 	return "reporting only, not triggering"
 }
+
+// wakeCues holds the cue at each level, rendered once: rendering on the wake
+// path would put ~12k sin() calls between hearing the wake word and
+// confirming it.
+var wakeCues = func() map[string][]float64 {
+	m := make(map[string][]float64, len(cue.Levels))
+	for _, lv := range cue.Levels {
+		m[lv] = cue.WakeCue(speakerRate, cue.LevelDBFS(lv))
+	}
+	return m
+}()
+
+// playWakeCue plays the wake sound at its configured level, if it is on.
+// Anything unrecognised plays medium.
+func playWakeCue(spk *speaker.PcmSpeaker) {
+	on, level := config.Get().WakeSoundSetting()
+	if !on || spk == nil {
+		return
+	}
+	c, ok := wakeCues[level]
+	if !ok {
+		c = wakeCues[cue.LevelMedium]
+	}
+	spk.PlayCue(c)
+}
+
+// playVolumeCue previews the newly selected device volume. PlayCue is mixed
+// after software volume (so wake sounds can stay absolute), therefore these
+// samples carry the device-volume gain themselves.
+func playVolumeCue(spk *speaker.PcmSpeaker, level int) {
+	if spk == nil {
+		return
+	}
+	spk.PlayCue(cue.VolumeCue(speakerRate, speaker.VolumeGain(level)))
+}
+
+// speakerRate mirrors the speaker binding's rate, declared here so this file
+// still builds on a host, where the //go:build server binding does not.
+const speakerRate = 48000
 
 // onWakeCrossing is what a threshold crossing does, decided fresh each time
 // from the current config rather than at scorer-construction time.
@@ -1067,7 +1425,16 @@ func actsOnCrossings(mode string) string {
 // during playback. The controller records it against the turn, and recording
 // the nominal threshold instead is what once made every barge-in look like a
 // wake that had fired below its own bar.
-func onWakeCrossing(cc *client.ControlClient, srv *server.Server,
+//
+// Under private listening a crossing OPENS A SESSION before it is reported, so
+// the audio after the wake word is already on its way when the controller
+// reads the wake. A crossing while a session is open is words inside it, not a
+// new wake, and is dropped.
+// localDuck is set in main before any wake can cross.
+var localDuck *speaker.LocalDuck
+
+func onWakeCrossing(cc *client.ControlClient, dc *client.DataClient,
+	spk *speaker.PcmSpeaker, srv *server.Server,
 	score, crossed float32, at time.Time) {
 	ageMs := time.Since(at).Milliseconds()
 	if config.Get().Snapshot().OwwOnDevice != config.OnDeviceOn {
@@ -1081,6 +1448,21 @@ func onWakeCrossing(cc *client.ControlClient, srv *server.Server,
 		cc.SendOwwShadowCross(score, ageMs)
 		log.Printf("[shadow] wake %.3f suppressed — muted", score)
 		return
+	}
+	if !config.Get().WakeWordOn() {
+		cc.SendOwwShadowCross(score, ageMs)
+		log.Printf("[shadow] wake %.3f suppressed — wake word off", score)
+		return
+	}
+	var session uint32
+	if dc.ListenState() == client.ListenLocal {
+		var ok bool
+		session, ok = dc.OpenListen(at)
+		if !ok {
+			log.Printf("[listen] wake %.3f inside open session %d — ignored", score, session)
+			return
+		}
+		log.Printf("[listen] wake %.3f opened session %d", score, session)
 	}
 	// #263: light the listening ring NOW, from the one place that already
 	// knows the wake happened. The crossing used to travel to the controller
@@ -1101,12 +1483,45 @@ func onWakeCrossing(cc *client.ControlClient, srv *server.Server,
 			}
 		}
 	}
-	cc.SendOwwWake(score, crossed, ageMs)
+	// Duck with the ring, not a round trip later. Music only: a reply being
+	// barged over is cut by the controller's speaker_flush, not ducked.
+	if spk != nil && localDuck != nil && spk.MusicAudible(0) {
+		localDuck.Start(config.Get().DuckDb)
+	}
+	barge := spk != nil && spk.VoiceAudible(wakeword.ScoreSpan)
+	level, peak, ok := dc.WakeLevel(at)
+	var lv *client.WakeLevel
+	if ok {
+		lv = &client.WakeLevel{Level: level, Peak: peak}
+	}
+	cc.SendOwwWake(score, crossed, at, session, dc.ListenFloor(), barge, lv)
 }
 
-func applyBleConfig(scanner *bluetooth.Scanner) {
+// syncListenState resolves what the device does with its wake stream and
+// tells the controller when that changes (always, when force is set). Called
+// after every config push and on every connect: those are the only moments
+// the mode, the controller's features or the scorer can change.
+func syncListenState(dc *client.DataClient, cc *client.ControlClient, force bool) {
 	snap := config.Get().Snapshot()
-	scanner.SetEnabled(snap.BleProxyEnabled != nil && *snap.BleProxyEnabled)
+	state, reason := listen.Resolve(
+		snap.OwwOnDevice == config.OnDeviceOn,
+		cc.HasFeature(client.FeatureListenSession),
+		dc.ShadowScorer() != nil,
+		shadowState.lastErr,
+	)
+	if dc.SetListenState(state) || force {
+		if err := cc.SendListenState(state, reason); err != nil {
+			log.Printf("[listen] could not report state %s: %v", state, err)
+		}
+	}
+}
+
+func applyBleConfig(scanner *bluetooth.Scanner, bridge *bluetooth.Bridge) {
+	snap := config.Get().Snapshot()
+	proxy := snap.BleProxyEnabled != nil && *snap.BleProxyEnabled
+	scanner.SetEnabled(proxy)
+	// Connections live inside the scan session, so they need the proxy on.
+	bridge.SetEnabled(proxy && snap.BleProxyConnections != nil && *snap.BleProxyConnections)
 }
 
 func allLEDs(r, g, b uint8) []led.Led {
@@ -1153,6 +1568,39 @@ func pulseOrange(ctx context.Context, s *server.Server) {
 			t := pulsePhase(start, period)
 			br := minBr + (maxBr-minBr)*(0.5+0.5*math.Sin(2*math.Pi*t))
 			s.SetLEDs(allLEDs(uint8(255*br), uint8(40*br), 0), nil)
+		}
+	}
+}
+
+// pulseRefused — orange, odd and even LEDs crossfading against each other,
+// while a controller refuses this device's credentials. Same colour as
+// pulseOrange (a link problem), different shape (one the owner can fix).
+func pulseRefused(ctx context.Context, s *server.Server) {
+	const (
+		minBr  = 0.03
+		maxBr  = 0.6
+		period = 1200 * time.Millisecond
+		stepMs = 50
+	)
+	ticker := time.NewTicker(stepMs * time.Millisecond)
+	defer ticker.Stop()
+	start := time.Now()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			a := 0.5 + 0.5*math.Sin(2*math.Pi*pulsePhase(start, period))
+			leds := allLEDs(0, 0, 0)
+			for i := range leds {
+				w := a
+				if i%2 == 1 {
+					w = 1 - a
+				}
+				br := minBr + (maxBr-minBr)*w
+				leds[i].R, leds[i].G = uint8(255*br), uint8(40*br)
+			}
+			s.SetLEDs(leds, nil)
 		}
 	}
 }

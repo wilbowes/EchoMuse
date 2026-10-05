@@ -9,7 +9,8 @@
 # v2.0.0 tag (the repo became a package afterwards). Don't bump that pin
 # without re-checking train.py's import.
 
-FROM python:3.11-slim
+# Pinned by the multi-arch index digest; Dependabot moves it with the tag.
+FROM python:3.11-slim@sha256:da047cb8f9d1d98e5c070f5300ba9f7274e33b8fc0e5be5ed88740aed1b95ba9
 
 ARG GPU=0
 
@@ -73,7 +74,29 @@ RUN sed -i 's/torch.load(checkpoint_path, map_location=device)/torch.load(checkp
       /usr/local/lib/python3.11/site-packages/dp/model/model.py \
     && grep -q "weights_only=False" /usr/local/lib/python3.11/site-packages/dp/model/model.py
 
-COPY forge.py model_metadata.py google_tts.py forge_web.py piper_voices.py config.template.yml /opt/forge/
+# ...and it is no longer reached at all. data.py downloaded DeepPhonemizer's
+# en_us_cmudict_forward.pt on first use from an S3 bucket that answers 403
+# (2026-09-28, no mirror found), saved the 278-byte error page AS the model,
+# and so failed every later run too; and the download lived in the
+# container, so recreating the container lost a copy that had worked.
+# forge_g2p answers the same question from espeak-ng, already here for
+# Piper. The patch asserts both edits landed, so an upstream change fails the
+# build rather than quietly reviving the download.
+COPY forge_g2p.py /opt/openwakeword/openwakeword/forge_g2p.py
+COPY patch_oww_g2p.py /tmp/patch_oww_g2p.py
+RUN python /tmp/patch_oww_g2p.py /opt/openwakeword/openwakeword/data.py && rm /tmp/patch_oww_g2p.py
+
+# train.py builds adversarial negatives one target phrase at a time and only
+# removes texts equal to that phrase, so "hey verona" emits "verona" as a
+# negative even when "verona" is a target too. The bare name then trains as
+# positive and negative at once and stops firing (2026-10-03). forge_negatives
+# drops any negative containing a target phrase; the patch asserts both call
+# sites were found.
+COPY forge_negatives.py /opt/openwakeword/openwakeword/forge_negatives.py
+COPY patch_oww_negatives.py /tmp/patch_oww_negatives.py
+RUN python /tmp/patch_oww_negatives.py /opt/openwakeword/openwakeword/train.py && rm /tmp/patch_oww_negatives.py
+
+COPY forge.py model_metadata.py google_tts.py forge_web.py forge_progress.py piper_voices.py config.template.yml /opt/forge/
 COPY static/ /opt/forge/static/
 
 WORKDIR /data

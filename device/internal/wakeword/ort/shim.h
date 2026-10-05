@@ -278,6 +278,61 @@ static char *em_model_run(em_model *m, const float *data, size_t n_in,
 	return NULL;
 }
 
+/*
+ * em_vad_run runs one Silero VAD step (the v4 export openwakeword ships):
+ * inputs `input` [1,n] float, `sr` int64 scalar, `h`/`c` [2,1,64] float;
+ * outputs `output` [1,1], `hn`, `cn`. h and c are Go-owned, 128 floats each,
+ * read as the carried state and overwritten with the next one, so a turn's
+ * state lives in Go and one session serves any number of streams.
+ */
+#define EM_VAD_STATE 128
+static char *em_vad_run(em_model *m, const float *x, size_t n,
+                        float *h, float *c, float *prob) {
+	const OrtApi *api = m->api;
+	if (!api || !m->sess) return em_dup("model is closed");
+
+	OrtMemoryInfo *mi = NULL;
+	char *err = em_err(api, api->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &mi));
+	if (err) return err;
+
+	int64_t sr = 16000;
+	const int64_t xs[] = {1, (int64_t)n};
+	const int64_t ss[] = {2, 1, 64};
+	OrtValue *in[4] = {NULL, NULL, NULL, NULL};
+	err = em_err(api, api->CreateTensorWithDataAsOrtValue(mi, (void *)x, n * sizeof(float),
+	                      xs, 2, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &in[0]));
+	if (!err) err = em_err(api, api->CreateTensorWithDataAsOrtValue(mi, &sr, sizeof(sr),
+	                      NULL, 0, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, &in[1]));
+	if (!err) err = em_err(api, api->CreateTensorWithDataAsOrtValue(mi, h, EM_VAD_STATE * sizeof(float),
+	                      ss, 3, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &in[2]));
+	if (!err) err = em_err(api, api->CreateTensorWithDataAsOrtValue(mi, c, EM_VAD_STATE * sizeof(float),
+	                      ss, 3, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &in[3]));
+	api->ReleaseMemoryInfo(mi);
+
+	static const char *in_names[] = {"input", "sr", "h", "c"};
+	static const char *out_names[] = {"output", "hn", "cn"};
+	OrtValue *out[3] = {NULL, NULL, NULL};
+	if (!err) err = em_err(api, api->Run(m->sess, NULL, in_names, (const OrtValue *const *)in, 4,
+	                                     out_names, 3, out));
+	for (int i = 0; i < 4; i++)
+		if (in[i]) api->ReleaseValue(in[i]);
+
+	float *p = NULL, *hn = NULL, *cn = NULL;
+	if (!err) err = em_err(api, api->GetTensorMutableData(out[0], (void **)&p));
+	if (!err) err = em_err(api, api->GetTensorMutableData(out[1], (void **)&hn));
+	if (!err) err = em_err(api, api->GetTensorMutableData(out[2], (void **)&cn));
+	if (!err) {
+		/* Inputs are released above, so overwriting the state they wrapped
+		 * is safe. */
+		*prob = p[0];
+		memcpy(h, hn, EM_VAD_STATE * sizeof(float));
+		memcpy(c, cn, EM_VAD_STATE * sizeof(float));
+	}
+	for (int i = 0; i < 3; i++)
+		if (out[i]) api->ReleaseValue(out[i]);
+	return err;
+}
+
 static void em_model_free(em_model *m) {
 	const OrtApi *api = m->api;
 	if (!api || !m->sess) return;

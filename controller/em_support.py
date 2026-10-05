@@ -37,9 +37,9 @@ Three rules, in order of how badly they would be missed:
    positional alias would still be one-to-one with a real person.
 
 Log lines are sanitised rather than trusted: they are the richest diagnostic
-in the bundle AND the most likely to contain speech, since turn lines carry
-`text='...'` verbatim. Quoted strings and URLs are stripped, and lines from
-known transcript-bearing sources are dropped entirely.
+in the bundle AND the most likely to contain speech, since `[TURN]` lines
+carry `text='...'` verbatim. Quoted strings and URLs are stripped, and lines
+from known transcript-bearing sources are dropped entirely.
 
 Serials are kept — they identify the user's own hardware to them, and
 without them nothing correlates — but nothing else is.
@@ -56,10 +56,17 @@ from typing import Any
 
 # Device columns safe to publish. Names are listed rather than filtered so a
 # future column is excluded by default.
+#
+# base_os (v21) and kernel_arch/kernel_release (v23) were stored for weeks
+# before anyone listed them here, so #566's bundle could not say whether the
+# device ran FireOS 6's kernel -- the one fact that tied it to #587's fault.
+# They describe the build, not the owner.
 _DEVICE_FIELDS = (
     "device_id", "approved", "firmware_ver", "firmware_previous",
     "first_seen", "last_seen", "config_sections", "use_global_config",
     "esphome_port", "ble_proxy_port", "ble_proxy_enabled",
+    "base_os", "kernel_arch", "kernel_release",
+    "emos_version", "emos_build",
 )
 
 # Config keys are behaviour, not secrets — but the WiFi credential is neither
@@ -99,6 +106,8 @@ _METRIC_FIELDS = (
     "cpu_temp_avg", "cpu_temp_max", "max_temp_max",
     "cores_online_last", "cores_online_min", "cores_total",
     "thermal_limit_min",
+    "tcp_down_segs", "tcp_down_retrans", "tcp_down_retrans_pct",
+    "tcp_up_retrans", "tcp_up_retrans_pct", "tcp_rto_max_ms",
 )
 
 # The controller's own resource use. Nothing here is private in itself, but it
@@ -134,11 +143,29 @@ _COUNTER_FIELDS = (
 # Log lines whose source is known to carry speech. Dropped whole rather than
 # sanitised: a partial redaction of a line that quotes a transcript is a bet
 # on the regex, and losing the line costs nothing we cannot get elsewhere.
-_LOG_DROP = ("STT result", "text=", "Utterance saved", "stt_text")
+#
+# Markers name the line, not the field. `text=` used to be here for the turn
+# trace, but it also matched the AnnounceRequest line, whose `text=` is a TTS
+# string HA sent us rather than speech, and which is the only record that an
+# announcement arrived at all (#507). That line falls through to _QUOTED.
+_LOG_DROP = (
+    "STT result",
+    "[TURN]",
+    "Utterance saved",
+    "stt_text",
+    "Spoken dismissal",
+)
 
 # Quoted strings and URLs. Turn traces quote transcripts; media URLs carry
-# provider paths and session tokens.
-_QUOTED = re.compile(r"""(['"])(?:(?!\1).)*\1""")
+# provider paths and session tokens. Log lines quote values by repr, so a
+# quote inside the string arrives escaped: the first two forms skip `\.`
+# pairs so `'it\'s "late"'` redacts whole instead of leaking the tail. The
+# plain forms are the fallback for text that is not repr (device shell
+# output, exception text via _scrub), where a value ending in a backslash
+# would otherwise never close.
+_QUOTED = re.compile(
+    r"'(?:[^'\\]|\\.)*'" r'|"(?:[^"\\]|\\.)*"' r"|'[^']*'" r'|"[^"]*"'
+)
 _URL = re.compile(r"""https?://[^\s'"]+""")
 
 # Bare network identifiers in log prose — "Device connected: ... at 10.10.1.60"
@@ -322,7 +349,7 @@ def sanitise_log(lines: list[str], accounts: dict[str, str] | None = None) -> li
     Make controller log lines safe to publish.
 
     Logs are the richest thing in a bundle and the likeliest to contain
-    speech — a turn trace carries `text='...'` verbatim — so they are
+    speech — a `[TURN]` trace carries `text='...'` verbatim — so they are
     filtered, never passed through. Lines from transcript-bearing sources go
     entirely; everything else keeps its structure with quoted strings and
     URLs replaced, since the timings and message types are the diagnostic
@@ -370,6 +397,20 @@ def redact_stats(stats: Any) -> dict | None:
     if not isinstance(stats, dict):
         return None
     return {k: stats[k] for k in _STATS_FIELDS if k in stats}
+
+
+# The latest boot and wear rows (schema v28), by name for the allowlist's reason.
+_BOOT_FIELDS = (
+    "boot_at", "firmware_ver", "boot_reason", "day", "emmc_rev", "emmc_pre_eol",
+    "emmc_life_a", "emmc_life_b", "emmc_name", "emmc_date", "emmc_manfid",
+)
+
+
+def redact_boot(boot: Any) -> dict | None:
+    """Project a device's latest boot row onto the allowlist."""
+    if not isinstance(boot, dict):
+        return None
+    return {k: boot[k] for k in _BOOT_FIELDS if k in boot}
 
 
 def redact_config(config: dict) -> dict:
@@ -525,7 +566,12 @@ _PROVISION_PROBES = (
     "packages",       # how many of the disable/hide lists are still visible
     "data_property",  # filenames only
     "boot_target",    # what /dev/block/other-boot resolves to (TWRP steps)
+    "net_log",        # tail of /run/net.log, over the emOS serial console
 )
+
+# How many lines of the network log survive. The wizard already tails it; this
+# is the limit that holds if something else posts.
+_NET_LOG_LINES = 200
 
 _INIT_SVC = re.compile(r"^\[init\.svc\.[a-z0-9_.-]+\]:\s*\[[a-z]+\]$", re.I)
 
@@ -611,6 +657,45 @@ def _probe_services(text: str) -> list[str]:
             if _INIT_SVC.match(ln.strip())]
 
 
+# Where a network name starts in a line of /run/net.log. Every message
+# wpa_supplicant 2.10 prints an SSID in at its default log level carries the
+# word (read from its source: "Trying to associate with SSID '%s'",
+# "(SSID='%s' freq=%d MHz)", `ssid="%s"`); the other two are dhcpcd's and the
+# mesh join line, which do not. An event NAME containing the word
+# (CTRL-EVENT-SSID-TEMP-DISABLED) is not where a name starts, and `bssid` is
+# a MAC, which _scrub takes.
+_NET_LOG_NAME = re.compile(
+    r"(?<![a-z])ssid(?![-\w])|access point|joining mesh", re.I)
+
+# What follows the name in the two messages where the tail is the diagnosis:
+# the channel, and why a network was disabled (reason=WRONG_KEY is a wrong
+# password). Anchored at the END of the line, so a name containing the same
+# text cannot stand in for it.
+_NET_LOG_TAIL = re.compile(
+    r"(freq=\d+ MHz\)|auth_failures=\d+ duration=\d+ reason=[A-Z_]+)$")
+
+
+def _probe_net_log(text: str) -> list[str]:
+    """
+    emOS's network log with the network names cut out.
+
+    `_scrub` alone is not enough here. It redacts quoted strings, and
+    wpa_supplicant quotes an SSID without escaping an apostrophe inside it
+    (`printf_encode` escapes `"` and `\\` only), so `SSID 'Bob's WiFi'` would
+    lose `'Bob'` and keep the rest. An SSID is 0-32 arbitrary bytes, so the
+    line is cut where the name starts instead of at whatever looks like its
+    end.
+    """
+    out = []
+    for ln in (text or "").splitlines()[-_NET_LOG_LINES:]:
+        m = _NET_LOG_NAME.search(ln)
+        if m:
+            tail = _NET_LOG_TAIL.search(ln)
+            ln = ln[:m.start()] + "<network>" + (f" {tail.group(1)}" if tail else "")
+        out.extend(_scrub(ln))
+    return out
+
+
 def build_provision_diagnostics(
     *,
     step: str,
@@ -662,6 +747,8 @@ def build_provision_diagnostics(
             value = _probe_wpa_scan(text, selected_ssid)
         elif name == "services":
             value = _probe_services(text)
+        elif name == "net_log":
+            value = _probe_net_log(text)
         else:
             value = _scrub(text)
         out["probes"][name] = value

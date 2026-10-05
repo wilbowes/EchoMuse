@@ -16,7 +16,13 @@ behind a pulsing orange ring.
 """
 
 import hmac
+import ipaddress
 from typing import NamedTuple, Optional
+
+
+# Why a device that has presented its token before was refused without it.
+# Shown on the dashboard, so it says what to do.
+MISSING_CREDENTIAL = "missing its link credential"
 
 
 class Verdict(NamedTuple):
@@ -33,6 +39,7 @@ def decide(
     *,
     presented: Optional[str],
     expected: Optional[str],
+    confirmed: bool,
     secure: bool,
     require_tls: bool,
 ) -> Verdict:
@@ -40,24 +47,30 @@ def decide(
     Whether to admit a device connection.
 
     `presented` is the X-EM-Token header, `expected` the stored token for this
-    device id, `secure` whether the connection arrived over TLS.
+    device id, `confirmed` whether this device has ever presented `expected`,
+    `secure` whether the connection arrived over TLS.
 
     Four rules:
 
     1. A presented token that MISMATCHES a stored one always rejects. This is
        the only case where a credential is actually wrong.
 
-    2. A stored token with NOTHING presented is allowed unless `require_tls`.
-       The DB row is minted before the files reach the device, and rejecting
-       in that window would cut off the shell plane that the credential push
-       itself rides on.
+    2. A stored token with NOTHING presented is allowed unless `require_tls`,
+       or unless the device has presented that token before (`confirmed`). The
+       DB row is minted before the files reach the device, and rejecting in
+       that window would cut off the shell plane that the credential push
+       itself rides on. Once the device has shown it holds the token, the
+       window is over: the device id is public (mDNS carries most of the
+       serial), so admitting a missing token let anyone on the LAN be any
+       Echo. Recovery for a device that really lost its credential is Remove
+       and approve again, via rule 3 (Wil, 2026-09-26).
 
     3. A token presented for a device with nothing on record is IGNORED, not
-       rejected. Rule 2 already admits a connection presenting no token at
-       all, so rejecting an unrecognised one treats it as worse than none
-       while an attacker can simply omit the header: it buys nothing, and it
-       is what made deleting a device a one-way door. Such a device comes back
-       as pending and waits for approval, which is a human decision anyway.
+       rejected. With nothing on record there is nothing to check it against,
+       and a connection presenting no token is admitted as pending too, so
+       rejecting it buys nothing; it is what made deleting a device a one-way
+       door. Such a device comes back as pending and waits for approval, which
+       is a human decision anyway.
 
     4. `require_tls` demands TLS AND a token matching a stored one, full stop.
        A deleted device is still refused there, and re-provisioning over USB
@@ -70,7 +83,43 @@ def decide(
         return Verdict(False,
                        "plain connection" if not secure else "missing a valid token")
 
+    if expected and not presented and confirmed:
+        return Verdict(False, MISSING_CREDENTIAL)
+
     if presented and not expected:
         return Verdict(True, "token presented but none on record", stale_token=True)
 
     return Verdict(True)
+
+
+def _ip(addr: Optional[str]):
+    """An address as an ip_address, with IPv4-mapped IPv6 unwrapped; None if unparseable."""
+    try:
+        a = ipaddress.ip_address((addr or "").split("%")[0])
+    except ValueError:
+        return None
+    return a.ipv4_mapped or a if a.version == 6 else a
+
+
+def follows_control(*, control_peer: Optional[str], control_secure: bool,
+                    peer: Optional[str], secure: bool) -> Optional[str]:
+    """
+    Why a /data or /shell connection must be refused because it does not come
+    from the device's live control connection, or None to admit it.
+
+    Token checks alone cannot stop this for a device that has never presented
+    a token: such a device is admitted without one, so anyone knowing its
+    (public) id could take over its audio on /data, or win the race for
+    /shell while a credential push is waiting on it and receive the token.
+    A real device dials all three from the same address, with the same scheme.
+
+    An unparseable address on either side admits: behind a proxy that hides
+    peers this check has nothing to compare, and refusing would take down
+    every device rather than protect one.
+    """
+    if control_secure and not secure:
+        return "plain connection while the control plane is TLS"
+    a, b = _ip(control_peer), _ip(peer)
+    if a is not None and b is not None and a != b:
+        return f"from {b}, not the control plane's {a}"
+    return None

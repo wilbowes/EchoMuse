@@ -750,10 +750,27 @@ static void note(const char *fmt, ...);
 static void netlog(const char *fmt, ...);
 static int  readint(const char *path);
 
+/* Overridable so trialcheck.c can point them at files and run off-target. */
+#ifndef BOOTDEV
 #define BOOTDEV   "/dev/block/mmcblk0p10"
+#endif
+#ifndef GOODIMG
 #define GOODIMG   "/data/emos/boot-good.img"
+#endif
+#ifndef BOOTSTATE
 #define BOOTSTATE "/data/emos/boot.state"
+#endif
+#ifndef TRIALMARK
+#define TRIALMARK "/data/emos/update.pending"
+#endif
+#ifndef ROLLBACKREC
+#define ROLLBACKREC "/data/emos/rollback.last"
+#endif
 #define MAX_TRIES 3
+/* How long an image on trial has, from kernel start, to be confirmed. A boot
+ * reaches the network in under a minute and the controller confirms seconds
+ * after the firmware registers, so this is three times the worst seen. */
+#define TRIAL_SECS 180
 
 static unsigned pad2048(unsigned n) { return (n + 2047u) / 2048u * 2048u; }
 
@@ -840,8 +857,58 @@ static int reboot_into(const char *mode)
     return -1;
 }
 
+/* The id in a boot image's header, as 40 hex digits. -1 if `path` does not
+ * hold a boot image. */
+static int image_id_hex(const char *path, char hex[41])
+{
+    unsigned char id[20];
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return -1;
+    long len = boot_image_len(fd);
+    ssize_t n = len > 0 ? pread(fd, id, sizeof id, 576) : -1;
+    close(fd);
+    if (n != (ssize_t)sizeof id)
+        return -1;
+    for (int i = 0; i < 20; i++)
+        snprintf(hex + 2 * i, 3, "%02x", id[i]);
+    return 0;
+}
+
+/* Say that a rollback happened, for whoever asks later.
+ *
+ * The restore removes the trial mark and leaves the device looking as it did
+ * before the update, so without this the controller can only infer a rollback
+ * from the image an update left on /data — and a rollback that was not an
+ * update at all leaves nothing. Found on the first forced rollback, C95,
+ * 2026-10-02.
+ *
+ * `from` is the image that failed and `to` the one restored, by header id;
+ * "unknown" when one cannot be read. Equal ids mean the same image was
+ * rewritten: three unconfirmed boots with no update involved. No timestamp:
+ * this runs before the network, and the clock has not been set.
+ *
+ * Called BEFORE the partition is overwritten, since `from` is read off it.
+ * The controller reads the record on connect and removes it
+ * (controller/em_emos_update.py); trialcheck.c pins the format.
+ */
+static void write_rollback_record(int tries)
+{
+    char from[41] = "unknown", to[41] = "unknown", b[160];
+    image_id_hex(BOOTDEV, from);
+    image_id_hex(GOODIMG, to);
+    int k = snprintf(b, sizeof b, "from=%s\nto=%s\ntries=%d\n", from, to, tries);
+    int fd = open(ROLLBACKREC, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0)
+        return;
+    if (write(fd, b, k) != k)
+        note("rollback record short write\n");
+    fsync(fd);
+    close(fd);
+}
+
 /* Write the known-good image back over the boot partition and reboot into it. */
-static void restore_good(void)
+static void restore_good(int tries)
 {
     int in = open(GOODIMG, O_RDONLY);
     if (in < 0)
@@ -850,11 +917,13 @@ static void restore_good(void)
     if (fstat(in, &st) != 0 || st.st_size < 2048) { close(in); return; }
     int out = open(BOOTDEV, O_WRONLY);
     if (out < 0) { close(in); return; }
+    write_rollback_record(tries);
     int rc = copy_range(in, out, st.st_size);
     fsync(out);
     close(out);
     close(in);
     note("rollback restored rc=%d bytes=%ld\n", rc, (long)st.st_size);
+    unlink(TRIALMARK);                       /* the image it named is gone */
     led_stop();                              /* the animator owns the ring */
     led_solid(C_AMBER);                      /* amber: rolling back */
     write_state(0);
@@ -904,6 +973,70 @@ static void promote_good(void)
     else
         unlink(GOODIMG ".new");
     netlog("rollback promoted rc=%d bytes=%ld\n", rc, len);
+}
+
+/* ── An image on trial ───────────────────────────────────────────────────────
+ *
+ * An update over the network (controller/em_emos_update.py) has nobody at the
+ * device, so the two gaps in the rollback above stop being acceptable: it
+ * counts boots, and an image with broken WiFi never reboots to be counted; and
+ * it confirms at network-up, which promotes an image that gets an address and
+ * cannot run the firmware. Either leaves a device that needs a cable.
+ *
+ * So the controller writes TRIALMARK before it flashes, naming the new image
+ * by its header id, and removes it once the device has re-registered on that
+ * image. While the mark names the RUNNING image, this boot is a trial: it is
+ * not confirmed at network-up, and PID 1 reboots at TRIAL_SECS if the mark is
+ * still there. MAX_TRIES of those and the ordinary rollback restores the
+ * known-good image.
+ *
+ * A mark naming any other image is left over — the flash never happened, or a
+ * rollback already undid it — and is removed, so it cannot put a later boot on
+ * trial. Anything unreadable is treated the same way: without a usable mark
+ * this is the rollback above, unchanged.
+ *
+ * The first line is the id as 40 lowercase hex digits. The controller keeps
+ * its own notes on later lines; nothing here reads them.
+ */
+enum { TRIAL_NONE, TRIAL_ACTIVE, TRIAL_STALE };
+
+/* The boot image id of whatever is on the boot partition, as hex. */
+static int boot_image_id_hex(char hex[41])
+{
+    return image_id_hex(BOOTDEV, hex);
+}
+
+static int trial_state(void)
+{
+    char mark[48] = {0}, dev[41];
+    int fd = open(TRIALMARK, O_RDONLY);
+    if (fd < 0)
+        return TRIAL_NONE;
+    ssize_t n = read(fd, mark, sizeof mark - 1);
+    close(fd);
+
+    int ok = n >= 40;
+    for (int i = 0; ok && i < 40; i++)
+        ok = (mark[i] >= '0' && mark[i] <= '9') ||
+             (mark[i] >= 'a' && mark[i] <= 'f');
+    /* Exactly forty: a longer run of hex is some other digest. */
+    if (ok && n > 40 && mark[40] != '\n' && mark[40] != '\r')
+        ok = 0;
+    if (ok && boot_image_id_hex(dev) == 0 && !memcmp(mark, dev, 40))
+        return TRIAL_ACTIVE;
+    unlink(TRIALMARK);
+    return TRIAL_STALE;
+}
+
+/* Set by PID 1 before it forks the services, so the network child inherits
+ * it. Whether the trial is still OPEN is always asked of the file. */
+static int on_trial;
+/* PID 1 only: reboot at TRIAL_SECS if the mark is still there. */
+static int trial_armed;
+
+static int trial_pending(void)
+{
+    return on_trial && access(TRIALMARK, F_OK) == 0;
 }
 
 static char trail[3072];
@@ -1409,6 +1542,10 @@ static void write_resolv_conf(void)
  * ships no rules whatsoever, so this is emOS being stricter than the thing it
  * replaces rather than catching up to it.
  *
+ * A listener the user turns on opens its own port for as long as it runs:
+ * the firmware's Sendspin player does (device/internal/firewall), so an Echo
+ * with nothing enabled is still outbound-only.
+ *
  * Order matters: every ACCEPT is installed before the policy flips to DROP, so
  * the window where everything is dropped never exists. And it runs before
  * ifup, so the interface is never up without the policy.
@@ -1433,6 +1570,14 @@ static void write_resolv_conf(void)
  *
  * IPv6 gets the same treatment; ICMPv6 must be allowed or IPv6 cannot
  * function at all (neighbour discovery rides it).
+ *
+ * Where the IPv6 policy cannot be set, IPv6 is switched OFF. FireOS 6's
+ * system partition ships no ip6tables, so on every emOS device built beside
+ * it the loop's ip6tables half failed and wlan0 took inbound IPv6 unfiltered
+ * (15LE, 2026-09-30; FireOS 5's system has it and C95 was filtered). Nothing
+ * here uses IPv6 — the controller link and mDNS both run over IPv4 — so an
+ * unfilterable stack is removed rather than left open. `default` covers
+ * wlan0, which the WiFi driver may not have created yet.
  */
 static void firewall(void)
 {
@@ -1447,7 +1592,11 @@ static void firewall(void)
         "done; "
         "iptables -I INPUT 4 -p udp --sport 67 --dport 68 -j ACCEPT; "
         "iptables -I INPUT 5 -p icmp -j ACCEPT; "
-        "ip6tables -I INPUT 4 -p icmpv6 -j ACCEPT", NULL };
+        "ip6tables -I INPUT 4 -p icmpv6 -j ACCEPT; "
+        "if ! ip6tables -S INPUT 2>/dev/null | grep -q '^-P INPUT DROP'; then "
+        "  for f in /proc/sys/net/ipv6/conf/*/disable_ipv6; do echo 1 > $f; done; "
+        "  echo 'ipv6 disabled: no ip6tables policy'; "
+        "fi", NULL };
     int st = run_wait(fw);
     netlog("firewall applied status=%d\n", st);
 }
@@ -1869,7 +2018,7 @@ static void net_main(void)
 
     char *dhcp_fos5[] = { "/system/bin/dhcpcd", "-ABK", "-f",
                           "/system/etc/dhcpcd/dhcpcd.conf", "wlan0", NULL };
-    char *dhcp_fos6[] = { "/sbin/udhcpc", "-f", "-i", "wlan0",
+    char *dhcp_fos6[] = { "/sbin/udhcpc", "-B", "-f", "-i", "wlan0",
                           "-s", (char *)UDHCPC_SCRIPT, NULL };
     char **dhcp = vendor ? dhcp_fos6 : dhcp_fos5;
     int st = 0;
@@ -1949,7 +2098,7 @@ static void net_main(void)
                      "ntpd", "-n", "-p", gwip, NULL };
     pid_t wpa = -1;
     pid_t dhc = -1, ntp = -1;
-    int nudges = 0, dry = 0, netup = 0;
+    int nudges = 0, dry = 0, netup = 0, confirmed = 0;
     /* Loop turns spent with a conf in place but no carrier. The ring goes red
      * after WIFI_FAIL_TURNS of them, because at that point the credentials
      * exist and are not working, which is a fault worth showing. Waiting with
@@ -1963,6 +2112,15 @@ static void net_main(void)
             else if (d == wpa)   wpa = -1;
             else if (d == dhc)   dhc = -1;
             else if (d == ntp)   ntp = netup ? spawn(ntpd) : -1;
+        }
+
+        /* The controller removed the mark: the trial passed. Up here because
+         * the branches below `continue`, and this must run every turn. */
+        if (netup && !confirmed && !trial_pending()) {
+            confirmed = 1;
+            netlog("trial: confirmed by the controller\n");
+            write_state(0);
+            promote_good();
         }
 
         /* No credentials yet: hold here rather than failing.
@@ -2045,9 +2203,16 @@ static void net_main(void)
                      * wait on the boot completing may now start. */
                     close(open("/run/net-up", O_WRONLY | O_CREAT, 0644));
                     /* The boot is confirmed: the device is reachable, which
-                     * is the property that makes it fixable without hands. */
-                    write_state(0);
-                    promote_good();
+                     * is the property that makes it fixable without hands.
+                     * An image on trial waits for the controller instead —
+                     * see the end of this loop. */
+                    if (trial_pending())
+                        netlog("trial: network up, waiting for the controller\n");
+                    else {
+                        confirmed = 1;
+                        write_state(0);
+                        promote_good();
+                    }
                     write_resolv_conf();
                     ntp = spawn(ntpd);
                 }
@@ -2389,9 +2554,20 @@ int main(int argc, char **argv)
     note("stage=boot try=%d\n", tries + 1);
     if (tries >= MAX_TRIES && access(GOODIMG, R_OK) == 0) {
         note("rollback: %d unconfirmed boots, restoring known-good\n", tries);
-        restore_good();                 /* reboots; returns only on failure */
+        restore_good(tries);            /* reboots; returns only on failure */
     }
     write_state(tries + 1);
+    /* Is this image on trial? Armed only while a failed trial still has a
+     * rollback to count toward: past MAX_TRIES with nothing to restore, a
+     * device that stays up is worth more than one rebooting every three
+     * minutes for ever. */
+    int ts = trial_state();
+    on_trial = ts == TRIAL_ACTIVE;
+    trial_armed = on_trial && tries < MAX_TRIES;
+    if (ts != TRIAL_NONE)
+        note("trial: %s armed=%d\n",
+             ts == TRIAL_ACTIVE ? "this image" : "stale mark removed",
+             trial_armed);
     int lk = open("/proc/last_kmsg", O_RDONLY);
     if (lk >= 0) {
         /* Rotate, so a device that reboot-loops cannot overwrite the crash
@@ -3174,6 +3350,14 @@ static void supervise(void)
     for (;;) {
         if (want_shutdown)
             do_shutdown();
+
+        if (trial_armed && mono_ms() > TRIAL_SECS * 1000L) {
+            trial_armed = 0;
+            if (trial_pending()) {
+                note("trial: unconfirmed after %ds, rebooting\n", TRIAL_SECS);
+                do_shutdown();
+            }
+        }
 
         /* Reap EVERYTHING, not just our own services: orphans reparent to PID
          * 1 and nobody else will ever collect them. */

@@ -45,13 +45,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections import deque
+from urllib.parse import urlsplit
 
 import em_eq
 import em_limiter
 import em_mbc
+import em_tasks
 
-log = logging.getLogger("player")
+log = logging.getLogger("echomuse.player")
+# Under `echomuse.` on purpose (#378). It was the bare name "player", which
+# is outside the hierarchy, so `echomuse=DEBUG` and any per-logger override
+# could never reach the loudest logger in the tree. It behaved correctly
+# only by accident: with DEBUG unset the root level is INFO and a logger
+# with no level of its own inherits that.
 
 SPEAKER_RATE  = 48000
 SPEAKER_BYTES = 4096                     # bytes per 0x02 period (mono S16)
@@ -138,6 +146,33 @@ SEEK_STALL_S    = 5.0
 # which is the point of catching it here.
 SOURCE_STALL_MS = 500.0
 
+# ...but only when the source is actually BEHIND. Music Assistant hands an HA
+# player a flow stream at 1.03x real time after a 3s burst, so once the burst
+# is spent every read waits ~1s for ~1s of audio. That is a source keeping
+# pace, and warning on it logged ~60 false stalls a minute on every Music
+# Assistant stream (2026-09-27), which pointed an investigation at Apple
+# Music's rate limiter for nothing. A slow read is a stall when the feed is
+# less than this far ahead of real time when it returns.
+SOURCE_BEHIND_S = 1.0
+
+# Music Assistant's queue flow URL: /flow/<session>/<player>/<item>/<file>.
+# A flow is a live stream and cannot seek, so resuming one by seeking waited
+# out SEEK_STALL_S of silence before rejoining the live edge — 7.2s from
+# "resume the music" to sound, measured 2026-09-27. Known up front instead.
+_MA_FLOW_PATH = re.compile(r"^/flow/[^/]+/[^/]+/[^/]+/[^/]+$")
+
+
+def known_unseekable(url: str) -> bool:
+    """True for a URL we know cannot seek (a Music Assistant flow)."""
+    try:
+        return bool(_MA_FLOW_PATH.match(urlsplit(url).path))
+    except ValueError:
+        return False
+
+# How long stopping a feed waits for its EOS to be sent before releasing the
+# player (see the feed's finally). The send itself is never abandoned.
+EOS_WAIT_S = 2.0
+
 # How many ffmpeg stderr lines to keep for the failure log. -loglevel error
 # means anything that IS on stderr is meaningful; five lines covers every
 # ffmpeg diagnostic this player has needed to explain a dead decoder.
@@ -222,47 +257,51 @@ def reported_state(device_id: str) -> str:
 
 async def play(device_id: str, url: str) -> None:
     s = _session(device_id)
-    if s.owned_by_turn:
-        # The common collision: "play some jazz" runs the intent BEFORE Home
-        # Assistant generates the spoken reply, so this can land while the TTS
-        # is still coming and put music on the same 0x02 plane as the response.
-        s.pending = ("play", url)
-        await s.push_intent(PLAYING)
-        return
-    await s.play(url)
+    async with s._command_lock:
+        if s.owned_by_turn:
+            # The common collision: "play some jazz" runs the intent BEFORE Home
+            # Assistant generates the spoken reply, so this can land while the TTS
+            # is still coming and put music on the same 0x02 plane as the response.
+            s.pending = ("play", url)
+            await s.push_intent(PLAYING)
+            return
+        await s.play(url)
 
 
 async def pause(device_id: str) -> None:
     """Pause from the USER (HA / Music Assistant / the media_player entity)."""
     s = _session(device_id)
-    if s.owned_by_turn:
-        # Already paused on the wire by interrupt(); record that the user now
-        # OWNS the paused state so the turn's end does not undo it.
-        s.pending = ("pause", None)
-        # Push it: until now HA was told PLAYING (see reported_state), because
-        # our own interrupt-pause must not read as the user's. Now that they
-        # have asked, the entity should say so without waiting for turn end.
-        await s.push_intent(PAUSED)
-        return
-    await s.pause()
+    async with s._command_lock:
+        if s.owned_by_turn:
+            # Already paused on the wire by interrupt(); record that the user now
+            # OWNS the paused state so the turn's end does not undo it.
+            s.pending = ("pause", None)
+            # Push it: until now HA was told PLAYING (see reported_state), because
+            # our own interrupt-pause must not read as the user's. Now that they
+            # have asked, the entity should say so without waiting for turn end.
+            await s.push_intent(PAUSED)
+            return
+        await s.pause()
 
 
 async def resume(device_id: str) -> None:
     s = _session(device_id)
-    if s.owned_by_turn:
-        s.pending = ("resume", None)
-        await s.push_intent(PLAYING)
-        return
-    await s.resume()
+    async with s._command_lock:
+        if s.owned_by_turn:
+            s.pending = ("resume", None)
+            await s.push_intent(PLAYING)
+            return
+        await s.resume()
 
 
 async def stop(device_id: str) -> None:
     s = _session(device_id)
-    if s.owned_by_turn:
-        s.pending = ("stop", None)
-        await s.push_intent(IDLE)
-        return
-    await s.stop()
+    async with s._command_lock:
+        if s.owned_by_turn:
+            s.pending = ("stop", None)
+            await s.push_intent(IDLE)
+            return
+        await s.stop()
 
 
 async def interrupt(device_id: str) -> None:
@@ -406,6 +445,14 @@ class MediaSession:
         self.device_id = device_id
         self.state = IDLE
         self.url: str | None = None
+        # Serialises the user's commands (play/pause/resume/stop below). Each
+        # arrives as its own task and yields partway — play() awaits stop(),
+        # which sends a flush before tearing the feed down — so without it a
+        # pause landing in that window was lost and the new track played.
+        # asyncio.Lock wakes waiters in order, so commands apply as sent.
+        # interrupt()/resume_interrupted() stay outside it: their bookkeeping
+        # is synchronous, and a wake must not queue behind a slow flush.
+        self._command_lock = asyncio.Lock()
         # A voice turn or announcement owns the speaker right now, so
         # playback commands are recorded rather than put on the wire.
         self.owned_by_turn = False
@@ -502,7 +549,7 @@ class MediaSession:
         self.url = url
         self._pos = 0.0
         # New URL, new answer — a track file after a flow stream is seekable.
-        self._seekable = True
+        self._seekable = not known_unseekable(url)
         self._start_feed()
 
     async def pause(self) -> None:
@@ -644,16 +691,21 @@ class MediaSession:
         # head (measured against a listening test on 2026-08-19: no audible
         # difference reported, because none of the changes were reaching the
         # audio at all).
-        eq = em_eq.StreamingEQ(SPEAKER_RATE, device.eq_bands, device.eq_loudness,
-                               limiter=em_limiter.Limiter(
-                                   SPEAKER_RATE,
-                                   threshold_db=device.limiter_threshold,
-                                   release_ms=device.limiter_release,
-                                   enabled=device.limiter_enabled),
-                               guard=em_mbc.BassGuard(
-                                   SPEAKER_RATE,
-                                   bass_guard_db=device.bass_guard_db,
-                                   enabled=device.bass_guard_enabled))
+        #
+        # A device that runs the chain itself gets the music untouched.
+        if device.output_chain_on_device:
+            eq = em_eq.Passthrough()
+        else:
+            eq = em_eq.StreamingEQ(SPEAKER_RATE, device.eq_bands, device.eq_loudness,
+                                   limiter=em_limiter.Limiter(
+                                       SPEAKER_RATE,
+                                       threshold_db=device.limiter_threshold,
+                                       release_ms=device.limiter_release,
+                                       enabled=device.limiter_enabled),
+                                   guard=em_mbc.BassGuard(
+                                       SPEAKER_RATE,
+                                       bass_guard_db=device.bass_guard_db,
+                                       enabled=device.bass_guard_enabled))
         start_pos = self._pos
         proc = None
         seg_start = loop.time()
@@ -775,11 +827,15 @@ class MediaSession:
                             t_first_pcm = loop.time()
                         if _read_ms > src_max_ms:
                             src_max_ms = _read_ms
-                        if _read_ms > SOURCE_STALL_MS:
+                        _src_ahead = (sent / BYTES_PER_SEC
+                                      - (loop.time() - seg_start))
+                        if (_read_ms > SOURCE_STALL_MS
+                                and _src_ahead < SOURCE_BEHIND_S):
                             src_stalls += 1
                             log.warning(
                                 f"[{self.device_id}] Media SOURCE stall: "
-                                f"{_read_ms:.0f}ms with no audio from the decoder "
+                                f"{_read_ms:.0f}ms with no audio from the decoder, "
+                                f"{max(_src_ahead, 0.0):.1f}s ahead of real time "
                                 f"({sent / BYTES_PER_SEC:.1f}s sent) — upstream, "
                                 f"not the device link")
                 except asyncio.IncompleteReadError as e:
@@ -858,15 +914,32 @@ class MediaSession:
                 log.info(
                     f"[{self.device_id}] Media feed done: "
                     f"{sent // SPEAKER_BYTES} periods, source max read "
-                    f"{src_max_ms:.0f}ms, {src_stalls} stall(s) over "
-                    f"{SOURCE_STALL_MS:.0f}ms, "
+                    f"{src_max_ms:.0f}ms, {src_stalls} stall(s) behind "
+                    f"real time, "
                     f"{em_eq.describe_activity(eq.limiter, eq.guard)}")
             if not eos_sent:
                 # The flush discard stays armed until it sees this stream's
                 # EOS — same contract as barge-in aborting stream_speaker.
+                #
+                # Bounded wait, never a dropped EOS. stop()/pause() await this
+                # finally while holding the command lock, and a device that
+                # lost power mid-stream leaves its data socket half-open: the
+                # send never returns, every later play/pause queues behind
+                # the lock, and Home Assistant shows `playing` until the
+                # add-on restarts (observed 2026-10-04 after a power cut).
+                # Past EOS_WAIT_S the send carries on in the background —
+                # its frame is already written ahead of the next stream's on
+                # a live socket, so a slow link still gets it in order —
+                # and the lock is released.
+                eos = em_tasks.spawn(device.send_data(bytes([eos_type])),
+                                     name=f"eos-{self.device_id}")
                 try:
-                    await asyncio.shield(
-                        device.send_data(bytes([eos_type])))
+                    await asyncio.wait_for(asyncio.shield(eos), EOS_WAIT_S)
+                except asyncio.TimeoutError:
+                    log.warning(
+                        f"[{self.device_id}] Media EOS not delivered within "
+                        f"{EOS_WAIT_S:.0f}s — link stalled or dead; "
+                        f"releasing the player and leaving it to finish")
                 except BaseException:
                     pass
             if proc is not None and proc.returncode is None:

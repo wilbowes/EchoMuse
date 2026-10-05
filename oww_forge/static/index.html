@@ -3,14 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>EchoMuse — Wake Word Forge</title>
+<title>Wake Word Forge · EchoMuse</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet">
 <script>
-  /* Applied before first paint, deliberately: the theme cannot be set from
-     the script at the end of the body without a dark-mode user seeing a
-     full flash of the light page on every load. Defaults to the OS
-     preference until a choice is made; the choice then wins permanently.
+  /* Applied before first paint: set from the script at the end of the body,
+     a dark-mode user would see a full flash of the light page on every load.
      Same key as the dashboard ('em-theme'), so one pick covers both. */
   (function () {
     try {
@@ -24,382 +22,423 @@
   })();
 </script>
 <style>
-  /* EchoMuse dashboard design language: warm greige appliance chassis,
-     gradient key-cap buttons, DM Sans/Mono, LCD console panels.
-
-     The token names and values are the DASHBOARD's, copied rather than
-     invented, so the two surfaces cannot drift into two slightly different
-     warm greys. Dark is not an inversion: it is the same hue family taken
-     down past the LCD, and the inset dark regions (the log console) stay
-     dark in both themes because they read as a lit panel set into the
-     surface. See controller/CLAUDE.md, "Dashboard styling and theming". */
+  /* Tokens are the DASHBOARD's (controller/static/dashboard.html), copied
+     rather than invented, so the two surfaces cannot drift into two slightly
+     different warm greys. Those values meet WCAG 2.2 AA in both themes and
+     controller/tests/test_contrast.py proves it; tests/test_forge_ui.py holds
+     these equal to them. The layout is the provisioning wizard's: a step
+     rail, a main panel with a footer of actions, the log as a flyout. */
   :root, :root[data-theme="light"] {
-    --raised:    #e8e4de;
-    --card:      #e0dcd4;
-    --surface:   #d8d4cc;
-    --sunken:    #d0ccc4;
-    --bg:        #ccc8c0;
-    --chassis:   #b8b4ac;
-
-    --border:      #b8b4ac;
-    --border-soft: #c0bdb6;
-    --border-hard: #b0aca4;
-
-    --text:   #1e1c18;
-    --text2:  #4a4844;
-    --muted:  #8a8680;
-    --faint:  #a8a49c;
-
-    --ok:     #286040;
-    --warn:   #c0601a;
-    --error:  #9a3020;
-
-    --accent:      #405878;
-    --accent-hi:   #6080a8;
-    --accent-deep: #304860;
-    --accent-tint: #dde8f4;
-    --on-accent:   #dde8f0;
-
-    --lcd-bg:    #1e2219;
-    --lcd-green: #9aba80;
-    --lcd-amber: #c8a040;
-    --lcd-text:  #c8d4b0;
-    --lcd-dim:   #7a9a68;
-    --lcd-line:  #1a1c18;
-
-    --key-top:    #d8d4cc;
-    --key-bottom: #c0bdb6;
-    --key-edge:   #a8a49c;
-    --key-face:   #2a2822;
-    --field:      #f0ece4;
-
-    --shadow-card: 0 2px 6px rgba(0,0,0,0.08), 0 1px 0 rgba(255,255,255,0.6) inset;
-    --shadow-key:  0 2px 4px rgba(0,0,0,0.2), 0 1px 0 rgba(255,255,255,0.15) inset;
-    --shadow-inset: inset 0 1px 3px rgba(0,0,0,0.08);
-    --hairline:    rgba(0,0,0,0.07);
-    --tint-ok:     rgba(40,96,64,0.12);
-    --tint-ok-line: rgba(40,96,64,0.3);
-    --tint-err:    rgba(154,48,32,0.09);
-    --tint-err-line: rgba(154,48,32,0.25);
-    --tint-accent: rgba(64,88,120,0.1);
-    --tint-accent-line: rgba(64,88,120,0.25);
+    --raised:#e8e4de; --card:#e0dcd4; --surface:#d8d4cc; --sunken:#d0ccc4; --bg:#ccc8c0;
+    --border:#b8b4ac; --border-soft:#c0bdb6; --border-hard:#b0aca4; --field-line:#777268;
+    --text:#1e1c18; --text2:#4a4844; --muted:#575450; --faint:#767269;
+    --ok:#285e3f; --warn:#854212; --error:#973020; --error-deep:#782020; --on-error:#f0d8d8;
+    --accent:#3e5675; --accent-hi:#4d698c; --accent-deep:#304860; --accent-lit:#8ab0d0;
+    --accent-tint:#dde8f4; --accent-line:#ccd8ec;
+    --lcd-bg:#1e2219; --lcd-green:#9aba80; --lcd-amber:#c8a141; --lcd-dim:#95ae86;
+    --lcd-line:#1a1c18; --lcd-face:#2a2e28; --lcd-faint:#3a4a30;
+    --shadow-card:0 4px 16px rgba(0,0,0,0.12), 0 1px 0 rgba(255,255,255,0.7) inset;
+    --shadow-inset:inset 0 2px 4px rgba(0,0,0,0.5);
+    --sheen:rgba(255,255,255,0.4); --hairline:rgba(0,0,0,0.06); --track:rgba(0,0,0,0.10);
   }
-
   :root[data-theme="dark"] {
-    --raised:    #2b3024;
-    --card:      #22261c;
-    --surface:   #1b1e16;
-    --sunken:    #171a12;
-    --bg:        #14160f;
-    --chassis:   #0e100a;
-
-    --border:      #343a2b;
-    --border-soft: #2c3124;
-    --border-hard: #414736;
-
-    --text:   #ddd9d1;
-    --text2:  #b2ada4;
-    --muted:  #83807a;
-    --faint:  #6d6a64;
-
-    --ok:     #6fa877;
-    --warn:   #d08a3a;
-    --error:  #cf7a68;
-
-    --accent:      #7397bd;
-    --accent-hi:   #8fb0d0;
-    --accent-deep: #4a6a8c;
-    --accent-tint: #1f2c3a;
-    --on-accent:   #101820;
-
-    --lcd-bg:    #12150e;
-    --lcd-green: #9aba80;
-    --lcd-amber: #c8a040;
-    --lcd-text:  #c8d4b0;
-    --lcd-dim:   #7a9a68;
-    --lcd-line:  #0c0e08;
-
-    --key-top:    #2f3427;
-    --key-bottom: #23271c;
-    --key-edge:   #414736;
-    --key-face:   #ddd9d1;
-    --field:      #11130c;
-
-    --shadow-card: 0 4px 16px rgba(0,0,0,0.45), 0 1px 0 rgba(255,255,255,0.05) inset;
-    --shadow-key:  0 2px 4px rgba(0,0,0,0.5), 0 1px 0 rgba(255,255,255,0.05) inset;
-    --shadow-inset: inset 0 1px 3px rgba(0,0,0,0.5);
-    --hairline:    rgba(255,255,255,0.07);
-    --tint-ok:     rgba(111,168,119,0.14);
-    --tint-ok-line: rgba(111,168,119,0.35);
-    --tint-err:    rgba(207,122,104,0.13);
-    --tint-err-line: rgba(207,122,104,0.3);
-    --tint-accent: rgba(115,151,189,0.14);
-    --tint-accent-line: rgba(115,151,189,0.3);
+    --raised:#2b3024; --card:#22261c; --surface:#1b1e16; --sunken:#171a12; --bg:#14160f;
+    --border:#343a2b; --border-soft:#2c3124; --border-hard:#414736; --field-line:#7f8b69;
+    --text:#ddd9d1; --text2:#b2ada4; --muted:#aaa8a4; --faint:#8a867f;
+    --ok:#82b489; --warn:#d79b56; --error:#da978a; --error-deep:#c16a5a; --on-error:#2a1512;
+    --accent:#8caac9; --accent-hi:#8fb0d0; --accent-deep:#4a6a8c; --accent-lit:#a8c8e4;
+    --accent-tint:#1f2c3a; --accent-line:#2f4054;
+    --lcd-bg:#12150e; --lcd-green:#9aba80; --lcd-amber:#c8a141; --lcd-dim:#95ae86;
+    --lcd-line:#0c0e08; --lcd-face:#1e2219; --lcd-faint:#3a4a30;
+    --shadow-card:0 4px 16px rgba(0,0,0,0.45), 0 1px 0 rgba(255,255,255,0.05) inset;
+    --shadow-inset:inset 0 2px 4px rgba(0,0,0,0.6);
+    --sheen:rgba(255,255,255,0.05); --hairline:rgba(255,255,255,0.07); --track:rgba(0,0,0,0.35);
   }
-  * { box-sizing: border-box; margin: 0; }
-  html, body { min-height: 100%; }
-  body {
-    background: linear-gradient(160deg, var(--bg) 0%, var(--chassis) 100%);
-    color: var(--text); font: 400 14px/1.5 'DM Sans', sans-serif;
+  /* Dark in both themes, so text on it takes the dark theme's values. */
+  .em-console { --text:#ddd9d1; --text2:#b2ada4; --muted:#aaa8a4; --faint:#8a867f;
+    --ok:#82b489; --warn:#d79b56; --error:#da978a; --accent:#8caac9; }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; }
+  body { background: var(--bg); color: var(--text); font: 400 14px/1.5 'DM Sans', system-ui, sans-serif;
+         padding: 16px; }
+  .mono { font-family: 'DM Mono', ui-monospace, monospace; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  h2, h3, p { margin: 0; }
+  a { color: var(--accent); text-underline-offset: 2px; }
+
+  /* Buttons: the dashboard's .em-pill and its variants. */
+  .em-pill { display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+    min-height: 32px; background: linear-gradient(180deg, var(--surface), var(--border-soft));
+    color: var(--text); border: 1px solid var(--faint); border-radius: 20px;
+    font: 500 12px 'DM Sans', sans-serif; padding: 7px 20px; cursor: pointer; white-space: nowrap;
+    text-decoration: none; transition: all 0.1s;
+    box-shadow: 0 1px 0 rgba(255,255,255,0.15) inset, 0 2px 4px rgba(0,0,0,0.2); }
+  .em-pill--small { font-size: 12px; padding: 5px 14px; min-height: 28px; }
+  .em-pill--big { font-size: 14px; font-weight: 600; padding: 10px 26px; }
+  .em-pill--accent { background: linear-gradient(180deg, var(--accent-hi), var(--accent));
+    color: var(--accent-tint); border-color: var(--accent-deep); }
+  .em-pill--danger { background: linear-gradient(180deg, var(--error), var(--error-deep));
+    color: var(--on-error); border-color: var(--error-deep); }
+  .em-pill:active:not(:disabled) { transform: translateY(1px); }
+  .em-pill:disabled { background: linear-gradient(180deg, var(--sunken), var(--border));
+    color: var(--muted); border-color: var(--border-hard); cursor: not-allowed; box-shadow: none; }
+  .link { background: none; border: 0; padding: 2px 0; font: inherit; color: var(--accent); cursor: pointer;
+    text-decoration: underline; text-underline-offset: 2px; }
+  .link.quiet { color: var(--muted); }
+  .em-label { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.15em; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* ── Frame: rail + main, the wizard's shape at full page height ─────── */
+  .app { max-width: 1120px; margin: 0 auto; height: calc(100dvh - 32px); min-height: 560px;
+    display: grid; grid-template-columns: 240px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr);
+    background: linear-gradient(170deg, var(--raised), var(--card)); border: 1px solid var(--border);
+    border-radius: 14px; box-shadow: var(--shadow-card); overflow: hidden; position: relative; }
+  .app > * { min-width: 0; }
+
+  .rail { border-right: 1px solid var(--border); display: flex;
+    flex-direction: column; min-height: 0; overflow-y: auto; padding: 18px 0 12px; }
+  .brand { padding: 0 18px 16px; display: flex; align-items: flex-start; gap: 8px; }
+  .brand h1 { font-size: 15px; font-weight: 600; margin: 0; line-height: 1.3; }
+  .brand h1 span { display: block; font-family: 'DM Mono', monospace; font-size: 10px; font-weight: 400;
+    color: var(--muted); letter-spacing: .06em; margin-top: 2px; }
+  .brand .theme { margin-left: auto; }
+  .rgroup { padding: 0 18px; margin: 14px 0 6px; }
+  .rail ul { list-style: none; margin: 0; padding: 0; }
+  .ritem { display: flex; gap: 10px; align-items: center; padding: 7px 18px; min-height: 36px;
+    border-left: 2px solid transparent; color: var(--text2); text-decoration: none; font-size: 13px; }
+  .ritem:hover { background: var(--hairline); color: var(--text); }
+  .ritem[aria-current="page"] { background: var(--hairline); border-left-color: var(--accent);
+    color: var(--text); font-weight: 600; }
+  .ritem .nm { overflow-wrap: anywhere; min-width: 0; }
+  .ritem small { display: block; font-size: 11px; font-weight: 400; color: var(--muted); }
+  .ritem .ic { width: 18px; height: 18px; border-radius: 50%; flex: none; display: grid; place-items: center;
+    border: 1.5px solid var(--faint); font-size: 10px; font-family: 'DM Mono', monospace; }
+  .ic.ok { background: var(--ok); border-color: var(--ok); color: var(--raised); }
+  .ic.run { border-color: var(--accent); }
+  .ic.run::after { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--accent);
+    animation: pulse 1.2s ease-in-out infinite; }
+  .ic.bad { background: var(--warn); border-color: var(--warn); color: var(--raised); }
+  .ic.new { border-style: dashed; color: var(--text2); }
+  .railfoot { margin-top: auto; padding: 12px 12px 0; display: grid; gap: 8px; }
+  .machine { font-family: 'DM Mono', monospace; font-size: 11px; color: var(--muted); padding: 0 6px;
+    display: flex; gap: 7px; align-items: center; }
+  .machine i { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); flex: none; }
+  .machine.gpu i { background: var(--ok); }
+  .logbtn { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px;
+    border: 1px solid transparent; background: none; font: 11px 'DM Mono', monospace; letter-spacing: .04em;
+    color: var(--text2); cursor: pointer; text-align: left; min-height: 32px; }
+  .logbtn:hover, .logbtn[aria-expanded="true"] { color: var(--text); border-color: var(--border); background: var(--hairline); }
+  .logbtn .n { margin-left: auto; color: var(--muted); }
+  .iconbtn { width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--border-hard);
+    background: var(--surface); color: var(--text2); cursor: pointer; display: grid; place-items: center;
+    font: 13px 'DM Mono', monospace; padding: 0; box-shadow: 0 1px 0 var(--sheen) inset; }
+  .iconbtn:hover { background: var(--raised); color: var(--text); }
+
+  /* ── Main panel ───────────────────────────────────────────────────────── */
+  .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .mhead { padding: 22px 32px 0; }
+  .mhead h2 { font-size: 24px; font-weight: 600; letter-spacing: -.01em; margin: 4px 0 6px;
+    overflow-wrap: anywhere; outline: none; }
+  .titlerow { display: flex; align-items: center; gap: 10px 14px; flex-wrap: wrap; }
+  .titlerow .tools { display: flex; gap: 6px; margin-left: auto; }
+  .phrases { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 4px; }
+  .say { display: inline-flex; align-items: center; gap: 6px; font: 13px 'DM Sans', sans-serif;
+    min-height: 28px; padding: 3px 12px 3px 10px; border-radius: 14px; border: 1px solid var(--field-line);
+    background: var(--hairline); color: var(--text2); cursor: pointer; }
+  .say:hover { color: var(--text); border-color: var(--accent); }
+  .say[aria-busy="true"] { border-color: var(--accent); color: var(--text); }
+  .steps { list-style: none; display: flex; gap: 4px; margin: 16px 0 0; padding: 0;
+    border-bottom: 1px solid var(--border); overflow-x: auto; }
+  .steps a { display: flex; align-items: center; gap: 8px; padding: 8px 14px 10px; font-size: 13px;
+    color: var(--muted); text-decoration: none; border-bottom: 2px solid transparent; margin-bottom: -1px;
+    white-space: nowrap; min-height: 36px; }
+  .steps a:hover { color: var(--text); }
+  .steps a[aria-current="step"] { color: var(--text); font-weight: 600; border-bottom-color: var(--accent); }
+  .steps .ic { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center;
+    border: 1.5px solid var(--faint); font: 10px 'DM Mono', monospace; }
+  .steps a[aria-current="step"] .ic:not(.ok) { border-color: var(--accent); background: var(--accent); color: var(--accent-tint); }
+
+  .mbody { flex: 1; min-height: 0; overflow-y: auto; padding: 20px 32px 24px; }
+  .mbody > * + * { margin-top: 14px; }
+  .lead { font-size: 15px; color: var(--text2); line-height: 1.55; max-width: 62ch; }
+  .mbody p { color: var(--text2); line-height: 1.55; max-width: 62ch; }
+  .mbody h3 { font-size: 15px; font-weight: 600; margin-top: 22px; }
+  .foot { border-top: 1px solid var(--border); padding: 12px 32px; display: flex; flex-wrap: wrap;
+    align-items: center; gap: 10px 12px; min-height: 58px; }
+  .foot .sp { flex: 1; }
+
+  /* ── Content blocks, as the wizard draws them ─────────────────────────── */
+  .checklist { list-style: none; padding: 0; margin-bottom: 0; margin-left: 0; margin-right: 0; display: grid; gap: 12px; max-width: 640px; }
+  .checklist li { display: grid; grid-template-columns: 24px 1fr; gap: 12px; align-items: start; line-height: 1.45; }
+  .checklist .ic { width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center;
+    font: 11px 'DM Mono', monospace; background: var(--hairline); border: 1px solid var(--border-hard); color: var(--text2); }
+  .checklist .ic.ok { background: var(--ok); border-color: var(--ok); color: var(--raised); }
+  .checklist .ic.run { border-color: var(--accent); background: none; }
+  .checklist small { display: block; color: var(--muted); font-size: 12px; margin-top: 1px; }
+  .checklist .pend { color: var(--muted); }
+  .checklist .row { margin-top: 8px; }
+  .status { display: flex; gap: 10px; align-items: center; padding: 10px 14px; border-radius: 8px; max-width: 640px;
+    background: color-mix(in srgb, var(--accent) 12%, var(--hairline));
+    border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--border)); font-size: 13px; color: var(--text); }
+  .status > i { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex: none;
+    animation: pulse 1.4s ease-in-out infinite; }
+  .status.ok { background: color-mix(in srgb, var(--ok) 12%, var(--hairline));
+    border-color: color-mix(in srgb, var(--ok) 30%, var(--border)); }
+  .status.ok > i, .status.bad > i, .status.still > i { animation: none; }
+  .status.ok > i { background: var(--ok); }
+  .status.bad { background: color-mix(in srgb, var(--error) 10%, var(--hairline));
+    border-color: color-mix(in srgb, var(--error) 35%, var(--border)); }
+  .status.bad > i { background: var(--error); }
+  .status .sp { flex: 1; }
+  .status .link, .warnbox a { color: var(--text); }
+  .warnbox { display: grid; grid-template-columns: 22px 1fr; gap: 10px; padding: 12px 14px; border-radius: 8px;
+    font-size: 13px; line-height: 1.5; max-width: 640px;
+    background: color-mix(in srgb, var(--warn) 10%, var(--hairline));
+    border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--border)); color: var(--text); }
+  .warnbox .ic { color: var(--warn); font-weight: 600; font-size: 16px; line-height: 1.2; }
+  .bar { height: 6px; background: var(--sunken); border-radius: 3px; overflow: hidden; margin: 6px 0 3px; max-width: 420px;
+    box-shadow: inset 0 0 0 1px var(--track); }
+  .bar i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .4s linear; }
+  .barlabel { font: 11px 'DM Mono', monospace; color: var(--muted); display: flex; gap: 12px; max-width: 420px; }
+  .barlabel .sp { flex: 1; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
+  .card { border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; background: var(--hairline);
+    display: grid; gap: 10px; align-content: start; }
+  .card h3 { margin: 0; font-size: 15px; }
+  .card p { font-size: 13px; }
+  .card + .card { margin-top: 0; }
+  #verdict > * + *, #impStatus > * + * { margin-top: 10px; }
+
+  /* Fields */
+  .field { display: grid; gap: 6px; max-width: 460px; }
+  .field > label, .field > .lbl { font-size: 13px; color: var(--text2); font-weight: 500; }
+  .field .hint { font-size: 12px; color: var(--muted); line-height: 1.45; }
+  input[type=text], input[type=number], select, textarea {
+    font: inherit; font-size: 14px; color: var(--text); background: var(--raised);
+    border: 1px solid var(--field-line); border-radius: 8px; padding: 8px 12px; width: 100%; min-height: 36px; }
+  input.big { font-size: 17px; padding: 10px 14px; }
+  ::placeholder { color: var(--muted); opacity: 1; }
+  textarea { font: 12px/1.5 'DM Mono', monospace; min-height: 90px; resize: vertical; }
+  select { cursor: pointer; }
+  input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .fields2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; max-width: 460px; }
+  .checks { display: flex; flex-wrap: wrap; gap: 8px 18px; }
+  .checks label { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; cursor: pointer; min-height: 28px; }
+  .checks input { width: 18px; height: 18px; accent-color: var(--accent); }
+  .filebtn { position: relative; }
+  .filebtn input { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; }
+  .filebtn.is-disabled { background: linear-gradient(180deg, var(--sunken), var(--border)); color: var(--muted);
+    border-color: var(--border-hard); box-shadow: none; }
+  .filebtn.is-disabled input { cursor: not-allowed; }
+  .filebtn:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 20px; }
+
+  details.more { border-top: 1px solid var(--border-soft); padding-top: 10px; max-width: 640px; }
+  details.more summary { cursor: pointer; color: var(--accent); font-size: 13px; min-height: 24px; }
+  details.more[open] summary { margin-bottom: 12px; }
+  details.more > * + * { margin-top: 12px; }
+  .kv { display: grid; grid-template-columns: 90px 1fr; gap: 4px 12px; font-size: 13px; max-width: 640px; }
+  .kv dt { color: var(--muted); }
+  .kv dd { margin: 0; color: var(--text2); overflow-wrap: anywhere; }
+  code { font: 12px 'DM Mono', monospace; background: var(--hairline); border: 1px solid var(--border-soft);
+    border-radius: 4px; padding: 0 4px; }
+
+  /* The try-it meter: the score against the line the Echo wakes at. */
+  .meter { position: relative; height: 10px; border-radius: 5px; background: var(--sunken); max-width: 420px;
+    box-shadow: inset 0 0 0 1px var(--track); margin: 12px 0 4px; }
+  .meter i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 5px; background: var(--accent); }
+  .meter.ok i { background: var(--ok); }
+  .meter b { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--text); left: 50%; }
+  .meterlabel { font: 11px 'DM Mono', monospace; color: var(--muted); display: flex; justify-content: space-between; max-width: 420px; }
+  .rec { width: 96px; height: 96px; border-radius: 50%; font-size: 14px; font-weight: 600; flex-direction: column; gap: 2px; }
+  .rec[aria-pressed="true"] { background: linear-gradient(180deg, var(--error), var(--error-deep));
+    color: var(--on-error); border-color: var(--error-deep); }
+  .rec small { font-size: 11px; font-weight: 400; }
+
+  /* Log flyout, over the main panel as the wizard's is. */
+  .flyout { position: absolute; top: 0; bottom: 0; left: 240px; right: 0; z-index: 2; display: flex;
+    flex-direction: column; gap: 12px; padding: 20px 24px;
+    background: linear-gradient(170deg, var(--raised), var(--card)); border-left: 1px solid var(--border);
+    box-shadow: -8px 0 24px rgba(0,0,0,.12); }
+  .flyout[hidden] { display: none; }
+  .flyout header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .flyout header h2 { margin: 0; font-size: 16px; font-weight: 600; }
+  .flyout header .sp { flex: 1; }
+  .em-console { background: linear-gradient(160deg, var(--lcd-face), var(--lcd-bg)); border: 1px solid var(--lcd-line);
+    border-radius: 8px; box-shadow: var(--shadow-inset); color: var(--lcd-green);
+    font: 11px/1.7 'DM Mono', monospace; padding: 10px 14px; overflow-y: auto; flex: 1; margin: 0; white-space: pre-wrap; }
+
+  /* Confirm dialog and error notice */
+  dialog { border: 1px solid var(--border); border-radius: 12px; padding: 22px 24px; max-width: 440px;
+    background: linear-gradient(170deg, var(--raised), var(--card)); color: var(--text); box-shadow: var(--shadow-card); }
+  dialog::backdrop { background: rgba(0,0,0,.4); }
+  dialog h2 { font-size: 17px; margin-bottom: 8px; }
+  dialog p { color: var(--text2); line-height: 1.5; }
+  dialog .row { justify-content: flex-end; margin-top: 18px; }
+  .notice { margin: 0 32px; margin-top: 12px; }
+  .notice:empty { display: none; }
+
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+  @media (prefers-reduced-motion: reduce) {
+    .ic.run::after, .status > i { animation: none; }
+    .bar i, .em-pill { transition: none; }
   }
-  .mono { font-family: 'DM Mono', monospace; }
-  .microlabel {
-    font-family: 'DM Mono', monospace; font-size: 9px; color: var(--muted);
-    text-transform: uppercase; letter-spacing: 0.15em; margin-bottom: 10px;
-  }
-  header {
-    display: flex; align-items: center; gap: 14px; padding: 16px 28px;
-    border-bottom: 1px solid var(--border);
-    background: linear-gradient(180deg, var(--surface), var(--bg));
-  }
-  header h1 { font-size: 17px; font-weight: 600; letter-spacing: 0.02em; }
-  header .sub { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--muted);
-                text-transform: uppercase; letter-spacing: 0.12em; margin-top: 2px; }
-  .pill {
-    margin-left: auto; display: inline-flex; align-items: center; gap: 7px;
-    font-family: 'DM Mono', monospace; font-size: 10px; letter-spacing: 0.06em;
-    color: var(--text2); padding: 5px 12px; border-radius: 14px;
-    border: 1px solid var(--border); background: linear-gradient(180deg,var(--raised),var(--sunken));
-  }
-  .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
-  .pill.on .dot { background: var(--ok); box-shadow: 0 0 5px var(--ok); }
 
-  main { max-width: 1180px; margin: 0 auto; padding: 22px 28px 120px;
-         display: grid; grid-template-columns: 330px 1fr; gap: 20px; }
-  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
-
-  .card {
-    background: linear-gradient(170deg,var(--raised),var(--card));
-    border: 1px solid var(--border); border-radius: 10px;
-    padding: 16px 18px; margin-bottom: 18px;
-    box-shadow: var(--shadow-card);
-  }
-
-  button {
-    background: linear-gradient(180deg,var(--key-top),var(--key-bottom)); color: var(--key-face);
-    border: 1px solid var(--key-edge); border-radius: 20px;
-    font: 500 12px 'DM Sans', sans-serif; padding: 7px 18px; cursor: pointer;
-    box-shadow: var(--shadow-key);
-    transition: all 0.1s; white-space: nowrap;
-  }
-  button:active:not(:disabled) { transform: translateY(1px); box-shadow: 0 1px 2px rgba(0,0,0,0.2); }
-  button:disabled { background: var(--sunken); color: var(--faint);
-                    border-color: var(--border-soft); box-shadow: none; cursor: not-allowed; }
-  button.accent { background: linear-gradient(180deg,var(--accent-hi),var(--accent)); color: var(--on-accent);
-                  border-color: var(--accent-deep); }
-  button.danger { background: none; border: none; box-shadow: none; color: var(--error);
-                  font-size: 11px; padding: 5px 8px; }
-  button.small { font-size: 11px; padding: 5px 14px; }
-
-  input {
-    background: var(--field); color: var(--text); border: 1px solid var(--border);
-    border-radius: 7px; padding: 8px 11px; font: 400 13px 'DM Sans', sans-serif;
-    width: 100%; box-shadow: var(--shadow-inset);
-  }
-  label { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--text2);
-          text-transform: uppercase; letter-spacing: 0.08em; display: block; margin: 12px 0 5px; }
-  .hint { font-size: 12px; color: var(--muted); margin-top: 6px; line-height: 1.45; }
-  details summary { cursor: pointer; font-family: 'DM Mono', monospace; font-size: 10px;
-                    color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em;
-                    margin-top: 12px; }
-
-  /* asset checklist */
-  .asset { display: flex; align-items: center; gap: 10px; padding: 7px 0;
-           border-bottom: 1px solid var(--hairline); font-size: 13px; }
-  .asset:last-child { border-bottom: 0; }
-  .asset .detail { margin-left: auto; font-family: 'DM Mono', monospace; font-size: 10px;
-                   color: var(--muted); }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); flex: none; }
-  .dot.on { background: var(--ok); }
-
-  /* wake word cards */
-  .ww .top { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
-  .ww h3 { font-size: 16px; font-weight: 600; }
-  .ww .phrase { color: var(--text2); font-style: italic; font-size: 13px; }
-  .ww .phrase a { color: inherit; text-decoration: none; border-bottom: 1px dotted var(--faint); }
-  .ww .phrase a:hover { color: var(--accent); border-bottom-color: var(--accent); }
-  .ww .built { margin-left: auto; font-family: 'DM Mono', monospace; font-size: 10px; color: var(--muted); }
-
-  /* pipeline stepper. Top-aligned: only the running step has a third line
-     (its count), so centring would bounce the row while a build runs. */
-  .stepper { display: flex; align-items: flex-start; margin: 14px 2px 16px; }
-  .step { display: flex; flex-direction: column; align-items: center; gap: 5px; flex: none; width: 92px; }
-  .step .bub { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--border);
-               background: var(--sunken); }
-  .step.done .bub { background: var(--ok); border-color: var(--ok); }
-  .step.active .bub { background: var(--lcd-amber); border-color: var(--warn); animation: pulse 1.2s ease-in-out infinite; }
-  /* the running stage shows how far it is instead of a bulb */
-  .step.active .bub.fill { width: 56px; border-radius: 4px;
-    background: linear-gradient(to right, var(--lcd-amber) var(--fill, 0%), var(--sunken) var(--fill, 0%)); }
-  .step .prog { text-transform: none; letter-spacing: 0; }
-  @keyframes pulse { 50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--lcd-amber) 25%, transparent); } }
-  .step span { font-family: 'DM Mono', monospace; font-size: 8.5px; text-transform: uppercase;
-               letter-spacing: 0.08em; color: var(--muted); text-align: center; }
-  .step.done span, .step.active span { color: var(--text2); }
-  .conn { flex: 1; height: 2px; background: var(--border); margin: 6px 2px 0; min-width: 8px; }
-  .conn.done { background: var(--ok); }
-
-  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-  .actiongroup { margin-top: 10px; }
-
-  /* results / verdicts */
-  .verdict { display: flex; align-items: center; gap: 9px; margin-top: 12px; padding: 10px 13px;
-             border-radius: 8px; font-weight: 500; font-size: 13px; }
-  .verdict.ok { background: var(--tint-ok); color: var(--ok); border: 1px solid var(--tint-ok-line); }
-  .verdict.no { background: var(--tint-err); color: var(--error); border: 1px solid var(--tint-err-line); }
-  .verdict.info { background: var(--tint-accent); color: var(--accent); border: 1px solid var(--tint-accent-line); }
-  .rawout { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--muted);
-            margin-top: 7px; white-space: pre-wrap; }
-
-  /* LCD console */
-  #console { position: fixed; left: 0; right: 0; bottom: 0; padding: 10px 28px 14px;
-             background: linear-gradient(180deg, transparent, var(--chassis) 30%); }
-  #console .inner { max-width: 1124px; margin: 0 auto; }
-  #console .bar { display: flex; gap: 12px; align-items: center; padding: 5px 4px; }
-  #console .bar strong { font-size: 12.5px; font-weight: 600; }
-  #console pre {
-    background: var(--lcd-bg); color: var(--lcd-text); border: 1px solid var(--lcd-line);
-    border-radius: 6px; box-shadow: inset 0 2px 6px rgba(0,0,0,0.6);
-    padding: 10px 13px; height: 150px; overflow-y: auto;
-    font: 400 11px/1.6 'DM Mono', monospace; white-space: pre-wrap;
-  }
-  #console.min pre { display: none; }
-  .status { font-family: 'DM Mono', monospace; font-size: 10.5px; letter-spacing: 0.04em; }
-  .status.running { color: var(--warn); } .status.ok { color: var(--ok); } .status.fail { color: var(--error); }
-  #toggleLog { margin-left: auto; }
-  .empty { color: var(--muted); font-size: 13px; line-height: 1.6; }
-
-  /* theme toggle */
-  .iconbtn { border-radius: 50%; width: 30px; height: 30px; padding: 0;
-             display: inline-flex; align-items: center; justify-content: center;
-             font-size: 13px; line-height: 1; }
-
-  /* google credentials */
-  .kv { display: flex; gap: 10px; font-size: 12px; padding: 3px 0; }
-  .kv .k { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--muted);
-           text-transform: uppercase; letter-spacing: 0.08em; min-width: 62px; }
-  .kv .v { color: var(--text2); word-break: break-all; }
-  textarea {
-    background: var(--field); color: var(--text); border: 1px solid var(--border);
-    border-radius: 7px; padding: 8px 11px; font: 400 11px/1.5 'DM Mono', monospace;
-    width: 100%; min-height: 90px; box-shadow: var(--shadow-inset); resize: vertical;
+  /* Narrow: the rail stacks above the panel and the page scrolls as one. */
+  @media (max-width: 860px) {
+    body { padding: 0; }
+    .app { grid-template-columns: 1fr; grid-template-rows: auto auto; height: auto; min-height: 100dvh;
+      border-radius: 0; border: 0; }
+    /* The rail becomes two scrolling rows of chips, so the page's own
+       content is on the first screen rather than below a list. */
+    .rail { border-right: 0; border-bottom: 1px solid var(--border); padding: 12px 0 10px; overflow: visible; }
+    .brand { padding: 0 16px 10px; }
+    .rgroup { display: none; }
+    .rail ul { display: flex; gap: 6px; overflow-x: auto; padding: 2px 16px 6px; scrollbar-width: none; }
+    .ritem { border: 1px solid var(--border-hard); border-radius: 18px; padding: 4px 12px 4px 6px; min-height: 36px;
+      white-space: nowrap; flex: none; }
+    .ritem[aria-current="page"] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+    .ritem small { display: inline; margin-left: 6px; }
+    .railfoot { flex-direction: row; display: flex; flex-wrap: wrap; align-items: center; padding: 4px 10px 0; }
+    .mbody { overflow: visible; }
+    .mhead, .mbody, .foot { padding-left: 16px; padding-right: 16px; }
+    .notice { margin: 12px 16px 0; }
+    .flyout { position: fixed; left: 0; }
   }
 </style>
 </head>
 <body>
-<header>
-  <div>
-    <h1>Wake Word Forge</h1>
-    <div class="sub">EchoMuse &middot; custom wake words</div>
-  </div>
-  <span class="pill" id="gpuBadge"><span class="dot"></span><span id="gpuText">connecting…</span></span>
-  <button class="iconbtn" id="themeBtn" title="Light / dark">◐</button>
-</header>
-
-<main>
-  <section>
-    <!-- Matches "Your wake words" opposite, so the two columns start on the
-         same line. Without it the left column sat one label-height higher
-         than the right and the cards read as misaligned. -->
-    <div class="microlabel" style="margin-left:2px">Setup</div>
-    <div class="card">
-      <div class="microlabel">Step 1 &middot; Voice data</div>
-      <div id="assetSummary" class="hint" style="margin:0 0 10px"></div>
-      <div id="assets" style="display:none"></div>
-      <div class="row" style="margin-top:12px">
-        <button id="dlAll" class="accent">Download voice data</button>
-        <button id="assetDetail" class="small">details</button>
-      </div>
+<a class="sr" href="#page">Skip to content</a>
+<div class="app">
+  <nav class="rail" aria-label="Wake words and setup">
+    <div class="brand">
+      <h1>Wake Word Forge<span>EchoMuse</span></h1>
+      <button class="iconbtn theme" type="button" id="themeBtn" aria-label="Switch to dark theme">◐</button>
     </div>
-
-    <div class="card">
-      <div class="microlabel">Step 2 &middot; Create a wake word</div>
-      <label>Wake phrase</label>
-      <input id="newPhrase" placeholder='e.g. "hey clara, hey clarra"'>
-      <div class="hint">Pick a short phrase of 3&ndash;4 syllables. The training voices are American
-        &mdash; add a comma-separated spelling of how <em>your family</em> says it
-        (&ldquo;clarra&rdquo; for a British &ldquo;clara&rdquo;). One wake word listens for all spellings.</div>
-      <div class="row" style="margin-top:8px">
-        <button class="small" id="previewBtn">▶ Hear each spelling</button>
-        <span class="hint" id="previewNote" style="margin:0"></span>
-      </div>
-      <details>
-        <summary>advanced</summary>
-        <label>Model name</label>
-        <input id="newName" placeholder="auto from phrase">
-        <label>Synthetic voice samples</label>
-        <input id="newSamples" type="number" value="30000">
-        <label>Max training steps</label>
-        <input id="newSteps" type="number" value="50000">
-      </details>
-      <div class="row" style="margin-top:14px">
-        <button class="accent" id="createBtn">Create</button>
-      </div>
+    <div class="rgroup em-label" id="wwHead">Your wake words</div>
+    <ul id="wwList" aria-labelledby="wwHead"></ul>
+    <div class="rgroup em-label" id="setupHead">Setup</div>
+    <ul id="setupList" aria-labelledby="setupHead"></ul>
+    <div class="railfoot">
+      <div class="machine" id="machine"><i></i><span>Connecting…</span></div>
+      <button class="logbtn" type="button" id="logBtn" aria-expanded="false" aria-controls="flyout">Show log<span class="n" id="logNote"></span></button>
     </div>
-
-    <div class="card">
-      <div class="microlabel">Optional &middot; Google voices</div>
-      <div id="googleState"></div>
-      <div id="googleSetup" style="display:none">
-        <div class="hint" style="margin-top:0">Adds British, Australian and US synthetic
-          voices on top of the built-in ones. Needs a Google Cloud
-          <strong>service account</strong> with the Text-to-Speech API enabled: in the
-          console, IAM &amp; Admin &rarr; Service Accounts &rarr; Keys &rarr; Add key &rarr; JSON.</div>
-        <label>Key file</label>
-        <input type="file" id="gFile" accept="application/json,.json">
-        <details>
-          <summary>or paste it</summary>
-          <textarea id="gPaste" placeholder='{ "type": "service_account", … }'></textarea>
-        </details>
-        <div class="row" style="margin-top:12px">
-          <button class="accent small" id="gSave">Save key</button>
-        </div>
-      </div>
-      <div class="row" id="googleActions" style="margin-top:12px; display:none">
-        <button class="small" id="gCheck">Test connection</button>
-        <button class="danger" id="gRemove" style="margin-left:auto">remove key</button>
-      </div>
-      <div class="verdict" id="gVerdict" style="display:none"></div>
-    </div>
-  </section>
-
-  <section>
-    <div class="microlabel" style="margin-left:2px">Your wake words</div>
-    <div id="wakewords"></div>
-  </section>
-</main>
-
-<div id="console" class="min" style="display:none">
-  <div class="inner">
-    <div class="bar">
-      <strong id="jobLabel"></strong>
-      <span class="status" id="jobStatus"></span>
-      <button id="cancelJob" class="small" style="display:none">Stop</button>
-      <button id="toggleLog" class="small">show log</button>
-    </div>
-    <pre id="logPre"></pre>
-  </div>
+  </nav>
+  <main class="main" id="page" tabindex="-1">
+    <div id="notice" class="notice" role="alert"></div>
+    <div id="view" style="display:contents"></div>
+  </main>
+  <aside class="flyout" id="flyout" aria-labelledby="flyTitle" hidden>
+    <header>
+      <h2 id="flyTitle">Log</h2><span class="status still" id="flyStatus" style="padding:4px 10px"></span>
+      <span class="sp"></span>
+      <button class="em-pill em-pill--small" type="button" id="cancelJob" hidden>Stop</button>
+      <button class="em-pill em-pill--small" type="button" id="logCopy">Copy</button>
+      <button class="em-pill em-pill--small em-pill--accent" type="button" id="logClose">Close</button>
+    </header>
+    <pre class="em-console" id="logPre" role="log" aria-label="Job output" tabindex="0"></pre>
+  </aside>
 </div>
+<div class="sr" id="live" aria-live="polite"></div>
+<dialog id="renameDlg" aria-labelledby="rnTitle">
+  <form id="rnForm">
+    <h2 id="rnTitle">Rename</h2>
+    <div class="field" style="margin-top:8px">
+      <label for="rnInput">New name</label>
+      <input type="text" id="rnInput" autocomplete="off" spellcheck="false" maxlength="64" aria-describedby="rnHint rnErr">
+      <div class="hint" id="rnHint">Also the file name EchoMuse shows. A copy already added to EchoMuse keeps its old name.</div>
+      <div class="hint" id="rnErr" role="alert" style="color:var(--error)"></div>
+    </div>
+    <div class="row">
+      <button class="em-pill" type="button" id="rnCancel">Cancel</button>
+      <button class="em-pill em-pill--accent" type="submit">Rename</button>
+    </div>
+  </form>
+</dialog>
+<dialog id="confirm" aria-labelledby="cfTitle" aria-describedby="cfBody">
+  <form method="dialog">
+    <h2 id="cfTitle"></h2>
+    <p id="cfBody"></p>
+    <div class="row">
+      <button class="em-pill" value="no" autofocus>Cancel</button>
+      <button class="em-pill" id="cfYes" value="yes"></button>
+    </div>
+  </form>
+</dialog>
 
 <script>
 const $ = id => document.getElementById(id);
-let state = null, logOffset = 0, lastJobKey = null, lastWwHtml = null;
+let state = null, logOffset = 0, lastJobKey = null;
 let logDone = '', logTail = '';   // log lines already complete, and the line still being written
+let lastView = null, lastRail = null, lastRoute = null, prevJob = null;
+let voices = null;                // /api/voices, fetched when first needed
+const verdicts = {};              // per wake word: the last try-it result, kept across re-renders
+const flashes = {};               // per wake word and page: the last confirmation, kept the same way
+const rates = {};                 // per wake word: progress samples, for time left
+/* The new-word form outlives the page: leaving it to check something (the
+   Google key, say) and coming back must not mean typing it all again. */
+const DRAFT0 = {phrase: '', name: '', samples: '30000', steps: '50000'};
+let draft = (() => { try { return {...DRAFT0, ...JSON.parse(sessionStorage.getItem('forge-draft') || '{}')}; } catch { return {...DRAFT0}; } })();
+function saveDraft() { try { sessionStorage.setItem('forge-draft', JSON.stringify(draft)); } catch {} }
 
+const THRESHOLD = 0.5;            // the Echo's default wake threshold
+const STAGES = [                  // build stage, what it is called here, what it does
+  ['generate', 'Make example voices', 'Thousands of clips of the phrase, in many different voices.'],
+  ['augment', 'Add room sound and noise', 'So it still works across a room, with the TV or music on.'],
+  ['train', 'Train the model', 'Teach it to tell the phrase apart from everything else.'],
+];
+const STEPS = [['train', 'Train'], ['try', 'Try it'], ['improve', 'Improve'], ['use', 'Use it']];
+
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const enc = encodeURIComponent;
+const n0 = n => Number(n || 0).toLocaleString();
+
+/* Errors appear at the top of the panel instead of an alert(): an alert
+   blocks the page and loses the message the moment it is dismissed. */
+function notice(msg) {
+  $('notice').innerHTML = msg ? `<div class="status bad"><i></i><span>${esc(msg)}</span><span class="sp"></span>
+    <button class="link quiet" type="button" onclick="notice('')">Dismiss</button></div>` : '';
+}
 async function api(path, opts) {
   const r = await fetch(path, opts);
-  if (!r.ok) { alert(await r.text()); throw new Error(path); }
+  if (!r.ok) { const t = await r.text(); notice(t || `${r.status} ${r.statusText}`); throw new Error(path); }
+  notice('');
   return r.json();
 }
-const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const post = (path, body) => api(path, {method: 'POST', headers: {'Content-Type': 'application/json'},
+  body: JSON.stringify(body || {})});
+function announce(msg) { $('live').textContent = ''; setTimeout(() => { $('live').textContent = msg; }, 50); }
 
-function fmtAgo(ts) {
-  const d = new Date(ts * 1000);
-  return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+function confirmDialog(title, body, yes, danger) {
+  const d = $('confirm');
+  $('cfTitle').textContent = title; $('cfBody').textContent = body;
+  $('cfYes').textContent = yes; $('cfYes').className = 'em-pill ' + (danger ? 'em-pill--danger' : 'em-pill--accent');
+  d.returnValue = '';
+  d.showModal();
+  return new Promise(res => d.addEventListener('close', () => res(d.returnValue === 'yes'), {once: true}));
 }
-function busy() { return state && state.job && state.job.running; }
 
-/* Friendly names for the job the console shows */
+function fmtWhen(ts) {
+  const d = new Date(ts * 1000);
+  return d.toLocaleDateString([], {day: 'numeric', month: 'short'}) + ', ' +
+         d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+}
+function fmtLeft(s) {
+  if (s < 90) return 'less than 2 minutes';
+  if (s < 3600) return `about ${Math.round(s / 60)} minutes`;
+  const h = s / 3600;
+  return `about ${h < 10 ? h.toFixed(1).replace(/\.0$/, '') : Math.round(h)} hours`;
+}
+
+/* ── What is going on ─────────────────────────────────────────────────── */
+function busy() { return !!(state && state.job && state.job.running); }
+const jobFor = name => busy() && state.job.label.includes(`'${name}'`);
+const wwByName = name => state.wakewords.find(w => w.name === name);
+const dataReady = () => state.assets.every(a => a.present);
+
+/* Friendly names for the job the log and the rail show */
 function friendlyJob(label) {
   return label
     .replace(/^downloading assets.*/, 'Downloading voice data')
@@ -407,189 +446,479 @@ function friendlyJob(label) {
     .replace(/^Google TTS × (\d+) \((.+)\) for '(.+)'$/, 'Adding $1 Google voices ($2) to “$3”')
     .replace(/^(\S+) voices × (\d+) for '(.+)'$/, 'Adding $2 $1 voices to “$3”');
 }
+function busyReason() { return busy() ? `Waiting for: ${friendlyJob(state.job.label)}.` : ''; }
 
-function render() {
-  const g = state.gpu || {};
-  $('gpuText').textContent = g.available ? `GPU · ${g.device}` : 'CPU (slower training)';
-  $('gpuBadge').className = 'pill' + (g.available ? ' on' : '');
-
-  // assets
-  const missing = state.assets.filter(a => !a.present);
-  $('assetSummary').textContent = missing.length
-    ? `A one-time ~25 GB download of training voices and background sounds is needed before training. (${state.assets.length - missing.length}/${state.assets.length} parts done)`
-    : 'All voice data downloaded — ready to train.';
-  $('assets').innerHTML = state.assets.map(a => `
-    <div class="asset">
-      <span class="dot ${a.present ? 'on' : ''}"></span>
-      <span>${esc(a.label)}</span>
-      <span class="detail">${a.present ? esc(a.detail) : 'missing'}</span>
-    </div>`).join('');
-  $('dlAll').disabled = busy() || missing.length === 0;
-  $('dlAll').textContent = missing.length ? 'Download voice data' : '✓ Downloaded';
-  $('dlAll').className = missing.length ? 'accent' : '';
-
-  renderGoogle();
-
-  // wake words
-  const html = state.wakewords.length ? state.wakewords.map(w => {
-    const stages = [                      // label, done, build stage it shows
-      ['Created', true],
-      ['Voices', w.clips_train > 0, 'generate'],
-      ['Mixing', w.features_built, 'augment'],
-      ['Ready', w.model_built, 'train'],
-    ];
-    // A running build reports its stage and how far along it is (clips and
-    // feature files counted in the wake word's directory, training steps
-    // from train.py's log); other jobs just pulse the next step. The
-    // numbers themselves are painted by paintProgress(), not baked in
-    // here: this markup is compared below to decide whether to rebuild the
-    // list, and a value that moves every poll would rebuild it every poll.
-    const progress = w.progress;
-    const isTraining = busy() && state.job.label.includes(`'${w.name}'`);
-    let activeIdx = -1;
-    if (progress) activeIdx = stages.findIndex(s => s[2] === progress.stage);
-    else if (isTraining) activeIdx = stages.findIndex(s => !s[1]);
-    const stepper = stages.map(([t, done, stage], i) => {
-      const active = i === activeIdx;
-      const cls = active ? 'active' : done ? 'done' : '';
-      const filled = active && progress && progress.total;
-      const bub = `<div class="bub${filled ? ' fill' : ''}"></div>`;
-      const prog = filled ? '<span class="prog"></span>' : '';
-      return `<div class="step ${cls}"${filled ? ` data-stage="${stage}"` : ''}>${bub}<span>${t}</span>${prog}</div>` +
-             (i < stages.length - 1 ? `<div class="conn ${stages[i+1][1] ? 'done' : ''}"></div>` : '');
-    }).join('');
-    return `
-    <div class="card ww" data-name="${esc(w.name)}">
-      <div class="top">
-        <h3>${esc(w.name)}</h3>
-        <span class="phrase">${w.phrases.map((p, i) =>
-          `<a href="#" data-say="${esc(p)}" title="Hear this spelling">“${esc(p)}” ▸</a>`).join(' / ')}</span>
-        ${w.model_built ? `<span class="built">trained ${fmtAgo(w.model_mtime)}</span>` : ''}
-      </div>
-      <div class="stepper">${stepper}</div>
-      <div class="row">
-        <button class="accent" data-act="build" ${busy() ? 'disabled' : ''}>
-          ${w.model_built ? 'Retrain' : w.clips_train ? 'Continue training' : 'Train'}</button>
-        ${w.model_built ? `
-          <button data-act="mic">🎤 Try it</button>
-          <button data-act="test">Test a recording…</button>
-          <a href="/api/models/${esc(w.name)}.onnx"><button>Download model</button></a>` : ''}
-        <button class="danger" data-act="del" style="margin-left:auto">remove</button>
-        <input type="file" accept="audio/*" multiple style="display:none">
-      </div>
-      <div class="actiongroup">
-        <div class="microlabel" style="margin-bottom:6px">Improve accuracy</div>
-        <div class="row">
-          <button class="small" data-act="addrec" ${busy() ? 'disabled' : ''}
-            title="The strongest accuracy boost: real recordings of your household saying the phrase">
-            + Family recordings…</button>
-          <button class="small" data-act="pipergb" ${busy() ? 'disabled' : ''}
-            title="Add voices in another accent or language, generated locally — no account, no cost">+ Accents &amp; languages…</button>
-          <button class="small" data-act="gtts" ${busy() ? 'disabled' : ''}
-            title="Adds British/Australian/US synthetic voices (usually free)">+ Google voices…</button>
-          <span class="hint" style="margin:0">then retrain to apply</span>
-        </div>
-        <details>
-          <summary>training settings</summary>
-          <div class="hint" style="margin-top:8px">Stop a run, change these, then press
-            Train again. Nothing already generated is thrown away.</div>
-          <label>Synthetic voice samples</label>
-          <input type="number" data-f="n_samples" value="${w.n_samples ?? ''}">
-          <label>Max training steps</label>
-          <input type="number" data-f="steps" value="${w.steps ?? ''}">
-          <label>Words it must NOT wake on</label>
-          <input data-f="negatives" placeholder="comma separated, e.g. hey clarice"
-                 value="${esc((w.custom_negative_phrases || []).join(', '))}">
-          <div class="hint">Add anything you hear it wake on by mistake, then retrain.</div>
-          <div class="row" style="margin-top:12px">
-            <button class="small" data-act="save" ${busy() ? 'disabled' : ''}>Save settings</button>
-          </div>
-        </details>
-      </div>
-      <div class="verdict" style="display:none"></div>
-      <div class="rawout" style="display:none"></div>
-    </div>`;
-  }).join('') : `<div class="card empty">No wake words yet.<br>
-      Download the voice data (step 1), then create your first wake word on the left —
-      after training you can try it with the microphone right here.</div>`;
-
-  // The poll rebuilds this list every 2.5s, which would wipe whatever is
-  // being typed into the settings fields and snap open panels shut. Only
-  // touch the DOM when the markup actually changed, never while the user is
-  // in one of the inputs, and put the open panels back afterwards.
-  const host = $('wakewords');
-  if (html === lastWwHtml) return;
-  // Only while something is being TYPED. Guarding on focus generally was
-  // wrong: a button keeps focus after it is clicked, so pressing "remove"
-  // froze the list — the delete succeeded, every later poll saw the focus
-  // still sitting on the (now stale) button, and nothing updated until the
-  // page was reloaded.
-  const ae = document.activeElement;
-  if (ae && host.contains(ae) && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)
-      && ae.type !== 'file') return;
-  const open = new Set([...host.querySelectorAll('.ww details[open]')]
-    .map(d => d.closest('.ww').dataset.name));
-  host.innerHTML = html;
-  lastWwHtml = html;
-  for (const d of host.querySelectorAll('.ww details'))
-    if (open.has(d.closest('.ww').dataset.name)) d.open = true;
+function wwStatus(w) {
+  if (jobFor(w.name) && state.job.kind === 'build') {
+    const p = w.progress;
+    const i = p ? STAGES.findIndex(s => s[0] === p.stage) : -1;
+    return ['run', i >= 0 ? `Training · step ${i + 1} of ${STAGES.length}` : 'Training'];
+  }
+  if (jobFor(w.name)) return ['run', 'Adding voices'];
+  if (w.model_built) return ['ok', 'Ready'];
+  if (w.clips_train > 0) return ['bad', 'Half trained'];
+  return ['', 'Not trained yet'];
 }
 
-/* The fill and its count move every poll; set in place on the card
-   render() has already put there, so the list markup stays stable and the
-   cards keep their state (a recording in progress, a verdict) during a
-   build. */
+/* Time left in the running stage, from how fast it has moved across polls.
+   Only shown once there is enough to go on: a guess from one sample is worse
+   than none. */
+function timeLeft(w) {
+  const p = w.progress; if (!p || !p.total) return null;
+  const r = rates[w.name] ||= {};
+  const now = Date.now() / 1000;
+  if (r.stage !== p.stage || p.done < (r.done ?? 0)) Object.assign(r, {stage: p.stage, t0: now, d0: p.done, n: 0});
+  if (p.done !== r.done) { r.done = p.done; r.n++; }
+  const dt = now - r.t0, dd = p.done - r.d0;
+  if (r.n < 3 || dt < 20 || dd <= 0) return null;
+  return (p.total - p.done) / (dd / dt);
+}
+
+/* ── Routing: #/new, #/data, #/google, #/w/<name>/<step> ──────────────── */
+function route() {
+  const parts = location.hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
+  if (parts[0] === 'w' && parts[1] && state && !wwByName(parts[1])) return {page: 'missing', name: parts[1]};
+  if (parts[0] === 'w' && parts[1] && state) {
+    const w = wwByName(parts[1]);
+    const step = STEPS.some(s => s[0] === parts[2]) ? parts[2] : (w.model_built ? 'try' : 'train');
+    return {page: 'ww', name: parts[1], step};
+  }
+  if (['new', 'data', 'google'].includes(parts[0])) return {page: parts[0]};
+  return {page: 'home'};
+}
+const href = (...p) => '#/' + p.map(enc).join('/');
+
+/* ── Rail ─────────────────────────────────────────────────────────────── */
+function renderRail(r) {
+  const cur = (page, name) => (r.page === page && (!name || r.name === name)) ? ' aria-current="page"' : '';
+  const ww = state.wakewords.map(w => {
+    const [cls, text] = wwStatus(w);
+    return `<li><a class="ritem" href="${href('w', w.name)}"${cur('ww', w.name)}>
+      <span class="ic ${cls}" aria-hidden="true">${cls === 'ok' ? '✓' : cls === 'bad' ? '!' : ''}</span>
+      <span class="nm">${esc(w.name)}<small>${esc(text)}</small></span></a></li>`;
+  }).join('') + `<li><a class="ritem" href="#/new"${cur('new')}>
+      <span class="ic new" aria-hidden="true">+</span><span class="nm">New wake word</span></a></li>`;
+  const missing = state.assets.filter(a => !a.present).length;
+  const dl = busy() && state.job.kind === 'assets';
+  const g = state.google || {};
+  const setup = `
+    <li><a class="ritem" href="#/data"${cur('data')}>
+      <span class="ic ${dl ? 'run' : missing ? 'bad' : 'ok'}" aria-hidden="true">${dl ? '' : missing ? '!' : '✓'}</span>
+      <span class="nm">Voice data<small>${dl ? 'Downloading' : missing ? 'Needed before training' : 'Downloaded'}</small></span></a></li>
+    <li><a class="ritem" href="#/google"${cur('google')}>
+      <span class="ic ${g.valid ? 'ok' : ''}" aria-hidden="true">${g.valid ? '✓' : ''}</span>
+      <span class="nm">Google voices<small>${g.valid ? 'Connected' : g.present ? 'Key unreadable' : 'Optional'}</small></span></a></li>`;
+  const html = ww + '§' + setup;
+  if (html === lastRail) return;
+  lastRail = html;
+  $('wwList').innerHTML = ww; $('setupList').innerHTML = setup;
+}
+
+function renderMachine() {
+  const g = state.gpu || {};
+  const lost = state.job && state.job.cpu_fallback;
+  $('machine').className = 'machine' + (g.available && !lost ? ' gpu' : '');
+  $('machine').lastElementChild.textContent = lost ? 'GPU not reachable: restart the forge'
+    : g.available ? `GPU · ${g.device}` : 'No GPU: training is slower';
+}
+
+/* ── Pages ────────────────────────────────────────────────────────────── */
+function frame({eyebrow, title, head = '', body, foot = '', tools = ''}) {
+  return `<div class="mhead"><div class="em-label">${esc(eyebrow)}</div>
+    <div class="titlerow"><h2 id="title" tabindex="-1">${esc(title)}</h2>${tools}</div>${head}</div>
+    <div class="mbody">${body}</div>
+    <div class="foot">${foot}</div>`;
+}
+const step = (ic, cls, text, small = '', extra = '') =>
+  `<li><span class="ic ${cls}" aria-hidden="true">${ic}</span><div class="${cls === 'pend' ? 'pend' : ''}">${text}${small ? `<small>${small}</small>` : ''}${extra}</div></li>`;
+
+function pageHome() {
+  const ready = dataReady();
+  const any = state.wakewords.length;
+  return frame({eyebrow: 'Welcome', title: 'Make your own wake word',
+    body: `
+      <p class="lead">Train a wake word your Echos will answer to, such as “hey verona”. The forge makes
+        thousands of example voices saying it, teaches a small model to recognise it, and gives you a file to add to EchoMuse.</p>
+      <ul class="checklist">
+        ${step(ready ? '✓' : '1', ready ? 'ok' : '', 'Download the voice data', 'Once only, about 25 GB.')}
+        ${step(any ? '✓' : '2', any ? 'ok' : '', 'Type your phrase and train it', 'Training runs by itself. You can close this page and come back.')}
+        ${step('3', '', 'Try it with your own voice')}
+        ${step('4', '', 'Add it to EchoMuse')}
+      </ul>`,
+    foot: `<span class="sp"></span>${ready
+      ? `<a class="em-pill em-pill--accent em-pill--big" href="#/new">New wake word</a>`
+      : `<a class="em-pill em-pill--accent em-pill--big" href="#/data">Get the voice data</a>`}`});
+}
+
+function pageData() {
+  const missing = state.assets.filter(a => !a.present);
+  const dl = busy() && state.job.kind === 'assets';
+  const ended = !busy() && state.job && state.job.kind === 'assets';
+  const items = state.assets.map(a => step(a.present ? '✓' : dl ? '' : '', a.present ? 'ok' : dl ? 'run' : '',
+    esc(a.label), a.present ? esc(a.detail) : dl ? 'Downloading' : 'Not downloaded')).join('');
+  let status = '';
+  if (dl) status = `<div class="status"><i></i>Downloading. It carries on if you close this page.</div>`;
+  else if (!missing.length) status = `<div class="status ok"><i></i>All downloaded. You're ready to train.</div>`;
+  else if (ended && !state.job.cancelled && state.job.rc) status = `<div class="status bad"><i></i>The download stopped with an error.
+      <button class="link" type="button" data-act="log">Show the log</button></div>`;
+  return frame({eyebrow: 'Setup', title: 'Voice data',
+    body: `
+      <p class="lead">Training needs example voices and background sounds to learn from. It's a one-time
+        download of about 25 GB, kept in the forge's <code>data</code> folder.</p>
+      ${status}
+      <ul class="checklist">${items}</ul>
+      ${missing.length && !dl && busy() ? `<p>${esc(busyReason())}</p>` : ''}`,
+    foot: `<span class="sp"></span>${missing.length
+      ? `<button class="em-pill em-pill--accent em-pill--big" type="button" data-act="download" ${busy() ? 'disabled' : ''}>
+           ${dl ? 'Downloading…' : state.assets.some(a => a.present) ? 'Download the rest' : 'Download voice data'}</button>`
+      : `<a class="em-pill em-pill--accent" href="${state.wakewords.length ? href('w', state.wakewords[0].name) : '#/new'}">
+           ${state.wakewords.length ? 'Back to your wake words' : 'New wake word'}</a>`}`});
+}
+
+function pageGoogle() {
+  const g = state.google || {};
+  const body = g.present && g.valid ? `
+      <div class="status ok still"><i></i>Connected. Add Google voices to a wake word from its Improve step.</div>
+      <dl class="kv"><dt>Project</dt><dd>${esc(g.project_id || '—')}</dd><dt>Account</dt><dd>${esc(g.client_email || '—')}</dd></dl>
+      <div id="gVerdict" aria-live="polite"></div>
+      <div class="row"><button class="em-pill" type="button" data-act="gcheck">Test the connection</button>
+        <button class="link quiet" type="button" data-act="gremove">Remove the key</button></div>` : `
+      ${g.present ? `<div class="status bad"><i></i>The saved key can't be read: ${esc(g.error || 'unknown error')}</div>` : ''}
+      <h3>Connect a Google account</h3>
+      <ol class="checklist">
+        ${step('1', '', 'In the Google Cloud console, turn on the <b>Text-to-Speech API</b>.')}
+        ${step('2', '', 'Go to <b>IAM &amp; Admin → Service Accounts</b> and create one.')}
+        ${step('3', '', 'On that account, <b>Keys → Add key → JSON</b>. A file downloads.')}
+        ${step('4', '', 'Choose that file here.')}
+      </ol>
+      <div class="field">
+        <label for="gFile">Key file (.json)</label>
+        <input type="file" id="gFile" accept="application/json,.json">
+      </div>
+      <details class="more"><summary>Or paste the key instead</summary>
+        <div class="field"><label for="gPaste">Key contents</label>
+        <textarea id="gPaste" placeholder='{ "type": "service_account", … }'></textarea></div>
+      </details>
+      <div id="gVerdict" aria-live="polite"></div>`;
+  return frame({eyebrow: 'Setup · optional', title: 'Google voices',
+    body: `<p class="lead">The built-in voices are American. Google adds British, Australian and other
+      English accents, so the wake word learns how your household actually says it. A typical run
+      uses about 2% of Google's free monthly allowance.</p>${body}`,
+    foot: `<span class="sp"></span>${g.valid ? '' : `<button class="em-pill em-pill--accent" type="button" data-act="gsave">Save key</button>`}`});
+}
+
+/* Mirrors forge.default_name: the first spelling, slugified. */
+function defaultName(phrase) {
+  const first = (phrase || '').split(',').map(p => p.trim()).find(Boolean) || '';
+  return first.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+}
+function pageMissing(r) {
+  return frame({eyebrow: 'Wake word', title: 'Not found',
+    body: `<p class="lead">There's no wake word called “${esc(r.name)}”. It may have been renamed or deleted.</p>`,
+    foot: `<span class="sp"></span><a class="em-pill em-pill--accent" href="#/new">New wake word</a>`});
+}
+function pageNew() {
+  return frame({eyebrow: 'New wake word', title: 'What should your Echo answer to?',
+    body: `
+      ${dataReady() ? '' : `<div class="warnbox"><span class="ic" aria-hidden="true">!</span><div>
+        You can create it now, but training needs the <a href="#/data">voice data</a> first.</div></div>`}
+      <div class="field">
+        <label for="newPhrase">Wake phrase</label>
+        <input class="big" type="text" id="newPhrase" autocomplete="off" spellcheck="false"
+          placeholder="hey verona" aria-describedby="phraseHint" value="${esc(draft.phrase)}">
+        <div class="hint" id="phraseHint">Three or four syllables work best. Avoid words people say all the time.</div>
+      </div>
+      <div class="row">
+        <button class="em-pill" type="button" data-act="hear-new">▶ Hear it</button>
+        <span class="hint" id="hearNote" aria-live="polite"></span>
+      </div>
+      <details class="more"><summary>The voices say it wrong</summary>
+        <p>The built-in voices are American. Add how your household says it as another spelling, separated by a comma:
+          <code>hey clara, hey clarra</code>. One wake word listens for every spelling. Press <b>Hear it</b> to check each one.</p>
+      </details>
+      <div class="field">
+        <label for="newName">Name</label>
+        <input type="text" id="newName" autocomplete="off" maxlength="64" value="${esc(draft.name)}"
+          placeholder="${esc(defaultName(draft.phrase) || 'Made from the phrase')}" aria-describedby="nameHint">
+        <div class="hint" id="nameHint">What it's called here and in EchoMuse. You can rename it later.</div>
+      </div>
+      <details class="more"${draft.samples !== DRAFT0.samples || draft.steps !== DRAFT0.steps ? ' open' : ''}><summary>Advanced settings</summary>
+        <div class="fields2">
+          <div class="field"><label for="newSamples">Example voices</label>
+            <input type="text" inputmode="numeric" id="newSamples" value="${esc(draft.samples)}"></div>
+          <div class="field"><label for="newSteps">Training steps</label>
+            <input type="text" inputmode="numeric" id="newSteps" value="${esc(draft.steps)}"></div>
+        </div>
+        <p class="hint">More of either takes longer. The defaults suit most phrases.</p>
+      </details>`,
+    foot: `<span class="sp"></span><button class="em-pill em-pill--accent em-pill--big" type="button" data-act="create">Create</button>`});
+}
+
+function wwTools(w) {
+  const dis = jobFor(w.name) ? ` disabled title="Stop the job running for it first"` : '';
+  return `<div class="tools">
+    <button class="em-pill em-pill--small" type="button" data-act="rename"${dis}>Rename</button>
+    <button class="em-pill em-pill--small" type="button" data-act="del"${dis}>Delete</button></div>`;
+}
+function wwHead(w, r) {
+  const n = STEPS.findIndex(s => s[0] === r.step);
+  const done = {train: w.model_built};
+  return `<div class="phrases" role="group" aria-label="Hear each spelling">${w.phrases.map(p =>
+      `<button class="say" type="button" data-say="${esc(p)}">▶ <span>“${esc(p)}”</span></button>`).join('')}</div>
+    <ol class="steps">${STEPS.map(([id, label], i) =>
+      `<li><a href="${href('w', w.name, id)}"${i === n ? ' aria-current="step"' : ''}>
+        <span class="ic ${done[id] ? 'ok' : ''}" aria-hidden="true">${done[id] ? '✓' : i + 1}</span>${label}</a></li>`).join('')}</ol>`;
+}
+
+function pageTrain(w) {
+  const mine = jobFor(w.name) && state.job.kind === 'build';
+  const p = mine ? w.progress : null;
+  const at = p ? STAGES.findIndex(s => s[0] === p.stage) : -1;
+  const doneFlags = [w.clips_train >= w.n_samples, w.features_built, w.model_built];
+  const failed = !busy() && state.job && state.job.kind === 'build' && state.job.label.includes(`'${w.name}'`)
+                 && !state.job.cancelled && state.job.rc;
+  const list = STAGES.map(([id, label, what], i) => {
+    if (i === at) return `<li><span class="ic run" aria-hidden="true"></span><div><b>${label}</b><small>${what}</small>
+        <div class="bar" role="progressbar" aria-label="${label}" aria-valuemin="0" aria-valuemax="100" data-stage="${id}"><i></i></div>
+        <div class="barlabel"><span class="count" data-stage="${id}"></span><span class="sp"></span><span class="left" data-stage="${id}"></span></div></div></li>`;
+    const ok = doneFlags[i] && !(mine && i > at);
+    return step(ok ? '✓' : i + 1, ok ? 'ok' : 'pend', label, what);
+  }).join('');
+  let status;
+  if (mine) status = `<div class="status"><i></i><span>Training. It carries on if you close this page.</span><span class="sp"></span>
+      <button class="em-pill em-pill--small" type="button" data-act="stop">Stop</button></div>`;
+  else if (failed) status = `<div class="status bad"><i></i><span>Training stopped with an error.</span><span class="sp"></span>
+      <button class="link" type="button" data-act="log">Show the log</button></div>`;
+  else if (w.model_built) status = `<div class="status ok"><i></i>Trained ${esc(fmtWhen(w.model_mtime))}. Retrain only after you change something in Improve.</div>`;
+  else if (w.clips_train > 0) status = `<div class="status still"><i></i>Stopped part-way. Continue picks up where it left off; nothing is lost.</div>`;
+  else status = `<p class="lead">Training takes a while, longer without a GPU. You can close this page and come back.</p>
+      <section class="card" aria-labelledby="c-before" style="max-width:640px">
+        <h3 id="c-before">Before you train: voices with your accent</h3>
+        <p>The built-in voices are American. If your household sounds different, add voices with your accent
+          or Google voices first, so the first training already knows how you say it. Optional.</p>
+        <div class="row"><a class="em-pill em-pill--small" href="${href('w', w.name, 'improve')}">Add voices first</a></div>
+      </section>`;
+  const cpu = mine && state.job.cpu_fallback ? `<div class="warnbox"><span class="ic" aria-hidden="true">!</span><div>
+      <b>Training on the CPU.</b> The forge can't reach the GPU, so this will take many hours. Stop it, restart the
+      forge's container (<code>docker restart oww-forge-ui</code>), then press Continue training. Nothing made so far is lost.</div></div>` : '';
+  const blocked = !dataReady() ? `<div class="warnbox"><span class="ic" aria-hidden="true">!</span><div>Training needs the
+      <a href="#/data">voice data</a>, and it isn't downloaded yet.</div></div>`
+    : busy() && !mine ? `<p>${esc(busyReason())}</p>` : '';
+  const label = w.model_built ? 'Retrain' : w.clips_train > 0 ? 'Continue training' : 'Start training';
+  return frame({eyebrow: 'Wake word', title: w.name, tools: wwTools(w), head: wwHead(w, {step: 'train'}),
+    body: `${cpu}${status}<ul class="checklist">${list}</ul>${blocked}
+      <details class="more" data-keep="train-settings"><summary>Training settings</summary>
+        ${settingsFields(w)}
+        <div aria-live="polite">${flashHtml(w.name, 'train')}</div>
+        <div class="row"><button class="em-pill em-pill--small" type="button" data-act="save" ${busy() ? 'disabled' : ''}>Save settings</button>
+          ${busy() ? `<span class="hint">Settings can be changed once nothing is running.</span>` : ''}</div>
+      </details>`,
+    foot: `${w.model_built && !mine ? `<button class="em-pill" type="button" data-act="build" ${busy() || !dataReady() ? 'disabled' : ''}>Retrain</button>` : ''}
+      <span class="sp"></span>
+      ${w.model_built ? `<a class="em-pill em-pill--accent" href="${href('w', w.name, 'try')}">Next: try it</a>`
+        : mine ? '' : `<button class="em-pill em-pill--accent em-pill--big" type="button" data-act="build" ${busy() || !dataReady() ? 'disabled' : ''}>${label}</button>`}`});
+}
+function settingsFields(w) {
+  return `<div class="fields2">
+      <div class="field"><label for="f-samples">Example voices</label>
+        <input type="text" inputmode="numeric" id="f-samples" data-f="n_samples" value="${esc(w.n_samples)}"></div>
+      <div class="field"><label for="f-steps">Training steps</label>
+        <input type="text" inputmode="numeric" id="f-steps" data-f="steps" value="${esc(w.steps)}"></div>
+    </div>`;
+}
+
+function needsModel(w, r, what, extra = '') {
+  return frame({eyebrow: 'Wake word', title: w.name, tools: wwTools(w), head: wwHead(w, r),
+    body: `<div class="status still"><i></i>Train it first, then ${what}.</div>${extra}`,
+    foot: `<span class="sp"></span><a class="em-pill em-pill--accent" href="${href('w', w.name, 'train')}">Go to Train</a>`});
+}
+
+function pageTry(w) {
+  if (!w.model_built) return needsModel(w, {step: 'try'}, 'you can try it');
+  const secure = window.isSecureContext && navigator.mediaDevices;
+  const v = verdicts[w.name];
+  return frame({eyebrow: 'Wake word', title: w.name, tools: wwTools(w), head: wwHead(w, {step: 'try'}),
+    body: `
+      <p class="lead">Say the phrase the way you would to the Echo, from about where you'd stand.</p>
+      ${secure ? `<div class="row" style="gap:18px">
+          <button class="em-pill em-pill--accent rec" type="button" data-act="mic" aria-pressed="false">
+            <span class="lbl">Record</span><small>5 seconds</small></button>
+          <p class="hint" style="max-width:36ch">Press Record, say “${esc(w.phrases[w.phrases.length - 1])}”, and wait.</p></div>`
+        : `<div class="warnbox"><span class="ic" aria-hidden="true">!</span><div>This browser only lets a page use the
+            microphone over a secure connection. Open the forge at <code>http://localhost:8769</code> on the machine it runs on,
+            or record the phrase on your phone and choose the file below.</div></div>`}
+      <div id="verdict" aria-live="polite">${v ? verdictHtml(w, v) : ''}</div>
+      <div class="row">
+        <span class="em-pill filebtn"><input type="file" accept="audio/*" multiple data-act="testfile"
+          aria-label="Test a recording">Test a recording…</span>
+        <span class="hint">Any audio file. Phone voice memos work.</span>
+      </div>`,
+    foot: `<a class="em-pill" href="${href('w', w.name, 'improve')}">It doesn't hear us</a>
+      <span class="sp"></span>
+      <a class="em-pill em-pill--accent" href="${href('w', w.name, 'use')}">Next: use it</a>`});
+}
+function verdictHtml(w, v) {
+  if (v.pending) return `<div class="status"><i></i>${esc(v.pending)}</div>`;
+  if (v.best == null) return `<div class="status bad"><i></i>That audio couldn't be scored.</div>` + rawOut(v);
+  const pct = Math.round(100 * Math.min(1, v.best));
+  const heard = v.best >= THRESHOLD;
+  const msg = heard ? 'Heard it. Your Echo would wake.'
+    : v.best >= 0.2 ? 'Close, but not enough to wake the Echo.'
+    : 'Not recognised.';
+  const tip = heard ? '' : `<p>Try again a little closer. If it keeps missing you, add your own recordings in
+    <a href="${href('w', w.name, 'improve')}">Improve</a> and retrain.</p>`;
+  return `<div class="status ${heard ? 'ok' : 'bad'} still"><i></i><b>${msg}</b></div>
+    <div class="meter ${heard ? 'ok' : ''}" role="meter" aria-label="Wake score" aria-valuemin="0" aria-valuemax="1"
+      aria-valuenow="${v.best.toFixed(2)}" aria-valuetext="${v.best.toFixed(2)}, wakes at ${THRESHOLD}"><i style="width:${pct}%"></i><b></b></div>
+    <div class="meterlabel"><span>Score ${v.best.toFixed(2)}</span><span>Wakes at ${THRESHOLD}</span><span>1.0</span></div>${tip}` + rawOut(v);
+}
+const rawOut = v => v.output ? `<details class="more"><summary>Details</summary><pre class="em-console" style="max-height:180px">${esc(v.output.trim())}</pre></details>` : '';
+
+function pageImprove(w) {
+  const g = state.google || {};
+  const dis = busy() ? 'disabled' : '';
+  const langs = voices ? voices.filter(l => l.max_speakers > 1 || l.language.startsWith('en_'))
+    .map(l => `<option value="${esc(l.language)}"${l.language === 'en_GB' ? ' selected' : ''}>${esc(l.label)} · ${l.max_speakers} speaker${l.max_speakers === 1 ? '' : 's'}</option>`).join('')
+    : '<option value="en_GB">English (Great Britain)</option>';
+  return frame({eyebrow: 'Wake word', title: w.name, tools: wwTools(w), head: wwHead(w, {step: 'improve'}),
+    body: `
+      <p class="lead">${w.model_built ? 'Each of these adds to what it learns from. Retrain afterwards to use them.'
+        : 'Add any of these before you train, and the first training uses them.'}</p>
+      ${busy() ? `<p>${esc(busyReason())}</p>` : ''}
+      <div id="impStatus" aria-live="polite">${flashHtml(w.name, 'improve')}</div>
+      <h3>It doesn't hear us</h3>
+      <div class="cards">
+        <section class="card" aria-labelledby="c-rec">
+          <h3 id="c-rec">Add your own recordings</h3>
+          <p>The biggest improvement. Have each person say the phrase 5 to 10 times into a phone, then add the files.</p>
+          <div class="row"><span class="em-pill filebtn ${busy() ? 'is-disabled' : ''}"><input type="file" accept="audio/*" multiple
+            data-act="addrec" aria-label="Add recordings" ${dis}>Add recordings…</span></div>
+        </section>
+        <section class="card" aria-labelledby="c-acc">
+          <h3 id="c-acc">Add voices with your accent</h3>
+          <p>Generated on this machine, free. The first run downloads the voice.</p>
+          <div class="field"><label for="pLang">Accent or language</label>
+            <select id="pLang">${langs}</select></div>
+          <div class="field"><label for="pN">How many clips</label>
+            <input type="text" inputmode="numeric" id="pN" value="4000"></div>
+          <div class="row"><button class="em-pill" type="button" data-act="piper" ${dis}>Add voices</button></div>
+        </section>
+        <section class="card" aria-labelledby="c-g">
+          <h3 id="c-g">Add Google voices</h3>
+          ${g.valid ? `<p>British, Australian and American voices from Google.</p>
+            <fieldset class="checks" style="border:0;padding:0;margin:0"><legend class="sr">Accents</legend>
+              <label><input type="checkbox" name="gl" value="en-GB" checked>British</label>
+              <label><input type="checkbox" name="gl" value="en-AU" checked>Australian</label>
+              <label><input type="checkbox" name="gl" value="en-US">American</label></fieldset>
+            <div class="field"><label for="gN">How many clips</label>
+              <input type="text" inputmode="numeric" id="gN" value="2000"></div>
+            <div class="row"><button class="em-pill" type="button" data-act="gtts" ${dis}>Add Google voices</button></div>`
+          : `<p>British, Australian and American voices from Google. Needs a Google key first.</p>
+            <div class="row"><a class="em-pill" href="#/google">Set up Google voices</a></div>`}
+        </section>
+      </div>
+      <h3>It wakes when it shouldn't</h3>
+      <div class="field" style="max-width:560px">
+        <label for="f-neg">Words it must not wake on</label>
+        <input type="text" id="f-neg" data-f="negatives" autocomplete="off"
+          value="${esc((w.custom_negative_phrases || []).join(', '))}" aria-describedby="negHint">
+        <div class="hint" id="negHint">Separate them with commas, for example <code>veronica, marina</code>.
+          Add anything you hear it wake on by mistake.</div>
+      </div>
+      <div class="row"><button class="em-pill em-pill--small" type="button" data-act="savenegs" ${dis}>Save</button></div>`,
+    foot: `<span class="sp"></span><button class="em-pill em-pill--accent" type="button" data-act="build" ${busy() || !dataReady() ? 'disabled' : ''}>${w.model_built ? 'Retrain with these' : w.clips_train > 0 ? 'Continue training' : 'Start training'}</button>`});
+}
+
+function pageUse(w) {
+  if (!w.model_built) return needsModel(w, {step: 'use'}, 'you can use it');
+  const file = `${w.name}.onnx`;
+  return frame({eyebrow: 'Wake word', title: w.name, tools: wwTools(w), head: wwHead(w, {step: 'use'}),
+    body: `
+      <p class="lead">Add it to EchoMuse, then pick it as the wake word.</p>
+      <ol class="checklist">
+        ${step('1', '', 'Download the model', `${esc(file)} · ${w.model_size_kb} KB`,
+          `<div class="row"><a class="em-pill em-pill--accent" href="/api/models/${enc(w.name)}.onnx" download>Download ${esc(file)}</a></div>`)}
+        ${step('2', '', 'In the EchoMuse dashboard, open <b>Settings</b> (the gear), then <b>Config → Wake word</b>.')}
+        ${step('3', '', 'Click <b>+ Custom model</b> and choose the file you downloaded.')}
+        ${step('4', '', `Select it, then say “${esc(w.phrases[w.phrases.length - 1])}” to an Echo.`,
+          'If it misses you, go to Improve, add recordings, retrain, and upload the new file the same way.')}
+      </ol>`,
+    foot: `<a class="em-pill" href="${href('w', w.name, 'try')}">Back</a><span class="sp"></span>`});
+}
+
+/* ── Render ───────────────────────────────────────────────────────────── */
+function view(r) {
+  if (r.page === 'ww') {
+    const w = wwByName(r.name);
+    return {train: pageTrain, try: pageTry, improve: pageImprove, use: pageUse}[r.step](w);
+  }
+  if (r.page === 'home' && state.wakewords.length) {
+    location.replace(href('w', state.wakewords[0].name));
+    return null;
+  }
+  if (r.page === 'missing') return pageMissing(r);
+  return {home: pageHome, data: pageData, google: pageGoogle, new: pageNew}[r.page]();
+}
+
+function render() {
+  const r = route();
+  const key = JSON.stringify(r);
+  const navigated = key !== lastRoute;
+  renderRail(r); renderMachine();
+  const html = view(r);
+  if (html == null) return;
+  if (!navigated && html === lastView) return;
+  // The poll re-renders every 2.5s. Never while something is being typed or
+  // chosen in the panel, or it would wipe the field; a button keeping focus
+  // after a click is not "typing", or pressing one would freeze the page.
+  const host = $('view'), ae = document.activeElement;
+  if (!navigated && ae && host.contains(ae) && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName) && ae.type !== 'file'
+      && ae.type !== 'checkbox') return;
+  const open = new Set([...host.querySelectorAll('details[open]')].map(d => d.querySelector('summary').textContent));
+  const scroll = host.querySelector('.mbody')?.scrollTop || 0;
+  host.innerHTML = html;
+  lastView = html; lastRoute = key;
+  for (const d of host.querySelectorAll('details'))
+    if (open.has(d.querySelector('summary').textContent) && !navigated) d.open = true;
+  if (!navigated) { const b = host.querySelector('.mbody'); if (b) b.scrollTop = scroll; }
+  document.title = `${$('title')?.textContent || 'Wake Word Forge'} · Wake Word Forge`;
+  if (navigated && r.page === 'ww' && r.step === 'improve' && !voices) loadVoices();
+  paintProgress();
+}
+
+/* The bar, count and time left move every poll; set in place so the page
+   markup stays stable between polls. */
 function paintProgress() {
   for (const w of state.wakewords) {
     const p = w.progress;
     if (!p || !p.total) continue;
-    // Matched on the stage, not on whichever step is active: render() leaves
-    // the DOM alone while a settings field is being typed in, and a count
-    // must not land on a step that has since moved on.
-    const step = document.querySelector(
-      `.ww[data-name="${CSS.escape(w.name)}"] .step[data-stage="${p.stage}"]`);
-    if (!step) continue;
-    step.querySelector('.bub').style.setProperty('--fill', `${Math.min(100, 100 * p.done / p.total).toFixed(1)}%`);
-    step.querySelector('.prog').textContent = `${p.done.toLocaleString()} / ${p.total.toLocaleString()}`;
-  }
-}
-
-/* Google credentials panel */
-function renderGoogle() {
-  const g = state.google || {};
-  const set = $('googleState'), setup = $('googleSetup'), acts = $('googleActions');
-  if (g.present && g.valid) {
-    set.innerHTML = `
-      <div class="kv"><span class="k">Project</span><span class="v">${esc(g.project_id || '—')}</span></div>
-      <div class="kv"><span class="k">Account</span><span class="v">${esc(g.client_email || '—')}</span></div>`;
-    setup.style.display = 'none';
-    acts.style.display = '';
-  } else {
-    set.innerHTML = g.present
-      ? `<div class="verdict no" style="margin-top:0">✗ The saved key is unreadable: ${esc(g.error || '')}</div>`
-      : '';
-    setup.style.display = '';
-    acts.style.display = g.present ? '' : 'none';
+    const left = timeLeft(w);
+    const bar = document.querySelector(`.bar[data-stage="${p.stage}"]`);
+    if (!bar || route().name !== w.name) continue;
+    const pct = Math.min(100, 100 * p.done / p.total);
+    bar.firstElementChild.style.width = `${pct.toFixed(1)}%`;
+    bar.setAttribute('aria-valuenow', pct.toFixed(0));
+    document.querySelector(`.count[data-stage="${p.stage}"]`).textContent = `${n0(p.done)} of ${n0(p.total)}`;
+    document.querySelector(`.left[data-stage="${p.stage}"]`).textContent = left == null ? 'Working out time left…' : `${fmtLeft(left)} left`;
   }
 }
 
 function renderJob() {
   const j = state.job;
-  $('console').style.display = j ? '' : 'none';
+  $('logBtn').disabled = !j;
+  $('logNote').textContent = !j ? '' : j.running ? '● running' : j.cancelled ? 'stopped' : j.rc === 0 ? 'finished' : 'failed';
   if (!j) return;
   const key = j.kind + j.started;
-  if (key !== lastJobKey) {
-    lastJobKey = key; logOffset = 0; logDone = logTail = ''; $('logPre').textContent = '';
-    $('console').classList.add('min');
-    $('toggleLog').textContent = 'show log';
-  }
-  $('jobLabel').textContent = friendlyJob(j.label);
-  const s = $('jobStatus');
-  if (j.running) { s.textContent = '● working — you can leave this page, it keeps going'; s.className = 'status running'; }
-  else if (j.cancelled) { s.textContent = '■ stopped — nothing generated so far was lost'; s.className = 'status'; }
-  else if (j.rc === 0) { s.textContent = '✓ finished'; s.className = 'status ok'; }
-  else { s.textContent = `✗ something went wrong (see log)`; s.className = 'status fail'; }
-  $('cancelJob').style.display = j.running ? '' : 'none';
+  if (key !== lastJobKey) { lastJobKey = key; logOffset = 0; logDone = logTail = ''; $('logPre').textContent = ''; }
+  $('flyTitle').textContent = friendlyJob(j.label);
+  const s = $('flyStatus');
+  s.className = 'status still ' + (j.running ? '' : j.rc === 0 ? 'ok' : j.cancelled ? '' : 'bad');
+  s.innerHTML = `<i></i>${j.running ? 'Running' : j.cancelled ? 'Stopped' : j.rc === 0 ? 'Finished' : 'Failed'}`;
+  $('cancelJob').hidden = !j.running;
+  // Say it when a job ends, once: that is the moment someone waiting needs.
+  if (prevJob && prevJob.running && !j.running && prevJob.started === j.started)
+    announce(`${friendlyJob(j.label)}: ${j.cancelled ? 'stopped' : j.rc === 0 ? 'finished' : 'failed'}.`);
+  prevJob = j;
 }
 
 // tqdm (train.py, the augmenter) redraws its bar with \r: keep only the
@@ -621,245 +950,251 @@ async function pollLog() {
 }
 
 async function refresh() {
-  try { state = await api('/api/state'); } catch { return; }
-  render(); renderJob(); paintProgress();
+  try {
+    const r = await fetch('/api/state');
+    if (!r.ok) throw new Error();
+    state = await r.json();
+  } catch { $('machine').lastElementChild.textContent = 'Can’t reach the forge'; return; }
+  renderJob(); render();
 }
 
-/* Turn `forge.py test` output into a plain-language verdict */
-function showVerdict(card, output) {
-  const v = card.querySelector('.verdict'), raw = card.querySelector('.rawout');
-  const scores = [...output.matchAll(/peak score ([\d.]+)/g)].map(m => +m[1]);
-  raw.textContent = output.trim(); raw.style.display = '';
-  v.style.display = '';
-  if (!scores.length) { v.className = 'verdict no'; v.textContent = '✗ Could not score that audio'; return; }
-  const best = Math.max(...scores);
-  if (best >= 0.5) { v.className = 'verdict ok'; v.textContent = `✓ Heard it! (score ${best.toFixed(2)} — the device would wake)`; }
-  else if (best >= 0.2) { v.className = 'verdict info'; v.textContent = `~ Close but under the wake threshold (score ${best.toFixed(2)} of 0.5 needed) — try again closer to the mic, or add family recordings and retrain`; }
-  else { v.className = 'verdict no'; v.textContent = `✗ Not recognised (score ${best.toFixed(2)}) — add family recordings or a spelling variant, then retrain`; }
+async function loadVoices() {
+  try { voices = await api('/api/voices'); } catch { return; }
+  lastView = null; render();
 }
 
-$('assetDetail').onclick = () => {
-  const el = $('assets');
-  el.style.display = el.style.display === 'none' ? '' : 'none';
-};
-
-$('dlAll').onclick = async () => {
-  await api('/api/assets/download', {method: 'POST',
-    headers: {'Content-Type': 'application/json'}, body: '{}'});
-  refresh();
-};
-
-$('createBtn').onclick = async () => {
-  const phrase = $('newPhrase').value.trim();
-  if (!phrase) return alert('Type the wake phrase first, e.g. "hey clara"');
-  await api('/api/wakewords', {method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({phrase, name: $('newName').value,
-      samples: $('newSamples').value, steps: $('newSteps').value})});
-  $('newPhrase').value = ''; $('newName').value = '';
-  refresh();
-};
-
-/* Speak a phrase so it can be judged by ear before a training run.
-   The first call downloads the voice (~77MB) and takes a moment; after that
-   the session is cached and it is roughly instant. */
+/* ── Sounds ───────────────────────────────────────────────────────────── */
+/* Speak a phrase so it can be judged by ear before a training run. The first
+   call downloads the voice (~77MB) and takes a moment; after that it is
+   roughly instant. */
 let previewing = false;
-async function say(text, note) {
+async function say(text, btn) {
   if (previewing) return;
   previewing = true;
-  if (note) note.textContent = 'synthesizing…';
+  btn?.setAttribute('aria-busy', 'true');
   try {
     const r = await fetch('/api/preview', {method: 'POST',
       headers: {'Content-Type': 'application/json'}, body: JSON.stringify({text})});
-    if (!r.ok) { alert(await r.text()); return; }
+    if (!r.ok) { notice(await r.text()); return; }
     const url = URL.createObjectURL(await r.blob());
     const a = new Audio(url);
-    // Wait for it, so "hear each spelling" plays them in order rather than
-    // on top of each other.
+    // Wait for it, so several spellings play in order rather than together.
     await new Promise(res => { a.onended = a.onerror = res; a.play().catch(res); });
     URL.revokeObjectURL(url);
   } finally {
     previewing = false;
-    if (note) note.textContent = '';
+    btn?.removeAttribute('aria-busy');
   }
 }
 
-$('previewBtn').onclick = async () => {
-  const variants = $('newPhrase').value.split(',').map(s => s.trim()).filter(Boolean);
-  if (!variants.length) return alert('Type the wake phrase first, e.g. "hey clara"');
-  const note = $('previewNote');
-  for (const v of variants) {
-    note.textContent = `“${v}”`;
-    await say(v, null);
-  }
-  note.textContent = '';
-};
+/* Turn `forge.py test` output into a score. */
+function parseTest(output) {
+  const scores = [...output.matchAll(/peak score ([\d.]+)/g)].map(m => +m[1]);
+  return {best: scores.length ? Math.max(...scores) : null, output};
+}
+function setVerdict(name, v) { verdicts[name] = v; lastView = null; render(); }
+async function scoreFiles(name, files, fieldName = 'wav') {
+  const fd = new FormData();
+  for (const f of files) fd.append(fieldName, f, f.name || 'mic.webm');
+  setVerdict(name, {pending: 'Scoring…'});
+  try {
+    const r = await api(`/api/wakewords/${enc(name)}/test`, {method: 'POST', body: fd});
+    setVerdict(name, parseTest(r.output));
+  } catch { setVerdict(name, null); }
+}
 
-$('wakewords').addEventListener('click', e => {
-  const link = e.target.closest('a[data-say]');
-  if (!link) return;
-  e.preventDefault();
-  say(link.dataset.say, null);
+let recorder = null;
+async function toggleMic(btn, name) {
+  if (recorder) { recorder.stop(); return; }
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({audio: true}); }
+  catch { notice('The microphone was blocked. Allow it for this page, or test a recording instead.'); return; }
+  const rec = new MediaRecorder(stream), chunks = [];
+  recorder = rec;
+  rec.ondataavailable = e => chunks.push(e.data);
+  rec.onstop = () => {
+    stream.getTracks().forEach(t => t.stop());
+    recorder = null; clearInterval(tick);
+    scoreFiles(name, [new File(chunks, 'mic.webm', {type: rec.mimeType})]);
+  };
+  rec.start();
+  btn.setAttribute('aria-pressed', 'true');
+  btn.querySelector('.lbl').textContent = 'Listening';
+  let left = 5;
+  const tick = setInterval(() => {
+    left--;
+    const s = btn.querySelector('small'); if (s) s.textContent = left > 0 ? `${left}s · press to stop` : '';
+    if (left <= 0 && recorder === rec) rec.stop();
+  }, 1000);
+  btn.querySelector('small').textContent = '5s · press to stop';
+}
+
+/* ── Actions ──────────────────────────────────────────────────────────── */
+const num = id => ($(id).value || '').replace(/[^\d]/g, '');
+const ACTIONS = {
+  async download() { await post('/api/assets/download'); refresh(); },
+  log() { openLog(); },
+  async 'hear-new'(btn) {
+    const variants = $('newPhrase').value.split(',').map(s => s.trim()).filter(Boolean);
+    if (!variants.length) { notice('Type the wake phrase first, for example “hey verona”.'); $('newPhrase').focus(); return; }
+    for (const v of variants) { $('hearNote').textContent = `Playing “${v}”`; await say(v, btn); }
+    $('hearNote').textContent = '';
+  },
+  async create() {
+    const phrase = $('newPhrase').value.trim();
+    if (!phrase) { notice('Type the wake phrase first, for example “hey verona”.'); $('newPhrase').focus(); return; }
+    const r = await post('/api/wakewords', {phrase, name: $('newName').value.trim(),
+      samples: num('newSamples'), steps: num('newSteps')});
+    draft = {...DRAFT0}; saveDraft();
+    await refresh();
+    location.hash = href('w', r.name, 'train');
+  },
+  async build(btn, name) { await post(`/api/wakewords/${enc(name)}/build`); await refresh();
+    if (route().step !== 'train') location.hash = href('w', name, 'train'); },
+  async stop() { await stopJob(); },
+  async save(btn, name) {
+    await api(`/api/wakewords/${enc(name)}`, {method: 'PATCH', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({n_samples: num('f-samples'), steps: num('f-steps')})});
+    flash('train', 'ok', 'Saved. They apply the next time it trains.'); refresh();
+  },
+  async savenegs(btn, name) {
+    await api(`/api/wakewords/${enc(name)}`, {method: 'PATCH', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({custom_negative_phrases: $('f-neg').value})});
+    impStatus('ok', wwByName(name)?.model_built ? 'Saved. Retrain to use them.' : 'Saved. Training will use them.'); refresh();
+  },
+  async piper(btn, name) {
+    await post(`/api/wakewords/${enc(name)}/piper-voices`, {language: $('pLang').value, samples: +num('pN') || 4000});
+    impStatus('', 'Adding voices. Train when that finishes.'); refresh();
+  },
+  async gtts(btn, name) {
+    const langs = [...document.querySelectorAll('input[name=gl]:checked')].map(i => i.value);
+    if (!langs.length) { notice('Pick at least one accent.'); return; }
+    await post(`/api/wakewords/${enc(name)}/google-tts`, {languages: langs.join(','), samples: +num('gN') || 2000});
+    impStatus('', 'Adding Google voices. Train when that finishes.'); refresh();
+  },
+  async del(btn, name) {
+    if (!await confirmDialog(`Delete ${name}?`, 'This deletes its training data and model from the forge. It can’t be undone.', 'Delete', true)) return;
+    await api(`/api/wakewords/${enc(name)}`, {method: 'DELETE'});
+    delete verdicts[name];
+    await refresh(); location.hash = '#/';
+  },
+  mic(btn, name) { toggleMic(btn, name); },
+  rename(btn, name) {
+    const d = $('renameDlg'), step = route().step;
+    $('rnTitle').textContent = `Rename ${name}`; $('rnInput').value = name; $('rnErr').textContent = '';
+    d.showModal(); $('rnInput').select();
+    $('rnForm').onsubmit = async e => {
+      e.preventDefault();
+      const to = $('rnInput').value.trim();
+      if (!to || to === name) { d.close(); return; }
+      const r = await fetch(`/api/wakewords/${enc(name)}/rename`, {method: 'POST',
+        headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name: to})});
+      if (!r.ok) { $('rnErr').textContent = await r.text(); $('rnInput').focus(); return; }
+      for (const k of Object.keys(flashes)) if (k.startsWith(name + '/')) { flashes[to + k.slice(name.length)] = flashes[k]; delete flashes[k]; }
+      if (verdicts[name]) { verdicts[to] = verdicts[name]; delete verdicts[name]; }
+      d.close();
+      await refresh();
+      location.hash = href('w', to, step || 'train');
+      announce(`Renamed to ${to}.`);
+    };
+  },
+  async gsave() {
+    const file = $('gFile').files[0], pasted = $('gPaste').value.trim();
+    if (!file && !pasted) { notice('Choose the key file, or paste its contents.'); return; }
+    await api('/api/google', {method: 'PUT', headers: {'Content-Type': 'application/json'}, body: file || pasted});
+    await refresh();
+    ACTIONS.gcheck();
+  },
+  async gcheck() {
+    const out = () => $('gVerdict');
+    if (out()) out().innerHTML = `<div class="status"><i></i>Asking Google…</div>`;
+    const r = await post('/api/google/check');
+    lastView = null; render();
+    if (out()) out().innerHTML = r.ok
+      ? `<div class="status ok"><i></i>Working: ${n0(r.voices)} voices in ${n0(r.languages)} languages.</div>`
+      : `<div class="status bad"><i></i>${esc(r.error)}</div>`;
+  },
+  async gremove() {
+    if (!await confirmDialog('Remove the Google key?', 'Wake words keep the Google voices they already have.', 'Remove', true)) return;
+    await api('/api/google', {method: 'DELETE'}); refresh();
+  },
+};
+/* A confirmation is state, not DOM: the poll redraws the page, and a message
+   written straight into it vanished on the next poll after a save. */
+function flash(page, cls, msg) { flashes[route().name + '/' + page] = msg ? {cls, msg} : null; lastView = null; render(); }
+const impStatus = (cls, msg) => flash('improve', cls, msg);
+function flashHtml(name, page) {
+  const f = flashes[name + '/' + page];
+  return f ? `<div class="status ${f.cls} still"><i></i>${esc(f.msg)}</div>` : '';
+}
+
+$('view').addEventListener('click', async e => {
+  const sayBtn = e.target.closest('button[data-say]');
+  if (sayBtn) { say(sayBtn.dataset.say, sayBtn); return; }
+  const btn = e.target.closest('button[data-act]');
+  if (!btn || btn.disabled) return;
+  const r = route();
+  try { await ACTIONS[btn.dataset.act](btn, r.name); } catch {}
+});
+$('view').addEventListener('change', async e => {
+  const input = e.target.closest('input[type=file][data-act]');
+  if (!input || !input.files.length) return;
+  const name = route().name, files = [...input.files];
+  input.value = '';
+  if (input.dataset.act === 'testfile') { scoreFiles(name, files); return; }
+  const fd = new FormData();
+  for (const f of files) fd.append('audio', f);
+  impStatus('', `Adding ${files.length} recording${files.length === 1 ? '' : 's'}…`);
+  try {
+    const r = await api(`/api/wakewords/${enc(name)}/samples`, {method: 'POST', body: fd});
+    impStatus(r.errors.length ? 'bad' : 'ok', `Added ${r.added} recording${r.added === 1 ? '' : 's'}.` +
+      (r.errors.length ? ` ${r.errors.length} couldn't be read.` : '') + ' Retrain to use them.');
+  } catch { impStatus('', ''); }
+});
+const DRAFT_FIELDS = {newPhrase: 'phrase', newName: 'name', newSamples: 'samples', newSteps: 'steps'};
+$('view').addEventListener('input', e => {
+  const k = DRAFT_FIELDS[e.target.id]; if (!k) return;
+  draft[k] = e.target.value; saveDraft();
+  if (k === 'phrase') $('newName').placeholder = defaultName(draft.phrase) || 'Made from the phrase';
+});
+$('view').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && e.target.id === 'newPhrase') ACTIONS.create().catch(() => {});
 });
 
+async function stopJob() {
+  if (!await confirmDialog('Stop this run?', 'Work already done is kept. Starting again picks up where it left off.', 'Stop')) return;
+  await api('/api/job/cancel', {method: 'POST'});
+  refresh();
+}
+$('rnCancel').onclick = () => $('renameDlg').close();
+$('cancelJob').onclick = () => stopJob().catch(() => {});
+
+function openLog() {
+  $('flyout').hidden = false; $('logBtn').setAttribute('aria-expanded', 'true');
+  const pre = $('logPre'); pre.scrollTop = pre.scrollHeight; $('logClose').focus();
+}
+function closeLog() { $('flyout').hidden = true; $('logBtn').setAttribute('aria-expanded', 'false'); $('logBtn').focus(); }
+$('logBtn').onclick = () => $('flyout').hidden ? openLog() : closeLog();
+$('logClose').onclick = closeLog;
+$('flyout').addEventListener('keydown', e => { if (e.key === 'Escape') closeLog(); });
+$('logCopy').onclick = async () => {
+  try { await navigator.clipboard.writeText($('logPre').textContent); announce('Log copied.'); }
+  catch { const s = getSelection(), rg = document.createRange(); rg.selectNodeContents($('logPre')); s.removeAllRanges(); s.addRange(rg); }
+};
+
+function themeLabel() {
+  const dark = document.documentElement.getAttribute('data-theme') === 'dark';
+  $('themeBtn').setAttribute('aria-label', dark ? 'Switch to light theme' : 'Switch to dark theme');
+}
 $('themeBtn').onclick = () => {
   const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
   document.documentElement.setAttribute('data-theme', next);
   try { localStorage.setItem('em-theme', next); } catch (e) {}
+  themeLabel();
 };
+themeLabel();
 
-$('cancelJob').onclick = async () => {
-  if (!confirm('Stop this run?\n\nWork already done is kept — pressing Train again picks up where it left off.')) return;
-  await api('/api/job/cancel', {method: 'POST'});
-  refresh();
-};
-
-/* Google credentials */
-function gVerdict(cls, text) {
-  const v = $('gVerdict');
-  v.style.display = ''; v.className = 'verdict ' + cls; v.textContent = text;
-}
-
-$('gSave').onclick = async () => {
-  const file = $('gFile').files[0];
-  const pasted = $('gPaste').value.trim();
-  let body;
-  if (file) { body = file; }
-  else if (pasted) { body = pasted; }
-  else return alert('Choose the JSON key file, or paste its contents.');
-  gVerdict('info', 'Saving…');
-  try {
-    await api('/api/google', {method: 'PUT', headers: {'Content-Type': 'application/json'}, body});
-  } catch (e) { $('gVerdict').style.display = 'none'; return; }
-  $('gFile').value = ''; $('gPaste').value = '';
-  gVerdict('info', 'Saved — testing the connection…');
-  await refresh();
-  $('gCheck').click();
-};
-
-$('gCheck').onclick = async () => {
-  gVerdict('info', 'Asking Google…');
-  const r = await api('/api/google/check', {method: 'POST'});
-  if (r.ok) gVerdict('ok', `✓ Connected — ${r.voices} voices across ${r.languages} languages available`);
-  else gVerdict('no', `✗ ${r.error}`);
-};
-
-$('gRemove').onclick = async () => {
-  if (!confirm('Remove the saved Google key?')) return;
-  await api('/api/google', {method: 'DELETE'});
-  $('gVerdict').style.display = 'none';
-  refresh();
-};
-
-$('toggleLog').onclick = () => {
-  const c = $('console');
-  c.classList.toggle('min');
-  $('toggleLog').textContent = c.classList.contains('min') ? 'show log' : 'hide log';
-};
-
-$('wakewords').addEventListener('click', async e => {
-  const btn = e.target.closest('button[data-act]');
-  if (!btn) return;
-  const card = btn.closest('.ww'), name = card.dataset.name;
-  const act = btn.dataset.act;
-  if (act === 'build') {
-    await api(`/api/wakewords/${name}/build`, {method: 'POST',
-      headers: {'Content-Type': 'application/json'}, body: '{}'});
-  } else if (act === 'save') {
-    const val = f => card.querySelector(`input[data-f="${f}"]`).value;
-    const r = await api(`/api/wakewords/${name}`, {method: 'PATCH',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({n_samples: val('n_samples'), steps: val('steps'),
-                            custom_negative_phrases: val('negatives')})});
-    const v = card.querySelector('.verdict');
-    v.style.display = ''; v.className = 'verdict ok';
-    v.textContent = '✓ Saved — press Train to apply';
-    lastWwHtml = null;
-  } else if (act === 'pipergb') {
-    let langs;
-    try { langs = await api('/api/voices'); } catch { return; }
-    const withMulti = langs.filter(l => l.max_speakers > 1);
-    const lang = prompt(
-      'Which accent or language should the extra voices use?\n\n' +
-      'The built-in voices are all American English, so this is how you teach it\n' +
-      'the way the phrase is actually said in your house.\n\n' +
-      'Codes with the most distinct speakers:\n  ' +
-      withMulti.slice(0, 8).map(l => `${l.language} (${l.max_speakers} speakers, ${l.label})`).join('\n  ') +
-      `\n\n${langs.length} languages available in total.`, 'en_GB');
-    if (!lang) return;
-    const n = prompt('How many clips to add?\n(Generated locally — no account, no cost. The first run downloads the voice, typically 20-80MB.)', '4000');
-    if (!n) return;
-    await api(`/api/wakewords/${name}/piper-voices`, {method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({samples: +n, language: lang.trim()})});
-  } else if (act === 'gtts') {
-    if (!(state.google && state.google.valid)) {
-      return alert('Set up the Google key first — see "Google voices" on the left.');
-    }
-    const n = prompt('How many Google voice clips to add?\n(Usually free — a run this size is ~2% of Google\'s monthly free allowance.)', '2000');
-    if (!n) return;
-    const langs = prompt('Which accents?\n  en-GB,en-AU = British + Australian only\n  en-US,en-GB,en-AU = all three', 'en-GB,en-AU');
-    if (!langs) return;
-    await api(`/api/wakewords/${name}/google-tts`, {method: 'POST',
-      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({samples: +n, languages: langs})});
-  } else if (act === 'test' || act === 'addrec') {
-    const input = card.querySelector('input[type=file]');
-    input.onchange = async () => {
-      const fd = new FormData();
-      for (const f of input.files) fd.append(act === 'test' ? 'wav' : 'audio', f);
-      const v = card.querySelector('.verdict');
-      v.style.display = ''; v.className = 'verdict info';
-      v.textContent = act === 'test' ? 'Scoring…' : 'Adding recordings…';
-      if (act === 'test') {
-        const r = await api(`/api/wakewords/${name}/test`, {method: 'POST', body: fd});
-        showVerdict(card, r.output);
-      } else {
-        const r = await api(`/api/wakewords/${name}/samples`, {method: 'POST', body: fd});
-        v.className = r.errors.length ? 'verdict no' : 'verdict ok';
-        v.textContent = `✓ Added ${r.added} recording(s) — press Retrain to teach the model with them` +
-          (r.errors.length ? ` (${r.errors.length} failed)` : '');
-        refresh();
-      }
-    };
-    input.click();
-    return;
-  } else if (act === 'mic') {
-    const v = card.querySelector('.verdict');
-    if (btn.dataset.rec) {
-      btn.dataset.rec = ''; btn.textContent = '🎤 Try it';
-      window.__rec?.stop();
-      return;
-    }
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({audio: true});
-      const rec = new MediaRecorder(stream);
-      const chunks = [];
-      rec.ondataavailable = e => chunks.push(e.data);
-      rec.onstop = async () => {
-        stream.getTracks().forEach(t => t.stop());
-        v.style.display = ''; v.className = 'verdict info'; v.textContent = 'Scoring…';
-        const fd = new FormData();
-        fd.append('wav', new Blob(chunks, {type: rec.mimeType}), 'mic.webm');
-        const r = await api(`/api/wakewords/${name}/test`, {method: 'POST', body: fd});
-        showVerdict(card, r.output);
-      };
-      window.__rec = rec;
-      rec.start();
-      btn.dataset.rec = '1'; btn.textContent = '⏹ Done';
-      v.style.display = ''; v.className = 'verdict info';
-      v.textContent = 'Recording — say the wake word, then press Done';
-      setTimeout(() => { if (btn.dataset.rec) { btn.dataset.rec = ''; btn.textContent = '🎤 Try it'; rec.stop(); } }, 5000);
-    } catch (err) {
-      v.style.display = ''; v.className = 'verdict no';
-      v.textContent = 'Microphone not available in this browser (needs HTTPS or localhost) — use "Test a recording…" with a phone recording instead';
-    }
-    return;
-  } else if (act === 'del') {
-    if (!confirm(`Remove '${name}'? This deletes its training data and model.`)) return;
-    await api(`/api/wakewords/${name}`, {method: 'DELETE'});
-  }
-  refresh();
-});
+addEventListener('hashchange', () => { render(); $('title')?.focus(); });
 
 refresh();
 setInterval(refresh, 2500);

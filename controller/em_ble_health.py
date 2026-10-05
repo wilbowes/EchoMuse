@@ -73,3 +73,31 @@ def observe(
         f"check the device log for the read error, and for mic or link "
         f"trouble in the same window",
     )
+
+
+# ─── Seen vs forwarded (#410) ────────────────────────────────────────────────
+#
+# The dashboard puts the device's adverts-seen next to the controller's
+# adverts-forwarded, and they counted from different moments: seen from the
+# device's process start, forwarded from the proxy's creation on the
+# controller. C95 read 36,430 seen against 194,146 forwarded, while the real
+# pass-through was 91%. So the controller keeps a baseline for the device's
+# counter and both are shown from the same instant.
+
+class SeenBase(NamedTuple):
+    """Where the device's seen counter stood when forwarding began counting."""
+    base: int
+    last: int                # the device's raw counter at the previous report
+    reset_forwarded: bool    # start the forwarded count again from here
+
+
+def rebase_seen(base: Optional[int], last: int, raw: int) -> SeenBase:
+    """
+    `base` is None until the first report. A raw counter below the last one
+    means the device restarted, so both counts start again from zero.
+    """
+    if base is None:
+        return SeenBase(raw, raw, True)
+    if raw < last:
+        return SeenBase(0, raw, True)
+    return SeenBase(base, raw, False)

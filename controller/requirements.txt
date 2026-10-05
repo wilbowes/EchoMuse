@@ -84,4 +84,4 @@ onnxruntime==1.20.1
 # and round-trips under runtime 7.35.1. The rule only rejects a runtime OLDER
 # than its gencode, so this direction is the safe one — but protobuf's
 # cross-version guarantee is a window, not a promise, so check again at 8.x.
-protobuf>=7.36.1
+protobuf>=7.36.2

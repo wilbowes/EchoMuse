@@ -555,3 +555,120 @@ func TestCloseDuringPushDoesNotPanic(t *testing.T) {
 		s.Close() // documented as safe to call twice
 	}
 }
+
+// TestBargeBarNeedsTwoConsecutiveFrames: at the barge-in bar one frame is not a
+// wake. That bar is ~10x below the wake threshold and scores the assistant's
+// own voice, and a single-frame rule cut long answers off (em_barge.decide).
+func TestBargeBarNeedsTwoConsecutiveFrames(t *testing.T) {
+	var mu sync.Mutex
+	var crosses int
+	inf := &fakeInferer{}
+	s := NewScorer(inf, 0.5, func(float32, float32, time.Time) {
+		mu.Lock()
+		crosses++
+		mu.Unlock()
+	})
+	defer s.Close()
+	s.SetBargeThreshold(0.10, func() bool { return true })
+
+	inf.set(0.0, 0)
+	pushAll(t, s, wakeword.FeatWindow+1)
+	// Alternate above and below the bar: never two in a row.
+	for i := 0; i < 6; i++ {
+		inf.set(0.2, 0)
+		pushAll(t, s, 1)
+		inf.set(0.0, 0)
+		pushAll(t, s, 1)
+	}
+	mu.Lock()
+	got := crosses
+	mu.Unlock()
+	if got != 0 {
+		t.Fatalf("crossed %d times on isolated frames at the barge bar", got)
+	}
+	inf.set(0.2, 0)
+	pushAll(t, s, 2)
+	waitFor(t, "a two-frame barge crossing", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return crosses == 1
+	})
+}
+
+// TestNormalBarStillFiresOnOneFrame: the two-frame rule is for the barge bar
+// only. At the wake threshold one frame is a wake, as it always was.
+func TestNormalBarStillFiresOnOneFrame(t *testing.T) {
+	var mu sync.Mutex
+	var crosses int
+	inf := &fakeInferer{}
+	s := NewScorer(inf, 0.5, func(float32, float32, time.Time) {
+		mu.Lock()
+		crosses++
+		mu.Unlock()
+	})
+	defer s.Close()
+	inf.set(0.0, 0)
+	pushAll(t, s, wakeword.FeatWindow+1)
+	inf.set(0.9, 0)
+	pushAll(t, s, 1)
+	waitFor(t, "a one-frame crossing", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return crosses == 1
+	})
+}
+
+// TestCrossingReportsCaptureTime: the time handed to the callback is when the
+// crossing frame was captured, not when inference got round to it. The queue
+// holds up to 640ms, and arbitration and the private-listening session both
+// measure from capture.
+func TestCrossingReportsCaptureTime(t *testing.T) {
+	got := make(chan time.Time, 1)
+	inf := &fakeInferer{}
+	s := NewScorer(inf, 0.5, func(_, _ float32, at time.Time) { got <- at })
+	defer s.Close()
+	inf.set(0.0, 0)
+	pushAll(t, s, wakeword.FeatWindow+1)
+	inf.set(0.9, 0)
+	captured := time.Now().Add(-500 * time.Millisecond)
+	b := make([]byte, wakeword.ChunkSamples*2)
+	s.PushBytesAt(b, captured)
+	select {
+	case at := <-got:
+		if !at.Equal(captured) {
+			t.Fatalf("callback got %v, want the capture time %v", at, captured)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no crossing")
+	}
+}
+
+// TestBargeWindowReportsThePeakAtTheBargeBar: the private path's replacement
+// for the controller barge watcher's "peak=" line.
+func TestBargeWindowReportsThePeakAtTheBargeBar(t *testing.T) {
+	inf := &fakeInferer{}
+	s := NewScorer(inf, 0.5, nil)
+	defer s.Close()
+	playing := false
+	var mu sync.Mutex
+	s.SetBargeThreshold(0.25, func() bool { mu.Lock(); defer mu.Unlock(); return playing })
+	inf.set(0.0, 0)
+	pushAll(t, s, wakeword.FeatWindow+1)
+	inf.set(0.9, 0) // idle: a wake, but not a barge-window frame
+	pushAll(t, s, 1)
+	if _, _, n := s.TakeBargeWindow(); n != 0 {
+		t.Fatalf("counted %d barge frames while idle", n)
+	}
+	mu.Lock()
+	playing = true
+	mu.Unlock()
+	inf.set(0.18, 0)
+	pushAll(t, s, 3)
+	peak, bar, n := s.TakeBargeWindow()
+	if n != 3 || bar != 0.25 || peak < 0.17 || peak > 0.19 {
+		t.Fatalf("window = peak %.3f bar %.2f frames %d", peak, bar, n)
+	}
+	if _, _, n := s.TakeBargeWindow(); n != 0 {
+		t.Fatal("window not reset")
+	}
+}

@@ -310,6 +310,29 @@ class StreamingEQ:
         return np.clip(tail, -32768, 32767).astype(np.int16).tobytes()
 
 
+class Passthrough:
+    """
+    StreamingEQ's interface with nothing behind it, for a device that runs the
+    output chain itself (the `output_chain` capability).
+
+    The audio must leave here untouched, and every call site keeps its shape:
+    `update` reports no change, so the music feed never logs a chain it is not
+    running, and `flush` has no look-ahead tail to emit.
+    """
+
+    limiter = None
+    guard = None
+
+    def update(self, **_) -> bool:
+        return False
+
+    def process(self, pcm: bytes) -> bytes:
+        return pcm
+
+    def flush(self) -> bytes:
+        return b""
+
+
 # ─── Chain instrumentation ────────────────────────────────────────────────
 #
 # Whether the output chain is doing anything has been unanswerable from

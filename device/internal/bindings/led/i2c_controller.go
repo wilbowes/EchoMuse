@@ -2,28 +2,31 @@ package led
 
 import (
 	"bytes"
-	"sync"
-
-	"github.com/wilbowes/EchoMuse/pkg/led"
+	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sync"
+
+	"github.com/wilbowes/EchoMuse/pkg/board"
+	"github.com/wilbowes/EchoMuse/pkg/led"
 )
 
-// i2C device that sets the current led
-const ledCurrentPath = "/sys/devices/soc/11007000.i2c/i2c-0/0-003f/led_current"
-
-// i2C device that seems to control brightness
-const privacyBrightnessPath = "/sys/devices/soc/10010000.keypad/amz_privacy/privacy_brightness"
-
-// i2C device that controls the actual LEDs
-const ledFrame = "/sys/devices/soc/11007000.i2c/i2c-0/0-003f/frame"
-
-// The is31fl3236 driver animates the ring itself from boot until something
-// clears this. Android's userspace does; ours does not, so on a device running
-// our own init the kernel animation and our frames drive the same LEDs over the
-// same i2C device and the ring visibly glitches. Reads 1 under our userspace and
-// 0 on stock.
-const bootAnimationPath = "/sys/devices/soc/11007000.i2c/i2c-0/0-003f/boot_animation"
+// The ring driver's attributes, under its i2c client's directory. The client
+// is found by driver name (pkg/board): the bus and address in its path are
+// where this board happens to put it.
+const (
+	// LED drive current.
+	ledCurrentAttr = "led_current"
+	// The frame the LEDs show.
+	ledFrameAttr = "frame"
+	// The is31fl3236 driver animates the ring itself from boot until
+	// something clears this. Android's userspace does; ours does not, so on a
+	// device running our own init the kernel animation and our frames drive
+	// the same LEDs and the ring visibly glitches. Reads 1 under our
+	// userspace and 0 on stock.
+	bootAnimationAttr = "boot_animation"
+)
 
 // file permission we need to access the i2C device
 const perm = os.FileMode(0644)
@@ -34,30 +37,38 @@ type I2CController struct {
 	// handler, volume timer). Without this, concurrent SetLEDs calls produce
 	// torn frames written to the i2C device.
 	mu sync.Mutex
+	// dir is the ring driver's sysfs directory and frame its frame attribute,
+	// set by Init.
+	dir   string
+	frame string
 }
 
 func (i *I2CController) Init() error {
+	i.dir = board.CurrentLayout().LEDRing
+	if i.dir == "" {
+		return errors.New("led: ring driver not found on this board")
+	}
+	i.frame = filepath.Join(i.dir, ledFrameAttr)
 
 	// Stop the kernel's boot animation before the first frame, or it keeps
 	// driving the same LEDs. Best-effort: on stock Android something has
 	// already cleared it, and a board without the attribute is not a failure.
-	_ = os.WriteFile(bootAnimationPath, []byte("0"), perm)
+	_ = os.WriteFile(filepath.Join(i.dir, bootAnimationAttr), []byte("0"), perm)
 
 	// Initialize the LED i2C device in order for us to control it
 	ledCurrentPacket := []byte("3")
 	privacyBrightnessPacket := []byte{48, 0}
 
-	err := os.WriteFile(ledCurrentPath, ledCurrentPacket, perm)
+	err := os.WriteFile(filepath.Join(i.dir, ledCurrentAttr), ledCurrentPacket, perm)
 	if err != nil {
 		return err
 	}
 
-        // privacy_brightness may not exist on all devices — ignore error
-        _ = os.WriteFile(privacyBrightnessPath, privacyBrightnessPacket, perm)
-
-	//if err = os.WriteFile(privacyBrightnessPath, privacyBrightnessPacket, perm); err != nil {
-	//	return err
-	//}
+	// Brightness of the mute button's LED, where the kernel has Amazon's
+	// privacy driver (privacy.go finds it by name). Best-effort.
+	if d := privacyDir(); d != "" {
+		_ = os.WriteFile(filepath.Join(d, "privacy_brightness"), privacyBrightnessPacket, perm)
+	}
 
 	// ledcontroller may overwrite our led config
 	// solution: let android kill it
@@ -85,7 +96,7 @@ func (i *I2CController) GetNumLEDs() (int, error) {
 //
 //		targetColor.Write(led.Leds[index].BuildArgument())
 //	}
-//	return os.WriteFile(ledFrame, targetColor.Bytes(), perm)
+//	return os.WriteFile(i.frame, targetColor.Bytes(), perm)
 //}
 
 func (i *I2CController) SetLEDs(LEDs ...led.Led) error {
@@ -103,7 +114,7 @@ func (i *I2CController) SetLEDs(LEDs ...led.Led) error {
     for _, l := range led.Leds {
         targetColor.Write(l.BuildArgument())
     }
-    return os.WriteFile(ledFrame, targetColor.Bytes(), perm)
+    return os.WriteFile(i.frame, targetColor.Bytes(), perm)
 }
 
 func NewDefaultController() (led.Controller, error) {

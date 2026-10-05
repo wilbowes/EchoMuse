@@ -55,8 +55,7 @@ class Console:
         attrs[4] = attrs[5] = termios.B115200
         termios.tcsetattr(self.fd, termios.TCSANOW, attrs)
         self.buf = ""
-        if password is not None:
-            self.login(password)
+        self.login(password)
         self.send("stty -echo")
         time.sleep(0.4)
         self.drain()
@@ -78,17 +77,71 @@ class Console:
         os.write(self.fd, (line + "\n").encode())
 
     def login(self, password):
-        """Wake the console and answer the password gate if there is one."""
+        """Wake the console and answer the password gate if there is one.
+
+        Waits for what the console prints rather than for a fixed time: the
+        gate re-prompts 2-5s late after three wrong answers, and hashing the
+        answer takes a moment on the device. A fixed wait sent the password,
+        or `stty -echo`, into the gap and read as a wrong password.
+        """
+        # A prompt left over from an earlier session would be answered in
+        # place of the one our newline produces.
+        termios.tcflush(self.fd, termios.TCIFLUSH)
+        self.drain(0.3)
         os.write(self.fd, b"\n")
-        seen = self.drain(1.5)
-        if "password:" in seen.lower():
+        seen = self._await(("password:", "# "), 15)
+        if seen.endswith("password:"):
+            if password is None:
+                raise SystemExit("console asks for a password: pass --password")
             self.send(password)
-            time.sleep(1.0)
-            seen += self.drain(1.0)
-            if "password:" in self.drain(0.5).lower():
+            if not self._logged_in(30):
                 raise SystemExit("console rejected the password")
         if self.debug:
             print(f"[login] {seen!r}", file=sys.stderr)
+
+    def _logged_in(self, timeout):
+        """True once a shell prompt follows the password. A password prompt
+        alone is not a refusal: it can be the gate's late answer to an
+        earlier line, so only one left unanswered for longer than the gate's
+        longest backoff (5s) counts."""
+        buf, quiet_since = "", time.time()
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                b = os.read(self.fd, 4096)
+                if b:
+                    buf += b.decode("utf-8", "replace")
+                    quiet_since = time.time()
+                    if buf.rstrip(" ").endswith("#"):
+                        return True
+                    continue
+            except BlockingIOError:
+                pass
+            if (buf.rstrip(" ").endswith("password:")
+                    and time.time() - quiet_since > 6.5):
+                return False
+            time.sleep(0.05)
+        return False
+
+    def _await(self, needles, timeout):
+        """Read until the text ends with one of `needles` (trailing blanks
+        ignored); return it, or raise if nothing matched in time."""
+        buf = ""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                b = os.read(self.fd, 4096)
+                if b:
+                    buf += b.decode("utf-8", "replace")
+                    tail = buf.rstrip(" ")
+                    for n in needles:
+                        if tail.endswith(n.rstrip(" ")):
+                            return tail
+                    continue
+            except BlockingIOError:
+                pass
+            time.sleep(0.05)
+        raise TimeoutError(f"console did not answer; buffer={buf[-300:]!r}")
 
     def run(self, cmd, timeout=20):
         tag = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))

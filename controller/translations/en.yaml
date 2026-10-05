@@ -60,6 +60,16 @@ configuration:
       Log protocol-level detail for devices and the Home Assistant
       connection. Verbose — turn it on to diagnose something, then off
       again.
+  log_levels:
+    name: Per-area log levels
+    description: >-
+      Override the level of individual areas, as comma-separated
+      name=LEVEL pairs. For example echomuse.esphome=DEBUG,
+      aiohttp.access=INFO. Names follow the logger hierarchy, so
+      echomuse=DEBUG covers every EchoMuse area and aiohttp.access covers
+      the dashboard's own request log. Each name overrides the level set
+      above it, so this can both add detail to one area and quiet another.
+      Leave empty unless you are narrowing down a specific fault.
   extra_ca_cert:
     name: Private CA certificate
     description: >-

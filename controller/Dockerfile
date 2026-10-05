@@ -1,4 +1,26 @@
-FROM python:3.12-slim
+# Silero VAD for the device's speech gate, rewritten so ONNX Runtime can load
+# it on armv7 (tools/silero_typed.py — as openwakeword ships it, ORT 1.19
+# takes SIGBUS in CreateSession on the Echo). A separate stage so `onnx` and
+# its dependencies never reach the controller image; only the model is copied.
+# Input and output are both pinned by sha256: the output is what devices run,
+# and it is the file measured on VVV. MIT licensed.
+#
+# numpy is pinned here too, to requirements.txt's 2.3.5 (#496): onnx pulls the
+# newest numpy, 2.4+ needs x86-64-v2, and this stage RUNS it — so a local
+# add-on build on a kvm64 host died here ("NumPy was built with baseline
+# optimizations: (X86_V2)"), while CI's v2-capable runners never saw it. The
+# output hash is unchanged with 2.3.5 (checked on linux/amd64).
+FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9 AS silero
+COPY tools/silero_typed.py /tmp/
+RUN pip install --no-cache-dir --root-user-action=ignore onnx==1.20.1 numpy==2.3.5 && \
+    python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/silero_vad.onnx', '/tmp/in.onnx')" && \
+    echo "a35ebf52fd3ce5f1469b2a36158dba761bc47b973ea3382b3186ca15b1f5af28  /tmp/in.onnx" | sha256sum -c - && \
+    python /tmp/silero_typed.py /tmp/in.onnx /silero_vad.onnx && \
+    echo "da5e8a9c9c07981b907e8affe5497fe604958c51b67bff07231778d701d164d0  /silero_vad.onnx" | sha256sum -c -
+
+# Base pinned by the multi-arch index digest, so every build of a given commit
+# starts from the same bytes; Dependabot moves the digest weekly with the tag.
+FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9
 # Links the GHCR package page back to the repo (and lets the package inherit
 # the repo's public visibility once connected).
 LABEL org.opencontainers.image.source="https://github.com/wilbowes/EchoMuse" \
@@ -80,28 +102,45 @@ COPY em_auth.py .
 COPY em_eq.py .
 COPY em_limiter.py .
 COPY em_mbc.py .
+COPY em_output_mute.py .
 COPY em_scenes.py .
 COPY em_support.py .
 COPY em_shadow.py .
+COPY em_wake_samples.py .
 COPY em_barge.py .
+COPY em_earlytts.py .
 COPY em_ns.py .
+COPY em_speechgate.py .
+COPY em_wav.py .
 COPY em_pki.py .
 COPY em_hostip.py .
 COPY em_ingressauth.py .
 COPY em_linkauth.py .
+COPY em_tcp.py .
 COPY em_pacing.py .
 COPY em_platform.py .
 COPY em_wsclose.py .
 COPY em_rttlog.py .
 COPY em_esphome.py .
 COPY em_ble_health.py .
+COPY em_config_types.py .
+COPY em_dbwriter.py .
+COPY em_tasks.py .
+COPY em_ble_gatt.py .
 COPY em_ble_proxy.py .
+COPY em_broadcast.py .
 COPY em_oww_assets.py  ./
 COPY em_oww_models.py .
+COPY em_pairing.py .
 COPY em_oww_metadata.py .
 COPY em_oww_warmup.py .
 COPY em_arbiter.py .
+COPY em_listen.py .
+COPY em_wakelevel.py .
+COPY em_endpoints.py .
+COPY em_health.py .
 COPY em_button.py .
+COPY em_wakeword.py .
 COPY em_tap_burst.py .
 COPY em_player.py .
 COPY em_config_sections.py .
@@ -109,6 +148,7 @@ COPY em_console_pw.py .
 COPY em_labels.py .
 COPY em_crashlog.py .
 COPY em_emos_build.py .
+COPY em_emos_update.py .
 COPY em_recordings.py .
 COPY em_turnclock.py .
 COPY em_firmware.py .
@@ -117,6 +157,7 @@ COPY em_runbarrier.py .
 COPY em_volume.py .
 COPY em_wifi.py .
 COPY em_timers.py .
+COPY em_loglevel.py .
 COPY version.py .
 # ESPHome native API subpackage (frame protocol, message registry, vendored protobuf)
 COPY esphome/ ./esphome/
@@ -151,13 +192,19 @@ RUN mkdir -p /app/models/oww_runtime && \
     echo "84737dd1fdb715f0ee695c0a9864f6949b66ecb4c46ca733bc9211bf0c2a7b5f  /tmp/ort.aar" | sha256sum -c - && \
     python -c "import zipfile, shutil; z = zipfile.ZipFile('/tmp/ort.aar'); shutil.copyfileobj(z.open('jni/armeabi-v7a/libonnxruntime.so'), open('/app/models/oww_runtime/libonnxruntime.so', 'wb'))" && \
     rm /tmp/ort.aar
+COPY --from=silero /silero_vad.onnx /app/models/oww_runtime/silero_vad.onnx
 # Dashboard SPA — placeholder is index.html, full dashboard is dashboard.html
 COPY static/ ./static/
 # Compile JSX dashboard with esbuild
 RUN EARCH="$(dpkg --print-architecture)" && case "$EARCH" in amd64) EPKG=linux-x64 ;; arm64) EPKG=linux-arm64 ;; *) echo "unsupported arch: $EARCH" >&2; exit 1 ;; esac && curl -sfL -o /tmp/esbuild.tar.gz "https://registry.npmjs.org/@esbuild/${EPKG}/-/${EPKG}-0.20.2.tgz" &&     tar -xz -C /tmp -f /tmp/esbuild.tar.gz &&     install -m755 /tmp/package/bin/esbuild /usr/local/bin/esbuild &&     esbuild /app/static/dashboard.jsx       --bundle=false       --jsx=transform       --jsx-factory=React.createElement       --jsx-fragment=React.Fragment       --outfile=/app/static/dashboard.js &&     rm -rf /tmp/esbuild.tar.gz /tmp/package /usr/local/bin/esbuild
-# Database persisted via volume mount
-# docker run -v ~/EchoMuse/controller/data:/app/data ...
-# Set DB_PATH=/app/data/echomuse.db in environment
+# The database, the device-link certificates and the recordings all sit beside
+# DB_PATH, so it defaults to the directory the compose files mount (#629).
+# The code's own default is the relative "echomuse.db", which in this image is
+# /app: with no .env everything was written inside the container and lost on
+# every recreate, certificates included, so every Echo needed pairing again.
+# The add-on sets its own DB_PATH (/data), which overrides this.
+ENV DB_PATH=/app/data/echomuse.db
+RUN mkdir -p /app/data
 COPY em_cacerts.py .
 COPY em_start.py .
 # em_start.py bridges /data/options.json (Home Assistant add-on config) into

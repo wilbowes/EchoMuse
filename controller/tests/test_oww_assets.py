@@ -425,3 +425,104 @@ def test_an_unreadable_inventory_reports_everything_missing():
     """
     desired = _base() + [_asset("selected.onnx", "c1", "classifier")]
     assert A.missing_assets(desired, {}) == [a.name for a in desired]
+
+
+# ── The speech gate's model ──────────────────────────────────────────────────
+
+def test_the_vad_model_is_never_evicted_as_a_leftover_classifier():
+    """
+    It is a .onnx the device was given and no desired list names as a
+    classifier — exactly the shape the LRU deletes. Deleting it drops every
+    device back to the RMS gate, silently.
+    """
+    desired = _base() + [_asset(A.VAD_NAME, "v1", "vad"),
+                         _asset("a.onnx", "c1", "classifier")]
+    actual = {a.name: (a.md5, NOW - 999_999) for a in desired}
+    assert A.VAD_NAME not in A.plan_sync(desired, actual, slots=0).prune
+    # Nor when this controller has no copy to offer (an older image): a
+    # device that already has one keeps it.
+    no_vad = [a for a in desired if a.kind != "vad"]
+    assert A.VAD_NAME not in A.plan_sync(no_vad, actual, slots=0).prune
+
+
+def test_the_vad_model_ships_from_the_image_not_the_package(tmp_path):
+    """openwakeword's own copy crashes ORT on the Echo; only the Dockerfile's
+    typed rewrite beside the runtime may be offered."""
+    (tmp_path / A.RUNTIME_NAME).write_bytes(b"rt")
+    assets, problems = A.desired_assets([], runtime_dir=tmp_path, include_stock=False)
+    assert A.VAD_NAME not in [a.name for a in assets]
+    assert any(A.VAD_NAME in p for p in problems), "a missing model is reported"
+
+    (tmp_path / A.VAD_NAME).write_bytes(b"vad")
+    assets, _ = A.desired_assets([], runtime_dir=tmp_path, include_stock=False)
+    vad = next(a for a in assets if a.name == A.VAD_NAME)
+    assert vad.kind == "vad" and vad.source == tmp_path / A.VAD_NAME
+
+
+def test_vad_name_matches_what_the_device_opens():
+    from pathlib import Path
+    go = (Path(__file__).resolve().parents[2]
+          / "device/internal/client/speechgate.go").read_text()
+    assert f'sileroModel = "{A.VAD_NAME}"' in go
+
+
+def test_the_image_builds_the_model_where_the_plan_looks():
+    from pathlib import Path
+    df = (Path(__file__).resolve().parents[1] / "Dockerfile").read_text()
+    assert f"COPY --from=silero /silero_vad.onnx {A.RUNTIME_DIR}/{A.VAD_NAME}" in df
+
+
+# ── Reconcile: every device carries the full set, whatever its mode ──────────
+
+@pytest.mark.parametrize("mode_off", [False, True])
+def test_a_complete_device_needs_nothing(mode_off):
+    assert A.reconcile_action(mode_off, None, []) == "none"
+
+
+@pytest.mark.parametrize("mode_off", [False, True])
+def test_gaps_are_repaired_in_either_mode(mode_off):
+    """The mode never decides WHETHER a device is repaired: one on the
+    controller's wake word must already hold what switching needs, and the
+    speech gate uses the VAD model in both."""
+    assert A.reconcile_action(mode_off, None, [A.VAD_NAME]) == "repair"
+
+
+def test_a_locally_scoring_device_without_its_model_is_deaf_until_repaired():
+    assert A.reconcile_action(False, "hey_jarvis_v0.1.onnx", ["hey_jarvis_v0.1.onnx"]) == "deaf"
+
+
+def test_a_controller_scoring_device_without_its_model_is_only_repaired():
+    """It can still hear its wake word: the controller is scoring for it."""
+    assert A.reconcile_action(True, "hey_jarvis_v0.1.onnx", ["hey_jarvis_v0.1.onnx"]) == "repair"
+
+
+def test_the_connect_reconcile_is_not_gated_on_the_wake_word_mode():
+    """It returned early under owwOnDevice=off until 2026-09-22, so a device on
+    the controller's wake word never got the runtime or the speech gate's
+    model, and could not switch mode without an install first."""
+    import ast
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "em_api.py").read_text()
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.AsyncFunctionDef) and n.name == "reconcile_oww_assets")
+    for node in ast.walk(fn):
+        if isinstance(node, ast.If) and "MODE_OFF" in ast.unparse(node.test):
+            assert not any(isinstance(b, ast.Return) for b in node.body), (
+                "reconcile_oww_assets returns early on the wake word mode")
+    assert "reconcile_action(" in ast.unparse(fn)
+
+
+def test_the_reconcile_never_changes_a_devices_mode():
+    """Repair, never switch: a device missing its model keeps its mode and
+    answers the button until the install lands (Wil, 2026-09-22)."""
+    import ast
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "em_api.py").read_text()
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.AsyncFunctionDef) and n.name == "reconcile_oww_assets")
+    for node in ast.walk(fn):
+        if isinstance(node, (ast.Assign, ast.AugAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for t in targets:
+                assert "oww_on_device" not in ast.unparse(t), (
+                    "reconcile_oww_assets changes the wake word mode")

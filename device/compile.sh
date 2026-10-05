@@ -9,6 +9,7 @@ if echo "$GIT_VERSION" | grep -q "dirty"; then
 else
     VERSION="$GIT_VERSION"
 fi
+[ -n "$EM_EXTRA_TAGS" ] && VERSION="${VERSION}-${EM_EXTRA_TAGS// /-}"
 echo "Building EchoMuse $VERSION..."
 
 # Suppress known harmless warnings from vendored C sources:
@@ -25,7 +26,7 @@ SUPPRESS="-Wno-deprecated-declarations -Wno-null-dereference"
 # strand it (see internal/client/tlscreds.go).
 BUILD_UNIX=$(date +%s)
 BUILD_CMD="cd /sdk && mkdir -p build && go build \
-    -tags server \
+    -tags \"server ${EM_EXTRA_TAGS}\" \
     -ldflags \"-X github.com/wilbowes/EchoMuse/internal/client.Version=${VERSION} \
                -X github.com/wilbowes/EchoMuse/internal/client.BuildUnix=${BUILD_UNIX}\" \
     -o build/server ./cmd/"

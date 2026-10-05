@@ -42,6 +42,36 @@ against real speech-over-TTS scores of 0.3-0.5.
 The cost is one frame of latency, 80ms, on a genuine barge. A real wake word
 holds a high score across several consecutive hops as the phrase completes,
 so it is not close.
+
+TWO REASONS TO GIVE UP THE TURN, AND ONLY ONE OF THEM IS A TRACEABLE EVENT
+-----------------------------------------------------------------------
+`barge_ceded` covers two different things: another Echo won the utterance, or
+`can_serve_turn` says there is no pipeline behind this one. Only the first was
+handled the way the wake path handles it, so someone talking over an answer
+during an HA outage got silence, no orange flash and nothing in the Activity
+tab — the barge path's version of the bug `record_dropped_wake` was written to
+stop happening on the wake path.
+
+The no-HA stand-down records and cues, for the same two reasons it does there:
+
+  - **A barge with no trace is indistinguishable from a device that heard
+    nothing.** The activity history is where an outage becomes visible
+    afterwards, and an HA outage is precisely when somebody barges in.
+  - **The cue reports the DEVICE's state, not a turn's outcome** — the wake word
+    worked, the controller is here, HA is not.
+
+Losing arbitration deliberately keeps only the log line. The wake path logs
+there too, and a cue would be reporting a race the user has no interest in:
+something in the house answered them, and they heard it.
+
+The trigger label is therefore its own decision here rather than a format
+string at the call site. Readers key on the trigger's PREFIX: `wake_word_phrase`
+sent to HA and `_persist_turn`'s shadow block both test
+`startswith("wakeword")`, and the wake statistics in the Activity tab are read
+the same way — so a borrowed prefix files a barge inside the wake-word numbers
+and names a wake word this turn never sent. "barge-in" is what a barge turn
+already records as; CONVERSATION_TRIGGER exists for the same reason, so that
+HA-initiated turns are not wake-word turns either.
 """
 
 from __future__ import annotations
@@ -115,3 +145,49 @@ def decide(*,
         return BargeDecision(True, f"score={score:.3f} >= {wake_threshold:.2f}")
     return BargeDecision(False, "")
 
+
+class CedeVerdict(NamedTuple):
+    # Give up the interrupting turn: playback has already stopped and stays
+    # stopped, and this device does not run the turn. Both reasons below set
+    # it, and they differ in everything else.
+    ceded: bool
+    # There is no pipeline behind this device — `can_serve_turn` refused, so
+    # nothing could have answered on it. The one reason that leaves a record
+    # and a cue; arbitration loss leaves neither, on purpose.
+    no_ha: bool
+    # The label to record the dropped wake under, and "" on every outcome that
+    # must not leave a record — so a caller cannot file a no_ha turn for a
+    # barge that lost a race.
+    trigger_label: str
+
+
+def cede(*, serves: bool, won_by: str, device_id: str,
+         score: float) -> CedeVerdict:
+    """
+    Whether a barge-in gives up the turn, and what it leaves behind.
+
+    `serves` is `em_esphome.can_serve_turn`, read BEFORE any claim is taken —
+    an Echo with no HA behind it must never take an arbitration window away
+    from one that could answer. `won_by` is the arbiter's answer, which is the
+    device's own id when it won (and when arbitration did not run at all).
+
+    The two failures are not the same event and must not share a handler:
+
+    * **no HA** — nothing on this device could ever have answered. Record it
+      and cue it, exactly as the wake listener does for the same stand-down.
+      Playback stopping is not the news; a missing pipeline is.
+    * **lost arbitration** — another Echo has the utterance and is answering
+      it. Log only. A cue would report a race nobody asked about, and the
+      record would put a second "wake heard" in the history for a turn the
+      neighbour is running.
+
+    Split out of `_barge_watcher` and `_private_barge` for the reason
+    `em_linkauth` and `em_turnclock` were: the suite cannot import
+    em_controller, so this was a decision with no coverage — and a copy at
+    each of those two call sites is two copies that can disagree.
+    """
+    if not serves:
+        return CedeVerdict(True, True, f"barge-in({score:.3f})")
+    if won_by != device_id:
+        return CedeVerdict(True, False, "")
+    return CedeVerdict(False, False, "")

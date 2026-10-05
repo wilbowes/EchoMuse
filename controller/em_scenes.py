@@ -288,6 +288,17 @@ def resolve(config: dict) -> dict:
     }
 
 
+def announcement_ring(*, capable: bool, turn_running: bool, alarm_ringing: bool) -> bool:
+    """
+    Whether an announcement shows the playback meter while it plays (#779).
+
+    It should look like any spoken reply. Not while a voice turn or a ringing
+    timer already owns the ring: the announcement would take it and then
+    clear it out from under them.
+    """
+    return capable and not turn_running and not alarm_ringing
+
+
 def meter_ttl(audio_seconds: float) -> int:
     """
     Dead-man TTL for a playback meter ring, sized to the response actually

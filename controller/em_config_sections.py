@@ -23,16 +23,18 @@ config key ends up belonging to no section.
 SECTIONS: dict[str, dict] = {
     "playback": {
         "label": "Playback",
-        "keys": ["eqBands", "eqLoudness", "duckDb",
+        "keys": ["eqBands", "eqLoudness", "duckDb", "responseLevel",
                  "limiterEnabled", "limiterThreshold", "limiterRelease",
-                 "bassGuardEnabled", "bassGuardDb"],
+                 "bassGuardEnabled", "bassGuardDb", "streamReply",
+                 "volumeButtonSound"],
     },
     "wakeword": {
         "label": "Wake word",
         "keys": [
             "owwModel", "owwThreshold", "owwSpeexNs",
             "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs",
-            "owwOnDevice",
+            "owwOnDevice", "wakeSound", "wakeSoundLevel",
+            "wakeClipCapture", "wakeClipMinScore",
         ],
     },
     "microphones": {
@@ -48,6 +50,7 @@ SECTIONS: dict[str, dict] = {
         "label": "Ring",
         "keys": [
             "ledScene", "ledListenColor", "ledThinkColor",
+            "remoteVolumeArc",
             "meterAttack", "meterDecay", "meterFloor",
             "meterGamma", "meterRef", "meterCurve",
         ],
@@ -62,11 +65,17 @@ SECTIONS: dict[str, dict] = {
             # management problem with no upside. It sits in a section like
             # every other key because the partition has to stay total.
             "consolePassword", "consoleTimeoutMin",
+            # Fleet-only (FLEET_KEYS): shown here, never overridden per device.
+            "controllerEndpoints",
         ],
     },
     "bluetooth": {
         "label": "Bluetooth",
-        "keys": ["bleProxyEnabled"],
+        "keys": ["bleProxyEnabled", "bleProxyConnections"],
+    },
+    "sendspin": {
+        "label": "Sendspin",
+        "keys": ["sendspinEnabled", "sendspinUnpaired"],
     },
 }
 
@@ -84,17 +93,26 @@ SECTIONS: dict[str, dict] = {
 # that has never reported.
 STATE_KEYS: frozenset[str] = frozenset({"startupVolume"})
 
+# Keys that belong to a section for display but are never overridden per
+# device: every device takes the fleet's value, whatever its scoping.
+#
+# controllerEndpoints is where Echos look for THIS controller. One device
+# holding a different list is a device that goes somewhere else when its link
+# drops, and nobody reading the fleet setting would know.
+FLEET_KEYS: frozenset[str] = frozenset({"controllerEndpoints"})
+
 SECTION_IDS: tuple[str, ...] = tuple(SECTIONS)
 
 
 def keys_for(section_ids) -> set[str]:
-    """Every config key belonging to the given sections. Unknown ids ignored."""
+    """Every config key a device overriding these sections may set. Unknown
+    ids ignored; FLEET_KEYS are never included."""
     out: set[str] = set()
     for sid in section_ids or ():
         section = SECTIONS.get(sid)
         if section:
             out.update(section["keys"])
-    return out
+    return out - FLEET_KEYS
 
 
 def normalise(section_ids) -> list[str]:

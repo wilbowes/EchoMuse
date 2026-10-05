@@ -58,13 +58,15 @@ def test_each_cause_of_an_early_end_records_its_own_outcome():
     """
     ctrl = (CONTROLLER / "em_controller.py").read_text()
     calls = re.findall(r"cancel_voice_turn\(([^)]*)\)", ctrl, re.S)
-    assert len(calls) == 3, f"expected 3 call sites, got {len(calls)}"
+    # Two barge paths since private listening (docs/listening.md): the stream
+    # path's _barge_watcher and _private_barge. Both must say "barged".
+    assert len(calls) == 4, f"expected 4 call sites, got {len(calls)}"
 
     reasons = sorted(
         re.search(r'reason="(\w+)"', c).group(1)
         for c in calls if re.search(r'reason="(\w+)"', c)
     )
-    assert reasons == ["barged", "cancelled", "muted"], (
+    assert reasons == ["barged", "barged", "cancelled", "muted"], (
         f"each cancel path must name its own cause; got {reasons}"
     )
 

@@ -1,6 +1,12 @@
 package codec
 
-import "testing"
+import (
+	"errors"
+	"sync"
+	"testing"
+
+	"github.com/wilbowes/EchoMuse/internal/bindings/mixer"
+)
 
 // A wrong name here is silence rather than an error, and the two ends failed
 // independently: the capture routes leave the ADCs powered down, the playback
@@ -42,5 +48,118 @@ func TestRoutesCoverBothEndsOfTheAudioPath(t *testing.T) {
 		if !want[name] {
 			t.Errorf("unexpected %s", name)
 		}
+	}
+}
+
+// ─── EnsureRoutes ────────────────────────────────────────────────────────────
+
+// The table test above reads as coverage and is not: `Routes` is a slice of
+// constant strings, which is a static symbol with no statements in it, and
+// `var once sync.Once` is zero-valued with none either. Every coverable
+// statement in this package is inside EnsureRoutes, so the package measured
+// 0.0% while looking well tested.
+//
+// The device build installs tinyalsa in an init; on a host the default backend
+// is `unavailable{}`, which makes EnsureRoutes run deterministically and fail
+// every write — so a fake is installed here to observe what it does.
+
+type recordingBackend struct {
+	sets [][]string
+	fail map[string]bool
+}
+
+func (b *recordingBackend) Set(name string, values []string) error {
+	if b.fail[name] {
+		return errors.New("no such control")
+	}
+	b.sets = append(b.sets, append([]string{name}, values...))
+	return nil
+}
+
+func (b *recordingBackend) Get(name string) (string, error) {
+	return "", errors.New("no such control")
+}
+
+// resetOnce clears the sync.Once so each test can drive EnsureRoutes afresh.
+// Unexported and in-package, which is the only reason this file is `package
+// codec` rather than `codec_test`.
+func resetOnce() { once = sync.Once{} }
+
+// The fake backend is installed without being restored. Nothing else in this
+// package reads the mixer — the other test walks the Routes table — and each
+// package's tests are a separate binary, so there is no state to leak into.
+// Exposing a reset on the mixer for this would be production API that exists
+// only for a test.
+
+func TestEnsureRoutesClosesEveryRoute(t *testing.T) {
+	resetOnce()
+	b := &recordingBackend{}
+	mixer.Use(b)
+
+	EnsureRoutes()
+
+	if len(b.sets) != len(Routes) {
+		t.Fatalf("%d writes for %d routes", len(b.sets), len(Routes))
+	}
+	for i, w := range Routes {
+		if len(b.sets[i]) != 2 || b.sets[i][0] != w.Name || b.sets[i][1] != w.Value {
+			t.Errorf("write %d = %v, want [%s %s]", i, b.sets[i], w.Name, w.Value)
+		}
+	}
+}
+
+// `sync.Once` is load-bearing: DAPM decides what to power at stream open, so the
+// routes must be closed before EITHER the mic or the speaker opens its PCM — and
+// both of them call this, so whichever runs second must not redo the work.
+func TestEnsureRoutesRunsOnlyOncePerProcess(t *testing.T) {
+	resetOnce()
+	b := &recordingBackend{}
+	mixer.Use(b)
+
+	EnsureRoutes()
+	first := len(b.sets)
+	EnsureRoutes()
+	EnsureRoutes()
+
+	if len(b.sets) != first {
+		t.Fatalf("repeated calls wrote %d routes, want %d — the second caller "+
+			"is the speaker opening its PCM and must not re-run this",
+			len(b.sets), first)
+	}
+}
+
+// A control that does not resolve must be counted, not swallowed. #546 is why:
+// addressing a route by its positional id wrote to a neighbouring control,
+// which is a perfectly valid write — tinymix exits 0 and the failure count
+// stays 0, so a device logs a clean boot and plays nothing. Going by NAME means
+// an absent control is now an error, and this is the count that says so.
+//
+// The control assertion is the second half: the same call with a backend that
+// accepts everything writes all ten, so a count of zero here cannot be an
+// artefact of the fake.
+func TestEnsureRoutesCountsAndReportsFailures(t *testing.T) {
+	resetOnce()
+	b := &recordingBackend{fail: map[string]bool{}}
+	// Fail exactly two of them, chosen from the table rather than by index so
+	// the test does not depend on the ordering of Routes.
+	b.fail[Routes[0].Name] = true
+	b.fail[Routes[len(Routes)-1].Name] = true
+	mixer.Use(b)
+
+	EnsureRoutes()
+
+	if len(b.sets) != len(Routes)-2 {
+		t.Fatalf("%d writes, want %d — a failing control must not stop the "+
+			"remaining routes being attempted", len(b.sets), len(Routes)-2)
+	}
+
+	// The control: nothing fails, everything is written.
+	resetOnce()
+	ok := &recordingBackend{}
+	mixer.Use(ok)
+	EnsureRoutes()
+	if len(ok.sets) != len(Routes) {
+		t.Fatalf("control: %d writes with nothing failing, want %d",
+			len(ok.sets), len(Routes))
 	}
 }

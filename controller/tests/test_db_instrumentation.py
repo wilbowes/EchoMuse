@@ -25,6 +25,28 @@ def fresh_db(tmp_path, monkeypatch):
         db._conn = None
 
 
+@pytest.fixture()
+def one_hour(monkeypatch):
+    """Pin em_db's clock to the middle of an hour.
+
+    The rollups bucket by wall-clock hour, so a test that writes twice and
+    reads one row fails whenever the two writes straddle the hour — which CI
+    hit at 11:59:59 UTC on 2026-09-22 (`assert 0 == 10`). Only em_db's
+    reference to `time` is replaced; patching the module would reach pytest.
+    """
+    import time as _time
+
+    class _Clock:
+        def __getattr__(self, name):
+            return getattr(_time, name)
+
+        @staticmethod
+        def time():
+            return 1_800_000_000 + 1800.0
+
+    monkeypatch.setattr(db, "time", _Clock())
+
+
 def _cols(table: str) -> set:
     return {r[1] for r in db._conn.execute(f"PRAGMA table_info({table})")}
 
@@ -178,6 +200,15 @@ def test_stats_relay_allowlist_covers_every_device_stat():
     drain = re.search(r"def drain_rtt\(.*?\n(?=    def |\n\n)", ctrl, re.S)
     assert drain, "could not locate Device.drain_rtt"
     allowlist |= set(re.findall(r'"(\w+)":', drain.group(0)))
+
+    # Downlink TCP loss is controller-measured too, via Device.drain_tcp ->
+    # em_tcp.LossWindow.drain, and merged into the same dict.
+    assert re.search(r"_tcp = device\.drain_tcp\(\)", ctrl) and "**_tcp}" in ctrl, \
+        "drain_tcp is not merged into the stats"
+    tcpsrc = (root / "em_tcp.py").read_text()
+    window = re.search(r"class LossWindow.*", tcpsrc, re.S)
+    assert window, "could not locate em_tcp.LossWindow"
+    allowlist |= set(re.findall(r'out\["(\w+)"\]', window.group(0)))
 
     record = re.search(r"def record_device_stats\(.*?\n(?=def )", dbsrc, re.S)
     assert record, "could not locate record_device_stats"
@@ -340,7 +371,7 @@ def test_shadow_counters_accumulate_and_max(fresh_db):
     assert r["dev_max_score"] == 0.9
 
 
-def test_shadow_counters_do_not_disturb_near_miss_columns(fresh_db):
+def test_shadow_counters_do_not_disturb_near_miss_columns(fresh_db, one_hour):
     """The dev_* arguments were added to an existing upsert that the wake loop
     calls every 2s. A mistake in the ON CONFLICT list would corrupt near-miss
     accounting, which has nothing to do with this feature."""
@@ -366,7 +397,7 @@ def test_device_metrics_has_thermal_columns(fresh_db):
         assert c in cols, f"device_metrics.{c} missing"
 
 
-def test_thermal_stats_relay_and_rollup(fresh_db):
+def test_thermal_stats_relay_and_rollup(fresh_db, one_hour):
     """The relay guard: a device stat has to be named in DeviceStats (Go), the
     em_controller allowlist AND here, or it is silently dropped. This covers
     the third."""
@@ -388,7 +419,7 @@ def test_thermal_stats_relay_and_rollup(fresh_db):
     assert m["thermal_limit_min"] == 3, "throttling happened this hour"
 
 
-def test_unreadable_temp_does_not_dilute_the_mean(fresh_db):
+def test_unreadable_temp_does_not_dilute_the_mean(fresh_db, one_hour):
     """A missing sensor reading must be skipped, not counted as 0C — averaging
     a zero in reads as a cool device, which is the wrong direction for a metric
     whose whole job is to warn."""
@@ -399,7 +430,7 @@ def test_unreadable_temp_does_not_dilute_the_mean(fresh_db):
     assert m["cpu_temp_avg"] == 40.0, "one temp sample, not 20.0"
 
 
-def test_metrics_without_thermals_stay_null(fresh_db):
+def test_metrics_without_thermals_stay_null(fresh_db, one_hour):
     """Older firmware sends no thermal fields; those must read as absent rather
     than as a 0C device with 0 cores."""
     db.record_device_stats("dev-old", {"cpuPct": 22.0, "memUsedMb": 180})
@@ -512,3 +543,37 @@ def test_zero_is_stored_as_zero(fresh_db):
     ).fetchone()
     assert row["ble_restarts_last"] == 0
     assert row["ble_hci_errors_last"] == 0
+
+
+# ─── v26 — TCP link loss ─────────────────────────────────────────────────────
+
+def test_tcp_loss_accumulates_and_reports_a_rate(fresh_db):
+    db = fresh_db
+    db.record_device_stats("dev1", {"tcpDownSegs": 1000, "tcpDownRetrans": 50,
+                                    "tcpUpRetrans": 3, "tcpRtoMaxMs": 400})
+    db.record_device_stats("dev1", {"tcpDownSegs": 1000, "tcpDownRetrans": 30,
+                                    "tcpUpRetrans": 1, "tcpRtoMaxMs": 900})
+    m = db.get_device_metrics("dev1", 0)[-1]
+    assert m["tcp_down_segs"] == 2000
+    assert m["tcp_down_retrans"] == 80
+    assert m["tcp_down_retrans_pct"] == 4.0
+    assert m["tcp_up_retrans"] == 4
+    assert m["tcp_up_retrans_pct"] is None   # no segment count from this kernel
+    assert m["tcp_rto_max_ms"] == 900
+
+
+def test_unmeasured_tcp_loss_is_none_not_a_clean_link(fresh_db):
+    # Old firmware sends no uplink figure and a controller that could not read
+    # its socket sends no downlink one: both must stay NULL, because 0 would
+    # claim the link was perfect.
+    db = fresh_db
+    db.record_device_stats("dev1", {"cpuPct": 10})
+    m = db.get_device_metrics("dev1", 0)[-1]
+    for k in ("tcp_down_segs", "tcp_down_retrans", "tcp_down_retrans_pct",
+              "tcp_up_retrans", "tcp_rto_max_ms"):
+        assert m[k] is None, k
+    # A later measured window starts the sum; an unmeasured one leaves it.
+    db.record_device_stats("dev1", {"tcpDownSegs": 100, "tcpDownRetrans": 0})
+    db.record_device_stats("dev1", {"cpuPct": 10})
+    m = db.get_device_metrics("dev1", 0)[-1]
+    assert m["tcp_down_segs"] == 100 and m["tcp_down_retrans_pct"] == 0.0

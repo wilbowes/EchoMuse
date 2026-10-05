@@ -1,5 +1,5 @@
 """
-`_stream_tts_audio_once` must kill ffmpeg BEFORE cancelling its feeder task.
+`_ffmpeg_decode` must kill ffmpeg BEFORE cancelling its feeder task.
 
 Found while reviewing PR #400, which proposed closing stdin first to fix #252
 (an unhandled InvalidStateError logged on every barge-in cancel). Measured over
@@ -31,11 +31,11 @@ import ast
 from pathlib import Path
 
 CONTROLLER = Path(__file__).resolve().parents[1]
-FUNC = "_stream_tts_audio_once"
+FUNC = "_ffmpeg_decode"
 
 
 def _finally_body() -> list[ast.stmt]:
-    """The `finally:` block of _stream_tts_audio_once."""
+    """The `finally:` block of _ffmpeg_decode."""
     tree = ast.parse((CONTROLLER / "em_esphome.py").read_text())
     for node in ast.walk(tree):
         if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)) and node.name == FUNC:

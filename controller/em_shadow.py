@@ -240,8 +240,7 @@ class PendingWake:
         return self._wake is not None
 
 
-def effective_mode(configured, trigger_capable: bool,
-                   model_ready: bool = True) -> str:
+def effective_mode(configured, trigger_capable: bool) -> str:
     """
     The mode actually in force, given what the device can do.
 
@@ -257,30 +256,15 @@ def effective_mode(configured, trigger_capable: bool,
     reaching this normally means firmware was rolled back under a config that
     was valid when it was set.
 
-    `model_ready` is the same rule applied to the OTHER thing a device needs in
-    order to score: the classifier itself. A device cannot score a wake word
-    whose model it does not have, and under "on" the controller has stood down
-    and no longer triggers on its behalf — so nothing fires, nothing warns, and
-    the dashboard reports the device as healthy. Selecting a wake word a device
-    has never been given is enough to produce that, and it is a normal thing to
-    do from the dashboard (#191).
-
-    A known-missing model therefore degrades all the way to "off", not to
-    "shadow": shadow cannot score either, and the only mode that keeps the
-    device answering is the one where the CONTROLLER triggers. Degrading to a
-    mode that also cannot score would be the wrong answer dressed as a
-    fallback.
-
-    It defaults True because absence of evidence is not evidence of absence:
-    callers that do not know what is installed must keep today's behaviour
-    rather than stand every device down. Pass False only when the model is
-    known to be missing.
+    **A missing wake word MODEL never changes the mode** (Wil, 2026-09-22). It
+    used to drop "on" to "off" so the controller would trigger instead; for
+    private-listening firmware that was already forbidden (docs/listening.md —
+    it would score a stream the operator chose not to send), and for older
+    firmware it was a fallback nobody chose. A device missing its model keeps
+    its mode, answers the button, and the connect reconcile installs the model
+    straight away — every device carries the full asset set.
     """
     mode = normalise_mode(configured)
-    if mode == MODE_OFF:
-        return mode
-    if not model_ready:
-        return MODE_OFF
     if mode == MODE_ON and not trigger_capable:
         return MODE_SHADOW
     return mode

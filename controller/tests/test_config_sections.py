@@ -125,13 +125,14 @@ def test_normalise_is_canonically_ordered():
 def test_summarise_reads_naturally():
     assert cs.summarise([]) == "Fleet"
     assert cs.summarise(["ring"]).startswith("Local override")
-    assert "1 of 6" in cs.summarise(["ring"])
-    assert "6 of 6" in cs.summarise(list(cs.SECTION_IDS))
+    n = len(cs.SECTION_IDS)
+    assert f"1 of {n}" in cs.summarise(["ring"])
+    assert f"{n} of {n}" in cs.summarise(list(cs.SECTION_IDS))
 
 
 # ─── Migration equivalence ───────────────────────────────────────────────────
 
-@pytest.mark.parametrize("use_global,expected", [(1, 0), (0, 6)])
+@pytest.mark.parametrize("use_global,expected", [(1, 0), (0, len(cs.SECTION_IDS))])
 def test_v8_backfill_is_lossless(tmp_path, use_global, expected):
     """
     The v8 migration must leave every device's effective config unchanged:
@@ -289,3 +290,18 @@ def test_the_echo_reference_override_is_scoped_and_offered():
 
     jsx = DASHBOARD.read_text()
     assert "aecRefSource" in jsx, "the dashboard must offer the control"
+
+
+def test_fleet_keys_are_shown_in_a_section_but_never_overridden():
+    import em_config_sections as cs
+    for key in cs.FLEET_KEYS:
+        assert any(key in s["keys"] for s in cs.SECTIONS.values())
+        assert key not in cs.keys_for(cs.SECTION_IDS)
+
+
+def test_a_device_value_for_a_fleet_key_never_wins():
+    import em_config_sections as cs
+    fleet = {"controllerEndpoints": [{"host": "10.0.0.1", "port": 8767, "tlsPort": 8770}]}
+    device = {"controllerEndpoints": []}
+    eff = cs.merge(fleet, device, list(cs.SECTION_IDS))
+    assert eff["controllerEndpoints"] == fleet["controllerEndpoints"]

@@ -67,6 +67,7 @@ class Job:
         # forge_progress), and whether a failure to do so was reported yet.
         self.train_log = forge_progress.TrainLog()
         self.progress_warned = False
+        self._cpu_seen = False
         LOGS.mkdir(parents=True, exist_ok=True)
         self.log_path = LOGS / f"{int(self.started)}_{kind}.log"
         self._logf = open(self.log_path, "wb", buffering=0)
@@ -127,9 +128,23 @@ class Job:
         except Exception:
             pass
 
+    def cpu_fallback(self) -> bool:
+        """Whether forge.py said it could not see a GPU. The header's GPU
+        probe runs once at startup, and a container can lose the device
+        after that (NVML "Unknown Error" after a host systemd reload), so
+        the job's own first lines are the truth about the run."""
+        if not self._cpu_seen and self.kind == "build":
+            try:
+                with open(self.log_path, "rb") as f:
+                    self._cpu_seen = b"falling back to CPU" in f.read(16384)
+            except OSError:
+                pass
+        return self._cpu_seen
+
     def as_dict(self):
         self.poll()
         return {
+            "cpu_fallback": self.cpu_fallback(),
             "kind": self.kind,
             "label": self.label,
             "running": self.rc is None,
@@ -290,7 +305,7 @@ async def api_wakeword_create(request):
         forge.cmd_new(ns)
     except SystemExit as e:
         raise web.HTTPBadRequest(text=str(e))
-    return web.json_response({"ok": True, "name": ns.name or forge.slugify(phrase)})
+    return web.json_response({"ok": True, "name": ns.name or forge.default_name(phrase)})
 
 
 def _require_wakeword(name: str) -> None:
@@ -687,6 +702,19 @@ async def api_delete(request):
     return web.json_response({"ok": True})
 
 
+async def api_rename(request):
+    name = request.match_info["name"]
+    _require_wakeword(name)
+    if _job and _job.poll() is None and f"'{name}'" in _job.label:
+        raise web.HTTPConflict(text="stop the job running for this wake word first")
+    new = ((await request.json()).get("name") or "").strip()
+    try:
+        forge.rename_wakeword(name, new)
+    except (ValueError, FileExistsError) as e:
+        raise web.HTTPBadRequest(text=str(e))
+    return web.json_response({"ok": True, "name": new})
+
+
 async def api_model_download(request):
     name = request.match_info["name"]
     path = forge.MODELS / f"{name}.onnx"
@@ -721,6 +749,7 @@ def make_app() -> web.Application:
     app.router.add_post("/api/wakewords/{name}/test", api_test)
     app.router.add_post("/api/wakewords/{name}/samples", api_add_samples)
     app.router.add_delete("/api/wakewords/{name}", api_delete)
+    app.router.add_post("/api/wakewords/{name}/rename", api_rename)
     app.router.add_get("/api/models/{name}.onnx", api_model_download)
     return app
 

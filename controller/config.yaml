@@ -3,7 +3,7 @@ name: "EchoMuse"
 # derives from the controller-v* tag (controller-v2.18.0 -> 2.18.0). Bump
 # both together: Supervisor pulls `image:version`, so a version with no
 # matching tag on GHCR fails to install.
-version: "2.24.1"
+version: "2.25.0"
 # Pull the published multi-arch image rather than building on the user's
 # machine. Without this Supervisor builds from this directory's Dockerfile,
 # which downloads a few hundred MB on whatever the user runs Home Assistant
@@ -73,6 +73,12 @@ options:
   require_device_tls: false
   device_approval: "strict"
   debug: false
+  # Per-logger level overrides, as comma-separated name=LEVEL pairs:
+  # "echomuse.esphome=DEBUG,aiohttp.access=INFO". Applied on top of the
+  # level `debug` sets, so a name here wins over it. Empty leaves every
+  # logger alone. A pair naming something that is not a logger is reported
+  # in the log and skipped rather than refused.
+  log_levels: ""
   # Path to a PEM CA certificate to trust, for a Home Assistant served
   # over HTTPS with a private CA. Put the file in Home Assistant's /ssl
   # folder and give the path as /ssl/<filename>.
@@ -88,4 +94,5 @@ schema:
   require_device_tls: "bool"
   device_approval: "list(strict|auto)"
   debug: "bool"
+  log_levels: "str"
   extra_ca_cert: "str?"

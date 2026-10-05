@@ -177,6 +177,59 @@ def test_transcript_bearing_log_lines_are_dropped_whole():
         "turn traces quote transcripts verbatim and must not be sanitised in place"
 
 
+def test_announce_request_lines_survive_with_the_text_redacted():
+    """
+    The AnnounceRequest line is the only record that an announcement arrived
+    and the only place `start_conversation` is logged, so dropping it hides
+    the difference between a plain announce and `ask_question`. Its `text=`
+    is a TTS string HA sent us, quoted by repr, so the quoted-string rule
+    already covers it: keep the line, lose the payload. Reported in #507
+    after a bundle showed announcement audio playing with no announcement
+    ever received, which is not a state the code can reach.
+    """
+    out = "\n".join(S.sanitise_log([
+        "[Kitchen] AnnounceRequest: media_id='http://10.10.1.81:8123/api/tts_proxy/a.mp3' "
+        "text='Dinner is ready' start_conversation=True",
+        # The turn trace is the transcript-bearing line the marker existed
+        # for; it must still go whole, apostrophes and all.
+        "[TURN] trigger=wakeword outcome=ok text=\"what's the weather\" tts_bytes=1",
+    ]))
+    assert "AnnounceRequest" in out
+    assert "start_conversation=True" in out
+    assert "media_id=<redacted>" in out
+    assert "text=<redacted>" in out
+    assert "Dinner" not in out and "ready" not in out
+    assert "[TURN]" not in out and "weather" not in out
+
+
+def test_announce_text_with_mixed_quotes_redacts_whole():
+    """
+    Announcement text is written by the user in their automations, so a
+    partial redaction is a leak. repr escapes an inner quote of the same
+    kind, and the quoted-string rule has to honour that escape instead of
+    ending the match at it.
+    """
+    line = (
+        "[Kitchen] AnnounceRequest: text=" + repr("it's \"late\"")
+        + " start_conversation=False"
+    )
+    out = "\n".join(S.sanitise_log([line]))
+    assert out.split("text=")[1] == "<redacted> start_conversation=False"
+
+
+def test_spoken_dismissal_lines_are_dropped():
+    """
+    The spoken-dismissal line logs the STT transcript by repr. Transcript
+    lines go whole, not redacted, like the other speech markers.
+    """
+    out = "\n".join(S.sanitise_log([
+        "[Kitchen] Spoken dismissal 'stop the alarm' — stopping alarm locally",
+        "[Kitchen] Device connected: ABC v=v2.9.13",
+    ]))
+    assert "Spoken dismissal" not in out and "stop" not in out
+    assert "Device connected" in out
+
+
 def test_live_stats_are_allowlisted_not_passed_through():
     """
     Regression: live.stats was handed over as a whole dict and leaked
@@ -655,6 +708,83 @@ def test_a_probe_with_an_unexpected_shape_still_gets_scrubbed():
     assert "aa:bb:cc:dd:ee:ff" not in json.dumps(d)
 
 
+def _wpa_ssid_txt(ssid: bytes) -> str:
+    """wpa_supplicant 2.10's printf_encode, which is how it prints an SSID."""
+    out = ""
+    for c in ssid:
+        if c == 0x22:   out += '\\"'
+        elif c == 0x5c: out += "\\\\"
+        elif c == 0x1b: out += "\\e"
+        elif c == 0x0a: out += "\\n"
+        elif c == 0x0d: out += "\\r"
+        elif c == 0x09: out += "\\t"
+        elif 32 <= c <= 126: out += chr(c)
+        else: out += f"\\x{c:02x}"
+    return out
+
+
+# An SSID is 0-32 arbitrary bytes (IEEE 802.11). Each of these is a name the
+# quote-matching scrub gets wrong or a form the cut has to survive.
+_NET_LOG_SSIDS = [
+    b"Neptune-Media",
+    b"Bob's WiFi",                       # an apostrophe is NOT escaped
+    b'Say "hi"',
+    b"back\\slash",
+    b"Caf\xc3\xa9",
+    b"a' freq=2412 MHz) b",              # looks like the line's own tail
+    b'x" auth_failures=1 duration=10 reason=FAKE',
+    b"ssid",
+    b" lead and trail ",
+    b"10.10.1.188 aa:bb:cc:dd:ee:ff",
+    b"W" * 32,
+    b"",
+]
+
+
+def test_the_network_log_keeps_the_diagnosis_and_loses_every_name():
+    """
+    The lines are wpa_supplicant 2.10's own formats, read from its source,
+    with each name printed the way it prints one.
+    """
+    for raw in _NET_LOG_SSIDS:
+        name = _wpa_ssid_txt(raw)
+        log = "\n".join([
+            "[   7365] stage 11 reached",
+            f"wlan0: Trying to associate with SSID '{name}'",
+            f"wlan0: SME: Trying to authenticate with 76:ac:b9:a6:9b:22 (SSID='{name}' freq=5785 MHz)",
+            f"wlan0: Trying to associate with 76:ac:b9:a6:9b:22 (SSID='{name}' freq=5785 MHz)",
+            f'wlan0: CTRL-EVENT-SSID-TEMP-DISABLED id=0 ssid="{name}" auth_failures=2 duration=20 reason=WRONG_KEY',
+            f'wlan0: CTRL-EVENT-SSID-REENABLED id=0 ssid="{name}"',
+            f"wlan0: connected to Access Point `{name}'",
+            "wlan0: CTRL-EVENT-CONNECTED - Connection to 76:ac:b9:a6:9b:22 completed [id=0 id_str=]",
+            "udhcpc: broadcasting discover",
+            "udhcpc: lease of 10.10.1.91 obtained from 10.10.1.1, lease time 86400",
+        ])
+        got = _diag(probes={"net_log": log})["probes"]["net_log"]
+        # The same nine lines whatever the name was: nothing of it survives,
+        # and the channel, the refusal reason and the lease do.
+        assert got == [
+            "[   7365] stage 11 reached",
+            "wlan0: Trying to associate with <network>",
+            "wlan0: SME: Trying to authenticate with <mac> (<network> freq=5785 MHz)",
+            "wlan0: Trying to associate with <mac> (<network> freq=5785 MHz)",
+            "wlan0: CTRL-EVENT-SSID-TEMP-DISABLED id=0 <network> "
+            "auth_failures=2 duration=20 reason=WRONG_KEY",
+            "wlan0: CTRL-EVENT-SSID-REENABLED id=0 <network>",
+            "wlan0: connected to <network>",
+            "wlan0: CTRL-EVENT-CONNECTED - Connection to <mac> completed [id=0 id_str=]",
+            "udhcpc: broadcasting discover",
+            "udhcpc: lease of <ip> obtained from <ip>, lease time 86400",
+        ], f"{raw!r}"
+
+
+def test_the_network_log_is_capped():
+    """The wizard tails it; the cap holds if something else posts."""
+    got = _diag(probes={"net_log": "\n".join(f"line {i}" for i in range(1000))})
+    assert len(got["probes"]["net_log"]) == S._NET_LOG_LINES
+    assert got["probes"]["net_log"][-1] == "line 999"
+
+
 def test_the_error_and_transcript_are_scrubbed_not_trusted():
     """
     Both are ours, but our error strings interpolate device output often
@@ -695,9 +825,12 @@ def test_the_wizard_probe_list_matches_the_allowlist():
     """
     jsx = (Path(__file__).resolve().parent.parent
            / "static" / "dashboard.jsx").read_text()
-    block = re.search(r"const _PROVISION_PROBES = \{(.*?)\n  \};", jsx, re.S)
-    assert block, "dashboard.jsx no longer defines _PROVISION_PROBES"
-    in_jsx = set(re.findall(r"^\s*([a-z_]+):", block.group(1), re.M))
+    in_jsx = set()
+    # Two lists: one asked over ADB, one over the emOS serial console.
+    for const in ("_PROVISION_PROBES", "_EMOS_PROBES"):
+        block = re.search(rf"const {const} = \{{(.*?)\n  \}};", jsx, re.S)
+        assert block, f"dashboard.jsx no longer defines {const}"
+        in_jsx |= set(re.findall(r"^\s*([a-z_]+):", block.group(1), re.M))
     in_py = set(S._PROVISION_PROBES)
 
     assert not (in_jsx - in_py), (
@@ -724,3 +857,26 @@ def test_home_assistant_display_names_are_redacted():
     assert "Wil Bowes" not in joined
     assert "wil" not in joined.replace("<admin>", "")
     assert joined.count("<admin>") == 2
+
+
+def test_devices_carry_their_userspace_and_kernel():
+    """#621: stored since schema v21/v23, but missing from the allowlist, so
+    #566's bundle could not say which kernel the device booted. A device that
+    never reported them (old firmware) simply has no such key."""
+    reported = Row({
+        "device_id": "G090LF1180130NJG", "approved": 1,
+        "base_os": "emos", "kernel_arch": "armv7l",
+        "kernel_release": "3.18.19-gecb8cb46060-dirty",
+    })
+    old = Row({"device_id": "G090LF1180440EFF", "approved": 1})
+    bundle = S.build(
+        controller_version="v2.24.1", devices=[reported, old],
+        fleet_config={}, schema_version=26, turns=[], metrics=[], counters=[],
+        device_configs={}, live_state={}, controller_log=[], device_log=[],
+    )
+    first, second = bundle["devices"]
+    assert first["base_os"] == "emos"
+    assert first["kernel_arch"] == "armv7l"
+    assert first["kernel_release"] == "3.18.19-gecb8cb46060-dirty"
+    for key in ("base_os", "kernel_arch", "kernel_release"):
+        assert key not in second

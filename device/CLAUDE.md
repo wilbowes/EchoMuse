@@ -12,8 +12,15 @@ The Echo Dot runs FireOS 5 (API 22). Standard Go cross-compilation won't work �
 **One-time setup:**
 ```bash
 # GoTinyAlsa is a git submodule at the repo root — the wilbowes/GoTinyAlsa
-# fork, NOT upstream Binozo: it carries the GetAudioStream defer-in-loop
-# leak fix (v2.9.2). Don't repoint it upstream until that fix is merged there.
+# fork, NOT upstream Binozo. It carries two GetAudioStream fixes: the
+# defer-in-loop leak (v2.9.2) and a fresh slice per read (fork PR #1, #607 —
+# one reused buffer meant queued batches were overwritten by the next read),
+# both now upstream (Binozo/GoTinyAlsa#2). It also carries a PLAYBACK fix
+# upstream does not have: WriteFrames blocks signals around pcm_write (fork
+# PR #2, #707). tinyalsa's pcm_write ignores the partial count a
+# signal-interrupted WRITEI returns, so the rest of the buffer was silently
+# dropped — ~15 audible clicks an hour per device, on every playback path,
+# before; 0 after. Don't repoint it upstream until that one is there too.
 git submodule update --init
 
 # Build the compiler Docker image (from device/)
@@ -113,19 +120,17 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
   rather than a user preference, and it exists so the two paths can be A/B'd on
   one device without a controller round trip.
 
-  **The reference is scaled by the device's own volume, and this is what made
-  it work.** The tap is pre-volume, so left alone every volume change is a step
-  in the echo path gain that the filter can only find by re-converging. First
-  hardware run, 2026-08-29: cancellation collapsed to **−1.7dB** immediately
-  after a change and took 3–4s to recover, over and over, while `ref` sat at
-  4000–8000 through a `mic` swing of 1263→16766. We are not obliged to guess
-  the scalar — the device SETS that volume — so `SetPlaybackLevel` feeds it
-  from the existing volume-change callback and the reference is multiplied by
-  `10^((level−127)/40)`, the control's own 0.5dB-per-step law. Worth **32.7dB**
-  of residual in the frames after a change, in the test that reproduces it.
-  Software-tap frames are deliberately NOT scaled: that ring holds audio
-  written before the change, so the correction would land on the wrong
-  samples, and leaving it alone preserves the baseline being compared against.
+  **The reference needs no volume scaling, because the volume is applied
+  before it.** Until 2026-09-24 the volume was the DAC's own digital control,
+  downstream of the loopback, so every volume change was an echo-path gain
+  step the filter could only find by re-converging — cancellation collapsed
+  to −1.7dB after a change and took 3–4s to recover (2026-08-29), fixed then
+  by multiplying the reference by `10^((level−127)/40)`. Volume is now applied
+  to the PCM in the speaker's write loop (`speaker/swvolume.go`) with the DAC
+  held at unity, so the loopback and the software tap both carry post-volume
+  audio and the scalar is gone. The saved echo path is unaffected: it was
+  learned against a reference already scaled to the same level. **Do not
+  reintroduce a scalar** — it would apply the volume twice.
 
   **Unity gain on the extraction, non-negotiably.** Mic channels get
   `micGainDb` (+24dB default) applied pre-truncation because speech sits at
@@ -145,14 +150,12 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
   capture-stall trim all exist to approximate. Anyone rebuilding this path
   should start there rather than tuning the delay further.
 
-  Two bounds. It is **pre-volume** (unchanged across a commanded 33.5dB cut),
-  so it does not track loudness and the adaptive filter must find that gain
-  itself — no worse than the current tap, which is also pre-volume. And it does
-  not represent the acoustic echo once the DAC clips: at index 170 the mic's
-  loudest component is the *seventh* harmonic while the reference stays a clean
-  fundamental. Unreachable in shipping firmware, because `DEVICE_VOLUME_MAX`
-  caps the control at 127 for the distortion reason under Volume — but it is a
-  hard reason never to raise that ceiling.
+  Two bounds. It is **pre-DAC** (unchanged across a commanded 33.5dB DAC cut,
+  which is why moving the volume into software made it post-volume). And it
+  does not represent the acoustic echo once the DAC clips: at index 170 the
+  mic's loudest component is the *seventh* harmonic while the reference stays
+  a clean fundamental. Unreachable in shipping firmware, since the DAC is held
+  at unity (127) — but it is a hard reason never to raise that.
 - **Barge-in** (controller-side `_barge_watcher`) — wake word spoken during TTS cancels playback (device does a stateful `speaker_flush`: drains buffer + discards until stream EOS, since the rest of the stream is typically still in TCP buffers; controller-side, both `stream_speaker` and the post-playback drain sleep race `cancel_event`). `bargeInThreshold` is used as-is and sits *below* `owwThreshold` by design (0.05–0.10): echo at the mic is ~25dB louder than the person, so speech-over-TTS scores are depressed (~0.3–0.5 observed), while converged self-echo scores 0.002–0.003. **A barge must abort HA's run before starting the interrupting turn** — see the voice backend section in `controller/CLAUDE.md`
 - **AGC** (`internal/processor/`) — lock_mic turns only; release is frozen during silence (RMS speech flag), preventing noise floor amplification. (Device-side RNNoise NS was removed 2026-07-12 — noise suppression is controller-side now: `em_ns.py`/DTLN on the ASR-bound stream, per-device `nsAsr` flag)
 - **VAD** (lock_mic turns only) runs on pre-NS/AGC audio; opens gate after `VAD_SPEECH_MS` of speech, closes after `VAD_SILENCE_MS` of silence, then sends an end-of-speech sentinel
@@ -166,16 +169,110 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
 | `internal/client/data.go` | WebSocket client to controller `/data` — mic streaming, speaker playback |
 | `internal/server/` | Local state machine: mute, volume, LED mode priority |
 | `internal/config/config.go` | Global runtime config; env var defaults, overridden by controller push |
-| `internal/bindings/` | Hardware drivers: mic PCM, speaker PCM, LED I2C, button evdev |
+| `internal/bindings/` | Hardware drivers: mic PCM, speaker PCM, LED I2C, button evdev. None of them names hardware by number: each opens what `pkg/board` resolved (see "Boards" below) |
+| `pkg/board/` | Which board this is (idme `device_type_id`), where its parts are BY NAME (`Hardware`), the lookup (`Resolve`), and the emOS thermal tuning. `guard_test.go` fails on an event number, i2c bus address, pcm path or `NewDevice` with literal numbers anywhere outside this package |
 | `internal/wakeword/` | openWakeWord streaming feature pipeline (mel ring → 76-frame windows → embedding ring → classifier). Pure Go: inference sits behind the `Inferer` interface so the buffering is host-testable with no ONNX/cgo. Validated tensor-for-tensor against Python via a golden fixture (`testdata/`, regenerate with `gen_fixture.py`) |
 | `internal/wakeword/ort/` | The `Inferer` implementation: ONNX Runtime via cgo. The library is **dlopen'd at runtime, never linked** (only the MIT C header is vendored) so a device without it boots normally and falls back to controller-side wake word — verified by the ARM binary needing only libdl/liblog/libc with zero undefined `Ort*` symbols. `DefaultOptions` (1 thread, XNNPACK, `allow_spinning=0`) is the measured optimum: 37.7% of one core against 243% for ORT's defaults. Don't "fix" the thread count — more threads lowers latency and *raises* CPU, the wrong trade for duty-cycled work |
 | `internal/wakeword/shadow/` | On-device scoring that reports but never acts (see "On-device wake word"). `Push` must never block: inference runs on its own goroutine and drops frames when behind |
+| `internal/listen/` | Private listening (docs/listening.md): the session gate that decides what of the wake stream may leave the device, and `Resolve` for local/stream/degraded. Pure, clock-injected, tested |
 | `internal/wakeword/fixture/` | Shared golden-fixture parser, tolerance policy and `Verify`. Used by both the host test and `tools/oww_probe`, deliberately — the probe's answer is the trusted one because it runs on hardware, so it must be exactly as strict as the test by construction. Tolerances are relative to the **tensor's** scale, not per element: per-element relative error is meaningless for tensors straddling zero |
 | `internal/bindings/als/` | Ambient light (ams **TSL2540** on i2c). Android does not expose it AT ALL — `dumpsys sensorservice` reports an empty list, nothing under `/sys/class/sensors`, no input device; it is visible only on the raw i2c bus, the same shape as the mute LED being on a different GPIO than the vendor HAL believed. Resolved **by name, not address** (`0-0039` is an enumeration accident). **The bus listing is not a hardware inventory**: both ALS names are registered by Amazon's board file, so a `tsl2540` at 0x39 and a `tsl2584tsv` at 0x29 appear on every unit whatever is soldered on (`modalias` is static kernel data). Which one answers differs by batch — ours have the 2540 and nothing at 0x29 (`taos_probe() err = -6`, ENXIO), the `G090LF096` batch has the 2584 instead, reachable only through IIO at `/sys/bus/iio/devices/iio:device0` (#90). A second-sourced part, not a driver fault, so the answer is to read the IIO sensor too, never to loosen the match to a `tsl` prefix. The **boot log is the real inventory** — both drivers probe on every unit and log what replied — but `dmesg` rolls, so it needs reading soon after a reboot. Never `unbind` the driver to experiment: it succeeds, leaves the `als_*` attributes in place, and the next read hangs the device until a power cycle. **Polled every 5s, not every 1s, and the reason is the kernel log rather than the syscalls.** The driver prints a line on every read under its darkness threshold (`tsl2540_get_lux: darkness (0 <= 10)`), so a 1Hz poll is ~86,000 kernel lines a day — and it only fires in the dark, so it runs all night, which is exactly when a device sits idle and a crash most needs explaining. Measured on EFF 2026-09-04: the whole log ring was that one line and `messages.last` had reached 609KB. The cost is not disk — MediaTek's ram_console is the ONLY crash channel this kernel has and it is a fixed-size ring we do not control, so anything filling it evicts the evidence. `MinInterval` already refuses to report more often than every 2s, so 1Hz was finer than the reporting floor it feeds; if #296 ever wants faster, make the poll adaptive rather than paying a permanent flood. `Lux()` returns **nil, never 0** — a covered sensor reads a genuine 0. `Watch` reports a step change immediately (25% relative, 10-lux floor, measured noise ±1.5%); the steady value rides the ~30s stats tick. `Report()` says **why** there is no sensor (`ok`/`no_chip`/`no_attribute`/`unknown`, plus every i2c name it saw) and rides the register message as `ambient_light_status` — absence used to be logged only to the device's own stdout, which support bundles do not collect, so two users could not be told apart without a shell session (#90). The whole bus is enumerated **before** matching: returning at the match truncated the list on working devices, which is exactly the side you compare against |
 | `internal/bindings/jack/` | Headphone jack detect (`/sys/class/switch/h2w`, mediatek accdet). Polled, not evented — the ACCDET input node reports no keys on this hardware. `Watch` dispatches the state it STARTS in as well as every change: accdet is edge-triggered and a boot has no edge, so a device booted with a cable in got no correction at all. The callback (`PcmSpeaker.SetJackRouting`) owns both positions — the amp switch, and the `HP Driver Gain Volume` that accdet drops to the floor of its range on insert and nothing used to raise. Output *destination* is still physical, done by the jack's own switch contacts, so no mux layer should be driven — but level is ours |
+| `internal/outchain/` | Speaker output chain — EQ → bass guard → limiter — run on the MIX at the ALSA write, after the duck and before the taps. A port of `em_eq`/`em_mbc`/`em_limiter`, held **bit-exact** to vectors the Python generates (`testdata/gen_vectors.py`), on the host and on VVV's A53. Inactive until the controller's ack carries `output_chain`, so it never runs twice. Processing is mono (L+R)/2 written to both channels — exact, since the wire is mono. Idles after ~2 silent periods, so a quiet speaker costs nothing. **Cost on VVV, 2026-09-22: 1.9ms per 42.7ms period at defaults (4.4% of one core), 2.6ms worst case (shaped EQ + speech boost, 6.2%)**, only while audio plays. Most of it is per-sample `Log`/`Exp` in the guard and 13 biquads; a `%` in the limiter cost a runtime divide call per sample, since Go's 32-bit ARM build has no divide instruction |
+| `internal/sendspin/` | Sendspin player (#89, EA): Music Assistant connects to the Echo directly for synchronised multi-room audio. Noise KKpsk2 responder, token pairing, the spec's Kalman time filter, FLAC decode, and a **pull** scheduler: `PcmSpeaker.SetMusicSource` makes the write loop read the substream's ALSA `delay` each period and ask for the audio due when that period reaches the DAC — the `0x04` plane plays in order and has no timestamps, so a push could not place anything. Consulted only while `0x04` is empty (HA wins), and the player reports itself taken while `0x04` has anything. **Speaks aiosendspin 9.1.1's wire, which disagrees with the spec in seven places** — `docs/audio-states.md` §6.4 lists them; re-run `tools/sendspin_interop/run.sh` against any new aiosendspin before trusting a Music Assistant upgrade. Held to references rather than readings: the time filter to aiosendspin's to the microsecond, FLAC bit-exact against its encoder, the token and Sentinel psk_id to the spec's vectors. **It is the first thing on the Echo that LISTENS, and emOS drops inbound** (init's `firewall()`): `internal/firewall` inserts an ACCEPT for 8928 before `Start` advertises and removes it on every stop, so an Echo with Sendspin off stays outbound-only. Without it the player logs "listening" and every connection times out, and Music Assistant does not list the player at all, so it looks like discovery failing. First heard on 15LE (emOS 32-bit) 2026-09-30: play, duck, seek, volume both ways, pause/resume, discovery. 2026-10-01, 15LE + C95 grouped: in sync by ear, 0.1–0.4ms self-reported, corrections 2–7/min settled (bursts to ~300/min for a minute or two), playback cost below what /proc resolves, both players stop in the same second as the controller link and resume with it, and a Music Assistant left/right stereo pair works with the mono player (MA picks the channel before encoding). `[sendspin] playing:` logs the counts once a minute. The occasional crackle was dropped audio, not corrections: tinyalsa's `pcm_write` discards the rest of a signal-interrupted write, fixed in the fork (see the GoTinyAlsa note above). `OutputClock` gates any reading over 3ms from prediction and `pullSource` brackets its status read with two clock reads (#710) |
 | `internal/wifi/` | Safe WiFi network change with auto-rollback (wifi_change/wifi_commit/wifi_scan control messages; pending-marker recovery at startup). Reload path is `svc wifi disable/enable` ONLY — see package comment for the hardware-proven constraints. **An SSID is 0–32 arbitrary BYTES and is handled as bytes** (`ssid.go`): decoded from wpa_cli's printf_encode, carried as `ssid_hex`, compared as bytes, and written quoted when wpa_supplicant's quoted form can hold it (it reads to the LAST `"`, so quotes and backslashes are literal) or as hex when not. Until 2026-09-19 every path refused `"` and `\`, trimmed spaces, and wrote escaped text back as a different network — and the emOS wizard put SSIDs into a shell command |
 | `internal/bluetooth/` | BLE proxy — raw HCI passive scan over `/dev/stpbt` (single-owner, so Android's Bluedroid is durably `pm disable`d first), parsed into adverts and forwarded to the controller. `emit.go` decides which of them are worth sending; see "The BLE proxy" below, and read it before changing the scan cadence or the filtering |
 | `pkg/led/`, `pkg/mic/`, `pkg/speaker/`, `pkg/buttons/` | Hardware abstractions (interfaces) |
+
+## Boards: hardware is found by name (#541, 2026-10-04)
+
+**`docs/boards.md` is the guide for anyone trying a new board; this is what
+must stay true.** A board states its parts in `pkg/board/hardware.go`: the two
+input devices, the ring's i2c driver, the mic and speaker PCM stream names,
+the light sensor and its lux attribute, the mute LED GPIO and the Bluetooth
+HCI device. `board.Resolve` finds them (`/proc/bus/input/devices`,
+`/proc/asound/pcm`, `/sys/bus/i2c/devices/*/name`) once per process, and the
+bindings open `board.CurrentLayout()`. Only biscuit is registered.
+
+- **Biscuit keeps its old numbers as a FALLBACK, and a new board must not get
+  one.** The fallback exists so a FireOS build that names a part differently
+  behaves as before; it is used only when the name is absent, logged, and sent
+  to the controller once per start as a `[board]` warning
+  (`Layout.Problems`), because the device's own log is RAM-backed and nobody
+  reads it on a working Echo. No unit we own takes that path: it is covered
+  by tests only, and the EA is how we learn whether any unit does.
+- **An unidentified device gets biscuit's layout**, as every build before
+  this assumed. That includes gpio444, so a new board is ADDED before the
+  firmware is run on it. On the Dot 3 that pin is an audio clock, and
+  exporting it silences the speaker until reboot.
+- **Ambiguous is refused, never first-match.** Biscuit has four
+  `tlv320aic3101` ADCs; a name that matches twice does not identify a part.
+- **Match input devices by NAME, not by key capability.** Both of biscuit's
+  claim `KEY_VOLUMEDOWN`; only `keys` sends it.
+- **The Bluetooth node is stated, never probed.** `/dev/stpbt` exists on the
+  Dot 3 too, where the radio is an MT7668 over SDIO.
+- **`server board`** prints the layout and changes nothing, so it runs beside
+  the supervised server: push the binary to a temp path and run it before
+  installing a build that changes any of this.
+
+Names were read on 2026-10-04 from VVV (FireOS 5.5.5.4), 15LE (emOS, FireOS 6
+32-bit kernel) and C95 (emOS, FireOS 5 64-bit kernel): `mtk-kpd` on event1,
+`keys` on event2, `is31fl3236` at 0-003f, `TLV320AIC3204 Playback` 0-23,
+`TLV320AIC3101 Capture` 0-24, identical on all three. VVV's output is the
+fixture `pkg/board/testdata/biscuit-fireos5/`.
+
+**Still biscuit's, inside the drivers:** the 9-channel S24 capture layout,
+`codec.Routes`, the amp switch and DAC unity, the jack tables, start-up
+ordering and the Android `stop <service>` names. They move into `Hardware`
+with the first second board. What the two existing ports need, from reading
+their diffs (nothing verified on hardware of ours): radar is close to biscuit (same SoC, ring, PCM layout and four
+ADCs; a speaker amp with a mute GPIO and a 117-byte filter); the Dot 3 needs
+behaviour as well as data (a 48kHz capture opened before the mic, no amp
+switch, unity at 255, 4-channel S32 capture, a different radio).
+
+## Private listening (the default since 2026-09-21)
+
+**The spec is `docs/listening.md`; this is what the firmware does to meet it.**
+Under `owwOnDevice=on`, against a controller announcing `listen_session`, with
+a scorer loaded, the device is `local`: the always-on wake stream still runs
+and feeds the scorer, and **nothing is sent**. A crossing opens a session in
+`internal/listen.Gate`; the audio captured after the crossing frame goes up as
+`0x07` frames tagged with the session until the controller's `listen_close`
+(end of speech) or a device-side limit. `listen.Resolve` is the whole state
+decision and `syncListenState` reports it as `listen_state` on every config
+push and every connect.
+
+- **The limits are the device's, not the controller's.** No `listen_ack`
+  within 3s closes the session; nothing outlives 30s; mute, `StopMic` and a
+  data-link drop close it. A controller that crashes mid-command must not
+  leave an Echo streaming, and that can only be guaranteed at this end.
+- **Missing scorer is `degraded`, never `stream`.** The button still works
+  (lock_mic turns are untouched); the wake stream sends nothing. Falling back
+  to streaming would make the dashboard's privacy statement false without
+  anyone choosing it. The controller's `effective_mode` has the matching rule:
+  it no longer degrades an `oww_local_only` device to "off".
+- **One timestamp per frame, taken once**, handed to both `PushBytesAt` and
+  `Gate.Push`. The scorer reports the CAPTURE time of the crossing frame, not
+  when inference finished (its queue holds up to 640ms), and the session
+  starts with every ringed frame captured after it. Two clocks would
+  duplicate or drop the first word.
+- **A crossing inside an open session is words, not a wake** — `Gate.Open`
+  refuses and `onWakeCrossing` drops it.
+- **`mic_stop` does not stop local listening, and does not end sessions.**
+  It ends a lock_mic turn and hands straight back to the wake stream, which is
+  what hears a barge-in over the reply. Sessions end only by id
+  (`listen_close`): mic_stop carries none, and one crossing a barge-in's
+  `oww_wake` on the wire would close the session the controller is about to
+  take. `mic_start` with lock_mic
+  REPLACES the wake stream rather than being refused as "already active",
+  which is what the button and HA follow-up questions rely on.
+- **The barge bar applies to music too** (`speakerPlaying`), mirroring the
+  controller's wake-over-music rule, and at that bar the scorer needs **two
+  consecutive frames** — em_barge.decide's rule, now on the device because a
+  private Echo sends the controller nothing to decide over.
+- **Older controllers keep the old behaviour.** Without `listen_session` the
+  state is `stream` in every mode, because an old controller only acts on a
+  device wake when stream frames are arriving.
 
 ## On-device wake word (shadow mode)
 
@@ -232,12 +329,18 @@ handler would be a second copy of the most delicate sequence in the controller.
   existing reader's `wakeword` prefix — including `_persist_turn`'s shadow
   block.
 
-**Arbitration is NOT yet corrected for this.** `_wake_arbiter.claim` still
-compares arrival order, so on a multi-device fleet a device can lose a 700ms
-window because its claim was late and the wrong room answers. The fix is to
-compare RTT-corrected times, never revoke a granted claim (that cuts a turn
-already speaking), and hold the window longer than it is measured. Single-device
-use is unaffected — solo fleets skip the window entirely.
+**Arbitration compares capture times, measured so time in flight cannot move
+them** (2026-09-22; docs/listening.md is the reference). A wake carries
+`capturedMono`, the crossing frame's capture instant on `client.MonoMs`'s
+clock, and every ping reply carries `mono`; the controller maps the one onto
+its own clock through the cleanest exchange of the last two minutes
+(`em_listen.DeviceClock`). The first version dated a wake as arrival − `ageMs`
+− half the RTT, which is right only when the message was not delayed: on the
+bench a wake spent 3.1s in flight and read as a separate utterance.
+A controller-scored wake is dated from the stream's sequence numbers instead
+(`CaptureClock`), so no firmware is needed for that half. A claim heard
+within the window of the winner's cedes whenever it arrives, the winner is held
+for the window plus 3s, and a granted claim is never revoked.
 
 **Shadow mode scores and reports; it never acts.** It exists to answer whether
 on-device detection is good enough to trust, by comparing both detectors on the
@@ -272,16 +375,20 @@ Three things are load-bearing:
   drops are counted in exactly one place. Note the first frame must record NO
   gap: a zero-valued `lastPush` would report a gap of however long the process
   had been running and point at a producer stall that never happened.
-- **The device never sends a timestamp.** An Echo's wall clock is bogus before
-  NTP, so it reports how long *ago* a crossing happened and the controller
-  converts against its own monotonic clock — same reasoning as the RTT
-  instrumentation.
+- **The device never sends a WALL-CLOCK timestamp.** An Echo's wall clock is
+  bogus before NTP, so it reports how long *ago* a crossing happened and the
+  controller converts against its own monotonic clock — same reasoning as the
+  RTT instrumentation. `capturedMono` and the ping reply's `mono` are the
+  device's MONOTONIC clock, which is immune to that, and mean nothing until
+  the controller has mapped them.
 
 **Thresholds must match or the comparison is meaningless.** The controller drops
 its wake bar to `bargeInThreshold` while the speaker is streaming (echo at the
 mic is ~25dB louder than the person, so speech-over-TTS scores are depressed), so
 the device mirrors that: `shadow.Scorer.SetBargeThreshold` uses the lower bar
-while `PcmSpeaker.IsStreaming()` is true, and never *raises* the bar if
+while `PcmSpeaker.VoiceAudible(wakeword.ScoreSpan)` is true (arriving, queued, or
+played within the 1.96s the model can still see — it was `IsStreaming`, "still
+arriving", until 2026-09-22, which dropped the bar ~0.1s into a reply), and never *raises* the bar if
 misconfigured above the normal one. The device reports the threshold in force
 with each window summary; it lands on the turn as `dev_threshold` (schema v15).
 `turns.wake_threshold` now records the **effective** threshold the wake actually
@@ -371,30 +478,29 @@ The first attempt stood the device down to controller-side scoring while the
 model installed. That works and was rejected: it silently overrides a setting
 the user chose, and the dashboard goes on reporting `owwOnDevice: on` — the
 same "reports healthy while something else is true" shape the capability rule
-exists to forbid. Note there is no privacy difference between the two modes
-(the device streams the wake audio either way, and the controller scores it in
-`on` mode too — that is what `turns.ctrl_wake_score` records), but a silent
-override is a trust problem regardless.
+exists to forbid. On firmware from before private listening there is no
+privacy difference between the modes (it streams either way); on current
+firmware there is all the difference, which makes a silent override to
+streaming the worst version of this.
 
 Only devices that actually score locally are held back — with
 `owwOnDevice=off` the file is irrelevant, so the change stays instant. Both the
 old and the incoming mode are consulted, or a save that enables on-device
 scoring while changing the wake word slips through on the old mode.
 
-`em_shadow.effective_mode` also takes `model_ready` alongside
-`trigger_capable`. Its writer is **`em_api.reconcile_oww_assets`**, run as a
-background task from the connect handler: install-before-switch covers every
-path where the device is connected, and this covers the one where it was not.
-A device whose wake word changed while it was offline is told to use the new
-model by the ordinary connect-time config push, with nothing checking it has
-the classifier — so the check happens straight after, and the mode drops to
-`off` if it does not. A known-missing model degrades to **`off`, not `shadow`** —
-shadow cannot score either, so degrading to it would be the wrong answer
-dressed as a fallback; only `off` puts the controller back in charge of
-triggering, which is the one arrangement that still answers the user. It
-defaults **True**: absence of evidence is not evidence of absence, and standing
-every device down because the controller has not looked would be worse than the
-bug.
+**A missing model never changes the mode — for the offline case either.**
+Install-before-switch covers every path where the device is connected;
+**`em_api.reconcile_oww_assets`**, run in the background from the connect
+handler, covers the one where it was not — a device whose wake word changed
+while it was offline is told to use the new model by the ordinary connect-time
+config push, with nothing checking it has the classifier. The reconcile
+installs it and pushes the config again so the scorer rebuilds. Until then the
+device keeps its mode and answers the button. It used to drop the mode to
+`off` so the controller would trigger meanwhile (`effective_mode`'s
+`model_ready`); private-listening firmware was already exempt, and on
+2026-09-22 Wil removed it for older firmware too and declined an opt-in for it
+("the button still works regardless") — `effective_mode` now takes no
+readiness at all, and a test pins that the reconcile never assigns the mode.
 
 The hold-back is invisible at the call site — the config push looks entirely
 ordinary and the whole guard is that one key was swapped out first — so tests
@@ -430,15 +536,14 @@ that ride with it) closes the offline case, and three rules keep it from doing
 harm:
 
 - **Failure to LOOK is not evidence of absence.** Any error reading the
-  device's inventory leaves `model_ready` alone — the shell plane is very
-  likely not up yet moments after connect, and standing a device down because
-  the controller could not ask would be worse than the bug. Only a successful
-  listing that lacks the model counts.
-- **Degrade first, then repair** — the mode drops to `off` the moment the
-  model is known missing, so the controller triggers throughout the install
-  rather than only after it. Deliberately the opposite ordering to
-  `_install_then_switch`, where the device is on a wake word it can still hear
-  and must not be disturbed; here it is already deaf.
+  device's inventory changes nothing — the shell plane is very likely not up
+  yet moments after connect. Only a successful listing that lacks a file
+  counts.
+- **Repair, never switch.** The mode is left alone whatever is missing; a
+  device missing its selected model is warned about, repaired, and sent the
+  config again so its scorer rebuilds. **Every device carries the full set
+  whatever its mode** (`em_oww_assets.reconcile_action`), so switching modes
+  never waits on an install.
 - **Quiet when there is nothing to do.** Devices reconnect often on this
   fleet, so the ordinary path is one shell round trip and no log line.
 
@@ -447,8 +552,9 @@ its name, and counting that as installed leaves the device scoring against a
 classifier that silently disagrees with the controller.
 
 **"Can it score today" and "is it complete" are two questions, and only the
-first was ever asked.** `missing_selected_classifier` decides whether to stand
-the mode down, and correctly looks only at the selected model —
+first was ever asked.** `missing_selected_classifier` decides whether the
+device is deaf (warned about, config re-pushed once repaired), and correctly
+looks only at the selected model —
 a missing spare is not a deaf device. But nothing looked at the spares at all,
 so Office ran from 17 August to 2026-09-02 without `alexa`, `hey_mycroft` or
 `hey_rhasspy`, scoring its own wake word perfectly and reported healthy by
@@ -500,6 +606,23 @@ enabled it and nothing happened" this removes.
 - `DEVICE_DIR`, the shared model names and the classifier stem rule are pinned
   against the firmware constants **by test**. Drift installs assets the device
   never looks for, and the only symptom is shadow mode silently never starting.
+- **`silero_vad.onnx` rides the same path, for the turn stream's speech gate**
+  (`internal/client/speechgate.go`), and it is NOT openwakeword's copy. As
+  shipped, that file takes ORT 1.19 on armv7 down with SIGBUS (`BUS_ADRALN`)
+  inside `CreateSession`: its tensors are protobuf `raw_data` at arbitrary
+  offsets. Rewriting the int64 tensors alone still faulted and graph
+  optimisation off did not help; every tensor in its typed field loads and is
+  bit-identical (`controller/tools/silero_typed.py`, run in the Dockerfile's
+  `silero` stage, input and output pinned by sha256). **It presents as a
+  hang**: debuggerd itself crashes dumping the 32-bit process, the tombstone
+  is 340 bytes, and the process sits in state `T` with no output — look in
+  `logcat` for `BUS_ADRALN`, not in the tombstone. The asset is optional and
+  never evictable; a device without it gates on RMS as before, and picks it up
+  on the next turn once installed, no restart. Measured on VVV: 9.2% of one
+  core at 12.5 frames/s continuous, p50 6.9ms; it only runs while a turn is
+  open. Every device carries the full asset set whatever its wake word mode
+  (controller `reconcile_action`), so this reaches controller-scoring devices
+  too, on their next connect.
 
 ## The external audio jack
 
@@ -719,9 +842,87 @@ suspected** (#404). Crossover on two Dots on one desk, same room as the AP,
 24h against its neighbour's 2**, worst 20049ms against 4792ms, and 5
 keepalive timeouts against 0. Moving the proxy to the other device moved the
 fault within minutes and reproduced the same *rate* — 2.64/min against
-2.49/min — on different hardware. It is not RF coexistence: stock FireOS
-drove a Bluetooth speaker while streaming over WiFi, so the combo chip does
-both. It is our own traffic.
+2.49/min — on different hardware. This section used to conclude "It is not
+RF coexistence", on the grounds that stock FireOS drove a Bluetooth speaker
+while streaming over WiFi. **That was wrong, and the next section is what
+replaced it** — the traffic below was real, but most of the fault was the scan
+itself.
+
+### The LE scan costs the WiFi link, and the scan YIELDS for it (2026-09-23)
+
+Measured AP-side, from UniFi's per-client counters, which nobody had looked at:
+while a Dot scans, the AP resends **47-150% of the frames it sends that Dot**,
+against **0.2-0.4%** for other Amazon devices and an LG TV on the SAME radio
+at weaker signal (VVV at -43dBm: 66%; an Amazon device at -53dBm: 0.4%).
+Crossover both ways and on both userspaces: VVV (FireOS) 126% → 0.1% with the
+proxy off, 15LE (emOS) 168% → 0.2%, ping loss 8% → 0, RTT excursions gone. The
+frames that exhaust the AP's retries are lost, and TCP backing off over them
+is the multi-second "RTT", the choppy reply and the stuttering console.
+Absolute rates depend on the traffic (146% under server traffic, ~37%
+ping-only), so compare within one session only.
+
+What the bench (`tools/ble_probe`, `-tags bench` for `internal/bluetooth/bench.go`)
+established, so nobody repeats it:
+
+- **The chip ignores the scan interval and window.** 320/30, 1280/120, 1280/30
+  and 10240/3 caught the same adverts (~1000 in 4 min) and cost the same;
+  adverts arrive on a fixed 80ms grid whatever is asked. The payload is
+  spec-correct (Core Vol 4 Part E 7.8.10) and answers status 0.
+- **Bluetooth powered, reset and NOT scanning costs nothing** (0.0%). Only
+  the scan does.
+- **Amazon's vendor init does not fix it.** `libbluetooth_mtk.so` sends six
+  vendor commands, none of them coexistence; the likely one, sleep `0xFC7A`
+  `03 40 1f 40 1f 00 04` (from `/data/nvram/APCFG/APRDEB/BT_Addr`, struct
+  offset = file offset + 4), plus radio `0xFC79` and `0xFC93`, made no
+  difference. The kernel sends the chip only `coex_wmt_ant_mode` (1, shared
+  antenna); the rest of MediaTek's coex table is compiled out
+  (`CFG_SUBSYS_COEX_NEED 0`).
+- **Damage is proportional to time scanning and recovers at once.** Toggling
+  the scan from our side: 50% on → 15%, 25% → 7-18%, 10% → 3%, against ~37%
+  continuous in the same session. Adverts fall in the same proportion, so
+  there is no ratio that keeps Bermuda and frees the link.
+- **The antenna really is shared, so `coex_wmt_ant_mode=1` is right.** Two
+  antennas on the board, both fed from one source (FCC ID 2AHSE-2045 photos).
+- **WiFi power save does not help, and Amazon forces it off anyway.** The
+  driver replaces any power-save request with CAM for `"biscuit"` by name
+  (FireOS 6 GPL source, `wlan_oid.c:7216`). With that line removed in a kernel
+  built from Amazon's source, fast and max power save left AP resends where CAM
+  had them, and max multiplied control-link RTT excursions 4-6x (JOURNAL
+  2026-09-25). Do not rebuild the kernel to try it again.
+- **2.4GHz is worse, not better**: the shared-antenna cost is band-independent,
+  and 2.4 adds overlap with advertising channels 37/38 and slower frames — and
+  Amazon's driver caps 2.4GHz Block Ack at 2 frames on biscuit.
+- Every Dot reports BD address `00:00:46:81:63:01`, the NVRAM default.
+
+**So the scan runs whenever nothing needs the link and stops while something
+does** — `Scanner.Yield`, driven by a 100ms poll in `cmd/server.go` over a
+button turn streaming, a private-listening session open, a voice reply still
+arriving (`PcmSpeaker.VoiceArriving`, which also ends 2s after the last period
+so a lost EOS cannot hold it), and any shell session (console, OTA, asset
+pushes). Polled rather than set and cleared at each edge, so no missed "done"
+can leave the proxy quiet. Only the scan stops — `/dev/stpbt` stays open, so
+resuming is one HCI command — and the silence watchdog is disarmed while
+yielded, or it would re-initialise the chip mid-turn. `scanning` in the stats
+still means "session up"; `yields`/`yieldedMs` count the pauses.
+
+Why this shape: Bermuda (source, 2026-07) re-decides areas every 1.05s,
+refuses adverts older than 10s for an area contest and calls a device away
+after 30s, and even a continuous scan gave nearby devices a fresh advert in
+only 35-77% of its cycles. A voice turn's few seconds fit that; music does
+not (hours), so music gets BURSTS instead of a yield (`bluetooth.MusicDuty`,
+2026-09-27): 2s of scan every 7s, and none while less than 2.5s of music is
+buffered. The 7s cycle sits inside Bermuda's 10s area age for any device that
+advertises within the 2s burst. Scanning straight through music was the
+earlier rule and it failed: on VVV with Music Assistant, 23 RTT excursions
+over 250ms in 2.7 min (worst 2.1s) and 15+ audible dropouts, none with the
+proxy off. Music Assistant hands an HA media player a flow stream at 1.03x
+real time after a 3s burst, so the buffer never holds more than ~5s and cannot
+ride out a 2s stall. **Known gap:** the controller paces music from a clock
+estimate, not from the device's buffer, so after a real dropout the buffer
+stays low for the rest of that stream and the 2.5s floor keeps the scan off
+until it ends. The fix is a device-reported buffer level. A controller-scoring
+device's always-on stream does not count as a turn. Remaining idle loss
+(pings, keepalives) is for TCP tolerance to absorb, not the scanner.
 
 **The mechanism was our own traffic on the liveness channel.**
 `SendBleAdverts` wrote to the CONTROL WebSocket through `writeJSON`, which
@@ -794,9 +995,8 @@ arrival waits at most one tick, which nothing downstream can perceive.
 
 **Two things that look like the fix and are not:**
 
-- **Lowering the scan duty cycle.** 320ms/30ms is exactly
-  `esp32_ble_tracker`'s default, which is what every Bermuda deployment is
-  tuned against. Fine as a one-off diagnostic, wrong as a shipped value.
+- **Lowering the scan duty cycle.** The chip ignores it (above). 320/30 stays
+  because it is `esp32_ble_tracker`'s default, not because it does anything.
 - **`filter_duplicates=1` at the chip.** It suppresses identical
   advertisements — but RSSI is the field that varies and the field Bermuda
   consumes, so the chip filter discards the signal and keeps the noise.
@@ -821,8 +1021,9 @@ Four things to know before picking this up:
   "reopening re-initialises the radio WiFi shares" text in `em_ble_proxy`'s
   warning is a hypothesis printed as a fact, and it produced a confident
   wrong call on the night — the timestamps rule it out. Fix that wording.
-- **It is not RF coexistence.** Stock FireOS drove a Bluetooth speaker while
-  streaming over WiFi.
+- **Coexistence costs the link while scanning** (see "The LE scan costs the
+  WiFi link"), so "not RF coexistence" no longer holds as a general
+  statement. Whether it explains these resets is untested.
 - **Memory pressure from the gate's table is RULED OUT — do not re-derive
   it.** The theory was that a 250ms buffer became a 5-minute retained table
   and cost GC pauses. The table is ~300 entries at ~200 bytes (privacy
@@ -899,6 +1100,20 @@ capacity, which bites well before any temperature reading looks alarming.
 
 ## Volume / mute persistence
 
+**Volume is applied in software, and the DAC stays at unity (2026-09-24).**
+`PcmSpeaker.SetVolume` scales each period after the output chain, ramped
+across one period so a change never lands as a step; the DAC's
+`PCM Playback Volume` sits at 127 while audio is live and is only used to
+mute around amp and stream changes. That is stock FireOS's arrangement
+(AudioFlinger attenuates, the DAC is never written). It was done so the wake
+sound (#120), mixed in AFTER the volume, plays at its own level whatever the
+volume — with the volume in the DAC nothing we write can escape it. The level
+keeps the control's law (0.5dB per step, unity at 127), so the controller, HA
+and stored `startupVolume` values are unchanged; level 0 is now true silence
+rather than −63.5dB. The speaker is silent until told a volume, and the
+volume controller applies its level the moment it is wired (`SetVolumeApply`),
+starting from 100, which is where Init used to leave the DAC.
+
 **The scale stops at the codec's unity gain, and that ceiling is load-bearing.**
 tinymix ctl 61 is the tlv320aic32x4 DAC *digital* volume: 176 steps of 0.5dB
 spanning −63.5…+24dB, with 0dB at index **127**. The firmware shipped
@@ -937,6 +1152,25 @@ calls are deliberately **not** floored — HA's volume 0.0 must still mean
 silent — and a press from below the floor lands *on* it, so one press always
 reaches audible.
 
+`volumeButtonSound` is the optional physical-button preview (#637). It plays
+only when the button actually changes the level and both voice and music have
+been quiet for 100ms; HA/controller volume sets never play it. The cue mixer
+sits after software volume for the wake sound's sake, so `VolumeCue` receives
+`speaker.VolumeGain(newLevel)` and bakes that gain into its samples exactly
+once. The cue is a single 350Hz electronic beep: a 36ms level body followed by
+a 125ms exponential release, with only 3% second harmonic so the fundamental
+remains dominant on the Echo's raw speaker path. Its rendered peak is
+normalised to -3dBFS at maximum volume; the extra headroom keeps the sustained
+low tone clean at the top of the range. It still bypasses EQ and the output
+chain so its timbre never changes, while `VolumeGain` makes its level follow
+playback's 0.5dB-per-index law. An extra Volume Up press at the ceiling replays
+the max-level cue even though the level cannot change; Volume Down at the floor
+remains silent. Repeated button presses replace the in-flight cue instead of
+queueing.
+The dashboard gates the setting on `volume_cue`, separate from `wake_cue`, so
+firmware that can play wake sounds but predates the volume behaviour is not
+offered a switch it will ignore.
+
 Volume is **state, not a setting** — it rides the config channel but has no dashboard control (the slider was removed 2026-07-25: `SeedVolume` ignores later pushes, so moving it did nothing until the device restarted and any real volume change overwrote it). It is listed in `em_config_sections.STATE_KEYS`, exempt from section scoping, and shown read-only on the Status tab.
 
 Volume persists through reboots **controller-side**: every device `volume_state` report is stored into the device's `startupVolume` config, and the device restores it via `Server.SeedVolume` on the **first config push per run only** (later pushes must not stomp live changes). Until seeded (or a local volume change makes the device authoritative), the device suppresses its connect-time `volume_state` report — reporting the boot-default level is what used to clobber the stored value on reboot. Mute is the opposite: **device-sovereign**, persisted locally in `/data/local/etc/echomuse/state.json` (survives OTA slot flips; written on toggle, restored at boot pre-connect — ADC mute immediately, red ring/button LED after LED init).
@@ -971,6 +1205,31 @@ Playback ring clearing waits for the device's `playback_stats` (`device.playback
   live**: the ADC mute is hardware and its button LED is a GPIO, so it is the
   one control that works with no controller at all — and making it inert would
   hand back a live mic on reconnect, since mute is persisted in `state.json`.
+  **One action-button gesture is handled BEFORE that gate: a 5 s hold asks
+  to pair** (`client.PairHold` → `StartPairing`, `internal/client/pairing.go`),
+  since the device that cannot connect is the one that needs it. The press is
+  forwarded as usual (the controller ignores presses); the release ending the
+  hold is swallowed so it does not also reach HA as a long press. The window
+  is two minutes and closes early when the credential files change — the
+  approval installs new ones and bounces the link, and a redial still
+  carrying `pairing` would raise a second request for a device already paired.
+  **Three link rings, and they must stay three.** Orange pulse: no controller
+  answered. Orange with odd and even LEDs alternating: a controller answered
+  and refused this device (`errRefused`: a certificate our CA did not sign, or
+  the controller's `refused` message), which the owner fixes by holding the
+  button. White pulse: pending approval. The first two looked identical until
+  2026-09-26, so a device that needed pairing looked like one waiting for its
+  network. Run keeps whichever held state it is in across redials (`held`).
+- **On a FireOS 6 kernel the mute button LED is Amazon's, not ours.** Its
+  `amz_privacy` driver (`amz_priv.c`) owns gpio444, toggles its own state on
+  every mute release, can be put INTO privacy from software
+  (`privacy_trigger`) but never out, and always boots unmuted. So after a
+  reboot while muted the two ran opposite for good, including a lit button
+  over a live mic (15LE, 2026-09-26). `internal/bindings/led/privacy.go`
+  finds it by name; `server/privacy.go` reconciles after every press and at
+  boot, and every disagreement resolves to muted. FireOS 5's kernel has no
+  such driver and we drive gpio444 ourselves. Never read its
+  `power_button_state`: it blocked the console.
 - **Mute ring** (solid red) is device-sovereign — enforced since v2.7.8: controller LED writes are recorded but not painted while muted. Needed because muting now terminates an active turn (controller cancels + `speaker_flush` on `mute_state`), so the cancelled turn's LED cleanup arrives after the red ring is up.
 - **Volume arc** owns the ring for its 2s display window against *animations* — they repaint ~every 100ms and would otherwise stomp the arc within one frame. It does **not** outrank a deliberate action-button press: a dot release calls `CancelVolumeDisplay()`, which drops the hold so the listening frame paints (it deliberately does not repaint — the controller's frame lands within an RTT, and clearing to black would put a dark gap between the two). The arc is protection from repaint churn, not from the user. On expiry the ring repaints the latest `baseLEDs` frame (`onDisplayExpire` → `paintBaseLEDs`), handing back mid-animation. The arc shows only for physical volume button presses (v2.9.5): remote sets and the boot-time volume seed apply silently (`volumeController.Set` showRing flag). The mute-button LED is sysfs gpio444, active-high — not the gpio445 in Amazon's `libled_hal.so`, whose constant is off by one and whose pad is muxed away (stock drives the pin via the `/dev/mtgpio` ioctl; see `mute_button.go`).
 

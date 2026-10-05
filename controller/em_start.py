@@ -40,6 +40,7 @@ OPTION_ENV_VARS = {
     "require_device_tls": "REQUIRE_DEVICE_TLS",
     "device_approval": "DEVICE_APPROVAL",
     "debug": "DEBUG",
+    "log_levels": "LOG_LEVELS",
     "extra_ca_cert": "EM_EXTRA_CA_CERT",
 }
 

@@ -35,9 +35,12 @@ import "C"
 
 import (
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"log"
 	"math"
 	"sync"
+	"time"
 	"unsafe"
 )
 
@@ -54,6 +57,16 @@ const (
 	maxDelayMs = 1000
 	minTailMs  = 50
 	maxTailMs  = 500
+
+	// hwTailMs is the filter length on the hardware reference, where the
+	// tail covers only the acoustic path: the reference arrives in the same
+	// frame as the mics, so there is no delay error left to absorb. Measured
+	// on a bench Dot (2026-09-22): converged, a 16ms tail cancelled as
+	// deeply as 300ms (20.3dB vs 20.4dB), while 300ms took ~10s of playback
+	// to converge against ~4s for 64ms. 64 leaves 4x headroom for a livelier
+	// room. aecTailMs still sets the software tap's length, which must also
+	// cover the delay error between the speaker write and the mic batches.
+	hwTailMs = 64
 )
 
 // Canceller is a single AEC instance shared by the speaker goroutine
@@ -64,9 +77,13 @@ type Canceller struct {
 	mu      sync.Mutex
 	enabled bool
 	delayMs int
-	tailMs  int
+	tailMs  int // configured (aecTailMs): the software tap's filter length
 
-	st *C.SpeexEchoState
+	st       *C.SpeexEchoState
+	stTailMs int // the length st was built with: hwTailMs or tailMs
+
+	statePath   string    // saved echo path (persist.go); empty = off
+	lastSaveTry time.Time // monotonic, rate-limits maybeSaveLocked
 
 	// Far-end reference ring (16kHz mono), plus the 3:1 decimator carry.
 	ring  [ringCap]int16
@@ -143,48 +160,6 @@ type Canceller struct {
 	// once-a-second attenuation line.
 	hwFrames  uint64
 	hwMissing uint64
-
-	// Playback gain the hardware reference has NOT been through, as a linear
-	// scalar (1.0 = the codec's unity gain, index 127). Measured on hardware:
-	// the loopback is tapped upstream of the DAC volume control, so it holds
-	// full scale whatever the user's volume — 0.431574 at index 127 against
-	// 0.431560 at index 60, across a commanded 33.5dB cut.
-	//
-	// Left uncorrected, every volume change is a step in the echo path gain
-	// that the adaptive filter can only discover by re-converging, and the
-	// field log shows exactly that: cancellation collapsed to -1.7dB
-	// immediately after a change and took 3-4 seconds to climb back, over
-	// and over (2026-08-29). We are not obliged to guess it — the device
-	// SETS this volume, so it knows the scalar precisely.
-	refScale    float64
-	scaleWarned bool // one-shot guard for the unscaled-reference log
-}
-
-// SetPlaybackLevel tells the canceller the DAC volume index the reference has
-// not been through, so the hardware reference can be scaled to match what the
-// speaker is actually emitting.
-//
-// The control is 0.5dB per step with unity at 127 (see Volume in
-// device/CLAUDE.md), so the scalar is 10^((level-127)/40).
-//
-// SOFTWARE-TAP FRAMES ARE DELIBERATELY LEFT ALONE. That tap is pre-volume
-// too, but its ring holds audio written BEFORE the change, so scaling it by
-// the current level would apply the correction to the wrong samples — and
-// keeping it untouched preserves the baseline the hardware path is being
-// compared against.
-func (c *Canceller) SetPlaybackLevel(level int) {
-	if level < 0 {
-		level = 0
-	}
-	scale := math.Pow(10, float64(level-127)/40.0)
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if scale == c.refScale {
-		return
-	}
-	c.refScale = scale
-	log.Printf("[aec] playback level %d → reference scale %.4f (%.1fdB)",
-		level, scale, 20*math.Log10(math.Max(scale, 1e-9)))
 }
 
 // SetHardwareRef selects the far-end source. True takes it from ch8 of the
@@ -192,10 +167,8 @@ func (c *Canceller) SetPlaybackLevel(level int) {
 //
 // Switching drops any ring contents: on the way in they would never be
 // consumed, and on the way out they are stale by however long the hardware
-// path ran. The filter state is deliberately KEPT — the physical echo path
-// has not changed, only our view of the signal driving it, and the two
-// references are the same audio to within the converter delay the filter
-// already absorbs.
+// path ran. The filter is kept only when both paths want the same length;
+// normally they do not (hwTailMs), and it is rebuilt.
 func (c *Canceller) SetHardwareRef(on bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -208,6 +181,24 @@ func (c *Canceller) SetHardwareRef(on bool) {
 	log.Printf("[aec] far-end reference: %s",
 		map[bool]string{true: "hardware (ch8, frame-aligned)",
 			false: "software tap (ring + aecDelayMs)"}[on])
+	// The two paths want different filter lengths (hwTailMs). A rebuild
+	// discards what was learnt, which on the way in is almost nothing: the
+	// hardware reference is confirmed by the first playback after boot.
+	if c.st != nil && c.effectiveTailLocked() != c.stTailMs {
+		c.buildLocked()
+		if !on {
+			c.seedRingLocked() // nothing drains the ring on the hardware path
+		}
+		c.loadStateLocked()
+	}
+}
+
+// effectiveTailLocked is the filter length for the reference in use.
+func (c *Canceller) effectiveTailLocked() int {
+	if c.hwRef {
+		return hwTailMs
+	}
+	return c.tailMs
 }
 
 // Enabled reports whether cancellation is armed. Callers use it to skip
@@ -256,9 +247,10 @@ func New() *Canceller {
 	return &Canceller{}
 }
 
-// SetParams applies config. Any change to delay or tail rebuilds the echo
-// state and re-seeds the ring — adaptive filter state is worthless across a
-// timing change anyway. Called from the control goroutine on config push.
+// SetParams applies config. On the software tap, any change to delay or tail
+// rebuilds the echo state and re-seeds the ring — adaptive filter state is
+// worthless across a timing change anyway. Called from the control goroutine
+// on config push.
 func (c *Canceller) SetParams(enabled bool, delayMs, tailMs int) {
 	if delayMs < 0 {
 		delayMs = 0
@@ -279,29 +271,38 @@ func (c *Canceller) SetParams(enabled bool, delayMs, tailMs int) {
 	if enabled == c.enabled && delayMs == c.delayMs && tailMs == c.tailMs {
 		return
 	}
-	// A delay-only change is a no-op on the hardware reference. delayMs
-	// never reaches speex — it only seeds the ring — so on a path with no
-	// ring the rebuild below would discard a converged filter to apply a
-	// number nothing reads. That is not hypothetical: the value still rides
+	// Delay and tail changes are no-ops on the hardware reference. delayMs
+	// only seeds the ring, and aecTailMs sets the software tap's length
+	// (hwTailMs is used here), so a rebuild would discard a converged filter
+	// to apply numbers nothing reads. That is not hypothetical: both ride
 	// every config push, so one fleet-wide edit would reset cancellation on
 	// every device using the hardware reference.
 	//
-	// Stored anyway, so a later fall back to the software tap seeds its
-	// ring with the operator's current setting rather than a stale one.
-	if c.hwRef && c.st != nil && enabled == c.enabled && tailMs == c.tailMs {
-		c.delayMs = delayMs
+	// Stored anyway, so a later fall back to the software tap uses the
+	// operator's current settings rather than stale ones.
+	if c.hwRef && c.st != nil && enabled == c.enabled {
+		c.delayMs, c.tailMs = delayMs, tailMs
 		return
 	}
-	c.freeLocked()
 	c.enabled = enabled
 	c.delayMs = delayMs
 	c.tailMs = tailMs
 	if !enabled {
+		c.freeLocked()
 		log.Printf("[aec] disabled")
 		return
 	}
+	c.buildLocked()
+	c.seedRingLocked()
+	c.loadStateLocked()
+}
 
-	tailSamples := C.int(tailMs * sampleRate / 1000)
+// buildLocked (re)creates the echo state at the length for the reference in
+// use. What was learnt is discarded: it is worthless across a length change.
+func (c *Canceller) buildLocked() {
+	c.freeLocked()
+	c.stTailMs = c.effectiveTailLocked()
+	tailSamples := C.int(c.stTailMs * sampleRate / 1000)
 	c.st = C.speex_echo_state_init(C.int(FrameSize), tailSamples)
 	rate := C.spx_int32_t(sampleRate)
 	C.speex_echo_ctl(c.st, C.SPEEX_ECHO_SET_SAMPLING_RATE, unsafe.Pointer(&rate))
@@ -309,17 +310,19 @@ func (c *Canceller) SetParams(enabled bool, delayMs, tailMs int) {
 	c.micBuf = (*C.spx_int16_t)(C.malloc(FrameSize * 2))
 	c.refBuf = (*C.spx_int16_t)(C.malloc(FrameSize * 2))
 	c.outBuf = (*C.spx_int16_t)(C.malloc(FrameSize * 2))
+	log.Printf("[aec] enabled: frame=%d tail=%dms delay=%dms", FrameSize, c.stTailMs, c.delayMs)
+}
 
-	// Seed the ring with the bulk delay as silence: the mic goroutine then
-	// reads reference samples delayMs behind their ALSA write, aligning
-	// them with when the sound actually reaches the mics.
+// seedRingLocked seeds the ring with the bulk delay as silence: the mic
+// goroutine then reads reference samples delayMs behind their ALSA write,
+// aligning them with when the sound actually reaches the mics.
+func (c *Canceller) seedRingLocked() {
 	c.head, c.tail, c.count = 0, 0, 0
 	c.dsum, c.dcnt = 0, 0
-	delaySamples := delayMs * sampleRate / 1000
+	delaySamples := c.delayMs * sampleRate / 1000
 	for i := 0; i < delaySamples; i++ {
 		c.pushLocked(0)
 	}
-	log.Printf("[aec] enabled: frame=%d tail=%dms delay=%dms", FrameSize, tailMs, delayMs)
 }
 
 func (c *Canceller) freeLocked() {
@@ -473,39 +476,11 @@ func (c *Canceller) process(mono, hwref []byte) []byte {
 			// Same frame, same clock — a straight copy, no ring, no delay
 			// bookkeeping. This is the whole point of #385.
 			hsub := hwref[off : off+FrameSize*2]
-			// Unity if nobody has told us the volume yet. That should not
-			// happen — cmd/server.go seeds the level from the device's own
-			// tinymix reading as it wires the callback, before the control
-			// client dials — but unity is the least-wrong guess, since a
-			// zero reference cancels nothing and looks identical to a
-			// working AEC with nothing playing.
-			//
-			// It is warned about because it is not free: the device boots
-			// at whatever level the previous run left in tinymix, and if
-			// that is (say) index 60, an unscaled reference is 33dB hot and
-			// cancellation collapses exactly as it did in round one.
-			scale := c.refScale
-			if scale <= 0 {
-				scale = 1.0
-				if !c.scaleWarned {
-					c.scaleWarned = true
-					log.Printf("[aec] no playback level yet — hardware " +
-						"reference running unscaled; cancellation will be " +
-						"poor at any volume below unity")
-				}
-			}
+			// The reference is the bytes written to ALSA, and the volume is
+			// applied to those bytes before the write (speaker/swvolume.go),
+			// so it is already what the speaker emits — no scalar.
 			for i := 0; i < FrameSize; i++ {
-				v := float64(int16(binary.LittleEndian.Uint16(hsub[i*2:]))) * scale
-				// The scalar only ever attenuates (level <= 127 by
-				// DEVICE_VOLUME_MAX), so this cannot clip in practice —
-				// clamped anyway because a future ceiling change must not
-				// silently wrap the reference to full-scale opposite sign.
-				if v > 32767 {
-					v = 32767
-				} else if v < -32768 {
-					v = -32768
-				}
-				ref[i] = int16(v)
+				ref[i] = int16(binary.LittleEndian.Uint16(hsub[i*2:]))
 			}
 			c.hwFrames++
 		} else {
@@ -553,6 +528,7 @@ func (c *Canceller) process(mono, hwref []byte) []byte {
 					log.Printf("[aec] att=%.1fdB mic=%.0f out=%.0f ref=%.0f "+
 						"src=hw(ch8) frames=%d",
 						att, inAvg, outAvg, refAvg, c.hwFrames)
+					c.maybeSaveLocked(att, refAvg > 100)
 				} else {
 					log.Printf("[aec] att=%.1fdB mic=%.0f out=%.0f ref=%.0f ring=%d (delay=%dms)",
 						att, inAvg, outAvg, refAvg, c.count, c.delayMs)
@@ -608,4 +584,79 @@ func frameRMS(s []int16) float64 {
 		sum += f * f
 	}
 	return math.Sqrt(sum / float64(len(s)))
+}
+
+// A saved echo path: what the canceller learned, so a restart need not learn
+// it again from nothing while the first reply plays. The header ties it to
+// the filter shape it came from; speex's own blob is only meaningful to a
+// state of the same frame size, filter length and rate.
+const stateMagic = "EMAEC1"
+
+const stateHeader = len(stateMagic) + 2 + 2 + 4 + 4 // magic, frame, tailMs, rate, payload
+
+// ExportState returns the learned echo path, or an error when cancellation
+// is off.
+func (c *Canceller) ExportState() ([]byte, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.exportLocked()
+}
+
+func (c *Canceller) exportLocked() ([]byte, error) {
+	if c.st == nil {
+		return nil, errors.New("aec: not enabled")
+	}
+	n := int(C.em_echo_state_size(c.st))
+	out := make([]byte, stateHeader+n)
+	copy(out, stateMagic)
+	h := out[len(stateMagic):]
+	binary.LittleEndian.PutUint16(h[0:], uint16(FrameSize))
+	binary.LittleEndian.PutUint16(h[2:], uint16(c.stTailMs))
+	binary.LittleEndian.PutUint32(h[4:], uint32(sampleRate))
+	binary.LittleEndian.PutUint32(h[8:], uint32(n))
+	if C.em_echo_state_export(c.st, unsafe.Pointer(&out[stateHeader]), C.int(n)) != 0 {
+		return nil, errors.New("aec: export size mismatch")
+	}
+	return out, nil
+}
+
+// ImportState loads a saved echo path into the running canceller. Anything
+// that does not match the current filter exactly, or holds a non-finite
+// value, is refused and the canceller is left as it was: a wrong filter is
+// worse than an empty one, which merely has to learn.
+func (c *Canceller) ImportState(b []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.importLocked(b)
+}
+
+func (c *Canceller) importLocked(b []byte) error {
+	if c.st == nil {
+		return errors.New("aec: not enabled")
+	}
+	if len(b) < stateHeader || string(b[:len(stateMagic)]) != stateMagic {
+		return errors.New("aec: not a saved echo path")
+	}
+	h := b[len(stateMagic):]
+	frame, tail := int(binary.LittleEndian.Uint16(h[0:])), int(binary.LittleEndian.Uint16(h[2:]))
+	rate, n := int(binary.LittleEndian.Uint32(h[4:])), int(binary.LittleEndian.Uint32(h[8:]))
+	if frame != FrameSize || tail != c.stTailMs || rate != sampleRate {
+		return fmt.Errorf("aec: saved for frame %d tail %dms rate %d, running %d/%dms/%d",
+			frame, tail, rate, FrameSize, c.stTailMs, sampleRate)
+	}
+	if n != int(C.em_echo_state_size(c.st)) || len(b) != stateHeader+n {
+		return errors.New("aec: saved echo path is the wrong size")
+	}
+	// Every field is 4 bytes and, in this FLOATING_POINT build, a float —
+	// bar one int flag, which reads as a tiny finite float either way.
+	for i := stateHeader; i+4 <= len(b); i += 4 {
+		v := math.Float32frombits(binary.LittleEndian.Uint32(b[i:]))
+		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+			return errors.New("aec: saved echo path holds a non-finite value")
+		}
+	}
+	if C.em_echo_state_import(c.st, unsafe.Pointer(&b[stateHeader]), C.int(n)) != 0 {
+		return errors.New("aec: import size mismatch")
+	}
+	return nil
 }

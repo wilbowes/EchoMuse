@@ -17,8 +17,8 @@ GOOD = "a" * 40
 STALE = "b" * 40
 
 
-def decide(presented=None, expected=None, secure=True, require_tls=False):
-    return LA.decide(presented=presented, expected=expected,
+def decide(presented=None, expected=None, secure=True, require_tls=False, confirmed=False):
+    return LA.decide(presented=presented, expected=expected, confirmed=confirmed,
                      secure=secure, require_tls=require_tls)
 
 
@@ -115,3 +115,86 @@ def test_comparison_is_constant_time():
     src = inspect.getsource(LA.decide)
     assert "compare_digest" in src
     assert "presented == expected" not in src
+
+
+# ─── A token once presented is required (Wil, 2026-09-26) ─────────────────────
+
+def test_a_confirmed_device_without_its_token_is_refused():
+    """
+    The device id is public: mDNS carries 12 of the serial's 16 characters and
+    the rest is a model prefix. Admitting a missing token let anyone on the LAN
+    register as any Echo and take its audio.
+    """
+    for secure in (False, True):
+        v = decide(presented=None, expected=GOOD, confirmed=True, secure=secure)
+        assert v.ok is False
+        assert v.reason == LA.MISSING_CREDENTIAL
+
+
+def test_an_unconfirmed_device_without_its_token_is_still_admitted():
+    # The rollout window: the row is minted before the files reach the device.
+    assert decide(presented=None, expected=GOOD, confirmed=False).ok
+
+
+def test_a_confirmed_device_with_its_token_is_admitted():
+    for secure in (False, True):
+        assert decide(presented=GOOD, expected=GOOD, confirmed=True, secure=secure).ok
+
+
+def test_a_confirmed_device_with_the_wrong_token_is_a_mismatch():
+    v = decide(presented=STALE, expected=GOOD, confirmed=True)
+    assert (v.ok, v.reason) == (False, "token mismatch")
+
+
+def test_confirmation_means_nothing_without_a_stored_token():
+    # A deleted device comes back pending whatever it carries (rule 3).
+    assert decide(presented=None, expected=None, confirmed=True).ok
+    assert decide(presented=STALE, expected=None, confirmed=True).ok
+
+
+def test_confirmed_is_required_of_every_caller():
+    import pytest
+    with pytest.raises(TypeError):
+        LA.decide(presented=None, expected=GOOD, secure=True, require_tls=False)
+
+
+# ─── /data and /shell follow the control connection ──────────────────────────
+
+def follows(control_peer, peer, control_secure=False, secure=False):
+    return LA.follows_control(control_peer=control_peer, control_secure=control_secure,
+                              peer=peer, secure=secure)
+
+
+def test_the_same_address_is_admitted():
+    assert follows("10.10.1.77", "10.10.1.77") is None
+    assert follows("fe80::1", "fe80::1") is None
+
+
+def test_ipv4_mapped_ipv6_is_the_same_address():
+    # A dual-stack listener reports the same peer both ways.
+    assert follows("10.10.1.77", "::ffff:10.10.1.77") is None
+    assert follows("::ffff:10.10.1.77", "10.10.1.77") is None
+
+
+def test_an_ipv6_zone_does_not_hide_the_address():
+    assert follows("fe80::1%wlan0", "fe80::1") is None
+    assert follows("fe80::1%wlan0", "fe80::2") is not None
+
+
+def test_another_address_is_refused():
+    why = follows("10.10.1.77", "10.10.1.200")
+    assert why and "10.10.1.200" in why
+
+
+def test_plain_is_refused_when_control_is_tls():
+    assert follows("10.10.1.77", "10.10.1.77", control_secure=True, secure=False)
+    assert follows("10.10.1.77", "10.10.1.77", control_secure=True, secure=True) is None
+    # The other way round is an upgrade, not an impersonation.
+    assert follows("10.10.1.77", "10.10.1.77", control_secure=False, secure=True) is None
+
+
+def test_an_unreadable_address_admits():
+    # Behind a proxy that hides peers there is nothing to compare, and refusing
+    # would take every device down.
+    for a, b in ((None, "10.0.0.1"), ("10.0.0.1", None), ("", "x"), ("garbage", "10.0.0.1")):
+        assert follows(a, b) is None

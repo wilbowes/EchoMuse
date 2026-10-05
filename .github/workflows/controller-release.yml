@@ -43,20 +43,32 @@ on:
       - 'controller-v*'
       - 'controller-ea-v*'
 
+# Read-only unless a job asks for more. The repository's default token is
+# already read-only; this keeps it so if that setting ever changes.
+permissions:
+  contents: read
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+      id-token: write       # provenance attestation (Sigstore OIDC)
+      attestations: write
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Identify the channel
         id: channel
         run: |
+          # The outputs below are derived from the tag and interpolated into
+          # later shell steps, and git allows $ ( ) ; in a tag name. Every
+          # controller tag ever cut matches this; anything else stops here.
+          echo "$GITHUB_REF_NAME" | grep -Eq '^controller-(ea-)?v[0-9]+\.[0-9]+\.[0-9]+(-ea\.[0-9]+)?$' || {
+            echo "::error::$GITHUB_REF_NAME is not a controller version tag"; exit 1; }
           case "$GITHUB_REF_NAME" in
             controller-ea-v*)
               echo "channel=ea"                                    >> "$GITHUB_OUTPUT"
@@ -110,10 +122,10 @@ jobs:
       # a layer that sets an environment variable, which needs no RUN and so
       # no emulation for either architecture.
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -130,7 +142,7 @@ jobs:
       # a prerelease on every standalone container at the next `compose pull`.
       - name: Docker metadata
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/${{ github.repository_owner }}/echomuse-controller
           tags: |
@@ -179,7 +191,7 @@ jobs:
       # cannot be known before the tag exists.
       - name: Stamp the version and push the release tags
         id: build
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: .github/version-stamp.Dockerfile
@@ -190,6 +202,16 @@ jobs:
             EM_CONTROLLER_VERSION=${{ steps.channel.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      # The release image is main's image plus one version layer, so it is a
+      # new digest and gets its own attestation; the one on main's :sha-*
+      # image covers the layers beneath it.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/echomuse-controller
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
 
       # ── Supply chain ────────────────────────────────────────────────────
       #
@@ -238,7 +260,7 @@ jobs:
       # without stopping the job — a release missing its SBOM is a gap in the
       # record, not a reason to report the release itself as broken.
       - name: Upload SBOM
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sbom-controller-${{ steps.channel.outputs.version }}
           path: sbom-controller-${{ steps.channel.outputs.version }}.cdx.json

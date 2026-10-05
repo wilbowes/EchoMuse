@@ -18,15 +18,18 @@ type DeviceStats struct {
 	// spawn; the tx/rx counters are plain sysfs reads and ride every tick.
 	// Band and BSSID matter because a single SSID spanning 2.4/5GHz means
 	// a device can silently re-associate to a much slower radio.
-	LinkSpeedMbps  int     `json:"linkSpeedMbps,omitempty"`
-	WifiFreqMhz    int     `json:"wifiFreqMhz,omitempty"`
-	WifiBssid      string  `json:"wifiBssid,omitempty"`
+	LinkSpeedMbps int    `json:"linkSpeedMbps,omitempty"`
+	WifiFreqMhz   int    `json:"wifiFreqMhz,omitempty"`
+	WifiBssid     string `json:"wifiBssid,omitempty"`
 	// Deltas since the previous stats tick — throughput and loss.
-	TxBytes        uint64  `json:"txBytes"`
-	RxBytes        uint64  `json:"rxBytes"`
-	TxErrors       uint64  `json:"txErrors"`
-	TxDropped      uint64  `json:"txDropped"`
-	RxCrcErrors    uint64  `json:"rxCrcErrors"`
+	TxBytes     uint64 `json:"txBytes"`
+	RxBytes     uint64 `json:"rxBytes"`
+	TxErrors    uint64 `json:"txErrors"`
+	TxDropped   uint64 `json:"txDropped"`
+	RxCrcErrors uint64 `json:"rxCrcErrors"`
+	// Uplink TCP loss since the last report (LinkLoss); nil = not measured.
+	TcpUpRetrans *uint64 `json:"tcpUpRetrans,omitempty"`
+	TcpUpSegs    *uint64 `json:"tcpUpSegs,omitempty"`
 	// Ble carries the BLE scanner diagnostics snapshot (bluetooth.Stats),
 	// nil when the proxy has never been enabled this boot.
 	Ble interface{} `json:"ble,omitempty"`
@@ -64,6 +67,13 @@ type DeviceStats struct {
 	// old to report it", and "off" collapsing into that would tell the
 	// dashboard a disarmed AEC is an unknown one.
 	AecRef string `json:"aecRef"`
+	// Sendspin is the player's status (sendspin.Status), nil when it is off.
+	// No secrets: the pairing token is asked for separately.
+	Sendspin interface{} `json:"sendspin,omitempty"`
+	// Emmc is the eMMC's wear report (platform.Emmc), re-read every few hours
+	// rather than per tick: wear moves in 10% steps over years, and a device
+	// can run for months without the reboot that the register copy needs.
+	Emmc interface{} `json:"emmc,omitempty"`
 	// The base OS deliberately does NOT ride this message — it is a static
 	// property of the boot and goes out once, on registration (control.go).
 	// It was here first and that was the bug: the payload reconcile asks for
@@ -74,22 +84,24 @@ type DeviceStats struct {
 // Safe for concurrent use — silently drops if not connected.
 func (c *ControlClient) SendStats(s DeviceStats) {
 	_ = c.writeJSON(map[string]interface{}{
-		"type":           "stats",
-		"cpuPct":         s.CPUPct,
-		"memUsedMb":      s.MemUsedMb,
-		"memTotalMb":     s.MemTotalMb,
-		"storageUsedMb":  s.StorageUsedMb,
-		"storageTotalMb": s.StorageTotalMb,
-		"wifiRssi":       s.WifiRssi,
-		"wifiSsid":       s.WifiSsid,
-		"linkSpeedMbps":  s.LinkSpeedMbps,
-		"wifiFreqMhz":    s.WifiFreqMhz,
-		"wifiBssid":      s.WifiBssid,
-		"txBytes":        s.TxBytes,
-		"rxBytes":        s.RxBytes,
-		"txErrors":       s.TxErrors,
-		"txDropped":      s.TxDropped,
-		"rxCrcErrors":    s.RxCrcErrors,
+		"type":             "stats",
+		"cpuPct":           s.CPUPct,
+		"memUsedMb":        s.MemUsedMb,
+		"memTotalMb":       s.MemTotalMb,
+		"storageUsedMb":    s.StorageUsedMb,
+		"storageTotalMb":   s.StorageTotalMb,
+		"wifiRssi":         s.WifiRssi,
+		"wifiSsid":         s.WifiSsid,
+		"linkSpeedMbps":    s.LinkSpeedMbps,
+		"wifiFreqMhz":      s.WifiFreqMhz,
+		"wifiBssid":        s.WifiBssid,
+		"tcpUpRetrans":     s.TcpUpRetrans,
+		"tcpUpSegs":        s.TcpUpSegs,
+		"txBytes":          s.TxBytes,
+		"rxBytes":          s.RxBytes,
+		"txErrors":         s.TxErrors,
+		"txDropped":        s.TxDropped,
+		"rxCrcErrors":      s.RxCrcErrors,
 		"ble":              s.Ble,
 		"owwShadow":        s.OwwShadow,
 		"ambientLux":       s.AmbientLux,
@@ -99,5 +111,7 @@ func (c *ControlClient) SendStats(s DeviceStats) {
 		"coresTotal":       s.CoresTotal,
 		"thermalCoreLimit": s.ThermalCoreLimit,
 		"aecRef":           s.AecRef,
+		"sendspin":         s.Sendspin,
+		"emmc":             s.Emmc,
 	})
 }

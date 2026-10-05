@@ -5,7 +5,6 @@ to ring. These pin the ring-transition reducer (which is what the async
 orchestrator in em_controller keys off), the spoken-dismissal matcher, and the
 duck applied to the alert while someone speaks over it.
 """
-import struct
 import pytest
 
 import em_timers as t
@@ -81,156 +80,115 @@ def test_clear_reports_whether_it_was_ringing():
     assert reg.active_count() == 0
 
 
-# ── Spoken dismissal ─────────────────────────────────────────────────────────
-# HA discards a timer when it finishes, so a spoken "stop" over a ringing alarm
-# reaches HA and is answered "there are no timers" — no CANCELLED is ever sent
-# (measured 2026-08-13). The dismissal is therefore recognised from the
-# transcript, and only ever while an alarm is actually ringing.
+# ── Stopping a ringing timer by voice ────────────────────────────────────────
+# A wake word heard while a timer rings pauses the ring; anything spoken after
+# it stops the ring, and silence lets it resume. DismissListen answers "did
+# someone speak" from one speech probability per 80ms frame.
 
-@pytest.mark.parametrize("text", [
-    "stop",
-    "Stop.",
-    " Stop. ",
-    "cancel the timer",
-    "Cancel the timer.",
-    "dismiss",
-    "turn it off",
-    "shut up",
-    "that's enough",
-    "ok ok",
-    "I'm up",
-])
-def test_dismissal_phrases_are_recognised(text):
-    assert t.is_dismissal(text) is True
+SPEECH, QUIET = 0.9, 0.05
 
 
-@pytest.mark.parametrize("text", [
-    "",
-    "   ",
-    "what's the weather",
-    "set a timer for five minutes",
-    "how much time is left",
-    "turn on the kitchen light",
-    "play some jazz",
-])
-def test_non_dismissals_reach_ha(text):
-    # A real command spoken over a ringing alarm must still go to HA — the
-    # matcher is generous, not indiscriminate.
-    assert t.is_dismissal(text) is False
+def _feed(listen, probs):
+    return [listen.push(p) for p in probs]
 
 
-def test_dismissal_matches_whole_words_only():
-    # "stopwatch" and "offer" contain dismissal words as substrings; matching
-    # on substrings would eat ordinary commands.
-    assert t.is_dismissal("start the stopwatch") is False
-    assert t.is_dismissal("what's on offer") is False
+def test_two_consecutive_speech_frames_after_the_preroll_stop_the_ring():
+    listen = t.DismissListen(preroll_frames=3)
+    assert _feed(listen, [QUIET] * 3 + [QUIET, SPEECH, SPEECH]) == [False] * 5 + [True]
+    assert listen.spoke is True
 
 
-# ── Dismissal-only: which utterances also lose HA's reply ────────────────────
-# Stopping the ring and suppressing HA's spoken reply are DIFFERENT questions,
-# and they rode on one match until 2026-08-21. A command that happens to
-# contain a dismissal word ("turn off the kitchen light") should stop the ring
-# AND still be answered — the light does turn off, so silence leaves the user
-# unable to tell whether it worked.
-
-@pytest.mark.parametrize("text", [
-    "stop",
-    "Stop.",
-    "cancel the timer",
-    "turn it off",
-    "turn off the alarm",
-    "stop the alarm please",
-    "shut up",
-    "that's enough",
-    "ok ok",
-    "I'm up",
-    "okay okay, stop",
-])
-def test_pure_dismissals_suppress_the_reply(text):
-    assert t.is_dismissal_only(text) is True
+def test_the_wake_words_own_tail_does_not_count_as_an_answer():
+    # The first frames after a wake carry the end of the wake word, which is
+    # speech. Counting it would make every wake a dismissal, which is the
+    # wake-alone rule this replaces: a false wake would silence an alarm.
+    listen = t.DismissListen(preroll_frames=3)
+    assert _feed(listen, [SPEECH] * 3 + [QUIET] * 40) == [False] * 43
+    assert listen.spoke is False
 
 
-@pytest.mark.parametrize("text", [
-    "turn off the kitchen light",
-    "stop the music",
-    "quiet the bedroom fan",
-    "turn off the lights downstairs",
-    "cancel my 7am alarm on the phone",
-])
-def test_commands_carrying_a_dismissal_keep_their_reply(text):
-    # These stop the ring — the generous match is right about that — but HA
-    # acts on them too, so its confirmation must survive.
-    assert t.is_dismissal(text) is True
-    assert t.is_dismissal_only(text) is False
+def test_silence_never_stops_the_ring():
+    listen = t.DismissListen(preroll_frames=3)
+    assert not any(_feed(listen, [QUIET] * 50))
+    assert listen.frames == 50
 
 
-@pytest.mark.parametrize("text", [
-    "",
-    "   ",
-    "what's the weather",
-    "set a timer for five minutes",
-    "turn on the kitchen light",
-])
-def test_non_dismissals_are_not_dismissal_only(text):
-    # Nothing to suppress if nothing was dismissed.
-    assert t.is_dismissal_only(text) is False
+def test_one_loud_frame_is_not_speech():
+    # A click or a clatter scores for a frame; a word lasts longer.
+    listen = t.DismissListen(preroll_frames=0)
+    assert not any(_feed(listen, [SPEECH, QUIET, SPEECH, QUIET, SPEECH, QUIET]))
 
 
-def test_dismissal_only_consumes_every_repetition():
-    # " stop stop " must lose BOTH — a single str.replace pass leaves the
-    # second one behind (the first eats the space between them) and the
-    # leftover reads as an unrecognised word.
-    assert t.is_dismissal_only("stop stop") is True
-    assert t.is_dismissal_only("stop, stop, stop!") is True
+def test_speech_frames_must_be_consecutive():
+    listen = t.DismissListen(preroll_frames=0, speech_frames=3)
+    assert _feed(listen, [SPEECH, SPEECH, QUIET, SPEECH, SPEECH, SPEECH]) == [False] * 5 + [True]
 
 
-# ── attenuate() — ducking the alert ──────────────────────────────────────────
-# The alert audio is the bundled Voice PE sound, decoded by em_controller
-# (ffmpeg), so these work on synthetic PCM rather than the file: the duck is
-# pure arithmetic on S16_LE and must not need an audio decoder to test.
-
-def _pcm(*values: int) -> bytes:
-    return struct.pack(f"<{len(values)}h", *values)
+def test_the_threshold_is_inclusive():
+    listen = t.DismissListen(preroll_frames=0)
+    assert _feed(listen, [t.DISMISS_SPEECH_PROB, t.DISMISS_SPEECH_PROB]) == [False, True]
+    below = t.DismissListen(preroll_frames=0)
+    assert not any(_feed(below, [t.DISMISS_SPEECH_PROB - 0.01] * 10))
 
 
-def _samples(pcm: bytes):
-    assert len(pcm) % 2 == 0, "S16_LE must be an even number of bytes"
-    return list(struct.unpack(f"<{len(pcm)//2}h", pcm))
+def test_the_verdict_latches():
+    # Once someone has spoken, a pause in their sentence does not unsay it.
+    listen = t.DismissListen(preroll_frames=0)
+    assert _feed(listen, [SPEECH, SPEECH, QUIET, QUIET]) == [False, True, True, True]
 
 
-def test_attenuate_scales_by_the_requested_gain():
-    duck = _samples(t.attenuate(_pcm(30000, -30000, 1000), t.DUCK_DB))
-    # −18dB ≈ 0.126×
-    assert 3600 < duck[0] < 3900
-    assert -3900 < duck[1] < -3600
-    assert 100 < duck[2] < 140
+def test_finished_is_speech_followed_by_a_pause():
+    # The ring stops at `spoke`; the listening ring stays lit until
+    # `finished`, so the person is not cut off mid-sentence.
+    listen = t.DismissListen(preroll_frames=0, end_frames=5)
+    _feed(listen, [SPEECH, SPEECH])
+    assert listen.spoke and not listen.finished
+    _feed(listen, [SPEECH] * 10 + [QUIET] * 4)
+    assert not listen.finished, "four quiet frames is a breath, not the end"
+    listen.push(QUIET)
+    assert listen.finished
 
 
-def test_attenuate_preserves_length():
-    # The ring swaps between full and ducked mid-alarm; a length change would
-    # shift the cadence of the loop.
-    full = _pcm(*([12000] * 500))
-    assert len(t.attenuate(full, t.DUCK_DB)) == len(full)
+def test_a_pause_shorter_than_the_end_does_not_finish():
+    # "Verona ... be quiet": a gap between words restarts the count.
+    listen = t.DismissListen(preroll_frames=0, end_frames=5)
+    _feed(listen, [SPEECH, SPEECH] + [QUIET] * 4 + [SPEECH] + [QUIET] * 4)
+    assert not listen.finished
+    listen.push(QUIET)
+    assert listen.finished
 
 
-def test_attenuate_never_boosts():
-    # The alert is mastered near full scale, so a positive gain would clip.
-    full = _pcm(30000, -30000)
-    assert t.attenuate(full, 6.0) == full
-    assert t.attenuate(full, 0.0) == full
+def test_silence_alone_never_finishes():
+    listen = t.DismissListen(preroll_frames=0)
+    _feed(listen, [QUIET] * 100)
+    assert not listen.spoke and not listen.finished
 
 
-def test_attenuated_alert_stays_audible():
-    # Ducked, not muted: it must still read as ringing while the user speaks
-    # over it, or the duck is indistinguishable from a dismissal.
-    duck = _samples(t.attenuate(_pcm(*([28000] * 100)), t.DUCK_DB))
-    assert max(abs(x) for x in duck) > 1500
+def test_peak_reports_the_loudest_frame_after_the_preroll():
+    # Logged when nobody spoke, to tell a quiet room from a near miss.
+    listen = t.DismissListen(preroll_frames=2)
+    _feed(listen, [0.99, 0.99, 0.1, 0.4, 0.2])
+    assert listen.peak == 0.4
 
 
-def test_attenuate_handles_empty_and_odd_input():
-    assert t.attenuate(b"", t.DUCK_DB) == b""
-    # An odd trailing byte cannot be a whole S16 sample — dropped, not crashed.
-    assert len(t.attenuate(b"\x00\x10\x7f", t.DUCK_DB)) == 2
+def test_a_short_word_is_enough():
+    # "Stop" is about 300ms: four 80ms frames, the middle ones voiced.
+    listen = t.DismissListen(preroll_frames=3)
+    assert _feed(listen, [QUIET] * 3 + [0.3, 0.8, 0.9, 0.4])[-2] is True
+
+
+def test_the_listen_is_long_enough_to_say_something():
+    # The hold outlives the wait in em_controller by a margin; the wait itself
+    # has to cover a breath and a few words.
+    assert 3.0 <= t.DISMISS_LISTEN_S <= 6.0
+
+
+def test_no_word_list_remains():
+    # The rule asks whether someone spoke, never what they said (Wil,
+    # 2026-10-04): a transcript matcher needs a list per language.
+    assert not hasattr(t, "is_dismissal")
+    assert not hasattr(t, "is_dismissal_only")
+
 
 
 def test_alert_sound_ships_with_its_licence():

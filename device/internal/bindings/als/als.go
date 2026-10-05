@@ -50,10 +50,9 @@ import (
 	"strings"
 	"sync"
 	"time"
-)
 
-// driverName is the sysfs `name` of the sensor that has a usable interface.
-const driverName = "tsl2540"
+	"github.com/wilbowes/EchoMuse/pkg/board"
+)
 
 // RetryInterval bounds how often an unresolved sensor is looked for again.
 // The scan is a glob plus a handful of small sysfs reads, so this is about
@@ -142,6 +141,15 @@ func resolve() string {
 	}
 	lastScan = time.Now()
 
+	// Which sensor, and which of its attributes reads lux, is the board's
+	// (pkg/board). biscuit: tsl2540, als_lux.
+	sensor := board.CurrentLayout().LightSensor
+	driverName, luxAttr := sensor.Driver, sensor.Attr
+	if driverName == "" {
+		status = Status{Code: StatusNoChip, Detail: "this board states no ambient light sensor"}
+		return ""
+	}
+
 	names, err := filepath.Glob(i2cGlob)
 	if err != nil {
 		status = Status{Code: StatusUnknown, Detail: "could not enumerate the i2c bus"}
@@ -171,7 +179,7 @@ func resolve() string {
 			continue
 		}
 		nameMatched = true
-		p := filepath.Join(filepath.Dir(n), "als_lux")
+		p := filepath.Join(filepath.Dir(n), luxAttr)
 		// A matching name is not enough: the name is board-file data and
 		// is present whether or not the chip is, so als_lux existing is
 		// what separates a fitted sensor from a declared one.
@@ -194,7 +202,7 @@ func resolve() string {
 	if nameMatched {
 		status = Status{
 			Code:   StatusNoAttribute,
-			Detail: driverName + " is on the i2c bus but exposes no als_lux attribute — the driver has not bound",
+			Detail: driverName + " is on the i2c bus but exposes no " + luxAttr + " attribute — the driver has not bound",
 			Seen:   seen,
 		}
 	} else {
@@ -210,8 +218,8 @@ func resolve() string {
 		// controller, so name which one it is: no chip on the bus at all,
 		// versus the chip present with no driver attribute bound to it.
 		if nameMatched {
-			log.Printf("[als] %s found but no als_lux attribute — driver not bound; "+
-				"ambient light unavailable", driverName)
+			log.Printf("[als] %s found but no %s attribute — driver not bound; "+
+				"ambient light unavailable", driverName, luxAttr)
 		} else {
 			log.Printf("[als] no %s on i2c (saw: %s) — ambient light unavailable, "+
 				"rechecking every %s", driverName, strings.Join(seen, ","), RetryInterval)

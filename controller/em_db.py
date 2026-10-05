@@ -20,6 +20,8 @@ Usage:
     db.log_device(device_id, "info", "device", "Connected")
 """
 
+import secrets
+import base64
 import hashlib
 import json
 import logging
@@ -32,20 +34,34 @@ from typing import Optional
 
 import em_config_sections
 import em_recordings
+import em_wake_samples
 
 log = logging.getLogger("echomuse.db")
 
 # ─── Default device config ────────────────────────────────────────────────────
 
 DEFAULT_DEVICE_CONFIG = {
-    # owwOnDevice: on-device wake word scoring. "off" or "shadow".
-    # Shadow scores the wake stream on the device and reports what it WOULD
-    # have detected, without acting on it, so the two can be compared on the
-    # same audio. Default off and it should stay that way: it costs ~38% of one
-    # core permanently on top of the ~18-20% mic-pipeline baseline, and it
-    # needs ONNX Runtime plus the models installed on the device out of band
-    # (they are not in the firmware). Enable on ONE device at a time.
-    "owwOnDevice":      "off",
+    # owwOnDevice: where the wake word is detected (docs/listening.md).
+    # "on" — on the Echo, which sends nothing until it hears it; "off" — on
+    # the controller, from a continuous stream; "shadow" — both, a streaming
+    # diagnostic. "on" is the default for NEW installs since 2026-09-21: it
+    # costs the Echo ~0.4 of a core, and privacy is what the project stands
+    # on. Existing installs keep what they had — _fixup_v25 pins "off" into a
+    # fleet config that never stored the key, because defaults are layered
+    # UNDER stored config and changing this line alone would silently switch
+    # every existing fleet.
+    "owwOnDevice":      "on",
+    # wakeSound: a rising two-tone on the wake word (#120). Off by default,
+    # since it interrupts "<wakeword>, do this"; an accessibility option
+    # first, because the ring is the only other sign the Echo is listening.
+    "wakeSound":        False,
+    "wakeSoundLevel":   "medium",   # quiet / medium / loud, played by the Echo
+    # Physical-button volume preview (#637). On by default, matching Alexa's
+    # familiar feedback and giving a useful level reference while idle.
+    "volumeButtonSound": True,
+    # Wake training samples are opt-in; candidates and triggers are saved for admin review.
+    "wakeClipCapture":  False,
+    "wakeClipMinScore": 0.20,
     "adcDigitalGain":   88,
     "adcMicpga":        40,
     # micGainDb: fixed digital gain (dB) the device applies to the full
@@ -168,6 +184,17 @@ DEFAULT_DEVICE_CONFIG = {
     # cannot perform. A taste parameter — it wants tuning by ear in a real
     # room, like the LED meter curve, not a firmware push per attempt.
     "duckDb": -18.0,
+    # Voice-response gain relative to the device volume. Firmware maps
+    # low / medium / high to 0 / +6 / +12dB before mixing with music, then
+    # tapers the boost near maximum so combined gain never exceeds unity.
+    "responseLevel":   "low",
+    # streamReply: start speaking when Home Assistant says the reply's first
+    # text has arrived (its tts_start_streaming signal) instead of when the whole
+    # reply is done. Default OFF: it is faster when the model and the TTS engine
+    # are quicker than speech, and pauses between sentences when either is
+    # slower, which the controller cannot tell in advance. See em_earlytts.
+    # Controller-side only, read per turn; the device ignores the key.
+    "streamReply":      False,
     "owwModel":         "hey_jarvis_v0.1",
     # Multi-device wake SUPPRESSION window (ms), not a wait. The first
     # device to detect answers immediately; any other device detecting
@@ -218,6 +245,21 @@ DEFAULT_DEVICE_CONFIG = {
     # Android Bluetooth stack on the device (required — /dev/stpbt is
     # single-owner) and brings up a second ESPHome listener + mDNS entry.
     "bleProxyEnabled":  False,
+    # bleProxyConnections: Home Assistant may open Bluetooth connections
+    # through the proxy (#656) — locks, SwitchBot, anything that needs more
+    # than adverts. Default off, and it needs bleProxyEnabled. Switching it on
+    # makes that proxy's ESPHome port require an encryption key
+    # (em_ble_proxy): a connection can operate the device at the other end,
+    # and the port had no authentication.
+    "bleProxyConnections": False,
+    # sendspinEnabled: the device runs a Sendspin player (#89) that Music
+    # Assistant connects to directly for synchronised multi-room audio.
+    # Default off: it opens a listening port and an mDNS record on the Echo.
+    # sendspinUnpaired lets a server the MA operator approved play without
+    # pairing; off by default, since pairing is one paste of the device's
+    # token and without it anyone on the LAN can claim to be a server.
+    "sendspinEnabled":  False,
+    "sendspinUnpaired": False,
     # beamformingEnabled: True — ch6 (centre/omni) hears the wake word, then
     # the turn locks to the best perimeter mic. The flag ONLY gates Lock():
     # unlocked is always ch6 and the wake path never locks, so the wake
@@ -253,6 +295,10 @@ DEFAULT_DEVICE_CONFIG = {
     "ledScene":         "standard",
     "ledListenColor":   "#00b400",
     "ledThinkColor":    "#00c800",
+    # Opt-in accessibility feedback for volume changes made from HA, the
+    # dashboard, automations, or another remote source. Physical buttons show
+    # the cyan arc regardless; mute and boot restore stay silent.
+    "remoteVolumeArc":  False,
     # Playback "meter" ring response curve — how hard the ring throbs with
     # the speaker level. Device-side defaults live in animator.go
     # (meterDefaults) and these mirror them; both are clamped independently.
@@ -308,6 +354,11 @@ DEFAULT_DEVICE_CONFIG = {
     #
     # emOS only, like the password beside it.
     "consoleTimeoutMin": 0,
+    # controllerEndpoints: addresses an Echo dials before mDNS, in order —
+    # [{host, port, tlsPort}]. Fleet-only (em_config_sections.FLEET_KEYS);
+    # delivered as a file, not by the config push (em_endpoints). Empty =
+    # mDNS alone, which is how every fleet worked before it.
+    "controllerEndpoints": [],
 }
 
 # The highest wake threshold that can ever fire, enforced on every config
@@ -527,7 +578,7 @@ MIGRATIONS: list[str] = [
     # token: shared secret the device presents in the X-EM-Token header on
     # all three WebSocket planes (/control, /data, /shell). Minted by
     # ensure_device_token() when credentials are first pushed (provisioning
-    # wizard or the dashboard "Secure link" action) and stored on the device
+    # wizard, or an approval: em_pairing) and stored on the device
     # at /data/local/etc/echomuse/token. NULL = no credentials issued yet —
     # such devices connect unauthenticated (legacy posture) until
     # REQUIRE_DEVICE_TLS=1 flips the controller to enforcing.
@@ -976,6 +1027,125 @@ MIGRATIONS: list[str] = [
     """
     UPDATE system_config SET value = '24' WHERE key = 'schema_version';
     """,
+
+    # ── v25 — keep existing fleets' wake word mode through the new default ──
+    #
+    # owwOnDevice's default moved "off" → "on" (private listening,
+    # docs/listening.md). Defaults are layered under stored fleet config, so
+    # a fleet that never saved the key would flip on upgrade. Wil's call:
+    # existing deployments keep their configuration, and the release notes
+    # tell them how to switch. The work is in _fixup_v25.
+    """
+    UPDATE system_config SET value = '25' WHERE key = 'schema_version';
+    """,
+
+    # ── v26 — link loss from the kernel's TCP counters ──────────────────────
+    #
+    # The BLE scan made the AP resend 47-150% of frames to a Dot for months
+    # and nothing here could see it (2026-09-23): the MTK RF counters are
+    # structurally zero and RTT shows only the symptom. TCP counts its own
+    # retransmits. Down = the controller's sockets to the device (segments +
+    # retransmits, so a rate); up = the device's own retransmits (a count;
+    # segments only where its kernel reports them). All NULLABLE: an hour
+    # nothing measured must not read as a clean link.
+    """
+    ALTER TABLE device_metrics ADD COLUMN tcp_down_segs_sum    INTEGER;
+    ALTER TABLE device_metrics ADD COLUMN tcp_down_retrans_sum INTEGER;
+    ALTER TABLE device_metrics ADD COLUMN tcp_up_segs_sum      INTEGER;
+    ALTER TABLE device_metrics ADD COLUMN tcp_up_retrans_sum   INTEGER;
+    ALTER TABLE device_metrics ADD COLUMN tcp_rto_max_ms       INTEGER;
+
+    UPDATE system_config SET value = '26' WHERE key = 'schema_version';
+    """,
+    # v27 — when the device first presented its current link token. Set once,
+    # at a register whose X-EM-Token matched; from then a connection claiming
+    # this device without the token is refused (em_linkauth rule 2). NULL means
+    # never presented, which keeps the rollout rule: a row minted before the
+    # credential files reach the device must not lock it out. Cleared whenever
+    # the token changes, so it always describes the CURRENT token.
+    """
+    ALTER TABLE devices ADD COLUMN token_confirmed_at INTEGER;
+
+    UPDATE system_config SET value = '27' WHERE key = 'schema_version';
+    """,
+    # v28 — boot-time health. One row per BOOT for how it started, keyed on
+    # the kernel's boot_id because a device re-registers on every redial; and
+    # one row per device per DAY for the eMMC's own wear report (JEDEC
+    # EXT_CSD), because a device can run for months without rebooting and a
+    # value that steps once every few years is only readable as a history.
+    # Every reading is NULLABLE: firmware that sends none, a FireOS 6 kernel
+    # whose cmdline has lost the boot reason, and a part below EXT_CSD rev 7
+    # must not read as a healthy zero.
+    """
+    CREATE TABLE IF NOT EXISTS device_boots (
+        device_id     TEXT    NOT NULL REFERENCES devices(device_id),
+        boot_id       TEXT    NOT NULL,
+        first_seen    INTEGER NOT NULL,
+        firmware_ver  TEXT,
+        boot_reason   TEXT,
+        PRIMARY KEY (device_id, boot_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS device_wear (
+        device_id     TEXT    NOT NULL REFERENCES devices(device_id),
+        day           TEXT    NOT NULL,
+        updated_at    INTEGER NOT NULL,
+        emmc_rev      INTEGER,
+        emmc_pre_eol  INTEGER,
+        emmc_life_a   INTEGER,
+        emmc_life_b   INTEGER,
+        emmc_name     TEXT,
+        emmc_date     TEXT,
+        emmc_manfid   TEXT,
+        PRIMARY KEY (device_id, day)
+    );
+
+    UPDATE system_config SET value = '28' WHERE key = 'schema_version';
+    """,
+
+    # ── v29 — labelled wake-word training clips ─────────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS wake_samples (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        device_id TEXT NOT NULL,
+        ts REAL NOT NULL,
+        audio_file TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'candidate',
+        label TEXT NOT NULL DEFAULT 'unreviewed',
+        model TEXT,
+        score REAL,
+        threshold REAL,
+        device_score REAL,
+        trigger_source TEXT,
+        FOREIGN KEY (device_id) REFERENCES devices(device_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_wake_samples_device_ts
+        ON wake_samples(device_id, ts DESC);
+
+    UPDATE system_config SET value = '29' WHERE key = 'schema_version';
+    """,
+
+    # v30 — the emOS image a device is running: VERSION_ID and BUILD_ID from
+    # its /etc/os-release. Stored for the reason base_os is (v21): "is there
+    # an emOS update" is asked about devices that are mostly offline. NULL on
+    # FireOS and until an emOS device has been asked, which is "unknown" and
+    # is never offered an update.
+    """
+    ALTER TABLE devices ADD COLUMN emos_version TEXT;
+    ALTER TABLE devices ADD COLUMN emos_build TEXT;
+
+    UPDATE system_config SET value = '30' WHERE key = 'schema_version';
+    """,
+
+    # v31 — the API encryption key for a device's Bluetooth proxy (#656).
+    # Home Assistant is given it once, as the ESPHome device's "encryption
+    # key". NULL until connections are first switched on for that device; a
+    # passive proxy stays unencrypted and needs none.
+    """
+    ALTER TABLE devices ADD COLUMN ble_proxy_key TEXT;
+
+    UPDATE system_config SET value = '31' WHERE key = 'schema_version';
+    """,
 ]
 
 # Post-migration fixups that need Python rather than SQL. Keyed by the schema
@@ -1071,7 +1241,34 @@ def _fixup_v24(conn) -> None:
                 (json.dumps(fixed),))
 
 
-_MIGRATION_FIXUPS = {11: _fixup_v11, 19: _fixup_v19, 24: _fixup_v24}
+def _fixup_v25(conn) -> None:
+    """
+    Pin owwOnDevice="off" into a stored fleet config that lacks it.
+
+    A fresh database already carries the key — v3 seeds the whole of
+    DEFAULT_DEVICE_CONFIG — so this touches only fleets that predate it,
+    which is exactly the set whose behaviour the new default would change.
+    Device rows need nothing: a key a device does not store falls through to
+    the fleet's. A config that will not parse is left alone.
+    """
+    row = conn.execute(
+        "SELECT value FROM system_config WHERE key = 'global_device_config'").fetchone()
+    if not row:
+        return
+    try:
+        cfg = json.loads(row["value"] or "{}") or {}
+    except (json.JSONDecodeError, TypeError):
+        return
+    if "owwOnDevice" in cfg:
+        return
+    cfg["owwOnDevice"] = "off"
+    conn.execute(
+        "UPDATE system_config SET value = ? WHERE key = 'global_device_config'",
+        (json.dumps(cfg),))
+
+
+_MIGRATION_FIXUPS = {11: _fixup_v11, 19: _fixup_v19, 24: _fixup_v24,
+                     25: _fixup_v25}
 
 # ─── Connection management ────────────────────────────────────────────────────
 
@@ -1349,7 +1546,8 @@ def get_all_devices() -> list[sqlite3.Row]:
 def get_pending_devices() -> list[sqlite3.Row]:
     """Return devices that have connected but not yet been approved."""
     return _q(
-        "SELECT * FROM devices WHERE approved = 0 ORDER BY first_seen ASC"
+        "SELECT * FROM devices WHERE approved = 0 AND last_seen IS NOT NULL "
+        "ORDER BY first_seen ASC"
     )
 
 
@@ -1415,18 +1613,21 @@ def upsert_device_seen(
     """
     Update ip, firmware_ver, and last_seen for a known device on each connection.
 
-    Does not touch approval status, label, or config.
+    Does not touch approval status, label, or config. Sets first_seen on the
+    first connection of a row the provisioning wizard created (#453).
     """
+    now = _now()
     with _tx() as conn:
         conn.execute(
             """
             UPDATE devices
             SET ip           = ?,
                 firmware_ver = ?,
+                first_seen   = COALESCE(first_seen, ?),
                 last_seen    = ?
             WHERE device_id = ?
             """,
-            (ip, version, _now(), device_id),
+            (ip, version, now, now, device_id),
         )
 
 
@@ -1459,6 +1660,32 @@ def get_device_token(device_id: str) -> Optional[str]:
     return row["token"] if row and row["token"] else None
 
 
+def get_device_link_auth(device_id: str) -> tuple[Optional[str], bool]:
+    """(token or None, whether the device has presented that token)."""
+    row = _q1("SELECT token, token_confirmed_at FROM devices WHERE device_id = ?",
+              (device_id,))
+    if not row or not row["token"]:
+        return None, False
+    return row["token"], row["token_confirmed_at"] is not None
+
+
+def confirm_device_token(device_id: str, token: str) -> bool:
+    """
+    Record that the device presented `token`, if it is still the stored one
+    and nothing was recorded yet. True when this call recorded it.
+
+    Conditional on the token so a presentation checked against a token that
+    has since been replaced cannot confirm the replacement.
+    """
+    with _tx() as conn:
+        cur = conn.execute(
+            "UPDATE devices SET token_confirmed_at = ? "
+            "WHERE device_id = ? AND token = ? AND token_confirmed_at IS NULL",
+            (_now(), device_id, token),
+        )
+        return cur.rowcount == 1
+
+
 def ensure_device_token(device_id: str) -> str:
     """
     Return the device's link-auth token, minting one if absent.
@@ -1474,30 +1701,43 @@ def ensure_device_token(device_id: str) -> str:
         return existing
 
     token = secrets.token_urlsafe(32)
-    now = _now()
     with _tx() as conn:
+        # first_seen/last_seen stay NULL: this device has never connected,
+        # and NULL is what tells a row the wizard made from one awaiting
+        # approval (#453). upsert_device_seen fills them on first contact.
         conn.execute(
             """
             INSERT INTO devices
                 (device_id, label, approved, ip, firmware_ver, first_seen, last_seen, config)
-            VALUES (?, NULL, 0, NULL, NULL, ?, ?, ?)
+            VALUES (?, NULL, 0, NULL, NULL, NULL, NULL, ?)
             ON CONFLICT(device_id) DO NOTHING
             """,
-            (device_id, now, now, json.dumps(DEFAULT_DEVICE_CONFIG)),
+            (device_id, json.dumps(DEFAULT_DEVICE_CONFIG)),
         )
         conn.execute(
-            "UPDATE devices SET token = ? WHERE device_id = ?",
+            "UPDATE devices SET token = ?, token_confirmed_at = NULL WHERE device_id = ?",
             (token, device_id),
         )
     log.info(f"[db] Link token minted for {device_id}")
     return token
 
 
+def set_device_token(device_id: str, token: str) -> None:
+    """Store a token already delivered to the device; it starts unconfirmed."""
+    with _tx() as conn:
+        conn.execute(
+            "UPDATE devices SET token = ?, token_confirmed_at = NULL WHERE device_id = ?",
+            (token, device_id),
+        )
+    log.info(f"[db] Link token replaced for {device_id}")
+
+
 def clear_device_token(device_id: str) -> None:
     """Revoke a device's link token (next credential push mints a new one)."""
     with _tx() as conn:
         conn.execute(
-            "UPDATE devices SET token = NULL WHERE device_id = ?", (device_id,)
+            "UPDATE devices SET token = NULL, token_confirmed_at = NULL WHERE device_id = ?",
+            (device_id,)
         )
 
 
@@ -1525,6 +1765,17 @@ def set_device_base_os(device_id: str, base_os: Optional[str]) -> None:
         )
 
 
+def set_device_emos(device_id: str, version: Optional[str],
+                    build: Optional[str]) -> None:
+    """Record the emOS image a device is running (schema v30)."""
+    with _tx() as conn:
+        conn.execute(
+            "UPDATE devices SET emos_version = ?, emos_build = ? "
+            "WHERE device_id = ?",
+            (version, build, device_id),
+        )
+
+
 def set_device_kernel(device_id: str, arch: str, release: str) -> None:
     """Record the kernel a device booted (`uname -m`, `uname -r`), per register."""
     with _tx() as conn:
@@ -1532,6 +1783,57 @@ def set_device_kernel(device_id: str, arch: str, release: str) -> None:
             "UPDATE devices SET kernel_arch = ?, kernel_release = ? WHERE device_id = ?",
             (arch, release, device_id),
         )
+
+
+def record_boot(device_id: str, boot_id: str, firmware_ver: Optional[str],
+                boot_reason: Optional[str]) -> None:
+    """
+    Record a boot from its register message, once: later registrations in the
+    same boot (every redial) are ignored, so the row keeps the first reading.
+    """
+    with _tx() as conn:
+        conn.execute(
+            """INSERT OR IGNORE INTO device_boots
+               (device_id, boot_id, first_seen, firmware_ver, boot_reason)
+               VALUES (?, ?, ?, ?, ?)""",
+            (device_id, boot_id, int(time.time()), firmware_ver, boot_reason or None),
+        )
+
+
+def record_wear(device_id: str, day: str, values: tuple) -> None:
+    """Upsert the day's eMMC reading: the latest reading of the day wins."""
+    with _tx() as conn:
+        conn.execute(
+            """INSERT INTO device_wear
+               (device_id, day, updated_at, emmc_rev, emmc_pre_eol, emmc_life_a,
+                emmc_life_b, emmc_name, emmc_date, emmc_manfid)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(device_id, day) DO UPDATE SET
+                 updated_at = excluded.updated_at,
+                 emmc_rev = excluded.emmc_rev, emmc_pre_eol = excluded.emmc_pre_eol,
+                 emmc_life_a = excluded.emmc_life_a, emmc_life_b = excluded.emmc_life_b,
+                 emmc_name = excluded.emmc_name, emmc_date = excluded.emmc_date,
+                 emmc_manfid = excluded.emmc_manfid""",
+            (device_id, day, int(time.time()), *values),
+        )
+
+
+def latest_health() -> dict[str, dict]:
+    """Each device's latest boot and latest wear reading merged into one dict,
+    keyed by device_id: one pass for the device list, not a query per device."""
+    out: dict[str, dict] = {}
+    for r in _q("""SELECT b.device_id, b.first_seen AS boot_at, b.boot_reason, b.firmware_ver
+                   FROM device_boots b
+                   JOIN (SELECT device_id, MAX(first_seen) AS t FROM device_boots
+                         GROUP BY device_id) m
+                     ON b.device_id = m.device_id AND b.first_seen = m.t"""):
+        out.setdefault(r["device_id"], {}).update(dict(r))
+    for r in _q("""SELECT w.* FROM device_wear w
+                   JOIN (SELECT device_id, MAX(day) AS d FROM device_wear
+                         GROUP BY device_id) m
+                     ON w.device_id = m.device_id AND w.day = m.d"""):
+        out.setdefault(r["device_id"], {}).update(dict(r))
+    return out
 
 
 def fleet_base_os() -> set[str]:
@@ -1578,6 +1880,18 @@ def _clamp_wake_threshold(config: dict, where: str) -> dict:
     return {**config, "owwThreshold": OWW_THRESHOLD_MAX}
 
 
+def _clamp_wake_sample_minimum(config: dict, where: str) -> dict:
+    """Keep the optional audio-capture floor in the UI's [0.05, 0.95] range."""
+    value = config.get("wakeClipMinScore")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return config
+    fixed = max(0.05, min(0.95, value))
+    if fixed == value:
+        return config
+    log.warning(f"[db] {where}: wakeClipMinScore {value} outside [0.05, 0.95]; storing {fixed}")
+    return {**config, "wakeClipMinScore": fixed}
+
+
 def set_device_config(device_id: str, config: dict) -> None:
     """
     Persist updated config for a device.
@@ -1585,7 +1899,7 @@ def set_device_config(device_id: str, config: dict) -> None:
     The caller is responsible for immediately pushing the config to the
     live device over the control WebSocket if it is currently connected.
     """
-    config = _clamp_wake_threshold(config, device_id)
+    config = _clamp_wake_sample_minimum(_clamp_wake_threshold(config, device_id), device_id)
     with _tx() as conn:
         conn.execute(
             "UPDATE devices SET config = ? WHERE device_id = ?",
@@ -1608,6 +1922,45 @@ def get_device_config(device_id: str) -> dict:
     except (json.JSONDecodeError, TypeError):
         log.warning(f"[db] Invalid config JSON for {device_id} — using defaults")
         return dict(DEFAULT_DEVICE_CONFIG)
+
+
+# Devices HA's wake word picker has turned off (#286). Stored because HA
+# never sends the picker's state back. Not a config key: a dashboard save
+# would overwrite it with whatever that page last loaded.
+_WAKE_WORD_OFF_KEY = "wake_word_off"
+
+
+def _wake_word_off_ids(conn: sqlite3.Connection) -> list[str]:
+    row = conn.execute(
+        "SELECT value FROM system_config WHERE key = ?", (_WAKE_WORD_OFF_KEY,)
+    ).fetchone()
+    if row is None or not row["value"]:
+        return []
+    try:
+        ids = json.loads(row["value"])
+    except (json.JSONDecodeError, TypeError):
+        log.warning("[db] Invalid wake_word_off JSON — treating every device as on")
+        return []
+    return [i for i in ids if isinstance(i, str)] if isinstance(ids, list) else []
+
+
+def get_wake_word_enabled(device_id: str) -> bool:
+    """Whether HA's picker leaves this device's wake word on. Default on."""
+    assert _conn is not None, "db.init() has not been called"
+    with _db_lock:
+        return device_id not in _wake_word_off_ids(_conn)
+
+
+def set_wake_word_enabled(device_id: str, enabled: bool) -> None:
+    """Record HA's picker choice for this device. Read-modify-write in one tx."""
+    with _tx() as conn:
+        ids = [i for i in _wake_word_off_ids(conn) if i != device_id]
+        if not enabled:
+            ids.append(device_id)
+        conn.execute(
+            "INSERT OR REPLACE INTO system_config (key, value) VALUES (?, ?)",
+            (_WAKE_WORD_OFF_KEY, json.dumps(sorted(ids))),
+        )
 
 
 def get_global_device_config() -> dict:
@@ -1657,7 +2010,7 @@ def get_global_device_config_raw() -> dict:
 
 def set_global_device_config(config: dict) -> None:
     """Persist updated fleet-wide default device config."""
-    config = _clamp_wake_threshold(config, "fleet")
+    config = _clamp_wake_sample_minimum(_clamp_wake_threshold(config, "fleet"), "fleet")
     with _tx() as conn:
         conn.execute(
             "INSERT OR REPLACE INTO system_config (key, value) VALUES ('global_device_config', ?)",
@@ -1794,10 +2147,11 @@ def set_firmware_previous(device_id: str, version: Optional[str]) -> None:
 
 def delete_device(device_id: str) -> None:
     """
-    Remove a device and all its logs from the registry.
+    Remove a device and its persisted records from the registry.
 
     This is a hard delete — use with care. Logs are removed first to
-    satisfy the foreign key constraint.
+    satisfy foreign keys. Wake-sample audio is unlinked before its rows,
+    within the transaction, so a cleanup failure leaves references for retry.
 
     Saved utterance recordings live on disk rather than in the DB, so no
     cascade reaches them — they are unlinked explicitly here. Leaving a
@@ -1806,7 +2160,20 @@ def delete_device(device_id: str) -> None:
     """
     with _tx() as conn:
         conn.execute("DELETE FROM device_logs WHERE device_id = ?", (device_id,))
+        wake_samples = conn.execute(
+            "SELECT audio_file FROM wake_samples WHERE device_id = ?", (device_id,)
+        ).fetchall()
+        for row in wake_samples:
+            if not em_wake_samples.unlink(device_id, row["audio_file"]):
+                raise OSError(
+                    f"could not remove wake sample {row['audio_file']} for {device_id}"
+                )
+        conn.execute("DELETE FROM wake_samples WHERE device_id = ?", (device_id,))
+        conn.execute("DELETE FROM device_boots WHERE device_id = ?", (device_id,))
+        conn.execute("DELETE FROM device_wear WHERE device_id = ?", (device_id,))
         conn.execute("DELETE FROM devices WHERE device_id = ?", (device_id,))
+    # A re-added device is new to HA, so it starts listening.
+    set_wake_word_enabled(device_id, True)
     try:
         removed = em_recordings.delete_device(device_id)
         if removed:
@@ -2000,6 +2367,32 @@ def ensure_ble_proxy_port(device_id: str) -> Optional[int]:
             )
             log.info(f"[db] BLE proxy port set: {device_id} → {port}")
     return port
+
+
+def ensure_ble_proxy_key(device_id: str) -> Optional[str]:
+    """
+    Return this device's Bluetooth proxy encryption key (base64 of 32 random
+    bytes, the form Home Assistant asks for), creating it on first call.
+    Assigned once and kept: Home Assistant stores it, so a key that changed
+    would lock its config entry out. None if the device is unknown.
+
+    Never log it. It is what stands between the LAN and whatever the proxy
+    can connect to.
+    """
+    with _tx() as conn:
+        row = conn.execute(
+            "SELECT ble_proxy_key FROM devices WHERE device_id = ?", (device_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        if row["ble_proxy_key"]:
+            return row["ble_proxy_key"]
+        key = base64.b64encode(secrets.token_bytes(32)).decode()
+        conn.execute(
+            "UPDATE devices SET ble_proxy_key = ? WHERE device_id = ?", (key, device_id),
+        )
+        log.info(f"[db] BLE proxy encryption key created for {device_id}")
+    return key
 
 
 def free_ble_proxy_port(device_id: str) -> None:
@@ -2337,6 +2730,90 @@ def get_wake_counters(device_id: str, since: float) -> list[sqlite3.Row]:
     )
 
 
+def insert_wake_sample(device_id: str, rec: dict) -> int:
+    """Persist metadata for one already-written wake sample; prune by id."""
+    with _tx() as conn:
+        cur = conn.execute(
+            """INSERT INTO wake_samples
+               (device_id, ts, audio_file, kind, label, model, score,
+                threshold, device_score, trigger_source)
+               VALUES (?, ?, ?, ?, 'unreviewed', ?, ?, ?, ?, ?)""",
+            (device_id, _py(rec["ts"]), rec["audio_file"], rec["kind"],
+             rec.get("model"), _py(rec.get("score")), _py(rec.get("threshold")),
+             _py(rec.get("device_score")), rec.get("trigger_source")),
+        )
+        sample_id = cur.lastrowid
+        expired = conn.execute(
+            """SELECT id, audio_file FROM wake_samples WHERE device_id = ?
+               ORDER BY id DESC LIMIT -1 OFFSET ?""",
+            (device_id, em_wake_samples.KEEP_PER_DEVICE),
+        ).fetchall()
+        if expired:
+            # Unlink before deleting metadata. If the process stops during
+            # cleanup, the rows remain available to retry the removals.
+            for row in expired:
+                if not em_wake_samples.unlink(device_id, row["audio_file"]):
+                    raise OSError(
+                        f"could not remove expired wake sample "
+                        f"{row['audio_file']} for {device_id}"
+                    )
+            conn.executemany("DELETE FROM wake_samples WHERE id = ?",
+                             [(r["id"],) for r in expired])
+    return sample_id
+
+
+def get_wake_samples(device_id: str, limit: int = 50) -> list[sqlite3.Row]:
+    return _q(
+        """SELECT id, device_id, ts, audio_file, kind, label, model, score,
+                  threshold, device_score, trigger_source
+           FROM wake_samples WHERE device_id = ? ORDER BY id DESC LIMIT ?""",
+        (device_id, max(1, min(int(limit), 100000))),
+    )
+
+
+def set_wake_sample_label(device_id: str, sample_id: int, label: str) -> bool:
+    if label not in ("wake", "not_wake", "uncertain"):
+        return False
+    with _tx() as conn:
+        row = conn.execute(
+            """SELECT audio_file, kind, model, score, threshold, device_score,
+                      trigger_source, ts FROM wake_samples
+               WHERE device_id = ? AND id = ?""",
+            (device_id, int(sample_id)),
+        ).fetchone()
+        if row is None:
+            return False
+        cur = conn.execute(
+            "UPDATE wake_samples SET label = ? WHERE device_id = ? AND id = ?",
+            (label, device_id, int(sample_id)),
+        )
+        updated = cur.rowcount == 1
+    # Best-effort: a failed archive copy must not fail the label call itself.
+    if updated:
+        try:
+            em_wake_samples.archive(device_id, row["audio_file"], label, dict(row))
+        except Exception as e:
+            log.warning(f"[db] Wake sample archive failed for {device_id}/{sample_id}: {e}")
+    return updated
+
+
+def delete_wake_sample(device_id: str, sample_id: int) -> str | None:
+    with _tx() as conn:
+        row = conn.execute(
+            "SELECT audio_file FROM wake_samples WHERE device_id = ? AND id = ?",
+            (device_id, int(sample_id)),
+        ).fetchone()
+        if row is None:
+            return None
+        if not em_wake_samples.unlink(device_id, row["audio_file"]):
+            raise OSError(
+                f"could not remove wake sample {row['audio_file']} for {device_id}"
+            )
+        conn.execute("DELETE FROM wake_samples WHERE device_id = ? AND id = ?",
+                     (device_id, int(sample_id)))
+        return row["audio_file"]
+
+
 def record_device_stats(device_id: str, stats: dict) -> None:
     """
     Fold one ~30s hardware stats report into the current hour's
@@ -2361,6 +2838,18 @@ def record_device_stats(device_id: str, stats: dict) -> None:
     _ble       = stats.get("ble") or {}
     ble_restarts = _ble.get("restarts")
     ble_hci_err  = _ble.get("hciErrors")
+
+    # TCP link loss (v26). Down is controller-measured (Device.drain_tcp),
+    # up is relayed from the device. Every one may be absent, and absent is
+    # NULL: a window nothing measured is not a clean link.
+    def _opt_int(key):
+        v = stats.get(key)
+        return int(v) if v is not None else None
+    tcp_down_segs    = _opt_int("tcpDownSegs")
+    tcp_down_retrans = _opt_int("tcpDownRetrans")
+    tcp_up_segs      = _opt_int("tcpUpSegs")
+    tcp_up_retrans   = _opt_int("tcpUpRetrans")
+    tcp_rto_max      = _opt_int("tcpRtoMaxMs")
     with _tx() as conn:
         conn.execute(
             """
@@ -2376,12 +2865,15 @@ def record_device_stats(device_id: str, stats: dict) -> None:
                 cpu_temp_sum, cpu_temp_samples, cpu_temp_max, max_temp_max,
                 cores_online_last, cores_online_min, cores_total,
                 thermal_limit_min,
-                ble_restarts_last, ble_hci_errors_last
+                ble_restarts_last, ble_hci_errors_last,
+                tcp_down_segs_sum, tcp_down_retrans_sum,
+                tcp_up_segs_sum, tcp_up_retrans_sum, tcp_rto_max_ms
             ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                       ?, ?, ?, ?, ?, ?, ?, ?, ?,
                       ?, ?, ?, ?, ?, ?, ?,
                       ?, ?, ?, ?, ?, ?, ?, ?,
-                      ?, ?)
+                      ?, ?,
+                      ?, ?, ?, ?, ?)
             ON CONFLICT (device_id, hour_ts) DO UPDATE SET
                 samples          = samples + 1,
                 cpu_sum          = cpu_sum + excluded.cpu_sum,
@@ -2460,7 +2952,24 @@ def record_device_stats(device_id: str, stats: dict) -> None:
                 ble_restarts_last   = COALESCE(excluded.ble_restarts_last,
                                                ble_restarts_last),
                 ble_hci_errors_last = COALESCE(excluded.ble_hci_errors_last,
-                                               ble_hci_errors_last)
+                                               ble_hci_errors_last),
+                -- TCP loss sums treat NULL as "not measured": a NULL window
+                -- leaves the sum alone, and the first measured one starts it.
+                tcp_down_segs_sum    = CASE WHEN excluded.tcp_down_segs_sum IS NULL
+                    THEN tcp_down_segs_sum
+                    ELSE COALESCE(tcp_down_segs_sum, 0) + excluded.tcp_down_segs_sum END,
+                tcp_down_retrans_sum = CASE WHEN excluded.tcp_down_retrans_sum IS NULL
+                    THEN tcp_down_retrans_sum
+                    ELSE COALESCE(tcp_down_retrans_sum, 0) + excluded.tcp_down_retrans_sum END,
+                tcp_up_segs_sum      = CASE WHEN excluded.tcp_up_segs_sum IS NULL
+                    THEN tcp_up_segs_sum
+                    ELSE COALESCE(tcp_up_segs_sum, 0) + excluded.tcp_up_segs_sum END,
+                tcp_up_retrans_sum   = CASE WHEN excluded.tcp_up_retrans_sum IS NULL
+                    THEN tcp_up_retrans_sum
+                    ELSE COALESCE(tcp_up_retrans_sum, 0) + excluded.tcp_up_retrans_sum END,
+                tcp_rto_max_ms       = CASE WHEN excluded.tcp_rto_max_ms IS NULL
+                    THEN tcp_rto_max_ms
+                    ELSE MAX(COALESCE(tcp_rto_max_ms, 0), excluded.tcp_rto_max_ms) END
             """,
             (
                 device_id, hour_ts,
@@ -2503,6 +3012,8 @@ def record_device_stats(device_id: str, stats: dict) -> None:
                 # be wrong here in a way it is not for the gauges above.
                 int(ble_restarts) if ble_restarts is not None else None,
                 int(ble_hci_err) if ble_hci_err is not None else None,
+                tcp_down_segs, tcp_down_retrans,
+                tcp_up_segs, tcp_up_retrans, tcp_rto_max,
             ),
         )
         conn.execute(
@@ -2585,6 +3096,20 @@ def get_device_metrics(device_id: str, since: float) -> list[dict]:
                 round(100.0 * (r["rtt_excursions"] - r["rtt_excursions_idle"])
                       / (r["rtt_samples"] - r["rtt_samples_idle"]), 1)
                 if (r["rtt_samples"] - r["rtt_samples_idle"]) else None),
+            # TCP link loss (v26) — the CAUSE the RTT excursions are a symptom
+            # of. Down is a rate (the controller counts its segments); up is a
+            # count unless the device's kernel reports segments. None means
+            # not measured, never a clean link.
+            "tcp_down_segs":        r["tcp_down_segs_sum"],
+            "tcp_down_retrans":     r["tcp_down_retrans_sum"],
+            "tcp_down_retrans_pct": (
+                round(100.0 * r["tcp_down_retrans_sum"] / r["tcp_down_segs_sum"], 2)
+                if r["tcp_down_segs_sum"] else None),
+            "tcp_up_retrans":       r["tcp_up_retrans_sum"],
+            "tcp_up_retrans_pct": (
+                round(100.0 * r["tcp_up_retrans_sum"] / r["tcp_up_segs_sum"], 2)
+                if r["tcp_up_segs_sum"] and r["tcp_up_retrans_sum"] is not None else None),
+            "tcp_rto_max_ms":       r["tcp_rto_max_ms"],
         })
     return out
 
@@ -2672,9 +3197,15 @@ def set_user_role(user_id: int, role: str) -> None:
         conn.execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
 
 
-def update_user_password(user_id: int, new_hash: str) -> None:
+def update_user_password(user_id: int, new_hash: str, *,
+                         keep_session: Optional[str]) -> int:
     """
-    Update the password hash for a user.
+    Update the password hash for a user and end their other sessions.
+
+    A password change is how someone locks out a session they did not start,
+    so every session but `keep_session` (the one making the change) is
+    deleted in the same transaction. Required rather than defaulted so a new
+    caller has to say which session survives. Returns the number revoked.
 
     new_hash must already be bcrypt-hashed — this function does not hash
     passwords itself. Raises ValueError if the user is not found.
@@ -2686,7 +3217,13 @@ def update_user_password(user_id: int, new_hash: str) -> None:
         )
         if cur.rowcount == 0:
             raise ValueError(f"User not found: {user_id}")
-    log.info(f"[db] Password updated for user id={user_id}")
+        revoked = conn.execute(
+            "DELETE FROM sessions WHERE user_id = ? AND token IS NOT ?",
+            (user_id, keep_session),
+        ).rowcount
+    log.info(f"[db] Password updated for user id={user_id}, "
+             f"{revoked} other session(s) ended")
+    return revoked
 
 
 def get_all_users() -> list[sqlite3.Row]:

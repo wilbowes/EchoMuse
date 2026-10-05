@@ -11,7 +11,7 @@ import re
 
 import em_oww_models
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("echomuse.owwmetadata")  # not __name__ (#378)
 _LANGUAGE = re.compile(r"^[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})*$")
 
 

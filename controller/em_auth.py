@@ -340,6 +340,11 @@ async def ws_resolve_session(request: web.Request) -> Optional[dict]:
 
 _bootstrap_token: Optional[str] = None
 
+# Serialises create_first_admin. Its checks run before an await (bcrypt in the
+# executor) and its write after, so two requests could both pass the checks
+# and both create an admin.
+_setup_lock = asyncio.Lock()
+
 
 def get_bootstrap_token() -> Optional[str]:
     """
@@ -398,6 +403,15 @@ async def create_first_admin(
       - a user already exists (setup can only run once)
       - username or password fail basic validation
     """
+    async with _setup_lock:
+        await _create_first_admin_locked(bootstrap_token, username, password)
+
+
+async def _create_first_admin_locked(
+    bootstrap_token: str,
+    username: str,
+    password: str,
+) -> None:
     global _bootstrap_token
 
     if _bootstrap_token is None:

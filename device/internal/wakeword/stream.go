@@ -35,6 +35,7 @@ package wakeword
 import (
 	"errors"
 	"fmt"
+	"time"
 )
 
 const (
@@ -80,6 +81,11 @@ const (
 	// rawBufMax caps the raw audio ring at 10s, matching upstream's deque.
 	rawBufMax = SampleRate * 10
 )
+
+// ScoreSpan is how much audio one score looks at: FeatWindow embeddings
+// MelStep mel frames apart, the last covering MelWindow frames of 10ms each
+// (1.96s). A sound stays in the classifier's view this long after it ends.
+const ScoreSpan = time.Duration((FeatWindow-1)*MelStep+MelWindow) * 10 * time.Millisecond
 
 // Inferer is the boundary between buffering (this package, pure Go) and
 // model execution (ONNX Runtime via cgo on device; a fixture in tests).

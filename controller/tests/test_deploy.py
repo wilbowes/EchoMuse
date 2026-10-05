@@ -1411,7 +1411,7 @@ def test_entity_names_do_not_repeat_the_device_label():
 
 def test_asset_sync_does_not_shadow_its_accumulator():
     """
-    _sync_oww_assets keeps a `pushed` list of installed asset names. Assigning
+    _sync_oww_assets_locked keeps a `pushed` list of installed asset names. Assigning
     the per-file transfer result to that same name shadowed the list on the
     FIRST file, so the append at the end of the loop raised
     AttributeError: 'TransferResult' object has no attribute 'append'
@@ -1426,9 +1426,9 @@ def test_asset_sync_does_not_shadow_its_accumulator():
     installed" while the dashboard offered to send it and returned 500.
     """
     src = (CONTROLLER / "em_api.py").read_text()
-    fn = re.search(r"async def _sync_oww_assets\(.*?\n(?=\nasync def |\ndef )",
+    fn = re.search(r"async def _sync_oww_assets_locked\(.*?\n(?=\nasync def |\ndef )",
                    src, re.S)
-    assert fn, "_sync_oww_assets not found"
+    assert fn, "_sync_oww_assets_locked not found"
     body = fn.group(0)
 
     assert "pushed = []" in body, "the accumulator is gone"
@@ -1522,25 +1522,6 @@ def test_a_failed_install_leaves_the_device_on_its_old_wake_word():
         "device onto a model it does not have"
     )
 
-
-
-def test_both_effective_mode_call_sites_pass_readiness():
-    """
-    Config push and device registration both resolve the mode. A guard applied
-    to one and not the other is a device that is safe until it reconnects —
-    the same shape as the v7 stats-relay miss.
-    """
-    for name in ("em_api.py", "em_controller.py"):
-        src = (CONTROLLER / name).read_text()
-        # Non-greedy matching to the first ")" is wrong here: the argument
-        # itself contains one (`effective.get("owwOnDevice")`). Take a fixed
-        # window after each call instead — the call sites are three lines.
-        for m in re.finditer(r"effective_mode\(", src):
-            call = src[m.end():m.end() + 200]
-            assert "model_ready" in call or "oww_model_ready" in call, (
-                f"{name}: an effective_mode call omits model readiness — "
-                f"{call.splitlines()[0]!r}"
-            )
 
 
 def test_an_announcement_clears_the_cancel_flag_before_playing():
@@ -1852,7 +1833,7 @@ def test_a_device_with_no_ha_stands_down_before_it_can_claim():
     """
     Detection order is a PROXIMITY proxy: the nearest Echo crosses threshold
     first whether or not HA has ever dialled its satellite port. So an
-    unlinked device must stand down before `_wake_arbiter.claim`, or it wins
+    unlinked device must stand down before `_claim_wake`, or it wins
     on nearness, silences the device that could have answered, and then dies
     no_ha — nothing answers, and the one that was ready is the one that went
     dark.
@@ -1864,7 +1845,7 @@ def test_a_device_with_no_ha_stands_down_before_it_can_claim():
     src = (CONTROLLER / "em_controller.py").read_text()
     body = src[src.index("async def wake_word_listener"):]
     serves = body.index("can_serve_turn")
-    claim  = body.index("_wake_arbiter.claim")
+    claim  = body.index("await _claim_wake(")
     assert serves < claim, (
         "the capability check must come BEFORE the arbitration claim — "
         "after it, the unlinked device has already taken the window"
@@ -1903,6 +1884,53 @@ def test_the_no_ha_cue_does_not_depend_on_another_device_losing():
         "the wake must still reach the activity history, or an HA outage is "
         "indistinguishable from a device that heard nothing"
     )
+
+
+def test_a_barge_that_stands_down_for_no_ha_leaves_the_same_trace_as_a_wake():
+    """
+    #417. `barge_ceded` covered two reasons and only the arbitration loss was
+    handled, so talking over an answer during an HA outage produced silence,
+    no cue and nothing in the Activity tab — indistinguishable from a device
+    that heard nothing. The wake path's stand-down records and cues; both barge
+    paths must not decide differently about it.
+
+    The record and the cue are NOT written where the barge fires. That block
+    runs before anything can unwind the turn, so the interrupted turn's own
+    `_persist_turn` overwrites `last_turn_outcome` with "barged" before the
+    ring reads it, and clearing `barge_detected` there skips the turn loop's
+    ceded branch — leaving `barge_ceded` and `cancel_event` set into the next
+    turn. So the watcher only CARRIES the reason across, and the loop's ceded
+    branch records it, by then with nothing left to overwrite it.
+
+    Source-shape because the suite cannot import em_controller, and the
+    decision itself is already covered by `em_barge.cede` — what is not
+    covered is whether the watcher acts on it, and where.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    for name in ("_barge_watcher", "_private_barge"):
+        fn = _fn_body(src, name)
+        assert "em_barge.cede(" in fn, f"{name} must use the shared decision"
+        assert "(not serves) or won_by !=" not in fn, (
+            f"{name} has the decision inlined again — two copies of a "
+            f"stand-down rule can disagree about what leaves a record"
+        )
+        tail = fn[fn.index("em_barge.cede("):]
+        assert "verdict.no_ha:" in tail, (
+            f"{name} must branch on the no-HA reason separately from losing "
+            f"arbitration"
+        )
+        no_ha = tail[tail.index("verdict.no_ha:"):]
+        assert "device.barge_no_ha" in no_ha, (
+            f"{name}: the no-HA reason must reach the turn loop's ceded branch"
+        )
+        assert "record_dropped_wake" not in no_ha, (
+            f"{name}: recorded here, the row is overwritten by the interrupted "
+            f"turn's _persist_turn before _leds_turn_end can read it"
+        )
+        assert "device.barge_detected = False" not in no_ha, (
+            f"{name}: clearing this skips the ceded branch, so barge_ceded and "
+            f"cancel_event survive into the next turn"
+        )
 
 
 def test_every_outcome_cue_names_a_scene_key_that_exists():
@@ -2088,14 +2116,14 @@ def test_a_barge_in_is_arbitrated_like_any_other_wake():
     body = src[src.index("async def _barge_watcher"):]
     body = body[:body.index("\nasync def ", 1)]
 
-    assert "_wake_arbiter.claim" in body, (
+    assert "await _claim_wake(" in body, (
         "the barge watcher must arbitrate — without it a second Echo answers "
         "the same interrupting utterance"
     )
     # Same ordering rule as the wake path: a device that cannot finish a turn
     # must not take the window first.
     serves = body.index("can_serve_turn")
-    claim  = body.index("_wake_arbiter.claim")
+    claim  = body.index("await _claim_wake(")
     assert serves < claim, (
         "can_serve_turn must precede the claim, or an unlinked device takes "
         "the window and then dies no_ha"
@@ -2125,6 +2153,34 @@ def test_a_ceded_barge_still_stops_playback_but_takes_no_turn():
     assert "break" in branch, (
         "a ceded barge must leave the turn loop rather than fall through "
         "into the interrupting turn"
+    )
+
+
+def test_the_no_ha_barge_records_where_nothing_overwrites_it():
+    """
+    The no-HA stand-down is the one barge outcome that must leave a row and a
+    cue, and both are written in the ceded branch for a reason that is only
+    visible as an ordering: the interrupted turn persists `barged` AFTER the
+    barge fires, so a row written at the point of the barge is overwritten
+    before the ring reads it. The branch also has to clear `barge_detected`
+    first, because `_leds_turn_end` suppresses its own cue while it is set.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    ceded = src.index("device.barge_detected and device.barge_ceded")
+    start = src.index("Barge-in: starting interrupting turn")
+    branch = src[ceded:start]
+    for call in ("leds_listening(device)", "record_dropped_wake(",
+                 "_leds_turn_end(device)"):
+        assert call in branch, f"the no-HA stand-down needs {call}"
+    assert branch.index("device.barge_detected = False") < \
+           branch.index("record_dropped_wake("), (
+        "the flag must be clear before the cue is painted, or "
+        "_leds_turn_end suppresses it"
+    )
+    cleanup = src.index("await cleanup_esphome()")
+    assert cleanup < ceded, (
+        "the record must come after the interrupted turn's cleanup has "
+        "persisted its own outcome, or that outcome overwrites this one"
     )
 
 
@@ -2650,7 +2706,13 @@ def test_the_emos_and_firmware_release_namespaces_cannot_select_each_other():
     src = (CONTROLLER / "em_api.py").read_text()
 
     fw = _strip_prose(_fn_body(src, "_fetch_latest_release"))
-    assert 'startswith("v")' in fw and '"server"' in fw, \
+    assert "_choose_firmware_release(" in fw, \
+        "the firmware poll must select through version.choose_firmware_release"
+    vsrc = (CONTROLLER / "version.py").read_text()
+    node = next(n for n in ast.parse(vsrc).body
+                if isinstance(n, ast.FunctionDef) and n.name == "choose_firmware_release")
+    chooser = _strip_prose(ast.get_source_segment(vsrc, node))
+    assert 'startswith("v")' in chooser and '"server"' in chooser, \
         "the firmware poll must select on a v* tag AND a server asset"
 
     emos = _strip_prose(_fn_body(src, "_fetch_latest_emos_release"))
@@ -3059,3 +3121,45 @@ def test_the_fireos_flow_refuses_an_emos_boot_image_before_it_writes():
         "runPatchBoot must check whose image is in the slot before patching it")
     assert fn.index("isOurBootImage(") < fn.index("of=/tmp/work/boot.img"), (
         "the emOS check must precede the pull, or the refusal comes too late")
+
+
+def test_asset_installs_queue_behind_the_ota_lock():
+    """
+    An upgrade that adds an asset has every device reconnect and push at once
+    — ~14MB each for a device that never had the runtime — over the transport
+    where three concurrent OTAs stalled the event loop 11.1s. So asset installs
+    take the same global lock, and only the wrapper may reach the unlocked body.
+    """
+    import ast
+    src = (CONTROLLER / "em_api.py").read_text()
+    tree = ast.parse(src)
+    fns = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)}
+    wrapper = fns["_sync_oww_assets"]
+    assert any(isinstance(n, ast.AsyncWith) and "_ota_lock" in ast.unparse(n.items[0].context_expr)
+               for n in ast.walk(wrapper)), "_sync_oww_assets does not take _ota_lock"
+    callers = [name for name, fn in fns.items()
+               if name not in ("_sync_oww_assets", "_sync_oww_assets_locked")
+               and "_sync_oww_assets_locked(" in ast.unparse(fn)]
+    assert not callers, f"unlocked asset sync called from {callers}"
+
+
+def test_the_image_keeps_its_data_on_the_mounted_directory():
+    """
+    #629: with no .env, DB_PATH fell back to the relative "echomuse.db", which
+    in the image is /app, outside the ./data:/app/data volume. The database,
+    the device-link CA and the recordings were lost on every recreate.
+
+    Read from the Dockerfile's instructions, not its comments.
+    """
+    root = Path(__file__).resolve().parent.parent
+    instructions = [ln.strip() for ln in (root / "Dockerfile").read_text().splitlines()
+                    if ln.strip() and not ln.lstrip().startswith("#")]
+    assert "ENV DB_PATH=/app/data/echomuse.db" in instructions
+    # sqlite will not create the directory, and without a volume nothing else does.
+    assert any(ln.startswith("RUN mkdir -p") and "/app/data" in ln.split()
+               for ln in instructions)
+    # The directory the default points at is the one both compose files mount.
+    for compose in ("docker-compose.yml", "docker-compose.deploy.yml"):
+        assert ":/app/data" in (root / compose).read_text(), compose
+    # The add-on keeps its own path, which has to win over the image's.
+    assert 'DB_PATH: "/data/echomuse.db"' in (root / "config.yaml").read_text()

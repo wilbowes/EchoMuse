@@ -43,6 +43,7 @@ on a regular expression.
 | Controller version, schema version | Almost every "is this fixed?" question starts here. |
 | Device serials | Nothing correlates without them. They identify your hardware to you; they are not otherwise meaningful. |
 | Firmware version, rollback slot, approval state | Tells us whether a fix is even present on that device. |
+| Userspace and kernel (`emos`/`fireos`, `armv7l`/`aarch64`, kernel release) | FireOS 5 and FireOS 6 run different kernels and some faults exist on only one. |
 | **Capabilities** (`mic`, `oww_shadow`, `ambient_light`…) | Decides which Home Assistant entities exist at all. "The light sensor didn't appear" is answered here in one line. |
 | Configuration — thresholds, EQ, LED scenes, wake model | Behaviour, not identity. Keys whose *name* looks credential-shaped are redacted anyway. |
 | Turn metadata — outcome, wake score, stage latencies, underruns | What happened and how long each stage took. No words, just timings and outcomes. |

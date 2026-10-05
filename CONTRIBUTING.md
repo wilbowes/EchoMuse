@@ -100,16 +100,19 @@ or `docker compose up --build`. emOS builds with `emos/build.sh`; see
 ## Before you open a PR
 
 ```bash
-cd controller && python -m pytest tests/    # needs pytest numpy scipy pyyaml
+cd controller && python -m pytest tests/    # needs pytest pytest-cov numpy scipy pyyaml aiohttp websockets bcrypt zeroconf protobuf
 cd device && go test ./... && go vet ./...
 ```
 
-Both run in CI on every push. **Please add a test if your change is pure
-logic** — the controller suite deliberately cannot import `em_controller` or
-`em_esphome` (they pull in aiohttp, zeroconf and openwakeword), so decisions
-that need coverage get extracted into their own module: see `em_button`,
-`em_linkauth`, `em_turnclock`, `em_barge`. Following that pattern is the
-single easiest way to get a change reviewed quickly.
+Both run in CI on every push and both report coverage; the controller
+baseline is in `controller/.coveragerc`.
+
+**Please add a test for anything you can reach.** This said "if your change
+is pure logic" until 2026-10-03, when the suite could not import
+`em_controller` (#739). It now can, and reachability is not testability:
+reading the source and asserting on substrings proves something about the
+*text*, which is not what runs. Extracting a decision into its own module
+(`em_linkauth`, `em_button`, `em_turnclock`) is still the easiest to review.
 
 Hardware-dependent code is not testable on the host and nobody expects you to
 fake it. Say what you tested it on.

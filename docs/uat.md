@@ -63,6 +63,9 @@ version numbers to the existing issue instead.
 | Music started elsewhere stays silent until a voice turn finishes | [#262](https://github.com/wilbowes/EchoMuse/issues/262) |
 | Double/triple tap detected unreliably | [#115](https://github.com/wilbowes/EchoMuse/issues/115) |
 | High CPU on the device | [#176](https://github.com/wilbowes/EchoMuse/issues/176) |
+| Music Assistant shows the next track 10–15 s before it plays | [#674](https://github.com/wilbowes/EchoMuse/issues/674) |
+| Music drops out when a voice turn ducks it (2.25.0-ea.1) | [#671](https://github.com/wilbowes/EchoMuse/pull/671) |
+| One stereo channel silent, with clicking, on line out | [#669](https://github.com/wilbowes/EchoMuse/issues/669) |
 
 ---
 
@@ -178,14 +181,19 @@ it.
 **Flag:** A model that uploads and is selectable but never triggers — that is
 a specific known class of bug and worth a report.
 
-### C5 · On-device wake word
-**Do:** Config → Wake word → turn on on-device detection.
-**Expect:** Wakes still work. Device → Activity still records turns.
-**Flag:** Wakes that stop entirely, or wake latency that gets noticeably
-worse.
+### C5 · Private listening
+**Do:** Config → Wake word detection → **On this Echo**. Wait for the line
+under it to say *listening privately*.
+**Expect:** Wakes still work, the first word of your command is not clipped,
+and interrupting a long reply with the wake word still works (with barge-in
+on). The home screen line counts this Echo as not streaming.
+**Flag:** Wakes that stop, a clipped first word, *button only* with no reason
+you can act on, or the line saying *listening privately* while the Echo shows
+as streaming anywhere else.
 
 ### C6 · Multiple devices don't both answer
-**Do:** With two devices in earshot, say the wake word once.
+**Do:** With two devices in earshot, say the wake word once. Repeat with one
+set to **On this Echo** and the other to **On the controller**.
 **Expect:** One device answers. The other doesn't.
 **Flag:** Both answering, or neither.
 
@@ -194,10 +202,19 @@ worse.
 ## D — Audio out
 
 ### D1 · Volume
-**Do:** Change volume from the dashboard, from HA, and with the device's own
-volume buttons.
-**Expect:** All three agree, and the level survives a reboot.
-**Flag:** Any of the three disagreeing with the others.
+**Do:** Enable Volume button sound. Change volume with the device's own
+buttons while idle, press Volume Up twice more after reaching maximum, then
+change it from HA; repeat both while music is playing. In Config → Ring,
+enable **Remote volume arc** and repeat the remote changes, including setting
+volume to zero; then send the current non-zero level again and reboot.
+**Expect:** The level agrees and survives a reboot. An idle physical-button
+change plays a short, low beep with a quick decay at the new volume, and each
+extra Volume Up press at maximum replays it; remote changes and active playback
+do not play the tone. Physical buttons always show the cyan arc. Changed,
+non-zero remote levels show it only while the setting is on; volume zero,
+repeated levels, and boot restoration stay silent.
+**Flag:** Any volume disagreement, an unexpected tone, or an arc for a muted,
+duplicate, or boot-restored volume.
 
 ### D2 · Speech is intelligible at low volume
 **Do:** Set volume to ~20%, ask something with a long answer.
@@ -221,10 +238,33 @@ something bass-heavy loud.
 noticeably worse.
 **Flag:** No difference with them on or off.
 
-### D6 · The headphone jack
+### D6 · Response level
+**Do:** At about 30% device volume, ask the same question at Low, Medium, and
+High response level. Repeat near maximum volume.
+**Expect:** Voice gets progressively louder at 30% without changing music or
+the device volume. Near maximum, the differences shrink; at maximum they are
+the same. No setting clips or adds a volume-ring animation.
+**Flag:** Music or device volume moving; no difference at 30%; distortion; or
+a boost that remains at maximum.
+
+### D7 · The headphone jack
 **Do:** Plug into the 3.5mm jack.
 **Expect:** Audio moves to the jack.
 **Flag:** Anything beyond the known jack faults in the table above.
+
+### D8 · Speak while the reply is written
+**Do:** Config → Playback → turn on "Speak while the reply is written" and save.
+Ask for something long ("explain in two paragraphs how a refrigerator works").
+Turn it off, save, and ask again.
+**Expect:** With it on, speech starts at the first sentence and the controller
+log shows `TTS streaming early`. With it off, speech starts once the whole reply
+is ready. The words are the same either way, and neither change needs a restart.
+On a model or a TTS engine slower than speech, pauses between sentences with it
+on are expected, which is why it is off by default.
+**Flag:** Speech that never starts or stops part-way with it on; no difference in
+when speech starts between the two settings on a setup where Home Assistant's
+agent and TTS engine both stream; a change that needs a restart. Give the model,
+the TTS engine and the length of the reply.
 
 ---
 
@@ -338,11 +378,14 @@ the end. See [led-ring-states.md](led-ring-states.md).
 
 ## I — Security and the device link
 
-### I1 · Secure link
-**Do:** Device → Status. If Link reads `plain ws`, press **Secure link**.
+### I1 · Pairing
+**Do:** Device → Status. If Link reads `plain ws`, hold the Echo's action
+button for 5 seconds, then press **Approve pairing** (on older firmware,
+press **Pair**).
 **Expect:** The device reconnects within a few seconds and Link reads
 `wss (TLS)`.
 **Flag:** A device that goes offline and stays there. (It should redial.)
+Approve pairing appearing without anyone holding the button.
 
 ### I2 · Credentials survive a reboot
 **Do:** Reboot a TLS device.
@@ -386,6 +429,27 @@ the state it is in is the diagnostic.
 tell you to update — it must never update itself.
 **Flag:** A notice with empty notes; or any button that claims to perform the
 update.
+
+### J4 · emOS update is offered (emOS Echoes only)
+**Do:** On an Echo running emOS, Device → **Updates**.
+**Expect:** An **emOS** panel under Firmware with the version on the device
+and the newest release. Update is offered only when the release is newer, and
+a release older than 0.10 reads as installing with the wizard. An Echo on
+FireOS has no emOS panel.
+**Flag:** "Up to date" on an Echo that is behind; an emOS panel on a FireOS
+Echo; "Version not read yet" on an Echo that has been connected for a minute.
+
+### J5 · **Destructive** — apply an emOS update
+**Do:** Press Update and confirm. Keep the Echo powered. Watch the log under
+the panels.
+**Expect:** Checking, reading the running image, building, sending, writing,
+restarting — then "running and confirmed" about a minute after the restart.
+The panel shows the new version and the Echo keeps its WiFi and settings.
+**Flag:** Any step that says something was changed and then fails; an Echo
+that comes back on the old version without the log saying it rolled back.
+**Do not unplug it during "Writing the boot partition".** If it has not
+returned after fifteen minutes, say so in the report before touching it; an
+amber ring means it is restoring the previous image by itself.
 
 ---
 

@@ -28,8 +28,26 @@ Wire format (plaintext frame):
     [0x00] [varuint: payload length] [varuint: message type] [payload bytes]
 
 The leading 0x00 byte is the plaintext indicator — a 0x01 there signals a
-Noise-encrypted frame, which we reject (we don't implement Noise; see
-ESPHOME_SPEC.md §5 option (a)).
+Noise-encrypted frame.
+
+ENCRYPTION (2026-10-03, #656). A listener given a key with set_encryption()
+speaks ESPHome's Noise framing instead, and refuses plaintext:
+
+    [0x01] [length, 2 bytes big-endian] [data]
+
+    client → hello frame (data empty today; whatever it holds is bound into
+             the handshake as the prologue "NoiseAPIInit" + length + data)
+    server → [0x01] name NUL mac NUL          chosen protocol, who we are
+    client → [0x00] + Noise message 1         -> psk, e
+    server → [0x00] + Noise message 2         <- e, ee
+    then, each way: encrypt( type(2) length(2) payload )
+
+A failed handshake is answered with [0x01] + a reason before closing, and the
+reason strings are the ones ESPHome's own firmware sends, because Home
+Assistant's client keys on them: "Handshake MAC failure" is what makes it ask
+for the key again rather than report a dead device. A plaintext client gets
+"Bad indicator byte"; any frame that opens with 0x01 is how it learns the
+device requires encryption. The handshake itself is esphome/noise.py.
 """
 
 from __future__ import annotations
@@ -37,6 +55,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import socket
+import struct
 from typing import Callable, Optional
 
 log = logging.getLogger("echomuse.esphome.frame")
@@ -229,6 +248,31 @@ class PlaintextFrameProtocol(asyncio.Protocol):
         self._reader = _VaruintReader()
         self._transport: Optional[asyncio.Transport] = None
         self.peer: str = "unknown"
+        # Encryption: None for a plaintext listener. See set_encryption.
+        self._noise_psk: Optional[bytes] = None
+        self._noise_hello = b""
+        self._noise_state = "hello"       # hello → handshake → data
+        self._noise_buf = bytearray()
+        self._noise_responder = None
+        self._noise_recv = None
+        self._noise_send = None
+
+    def set_encryption(self, psk: bytes, server_name: str, mac: str) -> None:
+        """
+        Require Noise encryption with this 32-byte key on this connection.
+        Call before the connection is made. `mac` is twelve lowercase hex
+        digits, as ESPHome reports it in its hello.
+        """
+        if len(psk) != 32:
+            raise ValueError("the encryption key must be 32 bytes")
+        self._noise_psk = psk
+        self._noise_hello = (b"\x01" + server_name.encode() + b"\x00"
+                             + mac.encode() + b"\x00")
+
+    @property
+    def encrypted(self) -> bool:
+        """True once the handshake is done and frames are encrypted."""
+        return self._noise_state == "data"
 
     # ── asyncio.Protocol interface ──────────────────────────────────────
 
@@ -250,6 +294,9 @@ class PlaintextFrameProtocol(asyncio.Protocol):
             self._on_disconnected(self)
 
     def data_received(self, data: bytes) -> None:
+        if self._noise_psk is not None:
+            self._noise_received(data)
+            return
         self._reader.feed(data)
         try:
             while True:
@@ -287,10 +334,17 @@ class PlaintextFrameProtocol(asyncio.Protocol):
         if preamble == _VARUINT_TOO_LONG:
             raise FrameProtocolError("preamble varuint exceeds byte limit")
         if preamble == 0x01:
+            # A client that holds an encryption key for a listener that has
+            # none — a Bluetooth proxy whose connections were switched off
+            # again. Answered as ESPHome's firmware answers it, a plaintext
+            # indicator and a reason, because that is what tells Home
+            # Assistant the device no longer uses encryption so it can offer
+            # to drop the key. Closing without a word reads as a dead device
+            # and it retries for ever (measured with its client, 2026-10-03).
+            if self._transport is not None and not self._transport.is_closing():
+                self._transport.write(b"\x00Bad indicator byte")
             raise FrameProtocolError(
-                "peer requested Noise-encrypted frame — this server is "
-                "plaintext-only (ESPHOME_SPEC.md §5 option (a))"
-            )
+                "peer sent an encrypted frame to a listener with no key")
         if preamble != 0x00:
             raise FrameProtocolError(f"invalid frame preamble 0x{preamble:02x}")
 
@@ -323,19 +377,109 @@ class PlaintextFrameProtocol(asyncio.Protocol):
         self._on_packet(self, msg_type, payload)
         return True
 
+    # ── Encrypted framing ────────────────────────────────────────────────
+
+    def _noise_received(self, data: bytes) -> None:
+        buf = self._noise_buf
+        buf += data
+        while buf:
+            if self._transport is None or self._transport.is_closing():
+                return
+            if buf[0] != 0x01:
+                # A plaintext client. The reply opens with 0x01, which is how
+                # it learns this device requires encryption.
+                log.warning(f"[{self._log_name}] {self.peer}: unencrypted "
+                            f"connection refused — this port requires a key")
+                self._noise_reject("Bad indicator byte")
+                return
+            if len(buf) < 3:
+                return
+            length = (buf[1] << 8) | buf[2]
+            if len(buf) < 3 + length:
+                return
+            frame = bytes(buf[3:3 + length])
+            del buf[:3 + length]
+            try:
+                self._noise_frame(frame)
+            except FrameProtocolError as e:
+                log.warning(f"[{self._log_name}] {self.peer}: {e} — closing connection")
+                self.close()
+                return
+
+    def _noise_frame(self, frame: bytes) -> None:
+        from esphome import noise  # needs `cryptography`; plaintext does not
+
+        if self._noise_state == "hello":
+            prologue = b"NoiseAPIInit" + struct.pack(">H", len(frame)) + frame
+            self._noise_responder = noise.Responder(self._noise_psk, prologue)
+            self._noise_write(self._noise_hello)
+            self._noise_state = "handshake"
+            return
+
+        if self._noise_state == "handshake":
+            if not frame:
+                self._noise_reject("Bad handshake packet len")
+                return
+            if frame[0] != 0x00:
+                self._noise_reject("Bad handshake error byte")
+                return
+            try:
+                self._noise_responder.read_message_1(frame[1:])
+                reply = self._noise_responder.write_message_2()
+                self._noise_recv, self._noise_send = self._noise_responder.split()
+            except noise.NoiseError as e:
+                log.warning(f"[{self._log_name}] {self.peer}: encryption "
+                            f"handshake failed ({e}) — wrong key?")
+                self._noise_reject("Handshake MAC failure")
+                return
+            self._noise_responder = None
+            self._noise_write(b"\x00" + reply)
+            self._noise_state = "data"
+            return
+
+        try:
+            plain = self._noise_recv.decrypt(frame)
+        except noise.NoiseError as e:
+            raise FrameProtocolError(f"encrypted frame rejected: {e}") from None
+        if len(plain) < 4:
+            raise FrameProtocolError("encrypted frame shorter than its header")
+        msg_type, length = struct.unpack(">HH", plain[:4])
+        if length > len(plain) - 4:
+            raise FrameProtocolError("encrypted frame shorter than its stated length")
+        self._on_packet(self, msg_type, plain[4:4 + length])
+
+    def _noise_write(self, data: bytes) -> None:
+        if self._transport is None or self._transport.is_closing():
+            return
+        self._transport.write(b"\x01" + struct.pack(">H", len(data)) + data)
+
+    def _noise_reject(self, reason: str) -> None:
+        self._noise_write(b"\x01" + reason.encode())
+        self._noise_state = "failed"
+        self.close()
+
+    def _noise_encode(self, msg_type: int, payload: bytes) -> bytes:
+        if len(payload) > MAX_PLAINTEXT_FRAME_SIZE - 4 - 16:
+            raise FrameProtocolError(f"message of {len(payload)} bytes does not fit a frame")
+        data = self._noise_send.encrypt(struct.pack(">HH", msg_type, len(payload)) + payload)
+        return b"\x01" + struct.pack(">H", len(data)) + data
+
     # ── Writing ───────────────────────────────────────────────────────────
 
     def send_packet(self, msg_type: int, payload: bytes) -> None:
         """Encode and write a single packet. Safe to call repeatedly for a burst."""
-        if self._transport is None or self._transport.is_closing():
-            return
-        self._transport.write(encode_frame(msg_type, payload))
+        self.send_packets([(msg_type, payload)])
 
     def send_packets(self, packets: list[tuple[int, bytes]]) -> None:
         """Encode and write multiple packets in a single socket write."""
         if self._transport is None or self._transport.is_closing():
             return
-        self._transport.write(b"".join(encode_frame(t, p) for t, p in packets))
+        if self._noise_psk is None:
+            self._transport.write(b"".join(encode_frame(t, p) for t, p in packets))
+            return
+        if self._noise_state != "data":
+            return  # nothing may be said in the clear on an encrypted port
+        self._transport.write(b"".join(self._noise_encode(t, p) for t, p in packets))
 
     def close(self) -> None:
         if self._transport is not None:

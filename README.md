@@ -118,27 +118,32 @@ The wizard offers two ways to run EchoMuse on the Dot:
   Dots that have one, and the action button as an event you can automate.
 - **A dashboard** for setup, updates, per-device settings (EQ, LED ring, mic
   tuning), logs and a history of voice turns.
-- **Firmware updates over WiFi**, with automatic rollback if a new version
-  fails to start. emOS itself is updated by re-running the wizard, for now
-  ([#573](https://github.com/wilbowes/EchoMuse/issues/573)).
+- **Updates over WiFi**, for the firmware and for emOS itself, each with
+  automatic rollback if the new version fails. emOS updates need emOS 0.10 as
+  the release to install and a controller newer than 2.25.0; before that,
+  emOS is updated by re-running the wizard.
 
 ## Privacy
 
-- **Nothing leaves your network because of EchoMuse.** The Dot streams its
-  microphone to the controller on your LAN, which listens for the wake word.
-  Only after the wake word is audio passed to Home Assistant, and where it
-  goes from there depends on your Assist pipeline (fully local with Whisper
-  and Piper, or a cloud service if you chose one).
+- **The Echo listens for its wake word itself.** Nothing leaves it until it
+  hears the wake word. Then what you say goes to the controller on your LAN
+  and on to Home Assistant, and stops when you stop speaking. Where it goes
+  after that depends on your Assist pipeline (fully local with Whisper and
+  Piper, or a cloud service if you chose one). A false wake sends a few
+  seconds of audio you didn't mean to; that is true of every wake word
+  system, Amazon's included. [How it works](docs/listening.md).
+- **You can detect the wake word on the controller instead**, per Echo. That
+  Echo then streams its microphone to the controller all the time, on your
+  LAN and nowhere else, and the dashboard says so. Installs from before this
+  keep their existing setting until you change it (Config → Wake word
+  detection). Firmware that predates it streams in every mode and is labelled
+  that way until you update it.
 - **No telemetry.** No analytics, no install counter. The controller only
   connects out to GitHub, to check for and download releases, and you can set
   how often it checks ([details](docs/configuration.md#what-leaves-your-network)).
 - **The mute button is a software mute.** It silences the microphones in the
   audio chip and EchoMuse refuses to listen while it is on, but the Dot 2 has
   no hardware switch that disconnects them.
-- **Even with wake word on the Dot, the microphone still streams to the
-  controller**, which keeps listening for comparison and for barge-in.
-  Keeping all audio on the Dot until it hears the wake word is the next step
-  ([#207](https://github.com/wilbowes/EchoMuse/issues/207)).
 
 ## Status and known issues
 
@@ -176,6 +181,8 @@ Everything else is in the [issue tracker](https://github.com/wilbowes/EchoMuse/i
 | [emOS](emos/README.md) | How our own userspace on the Dot works. |
 | [How the voice pipeline works](docs/voice-pipeline.md) | The path from wake word to answer. |
 | [Device ↔ controller protocol](docs/device-controller-interface.md) | For porting EchoMuse to new hardware. |
+| [Boards](docs/boards.md) | How the firmware finds its hardware by name, and how to describe a new board. |
+| [Profiling a new Echo](porting/README.md) | Scripts that collect what a port needs from an unsupported device. |
 | [Contributing](CONTRIBUTING.md) | Building from source, tests, and how to send changes. |
 | [Engineering journal](JOURNAL.md) | How each part was worked out, including the dead ends. |
 

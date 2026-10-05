@@ -20,7 +20,8 @@ x-forge-base: &forge-base
   build:
     context: .
     args:
-      GPU: "1"
+      # GPU=0 docker compose build … for the ~3GB CPU-only image
+      GPU: "${GPU:-1}"
   # torch DataLoader workers pass tensors via /dev/shm; Docker's 64MB
   # default kills them with bus errors during the training step
   shm_size: "8gb"
@@ -51,6 +52,17 @@ services:
     ports:
       - "8769:8769"
     restart: unless-stopped
+
+  # same, for a host with no NVIDIA runtime — including Apple Silicon.
+  # Build it CPU-only: GPU=0 docker compose build forge-ui-cpu
+  forge-ui-cpu:
+    <<: *forge-base
+    container_name: oww-forge-ui-cpu
+    command: ["ui"]
+    ports:
+      - "8769:8769"
+    restart: unless-stopped
+    profiles: ["cpu"]
 
   # one-shot CLI with GPU
   forge:

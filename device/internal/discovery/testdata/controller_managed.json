@@ -1,0 +1,1 @@
+{"managed_by":"echomuse-controller","endpoints":[{"host":"10.20.40.110","port":8767,"tls_port":8770},{"host":"fe80::1","port":9000,"tls_port":0},{"host":"controller.example.internal.","port":8767,"tls_port":8770}]}

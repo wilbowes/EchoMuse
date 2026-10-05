@@ -105,3 +105,24 @@ def test_the_status_payload_surfaces_the_counters():
     src = (CONTROLLER / "em_ble_proxy.py").read_text()
     assert '"hciRestarts"' in src
     assert '"hciErrors"' in src
+
+
+# ─── #410: seen and forwarded count from the same instant ───────────────────
+
+from em_ble_health import rebase_seen
+
+
+def test_the_first_report_sets_the_baseline_and_restarts_forwarding():
+    rb = rebase_seen(None, 0, 36_430)
+    assert (rb.base, rb.last, rb.reset_forwarded) == (36_430, 36_430, True)
+
+
+def test_later_reports_count_from_that_baseline():
+    rb = rebase_seen(36_430, 36_430, 37_371)
+    assert rb.reset_forwarded is False
+    assert rb.last - rb.base == 941
+
+
+def test_a_device_restart_starts_both_counts_again():
+    rb = rebase_seen(36_430, 40_000, 120)
+    assert (rb.base, rb.last, rb.reset_forwarded) == (0, 120, True)

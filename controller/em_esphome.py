@@ -65,6 +65,7 @@ Cancel (esphome mode):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import socket
@@ -84,12 +85,18 @@ import em_ns
 import em_announce
 import em_recordings
 import em_runbarrier
+import em_earlytts
+import em_speechgate
+import em_wav
 import em_oww_models
 import em_oww_metadata
 import em_player
+import em_tasks
 import em_timers
 import em_turnclock
 import em_volume
+import em_wakeword
+import em_output_mute
 
 # ── VAD sentinels ──────────────────────────────────────────────────────────────
 # Queue items marking end-of-speech in mic_queue/voice_queue, in place of
@@ -196,6 +203,9 @@ class TurnTrace:
 # 3 = 240ms. Lower if first command word gets clipped; raise if wake-word
 # tail bleeds into transcripts.
 VOICE_PREROLL_DISCARD = 3
+
+# The rate the device plays: TTS is asked for, and decoded to, exactly this.
+WIRE_RATE = 48000
 from esphome.satellite_server import SatelliteServerProtocol, serve, _HANDLED
 from esphome.feature_flags import (
     MediaPlayerEntityFeature,
@@ -239,6 +249,7 @@ MEDIA_PLAYER_KEY = 1
 # Append only.
 EVENT_KEY        = 2   # action-button hold, as an HA event entity
 AMBIENT_LUX_KEY  = 3   # TSL2540 ambient light, as an HA sensor
+MIC_MUTED_KEY    = 4   # the mic mute button, as a read-only binary sensor (#438)
 
 # Press types the event entity advertises. double/triple were parked because
 # detecting them means delaying the single press by the multi-tap window to
@@ -392,12 +403,18 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         # different things to find in the stats, and recording all of them
         # as "cancelled" loses the distinction the field is read for.
         self._turn_end_reason: Optional[str] = None
-        # Set when this turn's transcript dismissed a ringing alarm locally —
-        # suppresses HA's "there are no timers" reply for that turn.
-        self._dismissed_alarm   = False
         self._tts_audio_url:    Optional[str] = None
         self._tts_audio_data:   Optional[bytes] = None
         self._tts_event         = asyncio.Event()
+        # Early start (em_earlytts): the URL HA announced in RUN_START, whether
+        # this turn is playing from INTENT_PROGRESS rather than TTS_END, and the
+        # flag an HA ERROR sets to end an early fetch HA will never close.
+        self._early_tts_url:    Optional[str] = None
+        self._tts_streamed_early = False
+        self._tts_abort         = asyncio.Event()
+        # The device's streamReply setting, read once per turn (off by
+        # default: see em_earlytts for why this is the user's choice).
+        self._stream_reply      = False
         self._conversation_id:  str = ""
         self._trace:            "TurnTrace | None" = None
         # Set on VOICE_ASSISTANT_INTENT_END — the reliable "STT + intent
@@ -498,7 +515,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             return
         self._thinking_entered = True
         if self._on_thinking:
-            asyncio.create_task(self._on_thinking())
+            em_tasks.spawn(self._on_thinking())
 
     def _device_has(self, cap: str) -> bool:
         srv = self._owning_server
@@ -511,6 +528,10 @@ class EchoMuseSatellite(SatelliteServerProtocol):
     @property
     def _ambient_lux_capable(self) -> bool:
         return self._device_has("ambient_light")
+
+    @property
+    def _mic_capable(self) -> bool:
+        return self._device_has("mic")
 
     def _voice_assistant_flags(self) -> int:
         """
@@ -525,11 +546,35 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         return flags
 
     @property
+    def _current_muted(self) -> bool:
+        """Output mute as HA should see it (em_output_mute)."""
+        if self._owning_server is not None:
+            return self._owning_server.output_mute.muted
+        return False
+
+    @property
     def _current_volume(self) -> float:
         """Current volume as HA float (0.0–1.0), read from owning server."""
         if self._owning_server is not None:
             return self._owning_server.volume
         return 1.0
+
+    def _apply_output_mute(self, mute: bool) -> None:
+        """HA's mute/unmute: send the level em_output_mute decides."""
+        server = self._owning_server
+        if server is None:
+            return
+        om = server.output_mute
+        level = (om.mute(em_volume.ha_volume_to_device(server.volume))
+                 if mute else om.unmute())
+        log.info(f"[{self._log_name}] output {'mute' if mute else 'unmute'}"
+                 f"{'' if level is None else f' → level {level}'}")
+        if level is None:
+            return
+        if server._send_volume_set is not None:
+            em_tasks.spawn(server._send_volume_set(level))
+        else:
+            log.warning(f"[{self._log_name}] mute requested but device not connected")
 
     def handle_message(self, msg):
         """
@@ -559,13 +604,15 @@ class EchoMuseSatellite(SatelliteServerProtocol):
 
         if isinstance(msg, api_pb2.ListEntitiesRequest):
             log.debug(f"[{self._log_name}] ListEntitiesRequest from {self.peer}")
-            # supported_formats (Voice-PE-style): tells HA to run TTS and
-            # announcement audio through its ffmpeg proxy and hand us a URL
-            # already transcoded to 48kHz mono FLAC — the device's native
-            # wire rate — instead of whatever the TTS provider produced.
-            # _fetch_tts_audio then decodes without resampling. Harmless on
-            # HA versions that ignore it: ffmpeg decodes any format/rate.
-            _fmt = dict(format="flac", sample_rate=48000,
+            # supported_formats: tells HA to run TTS and announcement audio
+            # through its ffmpeg proxy and hand us a URL already at the wire
+            # format, 48kHz mono S16 — as WAV, which is that PCM behind a
+            # header, so _stream_tts_audio passes it straight through with no
+            # decoder to hold audio back between sentences (em_wav). It was
+            # FLAC, copied from Voice PE, which decodes on its own device.
+            # Harmless on HA versions that ignore it: anything else is decoded
+            # by ffmpeg.
+            _fmt = dict(format="wav", sample_rate=WIRE_RATE,
                         num_channels=1, sample_bytes=2)
             yield api_pb2.ListEntitiesMediaPlayerResponse(
                 object_id="media_player",
@@ -616,6 +663,14 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     device_class="illuminance",
                     state_class=1,   # STATE_CLASS_MEASUREMENT
                 )
+            # Read-only (#438): a writable entity would be a remote unmute.
+            if self._mic_capable:
+                yield api_pb2.ListEntitiesBinarySensorResponse(
+                    object_id="mic_muted",
+                    key=MIC_MUTED_KEY,
+                    name="Microphone Muted",
+                    icon="mdi:microphone-off",
+                )
             yield api_pb2.ListEntitiesDoneResponse()
             return
 
@@ -623,6 +678,9 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                              api_pb2.SubscribeHomeAssistantStatesRequest)):
             log.debug(f"[{self._log_name}] {type(msg).__name__} from {self.peer}")
             yield self._media_state_msg()
+            # Otherwise HA shows "unknown" until the button is next pressed.
+            if self._mic_capable:
+                yield self._mic_muted_msg()
             return
 
         if isinstance(msg, api_pb2.SubscribeVoiceAssistantRequest):
@@ -637,6 +695,10 @@ class EchoMuseSatellite(SatelliteServerProtocol):
 
         if isinstance(msg, api_pb2.VoiceAssistantConfigurationRequest):
             log.debug(f"[{self._log_name}] VoiceAssistantConfigurationRequest")
+            # HA's picker shows whatever we report here, so an empty list is
+            # how "No wake word" survives a reconnect.
+            srv = self._owning_server
+            enabled = srv is None or srv.wake_word_enabled
             yield api_pb2.VoiceAssistantConfigurationResponse(
                 available_wake_words=[
                     api_pb2.VoiceAssistantWakeWord(
@@ -645,42 +707,28 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                         trained_languages=list(self.oww_model_info.languages),
                     )
                 ],
-                active_wake_words=[self.oww_model_id],
+                active_wake_words=[self.oww_model_id] if enabled else [],
                 max_active_wake_words=1,
             )
             return
 
         if isinstance(msg, api_pb2.VoiceAssistantSetConfiguration):
-            # HA writing a wake-word choice back to us (its select entity's
-            # async_select_option). Handled explicitly rather than falling into
-            # the generic "unhandled" debug, which made a user-visible control
-            # silently do nothing.
-            #
-            # We advertise ONE model with max_active_wake_words=1, so HA's
-            # dropdown offers exactly our model plus "no wake word" — there is
-            # nothing to switch between, and a request naming our own model is
-            # genuinely a no-op rather than an unimplemented one. Selecting our
-            # model back is therefore correct and silent.
-            #
-            # An EMPTY list means "no wake word", i.e. deafen this satellite.
-            # That is a real request we do not implement — wake detection is
-            # controller-side config, not an HA-owned setting — so it is logged
-            # at warning rather than accepted quietly. Honouring it, and
-            # offering a choice worth making, both wait on multi-model support
-            # (#112).
+            # HA's wake word picker (#286): "No wake word" turns detection
+            # off, our model turns it back on. Applied synchronously because
+            # HA reads the configuration back straight after writing it.
             requested = list(msg.active_wake_words)
-            if requested == [self.oww_model_id]:
-                log.debug(
-                    f"[{self._log_name}] VoiceAssistantSetConfiguration: "
-                    f"{self.oww_model_id} already active — nothing to do"
-                )
-            else:
+            want = em_wakeword.requested_on(requested, self.oww_model_id)
+            if want is None:
                 log.warning(
                     f"[{self._log_name}] VoiceAssistantSetConfiguration asked "
-                    f"for active_wake_words={requested or '[] (no wake word)'} "
-                    f"— not applied; this device's wake word is set in the "
-                    f"EchoMuse dashboard and stays {self.oww_model_id}"
+                    f"for active_wake_words={requested} — not applied. This "
+                    f"device's wake word is {self.oww_model_id}, set in the "
+                    f"EchoMuse dashboard; choose it to listen, or \"No wake "
+                    f"word\" to stop."
                 )
+            else:
+                log.info(f"[{self._log_name}] wake word {'on' if want else 'off'} from HA")
+                self._apply_wake_word(want)
             yield _HANDLED
             return
 
@@ -694,13 +742,14 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 # ceiling is the codec's unity gain, above which the DAC
                 # clips (see em_volume's docstring).
                 level = em_volume.ha_volume_to_device(msg.volume)
+                self._owning_server.output_mute.volume_set(level)
                 log.debug(
                     f"[{self._log_name}] MediaPlayerCommandRequest: "
                     f"volume={msg.volume:.3f} → level={level}"
                 )
                 send_fn = self._owning_server._send_volume_set
                 if send_fn is not None:
-                    asyncio.create_task(send_fn(level))
+                    em_tasks.spawn(send_fn(level))
                 else:
                     log.warning(f"[{self._log_name}] volume set requested but device not connected")
             if msg.has_media_url and device_id is not None:
@@ -709,18 +758,29 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     # VoiceAssistantAnnounceRequest (interrupts music via
                     # the standalone-play wrapper, resumes after).
                     log.info(f"[{self._log_name}] play_media announce: {msg.media_url!r}")
-                    asyncio.create_task(self._play_media_announce(msg.media_url))
+                    em_tasks.spawn(self._play_media_announce(msg.media_url))
                 else:
                     log.info(f"[{self._log_name}] play_media: {msg.media_url!r}")
-                    asyncio.create_task(em_player.play(device_id, msg.media_url))
+                    em_tasks.spawn(em_player.play(device_id, msg.media_url))
             elif msg.has_command and device_id is not None:
                 cmd = msg.command
-                if cmd == api_pb2.MEDIA_PLAYER_COMMAND_PAUSE:
-                    asyncio.create_task(em_player.pause(device_id))
+                # Logged because the sender is otherwise invisible: a pause
+                # from Music Assistant, an automation or a UI looks the same
+                # on our side, and play_media is the only command we logged.
+                _name = {api_pb2.MEDIA_PLAYER_COMMAND_PAUSE: "pause",
+                         api_pb2.MEDIA_PLAYER_COMMAND_PLAY: "play",
+                         api_pb2.MEDIA_PLAYER_COMMAND_STOP: "stop"}.get(cmd)
+                if _name:
+                    log.info(f"[{self._log_name}] media command: {_name}")
+                if cmd in (api_pb2.MEDIA_PLAYER_COMMAND_MUTE,
+                           api_pb2.MEDIA_PLAYER_COMMAND_UNMUTE):
+                    self._apply_output_mute(cmd == api_pb2.MEDIA_PLAYER_COMMAND_MUTE)
+                elif cmd == api_pb2.MEDIA_PLAYER_COMMAND_PAUSE:
+                    em_tasks.spawn(em_player.pause(device_id))
                 elif cmd == api_pb2.MEDIA_PLAYER_COMMAND_PLAY:
-                    asyncio.create_task(em_player.resume(device_id))
+                    em_tasks.spawn(em_player.resume(device_id))
                 elif cmd == api_pb2.MEDIA_PLAYER_COMMAND_STOP:
-                    asyncio.create_task(em_player.stop(device_id))
+                    em_tasks.spawn(em_player.stop(device_id))
                 else:
                     log.debug(
                         f"[{self._log_name}] MediaPlayerCommandRequest: "
@@ -733,7 +793,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     key=MEDIA_PLAYER_KEY,
                     state=MediaPlayerState.PLAYING,
                     volume=self._current_volume,
-                    muted=False,
+                    muted=self._current_muted,
                 )
             else:
                 yield self._media_state_msg()
@@ -843,7 +903,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 f"[{self._log_name}] AnnounceRequest: media_id={msg.media_id!r} "
                 f"text={msg.text!r} start_conversation={msg.start_conversation}"
             )
-            asyncio.create_task(self._run_announce(
+            em_tasks.spawn(self._run_announce(
                 msg.media_id,
                 preannounce_media_id=msg.preannounce_media_id,
                 start_conversation=msg.start_conversation,
@@ -852,7 +912,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 key=MEDIA_PLAYER_KEY,
                 state=MediaPlayerState.PLAYING,
                 volume=self._current_volume,
-                muted=False,
+                muted=self._current_muted,
             )
             return
 
@@ -939,32 +999,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             if self._trace:
                 self._trace.stt_text = text
                 self._trace.t_stt_ms = self._trace.elapsed_ms()
-            # Spoken dismissal of a RINGING alarm is ours to handle: HA has
-            # already discarded the timer by the time it fires, so it would
-            # answer "there are no timers" (see em_timers.is_dismissal). Acted
-            # on here, at the transcript, rather than waiting for a CANCELLED
-            # that structurally cannot arrive.
-            srv = self._owning_server
-            if (srv is not None and srv.timer_ringing
-                    and em_timers.is_dismissal(text)):
-                # Stopping the ring is the generous match; suppressing HA's
-                # reply is NOT. "Turn off the kitchen light" is a dismissal by
-                # the rule above and also a real command HA answers, so the
-                # reply is only swallowed when the utterance is nothing but a
-                # dismissal (em_timers.is_dismissal_only).
-                self._dismissed_alarm = em_timers.is_dismissal_only(text)
-                log.info(
-                    f"[{self._log_name}] Spoken dismissal {text!r} — "
-                    f"stopping alarm locally"
-                    + ("" if self._dismissed_alarm
-                       else "; utterance carries a command, HA's reply stands")
-                )
-                task = asyncio.create_task(srv.dismiss_timer_alarm())
-                self._timer_tasks.add(task)
-                task.add_done_callback(self._timer_tasks.discard)
-                task.add_done_callback(self._log_timer_task_error)
             if self._on_stt_end and not self._turn_cancelled:
-                asyncio.create_task(self._on_stt_end(text))
+                em_tasks.spawn(self._on_stt_end(text))
 
         elif event_type == ET.VOICE_ASSISTANT_INTENT_END:
             # Reliable "STT + intent resolution genuinely finished" marker —
@@ -984,9 +1020,12 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             url = data.get("url", "")
             if url:
                 log.info(f"[{self._log_name}] TTS URL: {url}")
-            if self._trace:
+            if self._trace and self._trace.t_tts_url_ms < 0:
                 self._trace.t_tts_url_ms = self._trace.elapsed_ms()
-            self._tts_audio_url = url
+            if not self._tts_streamed_early:
+                # An early start is already playing its URL, and it is the same
+                # one (ESPHome's firmware does not restart on TTS_END either).
+                self._tts_audio_url = url
             self._tts_event.set()
 
         elif event_type == ET.VOICE_ASSISTANT_RUN_START:
@@ -998,6 +1037,28 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # `_internal_on_pipeline_event(PipelineEvent(RUN_END))`, so no
             # RUN_START is ever sent. Structural, not a race on timing.
             self._run_started = True
+            self._early_tts_url = em_earlytts.run_start_url(data)
+
+        elif event_type == ET.VOICE_ASSISTANT_INTENT_PROGRESS:
+            # The reply's first text has arrived and HA is feeding it to the TTS
+            # engine. Play the URL from RUN_START now instead of waiting for
+            # TTS_END, which comes after the whole reply (see em_earlytts).
+            if em_earlytts.should_start(
+                enabled=self._stream_reply,
+                progress=data,
+                announced_url=self._early_tts_url,
+                playing_url=self._tts_audio_url,
+                cancelled=self._turn_cancelled,
+            ):
+                log.info(
+                    f"[{self._log_name}] TTS streaming early "
+                    f"(tts_start_streaming): {self._early_tts_url}"
+                )
+                self._tts_audio_url = self._early_tts_url
+                self._tts_streamed_early = True
+                if self._trace and self._trace.t_tts_url_ms < 0:
+                    self._trace.t_tts_url_ms = self._trace.elapsed_ms()
+                self._tts_event.set()
 
         elif event_type == ET.VOICE_ASSISTANT_RUN_END:
             log.info(f"[{self._log_name}] Pipeline run ended")
@@ -1064,6 +1125,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # stream stays parked until the device's own gate closes.
             self._ha_vad_end.set()
             self._tts_event.set()  # unblock turn waiter
+            # An early TTS fetch is still open and HA will not close it.
+            self._tts_abort.set()
 
     # ── Announcement handling ────────────────────────────────────────────
 
@@ -1087,8 +1150,25 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             key=MEDIA_PLAYER_KEY,
             state=st,
             volume=self._current_volume,
-            muted=False,
+            muted=self._current_muted,
         )
+
+    def _mic_muted_msg(self) -> api_pb2.BinarySensorStateResponse:
+        srv = self._owning_server
+        return api_pb2.BinarySensorStateResponse(
+            key=MIC_MUTED_KEY,
+            state=bool(srv is not None and srv.mic_muted),
+        )
+
+    def _apply_wake_word(self, on: bool) -> None:
+        """Hand HA's wake word choice to the controller, synchronously."""
+        set_fn = (self._owning_server._set_wake_word
+                  if self._owning_server is not None else None)
+        if set_fn is None:
+            log.warning(f"[{self._log_name}] wake word change requested "
+                        f"but device not connected")
+            return
+        set_fn(on)
 
     def _announce_play_cb(self):
         """
@@ -1240,10 +1320,13 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._turn_active           = True
         self._turn_cancelled        = False
         self._turn_end_reason       = None
-        self._dismissed_alarm       = False
         self._tts_event.clear()
         self._tts_audio_url         = None
         self._tts_audio_data        = None
+        self._early_tts_url         = None
+        self._tts_streamed_early    = False
+        self._tts_abort.clear()
+        self._stream_reply          = bool(getattr(device, "stream_reply", False))
         self._intent_ended          = False
         self._stt_ended             = False
         # Derived from the trace's own trigger label rather than plumbed
@@ -1381,18 +1464,6 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 if trace: trace.outcome = why
                 return
 
-            if self._dismissed_alarm:
-                # We stopped the alarm ourselves off the transcript. HA does
-                # not know the timer existed any more, so its reply is "there
-                # are no timers" — playing it would contradict the alarm that
-                # just stopped, and the silence IS the confirmation.
-                log.info(
-                    f"[{self._log_name}] Alarm dismissed locally — "
-                    f"suppressing HA's reply"
-                )
-                if trace: trace.outcome = "alarm_dismissed"
-                return
-
             if self._tts_audio_url:
                 # HA deliberately keeps a streaming TTS response open while
                 # new utterances are synthesized. Buffering it with resp.read()
@@ -1418,9 +1489,18 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 try:
                     if trace:
                         trace.t_playback_ms = trace.elapsed_ms()
-                    pcm_bytes = await post_turn_play(
-                        _stamp_first_audio(_stream_tts_audio(self._tts_audio_url))
-                    )
+                    chunks = _stream_tts_audio(self._tts_audio_url)
+                    if self._tts_streamed_early:
+                        # Same reasoning as _stream_tts_audio wrapping
+                        # _stream_tts_audio_once below: closed explicitly so an
+                        # aborted early stream's pending fetch is cancelled now,
+                        # not whenever the generator is collected.
+                        chunks = em_earlytts.abortable_stream(chunks, self._tts_abort)
+                    # Closed explicitly: the player BREAKS out of its loop on
+                    # a barge-in, and teardown (ffmpeg's kill) must run then,
+                    # not whenever the generator is collected.
+                    async with contextlib.aclosing(_stamp_first_audio(chunks)) as stamped:
+                        pcm_bytes = await post_turn_play(stamped)
                 except Exception as e:
                     log.error(f"[{self._log_name}] TTS audio stream failed: {e}")
                     if trace: trace.outcome = "tts_error"
@@ -1428,6 +1508,13 @@ class EchoMuseSatellite(SatelliteServerProtocol):
 
                 if trace:
                     trace.tts_bytes = pcm_bytes or 0
+
+                if self._tts_streamed_early:
+                    # An early stream can end a moment before INTENT_END, which
+                    # carries continue_conversation. Give the event a beat.
+                    await em_earlytts.wait_until(
+                        lambda: self._intent_ended or self._turn_cancelled, 2.0
+                    )
 
                 if self._turn_cancelled or self._turn_end_reason:
                     # #251: cut off mid-response. This used to fall through to
@@ -1676,6 +1763,14 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         first_speech_at = None
         last_speech_at  = None
 
+        # Speech gate (em_speechgate): audio is held until Silero hears speech,
+        # so a turn nobody speaks in sends HA nothing to transcribe. Once
+        # open, speech_seen comes from the gate rather than the RMS check,
+        # which ducked-music residue passes. None = model unavailable, and
+        # the turn streams ungated exactly as before.
+        vad = em_speechgate.new_turn()
+        gate = em_speechgate.SpeechGate() if vad is not None else None
+
         def _is_speech(chunk: bytes) -> bool:
             samples = np.frombuffer(chunk, dtype=np.int16)
             if samples.size == 0:
@@ -1826,77 +1921,90 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     if self._trace:
                         self._trace.t_first_frame_ms = self._trace.elapsed_ms()
 
-                # Every frame, not just until the first hit: the controller's
-                # own endpoint needs to know when speech LAST was, not only
-                # that it once happened.
-                if _is_speech(payload):
-                    now = time.monotonic()
-                    last_speech_at = now
-                    if first_speech_at is None:
-                        first_speech_at = now
+                if gate is None:
+                    frames = [payload]
+                else:
+                    prob = await asyncio.get_running_loop().run_in_executor(
+                        None, vad.prob, payload)
+                    frames = gate.push(payload, prob)
+                    if gate.open and not speech_seen:
+                        speech_seen = True
+                        log.info(f"[{self._log_name}] Speech gate {gate.summary()}, p={prob:.2f}")
+                        em_tasks.spawn(device.beam_lock())
+                for payload in frames:
+                    # Every frame, not just until the first hit: the controller's
+                    # own endpoint needs to know when speech LAST was, not only
+                    # that it once happened.
+                    if _is_speech(payload):
+                        now = time.monotonic()
+                        last_speech_at = now
+                        if first_speech_at is None:
+                            first_speech_at = now
 
-                if not speech_seen and last_speech_at is not None:
-                    speech_seen = True
-                    log.debug(
-                        f"[{self._log_name}] Speech detected (above noise floor "
-                        f"{getattr(device, 'noise_floor', 0.0):.4f}) — no-speech timeout disarmed"
-                    )
-                    # Lock the beamformer onto the speaker now that they're
-                    # audibly talking. Matters for continuation turns (the wake
-                    # turn already locked at detection — the device no-ops a
-                    # second lock) and after any TTS mic restart, which resets
-                    # the beam to ch6 omni.
-                    asyncio.ensure_future(device.beam_lock())
-
-                if denoiser is not None:
-                    raw_payload = payload
-                    try:
-                        payload = await asyncio.get_running_loop().run_in_executor(
-                            None, denoiser.process, payload
+                    if gate is None and not speech_seen and last_speech_at is not None:
+                        speech_seen = True
+                        log.debug(
+                            f"[{self._log_name}] Speech detected (above noise floor "
+                            f"{getattr(device, 'noise_floor', 0.0):.4f}) — no-speech timeout disarmed"
                         )
-                    except Exception as e:
-                        log.warning(
-                            f"[{self._log_name}] NS failed mid-turn ({e}) — "
-                            f"raw audio for the rest of this turn"
-                        )
-                        # Dropped from the loop, but the counters it collected
-                        # up to the failure still describe this turn.
-                        ns_reporter = denoiser
-                        denoiser = None
-                        payload = raw_payload
-                    else:
-                        if em_ns.DEBUG_DIR:
-                            ns_debug_raw.extend(raw_payload)
-                            ns_debug_out.extend(payload)
+                        # Lock the beamformer onto the speaker now that they're
+                        # audibly talking. Matters for continuation turns (the wake
+                        # turn already locked at detection — the device no-ops a
+                        # second lock) and after any TTS mic restart, which resets
+                        # the beam to ch6 omni.
+                        em_tasks.spawn(device.beam_lock())
 
-                # Utterance capture sits HERE, below the denoiser, so the saved
-                # file is byte-for-byte what goes on the wire to HA — i.e. what
-                # STT actually heard. Tapping above NS (as this first shipped)
-                # answered "how good is the mic" but could not answer "why was
-                # the transcript wrong" on any device with nsAsr on, which is
-                # the question people actually ask. If NS fails mid-turn the
-                # payload falls back to raw for the rest of the turn and the
-                # capture follows it, which stays correct by construction.
-                if capture is not None and len(capture) < em_recordings.MAX_UTTERANCE_BYTES:
-                    capture.extend(payload)
+                    if denoiser is not None:
+                        raw_payload = payload
+                        try:
+                            payload = await asyncio.get_running_loop().run_in_executor(
+                                None, denoiser.process, payload
+                            )
+                        except Exception as e:
+                            log.warning(
+                                f"[{self._log_name}] NS failed mid-turn ({e}) — "
+                                f"raw audio for the rest of this turn"
+                            )
+                            # Dropped from the loop, but the counters it collected
+                            # up to the failure still describe this turn.
+                            ns_reporter = denoiser
+                            denoiser = None
+                            payload = raw_payload
+                        else:
+                            if em_ns.DEBUG_DIR:
+                                ns_debug_raw.extend(raw_payload)
+                                ns_debug_out.extend(payload)
 
-                if self._trace:
-                    self._trace.audio_frames += 1
-                pcm_buf.extend(payload)
+                    # Utterance capture sits HERE, below the denoiser, so the saved
+                    # file is byte-for-byte what goes on the wire to HA — i.e. what
+                    # STT actually heard. Tapping above NS (as this first shipped)
+                    # answered "how good is the mic" but could not answer "why was
+                    # the transcript wrong" on any device with nsAsr on, which is
+                    # the question people actually ask. If NS fails mid-turn the
+                    # payload falls back to raw for the rest of the turn and the
+                    # capture follows it, which stays correct by construction.
+                    if capture is not None and len(capture) < em_recordings.MAX_UTTERANCE_BYTES:
+                        capture.extend(payload)
 
-                # Send in 320-byte chunks (20ms at 16kHz mono S16_LE) —
-                # split small for smoother ESPHome API streaming.
-                AUDIO_CHUNK = 320
-                while len(pcm_buf) >= AUDIO_CHUNK:
-                    chunk = bytes(pcm_buf[:AUDIO_CHUNK])
-                    del pcm_buf[:AUDIO_CHUNK]
-                    self._send_one(api_pb2.VoiceAssistantAudio(data=chunk))
+                    if self._trace:
+                        self._trace.audio_frames += 1
+                    pcm_buf.extend(payload)
+
+                    # Send in 320-byte chunks (20ms at 16kHz mono S16_LE) —
+                    # split small for smoother ESPHome API streaming.
+                    AUDIO_CHUNK = 320
+                    while len(pcm_buf) >= AUDIO_CHUNK:
+                        chunk = bytes(pcm_buf[:AUDIO_CHUNK])
+                        del pcm_buf[:AUDIO_CHUNK]
+                        self._send_one(api_pb2.VoiceAssistantAudio(data=chunk))
         finally:
             # What the gate actually did to this turn. Logged unconditionally
             # when NS ran, because until now a denoiser chewing speech and a
             # quiet room were indistinguishable from any log, on either side
             # — which is why #137 spent nine days on two theories that a
             # single number would have settled.
+            if gate is not None and not gate.open:
+                log.info(f"[{self._log_name}] Speech gate {gate.summary()}")
             ns_reporter = denoiser if denoiser is not None else ns_reporter
             if ns_reporter is not None:
                 log.info(f"[{self._log_name}] NS: {ns_reporter.zero_report()}")
@@ -2032,9 +2140,12 @@ async def _stream_tts_audio(url: str) -> AsyncIterator[bytes]:
     last_exc: Exception | None = None
     for attempt in range(2):
         try:
-            async for pcm in _stream_tts_audio_once(url):
-                emitted = True
-                yield pcm
+            # aclosing, as below: a barge-in closes this generator, and the
+            # inner one must tear ffmpeg down NOW, not when collected.
+            async with contextlib.aclosing(_stream_tts_audio_once(url)) as once:
+                async for pcm in once:
+                    emitted = True
+                    yield pcm
             return
         except Exception as err:
             last_exc = err
@@ -2051,65 +2162,123 @@ async def _stream_tts_audio(url: str) -> AsyncIterator[bytes]:
 
 
 async def _stream_tts_audio_once(url: str) -> AsyncIterator[bytes]:
-    """Run one HTTP-to-ffmpeg streaming attempt for _stream_tts_audio."""
+    """Run one HTTP streaming attempt for _stream_tts_audio.
+
+    A WAV already at the wire format (what we declare to HA — see
+    supported_formats) is passed straight through: no decoder, so nothing is
+    held back when HA pauses between sentences (em_wav). Anything else is
+    decoded by ffmpeg.
+    """
     import aiohttp
 
+    timeout = aiohttp.ClientTimeout(
+        total=None,
+        connect=10,
+        sock_connect=10,
+        sock_read=60,
+    )
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(url) as resp:
+            resp.raise_for_status()
+            chunks = resp.content.iter_chunked(16 * 1024)
+            head = bytearray()
+            wav = em_wav.WavStream()
+            pcm = b""
+            try:
+                async for chunk in chunks:
+                    head += chunk
+                    if len(head) >= 4 and head[:4] != b"RIFF":
+                        break
+                    pcm = wav.push(chunk)
+                    if wav.ready:
+                        break
+            except em_wav.NotWav:
+                pass
+
+            if wav.ready and em_wav.is_wire_pcm(wav.format, WIRE_RATE):
+                log.debug("TTS: WAV passthrough")
+                odd = b""
+                async for part in _prepend(pcm, chunks):
+                    part = odd + part
+                    cut = len(part) & ~1
+                    odd = part[cut:]
+                    if cut:
+                        yield part[:cut]
+                return
+
+            log.info(f"TTS: decoding with ffmpeg ({wav.format or 'not WAV'})")
+            # aclosing: a barge-in closes THIS generator, and an inner one left
+            # to the garbage collector would run its kill-first teardown late,
+            # leaving ffmpeg alive past the turn.
+            async with contextlib.aclosing(
+                    _ffmpeg_decode(_prepend(bytes(head), chunks))) as decoded:
+                async for pcm in decoded:
+                    yield pcm
+
+
+async def _prepend(first: bytes, rest: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+    if first:
+        yield first
+    async for chunk in rest:
+        yield chunk
+
+
+async def _ffmpeg_decode(encoded: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+    """Decode any format ffmpeg reads to wire PCM, yielding as it decodes.
+
+    `-threads 1`: frame-threaded decoding holds one frame per thread before it
+    emits anything, which on an 8-core host kept ~1.7s of FLAC inside ffmpeg
+    (0.9s with one thread) — audio that is then stranded whenever the input
+    pauses. See em_wav for why TTS normally avoids this path altogether.
+    """
     proc: asyncio.subprocess.Process | None = None
     feeder: asyncio.Task | None = None
     stderr_task: asyncio.Task | None = None
     try:
-        timeout = aiohttp.ClientTimeout(
-            total=None,
-            connect=10,
-            sock_connect=10,
-            sock_read=60,
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-threads", "1",
+            "-i", "pipe:0",
+            "-f", "s16le", "-ar", str(WIRE_RATE), "-ac", "1",
+            "pipe:1",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url) as resp:
-                resp.raise_for_status()
-                proc = await asyncio.create_subprocess_exec(
-                    "ffmpeg", "-hide_banner", "-loglevel", "error",
-                    "-i", "pipe:0",
-                    "-f", "s16le", "-ar", "48000", "-ac", "1",
-                    "pipe:1",
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
 
-                async def _feed_encoded_audio() -> None:
-                    assert proc is not None and proc.stdin is not None
-                    try:
-                        async for chunk in resp.content.iter_chunked(16 * 1024):
-                            proc.stdin.write(chunk)
-                            await proc.stdin.drain()
-                    finally:
-                        if not proc.stdin.is_closing():
-                            proc.stdin.close()
-                            await proc.stdin.wait_closed()
+        async def _feed_encoded_audio() -> None:
+            assert proc is not None and proc.stdin is not None
+            try:
+                async for chunk in encoded:
+                    proc.stdin.write(chunk)
+                    await proc.stdin.drain()
+            finally:
+                if not proc.stdin.is_closing():
+                    proc.stdin.close()
+                    await proc.stdin.wait_closed()
 
-                feeder = asyncio.create_task(_feed_encoded_audio())
+        feeder = asyncio.create_task(_feed_encoded_audio())
 
-                # stderr is drained CONCURRENTLY, not after stdout EOF. A pipe
-                # holds ~64KB; if ffmpeg fills it, it blocks writing stderr,
-                # stops producing stdout, and the reader below waits forever.
-                # -loglevel error keeps that rare, but the case that produces
-                # lots of stderr is a malformed or truncated response — exactly
-                # the degraded case this path has to survive.
-                assert proc.stderr is not None
-                stderr_task = asyncio.create_task(proc.stderr.read())
+        # stderr is drained CONCURRENTLY, not after stdout EOF. A pipe
+        # holds ~64KB; if ffmpeg fills it, it blocks writing stderr,
+        # stops producing stdout, and the reader below waits forever.
+        # -loglevel error keeps that rare, but the case that produces
+        # lots of stderr is a malformed or truncated response — exactly
+        # the degraded case this path has to survive.
+        assert proc.stderr is not None
+        stderr_task = asyncio.create_task(proc.stderr.read())
 
-                assert proc.stdout is not None
-                while pcm := await proc.stdout.read(16 * 1024):
-                    yield pcm
+        assert proc.stdout is not None
+        while pcm := await proc.stdout.read(16 * 1024):
+            yield pcm
 
-                await feeder
-                err = await stderr_task
-                return_code = await asyncio.wait_for(proc.wait(), timeout=15.0)
-                if return_code != 0:
-                    raise RuntimeError(
-                        f"ffmpeg streaming decode failed: {err.decode()[:200]}"
-                    )
+        await feeder
+        err = await stderr_task
+        return_code = await asyncio.wait_for(proc.wait(), timeout=15.0)
+        if return_code != 0:
+            raise RuntimeError(
+                f"ffmpeg streaming decode failed: {err.decode()[:200]}"
+            )
     finally:
         # Kill ffmpeg FIRST, before cancelling the feeder — the ordering is
         # what makes this teardown terminate at all.
@@ -2155,7 +2324,7 @@ async def _fetch_tts_audio(url: str) -> bytes:
 
     Uses ffmpeg subprocess — handles MP3, WAV, FLAC, OGG transparently
     regardless of which TTS provider HA is configured with. When HA honours
-    our declared supported_formats the URL already serves 48kHz mono FLAC
+    our declared supported_formats the URL already serves 48kHz mono WAV
     and the -ar here is a no-op; otherwise ffmpeg's proper resampler does
     the conversion (better than the numpy linear interpolation this
     replaced, which cost ~2dB above 8kHz).
@@ -2198,7 +2367,7 @@ async def _fetch_tts_audio(url: str) -> bytes:
     proc = await asyncio.create_subprocess_exec(
         "ffmpeg", "-hide_banner", "-loglevel", "error",
         "-i", "pipe:0",
-        "-f", "s16le", "-ar", "48000", "-ac", "1",
+        "-f", "s16le", "-ar", str(WIRE_RATE), "-ac", "1",
         "pipe:1",
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
@@ -2256,6 +2425,17 @@ class DeviceESPhomeServer:
         # every volume_state message from the device. Read by the satellite
         # for MediaPlayerStateResponse rather than hardcoding 1.0.
         self.volume: float = 1.0
+        # HA's output mute; lives on the server so it survives the device
+        # reconnecting, which is exactly when it has to be re-applied.
+        self.output_mute = em_output_mute.OutputMute()
+        # The physical mic mute button (#438) and HA's wake word picker
+        # (#286). On the server so both outlive a reconnect: `mic_muted` is
+        # compared against to tell a press from the device's re-report.
+        self.mic_muted: bool = False
+        self.wake_word_enabled: bool = True
+        # Injected by device_connected(); applies HA's wake word choice
+        # synchronously. None when no device is connected.
+        self._set_wake_word = None
         # Injected by device_connected() — async callable(pcm_bytes) for
         # standalone announce playback (setup wizard, push TTS) when no
         # voice turn is active.
@@ -2318,8 +2498,8 @@ class DeviceESPhomeServer:
         begins a ring calls the injected orchestrator. A CANCELLED can still
         end a ring — the registry handles it, and an HA that behaves that way
         keeps working — but do not rely on one arriving for a RINGING alarm:
-        HA discards a timer when it finishes, so a spoken dismissal is
-        recognised from the transcript instead (em_timers.is_dismissal).
+        HA discards a timer when it finishes, so stopping one by voice is
+        decided on the controller (em_timers.DismissListen).
         """
         transition = self._timers.apply(event_type, timer_id)
         ev_name = {
@@ -2812,7 +2992,10 @@ async def _persist_turn(device, turn_record: dict) -> None:
         # device actually drove the turn — on a controller-triggered turn the
         # column does not apply, and writing our own score into it would make
         # every row agree with itself.
-        if str(turn_record.get("trigger", "")).startswith("wakeword-dev"):
+        # A privately listening Echo sends this controller nothing to score,
+        # so there is no comparison to make and no miss to record.
+        if (str(turn_record.get("trigger", "")).startswith("wakeword-dev")
+                and not getattr(device, "private_listening", False)):
             ctrl_score, ctrl_delta = device.ctrl_shadow.match(wake_mono)
             turn_record["ctrl_wake_score"]    = ctrl_score
             turn_record["ctrl_wake_delta_ms"] = ctrl_delta
@@ -3032,6 +3215,8 @@ async def device_connected(
     ring_alarm=None,
     stop_alarm=None,
     start_conversation=None,
+    set_wake_word=None,
+    wake_word_enabled: bool = True,
 ) -> None:
     """
     Called by em_controller.handle_control() when an Echo Dot connects.
@@ -3058,6 +3243,12 @@ async def device_connected(
     word, for HA's announce-then-listen (`assist_satellite.start_conversation`
     and `ask_question`). Same reasoning: it drives the mic, the ring and the
     voice lock.
+
+    set_wake_word: callable(on: bool) — applies HA's wake word picker (#286)
+    synchronously.
+
+    wake_word_enabled: HA's stored picker choice, set before the port comes
+    up so HA's first read is already correct.
     """
     server = _servers.get(device_id)
     if server is None:
@@ -3077,6 +3268,8 @@ async def device_connected(
     server._ring_alarm = ring_alarm
     server._stop_alarm = stop_alarm
     server._start_conversation = start_conversation
+    server._set_wake_word = set_wake_word
+    server.wake_word_enabled = bool(wake_word_enabled)
     if server._server is not None:
         log.debug(f"[esphome.{device_id[-8:]}] device_connected: port {server.port} already listening")
         return
@@ -3106,6 +3299,7 @@ async def device_disconnected(device_id: str) -> None:
     server._ring_alarm = None
     server._stop_alarm = None
     server._start_conversation = None
+    server._set_wake_word = None
     await server.stop()
     log.info(f"[esphome.{device_id[-8:]}] ESPHome port {server.port} down (device disconnected)")
 
@@ -3233,6 +3427,51 @@ def update_ambient_lux(device_id: str, lux) -> None:
         state=float(lux) if lux is not None else 0.0,
         missing_state=lux is None,
     ))
+
+
+def get_mic_muted_and_wake_word(device_id: str) -> tuple[bool, bool]:
+    """(mic muted, wake word on) as the server remembers them; (False, True)
+    with no server."""
+    server = _servers.get(device_id)
+    if server is None:
+        return False, True
+    return server.mic_muted, server.wake_word_enabled
+
+
+def update_mic_muted(device_id: str, muted: bool) -> None:
+    """Record the mic mute button's state and push it to HA's binary sensor."""
+    server = _servers.get(device_id)
+    if server is None:
+        return
+    server.mic_muted = bool(muted)
+    satellite = server.get_satellite()
+    if satellite is None:
+        return
+    satellite._send_one(satellite._mic_muted_msg())
+
+
+def update_wake_word(device_id: str, enabled: bool) -> None:
+    """Record HA's wake word choice (#286). Nothing to push: HA re-reads the
+    configuration itself after writing it."""
+    server = _servers.get(device_id)
+    if server is None:
+        return
+    server.wake_word_enabled = bool(enabled)
+
+
+def output_mute_report(device_id: str, level: int) -> tuple[bool, int | None]:
+    """(keep, send) for a device volume report (see
+    em_output_mute.device_report). (True, None) when no server exists."""
+    server = _servers.get(device_id)
+    if server is None:
+        return True, None
+    return server.output_mute.device_report(level)
+
+
+def output_mute_on_reconnect(device_id: str) -> int | None:
+    """Level to re-send after a reconnect while output-muted, else None."""
+    server = _servers.get(device_id)
+    return server.output_mute.on_reconnect() if server is not None else None
 
 
 def update_device_volume(device_id: str, volume: float) -> None:

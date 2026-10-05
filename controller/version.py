@@ -91,3 +91,96 @@ def compare(current: str, latest: str) -> dict:
     if l > c:
         return {"status": "update", "available": True}
     return {"status": "current", "available": False}
+
+
+# ─── Device firmware channels ────────────────────────────────────────────────
+#
+# Firmware is released as vX.Y.Z (GA) or vX.Y.Z-ea.N (Early Access, published
+# as a GitHub prerelease). GA controllers offer only GA firmware; EA and dev
+# controllers offer both. parse() above cannot tell 2.17.0-ea.1 from 2.17.0,
+# and the firmware check used to be a string comparison, which on a GA
+# controller offered a device running EA firmware the older GA as an
+# "update". firmware_key orders all of them.
+
+def firmware_key(text: str) -> tuple | None:
+    """
+    An ordering key for a firmware version, or None when it is not one (a
+    timestamped dev build such as "20260926-1044-dev").
+
+      v2.17.0-ea.1  <  v2.17.0-ea.2  <  v2.17.0  <  v2.17.0-3-gabc1234
+
+    The last is a build three commits past the tag (git describe), so it is
+    ahead of the release it was built from.
+    """
+    t = (text or "").strip().lstrip("v")
+    parts = t.split("-")
+    nums = parts[0].split(".")
+    if len(nums) != 3 or not all(n.isdigit() for n in nums):
+        return None
+    rest = parts[1:]
+    stage, ea = 1, 0
+    if rest and rest[0].startswith("ea."):
+        n = rest[0][3:]
+        if not n.isdigit():
+            return None
+        stage, ea = 0, int(n)
+        rest = rest[1:]
+    commits = 0
+    if rest and rest[0].isdigit():
+        commits = int(rest[0])
+    return (int(nums[0]), int(nums[1]), int(nums[2]), stage, ea, commits)
+
+
+def firmware_is_ea(text: str) -> bool:
+    k = firmware_key(text)
+    return k is not None and k[3] == 0
+
+
+def firmware_update(device: str | None, latest: str | None) -> bool:
+    """
+    Whether `latest` is an update for a device running `device`. A device
+    ahead of it (EA firmware on a GA controller, or a build past the tag) is
+    not offered it. When either is not a version, the old rule stands: any
+    difference is an update, which is what moves a dev build onto a release.
+    """
+    if not device or not latest:
+        return False
+    d, l = firmware_key(device), firmware_key(latest)
+    if d is None or l is None:
+        return device != latest
+    return l > d
+
+
+def offers_ea_firmware(controller_version: str = VERSION) -> bool:
+    """
+    Only a GA controller build (a plain X.Y.Z) is limited to GA firmware.
+    EA builds (2.25.0-ea.1), builds between tags and "dev" are not.
+    """
+    t = (controller_version or "").strip().removeprefix(_PREFIX).lstrip("v")
+    nums = t.split(".")
+    return not (len(nums) == 3 and all(n.isdigit() for n in nums))
+
+
+def choose_firmware_release(releases: list, include_ea: bool) -> dict | None:
+    """
+    The newest firmware release this controller may offer, from GitHub's
+    release list: published, a v* tag, carrying the `server` binary. A GA
+    controller skips prereleases AND anything named -ea.N, so neither a
+    mislabelled release nor a missing flag can put EA firmware on the GA
+    fleet. Chosen by version, not list order.
+    """
+    best, best_key = None, None
+    for r in releases or []:
+        tag = r.get("tag_name", "")
+        if r.get("draft") or not tag.startswith("v"):
+            continue
+        if not include_ea and (r.get("prerelease") or firmware_is_ea(tag)):
+            continue
+        if not any(a.get("name") == "server" for a in r.get("assets", [])):
+            continue
+        k = firmware_key(tag)
+        if k is None:
+            continue
+        if best_key is None or k > best_key:
+            best, best_key = r, k
+    return best

@@ -1277,3 +1277,66 @@ EXPORT int speex_echo_ctl(SpeexEchoState *st, int request, void *ptr)
    }
    return 0;
 }
+
+/* ── EchoMuse addition: save and restore the learned echo path ───────────────
+ *
+ * Only what was LEARNED is carried: both filters, the per-block step sizes
+ * and the adaptation state. Without `adapted`/`sum_adapt` a restored filter
+ * would be treated as new and re-learnt at the initial adaptation rate.
+ * Signal history (far-end buffers, powers, DC notch memory) starts fresh,
+ * because it describes audio from another run.
+ *
+ * The blob is only meaningful to a state of the same frame size, filter
+ * length and channel counts; the Go side checks that before calling import.
+ */
+#include <string.h>
+
+struct em_scalars {
+   int adapted;
+   spx_word32_t sum_adapt;
+   spx_word16_t leak_estimate;
+   spx_float_t Pey, Pyy;
+   spx_word32_t Davg1, Davg2;
+   spx_float_t Dvar1, Dvar2;
+};
+
+EXPORT int em_echo_state_size(SpeexEchoState *st)
+{
+   int n = st->M*st->window_size*st->C*st->K;
+   return (int)(sizeof(struct em_scalars) + n*sizeof(spx_word32_t)
+                + n*sizeof(spx_word16_t) + st->M*sizeof(spx_word16_t));
+}
+
+EXPORT int em_echo_state_export(SpeexEchoState *st, void *buf, int len)
+{
+   int n = st->M*st->window_size*st->C*st->K;
+   char *p = (char*)buf;
+   struct em_scalars s;
+   if (len != em_echo_state_size(st))
+      return -1;
+   s.adapted = st->adapted; s.sum_adapt = st->sum_adapt;
+   s.leak_estimate = st->leak_estimate; s.Pey = st->Pey; s.Pyy = st->Pyy;
+   s.Davg1 = st->Davg1; s.Davg2 = st->Davg2; s.Dvar1 = st->Dvar1; s.Dvar2 = st->Dvar2;
+   memcpy(p, &s, sizeof s); p += sizeof s;
+   memcpy(p, st->W, n*sizeof(spx_word32_t)); p += n*sizeof(spx_word32_t);
+   memcpy(p, st->foreground, n*sizeof(spx_word16_t)); p += n*sizeof(spx_word16_t);
+   memcpy(p, st->prop, st->M*sizeof(spx_word16_t));
+   return 0;
+}
+
+EXPORT int em_echo_state_import(SpeexEchoState *st, const void *buf, int len)
+{
+   int n = st->M*st->window_size*st->C*st->K;
+   const char *p = (const char*)buf;
+   struct em_scalars s;
+   if (len != em_echo_state_size(st))
+      return -1;
+   memcpy(&s, p, sizeof s); p += sizeof s;
+   st->adapted = s.adapted; st->sum_adapt = s.sum_adapt;
+   st->leak_estimate = s.leak_estimate; st->Pey = s.Pey; st->Pyy = s.Pyy;
+   st->Davg1 = s.Davg1; st->Davg2 = s.Davg2; st->Dvar1 = s.Dvar1; st->Dvar2 = s.Dvar2;
+   memcpy(st->W, p, n*sizeof(spx_word32_t)); p += n*sizeof(spx_word32_t);
+   memcpy(st->foreground, p, n*sizeof(spx_word16_t)); p += n*sizeof(spx_word16_t);
+   memcpy(st->prop, p, st->M*sizeof(spx_word16_t));
+   return 0;
+}

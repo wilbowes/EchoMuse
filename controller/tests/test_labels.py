@@ -41,3 +41,107 @@ def test_both_label_endpoints_enforce_it():
         body = api[api.index(handler):]
         body = body[:body.index("\n@", 1)]
         assert "_require_label(body)" in body, f"{handler} must use _require_label"
+
+
+# ── Beyond length: what Home Assistant accepts but should not be given ──────
+# Edges from Unicode's own categories rather than from typical names.
+
+def test_every_control_character_is_refused():
+    # All of Cc: C0 (U+0000-U+001F), DEL (U+007F), C1 (U+0080-U+009F).
+    for cp in [*range(0x00, 0x20), 0x7F, *range(0x80, 0xA0)]:
+        label, err = em_labels.check_label(f"Kit{chr(cp)}chen")
+        assert label is None and "control" in err, hex(cp)
+
+
+def test_a_control_character_at_the_ends_is_trimmed_not_refused():
+    # str.strip() removes \t \n \r \x0b \x0c and \x1c-\x1f; what it removes
+    # never reaches the check, the same as a pasted trailing newline.
+    label, err = em_labels.check_label("\tKitchen\n")
+    assert err is None and label == "Kitchen"
+
+
+def test_a_lone_surrogate_is_refused():
+    # json.loads('"\\ud800"') succeeds, and the label is later UTF-8 encoded
+    # for the mDNS TXT record, which would raise.
+    for s in ("\ud800", "Kitchen\udfff"):
+        label, err = em_labels.check_label(s)
+        assert label is None and err
+
+
+def test_no_letter_or_number_is_refused():
+    for s in ("🍳", "#!?", "---", "​", "‍", "́", "🍳 🍳"):
+        label, err = em_labels.check_label(s)
+        assert label is None and "letter or number" in err, repr(s)
+
+
+def test_any_script_letter_or_digit_is_enough():
+    for s in ("Kitchen", "Küche", "Кухня", "厨房", "مطبخ", "7", "٣", "🍳 Kitchen",
+              "Bob's Room", "Kids' room #2", "x" * em_labels.MAX_LABEL_LEN):
+        label, err = em_labels.check_label(s)
+        assert err is None and label == s, repr(s)
+
+
+def test_emoji_sequences_with_joiners_are_allowed_beside_a_letter():
+    # U+200D is Cf, not Cc: a family emoji must not read as a control character.
+    label, err = em_labels.check_label("👨‍👩‍👧 Room")
+    assert err is None
+
+
+def test_the_length_cap_counts_code_points():
+    # 32 four-byte characters plus a letter is 33 code points: refused on
+    # length, not waved through by a byte or UTF-16 count.
+    label, err = em_labels.check_label("a" + "😀" * 32)
+    assert label is None and "33" in err
+    label, err = em_labels.check_label("a" + "😀" * 31)
+    assert err is None
+
+
+def test_an_accepted_label_fits_the_mdns_txt_record():
+    # RFC 6763 §6.1: each TXT string is at most 255 bytes. The widest label
+    # the rules allow, in the widest UTF-8, must still fit.
+    widest = "a" + "\U0010FFFD" * (em_labels.MAX_LABEL_LEN - 1)
+    label, err = em_labels.check_label(widest)
+    assert err is None
+    assert len(f"friendly_name={label} Voice Assistant".encode()) <= 255
+
+
+# ── Duplicates: a hard no ───────────────────────────────────────────────────
+
+FLEET = [("A", "Kitchen"), ("B", "Lounge"), ("C", None), ("D", "Straße")]
+
+
+def test_the_same_name_in_any_case_or_width_is_a_duplicate():
+    for s in ("Kitchen", "kitchen", "KITCHEN", "Ｋｉｔｃｈｅｎ", "kItChEn"):
+        assert em_labels.duplicate_of(s, FLEET, "NEW") == "Kitchen", s
+
+
+def test_whitespace_inside_a_name_is_compared_collapsed():
+    fleet = [("A", "Kitchen 1")]
+    for s in ("Kitchen  1", "Kitchen 1", "Kitchen　1"):
+        assert em_labels.duplicate_of(s, fleet, "NEW") == "Kitchen 1", repr(s)
+
+
+def test_full_case_folding_not_just_lower():
+    # casefold, not lower: "ß" folds to "ss".
+    assert em_labels.duplicate_of("STRASSE", FLEET, "NEW") == "Straße"
+
+
+def test_different_names_are_not_duplicates():
+    for s in ("Kitchen 2", "Kitchens", "Küche", "Lounge Room", "Bedroom"):
+        assert em_labels.duplicate_of(s, FLEET, "NEW") is None, s
+
+
+def test_renaming_an_echo_to_its_own_name_is_allowed():
+    assert em_labels.duplicate_of("KITCHEN", FLEET, "A") is None
+
+
+def test_a_pending_echo_with_no_label_duplicates_nothing():
+    assert em_labels.duplicate_of("Anything", [("C", None), ("E", "")], "NEW") is None
+
+
+def test_both_label_endpoints_refuse_duplicates():
+    api = (CONTROLLER / "em_api.py").read_text()
+    for handler in ("async def _patch_device", "async def _post_approve"):
+        body = api[api.index(handler):]
+        body = body[:body.index("\n@", 1)]
+        assert "await _require_unique_label(label, device_id)" in body, handler

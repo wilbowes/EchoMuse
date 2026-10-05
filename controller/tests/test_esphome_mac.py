@@ -176,7 +176,20 @@ def test_migrations_are_append_only():
     rather than edited — which is the mistake this guards, and the one that
     broke every stats write and disconnect-looped the fleet when it happened.
     """
-    assert len(db.MIGRATIONS) == 24
+    assert len(db.MIGRATIONS) == 31
+    # v30 is its own entry (emos_version, emos_build), not appended onto v29.
+    assert "emos_version" in db.MIGRATIONS[29]
+    assert "emos_version" not in db.MIGRATIONS[28]
+    # v29 is its own entry (wake_samples), not appended onto v28.
+    assert "wake_samples" in db.MIGRATIONS[28]
+    assert "wake_samples" not in db.MIGRATIONS[27]
+    # v28 is its own entry (device_boots, device_wear), not appended onto v27.
+    assert "device_wear" in db.MIGRATIONS[27]
+    assert "device_boots" in db.MIGRATIONS[27]
+    assert "device_boots" not in db.MIGRATIONS[26]
+    # v27 is its own entry (token_confirmed_at), not appended onto v26.
+    assert "token_confirmed_at" in db.MIGRATIONS[26]
+    assert "token_confirmed_at" not in db.MIGRATIONS[25]
     assert "esphome_mac" in db.MIGRATIONS[18]
     assert "esphome_mac" not in db.MIGRATIONS[17]
     # v20 is its own entry and did not get appended onto v19's.
@@ -191,3 +204,6 @@ def test_migrations_are_append_only():
     # v24 moves only the version; its work is the Python fixup.
     assert "'24'" in db.MIGRATIONS[23]
     assert "kernel_arch" not in db.MIGRATIONS[23]
+    # v26: the TCP loss columns are their own entry, after v25's version move.
+    assert "tcp_down_segs_sum" in db.MIGRATIONS[25]
+    assert "tcp_down_segs_sum" not in db.MIGRATIONS[24]

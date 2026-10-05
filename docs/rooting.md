@@ -270,15 +270,17 @@ The light ring says which case you are in:
 | Ring | What it means | What to do |
 |---|---|---|
 | Filling, then white, then fading | Up and on the network | Nothing — done, about 30 seconds |
-| Two lit segments at the top, throbbing | Waiting for the network | Nothing — this is most of the boot |
+| Two lit segments at the bottom, throbbing | Waiting for the network | Nothing — this is most of the boot |
 | Solid amber | emOS is restoring its own last known-good image | **Leave it.** It reboots itself |
 | Red, stopped | A boot stage failed | Recoverable — go to TWRP and restore |
 | One segment orbiting a full blue ring, for more than a minute | emOS never started | Go to TWRP and restore |
 
-The last row is the only one that needs you. It means the kernel came up and
-our init never ran, so nothing on the device is going to fix itself — the
-orbit is the kernel's own boot animation, still running because userspace
-never claimed the ring.
+Restore the image from TWRP if the ring ends red and stopped, or as a single
+segment orbiting a full blue ring for more than a minute. Anything else means
+emOS is starting, so leave it to finish (#642). The orbit means the kernel
+came up and our init never ran, so nothing on the device is going to fix
+itself — it is the kernel's own boot animation, still running because
+userspace never claimed the ring.
 
 The amber row is worth knowing about precisely so you *do not* intervene:
 emOS counts boots that never reached the network and, after three, puts its

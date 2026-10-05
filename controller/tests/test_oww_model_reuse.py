@@ -27,7 +27,7 @@ def _api_src() -> str:
 
 def _listener_src() -> str:
     src = _controller_src()
-    start = src.index("async def wake_word_listener")
+    start = src.index("async def _stream_listen")
     end = src.index("async def ", start + 1)
     return src[start:end]
 
@@ -66,10 +66,31 @@ def test_reused_model_is_reset_but_a_fresh_one_is_not():
     src = _controller_src()
     acq = src.index("async def _acquire_wake_model")
     body = src[acq:src.index("async def ", acq + 1)]
-    hit = body.index("model.reset()")
+    hit = body.index("_reset_wake_model(model)")
     build = body.index("OWWModel(")
     assert hit < build, \
         "the cache hit must reset() before the miss path builds a new model"
+
+
+def test_reset_never_runs_on_the_event_loop():
+    # reset() embeds 4s of noise: ~400ms on the HA host, which stalled every
+    # Echo's audio and control plane on each controller-scored wake. Every
+    # reset goes through the executor helper.
+    src = _controller_src()
+    assert src.count("run_in_executor(None, model.reset)") == 1
+    assert ".reset()\n" not in "".join(
+        line + "\n" for line in src.splitlines()
+        if "model" in line and not line.lstrip().startswith("#")
+        and "warmup" not in line)
+
+
+def test_wake_routing_is_not_held_behind_the_reset():
+    # Frames that arrive while the reset runs must already route to the turn;
+    # awaiting it before oww_paused.set() drains the start of the command.
+    listener = _listener_src()
+    start = listener.index("model_reset = _reset_wake_model(model)")
+    route = listener.index("device.oww_paused.set()", start)
+    assert "await model_reset" not in listener[start:route]
 
 
 def test_superseded_listener_stands_down_before_scoring():

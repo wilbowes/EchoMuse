@@ -87,6 +87,46 @@ def test_shadow_capability_is_surfaced_to_the_dashboard():
         "the dashboard must gate the on-device toggle on the capability"
 
 
+def test_volume_cue_capability_is_surfaced_to_the_dashboard():
+    """Old firmware must not be offered a switch it cannot honour."""
+    caps = device_capabilities()
+    assert "volume_cue" in caps, "firmware no longer announces volume_cue"
+    assert "volume_cue_capable" in CONTROLLER.read_text(), \
+        "em_controller must expose the volume cue capability as a property"
+    assert "volumeCueCapable" in API.read_text(), \
+        "/api/devices must surface the volume cue capability"
+    jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
+    assert "volumeCueCapable" in jsx, \
+        "the dashboard must gate the volume button sound on the capability"
+
+
+def test_response_level_is_gated_on_its_capability():
+    assert "response_level" in device_capabilities()
+    assert "response_level_capable" in CONTROLLER.read_text()
+    assert "responseLevelCapable" in API.read_text()
+    jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
+    assert "disabled={!responseLevelCapable}" in jsx
+    select = re.search(r"function Select\(\{(.*?)\n\}", jsx, re.S)
+    assert select and "disabled" in select.group(1)
+
+
+def test_sendspin_is_gated_on_its_capability_and_its_token_stays_private():
+    """
+    Sendspin (#89) is off on firmware without a player, so the toggle must be
+    disabled with the reason there. The pairing token carries the device's
+    pairing key: it is fetched on request and must never ride the stats relay
+    or a dashboard event, which land in support bundles and every open tab.
+    """
+    assert "sendspin" in device_capabilities()
+    assert "sendspinCapable" in API.read_text()
+    jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
+    assert "disabled={!sendspinCapable}" in jsx
+    ctrl = CONTROLLER.read_text()
+    handler = ctrl.split('elif msg_type == "sendspin_token":', 1)[1].split("elif msg_type", 1)[0]
+    assert "log." not in handler and "_push_event" not in handler, \
+        "the sendspin_token handler must hand the token to its waiter and nothing else"
+
+
 def test_triggering_is_a_separate_capability_from_scoring():
     """
     Shadow shipped first, so there is firmware in the field that scores the
@@ -105,6 +145,15 @@ def test_triggering_is_a_separate_capability_from_scoring():
         "/api/devices must surface the trigger capability"
     assert "owwTriggerCapable" in (ROOT / "controller" / "static" / "dashboard.jsx").read_text(), \
         "the dashboard must gate the 'On device' option on the capability"
+
+
+def test_remote_volume_arc_is_capability_gated():
+    """Old firmware must not be offered a toggle it cannot honour."""
+    assert "remote_volume_arc" in device_capabilities()
+    assert "remote_volume_arc_capable" in CONTROLLER.read_text()
+    assert "remoteVolumeArcCapable" in API.read_text()
+    jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
+    assert "disabled={!remoteVolumeArcCapable}" in jsx
 
 
 def test_the_toggle_control_actually_honours_disabled():
@@ -317,3 +366,20 @@ def test_the_controller_announces_its_own_features_and_the_device_reads_them():
         f"controller announces {announced - consumed} which the device never "
         f"looks for — the feature would never be used and nothing would say so"
     )
+
+
+def test_private_listening_is_negotiated_in_both_directions():
+    """docs/listening.md: the device listens privately only against a
+    controller announcing listen_session, and the controller treats a device
+    as private-capable only on oww_local_only. The literals in em_controller
+    are what the two tests above cross-check against the Go; em_listen's
+    constants must be the same strings or the pure logic reads a different
+    capability from the one negotiated."""
+    import sys
+    sys.path.insert(0, str(ROOT / "controller"))
+    import em_listen
+    py = CONTROLLER.read_text()
+    assert f'"{em_listen.FEATURE}"' in py[py.index("CONTROLLER_FEATURES = ["):][:200]
+    assert f'"{em_listen.CAPABILITY}" in (self.capabilities' in py
+    assert em_listen.CAPABILITY in device_capabilities()
+    assert re.search(r'FeatureListenSession\s*=\s*"listen_session"', CONTROL_GO.read_text())

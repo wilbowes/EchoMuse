@@ -130,9 +130,16 @@ func TestTheRampIsGradualNotAStep(t *testing.T) {
 	if start < 9000 {
 		t.Fatalf("the ramp should START near the previous gain, got %d", start)
 	}
-	// And it must not have arrived within one period either.
-	if m.Gain() == target {
-		t.Fatal("the whole duck landed in one period — that is the step this avoids")
+	// It arrives within the period — the duck has to land with the ring —
+	// but as a fade: no neighbouring samples may differ by more than a
+	// small fraction of the swing, or it is a step with extra steps.
+	if m.Gain() != target {
+		t.Fatalf("a one-period ramp must arrive in one period, gain %d want %d", m.Gain(), target)
+	}
+	for i := 1; i < 64; i++ {
+		if d := sampleAt(first, i-1, 0) - sampleAt(first, i, 0); d > 10000/32 {
+			t.Fatalf("sample %d drops by %d — a step, not a fade", i, d)
+		}
 	}
 }
 

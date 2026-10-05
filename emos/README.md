@@ -13,28 +13,31 @@ emOS runs on both of the Echo Dot 2's kernels: FireOS 5's 64-bit one
 (amonet-biscuit v1.1.0) and FireOS 6's 32-bit one (v2.0.0). The wizard picks
 the matching init by reading your own boot image.
 
-**Status: 0.4, bench-proven, not field-proven.** Still a small number of
-devices over a handful of days. A complete voice turn has run on it — wake word
+**Status: 0.10.** The wizard's default, and updated over the network from
+this release on. A complete voice turn has run on it — wake word
 scored on-device, Home Assistant pipeline, spoken answer — along with WiFi, the
 9-channel mic array, hardware AEC, the BLE proxy, buttons, ambient light, jack
 detect and the LED ring. The known gaps are listed at the bottom and none of
 them is a research problem.
 
-Three things changed since 0.1 that are worth knowing before you try it:
+Three things worth knowing before you try it:
 
 - **The provisioning wizard has now run end to end**, on a device restored to
   genuine stock. It failed at four different steps first, and every one of
   those failures was in a *check* rather than in the operation being checked.
-- **emOS updates in place, over the network.** A device was taken 0.1 → 0.3
-  with no TWRP, no cable and no wipe. So a bug in a released emOS is something
-  we can push a fix for, rather than something that strands a device.
+- **emOS updates in place, over the network, from the dashboard** (0.10,
+  #573). The controller rebuilds the Echo's own image around the new release
+  and the Echo puts the previous image back by itself if the new one does not
+  reach the controller — see Rollback below. Run on both kernels and both
+  amonet versions, 2026-10-02, including a forced rollback. It was first done
+  by hand, 0.1 → 0.3, on 2026-09-06.
 - **emOS is no longer a one-way door.** `/init recovery` reboots the device
   into TWRP from its own console, and the wizard's first step already accepts
   a device that is in TWRP — so emOS → recovery → re-provision is a path that
   works, without powering the device off and holding a button in the dark.
   New in 0.4, confirmed on hardware 2026-09-10.
 
-`emos-v0.4` is tagged and published so the wizard can fetch the init, which is
+Each `emos-v*` tag is published so the controller can fetch the init, which is
 the only part of an image that can be distributed. **A tag is not a claim that
 this is finished.** Try it on a spare Echo, and read the Known gaps first.
 
@@ -697,6 +700,24 @@ reachability is the property that makes a device fixable without hands on it.
 After three unconfirmed boots init restores the known-good image, shows an
 amber ring and reboots.
 
+**An image installed over the network is on trial, and network-up does not
+confirm it.** The controller writes `/data/emos/update.pending` before it
+flashes, naming the new image by its header id, and removes it once the Echo
+has re-registered on that image. While the mark names the running image, init
+reboots at 180 seconds unconfirmed, and three of those restore the known-good
+image as above. That closes the two gaps the plain rule leaves with nobody at
+the device: an image whose WiFi is broken never reboots to be counted, and one
+that gets an address but cannot run the firmware would be promoted. A mark
+naming any other image is removed at boot. `trialcheck.c` drives the real
+parser; the controller's half is `controller/em_emos_update.py`. To confirm an
+image by hand from the console, `rm /data/emos/update.pending`.
+
+**A restore leaves a record**, `/data/emos/rollback.last`: the header ids of
+the image that failed and the one restored, and the number of unconfirmed
+boots. The controller reads it on the next connect, reports it in the Echo's
+log and removes it. Equal ids mean the same image was written back, which is
+three unconfirmed boots with no update involved.
+
 This is deliberately NOT the bootloader's A/B. biscuit has a real second slot
 and LK chooses between them; we have not reverse engineered how, and the
 standing guess — three tries per slot and then a soft brick — remains
@@ -849,7 +870,9 @@ is not proof it rebooted — compare uptime or a build fingerprint.
 
 ## Known gaps
 
-- **The clock is wrong** (reads 2010), so every timestamp is uncorrelatable.
+- ~~The clock is wrong (reads 2010).~~ **Fixed:** the controller tells the
+  Echo the time when it connects (`time_ms` on the `ack`), which is the
+  direction this entry ends on. What follows is why NTP alone could not do it.
   `ntpd` cannot use a hostname because **bionic resolves through Android's
   property service, not `/etc/resolv.conf`** — no bionic-linked binary has DNS
   here, though Go binaries are fine since Go carries its own resolver. Pointed
@@ -871,13 +894,15 @@ is not proof it rebooted — compare uptime or a build fingerprint.
   board. `/system` and `/data` are likewise hardcoded to p13 and p16; those
   were checked on a FireOS 6 device under amonet v2 and are still correct
   there, but nothing enforces it.
-- **The provisioning wizard cannot install a FireOS 6 image yet.** It fetches
-  the `init` asset from the emOS release and hands it to the controller's
-  packer; the supplicant and `wpa_cli` need the same road — a second release
-  asset, an endpoint, and a passthrough. The packer half already accepts
-  them. A locally built image installs today. Publishing them is allowed for
-  the same reason `init` is: they are our build (hostap is BSD, libnl-tiny
-  LGPL) and contain no Amazon code, unlike a boot image.
+- **An update interrupted by a power cut during the boot partition write
+  cannot be undone by the Echo.** The write takes about a second; an image
+  that fails before init runs needs TWRP and a cable. Everything after the
+  write is covered by the trial and the rollback.
+- **The rollback record has not run on a device.** It was added after the
+  hardware run that exercised the rollback, and is covered by `trialcheck.c`.
+- ~~The provisioning wizard cannot install a FireOS 6 image yet.~~ **Fixed
+  in 0.8:** the release carries `init32` and emOS's own WiFi tools in
+  `emos-payload.zip`, and the controller builds from it.
 - **WPA3 is one layer away, not three.** Asked of the driver rather than
   inferred from kernel strings: userspace is solved, since emOS now ships a
   supplicant with SAE; **PMF is not blocked** — the driver advertises

@@ -1,6 +1,9 @@
 package speaker
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // The buffering state machine, testable on the host because audioStream is
 // untagged. pcm_speaker.go can only be built on the device, which is why
@@ -100,9 +103,9 @@ func TestAFlushedStreamDoesNotLeaveEosArmedForTheNextOne(t *testing.T) {
 	s.ready(24)
 	s.take()
 
-	s.flush()                 // barge-in
-	s.drained()               // the pump loop sees the emptied channel
-	s.endStream()             // the cancelled stream's EOS finally arrives
+	s.flush()     // barge-in
+	s.drained()   // the pump loop sees the emptied channel
+	s.endStream() // the cancelled stream's EOS finally arrives
 
 	if s.eosPending.Load() {
 		t.Fatal("eosPending must not survive a flushed stream — the next " +
@@ -169,5 +172,61 @@ func TestMinDepthIgnoresTheTailOfAStream(t *testing.T) {
 	}
 	if s.minDepth != -1 {
 		t.Fatalf("tail periods must not be sampled, got minDepth=%d", s.minDepth)
+	}
+}
+
+func TestAudibleUntilTheLastPeriodHasPlayed(t *testing.T) {
+	// A reply arrives far faster than it plays (recvSpan 112ms for ~3s,
+	// 2026-09-22). isActive clears at EOS, which dropped the barge bar for
+	// nearly the whole reply; playedWithin must hold until the queue is
+	// played out, and for the hold after it.
+	s, _ := newTestStream(64)
+	pumpN(t, s, 30)
+	s.endStream()
+	now := time.Now()
+	if s.isActive() {
+		t.Fatal("precondition: EOS clears isActive")
+	}
+	if !s.playedWithin(now, 0) {
+		t.Fatal("a fully arrived, unplayed reply must count as audible")
+	}
+	for s.ready(24) {
+		s.take()
+	}
+	if !s.playedWithin(time.Now(), 2*time.Second) {
+		t.Fatal("audible within the hold after the last period")
+	}
+	if s.playedWithin(time.Now().Add(3*time.Second), 2*time.Second) {
+		t.Fatal("must stop counting once the hold has passed")
+	}
+}
+
+func TestNothingPlayedIsNotAudible(t *testing.T) {
+	s, _ := newTestStream(64)
+	if s.playedWithin(time.Now(), 2*time.Second) {
+		t.Fatal("a plane that never played must not hold the barge bar down")
+	}
+}
+
+// arriving is what the BLE scanner yields for: a reply still coming in over
+// the wire. It must end at the EOS, and must also end when the periods stop
+// without one — an EOS lost with the link would otherwise hold the scan off
+// until the next reply, which is a proxy gone quiet for no reason.
+func TestArrivingSpansTheWireAndNeverOutlivesIt(t *testing.T) {
+	s, _ := newTestStream(64)
+	now := time.Now()
+	if s.arriving(now, 2*time.Second) {
+		t.Fatal("nothing has arrived yet")
+	}
+	pumpN(t, s, 3)
+	if !s.arriving(time.Now(), 2*time.Second) {
+		t.Fatal("a stream mid-flight is arriving")
+	}
+	if s.arriving(time.Now().Add(3*time.Second), 2*time.Second) {
+		t.Fatal("no period for longer than stale: the EOS was lost, stop yielding")
+	}
+	s.endStream()
+	if s.arriving(time.Now(), 2*time.Second) {
+		t.Fatal("the EOS ends it, even while the buffer plays on")
 	}
 }
