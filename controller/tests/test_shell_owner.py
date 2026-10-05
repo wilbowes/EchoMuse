@@ -1,25 +1,15 @@
 """
-The shell lock belongs to the task that acquired it, and only to that task.
+The shell lock belongs to the task that acquired it.
 
-This is the EFF 2026-09-04 incident, end to end. A debloat push hung for 108s
-holding its device's shell lock; the wake-word reconcile queued behind it timed
-out waiting for the lock, and its `finally` — which runs whether or not the
-acquire succeeded — ran the SAME cleanup as a holder would. It closed the
-websocket the debloat transfer was still writing to, sent that device
-`shell_close`, and released the debloat's lock. The slot detect that followed
-then died with `Lock is not acquired`, returned `""`, and surfaced to the
-operator three steps away from anything to do with locking: **"could not
-determine active slot"**.
+EFF, 2026-09-04: a debloat push held its device's shell lock for 108s. The
+wake-word reconcile queued behind it timed out waiting, and its `finally` ran
+the holder's cleanup: it closed the websocket the debloat was writing to and
+released the debloat's lock. The operator saw "could not determine active
+slot".
 
-The bug is `Lock.locked()` being read as "am I the holder". It answers "is
-anyone holding this", so it is the wrong question and it was the only guard.
-`_shell_owner` records the task and every cleanup path asks whether it is that
-task.
-
-What is pinned here is the INVARIANT, not the shape: a task that does not hold
-the lock must have NO effect. Not "calls fewer methods" — none. Each test
-below fails against the `Lock.locked()` version, which is how they were
-verified.
+The guard had been `Lock.locked()`, which answers "is anyone holding this".
+`_shell_owner` records the task. What is pinned: a task that does not hold the
+lock has no effect at all. Each test fails against the `locked()` version.
 """
 
 import asyncio

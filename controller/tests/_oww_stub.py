@@ -1,23 +1,11 @@
 """
-Opt-in stub for openwakeword, so `em_controller` can be imported at all.
+Opt-in stub for openwakeword, so `em_controller` can be imported.
 
-em_controller does `from openwakeword.model import Model as OWWModel` at module
-level (em_controller.py:71). openwakeword is not installed in the test
-environment — it pulls onnxruntime and scikit-learn, minutes of install for
-nothing here — so importing em_controller raises ModuleNotFoundError, which is
-why its 2,181 statements measured 0.0% and its only coverage was guards reading
-the source.
+em_controller imports `openwakeword.model.Model` at module level, and the
+real package (onnxruntime, scikit-learn) is not installed for tests.
 
-Installing the real package is not the answer: CI's install line would go from
-seconds to minutes on every push to run a suite that scores no audio, and the
-model files it loads are on the device side, not here.
-
-This is opt-in per test rather than done in conftest.py, deliberately. Four
-existing tests call `pytest.importorskip("openwakeword")` so they skip when the
-real package is absent; a conftest-level stub satisfies that check and they stop
-skipping, then fail on the missing `MODELS` table. `importorskip` asks whether
-the package is importable, and after a global stub the honest answer would be
-"yes, at something that is not openwakeword".
+Opt-in per test, not in conftest: four tests `importorskip("openwakeword")`
+and a global stub would make them stop skipping and fail.
 """
 
 import sys
@@ -44,14 +32,9 @@ def install() -> None:
 
     class Model:
         """
-        Stand-in for openwakeword.model.Model. Constructible and inert.
-
-        `predict` refuses rather than returning a number. A test that reaches a
-        scoring path and gets a fabricated score would pass on a value nothing
-        measured, which is the same class of wrong as a metric that reads clean
-        because it is broken. Real scoring is validated tensor-for-tensor
-        against the device's golden fixtures (internal/wakeword/testdata), which
-        is where a score belongs.
+        Constructible and inert. `predict` raises: a fabricated score would let a
+        test pass on a number nothing measured. Scoring is checked against the
+        device's golden fixtures.
         """
 
         def __init__(self, *args, **kwargs):

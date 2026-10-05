@@ -1,23 +1,17 @@
 """
-The device's controller.json: two removals, and they must not be confused.
+The device's controller.json, and the two ways it is removed.
 
-`controllerEndpoints` is fleet-only and delivered as a FILE the firmware
-re-reads on every dial, which is why it needs no bounce and works on every
-v2.16.0+ device with no firmware change. #166 documented hand-writing that file
-for devices that cannot use mDNS, which is where the asymmetry comes from:
+`controllerEndpoints` reaches the device as a file the firmware re-reads on
+every dial. #166 documented writing that file by hand for devices that cannot
+use mDNS, so:
 
-  - the FLEET sync removes only a file carrying `managed_by`, because at that
-    point the controller is updating a fleet it does not own and a file
-    somebody wrote by hand is the only way back for a device without mDNS;
-  - the WIZARD removes ANY file, because at provisioning this controller is the
-    source of truth and emOS keeps /data across a re-provision.
+  - the fleet sync removes only a file carrying `managed_by`;
+  - the wizard removes any file, since at provisioning this controller is the
+    source of truth.
 
-Every failure here is silent and lands on the device rather than the dashboard.
-Deleting a hand-written file strands a device that can no longer find the
-controller at all, and it presents as a device that is simply offline. So the
-branch that removes nothing, and the branch that removes a hand-written file on
-purpose, are both asserted — including the branch where the device does not
-answer, which must change nothing rather than assume absence.
+Deleting a hand-written file leaves a device that cannot find its controller
+and simply looks offline, so both branches are asserted, and so is a device
+that does not answer: nothing changes.
 """
 
 import asyncio

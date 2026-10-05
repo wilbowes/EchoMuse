@@ -1,33 +1,15 @@
 """
-One sqlite3.Connection is shared across the executor pool, and every access to
-it must serialise.
+One sqlite3.Connection is shared across the executor pool, so every access to
+it has to hold `_db_lock`.
 
-This is the 2026-07-12 fleet deploy-all: updating one device left the other
-sitting on "updating…". `_tx()` took `_db_lock` for the whole write transaction;
-the read helpers `_q` and `_q1` took nothing. A read landing between a write's
-`execute` and its `commit` is two threads using one connection at once, which
-SQLite rejects with SQLITE_MISUSE ("bad parameter or other API misuse") — and
-because the pool was only ever exercised by a SOLO device update, nothing
-tripped it until two ran at once.
+2026-07-12, a fleet deploy-all: `_tx()` held the lock for a write, the read
+helpers `_q` and `_q1` held nothing, and a read landing inside a write raised
+SQLITE_MISUSE. One device updating alone never tripped it.
 
-The source says all of this at em_db.py:1305-1314. What it did not have was a
-test, and the 8-thread stress test that found the bug was written during the
-session and never committed. So there are two tests here and they are not
-redundant:
-
-  - the STRESS test proves the behaviour holds today, under real contention,
-    with the real lock and the real connection;
-  - the AST GUARD proves no future helper reintroduces an unguarded access.
-
-The stress test alone is not enough, because a missing lock is a race: it fails
-only when two threads actually interleave, and it passes for ever on a machine
-fast enough to serialise them by luck. The AST guard alone is not enough
-either, because it cannot tell an access inside the lock from one outside it
-without reading the code — which is the mistake that made the original bug
-invisible. Together: one says it works, the other says it cannot stop working.
-
-Run with -p no:randomly if you have it. The failure is a race and a test that
-only fails sometimes is how the original shipped.
+Two tests, not redundant. The stress test shows it holds under real
+contention today; the AST guard stops a future helper touching the connection
+outside the lock, which a race-based test only catches when threads happen to
+interleave.
 """
 
 import ast
@@ -70,17 +52,11 @@ def _seed(device_id: str) -> None:
 
 def test_reads_racing_writes_do_not_raise_sqlite_misuse(fresh_db):
     """
-    THE regression. Eight threads, reads and writes interleaved, many cycles.
+    The regression: eight threads, reads and writes interleaved.
 
-    The reads are the ones that were unguarded, so they are deliberately the
-    majority — the original bug needed a read to land inside someone's
-    transaction, and a test that mostly writes would rarely produce that
-    interleaving.
-
-    500 cycles is not decoration. At 8 threads that is 4000 operations against
-    one connection, which is what it takes to overlap a read with a commit
-    reliably on a loaded CI runner. A smaller number passes by luck, which is
-    the failure mode this whole file exists to close.
+    Reads are the majority because the reads were what was unguarded. 500 cycles
+    is what it takes to overlap a read with a commit reliably on a loaded runner;
+    fewer passes by luck.
     """
     devices = [f"dev{i}" for i in range(8)]
     for d in devices:
@@ -222,15 +198,9 @@ def _line_of(node) -> int:
 
 def test_every_connection_access_is_inside_the_lock():
     """
-    The AST guard. `_q`, `_q1` and `_tx` are the only three places that touch the
-    connection, and all three must hold `_db_lock` for the whole access.
-
-    The failure this pins is a MISSING lock, which is invisible at runtime
-    except as a race and invisible to pyflakes entirely — so it is caught here
-    instead, where a fourth helper cannot be added without answering.
-
-    Reads are the case that was wrong, so the check is not satisfied by `_tx`
-    alone: each access must sit inside a `with` that names `_db_lock`.
+    The AST guard: `_q`, `_q1` and `_tx` are the only places that touch the
+    connection, and each access must sit inside a `with` naming `_db_lock`.
+    A missing lock shows at runtime only as a race.
     """
     tree = ast.parse(EM_DB.read_text())
 

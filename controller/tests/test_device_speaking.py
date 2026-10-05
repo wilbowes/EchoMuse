@@ -1,25 +1,15 @@
 """
-The `speaking` flag and the dashboard push are ONE operation, and this drives
-it rather than reading it.
+The `speaking` flag and the dashboard push are one operation.
 
-`tests/test_thinking_transition.py` already pins this from the source — no other
-assignment to `self.speaking` exists — which is the right guard but could only
-ever be a guard. em_controller was unimportable until 2026-10-03, so the
-alternative was never available. It is now, and that makes the AST guard a
-belt-and-braces check on a property that can be tested directly.
+`stream_speaker` set the flag and nothing pushed the change, so a turn read
+listening -> thinking -> idle and showed Speaking only if the dashboard's 5s
+poll landed mid-playback. `_set_speaking` is now the single writer and pushes.
 
-The bug, from CLAUDE.md: `stream_speaker` and `stream_speaker_chunks` set
-`speaking`, and `_push_device_state` has always carried the field and the
-dashboard has always rendered it above `thinking` — but nothing PUSHED the
-transition. A turn read listening -> thinking -> idle and never showed Speaking
-at all. It surfaced only when the dashboard's 5s poll of /api/devices landed
-mid-playback, which for a ~2s response it usually did not, so it presented as
-"stuck on thinking" rather than "Speaking is broken".
+Starting to speak also clears `thinking`: both reach the dashboard and
+`speaking` outranks it, so a stale `thinking` reappears when speaking ends.
 
-The second half is the mutual exclusion: starting to speak clears `thinking`.
-Both reach the dashboard and `speaking` outranks `thinking`, so a stale
-`thinking` is invisible until speaking clears — and then the tile reads as if
-the device started thinking again mid-response.
+`test_thinking_transition.py` guards the same thing from the source. This
+drives the code.
 """
 
 import asyncio
@@ -170,15 +160,9 @@ def test_clearing_speaking_leaves_thinking_alone(pushed):
 
 def test_a_failing_push_does_not_raise(pushed):
     """
-    The push is wrapped in `except BaseException`, and it must be.
-
-    `_set_speaking` is called from `stream_speaker`'s finally, which is reached
-    when barge-in cancels the task mid-send — so a plain `except Exception` does
-    NOT catch the CancelledError that arises there. A dashboard push is not
-    worth failing a speaker stream over.
-
-    This is asserted with a push that raises, including a CancelledError,
-    because the plain-Exception version passes the first and fails the second.
+    The push is wrapped in `except BaseException`, and has to be.
+    `_set_speaking` runs in `stream_speaker`'s finally, which a barge-in reaches
+    by cancelling the task, and `except Exception` does not catch CancelledError.
     """
     d = _device()
 
@@ -221,17 +205,10 @@ def test_a_failing_push_does_not_raise(pushed):
 
 def test_speaker_busy_is_counted_and_is_not_speaking(pushed):
     """
-    Two different things, and the one that matters for audio.
-
-    `speaking` clears as soon as the socket writes finish, which complete
-    near-instantly however slow the link is (see send_ms) — so it goes False
-    while the device still has ~5.5s of audio buffered and playing. Anything that
-    must not write over live audio has to test `speaker_busy`, a COUNT of
-    streams-or-draining, not this flag.
-
-    Held as a distinction because the failure is silent in the worst way: a
-    second writer that trusts `speaking` interleaves frames on 0x02 and produces
-    a stutter rather than an error.
+    `speaking` clears when the socket writes finish, while the Echo still has
+    seconds of audio buffered. Anything that must not write over live audio tests
+    `speaker_busy`, a count of streams playing or draining. A second writer
+    trusting `speaking` interleaves frames and stutters, with no error.
     """
     d = _device()
 
