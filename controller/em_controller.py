@@ -4596,9 +4596,23 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             _d.cancel_event.clear()
             await em_player.interrupt(_d.device_id)
             await _d.mic_stop()
+            # The ring a spoken reply gets (#779): an announcement, and the
+            # opening message of a conversation HA starts, played with the
+            # ring dark. The length is known here, so one TTL covers it.
+            ring = em_scenes.announcement_ring(
+                capable=_d.led_anim_capable,
+                turn_running=_d.voice_lock.locked(),
+                alarm_ringing=_d.timer_alarm_ringing)
+            if ring:
+                meter = dict(_d.led_scene["meter_anim"])
+                meter["ttlSec"] = em_scenes.meter_ttl(
+                    len(pcm_bytes) / (SPEAKER_RATE * 2))
+                await _d.send_led_anim(meter)
             try:
                 await _run_post_turn_playback(_d, pcm_bytes)
             finally:
+                if ring:
+                    await leds_off(_d)
                 await _d.mic_start()
                 await em_player.resume_interrupted(_d.device_id)
             # Whether the audio actually reached the speaker. Something that
