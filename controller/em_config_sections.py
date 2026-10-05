@@ -41,7 +41,7 @@ SECTIONS: dict[str, dict] = {
         "label": "Microphones",
         "keys": [
             "adcMicpga", "adcDigitalGain", "micGainDb",
-            "beamformingEnabled", "beamAngle",
+            "beamformingEnabled", "beamAngle", "wakeMic",
             "aecEnabled", "aecDelayMs", "aecTailMs", "aecRefSource", "nsAsr",
             "saveUtterances",
         ],
@@ -59,7 +59,6 @@ SECTIONS: dict[str, dict] = {
         "label": "Advanced",
         "keys": [
             "agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs",
-            "wakeMic",
             # Already the button-turn section; these decide whether they happen.
             "buttonSingleTapEvent", "buttonMultiTapMs",
             # Fleet-level in practice: a per-device console password would be a

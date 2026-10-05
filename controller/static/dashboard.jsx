@@ -9231,9 +9231,9 @@ const STAGE_MONO = "'DM Mono',monospace";
 const CONFIG_SECTIONS = {
   "playback": ["eqBands", "eqLoudness", "duckDb", "responseLevel", "limiterEnabled", "limiterThreshold", "limiterRelease", "bassGuardEnabled", "bassGuardDb", "streamReply", "volumeButtonSound"],
   "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice", "wakeSound", "wakeSoundLevel", "wakeClipCapture", "wakeClipMinScore"],
-  "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "aecRefSource", "nsAsr", "saveUtterances"],
+  "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "wakeMic", "aecEnabled", "aecDelayMs", "aecTailMs", "aecRefSource", "nsAsr", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "remoteVolumeArc", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
-  "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "wakeMic", "buttonSingleTapEvent", "buttonMultiTapMs", "consolePassword", "consoleTimeoutMin", "controllerEndpoints"],
+  "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs", "consolePassword", "consoleTimeoutMin", "controllerEndpoints"],
   "bluetooth": ["bleProxyEnabled", "bleProxyConnections"],
   "sendspin": ["sendspinEnabled", "sendspinUnpaired"]
 };
@@ -9929,6 +9929,21 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
               onChange={v => set('aecRefSource', v)}/>
             <Toggle label="Save utterances" sub="keeps the last 10 turns' mic audio on the server — play or download from Activity" value={config.saveUtterances ?? false} onChange={v => set('saveUtterances', v)}/>
           </div>
+          {/* An escape hatch for a dead centre mic (#705). Disabled with the
+              reason on firmware that ignores the key. */}
+          <Select label="Wake word microphone"
+            sub={wakeMicCapable
+              ? 'Centre unless that mic has failed; MK1 to MK6 are the ones around the edge'
+              : 'needs newer firmware on this Echo'}
+            disabled={!wakeMicCapable}
+            value={config.wakeMic ?? 0}
+            options={[
+              { value: 0, label: 'Centre' },
+              { value: 1, label: 'MK1' }, { value: 2, label: 'MK2' },
+              { value: 3, label: 'MK3' }, { value: 4, label: 'MK4' },
+              { value: 5, label: 'MK5' }, { value: 6, label: 'MK6' },
+            ]}
+            onChange={v => set('wakeMic', v)}/>
         </StageAdvanced>
       </Stage>
 
@@ -10073,24 +10088,6 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
         {subHeader('Turn processing')}
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px', ...inputStyle }}>
           <Toggle label="Auto gain (AGC)" sub="levels button-turn speech; never the wake stream" value={config.agcEnabled ?? true} onChange={v => set('agcEnabled', v)}/>
-        </div>
-        {/* An escape hatch for a dead centre mic (#705), so it sits here and
-            not with the microphone gains. Disabled with the reason on
-            firmware that ignores the key. */}
-        <div style={inputStyle}>
-          <Select label="Wake word microphone"
-            sub={wakeMicCapable
-              ? 'Centre unless that mic has failed; MK1 to MK6 are the ones around the edge'
-              : 'needs newer firmware on this Echo'}
-            disabled={!wakeMicCapable}
-            value={config.wakeMic ?? 0}
-            options={[
-              { value: 0, label: 'Centre' },
-              { value: 1, label: 'MK1' }, { value: 2, label: 'MK2' },
-              { value: 3, label: 'MK3' }, { value: 4, label: 'MK4' },
-              { value: 5, label: 'MK5' }, { value: 6, label: 'MK6' },
-            ]}
-            onChange={v => set('wakeMic', v)}/>
         </div>
         {subHeader('Speech gate')}
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '4px 20px', ...inputStyle }}>
