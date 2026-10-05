@@ -42,28 +42,26 @@ log = logging.getLogger("echomuse.announce")
 ANNOUNCE_TIMEOUT_S = 120.0
 
 
-# How much quiet a message keeps at its end when the Echo listens straight
-# after it (Wil, 2026-10-05). Text-to-speech pads its clips, and by a
-# different amount per engine: 0.44s from Chatterbox and 0.40s from Google
-# for one sentence, measured that day. The ring follows the speaker's level,
-# so it sat dark for that long before the listening ring, and the person
-# waited it out before they could answer. A consistent short pause rather
-# than none: a reply that listens the instant the last word ends reads as
-# cutting in.
+# How much quiet a message ends on when the Echo listens straight after it.
+# Ours to set, not the text-to-speech engine's (Wil, 2026-10-05): engines pad
+# their clips by whatever they like, and that pad is time the person waits
+# before they can answer, with the ring dark. A short pause rather than none:
+# a reply that listens the instant its last word ends reads as cutting in.
 LISTEN_TAIL_MS = 200
 # A frame this far below the clip's loudest counts as quiet. Relative, so a
-# quiet voice is not trimmed as silence and a noisy pad is still found.
+# quiet voice is not taken for silence and a noisy pad is still found.
 _QUIET_DB = -40.0
 _TAIL_FRAME_MS = 10
 
 
-def cap_trailing_quiet(pcm: bytes, rate: int, keep_ms: int = LISTEN_TAIL_MS) -> bytes:
+def set_trailing_quiet(pcm: bytes, rate: int, tail_ms: int = LISTEN_TAIL_MS) -> bytes:
     """
-    `pcm` (mono S16_LE) with the quiet at its end cut down to `keep_ms`.
+    `pcm` (mono S16_LE) ending on exactly `tail_ms` of quiet after its last
+    sound: a longer tail is cut, a shorter one is filled out with silence.
 
-    Only ever shortens, and only the tail: a clip with less quiet than
-    `keep_ms` comes back untouched, as does one with no sound in it at all,
-    where there is no end of speech to measure from.
+    What quiet the clip already has is kept up to that length, so the voice's
+    own decay is not replaced by a hard cut to zero. A clip with no sound in
+    it comes back untouched: there is no end of speech to measure from.
     """
     frame = max(1, rate * _TAIL_FRAME_MS // 1000)
     samples = np.frombuffer(pcm[:len(pcm) - len(pcm) % 2], dtype="<i2")
@@ -75,11 +73,10 @@ def cap_trailing_quiet(pcm: bytes, rate: int, keep_ms: int = LISTEN_TAIL_MS) -> 
     if loudest <= 0.0:
         return pcm
     loud = np.nonzero(energy >= loudest * 10.0 ** (_QUIET_DB / 10.0))[0]
-    end_of_sound = (int(loud[-1]) + 1) * frame
-    keep = end_of_sound + rate * keep_ms // 1000
-    if keep >= len(samples):
-        return pcm
-    return samples[:keep].tobytes()
+    want = (int(loud[-1]) + 1) * frame + rate * tail_ms // 1000
+    if want <= len(samples):
+        return samples[:want].tobytes()
+    return samples.tobytes() + bytes(2 * (want - len(samples)))
 
 
 async def run(
@@ -115,7 +112,7 @@ async def run(
     so a wedged chime cannot extend the whole thing past it.
 
     `tail` reshapes the end of the MESSAGE before it plays, and is passed when
-    the Echo will listen straight after (`cap_trailing_quiet`). The chime is
+    the Echo will listen straight after (`set_trailing_quiet`). The chime is
     left as it is: nothing waits on its last note.
     """
     ok = False
@@ -187,5 +184,9 @@ async def play_media(
         return False
 
     if tail is not None:
+        before = len(pcm_bytes)
         pcm_bytes = tail(pcm_bytes)
+        if len(pcm_bytes) != before:
+            log.info(f"[{log_name}] Announce tail set: "
+                     f"{len(pcm_bytes) - before:+d} bytes")
     return await play(pcm_bytes) is not False

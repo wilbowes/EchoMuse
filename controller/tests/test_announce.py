@@ -368,8 +368,8 @@ def test_no_handler_dispatches_to_a_method_that_does_not_exist():
 
 # ── The quiet at the end of a message the Echo listens after ────────────────
 #
-# Text-to-speech pads its clips, by a different amount per engine. When the
-# Echo listens straight after the message, that pad is a dark ring and a wait.
+# How long the Echo pauses before it listens is ours to set, not the
+# text-to-speech engine's. Engines pad their clips by different amounts.
 
 import numpy as np
 
@@ -393,51 +393,52 @@ def _secs(pcm: bytes) -> float:
     return len(pcm) / 2 / RATE
 
 
-def test_a_long_tail_is_cut_to_the_same_length_whatever_it_was():
-    for pad in (0.40, 0.44, 1.0, 3.0):
+def test_every_clip_ends_on_the_same_tail_whatever_the_engine_added():
+    for pad in (0.0, 0.05, 0.19, 0.2, 0.44, 1.0, 3.0):
         clip = np.concatenate([_tone(1.0), _quiet(pad)]).tobytes()
-        out = em_announce.cap_trailing_quiet(clip, RATE)
+        out = em_announce.set_trailing_quiet(clip, RATE)
         assert abs(_secs(out) - 1.2) < 0.011, pad
         # The sound itself is untouched.
-        assert out == clip[:len(out)]
+        assert out[:RATE * 2] == clip[:RATE * 2]
 
 
-def test_a_tail_already_shorter_is_left_alone():
-    """It only ever shortens: quiet is never added."""
-    for pad in (0.0, 0.05, 0.2):
-        clip = np.concatenate([_tone(1.0), _quiet(pad)]).tobytes()
-        assert em_announce.cap_trailing_quiet(clip, RATE) == clip
+def test_a_short_tail_is_filled_out_with_silence_after_what_was_there():
+    """The clip's own decay stays; silence is added behind it."""
+    clip = np.concatenate([_tone(1.0), _quiet(0.05, noise=0.0005)]).tobytes()
+    out = em_announce.set_trailing_quiet(clip, RATE)
+    assert out[:len(clip)] == clip
+    assert set(out[len(clip):]) == {0}
 
 
 def test_quiet_before_and_inside_the_message_is_kept():
     clip = np.concatenate([_quiet(0.5), _tone(0.5), _quiet(0.8), _tone(0.5),
                            _quiet(1.0)]).tobytes()
-    out = em_announce.cap_trailing_quiet(clip, RATE)
+    out = em_announce.set_trailing_quiet(clip, RATE)
     assert abs(_secs(out) - 2.5) < 0.011
 
 
 def test_a_noisy_pad_is_still_found():
     """A pad is not always digital silence."""
     clip = np.concatenate([_tone(1.0), _quiet(1.0, noise=0.0005)]).tobytes()
-    assert abs(_secs(em_announce.cap_trailing_quiet(clip, RATE)) - 1.2) < 0.011
+    assert abs(_secs(em_announce.set_trailing_quiet(clip, RATE)) - 1.2) < 0.011
 
 
 def test_a_quiet_voice_is_not_taken_for_silence():
     """The bar is relative to the clip's own loudest moment."""
     clip = np.concatenate([_tone(1.0, amp=0.004), _quiet(1.0)]).tobytes()
-    assert abs(_secs(em_announce.cap_trailing_quiet(clip, RATE)) - 1.2) < 0.011
+    assert abs(_secs(em_announce.set_trailing_quiet(clip, RATE)) - 1.2) < 0.011
 
 
 def test_clips_with_nothing_to_measure_come_back_untouched():
     silence = _quiet(2.0).tobytes()
-    assert em_announce.cap_trailing_quiet(silence, RATE) == silence
-    assert em_announce.cap_trailing_quiet(b"", RATE) == b""
-    assert em_announce.cap_trailing_quiet(b"\x01\x02", RATE) == b"\x01\x02"
+    assert em_announce.set_trailing_quiet(silence, RATE) == silence
+    assert em_announce.set_trailing_quiet(b"", RATE) == b""
+    assert em_announce.set_trailing_quiet(b"\x01\x02", RATE) == b"\x01\x02"
 
 
 def test_an_odd_byte_never_splits_a_sample():
     clip = np.concatenate([_tone(1.0), _quiet(1.0)]).tobytes() + b"\x7f"
-    assert len(em_announce.cap_trailing_quiet(clip, RATE)) % 2 == 0
+    assert len(em_announce.set_trailing_quiet(clip, RATE)) % 2 == 0
 
 
 def test_the_message_gets_the_tail_and_the_chime_does_not():
@@ -457,5 +458,5 @@ def test_the_message_gets_the_tail_and_the_chime_does_not():
 
 def test_only_a_message_the_echo_listens_after_is_trimmed():
     call = ESPHOME_SRC.split("await em_announce.run(")[1].split("\n        )")[0]
-    assert "cap_trailing_quiet" in call
+    assert "set_trailing_quiet" in call
     assert "if start_conversation else None" in call
