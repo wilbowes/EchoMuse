@@ -4,8 +4,11 @@ way (#438): what a picker write means, that the button never moves the wake
 word, and the one stream re-stop an unmute needs.
 """
 
+import ast
+import inspect
 import os
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -174,3 +177,55 @@ def test_off_is_accepted_for_an_echo_streaming_to_the_controller():
 
 def test_on_is_never_declined():
     assert not em_wakeword.decline_off(want=True, listening_locally=True, device_can=False)
+
+
+# ── The same on either side of the wake word split ──────────────────────────
+#
+# "On this Echo" and "On the controller" must behave the same with the wake
+# word off (Wil, 2026-10-05). #552 shipped with one gate on the Echo and none
+# where the controller scores a barge, and a follow-up path that only worked
+# for an Echo listening privately.
+
+CONTROLLER = Path(__file__).resolve().parent.parent
+
+
+def _func(name: str) -> str:
+    tree = ast.parse((CONTROLLER / "em_controller.py").read_text())
+    return ast.unparse(next(
+        n for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name))
+
+
+def test_the_rule_does_not_know_where_the_wake_word_is_detected():
+    """No parameter to branch on is how the two modes cannot drift."""
+    params = set(inspect.signature(em_wakeword.wake_allowed).parameters)
+    assert params == {"mic_muted", "enabled"}
+
+
+def test_the_controller_asks_the_rule_for_wakes_and_for_barges():
+    assert "em_wakeword.wake_allowed(" in _func("_stream_listen")
+    assert "em_wakeword.wake_allowed(" in _func("_barge_watcher")
+
+
+def test_the_echo_stops_at_the_crossing_before_anything_can_act_on_it():
+    """A session opened or a wake reported is what the controller would turn
+    into a wake or a barge, so the Echo's check has to come first."""
+    go = (CONTROLLER.parent / "device/cmd/server.go").read_text()
+    body = go.split("func onWakeCrossing(")[1].split("\nfunc ")[0]
+    off = body.index("WakeWordOn()")
+    assert off < body.index("OpenListen(")
+    assert off < body.index("SendOwwWake(")
+
+
+def test_a_follow_up_gets_a_microphone_in_every_combination():
+    """Reusing the wake stream is right only when there is one: scored here,
+    with the wake word on."""
+    needs = em_wakeword.follow_up_needs_turn_stream
+    assert needs(private=False, enabled=True) is False
+    assert needs(private=False, enabled=False) is True
+    assert needs(private=True, enabled=True) is True
+    assert needs(private=True, enabled=False) is True
+
+
+def test_the_follow_up_path_uses_it():
+    assert "em_wakeword.follow_up_needs_turn_stream(" in _func("_run_voice_locked")

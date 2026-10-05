@@ -81,5 +81,25 @@ def on_mic_mute(*, was_muted: bool, now_muted: bool, enabled: bool) -> bool:
 
 
 def wake_allowed(*, mic_muted: bool, enabled: bool) -> bool:
-    """Whether a wake-word crossing may start a turn."""
+    """
+    Whether a wake-word crossing may start a turn, or interrupt one.
+
+    One rule for both, and no parameter for WHERE the wake word is detected:
+    an Echo that detects its own stops at the crossing (`onWakeCrossing` in
+    device/cmd/server.go, which runs before a session can open or a barge be
+    reported), and the controller asks this for the wakes and barges it
+    scores. The two listening modes must not differ (Wil, 2026-10-05).
+    """
     return enabled and not mic_muted
+
+
+def follow_up_needs_turn_stream(*, private: bool, enabled: bool) -> bool:
+    """
+    Whether a follow-up question needs its own bounded turn stream.
+
+    A privately listening Echo has no wake stream to reuse. Nor does one
+    scored here with the wake word off: its wake stream is down and
+    `mic_start` is skipped while it is off, so reusing it gave the follow-up
+    no microphone at all.
+    """
+    return private or not enabled
