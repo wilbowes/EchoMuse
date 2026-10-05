@@ -1,6 +1,10 @@
 package speaker
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/wilbowes/EchoMuse/internal/outchain"
+)
 
 // The values here are measurements off a stock FireOS Dot, not preferences.
 // Pinning them means a later edit has to disagree with the hardware on
@@ -117,5 +121,51 @@ func TestJackRoutingDriftSkipsUnreadableControls(t *testing.T) {
 	d := jackRoutingDrift(true, map[string]string{ctlHPDriverGain: "0"})
 	if len(d) != 1 || d[0].Ctl != ctlHPDriverGain {
 		t.Errorf("want only the readable, drifted control, got %+v", d)
+	}
+}
+
+// The bass guard is for the internal driver. With a plug in it must be off
+// whatever the controller configured, and everything else must pass through
+// untouched — in particular the limiter, which guards the EQ against clipping
+// (#231) on either output.
+func TestChainForJackBypassesOnlyTheGuardWithAPlugIn(t *testing.T) {
+	in := outchain.DefaultParams()
+	in.Bands[0] = 3
+	in.Loudness = true
+	in.GuardDb = -20
+
+	got := chainForJack(in, true)
+	if got.GuardEnabled {
+		t.Errorf("guard must be bypassed with a plug in")
+	}
+	want := in
+	want.GuardEnabled = false
+	if got != want {
+		t.Errorf("only GuardEnabled may change:\n got %+v\nwant %+v", got, want)
+	}
+	if !got.LimiterEnabled {
+		t.Errorf("limiter must stay on with a plug in")
+	}
+}
+
+// Nothing in the jack: the controller's params, exactly — including a guard
+// the user switched off, which must not be switched back on.
+func TestChainForJackPassesParamsThroughWithNothingPluggedIn(t *testing.T) {
+	for _, guard := range []bool{true, false} {
+		in := outchain.DefaultParams()
+		in.GuardEnabled = guard
+		if got := chainForJack(in, false); got != in {
+			t.Errorf("guard=%v: want params unchanged, got %+v", guard, got)
+		}
+	}
+}
+
+// The caller's params are not modified: PcmSpeaker keeps them to re-derive
+// the chain when the plug comes out.
+func TestChainForJackDoesNotModifyTheStoredParams(t *testing.T) {
+	in := outchain.DefaultParams()
+	chainForJack(in, true)
+	if !in.GuardEnabled {
+		t.Errorf("stored params were modified")
 	}
 }

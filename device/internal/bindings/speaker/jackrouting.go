@@ -1,6 +1,9 @@
 package speaker
 
-import "github.com/wilbowes/EchoMuse/internal/bindings/mixer"
+import (
+	"github.com/wilbowes/EchoMuse/internal/bindings/mixer"
+	"github.com/wilbowes/EchoMuse/internal/outchain"
+)
 
 // Jack routing: the codec state each plug position needs.
 //
@@ -80,6 +83,27 @@ func jackRouting(inserted bool) []mixerWrite {
 		{Ctl: ctlSpeakerAmp, Args: []string{"On"}},
 		{Ctl: ctlHPDriverGain, Args: []string{hpGainInternal, hpGainInternal}},
 	}
+}
+
+// chainForJack returns the output chain configuration a plug position needs:
+// the controller's params unchanged, except that the bass guard is bypassed
+// while something is in the jack.
+//
+// The guard exists for the INTERNAL driver — it pulls down the band below
+// 115Hz that the driver cannot radiate (em_mbc.py: -17.7dB at 50Hz, -5dB
+// overall). A cable carries that band to an amplifier or headphones that can
+// reproduce it, so the guard only throws it away there. "Speaker protection"
+// was one switch for both outputs, so a jack user chose between thin line-out
+// and an unguarded internal speaker.
+//
+// Only the guard. The limiter stays as configured — it is what stops the EQ
+// hard-clipping what it boosts (#231), and that is as true on a cable as on
+// the driver — and the EQ is the user's.
+func chainForJack(p outchain.Params, inserted bool) outchain.Params {
+	if inserted {
+		p.GuardEnabled = false
+	}
+	return p
 }
 
 // ── Drift ────────────────────────────────────────────────────────────────────

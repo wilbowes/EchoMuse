@@ -74,9 +74,14 @@ type PcmSpeaker struct {
 	// jackKnown says whether one has been applied at all. The reconcile loop
 	// needs a DESIRED state to compare against, and before jack.Watch has run
 	// there is none — acting on a default would fight whatever Init set up.
+	//
+	// chainParams is the output chain configuration last pushed by the
+	// controller, kept so a plug change can re-derive the chain from it
+	// (chainForJack). Under jackMu, since both inputs to that derivation are.
 	jackMu       sync.Mutex
 	jackInserted bool
 	jackKnown    bool
+	chainParams  outchain.Params
 	// deadCh is closed by silenceLoop on any exit so a pump call can return
 	// an error rather than block indefinitely waiting for a dead consumer.
 	deadCh chan struct{}
@@ -239,13 +244,14 @@ func (p *PcmSpeaker) OnStreamStats(cb func(StreamStats)) {
 
 func NewPcmSpeaker(echoTap func([]byte), levelTap func(rms float64)) (*PcmSpeaker, error) {
 	s := &PcmSpeaker{
-		stopCh:   make(chan struct{}),
-		deadCh:   make(chan struct{}),
-		echoTap:  echoTap,
-		levelTap: levelTap,
-		chain:    outchain.New(48000),
-		chainBuf: make([]byte, periodBytes),
-		srcBuf:   make([]byte, periodBytes),
+		stopCh:      make(chan struct{}),
+		deadCh:      make(chan struct{}),
+		echoTap:     echoTap,
+		levelTap:    levelTap,
+		chain:       outchain.New(48000),
+		chainParams: outchain.DefaultParams(),
+		chainBuf:    make([]byte, periodBytes),
+		srcBuf:      make([]byte, periodBytes),
 	}
 	s.voice = newAudioStream(audioChanDepth, s.deadCh)
 	s.music = newAudioStream(audioChanDepth, s.deadCh)
@@ -378,11 +384,16 @@ func (p *PcmSpeaker) SetJackRouting(inserted bool) {
 	p.jackMu.Lock()
 	p.jackInserted = inserted
 	p.jackKnown = true
+	p.chain.SetParams(chainForJack(p.chainParams, inserted))
+	guardBypassed := inserted && p.chainParams.GuardEnabled
 	p.jackMu.Unlock()
 
 	p.applyJackWrites(jackRouting(inserted))
 	log.Printf("[speaker] jack routing applied (%s)",
 		map[bool]string{true: "external", false: "internal"}[inserted])
+	if guardBypassed {
+		log.Printf("[speaker] output chain: bass guard bypassed while the jack is in use")
+	}
 }
 
 func (p *PcmSpeaker) applyJackWrites(ws []mixerWrite) {
@@ -640,8 +651,15 @@ func (p *PcmSpeaker) SetDuck(db float64) {
 
 // SetOutputChain sets the output chain's configuration; it lands on the next
 // period, keeping filter and limiter state, so a change mid-song is heard
-// within ~43ms and does not click.
-func (p *PcmSpeaker) SetOutputChain(params outchain.Params) { p.chain.SetParams(params) }
+// within ~43ms and does not click. A plug in the jack bypasses the bass guard
+// whatever the params say (chainForJack), and SetJackRouting re-derives the
+// chain from these params when the plug position changes.
+func (p *PcmSpeaker) SetOutputChain(params outchain.Params) {
+	p.jackMu.Lock()
+	p.chainParams = params
+	p.chain.SetParams(chainForJack(params, p.jackKnown && p.jackInserted))
+	p.jackMu.Unlock()
+}
 
 // SetOutputChainActive hands the output chain to this device (true) or back
 // to the controller (false). Only the controller's `output_chain` feature
