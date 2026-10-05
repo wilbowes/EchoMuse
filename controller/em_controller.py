@@ -3443,6 +3443,7 @@ async def _stream_listen(device: Device):
     nm_pending = 0    # near-misses buffered since the last hourly-rollup flush
     nm_max     = 0.0  # highest buffered near-miss score
     dead_streak = 0   # consecutive 10s mic_queue timeouts (resets on any frame)
+    stray_stopped_at = 0.0  # last mic_stop sent for a stream up with the wake word off
     try:
         while True:
             # Now that the model is shared via the module cache (#512), a
@@ -3624,6 +3625,15 @@ async def _stream_listen(device: Device):
                                             enabled=device.wake_word_enabled):
                 buf.clear()
                 device.wake_levels.clear()
+                if (em_wakeword.stray_stream(mic_muted=device.muted,
+                                             enabled=device.wake_word_enabled)
+                        and loop.time() - stray_stopped_at > 2.0):
+                    # Once per 2s: frames already in flight keep arriving
+                    # for a moment after the stop.
+                    stray_stopped_at = loop.time()
+                    log.info(f"[{device.device_id}] audio arriving with the "
+                             f"wake word off — stopping the stream")
+                    await device.mic_stop()
                 continue
 
             buf.extend(payload)

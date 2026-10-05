@@ -229,3 +229,19 @@ def test_a_follow_up_gets_a_microphone_in_every_combination():
 
 def test_the_follow_up_path_uses_it():
     assert "em_wakeword.follow_up_needs_turn_stream(" in _func("_run_voice_locked")
+
+
+def test_audio_arriving_with_the_wake_word_off_is_a_stream_to_stop():
+    """Off means nothing leaves the Echo. Muted, it sends nothing and owns
+    its stream; on, the stream is the wake stream."""
+    stray = em_wakeword.stray_stream
+    assert stray(mic_muted=False, enabled=False) is True
+    assert stray(mic_muted=True, enabled=False) is False
+    assert stray(mic_muted=False, enabled=True) is False
+    assert stray(mic_muted=True, enabled=True) is False
+
+
+def test_the_wake_listener_stops_a_stray_stream():
+    src = _func("_stream_listen")
+    at = src.index("em_wakeword.stray_stream(")
+    assert "mic_stop()" in src[at:at + 600]

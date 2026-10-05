@@ -93,6 +93,21 @@ def wake_allowed(*, mic_muted: bool, enabled: bool) -> bool:
     return enabled and not mic_muted
 
 
+def stray_stream(*, mic_muted: bool, enabled: bool) -> bool:
+    """
+    Whether wake-stream frames arriving now are a stream that should not be up.
+
+    With the wake word off the wake stream is down, so frames reaching the
+    wake listener mean something else left one running, and the Echo is
+    sending the room to the controller under "No wake word". Seen on
+    2026-10-05: an Echo listening privately restarts its own local stream
+    after a turn, and switching it to "On the controller" turned that into a
+    network stream nobody stopped for 31 seconds. While muted the Echo sends
+    nothing and owns its stream, so there is nothing to stop.
+    """
+    return not enabled and not mic_muted
+
+
 def follow_up_needs_turn_stream(*, private: bool, enabled: bool) -> bool:
     """
     Whether a follow-up question needs its own bounded turn stream.
