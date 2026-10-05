@@ -28,6 +28,8 @@ import asyncio
 import logging
 from typing import Awaitable, Callable, Optional
 
+import numpy as np
+
 log = logging.getLogger("echomuse.announce")
 
 # Whole-announcement cap: fetch plus playback. Sized to sit well under HA's
@@ -40,6 +42,46 @@ log = logging.getLogger("echomuse.announce")
 ANNOUNCE_TIMEOUT_S = 120.0
 
 
+# How much quiet a message keeps at its end when the Echo listens straight
+# after it (Wil, 2026-10-05). Text-to-speech pads its clips, and by a
+# different amount per engine: 0.44s from Chatterbox and 0.40s from Google
+# for one sentence, measured that day. The ring follows the speaker's level,
+# so it sat dark for that long before the listening ring, and the person
+# waited it out before they could answer. A consistent short pause rather
+# than none: a reply that listens the instant the last word ends reads as
+# cutting in.
+LISTEN_TAIL_MS = 200
+# A frame this far below the clip's loudest counts as quiet. Relative, so a
+# quiet voice is not trimmed as silence and a noisy pad is still found.
+_QUIET_DB = -40.0
+_TAIL_FRAME_MS = 10
+
+
+def cap_trailing_quiet(pcm: bytes, rate: int, keep_ms: int = LISTEN_TAIL_MS) -> bytes:
+    """
+    `pcm` (mono S16_LE) with the quiet at its end cut down to `keep_ms`.
+
+    Only ever shortens, and only the tail: a clip with less quiet than
+    `keep_ms` comes back untouched, as does one with no sound in it at all,
+    where there is no end of speech to measure from.
+    """
+    frame = max(1, rate * _TAIL_FRAME_MS // 1000)
+    samples = np.frombuffer(pcm[:len(pcm) - len(pcm) % 2], dtype="<i2")
+    n = len(samples) // frame
+    if n == 0:
+        return pcm
+    energy = (samples[:n * frame].astype(np.float64).reshape(n, frame) ** 2).mean(axis=1)
+    loudest = float(energy.max())
+    if loudest <= 0.0:
+        return pcm
+    loud = np.nonzero(energy >= loudest * 10.0 ** (_QUIET_DB / 10.0))[0]
+    end_of_sound = (int(loud[-1]) + 1) * frame
+    keep = end_of_sound + rate * keep_ms // 1000
+    if keep >= len(samples):
+        return pcm
+    return samples[:keep].tobytes()
+
+
 async def run(
     media_id: str,
     fetch: Callable[[str], Awaitable[bytes]],
@@ -48,6 +90,7 @@ async def run(
     log_name: str = "",
     timeout: float = ANNOUNCE_TIMEOUT_S,
     preannounce_media_id: str = "",
+    tail: Optional[Callable[[bytes], bytes]] = None,
 ) -> bool:
     """
     Fetch the announcement audio, play it, then report completion exactly once.
@@ -70,6 +113,10 @@ async def run(
     cue for the message; a missing cue is worth a log line, not a swallowed
     announcement, and `ok` reports the MESSAGE. Both share one timeout budget
     so a wedged chime cannot extend the whole thing past it.
+
+    `tail` reshapes the end of the MESSAGE before it plays, and is passed when
+    the Echo will listen straight after (`cap_trailing_quiet`). The chime is
+    left as it is: nothing waits on its last note.
     """
     ok = False
     try:
@@ -78,7 +125,7 @@ async def run(
         else:
             ok = await asyncio.wait_for(
                 _preannounce_then_play(
-                    media_id, preannounce_media_id, fetch, play, log_name),
+                    media_id, preannounce_media_id, fetch, play, log_name, tail),
                 timeout)
     except (asyncio.TimeoutError, TimeoutError):
         log.error(f"[{log_name}] Announce timed out after {timeout}s")
@@ -95,6 +142,7 @@ async def _preannounce_then_play(
     fetch: Callable[[str], Awaitable[bytes]],
     play: Optional[Callable[[bytes], Awaitable[object]]],
     log_name: str = "",
+    tail: Optional[Callable[[bytes], bytes]] = None,
 ) -> bool:
     """The chime, then the message. Returns whether the MESSAGE played."""
     if preannounce_media_id:
@@ -102,7 +150,7 @@ async def _preannounce_then_play(
             await play_media(preannounce_media_id, fetch, play, log_name)
         except Exception as e:
             log.warning(f"[{log_name}] Preannounce chime failed: {e}")
-    return await play_media(media_id, fetch, play, log_name)
+    return await play_media(media_id, fetch, play, log_name, tail)
 
 
 async def play_media(
@@ -110,6 +158,7 @@ async def play_media(
     fetch: Callable[[str], Awaitable[bytes]],
     play: Optional[Callable[[bytes], Awaitable[object]]],
     log_name: str = "",
+    tail: Optional[Callable[[bytes], bytes]] = None,
 ) -> bool:
     """
     Fetch and play, with no reply to anyone. True if the audio reached the
@@ -137,4 +186,6 @@ async def play_media(
         )
         return False
 
+    if tail is not None:
+        pcm_bytes = tail(pcm_bytes)
     return await play(pcm_bytes) is not False
