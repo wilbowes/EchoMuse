@@ -98,10 +98,11 @@ func TestEnsureRoutesClosesEveryRoute(t *testing.T) {
 
 	EnsureRoutes()
 
-	if len(b.sets) != len(Routes) {
-		t.Fatalf("%d writes for %d routes", len(b.sets), len(Routes))
+	all := append(append([]Write{}, Routes...), InputGains...)
+	if len(b.sets) != len(all) {
+		t.Fatalf("%d writes for %d routes and input gains", len(b.sets), len(all))
 	}
-	for i, w := range Routes {
+	for i, w := range all {
 		if len(b.sets[i]) != 2 || b.sets[i][0] != w.Name || b.sets[i][1] != w.Value {
 			t.Errorf("write %d = %v, want [%s %s]", i, b.sets[i], w.Name, w.Value)
 		}
@@ -135,7 +136,7 @@ func TestEnsureRoutesRunsOnlyOncePerProcess(t *testing.T) {
 // an absent control is now an error, and this is the count that says so.
 //
 // The control assertion is the second half: the same call with a backend that
-// accepts everything writes all ten, so a count of zero here cannot be an
+// accepts everything writes all of them, so a count of zero here cannot be an
 // artefact of the fake.
 func TestEnsureRoutesCountsAndReportsFailures(t *testing.T) {
 	resetOnce()
@@ -148,9 +149,9 @@ func TestEnsureRoutesCountsAndReportsFailures(t *testing.T) {
 
 	EnsureRoutes()
 
-	if len(b.sets) != len(Routes)-2 {
+	if want := len(Routes) + len(InputGains) - 2; len(b.sets) != want {
 		t.Fatalf("%d writes, want %d — a failing control must not stop the "+
-			"remaining routes being attempted", len(b.sets), len(Routes)-2)
+			"remaining routes being attempted", len(b.sets), want)
 	}
 
 	// The control: nothing fails, everything is written.
@@ -158,8 +159,52 @@ func TestEnsureRoutesCountsAndReportsFailures(t *testing.T) {
 	ok := &recordingBackend{}
 	mixer.Use(ok)
 	EnsureRoutes()
-	if len(ok.sets) != len(Routes) {
+	if want := len(Routes) + len(InputGains); len(ok.sets) != want {
 		t.Fatalf("control: %d writes with nothing failing, want %d",
-			len(ok.sets), len(Routes))
+			len(ok.sets), want)
+	}
+}
+
+// The input gains are a level, not a route, so a wrong one is quieter rather
+// than silent — which is how eight of them went unwritten until #806.
+// Every channel of every ADC, both sides, and OFF: On is the kernel's default
+// and reads about 6dB lower than the HAL's Off.
+func TestInputGainsCoverEveryChannelAndAreOff(t *testing.T) {
+	want := map[string]bool{}
+	for _, adc := range []string{"A", "B", "C", "D"} {
+		for _, side := range []string{"L", "R"} {
+			want["ADC_"+adc+" DIF1_"+side+" Input Gain"] = true
+		}
+	}
+	got := map[string]bool{}
+	for _, w := range InputGains {
+		if got[w.Name] {
+			t.Errorf("%s listed twice", w.Name)
+		}
+		if w.Value != "0" {
+			t.Errorf("%s: value %q, want \"0\" (Off, as the HAL leaves it)", w.Name, w.Value)
+		}
+		got[w.Name] = true
+	}
+	for name := range want {
+		if !got[name] {
+			t.Errorf("missing %s", name)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("%d input gains, want %d", len(got), len(want))
+	}
+}
+
+// A failed input gain is reported on its own and does not stop the others.
+func TestEnsureRoutesStillWritesTheOtherInputGainsWhenOneFails(t *testing.T) {
+	resetOnce()
+	b := &recordingBackend{fail: map[string]bool{InputGains[3].Name: true}}
+	mixer.Use(b)
+
+	EnsureRoutes()
+
+	if want := len(Routes) + len(InputGains) - 1; len(b.sets) != want {
+		t.Fatalf("%d writes, want %d", len(b.sets), want)
 	}
 }
