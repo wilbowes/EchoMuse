@@ -1468,6 +1468,7 @@ func (c *ControlClient) SendOwwShadowCross(score float32, ageMs int64) {
 //
 // level is how loud the wake word was here (wakelevel.go), nil if its frames
 // had already left the ring; the controller logs it with the capture time.
+// It carries the word's tilt too, when there was signal to measure it on.
 func (c *ControlClient) SendOwwWake(score, threshold float32, capturedAt time.Time,
 	session uint32, floor float64, barge bool, level *WakeLevel) {
 	msg := map[string]interface{}{
@@ -1485,6 +1486,9 @@ func (c *ControlClient) SendOwwWake(score, threshold float32, capturedAt time.Ti
 	if level != nil {
 		msg["level"] = level.Level
 		msg["peak"] = level.Peak
+		if level.HasTilt {
+			msg["tilt"] = level.Tilt
+		}
 	}
 	_ = c.writeJSON(msg)
 }

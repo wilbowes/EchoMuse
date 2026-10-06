@@ -528,6 +528,12 @@ func (d *DataClient) WakeLevel(at time.Time) (level, peak float64, ok bool) {
 	return d.wakeLevels.measure(at)
 }
 
+// WakeTilt is the tone of the same wake word (wakelevel.go), ok false when
+// its window held nothing to measure.
+func (d *DataClient) WakeTilt(at time.Time) (float64, bool) {
+	return d.wakeLevels.tilt(at)
+}
+
 func (d *DataClient) endListen(e *listen.End) {
 	if e == nil {
 		return
@@ -1348,7 +1354,7 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 					copy(chunk, buf[:vadOwwChunkBytes])
 					buf = buf[vadOwwChunkBytes:]
 					at := time.Now()
-					d.wakeLevels.push(at, vadPeriodRMS(chunk), gainLin)
+					d.wakeLevels.pushFrame(at, chunk, gainLin)
 					// Score the SAME bytes on the SAME 80ms boundaries the
 					// controller receives in stream mode, so a device/controller
 					// score difference can only be the engine, not the framing.

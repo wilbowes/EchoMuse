@@ -1856,7 +1856,7 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                 rms = float(np.sqrt(np.mean((samples.astype(np.float64) / 32768.0) ** 2)))
                 rms_sum += rms
                 rms_max  = max(rms_max, rms)
-                levels.push(rms)
+                levels.push(rms, _tilt_sums(samples))
                 prediction = await loop.run_in_executor(None, model.predict, samples)
                 score = prediction.get(barge_pred_key, 0.0)
                 frames += 1
@@ -1952,7 +1952,8 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                         # Capture time already carries the link's least
                         # delay; its smoothed RTT would count it twice.
                         won_by = await _claim_wake(
-                            device, fired_heard, levels.measure(device.mic_gain_db))
+                            device, fired_heard, levels.measure(device.mic_gain_db),
+                            tilt=levels.tilt())
                     verdict = em_barge.cede(
                         serves=serves, won_by=won_by,
                         device_id=device.device_id, score=score,
@@ -3284,13 +3285,24 @@ def _arbitration_hold() -> float:
     )
 
 
+def _tilt_sums(samples) -> tuple[float, float]:
+    """em_wakelevel.tilt_sums for one frame of int16 samples, vectorised: the
+    pure version loops over 1280 samples, twelve times a second per Echo."""
+    if len(samples) < 2:
+        return 0.0, 0.0
+    f = samples.astype(np.float64) / 32768.0
+    return float(np.sum(f[1:] ** 2)), float(np.sum(np.diff(f) ** 2))
+
+
 async def _claim_wake(device: "Device", heard_at: float | None,
                       level: tuple[float, float] | None = None,
-                      by: str = "controller") -> str:
+                      by: str = "controller",
+                      tilt: float | None = None) -> str:
     """Claim the utterance for `device`; returns the winner's id.
 
     `level` is the wake's (level, peak) in dBFS, logged with its capture time
     so contested wakes can be paired across Echos later; see em_wakelevel.
+    `tilt` is the wake's tone in dB, logged beside it and not acted on.
     """
     hold = _arbitration_hold()
     won_by = await _wake_arbiter.contest(
@@ -3306,8 +3318,14 @@ async def _claim_wake(device: "Device", heard_at: float | None,
         heard_wall = time.time() - (now - (heard_at if heard_at is not None else now))
         em_dbwriter.submit(db.log_device, device.device_id, "info", "controller", em_wakelevel.log_line(
             level[0], level[1], device.noise_floor, device.mic_gain_db,
-            heard_wall, by))
+            heard_wall, by, tilt))
     return won_by
+
+
+def _device_tilt(ev: dict) -> float | None:
+    """The tilt an Echo measured for its own wake, if its firmware sends one."""
+    t = ev.get("tilt")
+    return float(t) if isinstance(t, (int, float)) and not isinstance(t, bool) else None
 
 
 def _device_level(ev: dict) -> tuple[float, float] | None:
@@ -3387,7 +3405,8 @@ async def _private_wake_turn(device: Device, ev: dict) -> None:
     won_by = device.device_id
     if serves and device.wake_arb_ms > 0 and len(_devices) > 1:
         won_by = await _claim_wake(device, _wake_heard_at(device, ev),
-                                   _device_level(ev), by="device")
+                                   _device_level(ev), by="device",
+                                   tilt=_device_tilt(ev))
     if not serves or won_by != device.device_id:
         wake_info = device.last_wake
         device.last_wake = None
@@ -3453,7 +3472,8 @@ async def _private_barge(device: Device, ev: dict) -> None:
     won_by = device.device_id
     if serves and device.wake_arb_ms > 0 and len(_devices) > 1:
         won_by = await _claim_wake(device, _wake_heard_at(device, ev),
-                                   _device_level(ev), by="device")
+                                   _device_level(ev), by="device",
+                                   tilt=_device_tilt(ev))
     verdict = em_barge.cede(
         serves=serves, won_by=won_by,
         device_id=device.device_id, score=score,
@@ -3754,7 +3774,7 @@ async def _stream_listen(device: Device):
                     device.noise_floor += 0.3 * (rms - device.noise_floor)
                 else:
                     device.noise_floor += 0.008 * (rms - device.noise_floor)
-                device.wake_levels.push(rms)
+                device.wake_levels.push(rms, _tilt_sums(samples))
 
                 prediction = await loop.run_in_executor(
                     None, model.predict, samples
@@ -4025,7 +4045,8 @@ async def _stream_listen(device: Device):
                                 heard_at = heard
                             won_by = await _claim_wake(
                                 device, heard_at,
-                                device.wake_levels.measure(device.mic_gain_db))
+                                device.wake_levels.measure(device.mic_gain_db),
+                                tilt=device.wake_levels.tilt())
                         if not serves or won_by != device.device_id:
                             wake_info = device.last_wake
                             device.oww_paused.clear()

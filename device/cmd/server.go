@@ -1493,6 +1493,7 @@ func onWakeCrossing(cc *client.ControlClient, dc *client.DataClient,
 	var lv *client.WakeLevel
 	if ok {
 		lv = &client.WakeLevel{Level: level, Peak: peak}
+		lv.Tilt, lv.HasTilt = dc.WakeTilt(at)
 	}
 	cc.SendOwwWake(score, crossed, at, session, dc.ListenFloor(), barge, lv)
 }
