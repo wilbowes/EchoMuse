@@ -3294,7 +3294,7 @@ async def _claim_wake(device: "Device", heard_at: float | None,
                       over_playback: bool = False) -> str:
     """Claim the utterance for `device`; returns the winner's id.
 
-    `level` is the wake's (level, peak) in dBFS. Its peak is what the arbiter
+    `level` is the wake's (level, peak) in dBFS. Its level is what the arbiter
     compares across Echoes (em_arbiter.pick), and it is logged with its
     capture time so contested wakes can be paired later; see em_wakelevel.
     `over_playback` says this Echo heard the wake over its own speaker, which
@@ -3304,7 +3304,7 @@ async def _claim_wake(device: "Device", heard_at: float | None,
     won_by = await _wake_arbiter.contest(
         device.device_id, device.wake_arb_ms / 1000.0,
         heard_at=heard_at, slack_s=_arbitration_slack(), hold_s=hold,
-        peak=level[1] if level is not None else None,
+        level=level[0] if level is not None else None,
         gains=device.adc_gains, over_playback=over_playback,
     )
     now = asyncio.get_event_loop().time()

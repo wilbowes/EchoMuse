@@ -279,9 +279,12 @@ def test_contest_separate_utterance_opens_its_own():
     assert run(main()) == ("office", "lounge")
 
 
-# ── Loudness, and when it is allowed to decide (#747) ───────────────────────
+# ── Loudness and time together (#747) ───────────────────────────────────────
+#
+# Each measure decides only where its gap is larger than its own error: 3dB of
+# level, 150ms of time. Under both, the loudest wins.
 
-from em_arbiter import Claim, pick, LOUDER_MARGIN_DB
+from em_arbiter import Claim, pick, LEVEL_UNCERTAINTY_DB, TIME_UNCERTAINTY_S
 
 
 def _who(claims, **kw):
@@ -297,25 +300,63 @@ def test_the_clearly_loudest_wins_over_the_first_to_hear():
     assert who == "near" and why == "loudest by 24dB"
 
 
-def test_without_a_clear_lead_the_first_to_hear_wins():
-    """Loudness is the noisy measure when two Echoes are about as loud."""
-    claims = [Claim(0.000, "a", -55.0), Claim(0.060, "b", -52.0)]
-    who, why = _who(claims)
-    assert who == "a" and why == "earliest heard; levels within 3dB"
-
-
-def test_the_margin_is_met_at_exactly_its_value():
-    at = [Claim(0.0, "a", -60.0), Claim(0.05, "b", -60.0 + LOUDER_MARGIN_DB)]
-    under = [Claim(0.0, "a", -60.0), Claim(0.05, "b", -60.0 + LOUDER_MARGIN_DB - 0.1)]
-    assert _who(at)[0] == "b"
+def test_the_level_threshold_is_met_at_exactly_its_value():
+    """Just under it, with a clear lead on time, time decides instead."""
+    late = TIME_UNCERTAINTY_S + 0.01
+    at = [Claim(0.0, "a", -60.0), Claim(late, "b", -60.0 + LEVEL_UNCERTAINTY_DB)]
+    under = [Claim(0.0, "a", -60.0),
+             Claim(late, "b", -60.0 + LEVEL_UNCERTAINTY_DB - 0.1)]
+    assert _who(at) == ("b", "loudest by 3dB")
     assert _who(under)[0] == "a"
 
 
-def test_the_lead_is_over_the_second_loudest_not_the_first_to_hear():
-    """Two loud Echoes close together are a close call, whoever heard first."""
-    claims = [Claim(0.000, "far", -75.0), Claim(0.040, "x", -50.0),
-              Claim(0.050, "y", -52.0)]
-    assert _who(claims)[0] == "far"
+def test_close_on_level_and_clearly_first_goes_to_the_first():
+    claims = [Claim(0.000, "a", -55.0), Claim(0.200, "b", -53.0)]
+    who, why = _who(claims)
+    assert who == "a" and why == "earliest heard by 200ms; levels within 2dB"
+
+
+def test_the_time_threshold_is_met_at_exactly_its_value():
+    at = [Claim(0.0, "a", -55.0), Claim(TIME_UNCERTAINTY_S, "b", -53.0)]
+    under = [Claim(0.0, "a", -55.0), Claim(TIME_UNCERTAINTY_S - 0.001, "b", -53.0)]
+    assert _who(at)[0] == "a"
+    assert _who(under)[0] == "b"
+
+
+def test_close_on_both_goes_to_the_loudest():
+    """Three Echoes side by side on 2026-10-06: one word, heard up to 113ms
+    apart and within 2.6dB. The frame grid used to pick; the level does now."""
+    claims = [Claim(0.000, "c95", -53.0), Claim(0.041, "vvv", -55.6),
+              Claim(0.096, "15le", -57.8)]
+    who, why = _who(claims)
+    assert who == "c95" and why == "loudest by 2.6dB; heard within 41ms"
+    # The same three with the quietest heard first: still the loudest.
+    claims = [Claim(0.000, "15le", -57.8), Claim(0.054, "c95", -53.0),
+              Claim(0.110, "vvv", -55.6)]
+    assert _who(claims)[0] == "c95"
+
+
+def test_the_lead_on_time_is_over_the_second_to_hear():
+    """One early claim and two late ones is a clear lead; two early and one
+    late is not, whoever the late one is."""
+    clear = [Claim(0.000, "a", -55.0), Claim(0.180, "b", -54.0), Claim(0.200, "c", -53.5)]
+    crowded = [Claim(0.000, "a", -55.0), Claim(0.020, "b", -54.0), Claim(0.200, "c", -53.5)]
+    assert _who(clear)[0] == "a"
+    assert _who(crowded)[0] == "c"
+
+
+def test_a_clearly_quieter_echo_cannot_win_on_time():
+    """Two loud Echoes close together are a close call between THEM. A far
+    one 23dB down is out of it, however early it reported."""
+    claims = [Claim(0.000, "far", -75.0), Claim(0.160, "x", -50.0),
+              Claim(0.170, "y", -52.0)]
+    who, why = _who(claims)
+    assert who == "x" and why == "loudest by 2.0dB; heard within 10ms"
+    # Between the two near ones, a clear lead on time still counts.
+    claims = [Claim(0.000, "far", -75.0), Claim(0.010, "y", -52.0),
+              Claim(0.170, "x", -50.0)]
+    who, why = _who(claims)
+    assert who == "y" and why == "earliest heard by 160ms; levels within 2dB"
 
 
 def test_a_missing_level_sends_the_whole_contest_back_to_time():
@@ -347,14 +388,16 @@ def test_one_claim_is_its_own_answer():
     assert _who([Claim(0.0, "only", None)]) == ("only", "only claim")
 
 
-def test_a_tie_on_time_goes_to_the_claim_that_arrived_first():
+def test_a_tie_on_both_goes_to_the_claim_that_arrived_first():
     claims = [Claim(0.0, "first", -55.0), Claim(0.0, "second", -55.0)]
     assert _who(claims)[0] == "first"
 
 
 # Twelve wakes one house heard on several Echoes at once (#747), as numbers
-# only: (ms after the first to hear, peak dBFS) per Echo, and the index of the
-# Echo that was loudest by 11dB or more every time. First-to-hear chose it in
+# only: (ms after the first to hear, dBFS) per Echo, and the index of the
+# Echo that was loudest by 11dB or more every time. The levels are the PEAKS
+# from that bundle, which is what was read off it; with leads this size the
+# averaged level the rule now compares would rank them the same way. First-to-hear chose it in
 # eight. None was heard over playback except where marked, which stays on time.
 _HOUSE = [
     ([(0, -66), (54, -56), (194, -68)], 1),
@@ -393,10 +436,10 @@ def test_a_held_contest_gives_the_turn_to_the_loudest():
         arb = WakeArbiter()
         t = asyncio.get_running_loop().time()
         far = asyncio.create_task(arb.contest(
-            "far", WINDOW, heard_at=t, slack_s=3.0, hold_s=HOLD, peak=-70.0))
+            "far", WINDOW, heard_at=t, slack_s=3.0, hold_s=HOLD, level=-70.0))
         await asyncio.sleep(0.05)
         near = asyncio.create_task(arb.contest(
-            "near", WINDOW, heard_at=t + 0.05, slack_s=3.0, hold_s=HOLD, peak=-50.0))
+            "near", WINDOW, heard_at=t + 0.05, slack_s=3.0, hold_s=HOLD, level=-50.0))
         return await far, await near, arb.last_why
     assert run(main()) == ("near", "near", "loudest by 20dB")
 

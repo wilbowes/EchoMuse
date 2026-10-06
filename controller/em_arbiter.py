@@ -65,25 +65,42 @@ utterance until the contest is decided. A fleet whose Echoes all detect the
 same way races on equal terms, so it does not wait — `contest()` with
 `hold_s=0` is exactly `claim()`.
 
-**Every contest is held, and the clearly loudest Echo wins it** (Wil,
-2026-10-05, #747). First-to-hear turned out to be decided by timing noise at
-close range: the scorer works in 80ms frames, and in one house's twelve
-contested wakes the nearest Echo heard the word 54 to 164ms AFTER the winner
-in four of them, while being 11 to 26dB louder than every other Echo in all
-twelve. So whenever two or more Echoes can claim, the first claim is held
-`hold_s` from when it was heard, and `pick()` chooses: an Echo at least
-`LOUDER_MARGIN_DB` louder than every other takes the turn; otherwise the
-earliest heard does, as before.
+**Every contest is held, and loudness and time decide it together** (Wil,
+2026-10-05 and 2026-10-06, #747). First-to-hear alone turned out to be decided
+by timing noise: the scorer works in 80ms frames on a grid that starts at a
+different moment on each Echo, so three Echoes side by side, hearing one word
+within a millisecond, reported it 89 to 113ms apart (measured 2026-10-06), and
+one of them was 53-55ms behind another on every wake. Sound covers a metre in
+3ms, so that noise is larger than any real difference in a house. In one
+house's twelve contested wakes the nearest Echo heard the word 54 to 164ms
+AFTER the winner in four of them, while being 11 to 26dB louder than every
+other Echo in all twelve.
 
-Loudness is `peak` from em_wakelevel: post-AEC, AGC never runs on the wake
-stream, and the mic gain setting is divided out. It only overrides time when
-it can be trusted, and falls back to earliest-heard when any claim has no
-level (older firmware), when a claim was heard over that Echo's own playback
-(the reading includes the reply or the music), or when the Echoes' MICPGA and
-digital gain settings differ (those are not divided out). A weak microphone
-is NOT caught here: it reads quiet and would lose to a louder Echo further
-away. The answer to that is the per-Echo check against its other six mics
-(#731), not a wider margin.
+So whenever two or more Echoes can claim, the first claim is held `hold_s`
+from when it was heard, and `pick()` lets each measure decide only where its
+gap is larger than its own error:
+
+1. an Echo at least `LEVEL_UNCERTAINTY_DB` louder than every other wins;
+2. otherwise, among the Echoes within that much of the loudest, one that
+   heard it at least `TIME_UNCERTAINTY_S` before the rest wins;
+3. otherwise the loudest wins. By then the Echoes are as good as equidistant,
+   and a level is a steadier way to choose between them than a frame grid.
+
+Loudness is `level` from em_wakelevel, the energy mean over the wake's window:
+post-AEC, AGC never runs on the wake stream, and the mic gain setting is
+divided out. Side by side on matched settings, three Echoes agreed to within
+2.7dB on it across five wakes, and it moved less from wake to wake than the
+single loudest frame did (0.8dB against 1.9dB over ten). It is only used when
+it can be trusted: the contest goes back to earliest-heard when any claim has
+no level (older firmware), when a claim was heard over that Echo's own
+playback (the reading includes the reply or the music), or when the Echoes'
+MICPGA and digital gain settings differ (those are not divided out). A weak
+microphone is NOT caught here: it reads quiet and would lose to a louder Echo
+further away. The answer to that is the per-Echo check against its other six
+mics (#731), not a wider margin.
+
+NOT handled yet: an emOS Echo captures about 6dB below a FireOS 5 one (#806),
+so in a fleet with both the FireOS Echo is favoured by that much.
 
 This is not the best-SNR-after-a-wait design removed on 2026-07-20. That one
 waited on every wake in every fleet and ranked by a ratio that could not tell
@@ -99,46 +116,62 @@ from __future__ import annotations
 import asyncio
 from typing import NamedTuple
 
-# How much louder than every other claimant an Echo must be for loudness to
-# override capture time. Healthy units have not been measured against each
-# other yet; this is a starting point, well under the 11dB smallest lead in
-# the data that prompted it.
-LOUDER_MARGIN_DB = 6.0
+# How far apart two readings must be before the difference is believed.
+#
+# Level: three Echoes on matched settings, side by side, read within 2.7dB of
+# each other (2026-10-06). The smallest real lead in the data that prompted
+# this was 11dB.
+LEVEL_UNCERTAINTY_DB = 3.0
+# Time: the same three reported one word up to 113ms apart.
+TIME_UNCERTAINTY_S = 0.150
 
 
 class Claim(NamedTuple):
     heard: float
     device_id: str
-    # em_wakelevel's peak for this wake, dBFS; None when the Echo sent none.
-    peak: float | None = None
+    # em_wakelevel's level for this wake, dBFS; None when the Echo sent none.
+    level: float | None = None
     # The gain settings the reading still contains (MICPGA, digital gain).
     gains: tuple | None = None
     # Heard over this Echo's own speaker output.
     over_playback: bool = False
 
 
-def pick(claims: list, margin_db: float = LOUDER_MARGIN_DB) -> tuple:
+def pick(claims: list, level_db: float = LEVEL_UNCERTAINTY_DB,
+         time_s: float = TIME_UNCERTAINTY_S) -> tuple:
     """
     (winner, why) among claims for one utterance.
 
-    The Echo at least `margin_db` louder than every other wins. Without a
-    clear, trustworthy lead the earliest heard wins, and a tie on time goes
-    to the claim that arrived first. `why` is for the log line.
+    Loudness decides when one Echo leads every other by `level_db`; failing
+    that, time decides among the Echoes within `level_db` of the loudest when
+    one heard it `time_s` before the rest; failing both, the loudest wins. Without levels that can be compared the earliest
+    heard wins, and a tie on time goes to the claim that arrived first. `why`
+    is for the log line.
     """
-    earliest = min(claims, key=lambda c: c.heard)
+    by_time = sorted(claims, key=lambda c: c.heard)
+    earliest = by_time[0]
     if len(claims) < 2:
         return earliest, "only claim"
-    if any(c.peak is None for c in claims):
+    if any(c.level is None for c in claims):
         return earliest, "earliest heard; a level is missing"
     if any(c.over_playback for c in claims):
         return earliest, "earliest heard; one was heard over playback"
     if len({c.gains for c in claims}) > 1:
         return earliest, "earliest heard; gain settings differ"
-    ranked = sorted(claims, key=lambda c: c.peak, reverse=True)
-    lead = ranked[0].peak - ranked[1].peak
-    if lead >= margin_db:
-        return ranked[0], f"loudest by {lead:.0f}dB"
-    return earliest, f"earliest heard; levels within {lead:.0f}dB"
+    by_level = sorted(claims, key=lambda c: c.level, reverse=True)
+    lead = by_level[0].level - by_level[1].level
+    if lead >= level_db:
+        return by_level[0], f"loudest by {lead:.0f}dB"
+    # Nobody leads outright. Only the Echoes within reach of the loudest are
+    # still in it: one that is clearly quieter is not the nearest, however
+    # early its frame grid let it report.
+    close = [c for c in by_time if by_level[0].level - c.level < level_db]
+    ahead = close[1].heard - close[0].heard
+    if ahead >= time_s:
+        return close[0], (f"earliest heard by {ahead * 1000:.0f}ms; "
+                          f"levels within {lead:.0f}dB")
+    return by_level[0], (f"loudest by {lead:.1f}dB; "
+                         f"heard within {ahead * 1000:.0f}ms")
 
 
 class WakeArbiter:
@@ -192,13 +225,12 @@ class WakeArbiter:
 
     async def contest(self, device_id: str, window_s: float,
                       heard_at: float | None = None, slack_s: float = 0.0,
-                      hold_s: float = 0.0, peak: float | None = None,
-                      gains: tuple | None = None, over_playback: bool = False,
-                      margin_db: float = LOUDER_MARGIN_DB) -> str:
+                      hold_s: float = 0.0, level: float | None = None,
+                      gains: tuple | None = None, over_playback: bool = False) -> str:
         """
         claim(), held so that every Echo that heard the utterance is counted
-        and `pick()` chooses among them: the clearly loudest, else the one
-        that HEARD it first. See the module docstring.
+        and `pick()` chooses among them by loudness and by when each HEARD
+        it. See the module docstring.
 
         Waits until `hold_s` after the first claim of the utterance was heard
         (less any time it already spent getting here), then returns the
@@ -214,7 +246,7 @@ class WakeArbiter:
         if self._contest is not None:
             opened, entries, decided = self._contest
             if abs(heard - opened) < window_s:
-                entries.append(Claim(heard, device_id, peak, gains, over_playback))
+                entries.append(Claim(heard, device_id, level, gains, over_playback))
                 return await asyncio.shield(decided)
 
         # No contest to join. A granted winner still holds this utterance.
@@ -223,13 +255,13 @@ class WakeArbiter:
                 and now - self._heard_at < window_s + max(0.0, slack_s)):
             return self._winner
 
-        entries = [Claim(heard, device_id, peak, gains, over_playback)]
+        entries = [Claim(heard, device_id, level, gains, over_playback)]
         decided: asyncio.Future = loop.create_future()
         self._contest = (heard, entries, decided)
         try:
             await asyncio.sleep(max(0.0, heard + hold_s - now))
         finally:
-            won, self.last_why = pick(entries, margin_db)
+            won, self.last_why = pick(entries)
             winner = won.device_id
             if self._contest is not None and self._contest[2] is decided:
                 self._contest = None
