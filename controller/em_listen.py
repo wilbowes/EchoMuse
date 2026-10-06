@@ -478,6 +478,8 @@ def parse_wake(msg: dict, arrived: float) -> dict | None:
         # dBFS, mic gain removed (em_wakelevel); absent on older firmware.
         "level":     _num("level"),
         "peak":      _num("peak"),
+        # dB, the word's tone (em_wakelevel); absent on older firmware.
+        "tilt":      _num("tilt"),
         "barge":     bool(msg.get("barge")),
         "arrived":   arrived,
     }

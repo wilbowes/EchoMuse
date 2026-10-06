@@ -141,12 +141,19 @@ def test_parse_wake():
                        "ageMs": 120, "floor": 0.002, "barge": True}, 5.0)
     assert ev == {"session": 3, "score": 0.8, "threshold": 0.5, "age_ms": 120,
                   "floor": 0.002, "barge": True, "arrived": 5.0,
-                  "captured_mono": None, "level": None, "peak": None}
+                  "captured_mono": None, "level": None, "peak": None,
+                  "tilt": None}
 
 
 def test_parse_wake_carries_the_wake_level():
     ev = L.parse_wake({"session": 3, "score": 0.8, "level": -60.5, "peak": -50}, 5.0)
     assert (ev["level"], ev["peak"]) == (-60.5, -50.0)
+    # The tilt rides the same message. Dropped here once, on its first run on
+    # hardware: the field was sent, logged nowhere, and nothing failed.
+    ev = L.parse_wake({"session": 3, "score": 0.8, "level": -60.5, "peak": -50,
+                       "tilt": -7.3}, 5.0)
+    assert ev["tilt"] == -7.3
+    assert L.parse_wake({"session": 3, "score": 0.8, "tilt": "x"}, 5.0)["tilt"] is None
 
 
 def test_parse_wake_refuses_what_it_cannot_act_on():
