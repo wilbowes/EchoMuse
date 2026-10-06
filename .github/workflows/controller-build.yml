@@ -70,6 +70,9 @@ jobs:
           echo "version=v$v" >> "$GITHUB_OUTPUT"
           echo "sha=sha-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
           echo "building v$v as sha-$(git rev-parse --short=7 HEAD)"
+          # Rebuilds the image's apt layer once a week instead of serving it
+          # from cache until the base digest moves (controller/Dockerfile).
+          echo "apt=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
@@ -93,6 +96,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           build-args: |
             EM_CONTROLLER_VERSION=${{ steps.version.outputs.version }}
+            APT_SNAPSHOT=${{ steps.version.outputs.apt }}
           tags: ghcr.io/${{ github.repository_owner }}/echomuse-controller:${{ steps.version.outputs.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
