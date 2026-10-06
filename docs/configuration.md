@@ -301,9 +301,9 @@ you change the wake word.
 ### Arbitration window
 With more than one Echo, saying the wake word in earshot of two of them
 used to start two competing conversations. Now **one answers**: the Echo
-that heard you clearly loudest, or, when none stands out, the one that heard
-you first. Any other Echo that heard the same word within this window
-(default 700ms) quietly stands down.
+that heard you loudest, which is normally the one in the room you are in.
+Any other Echo that heard the same word within this window (default 700ms)
+quietly stands down.
 
 Choosing takes a moment. With two or more Echoes online, a wake waits up to a
 quarter of a second so that every Echo that heard it is counted. With one
