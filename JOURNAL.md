@@ -4601,8 +4601,7 @@ find the wake sound setting.
 
 ## 2026-10-06 — a third contributor batch, an image that never upgraded, and a night measuring which Echo should answer
 
-**@forming's eight.** #792 to #799 arrived in 54 minutes, two days after the
-ask for one or two at a time with the plan on the issue first. Every diff was
+**@forming's eight.** #792 to #799 arrived in 54 minutes. Every diff was
 read against its issue. Closed with replies: #798 (`emos-svc`: the tool opens
 the FIFO write-only and non-blocking while init holds the read end for an
 instant each second, so the open fails with `ENXIO`, reproduced off target;
