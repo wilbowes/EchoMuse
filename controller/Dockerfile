@@ -43,8 +43,19 @@ WORKDIR /app
 # apt install below and the floating base tag; it adds no new class of
 # nondeterminism.
 #
+# APT_SNAPSHOT is what makes the upgrade actually run in CI. Both workflows
+# build with the GHA layer cache, and this layer's key is the base digest plus
+# the text of the RUN line — neither changes week to week, so the layer was
+# served from cache and apt never ran: main's build of 2026-10-05 still had
+# openssl and pcre2 at versions Debian had already replaced, and the weekly
+# scan failed on them. The workflows pass the ISO week (2026-W41), so the
+# layer is rebuilt once a week and cached in between. It is echoed because an
+# ARG only reaches a RUN's cache key when the RUN uses it. A local or add-on
+# build passes nothing and behaves as before.
+#
 # curl is for vendoring JS dependencies.
-RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends curl ffmpeg && rm -rf /var/lib/apt/lists/*
+ARG APT_SNAPSHOT=unset
+RUN echo "apt snapshot: ${APT_SNAPSHOT}" && apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends curl ffmpeg && rm -rf /var/lib/apt/lists/*
 # Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

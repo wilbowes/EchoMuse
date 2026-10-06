@@ -299,6 +299,12 @@ jobs:
       # a result, including when it skips. A workflow-level `paths:` filter
       # would leave the check simply absent on most PRs, which is the one
       # state a branch protection rule cannot tell apart from "not finished".
+      # The same weekly key as controller-build.yml, so this check builds the
+      # apt layer main will publish and the two share its cache entry.
+      - name: Week for the apt layer
+        id: apt
+        if: steps.changed.outputs.build == 'true'
+        run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
       - name: Build the controller image
         if: steps.changed.outputs.build == 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -308,6 +314,8 @@ jobs:
           load: true
           tags: echomuse-controller:pr
           platforms: linux/amd64
+          build-args: |
+            APT_SNAPSHOT=${{ steps.apt.outputs.week }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       # A wheel's CPU baseline is invisible to every other check, because
