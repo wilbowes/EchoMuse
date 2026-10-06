@@ -4598,3 +4598,113 @@ table has never been read).
 ring-to-microphone lag behind #782 unmeasured; two users on #683 who cannot
 find the wake sound setting.
 
+
+## 2026-10-06 — a third contributor batch, an image that never upgraded, and a night measuring which Echo should answer
+
+**@forming's eight.** #792 to #799 arrived in 54 minutes, two days after the
+ask for one or two at a time with the plan on the issue first. Every diff was
+read against its issue. Closed with replies: #798 (`emos-svc`: the tool opens
+the FIFO write-only and non-blocking while init holds the read end for an
+instant each second, so the open fails with `ENXIO`, reproduced off target;
+`restart` sets the hold and never clears it; `status` prints in PID 1), #799
+(the text shown during a boot-partition write said "Unplug the device", where
+#269 asks for "do not unplug"), #795 (it read the auto-join counter from a
+`settings` key we could not find, and stated as fact the reboot #439 asked to
+have established first), #793 (an early return in `_start_conversation`
+directly above the comment explaining that a silent satellite hangs Home
+Assistant's `ask_question`). Declined: #796, a permanent "(at last connect)"
+on the firmware version in four places for a window measured at about six
+minutes. Merged: #797, once its "Fixes #378" became "Refs". Sent back: #792,
+with Wil's decision on #776's open question: KEEP a stored "No wake word" and
+report "on" while the firmware cannot honour it, so an upgrade restores the
+choice. #794 needs a run against Home Assistant: in the deadlock case it
+sends the abort, which cancels the pipeline task the asking script runs in
+(read, not run).
+
+**Other queue work.** #689 closed: the reporter's fix was HTTPS in front of
+Home Assistant, a different cause from #769's proxy body limit, and why the
+plain-HTTP upload hung is not known (#800). #753 (stereo Sendspin) reviewed
+and sent back for three things: main's `ProcessFloat` from #716 is mono, so
+stereo would fold during a boosted reply; an unrelated ambient-light commit
+belongs in its own PR; its DacMux commit duplicates #700. #700 merged on two
+contributors' jack runs (FireOS 5 and 6), Wil's call; the internal speaker
+after an unplug is unchecked on our own Echoes.
+
+**The image that never upgraded.** The weekly scan of `:latest` failed with 7
+HIGH findings in openssl and pcre2, all fixed in Debian. #365 had put
+`apt-get upgrade` in the image for exactly this, and it was not running: both
+workflows build with the GHA layer cache, and that layer's key is the base
+digest plus the text of the RUN line, so it came from cache. Main's build of
+the day before still had the old packages. #801 moved the base digest and
+#802 keys the layer on the ISO week; the same three lines built W41, W41
+again (cached) and W42 (apt ran). On the dev rig the new image reconnected
+all three Echoes on wss, answered a turn and an announcement on each, and
+started media through ffmpeg in 2246ms against 2175-2237ms before. The scan
+stays red until a GA moves `:latest`.
+
+**Go.** `x/crypto` 0.57 and `x/sys` 0.48 need Go 1.26 and the pinned compiler
+is 1.24.0, which is out of upstream support; upstream's image is still the
+digest we pin. #803 (draft) swaps only the toolchain, by checksum, to 1.26.8.
+Stage 1, off hardware: both vet and build; the binary is 1.4% larger with the
+same five libraries; one new libc import, `clearenv`, which API 22 exports;
+host tests pass with `-race`. `go.mod` stays at 1.24 so the GODEBUG defaults
+do not move in the same step. Nothing says it runs on a Dot yet.
+
+**Arbitration, measured (#790).** Three Echoes side by side, one voice at
+2m, then one Echo in the hand.
+
+- *Time is noise.* One word, reaching all three within a millisecond, was
+  reported 89 to 224ms apart, and one Echo was 53-55ms behind another on five
+  wakes running: the scorer's 80ms frame grid starts at a different moment on
+  each. Sound covers a metre in 3ms.
+- *A 6dB microphone difference between userspaces (#806).* VVV read 3.0-3.8dB
+  louder than both emOS Echoes in ten wakes, across two positions. Of 239
+  mixer controls eight differed: `ADC_A..D DIF1_L/R Input Gain`, Off on
+  FireOS 5, On on emOS. Written Off on C95 alone, C95 went from 0.4dB below
+  15LE to 4.8dB above it. Matched, the three read within 2.7dB. A comment in
+  `codec/routes.go` said changing these "does nothing", which was true of
+  waking a powered-down ADC and nothing else. #808 (draft) writes them.
+- *Level separates rooms, not Echoes in a room.* 15LE held at arm's length
+  read within 1dB of two Echoes a metre further in four wakes of five.
+- *The reporter's bundle, re-scored:* fourteen contested wakes, the loudest
+  leading by at least 9.7dB on averaged level; first-to-hear chose it in
+  eight. Level minus noise floor picked the same Echo each time, by as little
+  as 0.8dB, because the occupied room is the noisier one. In our room it had
+  picked the in-hand Echo 8 of 8.
+- *Tone (#807, draft, log-only).* A `tilt` figure per wake, the energy of the
+  sample difference over the energy of the samples. Units agree within 0.9dB
+  on a clear word and 2.7dB on a quiet one; a metre nearer moved it 0 to 2dB.
+  Too weak to decide on. Amazon's patent (US20170076720A1) ranks on SNR and
+  spectral centroid, computed on beamformed signals.
+- *The hold* shut the nearest Echo out once in about 35 contests: its claim
+  arrived 18ms after the 250ms closed.
+
+The rule went through three forms in the evening: a 6dB margin; level and
+time each deciding past its own error; and, after Wil said what he wanted
+from it, the one pushed: **the loudest answers, no margin**, earliest heard
+only when levels cannot be compared. Wil: "I would be more concerned about an
+Echo answering in the same room I'm in than one in a different room. If I had
+multiple Echoes in the same room I'm probably not going to care which answers
+me." On stickiness: "feels like a workaround". The final form has unit tests
+only.
+
+**Mistakes of mine.** A test recipe copied the whole repo into a container,
+including 36GB of untracked forge data, and filled the disk quota; no shell
+command could start until Wil deleted a file by hand. #802 was merged with
+#700's text as its commit body; fixed by amending main's tip at Wil's request
+(`dc012aa` to `0d068fc`, same tree). I told Wil C95 had not reconnected after
+reading the last 100 log lines, when its line had scrolled out. I asked for a
+Sendspin check on a controller image change that Sendspin does not pass
+through. The tilt was dropped by `parse_wake`, which keeps named fields only,
+and that cost ten wakes. I ruled SNR out, reversed on one room's data, and
+reversed again on the reporter's. A 150ms time threshold was set inside noise
+that then measured 224ms. One table gave a lead as 5.3dB that was 4.5.
+
+**Raised.** #800 (the wizard's image upload fails depending on what is in
+front of Home Assistant), #806.
+
+**Still open:** #790's final form on hardware, with an Echo in the next room;
+#808's before-and-after pass; #803 stages 2 and 3; #794's Home Assistant run;
+#781; #774 on hold behind #803; #807 in draft until next-room data. The dev
+rig is on the tilt firmware and an earlier form of #790, with the input gain
+set by hand on C95 and 15LE until they reboot.

@@ -230,7 +230,14 @@ before it reaches a shell (git allows `$ ( ) ;` in a tag name). The firmware
 `server`, the emOS assets and the controller image carry build-provenance
 attestations (`gh attestation verify`); **nothing checks them before OTA yet**,
 so they make a forged release detectable, not impossible. Base images are
-pinned by index digest. One GitHub account makes every change, so branch and
+pinned by index digest. **The controller image's `apt-get upgrade` layer is
+keyed on the ISO week** (`APT_SNAPSHOT`, #802): both workflows build with the
+GHA layer cache, the layer's key was the base digest plus the text of the RUN
+line, and so it was served from cache and apt never ran. Main's image of
+2026-10-05 carried openssl and pcre2 versions Debian had already replaced,
+with the upgrade line in place, and the weekly scan failed on them. The scan
+reads `:latest`, which only a GA release moves, so it stays red from a fix
+landing until the next GA. One GitHub account makes every change, so branch and
 tag rules guard against mistakes only, and the token on the dev box can lift
 them.
 

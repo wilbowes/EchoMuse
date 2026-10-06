@@ -1416,6 +1416,13 @@ new database column is excluded until someone deliberately adds it: the
 failure mode is that support loses a field, never that user data reaches a
 public issue. A denylist gets this wrong once and it is unrecoverable.
 
+**`controller.log_levels` is the levels IN FORCE, read from the loggers**
+(#797, @forming), never the `LOG_LEVELS` string: a pair naming a logger that
+does not exist is dropped with a warning, and `DEBUG` sets the global level
+underneath whatever was asked for. Only loggers with a level of their own are
+listed, plus the root. It is there because a thin log tail is otherwise
+ambiguous between "nothing happened" and "it was not being logged".
+
 Three rules, enforced by `tests/test_support.py`, which asserts secret values
 appear **nowhere in the serialised output** rather than checking field-by-field
 — a leak through a log line or nested config is the one nobody predicts:

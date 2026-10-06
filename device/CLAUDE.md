@@ -708,7 +708,15 @@ a stock FireOS 5.5.5.4 Dot and ours: writing ctl 62 with music playing took the
 jack from inaudible to audible, while the `ref` loopback tap stayed flat —
 confirming it is a post-DAC analog stage and not something upstream.
 
-Stock changes five controls on insert, we now change two. `Right Channel Only`
+**`Audio_DacMux_Setting` is the jack's second missing piece (#700, found by
+@Kozikodi).** emOS left it Off and stock runs it On; with it Off the jack sat
+20-30dB under stock's level on FireOS 5, and on FireOS 6 only one channel
+played (@sascha-hemi, #669). It is written On with a plug in and Off on
+removal, and it is in the 30s reconcile. Merged 2026-10-06 on those two
+contributors' hardware runs; the internal speaker after an unplug has not
+been checked on our own Echoes.
+
+Stock changes five controls on insert, we now change three. `Right Channel Only`
 and `Ignore Ramp Up` are deliberately **not** copied: our wire is mono and
 `toStereo` duplicates L into R, so channel selection carries the same samples
 either way (it becomes real the day the wire carries stereo), and the ramp
