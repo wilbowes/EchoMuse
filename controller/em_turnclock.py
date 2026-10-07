@@ -53,6 +53,42 @@ FALLBACK_SILENCE = 1.0
 # link and the ordinary path never reaches it.
 FIRST_AUDIO_GRACE = 5.0
 
+# Seconds to wait for Home Assistant's reply to BEGIN before the turn is
+# abandoned. Hardcoded 30.0 until #805, where the reporter's tool-using
+# conversation agent was making 5 model calls and 4 tool turns and was still
+# going at 27s — a question needing one more round-trip crosses 30s in
+# ordinary use, and the abandoned turn is silent: no TTS, no error anywhere
+# the user can see, which from across the room is a deaf Echo.
+#
+# Reachable as the add-on option `tts_wait_timeout` (`EM_TTS_WAIT_TIMEOUT`).
+# The default is deliberately unchanged, so no existing deployment moves.
+TTS_WAIT_DEFAULT = 30.0
+
+# The ceiling is not arbitrary. The thinking ring clears itself on
+# `em_scenes.SPIN_TTL` (135s) measured from the same moment, so a wait that
+# outlasts the ring does not fix the silent failure — it swaps one for
+# another: an Echo that looks idle while the controller is still waiting.
+TTS_WAIT_MAX = 120.0
+
+
+def tts_wait_seconds(raw, default=TTS_WAIT_DEFAULT, maximum=TTS_WAIT_MAX):
+    """The reply wait in seconds, from the raw environment string.
+
+    Read at import with whatever an operator typed into the add-on box, so
+    this must never raise and must never return something that leaves the
+    turn unbounded: anything that is not a positive number falls back to the
+    default, and anything above the ring's dead-man is clamped to it.
+    """
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    if value <= 0:
+        return default
+    return min(value, maximum)
+
 
 def no_speech_verdict(now, turn_start, listening_since, speech_seen,
                       no_speech_timeout=NO_SPEECH_TIMEOUT,

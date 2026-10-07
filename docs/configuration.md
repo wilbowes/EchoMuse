@@ -126,8 +126,9 @@ silence and carries on when the next part arrives, so the reply is not lost, but
 it pauses. Try it with a few long replies. If they come out in fits and starts,
 turn it off.
 
-With it on, the 30 seconds the controller waits for a reply to begin only has to
-be met by the first words.
+With it on, the wait for a reply to begin — 30 seconds by default, and the
+add-on's **Reply wait** option if a tool-using agent needs longer (#805) — only
+has to be met by the first words.
 
 ### Speaker protection
 Keeps bass the driver cannot deliver from muddying everything above it. Leave

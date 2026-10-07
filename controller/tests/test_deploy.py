@@ -141,6 +141,41 @@ def test_addon_default_threshold_matches_the_controller():
     )
 
 
+def test_addon_default_reply_wait_matches_the_controller():
+    """
+    Same shape as the wake threshold above, and the same failure: config.yaml
+    ships the value a fresh add-on install meets, so a default that drifts
+    from em_turnclock's silently hands out a reply wait nobody chose.
+
+    The RANGE is pinned too, because the two halves of #805's ceiling live in
+    different files: the schema enforces it in the add-on UI, em_turnclock
+    clamps it for the standalone container, and both have to mean the same
+    number. The number itself is bounded by the thinking ring — see
+    `TTS_WAIT_MAX`.
+    """
+    import sys
+    sys.path.insert(0, str(CONTROLLER))
+    import em_turnclock
+
+    config = (CONTROLLER / "config.yaml").read_text()
+
+    default = re.search(r"^\s*tts_wait_timeout:\s*([0-9.]+)", config, re.M)
+    assert default, "config.yaml has no tts_wait_timeout option"
+    assert float(default.group(1)) == em_turnclock.TTS_WAIT_DEFAULT, (
+        f"config.yaml ships tts_wait_timeout {default.group(1)} but "
+        f"em_turnclock.TTS_WAIT_DEFAULT is {em_turnclock.TTS_WAIT_DEFAULT}"
+    )
+
+    rng = re.search(r'^\s*tts_wait_timeout:\s*"int\((\d+),(\d+)\)"',
+                    config, re.M)
+    assert rng, "schema has no tts_wait_timeout range"
+    assert float(rng.group(2)) == em_turnclock.TTS_WAIT_MAX, (
+        f"schema caps tts_wait_timeout at {rng.group(2)} but "
+        f"em_turnclock.TTS_WAIT_MAX is {em_turnclock.TTS_WAIT_MAX} — the "
+        f"add-on would accept a wait the controller then clamps"
+    )
+
+
 def test_addon_image_is_published_not_built_on_the_user_machine():
     """
     Without an `image:` key Supervisor builds the Dockerfile on whatever

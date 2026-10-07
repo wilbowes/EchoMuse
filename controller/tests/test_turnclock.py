@@ -197,3 +197,40 @@ def test_it_beats_has_15s_cap_by_a_wide_margin():
     # maxwellh's turn took 15,056ms from the first audio frame to HA's
     # STT_VAD_END. Whichever bound binds, this is far inside it.
     assert grace_over < 4.0
+
+
+# ── #805: the reply wait is configurable, and cannot be made unbounded ───────
+
+def test_the_reply_wait_default_does_not_move():
+    # The whole point of #805 is that the wait CAN move, not that it moved:
+    # every existing deployment keeps the behaviour it has today.
+    assert tc.TTS_WAIT_DEFAULT == 30.0
+    assert tc.tts_wait_seconds(None) == 30.0
+    assert tc.tts_wait_seconds("") == 30.0
+
+
+def test_the_reply_wait_takes_what_the_add_on_sends():
+    assert tc.tts_wait_seconds("60") == 60.0
+    assert tc.tts_wait_seconds(" 75 ") == 75.0
+    assert tc.tts_wait_seconds(90) == 90.0
+
+
+def test_a_typed_value_cannot_stop_the_controller_booting():
+    # Read once at import, with whatever an operator put in the box.
+    for junk in ("ninety", "60s", "1e", "thirty seconds", " "):
+        assert tc.tts_wait_seconds(junk) == tc.TTS_WAIT_DEFAULT, junk
+
+
+def test_a_reply_wait_can_never_run_longer_than_the_thinking_ring():
+    # em_scenes.SPIN_TTL is 135s and the ring is the only thing telling the
+    # user the turn is alive. A wait that outlasts it replaces the silent
+    # abort with a silent idle ring, which is the same bug wearing a hat.
+    assert tc.tts_wait_seconds("135") == tc.TTS_WAIT_MAX
+    assert tc.tts_wait_seconds("600") == tc.TTS_WAIT_MAX
+    assert tc.TTS_WAIT_MAX < 135.0, "must stay inside em_scenes.SPIN_TTL"
+
+
+def test_a_non_positive_wait_falls_back_rather_than_expiring_at_once():
+    # "0" would abandon every turn the instant it started.
+    assert tc.tts_wait_seconds("0") == tc.TTS_WAIT_DEFAULT
+    assert tc.tts_wait_seconds("-30") == tc.TTS_WAIT_DEFAULT

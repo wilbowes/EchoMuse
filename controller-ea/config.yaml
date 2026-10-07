@@ -97,6 +97,15 @@ options:
   # over HTTPS with a private CA. Put the file in Home Assistant's /ssl
   # folder and give the path as /ssl/<filename>.
   extra_ca_cert: ""
+  # Seconds to wait for Home Assistant's reply to begin before the turn is
+  # given up (#805). 30 is not a safety net for a tool-using conversation
+  # agent — a question needing a few model round-trips crosses it in ordinary
+  # use, and the abandoned turn is silent: no audio, no error the user can
+  # see. Raise it if yours is one. The ceiling is the thinking ring's own
+  # dead-man (em_scenes.SPIN_TTL, 135s) less a margin: past that the ring
+  # goes idle while the controller is still waiting, which is the same silent
+  # failure from the other side.
+  tts_wait_timeout: 30
 schema:
   server_host: "str"
   server_ip: "str"
@@ -110,3 +119,4 @@ schema:
   debug: "bool"
   log_levels: "str"
   extra_ca_cert: "str?"
+  tts_wait_timeout: "int(5,120)"

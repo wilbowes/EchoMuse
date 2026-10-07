@@ -78,3 +78,13 @@ configuration:
       in Home Assistant's ssl folder and enter /ssl/<filename> here.
       Without it, fetching the spoken response fails certificate
       verification and turns end with no audio.
+  tts_wait_timeout:
+    name: Reply wait (seconds)
+    description: >-
+      How long the controller waits for Home Assistant to start answering
+      before it gives up on the turn, in seconds. Raise it if your
+      conversation agent uses tools: such an agent legitimately needs longer
+      than 30 seconds for a real question, and a turn that is given up is
+      silent — no audio and no error, which looks like a deaf Echo. Above
+      120 is not accepted, because the ring stops showing that the Echo is
+      working at 135 seconds.
