@@ -1942,7 +1942,13 @@ throughout — so the rules below are all one rule seen from different angles.
   "`su` is not working", and the install step logged `Cleared.` after every
   command had failed. Probes carry a sentinel (`echo _CLEARCHK`) so the two
   answers are distinguishable — the same fix `_sync_start_script` needed for
-  `_SHELL_OK`, in a different file.
+  `_SHELL_OK`, in a different file. Patch Boot Image and Pre-seed Root DB
+  read their artifact back the same way (#723, @forming: `_magiskbootVerdict`
+  with `_MBCHK`, `_preseedVerdict` with `_DBCHK`). **The size probe relies on
+  `wc`, and that is only safe where the step runs**: TWRP on a Dot 2 is
+  BusyBox 1.22.1 and prints `DB=36864` unpadded (run on VVV, 2026-10-08),
+  while FireOS 5's own shell has no `wc` at all and prints `DB=` for a file
+  that exists. A probe moved to another shell needs running there first.
 - **Verify the bytes you wrote, not the block that contains them.** The flash
   step read back whole megabytes and compared against the image zero-padded to
   match, so 425,984 bytes of the PREVIOUS boot image were checked against zeros

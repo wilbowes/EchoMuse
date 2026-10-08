@@ -4707,3 +4707,98 @@ front of Home Assistant), #806.
 #781; #774 on hold behind #803; #807 in draft until next-room data. The dev
 rig is on the tilt firmware and an earlier form of #790, with the input gain
 set by hand on C95 and 15LE until they reboot.
+
+## 2026-10-08 — a mishear traced to one echo filter serving seven microphones, and a release date
+
+**The complaint.** Wil, back after 36 hours: Verona "doesn't hear me as well
+as she used to", and was it the mixer change of the 6th. It was the command
+after the wake word, not the wake word.
+
+**What it was not.** Each was a cheap measurement before any theory.
+
+- *The input gain change (#806).* C95 and 15LE had not rebooted, so the
+  switches set by hand on the 6th were still in force. Saved recordings from
+  both were 2-4dB louder with 0% clipping, and 15LE's hourly cancellation
+  during playback read 13-19dB before the change and 18dB after.
+- *The speech-to-text swap of the 6th.* Thirty saved recordings went through
+  the current Gemma shim and the previous image: 30 identical transcripts.
+- *Level.* Sixteen clips replayed from -12 to +18dB: clean ones stayed right
+  and misheard ones stayed misheard. Small edits flipped the noun on marginal
+  clips, including ones it had got right.
+- *Clipping on the wake sound.* 15LE's clipped-sample count did not move on
+  three of four affected turns.
+
+**What it was (#814).** The canceller ran after the microphone was chosen and
+held one filter. The wake stream reads the centre microphone and each turn
+locks to an edge one, so the filter was converged on the previous turn's
+microphone when the wake sound played. From a raw nine-channel capture on
+15LE (a `bench` build of the firmware it was running), a 64ms path fitted on
+one microphone removed 24-26dB of the wake sound on that microphone and
+between 23dB and minus 7dB on another; ch0/1, ch3/4 and ch2/5/6 share a path.
+During that capture a command naming a room was transcribed without the
+room, with the wake sound at -6.4dBFS in the audio sent on, and every light
+in the house went off. The next turn, on the same microphone 19 seconds
+later, had it at -32.7dBFS.
+
+Wil had the direction already: the journal of 2026-10-03 records per-mic
+cancelling ahead of selection as the first step, and seven cancellers
+measured at 19% of a core. What that entry called unmeasured was the cost of
+the channel switch, and this is that measurement.
+
+**The fix (#819, draft).** A speex state per microphone on the hardware
+reference, all adapting on every period; the six not in use rest after 256ms
+of a silent reference and resume on the first frame that is not. Seven saved
+echo paths in one file. `aec_replay` learnt to change microphone mid-run
+(#817), and on the same capture the second turn's wake sound went from 6.2dB
+removed to 26.2dB.
+
+On 15LE, four turns from four sides with a raw capture running and each
+recording lined up against it: 23.7, 19.5, 17.6 and 19.4dB of the wake sound
+removed on ch5, ch0, ch0 and ch2, leaving it 7.5-11.1dB below the speech
+where at the microphone it is 9-12dB above. Speech passed within 0.2dB.
+Twelve turns on the build, twelve transcribed correctly. Idle CPU for the
+process: 53.9% of a core before, 61.1% with seven always running, 52.4% with
+the rest. VVV, C95 and 15LE were left on the build, each with the morning's
+firmware in its other slot.
+
+**#723 merged**, after its two probes were run in TWRP on VVV, the one place
+they execute and the one place nobody had run them. BusyBox 1.22.1 there
+answers as the verdicts parse. FireOS 5's own shell has no `wc`.
+
+**A release date.** Wil: a GA on Sunday the 11th. Agreed scope for a second
+Early Access first: #819, #808 (it stays in the firmware), #790 if an Echo in
+the next room wins from that room, #811 if its review is clean. #808 and #790
+were rebased off the amended commit of the 6th, and #807 was closed unmerged:
+tilt was for telling Echoes in one room apart, which the #747 decision does
+not need. A dev add-on built from #790's head is staged on the Home Assistant
+host, not installed.
+
+**Practice.** Asked whether the dashboard's CSS lets a change be made once:
+colour yes (46 tokens under a ratchet), type size, spacing and radius no (248
+font sizes over 16 values, 548 inline style blocks). Wil's rule, for the
+whole codebase: good practice where practicable, and where it is not, say so,
+write down why, and review it. #820 (dashboard tokens), #821 (split the
+11,324-line file; 40 test files read it as text), #822 (a formatter and a
+linter per language, as ratchets, which Wil confirmed over the older
+undefined-names-only decision). #823 is the first item: `gofmt` over 18
+drifted files and a CI check.
+
+**Mistakes of mine.** I leaned on the mixer change as a side effect on the
+canceller, then on clipping, and the log refuted both. I proposed measuring
+the CPU cost of seven cancellers when the journal already held the figure,
+and Wil had to say "we've looked at this already". I told him the recordings
+were taken after the AGC; wake-word turns have none. I read the wake sound as
+still as loud as the speech from a 10ms peak against an average, and it was
+8-11dB under. The firmware restart for the capture left 15LE's canceller
+cold for the turn that switched the lights off. My first test run of #723
+was against a stale local branch. I told him the build would bundle several
+dashboard files without having tried it.
+
+**Raised.** #814, #815 (a turn logged empty with speech in its recording),
+#816 (15LE reconnected twice without rebooting), #817, #818, #820, #821,
+#822.
+
+**Still open:** a longer run on #819; #808's before-and-after pass; the
+next-room test for #790; #811's review and a reading of #810; the
+`except Exception` audit and the rest of #822; whether level over playback
+can now be trusted, which would let #790 drop its fallback for barge-ins.
