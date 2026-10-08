@@ -71,6 +71,13 @@ const (
 	// NumMics is how many microphones the hardware-reference path cancels:
 	// every channel a turn can be given (see micStates).
 	NumMics = 7
+
+	// quietHold is how many silent reference frames pass before the unused
+	// microphones rest. The filter sees two frames of far-end history at
+	// the 64ms tail, so by then every state's history is the silence the
+	// skipped frames would have added, and it resumes where it would have
+	// been. 8 frames is 256ms.
+	quietHold = 8
 )
 
 // Canceller is a single AEC instance shared by the speaker goroutine
@@ -97,6 +104,12 @@ type Canceller struct {
 	// the device, 19% of a core (JOURNAL 2026-10-03).
 	micStates       [NumMics]*C.SpeexEchoState
 	lastMicsSaveTry time.Time
+	// farQuiet counts consecutive bit-exact silent reference frames, and
+	// micFrames the per-microphone cancellations run. Past quietHold the
+	// microphones not in use are skipped: nothing is playing, so they have
+	// nothing to learn or remove, and running them is most of the cost.
+	farQuiet  int
+	micFrames uint64
 
 	statePath   string    // saved echo path (persist.go); empty = off
 	lastSaveTry time.Time // monotonic, rate-limits maybeSaveLocked
@@ -652,14 +665,25 @@ func (c *Canceller) ProcessMicsWithRef(mics [][]byte, active int, ref []byte) []
 	far := unsafe.Slice((*int16)(unsafe.Pointer(c.refBuf)), FrameSize)
 	res := unsafe.Slice((*int16)(unsafe.Pointer(c.outBuf)), FrameSize)
 	for off := 0; off < len(mono); off += FrameSize * 2 {
+		quiet := true
 		for i := 0; i < FrameSize; i++ {
 			far[i] = int16(binary.LittleEndian.Uint16(ref[off+i*2:]))
+			quiet = quiet && far[i] == 0
+		}
+		if quiet {
+			c.farQuiet++
+		} else {
+			c.farQuiet = 0
 		}
 		c.hwFrames++
 		// The active microphone last, so mic and res still hold its frame
 		// for the telemetry below.
 		for k := 1; k <= NumMics; k++ {
 			m := (active + k) % NumMics
+			if m != active && c.farQuiet > quietHold {
+				continue
+			}
+			c.micFrames++
 			sub := mics[m][off : off+FrameSize*2]
 			for i := 0; i < FrameSize; i++ {
 				mic[i] = int16(binary.LittleEndian.Uint16(sub[i*2:]))

@@ -236,3 +236,55 @@ func TestMicrophoneStatesFollowTheHardwareReference(t *testing.T) {
 		t.Fatal("per-microphone states built while cancellation is off")
 	}
 }
+
+// Nothing playing is most of the day. The six microphones not in use rest
+// then, and a turn that starts on one of them after any length of quiet is
+// still cancelled from its first frames: the wake sound is the first thing
+// to play.
+func TestUnusedMicrophonesRestWhileNothingPlays(t *testing.T) {
+	const learn, idle, after = 150, 400, 8
+	signal := synth((learn + idle + after) * FrameSize)
+	room := synth((learn+idle+after)*FrameSize + 3)[3:] // near-end noise, unrelated to the playback
+	for i := learn * FrameSize; i < (learn+idle)*FrameSize; i++ {
+		signal[i] = 0 // bit-exact, as the loopback is when idle
+	}
+	echoes := sevenEchoes(signal)
+	for ch := range echoes {
+		for i := range echoes[ch] {
+			echoes[ch][i] += room[i] / 64
+		}
+	}
+
+	c := hwCanceller(64)
+	runMics(c, signal, echoes, 6, 0, learn)
+	if c.micFrames != learn*NumMics {
+		t.Fatalf("while playing, %d cancellations ran over %d frames, want every microphone on each", c.micFrames, learn)
+	}
+	runMics(c, signal, echoes, 6, learn, learn+idle)
+	// The echo's tail runs a few frames into the quiet, then quietHold.
+	if ran, most := c.micFrames-learn*NumMics, uint64(idle+(quietHold+2)*(NumMics-1)); ran > most {
+		t.Fatalf("%d cancellations ran over %d quiet frames, want no more than %d", ran, idle, most)
+	}
+	before := c.micFrames
+	att := runMics(c, signal, echoes, 3, learn+idle, learn+idle+after)
+	if c.micFrames-before != after*NumMics {
+		t.Fatal("the microphones did not all resume when playback did")
+	}
+
+	always := hwCanceller(64)
+	runMics(always, signal, echoes, 6, 0, learn)
+	for f := learn; f < learn+idle; f++ { // the same quiet, one frame at a time, never resting
+		always.farQuiet = 0
+		runMics(always, signal, echoes, 6, f, f+1)
+	}
+	always.farQuiet = 0
+	want := runMics(always, signal, echoes, 3, learn+idle, learn+idle+after)
+
+	t.Logf("first %dms on a rested microphone: %.1fdB, against %.1fdB for one that never rested", after*32, att, want)
+	if att < want-1.5 {
+		t.Fatalf("a rested microphone cancelled %.1fdB in its first frames, %.1fdB for one that never rested", att, want)
+	}
+	if att < 12 {
+		t.Fatalf("a rested microphone cancelled %.1fdB in its first frames, want 12dB over the room noise", att)
+	}
+}

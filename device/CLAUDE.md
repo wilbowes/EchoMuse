@@ -127,8 +127,14 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
   `OutputChannel`), so all seven are converged whichever is chosen: on that
   capture the second turn's wake sound, on a different microphone from the
   first, went from 6.2dB removed to 26.2dB. Cost: 6.04ms per 32ms period for
-  the seven on an Echo, 19% of a core (JOURNAL 2026-10-03), running whether
-  or not anything plays. The saved echo paths are one file for the seven
+  the seven on an Echo, 19% of a core (JOURNAL 2026-10-03), while something
+  plays. The six not in use rest after 256ms of a bit-exact silent reference
+  (`quietHold`) and resume on the first frame that is not, which is the wake
+  sound's first frame; a rested microphone cancels the same as one that never
+  rested (35.1dB both in the test, over room noise). First run on 15LE: 17.6
+  to 23.7dB of the wake sound removed on four turns across three microphones,
+  leaving it 7.5-11.1dB below the speech where at the microphone it is 9-12dB
+  above, and speech within 0.2dB. The saved echo paths are one file for the seven
   (`aec_echo_path.bin.mics`), all or nothing on load. **Hardware reference
   only**: the software tap's ring is drained once per period and keeps one
   filter on the microphone in use. The beamformer still chooses on RAW
