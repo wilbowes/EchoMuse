@@ -66,6 +66,8 @@ const (
 
 	// Centre mic channel — used for wake word detection (omnidirectional)
 	centreCh = 6
+	// NumMics is the number of microphone channels, ch0-ch6.
+	NumMics = 7
 
 	// Hardware echo reference — NOT a microphone. Ch7 and Ch8 are a stereo
 	// loopback of the device's own playback, arriving in the same TDM frame
@@ -163,6 +165,10 @@ type Beamformer struct {
 	// ring retains those slices across periods.
 	chanBuf [nDirections][]float32
 	hfBuf   [nDirections][]float32
+
+	// micBuf holds the microphones MicChannels extracts beside the one in
+	// use, reused across periods: nothing keeps them past the canceller.
+	micBuf [NumMics][]byte
 }
 
 // New creates a Beamformer.
@@ -396,19 +402,50 @@ func (b *Beamformer) Process(raw []byte, steerAngle float64, gain float64) (mono
 		}
 	}
 
-	var ch int
 	if steerAngle >= 0 {
 		// Fixed-beam: config-driven direction, ignores energy-based lock
-		fixedDir := nearestDirection(steerAngle)
-		ch = directionToChannel[fixedDir]
-		angle = candidateAngles[fixedDir]
+		angle = candidateAngles[nearestDirection(steerAngle)]
 	} else {
 		// Auto: use the channel selected at Lock() time
-		ch = b.lockedChannel
 		angle = candidateAngles[bestDir]
 	}
 
-	return b.extractChannel(raw, ch, gain), angle
+	return b.extractChannel(raw, b.OutputChannel(steerAngle), gain), angle
+}
+
+// OutputChannel is the channel Process returns audio from: the wake
+// microphone while unlocked, otherwise the fixed-beam microphone when a
+// steering angle is configured, otherwise the one chosen at Lock().
+func (b *Beamformer) OutputChannel(steerAngle float64) int {
+	switch {
+	case b.lockedChannel < 0:
+		return b.omniChannel()
+	case steerAngle >= 0:
+		return directionToChannel[nearestDirection(steerAngle)]
+	}
+	return b.lockedChannel
+}
+
+// MicChannels returns every microphone of one raw buffer as S16_LE mono with
+// the mic gain applied, indexed by channel, for the per-microphone echo
+// canceller. selected is what Process returned for sel and is passed through
+// as that entry; the other six are valid until the next call. Their clipped
+// samples are not counted: ClippedSamples describes the audio in use.
+func (b *Beamformer) MicChannels(raw []byte, gain float64, sel int, selected []byte) [][]byte {
+	out := make([][]byte, NumMics)
+	n := len(raw) / frameSize * 2
+	for ch := range out {
+		if ch == sel {
+			out[ch] = selected
+			continue
+		}
+		if cap(b.micBuf[ch]) < n {
+			b.micBuf[ch] = make([]byte, n)
+		}
+		out[ch] = b.micBuf[ch][:n]
+		extractInto(out[ch], raw, ch, gain)
+	}
+	return out
 }
 
 // hfEnergy returns the mean squared HF energy for direction di.
@@ -475,8 +512,15 @@ func decodeS24Sample(b0, b1, b2 byte) float32 {
 // the old upper-2-bytes behaviour bit-exactly. Samples outside int16
 // range are clamped and counted in clippedSamples.
 func (b *Beamformer) extractChannel(raw []byte, ch int, gain float64) []byte {
+	out := make([]byte, len(raw)/frameSize*2)
+	b.clippedSamples += extractInto(out, raw, ch, gain)
+	return out
+}
+
+// extractInto is extractChannel's conversion into a buffer the caller owns
+// (len(raw)/frameSize samples), returning how many samples it clamped.
+func extractInto(out, raw []byte, ch int, gain float64) (clipped uint64) {
 	n := len(raw) / frameSize
-	out := make([]byte, n*2)
 	offset0 := ch * byteSample
 	gainQ := int64(gain*4096.0 + 0.5)
 	for i := 0; i < n; i++ {
@@ -488,15 +532,15 @@ func (b *Beamformer) extractChannel(raw []byte, ch int, gain float64) []byte {
 		v := (int64(val) * gainQ) >> 20
 		if v > 32767 {
 			v = 32767
-			b.clippedSamples++
+			clipped++
 		} else if v < -32768 {
 			v = -32768
-			b.clippedSamples++
+			clipped++
 		}
 		out[i*2] = byte(uint16(v))
 		out[i*2+1] = byte(uint16(v) >> 8)
 	}
-	return out
+	return clipped
 }
 
 // EchoRef extracts the hardware echo reference (ch8) from the same raw

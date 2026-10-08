@@ -191,3 +191,66 @@ func TestWakeMicSelectsUnlockedChannel(t *testing.T) {
 		}
 	}
 }
+
+// MicChannels hands the canceller every microphone, in channel order, at the
+// mic gain, and the entry for the microphone in use IS what Process returned
+// (#814). OutputChannel must name that microphone in every state, or the
+// canceller reports and returns the wrong one.
+func TestMicChannelsCarriesEveryMicrophone(t *testing.T) {
+	raw := raw9(periodFrames, func(ch int) int32 { return int32(ch+1) << 16 })
+	sample := func(b []byte) int16 { return int16(uint16(b[0]) | uint16(b[1])<<8) }
+
+	for _, tc := range []struct {
+		name    string
+		prepare func(*Beamformer)
+		steer   float64
+		want    int
+	}{
+		{"unlocked, centre", func(*Beamformer) {}, -1, centreCh},
+		{"unlocked, wake microphone 3", func(b *Beamformer) { b.SetWakeMic(3) }, -1, 2},
+		{"locked", func(b *Beamformer) { b.lockedChannel = 4 }, -1, 4},
+		{"locked, fixed beam at 90 degrees", func(b *Beamformer) { b.lockedChannel = 4 }, 90, 2},
+		{"unlocked ignores the fixed beam", func(*Beamformer) {}, 90, centreCh},
+	} {
+		b := New()
+		tc.prepare(b)
+		mono, _ := b.Process(raw, tc.steer, 2.0)
+		sel := b.OutputChannel(tc.steer)
+		if sel != tc.want {
+			t.Errorf("%s: OutputChannel = ch%d, want ch%d", tc.name, sel, tc.want)
+			continue
+		}
+		mics := b.MicChannels(raw, 2.0, sel, mono)
+		if len(mics) != NumMics {
+			t.Fatalf("%s: %d microphones, want %d", tc.name, len(mics), NumMics)
+		}
+		if &mics[sel][0] != &mono[0] {
+			t.Errorf("%s: the microphone in use is not the buffer Process returned", tc.name)
+		}
+		for ch, m := range mics {
+			if len(m) != periodFrames*2 {
+				t.Fatalf("%s: ch%d is %d bytes, want %d", tc.name, ch, len(m), periodFrames*2)
+			}
+			// (ch+1)<<16 at gain 2 is (ch+1)*512 after the 24-to-16 shift.
+			if got, want := sample(m), int16((ch+1)*512); got != want {
+				t.Errorf("%s: ch%d reads %d, want %d", tc.name, ch, got, want)
+			}
+		}
+	}
+}
+
+// ClippedSamples describes the audio in use: six more microphones extracted
+// for the canceller must not multiply it.
+func TestMicChannelsDoesNotCountClipping(t *testing.T) {
+	b := New()
+	raw := raw9(periodFrames, func(int) int32 { return 0x7fffff })
+	mono, _ := b.Process(raw, -1, 16.0)
+	want := b.ClippedSamples()
+	if want != periodFrames {
+		t.Fatalf("the microphone in use clipped %d samples, want %d", want, periodFrames)
+	}
+	b.MicChannels(raw, 16.0, centreCh, mono)
+	if got := b.ClippedSamples(); got != want {
+		t.Fatalf("extracting the other microphones moved the clipped count from %d to %d", want, got)
+	}
+}

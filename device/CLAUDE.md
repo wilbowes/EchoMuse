@@ -94,6 +94,10 @@ Each mic buffer passes through, in order:
 raw 9ch S24_3LE → beamformer + fixed mic gain (micGainDb, applied to 24-bit samples) → mono S16_LE → [AEC] → [AGC] → [VAD gate] → /data WebSocket
 ```
 
+On the hardware reference the AEC stage cancels **all seven microphones**
+and passes on the one the beamformer chose (see "One filter per microphone"
+below); the diagram is the path the chosen one takes.
+
 Note the real buffer cadence: GoTinyAlsa's `GetAudioStream` reads the whole ALSA buffer per chunk (PeriodSize 512 × PeriodCount 5), so the mic pipeline runs on **160ms batches of 2560 samples**, not single 32ms periods. Anything assuming 512-sample buffers must handle multiples (this silently disabled AEC for four releases — see `aec.Process`).
 
 The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-free**: every 32ms period is sent continuously (batched into 80ms frames) so openwakeword scores an uninterrupted stream, and no adaptive gain state can drift with room noise. The VAD gate and AGC apply only to bounded `lock_mic` turn streams (button-triggered), which get a fresh `ResetAGC()` per stream.
@@ -107,6 +111,30 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
   occupancy governor — all three are bypassed on that path, and `WriteFar`
   returns early so nothing fills a ring nothing drains. Measured 41.2dB in the
   unit test with the real 33-sample offset and polarity inversion applied.
+
+  **One filter per microphone (#814, 2026-10-08).** The echo path from the
+  speaker differs per microphone, the wake stream reads the centre one, and
+  each turn locks to whichever edge microphone heard the wake word best and
+  holds it through the reply. One filter after the selection is therefore
+  converged on the LAST turn's microphone when the next turn starts, which is
+  when the wake sound plays. Measured on 15LE from a raw capture: a filter
+  learnt on a microphone removed 24-26dB of the wake sound on that microphone
+  and between 23dB and MINUS 7dB on another (ch0/1, ch3/4 and ch2/5/6 share a
+  path; across those groups it does nothing or adds echo). The same night a
+  wake sound reached speech-to-text at -6.4dBFS, above the speech, and a
+  command lost the word naming its room. `aec.ProcessMicsWithRef` runs a
+  state per microphone on every period (`beamformer.MicChannels`,
+  `OutputChannel`), so all seven are converged whichever is chosen: on that
+  capture the second turn's wake sound, on a different microphone from the
+  first, went from 6.2dB removed to 26.2dB. Cost: 6.04ms per 32ms period for
+  the seven on an Echo, 19% of a core (JOURNAL 2026-10-03), running whether
+  or not anything plays. The saved echo paths are one file for the seven
+  (`aec_echo_path.bin.mics`), all or nothing on load. **Hardware reference
+  only**: the software tap's ring is drained once per period and keeps one
+  filter on the microphone in use. The beamformer still chooses on RAW
+  energy, so playback still biases the choice; choosing on cancelled audio is
+  the next step in #731. `ProcessWithRef` and the single saved path remain
+  for `tools/aec_replay` and the tests, and the firmware no longer calls them.
 
   **The detector is deliberately narrow, and the narrowness is the point.**
   A reference channel is BIT-EXACT ZERO when nothing plays *and* carries audio
