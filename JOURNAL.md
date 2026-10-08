@@ -4756,7 +4756,8 @@ On 15LE, four turns from four sides with a raw capture running and each
 recording lined up against it: 23.7, 19.5, 17.6 and 19.4dB of the wake sound
 removed on ch5, ch0, ch0 and ch2, leaving it 7.5-11.1dB below the speech
 where at the microphone it is 9-12dB above. Speech passed within 0.2dB.
-Twelve turns on the build, twelve transcribed correctly. Idle CPU for the
+Fifteen turns on the build by 21:30; Wil confirmed the first eight as
+heard correctly and the other seven read as ordinary commands. Idle CPU for the
 process: 53.9% of a core before, 61.1% with seven always running, 52.4% with
 the rest. VVV, C95 and 15LE were left on the build, each with the morning's
 firmware in its other slot.
