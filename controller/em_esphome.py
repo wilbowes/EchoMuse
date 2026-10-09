@@ -1255,6 +1255,10 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             on_finished=reply,
             log_name=self._log_name,
             preannounce_media_id=preannounce_media_id,
+            # The Echo listens straight after this message, so its quiet
+            # tail is time the person waits before they can answer.
+            tail=((lambda pcm: em_announce.set_trailing_quiet(pcm, WIRE_RATE))
+                  if start_conversation else None),
         )
 
         # AFTER the reply, deliberately. HA blocks on AnnounceFinished for the
