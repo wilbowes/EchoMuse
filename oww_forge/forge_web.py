@@ -241,6 +241,10 @@ def _wakewords_state() -> list:
                 if not _job.progress_warned:
                     _job.progress_warned = True
                     _job._note(f"\n[forge-ui] no progress for '{name}': {type(e).__name__}: {e}\n")
+        # clips_train counts synthetic and uploaded clips together, so the
+        # page cannot tell a person's own recordings from the TTS sets without
+        # this — same directories, one prefix.
+        recs = forge.real_recordings(work)
         words.append({
             "name": name,
             "phrases": cfg.get("target_phrase", []),
@@ -250,6 +254,13 @@ def _wakewords_state() -> list:
             "custom_negative_phrases": cfg.get("custom_negative_phrases") or [],
             "clips_train": _count(work / "positive_train"),
             "clips_test": _count(work / "positive_test"),
+            "recordings": len(recs),
+            # ponytail: the list rides the 2.5s /api/state poll — roughly 120
+            # bytes an entry, so ~6 KB at a realistic 50 clips. Move it behind
+            # its own GET route, fetched when the <details> opens, past a few
+            # hundred. Empty list when there are none, which is the usual case.
+            "recording_files": [{"name": p.name, "kb": round(p.stat().st_size / 1e3),
+                                 "mtime": p.stat().st_mtime} for p in recs],
             "features_built": (work / "positive_features_train.npy").exists(),
             "model_built": model.exists(),
             "model_size_kb": round(model.stat().st_size / 1e3) if model.exists() else None,

@@ -165,6 +165,25 @@ def dir_has_files(path: Path, pattern: str = "*") -> bool:
     return path.is_dir() and next(path.glob(pattern), None) is not None
 
 
+def real_recordings(work: Path) -> list:
+    """The clips someone uploaded, from both positive sets: the training set
+    first, then the held-out tenth the uploader puts there, each in name order.
+
+    The `real_` prefix is the only thing separating an upload from the
+    synthetic sets sharing those two directories: piper writes piper_gb_*,
+    google_tts writes google_*, openWakeWord's --generate_clips writes bare
+    numbers, and only the uploader writes real_<epoch>_<i>.wav. No manifest —
+    the directory listing is the record, and a hand-dropped wav shows up here
+    the same as one that came through the browser.
+    """
+    found = []
+    for sub in ("positive_train", "positive_test"):
+        d = work / sub
+        if d.is_dir():
+            found += sorted(d.glob("real_*.wav"))
+    return found
+
+
 # ---------------------------------------------------------------- assets
 
 def fetch_piper() -> None:

@@ -92,3 +92,19 @@ def test_rename_before_training(tree):
     (models / "hello_marlow.onnx").unlink()
     forge.rename_wakeword("hello_marlow", "Marlow")
     assert (ww / "Marlow" / "config.yml").exists()
+
+
+def test_real_recordings_are_only_the_uploads(tree):
+    # Uploads and the synthetic sets share the two positive directories, and
+    # the `real_` prefix is the only thing telling them apart. The Train card
+    # counts and lists on it, so every other writer's stem must stay outside it.
+    ww, _ = tree
+    work = ww / "hello_marlow" / "hello_marlow"
+    train = work / "positive_train"
+    for name in ("real_1_0.wav", "piper_gb_000001_x_s0.wav", "google_000001_voice.wav", "0.wav"):
+        (train / name).write_bytes(b"w")
+    test = work / "positive_test"
+    test.mkdir()
+    (test / "real_9_2.wav").write_bytes(b"w")
+    assert [p.name for p in forge.real_recordings(work)] == ["real_1_0.wav", "real_9_2.wav"]
+    assert forge.real_recordings(ww / "nope") == []  # a word with neither dir yet

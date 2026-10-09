@@ -205,7 +205,10 @@ US vowel, not a British "clar-ra". Three levers, in increasing strength:
    kids to the training set; any phone recording format works (ffmpeg
    converts). Even 20–50 real clips measurably pull the model toward the
    voices that matter. They're augmented with reverb/noise like everything
-   else, and displace synthetic clips rather than growing the set.
+   else, and displace synthetic clips rather than growing the set. They are
+   counted with the synthetic clips on the Train step, and listed under
+   **Your recordings** — under the name the upload was given, since the name
+   it was uploaded with is not kept.
 
 ### Hearing the phrase before training on it
 

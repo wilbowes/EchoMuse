@@ -13,6 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 FORGE = (ROOT / "oww_forge" / "static" / "index.html").read_text()
 DASH = (ROOT / "controller" / "static" / "dashboard.html").read_text()
+WEB = (ROOT / "oww_forge" / "forge_web.py").read_text()
 
 
 def tokens(html: str, selector: str) -> dict:
@@ -53,3 +54,13 @@ def test_dark_surface_text_matches_dark_theme():
     # theme's values whatever the page theme is (as the dashboard's does).
     on_dark, dark = tokens(FORGE, ".em-console"), tokens(FORGE, ":root[data-theme=\"dark\"]")
     assert on_dark and {k: v for k, v in on_dark.items() if dark.get(k) != v} == {}
+
+
+def test_the_recordings_fields_are_the_ones_the_page_reads():
+    # forge_web needs aiohttp, which the metadata job does not install, so the
+    # one seam nothing else checks is a text match: the recordings count and
+    # list the Train card shows. Renaming either half alone empties the card,
+    # silently, with every test still green.
+    for field in ("recordings", "recording_files"):
+        assert re.search(rf'"{field}":', WEB), f"forge_web sends no {field}"
+        assert re.search(rf"w\.{field}\b", FORGE), f"the page never reads w.{field}"

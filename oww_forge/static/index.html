@@ -242,6 +242,11 @@
   .kv { display: grid; grid-template-columns: 90px 1fr; gap: 4px 12px; font-size: 13px; max-width: 640px; }
   .kv dt { color: var(--muted); }
   .kv dd { margin: 0; color: var(--text2); overflow-wrap: anywhere; }
+  .files { list-style: none; padding: 0; margin: 0; font: 12px 'DM Mono', monospace; color: var(--muted);
+    max-width: 640px; max-height: 220px; overflow-y: auto; }
+  .files li { display: flex; justify-content: space-between; gap: 14px; padding: 2px 0; }
+  .files b { font-weight: 400; color: var(--text2); overflow-wrap: anywhere; }
+  .files span { white-space: nowrap; }
   code { font: 12px 'DM Mono', monospace; background: var(--hairline); border: 1px solid var(--border-soft);
     border-radius: 4px; padding: 0 4px; }
 
@@ -670,6 +675,21 @@ function wwHead(w, r) {
         <span class="ic ${done[id] ? 'ok' : ''}" aria-hidden="true">${done[id] ? '✓' : i + 1}</span>${label}</a></li>`).join('')}</ol>`;
 }
 
+/* The recordings someone uploaded, so the page can say the trainer still has
+   them after a refresh. The names are the uploader's own (real_<epoch>_<i>.wav)
+   — the name they uploaded under is not kept, so size and time are all there
+   is. Nothing at all when there are none. */
+function recList(w, moreHref) {
+  const n = w.recordings || 0;
+  if (!n) return '';
+  const more = moreHref ? `<a class="em-pill em-pill--small" href="${moreHref}">Add more</a>` : '';
+  return `<details class="more" data-keep="recordings"><summary>Your recordings (${n0(n)})</summary>
+    <ul class="files">${(w.recording_files || []).map(f =>
+      `<li><b>${esc(f.name)}</b><span>${n0(f.kb)} KB · ${esc(fmtWhen(f.mtime))}</span></li>`).join('')}</ul>
+    <div class="row">${more}<span class="hint">Already in the training set — retrain to use them.</span></div>
+  </details>`;
+}
+
 function pageTrain(w) {
   const mine = jobFor(w.name) && state.job.kind === 'build';
   const p = mine ? w.progress : null;
@@ -712,7 +732,7 @@ function pageTrain(w) {
         <div aria-live="polite">${flashHtml(w.name, 'train')}</div>
         <div class="row"><button class="em-pill em-pill--small" type="button" data-act="save" ${busy() ? 'disabled' : ''}>Save settings</button>
           ${busy() ? `<span class="hint">Settings can be changed once nothing is running.</span>` : ''}</div>
-      </details>`,
+      </details>${recList(w, href('w', w.name, 'improve'))}`,
     foot: `${w.model_built && !mine ? `<button class="em-pill" type="button" data-act="build" ${busy() || !dataReady() ? 'disabled' : ''}>Retrain</button>` : ''}
       <span class="sp"></span>
       ${w.model_built ? `<a class="em-pill em-pill--accent" href="${href('w', w.name, 'try')}">Next: try it</a>`
@@ -793,6 +813,7 @@ function pageImprove(w) {
           <p>The biggest improvement. Have each person say the phrase 5 to 10 times into a phone, then add the files.</p>
           <div class="row"><span class="em-pill filebtn ${busy() ? 'is-disabled' : ''}"><input type="file" accept="audio/*" multiple
             data-act="addrec" aria-label="Add recordings" ${dis}>Add recordings…</span></div>
+          ${recList(w)}
         </section>
         <section class="card" aria-labelledby="c-acc">
           <h3 id="c-acc">Add voices with your accent</h3>
