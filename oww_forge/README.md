@@ -25,7 +25,7 @@ and orchestrated by `forge.py`:
    stock models) trains against the positives plus ~2,000 hours of
    precomputed negative features (ACAV100M), with false-positive validation
    against an 11-hour held-out set. Output: a single `.onnx` file, typically
-   under 1MB — exactly what the controller's `OWWModel` loads.
+   under 1MB — the file the Echo and the controller both load.
 
 Versions are pinned in the Dockerfile: openWakeWord @ `368c0371` (with a
 one-line patch for its `--convert_to_tflite` argparse bug — string default
@@ -337,6 +337,11 @@ oww_forge/
   forge_web.py         aiohttp web UI (port 8769) — thin layer over forge.py
   static/index.html    the web frontend (single file, no build step)
   google_tts.py        Google Cloud TTS positive-sample generator
+  forge_g2p.py         phonemes for words the CMU dictionary lacks, from espeak
+  forge_negatives.py   keeps your target phrases out of the adversarial negatives
+  forge_progress.py    per-stage build progress for the web UI
+  model_metadata.py    stamps the wake word's name and language into the .onnx
+  patch_oww_*.py       apply the two forge_* modules to the pinned openWakeWord
   piper_voices.py      Piper ONNX voices — accents/languages, and the phrase
                        preview; catalogue fetched, never hardcoded
   docker-compose.deploy.yml   pulls the published image instead of building

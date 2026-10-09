@@ -101,14 +101,18 @@ git tag -a --cleanup=verbatim emos-v0.4 -m "..."   # -a always; the annotation I
 git push origin emos-v0.4
 ```
 
-`emos-release.yml` compiles the init with the pinned NDK, asserts it is
-aarch64 and static, runs the ring and password checks against the source being
-published, and attaches **`init` and nothing else**.
+`emos-release.yml` compiles two inits with the pinned NDK: `init` (aarch64,
+for FireOS 5's kernel) and `init32` (armv7a, for FireOS 6's). It asserts each
+one's architecture, that both are static and that they are not the same file,
+and runs the off-target checks against the source being published. `init` is
+attached as its own asset; `init32` goes in `emos-payload.zip` with the rest
+of our userspace (busybox, the WiFi tools and `em-wifi`). busybox's source and
+licence are attached beside it.
 
-**Only the init is published, and it cannot be otherwise.** A bootable image
-contains the device's own kernel and device trees, so shipping one would mean
-redistributing Amazon's code. The init is ours; the image is assembled from
-the boot partition each user reads off their own device.
+**No bootable image is published, and it cannot be otherwise.** A bootable
+image contains the device's own kernel and device trees, so shipping one would
+mean redistributing Amazon's code. The init and userspace are ours; the image
+is assembled from the boot partition each user reads off their own device.
 
 Once emOS is running and on the network, flashing no longer needs TWRP:
 `curl` the image onto the device and `dd` it, about thirty seconds a cycle.

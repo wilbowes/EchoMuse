@@ -167,7 +167,7 @@ Everything else is in the [issue tracker](https://github.com/wilbowes/EchoMuse/i
   [our issues](https://github.com/wilbowes/EchoMuse/issues), not to the XDA
   thread.** The thread is for the unlock only.
 - Check the [FAQ](docs/faq.md) first.
-- Attach a support bundle (Dashboard → Support → Download bundle). It holds
+- Attach a support bundle (Settings → Support → Collect bundle, then Download). It holds
   the logs and versions we need, with transcripts, recordings and network
   names removed.
 

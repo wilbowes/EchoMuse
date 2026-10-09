@@ -11,7 +11,7 @@ ring that never lit.
 This document is the authoritative behavioural spec: every ring owner, every
 event, and the outcome for each. Entries are tagged:
 
-- **[today]** — current shipped behaviour (v2.9.7)
+- **[today]** — shipped behaviour when the entry was written (the document dates from v2.9.7; later entries say their version)
 - **[proposed]** — design not yet built, pending sign-off
 
 ---
@@ -228,12 +228,17 @@ Mute is the reference implementation of principle 5, and its behaviour is
 | L3 | Awaiting admin approval | boot | White slow pulse | [today] |
 | L4 | Link silently dead | any | **Nothing for up to 45s** — ring keeps showing the last state | [today] |
 | L5 | Link silently dead | any | Detected on the next interaction (§3) or by inbound-freshness timeout | [proposed] |
-| L6 | **Speaker stream ends** (EOS received *and* audio channel empty) | PLAYING | **Controller estimates this from wall-clock and clears the ring early on slow links** — measured up to 6.1s premature | [today] |
+| L6 | **Speaker stream ends** (EOS received *and* audio channel empty) | PLAYING | Controller waits for the Echo's `playback_stats` report and clears the ring then. It used to estimate this from wall-clock and cleared the ring up to 6.1s early on slow links (§5) | [today] |
 | L7 | Speaker stream ends | PLAYING | Device clears / hands back the ring itself, from the signal it already logs (`pcm_speaker.go:309`) | [proposed] |
 
 ---
 
-## 5. Why L6 is wrong today
+## 5. Why L6 was wrong (fixed)
+
+> **Fixed since this was written.** The controller no longer estimates the end
+> of playback: it waits for the Echo's `playback_stats` report, which the Echo
+> sends once its audio channel has drained after end of stream, and clears
+> the ring then. The analysis below is kept as the reason for that design.
 
 `_run_post_turn_playback` never learns when playback actually ended
 (`em_controller.py:746`):

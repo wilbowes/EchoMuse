@@ -322,8 +322,8 @@ used to open with was removed 2026-07-12.
     → controller: fetch TTS (one retry on transient failure; the satellite
       declares supported_formats 48kHz/mono/FLAC so recent HA transcodes at
       source) → ffmpeg decode straight to 48kHz mono S16_LE (cap 15s)
-    → controller: EQ → bass guard → limiter at 48kHz (no resample step
-      since v2.9.4) → stream to device ALSA as mono 0x02 frames
+    → EQ → bass guard → limiter at 48kHz, on the Echo with firmware announcing
+      `output_chain`, else on the controller (no resample step since v2.9.4) → stream to device ALSA as mono 0x02 frames
     → controller: MediaPlayerState ANNOUNCING → AnnounceFinished → IDLE
     → if HA set continue_conversation: mic_start → next turn immediately
       (preroll_discard=0), no wake word needed (v2.6.5 C2)
@@ -348,100 +348,22 @@ Under `buttonSingleTapEvent` the tap becomes an HA event too, and the button sto
 
 ## On-device wake word
 
-The Echo can run the wake model itself. `owwOnDevice` is `off` (default),
-`shadow` or `on`. An unrecognised value normalises to `off` at **both** ends
-rather than being guessed at — neither end may assume the other is the careful
-one, and the two plausible guesses ("score silently" and "start triggering")
-differ by a live behaviour change.
+**The specification is [docs/listening.md](docs/listening.md).** What this
+section used to describe (off by default, the mic stream unchanged, a fall
+back to the controller) is no longer how it works. In short:
 
-`on` is gated on the **`oww_trigger` capability, separate from `oww_shadow`**.
-Shadow shipped first, so firmware exists that scores and reports without being
-able to act on it; offering those `on` produces a device that scores perfectly
-and never answers. Absent the capability, `on` degrades to `shadow` — never to
-`on`, which would leave the controller waiting for wakes the firmware cannot
-send while no longer acting on its own.
-
-### Shadow — score and report
-
-**Shadow mode scores and reports; it never acts.** It exists to answer whether
-on-device detection is good enough to trust, by running both detectors over the
-same audio. The tap sits where the ungated wake stream's frames are written to
-the wire, so the device scores byte-identical 80ms frames on identical
-boundaries — a score difference can then only be the engine, not the framing.
-
-- Inference runs on **its own goroutine**, never the mic goroutine: it costs
-  ~31ms per 80ms frame against a mic loop reading 160ms ALSA batches into a
-  ring only 160ms deep. `Push` hands off to a buffered channel and returns,
-  and the scorer **drops frames and counts them** when behind. A run that
-  drops frames is informative; one that stutters the microphone is not.
-- **Nothing is sent per frame.** Threshold crossings go immediately (rare, and
-  their whole value is the timing); everything else is a window summary riding
-  the existing ~30s stats tick.
-- **The device never sends a timestamp** — an Echo's clock is bogus pre-NTP, so
-  it reports how long *ago* a crossing happened and the controller converts
-  against its own monotonic clock.
-- **Thresholds must match or the comparison is meaningless.** The controller
-  drops its bar to `bargeInThreshold` while the speaker streams, so the device
-  mirrors that and never *raises* the bar if misconfigured above the normal one.
-
-Correlation happens at turn-persist time, not at detection — a crossing report
-can land after the wake it belongs to. The nearest crossing within a 2.0s
-window wins and is consumed, so two quick turns can't both be credited to one
-crossing.
-
-### On — the device triggers
-
-The device sends `oww_wake` (score, the threshold it actually cleared, and how
-long *ago*) instead of a crossing report. It lands in a one-slot holder and the
-wake listener acts on it on its next mic frame, ~80ms, because that is where
-turn setup lives — capture routing, beam lock and arbitration have to happen
-together, and driving them from the control-plane handler would be a second
-copy of the most delicate sequence in the controller.
-
-What this buys is **latency and resilience, not bandwidth**: the mic stream is
-unchanged, because the controller still runs the turn. What changes is that the
-wake decision no longer crosses a network with measured 1.1–2.6s idle RTT
-excursions, and a controller restart no longer deafens the device.
-
-- **The controller keeps scoring, and stops triggering.** Its score records
-  whether it agreed (`turns.ctrl_wake_score`) — the same comparison with the
-  roles inverted, and the only place a *controller* miss is visible. Without
-  it, turning a device on would silently end the measurement: a device score
-  with nothing beside it reads as perfect agreement rather than as no data. It
-  is also what leaves barge-in untouched, since barge is scored
-  controller-side over the turn's own audio.
-- **The recorded wake instant is the crossing, not the arrival.** Using arrival
-  folds the network hop into every comparison and every arbitration decision.
-- **Mute is checked on the device** as well as controller-side. The `mic_start`
-  refusal and the hardware ADC mute already make a muted wake harmless, but
-  harmless still means the ring lights and HA runs a pipeline. The crossing is
-  still reported — it is real data about the detector.
-- **A pending wake expires after 4s**, measured from the crossing. That stale
-  means the person has finished speaking, so acting on it answers into silence.
-  The expiry logs the age, which is the instrument for whether the trigger
-  needs more slack.
-
-Two known gaps, both recorded rather than hidden:
-
-- **Arbitration is not corrected for this.** Claims are still compared by
-  arrival, so on a multi-device fleet a device can lose its window because its
-  claim was late and the wrong room answers. Solo fleets skip the window
-  entirely. The fix needs RTT-corrected claim times, never revoking a granted
-  claim, and a window held longer than it is measured.
-- **A NULL `ctrl_wake_score` is ambiguous.** It means the controller did not
-  detect the utterance *or* never got to look — if it had not yet scored that
-  audio when the turn started and drained the queue, there is no second
-  chance. Answering that needs the unscored backlog buffered and scored after
-  the turn.
-
-ONNX Runtime plus three models must be installed at
-`/data/local/share/echomuse/oww` — they are **not** in the firmware (12.3MB
-would double the OTA payload and both A/B slots). The provisioning wizard
-pushes them over USB/ADB; fielded devices get them over the shell plane from
-the Updates tab. Absence is an ordinary condition, logged once, and the device
-carries on with controller-side wake word. Costs ~38% of one core permanently
-on top of the ~18–20% mic-pipeline baseline, so **enable it one device at a
-time.**
+- `owwOnDevice` is `on` for new installs, `off` for an Echo set to detect the
+  wake word on the controller, and `shadow` as a developer diagnostic.
+- **On:** the Echo scores its own microphone and sends nothing until its wake
+  word fires, then sends what follows until end of speech. It enforces its own
+  limits (ack timeout, maximum session length, mute, link loss).
+- **An Echo that cannot score is `degraded`: button only, and it says why.**
+  Nothing falls back to streaming.
+- `oww_trigger` and `oww_shadow` are separate capabilities, because firmware
+  exists that can score and report without being able to act.
+- ONNX Runtime and the models are not in the firmware. They live in
+  `/data/local/share/echomuse/oww` (about 15MB) and the controller installs
+  them when the Echo connects.
 
 ---
 
@@ -576,10 +498,10 @@ The controller proxies bytes verbatim in both modes; the framing is interpreted 
 ```
 Device boots
   → orange LED pulse (searching for server)
-  → mDNS browse: _emcontroller._tcp.local (grandcat/zeroconf)
+  → static controller addresses if any, then mDNS browse: _emcontroller._tcp.local
   → credentials at /data/local/etc/echomuse/ + tls_port TXT property?
-      → dial wss://:8770 with pinned CA + X-EM-Token (v2.9.3)
-      → else plain ws://:8767 (rollout fallback until REQUIRE_DEVICE_TLS=1)
+      → CA present: dial wss://:8770 only, with pinned CA + X-EM-Token
+      → no CA: plain ws://:8767 (refused when REQUIRE_DEVICE_TLS=1)
   → connect /control → register (device_id = ro.serialno, version)
 
   CASE: unknown device, strict mode

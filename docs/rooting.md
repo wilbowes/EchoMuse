@@ -120,7 +120,7 @@ Everything below assumes you already have:
 
 - An Echo Dot Gen 2 (**biscuit**) with the persistent unlock applied
 - **TWRP** installed and bootable
-- **FireOS 5** (Android 5.1) sideloaded
+- **FireOS 5** installed (amonet v1.1.0), or **FireOS 6** in both slots (v2.0.0)
 
 Once those are done, EchoMuse takes over. The provisioning wizard in the
 dashboard handles the rest — see the [Quickstart](quickstart.md). It starts
@@ -142,14 +142,18 @@ from a device already in that state; it does not run the exploit.
 Both leave a failed step with the device still in TWRP and say so. The
 difference that matters afterwards:
 
-**A device on emOS cannot be re-provisioned by the wizard, and going back
-wipes it.** emOS runs no adbd — it cannot, since adbd needs Android's property
-service — so the wizard's first step finds no device to talk to. Returning to
-FireOS means booting TWRP by hand, wiping cache and data, sideloading the
-FireOS 5 image and then flashing `f1r30s.zip`. That erases `/data`, taking
-EchoMuse, its configuration and its credentials with it. **`f1r30s.zip` is not
-optional** — a stock flash restores dm-verity against a partition table the
-unlock modified, and without it the device does not boot.
+**A device on emOS has no adb, so the wizard cannot see it until it is back
+in TWRP.** Run `/init recovery` from the emOS USB console (emOS 0.4 or later),
+or hold the recovery button while applying power, and the wizard's first step
+accepts it. From TWRP there are two ways back to FireOS:
+
+- **Restore the escrowed boot image.** About ten seconds, and `/data` is left
+  alone.
+- **Return to stock by hand** (amonet v1.1.0): wipe cache and data, sideload
+  the FireOS 5 image and then flash `f1r30s.zip`. That erases `/data`, taking
+  EchoMuse, its configuration and its credentials with it. **`f1r30s.zip` is
+  not optional** — a stock flash restores dm-verity against a partition table
+  the unlock modified, and without it the device does not boot.
 
 Keep the escrowed boot image the emOS flow hands you at step 3. Writing it back
 takes about ten seconds, leaves `/data` alone, and is the undo for everything
@@ -158,7 +162,11 @@ below.
 ## What EchoMuse writes, and what it does not
 
 This device has several layers below the operating system, and EchoMuse only
-ever writes the FireOS one. Lowest first:
+ever writes the FireOS one. The partition numbers and names in this section
+were measured on an amonet v1.1.0 device. v2.0.0 puts the original partition
+table back, so there `boot_a` and `boot_b` are the kernel partitions (`p10`,
+`p11`) with no payload partition and no `/dev/block/other-boot`; the wizard
+handles both layouts. Lowest first:
 
 | Layer | What it is | Written by EchoMuse |
 |---|---|---|
@@ -303,7 +311,8 @@ recovery and unbricking.
 
 # Manual reference
 
-The wizard performs the steps below for you. They are kept here for anyone
+The wizard performs the steps below for you. They are the **FireOS flow on an
+amonet v1.1.0 device**; the emOS flow does none of them. They are kept here for anyone
 provisioning by hand, debugging a wizard step, or wanting to know exactly what
 is being done to their device before letting something do it automatically.
 
