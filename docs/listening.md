@@ -173,6 +173,7 @@ frame that crossed; the session starts with every ringed frame captured
 to text: `VOICE_PREROLL_DISCARD` (240 ms) applies only to a stream the
 controller scored itself, because on a session it removed the first word of a
 command spoken straight after the wake word (`em_listen.tail_discard`).
+A wake spoken over a reply opens a session the same way and is treated the same.
 
 Timestamps come from one `time.Now()` taken when the frame is handed to both
 the scorer and the ring, so the scorer's queue delay (up to 640 ms when busy)
