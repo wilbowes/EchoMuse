@@ -130,12 +130,22 @@ thread if not ([#619](https://github.com/wilbowes/EchoMuse/issues/619),
 image puts the boot partition back from TWRP if you need to start over.
 
 ### Connect Console fails on Linux.
-Two Linux users with Chromium have hit this and it isn't root-caused yet
-([#605](https://github.com/wilbowes/EchoMuse/issues/605)). Our guess is
-another program holding the Echo's serial port. ModemManager probes new USB
-serial devices on many distributions, so try `sudo systemctl stop
-ModemManager` and `adb kill-server` before clicking Connect Console. If it
-still fails, open the console yourself (below) and finish the WiFi step there.
+"Failed to open serial port" in the wizard means the browser was refused the
+Echo's serial port by your computer; the Echo has booted emOS and is waiting
+for WiFi. Three Linux users with Chromium have hit it
+([#605](https://github.com/wilbowes/EchoMuse/issues/605),
+[#767](https://github.com/wilbowes/EchoMuse/issues/767),
+[#810](https://github.com/wilbowes/EchoMuse/issues/810)), and one on Fedora
+got past it by joining the group that owns the port:
+
+```
+sudo usermod -aG dialout $USER     # then log out and back in
+```
+
+ModemManager also probes new USB serial devices on many distributions, so
+run `sudo systemctl stop ModemManager` and `adb kill-server` before clicking
+Connect Console. If it still fails, open the console yourself (below) and
+finish the WiFi step there.
 
 ---
 
