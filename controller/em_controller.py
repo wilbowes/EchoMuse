@@ -5611,6 +5611,14 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
             await ws.close()
             return
 
+        # #751: a device that reconnects registers the new socket here before
+        # the controller has noticed the old one is dead, so the old one used
+        # to be abandoned rather than closed — it then lived until the ping
+        # timeout reaped it, holding a handler task and a half-open TCP
+        # connection for WS_PING_TIMEOUT_S. Take the reference before the
+        # assignment replaces it.
+        replaced = device.data_ws
+
         device.data_ws = ws
         # The connection bridge rides this plane: ask what the device holds
         # now that there is somewhere for the answer to arrive.
@@ -5625,6 +5633,18 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
         device.listen_router.reset()
         device.data_ready.set()
         log.info(f"[data] Data connection established: {device_id}")
+
+        # Closed AFTER the replacement is wired, so nothing about the live
+        # socket waits on the dead one, and in the background so a peer that
+        # never answers the handshake cannot stall registration either — which
+        # is the normal case, since a device only reconnects here once its old
+        # socket is already beyond reach. Sent gracefully rather than through
+        # the transport so the old handler's finally reads a routine close and
+        # logs at INFO instead of the 1011 the ping timeout would have given.
+        if replaced is not None and replaced is not ws:
+            log.info(f"[data] {device_id}: closing the data connection this "
+                     f"one replaces")
+            em_tasks.spawn(replaced.close(), name=f"replaced-data-{device_id}")
 
         # One bad frame must not close the data connection (#255), same
         # reading as the control plane. This loop runs per frame though
