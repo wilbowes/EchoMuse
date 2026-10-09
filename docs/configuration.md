@@ -917,6 +917,7 @@ These are set once, on the server, and need a controller restart to change:
 | `SERVER_TLS_PORT` | Encrypted device link (wss) port — default 8770, `0` disables. Devices switch to it automatically once they hold credentials: from the wizard, from approving a new device, or from pairing (hold the Echo's action button 5 s, then **Approve pairing**). |
 | `REQUIRE_DEVICE_TLS` | Set to `1` **only after every device shows "wss (TLS)"** on its Status tab — from then on the controller rejects unencrypted or tokenless device connections. |
 | `EM_EXTRA_CA_CERT` | Path to a PEM CA certificate to trust — needed if Home Assistant, or a media server you stream from, is served over HTTPS with your own internal certificate authority. See below. |
+| `EM_TTS_WAIT_TIMEOUT` | Seconds to wait for Home Assistant's reply to begin before giving up on the turn — default 30, at most 120. Raise it if your conversation agent uses tools and needs longer. The add-on has the same setting as **Reply wait (seconds)**. |
 
 See `.env.example` for the complete list with comments.
 
