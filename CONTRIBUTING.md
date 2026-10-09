@@ -64,7 +64,7 @@ Saved searches for the common questions. Counts move; the filters do not.
 
 By area: [device](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Adevice) · [controller](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Acontroller) · [dashboard](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Adashboard) · [provisioning](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Aprovisioning) · [ha](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Aha) · [forge](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Aforge) · [docs](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Adocs)
 
-By milestone: [2.22.0](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20milestone%3A2.22.0) · [3.0.0](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20milestone%3A3.0.0)
+By milestone: [Link resilience](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20milestone%3A%22Link%20resilience%22) · [Sendspin and device-side audio](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20milestone%3A%22Sendspin%20and%20device-side%20audio%22)
 
 ## Milestones and releases
 
@@ -72,13 +72,11 @@ The firmware (`v*` tags), the controller (`controller-v*`) and emOS
 (`emos-v*`) are released separately. A release goes to Early Access first and
 becomes general once it has soaked and passed [UAT](docs/uat.md).
 
-A milestone is a theme, and the two in use carry the number they were planned
-for, which the releases have since passed:
+A milestone is a theme, and is not tied to a release number:
 
-- **2.22.0** — link resilience: the audio path survives a bad link (#140).
-  Still open work.
-- **3.0.0** — Sendspin, and the output chain on the device (#272). Both have
-  shipped in 2.x; the milestone holds what is left around them.
+- **Link resilience** — the audio path survives a bad link (#140).
+- **Sendspin and device-side audio** — Sendspin and the output chain on the
+  device (#272) have shipped; the milestone holds what is left around them.
 
 An issue with no milestone is not scheduled, which is not the same as
 unwanted. A `ready` issue outside a milestone is still a fine thing to pick
