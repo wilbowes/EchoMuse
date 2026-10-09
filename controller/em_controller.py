@@ -501,6 +501,11 @@ class Device:
         self.muted     = False
         # HA's wake word picker (#286); seeded from the DB at connect.
         self.wake_word_enabled = True
+        # #776: set when the live wake word was turned on for a firmware that
+        # cannot honour off, so the stored value stays off. Cleared when the
+        # stored value is written, which is what makes a later "on" request
+        # from Home Assistant stick after an upgrade.
+        self.wake_word_temporarily_on = False
         self.listening = False
         self.thinking  = False
 
@@ -4784,6 +4789,18 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                 log.info(f"[{_d.device_id}] Wake word off declined — this "
                          f"firmware would still send audio on each wake")
                 return
+            # #776: when the live value was turned on for a firmware that cannot
+            # honour off, the stored value is still off. A request for "on" here
+            # must still be stored, or the person's choice comes back as off
+            # after the upgrade — they would have to set it twice. The live
+            # value is already on, so on_request reports no change; this writes
+            # the stored value and clears the temporary flag.
+            if on and _d.wake_word_temporarily_on:
+                _d.wake_word_temporarily_on = False
+                em_dbwriter.submit(db.set_wake_word_enabled, _d.device_id, True)
+                log.info(f"[{_d.device_id}] Wake word on stored — the temporary "
+                         f"on is now the stored choice")
+                return
             t = em_wakeword.on_request(want=on, enabled=enabled, mic_muted=mic_muted)
             if not t.changed:
                 return
@@ -5341,6 +5358,41 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                             if after.state == em_listen.STATE_DEGRADED:
                                 em_dbwriter.submit(db.log_device, device_id, "warning", "device",
                                               f"Wake word unavailable, button only: {after.reason}")
+                        # #776: a wake word stored OFF, on firmware that
+                        # cannot stop at the crossing, opens a session on every
+                        # wake that the controller then closes — while Home
+                        # Assistant reads "No wake word" throughout. Report
+                        # "on" so the device works, but KEEP the stored value
+                        # off: after an upgrade the firmware can honour off
+                        # again, and the person's choice comes back without them
+                        # setting it twice. Clearing it would lose that.
+                        #
+                        # Here and not on connect: syncListenState is sent
+                        # AFTER the ack, so at registration listen_reported is
+                        # still None and a check there would read "not private"
+                        # for a private Echo — the same bug in a new place.
+                        if em_wakeword.stored_off_unsupported(
+                                stored=not device.wake_word_enabled,
+                                listening_locally=after.state == em_listen.STATE_LOCAL,
+                                device_can=device.wake_word_off_capable):
+                            device.wake_word_enabled = True
+                            device.wake_word_temporarily_on = True
+                            esphome.update_wake_word(device_id, True)
+                            em_dbwriter.submit(db.log_device, device_id, "info",
+                                               "controller",
+                                               "Wake word reported on temporarily: "
+                                               "this firmware still sends audio "
+                                               "on each wake, so the stored off "
+                                               "is kept until it can honour it")
+                            log.info(f"[{device_id}] Wake word reported on "
+                                     f"temporarily — this firmware still sends "
+                                     f"audio on each wake, so the stored off is "
+                                     f"kept until it can honour it")
+                            await api._push_event({
+                                "type":      "device_update",
+                                "device_id": device_id,
+                                "state":     {"wake_word_enabled": True},
+                            })
                         await _push_device_state(device)
 
                     elif msg_type == "listen_end":

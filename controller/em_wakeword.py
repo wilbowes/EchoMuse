@@ -62,6 +62,31 @@ def decline_off(*, want: bool, listening_locally: bool, device_can: bool) -> boo
     return not want and listening_locally and not device_can
 
 
+def stored_off_unsupported(*, stored: bool, listening_locally: bool,
+                           device_can: bool) -> bool:
+    """
+    Whether a STORED "No wake word" has to be given up because this firmware
+    cannot honour it (#776).
+
+    `decline_off` is the same rule applied to a request arriving now. This is
+    its mirror for a choice already in the database, which nothing ever
+    revisited: the device keeps opening a session on every wake and the
+    controller closes each one, while Home Assistant reads "No wake word" the
+    whole time. Reaching this needs the firmware to go backwards after the
+    picker was set — a slot rollback, or a downgrade after #552.
+
+    Returns True to turn the stored state back ON and report it, which is the
+    same outcome as a declined request. Clearing rather than merely reporting
+    is the point: keeping the stored value means the same false state returns
+    on every connect after the next upgrade, and nothing self-heals.
+
+    An Echo STREAMING to the controller with the wake word off is honouring
+    it — the controller stops that stream itself — so it is never reverted.
+    Only firmware that cannot stop at the crossing is.
+    """
+    return stored and listening_locally and not device_can
+
+
 def on_request(*, want: bool, enabled: bool, mic_muted: bool) -> Transition:
     """HA's picker asked for `want`, with the wake word `enabled` and the mic
     mute button `mic_muted`."""
