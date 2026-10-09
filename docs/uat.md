@@ -55,7 +55,7 @@ version numbers to the existing issue instead.
 |---|---|
 | HA's "Set up voice satellite" dialog times out and needs Retry, after the jingle plays | [#219](https://github.com/wilbowes/EchoMuse/issues/219) |
 | Radio / stream playback is interrupted | [#325](https://github.com/wilbowes/EchoMuse/issues/325) |
-| Unplugging the headphone jack stalls the mic and drops the device | [#117](https://github.com/wilbowes/EchoMuse/issues/117) |
+| Unplugging the headphone jack stalls the mic and drops the device (FireOS only; fixed under emOS) | [#117](https://github.com/wilbowes/EchoMuse/issues/117) |
 | Odd behaviour with something plugged into the aux jack | [#141](https://github.com/wilbowes/EchoMuse/issues/141) |
 | Ambient light sensor missing on a device with a `G090LF` serial | [#90](https://github.com/wilbowes/EchoMuse/issues/90) |
 | WiFi never reconnects after a reboot on a network with no internet, on a device provisioned before the fix for #317 | [#439](https://github.com/wilbowes/EchoMuse/issues/439) |

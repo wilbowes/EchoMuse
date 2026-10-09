@@ -152,7 +152,7 @@ EchoMuse is in active development and runs daily on a small fleet. emOS is
 newer than FireOS and has fewer device-hours behind it. Open issues worth
 knowing before you start:
 
-- The 3.5mm jack: unplugging can stall the microphone for about 30 seconds ([#117](https://github.com/wilbowes/EchoMuse/issues/117),
+- The 3.5mm jack on FireOS (not emOS): unplugging can stall the microphone for about 30 seconds ([#117](https://github.com/wilbowes/EchoMuse/issues/117),
   [#141](https://github.com/wilbowes/EchoMuse/issues/141)).
 - emOS on FireOS 6 cannot join WPA3 networks: the WiFi driver has no support
   for it. Use WPA2 ([#536](https://github.com/wilbowes/EchoMuse/issues/536)).
