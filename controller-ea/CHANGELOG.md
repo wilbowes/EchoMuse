@@ -1,5 +1,44 @@
 # Changelog
 
+## 2.26.0-ea.2 (Early Access)
+
+With Echoes in more than one room, the one you are nearest now answers, and a command said straight after the wake word keeps its first word. Pair with firmware v2.18.0-ea.2, which this controller offers.
+
+### New
+
+- **The loudest Echo answers (#747).** When more than one Echo hears the wake word, the one that heard it loudest takes the turn. Until now it was the first to report, which is mostly chance at close range. A house with two or more Echoes waits a quarter of a second to compare; a house with one never waits. A wake word spoken over a reply is still decided by which Echo heard it first.
+- **Turn the wake word off from Home Assistant (#552).** Home Assistant's wake word picker for an Echo now has "No wake word", which stops that Echo answering to it while the button still works. The mute button's state is reported to Home Assistant as well. Needs firmware v2.18.0-ea.2.
+- **Response level (#636).** Config → Playback → "Response level" raises spoken replies by 6 or 12 dB against the Echo's volume, for a house that keeps music low. The boost is capped so a reply is never louder than full volume. Needs firmware v2.18.0-ea.2.
+- **Reply wait (#805).** The add-on option "Reply wait (seconds)", or `EM_TTS_WAIT_TIMEOUT` for the container, sets how long a turn waits for Home Assistant to begin answering. It stays at 30 seconds unless you change it, up to 120. Raise it if your conversation agent uses tools.
+
+### Improved
+
+- "Remote volume arc" under Config → Ring shows the level on the ring when the volume is changed from Home Assistant (#713). Needs firmware v2.18.0-ea.2.
+- "Wake word microphone" under Config → Microphones → Advanced picks which microphone listens for the wake word, for an Echo whose centre microphone has failed (#705). Needs firmware v2.18.0-ea.2.
+- An announcement from Home Assistant lights the ring as a spoken reply does (#779).
+- The support bundle reports the log levels in force (#797).
+- A failed emOS WiFi step in the wizard collects the Echo's network log (#773).
+- The wizard reads back what each step wrote before reporting it done (#267, #268).
+- The wizard accepts an amonet 1 Echo carrying TWRP 3.7.0_9-bboe (#768).
+- The wizard and the docs say which ring states need a restore and which only need patience (#642).
+- Discovery announces on the controller's own network interface only, which fixes a multi-homed host (#604).
+- The image picks up Debian security fixes weekly (#802).
+
+### Fixed
+
+- A command said without a pause after the wake word lost its first word: "tell me a joke" arrived as "me a joke" (#829).
+- A container started without a `.env` kept its database, device certificates and recordings inside the container and lost them when it was recreated (#629).
+- Talking over a reply while Home Assistant was unreachable gave silence, with no ring cue and nothing in Activity (#417).
+
+### Known issues
+
+- A turn is occasionally logged as empty although its recording holds clear speech (#815).
+- An emOS Echo on the 32-bit kernel sometimes reconnects without rebooting (#816).
+
+### Thanks
+
+@Ahtran360 (the arbitration report, #747), @DaSonOfPoseidon (#552), @evy0311 (#713, #716), @shawnsi (#705, #730), @WegoW (#805, #811), @forming (#723, #724, #757, #797), @bboe (#768, #267), @NicFragale (#604), @cordlessblues (#629), @bapesupreme (#642) and @PipTheBirb (#767).
+
 ## 2.26.0-ea.1 (Early Access)
 
 Bluetooth connections, emOS updates from the dashboard, and a timer you can stop in any language. Pair with firmware v2.18.0-ea.1, which this controller offers.
