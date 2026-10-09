@@ -99,13 +99,14 @@ The wizard offers two ways to run EchoMuse on the Dot:
 ## Features
 
 - **Voice turns through Assist**, with the answer played on the Dot.
-- **Wake word on the controller or on the Dot.** By default the controller
-  listens for the wake word. The Dot can do it itself instead: switch it on
-  in the dashboard's wake word settings, for every Dot or just one. If a Dot can't (older firmware, or its wake
-  word model isn't installed yet), the controller takes over, so it never
-  goes deaf.
+- **Wake word on the Dot or on the controller.** By default each Dot listens
+  for the wake word itself and sends nothing until it hears it. The
+  controller can do it instead, for every Dot or just one; that Dot then
+  streams its microphone to the controller all the time. A Dot whose wake
+  word model isn't installed yet, or failed to load, answers to its button
+  only and says why. It never falls back to streaming.
 - **Barge-in:** say the wake word over a reply to interrupt it.
-- **More than one Dot:** the first to hear the wake word answers and the rest
+- **More than one Dot:** the one that hears you loudest answers and the rest
   stay quiet.
 - **Music:** each Dot is a Home Assistant media player (media browser, Music
   Assistant, radio). Speaking over music lowers it under the answer rather

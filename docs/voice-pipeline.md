@@ -4,23 +4,23 @@ What actually happens between you saying "Hey Rhasspy, turn off the lights"
 and the lights going off — stage by stage, in plain language, with the
 benefits and trade-offs of each design choice.
 
-The one-sentence version: **the Dot is deliberately dumb** — it captures
-sound as cleanly as possible and streams it out; all the intelligence
-(recognising the wake word, deciding when you've finished speaking,
-understanding you) lives on the controller and in Home Assistant, where it
-can be updated, tuned, and observed without touching the hardware.
+The one-sentence version: the Dot captures sound as cleanly as it can and
+listens for its own wake word; once it hears it, what you say goes to the
+controller and Home Assistant, which decide when you've finished speaking
+and what you meant. Everything tunable is set from the dashboard, without
+touching the hardware.
 
 ```
  YOUR VOICE
     │
     ▼
 ┌─ On the Echo Dot ───────────────────────────────────────────┐
-│  7 microphones → gain boost → echo cancel → mic selection   │
+│  7 microphones → gain → echo cancel → mic choice → wake word│
 └──────────────────────────────│──────────────────────────────┘
-                               │  continuous audio stream (WiFi)
+                               │  what you say after the wake word (WiFi)
                                ▼
 ┌─ On the controller ─────────────────────────────────────────┐
-│  wake-word spotting → conversation management → sound shaping│
+│  conversation management (and the wake word, if you choose) │
 └──────────────────────────────│──────────────────────────────┘
                                │
                                ▼
@@ -78,8 +78,7 @@ interrupting the assistant mid-sentence with the wake word (see the
 configuration guide's Barge-in setting).
 
 **Caveats:** it only removes the *Dot's own* sound — it does nothing about
-the TV (that's a different problem; see Stage 8). It ships disabled until
-you've turned it on and sanity-checked it. (Since v2.7.8 the canceller
+the TV (that's a different problem; see Stage 8). It is on by default. (Since v2.7.8 the canceller
 stays "warmed up" between responses instead of relearning each time —
 if barge-in used to need a raised voice, it shouldn't anymore.)
 
@@ -142,25 +141,17 @@ conversation starts. By default it runs **on the Echo**, which is why nothing
 needs to leave it until then; an Echo set to controller mode has the
 controller run it over the stream instead. Same model, same bar.
 
-With more than one device online, the **first** Echo to hear you answers
-straight away — judged by when each one captured the audio, not when its
-message reached the controller — and any other device detecting the same word within the
-**arbitration window** (default 700ms, configurable) stands down silently,
-its ring going dark as soon as the other device claims the turn.
-One utterance, one response, even in earshot of two devices — and no added
-latency, because the winner claims the turn on the spot rather than waiting
-out the window.
+With more than one device online, the Echo that heard you **loudest**
+answers, which is normally the one in the room you are in. The controller
+waits up to a quarter of a second so every Echo that heard the word is
+counted, and any other device detecting the same word within the
+**arbitration window** (default 700ms, configurable) stands down silently.
+One utterance, one response, even in earshot of two devices. With one Echo
+there is no wait. Before controller 2.26.0 the first Echo to hear you
+answered; [listening.md](listening.md) has the measurements behind the change.
 
-An earlier design instead waited out the window and gave the turn to
-whichever device heard you *best*. It was dropped for two measured reasons:
-it taxed every wake by ~364ms even with nothing competing, and the
-signal-to-noise winner produced a *worse* transcript than the device that
-simply heard you first.
-
-**Benefit:** because this runs on the controller rather than the Dot, you
-can change the wake word or sensitivity live from the dashboard, see every
-detection *and* every near-miss in the Status tab, and future improvements
-don't need firmware updates.
+**Benefit:** in either mode you can change the wake word or sensitivity live
+from the dashboard.
 
 **Caveat:** it's a probability, not a certainty — the sensitivity slider is
 a false-accepts vs. false-rejects trade-off you tune to your room (the
@@ -286,7 +277,7 @@ is off by default.
 
 **Caveat:** interrupting a response by voice (**barge-in**) works when
 enabled — say the wake word over the top and the response cuts off — but
-it's off by default and depends on AEC being on and tuned (Stage 3): the
+it's on by default and depends on echo cancellation (Stage 3), also on by default: the
 mics stay live during playback, and echo cancellation is what stops the
 device waking itself. It works from the first reply after a restart: the
 Dot saves what its echo canceller has learned about its own speaker and
@@ -317,7 +308,7 @@ only the bed under it. How far it drops is yours to set (**Ducking**,
 in the Playback section) — it's a taste call best made by ear in the
 actual room.
 
-For reliable wake-over-music, enable AEC and barge-in (Stage 3): the
+Wake-over-music relies on AEC and barge-in (Stage 3), both on by default: the
 same echo cancellation that lets you interrupt the assistant's own
 voice is what lets it hear you over a song.
 
@@ -330,8 +321,9 @@ behaviour — pause for the turn, resume after.
 
 1. **Dumb device, smart controller.** Anything that can drift, misjudge, or
    need tuning lives where it can be observed and updated without touching
-   hardware. The Dot captures, amplifies, cancels its own echo, and streams
-   — that's it.
+   hardware. The Dot captures, amplifies, cancels its own echo, listens for
+   its wake word and shapes what it plays; the settings for all of it come
+   from the controller.
 2. **Measure, don't modify.** The controller tracks each room's noise floor
    and uses it to make *decisions* (is anyone speaking?), but never rewrites
    the audio on its way to speech-to-text. Adaptive audio-mangling is how

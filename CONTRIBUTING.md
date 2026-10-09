@@ -71,7 +71,7 @@ By release: [2.21.0](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20i
 Issues are grouped by the release they are meant to land in, and a milestone
 is a theme rather than a bucket:
 
-- **2.21.0** — controller GA, in early access now. Closed to new work.
+- **2.21.0** — released. Closed.
 - **2.22.0** — link resilience. The audio path survives a bad link (#140).
 - **3.0.0** — Sendspin multi-room, and the output chain moves to the device
   (#272).

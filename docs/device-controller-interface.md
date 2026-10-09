@@ -7,7 +7,7 @@ specification rather than by reading the Dot's source. The controller is
 already board-agnostic; a new board is almost entirely a fresh set of hardware
 **Bindings** behind this same wire protocol.
 
-Terms in **bold** are defined in [CONTEXT.md](../CONTEXT.md). The authoritative
+The authoritative
 source for every message and field is the code cited inline; where this
 document and the code disagree, the code wins and this document is the bug.
 
@@ -460,8 +460,8 @@ to do its own job (see the direction note in the repo-root `CLAUDE.md`).
 
 The `crown` bindings are built behind a Go build tag mirroring `server`
 (ADR-0001). The hardware inventory — ALSA cards/devices, formats, input-device
-paths, autostart — lives in
-[echo-show-8-hardware-map.md](echo-show-8-hardware-map.md); this section records
+paths, autostart — lives in `docs/echo-show-8-hardware-map.md` on the branch of
+[PR #358](https://github.com/wilbowes/EchoMuse/pull/358), which has not merged; this section records
 only what the *interface* commits to for MVP.
 
 **Capabilities for MVP** (subset of the Dot's):
@@ -492,8 +492,8 @@ real hardware 2026-08-26 with `device/tools/capture_mics`: opens clean, real
 signal on all 4 mic channels, no digital zeros. `device/tools/hw_refine_probe`
 confirms the driver's own range matches checkers' constants exactly. Full
 history (why "digital zeros" was the original wrong read, the gain-fix
-investigation, the actual capture data) is in
-[echo-show-8-hardware-map.md](echo-show-8-hardware-map.md#on-hardware-capture-2026-08-26--the-gono-go-measurement-done).
+investigation, the actual capture data) is in the same file on
+[PR #358](https://github.com/wilbowes/EchoMuse/pull/358)'s branch.
 
 **Still open: quiet-room/across-room SNR**, not raw capture — today's test was
 a loud-room sanity check with music playing, not a wake-reliability

@@ -243,10 +243,10 @@ whether or not the controller is reachable.
 
 ## 02 — Wake word
 
-How the device decides you said the magic word. By default this work happens
-on the controller, not the Dot — the Dot just streams audio to it. The Dot
-can also do this work itself, either alongside the controller as a
-comparison or instead of it; see **Wake word detection** below.
+How the device decides you said the magic word. By default the Dot does this
+work itself and sends nothing until it hears the word. The controller can do
+it instead, with the Dot streaming audio to it all the time; see **Wake word
+detection** below.
 
 ### Wake word model
 Which word wakes it: Hey Jarvis, Alexa, Hey Mycroft, or Hey Rhasspy. These
@@ -311,11 +311,8 @@ quarter of a second so that every Echo that heard it is counted. With one
 Echo there is no wait. The window itself only decides how long afterwards a
 second Echo counts as "the same utterance". `0` disables arbitration.
 
-An earlier version instead waited out the window and gave the turn to
-whichever device heard you *best*. That was dropped: it taxed every wake by
-~364ms even when nothing was competing, and field data showed the
-signal-to-noise winner produced a *worse* transcript than the device that
-simply heard you first.
+Before controller 2.26.0 the first Echo to hear the word answered.
+[listening.md](listening.md) has the reasons that changed.
 
 ### Wake sound
 Plays a short rising tone when the Echo hears the wake word. Off by
@@ -914,7 +911,7 @@ These are set once, on the server, and need a controller restart to change:
 | `DB_PATH` | Where the database is kept. The device certificates and recordings are stored beside it. The published image defaults to `/app/data/echomuse.db`, the folder the compose files mount, so it survives an update with or without a `.env`. Bare-metal installs should set it. |
 | `OWW_MODEL` / `OWW_THRESHOLD` | Startup defaults for wake word/sensitivity — the dashboard values override these. |
 | `DEVICE_APPROVAL` | `strict` (you approve every new device — recommended) or `auto`. |
-| `SERVER_TLS_PORT` | Encrypted device link (wss) port — default 8770, `0` disables. Devices switch to it automatically once they hold credentials: from the wizard, from approving a new device, or from pairing (hold the Echo's action button 5 s, then **Approve pairing**). |
+| `SERVER_TLS_PORT` | Encrypted device link (wss) port — default 8770, `0` disables. Don't set `0` once Echoes are paired: an Echo holding credentials will not fall back to the plain link. Devices switch to it automatically once they hold credentials: from the wizard, from approving a new device, or from pairing (hold the Echo's action button 5 s, then **Approve pairing**). |
 | `REQUIRE_DEVICE_TLS` | Set to `1` **only after every device shows "wss (TLS)"** on its Status tab — from then on the controller rejects unencrypted or tokenless device connections. |
 | `EM_EXTRA_CA_CERT` | Path to a PEM CA certificate to trust — needed if Home Assistant, or a media server you stream from, is served over HTTPS with your own internal certificate authority. See below. |
 | `EM_TTS_WAIT_TIMEOUT` | Seconds to wait for Home Assistant's reply to begin before giving up on the turn — default 30, at most 120. Raise it if your conversation agent uses tools and needs longer. The add-on has the same setting as **Reply wait (seconds)**. |
