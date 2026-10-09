@@ -263,8 +263,8 @@ wakes the loudest Echo led every other by at least 9.7 dB, and first-to-hear
 chose it in eight.
 
 Not handled: an Echo with a weak microphone reads quiet and can lose the turn
-to a louder one further away (#731), and an emOS Echo reads about 6 dB below
-a FireOS 5 one until the firmware sets the same input gain on both (#806). A single-Echo house never waits. Until
+to a louder one further away (#731), and on firmware before v2.18.0 an emOS
+Echo reads about 6 dB below a FireOS 5 one (#806). A single-Echo house never waits. Until
 2026-10-05 only a mixed fleet, some Echoes detecting on the device and some
 scored by the controller, was held, and the earliest heard always won. A
 barge-in during playback fires on the second of two frames and is dated from

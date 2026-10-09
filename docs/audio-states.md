@@ -169,7 +169,7 @@ process.
 
 ---
 
-## 6. Sendspin — a second producer for the music plane **[built — EA, not yet heard on hardware]**
+## 6. Sendspin — a second producer for the music plane **[built — Early Access firmware, on hardware since 2026-10-01]**
 
 Synchronised multi-room playback via the Open Home Foundation's Sendspin
 protocol, which Music Assistant speaks natively. Placement decided 2026-08-22

@@ -99,13 +99,14 @@ The wizard offers two ways to run EchoMuse on the Dot:
 ## Features
 
 - **Voice turns through Assist**, with the answer played on the Dot.
-- **Wake word on the controller or on the Dot.** By default the controller
-  listens for the wake word. The Dot can do it itself instead: switch it on
-  in the dashboard's wake word settings, for every Dot or just one. If a Dot can't (older firmware, or its wake
-  word model isn't installed yet), the controller takes over, so it never
-  goes deaf.
+- **Wake word on the Dot or on the controller.** By default each Dot listens
+  for the wake word itself and sends nothing until it hears it. The
+  controller can do it instead, for every Dot or just one; that Dot then
+  streams its microphone to the controller all the time. A Dot whose wake
+  word model isn't installed yet, or failed to load, answers to its button
+  only and says why. It never falls back to streaming.
 - **Barge-in:** say the wake word over a reply to interrupt it.
-- **More than one Dot:** the first to hear the wake word answers and the rest
+- **More than one Dot:** the one that hears you loudest answers and the rest
   stay quiet.
 - **Music:** each Dot is a Home Assistant media player (media browser, Music
   Assistant, radio). Speaking over music lowers it under the answer rather
@@ -151,7 +152,7 @@ EchoMuse is in active development and runs daily on a small fleet. emOS is
 newer than FireOS and has fewer device-hours behind it. Open issues worth
 knowing before you start:
 
-- The 3.5mm jack: unplugging can stall the microphone for about 30 seconds ([#117](https://github.com/wilbowes/EchoMuse/issues/117),
+- The 3.5mm jack on FireOS (not emOS): unplugging can stall the microphone for about 30 seconds ([#117](https://github.com/wilbowes/EchoMuse/issues/117),
   [#141](https://github.com/wilbowes/EchoMuse/issues/141)).
 - emOS on FireOS 6 cannot join WPA3 networks: the WiFi driver has no support
   for it. Use WPA2 ([#536](https://github.com/wilbowes/EchoMuse/issues/536)).
@@ -166,7 +167,7 @@ Everything else is in the [issue tracker](https://github.com/wilbowes/EchoMuse/i
   [our issues](https://github.com/wilbowes/EchoMuse/issues), not to the XDA
   thread.** The thread is for the unlock only.
 - Check the [FAQ](docs/faq.md) first.
-- Attach a support bundle (Dashboard → Support → Download bundle). It holds
+- Attach a support bundle (Settings → Support → Collect bundle, then Download). It holds
   the logs and versions we need, with transcripts, recordings and network
   names removed.
 

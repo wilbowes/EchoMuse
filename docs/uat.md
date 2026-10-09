@@ -54,12 +54,11 @@ version numbers to the existing issue instead.
 | Symptom | Issue |
 |---|---|
 | HA's "Set up voice satellite" dialog times out and needs Retry, after the jingle plays | [#219](https://github.com/wilbowes/EchoMuse/issues/219) |
-| Playback cuts off part-way through a long spoken response | [#324](https://github.com/wilbowes/EchoMuse/issues/324) |
 | Radio / stream playback is interrupted | [#325](https://github.com/wilbowes/EchoMuse/issues/325) |
-| Unplugging the headphone jack stalls the mic and drops the device | [#117](https://github.com/wilbowes/EchoMuse/issues/117) |
+| Unplugging the headphone jack stalls the mic and drops the device (FireOS only; fixed under emOS) | [#117](https://github.com/wilbowes/EchoMuse/issues/117) |
 | Odd behaviour with something plugged into the aux jack | [#141](https://github.com/wilbowes/EchoMuse/issues/141) |
 | Ambient light sensor missing on a device with a `G090LF` serial | [#90](https://github.com/wilbowes/EchoMuse/issues/90) |
-| WiFi never reconnects after a reboot on a network with no internet | [#317](https://github.com/wilbowes/EchoMuse/issues/317) |
+| WiFi never reconnects after a reboot on a network with no internet, on a device provisioned before the fix for #317 | [#439](https://github.com/wilbowes/EchoMuse/issues/439) |
 | Music started elsewhere stays silent until a voice turn finishes | [#262](https://github.com/wilbowes/EchoMuse/issues/262) |
 | Double/triple tap detected unreliably | [#115](https://github.com/wilbowes/EchoMuse/issues/115) |
 | High CPU on the device | [#176](https://github.com/wilbowes/EchoMuse/issues/176) |
@@ -503,8 +502,8 @@ cycle.
 ### L2 · Losing WiFi
 **Do:** Take the AP down for a minute, then bring it back.
 **Expect:** The device rejoins on its own.
-**Flag:** A device that stays off the network. (Note the known issue #317 for
-networks with no internet.)
+**Flag:** A device that stays off the network. (A device provisioned before the fix
+for #317 can still do this on a network with no internet; see #439.)
 
 ### L3 · Losing Home Assistant
 **Do:** Stop HA. Say the wake word.

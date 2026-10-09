@@ -196,10 +196,10 @@ detection off and on. See
 
 ## Step 6 — Talk to it
 
-Say the wake word — **"Hey Rhasspy"** by default (changeable in the
+Say the wake word — **"Hey Jarvis"** by default (changeable in the
 dashboard, see [configuration.md](configuration.md)) — then speak normally:
 
-> "Hey Rhasspy … turn off the kitchen lights."
+> "Hey Jarvis … turn off the kitchen lights."
 
 The LED ring tells you what's happening:
 
