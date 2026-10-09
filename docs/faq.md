@@ -48,6 +48,18 @@ very old Dot, select **Echo Tap** in the app to get the old hotspot pairing
 flow; and turn **off** any file manager that auto-mounts USB devices, because
 it grabs the handshake and makes later adb steps fail with unhelpful errors.
 
+### The wizard stops at Escrow Boot Image and mentions `boot_a_x`.
+**The Echo has amonet v1's partition table under a v2 unlock.** Installing
+v2 is meant to put the original table back, and on this Echo it has not. The
+wizard has read and written nothing. Reinstalling FireOS does not change the
+table, so it won't help.
+
+One owner got past it by installing amonet v2 again, as a zip from TWRP
+([#712](https://github.com/wilbowes/EchoMuse/issues/712)). **We have not run
+that ourselves and can't tell you it is safe:** it rewrites the partition
+table and the bootloader, and an Echo on which it fails partway may not
+start. Ask on the XDA thread first and quote the wizard's error line.
+
 ### Sideloading FireOS 5.5.5.4 fails with a red flash of the ring.
 Sideload it again. It generally works on the second attempt.
 
@@ -147,6 +159,17 @@ run `sudo systemctl stop ModemManager` and `adb kill-server` before clicking
 Connect Console. If it still fails, open the console yourself (below) and
 finish the WiFi step there.
 
+### After the reboot into emOS the ring sits blue, or part of it turns red.
+**The Echo has booted emOS and is waiting for WiFi.** A blue ring with a
+brighter segment throbbing means it has no network saved yet, which is where
+every new install stops until the wizard's WiFi step. Red means a saved
+network did not connect within two minutes. Neither is a failed flash.
+
+If the wizard can't open the console to finish, open it yourself (below) and
+run `em-wifi`: it scans, you pick a network by number and type the password
+([#810](https://github.com/wilbowes/EchoMuse/issues/810),
+[#825](https://github.com/wilbowes/EchoMuse/issues/825)).
+
 ---
 
 ## emOS
@@ -185,6 +208,10 @@ VLANs. Put them on the same network, or give the Echo a
 [static controller endpoint](configuration.md#static-controller-endpoint).
 To check, open the console and run `tail -n 40 /tmp/server.log`: repeated
 `mDNS: no server found` lines mean discovery is what's failing.
+
+With a static endpoint the firewall still has to let the Echo open TCP 8767
+and 8770 on the controller (the default ports). An mDNS relay between the VLANs was not enough
+for one owner ([#827](https://github.com/wilbowes/EchoMuse/issues/827)).
 
 ### No sound on emOS with FireOS 6.
 Update the controller to **2.24.1** and the device to **v2.16.0**. Earlier
@@ -328,6 +355,12 @@ In order:
 3. Try a different model. The stock openWakeWord models vary a lot in how well
    they suit a given voice.
 
+If it never wakes at all but the action button works, the centre microphone
+may have failed: the wake word listens on that one alone. **Config →
+Microphones → Advanced → Wake word microphone** moves it to one of the six
+around the edge ([#705](https://github.com/wilbowes/EchoMuse/issues/705)).
+That is firmware v2.18.0 (Early Access from v2.18.0-ea.2).
+
 If it still misses at normal speaking distance in a quiet room, that's worth a
 report with the model name and the distance.
 
@@ -335,6 +368,14 @@ report with the model name and the distance.
 Move Sensitivity toward Precise. If it fires with the TV on specifically,
 [#294](https://github.com/wilbowes/EchoMuse/issues/294) is the open work on
 that — say what was playing.
+
+### Can it play a sound when it hears the wake word?
+Yes, from controller 2.25.0 and firmware v2.17.0. In the Echo's **Config →
+Wake word** section it is in the right-hand column, below the Arbitration
+window slider, with Quiet, Medium and Loud levels. It is off by default. If
+the section is dimmed the Echo is following the fleet setting, so switch it to
+Device or change it under the fleet settings. The sound is built in and can't
+be replaced with your own.
 
 ### Can I use my own wake word?
 Yes — [oww_forge](../oww_forge/README.md) trains one, and you install it in
@@ -351,6 +392,20 @@ wrong.
 ### The audio distorts when it's loud.
 Check **Config → Playback**: the limiter and bass guard should be on. If it
 still distorts, report the volume percentage — the number is the diagnostic.
+
+### The 3.5mm jack is very quiet, or only one channel plays.
+Fixed in firmware v2.18.0 (Early Access from v2.18.0-ea.2). A codec switch
+stock turns on with a plug in was never set
+([#566](https://github.com/wilbowes/EchoMuse/issues/566),
+[#669](https://github.com/wilbowes/EchoMuse/issues/669)). On older firmware,
+`tinymix -D 0 "Audio_DacMux_Setting" On` from a shell brings it back until
+the next restart.
+
+### The internal speaker is quieter than stock.
+Reported on some Dots and not others of the same model
+([#630](https://github.com/wilbowes/EchoMuse/issues/630)); there is no
+setting for it yet. Changing `HP Driver Gain` with `tinymix` lasts a few
+seconds, because the firmware keeps writing its own speaker routing back.
 
 ### It sounds worse than stock Alexa did.
 Partly true and partly fixed. A DAC clipping fault above unity gain was found
@@ -376,6 +431,13 @@ the reply is written** and it starts at the first sentence instead. It needs a
 conversation agent and a text-to-speech engine that both stream, and a model
 slower than speech may pause between sentences, so if it comes out in fits and
 starts, turn it off again.
+
+### A slow conversation agent never gets to answer.
+The controller waits 30 seconds for Home Assistant's reply to begin and then
+ends the turn, which an agent that calls tools can overrun. From controller
+2.26.0 (Early Access from 2.26.0-ea.2) raise **Reply wait (seconds)** in the
+add-on's options, or `EM_TTS_WAIT_TIMEOUT` on the container, up to 120
+([#805](https://github.com/wilbowes/EchoMuse/issues/805)).
 
 ### Long responses cut off part-way.
 Fixed; update the controller. If a long answer still stops early, a support
@@ -462,6 +524,11 @@ They shouldn't — arbitration picks one. **Config → Wake word → Arbitration
 window** widens the window devices are compared in. If both still answer,
 report it.
 
+If the wrong one answers, such as an Echo across the house instead of the one
+beside you: from controller 2.26.0 (Early Access from 2.26.0-ea.2) the Echo
+that heard you loudest answers. Before that it was the one that heard you
+first ([#747](https://github.com/wilbowes/EchoMuse/issues/747)).
+
 ### Can I swap a dead Echo for a new one and keep its history?
 Not yet — [#133](https://github.com/wilbowes/EchoMuse/issues/133).
 
@@ -527,8 +594,8 @@ still plaintext**, including mic audio —
 Only Echo Dot Gen 2 ("biscuit") is supported today. Community ports are in
 progress for the Echo Show 8 ([#358](https://github.com/wilbowes/EchoMuse/pull/358)),
 the Echo Show 5 ([#36](https://github.com/wilbowes/EchoMuse/issues/36)) and
-the Echo 2 ([#554](https://github.com/wilbowes/EchoMuse/pull/554)), and the
-original Echo Dot Gen 3 is being profiled
+the Echo 2 ([#687](https://github.com/wilbowes/EchoMuse/pull/687)), and
+@shortgame11 has EchoMuse running on an Echo Dot Gen 3 in a fork
 ([#527](https://github.com/wilbowes/EchoMuse/issues/527)).
 Other boards are welcome — the Android-specific surface is about twenty call
 sites, so a new board is mostly a mic/speaker/LED/button binding.
