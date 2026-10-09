@@ -334,3 +334,11 @@ def test_hold_whenever_two_or_more_echoes_can_claim():
     # A degraded Echo cannot claim, so there is nobody to wait for.
     assert hold(["device", None]) == 0
     assert hold(["controller", None, None]) == 0
+
+
+def test_only_a_stream_the_controller_scored_has_a_wake_tail_to_drop():
+    # "hey Verona tell me a joke" reached STT as "me a joke" (2026-10-09).
+    assert L.tail_discard(True, True, 3) == 0
+    assert L.tail_discard(True, False, 3) == 3
+    assert L.tail_discard(False, False, 3) == 0
+    assert L.tail_discard(False, True, 3) == 0

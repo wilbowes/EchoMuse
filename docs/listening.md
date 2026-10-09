@@ -169,9 +169,10 @@ the first half-second of the *next* user's command.
 The Echo keeps a ring of recent processed audio (`ringMs`, 2s) with the
 capture time of every 80 ms frame. A wake reports the capture time of the
 frame that crossed; the session starts with every ringed frame captured
-**after** it, then continues live. The controller's existing
-`VOICE_PREROLL_DISCARD` removes the wake word's tail, exactly as it does for a
-controller-detected wake.
+**after** it, then continues live. The controller sends all of it to speech
+to text: `VOICE_PREROLL_DISCARD` (240 ms) applies only to a stream the
+controller scored itself, because on a session it removed the first word of a
+command spoken straight after the wake word (`em_listen.tail_discard`).
 
 Timestamps come from one `time.Now()` taken when the frame is handed to both
 the scorer and the ring, so the scorer's queue delay (up to 640 ms when busy)

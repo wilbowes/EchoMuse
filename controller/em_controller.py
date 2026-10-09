@@ -2955,7 +2955,8 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown",
             # on the wake path) and VOICE_PREROLL_DISCARD only for the
             # initial wakeword-triggered turn.
             turn_label      = trigger_label
-            preroll_discard = esphome.VOICE_PREROLL_DISCARD if is_wakeword else 0
+            preroll_discard = em_listen.tail_discard(
+                is_wakeword, session is not None, esphome.VOICE_PREROLL_DISCARD)
             while True:
                 should_continue = False
                 try:
