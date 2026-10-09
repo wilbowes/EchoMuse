@@ -319,11 +319,11 @@ behaviour — pause for the turn, resume after.
 
 ## Design principles, if you're wondering "why is it like this?"
 
-1. **Dumb device, smart controller.** Anything that can drift, misjudge, or
-   need tuning lives where it can be observed and updated without touching
-   hardware. The Dot captures, amplifies, cancels its own echo, listens for
-   its wake word and shapes what it plays; the settings for all of it come
-   from the controller.
+1. **Capable device, smart controller.** The Dot does what has to happen
+   on it: it captures, amplifies, cancels its own echo, listens for its wake
+   word and shapes what it plays. Anything that can drift, misjudge, or need
+   tuning is set from the controller, where it can be observed and updated
+   without touching hardware.
 2. **Measure, don't modify.** The controller tracks each room's noise floor
    and uses it to make *decisions* (is anyone speaking?), but never rewrites
    the audio on its way to speech-to-text. Adaptive audio-mangling is how
