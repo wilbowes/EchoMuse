@@ -69,7 +69,7 @@ type PcmSpeaker struct {
 	pcm        board.PCMAddr
 	statusFile string
 	session    *tinyalsa.AudioSession
-	stopCh  chan struct{}
+	stopCh     chan struct{}
 	// jackInserted is the plug position last applied by SetJackRouting, and
 	// jackKnown says whether one has been applied at all. The reconcile loop
 	// needs a DESIRED state to compare against, and before jack.Watch has run

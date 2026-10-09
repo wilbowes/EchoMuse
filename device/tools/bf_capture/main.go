@@ -71,8 +71,8 @@ const (
 // ── Array geometry ────────────────────────────────────────────────────────────
 
 const (
-	micRadius       = 0.036  // metres, confirmed from PCB measurement
-	speedOfSound    = 343.0  // m/s
+	micRadius       = 0.036                     // metres, confirmed from PCB measurement
+	speedOfSound    = 343.0                     // m/s
 	samplesPerMetre = sampleRate / speedOfSound // ~46.647
 )
 
@@ -98,7 +98,7 @@ var mics = [7]micInfo{
 // ── VAD ───────────────────────────────────────────────────────────────────────
 
 const vadThreshold = 0.003 // RMS threshold for NS gating (lower than vad_stream.go
-								// because mic levels vary; tune per device)
+// because mic levels vary; tune per device)
 
 func isSpeech(samples []float32) bool {
 	var sum float64
@@ -119,7 +119,7 @@ const (
 
 // noiseSuppress holds per-bin noise floor estimates.
 type noiseSuppress struct {
-	noiseFloor []float64 // magnitude per FFT bin
+	noiseFloor  []float64 // magnitude per FFT bin
 	initialised bool
 }
 
@@ -205,11 +205,11 @@ func (ns *noiseSuppress) process(samples []float32, speech bool) []float32 {
 // ── AGC ───────────────────────────────────────────────────────────────────────
 
 const (
-	agcTargetRMS  = 0.1   // target RMS level (~-20dBFS)
-	agcMaxGain    = 20.0  // maximum gain factor
-	agcMinGain    = 0.1   // minimum gain factor
-	agcAttack     = 0.01  // gain reduction rate (fast attack)
-	agcRelease    = 0.001 // gain increase rate (slow release)
+	agcTargetRMS = 0.1   // target RMS level (~-20dBFS)
+	agcMaxGain   = 20.0  // maximum gain factor
+	agcMinGain   = 0.1   // minimum gain factor
+	agcAttack    = 0.01  // gain reduction rate (fast attack)
+	agcRelease   = 0.001 // gain increase rate (slow release)
 )
 
 type agcState struct {
@@ -428,11 +428,11 @@ func angleDiffDeg(a, b float64) float64 {
 // ── Capture ───────────────────────────────────────────────────────────────────
 
 func main() {
-	angle   := flag.Float64("angle", 0, "beam steering angle in degrees (clockwise from 12 o'clock)")
-	secs    := flag.Int("seconds", 5, "capture duration in seconds (1-60)")
-	doBF   := flag.Bool("bf", false, "enable frequency-domain beamforming")
-	doNS   := flag.Bool("ns", false, "enable VAD-gated spectral subtraction noise suppression")
-	doAGC  := flag.Bool("agc", false, "enable automatic gain control")
+	angle := flag.Float64("angle", 0, "beam steering angle in degrees (clockwise from 12 o'clock)")
+	secs := flag.Int("seconds", 5, "capture duration in seconds (1-60)")
+	doBF := flag.Bool("bf", false, "enable frequency-domain beamforming")
+	doNS := flag.Bool("ns", false, "enable VAD-gated spectral subtraction noise suppression")
+	doAGC := flag.Bool("agc", false, "enable automatic gain control")
 	flag.Parse()
 
 	if *secs < 1 || *secs > 60 {
@@ -461,7 +461,7 @@ func main() {
 	}
 
 	stream := make(chan []byte, 32)
-	errCh  := make(chan error, 1)
+	errCh := make(chan error, 1)
 	go func() {
 		if err := device.GetAudioStream(device.DeviceConfig, stream); err != nil {
 			errCh <- err
@@ -469,7 +469,7 @@ func main() {
 		close(errCh)
 	}()
 
-	deadline     := time.After(time.Duration(*secs) * time.Second)
+	deadline := time.After(time.Duration(*secs) * time.Second)
 	bytesWritten := 0
 
 	fmt.Printf("Capturing %ds...\n", *secs)
@@ -509,7 +509,7 @@ loop:
 
 	// Decode all channels into float32 periods
 	periodsTotal := totalFrames / periodSize
-	allChannels  := make([][]float32, 7)
+	allChannels := make([][]float32, 7)
 	for i := range allChannels {
 		allChannels[i] = make([]float32, periodsTotal*periodSize)
 	}
@@ -547,7 +547,7 @@ loop:
 	fmt.Printf("\nWrote %s (best mic, no processing)\n", outputDir+"out_raw.wav")
 
 	// ── Processed output ────────────────────────────────────────────────────
-	ns  := newNoiseSuppress()
+	ns := newNoiseSuppress()
 	agc := newAGC()
 
 	processed := make([][]float32, periodsTotal)
@@ -590,9 +590,15 @@ loop:
 	stages := "none"
 	if *doBF || *doNS || *doAGC {
 		stages = ""
-		if *doBF  { stages += "BF " }
-		if *doNS  { stages += "NS " }
-		if *doAGC { stages += "AGC" }
+		if *doBF {
+			stages += "BF "
+		}
+		if *doNS {
+			stages += "NS "
+		}
+		if *doAGC {
+			stages += "AGC"
+		}
 	}
 	fmt.Printf("Wrote %s (%s)\n", outputDir+"out_processed.wav", stages)
 	fmt.Printf("\nPull with: adb pull /tmp/out_raw.wav /tmp/out_processed.wav .\n")
@@ -633,7 +639,7 @@ func writePeriodWAV(path string, periods [][]float32) error {
 	defer f.Close()
 
 	numSamples := len(periods) * periodSize
-	dataSize   := uint32(numSamples * 2)
+	dataSize := uint32(numSamples * 2)
 
 	write := func(v any) { binary.Write(f, binary.LittleEndian, v) }
 
@@ -653,8 +659,12 @@ func writePeriodWAV(path string, periods [][]float32) error {
 
 	for _, period := range periods {
 		for _, s := range period {
-			if s > 1.0 { s = 1.0 }
-			if s < -1.0 { s = -1.0 }
+			if s > 1.0 {
+				s = 1.0
+			}
+			if s < -1.0 {
+				s = -1.0
+			}
 			write(int16(s * 32767))
 		}
 	}

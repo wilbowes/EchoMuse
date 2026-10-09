@@ -82,4 +82,3 @@ func TestTheAlwaysOnWakeStreamDoesNotHoldAdvertsBack(t *testing.T) {
 			"controller-side wake scoring that is every batch, forever")
 	}
 }
-

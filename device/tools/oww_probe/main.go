@@ -3,18 +3,18 @@
 //
 // It answers the two questions the host tests cannot:
 //
-//	1. Does the ONNX Runtime binding actually work on this hardware? The probe
-//	   runs fixture.Verify — the SAME comparison the host test runs, against
-//	   the same golden capture of openWakeWord's Python output — so a pass here
-//	   means the real pipeline reproduces Python on ARM, not merely on x86.
+//  1. Does the ONNX Runtime binding actually work on this hardware? The probe
+//     runs fixture.Verify — the SAME comparison the host test runs, against
+//     the same golden capture of openWakeWord's Python output — so a pass here
+//     means the real pipeline reproduces Python on ARM, not merely on x86.
 //
-//	2. What does it cost in the shape it will really run? Not flat-out latency,
-//	   which is the misleading number: the wake stream is duty-cycled at 12.5Hz,
-//	   and ORT's thread pool can burn several times the inference cost
-//	   spin-waiting in the gaps. So the second phase paces frames at real time
-//	   and reports process CPU from getrusage. That also captures what a C
-//	   benchmark cannot — cgo call overhead and Go GC pressure from the
-//	   buffering.
+//  2. What does it cost in the shape it will really run? Not flat-out latency,
+//     which is the misleading number: the wake stream is duty-cycled at 12.5Hz,
+//     and ORT's thread pool can burn several times the inference cost
+//     spin-waiting in the gaps. So the second phase paces frames at real time
+//     and reports process CPU from getrusage. That also captures what a C
+//     benchmark cannot — cgo call overhead and Go GC pressure from the
+//     buffering.
 //
 // Nothing here touches the microphone, the LEDs, or the running server. It
 // reads three model files, a fixture, and the ONNX Runtime shared library, and

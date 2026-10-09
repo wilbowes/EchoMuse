@@ -135,10 +135,10 @@ type Canceller struct {
 	// log the actual numbers instead of inferring them controller-side.
 	// Accumulated per Process call, reported ~1/s while the reference is
 	// active (i.e. during playback), then reset.
-	statFrames  int
-	statInSum   float64 // Σ mic-frame rms (pre-AEC)
-	statOutSum  float64 // Σ output-frame rms (post-AEC)
-	statRefSum  float64 // Σ reference-frame rms
+	statFrames int
+	statInSum  float64 // Σ mic-frame rms (pre-AEC)
+	statOutSum float64 // Σ output-frame rms (post-AEC)
+	statRefSum float64 // Σ reference-frame rms
 
 	// Far-end telemetry: what WriteFar actually receives and pushes,
 	// counted in pushed (16kHz) samples. Logged ~1/s while the far end is

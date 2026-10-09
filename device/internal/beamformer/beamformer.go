@@ -57,7 +57,7 @@ const (
 	// ALSA stream parameters — must match pcm_microphone.go
 	nChannels    = 9
 	sampleRate   = 16000
-	byteSample   = 3 // S24_3LE
+	byteSample   = 3                      // S24_3LE
 	frameSize    = nChannels * byteSample // 27 bytes per frame
 	periodFrames = 512
 
@@ -79,8 +79,8 @@ const (
 	echoRefCh = 8
 
 	// Smoothing constants
-	smoothAlpha   = 0.9    // fast smoother (~320ms time constant at 32ms/period)
-	baselineAlpha = 0.995  // slow smoother (~10s time constant) — tracks background noise
+	smoothAlpha   = 0.9   // fast smoother (~320ms time constant at 32ms/period)
+	baselineAlpha = 0.995 // slow smoother (~10s time constant) — tracks background noise
 
 	// Lock-back window. Controller-side wake detection lands 300–500ms
 	// after the wake word ends, by which time the fast smoother's onset

@@ -39,7 +39,7 @@ type Backend interface {
 var (
 	mu      sync.Mutex
 	backend Backend = unavailable{}
-	warned  = map[string]bool{}
+	warned          = map[string]bool{}
 )
 
 // Use installs a backend. The device build installs tinyalsa's in init; tests

@@ -708,3 +708,14 @@ jobs:
       - name: Run go vet
         working-directory: device
         run: go vet ./internal/... ./pkg/...
+      # gofmt is the one formatter Go has, so there is nothing to argue about
+      # and a diff shows only what changed. 18 files had drifted by 2026-10-08.
+      - name: Check gofmt
+        working-directory: device
+        run: |
+          out=$(gofmt -l cmd internal pkg tools)
+          if [ -n "$out" ]; then
+            echo "$out"
+            echo "::error::not gofmt-formatted -- run: gofmt -w cmd internal pkg tools"
+            exit 1
+          fi
