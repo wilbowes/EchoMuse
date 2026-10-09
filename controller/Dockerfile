@@ -127,6 +127,7 @@ COPY em_pki.py .
 COPY em_hostip.py .
 COPY em_ingressauth.py .
 COPY em_linkauth.py .
+COPY em_supersede.py .
 COPY em_tcp.py .
 COPY em_pacing.py .
 COPY em_platform.py .

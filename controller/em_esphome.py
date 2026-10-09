@@ -85,6 +85,7 @@ import em_ns
 import em_announce
 import em_recordings
 import em_runbarrier
+import em_supersede
 import em_earlytts
 import em_speechgate
 import em_wav
@@ -1273,7 +1274,34 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         Runs the ordinary turn path — the only differences are the trigger
         label and that `ask_question` truncates HA's pipeline at STT (see the
         RUN_END branch in _handle_voice_event).
+
+        #506: when the question was asked from INSIDE a turn's own intent,
+        that turn holds `voice_lock` and is waiting for a TTS that cannot
+        arrive, because HA's script is blocked on this very answer. Queueing
+        behind it waits ~30s for something that will never come. So the turn is
+        superseded here — the decision is em_supersede.decide, pure and
+        tested, because this file cannot be imported by the suite.
         """
+        verdict = em_supersede.decide(
+            turn_active=self._turn_active,
+            run_started=self._run_started,
+            run_finished=self._run_finished,
+            intent_ended=self._intent_ended,
+            already_cancelled=self._turn_cancelled,
+        )
+        if verdict.supersede:
+            # cancel_turn, NOT abort_ha_run: this sets _turn_cancelled and
+            # releases the voice lock, which is the half that unblocks the
+            # question. abort_ha_run alone would leave the turn waiting, and
+            # it defaults _turn_end_reason to "barged" — nobody spoke over
+            # anything here. abort_ha comes from the verdict because a run
+            # that never started has nothing to abort, and one that already
+            # finished must not be re-aborted: the protocol has no run id, so
+            # a second start=False races the question's own pipeline.
+            log.info(f"[{self._log_name}] Question asked from inside a live "
+                     f"turn — superseding it so the answer window can open")
+            self.cancel_turn(abort_ha=verdict.abort_ha, reason=verdict.reason)
+
         start = getattr(self._owning_server, "_start_conversation", None)
         if start is None:
             # The physical Dot is not connected — HA is talking to a satellite
