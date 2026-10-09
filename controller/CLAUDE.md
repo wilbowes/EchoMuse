@@ -490,6 +490,28 @@ by the vendored protobuf and read by nothing. Four rules:
   the device on the 30s TTS wait and recorded a timeout. The flag is derived
   from the trace's own trigger label so it cannot disagree with the stats, and
   the outcome is `answered`, not `no_tts`: the transcript IS the deliverable.
+- **The wake-tail discard is for a stream the controller scored, never for a
+  session** (#829, `em_listen.tail_discard`). `VOICE_PREROLL_DISCARD` drops
+  240ms from the start of a wake turn to keep the end of the wake word out of
+  the transcript. An Echo that detects its own wake word starts the session
+  AFTER the frame that crossed (docs/listening.md), and reports the wake once
+  the word has finished, so on a session the 240ms was the command: "hey
+  Verona tell me a joke" in one breath reached STT as "me a joke". Measured
+  2026-10-09: four run-on recordings began mid-speech at 0-80ms; with the
+  discard off, 14 commands (run-on, paused and barge-in) kept their first word
+  and none gained a tail. A barge-in the Echo heard opens a session too and is
+  treated the same. The timer-dismiss listener keeps its skip: there the tail
+  must not count as speech.
+- **The reply wait is `tts_wait_timeout` / `EM_TTS_WAIT_TIMEOUT`** (#811,
+  default 30s, clamped to `em_turnclock.TTS_WAIT_MAX` 120s, parsed in
+  `em_turnclock` so a typo cannot stop the import). It is a stop-gap. A Voice
+  PE has NO timer on this wait (ESPHome `voice_assistant.cpp`, state
+  AWAITING_RESPONSE, read 2026-10-09): it leaves only on HA's TTS start,
+  run end or error, or the user stopping it. #830 is the aligned behaviour,
+  with this option as the dead-man. Two things it must carry: HA sends
+  nothing between `intent-start` and `intent-end` during a long tool-using
+  think, so progress cannot be the heartbeat; and `em_scenes.SPIN_TTL` (135s)
+  covers the wait PLUS the TTS fetch, so at a 120s wait the ring has 15s left.
 - **A muted device runs the turn anyway, and that is deliberate.**
   `async_internal_ask_question` awaits its answer future with **no timeout**, so
   a satellite that refuses by staying silent hangs the caller's script for good.

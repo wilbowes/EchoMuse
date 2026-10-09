@@ -4803,3 +4803,81 @@ dashboard files without having tried it.
 next-room test for #790; #811's review and a reading of #810; the
 `except Exception` audit and the rest of #822; whether level over playback
 can now be trusted, which would let #790 drop its fallback for barge-ins.
+
+## 2026-10-09 — the next-room test, a lost first word, and a second Early Access
+
+**The next-room test (#790).** Wil moved C95 to the kitchen and left 15LE and
+VVV in the office. The house was still on the earlier margin-and-time build
+for the first runs; the final loudest-wins build went on at 12:08.
+
+- Most cross-room wakes are not contested: the far room does not fire.
+- From the office with the kitchen Echo also firing (4 wakes): the loudest
+  office Echo led C95 by 12.1-14.0dB, the quieter one by at least 9.2dB.
+- From the kitchen with the office also firing (3 wakes, final build): C95
+  led 15LE by 3.4-5.6dB, all three correct. C95 was on the floor behind a
+  table and 15LE on a stool in line of sight through the door, so that margin
+  is a placement, not a property of the rule. Not repeated at bench height.
+- A wake over C95's own reply (1): still decided on time, and went to the
+  office. C95's level lead was 4.9dB, the same as without playback, which
+  suggests level over playback is usable. One sample.
+- Late claims: two more (09:07:01, 11:56:30). 15LE reports the same word
+  115-150ms after VVV beside it. Hold left at 250ms.
+- Two wakes C95 never reported, 2-3s after its own turn ended. Checked
+  against the record afterwards: wakes within 4s of a turn ending score a
+  median 0.93 on the per-mic firmware (16) against 0.94 before it (47), and
+  C95 caught ten of the sixteen. Not a pattern.
+
+Per-Echo levels are in `device_logs` (`source='controller'`, "Wake level"),
+not in the add-on log, whose arbitration line gives only the lead.
+
+Wil: if it is not regressing, it goes out as a field test. #790 merged.
+
+**A command run on from the wake word lost its first word (#829).** Wil:
+"hey Verona tell me a joke" in one breath is heard as "me a joke". The
+controller dropped 240ms after every wake to remove the wake word's tail. On
+a session there is no tail: the Echo starts it after the frame that crossed.
+Four run-on recordings began mid-speech at 0-80ms; paused ones had 400-1600ms
+of room first. With the discard off for sessions, four run-on and five paused
+commands on C95 all kept their first word and none gained a tail, and five
+barge-in turns the same once that path was changed too (Wil: barge-in should
+behave as a plain wake does). Wil asked about going the other way and sending
+the whole wake word: HA does not strip the phrase from the transcript, every
+false wake would then carry speech, and it changes what leaves the Echo, so
+it was not done.
+
+**Barge-in.** Wil: "a bit iffy". The two complete misses (scores 0.002 and
+0.001 during a reply) were with C95 in a cubby; back on a stool six fired in
+a minute, the first after 8s of the first reply and the rest in 2-4s, with
+scores from 0.26 to 0.96 against a bar of 0.25. C95 had also rebooted at
+about 12:13, so its input gain switches were back On and it captured 6dB low
+all afternoon. What the canceller lacks, written down for after GA: the
+cancelled microphones are not combined during playback, the wake model has
+never heard the word under reply residue, and there is no measured hit rate.
+
+**#811 (@WegoW), the reply wait as an option.** Reviewed and merged. Wil
+asked whether it was well architected or a bandage, and what a Voice PE
+does: ESPHome's voice assistant has no timer on the wait at all. The option
+is a stop-gap with the default unchanged; #830 is the behaviour to build.
+
+**#819 and #808 merged.** #808's hardware pass on both emOS kernels: `8 input
+gains set` and all eight switches Off after a firmware start and after a
+cold boot. On emOS `reboot` does nothing and `busybox reboot` does, which is
+in emos/README.md and was read after the first attempt, not before. Loud
+speech at 30cm clipped about 550 samples on C95 and about 580 on VVV, which
+#808 does not touch (#835). #823 (gofmt) re-run on top: 17 files.
+
+**Early Access.** `controller-ea-v2.26.0-ea.2` and `v2.18.0-ea.2`, both on
+`a7ad7c0`. The house runs the tagged controller as the dev add-on and all
+three Echoes the published firmware asset (attestation verified) from 17:52,
+which is when the soak started. Wil chose to stay on the dev add-on: the
+Early Access add-on has its own database and CA, and the three Echoes hold
+the dev add-on's.
+
+**#810.** A third report of the wizard failing to open the serial port under
+Chromium on Linux. Replied with the `dialout` fix one Fedora user confirmed
+on #767; FAQ updated (#833). Wil: the wizard should offer a serial console
+at the end of an emOS install (#834).
+
+**Owed.** Wakes over a reply and kitchen wakes at bench height for #790's two
+open questions. Saturday: the soak's overnight turns and UAT. After GA: #830,
+#834, #835 and the barge-in work.
