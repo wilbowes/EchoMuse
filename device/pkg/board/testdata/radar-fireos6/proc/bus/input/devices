@@ -1,0 +1,13 @@
+I: Bus=0019 Vendor=2454 Product=6500 Version=0010
+N: Name="mtk-kpd"
+P: Phys=
+S: Sysfs=/devices/soc/10010000.keypad/input/input1
+U: Uniq=
+H: Handlers=event1
+
+I: Bus=0019 Vendor=0001 Product=0001 Version=0100
+N: Name="keys"
+P: Phys=gpio-keys/input0
+S: Sysfs=/devices/keys/input/input2
+U: Uniq=
+H: Handlers=event2

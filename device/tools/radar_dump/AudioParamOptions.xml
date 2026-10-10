@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<AudioParamOptions>
+ <Param name="MTK_WB_SPEECH_SUPPORT" value="no" />
+ <Param name="MTK_AUDIO_HD_REC_SUPPORT" value="no" />
+ <Param name="MTK_DUAL_MIC_SUPPORT" value="no" />
+ <Param name="MTK_HANDSFREE_DMNR_SUPPORT" value="no" />
+ <Param name="DMNR_TUNNING_AT_MODEMSIDE" value="" />
+ <Param name="MTK_VOIP_ENHANCEMENT_SUPPORT" value="no" />
+ <Param name="MTK_TB_WIFI_3G_MODE" value="WIFI_ONLY" />
+ <Param name="MTK_DISABLE_EARPIECE" value="" />
+ <Param name="MTK_ASR_SUPPORT" value="no" />
+ <Param name="MTK_VOIP_NORMAL_DMNR" value="no" />
+ <Param name="MTK_VOIP_HANDSFREE_DMNR" value="no" />
+ <Param name="MTK_INCALL_NORMAL_DMNR" value="no" />
+ <Param name="MTK_VOICE_UNLOCK_SUPPORT" value="yes" />
+ <Param name="MTK_VOICE_UI_SUPPORT" value="yes" />
+ <Param name="MTK_ACF_AUTO_GEN_SUPPORT" value="" />
+ <Param name="MTK_SPEAKER_MONITOR_SUPPORT" value="no" />
+ <Param name="MTK_AUDIO_BLOUD_CUSTOMPARAMETER_REV" value="MTK_AUDIO_BLOUD_CUSTOMPARAMETER_V5" />
+ <Param name="MTK_MAGICONFERENCE_SUPPORT" value="no" />
+ <Param name="MTK_HAC_SUPPORT" value="no" />
+ <Param name="MTK_AUDIO_SPH_LPBK_PARAM" value="" />
+ <Param name="MTK_AUDIO_GAIN_TABLE_BT" value="" />
+ <Param name="MTK_AUDIO_BT_NREC_WO_ENH_MODE" value="" />
+ <Param name="MTK_AUDIO_TUNING_TOOL_V2_PHASE" value="" />
+ <Param name="MATV_AUDIO_SUPPORT" value="" />
+ <Param name="MTK_FM_SUPPORT" value="no" />
+ <Param name="MTK_HEADSET_ACTIVE_NOISE_CANCELLATION" value="" />
+ <Param name="MTK_SUPPORT_TC1_TUNNING" value="no" />
+ <Param name="MTK_AUDIO_SPEAKER_PATH" value="" />
+ <Param name="VIR_WIFI_ONLY_SUPPORT" value="yes" />
+ <Param name="VIR_3G_DATA_ONLY_SUPPORT" value="no" />
+ <Param name="VIR_ASR_SUPPORT" value="no" />
+ <Param name="VIR_VOIP_NORMAL_DMNR_SUPPORT" value="no" />
+ <Param name="VIR_VOIP_HANDSFREE_DMNR_SUPPORT" value="no" />
+ <Param name="VIR_NO_SPEECH" value="yes" />
+ <Param name="VIR_INCALL_NORMAL_DMNR_SUPPORT" value="no" />
+ <Param name="VIR_INCALL_HANDSFREE_DMNR_SUPPORT" value="no" />
+ <Param name="VIR_VOICE_UNLOCK_SUPPORT" value="" />
+ <Param name="VIR_AUDIO_BLOUD_CUSTOMPARAMETER_V5" value="yes" />
+ <Param name="VIR_AUDIO_BLOUD_CUSTOMPARAMETER_V4" value="no" />
+ <Param name="VIR_MAGI_CONFERENCE_SUPPORT" value="no" />
+ <Param name="MTK_AUDIO_HIERARCHICAL_PARAM_SUPPORT" value="" />
+ <Param name="MTK_AUDIO_TUNING_TOOL_V2_PHASE" value="" />
+</AudioParamOptions>

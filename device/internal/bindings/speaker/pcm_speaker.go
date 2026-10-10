@@ -64,6 +64,7 @@ const primePeriods = 24
 var silencePeriod = make([]byte, periodBytes)
 
 type PcmSpeaker struct {
+	radar bool
 	// pcm is the playback device, found by name (pkg/board) in Init, and
 	// statusFile its substream's status in procfs.
 	pcm        board.PCMAddr
@@ -268,13 +269,26 @@ func NewPcmSpeaker(echoTap func([]byte), levelTap func(rms float64)) (*PcmSpeake
 	return s, nil
 }
 
-func (p *PcmSpeaker) Init() error {
+func (p *PcmSpeaker) Init() (err error) {
+	p.radar = board.Current() == board.Radar
 	pb := board.CurrentLayout().Playback
 	if pb == nil {
 		return errors.New("speaker: playback PCM not found on this board")
 	}
 	p.pcm = *pb
 	p.statusFile = statusPath(pb.Card, pb.Device)
+	if p.radar {
+		defer func() {
+			if err != nil {
+				p.abortRadarStartup()
+			}
+		}()
+		// Mute before stopping a stock media service, but wait for ownership
+		// of the PCM before replacing its codec configuration below.
+		if err = mixer.Set(radarMute, "On"); err != nil {
+			return err
+		}
+	}
 	// Startup order matters for the audible click (2026-07-10): the amp
 	// must come up onto a DAC that is already clocking silence, and the
 	// unmute must come last. The old order (amp on → unmute → open PCM)
@@ -290,6 +304,11 @@ func (p *PcmSpeaker) Init() error {
 	// work to do and is only ever in the way.
 	exec.Command("stop", "media").Run()
 	waitForFreePcm(p.pcm.Card, p.pcm.Device, pcmFreeTimeout)
+	if p.radar {
+		if err = prepareRadarSpeaker("/system/etc/audio_device.xml"); err != nil {
+			return err
+		}
+	}
 	// Connect the DAC to the output mixer before opening the stream: DAPM
 	// decides what to power at stream open, and an unrouted DAC is powered
 	// down, which presents as a clean "voice stream complete, underruns=0"
@@ -315,6 +334,13 @@ func (p *PcmSpeaker) Init() error {
 	p.session = &session
 
 	go p.silenceLoop()
+	if p.radar {
+		if err = p.startRadarOutput(); err != nil {
+			return err
+		}
+		log.Println("PcmSpeaker initialised — Radar profile loaded, silence settled, hardware unmuted")
+		return nil
+	}
 
 	time.Sleep(100 * time.Millisecond)        // silence reaches the DAC (~2 periods)
 	mixer.Set(mixer.SpeakerAmp, "On")         // enable amp onto a clocked, silent DAC
@@ -481,6 +507,11 @@ func (p *PcmSpeaker) WatchJackRouting(ctx context.Context) {
 // rather than hanging.
 func (p *PcmSpeaker) silenceLoop() {
 	defer close(p.deadCh)
+	defer func() {
+		if p.radar {
+			mixer.Set(radarMute, "On")
+		}
+	}()
 	var meter writeLoopMeter // bench builds only; empty otherwise
 	for {
 		select {
@@ -800,9 +831,15 @@ func (p *PcmSpeaker) SetResponseGainDB(db float64) { p.response.setDB(db) }
 // amp-off after every server exit as a belt-and-braces for paths where
 // this never runs (SIGKILL, panic).
 func (p *PcmSpeaker) Close() {
+	if p.radar {
+		mixer.Set(radarMute, "On")
+	}
 	mixer.Set(mixer.PlaybackVolume, "0") // mute
 	mixer.Set(mixer.SpeakerAmp, "Off")   // amp off
 	close(p.stopCh)
+	if p.radar {
+		<-p.deadCh
+	}
 	p.session.Close()
 	log.Println("PcmSpeaker closed — output muted, amp off")
 }

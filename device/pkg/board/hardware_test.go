@@ -10,6 +10,36 @@ import (
 // 2026-10-04: idme, /proc/asound/pcm, /proc/bus/input/devices and every i2c
 // client's name.
 const biscuitFOS5 = "testdata/biscuit-fireos5"
+const radarFOS6 = "testdata/radar-fireos6"
+
+// Radar uses only the confirmed, named hardware in its own descriptor. In
+// particular, missing parts must not inherit Biscuit's fallback numbers.
+func TestRadarResolvesItsConfirmedPartsByName(t *testing.T) {
+	b := Detect(radarFOS6)
+	if b != Radar {
+		t.Fatalf("fixture detected as %v", IDOf(b))
+	}
+	l := Resolve(radarFOS6, b)
+	if l.DotKeys != "/dev/input/event1" || l.VolumeKeys != "/dev/input/event2" {
+		t.Errorf("keys: dot %q volume %q, want event1 and event2",
+			l.DotKeys, l.VolumeKeys)
+	}
+	if want := filepath.Join(radarFOS6, "/sys/bus/i2c/devices/0-003f"); l.LEDRing != want {
+		t.Errorf("led ring %q, want %q", l.LEDRing, want)
+	}
+	if l.Capture == nil || *l.Capture != (PCMAddr{0, 24}) {
+		t.Errorf("capture %+v, want card 0 device 24", l.Capture)
+	}
+	if l.Playback == nil || *l.Playback != (PCMAddr{0, 23}) {
+		t.Errorf("playback %+v, want card 0 device 23", l.Playback)
+	}
+	if l.MuteLEDGPIO != "" || l.LightSensor != (LightSensor{}) || l.HCI != "" {
+		t.Errorf("unconfirmed hardware should remain unavailable: %+v", l)
+	}
+	if len(l.Problems) != 0 {
+		t.Errorf("confirmed input devices should resolve by name, got %v", l.Problems)
+	}
+}
 
 // Resolved by name, biscuit's parts must be exactly where every build before
 // this one opened them by number.

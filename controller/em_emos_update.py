@@ -689,6 +689,24 @@ async def run_update(io) -> str:
 
     # 4. Build.
     arch = build.reference_kernel_arch(reference)
+    cmdline = build.split_reference(reference)["cmdline"].decode(
+        errors="replace").split()
+    stamped_board = next((arg[len(build.BOARD_CMDLINE_KEY):]
+                          for arg in cmdline
+                          if arg.startswith(build.BOARD_CMDLINE_KEY)), None)
+    live_board = getattr(io, "board_id", None)
+    if stamped_board and live_board and stamped_board != live_board:
+        raise Refused(f"the installed emOS board ({stamped_board}) does not "
+                      f"match the connected device ({live_board})" + UNCHANGED)
+    board_id = (stamped_board or live_board
+                or build.reference_board_id(reference)
+                or build.BOARD_DEFAULT)
+    # Radar init defaults to Biscuit unless the boot command line says
+    # otherwise. Don't install a Radar ramdisk into an ambiguous old image.
+    if board_id == "radar" and stamped_board != "radar":
+        raise Refused("the installed image does not identify itself as Radar "
+                      "(missing emos.board=radar)" + UNCHANGED)
+    io.board_id = board_id
     init_bin, sbin, version = await io.payload(arch)
     if not _VERSION_SAFE.fullmatch(version or ""):
         raise Refused(f"{version!r} is not a usable version string" + UNCHANGED)
@@ -699,7 +717,7 @@ async def run_update(io) -> str:
     await io.step(f"Building emOS {version} for this device's {arch} kernel")
     try:
         info = await io.offload(build.build_emos_image, reference, init_bin,
-                                version, "", sbin, None)
+                                version, "", sbin, None, board_id, True)
     except build.BuildError as e:
         raise Refused(f"{e}" + UNCHANGED)
     image = info["image"]

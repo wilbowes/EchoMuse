@@ -2,14 +2,26 @@
 
 package mixer
 
-// Only functions exported by BOTH devices' /system/lib/libtinyalsa.so are
-// called here (checked 2026-09-17, FireOS 5 and FireOS 6): the header is
-// tinyalsa 2.x and the devices are not, and a symbol the device library lacks
-// stops the binary loading at all.
+// Ordinary controls use functions verified on both FireOS 5 and 6. The
+// compiler's header is newer than the devices' libraries: optional APIs must
+// be resolved at runtime, or a missing symbol prevents even unrelated boards
+// from loading the binary. Byte-array support below is one such optional API.
 
-// #cgo LDFLAGS: -ltinyalsa
-// #include <stdlib.h>
-// #include <tinyalsa/asoundlib.h>
+/*
+#cgo LDFLAGS: -ltinyalsa -ldl
+#include <stdlib.h>
+#include <errno.h>
+#include <dlfcn.h>
+#include <tinyalsa/asoundlib.h>
+
+// Resolve the byte-array API only when needed. Older boards must still load
+// the binary even if their system tinyalsa does not export this entry point.
+static int set_byte_array(struct mixer_ctl *ctl, const void *data, size_t count) {
+    typedef int (*set_array_fn)(struct mixer_ctl *, const void *, size_t);
+    set_array_fn fn = (set_array_fn)dlsym(RTLD_DEFAULT, "mixer_ctl_set_array");
+    return fn ? fn(ctl, data, count) : -ENOSYS;
+}
+*/
 import "C"
 
 import (
@@ -47,6 +59,18 @@ func (t *tinyalsa) Set(name string, values []string) error {
 	c, err := t.ctl(name)
 	if err != nil {
 		return err
+	}
+	if C.mixer_ctl_get_type(c) == C.MIXER_CTL_TYPE_BYTE {
+		// Byte controls (Radar's biquad profile) must be one atomic array
+		// write. mixer_ctl_set_value does not support this control type.
+		buf, err := byteValues(name, values, int(C.mixer_ctl_get_num_values(c)))
+		if err != nil {
+			return err
+		}
+		if rc := C.set_byte_array(c, unsafe.Pointer(&buf[0]), C.size_t(len(buf))); rc != 0 {
+			return fmt.Errorf("mixer: %q: byte array write failed (%d)", name, int(rc))
+		}
+		return nil
 	}
 	if C.mixer_ctl_get_type(c) == C.MIXER_CTL_TYPE_ENUM {
 		cs := C.CString(values[0])

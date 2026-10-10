@@ -445,6 +445,9 @@ class Device:
         # existing fleet exactly as it was.
         self._base_os: str | None = None
         self.kernel_arch: str | None = None
+        # Board detected by device firmware at registration. Used for emOS
+        # payload selection and to cross-check the installed boot image.
+        self.board_id: str | None = None
         # From the register message (schema v28): see em_health.
         self.boot_reason: str | None = None
         # The last eMMC wear row written, as (day, values), so a reading that
@@ -4524,6 +4527,8 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         # firmware; stored only when reported so a known value is not erased.
         device.kernel_arch = msg.get("kernel_arch") or None
         device.kernel_release = msg.get("kernel_release") or None
+        board_id = msg.get("board")
+        device.board_id = board_id if board_id in ("biscuit", "radar") else None
         if device.kernel_arch:
             em_dbwriter.submit(db.set_device_kernel, device_id, device.kernel_arch, device.kernel_release or "")
         # How this boot started and the eMMC's wear (schema v28), one row per

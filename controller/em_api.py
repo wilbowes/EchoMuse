@@ -2627,6 +2627,7 @@ class _EmosIO:
 
     def __init__(self, device_id: str, live, override: tuple | None):
         self.device_id, self.live, self.override = device_id, live, override
+        self.board_id = getattr(live, "board_id", None)
 
     async def sh(self, cmd: str, timeout: float) -> str:
         return await _emos_sh(self.live, cmd, timeout)
@@ -2638,11 +2639,13 @@ class _EmosIO:
         return "" if sent else str(sent)
 
     async def payload(self, arch: str) -> tuple:
+        board = getattr(self, "board_id", None) or "biscuit"
         if self.override is not None:
             init_bin, sbin, version, err = _select_emos_payload(
-                self.override[0], arch, self.override[1])
+                self.override[0], arch, self.override[1], board)
         else:
-            init_bin, sbin, version, err = await _fetch_emos_payload(arch)
+            init_bin, sbin, version, err = await _fetch_emos_payload(arch,
+                                                                      board)
         if err is not None:
             try:
                 reason = json.loads(err.text)["error"]
@@ -5622,7 +5625,45 @@ EMOS_SBIN_BOTH_ARCHES = ("em-wifi",)
 EMOS_PAYLOAD_ASSET = "emos-payload.zip"
 
 
-async def _fetch_emos_payload(arch: str) -> tuple:
+def _select_emos_payload(files: dict[str, bytes], arch: str,
+                        version: str, board: str = "biscuit") -> tuple:
+    """Select and validate the init and /sbin files from an uploaded bundle.
+
+    Keep the local-upload path subject to the same architecture and Wi-Fi
+    requirements as a published release; the manifest only checks file hashes.
+    Returns (init, sbin, version, error), like `_fetch_emos_payload`.
+    """
+    try:
+        init_name = em_emos_build.init_asset_name(arch, board)
+    except em_emos_build.BuildError as exc:
+        return None, {}, version, _error("unsupported_board", str(exc), 400)
+
+    init = files.get(init_name)
+    if init is None:
+        return None, {}, version, _error(
+            "no_init_for_arch",
+            f"Uploaded payload carries no '{init_name}', so there is no init "
+            f"for this device's {arch} kernel.", 400)
+    problems = em_emos_build.init_binary_problems(init, arch)
+    if problems:
+        return None, {}, version, _error(
+            "bad_payload", f"The {init_name} in the uploaded payload is not "
+            f"usable: {'; '.join(problems)}", 400)
+
+    sbin = {name: files[name] for name in EMOS_SBIN_BOTH_ARCHES
+            if name in files}
+    if arch == em_emos_build.ARCH_ARM:
+        missing = [name for name in EMOS_SBIN_ASSETS if name not in files]
+        if missing:
+            return None, {}, version, _error(
+                "no_wifi_tools_for_arch",
+                f"Uploaded payload is missing {', '.join(missing)}. A 32-bit "
+                "emOS image needs its own Wi-Fi tools.", 400)
+        sbin.update({name: files[name] for name in EMOS_SBIN_ASSETS})
+    return init, sbin, version, None
+
+
+async def _fetch_emos_payload(arch: str, board: str = "biscuit") -> tuple:
     """Everything an emOS image needs for `arch`, from ONE release.
 
     Returns (init, sbin, version, error) — `sbin` being the /sbin tools the
@@ -5635,6 +5676,11 @@ async def _fetch_emos_payload(arch: str) -> tuple:
     loose `init`, which is enough for FireOS 5 — so today's fleet keeps
     provisioning with no new tag. FireOS 6 needs the bundle and says so.
     """
+    try:
+        init_name = em_emos_build.init_asset_name(arch, board)
+    except em_emos_build.BuildError as exc:
+        return None, {}, "", _error("unsupported_board", str(exc), 400)
+
     release = await _fetch_latest_emos_release()
     if release is None:
         return None, {}, "", _error(
@@ -5648,7 +5694,7 @@ async def _fetch_emos_payload(arch: str) -> tuple:
 
     if bundle_asset is None:
         # Older release: FireOS 5 is served by the loose init, FireOS 6 cannot be.
-        if arch != em_emos_build.ARCH_ARM64:
+        if board != "biscuit" or arch != em_emos_build.ARCH_ARM64:
             return None, {}, version, _error(
                 "no_payload_bundle",
                 f"emOS release {version} predates the payload bundle, so it "
@@ -5676,17 +5722,7 @@ async def _fetch_emos_payload(arch: str) -> tuple:
             "bad_release_asset",
             f"The payload in emOS release {version} is not usable: {e}", 502)
 
-    return _select_emos_payload(payload["files"], arch, version)
-
-
-def _select_emos_payload(files: dict, arch: str, version: str) -> tuple:
-    """Pick the init and /sbin tools for `arch` out of a bundle's files.
-
-    Split from _fetch_emos_payload so an uploaded bundle (the emOS update's
-    dev path) is selected from by the same rules as a release.
-    """
-    init_name = EMOS_INIT_ASSETS.get(arch,
-                                     EMOS_INIT_ASSETS[em_emos_build.ARCH_ARM64])
+    files = payload["files"]
     init = files.get(init_name)
     if init is None:
         return None, {}, version, _error(
@@ -5854,7 +5890,7 @@ async def _get_provision_emos_init(request: web.Request) -> web.Response:
 # appends to the same POST, so the next field to be added has to be read here
 # or fail CI.
 EMOS_IMAGE_FIELDS = ("reference", "init", "reference_md5", "version",
-                     "use_latest_init", "system_part")
+                     "use_latest_init", "system_part", "board", "payload")
 
 
 @auth.require_admin
@@ -5897,8 +5933,10 @@ async def _post_provision_emos_image(request: web.Request) -> web.Response:
                             f"{field.name!r}, which this endpoint does not "
                             f"read")
                 continue
-            if field.name in ("reference", "init"):
+            if field.name in ("reference", "init", "payload"):
                 parts[field.name] = await field.read()
+            elif field.name == "board":
+                parts["board"] = (await field.read()).decode(errors="replace")[:32].strip()
             elif field.name == "system_part":
                 parts["system_part"] = (await field.read()).decode(
                     errors="replace")[:8]
@@ -5917,7 +5955,7 @@ async def _post_provision_emos_image(request: web.Request) -> web.Response:
             return _error("invalid_upload",
                           "Expected multipart field 'reference' — the boot "
                           "image read off the device", 400)
-        if not init_bin and not parts.get("use_latest_init"):
+        if not init_bin and not parts.get("payload") and not parts.get("use_latest_init"):
             return _error("invalid_upload",
                           "Expected multipart field 'init' — the emOS init "
                           "binary — or 'use_latest_init' to resolve it here",
@@ -5947,9 +5985,41 @@ async def _post_provision_emos_image(request: web.Request) -> web.Response:
                     f"{want_md5} off the device and {got_md5} arrived. "
                     f"Nothing has been built. Re-run the escrow step.", 400)
 
+        board = parts.get("board") or "biscuit"
+        arch = em_emos_build.reference_kernel_arch(reference)
+        try:
+            em_emos_build.init_asset_name(arch, board)
+        except em_emos_build.BuildError as exc:
+            return _error("unsupported_board", str(exc), 400)
+        detected = em_emos_build.reference_board_id(reference)
+        # Radar's stock DTB reports only the SoC (mt8163), so its stock
+        # identity must come from the wizard, not a guessed DTB board name.
+        if detected in ("biscuit", "radar") and detected != board:
+            return _error("board_mismatch", "Stock boot image and selected board disagree", 400)
+
         version = parts.get("version") or "0.1"
         # A hand-picked init carries no WiFi tools, matching emos/build.sh.
         sbin = {}
+
+        if parts.get("payload"):
+            try:
+                payload = em_emos_build.read_payload_bundle(parts["payload"])
+                files = payload["files"]
+                name = em_emos_build.init_asset_name(arch, board)
+                if name not in files:
+                    raise em_emos_build.BuildError(f"Payload has no {name} for {board}")
+                init_bin = files[name]
+                problems = em_emos_build.init_binary_problems(init_bin, arch)
+                if problems:
+                    raise em_emos_build.BuildError("; ".join(problems))
+                required = EMOS_SBIN_ASSETS if arch == em_emos_build.ARCH_ARM else ()
+                missing = [n for n in required if n not in files]
+                if missing:
+                    raise em_emos_build.BuildError(f"Payload is missing Wi-Fi tools: {', '.join(missing)}")
+                sbin = {n: files[n] for n in set(required) | set(EMOS_SBIN_BOTH_ARCHES) if n in files}
+                version = payload["version"]
+            except em_emos_build.BuildError as exc:
+                return _error("invalid_payload", str(exc), 400)
 
         # Which FireOS userspace this reference was read beside, stamped onto
         # the image so emOS mounts that one rather than assuming. The WIZARD
@@ -5973,7 +6043,7 @@ async def _post_provision_emos_image(request: web.Request) -> web.Response:
 
         # Also keeps ~3.5MB out of a request that has already hit HA ingress's
         # 413 once (2026-09-06).
-        if parts.get("use_latest_init"):
+        if parts.get("use_latest_init") and not parts.get("payload"):
             arch = em_emos_build.reference_kernel_arch(reference)
             if not arch:
                 # Refused, not defaulted: an init chosen by guess flashes fine
@@ -5984,12 +6054,12 @@ async def _post_provision_emos_image(request: web.Request) -> web.Response:
                     "image, so there is no way to tell which init it needs. "
                     "Check the escrow is the whole boot image, or build an init "
                     "from emos/ with build.sh and select it by hand.", 400)
-            init_bin, sbin, init_version, err = await _fetch_emos_payload(arch)
+            init_bin, sbin, init_version, err = await _fetch_emos_payload(arch, board)
             if err is not None:
                 return err
             version = parts.get("version") or init_version
             log.info(f"[api] emOS image: reference kernel is {arch}, using "
-                     f"{EMOS_INIT_ASSETS[arch]} from {init_version}"
+                     f"{em_emos_build.init_asset_name(arch, board)} from {init_version}"
                      + (f" plus {', '.join(sorted(sbin))}" if sbin else ""))
 
         loop = asyncio.get_event_loop()
@@ -5998,7 +6068,7 @@ async def _post_provision_emos_image(request: web.Request) -> web.Response:
         # through this process while somebody provisions a new one.
         info = await loop.run_in_executor(
             None, em_emos_build.build_emos_image, reference, init_bin, version,
-            "", sbin, system_part)
+            "", sbin, system_part, board)
 
         log.info(f"[api] emOS image built"
                  # Not "(older wizard)", which is one of three ways to get

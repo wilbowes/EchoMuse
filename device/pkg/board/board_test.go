@@ -26,6 +26,9 @@ func mkroot(t *testing.T, files map[string]string) string {
 
 func TestDetectMatchesDeviceTypeExactly(t *testing.T) {
 	cases := map[string]*Board{
+		"A7WXQPH584YP\x00":   Radar,
+		"A7WXQPH584YP\n":     Radar,
+		"A7WXQPH584YPX":      nil,
 		"A3S5BH2HU6VAYF\x00": Biscuit, // as the kernel returns it
 		"A3S5BH2HU6VAYF\n":   Biscuit,
 		"\x00A3S5BH2HU6VAYF": nil,

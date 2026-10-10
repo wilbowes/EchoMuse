@@ -82,6 +82,17 @@ var biscuitHardware = &Hardware{
 	HCI: "/dev/stpbt",
 }
 
+// radarHardware contains only parts confirmed on Radar. Unlike Biscuit, it
+// has no number fallbacks: an unrecognised enumeration must leave that part
+// unavailable rather than opening Biscuit's device number on another board.
+var radarHardware = &Hardware{
+	DotKeys:    Input{Name: "mtk-kpd"},
+	VolumeKeys: Input{Name: "keys"},
+	LEDRing:    I2C{Driver: "is31fl3236"},
+	Capture:    PCM{Name: "TLV320AIC3101 Capture"},
+	Playback:   PCM{Name: "TLV320AIC3204 Playback"},
+}
+
 // Layout is a board's Hardware resolved on the running device: what the
 // bindings open.
 type Layout struct {
