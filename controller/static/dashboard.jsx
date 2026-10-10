@@ -3380,6 +3380,23 @@ service echomuse /data/local/bin/start_server.sh
 // version uploads (e.g. a newer Magisk that doesn't support Android 5.1's
 // non-namespaced su, or a corrupted download) before they hit TWRP.
 
+// Which amonet's LK is in lk_a: 1, 2, or 0 for neither or unreadable. `head`
+// is the partition's first eight bytes as hex: the MTK image magic, then the
+// image's length, which tells amonet 1's LK (358,692 bytes) from v2.0.0's
+// (359,232). v1.0.0 and v1.1.0 ship the same lk.bin, which carries 13,164
+// bytes past its image. Each release writes its LK to both LK slots.
+//
+// It is the LK and not expdb that says which amonet runs. v2's fastbrick
+// writes its kaeru payload to expdb (88 16 88 58 at its start), and a v1
+// written over v2 can leave it there (#845). Find lk_a by its kernel
+// GPT name: under both amonet TWRPs, by-name lk_a is a decoy file in tmpfs.
+const _amonetLk = (head) => {
+  const h = head.toLowerCase();
+  if (h === '8816885824790500') return 1;
+  if (h === '88168858407b0500') return 2;
+  return 0;
+};
+
 // Was this Echo unlocked with amonet-biscuit v2.0.0 or later? v2.0.0
 // (R0rt1z2, 10 Sep 2026) writes a newer preloader, LK and TrustZone, and
 // FireOS 5 does not boot on them — so neither does EchoMuse, emOS included,
@@ -3391,12 +3408,8 @@ service echomuse /data/local/bin/start_server.sh
 // refusing a working v1.1.0 device because `od` was missing would be the
 // worse error. Three independent signs, any one of which is enough:
 //
-//   expdb   — first four bytes of the expdb partition, as hex. v2's preloader
-//             exploit loads the real LK from expdb (amonet-koboreru,
-//             `LK_PART_NAME "expdb"` for biscuit), so an MTK image header —
-//             magic 0x58881688, stored little-endian as 88 16 88 58 — at its
-//             start is v2's own mechanism rather than a side effect of it.
-//             v1 leaves expdb alone. Checked in recovery only: it needs root.
+//   lk      — the first eight bytes of lk_a, as hex: see _amonetLk. Checked
+//             in recovery only: it needs root.
 //   twrp    — the TWRP version. v2 installs 3.7.0_9-0, v1 ships 3.2.3-0.
 //             Compared numerically, so 3.10 is not read as older than 3.7.
 //             3.7.0_9-bboeN is the exception: overdub's dot_firmware.py
@@ -3406,9 +3419,9 @@ service echomuse /data/local/bin/start_server.sh
 //             /system's build.prop in recovery, because TWRP answers getprop
 //             with its own ramdisk. FireOS 6 is Android 7.1; v1 boots only
 //             FireOS 5, so a release of 6 or later on this board means v2.
-const _unlockVerdict = ({ release = '', expdb = '', twrp = '' }) => {
+const _unlockVerdict = ({ release = '', lk = '', twrp = '' }) => {
   const evidence = [];
-  if (expdb.toLowerCase() === '88168858') evidence.push('a bootloader image in expdb');
+  if (_amonetLk(lk) === 2) evidence.push('amonet 2\'s LK in lk_a');
   const tv = twrp.match(/(\d+)\.(\d+)/);
   if (tv && (+tv[1] > 3 || (+tv[1] === 3 && +tv[2] >= 7)) && !/^3\.7\.0_9-bboe\d+$/.test(twrp)) {
     evidence.push(`TWRP ${twrp}`);
@@ -4670,24 +4683,24 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     } else {
       addLog(`Firmware: ${fwName || '(unknown)'}  ${fwBuild || ''}`);
     }
-    // amonet v2.0.0 — see _unlockVerdict. expdb and the TWRP version can only
-    // be read in recovery (expdb needs root); in Android the release is the
+    // amonet v2.0.0 — see _unlockVerdict. lk_a and the TWRP version can only
+    // be read in recovery (lk_a needs root); in Android the release is the
     // evidence, and a v2 device that boots Android is necessarily on FireOS 6.
-    let expdb = '', twrp = '';
+    let lk = '', twrp = '';
     if (inRecovery) {
       const u = await c.shell(
-        'P=""; for d in /dev/block/platform/*/by-name /dev/block/by-name; do '
-        + '[ -z "$P" ] && [ -e "$d/expdb" ] && P="$d/expdb"; done; '
-        + 'echo "EXPDB=$([ -n "$P" ] && dd if="$P" bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d \' \\n\')"; '
+        'P=""; for u in /sys/block/mmcblk0/mmcblk0p*/uevent; do '
+        + 'grep -qx "PARTNAME=lk_a" "$u" 2>/dev/null && { d=${u%/uevent}; P="/dev/block/${d##*/}"; }; done; '
+        + 'echo "LK=$([ -n "$P" ] && dd if="$P" bs=8 count=1 2>/dev/null | od -An -tx1 | tr -d \' \\n\')"; '
         + 'echo "TWRP=$(getprop ro.twrp.version)"; '
         + 'echo "TWRPLOG=$(grep -m1 -o \'Starting TWRP [0-9][^ ]*\' /tmp/recovery.log 2>/dev/null)"; '
         + 'echo _UNLOCKCHK');
       if (u.includes('_UNLOCKCHK')) {
         const pick = k => ((u.match(new RegExp('^' + k + '=(.*)$', 'm')) || [])[1] || '').trim();
-        expdb = pick('EXPDB');
-        twrp  = pick('TWRP') || pick('TWRPLOG').replace(/^Starting TWRP /, '');
+        lk   = pick('LK');
+        twrp = pick('TWRP') || pick('TWRPLOG').replace(/^Starting TWRP /, '');
       }
-      addLog(`Unlock check: TWRP ${twrp || 'unknown'}, expdb ${expdb || 'unreadable'}`);
+      addLog(`Unlock check: TWRP ${twrp || 'unknown'}, lk_a ${lk || 'unreadable'}`);
     }
     // A v2 device is refused by the FireOS flow and ACCEPTED by the emOS one,
     // and that split is the point rather than a loosening.
@@ -4703,7 +4716,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // escrow-build-flash sequence the emOS flow runs is not FireOS-5-specific at
     // any step: it reads the device's own boot image, rebuilds it with an init
     // matching that image's kernel, and writes it back.
-    const unlock = _unlockVerdict({ release: effRelease, expdb, twrp });
+    const unlock = _unlockVerdict({ release: effRelease, lk, twrp });
     if (unlock.v2 && !isEmos) {
       expectDisconnect.current = true;
       try { await c.close(); } catch {}
@@ -5200,7 +5213,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     };
   }
 
-  // One read-only pass: where expdb is (its bytes are pulled and read in the
+  // One read-only pass: where lk_a is (its bytes are pulled and read in the
   // browser, never through `od`), the TWRP version, then BOTH system
   // partitions, each mounted privately read-only as _sysreadScript does and for
   // its reasons. Every required file is checked for both generations; the
@@ -5219,7 +5232,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       + 'if grep -qx "PARTNAME=$1" "$u" 2>/dev/null; then d=${u%/uevent}; echo "/dev/block/${d##*/}"; return; fi; done; '
       + 'for d in /dev/block/platform/*/by-name /dev/block/by-name; do '
       + 'if [ -e "$d/$1" ]; then readlink -f "$d/$1"; return; fi; done; }; '
-      + 'echo "EXPDBDEV=$(part expdb)"; '
+      + 'echo "LKDEV=$(part lk_a)"; '
       + 'T=$(getprop ro.twrp.version); '
       + '[ -z "$T" ] && T=$(grep -m1 -o \'Starting TWRP [0-9][^ ]*\' /tmp/recovery.log 2>/dev/null | sed \'s/^Starting TWRP //\'); '
       + 'echo "TWRP=$T"; '
@@ -5250,9 +5263,9 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                  layout: pick(`SYS_${x}_layout`), release: pick(`SYS_${x}_release`),
                  name: pick(`SYS_${x}_name`), build: pick(`SYS_${x}_incremental`), files };
     }
-    // `expdb` is filled in by the caller from bytes it pulls off expdbDev.
-    return { complete: text.includes('_DONORPROBE_OK'), expdbDev: pick('EXPDBDEV'),
-             expdb: pick('EXPDB').toLowerCase(), twrp: pick('TWRP'), sys };
+    // `lk` is filled in by the caller from bytes it pulls off lkDev.
+    return { complete: text.includes('_DONORPROBE_OK'), lkDev: pick('LKDEV'),
+             lk: pick('LK').toLowerCase(), twrp: pick('TWRP'), sys };
   }
 
   // The kernel's architecture from the head of a boot image — the builder's
@@ -5312,28 +5325,27 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         'The check of this Echo\'s partitions did not finish, so nothing about it can be '
         + 'trusted yet. Nothing has been written. Check the cable and try this step again.' };
     }
-    const v2Boot = probe.expdb === '88168858';
+    const amonet = _amonetLk(probe.lk);
+    const lkSays = amonet ? `lk_a holds amonet ${amonet}'s LK` : 'lk_a holds neither amonet\'s LK';
     const tw = probe.twrp;
     let gen = 0, unreadable = false;
-    if (!probe.expdb) {
+    if (!probe.lk) {
       unreadable = true;
-      why.push('the wizard could not read the expdb partition, so it cannot tell amonet 1 from amonet 2');
+      why.push('the wizard could not read the lk_a partition, so it cannot tell amonet 1 from amonet 2');
     } else if (!tw) {
       unreadable = true;
       why.push('the wizard could not read the TWRP version');
-    } else if (v2Boot && /^3\.7\.0(?![0-9])(?!_9-bboe)/.test(tw) && layout === 'v2') {
+    } else if (amonet === 2 && /^3\.7\.0(?![0-9])(?!_9-bboe)/.test(tw) && layout === 'v2') {
       gen = 6;
-    } else if (!v2Boot && /^3\.2\.3(?![0-9])|^3\.7\.0_9-bboe\d+$/.test(tw) && layout === 'v1') {
+    } else if (amonet === 1 && /^3\.2\.3(?![0-9])|^3\.7\.0_9-bboe\d+$/.test(tw) && layout === 'v1') {
       gen = 5;
     } else {
-      why.push(`the unlock does not add up: expdb ${v2Boot ? 'holds' : 'does not hold'} `
-        + `amonet 2's bootloader, TWRP is ${tw}, and the boot partitions are laid out `
+      why.push(`the unlock does not add up: ${lkSays}, TWRP is ${tw}, and the boot partitions are laid out `
         + `for amonet ${layout === 'v2' ? 2 : 1} (amonet 1 means TWRP 3.2.3 or 3.7.0_9-bboe and FireOS 5; `
         + 'amonet 2 means TWRP 3.7.0 and FireOS 6)');
     }
     if (gen) {
-      seen.push(`amonet ${gen === 6 ? 2 : 1}: expdb ${v2Boot ? 'holds' : 'does not hold'} `
-              + `amonet 2's bootloader, TWRP ${tw}`);
+      seen.push(`amonet ${gen === 6 ? 2 : 1}: ${lkSays}, TWRP ${tw}`);
       const want = gen === 6
         ? { layout: 'nested', release: '7.', arch: 'arm', label: 'FireOS 6' }
         : { layout: 'root', release: '5.', arch: 'arm64', label: 'FireOS 5' };
@@ -7271,16 +7283,16 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     addLog('Checking this Echo is in a state emOS can be built from…');
     const files = _emosSystemFiles();
     const donorProbe = parseDonorProbe(await c.shell(_donorProbeScript(files)));
-    // expdb's first four bytes, read here rather than with `od` on the device.
-    if (donorProbe.expdbDev) {
-      await c.shell(`dd if=${donorProbe.expdbDev} of=/tmp/em_expdb.bin bs=4 count=1 2>/dev/null`);
-      const e = await c.pull('/tmp/em_expdb.bin');
-      await c.shell('rm -f /tmp/em_expdb.bin');
-      if (e && e.length >= 4) {
-        donorProbe.expdb = [...e.subarray(0, 4)].map(b => b.toString(16).padStart(2, '0')).join('');
+    // lk_a's first eight bytes, read here rather than with `od` on the device.
+    if (donorProbe.lkDev) {
+      await c.shell(`dd if=${donorProbe.lkDev} of=/tmp/em_lk.bin bs=8 count=1 2>/dev/null`);
+      const e = await c.pull('/tmp/em_lk.bin');
+      await c.shell('rm -f /tmp/em_lk.bin');
+      if (e && e.length >= 8) {
+        donorProbe.lk = [...e.subarray(0, 8)].map(b => b.toString(16).padStart(2, '0')).join('');
       }
     }
-    addLog(`  expdb (${donorProbe.expdbDev || 'not found'}): ${donorProbe.expdb || 'unreadable'}`);
+    addLog(`  lk_a (${donorProbe.lkDev || 'not found'}): ${donorProbe.lk || 'unreadable'}`);
     const toCheck = plan
       ? ['a', 'b'].filter(x => slots[x].state === 'stock')
                   .map(x => ({ name: `boot_${x}`, dev: slots[x].dev }))
@@ -7315,7 +7327,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     //
     // v2 keeps its payload in expdb rather than in a partition alias, so the
     // absence of boot_*_amonet there is expected and says nothing. Step 1 has
-    // already identified the unlock generation from expdb and the TWRP
+    // already identified the unlock generation from lk_a and the TWRP
     // version; warning again here would contradict it.
     const amonet = /NAME boot_[ab]_amonet /.test(probe);
     if (boot.layout === 'v2') {

@@ -38,8 +38,12 @@ function liftArrow(name) {
 
 const { _unlockVerdict } = await import(
   "data:text/javascript;base64," + Buffer.from(
-    liftArrow("_unlockVerdict") + "\nexport { _unlockVerdict };"
+    liftArrow("_amonetLk") + "\n" + liftArrow("_unlockVerdict")
+    + "\nexport { _unlockVerdict };"
   ).toString("base64"));
+
+const LK_V1 = "8816885824790500";  // amonet v1.1.0's lk.bin: MTK magic, length 372,368
+const LK_V2 = "88168858407b0500";  // amonet v2.0.0's lk.bin: MTK magic, length 359,744
 
 let failures = 0;
 function check(name, cond, detail) {
@@ -50,33 +54,35 @@ function check(name, cond, detail) {
 const v2 = (args) => _unlockVerdict(args).v2;
 
 // ── A v1.1.0 device must pass, in every state the wizard can meet it in ──
-check("v1 in TWRP: FireOS 5 on /system, empty expdb, TWRP 3.2.3",
-  !v2({ release: "5.1.1", expdb: "00000000", twrp: "3.2.3-0" }));
+check("v1 in TWRP: FireOS 5 on /system, v1's LK, TWRP 3.2.3",
+  !v2({ release: "5.1.1", lk: LK_V1, twrp: "3.2.3-0" }));
 check("v1 in Android: only the release is known",
   !v2({ release: "5.1.1" }));
 check("every probe failed: nothing is evidence",
-  !v2({ release: "", expdb: "", twrp: "" }));
+  !v2({ release: "", lk: "", twrp: "" }));
 check("no arguments at all is not evidence either", !v2({}));
 check("v1 in TWRP 3.7.0_9-bboe2, which dot_firmware.py installs on v1",
-  !v2({ release: "5.1.1", expdb: "00000000", twrp: "3.7.0_9-bboe2" }));
-check("expdb holding something other than an LK header is not evidence",
-  !v2({ release: "5.1.1", expdb: "ffffffff", twrp: "3.2.3-0" }));
+  !v2({ release: "5.1.1", lk: LK_V1, twrp: "3.7.0_9-bboe2" }));
+check("an LK that is neither amonet's is not evidence",
+  !v2({ release: "5.1.1", lk: "ffffffffffffffff", twrp: "3.2.3-0" }));
+check("an MTK header of another length is not evidence",
+  !v2({ release: "5.1.1", lk: "8816885800000300", twrp: "3.2.3-0" }));
 
 // ── Each sign of v2 is enough on its own ──
-check("an MTK image header in expdb is v2",
-  v2({ release: "5.1.1", expdb: "88168858", twrp: "3.2.3-0" }));
+check("amonet 2's LK in lk_a is v2",
+  v2({ release: "5.1.1", lk: LK_V2, twrp: "3.2.3-0" }));
 check("the header is matched whatever the hex case",
-  v2({ expdb: "88168858".toUpperCase() }));
+  v2({ lk: LK_V2.toUpperCase() }));
 check("TWRP 3.7 is v2", v2({ twrp: "3.7.0_9-0" }));
 check("TWRP 3.10 is compared as a number, not a string", v2({ twrp: "3.10.0" }));
 check("TWRP 4.0 is v2", v2({ twrp: "4.0.0" }));
 check("TWRP 3.6 is not v2", !v2({ twrp: "3.6.2_9-0" }));
-check("a bboe TWRP does not hide v2's expdb",
-  v2({ expdb: "88168858", twrp: "3.7.0_9-bboe2" }));
+check("a bboe TWRP does not hide v2's LK",
+  v2({ lk: LK_V2, twrp: "3.7.0_9-bboe2" }));
 check("FireOS 6 on /system (Android 7.1) is v2", v2({ release: "7.1.2" }));
 
 // ── The refusal names what it found ──
-const both = _unlockVerdict({ release: "7.1.2", expdb: "88168858", twrp: "3.7.0_9-0" });
+const both = _unlockVerdict({ release: "7.1.2", lk: LK_V2, twrp: "3.7.0_9-0" });
 check("all three signs are reported, so the message says why",
   both.evidence.length === 3, JSON.stringify(both.evidence));
 check("the TWRP version appears in the evidence",

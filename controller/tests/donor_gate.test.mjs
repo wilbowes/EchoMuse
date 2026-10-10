@@ -42,10 +42,13 @@ function liftFunction(name) {
   return src.slice(start, i + 1);
 }
 
+// _amonetLk is a top-level arrow, not a function declaration.
+const amonetLk = src.slice(src.indexOf("const _amonetLk = ("),
+                           src.indexOf("\n};", src.indexOf("const _amonetLk = (")) + 3);
 const names = ["_emosSystemFiles", "_donorProbeScript", "parseDonorProbe",
                "_kernelArchOf", "donorVerdict"];
 const mod = await import("data:text/javascript;base64," + Buffer.from(
-  names.map(liftFunction).join("\n") + `\nexport { ${names.join(", ")} };`
+  [amonetLk, ...names.map(liftFunction)].join("\n") + `\nexport { ${names.join(", ")} };`
 ).toString("base64"));
 const { _emosSystemFiles, _donorProbeScript, parseDonorProbe, _kernelArchOf,
         donorVerdict } = mod;
@@ -90,8 +93,8 @@ const FILES = _emosSystemFiles();
         s.includes("/dev/block/platform/*/by-name") && s.includes("/dev/block/by-name"));
   check("never needs od on the device (TWRP 3.2.3 read expdb as unreadable through it)",
         !s.includes(" od "));
-  check("resolves expdb and both system partitions through the same lookup",
-        s.includes("$(part expdb)") && s.includes("$(part system_$x)"));
+  check("resolves lk_a and both system partitions through the same lookup",
+        s.includes("$(part lk_a)") && s.includes("$(part system_$x)"));
   check("reads BOTH system partitions", s.includes("for x in a b"));
   check("mounts read-only", s.includes("mount -o ro"));
   check("tests files are non-empty, not merely present", s.includes('[ -s "$R/$f" ]'));
@@ -122,17 +125,19 @@ const FOS6 = { layout: "nested", release: "7.1.2", name: "Fire OS 6.5.7.4 (NS657
                files: FILES[6] };
 const FOS5 = { layout: "root", release: "5.1.1", name: "Fire OS 5.5.5.4 (680767620)",
                files: FILES[5] };
-function probe({ expdb = "88168858", twrp = "3.7.0_9-0", a = FOS6, b = FOS6, done = true }) {
-  const lines = [`EXPDB=${expdb}`, `TWRP=${twrp}`, ...sysLines("a", a), ...sysLines("b", b)];
+const LK_V1 = "8816885824790500";  // amonet v1.1.0's lk.bin: MTK magic, length 372,368
+const LK_V2 = "88168858407b0500";  // amonet v2.0.0's lk.bin: MTK magic, length 359,744
+function probe({ lk = LK_V2, twrp = "3.7.0_9-0", a = FOS6, b = FOS6, done = true }) {
+  const lines = [`LK=${lk}`, `TWRP=${twrp}`, ...sysLines("a", a), ...sysLines("b", b)];
   if (done) lines.push("_DONORPROBE_OK");
   return parseDonorProbe(lines.join("\n"));
 }
 
 {
   const p = probe({});
-  check("parses the unlock evidence", p.expdb === "88168858" && p.twrp === "3.7.0_9-0");
-  check("parses where expdb is", parseDonorProbe("EXPDBDEV=/dev/block/mmcblk0p7\n").expdbDev
-        === "/dev/block/mmcblk0p7");
+  check("parses the unlock evidence", p.lk === LK_V2 && p.twrp === "3.7.0_9-0");
+  check("parses where lk_a is", parseDonorProbe("LKDEV=/dev/block/mmcblk0p10\n").lkDev
+        === "/dev/block/mmcblk0p10");
   check("parses a system slot", p.sys.a.layout === "nested" && p.sys.a.release === "7.1.2"
         && p.sys.a.files["vendor/bin/wmt_loader"] === "yes");
   check("a probe without its sentinel is incomplete", !probe({ done: false }).complete);
@@ -185,24 +190,24 @@ const armB = [{ name: "boot_b", arch: "arm" }];
         && r.confirmed.some(l => l.includes("boot_b")));
 }
 {
-  const r = v(probe({ expdb: "00000000", twrp: "3.2.3-0", a: FOS5, b: FOS5 }), "v1",
+  const r = v(probe({ lk: LK_V1, twrp: "3.2.3-0", a: FOS5, b: FOS5 }), "v1",
               [{ name: "the boot image", arch: "arm64" }]);
   check("amonet 1, FireOS 5 in both slots, 64-bit kernel: accepted", r.ok && r.gen === 5);
 }
 {
-  const bboe = (twrp, layout = "v1") => v(probe({ expdb: "00000000", twrp, a: FOS5, b: FOS5 }),
+  const bboe = (twrp, layout = "v1") => v(probe({ lk: LK_V1, twrp, a: FOS5, b: FOS5 }),
                                           layout, [{ name: "the boot image", arch: "arm64" }]);
   check("amonet 1 with dot_firmware.py's TWRP 3.7.0_9-bboe2: accepted",
         bboe("3.7.0_9-bboe2").ok && bboe("3.7.0_9-bboe2").gen === 5);
   check("a bboe TWRP on a v2 partition layout: refused", !bboe("3.7.0_9-bboe2", "v2").ok);
-  check("a bboe TWRP with amonet 2's expdb: refused",
+  check("a bboe TWRP with amonet 2's LK: refused",
         !v(probe({ twrp: "3.7.0_9-bboe2" }), "v2", armB).ok);
   check("v2's own TWRP 3.7.0_9-0 on amonet 1: still refused", !bboe("3.7.0_9-0").ok);
 }
 {
   // C95, 2026-09-25: amonet 1, FireOS 5 in system_a, FireOS 6 in system_b. The
   // image mounts system_a only, so system_b is reported and cannot block.
-  const v1 = (a, b) => v(probe({ expdb: "00000000", twrp: "3.2.3-0", a, b }), "v1",
+  const v1 = (a, b) => v(probe({ lk: LK_V1, twrp: "3.2.3-0", a, b }), "v1",
                          [{ name: "the boot image", arch: "arm64" }]);
   const r = v1(FOS5, FOS6);
   check("C95: amonet 1 with FireOS 6 in the unused system_b is accepted", r.ok && r.gen === 5);
@@ -233,12 +238,16 @@ const armB = [{ name: "boot_b", arch: "arm" }];
 }
 {
   const r = v(probe({ twrp: "3.2.3-0" }), "v2", armB);
-  check("expdb says amonet 2 but TWRP says amonet 1: refused", !r.ok
+  check("lk_a says amonet 2 but TWRP says amonet 1: refused", !r.ok
         && r.reason.includes("does not add up"));
 }
 {
-  const r = v(probe({ expdb: "00000000" }), "v2", armB);
-  check("TWRP 3.7 but no amonet 2 bootloader in expdb: refused", !r.ok);
+  const r = v(probe({ lk: LK_V1 }), "v2", armB);
+  check("TWRP 3.7 but amonet 1's LK in lk_a: refused", !r.ok);
+  const r0 = v(probe({ lk: "0000000000000000", twrp: "3.2.3-0", a: FOS5, b: FOS5 }), "v1",
+               [{ name: "the boot image", arch: "arm64" }]);
+  check("an LK that is neither amonet's: refused, not read as amonet 1",
+        !r0.ok && r0.reason.includes("neither amonet's LK"));
 }
 {
   const r = v(probe({}), "v1", armB);
@@ -250,10 +259,10 @@ const armB = [{ name: "boot_b", arch: "arm" }];
   check("TWRP 3.7.10 is not 3.7.0", !v(probe({ twrp: "3.7.10" }), "v2", armB).ok);
 }
 {
-  const ru = v(probe({ expdb: "" }), "v2", armB);
-  check("expdb unreadable: refused", !ru.ok);
+  const ru = v(probe({ lk: "" }), "v2", armB);
+  check("lk_a unreadable: refused", !ru.ok);
   check("an unreadable fact is reported as the wizard's failure, not the unlock's",
-        ru.reason.includes("could not read the expdb") && ru.reason.includes("Try this step again")
+        ru.reason.includes("could not read the lk_a") && ru.reason.includes("Try this step again")
         && !/unlock completed/.test(ru.reason));
   const rd = v(probe({ twrp: "3.2.3-0" }), "v2", armB);
   check("a disagreement names the combinations that are built for",
