@@ -726,7 +726,7 @@ not choose.
 
 ### What the slots actually contain
 
-Measured on G090LF11803611NF in TWRP, 2026-09-06, all reads. Recorded because
+Measured on …11NF in TWRP, 2026-09-06, all reads. Recorded because
 the paragraph above was written from the partition table alone and three of
 these were unknown.
 

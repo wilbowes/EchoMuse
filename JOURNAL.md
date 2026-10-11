@@ -2691,7 +2691,7 @@ reports, not a blanket bump.
 ## 2026-09-13 (evening) — emOS boots on FireOS 6, four EA builds getting there
 
 The FireOS 6 wizard path ran on hardware for the first time, against the spare
-(G090LF11752215LE) on a stock FireOS 6 install unlocked with amonet-biscuit
+(…15LE) on a stock FireOS 6 install unlocked with amonet-biscuit
 v2.0.0. **emOS booted** — `armv7l`, `emos-v0.5`, from an image the wizard built
 out of the device's own kernel — and associated to WiFi with our own
 `wpa_supplicant`. It stops one step short of finishing, and the reason is #524.
@@ -3253,7 +3253,7 @@ runs 2 and 3 built `e615da4c…` twice. So a re-provision that changes nothing
 writes identical bytes — run 1 proved the logic and the write path, not a
 change of content.
 
-*emOS on FireOS 5*, on G090LF11803611NF (v1) rather than VVV, because it was
+*emOS on FireOS 5*, on …11NF (v1) rather than VVV, because it was
 already emOS v0.5 and makes the v1 re-provision case: escrowed our own image
 (`d619034b…`, recognised by the ramoops marker alone — it predates the
 `emos.system=` stamp), the packer rebuilt from it without doubling its own
