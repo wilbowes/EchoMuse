@@ -71,8 +71,8 @@ function check(label, cond, detail) {
 
 // The globals the two functions read. Set per-case rather than once, since the
 // whole point is that the answer differs by deployment.
-function withPage({ usb, origin, baseURI }, fn) {
-  __setPage(usb ? { usb: {} } : {}, { location: { origin } }, { baseURI });
+function withPage({ usb, origin, baseURI, secure }, fn) {
+  __setPage(usb ? { usb: {} } : {}, { location: { origin }, isSecureContext: secure }, { baseURI });
   try { return fn(); } finally { __setPage(undefined, undefined, undefined); }
 }
 
@@ -119,6 +119,29 @@ for (const [name, page] of [["standalone", STANDALONE], ["ingress", INGRESS]]) {
         b.fix.includes("chrome://flags/#unsafely-treat-insecure-origin-as-secure"), b.fix);
   check(`${name} says to relaunch the browser`, /relaunch/.test(b.fix), b.fix);
 }
+
+// A secure page with no WebUSB is a browser without it (Firefox, Safari), and
+// the address must not be blamed (#844: HTTPS with a public certificate).
+for (const [name, page] of [
+  ["standalone", { ...STANDALONE, origin: "https://echomuse.example.com" }],
+  ["ingress", { ...INGRESS, origin: "https://homeassistant.example.com" }],
+]) {
+  const b = withPage({ ...page, usb: false, secure: true }, () => webUsbBlocked());
+  const text = `${b.why} ${b.fix}`;
+  check(`${name}, secure, no WebUSB: reports a blocker`, b !== null);
+  check(`${name}, secure, no WebUSB: does not call the address insecure`,
+        !/not a secure address|chrome:\/\/flags|HTTPS/.test(text), text);
+  check(`${name}, secure, no WebUSB: names a browser that works`, /Chrome/.test(b.fix), b.fix);
+}
+// Only a positive answer counts: a browser too old to say stays on the
+// insecure-address advice, as before.
+{
+  const b = withPage({ ...STANDALONE, usb: false, secure: false }, () => webUsbBlocked());
+  check("insecure context keeps the address advice", /not a secure address/.test(b.why), b.why);
+}
+// WebUSB present wins whatever the context says.
+check("secure context with WebUSB returns null",
+      withPage({ ...INGRESS, usb: true, secure: true }, () => webUsbBlocked()) === null);
 
 if (failures) {
   console.error(`\n${failures} check(s) failed`);

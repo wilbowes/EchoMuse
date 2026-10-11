@@ -61,6 +61,16 @@ function isIngress() {
 function webUsbBlocked() {
   if (navigator.usb) return null;
   const origin = window.location.origin;
+  // A secure page with no WebUSB is the BROWSER: Firefox and Safari do not
+  // implement it. Telling that person their HTTPS address is not secure sent
+  // them to fix a certificate that was fine (#844).
+  if (window.isSecureContext === true) {
+    return {
+      origin,
+      why: 'USB is not available in this browser.',
+      fix: 'Open this page in Chrome or Edge on a computer: Firefox and Safari have no WebUSB.',
+    };
+  }
   return {
     origin,
     why: `USB is blocked: ${origin} is not a secure address.`,
