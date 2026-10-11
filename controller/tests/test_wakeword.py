@@ -377,3 +377,37 @@ def test_a_request_for_on_while_temporarily_on_is_stored():
     assert "set_wake_word_enabled" in body, (
         "the stored value must be written when the temporary flag is set"
     )
+
+
+def test_home_assistant_is_made_to_read_a_state_it_did_not_set():
+    """HA reads the picker's state at connect and after its own writes only,
+    so a change it did not ask for needs its connection bounced (#776)."""
+    assert em_wakeword.ha_needs_refresh(told=False, enabled=True)
+    assert em_wakeword.ha_needs_refresh(told=True, enabled=False)
+    assert not em_wakeword.ha_needs_refresh(told=True, enabled=True)
+    assert not em_wakeword.ha_needs_refresh(told=False, enabled=False)
+    # Not asked yet: it reads the current value when it connects.
+    assert not em_wakeword.ha_needs_refresh(told=None, enabled=True)
+    assert not em_wakeword.ha_needs_refresh(told=None, enabled=False)
+
+
+def test_the_temporary_on_refreshes_home_assistant():
+    src = (CONTROLLER / "em_controller.py").read_text()
+    at = src.index("em_wakeword.stored_off_unsupported(")
+    assert "update_wake_word(device_id, True, refresh=True)" in src[at:at + 600]
+    esp = (CONTROLLER / "em_esphome.py").read_text()
+    fn = esp[esp.index("def update_wake_word("):]
+    fn = fn[:fn.index("\ndef ")]
+    assert "ha_needs_refresh(" in fn and "satellite.disconnect()" in fn
+    assert "srv.wake_word_told = enabled" in esp
+
+
+def test_a_stored_choice_that_can_be_honoured_again_refreshes_home_assistant():
+    """After the upgrade the stored off applies again, and HA may still show
+    the temporary on. Only for firmware with the capability: without it the
+    listen_state handler decides, and a refresh here would bounce HA twice."""
+    src = (CONTROLLER / "em_controller.py").read_text()
+    at = src.index("wake_word_enabled=device.wake_word_enabled,\n        )")
+    after = src[at:at + 700]
+    gate = after.index("if device.wake_word_off_capable:")
+    assert "update_wake_word(device_id, device.wake_word_enabled, refresh=True)" in after[gate:gate + 140]

@@ -75,16 +75,25 @@ def stored_off_unsupported(*, stored: bool, listening_locally: bool,
     whole time. Reaching this needs the firmware to go backwards after the
     picker was set — a slot rollback, or a downgrade after #552.
 
-    Returns True to turn the stored state back ON and report it, which is the
-    same outcome as a declined request. Clearing rather than merely reporting
-    is the point: keeping the stored value means the same false state returns
-    on every connect after the next upgrade, and nothing self-heals.
+    Returns True to report the wake word ON while this firmware runs. The
+    stored value stays off (Wil, 2026-10-06): after an upgrade the firmware
+    can honour it again, and the choice comes back without being set twice.
 
     An Echo STREAMING to the controller with the wake word off is honouring
     it — the controller stops that stream itself — so it is never reverted.
     Only firmware that cannot stop at the crossing is.
     """
     return stored and listening_locally and not device_can
+
+
+def ha_needs_refresh(*, told: bool | None, enabled: bool) -> bool:
+    """Whether Home Assistant must be made to read the wake word state again
+    after the controller changed it without being asked (#776).
+
+    HA reads the picker's state when it connects and after its own writes,
+    never otherwise. `told` is what it last read, None if it has not asked:
+    it will read the current value when it does."""
+    return told is not None and told != enabled
 
 
 def on_request(*, want: bool, enabled: bool, mic_muted: bool) -> Transition:

@@ -4817,6 +4817,12 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             set_wake_word=_set_wake_word,
             wake_word_enabled=device.wake_word_enabled,
         )
+        # #776: firmware that can honour the stored choice again (an upgrade)
+        # may meet a Home Assistant still showing the temporary "on". Without
+        # the capability the listen_state handler decides, once the Echo has
+        # said how it is listening.
+        if device.wake_word_off_capable:
+            esphome.update_wake_word(device_id, device.wake_word_enabled, refresh=True)
         # A device boots at its stored startupVolume, which an output mute
         # never overwrites — so a mute from before this connection has to be
         # sent again, or HA shows muted over audible music.
@@ -5357,7 +5363,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                                 device_can=device.wake_word_off_capable):
                             device.wake_word_enabled = True
                             device.wake_word_temporarily_on = True
-                            esphome.update_wake_word(device_id, True)
+                            esphome.update_wake_word(device_id, True, refresh=True)
                             em_dbwriter.submit(db.log_device, device_id, "info",
                                                "controller",
                                                "Wake word reported on temporarily: "
