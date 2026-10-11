@@ -4881,3 +4881,129 @@ at the end of an emOS install (#834).
 **Owed.** Wakes over a reply and kitchen wakes at bench height for #790's two
 open questions. Saturday: the soak's overnight turns and UAT. After GA: #830,
 #834, #835 and the barge-in work.
+
+## 2026-10-11 — acceptance testing finds a mute that did not survive a power cut and a wizard that would not say why, and 2.26.0 ships
+
+**Speech to text, before anything else.** Wil could not get the office blind
+opened by voice and suspected a regression. The dev controller's turns showed
+the wake word firing every time and the transcripts wrong: "I'm in the office
+blind", "Open the office light", "I opened the office blind". The saved
+recordings were replayed through both recognisers: Gemma (the Wyoming shim on
+:10302) gave the same wrong text on three runs each for five of seven
+"office blind" commands; whisper `small.en` on CPU, and then
+`distil-large-v3`, got all of them, including a slip Wil made himself. The
+shim's 10-06 change leaves the English prompt unchanged and the model server
+had not restarted, so the cause on Gemma's side is not known. The clips are
+quiet (speech around -25 to -30 dBFS over a floor of -38 on some), which may
+be part of it and was not tested. `faster-whisper` was started again and Wil
+pointed Home Assistant at it. One turn with the right transcript still drew a
+follow-up question; Wil turned on local command handling in HA for that.
+
+The reply "12:01 PM" was spoken as a number: the TTS shim passes text
+straight to the model. Wil wants an LLM pass to normalise it rather than
+rules in the shim, later.
+
+**A plugin boundary (#847).** A contributor has built a streaming-service
+client that runs on the Echo. Wil does not want to ship or own it, for the
+service's terms and for the listener it opens, and filed the idea of a device
+plugin interface instead: an audio output into the mixer and a lifecycle, no
+microphones, no control link, off by default, shown as third-party.
+
+**UAT, the automated part.** The candidate was the ea.2 pair; nothing but
+docs had landed since. First run on 15LE and VVV only, because I left C95 on
+the house controller without asking. Wil: "it's not a proper run without
+them", and "please ask before assuming". Repeated with all three: 46
+controls, 25 applied, 17 received, 4 shown disabled, none failed; axe clean
+on 22 views. Nine controls are new since the 2.25.0 report and the inventory
+found them unprompted. Solo checks in throwaway containers: 2.25.0's schema
+v27 migrates to v31 with `echomuse.db.pre-v27.bak` written first, and 2.25.0
+refuses the migrated file by name; `EM_TTS_WAIT_TIMEOUT` gives 45, defaults
+to 30, caps at 120; the bundle carries `LOG_LEVELS`; a container with no
+environment keeps its database and CA across a recreate. The migration ran on
+an empty database: copying the GA add-on's off the HA host was refused by the
+session's permission classifier and not worked around.
+
+**UAT, hands on.** Passed as written: mute and unmute, the volume tone, the
+no-HA cue, pairing by hold, the nearest Echo answering (6 of 6, by 6.9 to
+12.0 dB), barge-in, the timer's pause-resume-stop, "No wake word", the mute
+sensor, the remote volume arc, announcements, music and ducking, a timer
+under music, the wake word microphone, clip capture, the emOS panel.
+Findings that did not block:
+
+- Response level did nothing at first: the Echoes held per-device values, so
+  the fleet save reported "pushed to 3 devices" and changed nothing audible.
+  Scoping as designed, with nothing on the fleet page to say so.
+- A bare wake word during a ringing timer was taken by 15LE while C95 rang.
+  The ring paused and resumed correctly.
+- With speech forced together, 3 of 4 commands kept their first word (#829).
+  The one that did not began inside the first 50 ms of the recording.
+- Pausing music by voice failed in Home Assistant: transcribed correctly
+  twice, no media command sent.
+- Wil: the thinking spinner ends before the reply is heard. Audio reached the
+  Echo 0.36-0.43 s after the reply was ready on average, and the Echo then
+  held 1.1 s and 2.3 s on two turns. The same before today.
+- Wil: the ring's level scaling is still wrong. After GA.
+- Updating 15LE and VVV from the fleet panel stalled the controller's event
+  loop for 4.4 s and 3.2 s.
+- There is no identify control. The three Echoes were told apart by tapping
+  each action button and reading the log.
+
+**Sendspin lost sync after a restart mid-track.** VVV and C95 played in sync.
+VVV lost power, rebooted and rejoined the stream 1.85 s out, snapped once,
+was in sync briefly and then audibly behind, as an echo on lyrics. Both
+players logged `synced=true` with 0.16-0.38 ms of error throughout. On VVV
+after the reboot: the drift estimate stayed at 0.00 ppm for three minutes
+(C95 tracked -5.8), one sync round trip took 978 ms, and the speaker position
+stepped +4.2 ms and back. A new track brought them back into sync, which
+rules out my first lean that Android had changed VVV's output delay after the
+join. Not explained. Wil: not a blocker, wants the cause found after GA.
+
+**Mute did not survive a power cut (#849).** Mute, then power pulled: C95
+came back muted, VVV and 15LE did not, twice each. VVV's `state.json` was 0
+bytes and its log read "unreadable, ignoring"; 15LE's held the old value. The
+file was written as temp-then-rename with no sync, and the comment above it
+said a power cut could not truncate it. The code had not changed since mute
+persistence was written, so the 2.25.0 UAT passed this step on timing. Fixed
+by syncing the file before the rename and the directory after. On the fixed
+build, mute and unmute each survived power pulled within 2 s, twice each way,
+on all three. Released as `v2.18.0-ea.3` at Wil's word, with no soak: "just
+doing it for completeness". All three Echoes took it by OTA from the
+dashboard, which also exercised the update steps the plan had skipped.
+
+**The wizard (#850).** At Wil's request VVV was restored to stock FireOS
+5.5.5.4 (the recorded sequence) and 15LE to stock FireOS 6 NS65741 (his XDA
+steps: wipe, install to one slot, reboot recovery, install to the other).
+Tidying VVV afterwards I deleted `/sdcard/f1r30s.zip`. The FireOS wizard then
+stopped at step 3, correctly since #723, with a panel that said "Click Retry
+first" and offered to restore a boot image that had never been taken; step 1
+had printed "Delete it from the controller first" above a button that kept
+the record. Wil remembered the wizard asking for `f1r30s.zip` as an upload.
+It never has; the August recovery tool carries it by SHA-256, and Magisk is
+the file the wizard uploads. Fixed the same afternoon: the panel shows the
+step's reason, step 3 asks for the file and checks it against that hash, the
+restore panel needs an escrow, step 1 offers its two choices. A second
+"No file chosen" in his screenshot was the browser's tooltip, not a layout
+fault. Both wizards then ran clean, FireOS on VVV and emOS on 15LE, each
+registering on `v2.18.0-ea.3` over wss. Controller `2.26.0-ea.3` cut so the
+Early Access channel has the same pair.
+
+**The release.** Automated pass repeated on the ea.3 pair: the same 46 and
+22, none failed. Report `docs/uat-results/2.26.0.md`, named for the GA
+versions at Wil's instruction, with serials shortened to four characters at
+his request (the 2.25.0-ea.1 report, the emOS README and two entries here
+were shortened to match; test fixtures are #853). Main went red once, on the
+docs merge #839, in `TestScanPausesWhileConnecting`: no firmware change in
+that commit, green on rerun, 360 of 360 locally under the race detector. My
+reading is a 150 ms fake connect finishing before the scan loop looks; not
+proved. `v2.18.0` and `controller-v2.26.0` were tagged on `e119433` and
+`:latest` moved from 2.25.0. Closed with the version: #747, #566, #669, #541,
+#267, #268, #89, #818 (the arm64 image carries the same openssl and pcre2 as
+amd64), #705.
+
+**Not run:** talking over a reply with Home Assistant unreachable (#417,
+skipped by Wil), the Bluetooth proxy feeding Bermuda under music, a
+connection through the proxy.
+
+**Rig faults.** `rig.py up` does not start the browser container. `attach`
+to a rig that still holds the Echo's row moves its credentials aside and then
+fails the approval with 409.

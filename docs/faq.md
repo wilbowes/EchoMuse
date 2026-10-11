@@ -221,7 +221,7 @@ firmware left part of the speaker path switched off on FireOS 6's kernel
 ### How do I update emOS?
 Open the Echo in the dashboard and go to **Updates**. An Echo on emOS has an
 **emOS** panel there with the version it runs and the newest release; press
-**Update**. This needs a controller newer than 2.25.0 and installs emOS 0.10
+**Update**. This needs controller 2.26.0 or later and installs emOS 0.10
 or later. On an older controller, re-run the wizard's build and flash steps
 instead.
 

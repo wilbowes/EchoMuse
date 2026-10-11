@@ -219,6 +219,12 @@ Device firmware, controller and emOS are versioned independently from the same r
 run and its report (`tools/uat`, `docs/uat-results/`) are done on a GA
 candidate; an EA is cut from a green main without it, since finding faults is
 what the EA is for. 2.26.0-ea.1 / v2.18.0-ea.1 was the first cut that way.
+**The report is named for the GA versions being shipped** (Wil, 2026-10-11),
+`docs/uat-results/2.26.0.md`, and says which EA builds it ran on. A run needs
+all three bases attached: FireOS 5, emOS on the 32-bit kernel, emOS on the
+64-bit one. A fault fixed during the run goes out as a further EA of that
+component, and the automated pass is repeated on the final pair. Echoes are
+named by their last four characters in anything published.
 
 **Pipeline hygiene (2026-09-23).** Every action is pinned by commit SHA with
 its version in a trailing comment (`@<sha> # v7.0.1`), which Dependabot's

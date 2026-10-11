@@ -121,7 +121,7 @@ The wizard offers two ways to run EchoMuse on the Dot:
   tuning), logs and a history of voice turns.
 - **Updates over WiFi**, for the firmware and for emOS itself, each with
   automatic rollback if the new version fails. emOS updates need emOS 0.10 as
-  the release to install and a controller newer than 2.25.0; before that,
+  the release to install and controller 2.26.0 or later; before that,
   emOS is updated by re-running the wizard.
 
 ## Privacy

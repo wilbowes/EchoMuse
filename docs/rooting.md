@@ -62,7 +62,9 @@ For the unlock itself (R0rt1z2's thread has the authoritative list):
     `/system/etc/hosts` so the device cannot update itself, and disables
     dm-verity. **Always flash it after a stock firmware image or the OS
     will not boot** — a stock flash restores verity against a partition
-    table the unlock modified.
+    table the unlock modified. Leave it on the Echo's storage afterwards:
+    the FireOS wizard reads it from `/sdcard/f1r30s.zip` at step 3. If it is
+    not there the wizard asks for it, checks it and copies it over.
   - `Magisk-v17.3.zip` — from [GitHub](https://github.com/topjohnwu/Magisk/releases/tag/v17.3)
   - `server` — compiled EchoMuse binary (ARM, API 22)
 

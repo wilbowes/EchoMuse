@@ -1842,6 +1842,30 @@ The WebUSB/ADB wizard that takes a stock Dot to a fielded device. Four rules,
 each of which has already been broken once and each of which fails *silently*
 when broken — the wizard drives hardware nobody is watching a log of.
 
+**The failure panel carries the reason, and what it offers must be able to
+help (#850, 2026-10-11).** `stepError` holds the failed step's message and the
+panel shows its first paragraph (`_stepFailureReason`); command output stays
+in the transcript. Until then the panel read "Click Retry first" whatever had
+happened. Three consequences of the same rule:
+
+- **FireOS step 3 asks for `f1r30s.zip`.** The flow has always read
+  `/sdcard/f1r30s.zip` off the device and never uploaded it. `ensureF1r30s`
+  runs ahead of `runPatchBoot`: absent, the panel shows a picker, and the
+  retry checks the file against `_F1R30S_SHA256` (the build the August
+  recovery tool pinned), pushes it and reads it back. A probe that did not
+  run to its `_F1CHK` sentinel is not "absent". It is a separate function
+  because `boot_target.test.mjs` builds `runPatchBoot` with an explicit list
+  of injected names, so a new dependency inside it fails that test.
+- **The restore-escrow panel needs an escrow**: `emosRef`, or `restored` (a
+  session resumed after a reload, where the operator may hold the download).
+  It used to show on any failure at steps 2-4, including one before the
+  escrow, asking for an image "downloaded at step 3" that did not exist.
+- **A registered Echo at step 1** offers keep-record or delete, shows no
+  Retry (it could only stop again), and keep-record runs the step.
+
+Found by Wil running the FireOS wizard in the 2.26.0 UAT on an Echo whose
+`/sdcard` had been cleared after a stock restore.
+
 - **The finishing reboot belongs to the LAST step, and moving the last step
   means moving the reboot.** Install EchoMuse used to be last, so it ended by
   rebooting and clearing `adb`. When the wake word asset step was appended
