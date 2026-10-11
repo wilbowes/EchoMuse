@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.26.0-ea.3 (Early Access)
+
+Fixes from release testing on top of 2.26.0-ea.2: the provisioning wizard, and mute across a power cut. Pair with firmware v2.18.0-ea.3, which this controller offers.
+
+### Fixed
+
+- **The provisioning wizard did not say why a step failed.** The failure box read "Click Retry first" with the reason only in the log underneath. It now gives the reason, and the box to restore a boot image appears only when there is one to restore (#850).
+- **The wizard stopped at step 3 when `f1r30s.zip` was not on the Echo.** It now asks for the file, checks it and copies it over (#850).
+- **Re-provisioning an Echo the controller already knows** printed an error telling you to delete it, above a button that kept it. The step now offers the two choices and carries on when you pick one (#850).
+- **A muted Echo could come back unmuted after a power cut** within a few seconds of the mute press. Fixed in firmware v2.18.0-ea.3 (#849).
+
+### Known issues
+
+- A turn is occasionally logged as empty although its recording holds clear speech (#815).
+- An emOS Echo on the 32-bit kernel sometimes reconnects without rebooting (#816).
+- An Echo that restarts and rejoins a playing Sendspin group can fall out of sync until the next track.
+- A fleet setting saved while an Echo has its own value for it changes nothing on that Echo, and the fleet page does not say so.
+
 ## 2.26.0-ea.2 (Early Access)
 
 With Echoes in more than one room, the one you are nearest now answers, and a command said straight after the wake word keeps its first word. Pair with firmware v2.18.0-ea.2, which this controller offers.
