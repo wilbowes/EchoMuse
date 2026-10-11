@@ -8,6 +8,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/wilbowes/EchoMuse/internal/atomicfile"
 )
 
 // maxRecords is how many servers the device stays paired with at once. The
@@ -103,11 +105,7 @@ func (s *store) saveLocked() error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return err
 	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.path)
+	return atomicfile.Write(s.path, b, 0o600)
 }
 
 // pskCategory is which kind of PSK a handshake matched, which decides what

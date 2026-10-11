@@ -2,9 +2,10 @@ package config
 
 import (
 	"encoding/json"
-	"os"
 	"sync"
 	"time"
+
+	"github.com/wilbowes/EchoMuse/internal/atomicfile"
 )
 
 // ReportPath is where the device records the config it was sent and the
@@ -61,9 +62,5 @@ func (d *Device) WriteReport() error {
 	if err != nil {
 		return err
 	}
-	tmp := ReportPath + ".tmp"
-	if err := os.WriteFile(tmp, b, 0644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, ReportPath)
+	return atomicfile.Write(ReportPath, b, 0644)
 }

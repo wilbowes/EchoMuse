@@ -6,6 +6,8 @@ import (
 	"log"
 	"os"
 	"time"
+
+	"github.com/wilbowes/EchoMuse/internal/atomicfile"
 )
 
 // Saving the learned echo path across restarts (see ExportState).
@@ -178,12 +180,7 @@ func writeState(path string, b []byte, attDb float64) {
 			return
 		}
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		log.Printf("[aec] saving the echo path: %v", err)
-		return
-	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := atomicfile.Write(path, b, 0o600); err != nil {
 		log.Printf("[aec] saving the echo path: %v", err)
 		return
 	}

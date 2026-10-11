@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+
+	"github.com/wilbowes/EchoMuse/internal/atomicfile"
 )
 
 // ConsolePasswordPath is where emOS's init looks for the console password
@@ -55,12 +57,7 @@ func WriteConsolePassword(record string) (changed bool, err error) {
 	// Written to a temp file and renamed, so init can never read a half-written
 	// record: a truncated one parses as unusable, which is read as NO password
 	// and would leave the console open exactly while it looked configured.
-	tmp := ConsolePasswordPath + ".tmp"
-	if err := os.WriteFile(tmp, append(want, '\n'), 0o600); err != nil {
-		return false, err
-	}
-	if err := os.Rename(tmp, ConsolePasswordPath); err != nil {
-		os.Remove(tmp)
+	if err := atomicfile.Write(ConsolePasswordPath, append(want, '\n'), 0o600); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -131,12 +128,7 @@ func WriteConsoleTimeout(minutes int) (changed bool, err error) {
 	// truncated number would parse as a SHORTER timeout, which is the
 	// dangerous direction: a console that expires mid-command looks like the
 	// device dropping the link.
-	tmp := consoleTimeoutPath + ".tmp"
-	if err := os.WriteFile(tmp, append(want, '\n'), 0o600); err != nil {
-		return false, err
-	}
-	if err := os.Rename(tmp, consoleTimeoutPath); err != nil {
-		os.Remove(tmp)
+	if err := atomicfile.Write(consoleTimeoutPath, append(want, '\n'), 0o600); err != nil {
 		return false, err
 	}
 	return true, nil
