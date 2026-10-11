@@ -159,6 +159,7 @@ COPY em_device_view.py .
 COPY em_device_config.py .
 COPY em_diagnose.py .
 COPY em_credentials.py .
+COPY em_oidc.py .
 COPY em_linkauth.py .
 COPY em_tcp.py .
 COPY em_pacing.py .

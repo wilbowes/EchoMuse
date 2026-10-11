@@ -121,6 +121,13 @@ def _legacy_fleet(tmp_path, serials):
     import re
     with db._tx() as conn:
         conn.execute("UPDATE devices SET esphome_mac = NULL")
+        # Indexes first: SQLite refuses to drop a column an index covers
+        # (v32's unique oidc identity), and they are derived from the same
+        # SQL for the same reason the columns are.
+        for sql in db.MIGRATIONS[18:]:
+            for index in re.findall(
+                    r"CREATE (?:UNIQUE )?INDEX IF NOT EXISTS (\w+)", sql):
+                conn.execute(f"DROP INDEX IF EXISTS {index}")
         for sql in db.MIGRATIONS[18:]:
             for table, col in re.findall(
                     r"ALTER TABLE (\w+)\s+ADD COLUMN (\w+)", sql):
@@ -176,7 +183,11 @@ def test_migrations_are_append_only():
     rather than edited — which is the mistake this guards, and the one that
     broke every stats write and disconnect-looped the fleet when it happened.
     """
-    assert len(db.MIGRATIONS) == 33
+    assert len(db.MIGRATIONS) == 34
+    # v34 is its own entry (OIDC identity, added by _fixup_v34), not appended
+    # onto v33.
+    assert db._MIGRATION_FIXUPS[34].__name__ == "_fixup_v34"
+    assert "34" in db.MIGRATIONS[33] and "oidc" not in db.MIGRATIONS[32]
     # v33 is its own entry (prev_clean), not appended onto v32.
     assert "prev_clean" in db.MIGRATIONS[32]
     assert "prev_clean" not in db.MIGRATIONS[31]
