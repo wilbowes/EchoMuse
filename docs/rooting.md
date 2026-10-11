@@ -5,8 +5,8 @@
 
 > **Which amonet version?** Either. **v1.1.0** leaves the Echo on FireOS 5,
 > where the wizard offers emOS or FireOS with root. **v2.0.0** moves it to
-> FireOS 6, where the wizard offers emOS. Moving between amonet versions is
-> part of the unlock, which is R0rt1z2's work: follow the XDA thread for it.
+> FireOS 6, where the wizard offers emOS. [firebreak](#unlocking-with-firebreak)
+> moves a Dot between them.
 
 EchoMuse needs an Echo Dot Gen 2 that is already unlocked and running
 FireOS 5, or FireOS 6 for emOS. Two separate jobs get you there, and they carry very different
@@ -41,80 +41,72 @@ risk.
 > asking you.
 >
 > The FireOS flow needs **v1.1.0**, since it boots the device's own Android 5.
-> For that
-> version, `Fire OS 6.5.7.0 (NS6570/6077)` still matters: its instructions
-> tell you to update *to* it before unlocking, because the exploit downgrades
-> the firmware partitions on the way through.
 
 ## What you need
 
-For the unlock itself (R0rt1z2's thread has the authoritative list):
+- A computer running macOS, Linux or Windows, with adb, fastboot and
+  [uv](https://docs.astral.sh/uv/), once. firebreak downloads everything else.
+- A micro-USB cable that carries data.
+- For the EchoMuse half, a **Chromium-based browser** (Chrome or Edge — the
+  provisioning wizard talks to the device over WebUSB) and a running
+  controller. The wizard fetches the firmware itself.
 
-- **Linux machine** with ADB and fastboot installed — see the note below on macOS
-- Python 3 (for boot image patching and Magisk DB creation)
-- The following files downloaded and ready:
-  - `amonet-biscuit-v1.1.0.zip` or `v2.0.0` — from R0rt1z2's XDA thread.
-    v2.0.0 means emOS; see the note at the top of this page.
-  - `update-kindle-csm_biscuit-272.6.8.0_user_680767620.bin` — FireOS 5 firmware
-    (**this exact build** — see below)
-  - `f1r30s.zip` — from R0rt1z2's XDA thread. Does four things, not one:
-    enables ADB and UART console access, blocks Amazon's OTA domains in
-    `/system/etc/hosts` so the device cannot update itself, and disables
-    dm-verity. **Always flash it after a stock firmware image or the OS
-    will not boot** — a stock flash restores verity against a partition
-    table the unlock modified. Leave it on the Echo's storage afterwards:
-    the FireOS wizard reads it from `/sdcard/f1r30s.zip` at step 3. If it is
-    not there the wizard asks for it, checks it and copies it over.
-  - `Magisk-v17.3.zip` — from [GitHub](https://github.com/topjohnwu/Magisk/releases/tag/v17.3)
-  - `server` — compiled EchoMuse binary (ARM, API 22)
-
-> **Which FireOS 5 build?** R0rt1z2's thread lists six that boot on an
-> unlocked Dot, and EchoMuse is developed and tested against exactly one:
-> **Fire OS 5.5.5.4**, `272.6.8.0_user_680767620`. Every device in the
-> project's own fleet runs it. The older builds are not known to be broken —
-> they are simply untested here, and firmware defaults differ between builds
-> in ways that reach USB and ADB behaviour. If you are choosing, choose this
-> one. If you already have a device on another build and something behaves
-> oddly, that is the first thing to mention when reporting it.
+> **Which FireOS 5 build?** EchoMuse is developed and tested against exactly
+> one: **Fire OS 5.5.5.4**, `272.6.8.0_user_680767620`, which is the one
+> firebreak installs. Every device in the project's own fleet runs it. If you
+> have a device on another build and something behaves oddly, that is the
+> first thing to mention when reporting it.
 >
 > Check what you have with `adb shell getprop ro.build.version.name`. The
 > provisioning wizard reads it at the first step and says so in the log.
 
 > **Why Magisk 17.3?** Newer versions dropped support for Android 5.1 (API 22). 25.x installs but the daemon silently fails. 17.3 is the last version that works reliably on this device.
 
-> **Use Linux for the unlock.** `brick.sh` has been reported failing on
-> macOS, and the project's own devices were unlocked from a Linux install on
-> a Mac rather than from macOS itself. A live USB is enough — the unlock is
-> the only step that needs it. The unlock is R0rt1z2's work, so questions
-> about it belong on the XDA thread; this is only a note about what has been
-> observed to work.
->
 > **Linux ADB stability:** Linux aggressively power-manages USB devices by default, causing ADB disconnects. Disable autosuspend before starting: `echo -1 | sudo tee /sys/bus/usb/devices/*/power/autosuspend`.
-
-For the EchoMuse half, the provisioning wizard needs only a **Chromium-based
-browser** (Chrome or Edge — it talks to the device over WebUSB) and a running
-controller. It fetches the firmware itself, so the `server` binary above is
-only needed if you are provisioning by hand.
 
 ---
 
-## Unlocking the device — R0rt1z2's amonet-biscuit
+## Unlocking with firebreak
 
-The persistent unlock, the bootrom exploit and TWRP for this device are
-**R0rt1z2's** work, documented and maintained here:
+[firebreak](https://github.com/bboe/firebreak) unlocks the Dot over USB with
+R0rt1z2's amonet, from one command. It reads the state the Dot is in, does
+the next step, and stops at the target you name. A stopped run picks up where
+it left off.
 
-- [amonet-biscuit — unlock, root, TWRP, unbrick](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/)
-  on XDA Forums
+| target | the Dot ends with |
+| --- | --- |
+| `amonet-biscuit-v1.1.0-bboe` (default) | rooted FireOS 5.5.5.4 on amonet v1.1.0, with Magisk 17.3 and TWRP 3.7.0_9-bboe2 |
+| `amonet-biscuit-v2.0.0` | rooted FireOS 6 on amonet v2.0.0, for emOS |
+| `stock 8146` | stock FireOS 6, with the Dot erased |
 
-Follow that thread, not this page. We link to it rather than copying it
-because a copy goes out of date without anyone noticing. If the two ever
-disagree, the thread is correct.
+Install adb, fastboot and uv as [its
+README](https://github.com/bboe/firebreak#run-it) says for your OS, then run:
+
+```sh
+uvx firebreak@latest
+```
+
+Add a target to the end to move the Dot to it, for example
+`uvx firebreak@latest amonet-biscuit-v2.0.0`.
+
+- Do not set up a stock Dot in the Alexa app first. On WiFi it can update to
+  a build firebreak does not support.
+- The wizard accepts TWRP 3.7.0_9-bboe2 as amonet v1.1.0's.
+- The wizard's FireOS flow needs `f1r30s.zip` from the XDA thread, which
+  firebreak does not install. Have it ready for step 3. The emOS flow does
+  not need it.
+- When a run fails, run it again with `--report` and paste what it prints in
+  `#support-device-unlocking` on the
+  [Discord](https://discord.gg/vAPHMDvREG).
 
 **This is the part that can ruin a device.** It runs a bootrom exploit,
-modifies the partition table and wipes userdata. A failure here can leave a
-Dot soft-bricked badly enough that recovery means opening the case and
-shorting contacts on the board. Read the thread first, and do not start on a
-device you cannot afford to lose.
+rewrites the bootloaders and the partition table, and wipes userdata. A
+failure here can leave a Dot that needs its case opened and a contact on the
+board shorted, which `uvx firebreak@latest --short` walks through. Do not
+start on a device you cannot afford to lose.
+
+The bootrom exploit, the persistent unlock and TWRP are R0rt1z2's
+[amonet-biscuit](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/), and the XDA thread is the reference for them.
 
 ## Where EchoMuse picks up
 
@@ -151,11 +143,10 @@ accepts it. From TWRP there are two ways back to FireOS:
 
 - **Restore the escrowed boot image.** About ten seconds, and `/data` is left
   alone.
-- **Return to stock by hand** (amonet v1.1.0): wipe cache and data, sideload
-  the FireOS 5 image and then flash `f1r30s.zip`. That erases `/data`, taking
-  EchoMuse, its configuration and its credentials with it. **`f1r30s.zip` is
-  not optional** — a stock flash restores dm-verity against a partition table
-  the unlock modified, and without it the device does not boot.
+- **Reinstall FireOS 5 with firebreak** (amonet v1.1.0): run it again with no
+  target. From emOS it starts recovery, then installs rooted FireOS 5.5.5.4.
+  That erases `/data`, taking EchoMuse, its configuration and its credentials
+  with it.
 
 Keep the escrowed boot image the emOS flow hands you at step 3. Writing it back
 takes about ten seconds, leaves `/data` alone, and is the undo for everything
@@ -222,7 +213,8 @@ because it is time-critical:
 
 That state is recoverable, but the easy routes are gone: getting back in means
 opening the case and shorting a pin on the board to reach the bootrom, which
-R0rt1z2's thread documents and describes as not especially difficult. A device
+R0rt1z2's thread documents and describes as not especially difficult, and
+`uvx firebreak@latest --short` walks through. A device
 sitting in fastboot or TWRP on the end of a cable needs none of that.
 Repeatedly power cycling one that will not boot is what turns the first
 situation into the second.

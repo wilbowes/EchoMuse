@@ -40,8 +40,9 @@ install there.
 - **Not standalone.** You need a working Home Assistant with an
   [Assist pipeline](https://www.home-assistant.io/voice_control/). Home
   Assistant does the speech recognition, the understanding and the voice.
-- **Not ready out of the box.** The Dot needs a one-time unlock over USB with
-  R0rt1z2's tool first. Follow the instructions and it is straightforward. If
+- **Not ready out of the box.** The Dot needs a one-time unlock over USB
+  first, which [firebreak](https://github.com/bboe/firebreak) runs from one
+  command. If
   a step goes wrong the Dot can end up soft-bricked, and the
   [XDA thread](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/)
   covers recovering it.
@@ -57,13 +58,13 @@ install there.
 | An Echo Dot 2nd gen | The hardware being repurposed. |
 | Home Assistant | With a working Assist pipeline. |
 | An always-on computer | Runs the controller. The Home Assistant machine itself is fine if it runs add-ons. |
-| A Linux computer (a live USB works) and a micro-USB cable, once | To unlock the Dot. The unlock does not run on macOS. |
+| A computer (macOS, Linux or Windows) and a micro-USB cable, once | To unlock the Dot with firebreak. |
 | Chrome or Edge, once | The setup wizard talks to the Dot over USB from the browser. |
 
 ## Getting started
 
-1. **Unlock the Dot** with R0rt1z2's
-   [amonet-biscuit](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/).
+1. **Unlock the Dot** with [firebreak](https://github.com/bboe/firebreak),
+   which runs R0rt1z2's [amonet-biscuit](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/).
    Either version works: v1.1.0 leaves it on FireOS 5, v2.0.0 moves it to
    FireOS 6. The [rooting guide](docs/rooting.md) explains the choice. **You
    do this at your own risk.**

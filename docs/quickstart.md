@@ -28,10 +28,9 @@ Either amonet-biscuit version works: v1.1.0 (FireOS 5, emOS or FireOS with
 root) or v2.0.0 (FireOS 6, emOS).
 
 The Dot ships locked to Amazon's software. Unlocking it involves flashing
-modified firmware over USB — it's the only genuinely fiddly part of the
-project, it takes an hour or so the first time, and it's fully documented
-step-by-step in [rooting](rooting.md), which points at R0rt1z2's XDA Forums
-thread for the exploit itself.
+modified firmware over USB. [firebreak](rooting.md#unlocking-with-firebreak)
+does it from one command in about ten minutes, running R0rt1z2's amonet
+exploit.
 
 The good news: the dashboard has a **provisioning wizard** (plug the Dot into
 your laptop's USB port, open the dashboard in Chrome, follow the steps) that

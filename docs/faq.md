@@ -14,39 +14,33 @@ faults worth checking before you file, and
 ### Should I use amonet v1.1.0 or v2.0.0?
 **Either works.** v1.1.0 leaves the Echo on FireOS 5, where you can install
 emOS or keep FireOS with root. v2.0.0 moves it to FireOS 6, where EchoMuse
-offers emOS. Moving between amonet versions is part of the unlock, so follow
-R0rt1z2's XDA thread for that.
+offers emOS. [firebreak](rooting.md#unlocking-with-firebreak) moves a Dot
+between them.
 
 More in [rooting](rooting.md).
 
 ### The unlock won't run on my Mac.
-**It needs Linux.** The unlock is
-[R0rt1z2's work on XDA](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/),
-not ours, and it doesn't work on macOS. A live USB is enough — the unlock is
-the only step that needs Linux. Everything after it, including the
+**Use [firebreak](rooting.md#unlocking-with-firebreak).** It runs on macOS,
+Linux and Windows. Everything after it, including the
 provisioning wizard, runs from a Chromium-based browser on any OS.
 
 ### `brick.sh` refuses with "restricted on locked hw", or `fastbrick.sh` sits at "Sending payload...".
-**Your Dot isn't on the latest FireOS.** The exploit only works on current
-firmware. amonet 2.0.0's `fastbrick.sh` can hide the refusal: one owner
-found its retry loop swallows the error, so it waits at "Sending payload..."
-instead of failing.
-A Dot whose fastboot reports LK `41fb3ce-20221007_151724` is in this state
-too. Three owners got past it by letting Amazon update it to Fire OS 6574.1
-(software version `13222530692` or later in the Alexa app) first
+**Use [firebreak](rooting.md#unlocking-with-firebreak) instead.** amonet's
+scripts pick the exploit image from the Dot's LK, which fastboot reports as
+`lk_build_desc`, and know only one FireOS 6 LK, `63cb91b-20221007_072309`.
+FireOS 6 4310, 4313 and 4315 ship `41fb3ce-20221007_151724`, which then gets
+the wrong image and refuses it. amonet 2.0.0's `fastbrick.sh` hides the
+refusal: its retry loop swallows the error, so it waits at "Sending
+payload..." instead of failing.
+
+firebreak sends the right image for every LK in
+[its table](https://github.com/bboe/firebreak#bootloaders), so the Dot does
+not need a FireOS update first. With amonet's scripts, letting Amazon update
+the Dot to FireOS 6574.1 moves it to `63cb91b`
 ([#567](https://github.com/wilbowes/EchoMuse/issues/567)).
 
-1. Pair the Dot to an Amazon account (any account — make a throwaway) so it
-   gets on WiFi.
-2. Mute it and leave it plugged in for 20–30 minutes. Muting stops wake words
-   interrupting the update. You may need two of these unattended rounds.
-3. Then say "Alexa, check for software updates" to jump it to current.
-4. Retry `brick.sh` (or `fastbrick.sh`).
-
-Two things contributors have hit along the way: if the Alexa app won't pair a
-very old Dot, select **Echo Tap** in the app to get the old hotspot pairing
-flow; and turn **off** any file manager that auto-mounts USB devices, because
-it grabs the handshake and makes later adb steps fail with unhelpful errors.
+Turn **off** any file manager that auto-mounts USB devices. It grabs the
+handshake and makes later adb steps fail with unhelpful errors.
 
 ### The wizard stops at Escrow Boot Image and mentions `boot_a_x`.
 **The Echo has amonet v1's partition table under a v2 unlock.** Installing
@@ -64,9 +58,9 @@ start. Ask on the XDA thread first and quote the wizard's error line.
 Sideload it again. It generally works on the second attempt.
 
 ### Deeper questions about the unlock itself.
-Those belong on the [XDA thread](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/).
-We link to it rather than copying it, deliberately — a copy goes stale without
-anyone noticing.
+For a failed firebreak run, run it again with `--report` and paste what it
+prints in `#support-device-unlocking` on the Discord. amonet itself is
+R0rt1z2's work, and the [XDA thread](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/) is the reference for it.
 
 ### Did I brick it?
 **Probably not permanently.** A Dot stuck in preloader is usually
