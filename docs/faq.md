@@ -73,6 +73,18 @@ anyone noticing.
 recoverable — see the recovery notes on the XDA thread. Don't flash anything
 else at it until you've asked.
 
+### The Dot boot-loops on one computer but not on another.
+**The USB port can't power it.** The Dot draws the most as it enters TWRP,
+when the ring turns bright white, and a weak port lets it brown out and
+restart. Its own adapter supplies 9 W (5.2 V at 1.8 A); a computer's
+USB 2.0 port need supply only 2.5 W (0.5 A).
+
+To confirm a lack of power, boot into TWRP on a wall charger rated 1.8 A
+or more. A charger carries no data, so it cannot finish the unlock, but a Dot that
+stops looping on it has a power problem. Then finish from another computer.
+One owner's Dot looped on a desktop's ports, reached TWRP at once on a
+charger, and finished from a different computer.
+
 ---
 
 ## The provisioning wizard
@@ -99,6 +111,20 @@ some other address does not cover it.
 drops the bus — roughly every six seconds, with `device firmware changed` in
 `dmesg` each time. Forcing it to `adb` alone fixes it. Nothing EchoMuse does
 needs MTP.
+
+**On a Linux desktop, try the computer side first.** GNOME's MTP monitor
+probes the Echo's MTP interface, and that is what resets the link. Stop it,
+then unplug and replug the Echo:
+
+```sh
+systemctl --user stop gvfs-mtp-volume-monitor
+systemctl --user mask --runtime gvfs-mtp-volume-monitor
+```
+
+The monitor restarts itself on demand, so `stop` alone does not hold; the
+mask lasts until the computer reboots. This fixed it for two owners on
+Ubuntu, both at the end of the unlock and in the wizard. Windows is not
+affected.
 
 **`setprop` from a booted device will not work.** Android's property service
 refuses that specific property whatever `ro.secure` and `ro.debuggable` say
@@ -336,6 +362,18 @@ missing is running more than one wake word model at a time. Tracked as
 See [#210](https://github.com/wilbowes/EchoMuse/issues/210) — and please add
 your setup, that one needs more reports than it has.
 
+### The Echo shows up twice in Music Assistant.
+With **Sendspin player** on, Music Assistant lists the Echo once as its
+Sendspin player and once as its Home Assistant media player. Hide the Home
+Assistant one inside Music Assistant. Home Assistant keeps it for replies and
+announcements.
+
+### Replies fail with "Cannot connect to host homeassistant.local".
+**Set Home Assistant's local URL to its IP address.** The controller fetches
+reply audio from the address in that URL, and a `.local` name does not
+resolve on every network. It is under **Settings → System → Network → Home
+Assistant URL**.
+
 ### The device isn't offered as a target for "start a conversation".
 **Update the controller.** `assist_satellite.start_conversation` and
 `assist_satellite.ask_question` are both supported, attention chime included.
@@ -360,6 +398,10 @@ may have failed: the wake word listens on that one alone. **Config →
 Microphones → Advanced → Wake word microphone** moves it to one of the six
 around the edge ([#705](https://github.com/wilbowes/EchoMuse/issues/705)).
 That is firmware v2.18.0 (Early Access from v2.18.0-ea.2).
+
+If it scores the wake word on the device, check the device's **Updates** tab.
+Where **On-device wake word** reads *Out of date* or *Not installed*, press
+the button beside it, then restart the device.
 
 If it still misses at normal speaking distance in a quiet room, that's worth a
 report with the model name and the distance.
@@ -539,6 +581,13 @@ auto-joining it. **Fixed for devices provisioned by the current wizard**
 before that fix can still hit it, and clearing it on a fielded device is
 [#439](https://github.com/wilbowes/EchoMuse/issues/439).
 
+### Can it use 5 GHz WiFi?
+**Yes.** It runs on a combined 2.4 and 5 GHz network. One owner's ISP router
+(a BT Smart Hub 2, which cannot split its bands) let the Echo join on 5 GHz
+and never gave it an address. Turning 5 GHz off until the Echo joined on
+2.4 GHz fixed it. WPA3 is not supported; see the
+[README](../README.md).
+
 ### There's no ambient light sensor on my device.
 Some Dots ship a second-source sensor that binds a different driver. Known,
 and the fix is unverifiable on our hardware —
@@ -597,6 +646,8 @@ the Echo Show 5 ([#36](https://github.com/wilbowes/EchoMuse/issues/36)) and
 the Echo 2 ([#687](https://github.com/wilbowes/EchoMuse/pull/687)), and
 @shortgame11 has EchoMuse running on an Echo Dot Gen 3 in a fork
 ([#527](https://github.com/wilbowes/EchoMuse/issues/527)).
+Only the original Gen 3 has a known unlock: the refreshed Gen 3, the Echo Dot
+Gen 5 and the Echo Studio have none. Check XDA before buying one for this.
 Other boards are welcome — the Android-specific surface is about twenty call
 sites, so a new board is mostly a mic/speaker/LED/button binding.
 
