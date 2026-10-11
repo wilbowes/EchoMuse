@@ -95,7 +95,9 @@ def build(version: str, controls: dict, a11y: dict, human: dict | None) -> str:
     out += ["## How this was run", "",
             f"- Controller image `{controls.get('image')}`, isolated rig "
             "(tools/uat/rig.py); Echoes attached over USB: "
-            + ", ".join(f"`{sn}` ({b})" for sn, b in echoes.items()) + ".",
+            # The last four characters only, as the table heads use: the report is published, and
+            # a serial is the Echo's identity on its owner's network.
+            + ", ".join(f"`…{sn[-4:]}` ({b})" for sn, b in echoes.items()) + ".",
             f"- Controls run {controls.get('at')}; accessibility scan {a11y.get('at')}.",
             "- Each control: changed in the browser, saved, read back from the API, "
             "then checked on the Echo (`/tmp/em-config.json`: received, and applied "
