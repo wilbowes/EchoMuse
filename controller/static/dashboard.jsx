@@ -3451,6 +3451,21 @@ const _wipeVerdict = (out) => {
   return { ok: true, why: '', cacheLeft: cache };
 };
 
+// Is f1r30s.zip on the device? The probe prints F1R30S=yes when it is and
+// _F1CHK when it ran to the end, so "absent" and "the probe never ran" stay
+// apart: only a probe that ran may send the operator to the file picker.
+function _f1r30sVerdict(out) {
+  const text = out || '';
+  const ran = text.includes('_F1CHK');
+  return { ran, present: ran && /^F1R30S=yes$/m.test(text) };
+}
+
+// What the failure panel shows as the reason: the error's first paragraph.
+// The rest (command output, hashes) stays in the transcript below it.
+function _stepFailureReason(message) {
+  return String(message || '').split(/\n\s*\n/)[0].trim();
+}
+
 // Did the extract leave a magiskboot the rest of the step can run? `unzip`
 // exiting non-zero proves nothing by itself and its OUTPUT was never read:
 // /sdcard/f1r30s.zip missing answers "can't open", the step logs that line
@@ -3688,6 +3703,11 @@ const _SECURITY_LABEL = {
 };
 
 const _MAGISK_FILENAME = 'Magisk-v17.3.zip';
+// f1r30s.zip from R0rt1z2's XDA thread: the one build this flow has been run
+// with. Rooting leaves it on /sdcard; a wipe or a tidy-up removes it, and the
+// wizard then asks for it rather than failing (UAT 2026-10-11).
+const _F1R30S_PATH   = '/sdcard/f1r30s.zip';
+const _F1R30S_SHA256 = 'f1e522fb3b86a6c90d559e7b8085501ffc59165850310b39468a3acfbff5bbc8';
 const _MAGISK_SHA256    = '18e46b16b25ebe691c282fe311beccd4811cd533848a64e2efbd754fb85efde7';
 
 // Is this an EchoMuse server binary? Checked before the install step pushes
@@ -4258,6 +4278,13 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   const adbRef                  = useRef(null);
   const setAdb = c => { adbRef.current = c; _setAdb(c); };
   const [magiskFile, setMagiskFile] = useState(null);
+  // Step 3 on FireOS: set when f1r30s.zip is missing from the device, so the
+  // failure panel offers a picker; the file is pushed on the retry.
+  const [needF1r30s, setNeedF1r30s] = useState(false);
+  const [f1r30sFile, setF1r30sFile] = useState(null);
+  // The failed step's own message, shown in the failure panel. Until this
+  // existed the reason was only in the transcript below the fold.
+  const [stepError, setStepError] = useState('');
   const [binaryFile, setBinaryFile] = useState(null);
   // emOS flow. `emosRef` is the escrowed boot image — the build input
   // and the undo — held in the page for the length of the wizard; the copy
@@ -4807,9 +4834,9 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         await c.close();
         setAdb(null);
         const err = new Error(
-          `This device (serial ${serial}) appears to already be registered with the controller ` +
-          `as "${match.label || match.device_id}". Delete it from the controller first ` +
-          `if you want to re-provision, then retry.`
+          `This Echo (serial ${serial}) is already registered with the controller ` +
+          `as "${match.label || match.device_id}". Choose below: re-provision it and ` +
+          `keep its record, or delete the record.`
         );
         err.matchedDeviceId = match.device_id;
         throw err;
@@ -5509,6 +5536,44 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     return { ok: true, warn: true, layout: 'v1', target, names, reason:
       `could not identify ${target} in by-name — continuing, but it is not a partition this `
       + 'has been checked against.' };
+  }
+
+  // Step 3's precondition, kept out of runPatchBoot: rooting leaves
+  // f1r30s.zip on /sdcard, and when it is gone the operator is asked for it
+  // instead of being told unzip failed. Checked against the one known build
+  // before it is copied, as the Magisk zip is.
+  async function ensureF1r30s(c) {
+    const f1Probe = `[ -f ${_F1R30S_PATH} ] && echo F1R30S=yes; echo _F1CHK`;
+    const f1 = _f1r30sVerdict(await c.shell(f1Probe));
+    if (f1.ran && !f1.present) {
+      if (!f1r30sFile) {
+        const err = new Error(
+          'f1r30s.zip is not on this Echo. Choose it below and click Retry: '
+          + 'the wizard copies it over. Nothing has been changed.');
+        err.needsF1r30s = true;
+        throw err;
+      }
+      const buf = await f1r30sFile.arrayBuffer();
+      const hash = await _sha256Hex(buf);
+      if (hash !== _F1R30S_SHA256) {
+        const err = new Error(
+          `"${f1r30sFile.name}" is not the f1r30s.zip this wizard was built for. `
+          + `Nothing has been copied or changed. Choose the file from R0rt1z2's XDA thread.`
+          + `\n\nSHA-256 ${hash}\nexpected ${_F1R30S_SHA256}`);
+        err.needsF1r30s = true;
+        throw err;
+      }
+      addLog('f1r30s.zip verified. Copying it to the Echo…');
+      await c.push(_F1R30S_PATH, new Uint8Array(buf),
+        pct => setProgress({ label: 'Uploading f1r30s.zip', pct }));
+      setProgress(null);
+      if (!_f1r30sVerdict(await c.shell(f1Probe)).present) {
+        throw new Error('f1r30s.zip was sent but is not on the Echo afterwards. '
+          + 'Nothing has been patched or flashed.');
+      }
+      setNeedF1r30s(false);
+      addLog('f1r30s.zip is on the Echo.', 'ok');
+    }
   }
 
   async function runPatchBoot(c) {
@@ -8374,6 +8439,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     const abandoned = () => epoch !== stepEpoch.current;
 
     setRunning(true);
+    setStepError('');
     markStep(stepIdx, 'running');
     // One banner per step. The transcript is the only record of a provision
     // and people paste it when something goes wrong — without these it is a
@@ -8443,7 +8509,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       else switch (stepIdx) {
         case  0: c = await runConnectAndroid(); break;
         case  1: c = await runConnectTwrp(); break;
-        case  2: await runPatchBoot(c); break;
+        case  2: await ensureF1r30s(c); await runPatchBoot(c); break;
         case  3: await runInstallMagisk(c, magiskFile); break;
         case  4: await runPreseedDb(c); break;
         case  5: await runReboot(c); break;
@@ -8475,8 +8541,10 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         return;
       }
       addLog(`Error: ${e.message}`, 'error');
+      setStepError(e.message || String(e));
       markStep(stepIdx, 'error');
       if (e.matchedDeviceId) setDuplicateDeviceId(e.matchedDeviceId);
+      if (e.needsF1r30s) setNeedF1r30s(true);
       // Collect device state while it is still the state that failed. A
       // duplicate-device stop is our own bookkeeping and has nothing to ask
       // the device about.
@@ -8489,6 +8557,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       // clears the wrong thing on the other one.
       const failedId = STEPS[stepIdx]?.id;
       if (failedId === 'install_magisk') setMagiskFile(null);
+      if (failedId === 'patch_boot') setF1r30sFile(null);
       if (failedId === 'install_em') setBinaryFile(null);
     }
     if (!abandoned()) setRunning(false);
@@ -8553,6 +8622,14 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   const statusIcons  = { pending: '○', running: '◌', done: '●', error: '✕' };
 
   function recoveryHint() {
+    if (step === 0 && duplicateDeviceId) {
+      return 'Keeping the record keeps its port, config and Home Assistant '
+           + 'entities. Deleting it removes them.';
+    }
+    if (cur.id === 'patch_boot' && needF1r30s) {
+      return 'f1r30s.zip is the file from R0rt1z2\'s XDA thread that was '
+           + 'installed when this Echo was unlocked.';
+    }
     if (CONNECT.has(step)) {
       return adb
         ? 'The USB link is up but this step failed — click Retry to run it again.'
@@ -8615,7 +8692,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                 {doneCount} of {STEPS.length} complete · step {step + 1}
               </div>
             </div>
-            <div style={{ flex: 1, overflowY: 'auto', padding: '6px 0 12px' }}>
+            <div className="em-wizard-scroll" style={{ flex: 1, overflowY: 'auto', padding: '6px 0 12px' }}>
              {STEPS.map((s, i) => {
               const st = stepState[i]; const active = i === step;
               return (
@@ -8646,7 +8723,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                 the WebUSB warning on step 0 and the first-boot guide on the
                 emOS console step each left the button barely clickable (UAT
                 2026-09-27). */}
-            <div style={{ flex: '0 1 auto', minHeight: 0, overflowY: 'auto' }}>
+            <div className="em-wizard-scroll" style={{ flex: '0 1 auto', minHeight: 0, overflowY: 'auto' }}>
 
             {/* Step title + desc */}
             <div style={{ marginBottom: 12 }}>
@@ -8724,7 +8801,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
               </div>
             )}
 
-            {upcoming.length > 0 && !isDone && (
+            {upcoming.length > 0 && !isDone && !stepFailed && (
               <div className="em-wizard-upcoming">
                 <div className="em-label" style={{ marginBottom: 6 }}>Up next</div>
                 {upcoming.map(s => (
@@ -8878,7 +8955,12 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                 at step 3 rewrites the boot partition too, so the restore undoes
                 both. Not offered once Android is up — no TWRP, no restore. */}
             {(isEmos ? (step === 6 || step === 7) : (step >= 2 && step <= 4))
-              && stepState[step] === 'error' && !running && (
+              && stepState[step] === 'error' && !running
+              // Only when there is something to put back: this session
+              // escrowed an image, or it was resumed after a reload and the
+              // operator may hold the download. A step that failed before
+              // its escrow showed a picker for a file that did not exist.
+              && (emosRef || restored) && (
               <div className="em-inset" style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 8, padding: 10 }}>
                 <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)' }}>
                   Put {emosTarget || 'the boot partition'} back to the image escrowed at step 3
@@ -8995,7 +9077,15 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
             {stepFailed && !INPUT_STEPS.has(cur.id) && (
               <div className="em-panel em-wizard-recovery">
                 <div className="em-label">This step failed</div>
+                {stepError && (
+                  <p className="em-wizard-recovery__reason">{_stepFailureReason(stepError)}</p>
+                )}
                 <p className="em-wizard-recovery__hint">{recoveryHint()}</p>
+                {cur.id === 'patch_boot' && needF1r30s && (
+                  <input type="file" accept=".zip" aria-label="f1r30s.zip"
+                    onChange={e => setF1r30sFile(e.target.files[0] || null)}
+                    style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, marginBottom: 10 }} />
+                )}
                 {/* The same warning the Detail modal's delete gives (#375).
                     The matched device is resolved out of knownDevices rather
                     than carried across, so the port is named here too — only
@@ -9009,7 +9099,13 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                   );
                 })()}
                 <div className="em-wizard-recovery__actions">
-                  <Pill accent onClick={() => runStep(step)}>Retry</Pill>
+                  {/* Not offered where a retry cannot help: a registered Echo
+                      needs one of the two choices below first. */}
+                  {!(step === 0 && duplicateDeviceId) && (
+                    <Pill accent
+                      disabled={cur.id === 'patch_boot' && needF1r30s && !f1r30sFile}
+                      onClick={() => runStep(step)}>Retry</Pill>
+                  )}
                    {!CONNECT.has(step) && (
                     <Pill onClick={reconnectAdb}>{adb ? 'Reconnect' : 'Reconnect device'}</Pill>
                   )}
@@ -9023,11 +9119,13 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                   {step === 0 && duplicateDeviceId && (
                     <Pill accent onClick={() => {
                       keepRecordRef.current = duplicateDeviceId;
-                      addLog(`Keeping "${duplicateDeviceId}" on the controller. `
-                           + `Retry the step — the device keeps its port, config `
-                           + `and Home Assistant entities.`, 'ok');
+                      addLog(`Keeping "${duplicateDeviceId}" on the controller: `
+                           + `the device keeps its port, config and Home `
+                           + `Assistant entities.`, 'ok');
                       setDuplicateDeviceId(null);
-                      markStep(0, 'pending');
+                      // Straight on: the choice was the fix, and a second
+                      // click on Retry was one step nobody knew to take.
+                      runStep(0);
                     }}>Re-provision, keep its record</Pill>
                   )}
                   {step === 0 && duplicateDeviceId && (
@@ -9049,6 +9147,9 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
             {stepFailed && INPUT_STEPS.has(cur.id) && (
               <div className="em-panel em-wizard-recovery">
                 <div className="em-label">This step failed</div>
+                {stepError && (
+                  <p className="em-wizard-recovery__reason">{_stepFailureReason(stepError)}</p>
+                )}
                 <p className="em-wizard-recovery__hint">{recoveryHint()}</p>
                 <div className="em-wizard-recovery__actions">
                   <Pill onClick={reconnectAdb}>{adb ? 'Reconnect' : 'Reconnect device'}</Pill>
