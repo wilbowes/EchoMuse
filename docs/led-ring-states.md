@@ -11,7 +11,7 @@ ring that never lit.
 This document is the authoritative behavioural spec: every ring owner, every
 event, and the outcome for each. Entries are tagged:
 
-- **[today]** — current shipped behaviour (v2.9.7)
+- **[today]** — shipped behaviour when the entry was written (the document dates from v2.9.7; later entries say their version)
 - **[proposed]** — design not yet built, pending sign-off
 
 ---
@@ -45,7 +45,7 @@ expiry.
 
 | # | Owner | Visual | Lifetime | Sovereignty | Code |
 |---|---|---|---|---|---|
-| 1 | **Volume arc** | Cyan, N of 12 proportional | 2s window (`volumeLEDSecs`) | Device-local; physical presses only | `volume.go:145` |
+| 1 | **Volume arc** | Cyan, N of 12 proportional | 2s window (`volumeLEDSecs`) | Device-local; physical presses, plus changed remote levels when opted in | `volume.go:145` |
 | 2 | **Mute ring** | Solid red `(180,0,0)` + button LED (gpio444, active-high) | Until unmuted; survives reboot + OTA | **Device-sovereign**, persisted to `/data/local/etc/echomuse/state.json` | `mute.go:132` |
 | 3 | **Link state** | Orange sine pulse (disconnected) / white slow pulse (pending approval) | Until link resolves | Device-local | `cmd/server.go:161,174` |
 | 4 | **Turn / media animation** | `solid` · `spin` · `rotate` · `pulse` · `meter` · `off`, scene-coloured | Until replaced or `ttlSec` expires (30s listening / 135s spinner / per-response for the meter) | Controller-specified, device-rendered | `animator.go:53` |
@@ -203,7 +203,9 @@ Mute is the reference implementation of principle 5, and its behaviour is
 | V2 | LISTENING / THINKING / PLAYING | As V1 | Cyan arc 2s → hands back to the live animation mid-frame | [today] |
 | V3 | MUTED | As V1 | Cyan arc 2s → **red ring restored** (expiry is mute-aware) | [today] |
 | V4 | DISCONNECTED | As V1 | Cyan arc 2s → orange pulse resumes | [today] |
-| V5 | Remote set (controller / HA) or boot-time `SeedVolume` | `Set(level, showRing=false)` | **No arc** — nobody is at the device | [today] |
+| V5 | Remote set (controller / HA / Sendspin), setting off | `Set(level, showRing=false)` | No arc — default behaviour | [today] |
+| V6 | Remote set, `remoteVolumeArc` on, effective level changed to non-zero | `Set(level, showRing=true)` | Cyan arc 2s, then normal hand-back | [today] |
+| V7 | Remote set is zero, repeats the current level, or boot-time `SeedVolume` | `Set(level, showRing=false)` | No arc — mute, state sync and restore stay silent | [today] |
 
 ### 4.4 Controller-originated ring messages
 
@@ -226,12 +228,17 @@ Mute is the reference implementation of principle 5, and its behaviour is
 | L3 | Awaiting admin approval | boot | White slow pulse | [today] |
 | L4 | Link silently dead | any | **Nothing for up to 45s** — ring keeps showing the last state | [today] |
 | L5 | Link silently dead | any | Detected on the next interaction (§3) or by inbound-freshness timeout | [proposed] |
-| L6 | **Speaker stream ends** (EOS received *and* audio channel empty) | PLAYING | **Controller estimates this from wall-clock and clears the ring early on slow links** — measured up to 6.1s premature | [today] |
+| L6 | **Speaker stream ends** (EOS received *and* audio channel empty) | PLAYING | Controller waits for the Echo's `playback_stats` report and clears the ring then. It used to estimate this from wall-clock and cleared the ring up to 6.1s early on slow links (§5) | [today] |
 | L7 | Speaker stream ends | PLAYING | Device clears / hands back the ring itself, from the signal it already logs (`pcm_speaker.go:309`) | [proposed] |
 
 ---
 
-## 5. Why L6 is wrong today
+## 5. Why L6 was wrong (fixed)
+
+> **Fixed since this was written.** The controller no longer estimates the end
+> of playback: it waits for the Echo's `playback_stats` report, which the Echo
+> sends once its audio channel has drained after end of stream, and clears
+> the ring then. The analysis below is kept as the reason for that design.
 
 `_run_post_turn_playback` never learns when playback actually ended
 (`em_controller.py:746`):
@@ -355,9 +362,12 @@ which flashes the wrong state for one RTT whenever the press was a cancel.
 `{mu, gen}` (`animator.go:45`) — no pattern — so this needs the current pattern
 recorded alongside the generation. Roughly three lines.
 
-*Correctness today is exact:* neither `em_player` nor the announcement path
-paints the ring (announcements call `_run_post_turn_playback` directly, which
-has no LED calls), so "ring shows a turn state" ⟺ "a voice turn is active".
+*This equivalence stopped holding on 2026-10-05.* It used to be exact:
+neither `em_player` nor the announcement path painted the ring, so "ring
+shows a turn state" ⟺ "a voice turn is active". Since #780 an announcement,
+and the opening message of a conversation Home Assistant starts, show the
+playback meter while no voice turn is running. Option A would now read a
+press during an announcement as a cancel.
 
 *The risk is a future foot-gun, not a present bug.* The equivalence is an
 implicit contract. The day music playback gains a meter ring — a very natural

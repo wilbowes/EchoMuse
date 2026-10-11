@@ -10,11 +10,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Binozo/GoTinyAlsa/pkg/pcm"
+	"github.com/Binozo/GoTinyAlsa/pkg/tinyalsa"
 	"github.com/wilbowes/EchoMuse/internal/bindings/codec"
 	"github.com/wilbowes/EchoMuse/pkg/board"
 	pkgmic "github.com/wilbowes/EchoMuse/pkg/mic"
-	"github.com/Binozo/GoTinyAlsa/pkg/pcm"
-	"github.com/Binozo/GoTinyAlsa/pkg/tinyalsa"
 )
 
 // rawTap receives every raw 9-channel batch, and is nil in release builds.

@@ -880,3 +880,36 @@ def test_devices_carry_their_userspace_and_kernel():
     assert first["kernel_release"] == "3.18.19-gecb8cb46060-dirty"
     for key in ("base_os", "kernel_arch", "kernel_release"):
         assert key not in second
+
+
+def test_the_bundle_says_what_was_actually_being_logged():
+    """
+    #378: a bundle whose log tail is thin is ambiguous between "nothing
+    happened" and "it was not being logged", and those want opposite
+    investigations. `controller.log_levels` is the answer.
+
+    It has to be the levels IN FORCE rather than the LOG_LEVELS string that
+    was requested: a pair naming a logger that does not exist is dropped with
+    a warning, and DEBUG sets the global level underneath whatever was asked
+    for. A bundle quoting the request would be describing a controller that
+    is not the one that wrote it.
+    """
+    bundle = _bundle()
+    levels = bundle["controller"]["log_levels"]
+    assert isinstance(levels, dict) and levels, (
+        "a bundle must carry the levels in force; an empty one says nothing "
+        "and the omission is the bug"
+    )
+    # DEBUG owns the global level and is always explicitly set, so the
+    # baseline is always reportable.
+    assert levels.get("root"), (
+        "the root level is DEBUG's and is always set — without it a thin log "
+        "tail cannot be told apart from a quiet setting"
+    )
+    for name, level in levels.items():
+        assert "/" not in name and "\\" not in name, (
+            f"{name!r} looks like a path — a bundle is attached to public "
+            "issues and carries names only"
+        )
+        assert level in ("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG",
+                         "NOTSET"), f"{name} has an unrenderable level {level!r}"

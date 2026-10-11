@@ -101,18 +101,12 @@ func (vc *volumeController) SetApply(fn func(int)) {
 	}
 }
 
-// Set applies a new volume level (0–volumeMax). showRing
-// paints the cyan volume arc for the 2s display window — physical button
-// presses pass true; remote sets (controller command / HA) and the boot-time
-// SeedVolume pass false so the ring doesn't light when nobody is at the
-// device.
+// Set applies a new volume level (0–volumeMax). showRing paints the cyan
+// volume arc for the 2s display window — physical button presses pass true;
+// live remote sets pass the remoteVolumeArc setting; the boot-time SeedVolume
+// always passes false.
 func (vc *volumeController) Set(level int, showRing bool) bool {
-	if level < volumeMin {
-		level = volumeMin
-	}
-	if level > volumeMax {
-		level = volumeMax
-	}
+	level = clampVolumeLevel(level)
 
 	vc.mu.Lock()
 	changed := vc.level != level
@@ -137,6 +131,16 @@ func (vc *volumeController) Set(level int, showRing bool) bool {
 		cb(level)
 	}
 	return changed
+}
+
+func clampVolumeLevel(level int) int {
+	if level < volumeMin {
+		return volumeMin
+	}
+	if level > volumeMax {
+		return volumeMax
+	}
+	return level
 }
 
 // CancelDisplay ends the volume arc's hold early, releasing the ring back to

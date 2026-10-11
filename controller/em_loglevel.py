@@ -140,6 +140,42 @@ def apply(spec: str) -> Overrides:
     return Overrides(applied, tuple(problems))
 
 
+def effective() -> dict[str, str]:
+    """
+    The levels actually in force, read from the live logging module.
+
+    For the support bundle (#378), and the reason it reads the loggers rather
+    than the LOG_LEVELS string: a bundle with nothing in it is ambiguous
+    between "nothing happened" and "it was not being logged". The requested
+    string does not answer that — it says what was asked for, and the ask can
+    fail, be dropped for naming a logger that does not exist, or be
+    overridden by DEBUG. This reports what the controller is doing.
+
+    Only loggers with an EXPLICIT level are listed. A logger that inherits
+    from its parent is at whatever the parent says, and listing the inherited
+    value under every child would bury the two or three levels that were
+    actually chosen under forty that were not. The root's level is always
+    explicit, so the baseline is always present.
+
+    Names only — no paths, no filenames, nothing user-authored. This goes in
+    a file people attach to public issues.
+    """
+    out: dict[str, str] = {}
+    # The root is NOT in loggerDict — it is the manager itself — and it is the
+    # one level that is always explicitly set, by DEBUG. Without it a bundle
+    # cannot say whether a thin log tail is the fault or the setting.
+    out["root"] = logging.getLevelName(logging.getLogger().level)
+    for name, obj in logging.Logger.manager.loggerDict.items():
+        # Placeholder loggers: a name something has a Handle for but that has
+        # never emitted. It has no level of its own to report.
+        if not isinstance(obj, logging.Logger):
+            continue
+        if obj.level == logging.NOTSET:
+            continue
+        out[name] = logging.getLevelName(obj.level)
+    return dict(sorted(out.items()))
+
+
 def _reaches_a_logger(name: str) -> bool:
     """
     Whether `name` is a live logger or sits under one.

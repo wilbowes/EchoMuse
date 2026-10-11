@@ -103,18 +103,18 @@ func (i *I2CController) SetLEDs(LEDs ...led.Led) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	var targetColor bytes.Buffer
-    for _, curLed := range LEDs {
-        for j, storedLed := range led.Leds {
-            if curLed.ID == storedLed.ID {
-                led.Leds[j] = curLed  // update stored with incoming
-                break
-            }
-        }
-    }
-    for _, l := range led.Leds {
-        targetColor.Write(l.BuildArgument())
-    }
-    return os.WriteFile(i.frame, targetColor.Bytes(), perm)
+	for _, curLed := range LEDs {
+		for j, storedLed := range led.Leds {
+			if curLed.ID == storedLed.ID {
+				led.Leds[j] = curLed // update stored with incoming
+				break
+			}
+		}
+	}
+	for _, l := range led.Leds {
+		targetColor.Write(l.BuildArgument())
+	}
+	return os.WriteFile(i.frame, targetColor.Bytes(), perm)
 }
 
 func NewDefaultController() (led.Controller, error) {

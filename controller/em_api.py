@@ -1386,6 +1386,11 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
         live.wake_sound = bool(effective["wakeSound"])
     if "micGainDb" in effective:
         live.mic_gain_db = float(effective["micGainDb"])
+    # What a wake's level reading still contains; see em_arbiter.pick.
+    if "adcMicpga" in effective:
+        live.adc_gains = (int(effective["adcMicpga"]), live.adc_gains[1])
+    if "adcDigitalGain" in effective:
+        live.adc_gains = (live.adc_gains[0], int(effective["adcDigitalGain"]))
     if "owwOnDevice" in effective:
         # Resolved against the CAPABILITY, not taken at face value: "on"
         # against firmware that cannot trigger would stop this controller
@@ -6588,6 +6593,9 @@ def _merge_device(row, boot: dict | None = None) -> dict:
         "listen":          _listen_json(live) if live else None,
         "wakeCueCapable": getattr(live, "wake_cue_capable", False) if live else False,
         "volumeCueCapable": getattr(live, "volume_cue_capable", False) if live else False,
+        "wakeMicCapable": getattr(live, "wake_mic_capable", False) if live else False,
+        "remoteVolumeArcCapable": getattr(live, "remote_volume_arc_capable", False) if live else False,
+        "responseLevelCapable": getattr(live, "response_level_capable", False) if live else False,
         # Sendspin player (#89): whether the firmware has one, and its status
         # (no secrets; the pairing token is its own request).
         "sendspinCapable": getattr(live, "sendspin_capable", False) if live else False,

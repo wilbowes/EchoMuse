@@ -36,7 +36,7 @@ type BenchOptions struct {
 	BurstOn   time.Duration
 	BurstOff  time.Duration
 	OnAdverts func([]Advert)
-	Logf       func(format string, args ...any)
+	Logf      func(format string, args ...any)
 }
 
 // BenchSession opens /dev/stpbt, resets, sends the vendor commands, optionally

@@ -10,7 +10,7 @@
 # add-on build on a kvm64 host died here ("NumPy was built with baseline
 # optimizations: (X86_V2)"), while CI's v2-capable runners never saw it. The
 # output hash is unchanged with 2.3.5 (checked on linux/amd64).
-FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9 AS silero
+FROM python:3.12-slim@sha256:02108f5d322dd89f1c9e552442c25acb0543dfdbc455693a5599624f20d9155d AS silero
 COPY tools/silero_typed.py /tmp/
 RUN pip install --no-cache-dir --root-user-action=ignore onnx==1.20.1 numpy==2.3.5 && \
     python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/silero_vad.onnx', '/tmp/in.onnx')" && \
@@ -20,7 +20,7 @@ RUN pip install --no-cache-dir --root-user-action=ignore onnx==1.20.1 numpy==2.3
 
 # Base pinned by the multi-arch index digest, so every build of a given commit
 # starts from the same bytes; Dependabot moves the digest weekly with the tag.
-FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9
+FROM python:3.12-slim@sha256:02108f5d322dd89f1c9e552442c25acb0543dfdbc455693a5599624f20d9155d
 # Links the GHCR package page back to the repo (and lets the package inherit
 # the repo's public visibility once connected).
 LABEL org.opencontainers.image.source="https://github.com/wilbowes/EchoMuse" \
@@ -43,8 +43,19 @@ WORKDIR /app
 # apt install below and the floating base tag; it adds no new class of
 # nondeterminism.
 #
+# APT_SNAPSHOT is what makes the upgrade actually run in CI. Both workflows
+# build with the GHA layer cache, and this layer's key is the base digest plus
+# the text of the RUN line — neither changes week to week, so the layer was
+# served from cache and apt never ran: main's build of 2026-10-05 still had
+# openssl and pcre2 at versions Debian had already replaced, and the weekly
+# scan failed on them. The workflows pass the ISO week (2026-W41), so the
+# layer is rebuilt once a week and cached in between. It is echoed because an
+# ARG only reaches a RUN's cache key when the RUN uses it. A local or add-on
+# build passes nothing and behaves as before.
+#
 # curl is for vendoring JS dependencies.
-RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends curl ffmpeg && rm -rf /var/lib/apt/lists/*
+ARG APT_SNAPSHOT=unset
+RUN echo "apt snapshot: ${APT_SNAPSHOT}" && apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends curl ffmpeg && rm -rf /var/lib/apt/lists/*
 # Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -197,9 +208,14 @@ COPY --from=silero /silero_vad.onnx /app/models/oww_runtime/silero_vad.onnx
 COPY static/ ./static/
 # Compile JSX dashboard with esbuild
 RUN EARCH="$(dpkg --print-architecture)" && case "$EARCH" in amd64) EPKG=linux-x64 ;; arm64) EPKG=linux-arm64 ;; *) echo "unsupported arch: $EARCH" >&2; exit 1 ;; esac && curl -sfL -o /tmp/esbuild.tar.gz "https://registry.npmjs.org/@esbuild/${EPKG}/-/${EPKG}-0.20.2.tgz" &&     tar -xz -C /tmp -f /tmp/esbuild.tar.gz &&     install -m755 /tmp/package/bin/esbuild /usr/local/bin/esbuild &&     esbuild /app/static/dashboard.jsx       --bundle=false       --jsx=transform       --jsx-factory=React.createElement       --jsx-fragment=React.Fragment       --outfile=/app/static/dashboard.js &&     rm -rf /tmp/esbuild.tar.gz /tmp/package /usr/local/bin/esbuild
-# Database persisted via volume mount
-# docker run -v ~/EchoMuse/controller/data:/app/data ...
-# Set DB_PATH=/app/data/echomuse.db in environment
+# The database, the device-link certificates and the recordings all sit beside
+# DB_PATH, so it defaults to the directory the compose files mount (#629).
+# The code's own default is the relative "echomuse.db", which in this image is
+# /app: with no .env everything was written inside the container and lost on
+# every recreate, certificates included, so every Echo needed pairing again.
+# The add-on sets its own DB_PATH (/data), which overrides this.
+ENV DB_PATH=/app/data/echomuse.db
+RUN mkdir -p /app/data
 COPY em_cacerts.py .
 COPY em_start.py .
 # em_start.py bridges /data/options.json (Home Assistant add-on config) into

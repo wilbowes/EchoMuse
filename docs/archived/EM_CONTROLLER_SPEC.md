@@ -11,7 +11,7 @@
 > respectively); the OTA section describes an `update.sh` pushed to the device
 > that no longer exists. For how the controller actually works today, read
 > **`CLAUDE.md`** (current architecture and the invariants behind it) and
-> **[`JOURNAL.md`](JOURNAL.md)** (why each thing is the way it is). For using it,
+> **[`JOURNAL.md`](../../JOURNAL.md)** (why each thing is the way it is). For using it,
 > **`docs/quickstart.md`**.
 
 ---

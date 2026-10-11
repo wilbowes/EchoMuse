@@ -11,7 +11,7 @@ have already built automations against.
 
 **Read the whole page before you start.** The single most important step —
 copying `tls/` — happens early, and skipping it leaves every device unable to
-connect in a way that is not obvious and cannot be fixed from the dashboard.
+connect in a way that is not obvious, and putting it right means a visit to each one.
 
 ---
 
@@ -48,8 +48,10 @@ all.
 Turning off `require_device_tls` does **not** rescue this. Devices decide to
 use TLS from the mDNS record the controller advertises, not from that setting.
 
-Recovering means physically connecting each Dot over USB and pushing fresh
-credentials. Copying four files avoids it.
+Recovering means going to each Dot. On firmware v2.17.0 or later, hold its
+action button for 5 seconds and approve the pairing request in the dashboard.
+On older firmware, or with `require_device_tls` on, connect it over USB and
+push fresh credentials. Copying four files avoids it.
 
 ---
 
@@ -82,15 +84,19 @@ screen and you will re-enter these by hand:
 
 | `.env` | Add-on option |
 |---|---|
-| `SERVER_IP` | **Server IP** |
-| `SERVER_HOST` | **Server host** |
-| `MDNS_NAME` | **mDNS name** |
+| `SERVER_IP` | **Controller LAN IP address** |
+| `SERVER_HOST` | **Bind address** |
+| `MDNS_NAME` | **mDNS service name** |
 | `OWW_MODEL` | **Wake word model** |
-| `OWW_THRESHOLD` | **Wake word threshold** |
-| `DEVICE_APPROVAL` | **Device approval** |
-| `REQUIRE_DEVICE_TLS` | **Require device TLS** |
+| `OWW_THRESHOLD` | **Wake word sensitivity** |
+| `DEVICE_APPROVAL` | **Device approval policy** |
+| `REQUIRE_DEVICE_TLS` | **Require encrypted device connections** |
 | `ESPHOME_PROJECT_VERSION` | **ESPHome project version** |
-| `DEBUG` | **Debug** |
+| `EM_ESPHOME_PORT_BASE` | **ESPHome satellite base port** |
+| `DEBUG` | **Debug logging** |
+| `LOG_LEVELS` | **Per-area log levels** |
+| `EM_EXTRA_CA_CERT` | **Private CA certificate** |
+| `EM_TTS_WAIT_TIMEOUT` | **Reply wait (seconds)** |
 
 Four have no option, deliberately or otherwise:
 
@@ -180,7 +186,7 @@ find the rest — the server certificate and the CA must match each other.
 ### 4. Enter your settings and start it
 
 Fill in the options from step 2 of *Before you start*, remembering to update
-**Server IP** to the Home Assistant machine's address. Start the add-on and
+**Controller LAN IP address** to the Home Assistant machine's address. Start the add-on and
 watch its log.
 
 `Opening database: /data/echomuse.db` should be followed by your device names
@@ -271,7 +277,7 @@ anything that happened in between. Decide within a day rather than a month.
 ## Gotchas, in one place
 
 - **Copy `tls/` or nothing works**, in a way that gives you no useful error
-  and cannot be fixed remotely.
+  and needs a visit to every Dot to put right.
 - **Stop the old controller first.** Two controllers on one network are
   indistinguishable to a device, and Home Assistant will not re-point a device
   that still answers at its old address.

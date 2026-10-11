@@ -18,6 +18,14 @@ python3 rig.py detach <serial> && python3 rig.py down
   never reaches other Echoes; the attached Echo reaches it through an endpoint
   file with `mdns: false`. `detach` restores the Echo's own credentials and
   endpoint file exactly.
+- **`rig.py up` does not start the browser yet**, though `down` removes it.
+  Start it once per run:
+  `docker run -d --name em-uat-browser --network host --ipc host mcr.microsoft.com/playwright/python:v1.49.1-noble sh -c "pip install -q playwright==1.49.1 && playwright run-server --port 3111 --host 127.0.0.1"`.
+- **Attach only to a rig that does not know the Echo.** `attach` moves the
+  Echo's credentials aside and then approves it; on a rig that still holds
+  its row the approval answers 409 with the Echo already cut off from its own
+  controller. `rig.py up` again (it starts from an empty database), then
+  attach.
 - **The browser runs in a container** (`mcr.microsoft.com/playwright/python`,
   `playwright run-server` on :3111); the host needs only the client,
   `pip install playwright==1.49.1`.

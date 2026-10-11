@@ -382,7 +382,13 @@
       font-family: 'DM Mono', monospace; font-size: 10px; color: var(--text2);
       line-height: 1.6; margin: 0 0 10px;
     }
+    .em-wizard-recovery__reason {
+      font-family: 'DM Mono', monospace; font-size: 11px; color: var(--warn);
+      line-height: 1.6; margin: 0 0 8px;
+    }
     .em-wizard-recovery__actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    /* A light system scrollbar on these dark panes read as a white strip. */
+    .em-wizard-scroll, .em-console { scrollbar-width: thin; scrollbar-color: var(--muted) transparent; }
 
     /* Keyboard focus. Inline styles cannot express :focus-visible at all, so
        until now there was no focus ring anywhere in the dashboard. */

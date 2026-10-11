@@ -14,6 +14,15 @@
 //
 //	go run ./tools/aec_replay -in C1.s24 -out out/C1
 //
+// A turn locks to one microphone and the next turn to another. -mics replays
+// that (seconds:channel pairs), with one filter following the microphone in
+// use, or with -per-mic one per microphone as the firmware runs it (#814):
+//
+//	go run ./tools/aec_replay -in C1.s24 -out out/C1 -mics 0:6,12.6:2,30:6,32:3 -per-mic
+//
+// -tail sets the software tap's length only. On the hardware reference, which
+// is all this tool uses, the canceller keeps its own 64ms.
+//
 // There is no playback-level option: since #638 the volume is applied in
 // software before the loopback, so the reference already carries it. A
 // capture from firmware before that has a pre-volume reference and does not
@@ -23,10 +32,12 @@ package main
 import (
 	"encoding/binary"
 	"flag"
+	"fmt"
 	"log"
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/wilbowes/EchoMuse/internal/aec"
 	"github.com/wilbowes/EchoMuse/internal/beamformer"
@@ -41,10 +52,12 @@ const (
 func main() {
 	in := flag.String("in", "", "raw capture (.s24)")
 	out := flag.String("out", "", "output directory")
-	tail := flag.Int("tail", 300, "speex filter tail, ms")
+	tail := flag.Int("tail", 300, "speex filter tail for the software tap, ms; no effect here, the hardware reference keeps 64")
 	gainDb := flag.Float64("gain", 24, "mic gain, dB (micGainDb)")
 	load := flag.String("load", "", "start from a saved echo path (aec.ExportState) instead of cold")
 	save := flag.String("save", "", "write the echo path learnt by the end of this run")
+	mics := flag.String("mics", "", "microphone in use over time, as seconds:channel pairs, e.g. 0:6,12.6:2,30:6,32:3 (default: ch6 throughout)")
+	perMic := flag.Bool("per-mic", false, "with -mics: cancel every microphone, as the firmware does, instead of one filter following the microphone in use")
 	prime := flag.Bool("prime", false, "converge on one full pass first and write the second as speex_primed.wav: the ceiling, not a real run")
 	flag.Parse()
 	if *in == "" || *out == "" {
@@ -95,13 +108,30 @@ func main() {
 			log.Fatal(err)
 		}
 	}
+	plan, err := parseMics(*mics)
+	if err != nil {
+		log.Fatal(err)
+	}
 	for off := 0; off+step <= len(raw); off += step {
 		period := raw[off : off+step]
-		m, _ := bf.Process(period, -1, gain) // unlocked: ch6, as the wake stream
 		r := bf.EchoRef(period)
-		mic = append(mic, m...)
 		ref = append(ref, r...)
-		speex = append(speex, c.ProcessWithRef(m, r)...)
+		if plan == nil {
+			m, _ := bf.Process(period, -1, gain) // unlocked: ch6, as the wake stream
+			mic = append(mic, m...)
+			speex = append(speex, c.ProcessWithRef(m, r)...)
+			continue
+		}
+		// A turn locks to a microphone and the next one to another; -mics
+		// replays that, with one filter or with one per microphone (#814).
+		active := plan.at(float64(off/frameBytes) / rate)
+		all := bf.MicChannels(period, gain, -1, nil)
+		mic = append(mic, all[active]...)
+		if *perMic {
+			speex = append(speex, c.ProcessMicsWithRef(all, active, r)...)
+		} else {
+			speex = append(speex, c.ProcessWithRef(all[active], r)...)
+		}
 	}
 	if *save != "" {
 		b, err := c.ExportState()
@@ -118,6 +148,44 @@ func main() {
 		}
 	}
 	log.Printf("%s: %.1fs -> %s", *in, float64(len(mic))/2/rate, *out)
+}
+
+// micPlan is which microphone is in use from each time onward.
+type micPlan []struct {
+	from float64
+	ch   int
+}
+
+func parseMics(spec string) (micPlan, error) {
+	if spec == "" {
+		return nil, nil
+	}
+	var p micPlan
+	for _, part := range strings.Split(spec, ",") {
+		var from float64
+		var ch int
+		if _, err := fmt.Sscanf(part, "%g:%d", &from, &ch); err != nil || ch < 0 || ch >= beamformer.NumMics {
+			return nil, fmt.Errorf("-mics: %q is not seconds:channel with a channel of 0-%d", part, beamformer.NumMics-1)
+		}
+		if len(p) > 0 && from <= p[len(p)-1].from {
+			return nil, fmt.Errorf("-mics: times must increase, at %q", part)
+		}
+		p = append(p, struct {
+			from float64
+			ch   int
+		}{from, ch})
+	}
+	return p, nil
+}
+
+func (p micPlan) at(t float64) int {
+	ch := 6
+	for _, e := range p {
+		if t >= e.from {
+			ch = e.ch
+		}
+	}
+	return ch
 }
 
 func writeWAV(path string, pcm []byte) error {

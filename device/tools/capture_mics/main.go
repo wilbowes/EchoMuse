@@ -27,13 +27,13 @@ import (
 )
 
 const (
-	cardNr    = 0
-	deviceNr  = 24
-	channels  = 9
-	sampleRate = 16000
-	periodSize = 512
+	cardNr      = 0
+	deviceNr    = 24
+	channels    = 9
+	sampleRate  = 16000
+	periodSize  = 512
 	periodCount = 5
-	outputPath = "/data/local/tmp/capture.raw"
+	outputPath  = "/data/local/tmp/capture.raw"
 )
 
 func main() {
@@ -86,7 +86,7 @@ func main() {
 
 	fmt.Printf("Capturing %d seconds to %s ...\n", durationSecs, outputPath)
 
-	loop:
+loop:
 	for {
 		select {
 		case <-deadline:

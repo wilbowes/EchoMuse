@@ -320,13 +320,25 @@ def test_detector_by_state():
     assert L.detector(V(L.STATE_UNKNOWN, None), True) == "unknown"
 
 
-def test_hold_only_on_a_mixed_fleet():
+def test_hold_whenever_two_or_more_echoes_can_claim():
+    """Choosing by loudness needs every claim in hand, so any fleet of two or
+    more holds, however each Echo detects (Wil, 2026-10-05, #747). Until then
+    only a mixed fleet did."""
     hold = L.arbitration_hold
     assert hold([]) == 0
-    assert hold(["device", "device"]) == 0
-    assert hold(["controller", "controller", None]) == 0
-    assert hold(["device", "controller"]) == L.MIXED_HOLD_S
-    # An undecided Echo is not assumed to match the rest.
-    assert hold(["device", "unknown"]) == L.MIXED_HOLD_S
-    # A degraded Echo cannot claim, so it does not make the fleet mixed.
+    assert hold(["device"]) == 0
+    assert hold(["device", "device"]) == L.ARB_HOLD_S
+    assert hold(["controller", "controller"]) == L.ARB_HOLD_S
+    assert hold(["device", "controller"]) == L.ARB_HOLD_S
+    assert hold(["device", "unknown"]) == L.ARB_HOLD_S
+    # A degraded Echo cannot claim, so there is nobody to wait for.
     assert hold(["device", None]) == 0
+    assert hold(["controller", None, None]) == 0
+
+
+def test_only_a_stream_the_controller_scored_has_a_wake_tail_to_drop():
+    # "hey Verona tell me a joke" reached STT as "me a joke" (2026-10-09).
+    assert L.tail_discard(True, True, 3) == 0
+    assert L.tail_discard(True, False, 3) == 3
+    assert L.tail_discard(False, False, 3) == 0
+    assert L.tail_discard(False, True, 3) == 0

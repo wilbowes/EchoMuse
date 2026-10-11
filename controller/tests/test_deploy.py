@@ -24,6 +24,24 @@ def test_dockerfile_copies_every_controller_module():
     )
 
 
+def test_ci_runs_every_dashboard_test():
+    """
+    The dashboard job lists its tests by hand, so a new one that nobody adds to
+    the list passes locally and never runs in CI — green forever, testing
+    nothing. `device_tools.test.mjs` sat that way: written, passing, and run by
+    no job but a developer's own shell.
+
+    Same shape as the Dockerfile guard above, for the same reason: an
+    enumerated list is only honest while something checks it.
+    """
+    ci = (CONTROLLER.parent / ".github" / "workflows" / "ci.yml").read_text()
+    listed = set(re.findall(r"node\s+controller/tests/(\S+\.test\.mjs)", ci))
+    on_disk = {p.name for p in (CONTROLLER / "tests").glob("*.test.mjs")}
+    assert on_disk <= listed, (
+        f"dashboard tests on disk but never run by CI: {sorted(on_disk - listed)}"
+    )
+
+
 def test_dashboard_bundle_is_cache_busted():
     """
     /dashboard must not hand the browser a bare /static/dashboard.js URL.
@@ -138,6 +156,41 @@ def test_addon_default_threshold_matches_the_controller():
         f"em_db.DEFAULT_DEVICE_CONFIG says "
         f"{DEFAULT_DEVICE_CONFIG['owwThreshold']} — a fresh add-on install "
         f"would get the stale value"
+    )
+
+
+def test_addon_default_reply_wait_matches_the_controller():
+    """
+    Same shape as the wake threshold above, and the same failure: config.yaml
+    ships the value a fresh add-on install meets, so a default that drifts
+    from em_turnclock's silently hands out a reply wait nobody chose.
+
+    The RANGE is pinned too, because the two halves of #805's ceiling live in
+    different files: the schema enforces it in the add-on UI, em_turnclock
+    clamps it for the standalone container, and both have to mean the same
+    number. The number itself is bounded by the thinking ring — see
+    `TTS_WAIT_MAX`.
+    """
+    import sys
+    sys.path.insert(0, str(CONTROLLER))
+    import em_turnclock
+
+    config = (CONTROLLER / "config.yaml").read_text()
+
+    default = re.search(r"^\s*tts_wait_timeout:\s*([0-9.]+)", config, re.M)
+    assert default, "config.yaml has no tts_wait_timeout option"
+    assert float(default.group(1)) == em_turnclock.TTS_WAIT_DEFAULT, (
+        f"config.yaml ships tts_wait_timeout {default.group(1)} but "
+        f"em_turnclock.TTS_WAIT_DEFAULT is {em_turnclock.TTS_WAIT_DEFAULT}"
+    )
+
+    rng = re.search(r'^\s*tts_wait_timeout:\s*"int\((\d+),(\d+)\)"',
+                    config, re.M)
+    assert rng, "schema has no tts_wait_timeout range"
+    assert float(rng.group(2)) == em_turnclock.TTS_WAIT_MAX, (
+        f"schema caps tts_wait_timeout at {rng.group(2)} but "
+        f"em_turnclock.TTS_WAIT_MAX is {em_turnclock.TTS_WAIT_MAX} — the "
+        f"add-on would accept a wait the controller then clamps"
     )
 
 
@@ -1886,6 +1939,53 @@ def test_the_no_ha_cue_does_not_depend_on_another_device_losing():
     )
 
 
+def test_a_barge_that_stands_down_for_no_ha_leaves_the_same_trace_as_a_wake():
+    """
+    #417. `barge_ceded` covered two reasons and only the arbitration loss was
+    handled, so talking over an answer during an HA outage produced silence,
+    no cue and nothing in the Activity tab — indistinguishable from a device
+    that heard nothing. The wake path's stand-down records and cues; both barge
+    paths must not decide differently about it.
+
+    The record and the cue are NOT written where the barge fires. That block
+    runs before anything can unwind the turn, so the interrupted turn's own
+    `_persist_turn` overwrites `last_turn_outcome` with "barged" before the
+    ring reads it, and clearing `barge_detected` there skips the turn loop's
+    ceded branch — leaving `barge_ceded` and `cancel_event` set into the next
+    turn. So the watcher only CARRIES the reason across, and the loop's ceded
+    branch records it, by then with nothing left to overwrite it.
+
+    Source-shape because the suite cannot import em_controller, and the
+    decision itself is already covered by `em_barge.cede` — what is not
+    covered is whether the watcher acts on it, and where.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    for name in ("_barge_watcher", "_private_barge"):
+        fn = _fn_body(src, name)
+        assert "em_barge.cede(" in fn, f"{name} must use the shared decision"
+        assert "(not serves) or won_by !=" not in fn, (
+            f"{name} has the decision inlined again — two copies of a "
+            f"stand-down rule can disagree about what leaves a record"
+        )
+        tail = fn[fn.index("em_barge.cede("):]
+        assert "verdict.no_ha:" in tail, (
+            f"{name} must branch on the no-HA reason separately from losing "
+            f"arbitration"
+        )
+        no_ha = tail[tail.index("verdict.no_ha:"):]
+        assert "device.barge_no_ha" in no_ha, (
+            f"{name}: the no-HA reason must reach the turn loop's ceded branch"
+        )
+        assert "record_dropped_wake" not in no_ha, (
+            f"{name}: recorded here, the row is overwritten by the interrupted "
+            f"turn's _persist_turn before _leds_turn_end can read it"
+        )
+        assert "device.barge_detected = False" not in no_ha, (
+            f"{name}: clearing this skips the ceded branch, so barge_ceded and "
+            f"cancel_event survive into the next turn"
+        )
+
+
 def test_every_outcome_cue_names_a_scene_key_that_exists():
     """
     `device.led_scene.get(key)` falls through to a dark ring when the key is
@@ -2106,6 +2206,34 @@ def test_a_ceded_barge_still_stops_playback_but_takes_no_turn():
     assert "break" in branch, (
         "a ceded barge must leave the turn loop rather than fall through "
         "into the interrupting turn"
+    )
+
+
+def test_the_no_ha_barge_records_where_nothing_overwrites_it():
+    """
+    The no-HA stand-down is the one barge outcome that must leave a row and a
+    cue, and both are written in the ceded branch for a reason that is only
+    visible as an ordering: the interrupted turn persists `barged` AFTER the
+    barge fires, so a row written at the point of the barge is overwritten
+    before the ring reads it. The branch also has to clear `barge_detected`
+    first, because `_leds_turn_end` suppresses its own cue while it is set.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    ceded = src.index("device.barge_detected and device.barge_ceded")
+    start = src.index("Barge-in: starting interrupting turn")
+    branch = src[ceded:start]
+    for call in ("leds_listening(device)", "record_dropped_wake(",
+                 "_leds_turn_end(device)"):
+        assert call in branch, f"the no-HA stand-down needs {call}"
+    assert branch.index("device.barge_detected = False") < \
+           branch.index("record_dropped_wake("), (
+        "the flag must be clear before the cue is painted, or "
+        "_leds_turn_end suppresses it"
+    )
+    cleanup = src.index("await cleanup_esphome()")
+    assert cleanup < ceded, (
+        "the record must come after the interrupted turn's cleanup has "
+        "persisted its own outcome, or that outcome overwrites this one"
     )
 
 
@@ -3066,3 +3194,25 @@ def test_asset_installs_queue_behind_the_ota_lock():
                if name not in ("_sync_oww_assets", "_sync_oww_assets_locked")
                and "_sync_oww_assets_locked(" in ast.unparse(fn)]
     assert not callers, f"unlocked asset sync called from {callers}"
+
+
+def test_the_image_keeps_its_data_on_the_mounted_directory():
+    """
+    #629: with no .env, DB_PATH fell back to the relative "echomuse.db", which
+    in the image is /app, outside the ./data:/app/data volume. The database,
+    the device-link CA and the recordings were lost on every recreate.
+
+    Read from the Dockerfile's instructions, not its comments.
+    """
+    root = Path(__file__).resolve().parent.parent
+    instructions = [ln.strip() for ln in (root / "Dockerfile").read_text().splitlines()
+                    if ln.strip() and not ln.lstrip().startswith("#")]
+    assert "ENV DB_PATH=/app/data/echomuse.db" in instructions
+    # sqlite will not create the directory, and without a volume nothing else does.
+    assert any(ln.startswith("RUN mkdir -p") and "/app/data" in ln.split()
+               for ln in instructions)
+    # The directory the default points at is the one both compose files mount.
+    for compose in ("docker-compose.yml", "docker-compose.deploy.yml"):
+        assert ":/app/data" in (root / compose).read_text(), compose
+    # The add-on keeps its own path, which has to win over the image's.
+    assert 'DB_PATH: "/data/echomuse.db"' in (root / "config.yaml").read_text()

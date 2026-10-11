@@ -31,10 +31,10 @@ const (
 	leSubeventAdvReport = 0x02
 
 	// Opcodes (OGF<<10 | OCF)
-	opReset            = 0x03<<10 | 0x0003
-	opReadBdAddr       = 0x04<<10 | 0x0009
-	opLESetScanParams  = 0x08<<10 | 0x000B
-	opLESetScanEnable  = 0x08<<10 | 0x000C
+	opReset           = 0x03<<10 | 0x0003
+	opReadBdAddr      = 0x04<<10 | 0x0009
+	opLESetScanParams = 0x08<<10 | 0x000B
+	opLESetScanEnable = 0x08<<10 | 0x000C
 )
 
 // Advert is one received LE advertisement (or scan response), shaped for

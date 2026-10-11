@@ -1,0 +1,25 @@
+# What each language in this repository already uses, so an editor does not
+# have to guess. Go is whatever gofmt says, and CI checks that.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+
+[*.go]
+indent_style = tab
+
+[*.{py,c,h,sh}]
+indent_size = 4
+
+[*.{yml,yaml,json}]
+indent_size = 2
+
+# dashboard.jsx mixes two and four spaces; no size is stated until it is split
+# and formatted (#821).
+
+[*.md]
+trim_trailing_whitespace = false

@@ -16,13 +16,13 @@
 // a device with no Android, against a stock FireOS Dot running the same
 // firmware:
 //
-//	          stock   ours     meaning
-//	  0012      85      05     NADC clock divider, bit7 = powered
-//	  0013      83      03     MADC clock divider
-//	  0026      11      00     ADC flags: left+right converting
-//	  003f      d6      16     DAC data path, bit7/6 = left/right powered
-//	  0089      30      00     output driver power
-//	  008c/8d   08      00     HPL/HPR output mixer routing
+//	        stock   ours     meaning
+//	0012      85      05     NADC clock divider, bit7 = powered
+//	0013      83      03     MADC clock divider
+//	0026      11      00     ADC flags: left+right converting
+//	003f      d6      16     DAC data path, bit7/6 = left/right powered
+//	0089      30      00     output driver power
+//	008c/8d   08      00     HPL/HPR output mixer routing
 //
 // Applying the routes below took every one of those to stock's exact value.
 //
@@ -55,9 +55,11 @@ type Write struct {
 //
 // CAPTURE: the microphone array reaches the codec on the DIFFERENTIAL inputs,
 // not the single-ended ones. Nothing routed DIF1 into any of the four ADCs, so
-// all four sat powered down. Note the neighbouring "ADC_x DIF1_L/R Input Gain"
-// controls are a DIFFERENT thing in the same register block and were the first
-// thing tried; changing them does nothing, and they are not listed here.
+// all four sat powered down. The neighbouring "ADC_x DIF1_L/R Input Gain"
+// controls are a DIFFERENT thing in the same register block: they do not
+// route anything, which is why changing them did nothing for a powered-down
+// ADC when they were the first thing tried. They set the input's level, and
+// are InputGains below.
 //
 // PLAYBACK: the DAC was not connected to the output mixer, so it powered down
 // with the firmware streaming correctly into it.
@@ -75,9 +77,34 @@ var Routes = []Write{
 	{"HPL Output Mixer L_DAC Switch", "1"},
 }
 
+// InputGains is the level switch on the differential input each ADC channel
+// captures from, written OFF, which is what Amazon's HAL leaves it at.
+//
+// Nothing wrote these until 2026-10, so a device with no Android kept the
+// kernel's default of On and captured about 6dB quieter than one with it
+// (#806). Found measuring three Echoes side by side: of 239 mixer controls
+// these eight were the only difference between a FireOS 5 Echo and two emOS
+// ones, the FireOS one read 3.0-3.8dB louder on every wake, and writing them
+// Off on one emOS Echo raised it 5.2dB against the other, with its noise
+// floor up about 6dB. The reference dump in device/tools/ shows Off as well.
+//
+// So this is the same case as Routes: state we were inheriting from the HAL
+// without knowing, written here so both userspaces capture at one level. On
+// FireOS it is the value already there.
+var InputGains = []Write{
+	{"ADC_A DIF1_L Input Gain", "0"},
+	{"ADC_A DIF1_R Input Gain", "0"},
+	{"ADC_B DIF1_L Input Gain", "0"},
+	{"ADC_B DIF1_R Input Gain", "0"},
+	{"ADC_C DIF1_L Input Gain", "0"},
+	{"ADC_C DIF1_R Input Gain", "0"},
+	{"ADC_D DIF1_L Input Gain", "0"},
+	{"ADC_D DIF1_R Input Gain", "0"},
+}
+
 var once sync.Once
 
-// EnsureRoutes applies Routes exactly once per process.
+// EnsureRoutes applies Routes, then InputGains, exactly once per process.
 //
 // Called from both the microphone and the speaker Init, because either may run
 // first and each needs the routes closed BEFORE it opens its PCM — DAPM decides
@@ -98,6 +125,20 @@ func EnsureRoutes() {
 				failed, len(Routes))
 		} else {
 			log.Printf("[codec] %d DAPM routes closed", len(Routes))
+		}
+		// Separately counted: a route that fails is silence, an input gain
+		// that fails is a microphone 6dB down, and the log should say which.
+		failed = 0
+		for _, w := range InputGains {
+			if err := mixer.Set(w.Name, w.Value); err != nil {
+				failed++
+			}
+		}
+		if failed > 0 {
+			log.Printf("[codec] %d of %d input gains failed — microphones may read about 6dB low",
+				failed, len(InputGains))
+		} else {
+			log.Printf("[codec] %d input gains set", len(InputGains))
 		}
 	})
 }

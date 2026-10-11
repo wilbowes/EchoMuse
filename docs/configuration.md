@@ -96,6 +96,17 @@ little speaker is boomy and dull by default.
 An extra presence bump for spoken responses. Try it if responses sound
 muffled from across the room.
 
+### Response level
+Sets spoken responses relative to the device's normal volume: **Low** keeps
+the existing level, **Medium** adds 6dB, and **High** adds 12dB. The volume
+buttons still move both media and responses together; this setting only makes
+voice louder within that range. Near maximum volume the extra boost tapers
+away, reaching none at maximum, so it cannot drive the output above full
+scale. The wake sound remains independent and uses Wake sound level.
+
+Older firmware cannot apply this gain. Its control is disabled for those
+devices and explains that newer firmware is required.
+
 ### Speak while the reply is written
 Off by default. When it is off, the Dot starts speaking once Home Assistant
 has the whole reply. When it is on, it starts as soon as Home Assistant has the
@@ -115,8 +126,9 @@ silence and carries on when the next part arrives, so the reply is not lost, but
 it pauses. Try it with a few long replies. If they come out in fits and starts,
 turn it off.
 
-With it on, the 30 seconds the controller waits for a reply to begin only has to
-be met by the first words.
+With it on, the wait for a reply to begin — 30 seconds by default, and the
+add-on's **Reply wait** option if a tool-using agent needs longer (#805) — only
+has to be met by the first words.
 
 ### Speaker protection
 Keeps bass the driver cannot deliver from muddying everything above it. Leave
@@ -231,10 +243,10 @@ whether or not the controller is reachable.
 
 ## 02 — Wake word
 
-How the device decides you said the magic word. By default this work happens
-on the controller, not the Dot — the Dot just streams audio to it. The Dot
-can also do this work itself, either alongside the controller as a
-comparison or instead of it; see **Wake word detection** below.
+How the device decides you said the magic word. By default the Dot does this
+work itself and sends nothing until it hears the word. The controller can do
+it instead, with the Dot streaming audio to it all the time; see **Wake word
+detection** below.
 
 ### Wake word model
 Which word wakes it: Hey Jarvis, Alexa, Hey Mycroft, or Hey Rhasspy. These
@@ -289,21 +301,18 @@ you change the wake word.
 
 ### Arbitration window
 With more than one Echo, saying the wake word in earshot of two of them
-used to start two competing conversations. Now the **first device to hear
-you answers immediately**, and any other device detecting the same word
-within this window (default 700ms) quietly stands down.
+used to start two competing conversations. Now **one answers**: the Echo
+that heard you loudest, which is normally the one in the room you are in.
+Any other Echo that heard the same word within this window (default 700ms)
+quietly stands down.
 
-There is **no latency cost**: the winner claims the turn on the spot rather
-than waiting out the window, so a solo wake is exactly as fast as it was
-before. The window only decides how long afterwards a second device counts
-as "the same utterance". `0` disables it, and it never applies when only
-one device is online.
+Choosing takes a moment. With two or more Echoes online, a wake waits up to a
+quarter of a second so that every Echo that heard it is counted. With one
+Echo there is no wait. The window itself only decides how long afterwards a
+second Echo counts as "the same utterance". `0` disables arbitration.
 
-An earlier version instead waited out the window and gave the turn to
-whichever device heard you *best*. That was dropped: it taxed every wake by
-~364ms even when nothing was competing, and field data showed the
-signal-to-noise winner produced a *worse* transcript than the device that
-simply heard you first.
+Before controller 2.26.0 the first Echo to hear the word answered.
+[listening.md](listening.md) has the reasons that changed.
 
 ### Wake sound
 Plays a short rising tone when the Echo hears the wake word. Off by
@@ -560,6 +569,11 @@ delete the files from the controller's `data/recordings/` folder.
 A turn recorded a while ago may show no buttons — that just means its
 recording has aged past the last 10 and the turn history has outlived it.
 
+**Wake word microphone** — which of the seven microphones listens for the
+wake word. **Centre** is right for nearly every Echo. MK1 to MK6 are the six
+around the edge, for an Echo whose centre microphone has failed and no longer
+wakes. Older firmware ignores it, and shows the control disabled.
+
 ---
 
 ## 04 — Ring
@@ -591,6 +605,26 @@ The volume arc holds the ring for about two seconds so a turn animation
 can't wipe it the instant it appears — but **pressing the action button
 cancels it immediately**, so adjusting the volume and then talking to the
 device still shows you the listening ring straight away.
+
+**Remote volume arc** is an opt-in accessibility setting. When enabled, a
+volume change from Home Assistant, an automation, the EchoMuse dashboard, or
+another remote player shows that same cyan arc. It is off by default because
+remote changes can otherwise make the ring light unexpectedly. Physical
+volume buttons always show the arc. Setting volume to zero (including Home
+Assistant mute), repeating the current level, and restoring the saved volume
+at boot never do. Older firmware shows the setting disabled until updated.
+
+### Remote volume arc
+The physical volume buttons always show the cyan level arc. With this on,
+the arc also shows for about two seconds when the volume is changed from
+somewhere else: Home Assistant, Music Assistant, an automation. Off by
+default. It never shows for volume zero (which is how Home Assistant mutes),
+for a repeat of the current level, or when the level is restored at start-up.
+Older firmware cannot do this, and shows the switch disabled.
+
+The arc and Home Assistant's slider do not agree about what "half" is: 50%
+from Home Assistant lights about a quarter of the ring. That is
+[#783](https://github.com/wilbowes/EchoMuse/issues/783).
 
 ### How a turn ends
 The ring tells you *why* a conversation stopped, using rhythm rather than
@@ -873,12 +907,14 @@ These are set once, on the server, and need a controller restart to change:
 
 | Setting | What it is |
 |---|---|
-| `SERVER_IP` | The controller computer's LAN IP — what devices are told to connect to. Leave it empty to detect it from this host; the controller refuses to start rather than advertise an address it had to guess at, and warns if the detected one looks like a container bridge. |
+| `SERVER_IP` | The controller computer's LAN IP — what devices are told to connect to. Leave it empty to detect it from this host; the controller refuses to start rather than advertise an address it had to guess at, and warns if the detected one looks like a container bridge. mDNS is advertised on this address's interface only, so Home Assistant has to be on the same network to discover the Echoes; if the address is not one of this host's, the controller says so in its log and advertises on every interface. |
+| `DB_PATH` | Where the database is kept. The device certificates and recordings are stored beside it. The published image defaults to `/app/data/echomuse.db`, the folder the compose files mount, so it survives an update with or without a `.env`. Bare-metal installs should set it. |
 | `OWW_MODEL` / `OWW_THRESHOLD` | Startup defaults for wake word/sensitivity — the dashboard values override these. |
 | `DEVICE_APPROVAL` | `strict` (you approve every new device — recommended) or `auto`. |
-| `SERVER_TLS_PORT` | Encrypted device link (wss) port — default 8770, `0` disables. Devices switch to it automatically once they hold credentials: from the wizard, from approving a new device, or from pairing (hold the Echo's action button 5 s, then **Approve pairing**). |
+| `SERVER_TLS_PORT` | Encrypted device link (wss) port — default 8770, `0` disables. Don't set `0` once Echoes are paired: an Echo holding credentials will not fall back to the plain link. Devices switch to it automatically once they hold credentials: from the wizard, from approving a new device, or from pairing (hold the Echo's action button 5 s, then **Approve pairing**). |
 | `REQUIRE_DEVICE_TLS` | Set to `1` **only after every device shows "wss (TLS)"** on its Status tab — from then on the controller rejects unencrypted or tokenless device connections. |
 | `EM_EXTRA_CA_CERT` | Path to a PEM CA certificate to trust — needed if Home Assistant, or a media server you stream from, is served over HTTPS with your own internal certificate authority. See below. |
+| `EM_TTS_WAIT_TIMEOUT` | Seconds to wait for Home Assistant's reply to begin before giving up on the turn — default 30, at most 120. Raise it if your conversation agent uses tools and needs longer. The add-on has the same setting as **Reply wait (seconds)**. |
 
 See `.env.example` for the complete list with comments.
 

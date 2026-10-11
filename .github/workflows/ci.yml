@@ -107,6 +107,7 @@ jobs:
           node controller/tests/sysread.test.mjs
           node controller/tests/pm_verdict.test.mjs
           node controller/tests/wizard_log_class.test.mjs
+          node controller/tests/wizard_step_failure.test.mjs
           node controller/tests/web_usb_blocked.test.mjs
           node controller/tests/emos_md5.test.mjs
           node controller/tests/boot_image_length.test.mjs
@@ -120,7 +121,9 @@ jobs:
           node controller/tests/donor_gate.test.mjs
           node controller/tests/device_line.test.mjs
           node controller/tests/link_row.test.mjs
+          node controller/tests/device_tools.test.mjs
           node controller/tests/wipe_verdict.test.mjs
+          node controller/tests/artifact_verdict.test.mjs
           node controller/tests/wifi_nvram.test.mjs
           node controller/tests/kernel_label.test.mjs
           node controller/tests/wifi_ssid.test.mjs
@@ -299,6 +302,12 @@ jobs:
       # a result, including when it skips. A workflow-level `paths:` filter
       # would leave the check simply absent on most PRs, which is the one
       # state a branch protection rule cannot tell apart from "not finished".
+      # The same weekly key as controller-build.yml, so this check builds the
+      # apt layer main will publish and the two share its cache entry.
+      - name: Week for the apt layer
+        id: apt
+        if: steps.changed.outputs.build == 'true'
+        run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
       - name: Build the controller image
         if: steps.changed.outputs.build == 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -308,6 +317,8 @@ jobs:
           load: true
           tags: echomuse-controller:pr
           platforms: linux/amd64
+          build-args: |
+            APT_SNAPSHOT=${{ steps.apt.outputs.week }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       # A wheel's CPU baseline is invisible to every other check, because
@@ -698,3 +709,14 @@ jobs:
       - name: Run go vet
         working-directory: device
         run: go vet ./internal/... ./pkg/...
+      # gofmt is the one formatter Go has, so there is nothing to argue about
+      # and a diff shows only what changed. 18 files had drifted by 2026-10-08.
+      - name: Check gofmt
+        working-directory: device
+        run: |
+          out=$(gofmt -l cmd internal pkg tools)
+          if [ -n "$out" ]; then
+            echo "$out"
+            echo "::error::not gofmt-formatted -- run: gofmt -w cmd internal pkg tools"
+            exit 1
+          fi

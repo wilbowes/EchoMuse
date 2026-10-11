@@ -2691,7 +2691,7 @@ reports, not a blanket bump.
 ## 2026-09-13 (evening) — emOS boots on FireOS 6, four EA builds getting there
 
 The FireOS 6 wizard path ran on hardware for the first time, against the spare
-(G090LF11752215LE) on a stock FireOS 6 install unlocked with amonet-biscuit
+(…15LE) on a stock FireOS 6 install unlocked with amonet-biscuit
 v2.0.0. **emOS booted** — `armv7l`, `emos-v0.5`, from an image the wizard built
 out of the device's own kernel — and associated to WiFi with our own
 `wpa_supplicant`. It stops one step short of finishing, and the reason is #524.
@@ -3253,7 +3253,7 @@ runs 2 and 3 built `e615da4c…` twice. So a re-provision that changes nothing
 writes identical bytes — run 1 proved the logic and the write path, not a
 change of content.
 
-*emOS on FireOS 5*, on G090LF11803611NF (v1) rather than VVV, because it was
+*emOS on FireOS 5*, on …11NF (v1) rather than VVV, because it was
 already emOS v0.5 and makes the v1 re-provision case: escrowed our own image
 (`d619034b…`, recognised by the ramoops marker alone — it predates the
 `emos.system=` stamp), the packer rebuilt from it without doubling its own
@@ -4512,3 +4512,498 @@ target is emOS. And asking for "merge 743" often enough to be teased for it.
 **Still open:** #689; a decision on #747; #736 needs a closing reply; #753
 unread; the jack run for #748; telling the port contributors the plan; the
 dev rig is on pre-merge builds, not the released artifacts.
+
+## 2026-10-05 — an Early Access day one, "No wake word" in both modes, and a contributor batch sorted
+
+**The EA after 19 hours.** Controller `2.26.0-ea.1` took 1NF to firmware
+`v2.18.0-ea.1` and emOS 0.10 over the network, both confirmed. 20 turns, no
+errors. Idle RTT excursions 13.5 per 10 minutes against 11.8 on the previous
+build, so no change. One fault, from the log: an update to ONE Echo stalls the
+event loop 7.6s (firmware, 12.5MB) and 9.6s (emOS image). #770. Updates were
+serialised on 2026-09-02 after three at once stalled it 11.1s; that stopped
+them stacking and left the single transfer as slow as it was. The cause is
+not confirmed.
+
+**Home Assistant's "No wake word" (#552, #778).** #552 was run on 15LE with
+the wake word on the Echo: three wakes heard (0.95, 0.85, 0.97) and
+suppressed on the device, on again and it answered, and C95 on older firmware
+declined it. Wil then asked whether it behaved the same with the wake word on
+the controller: "the two options must be functionally identical". It had
+never been run. Reading the other path, then running it, found:
+
+- a follow-up question got no microphone in controller-scored mode, because
+  it reused a wake stream that was down; fixed, three follow-ups then heard;
+- **an Echo streamed the room for 31 seconds under "No wake word"** after
+  being switched from private listening to the controller, because a private
+  Echo restarts its own local stream after a turn and nothing stopped it once
+  it was a network stream. The controller dropped the frames, so nothing
+  showed. It now stops any stream that arrives while off: under a second on
+  the re-run;
+- a claim of mine that was wrong: that the wake word would interrupt a reply
+  in controller-scored mode. With the wake word off the barge watcher has no
+  audio to score (0 frames over a 60s reply).
+
+**@forming's thirteen.** Closed #763 (it rewrote CLAUDE.md to forbid the
+sign-off, on a count that missed every reply we post), #758 (firmware never
+compiled) and #755 (a banner for a fault a one-line default fixes: #785).
+Merged #757, #740, #741, #742 and #724, the last after a hardware run in both
+listening modes. One claim per test PR was checked by reintroducing the bug:
+both held. #754 and #720 went back. Their assistant had been reading
+CLAUDE.md as its own instructions, signing as the project; Wil keeps the file
+in the repo for transparency, and it now says who it is for (#786).
+
+**Also merged.** From contributors, each after a run on 15LE: #713 (remote
+volume arc), #716 (response level; at 100% it distorts equally with and
+without the boost, zero clipped samples), #730 (wake word microphone; we
+added the capability and the chooser), #604 (mDNS on SERVER_IP's interface;
+we added the fallback), #768 (a TWRP the wizard refused). Ours: #773 (a
+failed emOS WiFi step captures `/run/net.log`), #780 (announcements show the
+ring a reply does), #787, #788, #789.
+
+**Arbitration (#747).** The reporter's bundle held twelve wakes heard by
+several Echoes. The loudest Echo was the same one every time, by 11 to 26dB;
+first-to-hear picked it in eight; the wrong picks were 54 to 164ms apart,
+inside the scorer's 80ms frames. Wil: loudness as well as time, as planned on
+09-24. Built as draft #790: hold every contest 250ms, the Echo 6dB louder
+than every other wins, else the first to hear. Not on hardware yet. It does
+not fix the reported wake itself (heard over playback) or a weak microphone
+(#731).
+
+**Things measured that turned out otherwise.**
+- WiFi power-save on FireOS 6 (#631, #767): `set_power_mode 0` changed
+  nothing on 15LE, 1.9ms before and after. `device/CLAUDE.md` already said
+  the driver forces it off; Wil remembered, I had not looked.
+- The trailing silence in a TTS clip: I told Wil 0.44s and built #781 to
+  trim it. That was the MP3 from another endpoint. The WAV the Echo plays
+  ends on 0.19s, so the change did nothing on hardware, and the log's byte
+  count said so. #781 is parked.
+
+**Mistakes of mine.** Merging main into #552 in a second worktree with
+`git add -A` staged that worktree's stale GoTinyAlsa checkout and moved the
+pointer back on main, undoing #711 for 45 minutes (#777). Merging #787 with
+one check still running, because a watch timed out and the next command ran
+anyway. Triggering volume changes Wil had to watch without telling him first.
+Putting the wake word microphone in the general Advanced panel when the
+Microphones panel has its own (#789).
+
+**Raised.** #770, #771 (HA sensor and button for a ringing timer), #772 (dim
+the mute indicator by ambient light), #776 (a stored "No wake word" on
+firmware that cannot honour it), #782 (a one-word answer at the listening
+ring was missed; the speech detector peaked 0.40 against 0.50), #783 (the
+volume scale: 50% from Home Assistant is a quarter of the ring, and stock's
+table has never been read).
+
+**Still open:** the hardware run for #790; the jack test for #748 and #700;
+#753 unreviewed; #723 needs a wizard run; #729 and #756; #781 parked; the
+ring-to-microphone lag behind #782 unmeasured; two users on #683 who cannot
+find the wake sound setting.
+
+
+## 2026-10-06 — a third contributor batch, an image that never upgraded, and a night measuring which Echo should answer
+
+**@forming's eight.** #792 to #799 arrived in 54 minutes. Every diff was
+read against its issue. Closed with replies: #798 (`emos-svc`: the tool opens
+the FIFO write-only and non-blocking while init holds the read end for an
+instant each second, so the open fails with `ENXIO`, reproduced off target;
+`restart` sets the hold and never clears it; `status` prints in PID 1), #799
+(the text shown during a boot-partition write said "Unplug the device", where
+#269 asks for "do not unplug"), #795 (it read the auto-join counter from a
+`settings` key we could not find, and stated as fact the reboot #439 asked to
+have established first), #793 (an early return in `_start_conversation`
+directly above the comment explaining that a silent satellite hangs Home
+Assistant's `ask_question`). Declined: #796, a permanent "(at last connect)"
+on the firmware version in four places for a window measured at about six
+minutes. Merged: #797, once its "Fixes #378" became "Refs". Sent back: #792,
+with Wil's decision on #776's open question: KEEP a stored "No wake word" and
+report "on" while the firmware cannot honour it, so an upgrade restores the
+choice. #794 needs a run against Home Assistant: in the deadlock case it
+sends the abort, which cancels the pipeline task the asking script runs in
+(read, not run).
+
+**Other queue work.** #689 closed: the reporter's fix was HTTPS in front of
+Home Assistant, a different cause from #769's proxy body limit, and why the
+plain-HTTP upload hung is not known (#800). #753 (stereo Sendspin) reviewed
+and sent back for three things: main's `ProcessFloat` from #716 is mono, so
+stereo would fold during a boosted reply; an unrelated ambient-light commit
+belongs in its own PR; its DacMux commit duplicates #700. #700 merged on two
+contributors' jack runs (FireOS 5 and 6), Wil's call; the internal speaker
+after an unplug is unchecked on our own Echoes.
+
+**The image that never upgraded.** The weekly scan of `:latest` failed with 7
+HIGH findings in openssl and pcre2, all fixed in Debian. #365 had put
+`apt-get upgrade` in the image for exactly this, and it was not running: both
+workflows build with the GHA layer cache, and that layer's key is the base
+digest plus the text of the RUN line, so it came from cache. Main's build of
+the day before still had the old packages. #801 moved the base digest and
+#802 keys the layer on the ISO week; the same three lines built W41, W41
+again (cached) and W42 (apt ran). On the dev rig the new image reconnected
+all three Echoes on wss, answered a turn and an announcement on each, and
+started media through ffmpeg in 2246ms against 2175-2237ms before. The scan
+stays red until a GA moves `:latest`.
+
+**Go.** `x/crypto` 0.57 and `x/sys` 0.48 need Go 1.26 and the pinned compiler
+is 1.24.0, which is out of upstream support; upstream's image is still the
+digest we pin. #803 (draft) swaps only the toolchain, by checksum, to 1.26.8.
+Stage 1, off hardware: both vet and build; the binary is 1.4% larger with the
+same five libraries; one new libc import, `clearenv`, which API 22 exports;
+host tests pass with `-race`. `go.mod` stays at 1.24 so the GODEBUG defaults
+do not move in the same step. Nothing says it runs on a Dot yet.
+
+**Arbitration, measured (#790).** Three Echoes side by side, one voice at
+2m, then one Echo in the hand.
+
+- *Time is noise.* One word, reaching all three within a millisecond, was
+  reported 89 to 224ms apart, and one Echo was 53-55ms behind another on five
+  wakes running: the scorer's 80ms frame grid starts at a different moment on
+  each. Sound covers a metre in 3ms.
+- *A 6dB microphone difference between userspaces (#806).* VVV read 3.0-3.8dB
+  louder than both emOS Echoes in ten wakes, across two positions. Of 239
+  mixer controls eight differed: `ADC_A..D DIF1_L/R Input Gain`, Off on
+  FireOS 5, On on emOS. Written Off on C95 alone, C95 went from 0.4dB below
+  15LE to 4.8dB above it. Matched, the three read within 2.7dB. A comment in
+  `codec/routes.go` said changing these "does nothing", which was true of
+  waking a powered-down ADC and nothing else. #808 (draft) writes them.
+- *Level separates rooms, not Echoes in a room.* 15LE held at arm's length
+  read within 1dB of two Echoes a metre further in four wakes of five.
+- *The reporter's bundle, re-scored:* fourteen contested wakes, the loudest
+  leading by at least 9.7dB on averaged level; first-to-hear chose it in
+  eight. Level minus noise floor picked the same Echo each time, by as little
+  as 0.8dB, because the occupied room is the noisier one. In our room it had
+  picked the in-hand Echo 8 of 8.
+- *Tone (#807, draft, log-only).* A `tilt` figure per wake, the energy of the
+  sample difference over the energy of the samples. Units agree within 0.9dB
+  on a clear word and 2.7dB on a quiet one; a metre nearer moved it 0 to 2dB.
+  Too weak to decide on. Amazon's patent (US20170076720A1) ranks on SNR and
+  spectral centroid, computed on beamformed signals.
+- *The hold* shut the nearest Echo out once in about 35 contests: its claim
+  arrived 18ms after the 250ms closed.
+
+The rule went through three forms in the evening: a 6dB margin; level and
+time each deciding past its own error; and, after Wil said what he wanted
+from it, the one pushed: **the loudest answers, no margin**, earliest heard
+only when levels cannot be compared. Wil: "I would be more concerned about an
+Echo answering in the same room I'm in than one in a different room. If I had
+multiple Echoes in the same room I'm probably not going to care which answers
+me." On stickiness: "feels like a workaround". The final form has unit tests
+only.
+
+**Mistakes of mine.** A test recipe copied the whole repo into a container,
+including 36GB of untracked forge data, and filled the disk quota; no shell
+command could start until Wil deleted a file by hand. #802 was merged with
+#700's text as its commit body; fixed by amending main's tip at Wil's request
+(`dc012aa` to `0d068fc`, same tree). I told Wil C95 had not reconnected after
+reading the last 100 log lines, when its line had scrolled out. I asked for a
+Sendspin check on a controller image change that Sendspin does not pass
+through. The tilt was dropped by `parse_wake`, which keeps named fields only,
+and that cost ten wakes. I ruled SNR out, reversed on one room's data, and
+reversed again on the reporter's. A 150ms time threshold was set inside noise
+that then measured 224ms. One table gave a lead as 5.3dB that was 4.5.
+
+**Raised.** #800 (the wizard's image upload fails depending on what is in
+front of Home Assistant), #806.
+
+**Still open:** #790's final form on hardware, with an Echo in the next room;
+#808's before-and-after pass; #803 stages 2 and 3; #794's Home Assistant run;
+#781; #774 on hold behind #803; #807 in draft until next-room data. The dev
+rig is on the tilt firmware and an earlier form of #790, with the input gain
+set by hand on C95 and 15LE until they reboot.
+
+## 2026-10-08 — a mishear traced to one echo filter serving seven microphones, and a release date
+
+**The complaint.** Wil, back after 36 hours: Verona "doesn't hear me as well
+as she used to", and was it the mixer change of the 6th. It was the command
+after the wake word, not the wake word.
+
+**What it was not.** Each was a cheap measurement before any theory.
+
+- *The input gain change (#806).* C95 and 15LE had not rebooted, so the
+  switches set by hand on the 6th were still in force. Saved recordings from
+  both were 2-4dB louder with 0% clipping, and 15LE's hourly cancellation
+  during playback read 13-19dB before the change and 18dB after.
+- *The speech-to-text swap of the 6th.* Thirty saved recordings went through
+  the current Gemma shim and the previous image: 30 identical transcripts.
+- *Level.* Sixteen clips replayed from -12 to +18dB: clean ones stayed right
+  and misheard ones stayed misheard. Small edits flipped the noun on marginal
+  clips, including ones it had got right.
+- *Clipping on the wake sound.* 15LE's clipped-sample count did not move on
+  three of four affected turns.
+
+**What it was (#814).** The canceller ran after the microphone was chosen and
+held one filter. The wake stream reads the centre microphone and each turn
+locks to an edge one, so the filter was converged on the previous turn's
+microphone when the wake sound played. From a raw nine-channel capture on
+15LE (a `bench` build of the firmware it was running), a 64ms path fitted on
+one microphone removed 24-26dB of the wake sound on that microphone and
+between 23dB and minus 7dB on another; ch0/1, ch3/4 and ch2/5/6 share a path.
+During that capture a command naming a room was transcribed without the
+room, with the wake sound at -6.4dBFS in the audio sent on, and every light
+in the house went off. The next turn, on the same microphone 19 seconds
+later, had it at -32.7dBFS.
+
+Wil had the direction already: the journal of 2026-10-03 records per-mic
+cancelling ahead of selection as the first step, and seven cancellers
+measured at 19% of a core. What that entry called unmeasured was the cost of
+the channel switch, and this is that measurement.
+
+**The fix (#819, draft).** A speex state per microphone on the hardware
+reference, all adapting on every period; the six not in use rest after 256ms
+of a silent reference and resume on the first frame that is not. Seven saved
+echo paths in one file. `aec_replay` learnt to change microphone mid-run
+(#817), and on the same capture the second turn's wake sound went from 6.2dB
+removed to 26.2dB.
+
+On 15LE, four turns from four sides with a raw capture running and each
+recording lined up against it: 23.7, 19.5, 17.6 and 19.4dB of the wake sound
+removed on ch5, ch0, ch0 and ch2, leaving it 7.5-11.1dB below the speech
+where at the microphone it is 9-12dB above. Speech passed within 0.2dB.
+Fifteen turns on the build by 21:30; Wil confirmed the first eight as
+heard correctly and the other seven read as ordinary commands. Idle CPU for the
+process: 53.9% of a core before, 61.1% with seven always running, 52.4% with
+the rest. VVV, C95 and 15LE were left on the build, each with the morning's
+firmware in its other slot.
+
+**#723 merged**, after its two probes were run in TWRP on VVV, the one place
+they execute and the one place nobody had run them. BusyBox 1.22.1 there
+answers as the verdicts parse. FireOS 5's own shell has no `wc`.
+
+**A release date.** Wil: a GA on Sunday the 11th. Agreed scope for a second
+Early Access first: #819, #808 (it stays in the firmware), #790 if an Echo in
+the next room wins from that room, #811 if its review is clean. #808 and #790
+were rebased off the amended commit of the 6th, and #807 was closed unmerged:
+tilt was for telling Echoes in one room apart, which the #747 decision does
+not need. A dev add-on built from #790's head is staged on the Home Assistant
+host, not installed.
+
+**Practice.** Asked whether the dashboard's CSS lets a change be made once:
+colour yes (46 tokens under a ratchet), type size, spacing and radius no (248
+font sizes over 16 values, 548 inline style blocks). Wil's rule, for the
+whole codebase: good practice where practicable, and where it is not, say so,
+write down why, and review it. #820 (dashboard tokens), #821 (split the
+11,324-line file; 40 test files read it as text), #822 (a formatter and a
+linter per language, as ratchets, which Wil confirmed over the older
+undefined-names-only decision). #823 is the first item: `gofmt` over 18
+drifted files and a CI check.
+
+**Mistakes of mine.** I leaned on the mixer change as a side effect on the
+canceller, then on clipping, and the log refuted both. I proposed measuring
+the CPU cost of seven cancellers when the journal already held the figure,
+and Wil had to say "we've looked at this already". I told him the recordings
+were taken after the AGC; wake-word turns have none. I read the wake sound as
+still as loud as the speech from a 10ms peak against an average, and it was
+8-11dB under. The firmware restart for the capture left 15LE's canceller
+cold for the turn that switched the lights off. My first test run of #723
+was against a stale local branch. I told him the build would bundle several
+dashboard files without having tried it.
+
+**Raised.** #814, #815 (a turn logged empty with speech in its recording),
+#816 (15LE reconnected twice without rebooting), #817, #818, #820, #821,
+#822.
+
+**Still open:** a longer run on #819; #808's before-and-after pass; the
+next-room test for #790; #811's review and a reading of #810; the
+`except Exception` audit and the rest of #822; whether level over playback
+can now be trusted, which would let #790 drop its fallback for barge-ins.
+
+## 2026-10-09 — the next-room test, a lost first word, and a second Early Access
+
+**The next-room test (#790).** Wil moved C95 to the kitchen and left 15LE and
+VVV in the office. The house was still on the earlier margin-and-time build
+for the first runs; the final loudest-wins build went on at 12:08.
+
+- Most cross-room wakes are not contested: the far room does not fire.
+- From the office with the kitchen Echo also firing (4 wakes): the loudest
+  office Echo led C95 by 12.1-14.0dB, the quieter one by at least 9.2dB.
+- From the kitchen with the office also firing (3 wakes, final build): C95
+  led 15LE by 3.4-5.6dB, all three correct. C95 was on the floor behind a
+  table and 15LE on a stool in line of sight through the door, so that margin
+  is a placement, not a property of the rule. Not repeated at bench height.
+- A wake over C95's own reply (1): still decided on time, and went to the
+  office. C95's level lead was 4.9dB, the same as without playback, which
+  suggests level over playback is usable. One sample.
+- Late claims: two more (09:07:01, 11:56:30). 15LE reports the same word
+  115-150ms after VVV beside it. Hold left at 250ms.
+- Two wakes C95 never reported, 2-3s after its own turn ended. Checked
+  against the record afterwards: wakes within 4s of a turn ending score a
+  median 0.93 on the per-mic firmware (16) against 0.94 before it (47), and
+  C95 caught ten of the sixteen. Not a pattern.
+
+Per-Echo levels are in `device_logs` (`source='controller'`, "Wake level"),
+not in the add-on log, whose arbitration line gives only the lead.
+
+Wil: if it is not regressing, it goes out as a field test. #790 merged.
+
+**A command run on from the wake word lost its first word (#829).** Wil:
+"hey Verona tell me a joke" in one breath is heard as "me a joke". The
+controller dropped 240ms after every wake to remove the wake word's tail. On
+a session there is no tail: the Echo starts it after the frame that crossed.
+Four run-on recordings began mid-speech at 0-80ms; paused ones had 400-1600ms
+of room first. With the discard off for sessions, four run-on and five paused
+commands on C95 all kept their first word and none gained a tail, and five
+barge-in turns the same once that path was changed too (Wil: barge-in should
+behave as a plain wake does). Wil asked about going the other way and sending
+the whole wake word: HA does not strip the phrase from the transcript, every
+false wake would then carry speech, and it changes what leaves the Echo, so
+it was not done.
+
+**Barge-in.** Wil: "a bit iffy". The two complete misses (scores 0.002 and
+0.001 during a reply) were with C95 in a cubby; back on a stool six fired in
+a minute, the first after 8s of the first reply and the rest in 2-4s, with
+scores from 0.26 to 0.96 against a bar of 0.25. C95 had also rebooted at
+about 12:13, so its input gain switches were back On and it captured 6dB low
+all afternoon. What the canceller lacks, written down for after GA: the
+cancelled microphones are not combined during playback, the wake model has
+never heard the word under reply residue, and there is no measured hit rate.
+
+**#811 (@WegoW), the reply wait as an option.** Reviewed and merged. Wil
+asked whether it was well architected or a bandage, and what a Voice PE
+does: ESPHome's voice assistant has no timer on the wait at all. The option
+is a stop-gap with the default unchanged; #830 is the behaviour to build.
+
+**#819 and #808 merged.** #808's hardware pass on both emOS kernels: `8 input
+gains set` and all eight switches Off after a firmware start and after a
+cold boot. On emOS `reboot` does nothing and `busybox reboot` does, which is
+in emos/README.md and was read after the first attempt, not before. Loud
+speech at 30cm clipped about 550 samples on C95 and about 580 on VVV, which
+#808 does not touch (#835). #823 (gofmt) re-run on top: 17 files.
+
+**Early Access.** `controller-ea-v2.26.0-ea.2` and `v2.18.0-ea.2`, both on
+`a7ad7c0`. The house runs the tagged controller as the dev add-on and all
+three Echoes the published firmware asset (attestation verified) from 17:52,
+which is when the soak started. Wil chose to stay on the dev add-on: the
+Early Access add-on has its own database and CA, and the three Echoes hold
+the dev add-on's.
+
+**#810.** A third report of the wizard failing to open the serial port under
+Chromium on Linux. Replied with the `dialout` fix one Fedora user confirmed
+on #767; FAQ updated (#833). Wil: the wizard should offer a serial console
+at the end of an emOS install (#834).
+
+**Owed.** Wakes over a reply and kitchen wakes at bench height for #790's two
+open questions. Saturday: the soak's overnight turns and UAT. After GA: #830,
+#834, #835 and the barge-in work.
+
+## 2026-10-11 — acceptance testing finds a mute that did not survive a power cut and a wizard that would not say why, and 2.26.0 ships
+
+**Speech to text, before anything else.** Wil could not get the office blind
+opened by voice and suspected a regression. The dev controller's turns showed
+the wake word firing every time and the transcripts wrong: "I'm in the office
+blind", "Open the office light", "I opened the office blind". The saved
+recordings were replayed through both recognisers: Gemma (the Wyoming shim on
+:10302) gave the same wrong text on three runs each for five of seven
+"office blind" commands; whisper `small.en` on CPU, and then
+`distil-large-v3`, got all of them, including a slip Wil made himself. The
+shim's 10-06 change leaves the English prompt unchanged and the model server
+had not restarted, so the cause on Gemma's side is not known. The clips are
+quiet (speech around -25 to -30 dBFS over a floor of -38 on some), which may
+be part of it and was not tested. `faster-whisper` was started again and Wil
+pointed Home Assistant at it. One turn with the right transcript still drew a
+follow-up question; Wil turned on local command handling in HA for that.
+
+The reply "12:01 PM" was spoken as a number: the TTS shim passes text
+straight to the model. Wil wants an LLM pass to normalise it rather than
+rules in the shim, later.
+
+**A plugin boundary (#847).** A contributor has built a streaming-service
+client that runs on the Echo. Wil does not want to ship or own it, for the
+service's terms and for the listener it opens, and filed the idea of a device
+plugin interface instead: an audio output into the mixer and a lifecycle, no
+microphones, no control link, off by default, shown as third-party.
+
+**UAT, the automated part.** The candidate was the ea.2 pair; nothing but
+docs had landed since. First run on 15LE and VVV only, because I left C95 on
+the house controller without asking. Wil: "it's not a proper run without
+them", and "please ask before assuming". Repeated with all three: 46
+controls, 25 applied, 17 received, 4 shown disabled, none failed; axe clean
+on 22 views. Nine controls are new since the 2.25.0 report and the inventory
+found them unprompted. Solo checks in throwaway containers: 2.25.0's schema
+v27 migrates to v31 with `echomuse.db.pre-v27.bak` written first, and 2.25.0
+refuses the migrated file by name; `EM_TTS_WAIT_TIMEOUT` gives 45, defaults
+to 30, caps at 120; the bundle carries `LOG_LEVELS`; a container with no
+environment keeps its database and CA across a recreate. The migration ran on
+an empty database: copying the GA add-on's off the HA host was refused by the
+session's permission classifier and not worked around.
+
+**UAT, hands on.** Passed as written: mute and unmute, the volume tone, the
+no-HA cue, pairing by hold, the nearest Echo answering (6 of 6, by 6.9 to
+12.0 dB), barge-in, the timer's pause-resume-stop, "No wake word", the mute
+sensor, the remote volume arc, announcements, music and ducking, a timer
+under music, the wake word microphone, clip capture, the emOS panel.
+Findings that did not block:
+
+- Response level did nothing at first: the Echoes held per-device values, so
+  the fleet save reported "pushed to 3 devices" and changed nothing audible.
+  Scoping as designed, with nothing on the fleet page to say so.
+- A bare wake word during a ringing timer was taken by 15LE while C95 rang.
+  The ring paused and resumed correctly.
+- With speech forced together, 3 of 4 commands kept their first word (#829).
+  The one that did not began inside the first 50 ms of the recording.
+- Pausing music by voice failed in Home Assistant: transcribed correctly
+  twice, no media command sent.
+- Wil: the thinking spinner ends before the reply is heard. Audio reached the
+  Echo 0.36-0.43 s after the reply was ready on average, and the Echo then
+  held 1.1 s and 2.3 s on two turns. The same before today.
+- Wil: the ring's level scaling is still wrong. After GA.
+- Updating 15LE and VVV from the fleet panel stalled the controller's event
+  loop for 4.4 s and 3.2 s.
+- There is no identify control. The three Echoes were told apart by tapping
+  each action button and reading the log.
+
+**Sendspin lost sync after a restart mid-track.** VVV and C95 played in sync.
+VVV lost power, rebooted and rejoined the stream 1.85 s out, snapped once,
+was in sync briefly and then audibly behind, as an echo on lyrics. Both
+players logged `synced=true` with 0.16-0.38 ms of error throughout. On VVV
+after the reboot: the drift estimate stayed at 0.00 ppm for three minutes
+(C95 tracked -5.8), one sync round trip took 978 ms, and the speaker position
+stepped +4.2 ms and back. A new track brought them back into sync, which
+rules out my first lean that Android had changed VVV's output delay after the
+join. Not explained. Wil: not a blocker, wants the cause found after GA.
+
+**Mute did not survive a power cut (#849).** Mute, then power pulled: C95
+came back muted, VVV and 15LE did not, twice each. VVV's `state.json` was 0
+bytes and its log read "unreadable, ignoring"; 15LE's held the old value. The
+file was written as temp-then-rename with no sync, and the comment above it
+said a power cut could not truncate it. The code had not changed since mute
+persistence was written, so the 2.25.0 UAT passed this step on timing. Fixed
+by syncing the file before the rename and the directory after. On the fixed
+build, mute and unmute each survived power pulled within 2 s, twice each way,
+on all three. Released as `v2.18.0-ea.3` at Wil's word, with no soak: "just
+doing it for completeness". All three Echoes took it by OTA from the
+dashboard, which also exercised the update steps the plan had skipped.
+
+**The wizard (#850).** At Wil's request VVV was restored to stock FireOS
+5.5.5.4 (the recorded sequence) and 15LE to stock FireOS 6 NS65741 (his XDA
+steps: wipe, install to one slot, reboot recovery, install to the other).
+Tidying VVV afterwards I deleted `/sdcard/f1r30s.zip`. The FireOS wizard then
+stopped at step 3, correctly since #723, with a panel that said "Click Retry
+first" and offered to restore a boot image that had never been taken; step 1
+had printed "Delete it from the controller first" above a button that kept
+the record. Wil remembered the wizard asking for `f1r30s.zip` as an upload.
+It never has; the August recovery tool carries it by SHA-256, and Magisk is
+the file the wizard uploads. Fixed the same afternoon: the panel shows the
+step's reason, step 3 asks for the file and checks it against that hash, the
+restore panel needs an escrow, step 1 offers its two choices. A second
+"No file chosen" in his screenshot was the browser's tooltip, not a layout
+fault. Both wizards then ran clean, FireOS on VVV and emOS on 15LE, each
+registering on `v2.18.0-ea.3` over wss. Controller `2.26.0-ea.3` cut so the
+Early Access channel has the same pair.
+
+**The release.** Automated pass repeated on the ea.3 pair: the same 46 and
+22, none failed. Report `docs/uat-results/2.26.0.md`, named for the GA
+versions at Wil's instruction, with serials shortened to four characters at
+his request (the 2.25.0-ea.1 report, the emOS README and two entries here
+were shortened to match; test fixtures are #853). Main went red once, on the
+docs merge #839, in `TestScanPausesWhileConnecting`: no firmware change in
+that commit, green on rerun, 360 of 360 locally under the race detector. My
+reading is a 150 ms fake connect finishing before the scan loop looks; not
+proved. `v2.18.0` and `controller-v2.26.0` were tagged on `e119433` and
+`:latest` moved from 2.25.0. Closed with the version: #747, #566, #669, #541,
+#267, #268, #89, #818 (the arm64 image carries the same openssl and pcre2 as
+amd64), #705.
+
+**Not run:** talking over a reply with Home Assistant unreachable (#417,
+skipped by Wil), the Bluetooth proxy feeding Bermuda under music, a
+connection through the proxy.
+
+**Rig faults.** `rig.py up` does not start the browser container. `attach`
+to a rig that still holds the Echo's row moves its credentials aside and then
+fails the approval with 409.

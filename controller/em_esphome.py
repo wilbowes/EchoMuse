@@ -238,6 +238,14 @@ ESPHOME_PROJECT_VERSION = os.environ.get(
     "ESPHOME_PROJECT_VERSION", _CONTROLLER_VERSION
 )
 
+# How long the turn waits for Home Assistant's reply to BEGIN (#805). The
+# add-on option is `tts_wait_timeout`; 30s stays the default, so the change
+# is that this CAN move, not that it moved. The decision and its bounds live
+# in em_turnclock so they are reachable by the test suite.
+TTS_WAIT_TIMEOUT = em_turnclock.tts_wait_seconds(
+    os.environ.get("EM_TTS_WAIT_TIMEOUT")
+)
+
 # ─── Media player entity ─────────────────────────────────────────────────────
 
 # Single media_player entity key — stable per connection.
@@ -1451,7 +1459,9 @@ class EchoMuseSatellite(SatelliteServerProtocol):
 
             # ── Wait for TTS response (or RUN_END / error / timeout) ──────
             try:
-                await asyncio.wait_for(self._tts_event.wait(), timeout=30.0)
+                await asyncio.wait_for(
+                    self._tts_event.wait(), timeout=TTS_WAIT_TIMEOUT
+                )
             except asyncio.TimeoutError:
                 log.warning(f"[{self._log_name}] Timeout waiting for TTS response from HA")
                 if trace: trace.outcome = "timeout"
@@ -2648,7 +2658,10 @@ async def start_esphome_servers(
     """
     global _azc
 
-    _azc = AsyncZeroconf()
+    # See em_controller.main()'s AsyncZeroconf call for why this is pinned to
+    # SERVER_IP's own interface rather than left to auto-detect every one on
+    # the host.
+    _azc = em_hostip.bind_mdns(AsyncZeroconf, SERVER_IP)
     loop = asyncio.get_event_loop()
 
     all_devices = await loop.run_in_executor(None, db.get_all_devices)

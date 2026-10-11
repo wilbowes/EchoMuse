@@ -37,9 +37,12 @@ func loadDeviceState(path string) (st deviceState, ok bool) {
 	return st, true
 }
 
-// saveDeviceState writes the state atomically (write-then-rename, so a power
-// cut mid-write can't leave a truncated file). Called on every mute toggle —
-// rare enough that a synchronous flash write needs no debounce.
+// saveDeviceState writes the state atomically and durably: the temp file is
+// synced before the rename and the directory after it. Without the first
+// sync ext4 can commit the rename ahead of the data, and a power cut seconds
+// after a mute left a zero-length state.json, so the Echo booted unmuted
+// (VVV, 2026-10-11). Called on every mute toggle — rare enough that a
+// synchronous flash write needs no debounce.
 func saveDeviceState(path string, st deviceState) {
 	data, err := json.Marshal(st)
 	if err != nil {
@@ -51,11 +54,42 @@ func saveDeviceState(path string, st deviceState) {
 		return
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := writeFileSync(tmp, data, 0o644); err != nil {
 		log.Printf("[state] write failed: %v", err)
 		return
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		log.Printf("[state] rename failed: %v", err)
+		return
 	}
+	if err := syncDir(filepath.Dir(path)); err != nil {
+		log.Printf("[state] directory sync failed: %v", err)
+	}
+}
+
+// writeFileSync is os.WriteFile that returns only once the data is on flash.
+func writeFileSync(path string, data []byte, perm os.FileMode) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// syncDir makes a rename in dir survive a power cut.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }

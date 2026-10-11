@@ -8,8 +8,8 @@ import "testing"
 
 func TestJackRoutingMutesInternalDriverWhenSomethingIsPluggedIn(t *testing.T) {
 	got := jackRouting(true)
-	if len(got) != 2 {
-		t.Fatalf("want 2 writes, got %d: %+v", len(got), got)
+	if len(got) != 3 {
+		t.Fatalf("want 3 writes, got %d: %+v", len(got), got)
 	}
 	if got[0].Ctl != ctlSpeakerAmp || got[0].Args[0] != "Off" {
 		t.Errorf("internal amp must be Off with a plug in, got ctl %s = %v", got[0].Ctl, got[0].Args)
@@ -101,6 +101,7 @@ func TestJackRoutingDriftIsSilentWhenNothingMoved(t *testing.T) {
 	if d := jackRoutingDrift(true, map[string]string{
 		ctlSpeakerAmp:   "Off",
 		ctlHPDriverGain: hpGainJack,
+		ctlDacMux:       dacMuxJack,
 	}); len(d) != 0 {
 		t.Errorf("want no writes on a correct codec, got %+v", d)
 	}
@@ -117,5 +118,45 @@ func TestJackRoutingDriftSkipsUnreadableControls(t *testing.T) {
 	d := jackRoutingDrift(true, map[string]string{ctlHPDriverGain: "0"})
 	if len(d) != 1 || d[0].Ctl != ctlHPDriverGain {
 		t.Errorf("want only the readable, drifted control, got %+v", d)
+	}
+}
+
+// #566: with the mux Off the jack plays 20-30dB under line level even at the
+// right HP gain. Insert must set it On (stock's value); removal returns it to
+// Off, the only state the internal speaker has been tested in.
+func TestJackRoutingSetsTheDacMuxForEachPosition(t *testing.T) {
+	for _, tc := range []struct {
+		inserted bool
+		want     string
+	}{{true, "On"}, {false, "Off"}} {
+		var got *mixerWrite
+		for _, w := range jackRouting(tc.inserted) {
+			if w.Ctl == ctlDacMux {
+				w := w
+				got = &w
+			}
+		}
+		if got == nil {
+			t.Fatalf("inserted=%v: DAC mux not written", tc.inserted)
+		}
+		if got.Args[0] != tc.want {
+			t.Errorf("inserted=%v: want DAC mux %s, got %s", tc.inserted, tc.want, got.Args[0])
+		}
+	}
+	if ctlDacMux != "Audio_DacMux_Setting" {
+		t.Errorf("control name is the kernel's, got %q", ctlDacMux)
+	}
+}
+
+// If the HAL puts the mux back (FireOS 5's mediaserver rewrites the codec
+// every 60-90s), reconcile must catch it like it catches the gain.
+func TestJackRoutingDriftRestoresTheDacMux(t *testing.T) {
+	d := jackRoutingDrift(true, map[string]string{
+		ctlSpeakerAmp:   "Off",
+		ctlHPDriverGain: hpGainJack,
+		ctlDacMux:       "Off",
+	})
+	if len(d) != 1 || d[0].Ctl != ctlDacMux || d[0].Args[0] != "On" {
+		t.Errorf("want only the mux rewritten On, got %+v", d)
 	}
 }

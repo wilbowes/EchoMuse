@@ -12,11 +12,27 @@ import "github.com/wilbowes/EchoMuse/internal/bindings/mixer"
 // driving the same cable, by diffing all 239 mixer controls across an insert
 // on both devices. Stock changed five controls; we changed one.
 
-// The two controls, by name: the internal driver's amp and the jack's output
-// stage.
+// The controls, by name: the internal driver's amp, the jack's output stage,
+// and the DAC mux in front of the jack.
 const (
 	ctlSpeakerAmp   = mixer.SpeakerAmp
 	ctlHPDriverGain = mixer.HPDriverGain
+	ctlDacMux       = mixer.DacMux
+)
+
+// The DAC mux, #566. With a plug in, stock reads On and we read Off, and the
+// jack sat 20-30dB below line level with HP Driver Gain already correct.
+// Writing On restored stock's level (@Kozikodi, 2026-09-29, FireOS 5.5.5.4 on
+// two Dots, diffed against stock playing the same cable). The board's DT has
+// no extamp-dacmux pinctrl states, so AudDrv_GPIO_probe logs "fail -19" at
+// boot on stock as well — the control works regardless.
+//
+// Stock also leaves it On with the jack empty. That case is NOT measured on
+// the internal speaker, so removal writes Off: the state every Dot has played
+// its speaker in until now.
+const (
+	dacMuxJack     = "On"
+	dacMuxInternal = "Off"
 )
 
 // HP driver gain values, as mixer indices on a 0..35 range that maps to
@@ -52,7 +68,7 @@ type mixerWrite struct {
 // jackRouting returns the mixer writes that put the codec into the state a
 // given plug position needs.
 //
-// Two controls, deliberately. Stock also clears Right Channel Only and sets
+// Three controls, deliberately. Stock also clears Right Channel Only and sets
 // Ignore Ramp Up on insert, and NEITHER is copied here:
 //
 //   - Right Channel Only selects which codec channel carries the signal, and
@@ -73,12 +89,14 @@ func jackRouting(inserted bool) []mixerWrite {
 		return []mixerWrite{
 			{Ctl: ctlSpeakerAmp, Args: []string{"Off"}},
 			{Ctl: ctlHPDriverGain, Args: []string{hpGainJack, hpGainJack}},
+			{Ctl: ctlDacMux, Args: []string{dacMuxJack}},
 		}
 	}
 	// Nothing in the jack: the internal driver is the only output there is.
 	return []mixerWrite{
 		{Ctl: ctlSpeakerAmp, Args: []string{"On"}},
 		{Ctl: ctlHPDriverGain, Args: []string{hpGainInternal, hpGainInternal}},
+		{Ctl: ctlDacMux, Args: []string{dacMuxInternal}},
 	}
 }
 

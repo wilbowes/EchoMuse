@@ -40,3 +40,5 @@ Deeper technical references live elsewhere:
   chronological record of what was built, what broke, and what we got wrong.
 - [CLAUDE.md](../CLAUDE.md) — codebase orientation for developers (and AI
   assistants).
+- [archived/](archived/) — documents kept as a record and no longer current.
+  The v2.2.0 controller design spec is there.

@@ -138,3 +138,26 @@ _BRIDGE_NETS = ("172.17.", "172.18.", "172.19.", "172.20.",
 def looks_containerised(address: str) -> bool:
     """True if the address is in Docker's default bridge pool."""
     return address.startswith(_BRIDGE_NETS)
+
+
+def bind_mdns(make, address: str):
+    """
+    An mDNS responder on `address`'s interface alone: `make(interfaces=[address])`.
+
+    zeroconf's default opens a socket on every interface the host has, and a
+    send failing on one that mDNS never needed (a monitoring VLAN, #604)
+    surfaces in the event loop and stalls it.
+
+    Falls back to `make()`, every interface, when `address` is not one of this
+    host's: zeroconf raises OSError(ENODEV) for an address that is not local
+    and ValueError for one that is not an address, and either would otherwise
+    stop the controller at startup over a stale SERVER_IP.
+    """
+    try:
+        return make(interfaces=[address])
+    except (OSError, ValueError) as e:
+        log.warning(
+            f"SERVER_IP {address} is not an address on this host ({e}) — "
+            f"advertising mDNS on every interface instead")
+        return make()
+

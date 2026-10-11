@@ -26,6 +26,7 @@ const (
 	SpeakerAmp     = "Ext_Speaker_Amp_Switch"
 	PlaybackVolume = "PCM Playback Volume" // DAC digital volume, 0.5dB steps, 127 = 0dB
 	HPDriverGain   = "HP Driver Gain Volume"
+	DacMux         = "Audio_DacMux_Setting" // jack line level (#566); measured on FireOS 5 only
 )
 
 // Backend is the device implementation. Values are strings as tinymix prints
@@ -38,7 +39,7 @@ type Backend interface {
 var (
 	mu      sync.Mutex
 	backend Backend = unavailable{}
-	warned  = map[string]bool{}
+	warned          = map[string]bool{}
 )
 
 // Use installs a backend. The device build installs tinyalsa's in init; tests

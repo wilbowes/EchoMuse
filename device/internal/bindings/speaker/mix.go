@@ -1,6 +1,9 @@
 package speaker
 
-import "math"
+import (
+	"encoding/binary"
+	"math"
+)
 
 // Ducking and mixing for the two playback streams.
 //
@@ -111,6 +114,40 @@ func (m *Mixer) Mix(voice, music []byte, target int32) []byte {
 		mixInto(voice, music)
 		return voice
 	}
+}
+
+// MixResponse is the wide-precision voice path. It applies the response gain
+// to VOICE before summing music, exactly like Mix conceptually, but retains
+// values beyond S16 until the final device-volume multiply. That intermediate
+// headroom is what makes +6/+12dB useful at ordinary volumes without clipping
+// the voice before the master attenuation can act.
+//
+// dst is interleaved stereo in S16 sample units. gains has one value per
+// frame, already capped against the matching device-volume ramp.
+func (m *Mixer) MixResponse(dst []float64, voice, music []byte, target int32, gains []float64) []float64 {
+	if voice == nil {
+		return nil
+	}
+	if music == nil {
+		m.stepGain(target)
+	} else {
+		m.applyGain(music, target)
+	}
+
+	frames := min(len(voice)/4, len(dst)/2, len(gains))
+	out := dst[:frames*2]
+	for i := 0; i < frames; i++ {
+		gain := gains[i]
+		for ch := 0; ch < 2; ch++ {
+			off := i*4 + ch*2
+			x := float64(int16(binary.LittleEndian.Uint16(voice[off:]))) * gain
+			if off+2 <= len(music) {
+				x += float64(int16(binary.LittleEndian.Uint16(music[off:])))
+			}
+			out[i*2+ch] = x
+		}
+	}
+	return out
 }
 
 // stepGain moves the current gain one period toward the target, by at most

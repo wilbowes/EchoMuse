@@ -67,6 +67,17 @@ const (
 	// room. aecTailMs still sets the software tap's length, which must also
 	// cover the delay error between the speaker write and the mic batches.
 	hwTailMs = 64
+
+	// NumMics is how many microphones the hardware-reference path cancels:
+	// every channel a turn can be given (see micStates).
+	NumMics = 7
+
+	// quietHold is how many silent reference frames pass before the unused
+	// microphones rest. The filter sees two frames of far-end history at
+	// the 64ms tail, so by then every state's history is the silence the
+	// skipped frames would have added, and it resumes where it would have
+	// been. 8 frames is 256ms.
+	quietHold = 8
 )
 
 // Canceller is a single AEC instance shared by the speaker goroutine
@@ -81,6 +92,24 @@ type Canceller struct {
 
 	st       *C.SpeexEchoState
 	stTailMs int // the length st was built with: hwTailMs or tailMs
+
+	// micStates is one echo state per microphone, built with the hardware
+	// reference and used by ProcessMicsWithRef (#814). The echo path from
+	// the speaker differs per microphone, and a turn locks to a different
+	// one each time: a single filter is converged on the LAST turn's
+	// microphone, and measured on a Dot 2 (2026-10-08) it removed 24-26dB of
+	// the wake sound on that microphone and between 23dB and MINUS 7dB on
+	// another. All seven adapt on every period, so whichever one a turn
+	// picks has already learnt its own path. Costs 6.04ms per 32ms period on
+	// the device, 19% of a core (JOURNAL 2026-10-03).
+	micStates       [NumMics]*C.SpeexEchoState
+	lastMicsSaveTry time.Time
+	// farQuiet counts consecutive bit-exact silent reference frames, and
+	// micFrames the per-microphone cancellations run. Past quietHold the
+	// microphones not in use are skipped: nothing is playing, so they have
+	// nothing to learn or remove, and running them is most of the cost.
+	farQuiet  int
+	micFrames uint64
 
 	statePath   string    // saved echo path (persist.go); empty = off
 	lastSaveTry time.Time // monotonic, rate-limits maybeSaveLocked
@@ -106,10 +135,10 @@ type Canceller struct {
 	// log the actual numbers instead of inferring them controller-side.
 	// Accumulated per Process call, reported ~1/s while the reference is
 	// active (i.e. during playback), then reset.
-	statFrames  int
-	statInSum   float64 // Σ mic-frame rms (pre-AEC)
-	statOutSum  float64 // Σ output-frame rms (post-AEC)
-	statRefSum  float64 // Σ reference-frame rms
+	statFrames int
+	statInSum  float64 // Σ mic-frame rms (pre-AEC)
+	statOutSum float64 // Σ output-frame rms (post-AEC)
+	statRefSum float64 // Σ reference-frame rms
 
 	// Far-end telemetry: what WriteFar actually receives and pushes,
 	// counted in pushed (16kHz) samples. Logged ~1/s while the far end is
@@ -184,7 +213,7 @@ func (c *Canceller) SetHardwareRef(on bool) {
 	// The two paths want different filter lengths (hwTailMs). A rebuild
 	// discards what was learnt, which on the way in is almost nothing: the
 	// hardware reference is confirmed by the first playback after boot.
-	if c.st != nil && c.effectiveTailLocked() != c.stTailMs {
+	if c.st != nil && (c.effectiveTailLocked() != c.stTailMs || on != (c.micStates[0] != nil)) {
 		c.buildLocked()
 		if !on {
 			c.seedRingLocked() // nothing drains the ring on the hardware path
@@ -310,6 +339,12 @@ func (c *Canceller) buildLocked() {
 	c.micBuf = (*C.spx_int16_t)(C.malloc(FrameSize * 2))
 	c.refBuf = (*C.spx_int16_t)(C.malloc(FrameSize * 2))
 	c.outBuf = (*C.spx_int16_t)(C.malloc(FrameSize * 2))
+	if c.hwRef {
+		for i := range c.micStates {
+			c.micStates[i] = C.speex_echo_state_init(C.int(FrameSize), tailSamples)
+			C.speex_echo_ctl(c.micStates[i], C.SPEEX_ECHO_SET_SAMPLING_RATE, unsafe.Pointer(&rate))
+		}
+	}
 	log.Printf("[aec] enabled: frame=%d tail=%dms delay=%dms", FrameSize, c.stTailMs, c.delayMs)
 }
 
@@ -333,6 +368,12 @@ func (c *Canceller) freeLocked() {
 		C.free(unsafe.Pointer(c.refBuf))
 		C.free(unsafe.Pointer(c.outBuf))
 		c.micBuf, c.refBuf, c.outBuf = nil, nil, nil
+	}
+	for i, st := range c.micStates {
+		if st != nil {
+			C.speex_echo_state_destroy(st)
+			c.micStates[i] = nil
+		}
 	}
 }
 
@@ -433,6 +474,10 @@ func (c *Canceller) ProcessWithRef(mono, ref []byte) []byte {
 func (c *Canceller) process(mono, hwref []byte) []byte {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.processLocked(mono, hwref)
+}
+
+func (c *Canceller) processLocked(mono, hwref []byte) []byte {
 	if !c.enabled || c.st == nil {
 		return mono
 	}
@@ -507,35 +552,7 @@ func (c *Canceller) process(mono, hwref []byte) []byte {
 			binary.LittleEndian.PutUint16(out[off+i*2:], uint16(res[i]))
 		}
 
-		// Attenuation telemetry: fires while the speaker is playing
-		// (reference above the silence floor) — and also when the mic is
-		// loud with a quiet reference, the broken state this telemetry was
-		// built to catch. ~1 line/s of active audio.
-		refRMS := frameRMS(ref)
-		micRMS := frameRMS(mic)
-		if refRMS > 100 || micRMS > 500 { // int16 units; idle floor is well below both
-			c.statFrames++
-			c.statInSum += micRMS
-			c.statOutSum += frameRMS(res)
-			c.statRefSum += refRMS
-			if c.statFrames == 32 { // 32 × 32ms ≈ 1s
-				inAvg, outAvg, refAvg := c.statInSum/32, c.statOutSum/32, c.statRefSum/32
-				att := 0.0
-				if outAvg > 0 {
-					att = 20 * math.Log10(inAvg/outAvg)
-				}
-				if useHW {
-					log.Printf("[aec] att=%.1fdB mic=%.0f out=%.0f ref=%.0f "+
-						"src=hw(ch8) frames=%d",
-						att, inAvg, outAvg, refAvg, c.hwFrames)
-					c.maybeSaveLocked(att, refAvg > 100)
-				} else {
-					log.Printf("[aec] att=%.1fdB mic=%.0f out=%.0f ref=%.0f ring=%d (delay=%dms)",
-						att, inAvg, outAvg, refAvg, c.count, c.delayMs)
-				}
-				c.statFrames, c.statInSum, c.statOutSum, c.statRefSum = 0, 0, 0, 0
-			}
-		}
+		c.noteAttLocked(frameRMS(mic), frameRMS(res), frameRMS(ref), useHW, -1)
 	}
 
 	// Occupancy governor: the ring must sit at ~delaySamples. WriteFar fills
@@ -577,6 +594,110 @@ func (c *Canceller) process(mono, hwref []byte) []byte {
 	return out
 }
 
+// noteAttLocked is the attenuation telemetry: it fires while the speaker is
+// playing (reference above the silence floor), and also when the mic is loud
+// with a quiet reference, the broken state this telemetry was built to
+// catch. ~1 line/s of active audio. micCh is the microphone the figures are
+// for on the per-microphone path, or -1.
+func (c *Canceller) noteAttLocked(micRMS, outRMS, refRMS float64, useHW bool, micCh int) {
+	if refRMS <= 100 && micRMS <= 500 { // int16 units; idle floor is well below both
+		return
+	}
+	c.statFrames++
+	c.statInSum += micRMS
+	c.statOutSum += outRMS
+	c.statRefSum += refRMS
+	if c.statFrames < 32 { // 32 × 32ms ≈ 1s
+		return
+	}
+	inAvg, outAvg, refAvg := c.statInSum/32, c.statOutSum/32, c.statRefSum/32
+	att := 0.0
+	if outAvg > 0 {
+		att = 20 * math.Log10(inAvg/outAvg)
+	}
+	switch {
+	case micCh >= 0:
+		log.Printf("[aec] att=%.1fdB mic=%.0f out=%.0f ref=%.0f "+
+			"src=hw(ch8) on=ch%d frames=%d",
+			att, inAvg, outAvg, refAvg, micCh, c.hwFrames)
+		c.maybeSaveMicsLocked(att, refAvg > 100)
+	case useHW:
+		log.Printf("[aec] att=%.1fdB mic=%.0f out=%.0f ref=%.0f "+
+			"src=hw(ch8) frames=%d",
+			att, inAvg, outAvg, refAvg, c.hwFrames)
+		c.maybeSaveLocked(att, refAvg > 100)
+	default:
+		log.Printf("[aec] att=%.1fdB mic=%.0f out=%.0f ref=%.0f ring=%d (delay=%dms)",
+			att, inAvg, outAvg, refAvg, c.count, c.delayMs)
+	}
+	c.statFrames, c.statInSum, c.statOutSum, c.statRefSum = 0, 0, 0, 0
+}
+
+// ProcessMicsWithRef cancels EVERY microphone against the hardware reference
+// and returns the cancelled audio of the one in use (#814). mics holds
+// NumMics buffers of the same period, indexed by channel; active is the
+// channel the pipeline is reading. See micStates for why one filter is not
+// enough.
+//
+// Off the hardware reference this is Process on the active microphone: the
+// software tap's ring is drained once per period and cannot feed seven
+// filters, and its alignment error dwarfs the difference between mics.
+// Anything it cannot handle goes the same way and is logged there, never
+// silently bypassed.
+func (c *Canceller) ProcessMicsWithRef(mics [][]byte, active int, ref []byte) []byte {
+	if active < 0 || active >= len(mics) {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	mono := mics[active]
+	ok := c.enabled && c.hwRef && c.micStates[0] != nil && len(mics) == NumMics &&
+		len(mono) > 0 && len(mono)%(FrameSize*2) == 0 && len(ref) == len(mono)
+	for _, m := range mics {
+		ok = ok && len(m) == len(mono)
+	}
+	if !ok {
+		return c.processLocked(mono, ref)
+	}
+
+	out := make([]byte, len(mono))
+	mic := unsafe.Slice((*int16)(unsafe.Pointer(c.micBuf)), FrameSize)
+	far := unsafe.Slice((*int16)(unsafe.Pointer(c.refBuf)), FrameSize)
+	res := unsafe.Slice((*int16)(unsafe.Pointer(c.outBuf)), FrameSize)
+	for off := 0; off < len(mono); off += FrameSize * 2 {
+		quiet := true
+		for i := 0; i < FrameSize; i++ {
+			far[i] = int16(binary.LittleEndian.Uint16(ref[off+i*2:]))
+			quiet = quiet && far[i] == 0
+		}
+		if quiet {
+			c.farQuiet++
+		} else {
+			c.farQuiet = 0
+		}
+		c.hwFrames++
+		// The active microphone last, so mic and res still hold its frame
+		// for the telemetry below.
+		for k := 1; k <= NumMics; k++ {
+			m := (active + k) % NumMics
+			if m != active && c.farQuiet > quietHold {
+				continue
+			}
+			c.micFrames++
+			sub := mics[m][off : off+FrameSize*2]
+			for i := 0; i < FrameSize; i++ {
+				mic[i] = int16(binary.LittleEndian.Uint16(sub[i*2:]))
+			}
+			C.speex_echo_cancellation(c.micStates[m], c.micBuf, c.refBuf, c.outBuf)
+		}
+		for i := 0; i < FrameSize; i++ {
+			binary.LittleEndian.PutUint16(out[off+i*2:], uint16(res[i]))
+		}
+		c.noteAttLocked(frameRMS(mic), frameRMS(res), frameRMS(far), true, active)
+	}
+	return out
+}
+
 func frameRMS(s []int16) float64 {
 	var sum float64
 	for _, v := range s {
@@ -603,10 +724,14 @@ func (c *Canceller) ExportState() ([]byte, error) {
 }
 
 func (c *Canceller) exportLocked() ([]byte, error) {
-	if c.st == nil {
+	return c.exportStateLocked(c.st)
+}
+
+func (c *Canceller) exportStateLocked(st *C.SpeexEchoState) ([]byte, error) {
+	if st == nil {
 		return nil, errors.New("aec: not enabled")
 	}
-	n := int(C.em_echo_state_size(c.st))
+	n := int(C.em_echo_state_size(st))
 	out := make([]byte, stateHeader+n)
 	copy(out, stateMagic)
 	h := out[len(stateMagic):]
@@ -614,7 +739,7 @@ func (c *Canceller) exportLocked() ([]byte, error) {
 	binary.LittleEndian.PutUint16(h[2:], uint16(c.stTailMs))
 	binary.LittleEndian.PutUint32(h[4:], uint32(sampleRate))
 	binary.LittleEndian.PutUint32(h[8:], uint32(n))
-	if C.em_echo_state_export(c.st, unsafe.Pointer(&out[stateHeader]), C.int(n)) != 0 {
+	if C.em_echo_state_export(st, unsafe.Pointer(&out[stateHeader]), C.int(n)) != 0 {
 		return nil, errors.New("aec: export size mismatch")
 	}
 	return out, nil
@@ -631,7 +756,15 @@ func (c *Canceller) ImportState(b []byte) error {
 }
 
 func (c *Canceller) importLocked(b []byte) error {
-	if c.st == nil {
+	if err := c.checkStateLocked(c.st, b); err != nil {
+		return err
+	}
+	return c.loadIntoLocked(c.st, b)
+}
+
+// checkStateLocked says whether b is a saved echo path this state can take.
+func (c *Canceller) checkStateLocked(st *C.SpeexEchoState, b []byte) error {
+	if st == nil {
 		return errors.New("aec: not enabled")
 	}
 	if len(b) < stateHeader || string(b[:len(stateMagic)]) != stateMagic {
@@ -644,7 +777,7 @@ func (c *Canceller) importLocked(b []byte) error {
 		return fmt.Errorf("aec: saved for frame %d tail %dms rate %d, running %d/%dms/%d",
 			frame, tail, rate, FrameSize, c.stTailMs, sampleRate)
 	}
-	if n != int(C.em_echo_state_size(c.st)) || len(b) != stateHeader+n {
+	if n != int(C.em_echo_state_size(st)) || len(b) != stateHeader+n {
 		return errors.New("aec: saved echo path is the wrong size")
 	}
 	// Every field is 4 bytes and, in this FLOATING_POINT build, a float —
@@ -655,7 +788,12 @@ func (c *Canceller) importLocked(b []byte) error {
 			return errors.New("aec: saved echo path holds a non-finite value")
 		}
 	}
-	if C.em_echo_state_import(c.st, unsafe.Pointer(&b[stateHeader]), C.int(n)) != 0 {
+	return nil
+}
+
+// loadIntoLocked imports a saved echo path checkStateLocked has passed.
+func (c *Canceller) loadIntoLocked(st *C.SpeexEchoState, b []byte) error {
+	if C.em_echo_state_import(st, unsafe.Pointer(&b[stateHeader]), C.int(len(b)-stateHeader)) != 0 {
 		return errors.New("aec: import size mismatch")
 	}
 	return nil

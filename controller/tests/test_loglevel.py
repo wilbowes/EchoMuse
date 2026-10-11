@@ -264,3 +264,72 @@ def test_every_logger_the_controller_defines_is_reachable():
     assert not offenders, (
         "logger names outside the echomuse hierarchy — a per-area level "
         f"cannot reach these: {offenders}")
+
+# ── effective(): what is actually in force (#378) ─────────────────────────────
+#
+# For the support bundle. A bundle whose log tail is thin is ambiguous
+# between "nothing happened" and "it was not being logged", and those want
+# opposite investigations — so the bundle has to say which.
+
+def test_effective_reports_the_level_that_was_applied(levels_restored):
+    # The parent has to exist first, exactly as it does in the running
+    # controller: `apply` honours a name whose nearest EXISTING ancestor is a
+    # logger, so a bare name in a fresh test process is (correctly) refused.
+    logging.getLogger("echomuse")
+    em_loglevel.apply("echomuse.selftest=WARNING")
+    assert em_loglevel.effective()["echomuse.selftest"] == "WARNING"
+
+
+def test_effective_reports_the_root_because_debug_owns_it(levels_restored):
+    """The baseline is DEBUG's, and without it in the report a bundle cannot
+    say whether a thin log tail is the fault or the setting."""
+    logging.getLogger().setLevel(logging.INFO)
+    assert em_loglevel.effective().get("root") == "INFO"
+
+
+def test_effective_omits_a_logger_that_merely_inherits(levels_restored):
+    """
+    Only levels that were CHOSEN. A child at NOTSET is at whatever its parent
+    says, and listing the inherited value under every child would bury the two
+    or three levels that were set under forty that were not.
+    """
+    logging.getLogger("echomuse").setLevel(logging.WARNING)
+    logging.getLogger("echomuse.inherits").setLevel(logging.NOTSET)
+    logging.getLogger("echomuse.owns").setLevel(logging.ERROR)
+    out = em_loglevel.effective()
+    assert out.get("echomuse.owns") == "ERROR"
+    assert "echomuse.inherits" not in out
+
+
+def test_effective_reports_what_is_in_force_not_what_was_asked_for(levels_restored):
+    """
+    The reason this reads the loggers. A pair naming a logger that does not
+    exist is DROPPED, with a warning — so the requested string says one thing
+    and the controller does another, and a bundle quoting the request would be
+    wrong.
+
+    The name is under a root of its own rather than under `echomuse`, so no
+    other test creating that logger can turn the "nothing logs to this" case
+    into an honoured one and make this order-dependent.
+    """
+    requested = em_loglevel.apply("nosuchroot.absent=DEBUG")
+    assert "nosuchroot.absent" not in requested.levels
+    assert requested.problems, "a name nothing logs to must be reported"
+    assert "nosuchroot.absent" not in em_loglevel.effective()
+
+
+def test_effective_is_sorted_so_two_bundles_diff_cleanly(levels_restored):
+    logging.getLogger("echomuse")
+    em_loglevel.apply("echomuse.zeta=INFO,echomuse.alpha=INFO")
+    names = list(em_loglevel.effective())
+    assert names == sorted(names)
+
+
+def test_effective_carries_names_only(levels_restored):
+    """It goes in a file people attach to public issues, so a level name is
+    all it may contain — no paths, no filenames, nothing user-authored."""
+    logging.getLogger("echomuse")
+    em_loglevel.apply("echomuse.selftest=INFO")
+    for key, value in em_loglevel.effective().items():
+        assert "/" not in key and "\\" not in key, key
+        assert value.replace("_", "").isalpha(), value

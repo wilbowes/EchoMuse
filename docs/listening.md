@@ -81,6 +81,14 @@ audio before the controller could close it, so off is **refused** for it and
 the picker snaps back. An Echo streaming to the controller is stopped by the
 controller.
 
+Off behaves the same wherever the wake word is detected (#778). The wake word
+neither starts a turn nor interrupts a reply; a turn Home Assistant or the
+button starts still listens, and so does a follow-up question. And nothing is
+streamed while it is off: if audio arrives from an Echo whose wake word is
+off, the controller stops that stream. That case was found on hardware, when
+an Echo switched from listening privately to "On the controller" kept a
+stream running for 31 seconds under "No wake word".
+
 ## States an Echo can be in
 
 The controller resolves one of these per Echo (`em_listen.resolve`) and the
@@ -161,9 +169,11 @@ the first half-second of the *next* user's command.
 The Echo keeps a ring of recent processed audio (`ringMs`, 2s) with the
 capture time of every 80 ms frame. A wake reports the capture time of the
 frame that crossed; the session starts with every ringed frame captured
-**after** it, then continues live. The controller's existing
-`VOICE_PREROLL_DISCARD` removes the wake word's tail, exactly as it does for a
-controller-detected wake.
+**after** it, then continues live. The controller sends all of it to speech
+to text: `VOICE_PREROLL_DISCARD` (240 ms) applies only to a stream the
+controller scored itself, because on a session it removed the first word of a
+command spoken straight after the wake word (`em_listen.tail_discard`).
+A wake spoken over a reply opens a session the same way and is treated the same.
 
 Timestamps come from one `time.Now()` taken when the frame is handed to both
 the scorer and the ring, so the scorer's queue delay (up to 640 ms when busy)
@@ -225,20 +235,40 @@ not by when it arrived. 3 s is the Echo's ack timeout; a private wake later
 than that has already closed its session, and the controller ignores a wake
 for a session the Echo has closed.
 
-**A mixed fleet waits; a uniform one does not.** When some Echoes detect the
-wake word themselves and others are scored by the controller, the two paths
-reach the arbiter at different speeds, so the first claim to arrive is not
-the first heard: on 2026-09-24 an Echo 10 m away, detecting on the device,
-arrived 16 ms ahead of one a metre from the speaker that the controller was
-scoring, and took the turn. So on a mixed fleet the first claim is held until
-250 ms after it was heard (`MIXED_HOLD_S`, less whatever it already spent in
-flight), every claim heard within the window by then is collected, and the
-one heard **earliest** wins. Nothing is revoked: no one holds the turn until
-the hold ends. A fleet that detects one way races on equal terms and grants
-the first arrival at once, as above. An Echo whose mode is not yet known
-counts as different, so the fleet holds rather than guesses. A barge-in
-during playback fires on the second of two frames and is dated from the
-first.
+**Every contest is held, and the loudest Echo wins it** (#747).
+Whenever two or more Echoes can claim, the first claim is held until 250 ms
+after it was heard (`ARB_HOLD_S`, less whatever it already spent in flight),
+and every claim heard within the window by then is collected. Nothing is
+revoked: no one holds the turn until the hold ends.
+
+Then one is chosen: the **loudest**. Loudness is the wake's averaged level as
+the Echo measured it, after echo cancellation and with the mic gain setting
+divided out. There is no margin. What has to be right is the room, and
+between rooms the lead is large; inside one room the levels sit within a
+decibel or two, and which of those Echoes answers does not matter. Loudness
+is used only when it can be trusted, and the contest falls back to
+earliest-heard when:
+
+- any Echo sent no level (older firmware);
+- any Echo heard the wake over its own speaker, since the reading then
+  contains the reply or the music; a barge-in is always this case;
+- the Echoes' MICPGA or digital gain settings differ, since those are still
+  inside the reading.
+
+Why not time: the scorer works in 80 ms frames on a grid that starts at a
+different moment on each Echo, so the order of hearing is mostly frame
+alignment. Three Echoes side by side reported one word 89 to 224 ms apart
+(2026-10-06); sound covers a metre in 3 ms. In one house's fourteen contested
+wakes the loudest Echo led every other by at least 9.7 dB, and first-to-hear
+chose it in eight.
+
+Not handled: an Echo with a weak microphone reads quiet and can lose the turn
+to a louder one further away (#731), and on firmware before v2.18.0 an emOS
+Echo reads about 6 dB below a FireOS 5 one (#806). A single-Echo house never waits. Until
+2026-10-05 only a mixed fleet, some Echoes detecting on the device and some
+scored by the controller, was held, and the earliest heard always won. A
+barge-in during playback fires on the second of two frames and is dated from
+the first.
 
 The wake log line reports, for a controller-scored wake, how long after
 arrival it was scored and how long its frame spent in transit.

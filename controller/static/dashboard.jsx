@@ -660,7 +660,7 @@ function ControllerEndpointsField({ value, onChange, readOnly = false }) {
 // VISIBLE and disabled: the capability rule is that a device lacking a feature
 // shows the control with the reason, and a native select would hide the option
 // entirely, which reads as the feature not existing at all.
-function Select({ label, sub, value, options, onChange }) {
+function Select({ label, sub, value, options, onChange, disabled = false }) {
   return (
     <div style={{ marginBottom: 20, minWidth: 0 }}>
       <div style={{ marginBottom: 7, minWidth: 0 }}>
@@ -673,9 +673,9 @@ function Select({ label, sub, value, options, onChange }) {
             key={o.value}
             role="radio" aria-checked={o.value === value}
             className={'em-pill em-pill--small' + (o.value === value ? ' em-pill--accent' : '')}
-            disabled={!!o.disabled}
+            disabled={disabled || !!o.disabled}
             style={{ flex: 1, minWidth: 0 }}
-            onClick={() => { if (!o.disabled) onChange(o.value); }}>
+            onClick={() => { if (!(disabled || o.disabled)) onChange(o.value); }}>
             {o.label}
           </button>
         ))}
@@ -2456,6 +2456,9 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 listen={device.connected ? device.listen : null}
                 wakeCueCapable={!device.connected || !!device.wakeCueCapable}
                 volumeCueCapable={!device.connected || !!device.volumeCueCapable}
+                remoteVolumeArcCapable={!device.connected || !!device.remoteVolumeArcCapable}
+                responseLevelCapable={!device.connected || !!device.responseLevelCapable}
+                wakeMicCapable={!device.connected || !!device.wakeMicCapable}
                 sendspinCapable={!device.connected || !!device.sendspinCapable}
                 sendspinPanel={device.connected && device.sendspinCapable
                   ? <SendspinPairing deviceId={device.device_id} status={device.sendspin} isAdmin={isAdmin}/>
@@ -3448,6 +3451,98 @@ const _wipeVerdict = (out) => {
   return { ok: true, why: '', cacheLeft: cache };
 };
 
+// Is f1r30s.zip on the device? The probe prints F1R30S=yes when it is and
+// _F1CHK when it ran to the end, so "absent" and "the probe never ran" stay
+// apart: only a probe that ran may send the operator to the file picker.
+function _f1r30sVerdict(out) {
+  const text = out || '';
+  const ran = text.includes('_F1CHK');
+  return { ran, present: ran && /^F1R30S=yes$/m.test(text) };
+}
+
+// What the failure panel shows as the reason: the error's first paragraph.
+// The rest (command output, hashes) stays in the transcript below it.
+function _stepFailureReason(message) {
+  return String(message || '').split(/\n\s*\n/)[0].trim();
+}
+
+// Did the extract leave a magiskboot the rest of the step can run? `unzip`
+// exiting non-zero proves nothing by itself and its OUTPUT was never read:
+// /sdcard/f1r30s.zip missing answers "can't open", the step logs that line
+// and carries on, and the flow then patches nothing — no magiskboot, no
+// init.csm.project.rc entry — leaving a device that runs perfectly from
+// `sh /data/local/bin/start_server.sh` and is dead after every reboot. Nothing
+// downstream fails when magiskboot is missing, because every magiskboot call
+// below logs its own output and ignores it. So the probe prints:
+//
+//   MAGISKBOOT=yes  — present and executable
+//   _MBCHK          — the probe ran to the end
+//
+// Two answers are being kept apart and neither of them is "yes": a check that
+// could not run must not read as a pass, which is what `_CLEARCHK` and
+// `_WIPECHK` exist for.
+const _magiskbootVerdict = (out = '') => {
+  if (!out || !out.includes('_MBCHK')) {
+    return { ok: false, why:
+      'The check after the extract produced no output at all, so it never ran — '
+      + 'this says nothing about whether the archive unpacked.' };
+  }
+  if (!/^MAGISKBOOT=yes$/m.test(out)) {
+    return { ok: false, why:
+      'unzip did not leave an executable magiskboot at /tmp/bin/magiskboot. '
+      + 'Nothing has been patched or flashed. Check that /sdcard/f1r30s.zip is '
+      + 'on the device and retry this step.' };
+  }
+  return { ok: true, why: '' };
+};
+
+// Is the magisk.db on the device the one the controller served? Measured at 0
+// bytes where it was 36864, with the controller healthy and magiskd then
+// refusing every su ("sqlite3_exec: no such table: policies"). `cp` returning
+// 0 says the copy happened, not what it copied: push() returns without
+// draining — busybox cat on TWRP never closes stdout, so the next shell
+// command is the sequencing — and a cp that runs before cat has flushed
+// leaves a 0-byte source, a 0-byte destination, chmod still applied and
+// nothing anywhere saying so. Intermittent, and the same inputs succeed on a
+// retry, which is what makes it worth reading back rather than re-running.
+//
+//   DB=<bytes>  — the size of the INSTALLED file, read off the device
+//   _DBCHK      — the probe ran to the end
+//
+// `wc -c < file` rather than reading the bytes back: it is one applet in a
+// recovery that already has unzip, dd and cpio, and the number is the thing
+// being asserted. A probe that answered nothing is never a match — "we could
+// not measure this" and "this is zero" are different facts and only one of
+// them is the reported bug.
+const _preseedVerdict = (out = '', want) => {
+  if (!out || !out.includes('_DBCHK')) {
+    return { ok: false, why:
+      'The check after installing magisk.db produced no output at all, so it '
+      + 'never ran — this says nothing about what is on the device.' };
+  }
+  const got = ((out.match(/^DB=(\d+)/m) || [])[1] || '');
+  if (!got) {
+    return { ok: false, why:
+      'Could not read the size of /data/adb/magisk.db on the device, so there '
+      + 'is no evidence the copy landed. Retry this step; if it keeps failing, '
+      + 'check free space on /data.' };
+  }
+  if (!want) {
+    return { ok: false, why:
+      'The controller served a 0-byte magisk.db, which is exactly the file that '
+      + 'makes magiskd refuse every su. Nothing has been installed; retry the '
+      + 'step, and report it if the controller keeps serving an empty file.' };
+  }
+  if (+got !== want) {
+    return { ok: false, why:
+      `magisk.db is ${got} bytes on the device, expected ${want}. The push or `
+      + 'the copy did not land, so magiskd will reject every su request with '
+      + '"no such table: policies" until it does. Retry this step — nothing '
+      + 'else has been changed.' };
+  }
+  return { ok: true, why: '' };
+};
+
 // ── SSIDs and passphrases ───────────────────────────────────────────────────
 //
 // An SSID is 0-32 arbitrary octets (IEEE 802.11): spaces, quotes,
@@ -3608,6 +3703,11 @@ const _SECURITY_LABEL = {
 };
 
 const _MAGISK_FILENAME = 'Magisk-v17.3.zip';
+// f1r30s.zip from R0rt1z2's XDA thread: the one build this flow has been run
+// with. Rooting leaves it on /sdcard; a wipe or a tidy-up removes it, and the
+// wizard then asks for it rather than failing (UAT 2026-10-11).
+const _F1R30S_PATH   = '/sdcard/f1r30s.zip';
+const _F1R30S_SHA256 = 'f1e522fb3b86a6c90d559e7b8085501ffc59165850310b39468a3acfbff5bbc8';
 const _MAGISK_SHA256    = '18e46b16b25ebe691c282fe311beccd4811cd533848a64e2efbd754fb85efde7';
 
 // Is this an EchoMuse server binary? Checked before the install step pushes
@@ -4178,6 +4278,13 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   const adbRef                  = useRef(null);
   const setAdb = c => { adbRef.current = c; _setAdb(c); };
   const [magiskFile, setMagiskFile] = useState(null);
+  // Step 3 on FireOS: set when f1r30s.zip is missing from the device, so the
+  // failure panel offers a picker; the file is pushed on the retry.
+  const [needF1r30s, setNeedF1r30s] = useState(false);
+  const [f1r30sFile, setF1r30sFile] = useState(null);
+  // The failed step's own message, shown in the failure panel. Until this
+  // existed the reason was only in the transcript below the fold.
+  const [stepError, setStepError] = useState('');
   const [binaryFile, setBinaryFile] = useState(null);
   // emOS flow. `emosRef` is the escrowed boot image — the build input
   // and the undo — held in the page for the length of the wizard; the copy
@@ -4727,9 +4834,9 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         await c.close();
         setAdb(null);
         const err = new Error(
-          `This device (serial ${serial}) appears to already be registered with the controller ` +
-          `as "${match.label || match.device_id}". Delete it from the controller first ` +
-          `if you want to re-provision, then retry.`
+          `This Echo (serial ${serial}) is already registered with the controller ` +
+          `as "${match.label || match.device_id}". Choose below: re-provision it and ` +
+          `keep its record, or delete the record.`
         );
         err.matchedDeviceId = match.device_id;
         throw err;
@@ -5431,6 +5538,44 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       + 'has been checked against.' };
   }
 
+  // Step 3's precondition, kept out of runPatchBoot: rooting leaves
+  // f1r30s.zip on /sdcard, and when it is gone the operator is asked for it
+  // instead of being told unzip failed. Checked against the one known build
+  // before it is copied, as the Magisk zip is.
+  async function ensureF1r30s(c) {
+    const f1Probe = `[ -f ${_F1R30S_PATH} ] && echo F1R30S=yes; echo _F1CHK`;
+    const f1 = _f1r30sVerdict(await c.shell(f1Probe));
+    if (f1.ran && !f1.present) {
+      if (!f1r30sFile) {
+        const err = new Error(
+          'f1r30s.zip is not on this Echo. Choose it below and click Retry: '
+          + 'the wizard copies it over. Nothing has been changed.');
+        err.needsF1r30s = true;
+        throw err;
+      }
+      const buf = await f1r30sFile.arrayBuffer();
+      const hash = await _sha256Hex(buf);
+      if (hash !== _F1R30S_SHA256) {
+        const err = new Error(
+          `"${f1r30sFile.name}" is not the f1r30s.zip this wizard was built for. `
+          + `Nothing has been copied or changed. Choose the file from R0rt1z2's XDA thread.`
+          + `\n\nSHA-256 ${hash}\nexpected ${_F1R30S_SHA256}`);
+        err.needsF1r30s = true;
+        throw err;
+      }
+      addLog('f1r30s.zip verified. Copying it to the Echo…');
+      await c.push(_F1R30S_PATH, new Uint8Array(buf),
+        pct => setProgress({ label: 'Uploading f1r30s.zip', pct }));
+      setProgress(null);
+      if (!_f1r30sVerdict(await c.shell(f1Probe)).present) {
+        throw new Error('f1r30s.zip was sent but is not on the Echo afterwards. '
+          + 'Nothing has been patched or flashed.');
+      }
+      setNeedF1r30s(false);
+      addLog('f1r30s.zip is on the Echo.', 'ok');
+    }
+  }
+
   async function runPatchBoot(c) {
     addLog('Setting up work directories…');
     await c.shell('mkdir -p /tmp/work /tmp/bin');
@@ -5438,6 +5583,17 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     const unzipOut = await c.shell('unzip -o /sdcard/f1r30s.zip bin/magiskboot -d /tmp/ 2>&1');
     addLog(unzipOut || '(done)');
     await c.shell('chmod 755 /tmp/bin/magiskboot');
+    // Read the extract back rather than trusting it (#268). `unzip` on a
+    // missing archive prints "can't open" and exits non-zero, and this step
+    // used to log that line and carry on — after which nothing below fails,
+    // because every magiskboot call here logs its own output and ignores it.
+    // The device then patches no ramdisk and comes up dead after every reboot,
+    // having worked perfectly under `sh /data/local/bin/start_server.sh`.
+    const bootProbe = await c.shell(
+      '[ -x /tmp/bin/magiskboot ] && echo MAGISKBOOT=yes; echo _MBCHK');
+    const magiskboot = _magiskbootVerdict(bootProbe);
+    if (!magiskboot.ok) throw new Error(`${magiskboot.why}\n\nunzip said:\n${unzipOut || '(nothing)'}`);
+    addLog('magiskboot extracted.', 'ok');
 
     addLog('Checking which partition the boot image lives in…');
     const probe = await c.shell(
@@ -5659,6 +5815,21 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     addLog(`magisk.db: ${dbBytes.length} bytes`);
     await c.push('/tmp/magisk_preseed.db', dbBytes);
     await c.shell('cp /tmp/magisk_preseed.db /data/adb/magisk.db && chmod 600 /data/adb/magisk.db');
+    // Read the installed size back off the device (#267). The && above proves cp
+    // returned 0, which says nothing about the bytes it copied: push() returns
+    // without draining, so if the sequencing the transport relies on does not
+    // hold on this run, cp reads the file before cat has flushed it and leaves
+    // a 0-byte destination with the chmod still applied. Intermittent, and
+    // magiskd answers it by refusing every su — which reads as a broken root,
+    // on a device that is provisioned correctly in every other respect.
+    // Labelled, for the same reason MAGISKBOOT=yes is: the verdict looks for
+    // `DB=<n>` by name, and a bare `wc -c` prints the number alone — which
+    // reads as a probe that could not measure anything, so a correctly
+    // installed database would be refused on every device.
+    const dbProbe = await c.shell(
+      'echo "DB=$(wc -c < /data/adb/magisk.db 2>/dev/null)"; echo _DBCHK');
+    const seeded = _preseedVerdict(dbProbe, dbBytes.length);
+    if (!seeded.ok) throw new Error(seeded.why);
     addLog('magisk.db installed.', 'ok');
   }
 
@@ -8268,6 +8439,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     const abandoned = () => epoch !== stepEpoch.current;
 
     setRunning(true);
+    setStepError('');
     markStep(stepIdx, 'running');
     // One banner per step. The transcript is the only record of a provision
     // and people paste it when something goes wrong — without these it is a
@@ -8337,7 +8509,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       else switch (stepIdx) {
         case  0: c = await runConnectAndroid(); break;
         case  1: c = await runConnectTwrp(); break;
-        case  2: await runPatchBoot(c); break;
+        case  2: await ensureF1r30s(c); await runPatchBoot(c); break;
         case  3: await runInstallMagisk(c, magiskFile); break;
         case  4: await runPreseedDb(c); break;
         case  5: await runReboot(c); break;
@@ -8369,8 +8541,10 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         return;
       }
       addLog(`Error: ${e.message}`, 'error');
+      setStepError(e.message || String(e));
       markStep(stepIdx, 'error');
       if (e.matchedDeviceId) setDuplicateDeviceId(e.matchedDeviceId);
+      if (e.needsF1r30s) setNeedF1r30s(true);
       // Collect device state while it is still the state that failed. A
       // duplicate-device stop is our own bookkeeping and has nothing to ask
       // the device about.
@@ -8383,6 +8557,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       // clears the wrong thing on the other one.
       const failedId = STEPS[stepIdx]?.id;
       if (failedId === 'install_magisk') setMagiskFile(null);
+      if (failedId === 'patch_boot') setF1r30sFile(null);
       if (failedId === 'install_em') setBinaryFile(null);
     }
     if (!abandoned()) setRunning(false);
@@ -8447,6 +8622,14 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   const statusIcons  = { pending: '○', running: '◌', done: '●', error: '✕' };
 
   function recoveryHint() {
+    if (step === 0 && duplicateDeviceId) {
+      return 'Keeping the record keeps its port, config and Home Assistant '
+           + 'entities. Deleting it removes them.';
+    }
+    if (cur.id === 'patch_boot' && needF1r30s) {
+      return 'f1r30s.zip is the file from R0rt1z2\'s XDA thread that was '
+           + 'installed when this Echo was unlocked.';
+    }
     if (CONNECT.has(step)) {
       return adb
         ? 'The USB link is up but this step failed — click Retry to run it again.'
@@ -8509,7 +8692,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                 {doneCount} of {STEPS.length} complete · step {step + 1}
               </div>
             </div>
-            <div style={{ flex: 1, overflowY: 'auto', padding: '6px 0 12px' }}>
+            <div className="em-wizard-scroll" style={{ flex: 1, overflowY: 'auto', padding: '6px 0 12px' }}>
              {STEPS.map((s, i) => {
               const st = stepState[i]; const active = i === step;
               return (
@@ -8540,7 +8723,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                 the WebUSB warning on step 0 and the first-boot guide on the
                 emOS console step each left the button barely clickable (UAT
                 2026-09-27). */}
-            <div style={{ flex: '0 1 auto', minHeight: 0, overflowY: 'auto' }}>
+            <div className="em-wizard-scroll" style={{ flex: '0 1 auto', minHeight: 0, overflowY: 'auto' }}>
 
             {/* Step title + desc */}
             <div style={{ marginBottom: 12 }}>
@@ -8618,7 +8801,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
               </div>
             )}
 
-            {upcoming.length > 0 && !isDone && (
+            {upcoming.length > 0 && !isDone && !stepFailed && (
               <div className="em-wizard-upcoming">
                 <div className="em-label" style={{ marginBottom: 6 }}>Up next</div>
                 {upcoming.map(s => (
@@ -8772,7 +8955,12 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                 at step 3 rewrites the boot partition too, so the restore undoes
                 both. Not offered once Android is up — no TWRP, no restore. */}
             {(isEmos ? (step === 6 || step === 7) : (step >= 2 && step <= 4))
-              && stepState[step] === 'error' && !running && (
+              && stepState[step] === 'error' && !running
+              // Only when there is something to put back: this session
+              // escrowed an image, or it was resumed after a reload and the
+              // operator may hold the download. A step that failed before
+              // its escrow showed a picker for a file that did not exist.
+              && (emosRef || restored) && (
               <div className="em-inset" style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 8, padding: 10 }}>
                 <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)' }}>
                   Put {emosTarget || 'the boot partition'} back to the image escrowed at step 3
@@ -8832,12 +9020,16 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                     on their own hardware, and the wrong reaction (power
                     cycling) is what makes a recoverable Echo unrecoverable. */}
                 <p style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)', lineHeight: 1.7, margin: '10px 0 0' }}>
-                  <strong>If it does not come up, do not keep power cycling it</strong> — that turns a
-                  recoverable Echo into a case-opening job. Instead: unplug it, hold <strong>mute</strong> or{' '}
-                  <strong>+</strong> (<a href="https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/" target="_blank"
-                  rel="noreferrer">which one depends on your amonet version</a>) and plug it back in to
-                  reach TWRP, reconnect here and use <strong>Restore escrowed boot image</strong>. About
-                  ten seconds, and /data is untouched.
+                  <strong>Only two of those need you</strong> — <strong>red, stopped</strong>, or{' '}
+                  <strong>one segment orbiting a full blue ring for more than a minute</strong>.
+                  Anything else means emOS is still starting, so leave it to finish;
+                  power cycling a recoverable Echo is what turns it into a
+                  case-opening job. For either of the two: unplug it, hold{' '}
+                  <strong>mute</strong> or <strong>+</strong> (<a href="https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/" target="_blank"
+                  rel="noreferrer">which one depends on your amonet version</a>) and plug it
+                  back in to reach TWRP, reconnect here and use{' '}
+                  <strong>Restore escrowed boot image</strong>. About ten seconds, and /data
+                  is untouched.
                 </p>
               </div>
             )}
@@ -8885,7 +9077,15 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
             {stepFailed && !INPUT_STEPS.has(cur.id) && (
               <div className="em-panel em-wizard-recovery">
                 <div className="em-label">This step failed</div>
+                {stepError && (
+                  <p className="em-wizard-recovery__reason">{_stepFailureReason(stepError)}</p>
+                )}
                 <p className="em-wizard-recovery__hint">{recoveryHint()}</p>
+                {cur.id === 'patch_boot' && needF1r30s && (
+                  <input type="file" accept=".zip" aria-label="f1r30s.zip"
+                    onChange={e => setF1r30sFile(e.target.files[0] || null)}
+                    style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, marginBottom: 10 }} />
+                )}
                 {/* The same warning the Detail modal's delete gives (#375).
                     The matched device is resolved out of knownDevices rather
                     than carried across, so the port is named here too — only
@@ -8899,7 +9099,13 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                   );
                 })()}
                 <div className="em-wizard-recovery__actions">
-                  <Pill accent onClick={() => runStep(step)}>Retry</Pill>
+                  {/* Not offered where a retry cannot help: a registered Echo
+                      needs one of the two choices below first. */}
+                  {!(step === 0 && duplicateDeviceId) && (
+                    <Pill accent
+                      disabled={cur.id === 'patch_boot' && needF1r30s && !f1r30sFile}
+                      onClick={() => runStep(step)}>Retry</Pill>
+                  )}
                    {!CONNECT.has(step) && (
                     <Pill onClick={reconnectAdb}>{adb ? 'Reconnect' : 'Reconnect device'}</Pill>
                   )}
@@ -8913,11 +9119,13 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                   {step === 0 && duplicateDeviceId && (
                     <Pill accent onClick={() => {
                       keepRecordRef.current = duplicateDeviceId;
-                      addLog(`Keeping "${duplicateDeviceId}" on the controller. `
-                           + `Retry the step — the device keeps its port, config `
-                           + `and Home Assistant entities.`, 'ok');
+                      addLog(`Keeping "${duplicateDeviceId}" on the controller: `
+                           + `the device keeps its port, config and Home `
+                           + `Assistant entities.`, 'ok');
                       setDuplicateDeviceId(null);
-                      markStep(0, 'pending');
+                      // Straight on: the choice was the fix, and a second
+                      // click on Retry was one step nobody knew to take.
+                      runStep(0);
                     }}>Re-provision, keep its record</Pill>
                   )}
                   {step === 0 && duplicateDeviceId && (
@@ -8939,6 +9147,9 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
             {stepFailed && INPUT_STEPS.has(cur.id) && (
               <div className="em-panel em-wizard-recovery">
                 <div className="em-label">This step failed</div>
+                {stepError && (
+                  <p className="em-wizard-recovery__reason">{_stepFailureReason(stepError)}</p>
+                )}
                 <p className="em-wizard-recovery__hint">{recoveryHint()}</p>
                 <div className="em-wizard-recovery__actions">
                   <Pill onClick={reconnectAdb}>{adb ? 'Reconnect' : 'Reconnect device'}</Pill>
@@ -9222,10 +9433,10 @@ const STAGE_MONO = "'DM Mono',monospace";
 // control sitting under a toggle that does not govern it would look fine and
 // be silently wrong.
 const CONFIG_SECTIONS = {
-  "playback": ["eqBands", "eqLoudness", "duckDb", "limiterEnabled", "limiterThreshold", "limiterRelease", "bassGuardEnabled", "bassGuardDb", "streamReply", "volumeButtonSound"],
+  "playback": ["eqBands", "eqLoudness", "duckDb", "responseLevel", "limiterEnabled", "limiterThreshold", "limiterRelease", "bassGuardEnabled", "bassGuardDb", "streamReply", "volumeButtonSound"],
   "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice", "wakeSound", "wakeSoundLevel", "wakeClipCapture", "wakeClipMinScore"],
-  "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "aecRefSource", "nsAsr", "saveUtterances"],
-  "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
+  "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "wakeMic", "aecEnabled", "aecDelayMs", "aecTailMs", "aecRefSource", "nsAsr", "saveUtterances"],
+  "ring": ["ledScene", "ledListenColor", "ledThinkColor", "remoteVolumeArc", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
   "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs", "consolePassword", "consoleTimeoutMin", "controllerEndpoints"],
   "bluetooth": ["bleProxyEnabled", "bleProxyConnections"],
   "sendspin": ["sendspinEnabled", "sendspinUnpaired"]
@@ -9387,9 +9598,12 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                             localCapable = true, listen = null,
                             hwEchoRef = false, hwRefCapable = true,
                             emosFleet = true, wakeCueCapable = true,
-                            volumeCueCapable = true, sendspinCapable = true,
-                            sendspinPanel = null, bleConnectCapable = true,
-                            blePanel = null }) {
+                            volumeCueCapable = true,
+                            remoteVolumeArcCapable = true,
+                            responseLevelCapable = true,
+                            wakeMicCapable = true,
+                            sendspinCapable = true, sendspinPanel = null,
+                            bleConnectCapable = true, blePanel = null }) {
   // emosFleet defaults TRUE for the same reason the capability props above do,
   // and for one more: it gates the console password, which is emOS-only, and
   // disabling a setting because we do not KNOW the fleet has an emOS device
@@ -9617,6 +9831,20 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                 sub="faster with a quick model; a slow one may pause"
                 value={config.streamReply ?? false} onChange={v => set('streamReply', v)}/>
             </div>
+            <div style={{ marginTop: 8, ...inputStyle }}>
+              <Select label="Response level"
+                sub={responseLevelCapable
+                  ? "voice responses relative to device volume; boost tapers near maximum"
+                  : "needs newer firmware on this Echo"}
+                disabled={!responseLevelCapable}
+                value={config.responseLevel ?? 'low'}
+                options={[
+                  { value: 'low', label: 'Low (normal)' },
+                  { value: 'medium', label: 'Medium (+6 dB)' },
+                  { value: 'high', label: 'High (+12 dB)' },
+                ]}
+                onChange={v => set('responseLevel', v)}/>
+            </div>
             {/* Speaker protection: ONE toggle for the bass guard, and the
                 limiter is not offered at all.
 
@@ -9759,7 +9987,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                 <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)' }}>Precise</span>
                 <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)' }}>Eager</span>
               </div>
-              <Slider label="Arbitration window" sub="ms that the first Echo to hear you silences the others — no added delay; 0 disables" value={config.wakeArbitrationMs ?? 700} min={0} max={2000} step={50} unit="ms" onChange={v => set('wakeArbitrationMs', v)}/>
+              <Slider label="Arbitration window" sub="ms within which Echoes that hear you count as one request, and one answers; 0 disables" value={config.wakeArbitrationMs ?? 700} min={0} max={2000} step={50} unit="ms" onChange={v => set('wakeArbitrationMs', v)}/>
               <Toggle label="Save wake-word samples"
                 sub={onDeviceMode(config) === 'off'
                   ? 'saves clips for review in Activity'
@@ -9905,6 +10133,21 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
               onChange={v => set('aecRefSource', v)}/>
             <Toggle label="Save utterances" sub="keeps the last 10 turns' mic audio on the server — play or download from Activity" value={config.saveUtterances ?? false} onChange={v => set('saveUtterances', v)}/>
           </div>
+          {/* An escape hatch for a dead centre mic (#705). Disabled with the
+              reason on firmware that ignores the key. */}
+          <Select label="Wake word microphone"
+            sub={wakeMicCapable
+              ? 'Centre unless that mic has failed; MK1 to MK6 are the ones around the edge'
+              : 'needs newer firmware on this Echo'}
+            disabled={!wakeMicCapable}
+            value={config.wakeMic ?? 0}
+            options={[
+              { value: 0, label: 'Centre' },
+              { value: 1, label: 'MK1' }, { value: 2, label: 'MK2' },
+              { value: 3, label: 'MK3' }, { value: 4, label: 'MK4' },
+              { value: 5, label: 'MK5' }, { value: 6, label: 'MK6' },
+            ]}
+            onChange={v => set('wakeMic', v)}/>
         </StageAdvanced>
       </Stage>
 
@@ -9960,6 +10203,13 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
               </div>
             </div>
           )}
+        </div>
+        <div style={{ marginTop: 14, ...inputStyle }}>
+          <Toggle label="Remote volume arc"
+            sub={remoteVolumeArcCapable ? 'shows the cyan level arc for non-zero Home Assistant and other remote volume changes' : 'needs newer firmware on this Echo'}
+            disabled={!remoteVolumeArcCapable}
+            value={config.remoteVolumeArc ?? false}
+            onChange={v => set('remoteVolumeArc', v)}/>
         </div>
         <StageAdvanced open={advRing} onToggle={() => setAdvRing(o => !o)} disabledStyle={inputStyle}>
           <div style={{ fontFamily: mono, fontSize: 10, color: 'var(--text2)', lineHeight: 1.6, marginBottom: 12 }}>

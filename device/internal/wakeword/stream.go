@@ -112,8 +112,8 @@ type Detector struct {
 	remainder []int16 // samples not yet forming a whole ChunkSamples
 	accum     int     // samples buffered since the last melspec run
 
-	mel    []float32 // melFrames x MelBins, row-major
-	feat   []float32 // featFrames x FeatDim, row-major
+	mel     []float32 // melFrames x MelBins, row-major
+	feat    []float32 // featFrames x FeatDim, row-major
 	scratch []float32 // reused Embed input, avoids a per-chunk allocation
 }
 

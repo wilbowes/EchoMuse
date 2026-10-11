@@ -1208,6 +1208,9 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 				d.beam.Unlock()
 			}
 
+			if snap.WakeMic != nil {
+				d.beam.SetWakeMic(*snap.WakeMic)
+			}
 			mono, angle := d.beam.Process(raw, beamAngle, gainLin)
 			clipped := d.beam.ClippedSamples()
 
@@ -1231,7 +1234,11 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 				echoRef = d.beam.EchoRef(raw)
 			}
 			if echoRef != nil && d.noteEchoRef(echoRef) {
-				mono = d.aec.ProcessWithRef(mono, echoRef)
+				// Every microphone is cancelled, not only the one in use:
+				// the echo path differs per microphone and a turn locks to
+				// a different one each time (#814).
+				sel := d.beam.OutputChannel(beamAngle)
+				mono = d.aec.ProcessMicsWithRef(d.beam.MicChannels(raw, gainLin, sel, mono), sel, echoRef)
 			} else {
 				mono = d.aec.Process(mono)
 			}

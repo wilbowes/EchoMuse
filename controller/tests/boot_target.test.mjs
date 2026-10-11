@@ -42,6 +42,27 @@ function liftFunction(name) {
   return src.slice(start, i + 1);
 }
 
+// For `const name = (...) =>` module-scope verdicts, which liftFunction's
+// `function name` search cannot see. Imported rather than eval'd, because the
+// slice is the whole `const … ;` statement.
+function liftArrow(name) {
+  const start = src.indexOf(`const ${name} = (`);
+  if (start < 0) throw new Error(`dashboard.jsx no longer defines ${name}()`);
+  let depth = 0;
+  for (let i = start; i < src.length; i++) {
+    const ch = src[i];
+    if (ch === "{" || ch === "(" || ch === "[") depth++;
+    else if (ch === "}" || ch === ")" || ch === "]") depth--;
+    else if (ch === ";" && depth === 0) return src.slice(start, i + 1);
+  }
+  throw new Error(`could not find the end of ${name}`);
+}
+
+const { _magiskbootVerdict } = await import(
+  "data:text/javascript;base64," + Buffer.from(
+    liftArrow("_magiskbootVerdict") + "\nexport { _magiskbootVerdict };"
+  ).toString("base64"));
+
 const { classifyBootTarget } = await import(
   "data:text/javascript;base64," + Buffer.from(
     liftFunction("classifyBootTarget") + "\nexport { classifyBootTarget };"
@@ -362,6 +383,9 @@ for (const [original, outcome] of [
       commands.push(command);
       if (command.startsWith("d=")) return probe("/dev/block/mmcblk0p10");
       if (command.includes("magiskboot unpack")) return `CMDLINE [${original}]`;
+      // #268: runPatchBoot now refuses to go on without an executable
+      // magiskboot. This device has one, so the flow reaches the push.
+      if (command.includes("_MBCHK")) return "MAGISKBOOT=yes\n_MBCHK";
       return "";
     },
     async pull(path) {
@@ -385,10 +409,11 @@ for (const [original, outcome] of [
   const isOurBootImage = eval(`(${liftFunction("isOurBootImage")})`);
   const runPatchBoot = new Function("classifyBootTarget", "patchBootCmdline", "addLog",
     "setProgress", "_INIT_RC_APPEND", "_md5Hex", "setEmosRef", "setEmosTarget",
-    "_downloadBytes", "isOurBootImage", `return async ${liftFunction("runPatchBoot")}`)(
+    "_downloadBytes", "isOurBootImage", "_magiskbootVerdict",
+    `return async ${liftFunction("runPatchBoot")}`)(
       classifyBootTarget, patchBootCmdline, text => logs.push(text), () => {}, "",
       () => "0".repeat(32), () => events.push("escrow"), () => {}, () => events.push("download"),
-      isOurBootImage);
+      isOurBootImage, _magiskbootVerdict);
   let error;
   try { await runPatchBoot(c); } catch (e) { error = e; }
   check("the image is escrowed and downloaded before anything is pushed",

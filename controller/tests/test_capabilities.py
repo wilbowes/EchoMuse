@@ -87,6 +87,16 @@ def test_shadow_capability_is_surfaced_to_the_dashboard():
         "the dashboard must gate the on-device toggle on the capability"
 
 
+def test_wake_mic_capability_is_surfaced_to_the_dashboard():
+    """Older firmware ignores `wakeMic` (#705), so the control must not be
+    offered there as a switch that does nothing."""
+    assert "wake_mic" in device_capabilities(), "firmware no longer announces wake_mic"
+    assert "wake_mic_capable" in CONTROLLER.read_text()
+    assert "wakeMicCapable" in API.read_text()
+    jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
+    assert "disabled={!wakeMicCapable}" in jsx
+
+
 def test_volume_cue_capability_is_surfaced_to_the_dashboard():
     """Old firmware must not be offered a switch it cannot honour."""
     caps = device_capabilities()
@@ -98,6 +108,16 @@ def test_volume_cue_capability_is_surfaced_to_the_dashboard():
     jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
     assert "volumeCueCapable" in jsx, \
         "the dashboard must gate the volume button sound on the capability"
+
+
+def test_response_level_is_gated_on_its_capability():
+    assert "response_level" in device_capabilities()
+    assert "response_level_capable" in CONTROLLER.read_text()
+    assert "responseLevelCapable" in API.read_text()
+    jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
+    assert "disabled={!responseLevelCapable}" in jsx
+    select = re.search(r"function Select\(\{(.*?)\n\}", jsx, re.S)
+    assert select and "disabled" in select.group(1)
 
 
 def test_sendspin_is_gated_on_its_capability_and_its_token_stays_private():
@@ -135,6 +155,15 @@ def test_triggering_is_a_separate_capability_from_scoring():
         "/api/devices must surface the trigger capability"
     assert "owwTriggerCapable" in (ROOT / "controller" / "static" / "dashboard.jsx").read_text(), \
         "the dashboard must gate the 'On device' option on the capability"
+
+
+def test_remote_volume_arc_is_capability_gated():
+    """Old firmware must not be offered a toggle it cannot honour."""
+    assert "remote_volume_arc" in device_capabilities()
+    assert "remote_volume_arc_capable" in CONTROLLER.read_text()
+    assert "remoteVolumeArcCapable" in API.read_text()
+    jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
+    assert "disabled={!remoteVolumeArcCapable}" in jsx
 
 
 def test_the_toggle_control_actually_honours_disabled():

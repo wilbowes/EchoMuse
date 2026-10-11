@@ -51,6 +51,8 @@ import json
 import logging
 import re
 import time
+
+import em_loglevel
 from collections import deque
 from typing import Any
 
@@ -472,6 +474,13 @@ def build(
             # host it streams from was out of CPU, memory or disk at the time.
             "stats": {k: controller_stats[k] for k in _CONTROLLER_STAT_FIELDS
                       if k in (controller_stats or {})},
+            # What was actually being logged, not what was asked for (#378).
+            # A bundle whose log tail is thin is ambiguous between "nothing
+            # happened" and "it was not being logged", and the two want
+            # completely different investigations. LOG_LEVELS is not an
+            # answer: a pair can be dropped for naming a logger that does not
+            # exist, and DEBUG overrides the global level underneath it.
+            "log_levels": em_loglevel.effective(),
         },
         "fleet_config": redact_config(fleet_config),
         "devices": [],
