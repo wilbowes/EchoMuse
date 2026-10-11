@@ -1,5 +1,70 @@
 # Changelog
 
+## 2.26.0
+
+Bluetooth connections, Sendspin, emOS updates from the dashboard, and the nearest Echo answers. Pair with firmware v2.18.0, which this controller offers.
+
+### New
+
+- **Bluetooth connections through an Echo (#656).** Home Assistant can now connect to Bluetooth devices through an Echo's proxy; until now the proxy only passed on their adverts. Off by default: turn on "Allow connections" under Config → Bluetooth. Turning it on encrypts that proxy's port, so it goes offline in Home Assistant until you enter the key shown under the toggle. Three connections per Echo. Devices that need pairing are refused. Needs firmware v2.18.0.
+- **Sendspin player.** Music Assistant can play to Echoes directly, in sync across rooms. Turn it on per Echo under Config → Sendspin, then pair it from Music Assistant with the token shown there. Needs firmware v2.18.0.
+- **Update emOS from the dashboard (#573).** An Echo on emOS gets an emOS panel on its Updates tab. The controller rebuilds the Echo's own image around the new release, checks it at every step, and the Echo restores the previous image by itself if the new one does not reach the controller. Works on amonet 1 and 2. Needs emOS 0.10 or later as the release to install; keep the Echo powered while it updates.
+- **The loudest Echo answers (#747).** When more than one Echo hears the wake word, the one that heard it loudest takes the turn. Until now it was the first to report, which is mostly chance at close range. A house with two or more Echoes waits a quarter of a second to compare; a house with one never waits. A wake word spoken over a reply is still decided by which Echo heard it first.
+- **Stop a ringing timer in any language (#736).** Say the wake word and then anything at all. The wake word pauses the ring; anything spoken stops it, on whichever Echo is ringing; if nothing is said for four seconds the ring resumes. The English stop-word list is gone. A command spoken over a ringing timer stops the timer and is not sent to Home Assistant.
+- **Turn the wake word off from Home Assistant (#552).** Home Assistant's wake word picker for an Echo now has "No wake word", which stops that Echo answering to it while the button still works. The mute button's state is reported to Home Assistant as well. Needs firmware v2.18.0.
+- **Response level (#636).** Config → Playback → "Response level" raises spoken replies by 6 or 12 dB against the Echo's volume, for a house that keeps music low. The boost is capped so a reply is never louder than full volume. Needs firmware v2.18.0.
+- **Collect labelled wake-word examples.** Config → Wake word can save score candidates above a tunable floor and every detector hit, for an Echo whose wake word is detected on the controller. Activity plays the clips and lets an admin label them as wake word, not wake word or unsure. Capture is opt-in, clips stay on the controller, and each Echo retains at most 50, except a labelled clip, which is also copied into a permanent archive on disk, organised by label.
+- **Reply wait (#805).** The add-on option "Reply wait (seconds)", or `EM_TTS_WAIT_TIMEOUT` for the container, sets how long a turn waits for Home Assistant to begin answering. It stays at 30 seconds unless you change it, up to 120. Raise it if your conversation agent uses tools.
+
+### Improved
+
+- A finished timer rings for up to 15 minutes, as Home Assistant's Voice PE does; it was 2 minutes (#694).
+- A physical volume button plays a short tone at the new level when nothing else is playing; Config → Playback → "Volume button sound" turns it off (#637). Needs firmware v2.18.0.
+- "Remote volume arc" under Config → Ring shows the level on the ring when the volume is changed from Home Assistant (#713). Needs firmware v2.18.0.
+- "Wake word microphone" under Config → Microphones → Advanced picks which microphone listens for the wake word, for an Echo whose centre microphone has failed (#705). Needs firmware v2.18.0.
+- An announcement from Home Assistant lights the ring as a spoken reply does (#779).
+- Each Echo reports its flash wear and why it last booted (#709).
+- The Link row shows `wss (TLS) · no token` in amber for an Echo that is encrypted but has not been issued a token (#725).
+- Deleting an Echo says what it leaves behind in Home Assistant (#726).
+- `LOG_LEVELS` sets the log level per area, for example `echomuse.player=DEBUG` (#378), and the support bundle reports the levels in force (#797).
+- The wizard says why a step failed, and asks for `f1r30s.zip` when it is not on the Echo instead of stopping (#850).
+- Re-provisioning an Echo the controller already knows offers to keep its record or delete it, and carries on when you choose (#850).
+- The wizard reads back what each step wrote before reporting it done (#267, #268).
+- The wizard gives the emOS image build a deadline and says while it is waiting (#692), and a failed emOS WiFi step collects the Echo's network log (#773).
+- The wizard accepts an amonet 1 Echo carrying TWRP 3.7.0_9-bboe (#768).
+- The wizard and the docs say which ring states need a restore and which only need patience (#642).
+- Discovery announces on the controller's own network interface only, which fixes a multi-homed host (#604).
+- The image picks up Debian security fixes weekly (#802).
+
+### Fixed
+
+- A command said without a pause after the wake word lost its first word: "tell me a joke" arrived as "me a joke" (#829).
+- After a power cut mid-stream, Home Assistant showed the Echo as playing and ignored play and pause until the controller restarted (#749).
+- A container started without a `.env` kept its database, device certificates and recordings inside the container and lost them when it was recreated (#629).
+- Talking over a reply while Home Assistant was unreachable gave silence, with no ring cue and nothing in Activity (#417).
+- A local add-on build failed on CPUs without x86-64-v2 (#750).
+
+### Known issues
+
+- An Echo that restarts and rejoins a playing Sendspin group can fall out of sync until the next track.
+- A fleet setting saved while an Echo has its own value for it changes nothing on that Echo, and the fleet page does not say so.
+- Updating several Echoes' firmware at once can stall the controller for a few seconds; a reply playing at that moment may stutter.
+- A turn is occasionally logged as empty although its recording holds clear speech (#815).
+- An emOS Echo on the 32-bit kernel sometimes reconnects without rebooting (#816).
+- Bluetooth connections: one connection in testing took 10 seconds to establish; the others took about one.
+
+### Before you update
+
+**This release migrates the database (schema v28–v31).** A backup is written beside it first. An older controller will not start on the migrated database, so going back means restoring that backup.
+
+### Tested
+
+Acceptance run on three Echoes (FireOS 5, emOS on the 32-bit kernel, emOS on the 64-bit kernel), 2026-10-11: `docs/uat-results/2.26.0.md`.
+
+### Thanks
+
+@Ahtran360 (the arbitration report, #747), @DaSonOfPoseidon (#552, and asked for Bluetooth connections, #656), @evy0311 (#699, #713, #716), @shawnsi (#705, #730), @WegoW (#805, #811), @MikeFez (wake-word samples, #696), @forming (#722, #723, #724, #725, #726, #757, #797), @sascha-hemi (#749, #750), @bboe (#768, #267), @Nils3311 (the German timer report, #736), @NicFragale (#604), @cordlessblues (#629), @bapesupreme (#642), @PipTheBirb (#767) and @rolandsteinmeyer (#496).
+
 ## 2.26.0-ea.3 (Early Access)
 
 Fixes from release testing on top of 2.26.0-ea.2: the provisioning wizard, and mute across a power cut. Pair with firmware v2.18.0-ea.3, which this controller offers.
