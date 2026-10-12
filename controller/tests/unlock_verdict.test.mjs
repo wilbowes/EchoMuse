@@ -42,8 +42,8 @@ const { _unlockVerdict } = await import(
     + "\nexport { _unlockVerdict };"
   ).toString("base64"));
 
-const LK_V1 = "8816885824790500";  // amonet v1.1.0's lk.bin: MTK magic, length 372,368
-const LK_V2 = "88168858407b0500";  // amonet v2.0.0's lk.bin: MTK magic, length 359,744
+const LK_V1 = "8816885824790500";  // amonet 1's lk.bin: MTK magic, then the image length, 358,692
+const LK_V2 = "88168858407b0500";  // amonet v2.0.0's lk.bin: MTK magic, then the image length, 359,232
 
 let failures = 0;
 function check(name, cond, detail) {

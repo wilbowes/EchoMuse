@@ -2026,10 +2026,25 @@ throughout — so the rules below are all one rule seen from different angles.
   10 Sep 2026) writes a newer preloader, LK and TrustZone, FireOS 5 does not
   boot on them, and neither does emOS, which runs the FireOS 5 kernel — so
   without this the emOS flow would escrow, build and flash an image that
-  cannot boot. Any one of three signs refuses: an MTK image header
-  (`88168858`) at the start of `expdb`, where v2's preloader exploit loads LK
-  from (amonet-koboreru's `LK_PART_NAME`); TWRP 3.7 or later (v2 ships
-  3.7.0_9-0, v1 3.2.3-0); or Android 6+ as the release that matters. A probe
+  cannot boot. Any one of three signs refuses: amonet 2's LK in `lk_a`
+  (`_amonetLk`, below); TWRP 3.7 or later (v2 ships 3.7.0_9-0, v1 3.2.3-0,
+  and firebreak's 3.7.0_9-bboeN on v1 is the exception, never evidence); or
+  Android 6+ as the release that matters. **The LK replaced a check on
+  `expdb` on 2026-10-12 (#845, #846, @bboe).** v2's preloader exploit loads
+  LK from `expdb` (amonet-koboreru's `LK_PART_NAME`), so an MTK image header
+  (`88168858`) at its start was read as v2. But nothing clears `expdb` when
+  amonet 1 is written over amonet 2, so a Dot taken v2 then v1 kept the
+  payload and was refused as an unlock that "does not add up", on a correct
+  amonet 1 install. Each amonet release writes its own LK to both LK slots,
+  so `lk_a` says which one RUNS, where `expdb` only says v2 was once there.
+  `_amonetLk` reads the first eight bytes: the MTK magic, then the image
+  length from the header, `8816885824790500` (358,692) for amonet 1 and
+  `88168858407b0500` (359,232) for v2.0.0. v1.0.0 and v1.1.0 ship a
+  byte-identical `lk.bin` and firebreak's `v1.1.0-bboe` writes it unchanged,
+  so that is the only amonet 1 value; read on VVV, C95 and a contributor's
+  `v1-bboe` Dot, and v2's on 15LE (whose `expdb` starts `8816885870b20300`).
+  `lk_a` is found by the kernel's GPT name ONLY at this step: under both
+  amonet TWRPs the by-name `lk_a` is a decoy file in tmpfs. A probe
   that could not run yields empty strings, and empty is NOT evidence — the
   error that must not happen is refusing a working v1.1.0 device because `od`
   was missing. The absence of `boot_[ab]_amonet` is deliberately not one of
@@ -2059,9 +2074,9 @@ throughout — so the rules below are all one rule seen from different angles.
 - **Before the escrow reads anything for the build, the unlock, the recovery,
   the system partitions the image depends on and every stock kernel must be
   READ and must agree on one FireOS generation** (`donorVerdict`, #619).
-  amonet 2 = expdb holds its bootloader + TWRP 3.7.0 + the v2 partition layout
+  amonet 2 = its LK in `lk_a` + TWRP 3.7.0 + the v2 partition layout
   + FireOS 6 (7.1, system-as-root) in BOTH system slots + 32-bit stock
-  kernels; amonet 1 = expdb without it (`00000000` on C95) + TWRP 3.2.3 + the
+  kernels; amonet 1 = its LK in `lk_a` + TWRP 3.2.3 or 3.7.0_9-bboeN + the
   v1 layout + FireOS 5 (5.1.1, root layout) in `system_a` at `mmcblk0p13` +
   a 64-bit kernel. **Which system slots must pass is one question asked the
   same way everywhere — does the image, or its way back, depend on it?** Both
@@ -2072,8 +2087,12 @@ throughout — so the rules below are all one rule seen from different angles.
   beside a working FireOS 5 `system_a`, and refusing it would have made the
   outcome depend on a partition emOS never touches. Partitions are found by the
   kernel's GPT name (`PARTNAME` in sysfs) before TWRP's by-name map, and
-  expdb's bytes are read in the browser, because amonet 1's TWRP 3.2.3 read
-  expdb as unreadable through by-name + `od`. Every file emOS runs from
+  `lk_a`'s bytes are read in the browser, because amonet 1's TWRP 3.2.3 read
+  expdb as unreadable through by-name + `od` when that was the partition
+  checked. **An LK that is neither amonet's is refused here**, where the
+  expdb check read anything without v2's header as amonet 1: a later amonet
+  release needs its constant added to `_amonetLk` before the wizard accepts
+  it, and the refusal writes nothing. Every file emOS runs from
   `/system` must be non-empty (`_emosSystemFiles`, pinned against `init.c`).
   #619 was amonet 2 with a FireOS 6 flash that never finished: expdb and TWRP
   said amonet 2, `boot_b` and `system_b` said FireOS 5, and every check

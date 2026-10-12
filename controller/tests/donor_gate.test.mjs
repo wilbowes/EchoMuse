@@ -125,8 +125,8 @@ const FOS6 = { layout: "nested", release: "7.1.2", name: "Fire OS 6.5.7.4 (NS657
                files: FILES[6] };
 const FOS5 = { layout: "root", release: "5.1.1", name: "Fire OS 5.5.5.4 (680767620)",
                files: FILES[5] };
-const LK_V1 = "8816885824790500";  // amonet v1.1.0's lk.bin: MTK magic, length 372,368
-const LK_V2 = "88168858407b0500";  // amonet v2.0.0's lk.bin: MTK magic, length 359,744
+const LK_V1 = "8816885824790500";  // amonet 1's lk.bin: MTK magic, then the image length, 358,692
+const LK_V2 = "88168858407b0500";  // amonet v2.0.0's lk.bin: MTK magic, then the image length, 359,232
 function probe({ lk = LK_V2, twrp = "3.7.0_9-0", a = FOS6, b = FOS6, done = true }) {
   const lines = [`LK=${lk}`, `TWRP=${twrp}`, ...sysLines("a", a), ...sysLines("b", b)];
   if (done) lines.push("_DONORPROBE_OK");
