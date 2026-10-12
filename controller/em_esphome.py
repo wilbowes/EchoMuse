@@ -447,6 +447,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         # that has not finished is still emitting onto this socket,
         # and its tail belongs to no turn but this one.
         self._run_finished      = False
+        self._ha_ended_early    = False
         self._ha_never_started  = False
         # Barge-in run serialisation — the protocol has no run id, so the
         # satellite is what keeps two runs from overlapping on one connection.
@@ -1119,6 +1120,24 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 # against — the overwhelmingly common case.
                 self._run_finished = True
                 self._tts_event.set()
+            elif self._stt_ended:
+                # HA ended the run between STT and the intent's result, which
+                # is HA cancelling its own pipeline: ask_question, announce
+                # and start_conversation all open with
+                # _cancel_running_pipeline(). When the turn's own intent is
+                # what asked (#506), that is this run, the question follows
+                # 2ms later, and waiting out the reply timeout holds the
+                # voice lock the question needs. The premature RUN_END this
+                # guard is for arrives before STT_START, so STT_END tells the
+                # two apart. Measured 2026-10-12 on 15LE, twice: STT result,
+                # RUN_END +5ms, AnnounceRequest +7ms, then 30s of nothing.
+                log.info(
+                    f"[{self._log_name}] HA ended the run before the intent "
+                    f"finished — ending the turn"
+                )
+                self._run_finished = True
+                self._ha_ended_early = True
+                self._tts_event.set()
             else:
                 log.debug(
                     f"[{self._log_name}] Ignoring RUN_END — INTENT_END not yet "
@@ -1356,6 +1375,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         )
         self._run_started           = False
         self._run_finished          = False
+        self._ha_ended_early        = False
         self._ha_never_started      = False
         # Takes ownership of an abort armed during the PREVIOUS turn (at the
         # barge). Deliberately not a plain reset: the arm has to survive this
@@ -1569,6 +1589,11 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 # read every question answered as a turn that produced nothing.
                 log.info(f"[{self._log_name}] Question answered — no reply expected")
                 if trace: trace.outcome = "answered"
+            elif self._ha_ended_early:
+                # HA cancelled this run to do something else on this Echo,
+                # which is not a turn that produced nothing.
+                log.info(f"[{self._log_name}] Turn superseded by Home Assistant")
+                if trace: trace.outcome = "superseded"
             else:
                 log.info(f"[{self._log_name}] No TTS audio URL received — turn ended without response")
                 if trace: trace.outcome = "no_tts"
@@ -1582,7 +1607,11 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # of "Responding." RUN_END only signals server-side pipeline completion;
             # the satellite may still be fetching and playing audio at that point.
             if self._transport and not self._transport.is_closing():
-                self._send_one(api_pb2.VoiceAssistantAnnounceFinished(success=True))
+                # Not after HA cancelled the run: nothing was played, and HA
+                # is by then waiting on AnnounceFinished for the announcement
+                # it cancelled us for, which this would answer early.
+                if not self._ha_ended_early:
+                    self._send_one(api_pb2.VoiceAssistantAnnounceFinished(success=True))
                 # The MEDIA state, not a hardcoded IDLE.
                 #
                 # This used to assert IDLE at the end of every turn regardless

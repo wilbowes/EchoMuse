@@ -295,6 +295,25 @@ Note this makes turns end in **milliseconds**, so the ring needs an explicit
 `ack_anim` cue or it flashes and reads as a glitch; it previously stayed lit
 only because the turn was hung.
 
+**A `RUN_END` after `STT_END` and before `INTENT_END` is HA cancelling its own
+run, and it ends the turn (#506, 2026-10-12).** `ask_question`, `announce` and
+`start_conversation` all open with `_cancel_running_pipeline()` (read in HA
+2026.9.4's `assist_satellite/entity.py`). When the turn's own intent is what
+asked — a sentence-triggered automation calling `ask_question` on the Echo
+that heard it — the run cancelled is that turn's, and the question arrives
+2ms later. The premature `RUN_END` the guard above exists for arrives before
+`STT_START`, so `_stt_ended` tells the two apart. Ignored, the turn held the
+voice lock for the whole reply wait and the question's listening turn queued
+behind it: measured on 15LE, wake turn `timeout` at 33.1s, listening turn
+`no_speech`, no answer to the script; with the fix `superseded` at 3.3s,
+listening 2ms after the question, `answered`. Two things the turn must do
+with `_ha_ended_early`: record `superseded`, not `no_tts`; and NOT send its
+closing `AnnounceFinished`, which HA would take as the reply to the question
+it has just sent. No abort is sent, because HA has already ended the run and
+a `start=False` then would land on the question's. #794 (@forming) found the
+deadlock and proposed superseding from the announce side; the run-end
+handling made that unnecessary.
+
 **The protocol has NO run identifier, and HA does not serialise runs.**
 `VoiceAssistantEventResponse` is an event type plus a name/value list and
 nothing else, so a client structurally cannot attribute an event to a run: the
