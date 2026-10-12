@@ -213,9 +213,14 @@ def test_the_endpoint_installs_what_can_run_and_nothing_else(tmp_path, monkeypat
     from aiohttp import web
     from aiohttp.test_utils import TestClient, TestServer
 
+    # Removed again once em_api is imported: left in sys.modules it stops the
+    # importorskip("openwakeword") tests skipping (see _oww_stub.uninstall).
     import _oww_stub
     _oww_stub.install()
-    import em_api
+    try:
+        import em_api
+    finally:
+        _oww_stub.uninstall()
 
     monkeypatch.setenv("DB_PATH", str(tmp_path / "echomuse.db"))
     handler = em_api._post_oww_model_upload.__wrapped__   # past require_admin
