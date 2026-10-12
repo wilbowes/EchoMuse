@@ -1866,7 +1866,7 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                 rms_max  = max(rms_max, rms)
                 levels.push(rms)
                 prediction = await loop.run_in_executor(None, model.predict, samples)
-                score = prediction.get(barge_pred_key, 0.0)
+                score = em_oww_models.scalar_score(prediction.get(barge_pred_key, 0.0))
                 frames += 1
                 trusted = warmup.feed()
                 in_playback = playback_started.is_set()
@@ -3782,7 +3782,7 @@ async def _stream_listen(device: Device):
                 prediction = await loop.run_in_executor(
                     None, model.predict, samples
                 )
-                score = prediction.get(model_key, 0.0)
+                score = em_oww_models.scalar_score(prediction.get(model_key, 0.0))
                 # Exactly once per chunk the MODEL saw, whatever the score —
                 # the `device.speaking` skip above returns before predict(),
                 # so the gate and the model stay in step.

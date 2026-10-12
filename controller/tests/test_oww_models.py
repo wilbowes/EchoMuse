@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,40 @@ def test_prediction_key_path_reduces_to_stem():
 
 def test_prediction_key_relative_path():
     assert owm.prediction_key("data/oww_models/hey_clara.onnx") == "hey_clara"
+
+
+# ─── scalar_score ────────────────────────────────────────────────────────────
+# #869: a classifier exported with a [batch, 1, 1] output leaves openwakeword
+# holding a one-element array, and the listener crashed formatting it.
+
+@pytest.mark.parametrize("shape", [(), (1,), (1, 1), (1, 1, 1)])
+def test_scalar_score_takes_any_output_shape(shape):
+    np = pytest.importorskip("numpy")
+    score = owm.scalar_score(np.full(shape, 0.25, dtype=np.float32))
+    assert type(score) is float and score == 0.25
+    assert f"{score:.3f}" == "0.250"
+    assert json.dumps({"score": score}) == '{"score": 0.25}'
+
+
+def test_scalar_score_passes_plain_numbers_through():
+    # openwakeword returns a Python 0.0 for its first five frames, and
+    # dict.get's default is one too.
+    assert owm.scalar_score(0.0) == 0.0 and type(owm.scalar_score(0)) is float
+    np = pytest.importorskip("numpy")
+    assert owm.scalar_score(np.float32(0.5)) == 0.5
+
+
+def test_scalar_score_reads_the_first_element_as_the_firmware_does():
+    np = pytest.importorskip("numpy")
+    assert owm.scalar_score(np.array([[0.75, 0.1]], dtype=np.float32)) == 0.75
+
+
+def test_every_score_the_controller_reads_is_made_scalar():
+    src = (Path(__file__).resolve().parent.parent / "em_controller.py").read_text()
+    reads = [l.strip() for l in src.splitlines() if "prediction.get(" in l]
+    assert len(reads) >= 2
+    assert all(l.startswith("score = em_oww_models.scalar_score(prediction.get(")
+               for l in reads), reads
 
 
 # ─── safe_model_filename ─────────────────────────────────────────────────────

@@ -41,6 +41,21 @@ def prediction_key(model_name: str) -> str:
     return model_name
 
 
+def scalar_score(value) -> float:
+    """
+    One score as a plain float, whatever shape the classifier's output has.
+
+    openwakeword reads `prediction[0][0][0]`, a scalar for its own models,
+    whose output is [batch, 1]. A model exported with [batch, 1, 1]
+    (nanowakeword does) leaves a one-element array there, which compares
+    like a number and then fails in an f-string or json.dumps (#869). The
+    first element is also what the firmware reads, so both halves score a
+    model the same way.
+    """
+    ravel = getattr(value, "ravel", None)
+    return float(ravel()[0] if ravel is not None else value)
+
+
 # openWakeWord ships its stock models with a version suffix in the FILENAME
 # ("hey_jarvis_v0.1.onnx"). That is a packaging convention, not part of the
 # wake word, and it has no business in a string a user reads.
