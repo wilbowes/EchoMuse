@@ -139,7 +139,7 @@ new address when the old one has actually gone away.
 
 ### 2. Install the add-on, then stop it
 
-Add the repository (**Settings → Add-ons → Add-on Store → ⋮ → Repositories**):
+Add the repository (**Settings → Apps → Install App → ⋮ → Repositories → Add**):
 
 ```
 https://github.com/wilbowes/EchoMuse

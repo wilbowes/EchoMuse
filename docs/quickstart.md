@@ -57,7 +57,7 @@ always-on machine.
 <details open>
 <summary><b>As a Home Assistant add-on</b></summary>
 
-Settings → Add-ons → Add-on Store → ⋮ → **Repositories**, paste
+Settings → Apps → **Install App** → ⋮ → **Repositories** → **Add**, paste
 `https://github.com/wilbowes/EchoMuse`, then install **EchoMuse** from the
 store. The README has a one-click badge for adding the repository.
 
