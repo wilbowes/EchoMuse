@@ -61,7 +61,7 @@ check("v1 in Android: only the release is known",
 check("every probe failed: nothing is evidence",
   !v2({ release: "", lk: "", twrp: "" }));
 check("no arguments at all is not evidence either", !v2({}));
-check("v1 in TWRP 3.7.0_9-bboe2, which dot_firmware.py installs on v1",
+check("v1 in TWRP 3.7.0_9-bboe2, which firebreak installs on v1",
   !v2({ release: "5.1.1", lk: LK_V1, twrp: "3.7.0_9-bboe2" }));
 check("an LK that is neither amonet's is not evidence",
   !v2({ release: "5.1.1", lk: "ffffffffffffffff", twrp: "3.2.3-0" }));

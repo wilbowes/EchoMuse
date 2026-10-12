@@ -3412,9 +3412,9 @@ const _amonetLk = (head) => {
 //             in recovery only: it needs root.
 //   twrp    — the TWRP version. v2 installs 3.7.0_9-0, v1 ships 3.2.3-0.
 //             Compared numerically, so 3.10 is not read as older than 3.7.
-//             3.7.0_9-bboeN is the exception: overdub's dot_firmware.py
-//             installs it on v1 in place of 3.2.3, and its 64-bit kernel
-//             boots only on v1's LK, so it is never evidence of v2.
+//             3.7.0_9-bboeN is the exception: firebreak installs it on
+//             v1 in place of 3.2.3, and its 64-bit kernel boots only on
+//             v1's LK, so it is never evidence of v2.
 //   release — the Android release that MATTERS: getprop in Android, but
 //             /system's build.prop in recovery, because TWRP answers getprop
 //             with its own ramdisk. FireOS 6 is Android 7.1; v1 boots only

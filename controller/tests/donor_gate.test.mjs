@@ -197,7 +197,7 @@ const armB = [{ name: "boot_b", arch: "arm" }];
 {
   const bboe = (twrp, layout = "v1") => v(probe({ lk: LK_V1, twrp, a: FOS5, b: FOS5 }),
                                           layout, [{ name: "the boot image", arch: "arm64" }]);
-  check("amonet 1 with dot_firmware.py's TWRP 3.7.0_9-bboe2: accepted",
+  check("amonet 1 with firebreak's TWRP 3.7.0_9-bboe2: accepted",
         bboe("3.7.0_9-bboe2").ok && bboe("3.7.0_9-bboe2").gen === 5);
   check("a bboe TWRP on a v2 partition layout: refused", !bboe("3.7.0_9-bboe2", "v2").ok);
   check("a bboe TWRP with amonet 2's LK: refused",
