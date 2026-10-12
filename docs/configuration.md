@@ -258,7 +258,9 @@ Want your own word? Train a model with `oww_forge/` (see its README), then
 use the **+ Custom model** tile to upload the `.onnx` — it's stored in the
 controller's data volume, appears as a tile next to the stock words, and
 takes effect immediately on selection. The `×` on an unselected custom tile
-deletes it.
+deletes it. The upload is checked first: a file that could not run as
+a wake word model is refused with the reason. That shows the model can run;
+whether it hears its word is for you to test by saying it.
 
 **If the device does its own wake word detection** (see *On-device wake
 word*), it needs the recogniser on it before it can listen for that word.

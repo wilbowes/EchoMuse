@@ -141,6 +141,7 @@ COPY em_ble_gatt.py .
 COPY em_ble_proxy.py .
 COPY em_broadcast.py .
 COPY em_oww_assets.py  ./
+COPY em_oww_check.py   ./
 COPY em_oww_models.py .
 COPY em_pairing.py .
 COPY em_oww_metadata.py .

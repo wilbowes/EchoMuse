@@ -23,13 +23,16 @@ jobs:
       # protobuf) are installed so tests can import em_api and em_controller
       # and run them (#739). openwakeword is not: it pulls onnxruntime and
       # scikit-learn, minutes of install, and tests stub it instead.
+      # onnxruntime and onnx ARE installed: test_oww_check.py loads real
+      # models through the upload check, and fails rather than skips without
+      # them. onnx is held to the version the image's build stage uses.
       # pyyaml is for the add-on config parity tests (test_channels.py).
       #
       # -c requirements.txt holds each package to the version the image
       # ships, so the suite cannot pass against a library we do not run, and
       # a Dependabot bump there reaches this job with no second edit.
       - name: Install test dependencies
-        run: pip install -c controller/requirements.txt pytest pytest-cov numpy scipy pyyaml aiohttp websockets bcrypt zeroconf protobuf cryptography
+        run: pip install -c controller/requirements.txt pytest pytest-cov numpy scipy pyyaml aiohttp websockets bcrypt zeroconf protobuf cryptography onnxruntime onnx==1.20.1
       # test_emos_update_flow.py runs the emOS update's device commands in a
       # real shell, with busybox as the device has it. Without one the test
       # would skip, so it fails under CI instead — a skipped check of what is

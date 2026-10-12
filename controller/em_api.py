@@ -73,6 +73,7 @@ import em_emos_update
 import em_firmware
 import em_ingressauth
 import em_oww_assets
+import em_oww_check
 import em_oww_models
 import em_pairing
 import em_pki
@@ -1928,6 +1929,15 @@ async def _post_oww_model_upload(request: web.Request) -> web.Response:
             return _error("empty_upload", "Uploaded model is empty", 400)
         if len(data) > em_oww_models.MAX_MODEL_BYTES:
             return _error("too_large", "Model exceeds 20 MB limit", 413)
+
+        # Before anything is written: a model that cannot run is refused with
+        # the reason, where it used to fail later in the wake listener (#869).
+        why = await asyncio.get_running_loop().run_in_executor(
+            None, em_oww_check.problem, data)
+        if why:
+            log.info(f"[api] Wake model refused: {fname}: {why}")
+            return _error("invalid_model",
+                          f"This file cannot run as a wake word model: {why}.", 400)
 
         directory = em_oww_models.models_dir()
         directory.mkdir(parents=True, exist_ok=True)
