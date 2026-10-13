@@ -3374,11 +3374,9 @@ const _deleteHaWarning = (d) => {
 };
 
 // Starts EchoMuse at every boot from Magisk's service.d, beside the debloat
-// script. It used to be an init service appended to init.csm.project.rc, and
-// editing the ramdisk took magiskboot, which this flow could only get from
-// f1r30s.zip. An image patched that way still carries the service, and init
-// starts it there, so this script stands aside: two supervisors would race two
-// servers for the same ports. Backgrounded because Magisk runs service.d
+// script. A boot image whose init.csm.project.rc defines an echomuse service
+// has init start it, so this script stands aside: two supervisors would race
+// two servers for the same ports. Backgrounded because Magisk runs service.d
 // scripts one after another, and start_server.sh never returns.
 const _SERVICE_D_SCRIPT = `#!/system/bin/sh
 grep -q '^service echomuse' /init.csm.project.rc 2>/dev/null && exit 0
