@@ -57,6 +57,7 @@ import websockets
 
 import em_db as db
 import em_health
+import em_shellplane
 import em_auth as auth
 import em_ble_proxy
 import em_broadcast
@@ -2769,6 +2770,13 @@ async def _get_device_shell_ws(live) -> object:
     # that timed out above must not be able to answer yes.
     _shell_owner[device_id] = asyncio.current_task()
 
+    # A terminal refuses to open during a transfer; this is the other half.
+    # `shell_open` makes the Echo drop the shell it has, so asking now would
+    # cut off whoever is typing.
+    if device_id in _shell_dashboard:
+        _release_shell_lock(device_id)
+        raise RuntimeError(em_shellplane.TERMINAL_OPEN)
+
     future = loop.create_future()
     _shell_pending[device_id] = future
     # Deliberately do NOT set _shell_dashboard — signals programmatic mode.
@@ -2776,13 +2784,19 @@ async def _get_device_shell_ws(live) -> object:
     await live.send_control({"type": "shell_open"})
     try:
         ws = await asyncio.wait_for(future, timeout=15.0)
-        _shell_ws[device_id] = ws
-        return ws
     except asyncio.TimeoutError:
         _shell_pending.pop(device_id, None)
         _shell_ws.pop(device_id, None)
         _release_shell_lock(device_id)
         raise
+    if ws is None:
+        # Nothing resolves this future with None any more. Kept because the
+        # caller's next line is `ws.send`.
+        _shell_pending.pop(device_id, None)
+        _release_shell_lock(device_id)
+        raise RuntimeError(f"Shell session for {device_id} ended before it opened")
+    _shell_ws[device_id] = ws
+    return ws
 
 
 def _release_shell_lock(device_id: str) -> None:
@@ -3522,10 +3536,17 @@ async def _ws_shell(request: web.Request) -> web.WebSocketResponse:
     await _push_log_event(device_id, "info", "controller",
                           f"Shell session opened by {user['username']}")
 
+    # Asked again: a transfer may have started during the awaits above.
+    lock = _shell_lock.get(device_id)
+    if lock and lock.locked():
+        await ws.close(message=b"Device shell is busy")
+        return ws
+
     loop = asyncio.get_event_loop()
     done_future = loop.create_future()
+    terminal = em_shellplane.Terminal(ws, done_future)
     _shell_pending[device_id]   = done_future
-    _shell_dashboard[device_id] = ws
+    _shell_dashboard[device_id] = terminal
     # Do NOT set _shell_ws or acquire _shell_lock — interactive sessions
     # bypass the programmatic shell mechanism entirely.
 
@@ -3536,12 +3557,20 @@ async def _ws_shell(request: web.Request) -> web.WebSocketResponse:
         # to the dashboard via shell_meta. Programmatic sessions
         # (_get_device_shell_ws) deliberately do not set it.
         await live.send_control({"type": "shell_open", "pty": True})
-        await done_future
+        # Bounded, or an Echo that never dials leaves this terminal on record
+        # after its tab has closed, and every transfer is refused for it.
+        if await em_shellplane.wait_for_dial(terminal):
+            await done_future
+        else:
+            log.warning(f"[api] Shell session: {device_id} did not open a shell")
+            await ws.send_str("\r\nThis Echo did not open a shell.\r\n")
     except Exception as e:
         log.warning(f"[api] Shell session error ({device_id}): {e}")
     finally:
-        _shell_pending.pop(device_id, None)
-        _shell_dashboard.pop(device_id, None)
+        if _shell_pending.get(device_id) is done_future:
+            _shell_pending.pop(device_id, None)
+        if _shell_dashboard.get(device_id) is terminal:
+            _shell_dashboard.pop(device_id, None)
         await live.send_control({"type": "shell_close"})
         log.info(f"[api] Shell session closed: {device_id}")
         await _push_log_event(device_id, "info", "controller",

@@ -255,11 +255,12 @@ def test_programmatic_sessions_do_not_mark_the_dashboard_flag():
         live = FakeLive("dev")
 
         async def answer_the_open():
-            # The device's handle_shell resolves the pending future.
-            await asyncio.sleep(0)
-            fut = em_api._shell_pending.get("dev")
-            if fut is not None and not fut.done():
-                fut.set_result(FakeWS())
+            # The device's handle_shell resolves the pending future. Waited
+            # for: Python 3.10's wait_for takes several loop turns to acquire
+            # the lock, and one sleep(0) answered before the request existed.
+            while "dev" not in em_api._shell_pending:
+                await asyncio.sleep(0)
+            em_api._shell_pending["dev"].set_result(FakeWS())
 
         t = asyncio.create_task(answer_the_open())
         ws = await em_api._get_device_shell_ws(live)

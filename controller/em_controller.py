@@ -80,6 +80,7 @@ import em_api as api
 import em_pki
 import em_hostip
 import em_linkauth
+import em_shellplane
 import em_pairing
 import em_config_types
 import em_dbwriter
@@ -1591,7 +1592,7 @@ _wake_arbiter = em_arbiter.WakeArbiter()
 # Shell session coordination — keyed by device_id.
 #
 # _shell_pending:   Future resolved with the device ws when handle_shell receives it.
-# _shell_dashboard: dashboard WebSocket set by em_api for interactive sessions.
+# _shell_dashboard: em_shellplane.Terminal set by em_api for interactive sessions.
 _shell_pending:    dict[str, asyncio.Future] = {}
 _shell_dashboard:  dict[str, object]         = {}
 
@@ -5854,14 +5855,15 @@ async def handle_shell(ws: WebSocketServerProtocol, path: str, secure: bool = Fa
     log.info(f"[shell] Device connected: {device_id} (pty={pty_mode})")
 
     done_future  = _shell_pending.get(device_id)
-    dashboard_ws = _shell_dashboard.get(device_id)
+    terminal     = _shell_dashboard.get(device_id)
+    mode         = em_shellplane.route(done_future, terminal)
 
-    if done_future is None or done_future.done():
+    if mode == em_shellplane.NONE:
         log.warning(f"[shell] No pending shell request for {device_id} — closing")
         await ws.close()
         return
 
-    if dashboard_ws is None:
+    if mode == em_shellplane.PROGRAMMATIC:
         log.info(f"[shell] Programmatic session: {device_id}")
         done_future.set_result(ws)
         try:
@@ -5872,6 +5874,8 @@ async def handle_shell(ws: WebSocketServerProtocol, path: str, secure: bool = Fa
         return
 
     log.info(f"[shell] Proxying: {device_id}")
+    dashboard_ws = terminal.ws
+    terminal.dialled.set()
 
     # Tell the dashboard which mode the device established before any
     # shell bytes flow: PTY sessions use framed input (0x00 stdin /
