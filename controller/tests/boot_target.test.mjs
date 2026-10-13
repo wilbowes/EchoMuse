@@ -58,11 +58,6 @@ function liftArrow(name) {
   throw new Error(`could not find the end of ${name}`);
 }
 
-const { _magiskbootVerdict } = await import(
-  "data:text/javascript;base64," + Buffer.from(
-    liftArrow("_magiskbootVerdict") + "\nexport { _magiskbootVerdict };"
-  ).toString("base64"));
-
 const { classifyBootTarget } = await import(
   "data:text/javascript;base64," + Buffer.from(
     liftFunction("classifyBootTarget") + "\nexport { classifyBootTarget };"
@@ -362,8 +357,8 @@ for (const [part, dev] of [["boot_a", "/dev/block/mmcblk0p17"],
   }
 }
 
-// Drive the real caller with an in-memory device transport. A substring in
-// magiskboot's log must not bypass token replacement or field validation.
+// Drive the real caller with an in-memory device transport. A permissive token
+// already in the cmdline must not bypass token replacement or field validation.
 for (const [original, outcome] of [
   ["androidboot.selinux=enforce androidboot.selinux=permissive", "patch"],
   ["x=androidboot.selinux=permissive androidboot.selinux=enforce", "patch"],
@@ -382,17 +377,10 @@ for (const [original, outcome] of [
     async shell(command) {
       commands.push(command);
       if (command.startsWith("d=")) return probe("/dev/block/mmcblk0p10");
-      if (command.includes("magiskboot unpack")) return `CMDLINE [${original}]`;
-      // #268: runPatchBoot now refuses to go on without an executable
-      // magiskboot. This device has one, so the flow reaches the push.
-      if (command.includes("_MBCHK")) return "MAGISKBOOT=yes\n_MBCHK";
       return "";
     },
     async pull(path) {
       if (path === "/tmp/work/boot.img") return image;
-      if (path === "/tmp/ramdisk/init.csm.project.rc") {
-        return new TextEncoder().encode("service echomuse");
-      }
       throw new Error(`unexpected pull: ${path}`);
     },
     async push(path, bytes) {
@@ -408,19 +396,19 @@ for (const [original, outcome] of [
   // one is lifted, and these fixtures carry stock cmdlines.
   const isOurBootImage = eval(`(${liftFunction("isOurBootImage")})`);
   const runPatchBoot = new Function("classifyBootTarget", "patchBootCmdline", "addLog",
-    "setProgress", "_INIT_RC_APPEND", "_md5Hex", "setEmosRef", "setEmosTarget",
-    "_downloadBytes", "isOurBootImage", "_magiskbootVerdict",
+    "setProgress", "_md5Hex", "setEmosRef", "setEmosTarget",
+    "_downloadBytes", "isOurBootImage",
     `return async ${liftFunction("runPatchBoot")}`)(
-      classifyBootTarget, patchBootCmdline, text => logs.push(text), () => {}, "",
+      classifyBootTarget, patchBootCmdline, text => logs.push(text), () => {},
       () => "0".repeat(32), () => events.push("escrow"), () => {}, () => events.push("download"),
-      isOurBootImage, _magiskbootVerdict);
+      isOurBootImage);
   let error;
   try { await runPatchBoot(c); } catch (e) { error = e; }
   check("the image is escrowed and downloaded before anything is pushed",
         events[0] === "escrow" && events[1] === "download", events.join(","));
   if (outcome === "patch") {
     check("the caller pushes a corrected image", error === stopAfterPush &&
-          pushes.length === 1 && pushes[0].path === "/tmp/work/boot_patched.img", original);
+          pushes.length === 1 && pushes[0].path === "/tmp/work/new-boot.img", original);
     if (pushes.length) {
       const expected = patchBootCmdline(image);
       check("the caller sends the bounded transformation", expected.every(
@@ -431,7 +419,7 @@ for (const [original, outcome] of [
           /conflicting|terminator/.test(error.message) && pushes.length === 0, original);
   } else {
     check("an already patched image avoids another write", !error && pushes.length === 0 &&
-          logs.includes("Boot image already fully patched — nothing to flash."), error?.message);
+          logs.includes("cmdline already has androidboot.selinux=permissive — nothing to flash."), error?.message);
   }
   check("the caller leaves the pulled image unchanged", image.every((byte, i) => byte === before[i]));
   check("the test never reaches a flash command", !commands.some(command =>

@@ -1,6 +1,5 @@
-// Tests for _magiskbootVerdict() and _preseedVerdict() in dashboard.jsx — the
-// two wizard steps that wrote a file and reported success without reading it
-// back.
+// Tests for _preseedVerdict() in dashboard.jsx — a wizard step that wrote a
+// file and reported success without reading it back.
 //
 //     node controller/tests/artifact_verdict.test.mjs
 //
@@ -8,20 +7,16 @@
 // gives: the dashboard compiles to a single classic script with no module
 // boundary, so the alternative is a second copy that drifts.
 //
-// One rule under both: **a probe's results are evidence, not proof.** A command
+// The rule under it: **a probe's results are evidence, not proof.** A command
 // that exited 0 proves it ran, not that it did what the step needed:
 //
-//   #268  /sdcard/f1r30s.zip missing → unzip prints "can't open", the step
-//         logged it and carried on, magiskboot was never unpacked, and the
-//         device patched nothing — working under `sh start_server.sh`, dead
-//         after every reboot.
 //   #267  magisk.db measured at 0 bytes where it should be 36864, `cp &&`
 //         chmod both returning 0, and magiskd then refusing every su with
 //         "no such table: policies". push() returns without draining, so the
 //         copy can read the file before cat has flushed it.
 //
-// Both failures are silent on hardware nobody is watching a log of, and both
-// look like a working device.
+// The failure is silent on hardware nobody is watching a log of, and it
+// looks like a working device.
 
 import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
@@ -46,11 +41,10 @@ function liftArrow(name) {
   throw new Error(`could not find the end of ${name}`);
 }
 
-const { _magiskbootVerdict, _preseedVerdict } = await import(
+const { _preseedVerdict } = await import(
   "data:text/javascript;base64," + Buffer.from(
-    liftArrow("_magiskbootVerdict") + "\n"
-    + liftArrow("_preseedVerdict")
-    + "\nexport { _magiskbootVerdict, _preseedVerdict };"
+    liftArrow("_preseedVerdict")
+    + "\nexport { _preseedVerdict };"
   ).toString("base64"));
 
 let failures = 0;
@@ -58,52 +52,6 @@ function check(name, cond, detail) {
   if (cond) return;
   failures++;
   console.error(`FAIL: ${name}${detail ? `\n      ${detail}` : ""}`);
-}
-
-// ── magiskboot ───────────────────────────────────────────────────────────────
-// The probe prints MAGISKBOOT=yes only when the file is there and executable,
-// and _MBCHK whenever it ran to the end. Neither is "yes" by default.
-const mbYes = "MAGISKBOOT=yes\n_MBCHK";
-const mbRanMissing = "_MBCHK";
-
-{
-  const v = _magiskbootVerdict(mbYes);
-  check("an extracted magiskboot proceeds", v.ok, JSON.stringify(v));
-}
-
-for (const [what, out] of [
-  ["the probe ran and found nothing", mbRanMissing],
-  ["the probe ran and found a non-executable file", "MAGISKBOOT=no\n_MBCHK"],
-  ["the archive is missing, so nothing was extracted", "unzip: can't open /sdcard/f1r30s.zip"],
-  ["the check produced no output at all", ""],
-  // Cut off mid-probe. The yes alone is not enough: it is the only thing
-  // proving the probe reached its end, and a truncated read is not a verdict.
-  ["the probe was cut off after its answer", "MAGISKBOOT=yes"],
-]) {
-  const v = _magiskbootVerdict(out);
-  check(`${what} aborts`, v.ok === false, `ok=${v.ok}: ${v.why}`);
-}
-
-{
-  // The refusal has to say what is wrong and what was NOT done, since this is
-  // a partition write and the operator decides whether to retry from here.
-  const v = _magiskbootVerdict(mbRanMissing);
-  check("the refusal names the file that is missing",
-        /\/tmp\/bin\/magiskboot/.test(v.why), v.why);
-  check("the refusal says nothing was patched or flashed",
-        /nothing has been patched or flashed/i.test(v.why), v.why);
-  check("the refusal tells the operator what to do",
-        /f1r30s\.zip/.test(v.why) && /retry/i.test(v.why), v.why);
-}
-
-{
-  // "We could not measure this" and "this is zero" want opposite
-  // investigations, so they must not read as the same answer.
-  const cut = _magiskbootVerdict("MAGISKBOOT=yes");
-  check("a check that could not finish does not read as the extract working",
-        cut.ok === false, JSON.stringify(cut));
-  check("and says why, in its own words",
-        /never ran/.test(cut.why) && !/did not leave/.test(cut.why), cut.why);
 }
 
 // ── magisk.db ────────────────────────────────────────────────────────────────
@@ -155,7 +103,7 @@ for (const [what, out] of [
 
 // Missing or nonsense arguments must not throw — a verdict that raises is a
 // step that dies without a sentence.
-for (const fn of [_magiskbootVerdict, (out) => _preseedVerdict(out, WANT)]) {
+for (const fn of [(out) => _preseedVerdict(out, WANT)]) {
   for (const arg of [undefined, null, ""]) {
     let threw = null;
     try { fn(arg); } catch (e) { threw = e; }
@@ -163,7 +111,6 @@ for (const fn of [_magiskbootVerdict, (out) => _preseedVerdict(out, WANT)]) {
           threw === null, threw?.message);
   }
 }
-check("no argument at all is not a pass", _magiskbootVerdict().ok === false);
 check("no probe at all is not a pass", _preseedVerdict(undefined, WANT).ok === false);
 
 // ── The call sites ───────────────────────────────────────────────────────────
@@ -184,44 +131,7 @@ const fnBody = (name) => {
   return src.slice(start, i + 1);
 };
 
-// #268: a device with no f1r30s.zip on /sdcard. `unzip` answers "can't open",
-// which this step logged and moved past for the life of the issue.
-{
-  const pushed = [];
-  const logs = [];
-  let error = null;
-  const c = {
-    async shell(command) {
-      if (command.startsWith("unzip")) return "unzip: can't open /sdcard/f1r30s.zip";
-      // The shell answers fine and the file is not there — which is the whole
-      // of the report: nothing about the DEVICE was wrong, only the archive.
-      return "_MBCHK";
-    },
-    async push(path) { pushed.push(path); },
-  };
-  const runPatchBoot = new Function("classifyBootTarget", "patchBootCmdline", "addLog",
-    "setProgress", "_INIT_RC_APPEND", "_md5Hex", "setEmosRef", "setEmosTarget",
-    "_downloadBytes", "isOurBootImage", "_magiskbootVerdict",
-    `return ${fnBody("runPatchBoot")}`)(
-      () => { throw new Error("reached classifyBootTarget"); },
-      () => { throw new Error("reached patchBootCmdline"); },
-      text => logs.push(text), () => {}, "", () => "0".repeat(32),
-      () => {}, () => {}, () => {},
-      () => { throw new Error("reached isOurBootImage"); }, _magiskbootVerdict);
-  try { await runPatchBoot(c); } catch (e) { error = e; }
-
-  check("a missing archive stops the step", error !== null, "ran to completion");
-  check("the refusal names magiskboot",
-        /magiskboot/.test(error?.message || ""), error?.message);
-  // The reporter's only evidence was in unzip's own output; a refusal that
-  // drops it leaves them exactly where they were.
-  check("the refusal carries what unzip said",
-        /can't open \/sdcard\/f1r30s\.zip/.test(error?.message || ""), error?.message);
-  check("nothing is pushed or read after a failed extract", pushed.length === 0,
-        pushed.join(","));
-}
-
-// #267: the same shape one step later. A device whose magisk.db landed 0 bytes,
+// #267: a device whose magisk.db landed 0 bytes,
 // which is what the reported device measured against a healthy controller.
 {
   const drive = async (onDevice, { ran = true } = {}) => {
@@ -276,6 +186,40 @@ const fnBody = (name) => {
           && zero.error.message.includes(String(WANT)), zero.error?.message);
 }
 
+// The FireOS start script, installed into Magisk's service.d by the same
+// push-then-cp. An empty one is a device that never comes back after the
+// post-install reboot, so the step reads the file back and compares it whole.
+{
+  const SCRIPT = "#!/system/bin/sh\nstart\n";
+  const drive = async (onDevice) => {
+    const logs = [];
+    let error = null;
+    const c = {
+      async shell(command) {
+        return command.includes("_SVCCHK") ? `${onDevice}_SVCCHK\r\n` : "";
+      },
+      async push() {},
+    };
+    const run = new Function("addLog", "_SERVICE_D_SCRIPT",
+      `return ${fnBody("runInstallStartScript")}`)(text => logs.push(text), SCRIPT);
+    try { await run(c); } catch (e) { error = e; }
+    return { logs, error };
+  };
+
+  const good = await drive(SCRIPT.replace(/\n/g, "\r\n"));
+  check("a start script that reads back whole installs", good.error === null,
+        good.error?.message);
+  for (const [what, onDevice] of [
+    ["empty", ""],
+    ["cut short", SCRIPT.slice(0, 10)],
+    ["something else", "#!/system/bin/sh\n"],
+  ]) {
+    const r = await drive(onDevice);
+    check(`a start script read back ${what} aborts the step`, r.error !== null,
+          "installed anyway");
+  }
+}
+
 // The probe and the verdict must agree on the markers, or one of them is
 // testing a string the device never prints. Comments stripped first: a guard
 // that greps for the thing it forbids otherwise finds the comment explaining
@@ -283,8 +227,6 @@ const fnBody = (name) => {
 const code = src
   .replace(/\/\*[\s\S]*?\*\//g, "")
   .replace(/^[ \t]*\/\/.*$/gm, "");
-check("runPatchBoot's probe prints the sentinel both ends agree on",
-      code.includes("echo _MBCHK") && liftArrow("_magiskbootVerdict").includes("_MBCHK"));
 check("runPreseedDb's probe prints the sentinel both ends agree on",
       code.includes("echo _DBCHK") && liftArrow("_preseedVerdict").includes("_DBCHK"));
 

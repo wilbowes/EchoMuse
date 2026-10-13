@@ -3373,16 +3373,16 @@ const _deleteHaWarning = (d) => {
        + `before adding this Echo back.`;
 };
 
-const _INIT_RC_APPEND = `
-service mixer /system/bin/sh
-    oneshot
-    disabled
-    user root
-
-service echomuse /data/local/bin/start_server.sh
-    user root
-    group root system
-    class late_start
+// Starts EchoMuse at every boot from Magisk's service.d, beside the debloat
+// script. It used to be an init service appended to init.csm.project.rc, and
+// editing the ramdisk took magiskboot, which this flow could only get from
+// f1r30s.zip. An image patched that way still carries the service, and init
+// starts it there, so this script stands aside: two supervisors would race two
+// servers for the same ports. Backgrounded because Magisk runs service.d
+// scripts one after another, and start_server.sh never returns.
+const _SERVICE_D_SCRIPT = `#!/system/bin/sh
+grep -q '^service echomuse' /init.csm.project.rc 2>/dev/null && exit 0
+/system/bin/sh /data/local/bin/start_server.sh &
 `;
 
 // Known-good Magisk release for this device/Android version. Checked
@@ -3474,50 +3474,11 @@ const _wipeVerdict = (out) => {
   return { ok: true, why: '', cacheLeft: cache };
 };
 
-// Is f1r30s.zip on the device? The probe prints F1R30S=yes when it is and
-// _F1CHK when it ran to the end, so "absent" and "the probe never ran" stay
-// apart: only a probe that ran may send the operator to the file picker.
-function _f1r30sVerdict(out) {
-  const text = out || '';
-  const ran = text.includes('_F1CHK');
-  return { ran, present: ran && /^F1R30S=yes$/m.test(text) };
-}
-
 // What the failure panel shows as the reason: the error's first paragraph.
 // The rest (command output, hashes) stays in the transcript below it.
 function _stepFailureReason(message) {
   return String(message || '').split(/\n\s*\n/)[0].trim();
 }
-
-// Did the extract leave a magiskboot the rest of the step can run? `unzip`
-// exiting non-zero proves nothing by itself and its OUTPUT was never read:
-// /sdcard/f1r30s.zip missing answers "can't open", the step logs that line
-// and carries on, and the flow then patches nothing — no magiskboot, no
-// init.csm.project.rc entry — leaving a device that runs perfectly from
-// `sh /data/local/bin/start_server.sh` and is dead after every reboot. Nothing
-// downstream fails when magiskboot is missing, because every magiskboot call
-// below logs its own output and ignores it. So the probe prints:
-//
-//   MAGISKBOOT=yes  — present and executable
-//   _MBCHK          — the probe ran to the end
-//
-// Two answers are being kept apart and neither of them is "yes": a check that
-// could not run must not read as a pass, which is what `_CLEARCHK` and
-// `_WIPECHK` exist for.
-const _magiskbootVerdict = (out = '') => {
-  if (!out || !out.includes('_MBCHK')) {
-    return { ok: false, why:
-      'The check after the extract produced no output at all, so it never ran — '
-      + 'this says nothing about whether the archive unpacked.' };
-  }
-  if (!/^MAGISKBOOT=yes$/m.test(out)) {
-    return { ok: false, why:
-      'unzip did not leave an executable magiskboot at /tmp/bin/magiskboot. '
-      + 'Nothing has been patched or flashed. Check that /sdcard/f1r30s.zip is '
-      + 'on the device and retry this step.' };
-  }
-  return { ok: true, why: '' };
-};
 
 // Is the magisk.db on the device the one the controller served? Measured at 0
 // bytes where it was 36864, with the controller healthy and magiskd then
@@ -3726,11 +3687,6 @@ const _SECURITY_LABEL = {
 };
 
 const _MAGISK_FILENAME = 'Magisk-v17.3.zip';
-// f1r30s.zip from R0rt1z2's XDA thread: the one build this flow has been run
-// with. Rooting leaves it on /sdcard; a wipe or a tidy-up removes it, and the
-// wizard then asks for it rather than failing (UAT 2026-10-11).
-const _F1R30S_PATH   = '/sdcard/f1r30s.zip';
-const _F1R30S_SHA256 = 'f1e522fb3b86a6c90d559e7b8085501ffc59165850310b39468a3acfbff5bbc8';
 const _MAGISK_SHA256    = '18e46b16b25ebe691c282fe311beccd4811cd533848a64e2efbd754fb85efde7';
 
 // Is this an EchoMuse server binary? Checked before the install step pushes
@@ -4301,10 +4257,6 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   const adbRef                  = useRef(null);
   const setAdb = c => { adbRef.current = c; _setAdb(c); };
   const [magiskFile, setMagiskFile] = useState(null);
-  // Step 3 on FireOS: set when f1r30s.zip is missing from the device, so the
-  // failure panel offers a picker; the file is pushed on the retry.
-  const [needF1r30s, setNeedF1r30s] = useState(false);
-  const [f1r30sFile, setF1r30sFile] = useState(null);
   // The failed step's own message, shown in the failure panel. Until this
   // existed the reason was only in the transcript below the fold.
   const [stepError, setStepError] = useState('');
@@ -4995,7 +4947,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // An unresolvable target is refused rather than warned about: dd to a name
   // that is not a block device creates an ordinary file in TWRP's tmpfs, so
   // nothing reaches flash and the failure surfaces later as a confusing
-  // magiskboot error on a zero-byte image.
+  // error on a zero-byte image.
   //
   // A target with no names at all is allowed through with a warning. Not being
   // able to read by-name is not evidence of danger, and refusing on it would
@@ -5560,63 +5512,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       + 'has been checked against.' };
   }
 
-  // Step 3's precondition, kept out of runPatchBoot: rooting leaves
-  // f1r30s.zip on /sdcard, and when it is gone the operator is asked for it
-  // instead of being told unzip failed. Checked against the one known build
-  // before it is copied, as the Magisk zip is.
-  async function ensureF1r30s(c) {
-    const f1Probe = `[ -f ${_F1R30S_PATH} ] && echo F1R30S=yes; echo _F1CHK`;
-    const f1 = _f1r30sVerdict(await c.shell(f1Probe));
-    if (f1.ran && !f1.present) {
-      if (!f1r30sFile) {
-        const err = new Error(
-          'f1r30s.zip is not on this Echo. Choose it below and click Retry: '
-          + 'the wizard copies it over. Nothing has been changed.');
-        err.needsF1r30s = true;
-        throw err;
-      }
-      const buf = await f1r30sFile.arrayBuffer();
-      const hash = await _sha256Hex(buf);
-      if (hash !== _F1R30S_SHA256) {
-        const err = new Error(
-          `"${f1r30sFile.name}" is not the f1r30s.zip this wizard was built for. `
-          + `Nothing has been copied or changed. Choose the file from R0rt1z2's XDA thread.`
-          + `\n\nSHA-256 ${hash}\nexpected ${_F1R30S_SHA256}`);
-        err.needsF1r30s = true;
-        throw err;
-      }
-      addLog('f1r30s.zip verified. Copying it to the Echo…');
-      await c.push(_F1R30S_PATH, new Uint8Array(buf),
-        pct => setProgress({ label: 'Uploading f1r30s.zip', pct }));
-      setProgress(null);
-      if (!_f1r30sVerdict(await c.shell(f1Probe)).present) {
-        throw new Error('f1r30s.zip was sent but is not on the Echo afterwards. '
-          + 'Nothing has been patched or flashed.');
-      }
-      setNeedF1r30s(false);
-      addLog('f1r30s.zip is on the Echo.', 'ok');
-    }
-  }
-
   async function runPatchBoot(c) {
-    addLog('Setting up work directories…');
-    await c.shell('mkdir -p /tmp/work /tmp/bin');
-    addLog('Extracting magiskboot from /sdcard/f1r30s.zip…');
-    const unzipOut = await c.shell('unzip -o /sdcard/f1r30s.zip bin/magiskboot -d /tmp/ 2>&1');
-    addLog(unzipOut || '(done)');
-    await c.shell('chmod 755 /tmp/bin/magiskboot');
-    // Read the extract back rather than trusting it (#268). `unzip` on a
-    // missing archive prints "can't open" and exits non-zero, and this step
-    // used to log that line and carry on — after which nothing below fails,
-    // because every magiskboot call here logs its own output and ignores it.
-    // The device then patches no ramdisk and comes up dead after every reboot,
-    // having worked perfectly under `sh /data/local/bin/start_server.sh`.
-    const bootProbe = await c.shell(
-      '[ -x /tmp/bin/magiskboot ] && echo MAGISKBOOT=yes; echo _MBCHK');
-    const magiskboot = _magiskbootVerdict(bootProbe);
-    if (!magiskboot.ok) throw new Error(`${magiskboot.why}\n\nunzip said:\n${unzipOut || '(nothing)'}`);
-    addLog('magiskboot extracted.', 'ok');
-
     addLog('Checking which partition the boot image lives in…');
     const probe = await c.shell(
       'd=$(readlink -f /dev/block/other-boot 2>/dev/null); echo "TARGET=$d"; '
@@ -5662,7 +5558,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
 
     addLog('Pulling boot image from device (10–20s)…');
     // stderr carried through rather than discarded: dd reports its record
-    // counts there, and a silenced read failure used to reach magiskboot as
+    // counts there, and a silenced read failure used to reach the patch as
     // an empty file with nothing in the log to say why.
     // Every read and write below uses boot.target — the node classifyBootTarget
     // actually reached a verdict about — never /dev/block/other-boot again.
@@ -5673,6 +5569,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // resolution reads back exactly what it just wrote and passes. Same reason
     // the ESPHome mac is resolved once and passed rather than derived twice,
     // and the emOS flow below already does it this way.
+    await c.shell('mkdir -p /tmp/work');
     const pullOut = await c.shell(`dd if=${boot.target} of=/tmp/work/boot.img bs=1048576 2>&1`);
     addLog(pullOut.trim() || '(done)');
     const bootImg = await c.pull('/tmp/work/boot.img');
@@ -5702,55 +5599,16 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     addLog(`Escrowed ${boot.target} as it is now, md5 ${md5}. A copy has been downloaded `
          + 'to your computer. KEEP IT — from TWRP it puts this partition back as it was.', 'warn');
 
-    // Validate and transform the actual field even when magiskboot's log
-    // contains "permissive": it may be a substring or follow an enforce token.
-    // Only skip the write if the bounded patch leaves the image unchanged.
+    // Validate and transform the actual field, and skip the write only if the
+    // bounded patch leaves the image unchanged.
     const patched = patchBootCmdline(bootImg);
-    const cmdlineAlreadyPermissive = patched.every((byte, i) => byte === bootImg[i]);
-    // Unpack the current image for its ramdisk; the log remains diagnostic.
-    addLog('Checking current boot image cmdline…');
-    const probeOut = await c.shell('cd /tmp/work && /tmp/bin/magiskboot unpack boot.img 2>&1');
-    addLog(probeOut || '(done)');
-
-    let workImg = 'boot.img';
-    if (cmdlineAlreadyPermissive) {
-      addLog('cmdline already has androidboot.selinux=permissive — skipping cmdline patch.', 'warn');
-    } else {
-      addLog('Patching cmdline for SELinux permissive…');
-      addLog('Pushing patched image…');
-      await c.push('/tmp/work/boot_patched.img', patched, pct => setProgress({ label: 'Pushing boot image', pct }));
-      setProgress(null);
-      workImg = 'boot_patched.img';
-
-      addLog('Unpacking ramdisk…');
-      const unpackOut = await c.shell(`cd /tmp/work && /tmp/bin/magiskboot unpack ${workImg} 2>&1`);
-      addLog(unpackOut || '(done)');
-    }
-    // Either branch leaves /tmp/work/ramdisk.cpio in place — the probe
-    // unpack above already extracted it from boot.img when cmdline was
-    // already permissive, so no second unpack is needed in that case.
-    await c.shell('mkdir -p /tmp/ramdisk && cd /tmp/ramdisk && cpio -id < /tmp/work/ramdisk.cpio 2>/dev/null');
-
-    addLog('Patching init.csm.project.rc…');
-    const rcBytes  = await c.pull('/tmp/ramdisk/init.csm.project.rc');
-    const existing = new TextDecoder().decode(rcBytes);
-    const rcAlreadyPatched = existing.includes('service echomuse');
-    if (rcAlreadyPatched) {
-      addLog('Service entries already present — skipping.', 'warn');
-    } else {
-      await c.push('/tmp/ramdisk/init.csm.project.rc', new TextEncoder().encode(existing + _INIT_RC_APPEND));
-      await c.shell('chmod 750 /tmp/ramdisk/init.csm.project.rc');
-    }
-
-    if (cmdlineAlreadyPermissive && rcAlreadyPatched) {
-      addLog('Boot image already fully patched — nothing to flash.', 'ok');
+    if (patched.every((byte, i) => byte === bootImg[i])) {
+      addLog('cmdline already has androidboot.selinux=permissive — nothing to flash.', 'ok');
       return;
     }
-
-    addLog('Repacking ramdisk…');
-    await c.shell('cd /tmp/ramdisk && find . | cpio -o -H newc > /tmp/work/ramdisk.cpio 2>/dev/null');
-    const repackOut = await c.shell(`cd /tmp/work && /tmp/bin/magiskboot repack ${workImg} 2>&1`);
-    addLog(repackOut || '(done)');
+    addLog('Patching cmdline for SELinux permissive…');
+    await c.push('/tmp/work/new-boot.img', patched, pct => setProgress({ label: 'Pushing boot image', pct }));
+    setProgress(null);
 
     addLog(`Flashing patched boot image to ${boot.names.length ? `${boot.names.join(', ')} (${boot.target})` : boot.target}…`);
     const flashOut = await c.shell(`dd if=/tmp/work/new-boot.img of=${boot.target} bs=1048576 2>&1`);
@@ -6756,6 +6614,24 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       throw new Error(`Debloat script install verification failed — ${svcDir} contains: "${listing}". Is Magisk mounted (/sbin/.core present)?`);
     }
     addLog('Debloat applied — daemon stops take effect on the post-install reboot.', 'ok');
+  }
+
+  // FireOS only: emOS's init supervises start_server.sh itself. Read back
+  // rather than listed, because the push-then-cp pattern has left 0-byte files
+  // behind (see _preseedVerdict), and an empty start script is a device that
+  // never comes back after the reboot.
+  async function runInstallStartScript(c) {
+    addLog('Installing the boot-time start script (Magisk service.d)…');
+    const svcDir = '/sbin/.core/img/.core/service.d';
+    await c.push('/sdcard/echomuse-start.sh', new TextEncoder().encode(_SERVICE_D_SCRIPT));
+    await c.shell(`su -c 'mkdir -p ${svcDir} && cp /sdcard/echomuse-start.sh ${svcDir}/echomuse-start.sh && chmod 755 ${svcDir}/echomuse-start.sh'`);
+    const got = await c.shell(`su -c 'cat ${svcDir}/echomuse-start.sh; echo _SVCCHK' 2>&1`);
+    if (got.replace(/\r/g, '') !== _SERVICE_D_SCRIPT + '_SVCCHK\n') {
+      throw new Error(`The start script in ${svcDir} does not match what was sent, so EchoMuse `
+        + `would not start after the reboot. Is Magisk mounted (/sbin/.core present)? `
+        + `Click Retry.\n\nRead back:\n${got}`);
+    }
+    addLog('EchoMuse starts from the post-install reboot.', 'ok');
   }
 
   async function runInstallEchoMuse(c, file, useLatest) {
@@ -8531,7 +8407,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       else switch (stepIdx) {
         case  0: c = await runConnectAndroid(); break;
         case  1: c = await runConnectTwrp(); break;
-        case  2: await ensureF1r30s(c); await runPatchBoot(c); break;
+        case  2: await runPatchBoot(c); break;
         case  3: await runInstallMagisk(c, magiskFile); break;
         case  4: await runPreseedDb(c); break;
         case  5: await runReboot(c); break;
@@ -8540,7 +8416,8 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         case  8: await runDisableAlexa(c); break;
         case  9: await runDebloat(c); break;
         case 10: await runConfigWifi(c, wifiSsid, wifiPsk); break;
-        case 11: await runInstallEchoMuse(c, binaryFile, useLatest); break;
+        case 11: await runInstallEchoMuse(c, binaryFile, useLatest);
+                 await runInstallStartScript(c); break;
         case 12: await runInstallOwwAssets(c); break;
       }
       if (abandoned()) return;
@@ -8566,7 +8443,6 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       setStepError(e.message || String(e));
       markStep(stepIdx, 'error');
       if (e.matchedDeviceId) setDuplicateDeviceId(e.matchedDeviceId);
-      if (e.needsF1r30s) setNeedF1r30s(true);
       // Collect device state while it is still the state that failed. A
       // duplicate-device stop is our own bookkeeping and has nothing to ask
       // the device about.
@@ -8579,7 +8455,6 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       // clears the wrong thing on the other one.
       const failedId = STEPS[stepIdx]?.id;
       if (failedId === 'install_magisk') setMagiskFile(null);
-      if (failedId === 'patch_boot') setF1r30sFile(null);
       if (failedId === 'install_em') setBinaryFile(null);
     }
     if (!abandoned()) setRunning(false);
@@ -8647,10 +8522,6 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     if (step === 0 && duplicateDeviceId) {
       return 'Keeping the record keeps its port, config and Home Assistant '
            + 'entities. Deleting it removes them.';
-    }
-    if (cur.id === 'patch_boot' && needF1r30s) {
-      return 'f1r30s.zip is the file from R0rt1z2\'s XDA thread that was '
-           + 'installed when this Echo was unlocked.';
     }
     if (CONNECT.has(step)) {
       return adb
@@ -9103,11 +8974,6 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                   <p className="em-wizard-recovery__reason">{_stepFailureReason(stepError)}</p>
                 )}
                 <p className="em-wizard-recovery__hint">{recoveryHint()}</p>
-                {cur.id === 'patch_boot' && needF1r30s && (
-                  <input type="file" accept=".zip" aria-label="f1r30s.zip"
-                    onChange={e => setF1r30sFile(e.target.files[0] || null)}
-                    style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, marginBottom: 10 }} />
-                )}
                 {/* The same warning the Detail modal's delete gives (#375).
                     The matched device is resolved out of knownDevices rather
                     than carried across, so the port is named here too — only
@@ -9124,9 +8990,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                   {/* Not offered where a retry cannot help: a registered Echo
                       needs one of the two choices below first. */}
                   {!(step === 0 && duplicateDeviceId) && (
-                    <Pill accent
-                      disabled={cur.id === 'patch_boot' && needF1r30s && !f1r30sFile}
-                      onClick={() => runStep(step)}>Retry</Pill>
+                    <Pill accent onClick={() => runStep(step)}>Retry</Pill>
                   )}
                    {!CONNECT.has(step) && (
                     <Pill onClick={reconnectAdb}>{adb ? 'Reconnect' : 'Reconnect device'}</Pill>
