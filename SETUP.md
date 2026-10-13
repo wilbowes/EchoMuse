@@ -641,7 +641,7 @@ Two things this does NOT fix, so do not read it as "the jack works":
 
 **The mixer defaults are wrong.** Three mixer controls must be set after every boot — `start_server.sh` handles this automatically. Without them, tinyplay hangs silently on device 23.
 
-**The dummy mixer service is required.** EchoMuse's speaker Init() calls `stop mixer` as its first step. Without a `mixer` service in init.rc, this call fails. Adding a dummy service allows `stop mixer` to succeed.
+**No mixer service is needed.** EchoMuse's speaker and microphone call `stop mixer` before they open the PCM, and go on when it fails. Stock FireOS 5.5.5.4 defines no `mixer` service, and the wizard adds none.
 
 **Amp click/hiss suppression.** Order matters (found on hardware, 2026-07-10): `pcm_speaker.go` Init() mutes the output (tinymix ctl 61 → 0), opens the PCM stream and lets the silence loop clock the DAC for ~100ms, *then* enables the amp (ctl 5 On), waits 50ms for it to settle, and unmutes last. Enabling the amp onto a floating (unclocked) DAC and unmuting before stream-open was the source of the click on every service start. Shutdown is the mirror image: on SIGTERM the server's `PcmSpeaker.Close()` mutes → amp off → closes the stream, and `start_server.sh` repeats mute + amp-off after every server exit (covering SIGKILL/panic) — an enabled amp on an idle DAC audibly hisses for as long as the server is down (worst case: between OTA slots).
 

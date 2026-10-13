@@ -742,7 +742,7 @@ ramdisk than A. So a provisioned device carries a **second stock image we did
 not put there**, which is a usable last resort if an operator loses the escrow
 downloaded at the wizard's escrow step. It is not a substitute for that file:
 nothing guarantees B stays pristine, and it boots FireOS without our permissive
-cmdline or the `service echomuse` init entry, so EchoMuse does not start. It
+cmdline or Magisk, so EchoMuse does not start. It
 boots, which is what recovery is for.
 
 **On amonet v2 that last resort does not boot from where it is.** v2's

@@ -6623,14 +6623,15 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // FireOS only: emOS's init supervises start_server.sh itself. Read back
   // rather than listed, because the push-then-cp pattern has left 0-byte files
   // behind (see _preseedVerdict), and an empty start script is a device that
-  // never comes back after the reboot.
+  // never comes back after the reboot. shell() trims, so the sentinel is the
+  // last thing in a whole read.
   async function runInstallStartScript(c) {
     addLog('Installing the boot-time start script (Magisk service.d)…');
     const svcDir = '/sbin/.core/img/.core/service.d';
     await c.push('/sdcard/echomuse-start.sh', new TextEncoder().encode(_SERVICE_D_SCRIPT));
     await c.shell(`su -c 'mkdir -p ${svcDir} && cp /sdcard/echomuse-start.sh ${svcDir}/echomuse-start.sh && chmod 755 ${svcDir}/echomuse-start.sh'`);
     const got = await c.shell(`su -c 'cat ${svcDir}/echomuse-start.sh; echo _SVCCHK' 2>&1`);
-    if (got.replace(/\r/g, '') !== _SERVICE_D_SCRIPT + '_SVCCHK\n') {
+    if (got !== _SERVICE_D_SCRIPT + '_SVCCHK') {
       throw new Error(`The start script in ${svcDir} does not match what was sent, so EchoMuse `
         + `would not start after the reboot. Is Magisk mounted (/sbin/.core present)? `
         + `Click Retry.\n\nRead back:\n${got}`);

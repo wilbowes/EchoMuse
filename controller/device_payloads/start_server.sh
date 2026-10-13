@@ -4,7 +4,8 @@
 # Retry policy: if the server exits in under MIN_RUNTIME seconds,
 # it counts as a failed start. After MAX_ATTEMPTS consecutive fast
 # exits the inactive slot is restored via symlink and the script
-# exits cleanly so Android init restarts it with the old binary.
+# exits cleanly so whatever started it starts it again on the old binary:
+# Android init, emOS's init, or the FireOS wizard's Magisk service.d loop.
 #
 # If the server runs for >= MIN_RUNTIME seconds, the attempt counter
 # resets — this was a successful start that crashed later (operational
@@ -83,6 +84,9 @@ KEEP_LOG=524288    # 512KB carried into server.log.1
     done
 ) &
 TRIM_PID=$!
+# Nothing kills the loop when the script exits but this trap. Android init
+# killed the service's process group; emOS's init and the service.d loop do not.
+trap 'kill $TRIM_PID 2>/dev/null' EXIT
 
 # ── Persistent supervisor log ────────────────────────────────────────────────
 # Everything above logs to /tmp, which is RAM-backed and therefore wiped by
@@ -169,7 +173,7 @@ amp_off() {
 }
 
 # ── Signal handling ───────────────────────────────────────────────────────────
-# Forward SIGTERM/SIGINT to the server subprocess so Android init can
+# Forward SIGTERM/SIGINT to the server subprocess so a supervisor can
 # cleanly stop the service (exec is no longer used, so init signals us).
 # Wait for the server to finish its own graceful shutdown, then amp_off
 # as belt-and-braces. The log-trim loop dies with us too.
@@ -235,8 +239,8 @@ while true; do
 
     echo "[start_server] Auto-rollback: $CURRENT → $FALLBACK after $MAX_ATTEMPTS failed starts" >> /tmp/server.log
     ln -sf "$FALLBACK" /data/local/bin/server
-    sup_log "rollback $CURRENT -> $FALLBACK after $MAX_ATTEMPTS fast exits, supervisor exiting for init to restart it"
+    sup_log "rollback $CURRENT -> $FALLBACK after $MAX_ATTEMPTS fast exits, supervisor exiting to be started again"
 
-    # Exit cleanly — Android init will restart the service, now using $FALLBACK
+    # Exit cleanly — the supervisor starts this script again, now using $FALLBACK
     exit 0
 done

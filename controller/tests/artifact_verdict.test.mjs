@@ -189,6 +189,8 @@ const fnBody = (name) => {
 // The FireOS start script, installed into Magisk's service.d by the same
 // push-then-cp. An empty one is a device that never comes back after the
 // post-install reboot, so the step reads the file back and compares it whole.
+// The fake shell answers as AdbClient.shell() does: CRLF folded and trimmed.
+// A fake that skipped the trim passed a check every real device failed.
 {
   const SCRIPT = "#!/system/bin/sh\nstart\n";
   const drive = async (onDevice) => {
@@ -196,7 +198,8 @@ const fnBody = (name) => {
     let error = null;
     const c = {
       async shell(command) {
-        return command.includes("_SVCCHK") ? `${onDevice}_SVCCHK\r\n` : "";
+        const raw = command.includes("_SVCCHK") ? `${onDevice}_SVCCHK\r\n` : "";
+        return raw.replace(/\r\n/g, "\n").trim();
       },
       async push() {},
     };

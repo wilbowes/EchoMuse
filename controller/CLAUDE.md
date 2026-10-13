@@ -1865,16 +1865,8 @@ when broken — the wizard drives hardware nobody is watching a log of.
 help (#850, 2026-10-11).** `stepError` holds the failed step's message and the
 panel shows its first paragraph (`_stepFailureReason`); command output stays
 in the transcript. Until then the panel read "Click Retry first" whatever had
-happened. Three consequences of the same rule:
+happened. Two consequences of the same rule:
 
-- **FireOS step 3 asks for `f1r30s.zip`.** The flow has always read
-  `/sdcard/f1r30s.zip` off the device and never uploaded it. `ensureF1r30s`
-  runs ahead of `runPatchBoot`: absent, the panel shows a picker, and the
-  retry checks the file against `_F1R30S_SHA256` (the build the August
-  recovery tool pinned), pushes it and reads it back. A probe that did not
-  run to its `_F1CHK` sentinel is not "absent". It is a separate function
-  because `boot_target.test.mjs` builds `runPatchBoot` with an explicit list
-  of injected names, so a new dependency inside it fails that test.
 - **The restore-escrow panel needs an escrow**: `emosRef`, or `restored` (a
   session resumed after a reload, where the operator may hold the download).
   It used to show on any failure at steps 2-4, including one before the
@@ -2007,9 +1999,9 @@ throughout — so the rules below are all one rule seen from different angles.
   "`su` is not working", and the install step logged `Cleared.` after every
   command had failed. Probes carry a sentinel (`echo _CLEARCHK`) so the two
   answers are distinguishable — the same fix `_sync_start_script` needed for
-  `_SHELL_OK`, in a different file. Patch Boot Image and Pre-seed Root DB
-  read their artifact back the same way (#723, @forming: `_magiskbootVerdict`
-  with `_MBCHK`, `_preseedVerdict` with `_DBCHK`). **The size probe relies on
+  `_SHELL_OK`, in a different file. Pre-seed Root DB reads its artifact back
+  the same way (#723, @forming: `_preseedVerdict` with `_DBCHK`), and Install
+  EchoMuse reads back its service.d start script (`_SVCCHK`). **The size probe relies on
   `wc`, and that is only safe where the step runs**: TWRP on a Dot 2 is
   BusyBox 1.22.1 and prints `DB=36864` unpadded (run on VVV, 2026-10-08),
   while FireOS 5's own shell has no `wc` at all and prints `DB=` for a file
