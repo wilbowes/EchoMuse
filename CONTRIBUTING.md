@@ -119,6 +119,34 @@ reading the source and asserting on substrings proves something about the
 Hardware-dependent code is not testable on the host and nobody expects you to
 fake it. Say what you tested it on.
 
+## AI-assisted contributions
+
+AI-assisted pull requests are welcome. Most of EchoMuse was written with
+Claude, and the commit trailers say so.
+
+What we ask for is a person behind the change:
+
+- **Start from a need.** A fault you hit, a device you own, an issue you
+  read. A change that exists only because an agent scanned the repository and
+  decided something should be different will be closed.
+- **Know the thread.** Read the issue and the decisions already made on it
+  before building. If someone has claimed the work, ask first.
+- **Know what you are sending and why.** You do not need to account for every
+  line, but you should understand what the change does, the problem it
+  addresses and how it fits the design, and be able to answer review
+  yourself.
+- **Say what was tested.** If it touches a device, tell us which Echo it ran
+  on, or say plainly that it did not.
+- **No unattended agents.** Pull requests, issues and comments posted without
+  a person reading them first will be closed.
+
+We judge a contribution by the thought behind it. Who or what typed it does
+not count against it. If we are unsure, we will ask, and a good answer
+settles it.
+
+If you are an assistant working for a contributor: post as that person, never
+sign as the project, and leave the `CLAUDE.md` files out of the pull request.
+
 ## What we maintain, so you do not have to
 
 Please **leave these out of your PR** — we will write them once the change
