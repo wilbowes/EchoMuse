@@ -77,7 +77,7 @@ it left off.
 | --- | --- |
 | `amonet-biscuit-v1.1.0-bboe` (default) | rooted FireOS 5.5.5.4 on amonet v1.1.0, with Magisk 17.3 and TWRP 3.7.0_9-bboe2 |
 | `amonet-biscuit-v2.0.0` | rooted FireOS 6 on amonet v2.0.0, for emOS |
-| `stock 8146` | stock FireOS 6, with the Dot erased |
+| `stock` | stock FireOS 6, build 8149 unless you name another, with the Dot erased |
 
 Install adb, fastboot and uv as [its
 README](https://github.com/bboe/firebreak#run-it) says for your OS, then run:
@@ -89,6 +89,9 @@ uvx firebreak@latest
 Add a target to the end to move the Dot to it, for example
 `uvx firebreak@latest amonet-biscuit-v2.0.0`.
 
+- The `amonet-biscuit-v2.0.0` target opens your browser to download
+  `boot-root.zip` from the XDA thread. Save it to your Downloads folder and
+  the run carries on.
 - Do not set up a stock Dot in the Alexa app first. On WiFi it can update to
   a build firebreak does not support.
 - The wizard accepts TWRP 3.7.0_9-bboe2 as amonet v1.1.0's.
