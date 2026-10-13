@@ -133,8 +133,11 @@ What we ask for is a person behind the change:
   before building. If someone has claimed the work, ask first.
 - **Know what you are sending and why.** You do not need to account for every
   line, but you should understand what the change does, the problem it
-  addresses and how it fits the design, and be able to answer review
-  yourself.
+  addresses and how it fits the design.
+- **Keep it short and well scoped.** One change per pull request. The
+  description and your replies in review can be written with an assistant,
+  as ours are. What we ask is that they are concise and easy to follow: a
+  wall of text will be sent back.
 - **Say what was tested.** If it touches a device, tell us which Echo it ran
   on, or say plainly that it did not.
 - **No unattended agents.** Pull requests, issues and comments posted without
