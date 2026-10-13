@@ -3376,11 +3376,18 @@ const _deleteHaWarning = (d) => {
 // Starts EchoMuse at every boot from Magisk's service.d, beside the debloat
 // script. A boot image whose init.csm.project.rc defines an echomuse service
 // has init start it, so this script stands aside: two supervisors would race
-// two servers for the same ports. Backgrounded because Magisk runs service.d
-// scripts one after another, and start_server.sh never returns.
+// two servers for the same ports. start_server.sh exits after an OTA rollback
+// and expects to be started again on the old slot, as init and emOS's init
+// do, so the loop does that, 5 s apart as init spaces its restarts.
+// Backgrounded because Magisk runs service.d scripts one after another.
 const _SERVICE_D_SCRIPT = `#!/system/bin/sh
 grep -q '^service echomuse' /init.csm.project.rc 2>/dev/null && exit 0
-/system/bin/sh /data/local/bin/start_server.sh &
+(
+  while true; do
+    /system/bin/sh /data/local/bin/start_server.sh
+    sleep 5
+  done
+) &
 `;
 
 // Known-good Magisk release for this device/Android version. Checked
@@ -3726,7 +3733,7 @@ async function _sha256Hex(buf) {
 // Steps:
 //  0  connect_android  — connect in Android mode, verify FireOS 5, reboot to recovery
 //  1  connect_twrp     — reconnect once TWRP menu appears
-//  2  patch_boot       — SELinux cmdline + init.rc in one boot image pass  [auto]
+//  2  patch_boot       — SELinux permissive cmdline                        [auto]
 //  3  install_magisk   — flash Magisk 17.3 via twrp install                [file]
 //  4  preseed_db       — push pre-seeded magisk.db                         [auto]
 //  5  reboot           — reboot device to Android                          [button]
@@ -3735,11 +3742,11 @@ async function _sha256Hex(buf) {
 //  8  disable_alexa    — silence OOBE + pm disable BEFORE wifi            [auto]
 //  9  debloat          — pm hide bloat pkgs + service.d daemon-stop script [auto]
 // 10  wifi             — configure WiFi network                            [inputs]
-// 11  install_em       — push binary + startup script                      [file]
+// 11  install_em       — push binary, startup script + service.d starter   [file]
 const _WIZARD_STEPS = [
   { id: 'connect_android', label: 'Connect Device',     desc: 'Connect the Echo Dot via USB. Device should be on and booted into Android. Appears as "AEOBC" in the USB picker.' },
   { id: 'connect_twrp',    label: 'Connect to TWRP',   desc: 'Wait for TWRP recovery to appear, then reconnect. Appears as "Echo" in the USB picker.' },
-  { id: 'patch_boot',      label: 'Patch Boot Image',  desc: 'Apply SELinux permissive patch and add init.rc service entries.' },
+  { id: 'patch_boot',      label: 'Patch Boot Image',  desc: 'Apply the SELinux permissive patch.' },
   { id: 'install_magisk',  label: 'Install Magisk',    desc: 'Flash Magisk 17.3 for persistent root access.' },
   { id: 'preseed_db',      label: 'Pre-seed Root DB',  desc: 'Grant root to ADB shell without a screen prompt.' },
   { id: 'reboot',          label: 'Reboot to Android', desc: 'Reboot device to Android.' },
@@ -3774,8 +3781,7 @@ function _wizardLogClass(msg, type) {
 // four that only ever existed to obtain root inside Android:
 //
 //   Patch Boot Image   emOS loads no SELinux policy at all, so the permissive
-//                      cmdline has nothing to act on, and the init.rc entries
-//                      are replaced by emOS's own service table. THE MOST
+//                      cmdline has nothing to act on. THE MOST
 //                      DANGEROUS STEP IN THE WIZARD — in the wrong mode it
 //                      writes over the amonet unlock payload — and it is
 //                      simply not needed.

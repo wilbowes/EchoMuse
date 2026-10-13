@@ -179,8 +179,8 @@ handles both layouts. Lowest first:
 
 There is a single partition write either way, and TWRP presents that partition
 as `/dev/block/other-boot`. What goes into it differs by flow: the **FireOS**
-flow's Patch Boot Image step adds the SELinux permissive cmdline and the
-`service echomuse` init entry to the kernel already there, while the **emOS**
+flow's Patch Boot Image step adds the SELinux permissive cmdline to the image
+already there, while the **emOS**
 flow replaces the partition with an image rebuilt from that same kernel and
 device trees. Neither touches any layer above `No` in the table.
 
@@ -328,12 +328,10 @@ Do not reason about this as a kernel parameter, where a later value would overri
 
 > **Note:** The cmdline is a null-terminated ASCII string in a 512-byte field at a fixed offset (byte 64) of the Android boot image header. We patch it directly rather than using magiskboot, which doesn't support cmdline modification on this version.
 
-### From TWRP, extract magiskboot and pull the boot image:
+### From TWRP, pull the boot image:
 
 ```bash
-adb shell 'mkdir -p /tmp/work /tmp/bin'
-adb shell 'unzip /sdcard/f1r30s.zip bin/magiskboot -d /tmp/'
-adb shell 'chmod 755 /tmp/bin/magiskboot'
+adb shell 'mkdir -p /tmp/work'
 adb shell 'dd if=/dev/block/other-boot of=/tmp/work/boot.img bs=1048576'
 adb pull /tmp/work/boot.img boot_fresh.img
 ```
@@ -554,57 +552,28 @@ adb shell "su -c 'cp /sdcard/start_server.sh /data/local/bin/start_server.sh && 
 
 > **Log cap (v2.7.1):** `/tmp` is RAM-backed and the script only ever appends — a background loop in the script checks every 5 minutes and, past 5MB, keeps the newest 512KB in `/tmp/server.log.1` and truncates `server.log` in place (the server's `O_APPEND` fd continues at the new EOF). Total log footprint stays bounded at ~5.5MB. A 45MB log was observed in the wild before this existed.
 
-> The script runs the server as a subprocess (not via `exec`) so SIGTERM can be forwarded from Android init via the `trap`. If the binary exits in under 15 seconds three times in a row, the inactive A/B slot is restored via symlink and the script exits cleanly — init restarts it with the old binary. If the binary runs for ≥15s before crashing, the attempt counter resets (operational crash, not a deployment failure).
+> The script runs the server as a subprocess (not via `exec`) so SIGTERM can be forwarded from Android init via the `trap`. If the binary exits in under 15 seconds three times in a row, the inactive A/B slot is restored via symlink and the script exits cleanly — the service.d script below restarts it with the old binary. If the binary runs for ≥15s before crashing, the attempt counter resets (operational crash, not a deployment failure).
 
-### Add EchoMuse and mixer service to the ramdisk:
+### Start EchoMuse at boot:
 
-The init scripts on FireOS 5 live in the boot image ramdisk. We need to unpack it, edit `init.csm.project.rc`, and repack.
-
-Boot into TWRP:
-
-```bash
-adb reboot recovery
-```
-
-Extract magiskboot and unpack the boot image:
+Magisk runs every script in its `service.d` at boot. This one starts
+`start_server.sh`, and starts it again whenever it exits, as it does after an
+OTA rollback. It stands aside on a boot image whose `init.csm.project.rc`
+defines an `echomuse` service, because init starts EchoMuse there.
 
 ```bash
-adb shell 'mkdir -p /tmp/work /tmp/bin'
-adb shell 'unzip /sdcard/f1r30s.zip bin/magiskboot -d /tmp/'
-adb shell 'chmod 755 /tmp/bin/magiskboot'
-adb shell 'dd if=/dev/block/other-boot of=/tmp/work/boot.img bs=1048576'
-adb shell 'cd /tmp/work && /tmp/bin/magiskboot unpack boot.img'
-adb shell 'mkdir -p /tmp/ramdisk && cd /tmp/ramdisk && cpio -idv < /tmp/work/ramdisk.cpio 2>/dev/null | tail -3'
-```
-
-Pull the init script and edit it on your machine:
-
-```bash
-adb pull /tmp/ramdisk/init.csm.project.rc init.csm.project.rc
-```
-
-Append the following two service blocks to the end of `init.csm.project.rc`. The `mixer` stub must come first — EchoMuse's speaker Init() calls `stop mixer` as its first step:
-
-```
-service mixer /system/bin/sh
-    oneshot
-    disabled
-    user root
-
-service echomuse /data/local/bin/start_server.sh
-    user root
-    group root system
-    class late_start
-```
-
-Push back, fix permissions, repack and flash:
-
-```bash
-adb push init.csm.project.rc /tmp/ramdisk/init.csm.project.rc
-adb shell 'chmod 750 /tmp/ramdisk/init.csm.project.rc'
-adb shell 'cd /tmp/ramdisk && find . | cpio -o -H newc > /tmp/work/ramdisk.cpio'
-adb shell 'cd /tmp/work && /tmp/bin/magiskboot repack boot.img'
-adb shell 'dd if=/tmp/work/new-boot.img of=/dev/block/other-boot bs=1048576'
+cat > echomuse-start.sh <<'EOF'
+#!/system/bin/sh
+grep -q '^service echomuse' /init.csm.project.rc 2>/dev/null && exit 0
+(
+  while true; do
+    /system/bin/sh /data/local/bin/start_server.sh
+    sleep 5
+  done
+) &
+EOF
+adb push echomuse-start.sh /sdcard/echomuse-start.sh
+adb shell "su -c 'mkdir -p /sbin/.core/img/.core/service.d && cp /sdcard/echomuse-start.sh /sbin/.core/img/.core/service.d/echomuse-start.sh && chmod 755 /sbin/.core/img/.core/service.d/echomuse-start.sh'"
 adb reboot
 ```
 
@@ -613,8 +582,8 @@ adb reboot
 After full boot (allow ~90 seconds):
 
 ```bash
-adb shell "su -c 'getprop init.svc.echomuse'"
-# Expected: running
+adb shell "su -c 'pidof server'"
+# Expected: a process ID
 
 adb shell "su -c 'cat /tmp/server.log'"
 # Expected: Initializing... Ready... mDNS browsing...
