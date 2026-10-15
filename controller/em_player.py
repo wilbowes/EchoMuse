@@ -675,8 +675,10 @@ class MediaSession:
             await self._push_state()
             return
 
-        # Resolved once per feed rather than per chunk: the device cannot
-        # gain or lose the capability mid-stream, and this runs ~23×/s.
+        # Resolved once per feed, and re-resolved per chunk inside the loop
+        # below (#751 — a reconnect swaps the Device object). What stays hoisted
+        # here is what genuinely cannot change mid-stream: the device cannot
+        # gain or lose the capability, and the EQ chain carries filter state.
         frame_type, eos_type = _frame_types(device)
 
         # Built once for the whole feed and then UPDATED in place, never
@@ -781,6 +783,25 @@ class MediaSession:
             await self._push_state()
 
             while True:
+                # #751: a reconnect registers a NEW Device object, so the one
+                # resolved above goes stale at that instant — its data socket is
+                # closed and its config stops moving. Re-resolve per chunk and
+                # the stream rides out the bounce on the new socket; the getter
+                # is a dict lookup, and send_data's own DATA_RECONNECT_GRACE_S
+                # covers the window while the replacement is still handshaking.
+                # frame_type/eos_type stay hoisted above: the wire plane is
+                # fixed once audio is flowing, and re-deriving it mid-track
+                # would switch planes under a decoder already streaming.
+                #
+                # `device` is deliberately NOT rebound to None — the natural-end
+                # and teardown paths below still send an EOS through it, and
+                # send_data fails that fast on a closed socket by design.
+                fresh = _get_device(self.device_id) if _get_device else None
+                if fresh is None:
+                    log.warning(f"[{self.device_id}] Device left mid-stream — "
+                                f"ending the feed")
+                    break
+                device = fresh
                 # Config is pushed live (_apply_live_config), so re-read it
                 # per chunk. update() compares before it touches anything, so
                 # the steady-state cost is a tuple comparison ~23×/s.

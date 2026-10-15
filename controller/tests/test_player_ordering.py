@@ -101,6 +101,67 @@ def test_devices_do_not_wait_on_each_other():
     assert asyncio.run(main()) == PAUSED
 
 
+def test_a_reconnect_mid_stream_moves_the_feed_to_the_new_device():
+    # #751: a control reconnect registers a NEW Device object, so the one
+    # _feed resolved at its start goes stale — its data socket is closed and
+    # its config stops moving. Before the per-chunk re-resolve the feed kept
+    # writing into the dead socket for the rest of the track, one "Data send
+    # failed" line per period, and every EOS went the same way.
+    async def main():
+        old = FakeDevice("office")
+        new = FakeDevice("office")
+        current = [old]
+
+        em_player.init(get_device=lambda did: current[0], notify_state=None)
+        em_player._notify_state = None
+
+        s = StubSession("office", periods=40, endless=True, gap=0.005)
+        em_player._sessions["office"] = s
+        await s.play("http://radio/old")
+        await asyncio.sleep(0.03)
+
+        # The power cut: the old socket dies and a replacement Device
+        # registers, exactly as handle_data now sees it.
+        current[0] = new
+        await asyncio.sleep(0.05)
+
+        await em_player.stop("office")
+        return old, new, s
+
+    old, new, s = asyncio.run(main())
+    # Every frame of the stream after the swap went to the NEW device.
+    assert len(old.data_frames) < len(new.data_frames)
+    assert len(new.data_frames) > 0, "the feed never reached the new device"
+    assert s.state == IDLE
+
+
+def test_a_feed_whose_device_leaves_entirely_ends_and_releases_the_lock():
+    # The other half of #751: with the replacement gone the getter returns
+    # None, and the feed must stop rather than spin on a device that is not
+    # there. The command lock must come back, or every later command queues
+    # behind a feed that never finishes.
+    async def main():
+        device = FakeDevice("office")
+        current = [device]
+        em_player.init(get_device=lambda did: current[0], notify_state=None)
+        em_player._notify_state = None
+
+        s = StubSession("office", periods=40, endless=True, gap=0.005)
+        em_player._sessions["office"] = s
+        await s.play("http://radio/old")
+        await asyncio.sleep(0.03)
+
+        current[0] = None
+        await asyncio.wait_for(s._task, 2.0)
+        # And the lock is free — a following command completes rather than
+        # queueing behind a feed that will never finish.
+        await asyncio.wait_for(em_player.stop("office"), 2.0)
+        return s
+
+    s = asyncio.run(main())
+    assert s.state == IDLE
+
+
 class HalfOpenDevice(FakeDevice):
     """A device that lost power mid-stream: its data socket is half-open, so
     once `dead` is set no send on it ever returns (observed 2026-10-04)."""
