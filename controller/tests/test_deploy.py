@@ -276,13 +276,15 @@ def test_every_device_payload_has_an_update_path():
     """
     from pathlib import Path
     root = Path(__file__).resolve().parent.parent
-    api = (root / "em_api.py").read_text()
+    # The sync module, not em_api: the provisioning routes there name every
+    # payload too, and "installed only by the wizard" is the case this catches.
+    syncs = (root / "em_payloads.py").read_text()
     payloads = sorted(p.name for p in (root / "device_payloads").iterdir() if p.is_file())
     assert payloads, "device_payloads/ is empty — has it moved?"
 
     for name in payloads:
-        assert name in api, (
-            f"{name} has no update path: nothing in em_api.py references it. "
+        assert name in syncs, (
+            f"{name} has no update path: no sync in em_payloads.py references it. "
             f"A payload installed only by the provisioning wizard drifts on every "
             f"device already in the field."
         )
@@ -295,12 +297,10 @@ def test_debloat_sync_reconciles_both_halves():
     and changed nothing on any device.
     """
     from pathlib import Path
-    api = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
-    fn = api[api.index("async def _sync_debloat"):]
-    fn = fn[:fn.index("\nasync def ", 1)] if "\nasync def " in fn[1:] else fn
+    fn = _sources.def_source("sync_debloat")
 
     assert "echomuse-debloat.sh" in fn, "the boot script half must be synced"
-    assert "_debloat_packages()" in fn, "the pm-hide half must be reconciled"
+    assert "debloat_packages()" in fn, "the pm-hide half must be reconciled"
     assert "pm hide" in fn, "drifted packages must actually be hidden"
     # Rename-based replacement: the running shell keeps the old inode.
     assert "mv " in fn and ".new" in fn, \
@@ -2268,7 +2268,7 @@ def test_the_reconcile_runs_the_three_payloads_sequentially():
     fn = _strip_prose(_fn_body(
         (CONTROLLER / "em_api.py").read_text(), "reconcile_on_connect"))
 
-    for step in ("reconcile_oww_assets", "_sync_start_script", "_sync_debloat"):
+    for step in ("reconcile_oww_assets", "em_payloads.sync_start_script", "em_payloads.sync_debloat"):
         assert step in fn, f"{step} must run on connect"
     assert "asyncio.gather" not in fn, (
         "the three payloads share one shell plane — run them in order"
@@ -2354,8 +2354,8 @@ def test_the_payload_syncs_tell_a_missing_file_from_a_silent_device():
     date" event that is not true.
     """
     src = (CONTROLLER / "em_api.py").read_text()
-    for name in ("_sync_start_script", "_sync_debloat"):
-        fn = _strip_prose(_fn_body(src, name))
+    for name in ("sync_start_script", "sync_debloat"):
+        fn = _strip_prose(_sources.def_source(name))
         assert "em_shell.OK_MARK" in fn, (
             f"{name} must be able to tell a missing file from a silent device"
         )
@@ -3032,7 +3032,7 @@ def test_every_debloat_push_asks_which_userspace_the_device_booted():
     The debloat payload is Android-only — a pm-hide list and a Magisk
     service.d script — and emOS has neither a package manager nor Magisk.
 
-    `_sync_debloat` has THREE call sites and for a while only two of them
+    `em_payloads.sync_debloat` has THREE call sites and for a while only two of them
     asked. `reconcile_on_connect` gates on `live.android_userspace` and
     `_post_debloat` refuses with `not_android`, but the OTA path in
     `_run_update_locked` called it unconditionally. Found on EFF, 2026-09-07,
@@ -3051,9 +3051,8 @@ def test_every_debloat_push_asks_which_userspace_the_device_booted():
     """
     # Parsed, not grepped, so _strip_prose is neither needed nor wanted: an
     # AST contains no comments at all, and stripping them first breaks the
-    # parse on any line whose prose was load-bearing to the syntax.
-    tree = ast.parse((CONTROLLER / "em_api.py").read_text())
-
+    # parse on any line whose prose was load-bearing to the syntax. Every
+    # module, so a call site that moves out of em_api is still asked.
     def gated(node) -> bool:
         """True when `android_userspace` is tested anywhere above this call."""
         for anc in ancestors.get(node, ()):
@@ -3062,18 +3061,19 @@ def test_every_debloat_push_asks_which_userspace_the_device_booted():
         return False
 
     ancestors: dict = {}
-    for parent in ast.walk(tree):
-        for child in ast.iter_child_nodes(parent):
-            ancestors[child] = (parent,) + ancestors.get(parent, ())
-
-    calls = [
-        n for n in ast.walk(tree)
-        if isinstance(n, ast.Call)
-        and isinstance(n.func, ast.Name)
-        and n.func.id == "_sync_debloat"
-    ]
+    calls = []
+    for path in _sources.MODULES:
+        tree = _sources.tree(path)
+        for parent in ast.walk(tree):
+            for child in ast.iter_child_nodes(parent):
+                ancestors[child] = (parent,) + ancestors.get(parent, ())
+        calls += [
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.Call)
+            and getattr(n.func, "attr", getattr(n.func, "id", None)) == "sync_debloat"
+        ]
     assert len(calls) >= 3, (
-        f"expected at least three _sync_debloat call sites, found {len(calls)} — "
+        f"expected at least three sync_debloat call sites, found {len(calls)} — "
         "if one was removed, update this test rather than deleting it"
     )
 
@@ -3090,7 +3090,7 @@ def test_every_debloat_push_asks_which_userspace_the_device_booted():
     }
     ungated = [ln for ln in ungated if enclosing[ln] != "_post_debloat"]
     assert not ungated, (
-        "these _sync_debloat call sites do not check android_userspace: "
+        "these sync_debloat call sites do not check android_userspace: "
         + ", ".join(f"line {ln} in {enclosing[ln]}()" for ln in ungated)
         + " — an emOS device has no package manager to hide packages from and "
           "no Magisk daemon to have created the service.d directory."
