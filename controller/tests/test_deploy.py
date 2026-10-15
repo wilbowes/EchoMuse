@@ -58,9 +58,7 @@ def test_dashboard_bundle_is_cache_busted():
     import re
     from pathlib import Path
 
-    src = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
-    handler = src[src.index("async def _serve_dashboard"):]
-    handler = handler[:handler.index("\nasync def ", 1)]
+    handler = _sources.def_source("_serve_dashboard")
 
     assert "dashboard.js?v=" in handler, \
         "the bundle URL must carry a cache-busting token"
@@ -70,14 +68,13 @@ def test_dashboard_bundle_is_cache_busted():
     # mtime changes on every rebuild.
     # The token must be an mtime, not a version string: `version.py` reports
     # "dev" for every local build and so would never change between two of
-    # them. The stamp moved into _bundle_version() when /api/system/status
+    # them. The stamp moved into bundle_version() when /api/system/status
     # started publishing it for stale-tab detection, so the requirement is now
     # that the handler uses that ONE definition and that the definition is an
     # mtime — see test_the_bundle_stamp_has_exactly_one_definition.
-    assert "_bundle_version()" in handler, \
-        "the handler must take its token from _bundle_version()"
-    helper = src[src.index("def _bundle_version("):]
-    helper = helper[:helper.index("\nasync def ", 1)]
+    assert "bundle_version()" in handler, \
+        "the handler must take its token from bundle_version()"
+    helper = _sources.def_source("bundle_version")
     assert "st_mtime" in helper, \
         "cache-bust on the bundle's mtime, not on a version string"
 
@@ -97,7 +94,7 @@ def test_dashboard_paths_are_ingress_safe():
     index = (static / "index.html").read_text()
     dashboard = (static / "dashboard.html").read_text()
     jsx = (static / "dashboard.jsx").read_text()
-    api = (CONTROLLER / "em_api.py").read_text()
+    api = (CONTROLLER / "em_routes_static.py").read_text()
     config = (CONTROLLER / "config.yaml").read_text()
 
     for name, html in (("index.html", index), ("dashboard.html", dashboard)):
@@ -3083,22 +3080,20 @@ def test_the_bundle_stamp_has_exactly_one_definition():
     from the API — so the one number somebody checks to rule this out was the
     number lying to them (2026-09-10).
     """
-    src = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
-
-    _sources.find_def("_bundle_version")   # exactly one, in any module
-    assert '"bundle_version": _bundle_version()' in src, (
-        "/api/system/status must publish the stamp via _bundle_version(), so "
+    _sources.find_def("bundle_version")   # exactly one, in any module
+    status = _sources.def_source("_get_system_status")
+    assert '"bundle_version": em_routes_static.bundle_version()' in status, (
+        "/api/system/status must publish the stamp via bundle_version(), so "
         "the page can compare what it loaded against what is being served")
 
     # The URL stamp must come from the same call, not a second stat().
-    serve = src[src.index("async def _serve_dashboard"):]
-    serve = serve[:serve.index("async def _redirect_root")]
-    assert "_bundle_version()" in serve, (
-        "_serve_dashboard must stamp the URL from _bundle_version() rather "
+    serve = _sources.def_source("_serve_dashboard")
+    assert "bundle_version()" in serve, (
+        "_serve_dashboard must stamp the URL from bundle_version() rather "
         "than re-deriving the mtime")
     assert "st_mtime" not in serve, (
         "_serve_dashboard re-derives the bundle mtime — that is the drift "
-        "this test exists to prevent; use _bundle_version()")
+        "this test exists to prevent; use bundle_version()")
 
 
 def test_the_stale_bundle_check_does_not_refresh_the_displayed_version():
