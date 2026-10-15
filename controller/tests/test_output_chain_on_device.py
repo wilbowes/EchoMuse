@@ -9,6 +9,7 @@ running NOWHERE. Both come from one playback path forgetting the gate, and
 there are three of them.
 """
 
+import _sources
 import ast
 import re
 from pathlib import Path
@@ -70,10 +71,10 @@ def _reads_the_gate(fn) -> bool:
 
 def test_every_playback_path_that_builds_a_chain_checks_the_gate():
     builders = []
-    for mod in ("em_controller.py", "em_player.py", "em_esphome.py", "em_api.py"):
-        for fn in _functions(CONTROLLER / mod):
+    for path in _sources.MODULES:
+        for fn in _functions(path):
             if _builds_a_chain(fn):
-                builders.append((mod, fn))
+                builders.append((path.name, fn))
     names = sorted(f"{m}:{f.name}" for m, f in builders)
     # Three today. A fourth is fine, provided it is gated too.
     assert len(builders) >= 3, names

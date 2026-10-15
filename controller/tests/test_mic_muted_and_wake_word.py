@@ -12,6 +12,7 @@ does without.
 - Entity keys are append-only: HA keys its registry on them.
 """
 
+import _sources
 import re
 from pathlib import Path
 
@@ -54,7 +55,8 @@ def test_the_button_mute_is_read_only():
                     "isinstance(msg, api_pb2.MediaPlayerCommandRequest)"):
         block = _block(src, handler, "\n        if isinstance(msg, ")
         assert "MIC_MUTED_KEY" not in block
-    assert src.count("MIC_MUTED_KEY") == 3, "defined, advertised, reported — nothing else"
+    assert _sources.all_code().count("MIC_MUTED_KEY") == 3, \
+        "defined, advertised, reported — nothing else"
 
 
 def test_subscribing_to_states_reports_the_mute():

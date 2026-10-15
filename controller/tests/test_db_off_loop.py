@@ -15,10 +15,12 @@ it. em_dbwriter.submit never raises.
 
 import ast
 import logging
+import re
 import threading
 import time
 from pathlib import Path
 
+import _sources
 import em_dbwriter
 
 CONTROLLER = Path(__file__).resolve().parents[1]
@@ -50,13 +52,50 @@ def _sync_db_calls_in_coroutines(path: Path, allow=()) -> list[str]:
     return found
 
 
-def test_em_controller_coroutines_make_no_synchronous_db_calls():
+# Synchronous calls that were on the loop when this guard was widened from
+# em_controller to every module (2026-10-15), keyed by function and call so a
+# function moving between modules keeps its entry. The list may only shrink:
+# an entry that no longer matches anything fails the test until it is removed.
+KNOWN_ON_LOOP = {
+    ("_create_first_admin_locked", "user_count"),
+    ("_delete_oww_model", "get_all_devices"),
+    ("_delete_oww_model", "get_device_config"),
+    ("_delete_oww_model", "get_global_device_config"),
+    ("_fetch_controller_release", "get_config"),
+    ("_fetch_controller_release", "set_config"),
+    ("_fetch_latest_emos_release", "get_config"),
+    ("_fetch_latest_release", "get_config"),
+    ("_fetch_latest_release", "set_config"),
+    ("_get_cached_release", "get_config"),
+    ("_get_controller_release", "get_config"),
+    ("_get_provision_oww_asset", "get_global_device_config"),
+    ("_get_provision_oww_manifest", "get_global_device_config"),
+    ("_get_system_status", "fleet_base_os"),
+    ("_get_system_status", "get_config"),
+    ("login", "get_config"),
+    ("login_via_ingress", "get_config"),
+}
+
+# em_db is the database; em_dbwriter is the thread that calls it.
+NOT_ON_LOOP = {"em_db.py", "em_dbwriter.py"}
+
+
+def _key(found: str) -> tuple[str, str]:
+    call, fn = re.search(r"db\.(\w+) in (\w+)$", found).groups()
+    return fn, call
+
+
+def test_coroutines_make_no_synchronous_db_calls():
     # db.init runs once in main() before anything else is scheduled.
-    found = _sync_db_calls_in_coroutines(CONTROLLER / "em_controller.py", allow={"init"})
-    assert not found, (
-        "synchronous database calls on the event loop:\n  " + "\n  ".join(found)
+    found = [x for m in _sources.MODULES if m.name not in NOT_ON_LOOP
+             for x in _sync_db_calls_in_coroutines(m, allow={"init"})]
+    new = [x for x in found if _key(x) not in KNOWN_ON_LOOP]
+    assert not new, (
+        "synchronous database calls on the event loop:\n  " + "\n  ".join(new)
         + "\nQueue writes nothing reads back with em_dbwriter.submit; await "
           "reads with loop.run_in_executor.")
+    stale = KNOWN_ON_LOOP - {_key(x) for x in found}
+    assert not stale, f"fixed, so remove from KNOWN_ON_LOOP: {sorted(stale)}"
 
 
 def test_the_guard_sees_a_synchronous_call(tmp_path):

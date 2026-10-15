@@ -339,9 +339,20 @@ sh emos/device/em-wifi-check.sh
 ```
 
 Both suites plus `go vet` run in CI on every push/PR
-(`.github/workflows/ci.yml`). Controller tests deliberately cover the
-pure-logic modules only — see `controller/CLAUDE.md` before adding one that
-needs openwakeword or aiohttp.
+(`.github/workflows/ci.yml`). The controller suite imports `em_api`,
+`em_controller` and `em_esphome` since #739; openwakeword is stubbed per
+test (`tests/_oww_stub.py`, see `tests/conftest.py`).
+
+**A source guard finds code through `tests/_sources.py`, never by reading one
+file by name** (2026-10-15, ahead of splitting em_controller/em_api into
+modules). A rule over `em_controller.py` says nothing about a handler moved
+into its own module, and `"X" not in src` is true of a file X has left, so a
+move silences both while they go on passing. `_sources.MODULES` is every
+`em_*.py` by glob, `find_def` fails when a function is defined nowhere or
+twice, and `code_only` drops comments and docstrings. Widening the off-loop
+DB rule that way found 17 functions in em_api/em_auth calling `db.*` on the
+event loop; they are listed in `tests/test_db_off_loop.py`'s
+`KNOWN_ON_LOOP`, which may only shrink.
 
 **emOS is C with no test framework, so its off-target tools ARE its suite** —
 `ringsim --check` for the boot ring's invariants, `pwcheck` for the password

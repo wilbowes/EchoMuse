@@ -10,6 +10,7 @@ nothing anywhere reports a problem. That is the same silent-typo failure
 test_capabilities.py exists to prevent, so it is checked the same way.
 """
 
+import _sources
 import re
 import sys
 from pathlib import Path
@@ -209,5 +210,5 @@ def test_shell_lock_release_is_ownership_checked():
     # And the bare release in the acquire path is gone: it fired on a lock
     # another task may already have released, raising "Lock is not acquired"
     # and surfacing as an empty result three steps away.
-    assert "_shell_lock[device_id].release()" not in src, \
+    assert "_shell_lock[device_id].release()" not in _sources.all_code(), \
         "an unguarded shell-lock release is back"
