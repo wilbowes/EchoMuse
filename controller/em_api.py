@@ -57,6 +57,7 @@ import websockets
 import em_db as db
 import em_esphome
 import em_events
+import em_shell
 import em_http
 import em_state
 import em_health
@@ -314,22 +315,6 @@ def wifi_record_result(device_id: str, ok: bool, ssid: str, error: str
     return st, False
 
 # ─── Initialisation ───────────────────────────────────────────────────────────
-
-_shell_ws:        dict = {}   # device_id → live ws for programmatic sessions
-_shell_lock:      dict = {}   # device_id → asyncio.Lock (one session at a time)
-# device_id → the asyncio Task that actually holds _shell_lock.
-#
-# `Lock.locked()` answers "is anyone holding this", never "am I", and the
-# cleanup paths used it as though it meant the second. So a caller that gave
-# up WAITING for the lock ran the same cleanup as one that had it, and
-# released the lock out from under the transfer still using it — two shell
-# sessions on one device, which is the exact thing the lock exists to stop.
-# Seen end to end on EFF 2026-09-04: a debloat push hung for 108s, the wake
-# word reconcile behind it timed out and released the debloat's lock, and the
-# slot detect that followed then failed with `Lock is not acquired` and
-# reported an empty result — surfacing to the operator as "could not
-# determine active slot", three steps from anything to do with locking.
-_shell_owner:     dict = {}   # device_id → task holding _shell_lock
 
 async def create_app() -> web.Application:
     """
@@ -1235,15 +1220,15 @@ async def _disconnect_device(device_id: str) -> None:
     client when control drops (`control.go` Run) and re-establishes both on
     the next dial, so closing `/data` here would only race that. The shell
     plane is separate and demand-opened, so an open session would otherwise
-    hang against a device that is about to redial. `_release_shell_ws` is
+    hang against a device that is about to redial. `em_shell.release_ws` is
     called even with no programmatic session registered, because the
     `shell_close` it sends is the only thing that ends an INTERACTIVE
-    dashboard session — those deliberately do not set `_shell_ws`.
+    dashboard session — those deliberately do not set `em_shell.sockets`.
     """
     live = em_state.devices.get(device_id)
     if live is None:
         return
-    await _release_shell_ws(device_id, live)
+    await em_shell.release_ws(device_id, live)
     try:
         await live.control_ws.close()
     except Exception as e:
@@ -2138,7 +2123,7 @@ async def _run_update_locked(device_id: str, release: dict,
             "  echo \"SLOT:server_a MIGRATED\" || echo \"MIGRATE_FAILED\"; "
             "fi"
         )
-        detect_result = await _shell_run(live, detect_cmd, timeout=60.0)
+        detect_result = await em_shell.run(live, detect_cmd, timeout=60.0)
         log.info(f"[api] Slot detect result for {device_id}: {detect_result!r}")
 
         if "MIGRATE_FAILED" in detect_result:
@@ -2201,7 +2186,7 @@ async def _run_update_locked(device_id: str, release: dict,
         # never an awk field index — busybox wraps a long filesystem name onto
         # its own line, so $4 is the percentage on these devices.
         need_mb  = (len(binary) * 2) // 1048576 + 8   # binary + .part + slack
-        free_out = await _shell_run(
+        free_out = await em_shell.run(
             live, 'echo "FREE $(busybox df -m /data | busybox tail -1)"')
         free_mb = None
         for line in (free_out or "").splitlines():
@@ -2243,7 +2228,7 @@ async def _run_update_locked(device_id: str, release: dict,
         # Atomic symlink flip + service restart
         await em_events.push_log(device_id, "info", "controller",
                               f"Flipping symlink → {inactive_slot} and restarting")
-        result = await _shell_run(live,
+        result = await em_shell.run(live,
             f"ln -sf {inactive_slot} /data/local/bin/server && "
             f"kill $PPID"
         )
@@ -2321,7 +2306,7 @@ async def _run_rollback(device_id: str, target_version: str) -> None:
             return
 
         active_slot = None
-        detect_result = await _shell_run(live,
+        detect_result = await em_shell.run(live,
             "CURRENT=$(readlink /data/local/bin/server 2>/dev/null); "
             "if [ \"$CURRENT\" = \"server_a\" ] || [ \"$CURRENT\" = \"server_b\" ]; then "
             "  echo \"SLOT:$CURRENT\"; "
@@ -2343,7 +2328,7 @@ async def _run_rollback(device_id: str, target_version: str) -> None:
         await em_events.push_log(device_id, "info", "controller",
                               f"Flipping {active_slot} → {inactive_slot}")
 
-        result = await _shell_run(live,
+        result = await em_shell.run(live,
             f"ln -sf {inactive_slot} /data/local/bin/server && "
             f"kill $PPID"
         )
@@ -2579,7 +2564,7 @@ async def _emos_sh(live, cmd: str, timeout: float = 60.0) -> str:
     """
     Run `cmd` on the device and return what it printed up to em_emos_update.OK.
 
-    Not _shell_run: that gives up after 5s of SILENCE, and a boot partition
+    Not em_shell.run: that gives up after 5s of SILENCE, and a boot partition
     write is silent for longer than that. Returning early would also close the
     session under a dd that is still running. This waits the whole timeout,
     and a reply without OK is "did not finish" to every parser.
@@ -2587,7 +2572,7 @@ async def _emos_sh(live, cmd: str, timeout: float = 60.0) -> str:
     device_id = live.device_id
     buf = ""
     try:
-        ws = await _get_device_shell_ws(live)
+        ws = await em_shell.get_ws(live)
         await ws.send(cmd + "\n")
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline and em_emos_update.OK not in buf:
@@ -2600,7 +2585,7 @@ async def _emos_sh(live, cmd: str, timeout: float = 60.0) -> str:
     except Exception as e:
         log.warning(f"[api] [{device_id}] emOS shell step did not finish: {e}")
     finally:
-        await _release_shell_ws(device_id, live)
+        await em_shell.release_ws(device_id, live)
     await asyncio.sleep(1.0)        # let the session close before the next
     return buf
 
@@ -2619,7 +2604,7 @@ class _EmosIO:
         return await _emos_sh(self.live, cmd, timeout)
 
     async def send(self, data: bytes, dest: str) -> str:
-        sent = await _stream_file_to_device(self.live, data, dest, mode="600",
+        sent = await em_shell.stream_file(self.live, data, dest, mode="600",
                                             require_verify=True)
         await asyncio.sleep(1.0)
         return "" if sent else str(sent)
@@ -2721,126 +2706,9 @@ async def _emos_status_on_connect(live, device_id: str) -> None:
         await em_events.push_log(device_id, "warn", "controller", msg)
 
 
-# ─── Shell helpers ────────────────────────────────────────────────────────────
+# ─── Payloads pushed over the shell plane ─────────────────────────────────────
 
-async def _get_device_shell_ws(live) -> object:
-    """
-    Request a programmatic shell connection from the device.
-
-    Acquires a per-device lock so sessions are strictly sequential.
-    handle_shell resolves the future with the ws, then waits for ws.close()
-    before returning — so the connection stays alive while we use it.
-    """
-    device_id = live.device_id
-    loop      = asyncio.get_event_loop()
-
-    if device_id not in _shell_lock:
-        _shell_lock[device_id] = asyncio.Lock()
-
-    try:
-        await asyncio.wait_for(_shell_lock[device_id].acquire(), timeout=20.0)
-    except asyncio.TimeoutError:
-        raise RuntimeError(f"Shell lock acquisition timed out for {device_id}")
-    # Claimed immediately after a successful acquire and never before it:
-    # everything that cleans up asks whether it is the owner, so a caller
-    # that timed out above must not be able to answer yes.
-    _shell_owner[device_id] = asyncio.current_task()
-
-    future = loop.create_future()
-    em_state.shell_pending[device_id] = future
-    # Deliberately do NOT set em_state.shell_dashboard — signals programmatic mode.
-
-    await live.send_control({"type": "shell_open"})
-    try:
-        ws = await asyncio.wait_for(future, timeout=15.0)
-        _shell_ws[device_id] = ws
-        return ws
-    except asyncio.TimeoutError:
-        em_state.shell_pending.pop(device_id, None)
-        _shell_ws.pop(device_id, None)
-        _release_shell_lock(device_id)
-        raise
-
-
-def _release_shell_lock(device_id: str) -> None:
-    """
-    Release the shell lock, but only if THIS task is the one holding it.
-
-    `Lock.locked()` cannot answer that question — it says whether anyone
-    holds the lock — so guarding a release with it lets a caller that never
-    acquired release somebody else's. See the _shell_owner comment.
-    """
-    if _shell_owner.get(device_id) is not asyncio.current_task():
-        return
-    _shell_owner.pop(device_id, None)
-    lock = _shell_lock.get(device_id)
-    if lock and lock.locked():
-        try:
-            lock.release()
-        except RuntimeError:
-            pass
-
-
-async def _release_shell_ws(device_id: str, live=None) -> None:
-    """
-    Close the programmatic shell session.
-
-    Closing ws wakes handle_shell's ws.wait_closed(), which then returns
-    and lets the device clean up its side too.
-
-    **A task that does not hold the lock cleans up nothing.** Callers run
-    this from a `finally`, which is reached whether or not the acquire
-    succeeded — so a caller that timed out waiting used to close the
-    websocket belonging to the transfer that was still using it, send that
-    device `shell_close`, and release its lock. Every one of those is an
-    action against another operation's session.
-    """
-    if _shell_owner.get(device_id) is not asyncio.current_task():
-        return
-    ws = _shell_ws.pop(device_id, None)
-    if ws:
-        try:
-            await ws.close()
-        except Exception:
-            pass
-    em_state.shell_pending.pop(device_id, None)
-    if live is not None:
-        await live.send_control({"type": "shell_close"})
-    _release_shell_lock(device_id)
-
-
-async def _shell_run(live, cmd: str, timeout: float = 30.0) -> str:
-    """
-    Run a shell command on the device and return its stdout as a string.
-
-    Appends a sentinel marker to detect when output is complete.
-    """
-    SENTINEL = "__CMD_DONE_9f3a__"
-    device_id = live.device_id
-    output: list[str] = []
-    try:
-        ws = await _get_device_shell_ws(live)
-        await ws.send(f"{cmd} ; echo '{SENTINEL}'\n")
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            try:
-                msg  = await asyncio.wait_for(ws.recv(), timeout=5.0)
-                text = msg.decode("utf-8", errors="replace") if isinstance(msg, bytes) else msg
-                if SENTINEL in text:
-                    output.append(text[:text.index(SENTINEL)])
-                    break
-                output.append(text)
-            except asyncio.TimeoutError:
-                break
-        return "".join(output).strip()
-    except Exception as e:
-        log.error(f"[api] shell_run failed ({cmd!r}): {e}")
-        return ""
-    finally:
-        await _release_shell_ws(device_id, live)
-
-
-async def _stream_binary_to_slot(live, binary: bytes, slot: str) -> "TransferResult":
+async def _stream_binary_to_slot(live, binary: bytes, slot: str) -> "em_shell.TransferResult":
     """
     Transfer a firmware binary to /data/local/bin/{slot}.
 
@@ -2850,309 +2718,8 @@ async def _stream_binary_to_slot(live, binary: bytes, slot: str) -> "TransferRes
     so shipping one to the slot we are about to boot costs a reboot and a
     rollback to learn nothing (#76).
     """
-    return await _stream_file_to_device(live, binary, f"/data/local/bin/{slot}",
-                                        require_verify=True)
-
-
-class TransferResult:
-    """
-    The outcome of a device file transfer, carrying the STAGE it stopped at.
-
-    Truthy on success, so every existing `if not await _stream_file_to_device(
-    ...)` call site keeps working unchanged.
-
-    The stage exists because one message covered five different outcomes, and
-    the two that matter most are at opposite ends: "the bytes arrived corrupt"
-    and "we never opened a shell, so no byte was ever sent". #121 reported the
-    second and read as the first — three Dots failing with `failed or did not
-    verify`, fifteen seconds after starting, which is far too fast to have
-    attempted a 10MB payload. Nothing short of the controller's own stdout
-    could tell them apart, and a user cannot be asked for that mid-update.
-    """
-
-    __slots__ = ("ok", "stage", "detail")
-
-    def __init__(self, ok: bool, stage: str = "ok", detail: str = ""):
-        self.ok     = ok
-        self.stage  = stage
-        self.detail = detail
-
-    def __bool__(self) -> bool:
-        return self.ok
-
-    def __str__(self) -> str:
-        return self.detail or self.stage
-
-
-# Stage detail text. Phrased for someone reading a device log who is deciding
-# what to try next, so each one says whether any data left the controller —
-# that is the difference between "retry, the link was bad" and "the payload or
-# the device is wrong".
-_TRANSFER_STAGES = {
-    "shell":   "could not open a shell session on the device — no data was sent",
-    "decoder": "no base64 decoder found on the device — no data was sent",
-    "md5tool": "device has no md5 tool, refusing to send unverified",
-    "send":    "timed out part-way through sending",
-    "verify":  "sent, but timed out waiting for md5 verification",
-    "corrupt": "arrived corrupt — md5 did not match what was sent",
-    "error":   "transfer error",
-}
-
-
-def _transfer_failed(stage: str, extra: str = "") -> TransferResult:
-    detail = _TRANSFER_STAGES.get(stage, stage)
-    if extra:
-        detail = f"{detail} ({extra})"
-    return TransferResult(False, stage, detail)
-
-
-async def _stream_file_to_device(live, data: bytes, dest: str,
-                                 mode: str = "755",
-                                 require_verify: bool = False) -> TransferResult:
-    """
-    Transfer a file to `dest` on the device via shell heredoc (default mode 755).
-
-    Detects available base64 decoder (busybox base64, python3, python) before
-    transferring, since 'base64' is not always in PATH on Android/FireOS.
-    Uses a heredoc so no intermediate .b64 file is needed.
-    The heredoc delimiter contains '_' which is not in the base64 alphabet.
-
-    **md5 decides success, not the shell's exit status.** Bytes land in
-    `{dest}.part` and are renamed only once their md5 matches what we sent, so
-    a bad transfer leaves whatever was at `dest` untouched. `TRANSFER_OK` alone
-    only ever proved that the decode pipeline and chmod exited 0 — not that the
-    bytes arrived intact (#76). The verification rides the SAME shell session as
-    the transfer, so it costs a round trip on an open socket, not a new session.
-
-    `require_verify` decides what happens when the device has no md5 tool at
-    all. Callers default to False, which warns and accepts — the same behaviour
-    they had before this existed, and the base64 detection below already treats
-    a busybox-less device as a contemplated state. Firmware passes True.
-    """
-    import base64 as _b64
-
-    device_id     = live.device_id
-    DELIM         = "__END_B64_42__"
-    DETECT_MARKER = "__DETECT_DONE__"
-
-    try:
-        try:
-            ws = await _get_device_shell_ws(live)
-        except Exception as e:
-            log.error(f"[api] Could not open a shell to {device_id} for "
-                      f"{dest}: {e}")
-            return _transfer_failed("shell", str(e))
-
-        # `dest` is NOT deleted here, and must not be. This used to open with
-        # `rm -f {dest}` to clear a previous attempt, which for firmware means
-        # deleting /data/local/bin/server_<inactive> — THE ROLLBACK SLOT —
-        # before a single byte of the replacement had been sent. Every failed
-        # OTA therefore left the device with a good active slot and an empty
-        # partner, so a later crash-loop would flip the symlink onto nothing.
-        # It also contradicted the message the user was shown, which promised
-        # the slot was left untouched (#121). Nothing needs the delete: the
-        # heredoc writes with `>`, which truncates, and a verified transfer
-        # arrives by `mv` over whatever was there.
-
-        # ── Detect available base64 decoder ──────────────────────────────────
-        # Try busybox first (Magisk provides it), then python3/python.
-        # We run a round-trip sanity test so we know the decode flag works.
-        # The md5 tool is detected in the SAME round trip, not a second one.
-        # busybox first for the same reason as the decoder (Magisk provides
-        # it); bare md5sum as a fallback since some SKUs have it in PATH.
-        await ws.send(
-            "if echo dGVzdA== | busybox base64 -d >/dev/null 2>&1; then echo DECODER:busybox; "
-            "elif python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' </dev/null >/dev/null 2>&1; then echo DECODER:python3; "
-            "elif python  -c 'import base64,sys; sys.stdout.write(base64.b64decode(sys.stdin.read()))' </dev/null >/dev/null 2>&1; then echo DECODER:python; "
-            "else echo DECODER:none; fi; "
-            "if echo x | busybox md5sum >/dev/null 2>&1; then echo MD5:busybox; "
-            "elif echo x | md5sum >/dev/null 2>&1; then echo MD5:plain; "
-            f"else echo MD5:none; fi; "
-            # Does the destination DIRECTORY exist? Rides the round trip that
-            # was already happening, so it costs nothing.
-            #
-            # Without it a write into a directory that is not there fails, the
-            # `echo TRANSFER_OK` after it never runs, and the transfer waits
-            # out its full 120s timeout for a confirmation that can never
-            # come — holding the device's shell lock throughout. Measured on
-            # EFF 2026-09-04: the debloat payload targets Magisk's
-            # /sbin/.core overlay, which a device not running Magisk has no
-            # daemon to create, and every attempt cost two minutes and took
-            # the next shell operation down with it.
-            f"if [ -d {_sh_quote(_posixpath.dirname(dest) or '/')} ]; "
-            f"then echo DESTDIR:ok; else echo DESTDIR:missing; fi; "
-            f"echo {DETECT_MARKER}\n"
-        )
-
-        detect_buf = ""
-        detect_dl  = time.monotonic() + 15
-        while time.monotonic() < detect_dl:
-            try:
-                msg  = await asyncio.wait_for(ws.recv(), timeout=2)
-                text = msg.decode("utf-8", errors="replace") if isinstance(msg, bytes) else msg
-                detect_buf += text
-                if DETECT_MARKER in detect_buf:
-                    break
-            except asyncio.TimeoutError:
-                continue
-
-        # Checked before the decoder, because it is the more specific answer:
-        # a device with a perfectly good base64 and nowhere to put the file is
-        # not a device that failed to decode.
-        if "DESTDIR:missing" in detect_buf:
-            log.warning(f"[api] {device_id}: {dest} — the destination "
-                        f"directory does not exist on this device; not sending")
-            return _transfer_failed(
-                "destination",
-                f"{_posixpath.dirname(dest)} does not exist on the device")
-
-        if "DECODER:busybox" in detect_buf:
-            decode_cmd = "busybox base64 -d"
-        elif "DECODER:python3" in detect_buf:
-            decode_cmd = ("python3 -c "
-                          "'import sys,base64; "
-                          "sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))'")
-        elif "DECODER:python" in detect_buf:
-            decode_cmd = ("python -c "
-                          "'import sys,base64; "
-                          "sys.stdout.write(base64.b64decode(sys.stdin.read()))'")
-        else:
-            # Two very different things reach here. DETECT_MARKER present means
-            # the device answered and genuinely has no decoder — a property of
-            # that device, which retrying will not change. Absent means the
-            # round trip produced nothing in 15s, i.e. the shell plane is not
-            # carrying output, which is a link problem and IS worth retrying.
-            # Reporting both as "no base64 decoder" sent #121 looking at the
-            # wrong half.
-            if DETECT_MARKER not in detect_buf:
-                log.error(f"[api] Shell produced no output in 15s while probing "
-                          f"{device_id} for a decoder — link problem, not a "
-                          f"missing tool. Output so far: {detect_buf!r}")
-                return _transfer_failed(
-                    "shell", "device shell produced no output within 15s")
-            log.error(f"[api] No base64 decoder found on device. "
-                      f"Detection output: {detect_buf!r}")
-            return _transfer_failed("decoder")
-
-        log.info(f"[api] Decoder: {decode_cmd.split()[0]} {decode_cmd.split()[1]}")
-
-        if "MD5:busybox" in detect_buf:
-            md5_cmd = "busybox md5sum"
-        elif "MD5:plain" in detect_buf:
-            md5_cmd = "md5sum"
-        else:
-            md5_cmd = None
-            if require_verify:
-                log.error(f"[api] No md5 tool on device — refusing to transfer "
-                          f"{dest} unverified. Detection output: {detect_buf!r}")
-                return _transfer_failed("md5tool")
-            log.warning(f"[api] No md5 tool on device — {dest} will be "
-                        f"transferred WITHOUT verification")
-
-        # ── Heredoc transfer ─────────────────────────────────────────────────
-        lines = _b64.encodebytes(data).decode("ascii").splitlines(keepends=True)
-        log.info(f"[api] Transferring {len(data):,} bytes to {dest} "
-                 f"({len(lines)} base64 lines via heredoc)")
-
-        # Bytes land in .part; only a matching md5 promotes them to dest. With
-        # no md5 tool there is nothing to promote against, so write straight to
-        # dest and keep the old behaviour (require_verify already refused above
-        # for the payloads where that is not acceptable).
-        landing = f"{dest}.part" if md5_cmd else dest
-
-        # Single shell command: decode heredoc → landing, set permissions,
-        # confirm. chmod here rather than after the rename so the mode travels
-        # with the file and dest is never briefly present with the wrong one.
-        await ws.send(
-            f"{decode_cmd} << '{DELIM}' > {landing} && "
-            f"chmod {mode} {landing} && "
-            f"echo TRANSFER_OK\n"
-        )
-
-        # Stream base64 data — each line already ends with \n from encodebytes
-        for line in lines:
-            await ws.send(line)
-
-        # Close heredoc; shell now executes the decode pipeline
-        await ws.send(f"{DELIM}\n")
-        log.info(f"[api] Heredoc sent — waiting for TRANSFER_OK")
-
-        # Wait for confirmation (decode of ~13 MB on ARM takes a few seconds)
-        deadline    = time.monotonic() + 120
-        transferred = False
-        while time.monotonic() < deadline:
-            try:
-                msg  = await asyncio.wait_for(ws.recv(), timeout=5)
-                text = msg.decode("utf-8", errors="replace") if isinstance(msg, bytes) else msg
-                if "TRANSFER_OK" in text:
-                    transferred = True
-                    break
-                if text.strip():
-                    log.debug(f"[api] Shell output during transfer: {text!r}")
-            except asyncio.TimeoutError:
-                continue
-
-        if not transferred:
-            log.error(f"[api] Transfer to {dest} timed out waiting for TRANSFER_OK")
-            return _transfer_failed("send")
-
-        if md5_cmd is None:
-            log.info(f"[api] Transfer to {dest} confirmed (unverified)")
-            return TransferResult(True, "unverified")
-
-        # ── Verify, then promote ─────────────────────────────────────────────
-        # Same shell session, so this is a round trip on an open socket rather
-        # than a new session. A mismatch removes the .part and leaves dest as
-        # it was — for firmware that means the rollback slot keeps its previous
-        # binary instead of being replaced by a broken one.
-        # No `cut`: md5sum prints "<hash>  <path>", and the busybox-less branch
-        # is exactly where `busybox cut` would not be there either. A case glob
-        # needs no external tool at all.
-        want = hashlib.md5(data).hexdigest()
-        await ws.send(
-            f'GOT=$({md5_cmd} {landing} 2>/dev/null); '
-            f'case "$GOT" in {want}*) mv {landing} {dest} && echo VERIFY_OK ;; '
-            f'*) rm -f {landing}; echo "VERIFY_BAD:$GOT" ;; esac\n'
-        )
-
-        verify_buf = ""
-        verify_dl  = time.monotonic() + 120
-        while time.monotonic() < verify_dl:
-            try:
-                msg  = await asyncio.wait_for(ws.recv(), timeout=5)
-                text = msg.decode("utf-8", errors="replace") if isinstance(msg, bytes) else msg
-                verify_buf += text
-                if "VERIFY_OK" in verify_buf:
-                    log.info(f"[api] Transfer to {dest} confirmed "
-                             f"({len(data):,} bytes, md5 {want})")
-                    return TransferResult(True)
-                if "VERIFY_BAD" in verify_buf:
-                    got = verify_buf.split("VERIFY_BAD:")[-1].strip().split()
-                    log.error(f"[api] Transfer to {dest} CORRUPT — md5 {want} "
-                              f"expected, device reported {got[0] if got else '(none)'}. "
-                              f"{dest} left untouched.")
-                    return _transfer_failed("corrupt",
-                                            f"device reported {got[0] if got else '(none)'}")
-            except asyncio.TimeoutError:
-                continue
-
-        log.error(f"[api] Transfer to {dest} timed out waiting for md5 verification "
-                  f"— {dest} left untouched")
-        return _transfer_failed("verify")
-
-    except Exception as e:
-        log.error(f"[api] File transfer to {dest} failed: {e}")
-        return _transfer_failed("error", str(e))
-    finally:
-        await _release_shell_ws(device_id, live)
-
-
-
-# Appended to a probe command so an empty _shell_run result can be told apart
-# from a command that ran and printed nothing. _shell_run swallows every
-# exception and returns "", so without this "the file is missing" and "the
-# device never answered" are the same string — and they want opposite actions.
-_SHELL_OK = "__EM_SHELL_OK__"
+    return await em_shell.stream_file(live, binary, f"/data/local/bin/{slot}",
+                                      require_verify=True)
 
 
 async def _sync_start_script(live, device_id: str) -> None:
@@ -3179,13 +2746,13 @@ async def _sync_start_script(live, device_id: str) -> None:
     want = hashlib.md5(script).hexdigest()
 
     # The trailing marker separates "the file differs" from "the device did not
-    # answer". _shell_run returns "" for both — it swallows the exception — and
+    # answer". em_shell.run returns "" for both — it swallows the exception — and
     # an absent md5 was read as out-of-date, so a shell plane that is not up
     # yet produced a push attempt and a user-visible "out of date" event that
     # was not true. That was harmless while this only ran mid-OTA, with a shell
     # already proven; it is not, now that it also runs seconds after connect.
-    out = await _shell_run(live, f"busybox md5sum {path} 2>/dev/null; echo {_SHELL_OK}")
-    if _SHELL_OK not in out:
+    out = await em_shell.run(live, f"busybox md5sum {path} 2>/dev/null; echo {em_shell.OK_MARK}")
+    if em_shell.OK_MARK not in out:
         log.info(f"[api] [{device_id}] start_server.sh: no answer from the "
                  f"device — leaving it alone")
         return
@@ -3196,14 +2763,14 @@ async def _sync_start_script(live, device_id: str) -> None:
     await em_events.push_log(device_id, "info", "controller",
                           "start_server.sh out of date — syncing canonical version")
     tmp = path + ".new"
-    res = await _stream_file_to_device(live, script, tmp)
+    res = await em_shell.stream_file(live, script, tmp)
     if not res:
         await em_events.push_log(device_id, "warn", "controller",
                               f"start_server.sh sync failed: {res} — continuing OTA")
         return
     await asyncio.sleep(1.0)
 
-    res = await _shell_run(live,
+    res = await em_shell.run(live,
         f'NEW=$(busybox md5sum {tmp} | busybox cut -d" " -f1); '
         f'if [ "$NEW" = "{want}" ]; then '
         f'mv {tmp} {path} && chmod 755 {path} && echo SCRIPT_SYNCED; '
@@ -3235,11 +2802,11 @@ async def _sync_controller_endpoints(live, device_id: str) -> bool:
     """
     path = em_endpoints.DEVICE_PATH
     want = _controller_endpoints_file()
-    out = await _shell_run(
+    out = await em_shell.run(
         live, f"mkdir -p {DEVICE_TLS_DIR}; busybox md5sum {path} 2>/dev/null; "
               f"busybox grep -c '\"{em_endpoints.MANAGED_KEY}\"' {path} 2>/dev/null; "
-              f"echo {_SHELL_OK}")
-    if _SHELL_OK not in out:
+              f"echo {em_shell.OK_MARK}")
+    if em_shell.OK_MARK not in out:
         log.info(f"[api] [{device_id}] controller address: no answer from the "
                  f"device — leaving it alone")
         return False
@@ -3248,8 +2815,8 @@ async def _sync_controller_endpoints(live, device_id: str) -> bool:
     if want is None:
         if has_file and managed:
             await asyncio.sleep(1.0)
-            res = await _shell_run(live, f"rm -f {path}; [ -e {path} ] || echo {_SHELL_OK}")
-            if _SHELL_OK in res:
+            res = await em_shell.run(live, f"rm -f {path}; [ -e {path} ] || echo {em_shell.OK_MARK}")
+            if em_shell.OK_MARK in res:
                 await em_events.push_log(device_id, "info", "controller",
                                       "Controller address list removed — mDNS only from the next reconnect")
             else:
@@ -3263,7 +2830,7 @@ async def _sync_controller_endpoints(live, device_id: str) -> bool:
         await em_events.push_log(device_id, "info", "controller",
                               "Replacing a hand-written controller.json with the fleet's address list")
     await asyncio.sleep(1.0)
-    res = await _stream_file_to_device(live, want, path, mode="644")
+    res = await em_shell.stream_file(live, want, path, mode="644")
     if res:
         await em_events.push_log(device_id, "info", "controller",
                               "Controller address list updated — used from the next reconnect")
@@ -3346,9 +2913,9 @@ async def _sync_debloat(live, device_id: str) -> None:
         # answer the md5 will not answer `pm` either, and half 2 would
         # otherwise report a hide-list sync failure that is really a shell
         # that was never up.
-        out = await _shell_run(
-            live, f"busybox md5sum {DEBLOAT_SCRIPT_PATH} 2>/dev/null; echo {_SHELL_OK}")
-        if _SHELL_OK not in out:
+        out = await em_shell.run(
+            live, f"busybox md5sum {DEBLOAT_SCRIPT_PATH} 2>/dev/null; echo {em_shell.OK_MARK}")
+        if em_shell.OK_MARK not in out:
             log.info(f"[api] [{device_id}] debloat: no answer from the device "
                      f"— leaving it alone")
             return
@@ -3359,10 +2926,10 @@ async def _sync_debloat(live, device_id: str) -> None:
             await em_events.push_log(device_id, "info", "controller",
                                   "debloat script out of date — syncing canonical version")
             tmp = DEBLOAT_SCRIPT_PATH + ".new"
-            pushed = await _stream_file_to_device(live, script, tmp)
+            pushed = await em_shell.stream_file(live, script, tmp)
             if pushed:
                 await asyncio.sleep(1.0)
-                res = await _shell_run(live,
+                res = await em_shell.run(live,
                     f'NEW=$(busybox md5sum {tmp} | busybox cut -d" " -f1); '
                     f'if [ "$NEW" = "{want}" ]; then '
                     f'mv {tmp} {DEBLOAT_SCRIPT_PATH} && chmod 755 {DEBLOAT_SCRIPT_PATH} '
@@ -3389,7 +2956,7 @@ async def _sync_debloat(live, device_id: str) -> None:
     # thirty-third package.
     listing = ("\n".join(pkgs) + "\n").encode()
     remote_list = "/data/local/tmp/em_debloat_pkgs.txt"
-    pushed = await _stream_file_to_device(live, listing, remote_list, mode="644")
+    pushed = await em_shell.stream_file(live, listing, remote_list, mode="644")
     if not pushed:
         await em_events.push_log(device_id, "warn", "controller",
                               f"debloat hide-list sync failed: {pushed}")
@@ -3413,7 +2980,7 @@ async def _sync_debloat(live, device_id: str) -> None:
     # because a *different*, longer-named package was visible. That produced a
     # confident warning about a FireOS limitation that did not exist — `pm hide`
     # had worked, and dumpsys said hidden=true throughout.
-    res = await _shell_run(live,
+    res = await em_shell.run(live,
         f'PKGS=$(cat {remote_list}); VIS=$(pm list packages); N=0; '
         f'for p in $PKGS; do '
         f'if echo "$VIS" | busybox grep -qx "package:$p"; then '
@@ -3448,18 +3015,6 @@ async def _sync_debloat(live, device_id: str) -> None:
     await asyncio.sleep(1.0)
 
 
-async def _exec_shell(live, cmd: str) -> None:
-    """Send a command to the device shell and return immediately (fire-and-forget)."""
-    try:
-        ws = await _get_device_shell_ws(live)
-        await ws.send(cmd + "\n")
-        await asyncio.sleep(0.5)
-    except Exception as e:
-        log.warning(f"[api] Shell exec failed ({cmd!r}): {e}")
-    finally:
-        await _release_shell_ws(live.device_id, live)
-
-
 # ─── Shell WebSocket proxy (interactive dashboard terminal) ───────────────────
 
 async def _ws_shell(request: web.Request) -> web.WebSocketResponse:
@@ -3488,7 +3043,7 @@ async def _ws_shell(request: web.Request) -> web.WebSocketResponse:
     # Refuse if a programmatic shell session (e.g. OTA transfer) is in progress.
     # Opening a terminal mid-transfer sends shell_open to the device, which cancels
     # the current shell context and kills the transfer.
-    lock = _shell_lock.get(device_id)
+    lock = em_shell.locks.get(device_id)
     if lock and lock.locked():
         raise web.HTTPConflict(reason="Device shell is busy — an OTA update is in progress")
 
@@ -3503,7 +3058,7 @@ async def _ws_shell(request: web.Request) -> web.WebSocketResponse:
     done_future = loop.create_future()
     em_state.shell_pending[device_id]   = done_future
     em_state.shell_dashboard[device_id] = ws
-    # Do NOT set _shell_ws or acquire _shell_lock — interactive sessions
+    # Do NOT set em_shell.sockets or acquire em_shell.locks — interactive sessions
     # bypass the programmatic shell mechanism entirely.
 
     try:
@@ -3511,7 +3066,7 @@ async def _ws_shell(request: web.Request) -> web.WebSocketResponse:
         # line editing, top/vi, resize). Old firmware ignores the field and
         # opens the legacy pipe; handle_shell reports the established mode
         # to the dashboard via shell_meta. Programmatic sessions
-        # (_get_device_shell_ws) deliberately do not set it.
+        # (em_shell.get_ws) deliberately do not set it.
         await live.send_control({"type": "shell_open", "pty": True})
         await done_future
     except Exception as e:
@@ -3892,7 +3447,7 @@ async def _post_debloat(request: web.Request) -> web.Response:
             "debloat — the payload is a package list and a Magisk boot script.",
             409)
 
-    # No explicit shell release here: _shell_run and _stream_file_to_device each
+    # No explicit shell release here: em_shell.run and em_shell.stream_file each
     # acquire and release the session in their own finally, which is why
     # _sync_start_script does not either. Releasing it from out here could close
     # a session a concurrent caller had opened.
@@ -3924,14 +3479,14 @@ async def _issue_credentials(device_id: str) -> None:
         token = secrets.token_urlsafe(32)
         ca    = em_pki.ca_pem(_tls_dir)
 
-        await _shell_run(live, f"mkdir -p {DEVICE_TLS_DIR}")
+        await em_shell.run(live, f"mkdir -p {DEVICE_TLS_DIR}")
         await asyncio.sleep(1.0)  # let the shell session close cleanly
 
-        ok = await _stream_file_to_device(
+        ok = await em_shell.stream_file(
             live, ca.encode("ascii"), f"{DEVICE_TLS_DIR}/ca.pem", mode="644")
         if ok:
             await asyncio.sleep(1.0)
-            ok = await _stream_file_to_device(
+            ok = await em_shell.stream_file(
                 live, token.encode("ascii"), f"{DEVICE_TLS_DIR}/token", mode="600")
         if not ok:
             await em_events.push_log(device_id, "error", "controller",
@@ -4654,7 +4209,7 @@ async def _oww_device_state(live) -> dict:
     error line that could be mistaken for one.
     """
     d = em_oww_assets.DEVICE_DIR
-    out = await _shell_run(live, (
+    out = await em_shell.run(live, (
         f'for f in {d}/*.so {d}/*.onnx; do '
         f'[ -f "$f" ] && echo "$(busybox md5sum "$f" | busybox cut -d\" \" -f1) '
         f'$(busybox stat -c %Y "$f") $f"; done; '
@@ -4849,10 +4404,10 @@ async def _collect_crash_log(live, device_id: str) -> None:
     kmsg, seen = em_crashlog.KMSG_PATH, em_crashlog.SEEN_PATH
     probe = ""
     for attempt in range(2):
-        probe = await _shell_run(
+        probe = await em_shell.run(
             live, f"busybox md5sum {kmsg} 2>/dev/null; cat {seen} 2>/dev/null; "
-                  f"echo {_SHELL_OK}")
-        if _SHELL_OK in probe:
+                  f"echo {em_shell.OK_MARK}")
+        if em_shell.OK_MARK in probe:
             break
         if attempt == 0:
             await asyncio.sleep(CRASH_LOG_RETRY_S)
@@ -4868,18 +4423,18 @@ async def _collect_crash_log(live, device_id: str) -> None:
     if probe.count(md5) > 1:
         return  # this copy was already handled
     await asyncio.sleep(1.0)  # let the probe's shell session close
-    out = await _shell_run(live, f"cat {kmsg}; echo {_SHELL_OK}", timeout=60.0)
-    if _SHELL_OK not in out:
+    out = await em_shell.run(live, f"cat {kmsg}; echo {em_shell.OK_MARK}", timeout=60.0)
+    if em_shell.OK_MARK not in out:
         log.info(f"[api] [{device_id}] crash log: read incomplete, will retry "
                  f"on the next connect")
         return
-    msg = em_crashlog.summarise(out[:out.rindex(_SHELL_OK)])
+    msg = em_crashlog.summarise(out[:out.rindex(em_shell.OK_MARK)])
     if msg:
         log.warning(f"[api] [{device_id}] previous boot did not end cleanly — "
                     f"kernel log saved to the device's log events")
         await em_events.push_log(device_id, "error", "kernel", msg)
     await asyncio.sleep(1.0)
-    await _shell_run(live, f"echo {md5} > {seen}")
+    await em_shell.run(live, f"echo {md5} > {seen}")
 
 
 async def reconcile_on_connect(device_id: str, live) -> None:
@@ -5141,7 +4696,7 @@ async def _sync_oww_assets_locked(live, device_id: str, progress=None) -> dict:
         return {"ok": True, "pushed": [], "pruned": [], "problems": problems}
 
     d = em_oww_assets.DEVICE_DIR
-    await _shell_run(live, f"mkdir -p {d}")
+    await em_shell.run(live, f"mkdir -p {d}")
 
     pushed = []
     for asset in plan.push:
@@ -5158,15 +4713,15 @@ async def _sync_oww_assets_locked(live, device_id: str, progress=None) -> dict:
         # NOT `pushed` — that is the accumulator above, and assigning the
         # transfer result to it shadowed the list on the first file, so the
         # append below raised AttributeError and asset installation failed
-        # outright. TransferResult is truthy-compatible, which is what let
+        # outright. em_shell.TransferResult is truthy-compatible, which is what let
         # this reach a release: every `if not …` call site kept working and
         # only the one that treated it as a list broke.
-        sent = await _stream_file_to_device(live, data, part, mode="644")
+        sent = await em_shell.stream_file(live, data, part, mode="644")
         if not sent:
             await say("error", f"{asset.name} transfer failed: {sent}")
             return {"ok": False, "error": f"{asset.name}: {sent}"}
 
-        res = await _shell_run(live, (
+        res = await em_shell.run(live, (
             f'GOT=$(busybox md5sum {part} | busybox cut -d" " -f1); '
             f'if [ "$GOT" = "{asset.md5}" ]; then mv {part} {dest} && '
             f'chmod 644 {dest} && echo OK; else rm -f {part}; echo "BAD:$GOT"; fi'
@@ -5177,7 +4732,7 @@ async def _sync_oww_assets_locked(live, device_id: str, progress=None) -> dict:
         pushed.append(asset.name)
 
     for name in plan.prune:
-        await _shell_run(live, f"rm -f {em_oww_assets.device_path(name)}")
+        await em_shell.run(live, f"rm -f {em_oww_assets.device_path(name)}")
     if plan.prune:
         await say("info", f"removed unused: {', '.join(plan.prune)}")
 
@@ -5185,7 +4740,7 @@ async def _sync_oww_assets_locked(live, device_id: str, progress=None) -> dict:
     # even on a sync that did not need to re-push it.
     sel = next((a for a in desired if a.kind == "classifier"), None)
     if sel:
-        await _shell_run(live, f"touch {em_oww_assets.device_path(sel.name)}")
+        await em_shell.run(live, f"touch {em_oww_assets.device_path(sel.name)}")
 
     # Only the wake word needs a restart: the scorer is built once, while the
     # speech gate's model is picked up by the next turn.
@@ -6203,7 +5758,7 @@ async def _collect_supervisor_log(device_id: str) -> None:
     live = em_state.devices.get(device_id)
     if live is None:
         return
-    out = await _shell_run(live, f"busybox tail -c 4096 {SUPERVISOR_LOG}", timeout=30.0)
+    out = await em_shell.run(live, f"busybox tail -c 4096 {SUPERVISOR_LOG}", timeout=30.0)
     text = (out or "").strip()
     if not text:
         await em_events.push_log(device_id, "warn", "controller",

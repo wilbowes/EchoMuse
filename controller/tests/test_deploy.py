@@ -934,7 +934,7 @@ def test_firmware_transfer_is_verified_by_md5_not_by_an_exit_status():
     a rollback to learn nothing at all.
     """
     src = (CONTROLLER / "em_api.py").read_text()
-    fn  = _fn_body(src, "_stream_file_to_device")
+    fn  = _sources.def_source("stream_file")
 
     assert "hashlib.md5(data).hexdigest()" in fn, (
         "the transfer must hash what it actually sent — hashing anything else "
@@ -954,7 +954,7 @@ def test_firmware_transfer_is_verified_by_md5_not_by_an_exit_status():
     # require_verify is set, so a body-wide search passes on the prose alone
     # while the argument is gone (caught by reintroducing exactly that).
     slot = _fn_body(src, "_stream_binary_to_slot")
-    call = slot[slot.index("return await _stream_file_to_device"):]
+    call = slot[slot.index("return await em_shell.stream_file"):]
     assert "require_verify=True" in call, (
         "firmware is the payload where an unverifiable transfer must fail "
         "rather than proceed — it is the one we are about to boot"
@@ -1020,8 +1020,7 @@ def test_a_transfer_never_deletes_the_destination_before_sending():
     The `.part` discipline only protects `dest` from a CORRUPT transfer. It
     cannot protect it from being removed before the transfer starts.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
-    fn  = _fn_body(src, "_stream_file_to_device")
+    fn  = _sources.def_source("stream_file")
     code = "\n".join(l for l in fn.splitlines() if not l.lstrip().startswith("#"))
 
     assert "rm -f {dest}" not in code, (
@@ -1046,14 +1045,14 @@ def test_a_failed_transfer_says_which_stage_it_failed_at():
     one is a link problem worth retrying, the other is a property of the
     device that retrying cannot change.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
+    src = (CONTROLLER / "em_shell.py").read_text()
 
     assert "class TransferResult" in src and "__bool__" in src, (
         "the result must stay truthy so `if not await ...` call sites keep "
         "their meaning"
     )
 
-    fn = _fn_body(src, "_stream_file_to_device")
+    fn = _sources.def_source("stream_file")
     for stage in ("shell", "decoder", "send", "verify", "corrupt"):
         assert f'_transfer_failed("{stage}"' in fn, (
             f"the {stage} failure must be distinguishable from the others"
@@ -1064,7 +1063,8 @@ def test_a_failed_transfer_says_which_stage_it_failed_at():
     )
 
     # The OTA message must carry the stage through rather than re-flattening it.
-    ota = src[src.index("_stream_binary_to_slot(live, binary"):]
+    api = (CONTROLLER / "em_api.py").read_text()
+    ota = api[api.index("_stream_binary_to_slot(live, binary"):]
     ota = ota[:ota.index("_monitor_reconnect")]
     assert "{ok}" in ota, (
         "the update failure message must name the stage the transfer reached"
@@ -1487,7 +1487,7 @@ def test_asset_sync_does_not_shadow_its_accumulator():
 
     assert "pushed = []" in body, "the accumulator is gone"
     assert "pushed.append(" in body, "nothing accumulates installed names"
-    assert not re.search(r"pushed\s*=\s*await\s+_stream_file_to_device", body), (
+    assert not re.search(r"pushed\s*=\s*await\s+(em_shell\.)?stream_file", body), (
         "the transfer result must not be assigned to `pushed` — that shadows "
         "the accumulator and the append raises AttributeError")
 
@@ -2337,8 +2337,8 @@ def test_the_crash_log_marker_is_written_only_after_a_complete_read():
     fn = _strip_prose(_fn_body(
         (CONTROLLER / "em_api.py").read_text(), "_collect_crash_log"))
     read = fn.index("cat {kmsg}")
-    assert fn.index("_SHELL_OK not in out") > read
-    assert fn.index("summarise(") > fn.index("_SHELL_OK not in out")
+    assert fn.index("em_shell.OK_MARK not in out") > read
+    assert fn.index("summarise(") > fn.index("em_shell.OK_MARK not in out")
     assert fn.index("> {seen}") > fn.index("summarise(")
 
 
@@ -2354,7 +2354,7 @@ def test_deleting_a_device_forgets_its_debounce():
 
 def test_the_payload_syncs_tell_a_missing_file_from_a_silent_device():
     """
-    _shell_run swallows every exception and returns "" — so an absent md5 and
+    em_shell.run swallows every exception and returns "" — so an absent md5 and
     a device that never answered are the same string, and they want opposite
     actions. Without the marker, a shell plane that is not up yet (likely,
     seconds after connect) produces a push attempt and a user-visible "out of
@@ -2363,11 +2363,11 @@ def test_the_payload_syncs_tell_a_missing_file_from_a_silent_device():
     src = (CONTROLLER / "em_api.py").read_text()
     for name in ("_sync_start_script", "_sync_debloat"):
         fn = _strip_prose(_fn_body(src, name))
-        assert "_SHELL_OK" in fn, (
+        assert "em_shell.OK_MARK" in fn, (
             f"{name} must be able to tell a missing file from a silent device"
         )
         # The guard has to precede the push decision, or it guards nothing.
-        assert fn.index("_SHELL_OK not in out") < fn.index("_stream_file_to_device"), (
+        assert fn.index("em_shell.OK_MARK not in out") < fn.index("em_shell.stream_file"), (
             f"{name} must check the device answered BEFORE deciding to push"
         )
 

@@ -105,7 +105,7 @@ def test_issuing_rotates_the_token_and_stores_it_only_once_delivered():
                 if "ensure_device_token" in _names_in_call(c)]
     stores = [c for c in _calls(fn, "run_in_executor")
               if "set_device_token" in _names_in_call(c)]
-    pushes = _calls(fn, "_stream_file_to_device")
+    pushes = _calls(fn, "stream_file")
     assert stores and pushes
     assert min(c.lineno for c in stores) > max(c.lineno for c in pushes)
     assert _calls(fn, "done")

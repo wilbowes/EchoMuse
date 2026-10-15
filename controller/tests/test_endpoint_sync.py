@@ -34,10 +34,10 @@ def _reset():
 
 def _patch_shell(monkeypatch, replies):
     """
-    Answer `_shell_run` and `_stream_file_to_device` from a script.
+    Answer `em_shell.run` and `em_shell.stream_file` from a script.
 
     `replies` is a list of strings returned in order; the last one repeats.
-    Every reply the production code inspects has `_SHELL_OK` appended by the
+    Every reply the production code inspects has `em_shell.OK_MARK` appended by the
     device, so each entry here is the command's own output followed by that
     sentinel — exactly what a real device produces.
     """
@@ -59,8 +59,8 @@ def _patch_shell(monkeypatch, replies):
     async def no_sleep(_):
         return None
 
-    monkeypatch.setattr(em_api, "_shell_run", fake_shell_run)
-    monkeypatch.setattr(em_api, "_stream_file_to_device", fake_stream)
+    monkeypatch.setattr(em_api.em_shell, "run", fake_shell_run)
+    monkeypatch.setattr(em_api.em_shell, "stream_file", fake_stream)
     monkeypatch.setattr(em_api.em_events, "push_log", fake_log)
     monkeypatch.setattr(em_api.asyncio, "sleep", no_sleep)
     return calls, pushed
@@ -76,8 +76,8 @@ def test_an_empty_setting_removes_only_a_file_this_controller_wrote(monkeypatch)
     file we wrote.
     """
     _reset()
-    replies = [f"0123456789abcdef0123456789abcdef  {em_endpoints.DEVICE_PATH}\n1\n{em_api._SHELL_OK}",
-               f"{em_api._SHELL_OK}"]
+    replies = [f"0123456789abcdef0123456789abcdef  {em_endpoints.DEVICE_PATH}\n1\n{em_api.em_shell.OK_MARK}",
+               f"{em_api.em_shell.OK_MARK}"]
     calls, pushed = _patch_shell(monkeypatch, replies)
     monkeypatch.setattr(em_api, "_controller_endpoints_file", lambda: None)
 
@@ -97,7 +97,7 @@ def test_an_empty_setting_leaves_a_hand_written_file_alone(monkeypatch):
     """
     _reset()
     # File present (the md5sum line), but `grep -c managed_by` printed 0.
-    replies = [f"0123456789abcdef0123456789abcdef  {em_endpoints.DEVICE_PATH}\n0\n{em_api._SHELL_OK}"]
+    replies = [f"0123456789abcdef0123456789abcdef  {em_endpoints.DEVICE_PATH}\n0\n{em_api.em_shell.OK_MARK}"]
     calls, pushed = _patch_shell(monkeypatch, replies)
     monkeypatch.setattr(em_api, "_controller_endpoints_file", lambda: None)
 
@@ -112,7 +112,7 @@ def test_an_empty_setting_leaves_a_hand_written_file_alone(monkeypatch):
 def test_a_device_that_does_not_answer_is_left_entirely_alone(monkeypatch):
     """
     No answer is NOT evidence of absence, and this is the same rule
-    `reconcile_oww_assets` and `_sync_start_script` follow with `_SHELL_OK`.
+    `reconcile_oww_assets` and `_sync_start_script` follow with `em_shell.OK_MARK`.
 
     Seconds after a device connects its shell plane is very likely not up yet.
     Reading the silence as "no file" would either push a redundant file or —
@@ -144,7 +144,7 @@ def test_a_set_list_replaces_a_hand_written_file_and_says_so(monkeypatch):
     _reset()
     want = em_endpoints.file_bytes([{"host": "10.0.0.5", "port": 8767, "tlsPort": 8770}])
     assert want, "the fixture must produce a file to write"
-    replies = [f"0123456789abcdef0123456789abcdef  {em_endpoints.DEVICE_PATH}\n0\n{em_api._SHELL_OK}"]
+    replies = [f"0123456789abcdef0123456789abcdef  {em_endpoints.DEVICE_PATH}\n0\n{em_api.em_shell.OK_MARK}"]
     calls, pushed = _patch_shell(monkeypatch, replies)
     monkeypatch.setattr(em_api, "_controller_endpoints_file", lambda: want)
 
@@ -162,7 +162,7 @@ def test_a_file_already_carrying_the_want_is_left_alone(monkeypatch):
     """
     _reset()
     want = em_endpoints.file_bytes([{"host": "10.0.0.5", "port": 8767, "tlsPort": 8770}])
-    replies = [f"{em_endpoints.md5(want)}  {em_endpoints.DEVICE_PATH}\n1\n{em_api._SHELL_OK}"]
+    replies = [f"{em_endpoints.md5(want)}  {em_endpoints.DEVICE_PATH}\n1\n{em_api.em_shell.OK_MARK}"]
     calls, pushed = _patch_shell(monkeypatch, replies)
     monkeypatch.setattr(em_api, "_controller_endpoints_file", lambda: want)
 
@@ -182,7 +182,7 @@ def test_a_failed_removal_is_reported_and_not_claimed_as_success(monkeypatch):
     back on mDNS when it is not.
     """
     _reset()
-    replies = [f"0123456789abcdef0123456789abcdef  {em_endpoints.DEVICE_PATH}\n1\n{em_api._SHELL_OK}",
+    replies = [f"0123456789abcdef0123456789abcdef  {em_endpoints.DEVICE_PATH}\n1\n{em_api.em_shell.OK_MARK}",
                ""]  # the verification never echoes the sentinel
     _patch_shell(monkeypatch, replies)
     monkeypatch.setattr(em_api, "_controller_endpoints_file", lambda: None)

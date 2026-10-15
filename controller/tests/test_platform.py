@@ -187,7 +187,7 @@ def test_transfer_checks_the_destination_directory():
     its full timeout holding the device's shell lock. Measured at 120s per
     attempt on EFF, 2026-09-04, three times in one evening.
     """
-    src = _api_src()
+    src = _sources.def_source("stream_file")
     assert "DESTDIR:missing" in src and "DESTDIR:ok" in src
 
 
@@ -200,15 +200,14 @@ def test_shell_lock_release_is_ownership_checked():
     the transfer still using it — two shell sessions on one device, which is
     what the lock exists to prevent.
     """
-    src = _api_src()
-    assert "_shell_owner" in src, "no ownership tracking for the shell lock"
-    helper = src[src.index("def _release_shell_lock"):]
-    helper = helper[:helper.index("\nasync def ")]
+    src = (ROOT / "controller" / "em_shell.py").read_text()
+    assert "owners" in src, "no ownership tracking for the shell lock"
+    helper = _sources.def_source("release_lock")
     assert "current_task()" in helper, \
-        "_release_shell_lock does not verify the caller owns the lock"
+        "release_lock does not verify the caller owns the lock"
 
     # And the bare release in the acquire path is gone: it fired on a lock
     # another task may already have released, raising "Lock is not acquired"
     # and surfacing as an empty result three steps away.
-    assert "_shell_lock[device_id].release()" not in _sources.all_code(), \
+    assert "locks[device_id].release()" not in _sources.all_code(), \
         "an unguarded shell-lock release is back"

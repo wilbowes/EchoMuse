@@ -8,13 +8,13 @@ released the debloat's lock. The operator saw "could not determine active
 slot".
 
 The guard had been `Lock.locked()`, which answers "is anyone holding this".
-`_shell_owner` records the task. What is pinned: a task that does not hold the
+`em_shell.owners` records the task. What is pinned: a task that does not hold the
 lock has no effect at all. Each test fails against the `locked()` version.
 """
 
 import asyncio
 
-import em_api
+import em_shell
 import em_state
 
 
@@ -41,10 +41,10 @@ class FakeLive:
 
 def _reset():
     """Clear every per-device dict. They are module globals that outlive a test."""
-    em_api._shell_lock.clear()
-    em_api._shell_owner.clear()
+    em_shell.locks.clear()
+    em_shell.owners.clear()
     em_state.shell_pending.clear()
-    em_api._shell_ws.clear()
+    em_shell.sockets.clear()
     em_state.shell_dashboard.clear()
 
 
@@ -58,12 +58,12 @@ def test_a_non_owner_cannot_release_someone_elses_lock():
 
     async def main():
         lock = asyncio.Lock()
-        em_api._shell_lock["dev"] = lock
+        em_shell.locks["dev"] = lock
 
         # A real holder: acquired, and recorded as the owner.
         await lock.acquire()
         owner = asyncio.current_task()
-        em_api._shell_owner["dev"] = owner
+        em_shell.owners["dev"] = owner
 
         # THE CONTROL: the lock really is held, so `lock.locked()` — the
         # predicate the old code used — is True. A test that passes because
@@ -73,13 +73,13 @@ def test_a_non_owner_cannot_release_someone_elses_lock():
         # A different task now tries to release it. This is the waiter that
         # timed out in the incident.
         async def non_owner():
-            em_api._release_shell_lock("dev")
+            em_shell.release_lock("dev")
 
         await asyncio.create_task(non_owner())
 
         # Still held. Still owned.
         assert lock.locked(), "a non-owner released a lock it did not hold"
-        assert em_api._shell_owner.get("dev") is owner, "a non-owner stole the ownership record"
+        assert em_shell.owners.get("dev") is owner, "a non-owner stole the ownership record"
         return lock
 
     lock = asyncio.run(main())
@@ -87,16 +87,16 @@ def test_a_non_owner_cannot_release_someone_elses_lock():
     # And the real owner can still release it, which is what makes the lock
     # usable at all rather than merely untouchable.
     async def owner_releases():
-        em_api._shell_owner["dev"] = asyncio.current_task()
-        em_api._release_shell_lock("dev")
+        em_shell.owners["dev"] = asyncio.current_task()
+        em_shell.release_lock("dev")
 
     asyncio.run(owner_releases())
     assert not lock.locked(), "the owner must be able to release its own lock"
-    assert "dev" not in em_api._shell_owner, "the ownership record must be cleared on release"
+    assert "dev" not in em_shell.owners, "the ownership record must be cleared on release"
 
 
 def test_a_non_owner_closes_nothing_sends_nothing_and_releases_nothing():
-    """`_release_shell_ws` is reached from a `finally`, so a WAITER reaches it too.
+    """`em_shell.release_ws` is reached from a `finally`, so a WAITER reaches it too.
 
     Every action it can take is an action against another operation's session:
     closing the websocket the transfer is still using, sending `shell_close` to
@@ -108,26 +108,26 @@ def test_a_non_owner_closes_nothing_sends_nothing_and_releases_nothing():
     async def main():
         lock = asyncio.Lock()
         await lock.acquire()
-        em_api._shell_lock["dev"] = lock
+        em_shell.locks["dev"] = lock
 
         ws = FakeWS()
-        em_api._shell_ws["dev"] = ws
-        em_api._shell_owner["dev"] = "SOME-OTHER-TASK"
+        em_shell.sockets["dev"] = ws
+        em_shell.owners["dev"] = "SOME-OTHER-TASK"
         live = FakeLive("dev")
 
         # The waiter, running its cleanup.
-        await em_api._release_shell_ws("dev", live)
+        await em_shell.release_ws("dev", live)
 
         assert not ws.closed, "a non-owner closed the holder's websocket"
-        assert em_api._shell_ws.get("dev") is ws, "a non-owner dropped the holder's ws record"
+        assert em_shell.sockets.get("dev") is ws, "a non-owner dropped the holder's ws record"
         assert lock.locked(), "a non-owner released the holder's lock"
         assert live.sent == [], f"a non-owner sent the device a command: {live.sent}"
 
         # THE CONTROL: the owner does every one of those things. Without it,
         # the four assertions above could pass because the function is a
         # no-op for everybody.
-        em_api._shell_owner["dev"] = asyncio.current_task()
-        await em_api._release_shell_ws("dev", live)
+        em_shell.owners["dev"] = asyncio.current_task()
+        await em_shell.release_ws("dev", live)
         assert ws.closed, "control: the owner must close the websocket"
         assert not lock.locked(), "control: the owner must release the lock"
         assert live.sent == [{"type": "shell_close"}], "control: the owner must send shell_close"
@@ -139,7 +139,7 @@ def test_a_caller_that_times_out_waiting_becomes_no_ones_owner():
     """
     The ownership record is claimed AFTER a successful acquire, never before.
 
-    `_get_device_shell_ws` waits 20s for the lock and raises on timeout. If the
+    `em_shell.get_ws` waits 20s for the lock and raises on timeout. If the
     record were written before the acquire, that caller would answer "yes, I am
     the owner" to every cleanup path in the module while holding nothing — the
     exact shape of the incident, one step earlier than it happened.
@@ -148,7 +148,7 @@ def test_a_caller_that_times_out_waiting_becomes_no_ones_owner():
 
     async def main():
         lock = asyncio.Lock()
-        em_api._shell_lock["dev"] = lock
+        em_shell.locks["dev"] = lock
         # Held by a task that never registers as owner, standing in for a
         # transfer that is mid-write.
         await lock.acquire()
@@ -166,7 +166,7 @@ def test_a_caller_that_times_out_waiting_becomes_no_ones_owner():
         asyncio.wait_for = instant_timeout
         try:
             try:
-                await em_api._get_device_shell_ws(live)
+                await em_shell.get_ws(live)
                 raise AssertionError("expected the acquire to time out")
             except RuntimeError as e:
                 assert "timed out" in str(e), f"unexpected error: {e}"
@@ -175,7 +175,7 @@ def test_a_caller_that_times_out_waiting_becomes_no_ones_owner():
 
         # It did not acquire, so it must not be able to answer for the holder.
         assert lock.locked(), "the timed-out caller released a lock it never took"
-        assert em_api._shell_owner.get("dev") is None, (
+        assert em_shell.owners.get("dev") is None, (
             "a caller that timed out waiting claimed ownership of the lock — "
             "every cleanup path would then answer yes for it"
         )
@@ -197,7 +197,7 @@ def test_a_caller_that_times_out_waiting_for_the_device_releases_its_own_lock():
 
     async def main():
         lock = asyncio.Lock()
-        em_api._shell_lock["dev"] = lock
+        em_shell.locks["dev"] = lock
         live = FakeLive("dev")
 
         real_wait_for = asyncio.wait_for
@@ -218,7 +218,7 @@ def test_a_caller_that_times_out_waiting_for_the_device_releases_its_own_lock():
         asyncio.wait_for = counting_wait_for
         try:
             try:
-                await em_api._get_device_shell_ws(live)
+                await em_shell.get_ws(live)
                 raise AssertionError("expected the device wait to time out")
             except asyncio.TimeoutError:
                 pass
@@ -229,9 +229,9 @@ def test_a_caller_that_times_out_waiting_for_the_device_releases_its_own_lock():
             "the acquire succeeded and the device never answered — the lock "
             "must be released or the device's shell is stranded"
         )
-        assert "dev" not in em_api._shell_owner, "ownership must be cleared"
+        assert "dev" not in em_shell.owners, "ownership must be cleared"
         assert "dev" not in em_state.shell_pending, "the pending future must be dropped"
-        assert "dev" not in em_api._shell_ws, "no ws may be left recorded"
+        assert "dev" not in em_shell.sockets, "no ws may be left recorded"
         # The device WAS asked to open a shell, so it must be told to stop.
         assert live.sent == [{"type": "shell_open"}], live.sent
 
@@ -240,7 +240,7 @@ def test_a_caller_that_times_out_waiting_for_the_device_releases_its_own_lock():
 
 def test_programmatic_sessions_do_not_mark_the_dashboard_flag():
     """
-    `_get_device_shell_ws` deliberately leaves `_shell_dashboard` alone.
+    `em_shell.get_ws` deliberately leaves `em_state.shell_dashboard` alone.
 
     The flag is how a cleanup path tells a person's open console apart from a
     programmatic transfer, and setting it here would make a wizard push look
@@ -252,7 +252,7 @@ def test_programmatic_sessions_do_not_mark_the_dashboard_flag():
 
     async def main():
         lock = asyncio.Lock()
-        em_api._shell_lock["dev"] = lock
+        em_shell.locks["dev"] = lock
         live = FakeLive("dev")
 
         async def answer_the_open():
@@ -263,10 +263,10 @@ def test_programmatic_sessions_do_not_mark_the_dashboard_flag():
                 fut.set_result(FakeWS())
 
         t = asyncio.create_task(answer_the_open())
-        ws = await em_api._get_device_shell_ws(live)
+        ws = await em_shell.get_ws(live)
         await t
 
-        assert ws is em_api._shell_ws["dev"], "the resolved ws must be recorded"
+        assert ws is em_shell.sockets["dev"], "the resolved ws must be recorded"
         assert "dev" not in em_state.shell_dashboard, (
             "a programmatic session must not mark the dashboard flag"
         )
