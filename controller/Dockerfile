@@ -12,6 +12,9 @@
 # output hash is unchanged with 2.3.5 (checked on linux/amd64).
 FROM python:3.12-slim@sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159 AS silero
 COPY tools/silero_typed.py /tmp/
+# The pipes here only feed a hash to `sha256sum -c`, which is the status that
+# counts, so pipefail would change nothing (hadolint DL4006).
+# hadolint ignore=DL4006
 RUN pip install --no-cache-dir --root-user-action=ignore onnx==1.20.1 numpy==2.3.5 && \
     python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/silero_vad.onnx', '/tmp/in.onnx')" && \
     echo "a35ebf52fd3ce5f1469b2a36158dba761bc47b973ea3382b3186ca15b1f5af28  /tmp/in.onnx" | sha256sum -c - && \
@@ -27,6 +30,8 @@ RUN pip install --no-cache-dir --root-user-action=ignore onnx==1.20.1 numpy==2.3
 # given cannot come from different embedding models without the build failing.
 FROM python:3.12-slim@sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159 AS oww_stream
 COPY tools/oww_stream.py /tmp/
+# Pipes feed a hash to `sha256sum -c`; see the silero stage (DL4006).
+# hadolint ignore=DL4006
 RUN pip install --no-cache-dir --root-user-action=ignore onnx==1.20.1 numpy==2.3.5 && \
     python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/embedding_model.onnx', '/tmp/in.onnx')" && \
     echo "70d164290c1d095d1d4ee149bc5e00543250a7316b59f31d056cff7bd3075c1f  /tmp/in.onnx" | sha256sum -c - && \
@@ -241,6 +246,8 @@ RUN mkdir -p /app/models/dtln && \
 # of the hand-installed copy was confirmed. MIT licensed.
 #
 # Extracted with Python's zipfile because unzip is not in the slim base.
+# Pipe feeds a hash to `sha256sum -c`; see the silero stage (DL4006).
+# hadolint ignore=DL4006
 RUN mkdir -p /app/models/oww_runtime && \
     curl -sfL -o /tmp/ort.aar \
       https://repo1.maven.org/maven2/com/microsoft/onnxruntime/onnxruntime-android/1.19.2/onnxruntime-android-1.19.2.aar && \
@@ -253,6 +260,7 @@ COPY --from=silero /silero_vad.onnx /app/models/oww_runtime/silero_vad.onnx
 # pair itself and falls back to the stock model if they disagree, so a
 # mismatch would cost every Echo the saving with nothing failing: fail here.
 COPY --from=oww_stream /embedding_stream.onnx /app/models/oww_runtime/embedding_stream.onnx
+# hadolint ignore=DL4006
 RUN echo "70d164290c1d095d1d4ee149bc5e00543250a7316b59f31d056cff7bd3075c1f  $(python3 -c 'import openwakeword, os; print(os.path.join(os.path.dirname(openwakeword.__file__), "resources", "models", "embedding_model.onnx"))')" | sha256sum -c -
 # Dashboard SPA — placeholder is index.html, full dashboard is dashboard.html
 COPY static/ ./static/

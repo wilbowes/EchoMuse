@@ -897,7 +897,7 @@ jobs:
           fi
 
   shell-lint:
-    name: Shell lint (shellcheck)
+    name: Shell and Dockerfile lint
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -925,3 +925,12 @@ jobs:
           } | sort -u > /tmp/shell-scripts
           cat /tmp/shell-scripts
           xargs shellcheck --severity=warning < /tmp/shell-scripts
+      # All five Dockerfiles, at the strictest threshold, since nothing was
+      # left once each exception had a written reason (#822). DL3008 is off
+      # in .hadolint.yaml, and the DL4006 exceptions sit on their own lines.
+      # hadolint-py for the same reason as shellcheck-py.
+      - name: Run hadolint
+        run: |
+          pip install hadolint-py==2.15.1.2
+          git ls-files '*Dockerfile*' | tee /dev/stderr \
+            | xargs hadolint --failure-threshold style
