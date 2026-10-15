@@ -162,7 +162,7 @@ def test_a_device_log_line_is_relayed_once_with_its_level(monkeypatch):
 
     async def push(device_id, level, source, message):
         sent.append((device_id, level, source, message))
-    monkeypatch.setattr(em_controller.api, "_push_log_event", push)
+    monkeypatch.setattr(em_controller.em_events, "push_log", push)
     _run(em_controller._on_log(_device(), {"type": "log", "level": "warn", "message": "m"}))
     _run(em_controller._on_log(_device(), {"type": "log"}))
     assert sent == [("dev1", "warn", "device", "m"), ("dev1", "info", "device", "")]
@@ -173,7 +173,7 @@ def test_sendspin_status_is_held_and_pushed(monkeypatch):
 
     async def push(event):
         events.append(event)
-    monkeypatch.setattr(em_controller.api, "_push_event", push)
+    monkeypatch.setattr(em_controller.em_events, "push", push)
     d = _device()
     _run(em_controller._on_sendspin_status(d, {"type": "sendspin_status",
                                                "status": {"state": "playing"}}))

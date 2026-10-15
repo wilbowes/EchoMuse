@@ -79,10 +79,8 @@ def test_the_guard_sees_a_synchronous_call(tmp_path):
     assert _sync_db_calls_in_coroutines(p) == ["m.py:2 db.log_device in f"]
 
 
-def test_push_log_event_queues_its_write():
-    tree = ast.parse((CONTROLLER / "em_api.py").read_text())
-    fn = next(n for n in ast.walk(tree)
-              if isinstance(n, ast.AsyncFunctionDef) and n.name == "_push_log_event")
+def test_push_log_queues_its_write():
+    _, fn = _sources.find_def("push_log")
     submits = [n for n in ast.walk(fn) if isinstance(n, ast.Call)
                and getattr(n.func, "attr", None) == "submit"
                and getattr(n.func.value, "id", None) == "em_dbwriter"]

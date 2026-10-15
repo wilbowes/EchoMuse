@@ -75,6 +75,7 @@ import websockets
 from websockets.asyncio.server import ServerConnection as WebSocketServerProtocol
 
 import em_db as db
+import em_events
 import em_state
 import em_auth as auth
 import em_api as api
@@ -1564,7 +1565,7 @@ def _guard_for(device):
 
 async def _push_device_state(device: Device) -> None:
     """Push current transient device state to dashboard clients."""
-    await api._push_event({
+    await em_events.push({
         "type":      "device_update",
         "device_id": device.device_id,
         "state": {
@@ -3783,7 +3784,7 @@ async def _stream_listen(device: Device):
                             f"(threshold={device.oww_threshold:.3f}, "
                             f"total near-misses={device.oww_near_misses})"
                         )
-                        await api._push_event({
+                        await em_events.push({
                             "type":      "device_update",
                             "device_id": device.device_id,
                             "state":     {"owwNearMisses": device.oww_near_misses},
@@ -4401,7 +4402,7 @@ async def _on_mute_state(device: Device, msg: dict) -> None:
         device.cancel_event.set()
         esphome.cancel_voice_turn(device_id, reason="muted")
         await device.send_control({"type": "speaker_flush"})
-    await api._push_event({
+    await em_events.push({
         "type":      "device_update",
         "device_id": device_id,
         "state":     {"muted": device.muted,
@@ -4567,7 +4568,7 @@ async def _on_stats(device: Device, msg: dict) -> None:
                 dev_max_gap_ms=int(_shadow.get("maxGapMs") or 0),
             )
     await loop.run_in_executor(None, _persist_stats)
-    await api._push_event({
+    await em_events.push({
         "type":      "device_update",
         "device_id": device_id,
         "state":     {
@@ -4586,7 +4587,7 @@ async def _on_sendspin_status(device: Device, msg: dict) -> None:
     # The player's state as it changes (pairing, a stream
     # starting); the stats tick carries it too.
     device.sendspin = msg.get("status")
-    await api._push_event({
+    await em_events.push({
         "type": "device_update", "device_id": device_id,
         "state": {"sendspin": device.sendspin},
     })
@@ -4626,7 +4627,7 @@ async def _on_wifi_result(device: Device, msg: dict) -> None:
                         f"failed: {error}")
             em_dbwriter.submit(db.log_device, device_id, "warning", "device",
                           f'WiFi change to "{ssid}" failed: {error}')
-        await api._push_event({
+        await em_events.push({
             "type":      "device_update",
             "device_id": device_id,
             "state":     {"wifi": st},
@@ -4863,7 +4864,7 @@ async def _on_listen_state(device: Device, msg: dict) -> None:
                  f"temporarily — this firmware still sends "
                  f"audio on each wake, so the stored off is "
                  f"kept until it can honour it")
-        await api._push_event({
+        await em_events.push({
             "type":      "device_update",
             "device_id": device_id,
             "state":     {"wake_word_enabled": True},
@@ -4908,7 +4909,7 @@ async def _on_log(device: Device, msg: dict) -> None:
     device_id = device.device_id
     level   = msg.get("level", "info")
     message = msg.get("message", "")
-    # _push_log_event PERSISTS as well as pushing, so this must
+    # em_events.push_log PERSISTS as well as pushing, so this must
     # not also call db.log_device — doing both wrote every
     # device log line twice, ~6ms apart, which is how half the
     # device_logs table came to be duplicates. It also matters
@@ -4917,8 +4918,8 @@ async def _on_log(device: Device, msg: dict) -> None:
     # a leak hunt actually gets.
     #
     # The removed call was a synchronous DB write on the event
-    # loop; _push_log_event does it in an executor.
-    await api._push_log_event(device_id, level, "device", message)
+    # loop; em_events.push_log does it in an executor.
+    await em_events.push_log(device_id, level, "device", message)
 
 
 async def _on_pair_request(device: Device, msg: dict) -> None:
@@ -5387,7 +5388,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                     await _d.mic_stop()
                 if t.start_stream:
                     await _d.mic_start()
-                await api._push_event({
+                await em_events.push({
                     "type":      "device_update",
                     "device_id": _d.device_id,
                     "state":     {"wake_word_enabled": t.enabled},

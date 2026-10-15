@@ -1078,9 +1078,9 @@ def test_a_failed_transfer_says_which_stage_it_failed_at():
     )
 
 
-def test_push_log_event_callers_do_not_also_persist():
+def test_push_log_callers_do_not_also_persist():
     """
-    `_push_log_event` persists AND pushes. A caller that also calls
+    `em_events.push_log` persists AND pushes. A caller that also calls
     `db.log_device` writes the line twice.
 
     That is not hypothetical: the device `log` handler did both, so every
@@ -1101,13 +1101,13 @@ def test_push_log_event_callers_do_not_also_persist():
         name = path.name
         lines = _sources.source(path).splitlines()
         for i, line in enumerate(lines):
-            if "_push_log_event(" not in line or "async def" in line:
+            if "em_events.push_log(" not in line or "async def" in line:
                 continue
             # The persist would sit just above the push, in the same block.
             window = lines[max(0, i - 6):i]
             offenders = [w.strip() for w in window if "db.log_device(" in w]
             assert not offenders, (
-                f"{name}:{i+1} calls _push_log_event, which already persists, "
+                f"{name}:{i+1} calls em_events.push_log, which already persists, "
                 f"but is preceded by {offenders[0]!r}. That writes the log "
                 f"line twice. Drop the db.log_device call."
             )

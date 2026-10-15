@@ -61,7 +61,7 @@ def _patch_shell(monkeypatch, replies):
 
     monkeypatch.setattr(em_api, "_shell_run", fake_shell_run)
     monkeypatch.setattr(em_api, "_stream_file_to_device", fake_stream)
-    monkeypatch.setattr(em_api, "_push_log_event", fake_log)
+    monkeypatch.setattr(em_api.em_events, "push_log", fake_log)
     monkeypatch.setattr(em_api.asyncio, "sleep", no_sleep)
     return calls, pushed
 

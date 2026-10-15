@@ -121,7 +121,7 @@ def test_key_endpoint_is_admin_only_and_says_nothing_else():
     # put the key in the log.
     calls = [ast.unparse(n.func) for n in ast.walk(fn) if isinstance(n, ast.Call)]
     for forbidden in ("log.info", "log.warning", "log.debug", "log.error",
-                      "log_device", "broadcast", "_push_event"):
+                      "log_device", "broadcast", "em_events.push", "em_events.push_log"):
         assert not any(c == forbidden or c.endswith("." + forbidden) for c in calls), \
             f"the key handler calls {forbidden}"
     src = (CONTROLLER / "em_api.py").read_text()

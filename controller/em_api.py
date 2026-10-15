@@ -55,12 +55,13 @@ from aiohttp import web
 import websockets
 
 import em_db as db
+import em_esphome
+import em_events
 import em_http
 import em_state
 import em_health
 import em_auth as auth
 import em_ble_proxy
-import em_broadcast
 import em_config_sections as sections_mod
 import em_config_types
 import em_dbwriter
@@ -193,9 +194,6 @@ _link = {"ip": "", "port": 8767, "tls_port": 0}
 
 def set_link_ports(ip: str, port: int, tls_port: int) -> None:
     _link.update(ip=ip or "", port=port, tls_port=tls_port)
-
-# Set of connected /api/events WebSocket clients.
-_event_clients: set[web.WebSocketResponse] = set()
 
 # Track in-progress OTA updates per device_id to enforce one-at-a-time.
 _updates_in_progress: set[str] = set()
@@ -1116,7 +1114,7 @@ async def _patch_device(request: web.Request) -> web.Response:
         return em_http.error("device_not_found", f"No device: {device_id}", 404)
 
     await loop.run_in_executor(None, db.set_device_label, device_id, label)
-    await _push_event({"type": "device_update", "device_id": device_id,
+    await em_events.push({"type": "device_update", "device_id": device_id,
                        "state": {"label": label}})
     # Music Assistant lists the Sendspin player by this name; the device
     # restarts the player to re-advertise it.
@@ -1201,8 +1199,7 @@ async def _delete_device(request: web.Request) -> web.Response:
     # The satellite needs the same, and had no equivalent: it survives an
     # ordinary disconnect on purpose, so a delete used to leave it in
     # `_servers` holding the old port for a re-added device to inherit
-    # silently. Lazy import — em_esphome imports em_api at module level.
-    import em_esphome
+    # silently.
     await em_esphome.device_deleted(device_id)
     # Free the device's cached OWW models (#512), or a deleted device keeps its
     # models — and their ONNX sessions — for the life of the process.
@@ -1226,7 +1223,7 @@ async def _delete_device(request: web.Request) -> web.Response:
     # arrives as pending — except under REQUIRE_DEVICE_TLS, where it is
     # refused and re-provisioning over USB is the intended path.
     await _disconnect_device(device_id)
-    await _push_event({"type": "device_deleted", "device_id": device_id})
+    await em_events.push({"type": "device_deleted", "device_id": device_id})
     return em_http.ok({})
 
 
@@ -1280,7 +1277,7 @@ async def _post_approve(request: web.Request) -> web.Response:
     # Approval is the one human decision: it also issues link credentials when
     # the device next connects without them (em_pairing).
     em_pairing.approve(device_id)
-    await _push_event({"type": "device_approved", "device_id": device_id,
+    await em_events.push({"type": "device_approved", "device_id": device_id,
                        "label": label})
     return em_http.ok({"device_id": device_id, "label": label})
 
@@ -1322,9 +1319,7 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
         live.oww_threshold = float(effective["owwThreshold"])
     if "owwModel" in effective:
         live.oww_model = effective["owwModel"]
-        # Refresh HA's wake-word dropdown (lazy import — em_esphome imports
-        # em_api at module level).
-        import em_esphome
+        # Refresh HA's wake-word dropdown.
         await em_esphome.update_oww_model(device_id, effective["owwModel"])
     if pending_model:
         # The device is still on its previous wake word, still scoring
@@ -1554,7 +1549,7 @@ async def _post_device_config(request: web.Request) -> web.Response:
     # effective value without the key appearing in the body.
     await em_ble_proxy.reconcile(device_id)
 
-    await _push_event({"type": "device_update", "device_id": device_id,
+    await em_events.push({"type": "device_update", "device_id": device_id,
                        "state": {"config": config,
                                  "config_sections": new_sections,
                                  "use_global_config": not new_sections}})
@@ -1613,7 +1608,7 @@ async def _post_device_wifi(request: web.Request) -> web.Response:
     await live.send_control(change)
     em_dbwriter.submit(db.log_device, device_id, "info", "controller",
                        f'WiFi change to "{ssid}" requested')
-    await _push_event({"type": "device_update", "device_id": device_id,
+    await em_events.push({"type": "device_update", "device_id": device_id,
                        "state": {"wifi": st}})
     return em_http.ok({"device_id": device_id, "ssid": ssid, "status": "switching"},
                status=202)
@@ -2032,8 +2027,8 @@ async def _update_failed(device_id: str, reason: str) -> None:
     "updating…" indefinitely.
     """
     _update_errors[device_id] = reason
-    await _push_log_event(device_id, "error", "controller", reason)
-    await _push_event({
+    await em_events.push_log(device_id, "error", "controller", reason)
+    await em_events.push({
         "type":      "device_update_failed",
         "device_id": device_id,
         "error":     reason,
@@ -2104,13 +2099,13 @@ async def _run_update_locked(device_id: str, release: dict,
     version = release["version"]
 
     try:
-        await _push_log_event(device_id, "info", "controller",
+        await em_events.push_log(device_id, "info", "controller",
                               f"OTA update starting → {version}")
 
         # Fetch binary
         if binary_override is not None:
             binary = binary_override
-            await _push_log_event(device_id, "info", "controller",
+            await em_events.push_log(device_id, "info", "controller",
                                   f"Using uploaded binary ({len(binary):,} bytes)")
         else:
             binary = await _fetch_binary(release["url"], release.get("version", ""))
@@ -2165,7 +2160,7 @@ async def _run_update_locked(device_id: str, release: dict,
             return
 
         if "MIGRATED" in detect_result:
-            await _push_log_event(device_id, "info", "controller",
+            await em_events.push_log(device_id, "info", "controller",
                                   "A/B migration complete — active slot: server_a")
 
         # Sync the startup script while we're here — OTA is the only update
@@ -2225,7 +2220,7 @@ async def _run_update_locked(device_id: str, release: dict,
             log.warning(f"[api] Could not read free space on {device_id} "
                         f"from {free_out!r} — proceeding with update")
 
-        await _push_log_event(device_id, "info", "controller",
+        await em_events.push_log(device_id, "info", "controller",
                               f"Deploying to slot {inactive_slot} (active: {active_slot})")
 
         # Stream binary to inactive slot. Verified by md5 before it is renamed
@@ -2246,7 +2241,7 @@ async def _run_update_locked(device_id: str, release: dict,
         await asyncio.sleep(1.0)
 
         # Atomic symlink flip + service restart
-        await _push_log_event(device_id, "info", "controller",
+        await em_events.push_log(device_id, "info", "controller",
                               f"Flipping symlink → {inactive_slot} and restarting")
         result = await _shell_run(live,
             f"ln -sf {inactive_slot} /data/local/bin/server && "
@@ -2260,9 +2255,9 @@ async def _run_update_locked(device_id: str, release: dict,
 
         if confirmed:
             _update_errors.pop(device_id, None)
-            await _push_log_event(device_id, "info", "controller",
+            await em_events.push_log(device_id, "info", "controller",
                                   f"✓ Update confirmed: {version}")
-            await _push_event({
+            await em_events.push({
                 "type":      "device_updated",
                 "device_id": device_id,
                 "version":   version,
@@ -2280,10 +2275,10 @@ async def _run_update_locked(device_id: str, release: dict,
                     f"auto-rolled back to {running} — new binary failed to start"
                 )
                 _supervisor_log_wanted.add(device_id)
-                await _push_log_event(device_id, "warn", "controller",
+                await em_events.push_log(device_id, "warn", "controller",
                     f"Device auto-rolled back to {running} "
                     f"— new binary failed {3} start attempts")
-                await _push_event({
+                await em_events.push({
                     "type":      "device_auto_rolled_back",
                     "device_id": device_id,
                     "version":   running,
@@ -2293,9 +2288,9 @@ async def _run_update_locked(device_id: str, release: dict,
                     f"timed out — device running {running}"
                 )
                 _supervisor_log_wanted.add(device_id)
-                await _push_log_event(device_id, "warn", "controller",
+                await em_events.push_log(device_id, "warn", "controller",
                     f"Update timed out — device running: {running}")
-                await _push_event({
+                await em_events.push({
                     "type":      "device_update_failed",
                     "device_id": device_id,
                     "error":     _update_errors[device_id],
@@ -2316,7 +2311,7 @@ async def _run_rollback(device_id: str, target_version: str) -> None:
     _updates_in_progress.add(device_id)
     _update_errors.pop(device_id, None)  # fresh attempt clears the last failure
     try:
-        await _push_log_event(device_id, "info", "controller",
+        await em_events.push_log(device_id, "info", "controller",
                               f"Rolling back to {target_version}")
 
         live = em_state.devices.get(device_id)
@@ -2345,7 +2340,7 @@ async def _run_rollback(device_id: str, target_version: str) -> None:
             return
 
         inactive_slot = "server_b" if active_slot == "server_a" else "server_a"
-        await _push_log_event(device_id, "info", "controller",
+        await em_events.push_log(device_id, "info", "controller",
                               f"Flipping {active_slot} → {inactive_slot}")
 
         result = await _shell_run(live,
@@ -2368,9 +2363,9 @@ async def _run_rollback(device_id: str, target_version: str) -> None:
             await loop.run_in_executor(
                 None, db.set_firmware_previous, device_id, None
             )
-            await _push_log_event(device_id, "info", "controller",
+            await em_events.push_log(device_id, "info", "controller",
                                   f"✓ Rollback confirmed: {target_version}")
-            await _push_event({
+            await em_events.push({
                 "type":      "device_rolled_back",
                 "device_id": device_id,
                 "version":   target_version,
@@ -2547,9 +2542,9 @@ async def _emos_update_failed(device_id: str, reason: str) -> None:
     # The controller's own log as well as the device's: on C95's first run
     # the only trace here was the file transfer, with no outcome either way.
     log.warning(f"[api] [{device_id}] emOS update failed: {reason}")
-    await _push_log_event(device_id, "error", "controller",
+    await em_events.push_log(device_id, "error", "controller",
                           f"emOS update: {reason}")
-    await _push_event({"type": "device_emos_update_failed",
+    await em_events.push({"type": "device_emos_update_failed",
                        "device_id": device_id, "error": reason})
 
 
@@ -2652,7 +2647,7 @@ class _EmosIO:
         _emos_update_stage[self.device_id] = msg
         if log:
             _emos_log.info(f"[api] [{self.device_id}] emOS update: {msg}")
-            await _push_log_event(self.device_id, "info", "controller",
+            await em_events.push_log(self.device_id, "info", "controller",
                                   f"emOS update: {msg}")
 
     async def record(self, version, build) -> None:
@@ -2686,9 +2681,9 @@ async def _run_emos_update_locked(device_id: str, override: tuple | None) -> Non
         return await _emos_update_failed(device_id, str(e))
     _emos_update_errors.pop(device_id, None)
     log.info(f"[api] [{device_id}] emOS update confirmed: {version}")
-    await _push_log_event(device_id, "info", "controller",
+    await em_events.push_log(device_id, "info", "controller",
                           f"✓ emOS update confirmed: {version}")
-    await _push_event({"type": "device_emos_updated",
+    await em_events.push({"type": "device_emos_updated",
                        "device_id": device_id, "version": version})
 
 
@@ -2707,12 +2702,12 @@ async def _emos_status_on_connect(live, device_id: str) -> None:
         return
     em_dbwriter.submit(db.set_device_emos, device_id, st["version"], st["build"])
     if verdict == "confirm":
-        await _push_log_event(device_id, "info", "controller",
+        await em_events.push_log(device_id, "info", "controller",
                               f"✓ emOS update confirmed: {st['version']}")
     elif verdict == "incomplete":
         log.warning(f"[api] [{device_id}] an emOS update did not complete; "
                     f"running {st['version']}")
-        await _push_log_event(
+        await em_events.push_log(
             device_id, "warn", "controller",
             f"An emOS update did not complete or was rolled back: the Echo "
             f"is running {st['version']}. The image it left behind was removed.")
@@ -2723,7 +2718,7 @@ async def _emos_status_on_connect(live, device_id: str) -> None:
             msg = (f"emOS update to {st['mark'].get('version', '?')} was "
                    f"rolled back: the Echo is running {st['version']}")
         log.warning(f"[api] [{device_id}] {msg}")
-        await _push_log_event(device_id, "warn", "controller", msg)
+        await em_events.push_log(device_id, "warn", "controller", msg)
 
 
 # ─── Shell helpers ────────────────────────────────────────────────────────────
@@ -3198,12 +3193,12 @@ async def _sync_start_script(live, device_id: str) -> None:
         return  # in sync — the common case
     await asyncio.sleep(1.0)  # let the md5 shell session close cleanly
 
-    await _push_log_event(device_id, "info", "controller",
+    await em_events.push_log(device_id, "info", "controller",
                           "start_server.sh out of date — syncing canonical version")
     tmp = path + ".new"
     res = await _stream_file_to_device(live, script, tmp)
     if not res:
-        await _push_log_event(device_id, "warn", "controller",
+        await em_events.push_log(device_id, "warn", "controller",
                               f"start_server.sh sync failed: {res} — continuing OTA")
         return
     await asyncio.sleep(1.0)
@@ -3214,10 +3209,10 @@ async def _sync_start_script(live, device_id: str) -> None:
         f'mv {tmp} {path} && chmod 755 {path} && echo SCRIPT_SYNCED; '
         f'else rm -f {tmp}; echo SCRIPT_MD5_MISMATCH:$NEW; fi')
     if "SCRIPT_SYNCED" in res:
-        await _push_log_event(device_id, "info", "controller",
+        await em_events.push_log(device_id, "info", "controller",
                               "start_server.sh synced — takes effect on next device reboot")
     else:
-        await _push_log_event(device_id, "warn", "controller",
+        await em_events.push_log(device_id, "warn", "controller",
                               f"start_server.sh sync failed ({res.strip() or 'no output'}) — continuing OTA")
     await asyncio.sleep(1.0)
 
@@ -3255,25 +3250,25 @@ async def _sync_controller_endpoints(live, device_id: str) -> bool:
             await asyncio.sleep(1.0)
             res = await _shell_run(live, f"rm -f {path}; [ -e {path} ] || echo {_SHELL_OK}")
             if _SHELL_OK in res:
-                await _push_log_event(device_id, "info", "controller",
+                await em_events.push_log(device_id, "info", "controller",
                                       "Controller address list removed — mDNS only from the next reconnect")
             else:
-                await _push_log_event(device_id, "warn", "controller",
+                await em_events.push_log(device_id, "warn", "controller",
                                       "Controller address list not removed")
                 return False
         return True
     if em_endpoints.md5(want) in out:
         return True
     if has_file and not managed:
-        await _push_log_event(device_id, "info", "controller",
+        await em_events.push_log(device_id, "info", "controller",
                               "Replacing a hand-written controller.json with the fleet's address list")
     await asyncio.sleep(1.0)
     res = await _stream_file_to_device(live, want, path, mode="644")
     if res:
-        await _push_log_event(device_id, "info", "controller",
+        await em_events.push_log(device_id, "info", "controller",
                               "Controller address list updated — used from the next reconnect")
         return True
-    await _push_log_event(device_id, "warn", "controller",
+    await em_events.push_log(device_id, "warn", "controller",
                           f"Controller address list not written: {res}")
     return False
 
@@ -3361,7 +3356,7 @@ async def _sync_debloat(live, device_id: str) -> None:
             # An empty md5 also lands here — a device provisioned before the
             # script existed has no file at all, and installing it is right.
             await asyncio.sleep(1.0)
-            await _push_log_event(device_id, "info", "controller",
+            await em_events.push_log(device_id, "info", "controller",
                                   "debloat script out of date — syncing canonical version")
             tmp = DEBLOAT_SCRIPT_PATH + ".new"
             pushed = await _stream_file_to_device(live, script, tmp)
@@ -3373,14 +3368,14 @@ async def _sync_debloat(live, device_id: str) -> None:
                     f'mv {tmp} {DEBLOAT_SCRIPT_PATH} && chmod 755 {DEBLOAT_SCRIPT_PATH} '
                     f'&& echo DEBLOAT_SYNCED; '
                     f'else rm -f {tmp}; echo DEBLOAT_MD5_MISMATCH:$NEW; fi')
-                await _push_log_event(
+                await em_events.push_log(
                     device_id,
                     "info" if "DEBLOAT_SYNCED" in res else "warn", "controller",
                     "debloat script synced — daemon stops take effect on next device reboot"
                     if "DEBLOAT_SYNCED" in res else
                     f"debloat script sync failed ({res.strip() or 'no output'})")
             else:
-                await _push_log_event(device_id, "warn", "controller",
+                await em_events.push_log(device_id, "warn", "controller",
                                       f"debloat script sync failed: {pushed}")
             await asyncio.sleep(1.0)
 
@@ -3396,7 +3391,7 @@ async def _sync_debloat(live, device_id: str) -> None:
     remote_list = "/data/local/tmp/em_debloat_pkgs.txt"
     pushed = await _stream_file_to_device(live, listing, remote_list, mode="644")
     if not pushed:
-        await _push_log_event(device_id, "warn", "controller",
+        await em_events.push_log(device_id, "warn", "controller",
                               f"debloat hide-list sync failed: {pushed}")
         return
     await asyncio.sleep(1.0)
@@ -3443,11 +3438,11 @@ async def _sync_debloat(live, device_id: str) -> None:
         if line.strip().startswith("STILL_VISIBLE:"):
             still = line.split(":", 1)[1].strip()
     if applied:
-        await _push_log_event(device_id, "info", "controller",
+        await em_events.push_log(device_id, "info", "controller",
                               f"debloat: hid {applied} newly-listed package(s) — "
                               f"persistent ones stop at the next device reboot")
     if still:
-        await _push_log_event(device_id, "warn", "controller",
+        await em_events.push_log(device_id, "warn", "controller",
                               f"debloat: {len(still.split())} package(s) could not be "
                               f"hidden and are still active: {still}")
     await asyncio.sleep(1.0)
@@ -3501,7 +3496,7 @@ async def _ws_shell(request: web.Request) -> web.WebSocketResponse:
     await ws.prepare(request)
 
     log.info(f"[api] Shell session requested: {device_id} by {user['username']}")
-    await _push_log_event(device_id, "info", "controller",
+    await em_events.push_log(device_id, "info", "controller",
                           f"Shell session opened by {user['username']}")
 
     loop = asyncio.get_event_loop()
@@ -3526,7 +3521,7 @@ async def _ws_shell(request: web.Request) -> web.WebSocketResponse:
         em_state.shell_dashboard.pop(device_id, None)
         await live.send_control({"type": "shell_close"})
         log.info(f"[api] Shell session closed: {device_id}")
-        await _push_log_event(device_id, "info", "controller",
+        await em_events.push_log(device_id, "info", "controller",
                               f"Shell session closed by {user['username']}")
 
     return ws
@@ -3920,7 +3915,7 @@ async def _issue_credentials(device_id: str) -> None:
     if live is None or _tls_dir is None:
         return
     try:
-        await _push_log_event(device_id, "info", "controller",
+        await em_events.push_log(device_id, "info", "controller",
                               "Pairing: installing link credentials")
         # Minted here and stored only once the device has it. The push rides
         # the shell plane, which the device dials with its CURRENT token, so
@@ -3939,13 +3934,13 @@ async def _issue_credentials(device_id: str) -> None:
             ok = await _stream_file_to_device(
                 live, token.encode("ascii"), f"{DEVICE_TLS_DIR}/token", mode="600")
         if not ok:
-            await _push_log_event(device_id, "error", "controller",
+            await em_events.push_log(device_id, "error", "controller",
                                   f"Pairing: credential transfer failed: {ok}")
             return
 
         await loop.run_in_executor(None, db.set_device_token, device_id, token)
         em_pairing.done(device_id)
-        await _push_log_event(
+        await em_events.push_log(
             device_id, "info", "controller",
             "Pairing: credentials installed — reconnecting over TLS")
         # The Go client reloads credentials on every dial, so a reconnect
@@ -3956,7 +3951,7 @@ async def _issue_credentials(device_id: str) -> None:
             pass
     except Exception as e:
         log.exception(f"[api] Issuing credentials failed for {device_id}: {e}")
-        await _push_log_event(device_id, "error", "controller",
+        await em_events.push_log(device_id, "error", "controller",
                               f"Pairing failed: {e}")
 
 
@@ -4296,9 +4291,9 @@ async def _ws_events(request: web.Request) -> web.WebSocketResponse:
 
     ws = web.WebSocketResponse(heartbeat=30)
     await ws.prepare(request)
-    _event_clients.add(ws)
+    em_events.clients.add(ws)
     log.debug(f"[api] Events client connected ({user['username']}) "
-              f"— {len(_event_clients)} total")
+              f"— {len(em_events.clients)} total")
 
     try:
         # Send full device snapshot on connect so the dashboard has
@@ -4316,49 +4311,11 @@ async def _ws_events(request: web.Request) -> web.WebSocketResponse:
                 break
 
     finally:
-        _event_clients.discard(ws)
+        em_events.clients.discard(ws)
         log.debug(f"[api] Events client disconnected — "
-                  f"{len(_event_clients)} remaining")
+                  f"{len(em_events.clients)} remaining")
 
     return ws
-
-
-async def _push_event(event: dict) -> None:
-    """
-    Broadcast a JSON event to all connected /api/events clients.
-
-    Called by route handlers and background tasks whenever device
-    state changes.
-    """
-    if not _event_clients:
-        return
-    await em_broadcast.broadcast(_event_clients, json.dumps(event))
-
-
-async def _push_log_event(
-    device_id: str,
-    level: str,
-    source: str,
-    message: str,
-) -> None:
-    """
-    Persist a controller-generated log entry and push it to event clients.
-
-    The write is queued (em_dbwriter), not awaited: this is called inline from
-    each device's control handler for every relayed log line, and awaiting the
-    write held that device's pongs and wake events behind it.
-    """
-    em_dbwriter.submit(db.log_device, device_id, level, source, message)
-    await _push_event({
-        "type":      "device_log",
-        "device_id": device_id,
-        "entry": {
-            "ts":      int(time.time() * 1000),
-            "level":   level,
-            "source":  source,
-            "message": message,
-        },
-    })
 
 
 # ─── GitHub release fetching ──────────────────────────────────────────────────
@@ -4539,7 +4496,7 @@ async def _fetch_latest_release(force: bool = False) -> Optional[dict]:
             # Updates panel does not sit on the old version until someone
             # reloads or presses Check now.
             log.info(f"[api] Release changed {previous_tag or '(none)'} -> {tag}")
-            await _push_event({
+            await em_events.push({
                 "type":         "release_update",
                 "version":      tag,
                 "notes":        notes,
@@ -4639,7 +4596,7 @@ async def _fetch_controller_release(force: bool = False) -> Optional[dict]:
         if version != previous:
             # Same live-push as device releases: a dashboard left open should
             # not sit on stale information until someone reloads.
-            await _push_event({
+            await em_events.push({
                 "type":         "controller_update",
                 "version":      version,
                 "notes":        notes,
@@ -4799,7 +4756,7 @@ async def _install_then_switch(device_id: str, model: str) -> None:
     if live is None:
         return
 
-    await _push_log_event(
+    await em_events.push_log(
         device_id, "info", "controller",
         f"Installing wake word model {model} before switching to it"
     )
@@ -4817,7 +4774,7 @@ async def _install_then_switch(device_id: str, model: str) -> None:
         # actually hear. The controller is scoring the NEW model (fleet config
         # decides that), so the two disagree until this is resolved — worth
         # saying loudly, and better than a device that hears nothing.
-        await _push_log_event(
+        await em_events.push_log(
             device_id, "error", "controller",
             f"Could not install wake word model {model} "
             f"({result.get('error')}) — this device is still using "
@@ -4839,9 +4796,8 @@ async def _install_then_switch(device_id: str, model: str) -> None:
 
     await live.send_control({"type": "config", **_well_typed(device_id, effective)})
     live.oww_model = model
-    import em_esphome
     await em_esphome.update_oww_model(device_id, model)
-    await _push_log_event(
+    await em_events.push_log(
         device_id, "info", "controller",
         f"Wake word model {model} installed — device switched"
     )
@@ -4921,7 +4877,7 @@ async def _collect_crash_log(live, device_id: str) -> None:
     if msg:
         log.warning(f"[api] [{device_id}] previous boot did not end cleanly — "
                     f"kernel log saved to the device's log events")
-        await _push_log_event(device_id, "error", "kernel", msg)
+        await em_events.push_log(device_id, "error", "kernel", msg)
     await asyncio.sleep(1.0)
     await _shell_run(live, f"echo {md5} > {seen}")
 
@@ -5076,7 +5032,7 @@ async def reconcile_oww_assets(device_id: str, live) -> None:
                          "(the button still works)")
         log.warning(f"[api] [{device_id}] oww reconcile: {missing} is not "
                     f"installed — {while_missing}")
-        await _push_log_event(device_id, "warn", "controller",
+        await em_events.push_log(device_id, "warn", "controller",
                               f"Wake word model {missing} is missing — {while_missing}")
     else:
         # Nothing is deaf, so no warning is owed — but anything missing is a
@@ -5096,7 +5052,7 @@ async def reconcile_oww_assets(device_id: str, live) -> None:
 
     if not result.get("ok"):
         if action == "deaf":
-            await _push_log_event(
+            await em_events.push_log(
                 device_id, "error", "controller",
                 f"Could not install {missing} ({result.get('error')}) — "
                 f"this Echo still cannot hear its wake word"
@@ -5114,7 +5070,7 @@ async def reconcile_oww_assets(device_id: str, live) -> None:
         # The device builds its scorer from the config push, so it needs telling
         # the model is now there — same mechanism _install_then_switch relies on.
         await live.send_control({"type": "config", **_well_typed(device_id, effective)})
-        await _push_log_event(
+        await em_events.push_log(
             device_id, "info", "controller",
             f"Wake word model {missing} installed — listening for its wake word again"
         )
@@ -5163,7 +5119,7 @@ async def _sync_oww_assets_locked(live, device_id: str, progress=None) -> dict:
     """
     async def say(level: str, msg: str):
         log.info(f"[api] [{device_id}] oww assets: {msg}")
-        await _push_log_event(device_id, level, "controller", f"Wake word assets: {msg}")
+        await em_events.push_log(device_id, level, "controller", f"Wake word assets: {msg}")
         if progress:
             await progress(level, msg)
 
@@ -6250,12 +6206,12 @@ async def _collect_supervisor_log(device_id: str) -> None:
     out = await _shell_run(live, f"busybox tail -c 4096 {SUPERVISOR_LOG}", timeout=30.0)
     text = (out or "").strip()
     if not text:
-        await _push_log_event(device_id, "warn", "controller",
+        await em_events.push_log(device_id, "warn", "controller",
             "Update failed, and the device has no supervisor log — firmware "
             "predating it, or start_server.sh has not been synced yet "
             "(it takes effect on the next device reboot).")
         return
-    await _push_log_event(device_id, "warn", "controller",
+    await em_events.push_log(device_id, "warn", "controller",
         "Supervisor log from the failed update:\n" + text)
 
 
@@ -6280,7 +6236,7 @@ async def notify_device_connected(device_id: str, version: str | None = None) ->
         row = await loop.run_in_executor(None, db.get_device, device_id)
         if row:
             event["firmware_ver"] = row["firmware_ver"]
-    await _push_event(event)
+    await em_events.push(event)
 
     # Owed an explanation from a failed update? Collect it now the device is
     # reachable again. Removed from the set on the way in, so a flapping
@@ -6303,21 +6259,21 @@ async def notify_device_connected(device_id: str, version: str | None = None) ->
 
 async def notify_device_disconnected(device_id: str) -> None:
     """Called by em_controller when a device disconnects."""
-    await _push_event({"type": "device_disconnected", "device_id": device_id})
+    await em_events.push({"type": "device_disconnected", "device_id": device_id})
 
 
 async def notify_pair_request(device_id: str, via: str) -> None:
     """A device asked to pair; the dashboard offers Approve pairing."""
     if em_pairing.request(device_id, via):
         log.info(f"[api] {device_id} asked to pair ({via})")
-        await _push_log_event(device_id, "info", "controller",
+        await em_events.push_log(device_id, "info", "controller",
                               "Asked to pair — approve it in the dashboard")
-        await _push_event({"type": "device_pair_request", "device_id": device_id})
+        await em_events.push({"type": "device_pair_request", "device_id": device_id})
 
 
 async def notify_device_pending(device_id: str, ip: str) -> None:
     """Called by em_controller when an unapproved device attempts connection."""
-    await _push_event({
+    await em_events.push({
         "type":      "device_pending",
         "device_id": device_id,
         "ip":        ip,
@@ -6427,12 +6383,6 @@ def _merge_device(row, boot: dict | None = None) -> dict:
     """
     device_id = row["device_id"]
     live = em_state.devices.get(device_id)
-    # Lazy, for the reason every other em_esphome call site here is lazy:
-    # em_esphome imports em_api at module level. After the first call this
-    # is a sys.modules lookup, which is what makes it affordable on a path
-    # that runs per device per dashboard poll.
-    import em_esphome
-
     return {
         # Persistent
         "device_id":          device_id,

@@ -133,7 +133,7 @@ def test_sendspin_is_gated_on_its_capability_and_its_token_stays_private():
     jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
     assert "disabled={!sendspinCapable}" in jsx
     handler = _sources.def_source("_on_sendspin_token")
-    assert "log." not in handler and "_push_event" not in handler, \
+    assert "log." not in handler and "em_events.push" not in handler, \
         "the sendspin_token handler must hand the token to its waiter and nothing else"
 
 

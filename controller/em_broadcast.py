@@ -1,10 +1,10 @@
 """
 Sending one payload to every connected dashboard.
 
-Split out of `em_api._push_event` so it can be tested without aiohttp. The
-loop used to walk the live `_event_clients` set while awaiting each send, and
-a dashboard connecting or disconnecting during that await changed the set
-under it: `RuntimeError: Set changed size during iteration`, raised into
+Split out of what is now `em_events.push` so it can be tested without
+aiohttp. The loop used to walk the live set of clients while awaiting each
+send, and a dashboard connecting or disconnecting during that await changed
+the set under it: `RuntimeError: Set changed size during iteration`, raised into
 whichever caller was broadcasting — often a device's control handler, which
 then dropped the message it was processing.
 """

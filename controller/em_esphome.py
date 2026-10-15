@@ -79,7 +79,7 @@ from zeroconf.asyncio import AsyncZeroconf
 from zeroconf import ServiceInfo
 
 import em_db as db
-import em_api as api
+import em_events
 import em_hostip
 import em_ns
 import em_announce
@@ -1679,7 +1679,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 await _persist_turn(device, turn_record)
                 device.turn_history.append(turn_record)
                 try:
-                    await api._push_event({
+                    await em_events.push({
                         "type":      "turn_complete",
                         "device_id": device.device_id,
                         "turn":      turn_record,
