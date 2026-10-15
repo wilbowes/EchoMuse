@@ -130,6 +130,7 @@ COPY em_routes_auth.py .
 COPY em_routes_link.py .
 COPY em_routes_oww.py .
 COPY em_routes_provision.py .
+COPY em_routes_shell.py .
 COPY em_routes_static.py .
 COPY em_routes_system.py .
 COPY em_routes_updates.py .

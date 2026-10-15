@@ -74,6 +74,7 @@ import em_routes_auth
 import em_routes_link
 import em_routes_oww
 import em_routes_provision
+import em_routes_shell
 import em_routes_static
 import em_routes_system
 import em_routes_updates
@@ -207,7 +208,7 @@ async def create_app() -> web.Application:
     app.router.add_post("/api/devices/{id}/wifi/scan",    _post_device_wifi_scan)
 
     em_routes_oww.register(app)
-    app.router.add_get("/api/devices/{id}/shell",         _ws_shell)
+    em_routes_shell.register(app)
 
     # Updates: firmware, emOS, releases, the controller release notice
     em_routes_updates.register(app)
@@ -1197,73 +1198,6 @@ async def _get_device_logs(request: web.Request) -> web.Response:
         for r in rows
     ]
     return em_http.ok(entries)
-
-
-# ─── Shell WebSocket proxy (interactive dashboard terminal) ───────────────────
-
-async def _ws_shell(request: web.Request) -> web.WebSocketResponse:
-    """
-    WS /api/devices/{id}/shell — interactive shell terminal for dashboard.
-
-    Auth is handled via ws_resolve_session (checks cookie then ?token= query
-    param) because browser WebSocket clients cannot set custom headers.
-    Do NOT add @auth.require_admin here — _extract_token doesn't read query
-    params and would reject every connection before this function runs.
-
-    Sets em_state.shell_dashboard so handle_shell proxies in interactive mode.
-    """
-    device_id = request.match_info["id"]
-
-    user = await auth.ws_resolve_session(request)
-    if user is None:
-        raise web.HTTPUnauthorized()
-    if user["role"] != "admin":
-        raise web.HTTPForbidden()
-
-    live = em_state.devices.get(device_id)
-    if live is None:
-        raise web.HTTPConflict(reason="Device is not connected")
-
-    # Refuse if a programmatic shell session (e.g. OTA transfer) is in progress.
-    # Opening a terminal mid-transfer sends shell_open to the device, which cancels
-    # the current shell context and kills the transfer.
-    lock = em_shell.locks.get(device_id)
-    if lock and lock.locked():
-        raise web.HTTPConflict(reason="Device shell is busy — an OTA update is in progress")
-
-    ws = web.WebSocketResponse()
-    await ws.prepare(request)
-
-    log.info(f"[api] Shell session requested: {device_id} by {user['username']}")
-    await em_events.push_log(device_id, "info", "controller",
-                          f"Shell session opened by {user['username']}")
-
-    loop = asyncio.get_event_loop()
-    done_future = loop.create_future()
-    em_state.shell_pending[device_id]   = done_future
-    em_state.shell_dashboard[device_id] = ws
-    # Do NOT set em_shell.sockets or acquire em_shell.locks — interactive sessions
-    # bypass the programmatic shell mechanism entirely.
-
-    try:
-        # pty:true — interactive terminal wants a real PTY (mksh prompt,
-        # line editing, top/vi, resize). Old firmware ignores the field and
-        # opens the legacy pipe; handle_shell reports the established mode
-        # to the dashboard via shell_meta. Programmatic sessions
-        # (em_shell.get_ws) deliberately do not set it.
-        await live.send_control({"type": "shell_open", "pty": True})
-        await done_future
-    except Exception as e:
-        log.warning(f"[api] Shell session error ({device_id}): {e}")
-    finally:
-        em_state.shell_pending.pop(device_id, None)
-        em_state.shell_dashboard.pop(device_id, None)
-        await live.send_control({"type": "shell_close"})
-        log.info(f"[api] Shell session closed: {device_id}")
-        await em_events.push_log(device_id, "info", "controller",
-                              f"Shell session closed by {user['username']}")
-
-    return ws
 
 
 # ─── Global device config ─────────────────────────────────────────────────────
