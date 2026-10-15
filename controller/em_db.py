@@ -1995,7 +1995,7 @@ def get_global_device_config_raw() -> dict:
     The stored fleet config with defaults NOT underlaid — i.e. exactly the
     keys an operator has persisted.
 
-    Used by the config-clobber guard (em_api._dropped_keys). The guard must
+    Used by the config-clobber guard (em_device_config.dropped_keys). The guard must
     compare against what is really stored: if it compared against the
     defaults-underlaid view, a controller upgrade that introduces a new
     default key would make every save from an already-open dashboard tab

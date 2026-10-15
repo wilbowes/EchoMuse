@@ -7,7 +7,7 @@ down the wire is not what makes them work; an attribute on the Device object
 is. That attribute is set in two places, and both have to agree:
 
   - `em_controller.handle_control`, when a device registers, and
-  - `em_api._apply_live_config`, when someone saves config in the dashboard.
+  - `em_device_config.apply_live_config`, when someone saves config in the dashboard.
 
 A key mirrored in the first but not the second reads as working. The database
 is written, the device is sent the value and throws it away, and the setting
@@ -16,7 +16,7 @@ a restart, which is exactly when someone would stop investigating.
 
 That is what happened to the limiter and the bass guard (2026-08-19): a whole
 listening test produced no audible difference from any setting, because none
-of them were reaching the audio. `_apply_live_config`'s own docstring warned
+of them were reaching the audio. `apply_live_config`'s own docstring warned
 about this shape — "a mirror added to one but not the other is a bug that
 reads as working" — and it happened anyway, which is why it is now a test
 rather than a comment.
@@ -61,7 +61,7 @@ def _registration_keys() -> set[str]:
 
 
 def _live_push_keys() -> set[str]:
-    body = _sources.def_source("_apply_live_config")
+    body = _sources.def_source("apply_live_config")
     return set(re.findall(r'effective\[?["\']([A-Za-z]+)["\']', body))
 
 
@@ -73,7 +73,7 @@ def test_every_registration_mirror_is_also_applied_on_a_live_push():
         "These config keys update the controller when a device registers but "
         "NOT when config is saved:\n  " + "\n  ".join(sorted(missing)) +
         "\n\nThey will appear to do nothing until the device reconnects. Add "
-        "them to em_api._apply_live_config, or to REGISTRATION_ONLY with a "
+        "them to em_device_config.apply_live_config, or to REGISTRATION_ONLY with a "
         "reason."
     )
 

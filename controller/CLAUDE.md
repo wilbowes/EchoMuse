@@ -1249,7 +1249,7 @@ Three invariants, each guarded by `tests/test_config_sections.py`:
 - **`dashboard.jsx`'s `CONFIG_SECTIONS` mirror must match Python** — it is parsed as JSON out of the file, so keep it comment-free and double-quoted. Drift puts a control under a toggle that does not govern it.
 - **`STATE_KEYS` (`startupVolume`) are never section-scoped** — persisted device state, always taken from the device, never fleet-inherited.
 
-Reverting a section **discards** its stored values (`set_device_config_sections` prunes), so no shadow values resurrect on a later re-override. Both config write paths push the **effective** config via the shared `_apply_live_config`, never the request body — with per-section scoping a body is partial by design, and the fleet endpoint now pushes every connected device rather than only fully-inheriting ones.
+Reverting a section **discards** its stored values (`set_device_config_sections` prunes), so no shadow values resurrect on a later re-override. Both config write paths push the **effective** config via the shared `em_device_config.apply_live_config`, never the request body — with per-section scoping a body is partial by design, and the fleet endpoint now pushes every connected device rather than only fully-inheriting ones.
 
 **A fleet edit to a section a device overrides silently does nothing to that
 device, and the dashboard reports success.** It is the merge working as
@@ -1271,7 +1271,7 @@ act must say so rather than appear to work.
 **Every controller-consumed key needs mirroring in BOTH places, and a test
 enforces it.** Config reaches the running controller as attributes on `Device`,
 set in `em_controller.handle_control` when a device registers AND in
-`em_api._apply_live_config` when someone saves. A key in the first but not the
+`em_device_config.apply_live_config` when someone saves. A key in the first but not the
 second reads as working: the database is written, the device is sent a value it
 discards, and the setting takes effect at the next reconnect — which is exactly
 what someone does before investigating further. That happened to all five

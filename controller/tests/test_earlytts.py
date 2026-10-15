@@ -24,6 +24,8 @@ sys.path.insert(0, str(CONTROLLER))
 
 import pytest
 
+import _sources
+
 import em_earlytts as early
 
 
@@ -375,7 +377,7 @@ def test_stream_reply_is_off_by_default_in_config_and_on_the_device():
 
 
 def test_stream_reply_is_mirrored_on_live_config_saves():
-    assert 'live.stream_reply = bool(effective["streamReply"])' in _source("em_api.py")
+    assert 'live.stream_reply = bool(effective["streamReply"])' in _sources.def_source("apply_live_config")
 
 
 def test_stream_reply_belongs_to_the_playback_section():

@@ -51,7 +51,6 @@ import em_events
 import em_shell
 import em_payloads
 import em_ota
-import em_oww_sync
 import em_reconcile
 import em_http
 import em_state
@@ -60,9 +59,9 @@ import em_ble_proxy
 import em_config_sections as sections_mod
 import em_config_types
 import em_dbwriter
+import em_device_config
 import em_device_view
 import em_tasks
-import em_console_pw
 import em_tcp
 import em_labels
 import em_firmware
@@ -80,8 +79,6 @@ import em_recordings
 import em_wake_samples
 import em_wifi
 import em_endpoints
-import em_scenes
-import em_shadow
 
 log = logging.getLogger("echomuse.api")
 
@@ -745,122 +742,6 @@ async def _post_approve(request: web.Request) -> web.Response:
     return em_http.ok({"device_id": device_id, "label": label})
 
 
-async def _apply_live_config(device_id: str, live, effective: dict) -> None:
-    """
-    Push an effective config to a connected device and refresh the
-    controller-side mirrors of it.
-
-    Extracted because the per-device and fleet endpoints both did this
-    inline, and a mirror added to one but not the other is a bug that reads
-    as working — the same shape as the v7 stats-relay miss (PR #23). Take
-    the EFFECTIVE config, never a request body: with per-section scoping a
-    body is partial by design, and a device must always be sent the whole
-    resolved picture.
-
-    One key is held back: a NEW `owwModel` is not sent to a device that scores
-    locally until the classifier is actually on it — see em_oww_sync.hold_back_model.
-    """
-    effective = em_config_types.well_typed(device_id, effective)
-    effective, pending_model = em_oww_sync.hold_back_model(live, effective)
-    await live.send_control({"type": "config", **effective})
-    if "owwThreshold" in effective:
-        live.oww_threshold = float(effective["owwThreshold"])
-    if "owwModel" in effective:
-        live.oww_model = effective["owwModel"]
-        # Refresh HA's wake-word dropdown.
-        await em_esphome.update_oww_model(device_id, effective["owwModel"])
-    if pending_model:
-        # The device is still on its previous wake word, still scoring
-        # locally, still answering. Install, then switch.
-        em_tasks.spawn(em_oww_sync.install_then_switch(device_id, pending_model))
-    if "owwSpeexNs" in effective:
-        live.oww_speex_ns = bool(effective["owwSpeexNs"])
-    if "nsAsr" in effective:
-        live.ns_asr = bool(effective["nsAsr"])
-    if "saveUtterances" in effective:
-        live.save_utterances = bool(effective["saveUtterances"])
-    if "wakeClipCapture" in effective:
-        live.wake_clip_capture = bool(effective["wakeClipCapture"])
-        if not live.wake_clip_capture:
-            live.wake_capture.reset()
-    if "wakeClipMinScore" in effective:
-        try:
-            live.wake_clip_min_score = max(0.05, min(0.95, float(effective["wakeClipMinScore"])))
-        except (TypeError, ValueError):
-            live.wake_clip_min_score = 0.20
-    if "streamReply" in effective:
-        live.stream_reply = bool(effective["streamReply"])
-    if "bargeInEnabled" in effective:
-        live.barge_in_enabled = bool(effective["bargeInEnabled"])
-    if "bargeInThreshold" in effective:
-        live.barge_threshold = float(effective["bargeInThreshold"])
-    if "buttonSingleTapEvent" in effective:
-        live.button_single_tap_event = bool(effective["buttonSingleTapEvent"])
-    if "buttonMultiTapMs" in effective:
-        live.button_multi_tap_ms = int(effective["buttonMultiTapMs"])
-    if "wakeArbitrationMs" in effective:
-        live.wake_arb_ms = int(effective["wakeArbitrationMs"])
-    # Consumed controller-side ONLY on the controller-detected wake path
-    # (#120): a device that detects its own wake plays the cue itself and
-    # never consults this. Mirrored anyway, because the path that does need
-    # it is the one where the setting would otherwise silently do nothing.
-    if "wakeSound" in effective:
-        live.wake_sound = bool(effective["wakeSound"])
-    if "micGainDb" in effective:
-        live.mic_gain_db = float(effective["micGainDb"])
-    # What a wake's level reading still contains; see em_arbiter.pick.
-    if "adcMicpga" in effective:
-        live.adc_gains = (int(effective["adcMicpga"]), live.adc_gains[1])
-    if "adcDigitalGain" in effective:
-        live.adc_gains = (live.adc_gains[0], int(effective["adcDigitalGain"]))
-    if "owwOnDevice" in effective:
-        # Resolved against the CAPABILITY, not taken at face value: "on"
-        # against firmware that cannot trigger would stop this controller
-        # acting on its own detections while waiting for wakes the device has
-        # no code to send, leaving it deaf. em_shadow.effective_mode degrades
-        # that to shadow.
-        new_oww_on_device = em_shadow.effective_mode(
-            effective["owwOnDevice"], live.oww_trigger_capable,
-        )
-        if new_oww_on_device != live.oww_on_device:
-            # #696 review: a buffered pre-roll from the old mode must not
-            # carry into the new one.
-            live.wake_capture.reset()
-        live.oww_on_device = new_oww_on_device
-    if "eqBands" in effective:
-        live.eq_bands = effective["eqBands"]
-    if "eqLoudness" in effective:
-        live.eq_loudness = bool(effective["eqLoudness"])
-    # The output chain is consumed HERE, not on the device — it ignores these
-    # five keys entirely — so this mirror is the only thing that carries them.
-    # Missing it meant a push wrote the database, sent JSON the device threw
-    # away, and changed nothing audible until the device happened to
-    # reconnect. Exactly the shape this function's docstring warns about, and
-    # it cost a whole listening test on 2026-08-19: every setting appeared to
-    # do nothing, because every setting WAS doing nothing.
-    if "limiterEnabled" in effective:
-        live.limiter_enabled = bool(effective["limiterEnabled"])
-    if "limiterThreshold" in effective:
-        live.limiter_threshold = float(effective["limiterThreshold"])
-    if "limiterRelease" in effective:
-        live.limiter_release = float(effective["limiterRelease"])
-    if "bassGuardEnabled" in effective:
-        live.bass_guard_enabled = bool(effective["bassGuardEnabled"])
-    if "bassGuardDb" in effective:
-        live.bass_guard_db = float(effective["bassGuardDb"])
-    live.led_scene = em_scenes.resolve(effective)
-    # #263: keep the device's cached listening animation in step when the
-    # scene changes live, same push as at registration. Without it the ring
-    # lit locally in the OLD scene's colours until the next reconnect.
-    if live.led_anim_capable and live.led_scene.get("listening_anim"):
-        try:
-            await live.send_control(
-                {"type": "config",
-                 "listeningAnim": live.led_scene["listening_anim"]})
-        except Exception:
-            pass  # device offline — next connect re-sends it
-
-
 @auth.require_auth
 async def _get_device_config(request: web.Request) -> web.Response:
     """GET /api/devices/{id}/config — effective config, scoping, and fleet view."""
@@ -935,13 +816,13 @@ async def _post_device_config(request: web.Request) -> web.Response:
 
     in_scope = sections_mod.keys_for(new_sections) | sections_mod.STATE_KEYS
 
-    # Same replace-not-merge trap as the global endpoint (see _dropped_keys),
+    # Same replace-not-merge trap as the global endpoint (see em_device_config.dropped_keys),
     # but scoped: only keys that REMAIN in scope can be accidentally dropped.
     # Keys leaving scope are being deliberately handed back to the fleet, and
     # flagging those would make every legitimate un-override a 409.
     stored = await loop.run_in_executor(None, db.get_device_config, device_id)
     stored_in_scope = {k: v for k, v in stored.items() if k in in_scope}
-    dropped = _dropped_keys(body, stored_in_scope)
+    dropped = em_device_config.dropped_keys(body, stored_in_scope)
     if dropped and not explicit_replace:
         return em_http.error(
             "would_drop_keys",
@@ -954,7 +835,7 @@ async def _post_device_config(request: web.Request) -> web.Response:
 
     # Validated BEFORE anything is written: a refusal must leave the stored
     # config untouched, not half-applied with the bad key rejected later.
-    if (err := _validate_console_timeout(body)):
+    if (err := em_device_config.validate_console_timeout(body)):
         return em_http.error("bad_console_timeout", err, 400)
     # Judged against what the device has in force now, so re-sending a value
     # it already has is never refused (em_config_types.problems).
@@ -988,7 +869,7 @@ async def _post_device_config(request: web.Request) -> web.Response:
     pushed = False
     live = em_state.devices.get(device_id)
     if live is not None:
-        await _apply_live_config(device_id, live, config)
+        await em_device_config.apply_live_config(device_id, live, config)
         log.info(f"[api] Config pushed to live device: {device_id}")
         pushed = True
 
@@ -1146,77 +1027,7 @@ async def _get_global_config(request: web.Request) -> web.Response:
     """GET /api/global/config — fleet-wide default device config."""
     loop = asyncio.get_event_loop()
     config = await loop.run_in_executor(None, db.get_global_device_config)
-    return em_http.ok(_redact_console_pw(config))
-
-
-# The console password record never leaves the controller. Hashing before
-# storage is pointless if the result is then handed to every client that asks
-# for the config, so reads see a sentinel and writes send it back untouched —
-# see em_console_pw.for_display / resolve_write.
-_CONSOLE_PW_KEY = "consolePassword"
-
-
-def _redact_console_pw(config: dict) -> dict:
-    if not config or _CONSOLE_PW_KEY not in config:
-        return config
-    out = dict(config)
-    out[_CONSOLE_PW_KEY] = em_console_pw.for_display(out[_CONSOLE_PW_KEY])
-    return out
-
-
-def _resolve_console_pw(incoming: dict, stored: dict) -> None:
-    """Turn whatever a client sent into the record to store, in place."""
-    if _CONSOLE_PW_KEY not in incoming:
-        return
-    incoming[_CONSOLE_PW_KEY] = em_console_pw.resolve_write(
-        incoming[_CONSOLE_PW_KEY], (stored or {}).get(_CONSOLE_PW_KEY)
-    )
-
-
-# The console idle timeout, in minutes: 0 for none, otherwise 1-90.
-_CONSOLE_TMOUT_KEY = "consoleTimeoutMin"
-_CONSOLE_TMOUT_MAX = 90
-
-
-def _validate_console_timeout(config: dict) -> str | None:
-    """
-    Return an error message when the timeout is out of range, else None.
-
-    REFUSED rather than clamped, deliberately. A value of 600 is somebody who
-    meant seconds, and silently giving them ten minutes is a console that logs
-    them out all day from a setting that looked accepted. The device refuses
-    it too — the controller validating first means a bad value reaching the
-    firmware is a bug rather than a user, but neither end assumes the other is
-    the careful one.
-
-    Absence is fine: it means the body did not mention the key.
-    """
-    if _CONSOLE_TMOUT_KEY not in config:
-        return None
-    v = config[_CONSOLE_TMOUT_KEY]
-    if isinstance(v, bool) or not isinstance(v, int):
-        return (f"{_CONSOLE_TMOUT_KEY} must be a whole number of minutes, "
-                f"got {v!r}")
-    if v < 0 or v > _CONSOLE_TMOUT_MAX:
-        return (f"{_CONSOLE_TMOUT_KEY} must be 0 (no timeout) or 1-"
-                f"{_CONSOLE_TMOUT_MAX} minutes, got {v}")
-    return None
-
-
-def _dropped_keys(incoming: dict, stored: dict) -> list[str]:
-    """
-    Keys present in the stored config that the incoming body would delete.
-
-    Config POSTs REPLACE the stored dict — they do not merge. That is fine
-    for the dashboard, which always submits the complete config, and a trap
-    for anything that submits a partial one: on 2026-07-20 a POST carrying a
-    single key silently reset all 26 fleet settings to defaults, taking the
-    wake model from hey_mycroft back to hey_jarvis and dropping owwThreshold
-    0.5 -> 0.3, which surfaced as devices false-waking on ordinary
-    conversation. Callers that genuinely intend a destructive write pass
-    replace=true; everything else is refused before anything is persisted.
-    """
-    return sorted(set(stored) - set(incoming))
+    return em_http.ok(em_device_config.redact_console_pw(config))
 
 
 @auth.require_admin
@@ -1235,7 +1046,7 @@ async def _post_global_config(request: web.Request) -> web.Response:
 
     The body REPLACES the stored config. A body that would drop existing
     keys is refused with 409 unless it sets replace=true — see
-    _dropped_keys.
+    em_device_config.dropped_keys.
     """
     config = await em_http.json_body(request)
     loop = asyncio.get_event_loop()
@@ -1244,8 +1055,8 @@ async def _post_global_config(request: web.Request) -> web.Response:
     # Raw (defaults NOT underlaid): see get_global_device_config_raw — a
     # newly-added default must not look like a key this body is deleting.
     stored = await loop.run_in_executor(None, db.get_global_device_config_raw)
-    _resolve_console_pw(config, stored)
-    if (err := _validate_console_timeout(config)):
+    em_device_config.resolve_console_pw(config, stored)
+    if (err := em_device_config.validate_console_timeout(config)):
         return em_http.error("bad_console_timeout", err, 400)
     if (bad := em_config_types.problems(config, stored)):
         return em_http.error("bad_config_value", "; ".join(bad), 400)
@@ -1256,7 +1067,7 @@ async def _post_global_config(request: web.Request) -> web.Response:
         if err:
             return em_http.error("bad_controller_endpoints", f"Controller address list {err}.", 400)
         config["controllerEndpoints"] = eps
-    dropped = _dropped_keys(config, stored)
+    dropped = em_device_config.dropped_keys(config, stored)
     if dropped and not explicit_replace:
         return em_http.error(
             "would_drop_keys",
@@ -1275,7 +1086,7 @@ async def _post_global_config(request: web.Request) -> web.Response:
         effective = await loop.run_in_executor(
             None, db.get_effective_device_config, device_id
         )
-        await _apply_live_config(device_id, live, effective)
+        await em_device_config.apply_live_config(device_id, live, effective)
         pushed.append(device_id)
 
     if pushed:

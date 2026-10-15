@@ -11,6 +11,8 @@ the config push, and the device draws it before reporting the crossing.
 import re
 from pathlib import Path
 
+import _sources
+
 CONTROLLER = Path(__file__).resolve().parents[1]
 ROOT = CONTROLLER.parent
 
@@ -32,7 +34,7 @@ def test_the_controller_updates_it_on_a_live_scene_change():
     'mirrored at registration but not live' shape test_config_mirrors
     exists for.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
+    src = _sources.def_source("apply_live_config")
     body = src[src.index("live.led_scene = em_scenes.resolve(effective)"):]
     body = body[:1200]
     assert '"listeningAnim"' in body, \

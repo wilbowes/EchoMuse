@@ -1489,7 +1489,7 @@ def test_a_new_wake_word_is_installed_before_the_device_is_told_about_it():
     The hold-back is invisible at the call site: the config push looks
     ordinary, and the whole guard is that one key was swapped out first.
     """
-    body = _sources.def_source("_apply_live_config")
+    body = _sources.def_source("apply_live_config")
 
     hold = body.find("em_oww_sync.hold_back_model(live, effective)")
     push = body.find('send_control({"type": "config"')

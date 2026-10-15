@@ -23,7 +23,7 @@ CONTROLLER = REPO / "controller"
 # Keys the table deliberately leaves out, and why.
 UNLISTED = {
     "consolePassword",      # pointer on the wire; validated by em_console_pw
-    "consoleTimeoutMin",    # pointer on the wire; _validate_console_timeout
+    "consoleTimeoutMin",    # pointer on the wire; validate_console_timeout
     "controllerEndpoints",  # fleet-only, validated by em_endpoints
     "ledScene", "ledListenColor", "ledThinkColor",  # em_scenes falls back
     "meterAttack", "meterDecay", "meterFloor",       # em_scenes falls back

@@ -147,7 +147,7 @@ def well_typed(device_id: str, config: dict) -> dict:
     `config` without stored values of the wrong type, for a push to a device.
 
     One mistyped field fails the device's whole decode, and the conversions in
-    em_api._apply_live_config raise on it; a dropped key reads as absent at
+    em_device_config.apply_live_config raise on it; a dropped key reads as absent at
     both ends. Every full-config push goes through here.
     """
     config, bad = drop_invalid(config)

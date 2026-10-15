@@ -27,8 +27,8 @@ CONTROLLER = Path(__file__).resolve().parents[1]
 
 def _load_dropped_keys():
     """
-    Extract _dropped_keys from em_api source and exec it in isolation.
-    Importing em_api would drag in aiohttp/openwakeword; the function is
+    Extract dropped_keys from em_device_config's source and exec it in
+    isolation. Importing that module drags in em_esphome; the function is
     self-contained (stdlib only), so this keeps the test honest without the
     dependency weight.
 
@@ -38,16 +38,12 @@ def _load_dropped_keys():
     which is exactly why the separate decorator-placement tests below exist.
     """
     import ast
-    src = (CONTROLLER / "em_api.py").read_text()
-    tree = ast.parse(src)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "_dropped_keys":
-            node.decorator_list = []
-            mod = ast.Module(body=[node], type_ignores=[])
-            ns: dict = {}
-            exec(compile(ast.fix_missing_locations(mod), "<em_api>", "exec"), ns)
-            return ns["_dropped_keys"]
-    raise AssertionError("could not locate _dropped_keys in em_api.py")
+    _, node = _sources.find_def("dropped_keys")
+    node.decorator_list = []
+    mod = ast.Module(body=[node], type_ignores=[])
+    ns: dict = {}
+    exec(compile(ast.fix_missing_locations(mod), "<em_device_config>", "exec"), ns)
+    return ns["dropped_keys"]
 
 
 dropped_keys = _load_dropped_keys()
@@ -115,7 +111,7 @@ def test_both_write_paths_are_guarded(path, handler):
     guard on only one would leave the identical trap open next door.
     """
     body = _sources.def_source(handler)
-    assert "_dropped_keys(" in body, f"{handler} does not call _dropped_keys"
+    assert "dropped_keys(" in body, f"{handler} does not call dropped_keys"
     assert "would_drop_keys" in body, f"{handler} does not refuse the write"
 
 
@@ -147,7 +143,7 @@ def test_guard_reads_raw_stored_config_not_the_underlaid_view():
 # ── decorator-placement guards ────────────────────────────────────────────
 #
 # Inserting a helper immediately above an already-decorated handler silently
-# steals its decorator: on 2026-07-20 `_dropped_keys` was written directly
+# steals its decorator: on 2026-07-20 `dropped_keys` was written directly
 # under `@auth.require_admin`, so the decorator bound to the helper instead
 # and `_post_global_config` was left with NO admin requirement — an auth
 # bypass on a config-write endpoint. It surfaced only as a 500 in live
@@ -164,8 +160,8 @@ def _decorators_of(name):
 
 
 def test_dropped_keys_is_a_plain_helper_not_a_route_handler():
-    assert _decorators_of("_dropped_keys") == [], (
-        "_dropped_keys has picked up a decorator — it is a pure helper. This "
+    assert _decorators_of("dropped_keys") == [], (
+        "dropped_keys has picked up a decorator — it is a pure helper. This "
         "means it was inserted directly beneath a decorated handler and stole "
         "that decorator."
     )

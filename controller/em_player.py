@@ -781,7 +781,7 @@ class MediaSession:
             await self._push_state()
 
             while True:
-                # Config is pushed live (_apply_live_config), so re-read it
+                # Config is pushed live (em_device_config.apply_live_config), so re-read it
                 # per chunk. update() compares before it touches anything, so
                 # the steady-state cost is a tuple comparison ~23×/s.
                 #
