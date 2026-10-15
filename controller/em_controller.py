@@ -4363,7 +4363,10 @@ async def _on_ambient_light(device: Device, msg: dict) -> None:
     # a light on"). The steady-state value still rides stats.
     _lux = msg.get("lux")
     if isinstance(_lux, int):
-        device.stats["ambientLux"] = _lux
+        # None until the first stats report; that report carries the
+        # reading too, so there is nothing to hold until then.
+        if device.stats is not None:
+            device.stats["ambientLux"] = _lux
         esphome.update_ambient_lux(device_id, _lux)
         log.info(f"[{device_id}] Ambient light → {_lux} lux")
 
