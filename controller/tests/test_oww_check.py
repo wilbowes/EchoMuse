@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+import _sources
+
 import em_oww_check as chk
 
 F = "tensor(float)"
@@ -213,17 +215,18 @@ def test_the_endpoint_installs_what_can_run_and_nothing_else(tmp_path, monkeypat
     from aiohttp import web
     from aiohttp.test_utils import TestClient, TestServer
 
-    # Removed again once em_api is imported: left in sys.modules it stops the
-    # importorskip("openwakeword") tests skipping (see _oww_stub.uninstall).
+    # Removed again once em_routes_oww is imported: left in sys.modules it
+    # stops the importorskip("openwakeword") tests skipping (see
+    # _oww_stub.uninstall).
     import _oww_stub
     _oww_stub.install()
     try:
-        import em_api
+        import em_routes_oww
     finally:
         _oww_stub.uninstall()
 
     monkeypatch.setenv("DB_PATH", str(tmp_path / "echomuse.db"))
-    handler = em_api._post_oww_model_upload.__wrapped__   # past require_admin
+    handler = em_routes_oww._post_oww_model_upload.__wrapped__   # past require_admin
 
     async def post(client, name, data):
         form = aiohttp.FormData()
@@ -252,8 +255,6 @@ def test_the_endpoint_installs_what_can_run_and_nothing_else(tmp_path, monkeypat
 
 
 def test_the_upload_is_checked_before_anything_is_written():
-    src = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
-    body = src[src.index("async def _post_oww_model_upload"):
-               src.index("async def _delete_oww_model")]
+    body = _sources.def_source("_post_oww_model_upload")
     assert body.index("em_oww_check.problem, data") < body.index("mkstemp")
     assert '"invalid_model"' in body
