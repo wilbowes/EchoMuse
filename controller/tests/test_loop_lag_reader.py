@@ -15,6 +15,7 @@ import ast
 import re
 from pathlib import Path
 
+import _sources
 import em_api
 import em_state
 
@@ -84,26 +85,29 @@ def test_every_auth_decorator_is_followed_by_the_function_it_decorates():
     the opposite of what it appears to say, and then asserts about the line
     after it. That trap has been hit three times in this tree.
     """
-    lines = (CONTROLLER / "em_api.py").read_text().splitlines()
     decorator = re.compile(r"\s*@auth\.require_(\w+)\s*$")
     handler   = re.compile(r"\s*async def \w+\(\s*request\b")
 
+    # Every module, not em_api by name: route areas move out of em_api, and a
+    # guard reading one file stops checking a handler the moment it leaves.
     sites = 0
-    for i, line in enumerate(lines):
-        m = decorator.match(line)
-        if not m:
-            continue
-        sites += 1
-        j = i + 1
-        while j < len(lines) and re.match(r"\s*@", lines[j]):
-            j += 1   # stacked decorators are fine; keep walking
-        following = lines[j] if j < len(lines) else "<end of file>"
-        assert handler.match(following), (
-            f"em_api.py:{i + 1}: @auth.require_{m.group(1)} is followed by "
-            f"{following.strip()!r}, not the async handler it decorates — "
-            f"whatever sits between them takes the decorator and the "
-            f"endpoint is left unauthenticated"
-        )
+    for module in _sources.MODULES:
+        lines = _sources.source(module).splitlines()
+        for i, line in enumerate(lines):
+            m = decorator.match(line)
+            if not m:
+                continue
+            sites += 1
+            j = i + 1
+            while j < len(lines) and re.match(r"\s*@", lines[j]):
+                j += 1   # stacked decorators are fine; keep walking
+            following = lines[j] if j < len(lines) else "<end of file>"
+            assert handler.match(following), (
+                f"{module.name}:{i + 1}: @auth.require_{m.group(1)} is followed by "
+                f"{following.strip()!r}, not the async handler it decorates — "
+                f"whatever sits between them takes the decorator and the "
+                f"endpoint is left unauthenticated"
+            )
 
     # A guard that silently matches nothing is the failure this replaced.
     assert sites >= 40, \

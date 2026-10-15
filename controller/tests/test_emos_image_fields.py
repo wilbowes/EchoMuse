@@ -24,7 +24,7 @@ caller for the handler's omission.
 Nothing could have caught it. The packer's tests pass `system_part` directly,
 the dashboard tests cover `chooseBootSlots` (which resolves the value
 correctly), and no test crossed the boundary between them. So this one asserts
-across it: what dashboard.jsx appends must be what em_api.py reads.
+across it: what dashboard.jsx appends must be what em_routes_provision.py reads.
 
 Pure source analysis — the suite cannot import em_api, which needs aiohttp.
 The Python side is read with `ast` and the JS side from the function body, so
@@ -36,12 +36,14 @@ import ast
 import re
 from pathlib import Path
 
+import _sources
+
 CONTROLLER = Path(__file__).resolve().parents[1]
 HANDLER = "_post_provision_emos_image"
 
 
 def _api_tree() -> ast.Module:
-    return ast.parse((CONTROLLER / "em_api.py").read_text())
+    return ast.parse((CONTROLLER / "em_routes_provision.py").read_text())
 
 
 def _declared_fields() -> tuple:
@@ -52,7 +54,7 @@ def _declared_fields() -> tuple:
         if any(isinstance(t, ast.Name) and t.id == "EMOS_IMAGE_FIELDS"
                for t in node.targets):
             return tuple(ast.literal_eval(node.value))
-    raise AssertionError("em_api.EMOS_IMAGE_FIELDS not found")
+    raise AssertionError("em_routes_provision.EMOS_IMAGE_FIELDS not found")
 
 
 def _handled_fields() -> set:
@@ -66,7 +68,7 @@ def _handled_fields() -> set:
          if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
          and n.name == HANDLER),
         None)
-    assert handler is not None, f"em_api.{HANDLER} not found"
+    assert handler is not None, f"em_routes_provision.{HANDLER} not found"
 
     def _is_field_name(node) -> bool:
         return (isinstance(node, ast.Attribute) and node.attr == "name"
@@ -112,7 +114,7 @@ def test_the_handler_reads_every_field_the_wizard_sends():
     missing = _wizard_fields() - set(_declared_fields())
     assert not missing, (
         f"dashboard.jsx sends {sorted(missing)} to /api/provision/emos_image "
-        f"and em_api.EMOS_IMAGE_FIELDS does not list them, so they are "
+        f"and em_routes_provision.EMOS_IMAGE_FIELDS does not list them, so they are "
         f"dropped without an error and the image is built as though they were "
         f"never sent")
 
@@ -151,10 +153,7 @@ def test_an_unknown_field_is_logged_rather_than_skipped():
     """
     handled = _handled_fields()
     assert handled, "the parse loop no longer branches on field.name"
-    src = (CONTROLLER / "em_api.py").read_text()
-    start = src.index(f"async def {HANDLER}")
-    end = src.index("\nasync def ", start + 1)
-    body = src[start:end]
+    body = _sources.code_only(_sources.def_source(HANDLER))
     assert "EMOS_IMAGE_FIELDS" in body, (
         "the parse loop must check the allowlist")
     assert re.search(r"log\.warning\([^)]*field\.name", body, re.S), (

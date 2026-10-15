@@ -2715,8 +2715,7 @@ def test_the_emos_build_endpoint_stores_nothing():
     care never to redistribute. Keeping a copy would mean holding a device
     image for no reason.
     """
-    fn = _strip_prose(_fn_body(
-        (CONTROLLER / "em_api.py").read_text(), "_post_provision_emos_image"))
+    fn = _strip_prose(_sources.def_source("_post_provision_emos_image"))
     for writer in ("open(", "write_bytes", "Path(", "tempfile"):
         assert writer not in fn, (
             f"the emOS build endpoint must not persist anything (found {writer!r})")
@@ -2909,7 +2908,6 @@ def test_the_init_architecture_is_decided_where_the_reference_is():
     rather than behaviour, the build step having no seam to test through.
     """
     jsx = (CONTROLLER / "static" / "dashboard.jsx").read_text()
-    api = (CONTROLLER / "em_api.py").read_text()
     build = _js_fn_body(jsx, "runBuildEmos")
 
     # The wizard asks the controller to resolve it, and does not fetch one to
@@ -2931,7 +2929,7 @@ def test_the_init_architecture_is_decided_where_the_reference_is():
     # The endpoint reads it off the reference, and refuses rather than
     # defaulting when it cannot: an init chosen by guess is the one failure with
     # no symptom on the device.
-    handler = _fn_body(api, "_post_provision_emos_image")
+    handler = _sources.def_source("_post_provision_emos_image")
     assert "reference_kernel_arch" in handler, (
         "the image endpoint must read the architecture off the reference")
     assert "unknown_reference_arch" in handler, (
