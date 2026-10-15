@@ -153,6 +153,7 @@ COPY em_events.py .
 COPY em_shell.py .
 COPY em_releases.py .
 COPY em_payloads.py .
+COPY em_ota.py .
 COPY em_listen.py .
 COPY em_wakelevel.py .
 COPY em_endpoints.py .

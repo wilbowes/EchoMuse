@@ -45,3 +45,10 @@ def test_code_only_drops_comments_and_docstrings_but_keeps_strings():
 
 def test_code_only_takes_an_indented_method():
     assert "x = 1" in _sources.code_only("    def m(self):\n        x = 1\n")
+
+
+def test_find_def_takes_a_module_qualified_name():
+    path, _ = _sources.find_def("em_ota.run_update")
+    assert path.name == "em_ota.py"
+    with pytest.raises(AssertionError, match="defined 2 times"):
+        _sources.find_def("run_update")       # em_ota and em_emos_update

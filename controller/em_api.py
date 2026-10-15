@@ -60,6 +60,7 @@ import em_events
 import em_shell
 import em_releases
 import em_payloads
+import em_ota
 import em_http
 import em_state
 import em_health
@@ -161,48 +162,6 @@ _link = {"ip": "", "port": 8767, "tls_port": 0}
 
 def set_link_ports(ip: str, port: int, tls_port: int) -> None:
     _link.update(ip=ip or "", port=port, tls_port=tls_port)
-
-# Track in-progress OTA updates per device_id to enforce one-at-a-time.
-_updates_in_progress: set[str] = set()
-
-# Firmware updates are SERIALISED across the whole controller, not just per
-# device. Three concurrent OTAs stalled the event loop for 11.1 seconds on
-# 2026-09-02 — measured, in the `[loop] event loop stalled` warnings — and
-# that loop is what sends speaker periods and LED frames, so a device mid
-# response pays for a device being updated. The transfer is base64 over the
-# shell plane and CPU-bound in this process; the fix is to stop doing several
-# at once, not to make one cheaper.
-#
-# A device-level guard cannot do this: `_updates_in_progress` stops one device
-# being updated twice, and says nothing about two devices being updated at
-# once. So the lock is global and BOTH entry points go through it — the fleet
-# deploy and a hand-clicked single update, which collide identically.
-#
-# A failure does NOT stop the queue. Wil's call, 2026-09-02: mark it, carry on,
-# report at the end — one device that will not come back should not strand the
-# rest of a fleet update behind it.
-_ota_lock = asyncio.Lock()
-
-# Longest one device may hold the OTA queue. A real update is a ~10MB transfer,
-# a reboot and a 90s reconnect watch, so this is a deadlock cap rather than a
-# performance budget: it exists because serialising made one wedged device able
-# to block the whole fleet's updates until the controller restarted.
-OTA_MAX_HOLD_S = 300.0
-
-# Devices waiting on `_ota_lock`. Reported separately from
-# `update_in_progress` so the dashboard says "queued" rather than claiming
-# work that has not started — the same rule as everywhere else here: a control
-# that cannot act must say so rather than appear to work.
-_updates_queued: set[str] = set()
-
-# Last OTA failure per device, surfaced as `update_error` in /api/devices so
-# the dashboard (fleet deploy modal + per-device update log) can show *why* a
-# tile stopped progressing instead of sitting at "updating…" forever. Set by
-# _update_failed on every _run_update/_run_rollback failure path; cleared when
-# a new update starts and on confirmed success. In-memory by design — a
-# controller restart clears stale errors along with the update tasks
-# themselves.
-_update_errors: dict[str, str] = {}
 
 # Pending local binary uploads — keyed by UUID token, expire after 10 minutes.
 _pending_uploads: dict[str, bytes] = {}
@@ -1671,7 +1630,7 @@ async def _post_device_update(request: web.Request) -> web.Response:
         binary_override = _pending_uploads.get(upload_token)
         if binary_override is None:
             return em_http.error("invalid_token", "Upload token not found or expired", 404)
-        _embedded = _extract_binary_version(binary_override)
+        _embedded = em_ota.extract_binary_version(binary_override)
         _ver      = _embedded or f"local-{time.strftime('%Y%m%d-%H%M')}"
         release   = {"version": _ver, "url": None}
     else:
@@ -1688,7 +1647,7 @@ async def _post_device_update(request: web.Request) -> web.Response:
     if live is None:
         return em_http.error("device_offline", "Device is not connected", 409)
 
-    if (device_id in _updates_in_progress or device_id in _updates_queued
+    if (device_id in em_ota.in_progress or device_id in em_ota.queued
             or _emos_update_busy(device_id)):
         return em_http.error("update_in_progress", "An update is already in progress", 409)
 
@@ -1716,7 +1675,7 @@ async def _post_device_update(request: web.Request) -> web.Response:
 
     if upload_token:
         _pending_uploads.pop(upload_token, None)
-    em_tasks.spawn(_run_update(device_id, release, binary_override))
+    em_tasks.spawn(em_ota.run_update(device_id, release, binary_override))
     return em_http.ok({"status": "started", "version": release["version"]}, status=202)
 
 
@@ -1743,11 +1702,11 @@ async def _post_device_rollback(request: web.Request) -> web.Response:
     if live is None:
         return em_http.error("device_offline", "Device is not connected", 409)
 
-    if (device_id in _updates_in_progress or device_id in _updates_queued
+    if (device_id in em_ota.in_progress or device_id in em_ota.queued
             or _emos_update_busy(device_id)):
         return em_http.error("update_in_progress", "An update is already in progress", 409)
 
-    em_tasks.spawn(_run_rollback(device_id, row["firmware_previous"]))
+    em_tasks.spawn(em_ota.run_rollback(device_id, row["firmware_previous"]))
     return em_http.ok({"status": "started", "rolling_back_to": row["firmware_previous"]}, status=202)
 
 
@@ -1779,7 +1738,7 @@ async def _post_upload_binary(request: web.Request) -> web.Response:
 
         token = str(_uuid.uuid4())
         _pending_uploads[token] = binary
-        version = _extract_binary_version(binary)
+        version = em_ota.extract_binary_version(binary)
         log.info(f"[api] Binary uploaded: {len(binary):,} bytes "
                  f"version={version or 'unknown'} token={token[:8]}…")
 
@@ -1913,458 +1872,10 @@ async def _delete_oww_model(request: web.Request) -> web.Response:
     return em_http.ok({"deleted": fname})
 
 
-# ─── OTA background tasks ─────────────────────────────────────────────────────
-
-
-def _extract_binary_version(binary: bytes) -> str | None:
-    """
-    Scan a compiled Go binary for its embedded EchoMuse version string.
-
-    Two schemes, because compile.sh changed and this did not:
-
-      v2.12.0-63-g99628d3   `git describe --tags --match 'v*'` — CURRENT
-      20260614-1152-dev     date+suffix — used when the tree is DIRTY, and
-                            the only scheme this function knew until now
-
-    Matching only the second is why a clean-tree local build extracted
-    nothing, fell back to a `local-<timestamp>` label, and then never matched
-    the version the device reported on reboot — so a completely successful
-    deploy was announced as "auto-rolled back". A message that says the
-    opposite of what happened is worse than a plain failure, because the
-    natural response is to distrust the feature.
-
-    BARE `vX.Y.Z` IS DELIBERATELY NOT MATCHED, and that is the whole
-    subtlety. A Go binary embeds its dependencies' module versions, so the
-    shape is far from unique — measured on the v2.12.0-63-g99628d3 build:
-    102 occurrences, 9 distinct, including v0.41.0 (x/sys), v1.5.3
-    (gorilla/websocket), v1.0.3 (GoTinyAlsa) and v1.1.41 (miekg/dns). Our own
-    version happened to appear first in file order on that build, which is
-    luck and not a property to rely on: a dependency string landing earlier
-    would silently extract the wrong version and label the deploy with it.
-
-    The `-N-gSHA` suffix makes it unique — exactly one match on the same
-    binary — so only the suffixed form is accepted. A build made exactly ON a
-    tag has no suffix and extracts nothing, which is correct: that binary
-    belongs on the release path, and returning None gets an honest
-    `local-<timestamp>` label rather than a confident wrong one.
-
-    Returns None when nothing matches; the caller labels it
-    `local-YYYYMMDD-HHMM` and the reconnect check compares against the
-    version the device had BEFORE the push rather than against this.
-    """
-    import re as _re
-    for pattern in (
-        # git describe, suffixed form only — see above
-        rb'v\d+\.\d+\.\d+-\d+-g[0-9a-f]{7,40}',
-        # dirty-tree builds, and every binary predating the compile.sh change
-        rb'20\d{6}-\d{4}-[a-z][a-z0-9]*',
-    ):
-        match = _re.search(pattern, binary)
-        if match:
-            return match.group(0).decode("ascii")
-    return None
-
-
-async def _update_failed(device_id: str, reason: str) -> None:
-    """
-    Record and broadcast an OTA failure: device log line, in-memory
-    update_error (read back via /api/devices), and a device_update_failed
-    event for the dashboard WS. Every abort path in _run_update/_run_rollback
-    must come through here — a log-only failure leaves the dashboard tile at
-    "updating…" indefinitely.
-    """
-    _update_errors[device_id] = reason
-    await em_events.push_log(device_id, "error", "controller", reason)
-    await em_events.push({
-        "type":      "device_update_failed",
-        "device_id": device_id,
-        "error":     reason,
-    })
-
-
-async def _run_update(device_id: str, release: dict,
-                      binary_override: bytes | None = None) -> None:
-    """
-    Background task: A/B slot update.
-
-    1. Fetch binary (GitHub or pre-uploaded).
-    2. Detect active slot via readlink; migrate legacy layout if needed.
-    3. Stream binary to inactive slot.
-    4. Flip symlink atomically.
-    5. Restart service and monitor reconnect.
-    6. Detect auto-rollback (start_server.sh retry exhausted).
-    """
-    _update_errors.pop(device_id, None)  # fresh attempt clears the last failure
-
-    # Wait for any other device's update to finish before touching this one.
-    # Queued state is visible while waiting (see `_updates_queued`), and the
-    # binary is fetched INSIDE the lock so a queued device is holding nothing
-    # but its place in line.
-    _updates_queued.add(device_id)
-    try:
-        await _ota_lock.acquire()
-    finally:
-        _updates_queued.discard(device_id)
-
-    _updates_in_progress.add(device_id)
-    try:
-        # Bounded, because serialising turned a device-local stall into a
-        # fleet-wide one. Every `recv` in the transfer is wait_for-bounded but
-        # `await ws.send(line)` in the base64 loop is not: a device that stops
-        # reading applies backpressure and can hang there. Before the lock that
-        # stalled one device; now it would hold the queue and NOTHING could be
-        # updated until the controller restarted.
-        #
-        # Generous on purpose — a real update is a ~10MB transfer plus a reboot
-        # and a 90s reconnect watch, so this is a deadlock cap, not a
-        # performance budget. A device that trips it has failed anyway.
-        await asyncio.wait_for(
-            _run_update_locked(device_id, release, binary_override),
-            timeout=OTA_MAX_HOLD_S,
-        )
-    except asyncio.TimeoutError:
-        await _update_failed(
-            device_id,
-            f"Update abandoned after {OTA_MAX_HOLD_S:.0f}s so the queue "
-            f"could continue — the device may still be mid-update",
-        )
-    finally:
-        _updates_in_progress.discard(device_id)
-        # Release LAST, so the next queued device does not start its transfer
-        # while this one is still being cleaned up.
-        _ota_lock.release()
-
-
-async def _run_update_locked(device_id: str, release: dict,
-                             binary_override: bytes | None = None) -> None:
-    """
-    The update itself, run with `_ota_lock` already held. Split from
-    `_run_update` so the whole of it can sit under one timeout — the queue is
-    only as safe as its slowest member.
-    """
-    loop = asyncio.get_event_loop()
-    version = release["version"]
-
-    try:
-        await em_events.push_log(device_id, "info", "controller",
-                              f"OTA update starting → {version}")
-
-        # Fetch binary
-        if binary_override is not None:
-            binary = binary_override
-            await em_events.push_log(device_id, "info", "controller",
-                                  f"Using uploaded binary ({len(binary):,} bytes)")
-        else:
-            binary = await _fetch_binary(release["url"], release.get("version", ""))
-            if binary is None:
-                await _update_failed(device_id,
-                                     "Failed to fetch binary from GitHub")
-                return
-
-        # Record current version as previous before anything changes
-        row = await loop.run_in_executor(None, db.get_device, device_id)
-        current_ver = row["firmware_ver"] if row else None
-        await loop.run_in_executor(None, db.set_firmware_previous, device_id, current_ver)
-
-        live = em_state.devices.get(device_id)
-        if live is None:
-            await _update_failed(device_id,
-                                 "Device disconnected before update could start")
-            return
-
-        # Detect active slot and migrate legacy layout if needed — single shell
-        # session to avoid the race condition of two sequential open/close cycles.
-        detect_cmd = (
-            "CURRENT=$(readlink /data/local/bin/server 2>/dev/null); "
-            "if [ \"$CURRENT\" = \"server_a\" ] || [ \"$CURRENT\" = \"server_b\" ]; then "
-            "  echo \"SLOT:$CURRENT\"; "
-            "else "
-            "  cp /data/local/bin/server /data/local/bin/server_a 2>&1 && "
-            "  chmod 755 /data/local/bin/server_a && "
-            "  ln -sf server_a /data/local/bin/server && "
-            "  echo \"SLOT:server_a MIGRATED\" || echo \"MIGRATE_FAILED\"; "
-            "fi"
-        )
-        detect_result = await em_shell.run(live, detect_cmd, timeout=60.0)
-        log.info(f"[api] Slot detect result for {device_id}: {detect_result!r}")
-
-        if "MIGRATE_FAILED" in detect_result:
-            await _update_failed(device_id,
-                                 "A/B migration failed — aborting update")
-            return
-
-        active_slot = None
-        for line in detect_result.splitlines():
-            if "SLOT:" in line:
-                candidate = line.split("SLOT:")[-1].strip().split()[0]
-                if candidate in ("server_a", "server_b"):
-                    active_slot = candidate
-                    break
-
-        if active_slot is None:
-            await _update_failed(device_id,
-                                 f"Could not determine active slot — output: {detect_result!r}")
-            return
-
-        if "MIGRATED" in detect_result:
-            await em_events.push_log(device_id, "info", "controller",
-                                  "A/B migration complete — active slot: server_a")
-
-        # Sync the startup script while we're here — OTA is the only update
-        # path existing devices have for it (see em_payloads.sync_start_script).
-        #
-        # NOT gated on the platform, deliberately: emOS runs this same script.
-        # Its init supervises `/system/bin/sh /data/local/bin/start_server.sh`
-        # (emos/init/init.c), because the script owns the A/B slot symlink and
-        # the fast-exit backoff, which both bases need. Gating it here by
-        # symmetry with the debloat below would strand emOS devices on whatever
-        # script they were provisioned with.
-        await em_payloads.sync_start_script(live, device_id)
-        # Payload drift is not limited to the start script — the debloat
-        # halves had no update path at all until 2026-07-30.
-        #
-        # Gated, because the debloat is Android-only: a pm-hide list and a
-        # Magisk service.d script, and emOS has neither a package manager nor
-        # Magisk. This was the THIRD call site of em_payloads.sync_debloat and the only
-        # one that did not ask — reconcile_on_connect and _post_debloat both
-        # check. Found on EFF 2026-09-07 at its first OTA onto emOS: the
-        # transfer targeted /sbin/.core/img/.core/service.d/ on a device with
-        # no Magisk daemon to have created it.
-        #
-        # It cost only a wasted shell round trip because the destination
-        # directory probe caught it. Without that probe it is the 240s stall
-        # measured on this same device on 2026-09-04 — TRANSFER_OK never
-        # arrives and the transfer holds the shell lock for its full timeout,
-        # twice. The gate belongs here anyway: the probe bounds the damage of
-        # a payload that should never have been sent.
-        if live.android_userspace:
-            await em_payloads.sync_debloat(live, device_id)
-
-        inactive_slot = "server_b" if active_slot == "server_a" else "server_a"
-
-        # Free space, checked BEFORE writing anything. The transfer needs room
-        # for the new binary alongside its .part, and running /data out of
-        # space mid-write is a bad way to find out. Read with parse_free_mb,
-        # never an awk field index — busybox wraps a long filesystem name onto
-        # its own line, so $4 is the percentage on these devices.
-        need_mb  = (len(binary) * 2) // 1048576 + 8   # binary + .part + slack
-        free_out = await em_shell.run(
-            live, 'echo "FREE $(busybox df -m /data | busybox tail -1)"')
-        free_mb = None
-        for line in (free_out or "").splitlines():
-            if line.startswith("FREE"):
-                free_mb = em_oww_assets.parse_free_mb(line[5:])
-                break
-        if free_mb is not None and free_mb < need_mb:
-            await _update_failed(
-                device_id,
-                f"Not enough space on /data: {free_mb}MB free, needs ~{need_mb}MB")
-            return
-        if free_mb is None:
-            # Unknown reads as "carry on" — a df we cannot parse is not
-            # evidence of a full disk, and refusing on it would block updates
-            # on any device whose df we have not seen.
-            log.warning(f"[api] Could not read free space on {device_id} "
-                        f"from {free_out!r} — proceeding with update")
-
-        await em_events.push_log(device_id, "info", "controller",
-                              f"Deploying to slot {inactive_slot} (active: {active_slot})")
-
-        # Stream binary to inactive slot. Verified by md5 before it is renamed
-        # into place, so a corrupt transfer leaves the slot as it was and never
-        # reaches the symlink flip below (#76).
-        ok = await _stream_binary_to_slot(live, binary, inactive_slot)
-        if not ok:
-            # Name the stage. "failed or did not verify" covered everything
-            # from a shell that never opened to a corrupt payload, and #121
-            # was the former reported in the language of the latter.
-            await _update_failed(device_id,
-                                 f"Binary transfer to {inactive_slot} failed: "
-                                 f"{ok} — {inactive_slot} left untouched")
-            return
-
-        # Brief pause so device can cleanly close the transfer shell before
-        # we open a new one for the symlink flip.
-        await asyncio.sleep(1.0)
-
-        # Atomic symlink flip + service restart
-        await em_events.push_log(device_id, "info", "controller",
-                              f"Flipping symlink → {inactive_slot} and restarting")
-        result = await em_shell.run(live,
-            f"ln -sf {inactive_slot} /data/local/bin/server && "
-            f"kill $PPID"
-        )
-        # Shell dies when the server process is killed — FLIP_OK will never arrive.
-        # _monitor_reconnect below detects whether the restart succeeded.
-
-        # Wait for device to come back
-        confirmed = await _monitor_reconnect(device_id, version, previous_version=current_ver, timeout=90)
-
-        if confirmed:
-            _update_errors.pop(device_id, None)
-            await em_events.push_log(device_id, "info", "controller",
-                                  f"✓ Update confirmed: {version}")
-            await em_events.push({
-                "type":      "device_updated",
-                "device_id": device_id,
-                "version":   version,
-            })
-        else:
-            row     = await loop.run_in_executor(None, db.get_device, device_id)
-            running = row["firmware_ver"] if row else "unknown"
-
-            if running == current_ver:
-                # Device came back on old version — auto-rollback by start_server.sh
-                await loop.run_in_executor(
-                    None, db.set_firmware_previous, device_id, None
-                )
-                _update_errors[device_id] = (
-                    f"auto-rolled back to {running} — new binary failed to start"
-                )
-                _supervisor_log_wanted.add(device_id)
-                await em_events.push_log(device_id, "warn", "controller",
-                    f"Device auto-rolled back to {running} "
-                    f"— new binary failed {3} start attempts")
-                await em_events.push({
-                    "type":      "device_auto_rolled_back",
-                    "device_id": device_id,
-                    "version":   running,
-                })
-            else:
-                _update_errors[device_id] = (
-                    f"timed out — device running {running}"
-                )
-                _supervisor_log_wanted.add(device_id)
-                await em_events.push_log(device_id, "warn", "controller",
-                    f"Update timed out — device running: {running}")
-                await em_events.push({
-                    "type":      "device_update_failed",
-                    "device_id": device_id,
-                    "error":     _update_errors[device_id],
-                    "running":   running,
-                })
-
-    except Exception as e:
-        log.exception(f"[api] OTA update error for {device_id}: {e}")
-        await _update_failed(device_id, f"OTA exception: {e}")
-
-
-async def _run_rollback(device_id: str, target_version: str) -> None:
-    """
-    Background task: flip to inactive A/B slot.
-
-    No binary transfer needed — the old binary is already in the inactive slot.
-    """
-    _updates_in_progress.add(device_id)
-    _update_errors.pop(device_id, None)  # fresh attempt clears the last failure
-    try:
-        await em_events.push_log(device_id, "info", "controller",
-                              f"Rolling back to {target_version}")
-
-        live = em_state.devices.get(device_id)
-        if live is None:
-            await _update_failed(device_id,
-                                 "Device disconnected before rollback")
-            return
-
-        active_slot = None
-        detect_result = await em_shell.run(live,
-            "CURRENT=$(readlink /data/local/bin/server 2>/dev/null); "
-            "if [ \"$CURRENT\" = \"server_a\" ] || [ \"$CURRENT\" = \"server_b\" ]; then "
-            "  echo \"SLOT:$CURRENT\"; "
-            "else echo \"SLOT_UNKNOWN\"; fi"
-        )
-        for line in detect_result.splitlines():
-            if "SLOT:" in line:
-                candidate = line.split("SLOT:")[-1].strip().split()[0]
-                if candidate in ("server_a", "server_b"):
-                    active_slot = candidate
-                    break
-
-        if active_slot is None:
-            await _update_failed(device_id,
-                                 "Cannot determine active slot — is A/B set up?")
-            return
-
-        inactive_slot = "server_b" if active_slot == "server_a" else "server_a"
-        await em_events.push_log(device_id, "info", "controller",
-                              f"Flipping {active_slot} → {inactive_slot}")
-
-        result = await em_shell.run(live,
-            f"ln -sf {inactive_slot} /data/local/bin/server && "
-            f"kill $PPID"
-        )
-        # Shell dies when the server process is killed — ROLLBACK_OK will never arrive.
-
-        loop = asyncio.get_event_loop()
-        row_pre = await loop.run_in_executor(None, db.get_device, device_id)
-        current_fw = row_pre["firmware_ver"] if row_pre else None
-        confirmed = await _monitor_reconnect(
-            device_id, target_version,
-            previous_version=current_fw,
-            timeout=90,
-        )
-
-        if confirmed:
-            _update_errors.pop(device_id, None)
-            await loop.run_in_executor(
-                None, db.set_firmware_previous, device_id, None
-            )
-            await em_events.push_log(device_id, "info", "controller",
-                                  f"✓ Rollback confirmed: {target_version}")
-            await em_events.push({
-                "type":      "device_rolled_back",
-                "device_id": device_id,
-                "version":   target_version,
-            })
-        else:
-            await _update_failed(device_id,
-                                 "Rollback did not reconnect within 90s")
-
-    except Exception as e:
-        log.exception(f"[api] Rollback error for {device_id}: {e}")
-        await _update_failed(device_id, f"Rollback exception: {e}")
-    finally:
-        _updates_in_progress.discard(device_id)
-
-
-async def _monitor_reconnect(
-    device_id: str,
-    expected_version: str,
-    previous_version: str | None = None,
-    timeout: int = 90,
-) -> bool:
-    """
-    Poll until the device reconnects on a new version, or timeout elapses.
-
-    Accepts success if the device reports expected_version exactly (GitHub
-    releases where the tag matches the binary's embedded version), OR any
-    version that differs from previous_version (local uploads where the
-    binary reports its own version string, not the controller's local-YYYYMMDD
-    tracking string).
-    """
-    loop     = asyncio.get_event_loop()
-    deadline = time.monotonic() + timeout
-    await asyncio.sleep(8)  # give device time to stop and restart
-
-    while time.monotonic() < deadline:
-        if device_id in em_state.devices:
-            row = await loop.run_in_executor(None, db.get_device, device_id)
-            if row:
-                running = row["firmware_ver"]
-                if running == expected_version:
-                    return True
-                if previous_version is not None and running != previous_version:
-                    return True
-        await asyncio.sleep(2)
-
-    return False
-
-
 # ─── emOS update (#573) ───────────────────────────────────────────────────────
 #
 # Same shape as the firmware update above — per device, queued behind
-# `_ota_lock`, verified before anything is written, watched afterwards — but
+# `em_ota.queue`, verified before anything is written, watched afterwards — but
 # what it writes is the boot partition. em_emos_update holds every decision
 # and its docstring is the design; this section only carries.
 
@@ -2448,8 +1959,8 @@ async def _post_device_emos_update(request: web.Request) -> web.Response:
     # Refused here as well as greyed out in the panel: this is a plain POST.
     if live.android_userspace:
         return em_http.error("not_emos", "This device is not running emOS", 409)
-    if (_emos_update_busy(device_id) or device_id in _updates_in_progress
-            or device_id in _updates_queued):
+    if (_emos_update_busy(device_id) or device_id in em_ota.in_progress
+            or device_id in em_ota.queued):
         return em_http.error("update_in_progress", "An update is already in progress", 409)
 
     override = None
@@ -2496,11 +2007,11 @@ async def _emos_update_failed(device_id: str, reason: str) -> None:
 
 
 async def _run_emos_update(device_id: str, override: tuple | None = None) -> None:
-    """Background task: queue behind `_ota_lock`, then update under a cap."""
+    """Background task: queue behind `em_ota.queue`, then update under a cap."""
     _emos_update_errors.pop(device_id, None)
     _emos_updates_queued.add(device_id)
     try:
-        await _ota_lock.acquire()
+        await em_ota.queue.acquire()
     finally:
         _emos_updates_queued.discard(device_id)
 
@@ -2519,7 +2030,7 @@ async def _run_emos_update(device_id: str, override: tuple | None = None) -> Non
     finally:
         _emos_updates_in_progress.discard(device_id)
         _emos_update_stage.pop(device_id, None)
-        _ota_lock.release()
+        em_ota.queue.release()
 
 
 async def _emos_sh(live, cmd: str, timeout: float = 60.0) -> str:
@@ -2668,22 +2179,6 @@ async def _emos_status_on_connect(live, device_id: str) -> None:
         await em_events.push_log(device_id, "warn", "controller", msg)
 
 
-# ─── Firmware transfer ────────────────────────────────────────────────────────
-
-async def _stream_binary_to_slot(live, binary: bytes, slot: str) -> "em_shell.TransferResult":
-    """
-    Transfer a firmware binary to /data/local/bin/{slot}.
-
-    require_verify=True: firmware is the one payload where an unverifiable
-    transfer must fail rather than proceed. A corrupt binary and a genuinely
-    broken one produce the same observable — three fast exits and a rollback —
-    so shipping one to the slot we are about to boot costs a reboot and a
-    rollback to learn nothing (#76).
-    """
-    return await em_shell.stream_file(live, binary, f"/data/local/bin/{slot}",
-                                      require_verify=True)
-
-
 # ─── Shell WebSocket proxy (interactive dashboard terminal) ───────────────────
 
 async def _ws_shell(request: web.Request) -> web.WebSocketResponse:
@@ -2802,7 +2297,7 @@ async def _post_deploy_all(request: web.Request) -> web.Response:
         # below could never fire for an upload and the whole fleet re-flashed
         # what it was already running. The timestamp remains the fallback for
         # a binary carrying no recognisable version.
-        _embedded = _extract_binary_version(binary_override)
+        _embedded = em_ota.extract_binary_version(binary_override)
         release = {
             "version": _embedded or f"local-{time.strftime('%Y%m%d-%H%M')}",
             "url": None,
@@ -2829,11 +2324,11 @@ async def _post_deploy_all(request: web.Request) -> web.Response:
                 and not body.get("force")):
             skipped.append({"device_id": device_id, "reason": "already_current"})
             continue
-        if device_id in _updates_in_progress or device_id in _updates_queued:
+        if device_id in em_ota.in_progress or device_id in em_ota.queued:
             skipped.append({"device_id": device_id, "reason": "update_in_progress"})
             continue
 
-        em_tasks.spawn(_run_update(device_id, release, binary_override))
+        em_tasks.spawn(em_ota.run_update(device_id, release, binary_override))
         started.append(device_id)
 
     return em_http.ok({
@@ -2909,7 +2404,7 @@ async def _get_provision_latest_binary(request: web.Request) -> web.Response:
     if release is None:
         return em_http.error("no_release", "No release information available", 404)
 
-    binary = await _fetch_binary(release["url"], release.get("version", ""))
+    binary = await em_releases.download(release["url"], release.get("version", ""))
     if binary is None:
         return em_http.error("fetch_failed", "Could not download binary from GitHub", 502)
 
@@ -4008,34 +3503,34 @@ async def _sync_oww_assets(live, device_id: str, progress=None) -> dict:
     Make a device's asset directory match what it needs, queued behind every
     other multi-megabyte transfer on this controller.
 
-    Asset installs share `_ota_lock` with firmware updates. On an upgrade that
+    Asset installs share `em_ota.queue` with firmware updates. On an upgrade that
     adds an asset, every device reconnects at once and each would start its
     own push — ~14MB each for a device that never had the runtime, which is
     most of an existing fleet on the controller's wake word (every device
     carries the full set since 2026-09-22). Three concurrent OTAs over the same
     transport stalled the event loop 11.1s (2026-09-02), and that loop feeds
-    speaker periods. Bounded by OTA_MAX_HOLD_S for the OTA path's reason: a
+    speaker periods. Bounded by em_ota.MAX_HOLD_S for the OTA path's reason: a
     device that stops reading must not hold the queue for good.
     """
-    if _ota_lock.locked():
+    if em_ota.queue.locked():
         log.info(f"[api] [{device_id}] oww assets: queued behind another transfer")
         if progress:
             await progress("info", "waiting for another device's transfer…")
-    async with _ota_lock:
+    async with em_ota.queue:
         try:
             return await asyncio.wait_for(
                 _sync_oww_assets_locked(live, device_id, progress),
-                timeout=OTA_MAX_HOLD_S,
+                timeout=em_ota.MAX_HOLD_S,
             )
         except asyncio.TimeoutError:
             return {"ok": False,
-                    "error": f"abandoned after {OTA_MAX_HOLD_S:.0f}s so the queue could continue"}
+                    "error": f"abandoned after {em_ota.MAX_HOLD_S:.0f}s so the queue could continue"}
 
 
 async def _sync_oww_assets_locked(live, device_id: str, progress=None) -> dict:
     """
     Make a device's asset directory match what it needs. Idempotent. Run with
-    `_ota_lock` held — call _sync_oww_assets.
+    `em_ota.queue` held — call _sync_oww_assets.
 
     Push to `.part` then rename only once md5 matches, so an interrupted
     transfer can never leave a file the device would try to dlopen. md5 is
@@ -4453,7 +3948,7 @@ async def _fetch_emos_payload(arch: str) -> tuple:
         init, version, err = await _fetch_one_init(release, arch)
         return (None, {}, version, err) if err else (init, {}, version, None)
 
-    raw = await _fetch_binary(bundle_asset["url"],
+    raw = await em_releases.download(bundle_asset["url"],
                               f"{version}-{EMOS_PAYLOAD_ASSET}")
     if raw is None:
         return None, {}, version, em_http.error(
@@ -4562,7 +4057,7 @@ async def _fetch_one_init(release: dict, arch: str) -> tuple:
             f"emos-v* tag, or build one from emos/ with build.sh and select it "
             f"by hand.", 404)
 
-    binary = await _fetch_binary(asset["url"], f"{release['version']}-{name}")
+    binary = await em_releases.download(asset["url"], f"{release['version']}-{name}")
     if binary is None:
         return None, release["version"], em_http.error(
             "fetch_failed", "Could not download the emOS init from GitHub", 502)
@@ -4932,51 +4427,6 @@ async def _get_support_bundle(request: web.Request) -> web.Response:
     )
 
 
-async def _fetch_binary(download_url: str,
-                        version: str = "") -> Optional[bytes]:
-    """
-    The release binary, from disk if we already have it.
-
-    A published tag never changes what it points at, so the download is worth
-    doing once per release rather than once per device — a fleet update used to
-    pull the same ~10MB for every Dot, and the provisioning wizard again for
-    every device it set up.
-
-    `version` is optional so a caller with only a URL still works; it simply
-    does not get the cache. Nothing here can fail an update: a cache miss, an
-    unwritable directory or a corrupt entry all end in an ordinary download.
-    """
-    if version:
-        cached = await asyncio.get_event_loop().run_in_executor(
-            None, em_firmware.read, version
-        )
-        if cached is not None:
-            return cached
-
-    log.info(f"[api] Fetching binary: {download_url}")
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                download_url,
-                timeout=aiohttp.ClientTimeout(total=120),
-            ) as resp:
-                if resp.status != 200:
-                    log.error(f"[api] Binary download failed: HTTP {resp.status}")
-                    return None
-                data = await resp.read()
-    except Exception as e:
-        log.error(f"[api] Binary download exception: {e}")
-        return None
-
-    if version and data:
-        # Off the event loop: hashing and writing 10MB blocks it for long
-        # enough to delay speaker frames, and this runs during an OTA.
-        await asyncio.get_event_loop().run_in_executor(
-            None, em_firmware.write, version, data
-        )
-    return data
-
-
 # ─── Periodic background tasks ────────────────────────────────────────────────
 
 async def session_prune_loop() -> None:
@@ -4991,11 +4441,6 @@ async def session_prune_loop() -> None:
 
 
 # ─── Helpers shared across em_controller ─────────────────────────────────────
-
-# Devices whose last update failed and whose supervisor log has not yet been
-# collected. The fetch cannot happen at failure time — the device is gone,
-# which is the whole problem — so it waits for the next connect.
-_supervisor_log_wanted: set[str] = set()
 
 # Supervisor decisions kept on the device, surviving the reboot that /tmp does
 # not. Must match SUP_LOG in device_payloads/start_server.sh.
@@ -5059,8 +4504,8 @@ async def notify_device_connected(device_id: str, version: str | None = None) ->
     # reachable again. Removed from the set on the way in, so a flapping
     # device cannot queue repeated fetches, and scheduled rather than awaited
     # so a slow shell never delays the connect path.
-    if device_id in _supervisor_log_wanted:
-        _supervisor_log_wanted.discard(device_id)
+    if device_id in em_ota.supervisor_log_wanted:
+        em_ota.supervisor_log_wanted.discard(device_id)
 
         async def _collect_soon(_id=device_id):
             # The device has just registered; give its shell plane a moment
@@ -5357,13 +4802,13 @@ def _merge_device(row, boot: dict | None = None) -> dict:
         "emos_update_stage":       _emos_update_stage.get(device_id),
         "emos_update_error":       _emos_update_errors.get(device_id),
         # Update state
-        "update_in_progress": device_id in _updates_in_progress,
+        "update_in_progress": device_id in em_ota.in_progress,
         # Waiting on the global OTA lock — started, but nothing has been sent
         # to this device yet. Distinct from update_in_progress so the panel
         # does not report a transfer that has not begun.
-        "update_queued":      device_id in _updates_queued,
+        "update_queued":      device_id in em_ota.queued,
         # Last OTA/rollback failure (None when the last attempt succeeded or
         # none was made) — lets the dashboard show a terminal ✗ state instead
         # of "updating…" forever when an update aborts.
-        "update_error":       _update_errors.get(device_id),
+        "update_error":       em_ota.errors.get(device_id),
     }

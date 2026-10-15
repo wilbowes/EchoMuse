@@ -41,10 +41,13 @@ def find_def(name: str) -> tuple[Path, ast.FunctionDef | ast.AsyncFunctionDef]:
     """The one function or method called `name` in the controller.
 
     Fails, rather than returning None, when it is missing or defined more than
-    once: a guard handed nothing must not pass on nothing."""
-    hits = [(path, node) for path in MODULES for node in ast.walk(tree(path))
+    once: a guard handed nothing must not pass on nothing. A name two modules
+    both define is asked for as `module.name` (`em_ota.run_update`)."""
+    module, _, func = name.rpartition(".")
+    paths = [p for p in MODULES if not module or p.stem == module]
+    hits = [(path, node) for path in paths for node in ast.walk(tree(path))
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and node.name == name]
+            and node.name == func]
     assert hits, f"{name} is not defined in any controller module"
     assert len(hits) == 1, (
         f"{name} is defined {len(hits)} times: "

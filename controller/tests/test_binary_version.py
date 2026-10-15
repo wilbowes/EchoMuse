@@ -1,5 +1,5 @@
 """
-_extract_binary_version must know the scheme compile.sh actually produces.
+em_ota.extract_binary_version must know the scheme compile.sh actually produces.
 
 It knew only the old date-based one (`20260614-1152-dev`) while compile.sh
 moved to `git describe`. A clean-tree local build therefore extracted
@@ -11,13 +11,13 @@ A message that says the opposite of what happened is worse than a plain
 failure: the natural response to being told a deploy reverted is to stop
 using the feature.
 
-em_api imports aiohttp and the whole controller stack, so the function's
-source is executed in a stub namespace — the same approach as
-test_update_interval.py, and it runs the code that actually ships.
+Driven against em_ota itself.
 """
 
 import re
 from pathlib import Path
+
+import em_ota
 
 import pytest
 
@@ -25,13 +25,7 @@ CONTROLLER = Path(__file__).resolve().parents[1]
 
 
 def _extract():
-    """The shipped _extract_binary_version, executed standalone."""
-    src = (CONTROLLER / "em_api.py").read_text()
-    start = src.index("def _extract_binary_version")
-    end = src.index("async def _update_failed", start)
-    ns: dict = {}
-    exec(src[start:end], ns)
-    return ns["_extract_binary_version"]
+    return em_ota.extract_binary_version
 
 
 @pytest.mark.parametrize("embedded,expected", [

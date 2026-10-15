@@ -773,9 +773,8 @@ def test_a_failed_update_asks_for_the_supervisor_log():
     # The failure paths live in _run_update_locked, which is what awaits
     # _monitor_reconnect and decides what its result means. (_run_update is
     # now the queue wrapper in front of it.)
-    monitor = api[api.index("async def _run_update_locked"):]
-    monitor = monitor[:monitor.index("\nasync def ", 1)]
-    assert monitor.count("_supervisor_log_wanted.add") >= 2, (
+    monitor = _sources.def_source("_run_update_locked")
+    assert monitor.count("supervisor_log_wanted.add") >= 2, (
         "both update-failure paths (auto-rollback and timeout) must request "
         "the supervisor log"
     )
@@ -946,7 +945,7 @@ def test_firmware_transfer_is_verified_by_md5_not_by_an_exit_status():
     # Anchored on the CALL, not the function body: the docstring explains why
     # require_verify is set, so a body-wide search passes on the prose alone
     # while the argument is gone (caught by reintroducing exactly that).
-    slot = _fn_body(src, "_stream_binary_to_slot")
+    slot = _sources.def_source("_stream_binary_to_slot")
     call = slot[slot.index("return await em_shell.stream_file"):]
     assert "require_verify=True" in call, (
         "firmware is the payload where an unverifiable transfer must fail "
@@ -960,7 +959,7 @@ def test_a_corrupt_binary_never_reaches_the_symlink_flip():
     a mismatch must be caught while the device is still running fine, not
     after it has taken a reboot and a rollback to tell us the same thing.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
+    src = (CONTROLLER / "em_ota.py").read_text()
     ota = src[src.index("_stream_binary_to_slot(live, binary"):]
     ota = ota[:ota.index("_monitor_reconnect")]
 
@@ -986,7 +985,7 @@ def test_ota_checks_free_space_before_writing_anything():
     disk — refusing on an unparsed reading blocks updates on any device whose
     df we have not seen.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
+    src = (CONTROLLER / "em_ota.py").read_text()
     ota = src[src.index("inactive_slot = "):src.index("_stream_binary_to_slot(live, binary")]
 
     assert "parse_free_mb" in ota, (
@@ -1056,7 +1055,7 @@ def test_a_failed_transfer_says_which_stage_it_failed_at():
     )
 
     # The OTA message must carry the stage through rather than re-flattening it.
-    api = (CONTROLLER / "em_api.py").read_text()
+    api = (CONTROLLER / "em_ota.py").read_text()
     ota = api[api.index("_stream_binary_to_slot(live, binary"):]
     ota = ota[:ota.index("_monitor_reconnect")]
     assert "{ok}" in ota, (
@@ -2023,35 +2022,34 @@ def test_firmware_updates_are_serialised_across_the_whole_controller():
     has to be a global lock taken inside `_run_update`, so both entry points —
     the fleet deploy and a hand-clicked single update — go through it.
     """
-    src  = (CONTROLLER / "em_api.py").read_text()
-    body = _strip_prose(_fn_body(src, "_run_update"))
+    body = _strip_prose(_sources.def_source("em_ota.run_update"))
 
-    assert "_ota_lock.acquire()" in body, (
-        "_run_update must take the global OTA lock — a per-device guard does "
+    assert "queue.acquire()" in body, (
+        "run_update must take the global OTA lock — a per-device guard does "
         "not stop two devices updating at once"
     )
-    assert "_ota_lock.release()" in body, "the lock must be released"
+    assert "queue.release()" in body, "the lock must be released"
 
     # Nothing may reach the device before the lock is held, or the serialising
     # is decorative: the transfer is the expensive part, and it all lives
     # inside _run_update_locked.
-    acquire = body.index("_ota_lock.acquire()")
+    acquire = body.index("queue.acquire()")
     work    = body.index("_run_update_locked")
     assert acquire < work, (
         "the lock must be acquired BEFORE the update work starts"
     )
-    inner = _strip_prose(_fn_body(src, "_run_update_locked"))
+    inner = _strip_prose(_sources.def_source("_run_update_locked"))
     assert "_stream_binary_to_slot" in inner, (
         "the transfer must live inside the locked half"
     )
-    assert "_ota_lock" not in inner, (
+    assert not re.search(r"\bqueue\b", inner), (
         "the locked half must not touch the lock — one owner, or a release "
         "on a path that never acquired frees somebody else's turn"
     )
 
     # Bounded, or one wedged device holds the whole fleet's queue: the base64
     # send loop has no timeout of its own.
-    assert "OTA_MAX_HOLD_S" in body and "wait_for" in body, (
+    assert "MAX_HOLD_S" in body and "wait_for" in body, (
         "the locked half must run under a timeout — serialising turns a "
         "device-local stall into a fleet-wide one"
     )
@@ -2060,7 +2058,7 @@ def test_firmware_updates_are_serialised_across_the_whole_controller():
     # would otherwise hold the lock for the life of the process and no device
     # could ever be updated again without a restart.
     tail = body[body.rindex("finally:"):]
-    assert "_ota_lock.release()" in tail, (
+    assert "queue.release()" in tail, (
         "release the lock in the finally — a failed update must not strand "
         "every later one behind it"
     )
@@ -2078,11 +2076,11 @@ def test_a_queued_update_is_reported_as_queued_not_as_in_progress():
         "waiting from working"
     )
 
-    body = _strip_prose(_fn_body(src, "_run_update"))
-    add     = body.index("_updates_queued.add")
-    acquire = body.index("_ota_lock.acquire()")
+    body = _strip_prose(_sources.def_source("em_ota.run_update"))
+    add     = body.index("queued.add")
+    acquire = body.index("queue.acquire()")
     assert add < acquire, "a device must be marked queued BEFORE it waits"
-    assert "_updates_queued.discard" in body, (
+    assert "queued.discard" in body, (
         "queued state must be cleared once the lock is held, or a device "
         "reads as queued for the whole of its own update"
     )
@@ -2403,7 +2401,7 @@ def test_a_refused_update_does_not_consume_the_uploaded_binary():
         "peek the token — every refusal below it must leave it usable"
     )
     pop = fn.index("_pending_uploads.pop")
-    run = fn.index("_run_update(")
+    run = fn.index("em_ota.run_update(")
     refuse = fn.index("already_running")
     assert refuse < pop, "the duplicate check must come before the token is consumed"
     assert pop < run, "consume the token only once the update is committed"
@@ -2418,7 +2416,7 @@ def test_the_fleet_endpoint_reads_the_version_out_of_an_uploaded_binary():
     src = (CONTROLLER / "em_api.py").read_text()
     fn  = _strip_prose(_fn_body(src, "_post_deploy_all"))
 
-    assert "_extract_binary_version(binary_override)" in fn, (
+    assert "em_ota.extract_binary_version(binary_override)" in fn, (
         "the fleet path must read the uploaded binary's own version"
     )
     assert "not upload_token and" not in fn, (
@@ -2433,7 +2431,7 @@ def test_the_upload_endpoint_reports_what_was_uploaded():
     """
     fn = _strip_prose(_fn_body(
         (CONTROLLER / "em_api.py").read_text(), "_post_upload_binary"))
-    assert "_extract_binary_version(binary)" in fn
+    assert "em_ota.extract_binary_version(binary)" in fn
     assert '"version": version' in fn
 
 
@@ -3181,12 +3179,12 @@ def test_asset_installs_queue_behind_the_ota_lock():
     take the same global lock, and only the wrapper may reach the unlocked body.
     """
     import ast
-    src = (CONTROLLER / "em_api.py").read_text()
-    tree = ast.parse(src)
-    fns = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)}
+    # Every module: a caller of the unlocked body is a caller wherever it is.
+    fns = {n.name: n for path in _sources.MODULES for n in ast.walk(_sources.tree(path))
+           if isinstance(n, ast.AsyncFunctionDef)}
     wrapper = fns["_sync_oww_assets"]
-    assert any(isinstance(n, ast.AsyncWith) and "_ota_lock" in ast.unparse(n.items[0].context_expr)
-               for n in ast.walk(wrapper)), "_sync_oww_assets does not take _ota_lock"
+    assert any(isinstance(n, ast.AsyncWith) and "em_ota.queue" in ast.unparse(n.items[0].context_expr)
+               for n in ast.walk(wrapper)), "_sync_oww_assets does not take em_ota.queue"
     callers = [name for name, fn in fns.items()
                if name not in ("_sync_oww_assets", "_sync_oww_assets_locked")
                and "_sync_oww_assets_locked(" in ast.unparse(fn)]

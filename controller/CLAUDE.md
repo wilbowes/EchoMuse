@@ -1590,25 +1590,25 @@ bounded.** Three concurrent OTAs stalled the event loop for 11.1 seconds
 loop stalled` warnings — the reliable source, since the reported peak reads 0
 under the add-on, #306). That loop sends speaker periods and LED frames, so a
 device answering someone pays for a device being updated.
-`_updates_in_progress` could never have prevented it: it stops ONE device
-being updated twice and says nothing about two at once. So `_ota_lock` is
+`em_ota.in_progress` could never have prevented it: it stops ONE device
+being updated twice and says nothing about two at once. So `em_ota.queue` is
 global and both entry points go through it — the fleet deploy and a
 hand-clicked single update collide identically, and only the first was ever
 going to be noticed.
 
-- **Wake word asset installs take the same lock** (`_sync_oww_assets`, 2026-09-22). Every device carries the full asset set whatever its mode, so an upgrade that adds an asset has the whole fleet reconnect and push at once — ~14MB each for a device on the controller's wake word that never had the runtime, which is most of an existing fleet. Same transport, same stall; same queue, same `OTA_MAX_HOLD_S` cap. A test pins that only the wrapper reaches `_sync_oww_assets_locked`.
+- **Wake word asset installs take the same lock** (`_sync_oww_assets`, 2026-09-22). Every device carries the full asset set whatever its mode, so an upgrade that adds an asset has the whole fleet reconnect and push at once — ~14MB each for a device on the controller's wake word that never had the runtime, which is most of an existing fleet. Same transport, same stall; same queue, same `em_ota.MAX_HOLD_S` cap. A test pins that only the wrapper reaches `_sync_oww_assets_locked`.
 - **The binary is fetched inside the lock**, so a queued device holds nothing
   but its place in line, and the lock is released in a `finally` — an update
   that raises would otherwise hold it for the life of the process and no
   device could be updated again without a restart.
 - **A failure does not stop the queue.** Mark it, carry on, report at the end:
   one device that will not come back must not strand a fleet update behind it.
-- **`OTA_MAX_HOLD_S` (300s) caps the hold**, because serialising turns a
+- **`em_ota.MAX_HOLD_S` (300s) caps the hold**, because serialising turns a
   device-local stall into a fleet-wide one. Every `recv` in
-  `_stream_file_to_device` is `wait_for`-bounded but `await ws.send(line)` in
+  `em_shell.stream_file` is `wait_for`-bounded but `await ws.send(line)` in
   the base64 loop is not, and a device that stops reading applies backpressure
-  and can hang there. `_run_update` is a thin wrapper around
-  `_run_update_locked` so the whole of the update sits under one timeout.
+  and can hang there. `em_ota.run_update` is a thin wrapper around
+  `em_ota._run_update_locked` so the whole of the update sits under one timeout.
 - **Queued is reported separately from in-progress** (`update_queued`), and
   rendered as "queued": a device that has been started and not yet touched is
   not having a transfer, and claiming otherwise is the same failure as any
@@ -1616,7 +1616,7 @@ going to be noticed.
 
 **Every payload reconciles on OTA or on a click, and nothing reconciles on
 CONNECT — which is the wrong trigger and is why devices drift.**
-`em_payloads.sync_start_script` and `em_payloads.sync_debloat` run inside `_run_update_locked` and
+`em_payloads.sync_start_script` and `em_payloads.sync_debloat` run inside `em_ota._run_update_locked` and
 from the Maintenance button; `reconcile_oww_assets` does run on connect but
 returns early unless `owwOnDevice` is on, and then checks only the SELECTED
 classifier. So a device can sit for weeks missing three of the four stock wake
@@ -1625,13 +1625,13 @@ alone — while every panel reports it healthy. A device arriving is exactly the
 moment we know what it has. Wil's call, same day: reconcile all three payloads
 on connect, debounced per device.
 
-**The shell lock is released by its OWNER, never by whoever happens to be cleaning up.** `Lock.locked()` answers "is anyone holding this", not "am I", and both cleanup paths used it as though it meant the second — so a caller that merely timed out WAITING ran the same cleanup as one that held the lock, closing the websocket and releasing the lock belonging to a transfer still using them. `_shell_owner` records the task, and every cleanup path is gated on being it. Seen end to end on EFF 2026-09-04: a debloat push hung 108s, the wake word reconcile behind it timed out and released the debloat's lock, and the slot detect that followed died with `Lock is not acquired` and returned `""` — surfacing to the operator as "could not determine active slot", three steps from anything to do with locking.
+**The shell lock is released by its OWNER, never by whoever happens to be cleaning up.** `Lock.locked()` answers "is anyone holding this", not "am I", and both cleanup paths used it as though it meant the second — so a caller that merely timed out WAITING ran the same cleanup as one that held the lock, closing the websocket and releasing the lock belonging to a transfer still using them. `em_shell.owners` records the task, and every cleanup path is gated on being it. Seen end to end on EFF 2026-09-04: a debloat push hung 108s, the wake word reconcile behind it timed out and released the debloat's lock, and the slot detect that followed died with `Lock is not acquired` and returned `""` — surfacing to the operator as "could not determine active slot", three steps from anything to do with locking.
 
 **A transfer probes that the destination DIRECTORY exists before sending.** The heredoc writes with `>`, so a write into a directory that is not there fails, the trailing `echo TRANSFER_OK` never runs, and the transfer waits out its whole 120s timeout holding the device's shell lock. The probe rides the round trip that already detects the base64 decoder and the md5 tool, so it costs nothing, and it is checked BEFORE the decoder because "nowhere to put the file" is the more specific answer. The case that found it: the debloat payload targets Magisk's `/sbin/.core` overlay, which a device without Magisk has no daemon to create.
 
-**Android-only payloads are gated on `Device.android_userspace`** (`em_platform`, pure and tested), which is False only for a device that has POSITIVELY reported `base_os: emos`. Old firmware, a device that has not registered, and any unrecognised value all keep today's behaviour — the two ways of being wrong are not equal. `_post_debloat` refuses server-side rather than relying on the greyed-out control, since it is a plain POST with a session token; the endpoint and the dashboard read the same derived `androidUserspace` so they cannot disagree. **All THREE call sites must check, and for a while only two did.** `reconcile_on_connect` gates on `android_userspace` and `_post_debloat` refuses `not_android`, but the OTA path in `_run_update_locked` called `em_payloads.sync_debloat` unconditionally until #480. Found in the field 2026-09-07 on EFF's first OTA after it moved to emOS: the transfer targeted `/sbin/.core/img/.core/service.d/` on a device with no Magisk daemon to have created it. It cost only a wasted shell round trip because the destination-directory probe above caught it — **the probe is the backstop, not the gate**, and without it this is the 240s stall measured on the same device on 2026-09-04. `tests/test_deploy.py` now asserts per call site rather than by counting, so a fourth has to answer too.
+**Android-only payloads are gated on `Device.android_userspace`** (`em_platform`, pure and tested), which is False only for a device that has POSITIVELY reported `base_os: emos`. Old firmware, a device that has not registered, and any unrecognised value all keep today's behaviour — the two ways of being wrong are not equal. `_post_debloat` refuses server-side rather than relying on the greyed-out control, since it is a plain POST with a session token; the endpoint and the dashboard read the same derived `androidUserspace` so they cannot disagree. **All THREE call sites must check, and for a while only two did.** `reconcile_on_connect` gates on `android_userspace` and `_post_debloat` refuses `not_android`, but the OTA path in `em_ota._run_update_locked` called `em_payloads.sync_debloat` unconditionally until #480. Found in the field 2026-09-07 on EFF's first OTA after it moved to emOS: the transfer targeted `/sbin/.core/img/.core/service.d/` on a device with no Magisk daemon to have created it. It cost only a wasted shell round trip because the destination-directory probe above caught it — **the probe is the backstop, not the gate**, and without it this is the 240s stall measured on the same device on 2026-09-04. `tests/test_deploy.py` now asserts per call site rather than by counting, so a fourth has to answer too.
 
-Worth noting HOW it was missed, because this exact line was already documented as special: the reconcile debounce does NOT cover it either — `em_payloads.sync_debloat` is called directly inside `_run_update_locked`, so every OTA pushes it regardless of the stamp. Somebody reasoned about one guard this call site bypasses and stopped there. **A call site documented as an exception to one rule is worth checking against every rule its siblings follow.**
+Worth noting HOW it was missed, because this exact line was already documented as special: the reconcile debounce does NOT cover it either — `em_payloads.sync_debloat` is called directly inside `em_ota._run_update_locked`, so every OTA pushes it regardless of the stamp. Somebody reasoned about one guard this call site bypasses and stopped there. **A call site documented as an exception to one rule is worth checking against every rule its siblings follow.**
 
 `em_payloads.sync_start_script` beside it is deliberately NOT gated: emOS runs that same script — its init supervises `/system/bin/sh /data/local/bin/start_server.sh` (`emos/init/init.c`) because the script owns the A/B slot symlink and the fast-exit backoff, which both bases need. Gating it by symmetry would strand every emOS device on whatever script it was provisioned with.
 
@@ -1639,7 +1639,7 @@ Worth noting HOW it was missed, because this exact line was already documented a
 `TRANSFER_OK` only ever proved that the base64 decode pipeline and `chmod`
 exited 0 — never that the bytes on the device match the bytes sent. Bytes
 therefore land in `{dest}.part` and are renamed only on an md5 match
-(`_stream_file_to_device`), the same discipline the asset path has always
+(`em_shell.stream_file`), the same discipline the asset path has always
 had. **The point is the ordering, not the error message**: a corrupt binary
 and a genuinely broken one produce the *same* observable — three fast exits,
 a symlink flip, a device back on its old version — so an unverified transfer
@@ -1699,7 +1699,7 @@ twice — was the one case nothing guarded, and it took a person doing it
 (2026-09-03) to find that.
 
 Both endpoints now read the binary's own version via
-`_extract_binary_version`. Three rules:
+`em_ota.extract_binary_version`. Three rules:
 
 - **The single-device path REFUSES** (`already_running`) rather than skipping
   silently: someone pressed a button, and a no-op reported as success is how
@@ -1718,7 +1718,7 @@ sends `force` when they say yes. That check is a convenience — the server
 refuses either way.
 
 **The release binary is cached on disk** (`em_firmware.py`, `firmware/` beside
-the DB). `_fetch_binary` used to re-download the whole ~10MB asset per call, so
+the DB). `em_releases.download` used to re-download the whole ~10MB asset per call, so
 a fleet update pulled it once per device and the provisioning wizard again per
 device set up; a published tag never changes what it points at. Two rules, both
 of which read as over-caution until they are not:
@@ -1747,7 +1747,7 @@ Device-side payloads the controller distributes (`start_server.sh` via `/api/pro
 - **Sequential, never gathered.** All three talk to one device over one shell plane; concurrency contends for a single session and none of them is on the critical path of anything.
 - **One failure must not skip the other two.** Unrelated payloads — a device with a stale debloat list should still get its wake word models — so each step is caught individually, not the loop.
 - **Debounced per device** (`RECONCILE_DEBOUNCE_S`, 15 min), because reconnects are routine on this fleet and the payloads are not; they change when someone deploys or edits a config, which is minutes to days apart. The stamp is claimed **before** the work, so a device reconnecting mid-run cannot start a second one against the same shell plane. `_delete_device` calls `forget_reconcile` — a re-added device is the one whose payloads are least likely to be right.
-- **A silent device is not a missing file.** `_shell_run` swallows every exception and returns `""`, so an absent md5 and a device that never answered were the same string — and the syncs read empty as out-of-date. That was harmless while they only ran mid-OTA against a shell already proven; seconds after connect the shell plane is very likely **not up yet**, so it meant a pointless push and a user-visible "out of date" event that was untrue. Both syncs now append `_SHELL_OK` to the probe and return untouched without it. Same shape as `reconcile_oww_assets`'s "failure to LOOK is not evidence of absence".
+- **A silent device is not a missing file.** `em_shell.run` swallows every exception and returns `""`, so an absent md5 and a device that never answered were the same string — and the syncs read empty as out-of-date. That was harmless while they only ran mid-OTA against a shell already proven; seconds after connect the shell plane is very likely **not up yet**, so it meant a pointless push and a user-visible "out of date" event that was untrue. Both syncs now append `em_shell.OK_MARK` to the probe and return untouched without it. Same shape as `reconcile_oww_assets`'s "failure to LOOK is not evidence of absence".
 
 **The wake word MODE does not gate the assets reconcile — every device carries the full set** (Wil, 2026-09-22: "either could be switched to the other mode and should be already in a state to accommodate the switch — consistency across the devices is key"). It used to return early under `owwOnDevice=off` on the grounds that such a device scores nothing and the 12.3MB runtime is irrelevant. Two things made that wrong: the speech gate's `silero_vad.onnx` is used in BOTH modes, so a controller-scoring device was left on the RMS gate; and a device that must install 14MB before it can switch mode is the "enabled it and nothing happened" this whole system exists to remove. The mode now decides one thing only, in `em_oww_assets.reconcile_action` (pure, tested): a device scoring LOCALLY whose selected classifier is missing is deaf, so it is warned about and sent its config again once repaired; any other gap is a quiet repair. **The mode itself is never changed** — no device is moved to the controller's wake word because a model is missing, and there is no opt-in for it (Wil, 2026-09-22: "the button still works regardless"); `effective_mode` takes no readiness, and an AST test fails if the reconcile ever assigns the mode. Only firmware that cannot load a runtime at all (`oww_shadow` absent) is skipped. An AST test fails if a `MODE_OFF` early return reappears. The other two payloads are md5 compares and run regardless.
 
@@ -1763,7 +1763,7 @@ The controller reads the running image off `mmcblk0p10` over the shell plane,
 keeps its kernel, load addresses and cmdline byte for byte, swaps the ramdisk
 for one built from the release's init, and writes it back. Offered per device
 on the Updates tab (`emosUpdateAvailable`, decided server-side), queued behind
-`_ota_lock` like firmware, `POST /api/devices/{id}/emos_update`.
+`em_ota.queue` like firmware, `POST /api/devices/{id}/emos_update`.
 
 **amonet 1 and 2 take the same path**, and that is the point of rebuilding from
 the running image rather than from stock: the kernel architecture and the
@@ -2008,7 +2008,7 @@ throughout — so the rules below are all one rule seen from different angles.
   "`su` is not working", and the install step logged `Cleared.` after every
   command had failed. Probes carry a sentinel (`echo _CLEARCHK`) so the two
   answers are distinguishable — the same fix `em_payloads.sync_start_script` needed for
-  `_SHELL_OK`, in a different file. Patch Boot Image and Pre-seed Root DB
+  `em_shell.OK_MARK`, in a different file. Patch Boot Image and Pre-seed Root DB
   read their artifact back the same way (#723, @forming: `_magiskbootVerdict`
   with `_MBCHK`, `_preseedVerdict` with `_DBCHK`). **The size probe relies on
   `wc`, and that is only safe where the step runs**: TWRP on a Dot 2 is
