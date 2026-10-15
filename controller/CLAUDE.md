@@ -2013,7 +2013,7 @@ throughout — so the rules below are all one rule seen from different angles.
   `wc`, and that is only safe where the step runs**: TWRP on a Dot 2 is
   BusyBox 1.22.1 and prints `DB=36864` unpadded (run on VVV, 2026-10-08),
   while FireOS 5's own shell has no `wc` at all and prints `DB=` for a file
-  that exists. A probe moved to another shell needs running there first.
+  that exists. A probe moved to another shell needs running there first. Step 1's own `lk_a` probe is one that was not (#903): it pipes through `od -An`, which TWRP 3.2.3's BusyBox 1.22.1 rejects, so on amonet 1 it reads nothing and the step falls back on the TWRP version. The emOS gate decodes the bytes in the browser and is unaffected (VVV, 2026-10-15).
 - **Verify the bytes you wrote, not the block that contains them.** The flash
   step read back whole megabytes and compared against the image zero-padded to
   match, so 425,984 bytes of the PREVIOUS boot image were checked against zeros

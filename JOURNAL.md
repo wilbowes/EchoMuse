@@ -5007,3 +5007,84 @@ connection through the proxy.
 **Rig faults.** `rig.py up` does not start the browser container. `attach`
 to a rig that still holds the Echo's row moves its credentials aside and then
 fails the approval with 409.
+
+## 2026-10-15 — 2.26.1 ships on targeted checks, a better wake word head that only runs with a fixed shape, and Bonsai behind Verona
+
+**The rule.** Wil exempted point releases from the full acceptance run. A
+point release's GA is now gated by checks of what changed, made on the Early
+Access pair, plus field time on that EA, and the checks are listed in the
+release notes rather than in `docs/uat-results/` (CLAUDE.md, #901).
+
+**The checks for 2.26.1 / v2.18.1, all passed.**
+- **Soak:** 2.26.1-ea.1 from 21:05 on 10-13 to 13:00 on 10-15. One
+  controller start and no errors; the only traceback in the log was a port
+  clash during the add-on swap before the soak (#889). 14 turns, one timeout
+  (Home Assistant sent no reply in 30 s). RTT spikes over 5 s in 5% of
+  reports, against 17% on GA over the previous two weeks. Loop stalls: two of
+  about 1.3 s, against 22 up to 8.4 s.
+- **VVV on plain `v2.18.1-ea.1` in slot A,** byte-identical to the release
+  asset by SHA-256. It was switched by the controller's own rollback method
+  (point the link at slot A, kill the server) and came back on wss,
+  listening on the Echo, with the hardware echo reference.
+- **Custom model upload in a browser (#876):** a text file named `.onnx` was
+  refused; a good model installed and went to four Echoes with md5 checks.
+  Delete was refused while a saved config used the model, and allowed once
+  none did. The installs pushed older leftover models off two Echoes (four
+  slots each, oldest first), as designed.
+- **Wizard step 1 on VVV,** from FireOS and from TWRP 3.2.3: identified,
+  offered the registered-Echo choice, wrote nothing. In TWRP the `lk_a` probe
+  read nothing. Reproduced from adb: BusyBox 1.22.1's `od` rejects `-A`. The
+  emOS gate's own read, which decodes in the browser, gave
+  `8816885824790500`, amonet 1's header (#903).
+
+`controller-v2.26.1` and `v2.18.1` were tagged on `b18a0be` once
+`Controller Build (main)` was green; `:latest` moved; the house moved back to
+the GA add-on. At its first start, CHE's Bluetooth proxy was started twice in
+a second, and the second bind failure escaped into the control handler and
+dropped CHE's link for 5 s (#904; not in either add-on's logs before today).
+Wil pointed out that the fleet panel's "rebooting…" is wrong, since an update
+restarts the server and not the Echo (#902).
+
+**A wake word head (#838, candidate 4).** livekit-wakeword's three heads
+(simple network, conv-attention small and medium) were trained on the
+"Hey Verona" forge run's own features with defaults that match the forge's.
+Scored frame by frame on openWakeWord's 10.7 h validation set, best recall
+within a false-wake budget:
+- **At ≤ 0.5 an hour:** forge 32.0%, livekit simple 34.3%, small 37.8%,
+  medium 46.1%.
+- **At ≤ 0.1 an hour:** forge 27.9%, livekit simple 26.6%, small 29.7%,
+  medium 42.2% (threshold 0.70).
+
+The simple network gains nothing, so the gain is the classifier. On VVV
+(`oww_probe`, whole pipeline) the medium head costs 41.4% of a core against
+38.4%, p50 32.8 ms. livekit's export (dynamic batch) fails its first
+inference on the Echo's ORT with XNNPACK in an attention Reshape, while
+passing `em_oww_check` and running on x86 ORT 1.19.2; a fixed `[1, 16, 96]`
+export runs. The positives are synthetic; real-Echo audio (step 0) is still
+owed.
+
+**Speech to text for a controller with no GPU.** Cactus Whistle (16.9 MB,
+CPU) was run on 93 saved clips beside faster-whisper and Gemma. It was twice
+as fast as whisper on the GPU (80 ms median on 8 x86 cores), but matched
+whisper word for word on 49 clips, and got the "office blind" set right 7 of
+9 times against whisper's 9. Keyword biasing recovered about 10 misses. Its
+telemetry is on by default in the Python wrapper only; it was run with that
+off and in a network namespace. Parked: a CPU-only controller would need it
+measured on ARM.
+
+**The LLM behind Verona.** Same harness as 09-27 (HA's rules plus the
+speech rules, 20 cases, three runs, two web-search cases added):
+- **Gemma 4 12B:** 57/60 at a 684 ms median turn. Its three misses were one
+  case returning nothing.
+- **Bonsai 2 27B,** on PrismML `prism-b10777`: 60/60 at 814 ms, down from
+  1215 ms on 09-27. Speculation (n-gram) changed nothing, and the MTP graft
+  did not start.
+- **Qwen3.5-9B:** 51/60 at 977 ms. It declined to search the web for a price
+  three times.
+
+At temperature 0.7 Bonsai fell to 56/60, so it runs at 0.3. Bonsai went live
+behind Verona that evening as a trial, with `wyoming-gemma` stopped, and
+whisper stays the speech to text. An instruction to add a quip
+"occasionally", or "one reply in four", produced none from it. "Always, for
+questions about the world", with three example quips and "never a new
+fact", did.
