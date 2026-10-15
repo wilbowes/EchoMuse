@@ -826,8 +826,7 @@ def test_support_bundle_attributes_metrics_to_a_device():
     present in the bundle, useless for diagnosis, and wrong in the quiet way
     where the file still looks full of data. Shipped like that in #63.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
-    body = src.split("_get_support_bundle")[-1]
+    body = _sources.def_source("_get_support_bundle")
     call = re.search(r"metrics \+= \[(.*?)\]\n", body, re.S)
     assert call, "could not find where the support bundle collects metrics"
     assert "device_id" in call.group(1), (
@@ -843,10 +842,7 @@ def test_support_bundle_redacts_account_names():
     handler must therefore pass the user table to em_support; the redaction
     itself is tested in test_support.py.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
-    # "return web.Response", not "web.Response" — the latter is the handler's
-    # own return annotation and slices the body away to nothing.
-    body = src.split("_get_support_bundle")[-1].split("return web.Response")[0]
+    body = _sources.def_source("_get_support_bundle")
     assert "accounts=" in body and "get_all_users" in body, (
         "the support bundle must pass the real accounts to em_support — "
         "there is nothing in a log line to pattern-match them by"
@@ -1132,10 +1128,9 @@ def test_bundle_live_state_carries_ambient_light_status():
     the field has to be put there by em_api. A reason that never reaches a
     bundle leaves us exactly where #90 started.
     """
-    root = Path(__file__).resolve().parent.parent
-    api = (root / "em_api.py").read_text()
-    assert '"ambient_light_status":' in api, (
-        "em_api's live_state must include ambient_light_status so support "
+    body = _sources.def_source("_get_support_bundle")
+    assert '"ambient_light_status":' in body, (
+        "the support bundle's live_state must include ambient_light_status so "
         "bundles can answer why a device reports no light sensor"
     )
 

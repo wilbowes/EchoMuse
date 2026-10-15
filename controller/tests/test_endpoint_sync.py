@@ -26,10 +26,12 @@ class FakeLive:
         self.device_id = device_id
 
 
+# Log events the code under test pushed, as (level, source, message).
+_events: list = []
+
+
 def _reset():
-    em_api._updates_in_progress = set()
-    em_api._ota_lock = asyncio.Lock()
-    em_api._events = []
+    _events.clear()
 
 
 def _patch_shell(monkeypatch, replies):
@@ -54,7 +56,7 @@ def _patch_shell(monkeypatch, replies):
         return "ok"
 
     async def fake_log(device_id, level, source, message):
-        em_api._events.append((level, source, message))
+        _events.append((level, source, message))
 
     async def no_sleep(_):
         return None
@@ -83,7 +85,7 @@ def test_an_empty_setting_removes_only_a_file_this_controller_wrote(monkeypatch)
 
     assert asyncio.run(em_api.em_payloads.sync_endpoints(FakeLive(), "dev")) is True
     assert any("rm -f" in c for c in calls), "a managed file must be removed"
-    assert any("updated" in m or "removed" in m for _, _, m in em_api._events), em_api._events
+    assert any("updated" in m or "removed" in m for _, _, m in _events), _events
 
 
 def test_an_empty_setting_leaves_a_hand_written_file_alone(monkeypatch):
@@ -106,7 +108,7 @@ def test_an_empty_setting_leaves_a_hand_written_file_alone(monkeypatch):
         "the fleet sync deleted a HAND-WRITTEN controller.json — #166 devices "
         f"lose their only route to the controller. calls={calls}"
     )
-    assert em_api._events == [], f"removing nothing must not report a change: {em_api._events}"
+    assert _events == [], f"removing nothing must not report a change: {_events}"
 
 
 def test_a_device_that_does_not_answer_is_left_entirely_alone(monkeypatch):
@@ -129,8 +131,8 @@ def test_a_device_that_does_not_answer_is_left_entirely_alone(monkeypatch):
     # It logs rather than raising a dashboard event, deliberately: this runs on
     # every connect, and an event per silent reconcile would bury the ones that
     # matter. The log line is the operator-facing record.
-    assert em_api._events == [], (
-        f"a silent device must not raise a dashboard event: {em_api._events}"
+    assert _events == [], (
+        f"a silent device must not raise a dashboard event: {_events}"
     )
 
 
@@ -151,7 +153,7 @@ def test_a_set_list_replaces_a_hand_written_file_and_says_so(monkeypatch):
     assert asyncio.run(em_api.em_payloads.sync_endpoints(FakeLive(), "dev")) is True
     assert pushed, "a configured list must be written even over a hand-written file"
     assert pushed[0][1] == em_endpoints.DEVICE_PATH
-    assert any("hand-written" in m for _, _, m in em_api._events), em_api._events
+    assert any("hand-written" in m for _, _, m in _events), _events
 
 
 def test_a_file_already_carrying_the_want_is_left_alone(monkeypatch):
@@ -168,7 +170,7 @@ def test_a_file_already_carrying_the_want_is_left_alone(monkeypatch):
 
     assert asyncio.run(em_api.em_payloads.sync_endpoints(FakeLive(), "dev")) is True
     assert pushed == [], f"re-pushed an identical file: {pushed}"
-    assert em_api._events == [], em_api._events
+    assert _events == [], _events
 
 
 def test_a_failed_removal_is_reported_and_not_claimed_as_success(monkeypatch):
@@ -188,9 +190,9 @@ def test_a_failed_removal_is_reported_and_not_claimed_as_success(monkeypatch):
     monkeypatch.setattr(em_api.em_payloads, "endpoints_file", lambda: None)
 
     assert asyncio.run(em_api.em_payloads.sync_endpoints(FakeLive(), "dev")) is False
-    assert any(level == "warn" for level, _, _ in em_api._events), em_api._events
-    assert not any("removed — mDNS" in m for _, _, m in em_api._events), (
-        f"claimed a removal that did not happen: {em_api._events}"
+    assert any(level == "warn" for level, _, _ in _events), _events
+    assert not any("removed — mDNS" in m for _, _, m in _events), (
+        f"claimed a removal that did not happen: {_events}"
     )
 
 

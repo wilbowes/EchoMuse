@@ -78,6 +78,7 @@ import em_db as db
 import em_events
 import em_process_stats
 import em_reconcile
+from version import VERSION as CONTROLLER_VERSION
 import em_releases
 import em_state
 import em_auth as auth
@@ -6023,7 +6024,7 @@ async def event_loop_lag_monitor(interval: float = 1.0,
 
 
 async def main():
-    log.info(f"EchoMuse Controller {api.CONTROLLER_VERSION}")
+    log.info(f"EchoMuse Controller {CONTROLLER_VERSION}")
     db.init(DB_PATH)
     auth.maybe_generate_bootstrap_token()
     em_player.init(
