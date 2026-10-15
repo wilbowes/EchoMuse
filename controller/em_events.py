@@ -1,8 +1,8 @@
 """
 Live events to every open dashboard: device state changes, log lines,
-pending alerts. The dashboard connects once to /api/events (em_api's
-_ws_events, which adds and removes its socket here) and is pushed each event
-as it happens rather than polling.
+pending alerts. The dashboard connects once to /api/events
+(em_routes_events._ws_events, which adds and removes its socket here) and
+is pushed each event as it happens rather than polling.
 
 Its own module because the device control handlers, the ESPHome satellite
 and the API routes all push, and none of them should need em_api to do it.

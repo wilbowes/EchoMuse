@@ -128,6 +128,7 @@ COPY em_hostip.py .
 COPY em_ingressauth.py .
 COPY em_routes_auth.py .
 COPY em_routes_config.py .
+COPY em_routes_events.py .
 COPY em_routes_link.py .
 COPY em_routes_oww.py .
 COPY em_routes_provision.py .
