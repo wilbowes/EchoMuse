@@ -16,10 +16,11 @@ suite deliberately keeps out. The handler wiring is a two-line call into
 this function on each of the two write paths.
 """
 
-import re
 from pathlib import Path
 
 import pytest
+
+import _sources
 
 CONTROLLER = Path(__file__).resolve().parents[1]
 
@@ -113,10 +114,7 @@ def test_both_write_paths_are_guarded(path, handler):
     Both endpoints replace rather than merge, so both need the check. A
     guard on only one would leave the identical trap open next door.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
-    m = re.search(rf"async def {handler}\(.*?(?=\nasync def )", src, re.S)
-    assert m, f"could not locate {handler}"
-    body = m.group(0)
+    body = _sources.def_source(handler)
     assert "_dropped_keys(" in body, f"{handler} does not call _dropped_keys"
     assert "would_drop_keys" in body, f"{handler} does not refuse the write"
 
@@ -143,10 +141,7 @@ def test_new_default_key_does_not_block_a_stale_dashboard_save():
 
 def test_guard_reads_raw_stored_config_not_the_underlaid_view():
     """The guard must call the raw accessor, or the false positive returns."""
-    src = (CONTROLLER / "em_api.py").read_text()
-    m = re.search(r"async def _post_global_config\(.*?(?=\nasync def )", src, re.S)
-    assert m
-    assert "get_global_device_config_raw" in m.group(0)
+    assert "get_global_device_config_raw" in _sources.def_source("_post_global_config")
 
 
 # ── decorator-placement guards ────────────────────────────────────────────

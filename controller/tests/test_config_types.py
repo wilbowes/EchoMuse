@@ -82,8 +82,7 @@ def test_every_default_fits_its_kind():
 def test_every_registration_conversion_is_covered():
     # handle_control converts these with float()/int()/bool(); each must be
     # listed, or a stored bad value reaches the conversion.
-    src = (CONTROLLER / "em_controller.py").read_text()
-    body = src.split("async def handle_control", 1)[1].split("\nasync def ", 1)[0]
+    body = _sources.def_source("handle_control")
     converted = set(re.findall(
         r'(?:float|int|bool)\(\s*config\.get\(\s*["\'](\w+)["\']', body))
     assert converted, "no conversions found; has handle_control changed shape?"

@@ -34,6 +34,8 @@ shipped source in the established style (see test_update_interval.py).
 import re
 from pathlib import Path
 
+import _sources
+
 CONTROLLER = Path(__file__).resolve().parents[1]
 
 
@@ -83,9 +85,7 @@ def test_the_handler_does_not_swallow_aiohttp_http_exceptions():
     internal error. The middleware re-raises HTTPException deliberately; the
     handler has to as well, and BEFORE the general clause.
     """
-    src = _src()
-    start = src.index("async def _post_upload_binary")
-    body = src[start:start + 4000]
+    body = _sources.def_source("_post_upload_binary")
 
     assert "except web.HTTPException" in body, (
         "the upload handler must re-raise aiohttp's own HTTP exceptions "

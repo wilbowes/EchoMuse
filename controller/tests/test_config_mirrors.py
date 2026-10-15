@@ -25,6 +25,8 @@ rather than a comment.
 import re
 from pathlib import Path
 
+import _sources
+
 CONTROLLER = Path(__file__).resolve().parents[1]
 
 # Keys deliberately mirrored only at registration.
@@ -59,10 +61,7 @@ def _registration_keys() -> set[str]:
 
 
 def _live_push_keys() -> set[str]:
-    src = (CONTROLLER / "em_api.py").read_text()
-    block = src.split("async def _apply_live_config")
-    assert len(block) > 1, "_apply_live_config not found — has it been renamed?"
-    body = block[1].split("\n@auth")[0]
+    body = _sources.def_source("_apply_live_config")
     return set(re.findall(r'effective\[?["\']([A-Za-z]+)["\']', body))
 
 

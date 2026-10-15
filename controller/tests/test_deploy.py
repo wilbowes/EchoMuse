@@ -868,8 +868,7 @@ def test_the_music_feed_reads_its_lead_per_chunk():
     module constant, silently restores the old behaviour and the fix becomes
     a no-op with every test still passing.
     """
-    src = (CONTROLLER / "em_player.py").read_text()
-    feed = src.split("async def _feed")[-1]
+    feed = _sources.def_source("em_player._feed")
     pacing = re.search(r"ahead = sent / BYTES_PER_SEC.*?await asyncio\.sleep\(([^)]*)\)",
                        feed, re.S)
     assert pacing, "could not find the feed's pacing sleep"
@@ -881,11 +880,17 @@ def test_the_music_feed_reads_its_lead_per_chunk():
 
 
 def _fn_body(src: str, name: str) -> str:
-    """Slice one async def out of a module's source, up to the next top-level def."""
-    start = src.index(f"async def {name}")
-    rest  = src[start + 1:]
-    end   = rest.index("\nasync def ") if "\nasync def " in rest else len(rest)
-    return src[start:start + 1 + end]
+    """The source of the one top-level function `name` in `src`, exactly.
+
+    It used to slice to the next `async def`, so it took in whatever came
+    after, and grew when the next function moved to another module: a guard
+    on _fetch_emos_payload passed on a check that lived in the function after
+    it (#921)."""
+    found = [n for n in ast.parse(src).body
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+             and n.name == name]
+    assert len(found) == 1, f"{name}: {len(found)} top-level definitions"
+    return ast.get_source_segment(src, found[0])
 
 
 def _js_fn_body(src: str, name: str) -> str:
@@ -925,7 +930,6 @@ def test_firmware_transfer_is_verified_by_md5_not_by_an_exit_status():
     its old version. Shipping an unverified binary therefore costs a reboot and
     a rollback to learn nothing at all.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
     fn  = _sources.def_source("stream_file")
 
     assert "hashlib.md5(data).hexdigest()" in fn, (
@@ -1222,15 +1226,12 @@ def test_recordings_and_transcripts_are_admin_only():
     assert audio.group(1) == "@auth.require_admin", (
         "the utterance audio route must be admin-only")
 
-    turns = re.search(
-        r"async def _get_device_turns\b.*?\n(?=\n@|\ndef |\nasync def )",
-        src, re.S)
-    assert turns and "_redact_turns_for" in turns.group(0), (
+    turns = _sources.def_source("_get_device_turns")
+    assert "_redact_turns_for" in turns, (
         "_get_device_turns must strip transcripts for non-admin sessions")
 
-    redact = re.search(r"def _redact_turns_for\(.*?\n(?=\n@|\ndef |\nasync def )",
-                       src, re.S)
-    assert redact and '"stt_text"' in redact.group(0), (
+    redact = _sources.def_source("_redact_turns_for")
+    assert '"stt_text"' in redact, (
         "_redact_turns_for must remove stt_text")
 
 
@@ -1497,11 +1498,7 @@ def test_a_new_wake_word_is_installed_before_the_device_is_told_about_it():
     The hold-back is invisible at the call site: the config push looks
     ordinary, and the whole guard is that one key was swapped out first.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
-    fn = re.search(r"async def _apply_live_config\(.*?\n(?=\nasync def |\ndef )",
-                   src, re.S)
-    assert fn, "_apply_live_config not found"
-    body = fn.group(0)
+    body = _sources.def_source("_apply_live_config")
 
     hold = body.find("em_oww_sync.hold_back_model(live, effective)")
     push = body.find('send_control({"type": "config"')
@@ -1663,10 +1660,8 @@ def test_speaking_clears_on_device_confirmation_not_on_the_socket_write():
         )
 
     for fn_name in ("_run_post_turn_playback", "_run_streaming_post_turn_playback"):
-        fn = re.search(rf"async def {fn_name}\(.*?\n(?=\nasync def |\ndef )",
-                       src, re.S)
-        assert fn, f"{fn_name} not found"
-        assert "_set_speaking(False)" in fn.group(0), (
+        fn = _sources.def_source(fn_name)
+        assert "_set_speaking(False)" in fn, (
             f"{fn_name} waits for the device's playback_stats and must be what "
             f"clears speaking"
         )
@@ -2333,7 +2328,6 @@ def test_the_payload_syncs_tell_a_missing_file_from_a_silent_device():
     seconds after connect) produces a push attempt and a user-visible "out of
     date" event that is not true.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
     for name in ("sync_start_script", "sync_debloat"):
         fn = _strip_prose(_sources.def_source(name))
         assert "em_shell.OK_MARK" in fn, (
@@ -2733,8 +2727,6 @@ def test_the_emos_and_firmware_release_namespaces_cannot_select_each_other():
     failure if it broke would be the OTA offering an aarch64 init to a fleet
     of armv7a devices as a firmware update.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
-
     fw = _strip_prose(_sources.def_source("fetch_firmware"))
     assert "_choose_firmware_release(" in fw, \
         "the firmware poll must select through version.choose_firmware_release"
