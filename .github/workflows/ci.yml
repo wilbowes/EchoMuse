@@ -468,7 +468,25 @@ jobs:
           echo "::error::controller did not report ready within 90s"
           docker logs em-ci
           exit 1
-      - name: Stop the controller
+      # The controller is PID 1 in this container, and Linux drops a signal
+      # PID 1 has no handler for. Until #889 that was SIGTERM: every stop
+      # waited the whole grace period and ended in SIGKILL (exit 137), and a
+      # start inside it failed on a port still held. 5s is well over the ~2s
+      # a clean stop takes here and well under the 10s that means it was
+      # killed.
+      - name: A stop signal shuts it down
+        run: |
+          start=$(date +%s)
+          docker stop -t 10 em-ci
+          took=$(( $(date +%s) - start ))
+          code=$(docker inspect -f '{{.State.ExitCode}}' em-ci)
+          docker logs em-ci 2>&1 | tail -5
+          echo "stopped in ${took}s with exit code ${code}"
+          [ "$code" = "0" ] || { echo "::error::controller exited ${code} on stop, not 0"; exit 1; }
+          [ "$took" -le 5 ] || { echo "::error::controller took ${took}s to stop"; exit 1; }
+          docker logs em-ci 2>&1 | grep -q "EchoMuse Controller stopped" || {
+            echo "::error::controller stopped without running its cleanup"; exit 1; }
+      - name: Remove the container
         if: always()
         run: docker rm -f em-ci 2>/dev/null || true
 

@@ -40,6 +40,23 @@ Key env vars in `.env` (see `.env.example` for the full list):
   accepts, displays and stores the setting and `em_start` warns to a log
   nobody reads.
 
+### Stopping
+
+**The controller is PID 1 in its container and must handle its own stop
+signal** (#889, `em_shutdown`). `init: false` in `config.yaml`, and
+`em_start.py` `exec`s `em_controller.py`, so nothing sits above it; Linux does
+not apply a signal's default action to PID 1, and with no handler SIGTERM was
+dropped. Every add-on stop and `docker stop` from at least 2026-10-11 to
+10-13 waited the 10 second grace period and ended in SIGKILL (exit 137), and
+a start inside those 10 seconds failed with `address already in use` on the
+dashboard port, which on 2026-10-13 left no controller running. Measured on
+the 2.26.1-ea.1 image with no Echoes attached: 10.9 s and exit 137 before,
+1.9 s and exit 0 after. `main()` awaits the signal and then runs the `finally`
+it always had; `em_shutdown.backstop` exits non-zero after 8 seconds if that
+cleanup hangs, from a thread because a stuck event loop is the case it is
+for. CI sends the stop to the booted image and fails on a slow or non-zero
+exit. Not yet measured with Echoes connected.
+
 ### Home Assistant add-on
 
 The controller also ships as a Home Assistant Supervisor add-on
