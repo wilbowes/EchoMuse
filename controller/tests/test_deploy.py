@@ -1151,14 +1151,19 @@ def test_ingress_login_passes_the_real_deployment_flag_and_peer_address():
     test_ingressauth.py; this pins that it is actually consulted with real
     inputs.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
+    src = _sources.def_source("_post_ingress_login")
     call = re.search(
         r"em_ingressauth\.decide\((.*?)\)\s*\n", src, re.S)
-    assert call, "em_api no longer calls em_ingressauth.decide"
+    assert call, "_post_ingress_login no longer calls em_ingressauth.decide"
     args = call.group(1)
 
-    assert "ingress_only=INGRESS_ONLY" in args, (
-        "ingress_only must be the module's INGRESS_ONLY, never a literal")
+    assert "ingress_only=em_ingressauth.INGRESS_ONLY" in args, (
+        "ingress_only must be em_ingressauth.INGRESS_ONLY, never a literal")
+    # ...and that flag is the deployment's, read from the environment once.
+    flag = re.search(r"^INGRESS_ONLY = (.*)$",
+                     _sources.source(CONTROLLER / "em_ingressauth.py"), re.M)
+    assert flag and "ECHOMUSE_HOME_ASSISTANT_INGRESS" in flag.group(1), (
+        "INGRESS_ONLY must come from the add-on's environment")
     assert "remote=request.remote" in args, (
         "remote must be the live peer address, never a literal")
     for literal in ("ingress_only=True", "remote=em_ingressauth.INGRESS_GATEWAY_IP"):
@@ -1179,8 +1184,8 @@ def test_ingress_login_is_the_only_reader_of_the_remote_user_headers():
         text = path.read_text()
         if re.search(r'headers(?:\.get\(|\[)\s*["\']X-Remote-User', text):
             readers.append(path.name)
-    assert readers == ["em_api.py"], (
-        f"X-Remote-User headers read in {readers} — expected em_api.py only")
+    assert readers == ["em_routes_auth.py"], (
+        f"X-Remote-User headers read in {readers} — expected em_routes_auth.py only")
 
 
 def test_addon_panel_stays_admin_only():
@@ -1237,11 +1242,7 @@ def test_role_changes_refuse_to_strand_the_install():
     the one an admin reaches for while tidying up.
 
     """
-    src = (CONTROLLER / "em_api.py").read_text()
-    handler = re.search(
-        r"async def _patch_user\b.*?\n(?=\n@|\ndef |\nasync def )", src, re.S)
-    assert handler, "_patch_user not found"
-    body = handler.group(0)
+    body = _strip_prose(_sources.def_source("_patch_user"))
 
     assert "admin_count" in body, "must count admins before demoting one"
     assert "last_admin" in body, "must refuse to remove the final admin"

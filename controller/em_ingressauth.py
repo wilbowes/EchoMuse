@@ -30,7 +30,15 @@ the caller's business. See docs and config.yaml's `panel_admin`.
 
 from __future__ import annotations
 
+import os
 from typing import NamedTuple, Optional
+
+# Set when running as a Home Assistant add-on (config.yaml's `environment`
+# block) — gates em_api's ingress-only middleware. Unset for every other
+# deployment (docker-compose, bare python), which keeps serving the
+# dashboard directly exactly as before. decide() takes it as an argument,
+# so it stays a pure function of its inputs.
+INGRESS_ONLY = os.environ.get("ECHOMUSE_HOME_ASSISTANT_INGRESS") == "true"
 
 # Supervisor's gateway address. Every ingress request is proxied from here.
 INGRESS_GATEWAY_IP = "172.30.32.2"
