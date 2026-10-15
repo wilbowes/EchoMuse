@@ -282,7 +282,7 @@ async def _run_update_locked(device_id: str, release: dict,
         # Gated, because the debloat is Android-only: a pm-hide list and a
         # Magisk service.d script, and emOS has neither a package manager nor
         # Magisk. This was the THIRD call site of em_payloads.sync_debloat and the only
-        # one that did not ask — reconcile_on_connect and _post_debloat both
+        # one that did not ask — em_reconcile.on_connect and _post_debloat both
         # check. Found on EFF 2026-09-07 at its first OTA onto emOS: the
         # transfer targeted /sbin/.core/img/.core/service.d/ on a device with
         # no Magisk daemon to have created it.

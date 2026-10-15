@@ -2235,12 +2235,12 @@ def test_the_connect_handler_reconciles_all_three_payloads():
     that reaches a device on current firmware.
     """
     src = _strip_prose((CONTROLLER / "em_controller.py").read_text())
-    assert "api.reconcile_on_connect(" in src, (
-        "the connect handler must call api.reconcile_on_connect"
+    assert "em_reconcile.on_connect(" in src, (
+        "the connect handler must call em_reconcile.on_connect"
     )
     elsewhere = "\n".join(_sources.code_only(_sources.source(m))
-                          for m in _sources.MODULES if m.name != "em_api.py")
-    assert "reconcile_oww_assets(" not in elsewhere, (
+                          for m in _sources.MODULES if m.name != "em_reconcile.py")
+    assert "em_oww_sync.reconcile(" not in elsewhere, (
         "call the umbrella, not one payload — the other two then have no "
         "trigger that reaches a device already on the latest firmware"
     )
@@ -2251,8 +2251,7 @@ def test_the_reconcile_runs_the_three_payloads_sequentially():
     All three talk to one device over one shell plane. Gathering them contends
     for a single session for no gain — nothing is on a critical path here.
     """
-    fn = _strip_prose(_fn_body(
-        (CONTROLLER / "em_api.py").read_text(), "reconcile_on_connect"))
+    fn = _strip_prose(_sources.def_source("em_reconcile.on_connect"))
 
     for step in ("em_oww_sync.reconcile", "em_payloads.sync_start_script", "em_payloads.sync_debloat"):
         assert step in fn, f"{step} must run on connect"
@@ -2267,8 +2266,7 @@ def test_one_failing_payload_does_not_skip_the_others():
     wake word models, so each step is caught individually rather than the loop
     being wrapped in one try.
     """
-    fn = _strip_prose(_fn_body(
-        (CONTROLLER / "em_api.py").read_text(), "reconcile_on_connect"))
+    fn = _strip_prose(_sources.def_source("em_reconcile.on_connect"))
     body = fn[fn.index("for name"):]
     assert "try:" in body and "except Exception" in body, (
         "each step must be caught inside the loop, not around it"
@@ -2282,13 +2280,11 @@ def test_the_reconcile_is_debounced_and_claimed_before_the_work():
     multi-megabyte push, and a device that reconnects mid-run must not start a
     second one against the same shell plane.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
-    fn  = _strip_prose(_fn_body(src, "reconcile_on_connect"))
-    assert "_reconcile_due(" in fn, "the reconcile must be debounced per device"
+    fn  = _strip_prose(_sources.def_source("em_reconcile.on_connect"))
+    assert "_due(" in fn, "the reconcile must be debounced per device"
 
-    decide = src[src.index("def _reconcile_due"):]
-    decide = _strip_prose(decide[:decide.index("\nasync def ")])
-    stamp  = decide.index("_last_reconcile[device_id] = now")
+    decide = _strip_prose(_sources.def_source("em_reconcile._due"))
+    stamp  = decide.index("stamps[device_id] = now")
     ret    = decide.index("return True")
     assert stamp < ret, "claim the debounce before returning, not after the work"
 
@@ -2300,10 +2296,9 @@ def test_emos_crash_logs_are_checked_on_connect_before_the_debounce():
     only for a device that positively reported emOS, which is what saves the
     ram console.
     """
-    fn = _strip_prose(_fn_body(
-        (CONTROLLER / "em_api.py").read_text(), "reconcile_on_connect"))
+    fn = _strip_prose(_sources.def_source("em_reconcile.on_connect"))
     assert "_collect_crash_log(" in fn
-    assert fn.index("_collect_crash_log(") < fn.index("_reconcile_due(")
+    assert fn.index("_collect_crash_log(") < fn.index("_due(")
     gate = fn[:fn.index("_collect_crash_log(")]
     assert "not live.android_userspace" in gate
 
@@ -2313,8 +2308,7 @@ def test_the_crash_log_marker_is_written_only_after_a_complete_read():
     The marker says "this boot was examined". Writing it before the read
     completed would lose a crash to a dropped shell session.
     """
-    fn = _strip_prose(_fn_body(
-        (CONTROLLER / "em_api.py").read_text(), "_collect_crash_log"))
+    fn = _strip_prose(_sources.def_source("em_reconcile._collect_crash_log"))
     read = fn.index("cat {kmsg}")
     assert fn.index("em_shell.OK_MARK not in out") > read
     assert fn.index("summarise(") > fn.index("em_shell.OK_MARK not in out")
@@ -2326,9 +2320,8 @@ def test_deleting_a_device_forgets_its_debounce():
     A re-added device is the one whose payloads are least likely to be right;
     inheriting the deleted row's stamp would skip its first reconcile.
     """
-    fn = _strip_prose(_fn_body(
-        (CONTROLLER / "em_api.py").read_text(), "_delete_device"))
-    assert "forget_reconcile(device_id)" in fn
+    fn = _strip_prose(_sources.def_source("_delete_device"))
+    assert "em_reconcile.forget(device_id)" in fn
 
 
 def test_the_payload_syncs_tell_a_missing_file_from_a_silent_device():
@@ -3021,7 +3014,7 @@ def test_every_debloat_push_asks_which_userspace_the_device_booted():
     service.d script — and emOS has neither a package manager nor Magisk.
 
     `em_payloads.sync_debloat` has THREE call sites and for a while only two of them
-    asked. `reconcile_on_connect` gates on `live.android_userspace` and
+    asked. `em_reconcile.on_connect` gates on `live.android_userspace` and
     `_post_debloat` refuses with `not_android`, but the OTA path in
     `_run_update_locked` called it unconditionally. Found on EFF, 2026-09-07,
     at its first OTA after being moved to emOS: the transfer targeted

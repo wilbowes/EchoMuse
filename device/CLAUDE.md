@@ -565,7 +565,7 @@ model on the device — including ones a user trained and cannot re-download.
 Stock models are required by definition and never evictable.
 
 **Reconcile-on-connect** (`em_api.reconcile_oww_assets`, reached through
-`reconcile_on_connect` — see controller/CLAUDE.md for the other two payloads
+`em_reconcile.on_connect` — see controller/CLAUDE.md for the other two payloads
 that ride with it) closes the offline case, and three rules keep it from doing
 harm:
 

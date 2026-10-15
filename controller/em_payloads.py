@@ -6,7 +6,7 @@ controller address list (controller.json, #166).
 Each sync compares the device's copy by md5 and pushes only on a difference,
 and each tells a missing file from a device that did not answer
 (em_shell.OK_MARK) before deciding anything. They run on connect
-(em_api.reconcile_on_connect), during an OTA, and from the Maintenance
+(em_reconcile.on_connect), during an OTA, and from the Maintenance
 button; see "OTA update system" in controller/CLAUDE.md.
 """
 

@@ -76,6 +76,7 @@ from websockets.asyncio.server import ServerConnection as WebSocketServerProtoco
 
 import em_db as db
 import em_events
+import em_reconcile
 import em_releases
 import em_state
 import em_auth as auth
@@ -5087,7 +5088,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         # reads as "not reported" rather than as a fault.
         device.ambient_light_status = msg.get("ambient_light_status")
         # Static property of the boot, so it arrives with registration
-        # rather than on the stats tick — reconcile_on_connect asks for it
+        # rather than on the stats tick — em_reconcile.on_connect asks for it
         # immediately and a stats-borne value is ~30s too late.
         device._base_os = msg.get(em_platform.REGISTER_KEY)
         # Persisted as well as held live (schema v21). The live value answers
@@ -5214,10 +5215,10 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             device.wake_capture.reset()
         device.oww_on_device = new_oww_on_device
         # Wake word assets, start script and debloat, reconciled against what
-        # the device actually has — see api.reconcile_on_connect for why the
+        # the device actually has — see em_reconcile.on_connect for why the
         # arrival is the trigger. Background: shell round trips and possibly a
         # multi-megabyte push, none of which the handshake should wait on.
-        em_tasks.spawn(api.reconcile_on_connect(device_id, device))
+        em_tasks.spawn(em_reconcile.on_connect(device_id, device))
         # An approval (a new device, or an approved pairing) issues link
         # credentials unless this connection already has working ones.
         if em_pairing.approved(device_id):

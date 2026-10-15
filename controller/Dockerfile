@@ -156,6 +156,7 @@ COPY em_payloads.py .
 COPY em_ota.py .
 COPY em_oww_sync.py .
 COPY em_emos_ota.py .
+COPY em_reconcile.py .
 COPY em_listen.py .
 COPY em_wakelevel.py .
 COPY em_endpoints.py .
