@@ -1772,7 +1772,7 @@ carried across untouched. Nothing asks which amonet a device has.
 
 `em_emos_update.run_update(io)` is the whole sequence, written against a small
 `io` so it runs in `tests/test_emos_update_flow.py` against a simulated device
-whose commands are executed by a REAL shell with busybox. `em_api._EmosIO` is
+whose commands are executed by a REAL shell with busybox. `em_emos_ota._EmosIO` is
 the real carrier and decides nothing. That test found two things no reading
 would have: `dd` without `conv=notrunc`, and that not every busybox has
 `base64` (Ubuntu's does not), which is why preflight probes each tool by
@@ -1813,7 +1813,7 @@ controller that is down through that window costs a good update its place** —
 it is rolled back and has to be retried. That was chosen over promoting an
 image nobody could reach (Wil, 2026-10-02).
 
-**Confirmation is stateless on purpose.** `_emos_status_on_connect` runs for
+**Confirmation is stateless on purpose.** `em_emos_ota.status_on_connect` runs for
 every emOS connect, not debounced: the mark carries the build it was written
 for, so a controller that restarted mid-update still confirms. It also stores
 `emos_version`/`emos_build` (schema v30) — read over the shell plane rather

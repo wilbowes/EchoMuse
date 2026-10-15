@@ -773,7 +773,7 @@ def test_a_failed_update_asks_for_the_supervisor_log():
     # The failure paths live in _run_update_locked, which is what awaits
     # _monitor_reconnect and decides what its result means. (_run_update is
     # now the queue wrapper in front of it.)
-    monitor = _sources.def_source("_run_update_locked")
+    monitor = _sources.def_source("em_ota._run_update_locked")
     assert monitor.count("supervisor_log_wanted.add") >= 2, (
         "both update-failure paths (auto-rollback and timeout) must request "
         "the supervisor log"
@@ -2026,7 +2026,7 @@ def test_firmware_updates_are_serialised_across_the_whole_controller():
     assert acquire < work, (
         "the lock must be acquired BEFORE the update work starts"
     )
-    inner = _strip_prose(_sources.def_source("_run_update_locked"))
+    inner = _strip_prose(_sources.def_source("em_ota._run_update_locked"))
     assert "_stream_binary_to_slot" in inner, (
         "the transfer must live inside the locked half"
     )
@@ -2769,8 +2769,7 @@ def test_the_emos_init_is_verified_before_it_is_served():
     ways to get an init, and a check at only one is a way in that does not
     verify.
     """
-    api = (CONTROLLER / "em_api.py").read_text()
-    resolver = _strip_prose(_fn_body(api, "_fetch_one_init"))
+    resolver = _strip_prose(_sources.def_source("em_emos_ota._fetch_one_init"))
     assert "init_binary_problems" in resolver, (
         "the init must be checked for architecture/static before it is served")
     assert "bad_release_asset" in resolver
@@ -2780,13 +2779,13 @@ def test_the_emos_init_is_verified_before_it_is_served():
 
     # Every route to an init goes through that one function, so none of them can
     # serve an unchecked one.
-    assert "_fetch_one_init" in _strip_prose(_fn_body(api, "_fetch_emos_init")), \
+    assert "_fetch_one_init" in _strip_prose(_sources.def_source("em_emos_ota.fetch_init")), \
         "the download endpoint's resolver must go through _fetch_one_init"
-    assert "_fetch_one_init" in _strip_prose(_fn_body(api, "_fetch_emos_payload")), \
+    assert "_fetch_one_init" in _strip_prose(_sources.def_source("em_emos_ota.fetch_payload")), \
         "the image endpoint's resolver must go through _fetch_one_init"
-    for name, want in (("_get_provision_emos_init", "_fetch_emos_init"),
-                       ("_post_provision_emos_image", "_fetch_emos_payload")):
-        fn = _strip_prose(_fn_body(api, name))
+    for name, want in (("_get_provision_emos_init", "em_emos_ota.fetch_init"),
+                       ("_post_provision_emos_image", "em_emos_ota.fetch_payload")):
+        fn = _strip_prose(_sources.def_source(name))
         assert want in fn, f"{name} must resolve through {want}"
 
 
@@ -2897,8 +2896,8 @@ def test_the_emos_release_workflow_asserts_what_it_publishes():
     # exact name, so renaming it strands every controller already in the field
     # looking for it — which is why the second init was ADDED as `init32`
     # rather than the pair being renamed to `init-arm64`/`init-arm`.
-    api = (CONTROLLER / "em_api.py").read_text()
-    mapping = api[api.index("EMOS_INIT_ASSETS = {"):]
+    ota = (CONTROLLER / "em_emos_ota.py").read_text()
+    mapping = ota[ota.index("INIT_ASSETS = {"):]
     mapping = mapping[:mapping.index("}") + 1]
     assert '"init"' in mapping and '"init32"' in mapping, (
         f"the arch-to-asset map must name the published assets, got: {mapping}")
@@ -2955,8 +2954,11 @@ def test_the_wifi_tools_go_only_into_a_32_bit_image():
     Missing them on FireOS 6 is fatal, not degraded: Amazon's aborts under emOS,
     so the image would have no WiFi and no way to report it but a cable.
     """
-    api = (CONTROLLER / "em_api.py").read_text()
-    fn = _strip_prose(_fn_body(api, "_fetch_emos_payload"))
+    ota = (CONTROLLER / "em_emos_ota.py").read_text()
+    # The gate is in select_payload, which fetch_payload hands the release to.
+    assert "select_payload(" in _strip_prose(
+        _sources.def_source("em_emos_ota.fetch_payload"))
+    fn = _strip_prose(_sources.def_source("em_emos_ota.select_payload"))
     assert "ARCH_ARM" in fn, (
         "the WiFi tools must be gated on the reference's kernel architecture")
     assert "no_wifi_tools_for_arch" in fn, (
@@ -2971,12 +2973,12 @@ def test_the_wifi_tools_go_only_into_a_32_bit_image():
 
     # And all three travel together: em-wifi is useless without the two binaries
     # it drives, and wpa_cli alone would change which binary init's nudge uses.
-    assert "EMOS_SBIN_ASSETS" in fn, \
+    assert "SBIN_ASSETS" in fn, \
         "the tools must come from the one list, so they cannot diverge"
-    tools = api[api.index("EMOS_SBIN_ASSETS = ("):]
+    tools = ota[ota.index("\nSBIN_ASSETS = ("):]
     tools = tools[:tools.index(")") + 1]
     for name in ("wpa_supplicant", "wpa_cli", "em-wifi", "busybox"):
-        assert f'"{name}"' in tools, f"{name} missing from EMOS_SBIN_ASSETS"
+        assert f'"{name}"' in tools, f"{name} missing from SBIN_ASSETS"
 
 
 def test_a_v2_device_is_refused_by_the_fireos_flow_and_accepted_by_emos():

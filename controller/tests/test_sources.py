@@ -50,5 +50,5 @@ def test_code_only_takes_an_indented_method():
 def test_find_def_takes_a_module_qualified_name():
     path, _ = _sources.find_def("em_ota.run_update")
     assert path.name == "em_ota.py"
-    with pytest.raises(AssertionError, match="defined 2 times"):
-        _sources.find_def("run_update")       # em_ota and em_emos_update
+    with pytest.raises(AssertionError, match="defined 3 times"):
+        _sources.find_def("run_update")       # em_ota, em_emos_ota, em_emos_update

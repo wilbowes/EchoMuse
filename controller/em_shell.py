@@ -22,6 +22,10 @@ import em_state
 
 log = logging.getLogger("echomuse.api")
 
+# How long to wait before asking again when the shell plane did not answer:
+# seconds after a register it is often not up yet.
+CONNECT_RETRY_S = 10.0
+
 sockets: dict = {}   # device_id → live ws for programmatic sessions
 locks:   dict = {}   # device_id → asyncio.Lock (one session at a time)
 # device_id → the asyncio Task that actually holds its lock.

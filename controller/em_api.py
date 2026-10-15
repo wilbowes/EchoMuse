@@ -62,6 +62,7 @@ import em_releases
 import em_payloads
 import em_ota
 import em_oww_sync
+import em_emos_ota
 import em_http
 import em_state
 import em_health
@@ -167,20 +168,8 @@ def set_link_ports(ip: str, port: int, tls_port: int) -> None:
 # Pending local binary uploads — keyed by UUID token, expire after 10 minutes.
 _pending_uploads: dict[str, bytes] = {}
 
-# emOS updates (#573, em_emos_update). Their own sets rather than the firmware
-# ones above: the dashboard shows the two side by side, and a shared flag
-# would put "updating…" on the firmware panel while emOS is being flashed.
-# Both endpoints refuse while EITHER is running on a device.
-_emos_updates_in_progress: set[str] = set()
-_emos_updates_queued: set[str] = set()
-_emos_update_errors: dict[str, str] = {}
-# The step an update is on, for the panel. Cleared when it ends.
-_emos_update_stage: dict[str, str] = {}
 # Uploaded payload bundles (the dev path), token -> (files, version).
 _pending_emos_uploads: dict[str, tuple] = {}
-# An emOS update holds the queue through the reboot and, when the new image
-# fails, through init's whole trial and rollback.
-EMOS_OTA_MAX_HOLD_S = em_emos_update.WATCH_S + 600.0
 
 # Largest firmware binary /api/releases/upload will accept. Roughly 5x the
 # current ~10.7 MB build, so it bounds memory (the upload is held in RAM until
@@ -1634,7 +1623,7 @@ async def _post_device_update(request: web.Request) -> web.Response:
         return em_http.error("device_offline", "Device is not connected", 409)
 
     if (device_id in em_ota.in_progress or device_id in em_ota.queued
-            or _emos_update_busy(device_id)):
+            or em_emos_ota.busy(device_id)):
         return em_http.error("update_in_progress", "An update is already in progress", 409)
 
     # Installing what the device is already running costs a transfer, a
@@ -1689,7 +1678,7 @@ async def _post_device_rollback(request: web.Request) -> web.Response:
         return em_http.error("device_offline", "Device is not connected", 409)
 
     if (device_id in em_ota.in_progress or device_id in em_ota.queued
-            or _emos_update_busy(device_id)):
+            or em_emos_ota.busy(device_id)):
         return em_http.error("update_in_progress", "An update is already in progress", 409)
 
     em_tasks.spawn(em_ota.run_rollback(device_id, row["firmware_previous"]))
@@ -1865,10 +1854,6 @@ async def _delete_oww_model(request: web.Request) -> web.Response:
 # what it writes is the boot partition. em_emos_update holds every decision
 # and its docstring is the design; this section only carries.
 
-def _emos_update_busy(device_id: str) -> bool:
-    return (device_id in _emos_updates_in_progress
-            or device_id in _emos_updates_queued)
-
 
 @auth.require_admin
 async def _post_emos_upload(request: web.Request) -> web.Response:
@@ -1945,7 +1930,7 @@ async def _post_device_emos_update(request: web.Request) -> web.Response:
     # Refused here as well as greyed out in the panel: this is a plain POST.
     if live.android_userspace:
         return em_http.error("not_emos", "This device is not running emOS", 409)
-    if (_emos_update_busy(device_id) or device_id in em_ota.in_progress
+    if (em_emos_ota.busy(device_id) or device_id in em_ota.in_progress
             or device_id in em_ota.queued):
         return em_http.error("update_in_progress", "An update is already in progress", 409)
 
@@ -1976,193 +1961,8 @@ async def _post_device_emos_update(request: web.Request) -> web.Response:
 
     if token:
         _pending_emos_uploads.pop(token, None)
-    em_tasks.spawn(_run_emos_update(device_id, override))
+    em_tasks.spawn(em_emos_ota.run_update(device_id, override))
     return em_http.ok({"status": "started", "version": version}, status=202)
-
-
-async def _emos_update_failed(device_id: str, reason: str) -> None:
-    """Every abort path comes through here, as _update_failed's do."""
-    _emos_update_errors[device_id] = reason
-    # The controller's own log as well as the device's: on C95's first run
-    # the only trace here was the file transfer, with no outcome either way.
-    log.warning(f"[api] [{device_id}] emOS update failed: {reason}")
-    await em_events.push_log(device_id, "error", "controller",
-                          f"emOS update: {reason}")
-    await em_events.push({"type": "device_emos_update_failed",
-                       "device_id": device_id, "error": reason})
-
-
-async def _run_emos_update(device_id: str, override: tuple | None = None) -> None:
-    """Background task: queue behind `em_ota.queue`, then update under a cap."""
-    _emos_update_errors.pop(device_id, None)
-    _emos_updates_queued.add(device_id)
-    try:
-        await em_ota.queue.acquire()
-    finally:
-        _emos_updates_queued.discard(device_id)
-
-    _emos_updates_in_progress.add(device_id)
-    try:
-        await asyncio.wait_for(_run_emos_update_locked(device_id, override),
-                               timeout=EMOS_OTA_MAX_HOLD_S)
-    except asyncio.TimeoutError:
-        await _emos_update_failed(
-            device_id,
-            f"abandoned after {EMOS_OTA_MAX_HOLD_S:.0f}s so the queue could "
-            f"continue — the device may still be mid-update")
-    except Exception as e:
-        log.exception(f"[api] emOS update error for {device_id}: {e}")
-        await _emos_update_failed(device_id, f"exception: {e}")
-    finally:
-        _emos_updates_in_progress.discard(device_id)
-        _emos_update_stage.pop(device_id, None)
-        em_ota.queue.release()
-
-
-async def _emos_sh(live, cmd: str, timeout: float = 60.0) -> str:
-    """
-    Run `cmd` on the device and return what it printed up to em_emos_update.OK.
-
-    Not em_shell.run: that gives up after 5s of SILENCE, and a boot partition
-    write is silent for longer than that. Returning early would also close the
-    session under a dd that is still running. This waits the whole timeout,
-    and a reply without OK is "did not finish" to every parser.
-    """
-    device_id = live.device_id
-    buf = ""
-    try:
-        ws = await em_shell.get_ws(live)
-        await ws.send(cmd + "\n")
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline and em_emos_update.OK not in buf:
-            try:
-                msg = await asyncio.wait_for(ws.recv(), timeout=5.0)
-            except asyncio.TimeoutError:
-                continue
-            buf += (msg.decode("utf-8", errors="replace")
-                    if isinstance(msg, bytes) else msg)
-    except Exception as e:
-        log.warning(f"[api] [{device_id}] emOS shell step did not finish: {e}")
-    finally:
-        await em_shell.release_ws(device_id, live)
-    await asyncio.sleep(1.0)        # let the session close before the next
-    return buf
-
-
-# `step` takes a `log` argument, which hides the module's logger inside it.
-_emos_log = log
-
-
-class _EmosIO:
-    """What em_emos_update.run_update needs from the controller."""
-
-    def __init__(self, device_id: str, live, override: tuple | None):
-        self.device_id, self.live, self.override = device_id, live, override
-
-    async def sh(self, cmd: str, timeout: float) -> str:
-        return await _emos_sh(self.live, cmd, timeout)
-
-    async def send(self, data: bytes, dest: str) -> str:
-        sent = await em_shell.stream_file(self.live, data, dest, mode="600",
-                                            require_verify=True)
-        await asyncio.sleep(1.0)
-        return "" if sent else str(sent)
-
-    async def payload(self, arch: str) -> tuple:
-        if self.override is not None:
-            init_bin, sbin, version, err = _select_emos_payload(
-                self.override[0], arch, self.override[1])
-        else:
-            init_bin, sbin, version, err = await _fetch_emos_payload(arch)
-        if err is not None:
-            try:
-                reason = json.loads(err.text)["error"]
-            except Exception:
-                reason = "the emOS release could not be fetched"
-            raise em_emos_update.Refused(reason + em_emos_update.UNCHANGED)
-        return init_bin, sbin, version
-
-    async def offload(self, fn, *args):
-        # Gzipping a ramdisk and hashing two images blocks the loop for long
-        # enough to matter while other devices stream audio through it.
-        return await asyncio.get_event_loop().run_in_executor(None, fn, *args)
-
-    async def step(self, msg: str, log: bool = True) -> None:
-        _emos_update_stage[self.device_id] = msg
-        if log:
-            _emos_log.info(f"[api] [{self.device_id}] emOS update: {msg}")
-            await em_events.push_log(self.device_id, "info", "controller",
-                                  f"emOS update: {msg}")
-
-    async def record(self, version, build) -> None:
-        em_dbwriter.submit(db.set_device_emos, self.device_id, version, build)
-
-    async def sleep(self, seconds: float) -> None:
-        await asyncio.sleep(seconds)
-
-    def now(self) -> float:
-        return time.monotonic()
-
-    def relink(self) -> str:
-        current = em_state.devices.get(self.device_id)
-        if current is self.live:
-            return "same"
-        if current is None:
-            return "gone"
-        self.live = current
-        return "new"
-
-
-async def _run_emos_update_locked(device_id: str, override: tuple | None) -> None:
-    live = em_state.devices.get(device_id)
-    if live is None:
-        return await _emos_update_failed(
-            device_id, "the device disconnected before the update started")
-    try:
-        version = await em_emos_update.run_update(
-            _EmosIO(device_id, live, override))
-    except em_emos_update.Refused as e:
-        return await _emos_update_failed(device_id, str(e))
-    _emos_update_errors.pop(device_id, None)
-    log.info(f"[api] [{device_id}] emOS update confirmed: {version}")
-    await em_events.push_log(device_id, "info", "controller",
-                          f"✓ emOS update confirmed: {version}")
-    await em_events.push({"type": "device_emos_updated",
-                       "device_id": device_id, "version": version})
-
-
-async def _emos_status_on_connect(live, device_id: str) -> None:
-    """Record which emOS a connected device runs, and settle a trial mark the
-    update task is no longer around to settle (em_emos_update.settle_on_connect)."""
-    if _emos_update_busy(device_id):
-        return
-    sh = lambda cmd, timeout: _emos_sh(live, cmd, timeout)
-    st, verdict = await em_emos_update.settle_on_connect(sh)
-    if not st and em_state.devices.get(device_id) is live:
-        await asyncio.sleep(CRASH_LOG_RETRY_S)      # shell plane not up yet
-        if em_state.devices.get(device_id) is live and not _emos_update_busy(device_id):
-            st, verdict = await em_emos_update.settle_on_connect(sh)
-    if not st:
-        return
-    em_dbwriter.submit(db.set_device_emos, device_id, st["version"], st["build"])
-    if verdict == "confirm":
-        await em_events.push_log(device_id, "info", "controller",
-                              f"✓ emOS update confirmed: {st['version']}")
-    elif verdict == "incomplete":
-        log.warning(f"[api] [{device_id}] an emOS update did not complete; "
-                    f"running {st['version']}")
-        await em_events.push_log(
-            device_id, "warn", "controller",
-            f"An emOS update did not complete or was rolled back: the Echo "
-            f"is running {st['version']}. The image it left behind was removed.")
-    elif verdict == "rolled_back":
-        if st["rollback"]:
-            msg = em_emos_update.rollback_text(st["rollback"], st["version"])
-        else:
-            msg = (f"emOS update to {st['mark'].get('version', '?')} was "
-                   f"rolled back: the Echo is running {st['version']}")
-        log.warning(f"[api] [{device_id}] {msg}")
-        await em_events.push_log(device_id, "warn", "controller", msg)
 
 
 # ─── Shell WebSocket proxy (interactive dashboard terminal) ───────────────────
@@ -3043,7 +2843,6 @@ async def _get_controller_release(request: web.Request) -> web.Response:
     return em_http.ok(data)
 
 
-
 # ─── Connect-time reconcile ───────────────────────────────────────────────────
 
 # How long a device is left alone after a connect-time reconcile. Devices on
@@ -3072,11 +2871,6 @@ def _reconcile_due(device_id: str, now: float,
     return True
 
 
-# How long to wait before asking again when the shell plane did not answer:
-# seconds after a register it is often not up yet.
-CRASH_LOG_RETRY_S = 10.0
-
-
 async def _collect_crash_log(live, device_id: str) -> None:
     """
     Report an emOS device's previous boot if it did not end cleanly.
@@ -3097,7 +2891,7 @@ async def _collect_crash_log(live, device_id: str) -> None:
         if em_shell.OK_MARK in probe:
             break
         if attempt == 0:
-            await asyncio.sleep(CRASH_LOG_RETRY_S)
+            await asyncio.sleep(em_shell.CONNECT_RETRY_S)
             if em_state.devices.get(device_id) is not live:
                 return
     else:
@@ -3165,7 +2959,7 @@ async def reconcile_on_connect(device_id: str, live) -> None:
         # Not debounced either: an image on trial has TRIAL_SECS to be
         # confirmed, and this is what confirms it after a controller restart.
         try:
-            await _emos_status_on_connect(live, device_id)
+            await em_emos_ota.status_on_connect(live, device_id)
         except Exception as e:
             log.warning(f"[api] [{device_id}] emOS status check failed ({e})")
     if not _reconcile_due(device_id, time.monotonic()):
@@ -3265,7 +3059,6 @@ async def _post_oww_assets(request: web.Request) -> web.Response:
     return em_http.ok(result)
 
 
-
 @auth.require_auth
 async def _get_provision_oww_manifest(request: web.Request) -> web.Response:
     """
@@ -3313,7 +3106,6 @@ async def _get_provision_oww_asset(request: web.Request) -> web.Response:
         content_type="application/octet-stream",
         headers={"X-Asset-MD5": asset.md5},
     )
-
 
 
 def _read_first_line(path: str) -> str:
@@ -3474,206 +3266,6 @@ async def _post_provision_diagnostics(request: web.Request) -> web.Response:
     )
 
 
-# Which release asset carries the init for each kernel architecture. The init
-# must match the device's KERNEL — see em_emos_build's ARCH_* constants — and
-# these are the names emos-release.yml publishes.
-EMOS_INIT_ASSETS = {
-    em_emos_build.ARCH_ARM64: "init",
-    em_emos_build.ARCH_ARM: "init32",
-}
-
-# emOS's own userspace, installed into the image's /sbin. ONE build serves
-# both kernels — these are ordinary processes, and a 64-bit kernel runs 32-bit
-# binaries — so unlike the init there is nothing per-architecture here.
-#
-# busybox is here for the same reason the supplicant is: a FireOS 6 /system
-# ships toybox and no busybox at all, so without ours there is no udhcpc and
-# the image boots, associates, and never gets an address — plus no ntpd, no
-# syslogd/klogd, and no awk for em-wifi to read a scan with.
-#
-# This tuple is an allowlist and a payload missing any member is REFUSED, so
-# adding a name here strands every emOS release cut before it. Tag emOS first,
-# then the controller.
-EMOS_SBIN_ASSETS = ("wpa_supplicant", "wpa_cli", "em-wifi", "busybox")
-
-# The one member that rides in BOTH images. em-wifi is a shell script init
-# never execs, and it resolves wpa_cli and wpa_supplicant the same
-# /sbin-then-/system/bin way init does — so adding it to a FireOS 5 image
-# changes nothing about which supplicant runs, which is the constraint the
-# rest of this payload is held to.
-#
-# Without it a FireOS 5 device has no console way to set WiFi at all, and that
-# is most of the fleet. Found on Office, 2026-09-21: emos-v0.8, /sbin/em-wifi
-# absent, and correctly so under the old rule.
-EMOS_SBIN_BOTH_ARCHES = ("em-wifi",)
-
-# One archive with a manifest of sha256s — see build_payload_bundle.
-EMOS_PAYLOAD_ASSET = "emos-payload.zip"
-
-
-async def _fetch_emos_payload(arch: str) -> tuple:
-    """Everything an emOS image needs for `arch`, from ONE release.
-
-    Returns (init, sbin, version, error) — `sbin` being the /sbin tools the
-    packer installs, and `error` a ready web.Response on failure and None on
-    success, so every caller refuses identically. They are entry points to one
-    question, and an answer that differed between them would be a bug nobody
-    would look for.
-
-    Comes from the release's bundle. A release predating it falls back to its
-    loose `init`, which is enough for FireOS 5 — so today's fleet keeps
-    provisioning with no new tag. FireOS 6 needs the bundle and says so.
-    """
-    release = await em_releases.fetch_emos()
-    if release is None:
-        return None, {}, "", em_http.error(
-            "no_emos_release",
-            "No published emOS release with an 'init' asset was found. Build "
-            "one from emos/ with build.sh and select it by hand, or cut an "
-            "emos-v* tag.", 404)
-
-    version = release["version"]
-    bundle_asset = release.get("assets", {}).get(EMOS_PAYLOAD_ASSET)
-
-    if bundle_asset is None:
-        # Older release: FireOS 5 is served by the loose init, FireOS 6 cannot be.
-        if arch != em_emos_build.ARCH_ARM64:
-            return None, {}, version, em_http.error(
-                "no_payload_bundle",
-                f"emOS release {version} predates the payload bundle, so it "
-                f"carries no {arch} init and none of emOS's WiFi tools — a "
-                f"FireOS 6 image needs both. Cut a newer emos-v* tag.", 404)
-        init, version, err = await _fetch_one_init(release, arch)
-        return (None, {}, version, err) if err else (init, {}, version, None)
-
-    raw = await em_releases.download(bundle_asset["url"],
-                              f"{version}-{EMOS_PAYLOAD_ASSET}")
-    if raw is None:
-        return None, {}, version, em_http.error(
-            "fetch_failed",
-            f"Could not download {EMOS_PAYLOAD_ASSET} from GitHub", 502)
-
-    # Checked against the digests the release recorded. Loud, because a bad
-    # release is bad for everyone and the next move is a partition write.
-    try:
-        payload = await asyncio.get_event_loop().run_in_executor(
-            None, em_emos_build.read_payload_bundle, raw)
-    except em_emos_build.BuildError as e:
-        log.error(f"[api] emOS release {version} carries an unusable payload "
-                  f"bundle: {e}")
-        return None, {}, version, em_http.error(
-            "bad_release_asset",
-            f"The payload in emOS release {version} is not usable: {e}", 502)
-
-    return _select_emos_payload(payload["files"], arch, version)
-
-
-def _select_emos_payload(files: dict, arch: str, version: str) -> tuple:
-    """Pick the init and /sbin tools for `arch` out of a bundle's files.
-
-    Split from _fetch_emos_payload so an uploaded bundle (the emOS update's
-    dev path) is selected from by the same rules as a release.
-    """
-    init_name = EMOS_INIT_ASSETS.get(arch,
-                                     EMOS_INIT_ASSETS[em_emos_build.ARCH_ARM64])
-    init = files.get(init_name)
-    if init is None:
-        return None, {}, version, em_http.error(
-            "no_init_for_arch",
-            f"emOS release {version} carries no '{init_name}', so there is no "
-            f"init for this device's {arch} kernel. Cut a newer emos-v* tag, or "
-            f"build one from emos/ with build.sh and select it by hand.", 404)
-
-    # The manifest proves the bytes arrived intact, not that they are the right
-    # kind of binary.
-    problems = em_emos_build.init_binary_problems(init, arch)
-    if problems:
-        log.error(f"[api] emOS release {version} carries an unusable "
-                  f"{init_name}: {'; '.join(problems)}")
-        return None, {}, version, em_http.error(
-            "bad_release_asset",
-            f"The {init_name} in emOS release {version} is not usable: "
-            f"{'; '.join(problems)}", 502)
-
-    # The BINARIES are 32-bit kernel only, i.e. FireOS 6. init prefers
-    # /sbin/wpa_supplicant the moment one exists, so including those in a
-    # FireOS 5 image would move the whole fleet off Amazon's working
-    # supplicant as a side effect. Same for wpa_cli, which init's reassociate
-    # nudge now prefers.
-    #
-    # em-wifi is exempt and rides in both: it is a script nothing execs, so it
-    # cannot change which supplicant init starts. Not fatal when missing — a
-    # release predating it still builds a FireOS 5 image, exactly as before.
-    sbin = {n: files[n] for n in EMOS_SBIN_BOTH_ARCHES if n in files}
-    if arch == em_emos_build.ARCH_ARM:
-        missing = [n for n in EMOS_SBIN_ASSETS if n not in files]
-        if missing:
-            # Fatal: Amazon's supplicant cannot run under emOS, so the image
-            # would have no WiFi and no way to report it but a cable.
-            return None, {}, version, em_http.error(
-                "no_wifi_tools_for_arch",
-                f"emOS release {version} carries no {', '.join(missing)}. A "
-                f"FireOS 6 image needs emOS's own userspace — Amazon's "
-                f"supplicant cannot run under emOS and its /system has no "
-                f"busybox — so there is nothing to build a working image "
-                f"from. Cut a newer emos-v* tag.", 404)
-        sbin.update({n: files[n] for n in EMOS_SBIN_ASSETS})
-
-    return init, sbin, version, None
-
-
-async def _fetch_emos_init(arch: str) -> tuple:
-    """Just the init, for the download endpoint: (binary, version, error)."""
-    release = await em_releases.fetch_emos()
-    if release is None:
-        return None, "", em_http.error(
-            "no_emos_release",
-            "No published emOS release with an 'init' asset was found. Build "
-            "one from emos/ with build.sh and select it by hand, or cut an "
-            "emos-v* tag.", 404)
-    return await _fetch_one_init(release, arch)
-
-
-async def _fetch_one_init(release: dict, arch: str) -> tuple:
-    """The init for `arch` out of an already-resolved release.
-
-    Validation happens HERE, against the architecture that was asked for, so a
-    release built wrong is refused at the point of download rather than at the
-    point of boot — and every route to an init goes through this one function.
-    """
-    name = EMOS_INIT_ASSETS.get(arch, EMOS_INIT_ASSETS[em_emos_build.ARCH_ARM64])
-    asset = release.get("assets", {}).get(name)
-    if asset is None:
-        # A release predating the second init, asked for the 32-bit one. Said
-        # plainly rather than falling back to the 64-bit asset, which would
-        # build an image that takes the flash and then produces no output at
-        # all — the failure this whole path exists to prevent.
-        return None, release["version"], em_http.error(
-            "no_init_for_arch",
-            f"emOS release {release['version']} carries no '{name}' asset, so "
-            f"there is no init for this device's {arch} kernel. Cut a newer "
-            f"emos-v* tag, or build one from emos/ with build.sh and select it "
-            f"by hand.", 404)
-
-    binary = await em_releases.download(asset["url"], f"{release['version']}-{name}")
-    if binary is None:
-        return None, release["version"], em_http.error(
-            "fetch_failed", "Could not download the emOS init from GitHub", 502)
-
-    problems = em_emos_build.init_binary_problems(binary, arch)
-    if problems:
-        # A release that is wrong is worth saying so about loudly: it is wrong
-        # for everyone, not just this download.
-        log.error(f"[api] emOS release {release['version']} carries an unusable "
-                  f"{name}: {'; '.join(problems)}")
-        return None, release["version"], em_http.error(
-            "bad_release_asset",
-            f"The {name} in emOS release {release['version']} is not usable: "
-            f"{'; '.join(problems)}", 502)
-
-    return binary, release["version"], None
-
-
 @auth.require_admin
 async def _get_provision_emos_init(request: web.Request) -> web.Response:
     """
@@ -3704,13 +3296,13 @@ async def _get_provision_emos_init(request: web.Request) -> web.Response:
     decided, and the only thing that actually knows is the image.
     """
     arch = (request.query.get("arch") or em_emos_build.ARCH_ARM64).strip()
-    if arch not in EMOS_INIT_ASSETS:
+    if arch not in em_emos_ota.INIT_ASSETS:
         return em_http.error(
             "bad_arch",
             f"Unknown architecture {arch!r} — expected one of "
-            f"{', '.join(sorted(EMOS_INIT_ASSETS))}.", 400)
+            f"{', '.join(sorted(em_emos_ota.INIT_ASSETS))}.", 400)
 
-    binary, version, err = await _fetch_emos_init(arch)
+    binary, version, err = await em_emos_ota.fetch_init(arch)
     if err is not None:
         return err
 
@@ -3721,7 +3313,7 @@ async def _get_provision_emos_init(request: web.Request) -> web.Response:
             # Named for the asset that was served, so a downloaded file says
             # which kernel it is for rather than every arch arriving as "init".
             "Content-Disposition":
-                f'attachment; filename="{EMOS_INIT_ASSETS[arch]}"',
+                f'attachment; filename="{em_emos_ota.INIT_ASSETS[arch]}"',
             "X-Emos-Version": version,
             "X-Emos-Arch": arch,
         },
@@ -3873,12 +3465,12 @@ async def _post_provision_emos_image(request: web.Request) -> web.Response:
                     "image, so there is no way to tell which init it needs. "
                     "Check the escrow is the whole boot image, or build an init "
                     "from emos/ with build.sh and select it by hand.", 400)
-            init_bin, sbin, init_version, err = await _fetch_emos_payload(arch)
+            init_bin, sbin, init_version, err = await em_emos_ota.fetch_payload(arch)
             if err is not None:
                 return err
             version = parts.get("version") or init_version
             log.info(f"[api] emOS image: reference kernel is {arch}, using "
-                     f"{EMOS_INIT_ASSETS[arch]} from {init_version}"
+                     f"{em_emos_ota.INIT_ASSETS[arch]} from {init_version}"
                      + (f" plus {', '.join(sorted(sbin))}" if sbin else ""))
 
         loop = asyncio.get_event_loop()
@@ -4395,10 +3987,10 @@ def _merge_device(row, boot: dict | None = None) -> dict:
             row["emos_version"], em_releases.emos_latest_version()),
         "emosOffer":        em_emos_update.offer(
             row["emos_version"], em_releases.emos_latest_version()),
-        "emos_update_in_progress": device_id in _emos_updates_in_progress,
-        "emos_update_queued":      device_id in _emos_updates_queued,
-        "emos_update_stage":       _emos_update_stage.get(device_id),
-        "emos_update_error":       _emos_update_errors.get(device_id),
+        "emos_update_in_progress": device_id in em_emos_ota.in_progress,
+        "emos_update_queued":      device_id in em_emos_ota.queued,
+        "emos_update_stage":       em_emos_ota.stage.get(device_id),
+        "emos_update_error":       em_emos_ota.errors.get(device_id),
         # Update state
         "update_in_progress": device_id in em_ota.in_progress,
         # Waiting on the global OTA lock — started, but nothing has been sent

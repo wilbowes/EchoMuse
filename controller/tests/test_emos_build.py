@@ -854,14 +854,14 @@ def test_em_wifi_rides_in_both_architectures():
     Found on Office, 2026-09-21: emos-v0.8 with no /sbin/em-wifi.
     """
     root = Path(__file__).resolve().parents[2]
-    api = (root / "controller" / "em_api.py").read_text()
+    api = (root / "controller" / "em_emos_ota.py").read_text()
 
-    m = re.search(r"EMOS_SBIN_BOTH_ARCHES = \(([^)]*)\)", api)
-    assert m, "em_api no longer declares EMOS_SBIN_BOTH_ARCHES"
+    m = re.search(r"^SBIN_BOTH_ARCHES = \(([^)]*)\)", api, re.M)
+    assert m, "em_emos_ota no longer declares SBIN_BOTH_ARCHES"
     both = set(re.findall(r'"([^"]+)"', m.group(1)))
 
-    m = re.search(r"EMOS_SBIN_ASSETS = \(([^)]*)\)", api)
-    assert m, "em_api no longer declares EMOS_SBIN_ASSETS"
+    m = re.search(r"^SBIN_ASSETS = \(([^)]*)\)", api, re.M)
+    assert m, "em_emos_ota no longer declares SBIN_ASSETS"
     every = set(re.findall(r'"([^"]+)"', m.group(1)))
 
     assert "em-wifi" in both

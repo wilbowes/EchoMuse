@@ -28,7 +28,7 @@ def test_an_unconfirmed_update_says_what_happened(connected, running, previous, 
 
 def test_the_update_decides_with_the_live_connection():
     """The verdict is only right if it is asked whether the device is back."""
-    fn = _sources.def_source("_run_update_locked")
+    fn = _sources.def_source("em_ota._run_update_locked")
     call = next(n for n in ast.walk(ast.parse(fn)) if isinstance(n, ast.Call)
                 and ast.unparse(n.func).endswith("failed_update_outcome"))
     assert ast.unparse(call.args[0]) == "device_id in em_state.devices"
