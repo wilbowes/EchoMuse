@@ -29,7 +29,8 @@ docker build -t echomuse-compiler compiler/
 ```
 
 **The compiler base is pinned by DIGEST, and must stay that way.**
-`compiler/Dockerfile` carries the Go toolchain (1.24.0) and NDK
+`compiler/Dockerfile` carries the Go toolchain (1.26.8, swapped into the
+base image by checksum since 2026-10; the base's own is 1.24.0) and NDK
 (21.4.7075529) that compile the firmware, so it is the layer sitting
 directly on top of FireOS 5 — a 2015 platform that cannot be upgraded. It
 was `FROM ghcr.io/binozo/echogo:latest`, a third party's floating tag, and
