@@ -368,8 +368,25 @@ async def _run_update_locked(device_id: str, release: dict,
         else:
             row     = await loop.run_in_executor(None, db.get_device, device_id)
             running = row["firmware_ver"] if row else "unknown"
+            outcome = failed_update_outcome(device_id in em_state.devices,
+                                            running, current_ver)
 
-            if running == current_ver:
+            if outcome == "not_back":
+                errors[device_id] = (
+                    "did not reconnect within 90s of the restart — "
+                    f"last reported {running}"
+                )
+                supervisor_log_wanted.add(device_id)
+                await em_events.push_log(device_id, "warn", "controller",
+                    f"Update to {version}: the device has not reconnected "
+                    f"since the restart (last reported {running})")
+                await em_events.push({
+                    "type":      "device_update_failed",
+                    "device_id": device_id,
+                    "error":     errors[device_id],
+                    "running":   running,
+                })
+            elif outcome == "rolled_back":
                 # Device came back on old version — auto-rollback by start_server.sh
                 await loop.run_in_executor(
                     None, db.set_firmware_previous, device_id, None
@@ -403,6 +420,27 @@ async def _run_update_locked(device_id: str, release: dict,
     except Exception as e:
         log.exception(f"[api] OTA update error for {device_id}: {e}")
         await _update_failed(device_id, f"OTA exception: {e}")
+
+
+def failed_update_outcome(connected: bool, running: str | None,
+                          previous: str | None) -> str:
+    """
+    What an update that was not confirmed within the watch actually did.
+
+    "rolled_back" needs the device BACK and on its old version: that is
+    start_server.sh giving up on the new binary after three fast exits. The
+    stored version cannot say it alone, because it only changes when a device
+    registers, so a device that never came back still holds the old one; read
+    without `connected`, every Echo that died on its update was reported as
+    "auto-rolled back", which reads as healthy (found driving an OTA at a fake
+    Echo that did not redial, 2026-10-15). "not_back" is that case, and
+    "timeout" is a device back on something else.
+    """
+    if not connected:
+        return "not_back"
+    if running == previous:
+        return "rolled_back"
+    return "timeout"
 
 
 async def run_rollback(device_id: str, target_version: str) -> None:
