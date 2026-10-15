@@ -236,16 +236,12 @@ def test_release_notes_survive_the_whole_relay():
     one.
     """
     from pathlib import Path
-    api = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
-
-    fetch = api[api.index("async def _fetch_latest_release"):]
-    fetch = fetch[:fetch.index("\nasync def ", 1)]
+    fetch = _sources.def_source("fetch_firmware")
     assert 'release.get("body")' in fetch or '.get("body")' in fetch, \
         "the GitHub release body must be captured"
     assert 'set_config("latest_notes"' in fetch, "notes must be persisted"
 
-    cached = api[api.index("    # Load from DB cache"):]
-    cached = cached[:cached.index("\nasync def ", 1)] if "\nasync def " in cached else cached
+    cached = _sources.def_source("cached_firmware")
     assert '"latest_notes"' in cached and 'stored["latest_notes"]' in cached, \
         "the DB-cache path must restore notes, or they vanish on restart"
 
@@ -338,13 +334,11 @@ def test_stale_release_cache_is_not_returned_when_it_has_aged_out():
     interval, falling back to the stale value only if the fetch fails.
     """
     from pathlib import Path
-    api = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
-    fn = api[api.index("async def _get_cached_release"):]
-    fn = fn[:fn.index("\nasync def ", 1)]
+    fn = _sources.def_source("cached_firmware")
 
-    assert "await _fetch_latest_release()" in fn, \
+    assert "await fetch_firmware()" in fn, \
         "an aged-out cache must be refreshed synchronously, not in the background"
-    assert "asyncio.create_task(_fetch_latest_release())" not in fn, \
+    assert "create_task(fetch_firmware())" not in fn and "spawn(fetch_firmware())" not in fn, \
         "fire-and-forget refresh returns the stale value to this caller"
 
 
@@ -353,7 +347,7 @@ def test_release_change_is_pushed_to_open_dashboards():
     version until someone reloads."""
     from pathlib import Path
     root = Path(__file__).resolve().parent.parent
-    api = (root / "em_api.py").read_text()
+    api = _sources.all_source()
     assert '"type":         "release_update"' in api or '"release_update"' in api, \
         "a release change must be broadcast on the event stream"
     jsx = (root / "static" / "dashboard.jsx").read_text()
@@ -504,16 +498,14 @@ def test_controller_notes_come_from_the_tag_annotation():
     DEVICE firmware release instead — right shape, wrong product.
     """
     from pathlib import Path
-    api = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
-    fn = api[api.index("async def _fetch_controller_release"):]
-    fn = fn[:fn.index("\nasync def ", 1)]
+    fn = _sources.def_source("fetch_controller")
     assert "GITHUB_TAGS_URL" in fn and "GITHUB_TAG_OBJECT_URL" in fn, \
         "controller notes must come from the tag annotation, not /releases"
     assert "GITHUB_API_URL" not in fn, \
         "that is the device firmware release feed, not the controller's"
 
 
-def test_every_db_call_in_em_api_exists():
+def test_every_db_call_exists():
     """
     A typo'd db.<name> is invisible to pyflakes (it is a valid attribute
     expression) and raises AttributeError only on the request that uses it.
@@ -527,9 +519,10 @@ def test_every_db_call_in_em_api_exists():
     from pathlib import Path
     root = Path(__file__).resolve().parent.parent
 
-    tree = ast.parse((root / "em_api.py").read_text())
+    # Every module that imports em_db as `db`, not only em_api: a function
+    # moved out of em_api keeps its db calls.
     used = {
-        n.attr for n in ast.walk(tree)
+        n.attr for path in _sources.MODULES for n in ast.walk(_sources.tree(path))
         if isinstance(n, ast.Attribute)
         and isinstance(n.value, ast.Name) and n.value.id == "db"
     }
@@ -548,7 +541,7 @@ def test_every_db_call_in_em_api_exists():
         if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name)
     }
     missing = sorted(used - defined)
-    assert not missing, f"em_api.py calls db.{{{', '.join(missing)}}} which em_db.py does not define"
+    assert not missing, f"db.{{{', '.join(missing)}}} is called but em_db.py does not define it"
 
 
 def test_the_wake_word_asset_wizard_step_is_mandatory():
@@ -2763,7 +2756,7 @@ def test_the_emos_and_firmware_release_namespaces_cannot_select_each_other():
     """
     src = (CONTROLLER / "em_api.py").read_text()
 
-    fw = _strip_prose(_fn_body(src, "_fetch_latest_release"))
+    fw = _strip_prose(_sources.def_source("fetch_firmware"))
     assert "_choose_firmware_release(" in fw, \
         "the firmware poll must select through version.choose_firmware_release"
     vsrc = (CONTROLLER / "version.py").read_text()
@@ -2773,7 +2766,7 @@ def test_the_emos_and_firmware_release_namespaces_cannot_select_each_other():
     assert 'startswith("v")' in chooser and '"server"' in chooser, \
         "the firmware poll must select on a v* tag AND a server asset"
 
-    emos = _strip_prose(_fn_body(src, "_fetch_latest_emos_release"))
+    emos = _strip_prose(_sources.def_source("fetch_emos"))
     assert 'startswith("emos-v")' in emos and '"init"' in emos, \
         "the emOS poll must select on an emos-v* tag AND an init asset"
 

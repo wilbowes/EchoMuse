@@ -160,7 +160,7 @@ One publish path, channel taken from the tag: `controller-v2.20.0` →
 **EA never moves `:latest`** — that is what `docker-compose.deploy.yml` pulls,
 so an EA build touching it would push a prerelease to every standalone
 container on the next `docker compose pull`. The prefixes are distinct rather
-than one scheme with a suffix because `_fetch_controller_release` lists tags
+than one scheme with a suffix because `em_releases.fetch_controller` lists tags
 by **prefix match** on `controller-v`, which excludes `controller-ea-v*` from
 the dashboard's update notice for free.
 

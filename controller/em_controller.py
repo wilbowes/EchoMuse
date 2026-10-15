@@ -76,6 +76,7 @@ from websockets.asyncio.server import ServerConnection as WebSocketServerProtoco
 
 import em_db as db
 import em_events
+import em_releases
 import em_state
 import em_auth as auth
 import em_api as api
@@ -6034,7 +6035,7 @@ async def main():
     await site.start()
     log.info(f"Dashboard + API listening on http://{SERVER_HOST}:{API_PORT}")
 
-    release_task       = asyncio.create_task(api.release_poll_loop())
+    release_task       = asyncio.create_task(em_releases.poll_loop())
     session_prune_task = asyncio.create_task(api.session_prune_loop())
     loop_lag_task      = asyncio.create_task(event_loop_lag_monitor())
 
