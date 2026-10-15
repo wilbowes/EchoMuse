@@ -1,0 +1,10 @@
+# hadolint for every Dockerfile in the repository (#822). Rules switched off
+# here are switched off for a reason that is written down; a one-line
+# exception goes beside the line as `# hadolint ignore=<rule>` with its reason.
+ignored:
+  # Pin versions in apt-get install. The controller image takes Debian's
+  # current packages on purpose and rebuilds that layer weekly (APT_SNAPSHOT,
+  # "Week for the apt layer" in ci.yml), because the scanner failed it on
+  # openssl and pcre2 versions Debian had already replaced. A pinned version
+  # also stops installing the day the archive drops it.
+  - DL3008
