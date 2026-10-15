@@ -1209,12 +1209,8 @@ def test_recordings_and_transcripts_are_admin_only():
     plain GET with a session token, so a UI-only rule protects nothing from
     anyone who opens the network tab.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
-
-    audio = re.search(
-        r"(@auth\.require_\w+)\s*\nasync def _get_turn_audio\b", src)
-    assert audio, "_get_turn_audio not found"
-    assert audio.group(1) == "@auth.require_admin", (
+    _, audio = _sources.find_def("_get_turn_audio")
+    assert [ast.unparse(d) for d in audio.decorator_list] == ["auth.require_admin"], (
         "the utterance audio route must be admin-only")
 
     turns = _sources.def_source("_get_device_turns")

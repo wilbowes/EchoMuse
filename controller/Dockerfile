@@ -126,6 +126,7 @@ COPY em_wav.py .
 COPY em_pki.py .
 COPY em_hostip.py .
 COPY em_ingressauth.py .
+COPY em_routes_activity.py .
 COPY em_routes_auth.py .
 COPY em_routes_config.py .
 COPY em_routes_events.py .
