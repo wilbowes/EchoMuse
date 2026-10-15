@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.26.1
+
+Fixes on top of 2.26.0. Pair with firmware v2.18.1, which this controller offers. No database changes.
+
+### Improved
+
+- An uploaded wake word model is checked before it is installed, and a file that cannot run is refused with the reason (#876).
+- A message the Echo listens after ends on 200 ms of quiet, whatever padding the speech engine added (#781).
+- aiohttp 3.14.4 and websockets 17.2, and a refreshed base image (#775, #881, #882).
+
+### Fixed
+
+- **A custom wake word model could leave an Echo deaf.** A model exported with a `[batch, 1, 1]` output crashed the controller's wake listener about 30 seconds in, and it restarted in a loop (#869).
+- **A question asked from inside a voice turn got no answer.** `assist_satellite.ask_question` called from the turn's own intent spoke the question, opened the answer window about 30 seconds late, and Home Assistant reported no answer (#506).
+- **"No wake word" stayed stored for an Echo whose firmware cannot honour it,** so Home Assistant read "No wake word" while the Echo still woke. The controller now gives the setting up and Home Assistant shows the wake word again (#776).
+- **The wizard refused an amonet 1 Echo that had once been on amonet 2.** It now tells the two apart by the bootloader that runs (#845).
+- **The wizard told Firefox and Safari users on HTTPS that the address was not secure.** It now says to open the page in Chrome or Edge (#844).
+
+### Known issues
+
+- An Echo that restarts and rejoins a playing Sendspin group can fall out of sync until the next track.
+- A fleet setting saved while an Echo has its own value for it changes nothing on that Echo, and the fleet page does not say so.
+- Updating several Echoes' firmware at once can stall the controller for a few seconds; a reply playing at that moment may stutter.
+- A turn is occasionally logged as empty although its recording holds clear speech (#815).
+- An emOS Echo on the 32-bit kernel sometimes reconnects without rebooting (#816).
+
 ## 2.26.1-ea.1 (Early Access)
 
 Fixes on top of 2.26.0. Pair with firmware v2.18.1-ea.1, which this controller offers. No database changes.

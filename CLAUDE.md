@@ -225,6 +225,13 @@ all three bases attached: FireOS 5, emOS on the 32-bit kernel, emOS on the
 64-bit one. A fault fixed during the run goes out as a further EA of that
 component, and the automated pass is repeated on the final pair. Echoes are
 named by their last four characters in anything published.
+**A point release (`X.Y.Z`, Z > 0) is exempt from the full run** (Wil,
+2026-10-15): its GA is gated by targeted checks of what changed since the
+last GA, on the EA pair, plus field time on that EA. The checks and their
+results go in the release notes; no `docs/uat-results/` report is written.
+First used for 2.26.1 / v2.18.1: the wizard's detect step without writing, a
+custom wake-model upload through the dashboard in a browser, and VVV back on
+plain `v2.18.1-ea.1` in slot A so FireOS 5 is covered.
 
 **Pipeline hygiene (2026-09-23).** Every action is pinned by commit SHA with
 its version in a trailing comment (`@<sha> # v7.0.1`), which Dependabot's
