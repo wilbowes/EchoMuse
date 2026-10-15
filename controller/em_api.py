@@ -37,15 +37,12 @@ import html as _html
 import json
 import secrets
 import logging
-import os
-import platform
 import posixpath as _posixpath
 import re
 from shlex import quote as _sh_quote
-import shutil
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 import aiohttp
 from aiohttp import web
@@ -79,6 +76,7 @@ import em_ingressauth
 import em_routes_auth
 import em_routes_oww
 import em_routes_provision
+import em_process_stats
 import em_routes_updates
 import em_pairing
 import em_pki
@@ -96,62 +94,10 @@ from version import firmware_update as _firmware_update
 
 log = logging.getLogger("echomuse.api")
 
-# Import time, which is startup: em_controller imports this module before it
-# serves anything. Close enough to process start for "how long has it been up",
-# and it needs no procfs.
-_PROCESS_START = time.time()
-
-# CPU over 1m/5m/1h, fed by the event-loop lag monitor (see sample_cpu). The
-# ring is bounded by its longest window; nothing here runs per request.
-_cpu_history = em_support.CpuHistory()
-CPU_SAMPLE_INTERVAL_S = em_support.CpuHistory.INTERVAL_S
-
-# The controller's own recent log, kept in memory for support bundles. Every
-# line that would have explained #62 goes to stdout, and stdout was not in
-# the bundle at all.
-_log_ring = em_support.LogRing()
-
-
-def install_log_ring(fmt: str) -> None:
-    """
-    Attach the in-memory log ring to the root logger.
-
-    Called from em_controller once logging is configured, with the same
-    format string, so a bundle reads exactly like the console does.
-    """
-    _log_ring.setFormatter(logging.Formatter(fmt))
-    logging.getLogger().addHandler(_log_ring)
-
-
-def sample_cpu() -> None:
-    """
-    Take one CPU sample. Called from em_controller's existing 1s ticker, not
-    on a task of its own — the cost is one os.times() every INTERVAL_S.
-    """
-    _cpu_history.add(time.monotonic(), sum(os.times()[:2]))
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
 STATIC_DIR = Path(__file__).parent / "static"
-# Device-link TLS material directory — set by em_controller.main() once
-# em_pki.ensure_pki() succeeds. None = TLS listener not running (no
-# cryptography package / setup failure); credential endpoints then 503.
-_tls_dir: str | None = None
-
-
-def set_tls_dir(tls_dir: str) -> None:
-    global _tls_dir
-    _tls_dir = tls_dir
-
-
-# This controller's own address and device ports: the defaults for an entry
-# in controllerEndpoints, and what the dashboard offers to fill in.
-# tls_port is 0 when the wss listener is not running.
-_link = {"ip": "", "port": 8767, "tls_port": 0}
-
-
-def set_link_ports(ip: str, port: int, tls_port: int) -> None:
-    _link.update(ip=ip or "", port=port, tls_port=tls_port)
 
 
 # WiFi change state per device_id — {"pending": {...}|None, "last_result":
@@ -1479,7 +1425,7 @@ async def _post_provision_tls_credentials(request: web.Request) -> web.Response:
     token (minting one — and a pending device row — if needed) so the
     wizard can install them over adb before the device's first contact.
     """
-    if _tls_dir is None:
+    if em_state.tls_dir is None:
         return em_http.error("tls_unavailable",
                       "Device-link TLS is not active on this controller", 503)
     body      = await em_http.json_body(request)
@@ -1488,7 +1434,7 @@ async def _post_provision_tls_credentials(request: web.Request) -> web.Response:
     loop  = asyncio.get_event_loop()
     token = await loop.run_in_executor(None, db.ensure_device_token, device_id)
     return em_http.ok({
-        "ca_pem": em_pki.ca_pem(_tls_dir),
+        "ca_pem": em_pki.ca_pem(em_state.tls_dir),
         "token":  token,
         "dir":    DEVICE_TLS_DIR,
     })
@@ -1523,7 +1469,7 @@ async def _post_pair(request: web.Request) -> web.Response:
     connection. A connected device is issued them now; one that could not
     connect is issued them when it next dials within its window.
     """
-    if _tls_dir is None:
+    if em_state.tls_dir is None:
         return em_http.error("tls_unavailable",
                       "Device-link TLS is not active on this controller", 503)
     device_id = request.match_info["id"]
@@ -1599,7 +1545,7 @@ async def _issue_credentials(device_id: str) -> None:
     """
     loop = asyncio.get_event_loop()
     live = em_state.devices.get(device_id)
-    if live is None or _tls_dir is None:
+    if live is None or em_state.tls_dir is None:
         return
     try:
         await em_events.push_log(device_id, "info", "controller",
@@ -1609,7 +1555,7 @@ async def _issue_credentials(device_id: str) -> None:
         # storing the new one first refused the push on any device that was
         # connected over wss (found on 15LE, 2026-09-26).
         token = secrets.token_urlsafe(32)
-        ca    = em_pki.ca_pem(_tls_dir)
+        ca    = em_pki.ca_pem(em_state.tls_dir)
 
         await em_shell.run(live, f"mkdir -p {DEVICE_TLS_DIR}")
         await asyncio.sleep(1.0)  # let the shell session close cleanly
@@ -1657,7 +1603,7 @@ async def _get_system_status(request: web.Request) -> web.Response:
         "controller_version": CONTROLLER_VERSION,
         # This controller's device address and ports — what a new entry in
         # the controller address list starts from.
-        "link": dict(_link),
+        "link": dict(em_state.link),
         # The mtime stamped onto the dashboard bundle's URL by
         # _serve_dashboard, so a running page can tell whether the JavaScript
         # it is executing is still the JavaScript this controller serves.
@@ -1877,7 +1823,7 @@ async def _post_global_config(request: web.Request) -> web.Response:
     endpoints_before = stored.get("controllerEndpoints") or []
     if "controllerEndpoints" in config:
         eps, err = em_endpoints.normalise(
-            config["controllerEndpoints"], _link["port"], _link["tls_port"])
+            config["controllerEndpoints"], em_state.link["port"], em_state.link["tls_port"])
         if err:
             return em_http.error("bad_controller_endpoints", f"Controller address list {err}.", 400)
         config["controllerEndpoints"] = eps
@@ -1972,127 +1918,6 @@ async def _ws_events(request: web.Request) -> web.WebSocketResponse:
 # ─── Controller stats and support bundle ─────────────────────────────────────
 
 
-def _read_first_line(path: str) -> str:
-    with open(path) as fh:
-        return fh.readline().strip()
-
-
-def _proc_meminfo() -> dict[str, float]:
-    """/proc/meminfo in MB. Empty on anything without procfs."""
-    out: dict[str, float] = {}
-    try:
-        with open("/proc/meminfo") as fh:
-            for ln in fh:
-                parts = ln.split()
-                if len(parts) >= 2 and parts[1].isdigit():
-                    out[parts[0].rstrip(":")] = int(parts[1]) / 1024.0
-    except OSError:
-        pass
-    return out
-
-
-def _controller_stats() -> dict:
-    """
-    The controller's own CPU, memory and storage.
-
-    Read from /proc and the filesystem rather than psutil, which is not a
-    dependency and is not worth becoming one for a handful of files. Every
-    lookup degrades to an absent key: a bundle missing a stat is a nuisance,
-    a bundle that 500s when the host is unusual is the failure that matters,
-    since the bundle is what someone reaches for when things are wrong.
-
-    Paths are deliberately never reported — on a bare-metal install the data
-    directory carries the account name, which is the leak this same change
-    fixes in the log tail.
-    """
-    stats: dict[str, Any] = {"loop_lag_peak_ms": round(em_state.loop_lag_peak_ms, 1)}
-
-    stats["python"] = platform.python_version()
-    stats["platform"] = f"{platform.system()} {platform.machine()}"
-    stats["cpu_count"] = os.cpu_count()
-    stats["container"] = os.path.exists("/.dockerenv")
-
-    try:
-        load = os.getloadavg()
-        stats["load_1"], stats["load_5"], stats["load_15"] = [round(x, 2) for x in load]
-    except OSError:
-        pass
-
-    mem = _proc_meminfo()
-    if "MemTotal" in mem:
-        stats["mem_total_mb"] = round(mem["MemTotal"], 1)
-    if "MemAvailable" in mem:
-        stats["mem_available_mb"] = round(mem["MemAvailable"], 1)
-
-    # cgroup v2 then v1: in a container MemTotal is the HOST's memory, which
-    # reads as plenty of headroom while the container is being OOM-killed.
-    for limit_path in ("/sys/fs/cgroup/memory.max",
-                       "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
-        try:
-            raw = _read_first_line(limit_path)
-            if raw and raw != "max":
-                val = int(raw) / 1048576.0
-                # An unset v1 limit is a sentinel near 2^63, not a real cap.
-                if val < 1024 * 1024:
-                    stats["mem_limit_mb"] = round(val, 1)
-            break
-        except (OSError, ValueError):
-            continue
-
-    try:
-        with open("/proc/self/status") as fh:
-            for ln in fh:
-                if ln.startswith("VmRSS:"):
-                    stats["rss_mb"] = round(int(ln.split()[1]) / 1024.0, 1)
-                    break
-    except OSError:
-        pass
-
-    # Process CPU as a share of one core, averaged over the process lifetime.
-    # A lifetime average, not an instant sample: a support bundle is taken
-    # once, and a single 100ms sample of an asyncio process is noise.
-    try:
-        uptime = time.time() - _PROCESS_START
-        stats["uptime_s"] = int(uptime)
-        cpu_time = sum(os.times()[:2])
-        # Below a few seconds the ratio is startup cost divided by almost
-        # nothing — it reads as 1147% and looks like a controller on fire.
-        # Omitted rather than reported wrong; a bundle taken in the first
-        # seconds of a run has no CPU history worth having anyway.
-        # Percent of ONE core, as `top` reports it — over 100 means more than
-        # a core's worth. The windowed figures are what point anywhere: a
-        # lifetime average cannot tell a controller busy right now from one
-        # that was busy for an hour this morning.
-        stats.update(_cpu_history.windows(time.monotonic(), cpu_time))
-        if uptime >= 5.0:
-            stats["cpu_pct_life"] = round(100.0 * cpu_time / uptime, 1)
-    except Exception:
-        pass
-
-    # Same resolution as em_recordings, via its helper — the DB path lives in
-    # one place and this must not become a second definition of it.
-    db_path = Path(os.environ.get("DB_PATH", "echomuse.db")).resolve()
-    try:
-        usage = shutil.disk_usage(db_path.parent)
-        stats["data_used_mb"] = round(usage.used / 1048576.0, 1)
-        stats["data_free_mb"] = round(usage.free / 1048576.0, 1)
-    except OSError:
-        pass
-    try:
-        # The database is the thing that grows without anyone watching it.
-        stats["db_mb"] = round(db_path.stat().st_size / 1048576.0, 1)
-    except OSError:
-        pass
-    try:
-        rec_dir = em_recordings.recordings_dir()
-        total = sum(f.stat().st_size for f in rec_dir.iterdir() if f.is_file())
-        stats["recordings_mb"] = round(total / 1048576.0, 1)
-    except OSError:
-        pass
-
-    return stats
-
-
 @auth.require_admin
 async def _get_support_bundle(request: web.Request) -> web.Response:
     """
@@ -2166,7 +1991,7 @@ async def _get_support_bundle(request: web.Request) -> web.Response:
         counters=counters,
         device_configs=device_configs,
         live_state=live_state,
-        controller_log=_log_ring.tail(),
+        controller_log=em_process_stats.log_ring.tail(),
         device_log=[ln for _, ln in sorted(logs)],
         # From the user table, not guessed at: an account name in log prose
         # has nothing to pattern-match on. Mapped to the ROLE it is replaced
@@ -2175,7 +2000,7 @@ async def _get_support_bundle(request: web.Request) -> web.Response:
         # one-to-one stand-in for a real person.
         accounts={u["username"]: u["role"] for u in
                   await loop.run_in_executor(None, db.get_all_users)},
-        controller_stats=await loop.run_in_executor(None, _controller_stats),
+        controller_stats=await loop.run_in_executor(None, em_process_stats.controller_stats),
     )
     body = em_support.to_json(bundle)
     stamp = time.strftime("%Y%m%d-%H%M%S")

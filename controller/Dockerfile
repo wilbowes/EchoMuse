@@ -130,6 +130,7 @@ COPY em_routes_auth.py .
 COPY em_routes_oww.py .
 COPY em_routes_provision.py .
 COPY em_routes_updates.py .
+COPY em_process_stats.py .
 COPY em_linkauth.py .
 COPY em_tcp.py .
 COPY em_pacing.py .

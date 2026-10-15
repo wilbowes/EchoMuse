@@ -76,6 +76,7 @@ from websockets.asyncio.server import ServerConnection as WebSocketServerProtoco
 
 import em_db as db
 import em_events
+import em_process_stats
 import em_reconcile
 import em_releases
 import em_state
@@ -136,7 +137,7 @@ log = logging.getLogger("echomuse")
 
 # Keep the last few hundred lines in memory so a support bundle can carry the
 # controller's own log, not just the relayed per-device one.
-api.install_log_ring(_LOG_FORMAT)
+em_process_stats.install_log_ring(_LOG_FORMAT)
 
 # websockets' own logger stays quiet — its per-connection chatter is not
 # useful — but that ALSO silenced its account of why a connection closed,
@@ -6012,8 +6013,8 @@ async def event_loop_lag_monitor(interval: float = 1.0,
         # starting a second one: it is one os.times() every 30s, and the
         # windowed CPU it feeds is only read when a support bundle is built.
         if loop.time() >= next_cpu:
-            next_cpu = loop.time() + api.CPU_SAMPLE_INTERVAL_S
-            api.sample_cpu()
+            next_cpu = loop.time() + em_process_stats.CPU_SAMPLE_INTERVAL_S
+            em_process_stats.sample_cpu()
         if lag_ms >= warn_ms:
             log.warning(
                 f"[loop] event loop stalled {lag_ms:.0f}ms — "
@@ -6050,10 +6051,10 @@ async def main():
             tls_dir = em_pki.ensure_pki(DB_PATH)
             if tls_dir:
                 tls_ctx = em_pki.server_ssl_context(tls_dir)
-                api.set_tls_dir(tls_dir)
+                em_state.set_tls_dir(tls_dir)
         except Exception as e:
             log.error(f"Device-link TLS setup failed — wss listener disabled: {e}")
-    api.set_link_ports(SERVER_IP, SERVER_PORT, SERVER_TLS_PORT if tls_ctx else 0)
+    em_state.set_link_ports(SERVER_IP, SERVER_PORT, SERVER_TLS_PORT if tls_ctx else 0)
 
     # Bound to SERVER_IP's own interface, never auto-detected across all of
     # them. zeroconf's default enumerates every interface on the host and

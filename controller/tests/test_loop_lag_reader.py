@@ -16,7 +16,7 @@ import re
 from pathlib import Path
 
 import _sources
-import em_api
+import em_process_stats
 import em_state
 
 CONTROLLER = Path(__file__).resolve().parents[1]
@@ -24,14 +24,11 @@ CONTROLLER = Path(__file__).resolve().parents[1]
 
 def test_the_bundle_reads_the_peak_the_monitor_wrote(monkeypatch):
     monkeypatch.setattr(em_state, "loop_lag_peak_ms", 881.04)
-    assert em_api._controller_stats()["loop_lag_peak_ms"] == 881.0
+    assert em_process_stats.controller_stats()["loop_lag_peak_ms"] == 881.0
 
 
 def test_the_status_endpoint_reads_em_state():
-    src = (CONTROLLER / "em_api.py").read_text()
-    fn = next(n for n in ast.walk(ast.parse(src))
-              if isinstance(n, ast.AsyncFunctionDef)
-              and n.name == "_get_system_status")
+    _, fn = _sources.find_def("_get_system_status")
     assert "em_state.loop_lag_peak_ms" in ast.unparse(fn)
 
 

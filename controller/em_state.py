@@ -1,7 +1,7 @@
 """
 The controller's live, process-wide state: the device registry, shell
-session coordination, the OWW model caches, the wake arbiter and the loop
-lag peak.
+session coordination, the OWW model caches, the wake arbiter, the loop
+lag peak, and this controller's link ports and TLS directory.
 
 It is a module of its own because em_controller cannot hold it. em_start.py
 execvp's em_controller.py, so the running controller is `__main__`, and any
@@ -84,3 +84,24 @@ wake_arbiter = em_arbiter.WakeArbiter()
 # em_controller.event_loop_lag_monitor). Read by the API for
 # /api/system/status and the support bundle.
 loop_lag_peak_ms: float = 0.0
+
+
+# Device-link TLS material directory — set by em_controller.main() once
+# em_pki.ensure_pki() succeeds. None = TLS listener not running (no
+# cryptography package / setup failure); credential endpoints then 503.
+tls_dir: str | None = None
+
+
+def set_tls_dir(path: str) -> None:
+    global tls_dir
+    tls_dir = path
+
+
+# This controller's own address and device ports: the defaults for an entry
+# in controllerEndpoints, and what the dashboard offers to fill in.
+# tls_port is 0 when the wss listener is not running.
+link = {"ip": "", "port": 8767, "tls_port": 0}
+
+
+def set_link_ports(ip: str, port: int, tls_port: int) -> None:
+    link.update(ip=ip or "", port=port, tls_port=tls_port)
