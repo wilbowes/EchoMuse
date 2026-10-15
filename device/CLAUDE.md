@@ -503,7 +503,7 @@ docs/configuration.md. Worth remembering before adding any new bounce.
 
 **The fix is install-before-switch, not a fallback.** A device is never told
 about a new `owwModel` until the classifier is on it
-(`em_api._hold_back_oww_model` swaps the key back to the current model, and
+(`em_oww_sync.hold_back_model` swaps the key back to the current model, and
 `_install_then_switch` pushes the real config once the file has landed). The
 device keeps listening for its CURRENT wake word, on-device, throughout; if the
 install fails it simply stays there and says so loudly.
@@ -524,7 +524,7 @@ scoring while changing the wake word slips through on the old mode.
 
 **A missing model never changes the mode — for the offline case either.**
 Install-before-switch covers every path where the device is connected;
-**`em_api.reconcile_oww_assets`**, run in the background from the connect
+**`em_oww_sync.reconcile`**, run in the background from the connect
 handler, covers the one where it was not — a device whose wake word changed
 while it was offline is told to use the new model by the ordinary connect-time
 config push, with nothing checking it has the classifier. The reconcile
@@ -564,7 +564,7 @@ so under the old rule installing them would have silently deleted every custom
 model on the device — including ones a user trained and cannot re-download.
 Stock models are required by definition and never evictable.
 
-**Reconcile-on-connect** (`em_api.reconcile_oww_assets`, reached through
+**Reconcile-on-connect** (`em_oww_sync.reconcile`, reached through
 `em_reconcile.on_connect` — see controller/CLAUDE.md for the other two payloads
 that ride with it) closes the offline case, and three rules keep it from doing
 harm:

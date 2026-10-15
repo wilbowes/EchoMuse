@@ -276,7 +276,7 @@ the ESPHome layer pushes the new wake-word name to Home Assistant
 automatically. A custom tile's `×` deletes the file (refused while any
 device or the global default still selects it).
 
-Equivalent API (`em_api.py`):
+Equivalent API (`em_routes_oww.py`):
 
 ```bash
 curl -X POST http://<controller>:8768/api/oww_models/upload \
