@@ -289,7 +289,9 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/users",        _get_users)
     app.router.add_patch("/api/users/{id}", _patch_user)
 
-    # Devices — order matters: specific paths before parameterised ones
+    # Devices. A literal path wins over a parameterised one in any order;
+    # order decides only between parameterised routes that overlap
+    # (tests/test_route_resolution.py).
     app.router.add_get("/api/devices",                    _get_devices)
     app.router.add_get("/api/devices/pending",            _get_pending)
     app.router.add_get("/api/devices/{id}",               _get_device)
