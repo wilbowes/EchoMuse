@@ -158,17 +158,9 @@ def test_guard_reads_raw_stored_config_not_the_underlaid_view():
 # text, which drops decorators entirely, so they were exercising a different
 # function than production. These parse the real file instead.
 
-def _ast_tree():
-    import ast
-    return ast.parse((CONTROLLER / "em_api.py").read_text())
-
-
 def _decorators_of(name):
-    import ast
-    for n in ast.walk(_ast_tree()):
-        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name:
-            return [getattr(d, "id", getattr(d, "attr", "?")) for d in n.decorator_list]
-    raise AssertionError(f"{name} not found in em_api.py")
+    _, n = _sources.find_def(name)
+    return [getattr(d, "id", getattr(d, "attr", "?")) for d in n.decorator_list]
 
 
 def test_dropped_keys_is_a_plain_helper_not_a_route_handler():

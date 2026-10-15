@@ -2350,8 +2350,7 @@ def test_the_payload_syncs_tell_a_missing_file_from_a_silent_device():
 # nothing guarded.
 
 def test_the_update_endpoint_refuses_a_version_the_device_already_runs():
-    fn = _strip_prose(_fn_body(
-        (CONTROLLER / "em_api.py").read_text(), "_post_device_update"))
+    fn = _strip_prose(_sources.def_source("_post_device_update"))
 
     assert 'row["firmware_ver"] == release["version"]' in fn, (
         "the update endpoint must compare the target against what the device "
@@ -2370,8 +2369,7 @@ def test_a_refused_update_does_not_consume_the_uploaded_binary():
     Popping first meant a refusal cost an 11MB re-upload to act on the very
     advice the refusal had just given.
     """
-    fn = _strip_prose(_fn_body(
-        (CONTROLLER / "em_api.py").read_text(), "_post_device_update"))
+    fn = _strip_prose(_sources.def_source("_post_device_update"))
 
     assert "_pending_uploads.get(upload_token)" in fn, (
         "peek the token — every refusal below it must leave it usable"
@@ -2389,8 +2387,7 @@ def test_the_fleet_endpoint_reads_the_version_out_of_an_uploaded_binary():
     no device had ever run — so `already_current` could never fire for one and
     a fleet push re-flashed every device with what it was already running.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
-    fn  = _strip_prose(_fn_body(src, "_post_deploy_all"))
+    fn  = _strip_prose(_sources.def_source("_post_deploy_all"))
 
     assert "em_ota.extract_binary_version(binary_override)" in fn, (
         "the fleet path must read the uploaded binary's own version"
@@ -2405,8 +2402,7 @@ def test_the_upload_endpoint_reports_what_was_uploaded():
     The version rides back so the dashboard can warn at the point of deciding
     rather than after the operator has committed.
     """
-    fn = _strip_prose(_fn_body(
-        (CONTROLLER / "em_api.py").read_text(), "_post_upload_binary"))
+    fn = _strip_prose(_sources.def_source("_post_upload_binary"))
     assert "em_ota.extract_binary_version(binary)" in fn
     assert '"version": version' in fn
 
