@@ -6,6 +6,7 @@ em_pairing is pure; the wiring in em_api and em_controller is checked by ast,
 since the suite imports neither.
 """
 
+import _sources
 import ast
 from pathlib import Path
 
@@ -114,8 +115,8 @@ def test_credentials_are_issued_only_behind_an_approval():
     # _issue_credentials writes the token to whoever holds the connection, so
     # every caller must be one that an admin approval gates.
     callers = set()
-    for mod in ("em_api.py", "em_controller.py"):
-        tree = _tree(mod)
+    for path in _sources.MODULES:
+        tree = _sources.tree(path)
         for fn in ast.walk(tree):
             if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and fn.name != "_issue_credentials":
                 if _calls(fn, "_issue_credentials"):
@@ -133,7 +134,7 @@ def test_approving_a_device_opens_the_window():
 
 
 def test_secure_link_is_gone():
-    src = (CONTROLLER / "em_api.py").read_text()
+    src = _sources.all_code()
     assert "/secure_link" not in src and "_post_secure_link" not in src
     assert "secure_link" not in (CONTROLLER / "static" / "dashboard.jsx").read_text()
 

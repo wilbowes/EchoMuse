@@ -6,6 +6,7 @@ forgotten (bitten by em_scenes.py 2026-07-10 and em_oww_models.py
 2026-07-19).
 """
 
+import _sources
 import ast
 import re
 from pathlib import Path
@@ -487,10 +488,10 @@ def test_controller_update_is_advisory_only():
             f"{forbidden!r} — updating is the user's docker command to run"
         )
 
-    api = (root / "em_api.py").read_text()
+    api = _sources.all_source()
     assert 'add_get("/api/releases/controller"' in api, \
         "the controller release endpoint must be read-only (GET)"
-    for verb in ("add_post", "add_put", "add_delete"):
+    for verb in ("add_post", "add_put", "add_delete", "add_patch", "add_route"):
         assert f'{verb}("/api/releases/controller' not in api, \
             f"{verb} on /api/releases/controller would make the update actionable"
 
@@ -650,8 +651,8 @@ def test_no_unjustified_hardcoded_media_state():
     Anything else must go through _media_state_msg(), which reads em_player
     truth.
     """
-    from pathlib import Path
-    src = (Path(__file__).resolve().parent.parent / "em_esphome.py").read_text()
+    # Every module: a state message built outside em_esphome reaches HA too.
+    src = _sources.all_source()
 
     code = "\n".join(
         l for l in src.splitlines() if not l.lstrip().startswith("#")
@@ -1096,9 +1097,9 @@ def test_push_log_event_callers_do_not_also_persist():
     Checked by source shape because the alternative is importing
     em_controller, which the suite deliberately does not do.
     """
-    root = Path(__file__).resolve().parent.parent
-    for name in ("em_controller.py", "em_api.py"):
-        lines = (root / name).read_text().splitlines()
+    for path in _sources.MODULES:
+        name = path.name
+        lines = _sources.source(path).splitlines()
         for i, line in enumerate(lines):
             if "_push_log_event(" not in line or "async def" in line:
                 continue
@@ -2256,7 +2257,9 @@ def test_the_connect_handler_reconciles_all_three_payloads():
     assert "api.reconcile_on_connect(" in src, (
         "the connect handler must call api.reconcile_on_connect"
     )
-    assert "api.reconcile_oww_assets(" not in src, (
+    elsewhere = "\n".join(_sources.code_only(_sources.source(m))
+                          for m in _sources.MODULES if m.name != "em_api.py")
+    assert "reconcile_oww_assets(" not in elsewhere, (
         "call the umbrella, not one payload — the other two then have no "
         "trigger that reaches a device already on the latest firmware"
     )
@@ -3119,8 +3122,7 @@ def test_the_bundle_stamp_has_exactly_one_definition():
     """
     src = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
 
-    assert src.count("def _bundle_version(") == 1, (
-        "_bundle_version must be the single definition of the bundle stamp")
+    _sources.find_def("_bundle_version")   # exactly one, in any module
     assert '"bundle_version": _bundle_version()' in src, (
         "/api/system/status must publish the stamp via _bundle_version(), so "
         "the page can compare what it loaded against what is being served")

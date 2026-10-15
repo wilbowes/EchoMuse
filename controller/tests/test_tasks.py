@@ -16,9 +16,8 @@ import gc
 import logging
 from pathlib import Path
 
+import _sources
 import em_tasks
-
-CONTROLLER = Path(__file__).resolve().parents[1]
 
 
 # ── em_tasks.spawn ──────────────────────────────────────────────────────────
@@ -71,7 +70,6 @@ def test_cancellation_is_not_reported_as_failure(caplog):
 
 # ── no discarded tasks in the controller ────────────────────────────────────
 
-MODULES = ["em_api.py", "em_controller.py", "em_esphome.py"]
 
 
 def _discarded_tasks(path: Path) -> list[str]:
@@ -95,7 +93,7 @@ def _discarded_tasks(path: Path) -> list[str]:
 
 
 def test_no_task_is_created_and_discarded():
-    found = [x for m in MODULES for x in _discarded_tasks(CONTROLLER / m)]
+    found = [x for m in _sources.MODULES for x in _discarded_tasks(m)]
     assert not found, (
         "tasks created and thrown away (use em_tasks.spawn): " + ", ".join(found))
 
@@ -111,7 +109,6 @@ def test_the_discard_check_sees_both_shapes(tmp_path):
 
 # ── helper waits are torn down on every exit ────────────────────────────────
 
-WAIT_MODULES = ["em_controller.py", "em_esphome.py", "em_earlytts.py"]
 
 
 def _unfinalised_waits(path: Path) -> list[str]:
@@ -144,7 +141,7 @@ def _unfinalised_waits(path: Path) -> list[str]:
 
 
 def test_every_wait_task_is_torn_down_in_a_finally():
-    found = [x for m in WAIT_MODULES for x in _unfinalised_waits(CONTROLLER / m)]
+    found = [x for m in _sources.MODULES for x in _unfinalised_waits(m)]
     assert not found, ("Event.wait() tasks not cancelled in a finally: "
                        + ", ".join(found))
 

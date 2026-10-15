@@ -13,9 +13,8 @@ comment explaining them and passes (see source-guards-match-their-own-prose).
 """
 
 import ast
-from pathlib import Path
 
-CONTROLLER = Path(__file__).resolve().parent.parent
+import _sources
 
 # Reachable without a session, each for a reason:
 PUBLIC = {
@@ -36,28 +35,50 @@ WS_SELF_AUTH = {"_ws_shell", "_ws_events"}
 DECORATORS = {"require_auth", "require_admin"}
 
 
-def _module():
-    return ast.parse((CONTROLLER / "em_api.py").read_text())
+def _routes() -> dict[str, str]:
+    """handler name -> path, for every app.router.add_<method>(path, handler)
+    in any controller module.
 
-
-def _routes(tree) -> dict[str, str]:
-    """handler name -> path, for every app.router.add_<method>(path, handler)."""
+    A registration this cannot read fails rather than being skipped: a route
+    the guard does not see is a route nothing checks."""
     out = {}
-    for node in ast.walk(tree):
-        if not (isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr.startswith("add_")
-                and node.func.attr != "add_static"
-                and len(node.args) == 2
-                and isinstance(node.args[1], ast.Name)):
-            continue
-        path = node.args[0].value if isinstance(node.args[0], ast.Constant) else "?"
-        out[node.args[1].id] = path
+    for module in _sources.MODULES:
+        for node in ast.walk(_sources.tree(module)):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr.startswith("add_")
+                    and node.func.attr != "add_static"
+                    and isinstance(node.func.value, ast.Attribute)
+                    and node.func.value.attr == "router"):
+                continue
+            where = f"{module.name}:{node.lineno}"
+            assert len(node.args) == 2, f"{where}: unreadable route registration"
+            handler = node.args[1]
+            if isinstance(handler, ast.Attribute):     # module.handler
+                handler = ast.Name(handler.attr)
+            assert isinstance(handler, ast.Name), \
+                f"{where}: route handler is not a plain name"
+            path = node.args[0].value if isinstance(node.args[0], ast.Constant) else "?"
+            out[handler.id] = path
     return out
 
 
-def _functions(tree) -> dict[str, ast.AsyncFunctionDef]:
-    return {n.name: n for n in tree.body if isinstance(n, ast.AsyncFunctionDef)}
+def _functions() -> dict[str, ast.AsyncFunctionDef]:
+    """Every route handler, by name, from whichever module defines it. A name
+    defined twice would make the route table ambiguous, so that fails."""
+    defs = {}
+    for module in _sources.MODULES:
+        for n in _sources.tree(module).body:
+            if isinstance(n, ast.AsyncFunctionDef):
+                defs.setdefault(n.name, []).append((module.name, n))
+    out = {}
+    for name in _routes():
+        found = defs.get(name, [])
+        assert len(found) <= 1, \
+            f"route handler {name} is defined in {[m for m, _ in found]}"
+        if found:
+            out[name] = found[0][1]
+    return out
 
 
 def _decorators(fn) -> set[str]:
@@ -72,16 +93,15 @@ def _calls(fn, attr: str) -> bool:
 def test_the_route_table_was_found():
     # Guards the guard: a refactor of create_app that this parser no longer
     # understands must fail loudly, not pass on an empty table.
-    routes = _routes(_module())
+    routes = _routes()
     assert len(routes) > 50
     assert "_get_devices" in routes
 
 
 def test_every_route_is_authenticated_or_named_public():
-    tree = _module()
-    fns = _functions(tree)
+    fns = _functions()
     missing = []
-    for name, path in sorted(_routes(tree).items()):
+    for name, path in sorted(_routes().items()):
         assert name in fns, f"route {path} -> {name}: handler not found"
         if name in PUBLIC or name in WS_SELF_AUTH:
             continue
@@ -94,7 +114,7 @@ def test_every_route_is_authenticated_or_named_public():
 
 
 def test_websocket_handlers_authenticate_themselves():
-    fns = _functions(_module())
+    fns = _functions()
     for name in WS_SELF_AUTH:
         assert _calls(fns[name], "ws_resolve_session"), (
             f"{name} is exempt from the decorator rule only because it calls "
@@ -103,11 +123,11 @@ def test_websocket_handlers_authenticate_themselves():
 
 def test_public_list_names_real_routes():
     # A stale entry is an exemption waiting for a new handler to inherit it.
-    routes = _routes(_module())
+    routes = _routes()
     assert not (PUBLIC | WS_SELF_AUTH) - set(routes)
 
 
 def test_oww_assets_and_controller_release_need_a_session():
-    fns = _functions(_module())
+    fns = _functions()
     assert _decorators(fns["_get_oww_assets"]) & DECORATORS
     assert _decorators(fns["_get_controller_release"]) & DECORATORS
