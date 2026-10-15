@@ -20,15 +20,15 @@ em_controller.py — aiohttp handles /api/* and /, websockets handles
 
 Usage (from em_controller.py main()):
     import em_api
-    runner = await em_api.create_runner(devices_ref)
+    runner = await em_api.create_runner()
     await runner.setup()
     site = web.TCPSite(runner, host, port + 1)   # or same port via middleware
     await site.start()
     ...
     await runner.cleanup()
 
-The _devices dict reference is passed in so the API can merge live
-state with persisted DB state without coupling to a global.
+Live state shared with em_controller (the device registry, shell sessions)
+is in em_state, which both import by name.
 """
 
 import asyncio
@@ -45,7 +45,6 @@ import re
 from shlex import quote as _sh_quote
 import shutil
 import sqlite3 as _sqlite3
-import sys
 import tempfile
 import time
 from pathlib import Path
@@ -56,6 +55,7 @@ from aiohttp import web
 import websockets
 
 import em_db as db
+import em_state
 import em_health
 import em_auth as auth
 import em_ble_proxy
@@ -172,9 +172,6 @@ GITHUB_TAG_OBJECT_URL = "https://api.github.com/repos/{repo}/git/tags/{sha}"
 
 _controller_cache: dict = {}
 _controller_cache_ts: float = 0.0
-
-# Reference to the live devices dict from em_controller — set by init().
-_devices: dict = {}
 
 # Device-link TLS material directory — set by em_controller.main() once
 # em_pki.ensure_pki() succeeds. None = TLS listener not running (no
@@ -319,8 +316,6 @@ def wifi_record_result(device_id: str, ok: bool, ssid: str, error: str
 
 # ─── Initialisation ───────────────────────────────────────────────────────────
 
-_shell_pending:   dict = {}
-_shell_dashboard: dict = {}
 _shell_ws:        dict = {}   # device_id → live ws for programmatic sessions
 _shell_lock:      dict = {}   # device_id → asyncio.Lock (one session at a time)
 # device_id → the asyncio Task that actually holds _shell_lock.
@@ -336,18 +331,6 @@ _shell_lock:      dict = {}   # device_id → asyncio.Lock (one session at a tim
 # reported an empty result — surfacing to the operator as "could not
 # determine active slot", three steps from anything to do with locking.
 _shell_owner:     dict = {}   # device_id → task holding _shell_lock
-
-def init(devices_ref: dict, shell_pending_ref: dict, shell_dashboard_ref: dict) -> None:
-    """
-    Bind live shared state from em_controller.
-
-    Must be called before create_app().
-    """
-    global _devices, _shell_pending, _shell_dashboard
-    _devices         = devices_ref
-    _shell_pending   = shell_pending_ref
-    _shell_dashboard = shell_dashboard_ref
-
 
 async def create_app() -> web.Application:
     """
@@ -484,10 +467,8 @@ async def create_app() -> web.Application:
     return app
 
 
-async def create_runner(devices_ref: dict, shell_pending_ref: dict,
-                        shell_dashboard_ref: dict) -> web.AppRunner:
-    """Convenience wrapper — init + create_app + AppRunner."""
-    init(devices_ref, shell_pending_ref, shell_dashboard_ref)
+async def create_runner() -> web.AppRunner:
+    """Convenience wrapper — create_app + AppRunner."""
     app = await create_app()
     return web.AppRunner(app)
 
@@ -1138,7 +1119,7 @@ async def _patch_device(request: web.Request) -> web.Response:
                        "state": {"label": label}})
     # Music Assistant lists the Sendspin player by this name; the device
     # restarts the player to re-advertise it.
-    live = _devices.get(device_id)
+    live = em_state.devices.get(device_id)
     if live is not None and getattr(live, "sendspin_capable", False):
         with contextlib.suppress(Exception):
             await live.send_control({"type": "config", "sendspinName": label})
@@ -1184,7 +1165,7 @@ async def _get_sendspin_token(request: web.Request) -> web.Response:
     Admin only for the same reason.
     """
     device_id = request.match_info["id"]
-    live = _devices.get(device_id)
+    live = em_state.devices.get(device_id)
     if live is None:
         return _error("device_offline", "The Echo is offline", 409)
     if not getattr(live, "sendspin_capable", False):
@@ -1223,12 +1204,8 @@ async def _delete_device(request: web.Request) -> web.Response:
     import em_esphome
     await em_esphome.device_deleted(device_id)
     # Free the device's cached OWW models (#512), or a deleted device keeps its
-    # models — and their ONNX sessions — for the life of the process. Resolve
-    # the RUNNING controller module (not a fresh import) for the same reason
-    # _running_controller_module exists.
-    ctrl = _running_controller_module()
-    if ctrl is not None:
-        ctrl._forget_oww_models(device_id)
+    # models — and their ONNX sessions — for the life of the process.
+    em_state.forget_oww_models(device_id)
     # A re-added device is the one whose payloads are least likely to be
     # right, so it must not inherit the deleted row's debounce and skip its
     # first reconcile — the bounce below has it redialling within seconds.
@@ -1265,7 +1242,7 @@ async def _disconnect_device(device_id: str) -> None:
     `shell_close` it sends is the only thing that ends an INTERACTIVE
     dashboard session — those deliberately do not set `_shell_ws`.
     """
-    live = _devices.get(device_id)
+    live = em_state.devices.get(device_id)
     if live is None:
         return
     await _release_shell_ws(device_id, live)
@@ -1565,7 +1542,7 @@ async def _post_device_config(request: web.Request) -> web.Response:
     # Push the EFFECTIVE config — with per-section scoping the body is
     # partial by design, so the device must be sent the resolved picture.
     pushed = False
-    live = _devices.get(device_id)
+    live = em_state.devices.get(device_id)
     if live is not None:
         await _apply_live_config(device_id, live, config)
         log.info(f"[api] Config pushed to live device: {device_id}")
@@ -1615,7 +1592,7 @@ async def _post_device_wifi(request: web.Request) -> web.Response:
     if why:
         return _error("invalid_credentials", why, 400)
 
-    live = _devices.get(device_id)
+    live = em_state.devices.get(device_id)
     if live is None:
         return _error("device_offline", "Device is not connected", 409)
 
@@ -1651,7 +1628,7 @@ async def _post_device_wifi_scan(request: web.Request) -> web.Response:
     takes ~5s).
     """
     device_id = request.match_info["id"]
-    live = _devices.get(device_id)
+    live = em_state.devices.get(device_id)
     if live is None:
         return _error("device_offline", "Device is not connected", 409)
     if getattr(live, "wifi_scan_future", None) is not None:
@@ -1764,7 +1741,7 @@ async def _post_device_update(request: web.Request) -> web.Response:
     if row is None:
         return _error("device_not_found", f"No device: {device_id}", 404)
 
-    live = _devices.get(device_id)
+    live = em_state.devices.get(device_id)
     if live is None:
         return _error("device_offline", "Device is not connected", 409)
 
@@ -1819,7 +1796,7 @@ async def _post_device_rollback(request: web.Request) -> web.Response:
         return _error("no_rollback_available",
                       "No previous version recorded — cannot roll back", 404)
 
-    live = _devices.get(device_id)
+    live = em_state.devices.get(device_id)
     if live is None:
         return _error("device_offline", "Device is not connected", 409)
 
@@ -2142,7 +2119,7 @@ async def _run_update_locked(device_id: str, release: dict,
         current_ver = row["firmware_ver"] if row else None
         await loop.run_in_executor(None, db.set_firmware_previous, device_id, current_ver)
 
-        live = _devices.get(device_id)
+        live = em_state.devices.get(device_id)
         if live is None:
             await _update_failed(device_id,
                                  "Device disconnected before update could start")
@@ -2337,7 +2314,7 @@ async def _run_rollback(device_id: str, target_version: str) -> None:
         await _push_log_event(device_id, "info", "controller",
                               f"Rolling back to {target_version}")
 
-        live = _devices.get(device_id)
+        live = em_state.devices.get(device_id)
         if live is None:
             await _update_failed(device_id,
                                  "Device disconnected before rollback")
@@ -2424,7 +2401,7 @@ async def _monitor_reconnect(
     await asyncio.sleep(8)  # give device time to stop and restart
 
     while time.monotonic() < deadline:
-        if device_id in _devices:
+        if device_id in em_state.devices:
             row = await loop.run_in_executor(None, db.get_device, device_id)
             if row:
                 running = row["firmware_ver"]
@@ -2518,7 +2495,7 @@ async def _post_device_emos_update(request: web.Request) -> web.Response:
     row = await loop.run_in_executor(None, db.get_device, device_id)
     if row is None:
         return _error("device_not_found", f"No device: {device_id}", 404)
-    live = _devices.get(device_id)
+    live = em_state.devices.get(device_id)
     if live is None:
         return _error("device_offline", "Device is not connected", 409)
     # Refused here as well as greyed out in the panel: this is a plain POST.
@@ -2683,7 +2660,7 @@ class _EmosIO:
         return time.monotonic()
 
     def relink(self) -> str:
-        current = _devices.get(self.device_id)
+        current = em_state.devices.get(self.device_id)
         if current is self.live:
             return "same"
         if current is None:
@@ -2693,7 +2670,7 @@ class _EmosIO:
 
 
 async def _run_emos_update_locked(device_id: str, override: tuple | None) -> None:
-    live = _devices.get(device_id)
+    live = em_state.devices.get(device_id)
     if live is None:
         return await _emos_update_failed(
             device_id, "the device disconnected before the update started")
@@ -2717,9 +2694,9 @@ async def _emos_status_on_connect(live, device_id: str) -> None:
         return
     sh = lambda cmd, timeout: _emos_sh(live, cmd, timeout)
     st, verdict = await em_emos_update.settle_on_connect(sh)
-    if not st and _devices.get(device_id) is live:
+    if not st and em_state.devices.get(device_id) is live:
         await asyncio.sleep(CRASH_LOG_RETRY_S)      # shell plane not up yet
-        if _devices.get(device_id) is live and not _emos_update_busy(device_id):
+        if em_state.devices.get(device_id) is live and not _emos_update_busy(device_id):
             st, verdict = await em_emos_update.settle_on_connect(sh)
     if not st:
         return
@@ -2770,8 +2747,8 @@ async def _get_device_shell_ws(live) -> object:
     _shell_owner[device_id] = asyncio.current_task()
 
     future = loop.create_future()
-    _shell_pending[device_id] = future
-    # Deliberately do NOT set _shell_dashboard — signals programmatic mode.
+    em_state.shell_pending[device_id] = future
+    # Deliberately do NOT set em_state.shell_dashboard — signals programmatic mode.
 
     await live.send_control({"type": "shell_open"})
     try:
@@ -2779,7 +2756,7 @@ async def _get_device_shell_ws(live) -> object:
         _shell_ws[device_id] = ws
         return ws
     except asyncio.TimeoutError:
-        _shell_pending.pop(device_id, None)
+        em_state.shell_pending.pop(device_id, None)
         _shell_ws.pop(device_id, None)
         _release_shell_lock(device_id)
         raise
@@ -2826,7 +2803,7 @@ async def _release_shell_ws(device_id: str, live=None) -> None:
             await ws.close()
         except Exception:
             pass
-    _shell_pending.pop(device_id, None)
+    em_state.shell_pending.pop(device_id, None)
     if live is not None:
         await live.send_control({"type": "shell_close"})
     _release_shell_lock(device_id)
@@ -3305,7 +3282,7 @@ async def _push_controller_endpoints(live, device_id: str) -> None:
     if await _sync_controller_endpoints(live, device_id):
         return
     await asyncio.sleep(ENDPOINTS_RETRY_S)
-    if _devices.get(device_id) is live:
+    if em_state.devices.get(device_id) is live:
         await _sync_controller_endpoints(live, device_id)
 
 
@@ -3494,7 +3471,7 @@ async def _ws_shell(request: web.Request) -> web.WebSocketResponse:
     Do NOT add @auth.require_admin here — _extract_token doesn't read query
     params and would reject every connection before this function runs.
 
-    Sets _shell_dashboard so handle_shell proxies in interactive mode.
+    Sets em_state.shell_dashboard so handle_shell proxies in interactive mode.
     """
     device_id = request.match_info["id"]
 
@@ -3504,7 +3481,7 @@ async def _ws_shell(request: web.Request) -> web.WebSocketResponse:
     if user["role"] != "admin":
         raise web.HTTPForbidden()
 
-    live = _devices.get(device_id)
+    live = em_state.devices.get(device_id)
     if live is None:
         raise web.HTTPConflict(reason="Device is not connected")
 
@@ -3524,8 +3501,8 @@ async def _ws_shell(request: web.Request) -> web.WebSocketResponse:
 
     loop = asyncio.get_event_loop()
     done_future = loop.create_future()
-    _shell_pending[device_id]   = done_future
-    _shell_dashboard[device_id] = ws
+    em_state.shell_pending[device_id]   = done_future
+    em_state.shell_dashboard[device_id] = ws
     # Do NOT set _shell_ws or acquire _shell_lock — interactive sessions
     # bypass the programmatic shell mechanism entirely.
 
@@ -3540,8 +3517,8 @@ async def _ws_shell(request: web.Request) -> web.WebSocketResponse:
     except Exception as e:
         log.warning(f"[api] Shell session error ({device_id}): {e}")
     finally:
-        _shell_pending.pop(device_id, None)
-        _shell_dashboard.pop(device_id, None)
+        em_state.shell_pending.pop(device_id, None)
+        em_state.shell_dashboard.pop(device_id, None)
         await live.send_control({"type": "shell_close"})
         log.info(f"[api] Shell session closed: {device_id}")
         await _push_log_event(device_id, "info", "controller",
@@ -3615,7 +3592,7 @@ async def _post_deploy_all(request: web.Request) -> web.Response:
     skipped = []
     loop = asyncio.get_event_loop()
 
-    for device_id, live in list(_devices.items()):
+    for device_id, live in list(em_state.devices.items()):
         row = await loop.run_in_executor(None, db.get_device, device_id)
         if row is None or not row["approved"]:
             skipped.append({"device_id": device_id, "reason": "not_approved"})
@@ -3707,7 +3684,7 @@ async def _get_provision_latest_binary(request: web.Request) -> web.Response:
     Distinct from /api/releases/latest (metadata only: {version, url}) —
     this route does the actual download from GitHub on the server side
     and streams the binary back, since a freshly-flashed device isn't
-    registered in _devices yet and can't go through the
+    registered in em_state.devices yet and can't go through the
     /api/devices/{id}/update fleet-OTA path (that requires a live
     WebSocket session). Reuses the same cache/fetch machinery as OTA.
     """
@@ -3863,7 +3840,7 @@ async def _post_pair(request: web.Request) -> web.Response:
         return _error("tls_unavailable",
                       "Device-link TLS is not active on this controller", 503)
     device_id = request.match_info["id"]
-    live = _devices.get(device_id)
+    live = em_state.devices.get(device_id)
     # Firmware without `pairing` cannot ask, so for a connected device whose
     # link is plain the admin's click is the request. It goes away as devices
     # update; firmware that CAN ask must, so the button on the device is
@@ -3896,7 +3873,7 @@ async def _post_debloat(request: web.Request) -> web.Response:
     pressing it twice costs a `pm list packages` and nothing else.
     """
     device_id = request.match_info["id"]
-    live = _devices.get(device_id)
+    live = em_state.devices.get(device_id)
     if live is None:
         return _error("device_offline", f"Device not connected: {device_id}", 409)
 
@@ -3934,7 +3911,7 @@ async def _issue_credentials(device_id: str) -> None:
     starts unconfirmed.
     """
     loop = asyncio.get_event_loop()
-    live = _devices.get(device_id)
+    live = em_state.devices.get(device_id)
     if live is None or _tls_dir is None:
         return
     try:
@@ -3987,10 +3964,6 @@ async def _get_system_status(request: web.Request) -> web.Response:
     all_rows = await loop.run_in_executor(None, db.get_all_devices)
     release = await _get_cached_release()
 
-    # Lazy resolution — em_controller imports em_api at module level, and
-    # importing by name would load a second, uninitialised copy (#306).
-    _ctrl = _running_controller_module()
-
     return _ok({
         "controller_version": CONTROLLER_VERSION,
         # This controller's device address and ports — what a new entry in
@@ -4028,8 +4001,8 @@ async def _get_system_status(request: web.Request) -> web.Response:
         "fleet_base_os": sorted(db.fleet_base_os()),
         # Peak asyncio event-loop stall since start (ms). Non-trivial values
         # mean the controller itself delayed speaker frames and LED updates.
-        "loop_lag_peak_ms": round(_ctrl._loop_lag_peak_ms, 1),
-        "connected":      len(_devices),
+        "loop_lag_peak_ms": round(em_state.loop_lag_peak_ms, 1),
+        "connected":      len(em_state.devices),
         "total_devices":  len(all_rows),
         "pending":        sum(1 for r in all_rows if not r["approved"]),
         "approval_mode":  db.get_config("device_approval", "strict"),
@@ -4056,30 +4029,6 @@ async def _get_system_status(request: web.Request) -> web.Response:
             if release and _firmware_update(r["firmware_ver"], release["version"])
         ),
     })
-
-
-def _running_controller_module():
-    """
-    The module object the RUNNING controller executes as (#306).
-
-    em_start.py execvp's em_controller.py, so in production the running
-    code is __main__ — and `import em_controller` would load a SECOND,
-    never-initialised copy whose module state is all defaults. That is
-    why /api/system/status reported loop_lag_peak_ms: 0.0 next to a log
-    line saying the loop had stalled 881ms: the reader was reading a
-    fresh copy, not the live module. Resolve the running object instead
-    of importing by name. The lazy-import pattern itself stays — the
-    circular dependency is real — only the resolution changes.
-
-    Placement note (#309 review): this deliberately sits BELOW its two
-    callers' section divider rather than directly above a decorated
-    function — between `@auth.require_auth` and `_get_system_status` it
-    stole the decorator, leaving the status endpoint unauthenticated.
-    """
-    main = sys.modules.get("__main__")
-    if main is not None and hasattr(main, "_loop_lag_peak_ms"):
-        return main
-    return sys.modules.get("em_controller")
 
 
 @auth.require_admin
@@ -4259,7 +4208,7 @@ async def _post_global_config(request: web.Request) -> web.Response:
 
     # Push every connected device its own resolved effective config.
     pushed = []
-    for device_id, live in list(_devices.items()):
+    for device_id, live in list(em_state.devices.items()):
         effective = await loop.run_in_executor(
             None, db.get_effective_device_config, device_id
         )
@@ -4273,7 +4222,7 @@ async def _post_global_config(request: web.Request) -> web.Response:
         # Connected devices get the file now; the rest on their next connect,
         # which must not be skipped by a reconcile stamp from before the change.
         _last_reconcile.clear()
-        for device_id, live in list(_devices.items()):
+        for device_id, live in list(em_state.devices.items()):
             em_tasks.spawn(_push_controller_endpoints(live, device_id))
 
     # Reconcile BT proxies for every approved device — offline ones included
@@ -4821,7 +4770,7 @@ async def _install_then_switch(device_id: str, model: str) -> None:
     The sync is idempotent, so a device that already has the model completes in
     an md5 compare and the switch is effectively immediate.
     """
-    live = _devices.get(device_id)
+    live = em_state.devices.get(device_id)
     if live is None:
         return
 
@@ -4834,7 +4783,7 @@ async def _install_then_switch(device_id: str, model: str) -> None:
     except Exception as e:
         result = {"ok": False, "error": str(e)}
 
-    live = _devices.get(device_id)
+    live = em_state.devices.get(device_id)
     if live is None:
         return
 
@@ -4926,7 +4875,7 @@ async def _collect_crash_log(live, device_id: str) -> None:
             break
         if attempt == 0:
             await asyncio.sleep(CRASH_LOG_RETRY_S)
-            if _devices.get(device_id) is not live:
+            if em_state.devices.get(device_id) is not live:
                 return
     else:
         log.info(f"[api] [{device_id}] crash log: no answer from the device")
@@ -5020,7 +4969,7 @@ async def reconcile_on_connect(device_id: str, live) -> None:
         # through is a different object in the registry. The one we are
         # holding then has a shell plane nobody is on the other end of, so
         # "still connected" would be true of the registry and false of us.
-        if _devices.get(device_id) is not live:
+        if em_state.devices.get(device_id) is not live:
             log.info(f"[api] [{device_id}] reconcile: device went away — "
                      f"stopping before {name}")
             return
@@ -5116,7 +5065,7 @@ async def reconcile_oww_assets(device_id: str, live) -> None:
     except Exception as e:
         result = {"ok": False, "error": str(e)}
 
-    live = _devices.get(device_id)
+    live = em_state.devices.get(device_id)
     if live is None:
         return
 
@@ -5269,7 +5218,7 @@ async def _sync_oww_assets_locked(live, device_id: str, progress=None) -> dict:
 async def _get_oww_assets(request: web.Request) -> web.Response:
     """GET /api/devices/{id}/oww_assets — what is installed, and what is needed."""
     device_id = request.match_info["id"]
-    live = _devices.get(device_id)
+    live = em_state.devices.get(device_id)
 
     desired, problems = em_oww_assets.desired_assets(_oww_wanted_models(device_id))
     payload = {
@@ -5307,7 +5256,7 @@ async def _get_oww_assets(request: web.Request) -> web.Response:
 async def _post_oww_assets(request: web.Request) -> web.Response:
     """POST /api/devices/{id}/oww_assets — install or update them."""
     device_id = request.match_info["id"]
-    live = _devices.get(device_id)
+    live = em_state.devices.get(device_id)
     if live is None:
         return _error("device_offline", "Device is not connected", 409)
     result = await _sync_oww_assets(live, device_id)
@@ -5323,7 +5272,7 @@ async def _get_provision_oww_manifest(request: web.Request) -> web.Response:
     GET /api/provision/oww_assets — what the wizard should push, and where.
 
     The wizard pushes over ADB from the browser rather than through the shell
-    plane: a freshly-flashed device is not in _devices yet, and USB is far
+    plane: a freshly-flashed device is not in em_state.devices yet, and USB is far
     better suited to 15MB than a base64 heredoc. Same bytes, same md5s, same
     destination as the field path — only the transport differs.
     """
@@ -5398,13 +5347,7 @@ def _controller_stats() -> dict:
     directory carries the account name, which is the leak this same change
     fixes in the log tail.
     """
-    stats: dict[str, Any] = {}
-    try:
-        _ctrl = _running_controller_module()
-        if _ctrl is not None:
-            stats["loop_lag_peak_ms"] = round(_ctrl._loop_lag_peak_ms, 1)
-    except Exception:
-        pass
+    stats: dict[str, Any] = {"loop_lag_peak_ms": round(em_state.loop_lag_peak_ms, 1)}
 
     stats["python"] = platform.python_version()
     stats["platform"] = f"{platform.system()} {platform.machine()}"
@@ -6074,7 +6017,7 @@ async def _get_support_bundle(request: web.Request) -> web.Response:
         did = row["device_id"]
         device_configs[did] = await loop.run_in_executor(
             None, db.get_effective_device_config, did)
-        live = _devices.get(did)
+        live = em_state.devices.get(did)
         live_state[did] = {
             "connected":    live is not None,
             # Capabilities decide which HA entities are advertised at all,
@@ -6273,7 +6216,7 @@ async def _collect_supervisor_log(device_id: str) -> None:
     so the evidence arrives where someone would look, instead of sitting in a
     file nobody knows to read.
     """
-    live = _devices.get(device_id)
+    live = em_state.devices.get(device_id)
     if live is None:
         return
     out = await _shell_run(live, f"busybox tail -c 4096 {SUPERVISOR_LOG}", timeout=30.0)
@@ -6500,11 +6443,11 @@ def _merge_device(row, boot: dict | None = None) -> dict:
     Merge a DB device row with live in-memory state.
 
     DB row provides persistent fields (label, config, firmware_ver etc).
-    Live _devices dict provides transient state (connected, speaking,
+    Live em_state.devices dict provides transient state (connected, speaking,
     muted, listening, thinking).
     """
     device_id = row["device_id"]
-    live = _devices.get(device_id)
+    live = em_state.devices.get(device_id)
     # Lazy, for the reason every other em_esphome call site here is lazy:
     # em_esphome imports em_api at module level. After the first call this
     # is a sys.modules lookup, which is what makes it affordable on a path

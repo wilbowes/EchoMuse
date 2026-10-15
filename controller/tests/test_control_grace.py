@@ -41,7 +41,7 @@ def test_the_grace_task_checks_for_a_replacement():
     start = src.index("async def _release_device_services")
     task = src[start:start + 2500]
     assert "CONTROL_RECONNECT_GRACE_S" in task
-    assert "_devices.get(device.device_id)" in task, \
+    assert "em_state.devices.get(device.device_id)" in task, \
         "the task must check whether a replacement registered"
     for call in ("notify_device_disconnected", "esphome.device_disconnected",
                  "em_ble_proxy.device_disconnected", "device_gone"):

@@ -7,69 +7,63 @@ __main__. The readers did `import em_controller`, which does not find
 __main__ under that name and loads a SECOND, never-initialised copy —
 reading defaults instead of the live monitor's peak.
 
-The fix resolves the running module object. em_api imports aiohttp and the
-whole stack, so it is deliberately not importable here (see conftest); the
-helper's source is extracted and executed in a stub namespace instead,
-testing the code that actually ships.
+The peak now lives in em_state, which is only ever imported by name, so the
+writer and both readers share one module object.
 """
 
+import ast
 import re
-import sys
-import types
 from pathlib import Path
+
+import em_api
+import em_state
 
 CONTROLLER = Path(__file__).resolve().parents[1]
 
 
-def _load_helper(monkeypatched_sys):
+def test_the_bundle_reads_the_peak_the_monitor_wrote(monkeypatch):
+    monkeypatch.setattr(em_state, "loop_lag_peak_ms", 881.04)
+    assert em_api._controller_stats()["loop_lag_peak_ms"] == 881.0
+
+
+def test_the_status_endpoint_reads_em_state():
     src = (CONTROLLER / "em_api.py").read_text()
-    start = src.index("def _running_controller_module")
-    ends = [i for i in (src.find("\ndef ", start + 10),
-                        src.find("\nasync def ", start + 10),
-                        src.find("\n@", start + 10)) if i != -1]
-    ns = {"sys": monkeypatched_sys}
-    exec(src[start:min(ends)], ns)
-    return ns["_running_controller_module"]
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.AsyncFunctionDef)
+              and n.name == "_get_system_status")
+    assert "em_state.loop_lag_peak_ms" in ast.unparse(fn)
 
 
-def test_production_resolves_main_not_a_fresh_copy():
-    """In production __main__ IS the running em_controller: it carries the
-    attribute the monitor writes, so it must win over a name import."""
-    main = types.ModuleType("__main__")
-    main._loop_lag_peak_ms = 881.0          # what the monitor wrote
-    fake = types.SimpleNamespace(modules={"__main__": main})
-    got = _load_helper(fake)()
-    assert got is main, "the reader must resolve the RUNNING module"
+def test_the_monitor_writes_em_state():
+    src = (CONTROLLER / "em_controller.py").read_text()
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.AsyncFunctionDef)
+              and n.name == "event_loop_lag_monitor")
+    assert "em_state.loop_lag_peak_ms = " in ast.unparse(fn)
 
 
-def test_under_pytest_the_imported_module_wins():
-    """Under pytest, __main__ is the test runner and has no such attribute;
-    then the explicitly imported em_controller module is correct."""
-    main = types.ModuleType("__main__")      # pytest's main: no attribute
-    ctrl = types.ModuleType("em_controller")
-    ctrl._loop_lag_peak_ms = 42.0
-    fake = types.SimpleNamespace(modules={"__main__": main,
-                                          "em_controller": ctrl})
-    got = _load_helper(fake)()
-    assert got is ctrl
-
-
-def test_neither_present_returns_none_without_raising():
-    fake = types.SimpleNamespace(modules={})
-    got = _load_helper(fake)()
-    assert got is None
-
-
-def test_both_reader_sites_use_the_helper():
-    """
-    The bug lived in two call sites doing `import em_controller as _ctrl`.
-    Neither may remain: both must go through the resolver.
-    """
-    src = (CONTROLLER / "em_api.py").read_text()
-    assert "import em_controller as _ctrl" not in src, \
-        "importing by name loads a second, uninitialised module copy"
-    assert src.count("_running_controller_module()") >= 2, \
-        "status endpoint AND support bundle must resolve via the helper"
+def test_no_module_imports_the_running_controller_by_name():
+    """Importing em_controller by name is what loaded the second copy. Nothing
+    the running controller imports may do it."""
+    for path in CONTROLLER.glob("em_*.py"):
+        if path.name == "em_controller.py":
+            continue
+        tree = ast.parse(path.read_text())
+        # An import under `if TYPE_CHECKING:` never runs.
+        typing_only = {id(n) for top in ast.walk(tree)
+                       if isinstance(top, ast.If)
+                       and getattr(top.test, "id", None) == "TYPE_CHECKING"
+                       for n in ast.walk(top)}
+        for node in ast.walk(tree):
+            if id(node) in typing_only:
+                continue
+            names = []
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names = [node.module]
+            assert "em_controller" not in names, \
+                f"{path.name} imports em_controller by name"
 
 
 def test_every_auth_decorator_is_followed_by_the_function_it_decorates():

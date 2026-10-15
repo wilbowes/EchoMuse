@@ -15,6 +15,7 @@ lock has no effect at all. Each test fails against the `locked()` version.
 import asyncio
 
 import em_api
+import em_state
 
 
 class FakeWS:
@@ -42,9 +43,9 @@ def _reset():
     """Clear every per-device dict. They are module globals that outlive a test."""
     em_api._shell_lock.clear()
     em_api._shell_owner.clear()
-    em_api._shell_pending.clear()
+    em_state.shell_pending.clear()
     em_api._shell_ws.clear()
-    em_api._shell_dashboard.clear()
+    em_state.shell_dashboard.clear()
 
 
 def test_a_non_owner_cannot_release_someone_elses_lock():
@@ -229,7 +230,7 @@ def test_a_caller_that_times_out_waiting_for_the_device_releases_its_own_lock():
             "must be released or the device's shell is stranded"
         )
         assert "dev" not in em_api._shell_owner, "ownership must be cleared"
-        assert "dev" not in em_api._shell_pending, "the pending future must be dropped"
+        assert "dev" not in em_state.shell_pending, "the pending future must be dropped"
         assert "dev" not in em_api._shell_ws, "no ws may be left recorded"
         # The device WAS asked to open a shell, so it must be told to stop.
         assert live.sent == [{"type": "shell_open"}], live.sent
@@ -257,7 +258,7 @@ def test_programmatic_sessions_do_not_mark_the_dashboard_flag():
         async def answer_the_open():
             # The device's handle_shell resolves the pending future.
             await asyncio.sleep(0)
-            fut = em_api._shell_pending.get("dev")
+            fut = em_state.shell_pending.get("dev")
             if fut is not None and not fut.done():
                 fut.set_result(FakeWS())
 
@@ -266,7 +267,7 @@ def test_programmatic_sessions_do_not_mark_the_dashboard_flag():
         await t
 
         assert ws is em_api._shell_ws["dev"], "the resolved ws must be recorded"
-        assert "dev" not in em_api._shell_dashboard, (
+        assert "dev" not in em_state.shell_dashboard, (
             "a programmatic session must not mark the dashboard flag"
         )
 

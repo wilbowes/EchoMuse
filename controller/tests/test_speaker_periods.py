@@ -16,6 +16,7 @@ The suite cannot import `em_controller`, so the numbers come from the
 importable half of the chain and the ordering is pinned against the source.
 """
 
+import ast
 import re
 from pathlib import Path
 
@@ -39,8 +40,10 @@ def _stream_body() -> str:
     about, so a source search that includes them matches the warning rather
     than the code — which is how the first version of this test failed.
     """
-    body = SRC[SRC.index("async def stream_speaker_chunks"):]
-    body = body[:body.index("\n# The live device registry")]
+    fn = next(n for n in ast.walk(ast.parse(SRC))
+              if isinstance(n, ast.AsyncFunctionDef)
+              and n.name == "stream_speaker_chunks")
+    body = ast.get_source_segment(SRC, fn)
     return "\n".join(
         line for line in body.splitlines() if not line.lstrip().startswith("#")
     )
