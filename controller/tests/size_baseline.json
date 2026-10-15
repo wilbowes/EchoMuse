@@ -1,0 +1,27 @@
+{
+ "files": {
+  "em_controller.py": 6132,
+  "em_db.py": 3355,
+  "em_esphome.py": 3611
+ },
+ "functions": {
+  "em_controller.Device.__init__": 387,
+  "em_controller._barge_watcher": 289,
+  "em_controller._run_post_turn_playback": 172,
+  "em_controller._run_voice_locked": 430,
+  "em_controller._stream_listen": 645,
+  "em_controller.handle_control": 580,
+  "em_controller.handle_data": 193,
+  "em_db.record_device_stats": 206,
+  "em_device_view.merge_device": 177,
+  "em_esphome.EchoMuseSatellite._handle_voice_event": 223,
+  "em_esphome.EchoMuseSatellite._stream_mic_audio": 374,
+  "em_esphome.EchoMuseSatellite.handle_message": 345,
+  "em_esphome.EchoMuseSatellite.run_esphome_voice_turn": 371,
+  "em_ota._run_update_locked": 229,
+  "em_player.MediaSession._feed": 318,
+  "em_routes_provision._post_provision_emos_image": 182,
+  "em_scenes.resolve": 151,
+  "em_shell.stream_file": 239
+ }
+}
