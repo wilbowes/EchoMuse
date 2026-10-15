@@ -135,6 +135,7 @@ COPY em_routes_static.py .
 COPY em_routes_system.py .
 COPY em_routes_updates.py .
 COPY em_process_stats.py .
+COPY em_device_view.py .
 COPY em_linkauth.py .
 COPY em_tcp.py .
 COPY em_pacing.py .

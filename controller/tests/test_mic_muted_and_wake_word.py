@@ -184,7 +184,7 @@ def test_the_wake_stream_does_not_come_up_with_the_wake_word_off():
 
 def test_the_api_readout_is_the_stored_choice():
     """Read from the DB, not defaulted off `live`, so an offline device reports HA's choice."""
-    src = (ROOT / "controller" / "em_api.py").read_text()
+    src = _sources.def_source("merge_device")
     lines = [ln for ln in src.splitlines() if '"wake_word":' in ln]
     assert len(lines) == 1, lines
     assert "db.get_wake_word_enabled(" in lines[0], lines[0].strip()

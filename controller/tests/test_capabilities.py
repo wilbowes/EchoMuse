@@ -22,8 +22,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent.parent
 CONTROL_GO = ROOT / "device" / "internal" / "client" / "control.go"
 CONTROLLER = ROOT / "controller" / "em_controller.py"
-API = ROOT / "controller" / "em_api.py"
 ESPHOME = ROOT / "controller" / "em_esphome.py"
+
+
+def _device_record() -> str:
+    """merge_device, which builds each device's record for /api/devices."""
+    return _sources.def_source("merge_device")
 
 
 def device_capabilities() -> list[str]:
@@ -81,7 +85,7 @@ def test_shadow_capability_is_surfaced_to_the_dashboard():
     """
     assert "oww_shadow_capable" in CONTROLLER.read_text(), \
         "em_controller must expose the shadow capability as a property"
-    assert "owwShadowCapable" in API.read_text(), \
+    assert "owwShadowCapable" in _device_record(), \
         "/api/devices must surface the shadow capability"
     jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
     assert "owwShadowCapable" in jsx, \
@@ -93,7 +97,7 @@ def test_wake_mic_capability_is_surfaced_to_the_dashboard():
     offered there as a switch that does nothing."""
     assert "wake_mic" in device_capabilities(), "firmware no longer announces wake_mic"
     assert "wake_mic_capable" in CONTROLLER.read_text()
-    assert "wakeMicCapable" in API.read_text()
+    assert "wakeMicCapable" in _device_record()
     jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
     assert "disabled={!wakeMicCapable}" in jsx
 
@@ -104,7 +108,7 @@ def test_volume_cue_capability_is_surfaced_to_the_dashboard():
     assert "volume_cue" in caps, "firmware no longer announces volume_cue"
     assert "volume_cue_capable" in CONTROLLER.read_text(), \
         "em_controller must expose the volume cue capability as a property"
-    assert "volumeCueCapable" in API.read_text(), \
+    assert "volumeCueCapable" in _device_record(), \
         "/api/devices must surface the volume cue capability"
     jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
     assert "volumeCueCapable" in jsx, \
@@ -114,7 +118,7 @@ def test_volume_cue_capability_is_surfaced_to_the_dashboard():
 def test_response_level_is_gated_on_its_capability():
     assert "response_level" in device_capabilities()
     assert "response_level_capable" in CONTROLLER.read_text()
-    assert "responseLevelCapable" in API.read_text()
+    assert "responseLevelCapable" in _device_record()
     jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
     assert "disabled={!responseLevelCapable}" in jsx
     select = re.search(r"function Select\(\{(.*?)\n\}", jsx, re.S)
@@ -129,7 +133,7 @@ def test_sendspin_is_gated_on_its_capability_and_its_token_stays_private():
     or a dashboard event, which land in support bundles and every open tab.
     """
     assert "sendspin" in device_capabilities()
-    assert "sendspinCapable" in API.read_text()
+    assert "sendspinCapable" in _device_record()
     jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
     assert "disabled={!sendspinCapable}" in jsx
     handler = _sources.def_source("_on_sendspin_token")
@@ -151,7 +155,7 @@ def test_triggering_is_a_separate_capability_from_scoring():
         "oww_trigger must not replace oww_shadow — shadow is still a mode"
     assert "oww_trigger_capable" in CONTROLLER.read_text(), \
         "em_controller must expose the trigger capability as a property"
-    assert "owwTriggerCapable" in API.read_text(), \
+    assert "owwTriggerCapable" in _device_record(), \
         "/api/devices must surface the trigger capability"
     assert "owwTriggerCapable" in (ROOT / "controller" / "static" / "dashboard.jsx").read_text(), \
         "the dashboard must gate the 'On device' option on the capability"
@@ -161,7 +165,7 @@ def test_remote_volume_arc_is_capability_gated():
     """Old firmware must not be offered a toggle it cannot honour."""
     assert "remote_volume_arc" in device_capabilities()
     assert "remote_volume_arc_capable" in CONTROLLER.read_text()
-    assert "remoteVolumeArcCapable" in API.read_text()
+    assert "remoteVolumeArcCapable" in _device_record()
     jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
     assert "disabled={!remoteVolumeArcCapable}" in jsx
 
@@ -287,8 +291,7 @@ def test_the_api_can_tell_no_sensor_from_no_reading():
     is its own question, tracked separately. The API field stands on its own
     merits regardless of who renders it.
     """
-    api = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
-    assert "ambientLightCapable" in api, \
+    assert "ambientLightCapable" in _device_record(), \
         "/api/devices must report whether the device found its ALS"
 
 
@@ -316,7 +319,7 @@ def test_hardware_echo_reference_is_a_capability_and_a_runtime_state():
     assert '"aecRef"' in ctl or "'aecRef'" in ctl, \
         "the stats allowlist must carry aecRef, or it is dropped in the relay"
 
-    api = API.read_text()
+    api = _device_record()
     for field in ("aecHwRefCapable", "aecRef"):
         assert field in api, f"/api/devices must surface {field}"
 

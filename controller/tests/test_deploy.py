@@ -2045,7 +2045,7 @@ def test_a_queued_update_is_reported_as_queued_not_as_in_progress():
     that as `update_in_progress` claims a transfer that has not begun, which
     is the same failure as any control that appears to work and does not.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
+    src = _sources.def_source("merge_device")
     assert '"update_queued":' in src, (
         "/api/devices must expose update_queued, or the dashboard cannot tell "
         "waiting from working"
@@ -2483,7 +2483,7 @@ def test_base_os_survives_the_device_going_offline():
     FireOS 5 slug would vanish whenever a device went offline — exactly when
     someone is trying to work out what it was. A live report still wins.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
+    src = _sources.def_source("merge_device")
     at = src.index('"baseOs":')
     line = src[at:src.index("\n", src.index("\n", at) + 1)]
     assert 'getattr(live, "base_os", None)' in line, "a live report must come first"

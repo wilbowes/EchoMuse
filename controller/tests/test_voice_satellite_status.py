@@ -21,6 +21,8 @@ implementing it; the shape of that bug is now known and designed out.
 import re
 from pathlib import Path
 
+import _sources
+
 CONTROLLER = Path(__file__).resolve().parents[1]
 
 
@@ -86,8 +88,7 @@ def test_api_exposes_it_beside_the_bt_proxy():
     Same payload, same shape, one poll. If this drops out, the dashboard
     silently falls back to rendering nothing rather than erroring.
     """
-    body = _fn_source(CONTROLLER / "em_api.py",
-                      "def _merge_device(", _strip_py_comments)
+    body = _strip_py_comments(_sources.def_source("merge_device"))
     assert '"voiceSatellite"' in body
     assert "em_esphome.get_status(device_id)" in body
 

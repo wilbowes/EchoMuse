@@ -76,6 +76,7 @@ from websockets.asyncio.server import ServerConnection as WebSocketServerProtoco
 
 import em_db as db
 import em_events
+import em_device_view
 import em_process_stats
 import em_reconcile
 import em_routes_link
@@ -502,7 +503,7 @@ class Device:
         # this, not `speaking`.
         self.speaker_busy = 0
 
-        # Transient state — read by em_api._merge_device()
+        # Transient state — read by em_device_view.merge_device()
         self.speaking  = False
         self.muted     = False
         # HA's wake word picker (#286); seeded from the DB at connect.
@@ -584,7 +585,7 @@ class Device:
         self.led_scene:     dict  = em_scenes.resolve({})
         self.stats:         dict | None = None
         # In-flight wifi_scan awaiter (set by the API handler). Change
-        # pending/result state lives in api._wifi_states instead — this
+        # pending/result state lives in em_device_view._wifi_states instead — this
         # Device object dies with the connection when the network switches.
         self.wifi_scan_future: asyncio.Future | None = None
         # Q4 fix (2026-07-05 review): dashboard-visible near-miss counter —
@@ -4304,7 +4305,7 @@ async def _link_auth_ok(
         # Only for a device with a row and a token, so ids nobody issued
         # cannot grow the map. The dashboard shows it on the Link row.
         if expected:
-            api.note_link_refused(device_id, verdict.reason)
+            em_device_view.note_link_refused(device_id, verdict.reason)
         return False
     if presented and expected and not confirmed:
         # First sight of the device holding its token: from now on it must.
@@ -4313,7 +4314,7 @@ async def _link_auth_ok(
             log.info(f"[{plane}] {device_id}: link token confirmed — "
                      f"a connection without it will be refused from now on")
     if plane == "control":
-        api.clear_link_refused(device_id)
+        em_device_view.clear_link_refused(device_id)
     if verdict.stale_token:
         # Allowed, but worth seeing in the log: almost always a device that was
         # deleted and has come back carrying the credential from its previous
@@ -4620,7 +4621,7 @@ async def _on_wifi_result(device: Device, msg: dict) -> None:
     ok    = bool(msg.get("ok"))
     ssid  = msg.get("ssid", "")
     error = msg.get("error") or ""
-    st, duplicate = api.wifi_record_result(device_id, ok, ssid, error)
+    st, duplicate = em_device_view.wifi_record_result(device_id, ok, ssid, error)
     await device.send_control({"type": "wifi_commit"})
     if not duplicate:
         if ok:
