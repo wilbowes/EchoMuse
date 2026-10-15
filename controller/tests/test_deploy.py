@@ -1457,7 +1457,7 @@ def test_entity_names_do_not_repeat_the_device_label():
 
 def test_asset_sync_does_not_shadow_its_accumulator():
     """
-    _sync_oww_assets_locked keeps a `pushed` list of installed asset names. Assigning
+    em_oww_sync._sync_locked keeps a `pushed` list of installed asset names. Assigning
     the per-file transfer result to that same name shadowed the list on the
     FIRST file, so the append at the end of the loop raised
     AttributeError: 'TransferResult' object has no attribute 'append'
@@ -1471,11 +1471,7 @@ def test_asset_sync_does_not_shadow_its_accumulator():
     Found on hardware 2026-08-16: a device reporting "classifier model not
     installed" while the dashboard offered to send it and returned 500.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
-    fn = re.search(r"async def _sync_oww_assets_locked\(.*?\n(?=\nasync def |\ndef )",
-                   src, re.S)
-    assert fn, "_sync_oww_assets_locked not found"
-    body = fn.group(0)
+    body = _sources.def_source("em_oww_sync._sync_locked")
 
     assert "pushed = []" in body, "the accumulator is gone"
     assert "pushed.append(" in body, "nothing accumulates installed names"
@@ -1506,7 +1502,7 @@ def test_a_new_wake_word_is_installed_before_the_device_is_told_about_it():
     assert fn, "_apply_live_config not found"
     body = fn.group(0)
 
-    hold = body.find("_hold_back_oww_model(live, effective)")
+    hold = body.find("em_oww_sync.hold_back_model(live, effective)")
     push = body.find('send_control({"type": "config"')
     assert hold != -1, "the new model is no longer held back"
     assert push != -1, "the config push is gone"
@@ -1514,7 +1510,7 @@ def test_a_new_wake_word_is_installed_before_the_device_is_told_about_it():
         "the model must be held back BEFORE the config is pushed, or the "
         "device is told to use a model it does not have"
     )
-    assert "_install_then_switch" in body, "nothing installs the pending model"
+    assert "em_oww_sync.install_then_switch" in body, "nothing installs the pending model"
 
 
 def test_only_devices_that_score_locally_are_held_back():
@@ -1527,11 +1523,7 @@ def test_only_devices_that_score_locally_are_held_back():
     the same save that changes the wake word must not slip through on the
     strength of the old mode being "off".
     """
-    src = (CONTROLLER / "em_api.py").read_text()
-    fn = re.search(r"def _hold_back_oww_model\(.*?\n(?=\nasync def |\ndef )",
-                   src, re.S)
-    assert fn, "_hold_back_oww_model not found"
-    body = fn.group(0)
+    body = _sources.def_source("hold_back_model")
 
     assert "oww_shadow_capable" in body, (
         "a device that cannot score locally must not be held back"
@@ -1551,11 +1543,7 @@ def test_a_failed_install_leaves_the_device_on_its_old_wake_word():
     deaf device; standing the device down instead overrides the user's choice.
     Staying put means the device keeps answering, on a wake word it can hear.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
-    fn = re.search(r"async def _install_then_switch\(.*?\n(?=\nasync def |\ndef )",
-                   src, re.S)
-    assert fn, "_install_then_switch not found"
-    body = fn.group(0)
+    body = _sources.def_source("install_then_switch") + "\n"
 
     # The failure BRANCH itself, not the span up to the switch — that span
     # contains other returns, which is how the first version of this test
@@ -2266,7 +2254,7 @@ def test_the_reconcile_runs_the_three_payloads_sequentially():
     fn = _strip_prose(_fn_body(
         (CONTROLLER / "em_api.py").read_text(), "reconcile_on_connect"))
 
-    for step in ("reconcile_oww_assets", "em_payloads.sync_start_script", "em_payloads.sync_debloat"):
+    for step in ("em_oww_sync.reconcile", "em_payloads.sync_start_script", "em_payloads.sync_debloat"):
         assert step in fn, f"{step} must run on connect"
     assert "asyncio.gather" not in fn, (
         "the three payloads share one shell plane — run them in order"
@@ -3180,14 +3168,15 @@ def test_asset_installs_queue_behind_the_ota_lock():
     """
     import ast
     # Every module: a caller of the unlocked body is a caller wherever it is.
-    fns = {n.name: n for path in _sources.MODULES for n in ast.walk(_sources.tree(path))
-           if isinstance(n, ast.AsyncFunctionDef)}
-    wrapper = fns["_sync_oww_assets"]
+    _, wrapper = _sources.find_def("em_oww_sync.sync")
+    _sources.find_def("em_oww_sync._sync_locked")   # the body exists to be guarded
     assert any(isinstance(n, ast.AsyncWith) and "em_ota.queue" in ast.unparse(n.items[0].context_expr)
-               for n in ast.walk(wrapper)), "_sync_oww_assets does not take em_ota.queue"
-    callers = [name for name, fn in fns.items()
-               if name not in ("_sync_oww_assets", "_sync_oww_assets_locked")
-               and "_sync_oww_assets_locked(" in ast.unparse(fn)]
+               for n in ast.walk(wrapper)), "em_oww_sync.sync does not take em_ota.queue"
+    callers = [f"{path.name}:{fn.name}" for path in _sources.MODULES
+               for fn in ast.walk(_sources.tree(path))
+               if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+               and fn is not wrapper and fn.name != "_sync_locked"
+               and "_sync_locked(" in ast.unparse(fn)]
     assert not callers, f"unlocked asset sync called from {callers}"
 
 

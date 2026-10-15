@@ -1292,7 +1292,7 @@ for `saveUtterances` means recording. Both config POSTs now refuse a value of
 the wrong type with `bad_config_value`, judging only values the write CHANGES
 so a read-modify-write carrying a value stored before the check still saves.
 Every full-config push drops stored bad values first (`drop_invalid` at
-registration, `_well_typed` for the three pushes in `em_api`), and a dropped
+registration, `em_config_types.well_typed` for every other full push), and a dropped
 key reads as absent at both ends. `tests/test_config_types.py` holds `KINDS`
 against `config.go`, makes every `DEFAULT_DEVICE_CONFIG` key either listed or
 named as read defensively elsewhere, and fails if a push skips the filter —
@@ -1596,7 +1596,7 @@ global and both entry points go through it — the fleet deploy and a
 hand-clicked single update collide identically, and only the first was ever
 going to be noticed.
 
-- **Wake word asset installs take the same lock** (`_sync_oww_assets`, 2026-09-22). Every device carries the full asset set whatever its mode, so an upgrade that adds an asset has the whole fleet reconnect and push at once — ~14MB each for a device on the controller's wake word that never had the runtime, which is most of an existing fleet. Same transport, same stall; same queue, same `em_ota.MAX_HOLD_S` cap. A test pins that only the wrapper reaches `_sync_oww_assets_locked`.
+- **Wake word asset installs take the same lock** (`em_oww_sync.sync`, 2026-09-22). Every device carries the full asset set whatever its mode, so an upgrade that adds an asset has the whole fleet reconnect and push at once — ~14MB each for a device on the controller's wake word that never had the runtime, which is most of an existing fleet. Same transport, same stall; same queue, same `em_ota.MAX_HOLD_S` cap. A test pins that only the wrapper reaches `em_oww_sync._sync_locked`.
 - **The binary is fetched inside the lock**, so a queued device holds nothing
   but its place in line, and the lock is released in a `finally` — an update
   that raises would otherwise hold it for the life of the process and no
@@ -1617,7 +1617,7 @@ going to be noticed.
 **Every payload reconciles on OTA or on a click, and nothing reconciles on
 CONNECT — which is the wrong trigger and is why devices drift.**
 `em_payloads.sync_start_script` and `em_payloads.sync_debloat` run inside `em_ota._run_update_locked` and
-from the Maintenance button; `reconcile_oww_assets` does run on connect but
+from the Maintenance button; `em_oww_sync.reconcile` does run on connect but
 returns early unless `owwOnDevice` is on, and then checks only the SELECTED
 classifier. So a device can sit for weeks missing three of the four stock wake
 words — measured on Office 2026-09-02, provisioned 17 Aug with `hey_jarvis`
@@ -1747,7 +1747,7 @@ Device-side payloads the controller distributes (`start_server.sh` via `/api/pro
 - **Sequential, never gathered.** All three talk to one device over one shell plane; concurrency contends for a single session and none of them is on the critical path of anything.
 - **One failure must not skip the other two.** Unrelated payloads — a device with a stale debloat list should still get its wake word models — so each step is caught individually, not the loop.
 - **Debounced per device** (`RECONCILE_DEBOUNCE_S`, 15 min), because reconnects are routine on this fleet and the payloads are not; they change when someone deploys or edits a config, which is minutes to days apart. The stamp is claimed **before** the work, so a device reconnecting mid-run cannot start a second one against the same shell plane. `_delete_device` calls `forget_reconcile` — a re-added device is the one whose payloads are least likely to be right.
-- **A silent device is not a missing file.** `em_shell.run` swallows every exception and returns `""`, so an absent md5 and a device that never answered were the same string — and the syncs read empty as out-of-date. That was harmless while they only ran mid-OTA against a shell already proven; seconds after connect the shell plane is very likely **not up yet**, so it meant a pointless push and a user-visible "out of date" event that was untrue. Both syncs now append `em_shell.OK_MARK` to the probe and return untouched without it. Same shape as `reconcile_oww_assets`'s "failure to LOOK is not evidence of absence".
+- **A silent device is not a missing file.** `em_shell.run` swallows every exception and returns `""`, so an absent md5 and a device that never answered were the same string — and the syncs read empty as out-of-date. That was harmless while they only ran mid-OTA against a shell already proven; seconds after connect the shell plane is very likely **not up yet**, so it meant a pointless push and a user-visible "out of date" event that was untrue. Both syncs now append `em_shell.OK_MARK` to the probe and return untouched without it. Same shape as `em_oww_sync.reconcile`'s "failure to LOOK is not evidence of absence".
 
 **The wake word MODE does not gate the assets reconcile — every device carries the full set** (Wil, 2026-09-22: "either could be switched to the other mode and should be already in a state to accommodate the switch — consistency across the devices is key"). It used to return early under `owwOnDevice=off` on the grounds that such a device scores nothing and the 12.3MB runtime is irrelevant. Two things made that wrong: the speech gate's `silero_vad.onnx` is used in BOTH modes, so a controller-scoring device was left on the RMS gate; and a device that must install 14MB before it can switch mode is the "enabled it and nothing happened" this whole system exists to remove. The mode now decides one thing only, in `em_oww_assets.reconcile_action` (pure, tested): a device scoring LOCALLY whose selected classifier is missing is deaf, so it is warned about and sent its config again once repaired; any other gap is a quiet repair. **The mode itself is never changed** — no device is moved to the controller's wake word because a model is missing, and there is no opt-in for it (Wil, 2026-09-22: "the button still works regardless"); `effective_mode` takes no readiness, and an AST test fails if the reconcile ever assigns the mode. Only firmware that cannot load a runtime at all (`oww_shadow` absent) is skipped. An AST test fails if a `MODE_OFF` early return reappears. The other two payloads are md5 compares and run regardless.
 

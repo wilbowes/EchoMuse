@@ -6,6 +6,7 @@ first tests hold it against them: the device's ConfigMessage (parsed from
 config.go), and every key the controller converts when a device registers.
 """
 
+import _sources
 import ast
 import math
 import re
@@ -163,14 +164,16 @@ def _calls(fn, name):
                for n in ast.walk(fn))
 
 
-def test_every_em_api_config_push_is_filtered():
-    tree = ast.parse((CONTROLLER / "em_api.py").read_text())
-    pushes = [(fn, v) for fn, v in _config_pushes(tree) if fn.name != "push_config"]
+def test_every_config_push_outside_registration_is_filtered():
+    # Every module: a push moved out of em_api is still a push. Registration
+    # (handle_control) filters with drop_invalid, pinned below.
+    pushes = [(fn, v) for path in _sources.MODULES if path.name != "em_controller.py"
+              for fn, v in _config_pushes(_sources.tree(path)) if fn.name != "push_config"]
     assert len(pushes) >= 3
     for fn, v in pushes:
-        direct = isinstance(v, ast.Call) and getattr(v.func, "id", None) == "_well_typed"
-        assert direct or _calls(fn, "_well_typed"), (
-            f"{fn.name} pushes a full config without _well_typed")
+        direct = isinstance(v, ast.Call) and getattr(v.func, "attr", None) == "well_typed"
+        assert direct or _calls(fn, "well_typed"), (
+            f"{fn.name} pushes a full config without em_config_types.well_typed")
 
 
 def test_registration_filters_before_it_pushes():

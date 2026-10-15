@@ -112,7 +112,7 @@ def test_an_empty_setting_leaves_a_hand_written_file_alone(monkeypatch):
 def test_a_device_that_does_not_answer_is_left_entirely_alone(monkeypatch):
     """
     No answer is NOT evidence of absence, and this is the same rule
-    `reconcile_oww_assets` and `em_payloads.sync_start_script` follow with `em_shell.OK_MARK`.
+    `em_oww_sync.reconcile` and `em_payloads.sync_start_script` follow with `em_shell.OK_MARK`.
 
     Seconds after a device connects its shell plane is very likely not up yet.
     Reading the silence as "no file" would either push a redundant file or —

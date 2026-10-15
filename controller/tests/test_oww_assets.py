@@ -8,6 +8,7 @@ the model a device is using; a wrong "keep" leaves it scoring against a
 stale classifier that silently disagrees with the controller.
 """
 
+import _sources
 import time
 
 import pytest
@@ -502,13 +503,11 @@ def test_the_connect_reconcile_is_not_gated_on_the_wake_word_mode():
     model, and could not switch mode without an install first."""
     import ast
     from pathlib import Path
-    src = (Path(__file__).resolve().parents[1] / "em_api.py").read_text()
-    fn = next(n for n in ast.walk(ast.parse(src))
-              if isinstance(n, ast.AsyncFunctionDef) and n.name == "reconcile_oww_assets")
+    _, fn = _sources.find_def("em_oww_sync.reconcile")
     for node in ast.walk(fn):
         if isinstance(node, ast.If) and "MODE_OFF" in ast.unparse(node.test):
             assert not any(isinstance(b, ast.Return) for b in node.body), (
-                "reconcile_oww_assets returns early on the wake word mode")
+                "em_oww_sync.reconcile returns early on the wake word mode")
     assert "reconcile_action(" in ast.unparse(fn)
 
 
@@ -517,12 +516,10 @@ def test_the_reconcile_never_changes_a_devices_mode():
     answers the button until the install lands (Wil, 2026-09-22)."""
     import ast
     from pathlib import Path
-    src = (Path(__file__).resolve().parents[1] / "em_api.py").read_text()
-    fn = next(n for n in ast.walk(ast.parse(src))
-              if isinstance(n, ast.AsyncFunctionDef) and n.name == "reconcile_oww_assets")
+    _, fn = _sources.find_def("em_oww_sync.reconcile")
     for node in ast.walk(fn):
         if isinstance(node, (ast.Assign, ast.AugAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             for t in targets:
                 assert "oww_on_device" not in ast.unparse(t), (
-                    "reconcile_oww_assets changes the wake word mode")
+                    "em_oww_sync.reconcile changes the wake word mode")
