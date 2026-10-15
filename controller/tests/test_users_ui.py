@@ -50,3 +50,22 @@ def test_server_reason_reaches_the_user():
     fn = src[src.index("async function setUserRole"):]
     fn = fn[:fn.index("async function loadUsers") if "async function loadUsers" in fn else 800]
     assert "e.error ||" in fn, "the PATCH refusal reason must be shown"
+
+
+# ── OpenID Connect accounts (em_oidc) ─────────────────────────────────────────
+
+def test_oidc_linked_accounts_do_not_offer_a_role_button():
+    """
+    The provider's groups decide an OIDC account's role at every sign-in, so a
+    promote/demote button would be a control whose effect expires. The server
+    refuses it (409 oidc_linked); the screen must not offer it in the first
+    place, and must say where the role is actually set.
+    """
+    src = _settings_src()
+    assert "u.oidc_linked" in src
+    row = src[src.index("{(users || []).map(u => ("):]
+    row = row[:row.index("!users && !usersMsg")]
+    assert "u.oidc_linked" in row.split("Pill")[0] or \
+        "!u.oidc_linked" in row, \
+        "the role Pill must be conditional on the account not being oidc_linked"
+    assert "group" in src.lower(), "the screen must say the role comes from a group"

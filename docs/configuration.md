@@ -920,6 +920,48 @@ These are set once, on the server, and need a controller restart to change:
 
 See `.env.example` for the complete list with comments.
 
+### Single sign-on (OpenID Connect)
+
+The dashboard can sign people in through an OpenID Connect provider such as
+Authentik, Keycloak or Authelia, instead of (or alongside) its own
+passwords. Roles follow group membership at the provider, and an account is
+created the first time someone signs in.
+
+Set these on the controller, and restart it:
+
+| Setting | What it is |
+|---|---|
+| `OIDC_ISSUER` | The provider's issuer URL, which has a `/.well-known/openid-configuration` beneath it. Must be `https` (plain `http` only for `localhost`). Setting it turns single sign-on on. |
+| `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | The client you registered for EchoMuse. Register it as a confidential client using the authorization-code flow. |
+| `OIDC_REDIRECT_URI` | `https://<where you open the dashboard>/api/auth/oidc/callback`. Register exactly this at the provider. |
+| `OIDC_ADMIN_GROUPS` | Comma-separated group names whose members become **admin**. |
+| `OIDC_READONLY_GROUPS` | Comma-separated group names whose members become **read-only**. |
+| `OIDC_GROUPS_CLAIM` | The ID token claim that lists a person's groups. Default `groups`. |
+| `OIDC_SCOPES` | Default `openid profile email groups`. |
+| `OIDC_PASSWORD_LOGIN` | `false` removes the password form and refuses password sign-in. Default `true`. |
+| `OIDC_SESSION_HOURS` | How long a single sign-on session lasts. Default 12. A change to someone's groups takes effect when their session next signs in, so this is the longest a removed person keeps access. |
+| `OIDC_BUTTON_LABEL` | The text on the sign-in button. Default "Sign in with SSO". |
+
+What to know before turning it on:
+
+- **A person in none of the listed groups cannot sign in.** There is no
+  default role. Removing someone from the group at the provider is how you
+  remove their access.
+- **An admin group wins** over a read-only group when someone is in both.
+- **The role is set by the provider at every sign-in.** It cannot be edited
+  on the Users tab for these accounts, which are marked "SSO".
+- **Accounts are tied to the provider's stable user id**, not the name, so a
+  rename at the provider does not create a second account.
+- **Keep a local admin.** Leave `OIDC_PASSWORD_LOGIN` on, or at least keep one
+  password account, until you have signed in by single sign-on and seen it
+  work. If the provider is down, that account is the way back in.
+- **Start sign-in from the address in `OIDC_REDIRECT_URI`.** The browser is
+  sent back to exactly that host, and the cookie that ties the return trip to
+  the sign-in belongs to the host you started from. Starting from a different
+  address (the controller's bare LAN IP, say) ends in "That sign-in expired".
+- A half-set configuration is logged and ignored, so a typo leaves you with
+  the password form rather than locked out.
+
 ### Encrypted device link
 
 The controller generates its own certificate authority on first start

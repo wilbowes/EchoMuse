@@ -153,6 +153,38 @@
     button[type=submit]:active { box-shadow: inset 0 2px 4px rgba(0,0,0,0.15); }
     button[type=submit]:disabled { opacity: 0.5; cursor: default; }
 
+    /* Single sign-on. A link, not a submit button, so it is its own block. */
+    .sso { display: none; }
+    .sso.active { display: block; }
+    .sso-btn {
+      display: block;
+      margin-top: 8px;
+      background: linear-gradient(170deg, #e8e4dc 0%, var(--surface) 100%);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      font-family: 'DM Mono', monospace;
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--text);
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      text-align: center;
+      text-decoration: none;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.12), 0 1px 0 rgba(255,255,255,0.6) inset;
+    }
+    .sso-btn:hover { background: #eceae2; }
+    .sso-or {
+      font-family: 'DM Mono', monospace;
+      font-size: 9px;
+      color: var(--muted);
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      margin: 14px 0 2px;
+      display: none;
+    }
+    .sso-or.active { display: block; }
+
     .hint {
       font-family: 'DM Mono', monospace;
       font-size: 10px;
@@ -349,6 +381,15 @@
       <button type="submit" id="li-btn">Sign in</button>
     </form>
 
+    <!-- Single sign-on — revealed by init() only when the controller has an
+         OpenID Connect provider configured. Relative href so it also works
+         under Home Assistant ingress. The label is replaced from the server
+         as text. -->
+    <div class="sso-or" id="sso-or">or</div>
+    <div class="sso" id="sso">
+      <a class="sso-btn" id="sso-btn" href="api/auth/oidc/login">Sign in with SSO</a>
+    </div>
+
     <div class="hint" id="hint"></div>
 
   </div>
@@ -403,6 +444,25 @@
       location.replace('dashboard');
     }
 
+    // The callback hands the browser a one-shot code in the URL FRAGMENT
+    // (never sent to a server, never in a log) and, on failure, a FIXED error
+    // code in the query. Both are attacker-influenced input, so the code is
+    // accepted only if it is shaped like one, and an error code is only ever
+    // turned into a sentence of ours.
+    function oidcCodeFromHash(hash) {
+      const m = /^#oidc=([A-Za-z0-9_-]{1,128})$/.exec(hash || '');
+      return m ? m[1] : null;
+    }
+
+    function oidcErrorMessage(code) {
+      switch (code) {
+        case 'expired':   return 'That sign-in expired. Please try again.';
+        case 'denied':    return 'The identity provider declined the sign-in.';
+        case 'no_access': return 'Your account is not in a group allowed to use EchoMuse.';
+        default:          return 'Single sign-on failed. Please try again.';
+      }
+    }
+
     // ── Setup form ──
     document.getElementById('form-setup').addEventListener('submit', async e => {
       e.preventDefault();
@@ -449,7 +509,54 @@
     // 2. Home Assistant already authenticated us → straight to /dashboard.
     // 3. Setup pending → amber ring + create-admin form.
     // 4. Configured → green ring + login form.
+    // Reveal the single sign-on button when the server has a provider, and
+    // hide the password form if it has been switched off. Never throws: SSO
+    // being unreachable must not take the password form away.
+    async function applySso() {
+      try {
+        const r = await fetch('api/auth/oidc/config');
+        const cfg = await r.json();
+        if (!cfg.enabled) return;
+        document.getElementById('sso-btn').textContent = cfg.label;
+        document.getElementById('sso').classList.add('active');
+        if (cfg.password_login) {
+          document.getElementById('sso-or').classList.add('active');
+        } else {
+          show('');
+        }
+      } catch {}
+    }
+
+    // A finished single sign-on arrives as #oidc=<code>. The code is removed
+    // from the address bar BEFORE it is exchanged, so it is not left in
+    // history and a reload cannot replay it. Returns an error code to show,
+    // or null when the sign-in completed and the page is navigating away.
+    async function finishOidcSignIn(code) {
+      history.replaceState(null, '', location.pathname + location.search);
+      try {
+        const d = await post('api/auth/oidc/exchange', { code });
+        setLcd('Signed in', GREEN);
+        setRing(GREEN);
+        enterDashboard(d.token, d.role, 'oidc');
+        return null;
+      } catch {
+        return 'expired';
+      }
+    }
+
     async function init() {
+      let oidcError = null;
+      const oidcCode = oidcCodeFromHash(location.hash);
+      if (oidcCode) {
+        oidcError = await finishOidcSignIn(oidcCode);
+        if (!oidcError) return;
+      }
+      const query = new URLSearchParams(location.search);
+      if (query.has('oidc_error')) {
+        oidcError = query.get('oidc_error');
+        history.replaceState(null, '', location.pathname);
+      }
+
       const token = localStorage.getItem('em_token');
       if (token) {
         try {
@@ -497,6 +604,11 @@
           hint.textContent = '';
           show('form-login');
           document.getElementById('li-user').focus();
+          await applySso();
+          if (oidcError) {
+            setRing(RED);
+            setLcd(oidcErrorMessage(oidcError), RED);
+          }
         }
       } catch (e) {
         setRing(DIM);

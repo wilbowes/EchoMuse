@@ -10931,6 +10931,8 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
                 Admins approve devices, change config and can open a root shell to any device.
                 Read-only accounts see status only. An account with an HA badge gets its sign-in
                 from Home Assistant; its ROLE is still set here and never overwritten by a login.
+                An account marked SSO signs in through your identity provider and its role follows
+                its group membership there, so it is changed in the provider, not here.
                 The last admin cannot be demoted.
               </div>
               {(users || []).map(u => (
@@ -10939,12 +10941,14 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
                   <div style={{ flex:1 }}>
                     <div style={{ fontFamily:"'DM Sans',sans-serif", fontSize:14 }}>{u.username}</div>
                     <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)' }}>
-                      {u.role}{u.ha_linked ? ' · HA-linked' : ''}
+                      {u.role}{u.ha_linked ? ' · HA-linked' : ''}{u.oidc_linked ? ' · SSO · role from group' : ''}
                     </div>
                   </div>
-                  {u.role === 'admin'
-                    ? <Pill onClick={() => setUserRole(u.id, 'readonly')}>Demote to read-only</Pill>
-                    : <Pill accent onClick={() => setUserRole(u.id, 'admin')}>Promote to admin</Pill>}
+                  {u.oidc_linked
+                    ? null
+                    : u.role === 'admin'
+                      ? <Pill onClick={() => setUserRole(u.id, 'readonly')}>Demote to read-only</Pill>
+                      : <Pill accent onClick={() => setUserRole(u.id, 'admin')}>Promote to admin</Pill>}
                 </div>
               ))}
               {!users && !usersMsg && <div className="help">Loading…</div>}

@@ -27,6 +27,12 @@ PUBLIC = {
     "_post_login",
     "_post_ingress_login",  # gated by em_ingressauth.decide
     "_post_logout",         # a no-op without a session
+    # OpenID Connect sign-in — how a session is obtained, so it cannot
+    # require one. tests/test_oidc_routes.py pins what each hop refuses.
+    "_get_oidc_config",     # label and flags for the login page; no secrets
+    "_get_oidc_login",      # 302 to the provider, sets the flow cookie
+    "_get_oidc_callback",   # needs the flow cookie AND the matching state
+    "_post_oidc_exchange",  # needs a single-use code only a callback issues
 }
 
 # WebSocket upgrades cannot carry the Authorization header from a browser, so

@@ -1149,6 +1149,26 @@ MIGRATIONS: list[str] = [
 
     UPDATE system_config SET value = '31' WHERE key = 'schema_version';
     """,
+
+    # v32 — OpenID Connect identity on a user row.
+    #
+    # Keyed on (issuer, subject), never on the name: names are editable at the
+    # provider, and keying on one would hand a renamed user a fresh account,
+    # or hand somebody else's account to whoever took the old name. The issuer
+    # is part of the key because `sub` is only unique within one provider.
+    #
+    # NULL for every account that is not an OIDC sign-in, which is every
+    # account that existed before this migration. The unique index is partial
+    # for the reason v18's is: it costs local accounts nothing.
+    """
+    ALTER TABLE users ADD COLUMN oidc_issuer TEXT;
+    ALTER TABLE users ADD COLUMN oidc_subject TEXT;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_users_oidc_identity
+        ON users(oidc_issuer, oidc_subject) WHERE oidc_subject IS NOT NULL;
+
+    UPDATE system_config SET value = '32' WHERE key = 'schema_version';
+    """,
 ]
 
 # Post-migration fixups that need Python rather than SQL. Keyed by the schema
@@ -3170,20 +3190,59 @@ def create_ha_user(ha_user_id: str, username: str, role: str) -> int:
     """
     now = _now()
     with _tx() as conn:
-        base = username
-        suffix = 1
-        while conn.execute(
-            "SELECT 1 FROM users WHERE username = ?", (base,)
-        ).fetchone() is not None:
-            suffix += 1
-            base = f"{username}-{suffix}"
         cur = conn.execute(
             """
             INSERT INTO users (username, password_hash, role, created_at,
                                ha_user_id)
             VALUES (?, ?, ?, ?, ?)
             """,
-            (base, HA_USER_PASSWORD_SENTINEL, role, now, ha_user_id),
+            (_unused_username(conn, username), HA_USER_PASSWORD_SENTINEL,
+             role, now, ha_user_id),
+        )
+        return cur.lastrowid
+
+
+def _unused_username(conn: sqlite3.Connection, username: str) -> str:
+    """`username`, or `username-2`, `-3`… — never an existing account's name,
+    so two people with one display name are never merged onto one row."""
+    candidate = username
+    suffix = 1
+    while conn.execute(
+        "SELECT 1 FROM users WHERE username = ?", (candidate,)
+    ).fetchone() is not None:
+        suffix += 1
+        candidate = f"{username}-{suffix}"
+    return candidate
+
+
+def get_user_by_oidc(issuer: str, subject: str) -> Optional[sqlite3.Row]:
+    """Return the user linked to an OpenID Connect identity, or None."""
+    return _q1(
+        "SELECT * FROM users WHERE oidc_issuer = ? AND oidc_subject = ?",
+        (issuer, subject),
+    )
+
+
+def create_oidc_user(issuer: str, subject: str, username: str, role: str) -> int:
+    """
+    Insert a user authenticated by an OpenID Connect provider; return its id.
+
+    Like create_ha_user, the account has no password: the stored hash is the
+    sentinel no bcrypt check can match, so it cannot be used on the password
+    form even if the provider is later switched off.
+    """
+    if role not in ("admin", "readonly"):
+        raise ValueError(f"unknown role: {role!r}")
+    now = _now()
+    with _tx() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO users (username, password_hash, role, created_at,
+                               oidc_issuer, oidc_subject)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (_unused_username(conn, username), HA_USER_PASSWORD_SENTINEL,
+             role, now, issuer, subject),
         )
         return cur.lastrowid
 
@@ -3274,10 +3333,11 @@ def ha_admin_count() -> int:
 
 # ─── Sessions ─────────────────────────────────────────────────────────────────
 
-def create_session(token: str, user_id: int, expiry_days: int = 30) -> None:
+def create_session(token: str, user_id: int, expiry_days: float = 30) -> None:
     """Insert a new session row."""
     now = _now()
-    expires = now + expiry_days * 86400
+    # A float so a provider-governed session can be hours long, not whole days.
+    expires = int(now + expiry_days * 86400)
     with _tx() as conn:
         conn.execute(
             """
@@ -3306,6 +3366,13 @@ def delete_session(token: str) -> None:
     """Delete a session (logout)."""
     with _tx() as conn:
         conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+
+
+def delete_user_sessions(user_id: int) -> int:
+    """End every session a user holds. Returns how many were deleted."""
+    with _tx() as conn:
+        return conn.execute(
+            "DELETE FROM sessions WHERE user_id = ?", (user_id,)).rowcount
 
 
 def prune_sessions() -> int:
