@@ -110,7 +110,7 @@ def test_both_write_paths_are_guarded(path, handler):
     Both endpoints replace rather than merge, so both need the check. A
     guard on only one would leave the identical trap open next door.
     """
-    body = _sources.def_source(handler)
+    body = _sources.code_only(_sources.def_source(handler))
     assert "dropped_keys(" in body, f"{handler} does not call dropped_keys"
     assert "would_drop_keys" in body, f"{handler} does not refuse the write"
 
@@ -137,7 +137,8 @@ def test_new_default_key_does_not_block_a_stale_dashboard_save():
 
 def test_guard_reads_raw_stored_config_not_the_underlaid_view():
     """The guard must call the raw accessor, or the false positive returns."""
-    assert "get_global_device_config_raw" in _sources.def_source("_post_global_config")
+    code = _sources.code_only(_sources.def_source("_post_global_config"))
+    assert "get_global_device_config_raw" in code
 
 
 # ── decorator-placement guards ────────────────────────────────────────────

@@ -17,8 +17,10 @@ that does not answer: nothing changes.
 import asyncio
 import re
 
-import em_api
 import em_endpoints
+import em_events
+import em_payloads
+import em_shell
 
 
 class FakeLive:
@@ -61,10 +63,10 @@ def _patch_shell(monkeypatch, replies):
     async def no_sleep(_):
         return None
 
-    monkeypatch.setattr(em_api.em_shell, "run", fake_shell_run)
-    monkeypatch.setattr(em_api.em_shell, "stream_file", fake_stream)
-    monkeypatch.setattr(em_api.em_events, "push_log", fake_log)
-    monkeypatch.setattr(em_api.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(em_shell, "run", fake_shell_run)
+    monkeypatch.setattr(em_shell, "stream_file", fake_stream)
+    monkeypatch.setattr(em_events, "push_log", fake_log)
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
     return calls, pushed
 
 
@@ -78,12 +80,12 @@ def test_an_empty_setting_removes_only_a_file_this_controller_wrote(monkeypatch)
     file we wrote.
     """
     _reset()
-    replies = [f"0123456789abcdef0123456789abcdef  {em_endpoints.DEVICE_PATH}\n1\n{em_api.em_shell.OK_MARK}",
-               f"{em_api.em_shell.OK_MARK}"]
+    replies = [f"0123456789abcdef0123456789abcdef  {em_endpoints.DEVICE_PATH}\n1\n{em_shell.OK_MARK}",
+               f"{em_shell.OK_MARK}"]
     calls, pushed = _patch_shell(monkeypatch, replies)
-    monkeypatch.setattr(em_api.em_payloads, "endpoints_file", lambda: None)
+    monkeypatch.setattr(em_payloads, "endpoints_file", lambda: None)
 
-    assert asyncio.run(em_api.em_payloads.sync_endpoints(FakeLive(), "dev")) is True
+    assert asyncio.run(em_payloads.sync_endpoints(FakeLive(), "dev")) is True
     assert any("rm -f" in c for c in calls), "a managed file must be removed"
     assert any("updated" in m or "removed" in m for _, _, m in _events), _events
 
@@ -99,11 +101,11 @@ def test_an_empty_setting_leaves_a_hand_written_file_alone(monkeypatch):
     """
     _reset()
     # File present (the md5sum line), but `grep -c managed_by` printed 0.
-    replies = [f"0123456789abcdef0123456789abcdef  {em_endpoints.DEVICE_PATH}\n0\n{em_api.em_shell.OK_MARK}"]
+    replies = [f"0123456789abcdef0123456789abcdef  {em_endpoints.DEVICE_PATH}\n0\n{em_shell.OK_MARK}"]
     calls, pushed = _patch_shell(monkeypatch, replies)
-    monkeypatch.setattr(em_api.em_payloads, "endpoints_file", lambda: None)
+    monkeypatch.setattr(em_payloads, "endpoints_file", lambda: None)
 
-    assert asyncio.run(em_api.em_payloads.sync_endpoints(FakeLive(), "dev")) is True
+    assert asyncio.run(em_payloads.sync_endpoints(FakeLive(), "dev")) is True
     assert not any("rm -f" in c for c in calls), (
         "the fleet sync deleted a HAND-WRITTEN controller.json — #166 devices "
         f"lose their only route to the controller. calls={calls}"
@@ -123,9 +125,9 @@ def test_a_device_that_does_not_answer_is_left_entirely_alone(monkeypatch):
     """
     _reset()
     calls, pushed = _patch_shell(monkeypatch, [""])  # no sentinel at all
-    monkeypatch.setattr(em_api.em_payloads, "endpoints_file", lambda: None)
+    monkeypatch.setattr(em_payloads, "endpoints_file", lambda: None)
 
-    assert asyncio.run(em_api.em_payloads.sync_endpoints(FakeLive(), "dev")) is False
+    assert asyncio.run(em_payloads.sync_endpoints(FakeLive(), "dev")) is False
     assert not any("rm -f" in c for c in calls), f"acted on a silent device: {calls}"
     assert pushed == [], f"pushed to a device that never answered: {pushed}"
     # It logs rather than raising a dashboard event, deliberately: this runs on
@@ -146,11 +148,11 @@ def test_a_set_list_replaces_a_hand_written_file_and_says_so(monkeypatch):
     _reset()
     want = em_endpoints.file_bytes([{"host": "10.0.0.5", "port": 8767, "tlsPort": 8770}])
     assert want, "the fixture must produce a file to write"
-    replies = [f"0123456789abcdef0123456789abcdef  {em_endpoints.DEVICE_PATH}\n0\n{em_api.em_shell.OK_MARK}"]
+    replies = [f"0123456789abcdef0123456789abcdef  {em_endpoints.DEVICE_PATH}\n0\n{em_shell.OK_MARK}"]
     calls, pushed = _patch_shell(monkeypatch, replies)
-    monkeypatch.setattr(em_api.em_payloads, "endpoints_file", lambda: want)
+    monkeypatch.setattr(em_payloads, "endpoints_file", lambda: want)
 
-    assert asyncio.run(em_api.em_payloads.sync_endpoints(FakeLive(), "dev")) is True
+    assert asyncio.run(em_payloads.sync_endpoints(FakeLive(), "dev")) is True
     assert pushed, "a configured list must be written even over a hand-written file"
     assert pushed[0][1] == em_endpoints.DEVICE_PATH
     assert any("hand-written" in m for _, _, m in _events), _events
@@ -164,11 +166,11 @@ def test_a_file_already_carrying_the_want_is_left_alone(monkeypatch):
     """
     _reset()
     want = em_endpoints.file_bytes([{"host": "10.0.0.5", "port": 8767, "tlsPort": 8770}])
-    replies = [f"{em_endpoints.md5(want)}  {em_endpoints.DEVICE_PATH}\n1\n{em_api.em_shell.OK_MARK}"]
+    replies = [f"{em_endpoints.md5(want)}  {em_endpoints.DEVICE_PATH}\n1\n{em_shell.OK_MARK}"]
     calls, pushed = _patch_shell(monkeypatch, replies)
-    monkeypatch.setattr(em_api.em_payloads, "endpoints_file", lambda: want)
+    monkeypatch.setattr(em_payloads, "endpoints_file", lambda: want)
 
-    assert asyncio.run(em_api.em_payloads.sync_endpoints(FakeLive(), "dev")) is True
+    assert asyncio.run(em_payloads.sync_endpoints(FakeLive(), "dev")) is True
     assert pushed == [], f"re-pushed an identical file: {pushed}"
     assert _events == [], _events
 
@@ -184,12 +186,12 @@ def test_a_failed_removal_is_reported_and_not_claimed_as_success(monkeypatch):
     back on mDNS when it is not.
     """
     _reset()
-    replies = [f"0123456789abcdef0123456789abcdef  {em_endpoints.DEVICE_PATH}\n1\n{em_api.em_shell.OK_MARK}",
+    replies = [f"0123456789abcdef0123456789abcdef  {em_endpoints.DEVICE_PATH}\n1\n{em_shell.OK_MARK}",
                ""]  # the verification never echoes the sentinel
     _patch_shell(monkeypatch, replies)
-    monkeypatch.setattr(em_api.em_payloads, "endpoints_file", lambda: None)
+    monkeypatch.setattr(em_payloads, "endpoints_file", lambda: None)
 
-    assert asyncio.run(em_api.em_payloads.sync_endpoints(FakeLive(), "dev")) is False
+    assert asyncio.run(em_payloads.sync_endpoints(FakeLive(), "dev")) is False
     assert any(level == "warn" for level, _, _ in _events), _events
     assert not any("removed — mDNS" in m for _, _, m in _events), (
         f"claimed a removal that did not happen: {_events}"
