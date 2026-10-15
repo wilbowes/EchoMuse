@@ -1953,9 +1953,13 @@ async def _delete_oww_model(request: web.Request) -> web.Response:
     if not path.is_file():
         return _error("not_found", "No such model", 404)
 
-    configs: dict[str, dict] = {"global": db.get_global_device_config()}
-    for row in db.get_all_devices():
-        configs[row["device_id"]] = db.get_device_config(row["device_id"])
+    def _configs() -> dict[str, dict]:
+        out = {"global": db.get_global_device_config()}
+        for row in db.get_all_devices():
+            out[row["device_id"]] = db.get_device_config(row["device_id"])
+        return out
+
+    configs = await asyncio.get_running_loop().run_in_executor(None, _configs)
     users = em_oww_models.in_use_by(str(path), configs)
     if users:
         return _error("model_in_use",
@@ -3962,6 +3966,8 @@ async def _get_system_status(request: web.Request) -> web.Response:
     """GET /api/system/status"""
     loop = asyncio.get_event_loop()
     all_rows = await loop.run_in_executor(None, db.get_all_devices)
+    fleet_base_os, approval_mode = await loop.run_in_executor(None, lambda: (
+        db.fleet_base_os(), db.get_config("device_approval", "strict")))
     release = await _get_cached_release()
 
     return _ok({
@@ -3998,14 +4004,14 @@ async def _get_system_status(request: web.Request) -> web.Response:
         # same as "all Android" and must not be read that way — a control
         # disabled on the strength of not knowing is worse than one that is
         # merely useless on this fleet.
-        "fleet_base_os": sorted(db.fleet_base_os()),
+        "fleet_base_os": sorted(fleet_base_os),
         # Peak asyncio event-loop stall since start (ms). Non-trivial values
         # mean the controller itself delayed speaker frames and LED updates.
         "loop_lag_peak_ms": round(em_state.loop_lag_peak_ms, 1),
         "connected":      len(em_state.devices),
         "total_devices":  len(all_rows),
         "pending":        sum(1 for r in all_rows if not r["approved"]),
-        "approval_mode":  db.get_config("device_approval", "strict"),
+        "approval_mode":  approval_mode,
         # Whether the BACKGROUND poll runs (#159). With it off, "No release
         # info" and a GitHub outage are indistinguishable from the Updates
         # tab, and the tab is where someone goes to find out — so the reason
@@ -4389,17 +4395,21 @@ async def _get_cached_release() -> Optional[dict]:
         return _release_cache
 
     # Load from DB cache
-    version = db.get_config("latest_version")
-    url     = db.get_config("latest_binary_url")
-    last_check = db.get_config("last_update_check")
+    stored = await asyncio.get_running_loop().run_in_executor(None, lambda: {
+        key: db.get_config(key) for key in (
+            "latest_version", "latest_binary_url", "last_update_check",
+            "latest_notes", "latest_release_url", "latest_published_at")})
+    version = stored["latest_version"]
+    url     = stored["latest_binary_url"]
+    last_check = stored["last_update_check"]
 
     if version and url:
         _release_cache = {
             "version":      version,
             "url":          url,
-            "notes":        db.get_config("latest_notes", "") or "",
-            "release_url":  db.get_config("latest_release_url", "") or "",
-            "published_at": db.get_config("latest_published_at", "") or "",
+            "notes":        stored["latest_notes"] or "",
+            "release_url":  stored["latest_release_url"] or "",
+            "published_at": stored["latest_published_at"] or "",
         }
         _release_cache_ts = time.monotonic()
 
@@ -4461,7 +4471,9 @@ async def _fetch_latest_release(force: bool = False) -> Optional[dict]:
     """
     global _release_cache, _release_cache_ts
 
-    repo = db.get_config("github_repo", "wilbowes/EchoMuse")
+    loop = asyncio.get_running_loop()
+    repo = await loop.run_in_executor(
+        None, db.get_config, "github_repo", "wilbowes/EchoMuse")
     url  = GITHUB_API_URL.format(repo=repo)
 
     log.info(f"[api] Polling GitHub releases: {url}")
@@ -4497,15 +4509,18 @@ async def _fetch_latest_release(force: bool = False) -> Optional[dict]:
         # .github/workflows/release.yml), which is why tags are annotated.
         notes = (release.get("body") or "").strip()
 
-        previous_tag = db.get_config("latest_version")
+        def _persist() -> str | None:
+            previous = db.get_config("latest_version")
+            db.set_config("latest_version",    tag)
+            db.set_config("latest_binary_url", download_url)
+            db.set_config("latest_notes",      notes)
+            db.set_config("latest_release_url", release.get("html_url") or "")
+            db.set_config("latest_published_at", release.get("published_at") or "")
+            db.set_config("last_update_check", str(time.time()))
+            return previous
 
         # Persist to DB
-        db.set_config("latest_version",    tag)
-        db.set_config("latest_binary_url", download_url)
-        db.set_config("latest_notes",      notes)
-        db.set_config("latest_release_url", release.get("html_url") or "")
-        db.set_config("latest_published_at", release.get("published_at") or "")
-        db.set_config("last_update_check", str(time.time()))
+        previous_tag = await loop.run_in_executor(None, _persist)
 
         # Update in-memory cache
         _release_cache    = {
@@ -4556,7 +4571,9 @@ async def _fetch_controller_release(force: bool = False) -> Optional[dict]:
             and (time.monotonic() - _controller_cache_ts) < RELEASE_CACHE_TTL):
         return _controller_cache
 
-    repo = db.get_config("github_repo", "wilbowes/EchoMuse")
+    loop = asyncio.get_running_loop()
+    repo = await loop.run_in_executor(
+        None, db.get_config, "github_repo", "wilbowes/EchoMuse")
     headers = {"Accept": "application/vnd.github+json"}
     timeout = aiohttp.ClientTimeout(total=10)
 
@@ -4597,11 +4614,14 @@ async def _fetch_controller_release(force: bool = False) -> Optional[dict]:
                         published_at = (tag_obj.get("tagger") or {}).get("date", "")
 
         version = tag.removeprefix("controller-")
-        previous = db.get_config("latest_controller_version")
+        def _persist() -> str | None:
+            before = db.get_config("latest_controller_version")
+            db.set_config("latest_controller_version", version)
+            db.set_config("latest_controller_notes", notes)
+            db.set_config("latest_controller_published_at", published_at)
+            return before
 
-        db.set_config("latest_controller_version", version)
-        db.set_config("latest_controller_notes", notes)
-        db.set_config("latest_controller_published_at", published_at)
+        previous = await loop.run_in_executor(None, _persist)
 
         _controller_cache = {
             "version":      version,
@@ -4639,15 +4659,19 @@ async def _get_controller_release(request: web.Request) -> web.Response:
     if data is None:
         # Fall back to the DB cache so a GitHub outage does not blank the
         # panel — offline is not the same as "no update exists".
-        version = db.get_config("latest_controller_version", "") or ""
+        stored = await asyncio.get_running_loop().run_in_executor(None, lambda: {
+            key: db.get_config(key, "") or "" for key in (
+                "latest_controller_version", "latest_controller_notes",
+                "latest_controller_published_at")})
+        version = stored["latest_controller_version"]
         if not version:
             return _ok({"version": None, "current": CONTROLLER_VERSION,
                         "status": "unknown", "available": False})
         data = {
             "version":      version,
             "current":      CONTROLLER_VERSION,
-            "notes":        db.get_config("latest_controller_notes", "") or "",
-            "published_at": db.get_config("latest_controller_published_at", "") or "",
+            "notes":        stored["latest_controller_notes"],
+            "published_at": stored["latest_controller_published_at"],
             "release_url":  "",
             **_compare_versions(CONTROLLER_VERSION, version),
         }
@@ -5276,7 +5300,8 @@ async def _get_provision_oww_manifest(request: web.Request) -> web.Response:
     better suited to 15MB than a base64 heredoc. Same bytes, same md5s, same
     destination as the field path — only the transport differs.
     """
-    fleet = db.get_global_device_config() or {}
+    fleet = await asyncio.get_running_loop().run_in_executor(
+        None, db.get_global_device_config) or {}
     models = [m for m in [fleet.get("owwModel") or ""] if m]
     desired, problems = em_oww_assets.desired_assets(models)
     return _ok({
@@ -5296,7 +5321,8 @@ async def _get_provision_oww_asset(request: web.Request) -> web.Response:
     it onto a directory is how a path traversal gets written by accident.
     """
     name = request.match_info["name"]
-    fleet = db.get_global_device_config() or {}
+    fleet = await asyncio.get_running_loop().run_in_executor(
+        None, db.get_global_device_config) or {}
     desired, _ = em_oww_assets.desired_assets(
         [m for m in [fleet.get("owwModel") or ""] if m])
     asset = next((a for a in desired if a.name == name), None)
@@ -5497,7 +5523,8 @@ async def _fetch_latest_emos_release() -> Optional[dict]:
     does not `startswith("v")`, so the firmware poll can never select an emOS
     release, and this one cannot select a firmware release.
     """
-    repo = db.get_config("github_repo", "wilbowes/EchoMuse")
+    repo = await asyncio.get_running_loop().run_in_executor(
+        None, db.get_config, "github_repo", "wilbowes/EchoMuse")
     url = GITHUB_API_URL.format(repo=repo)
     try:
         async with aiohttp.ClientSession() as session:

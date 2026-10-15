@@ -350,9 +350,8 @@ into its own module, and `"X" not in src` is true of a file X has left, so a
 move silences both while they go on passing. `_sources.MODULES` is every
 `em_*.py` by glob, `find_def` fails when a function is defined nowhere or
 twice, and `code_only` drops comments and docstrings. Widening the off-loop
-DB rule that way found 17 functions in em_api/em_auth calling `db.*` on the
-event loop; they are listed in `tests/test_db_off_loop.py`'s
-`KNOWN_ON_LOOP`, which may only shrink.
+DB rule that way found 34 `db.*` calls on the event loop in em_api and
+em_auth that the em_controller-only guard had never looked at.
 
 **emOS is C with no test framework, so its off-target tools ARE its suite** —
 `ringsim --check` for the boot ring's invariants, `pwcheck` for the password

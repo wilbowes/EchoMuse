@@ -246,7 +246,7 @@ def test_release_notes_survive_the_whole_relay():
 
     cached = api[api.index("    # Load from DB cache"):]
     cached = cached[:cached.index("\nasync def ", 1)] if "\nasync def " in cached else cached
-    assert 'get_config("latest_notes"' in cached, \
+    assert '"latest_notes"' in cached and 'stored["latest_notes"]' in cached, \
         "the DB-cache path must restore notes, or they vanish on restart"
 
     jsx = (Path(__file__).resolve().parent.parent / "static" / "dashboard.jsx").read_text()
