@@ -6,7 +6,7 @@ regenerated CA, a move to a new controller) or it never had any, the owner
 holds its action button: the device opens a two-minute pairing window, asks
 over whatever connection it can make, and an admin approves it in the
 dashboard. The approval is what issues credentials: a fresh token and the CA,
-pushed over that connection (em_api._issue_credentials). Approving a NEW
+pushed over that connection (em_routes_link.issue_credentials). Approving a NEW
 device opens the same window, so approval is the one human decision and no
 separate "secure link" step exists (Wil, 2026-09-26).
 

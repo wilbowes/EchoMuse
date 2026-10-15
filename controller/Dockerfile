@@ -127,6 +127,7 @@ COPY em_pki.py .
 COPY em_hostip.py .
 COPY em_ingressauth.py .
 COPY em_routes_auth.py .
+COPY em_routes_link.py .
 COPY em_routes_oww.py .
 COPY em_routes_provision.py .
 COPY em_routes_static.py .

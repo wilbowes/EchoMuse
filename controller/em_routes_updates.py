@@ -19,6 +19,7 @@ import em_emos_ota
 import em_emos_update
 import em_http
 import em_ota
+import em_payloads
 import em_releases
 import em_state
 import em_tasks
@@ -38,6 +39,7 @@ def register(app: web.Application) -> None:
     app.router.add_get("/api/releases/controller", _get_controller_release)
     app.router.add_post("/api/releases/check",   _post_check_release)
     app.router.add_post("/api/releases/deploy",  _post_deploy_all)
+    app.router.add_post("/api/devices/{id}/debloat",      _post_debloat)
 
 
 # Pending local binary uploads — keyed by UUID token, expire after 10 minutes.
@@ -456,3 +458,45 @@ async def _get_controller_release(request: web.Request) -> web.Response:
             **_compare_versions(CONTROLLER_VERSION, version),
         }
     return em_http.ok(data)
+
+
+@auth.require_admin
+async def _post_debloat(request: web.Request) -> web.Response:
+    """
+    POST /api/devices/{id}/debloat
+
+    Re-apply the debloat payloads to a live device: sync the boot script and
+    hide any newly-listed packages.
+
+    This exists because the OTA-time sync cannot reach every device. A device
+    already running the latest firmware will not be updated again, so it would
+    never receive a payload change — which is exactly the situation the first
+    device hit (Lounge was current when round 2 landed). Idempotent, so
+    pressing it twice costs a `pm list packages` and nothing else.
+    """
+    device_id = request.match_info["id"]
+    live = em_state.devices.get(device_id)
+    if live is None:
+        return em_http.error("device_offline", f"Device not connected: {device_id}", 409)
+
+    # Refused server-side, not merely greyed out in the dashboard. This is a
+    # plain POST with a session token, so a dashboard-only rule protects
+    # nothing from anyone who opens the network tab — the same reasoning that
+    # puts the recordings check on the server. And the cost of running it
+    # anyway is not a no-op: the payload targets Magisk's /sbin/.core overlay,
+    # which a device without Magisk has no daemon to create, so the write
+    # fails, TRANSFER_OK never comes, and the transfer holds that device's
+    # shell lock for its full timeout.
+    if not live.android_userspace:
+        return em_http.error(
+            "not_android",
+            "This device is not running Android, so there is nothing to "
+            "debloat — the payload is a package list and a Magisk boot script.",
+            409)
+
+    # No explicit shell release here: em_shell.run and em_shell.stream_file each
+    # acquire and release the session in their own finally, which is why
+    # em_payloads.sync_start_script does not either. Releasing it from out here could close
+    # a session a concurrent caller had opened.
+    em_tasks.spawn(em_payloads.sync_debloat(live, device_id))
+    return em_http.ok({"started": True})

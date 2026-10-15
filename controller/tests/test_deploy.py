@@ -312,11 +312,10 @@ def test_debloat_reachable_without_an_ota():
     which is the exact case that exposed the gap. A manual trigger is required,
     not a nicety.
     """
-    from pathlib import Path
-    root = Path(__file__).resolve().parent.parent
-    api = (root / "em_api.py").read_text()
-    assert '"/api/devices/{id}/debloat"' in api, "no manual debloat endpoint registered"
-    jsx = (root / "static" / "dashboard.jsx").read_text()
+    # all_code() is unparsed, which writes every string single-quoted.
+    assert "'/api/devices/{id}/debloat'" in _sources.all_code(), \
+        "no manual debloat endpoint registered"
+    jsx = (CONTROLLER / "static" / "dashboard.jsx").read_text()
     assert "/debloat`" in jsx, "the dashboard must be able to trigger it"
 
 

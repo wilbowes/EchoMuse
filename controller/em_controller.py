@@ -78,6 +78,7 @@ import em_db as db
 import em_events
 import em_process_stats
 import em_reconcile
+import em_routes_link
 from version import VERSION as CONTROLLER_VERSION
 import em_releases
 import em_state
@@ -5006,7 +5007,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         if pairing and em_pairing.approved(device_id):
             # An admin approved this pairing. Rotate first: with no token on
             # record the device is admitted by em_linkauth's existing rules,
-            # and _issue_credentials mints its new one below.
+            # and issue_credentials mints its new one below.
             await loop.run_in_executor(None, db.clear_device_token, device_id)
             log.info(f"[control] {device_id}: pairing approved — admitting to issue credentials")
 
@@ -5227,7 +5228,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             if secure and await _presented_its_token(ws, device_id):
                 em_pairing.done(device_id)
             else:
-                em_tasks.spawn(api._issue_credentials(device_id))
+                em_tasks.spawn(em_routes_link.issue_credentials(device_id))
         elif pairing:
             # Connected (no credentials yet, or plain) and asking: offer it.
             await api.notify_pair_request(device_id, "link")

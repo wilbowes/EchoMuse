@@ -151,9 +151,7 @@ def test_debloat_endpoint_refuses_server_side():
     the cost is not a no-op: the write lands nowhere, TRANSFER_OK never comes,
     and the transfer holds that device's shell lock for its whole timeout.
     """
-    src = _api_src()
-    body = src[src.index("async def _post_debloat"):]
-    body = body[:body.index("\ndef ")]
+    body = _sources.def_source("_post_debloat")
     assert "android_userspace" in body, \
         "_post_debloat does not check the base OS"
 

@@ -99,7 +99,7 @@ def test_issuing_rotates_the_token_and_stores_it_only_once_delivered():
     # The push rides the shell plane, which the device dials with its CURRENT
     # token. Storing the new one first refused the push on every device
     # connected over wss (15LE, 2026-09-26).
-    fn = _fn(_tree("em_api.py"), "_issue_credentials")
+    _, fn = _sources.find_def("issue_credentials")
     assert _calls(fn, "token_urlsafe"), "a fresh token, never the stored one"
     assert not [c for c in _calls(fn, "run_in_executor")
                 if "ensure_device_token" in _names_in_call(c)]
@@ -112,18 +112,18 @@ def test_issuing_rotates_the_token_and_stores_it_only_once_delivered():
 
 
 def test_credentials_are_issued_only_behind_an_approval():
-    # _issue_credentials writes the token to whoever holds the connection, so
+    # issue_credentials writes the token to whoever holds the connection, so
     # every caller must be one that an admin approval gates.
     callers = set()
     for path in _sources.MODULES:
         tree = _sources.tree(path)
         for fn in ast.walk(tree):
-            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and fn.name != "_issue_credentials":
-                if _calls(fn, "_issue_credentials"):
+            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and fn.name != "issue_credentials":
+                if _calls(fn, "issue_credentials"):
                     callers.add(fn.name)
     assert callers == {"handle_control", "_post_pair"}
     hc = _fn(_tree("em_controller.py"), "handle_control")
-    issue = _calls(hc, "_issue_credentials")[0]
+    issue = _calls(hc, "issue_credentials")[0]
     gated = [n for n in ast.walk(hc) if isinstance(n, ast.If)
              and _calls(n.test, "approved") and any(issue is x for x in ast.walk(n))]
     assert gated, "handle_control must issue credentials only under em_pairing.approved"
