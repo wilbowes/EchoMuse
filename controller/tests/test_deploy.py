@@ -2687,7 +2687,7 @@ def test_the_serial_console_disables_echo_before_anything_else():
 
 def test_the_wizard_reads_the_device_list_the_way_the_api_returns_it():
     """
-    /api/devices returns a bare ARRAY (`_ok([...])`), not {devices: [...]}.
+    /api/devices returns a bare ARRAY (`em_http.ok([...])`), not {devices: [...]}.
 
     The emOS WiFi step read `.devices` off it, which is undefined, and the
     `|| []` turned that into an empty list on every pass — so its wait loop
@@ -2708,7 +2708,7 @@ def test_the_wizard_reads_the_device_list_the_way_the_api_returns_it():
     api = (CONTROLLER / "em_api.py").read_text()
     handler = api[api.index("async def _get_devices"):]
     handler = handler[:handler.index("\n@")] if "\n@" in handler else handler[:400]
-    assert "_ok([" in handler, (
+    assert "em_http.ok([" in handler, (
         "this test assumes /api/devices returns a bare list — if that changed, "
         "every caller in dashboard.jsx has to change with it")
 

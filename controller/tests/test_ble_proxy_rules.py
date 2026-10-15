@@ -117,9 +117,13 @@ def test_pairing_is_not_advertised():
 def test_key_endpoint_is_admin_only_and_says_nothing_else():
     fn = _func("em_api.py", "_get_ble_proxy_key")
     assert [ast.unparse(d) for d in fn.decorator_list] == ["auth.require_admin"]
-    calls = _calls(fn)
-    for forbidden in ("info", "warning", "debug", "error", "log_device", "broadcast", "_push_event"):
-        assert forbidden not in calls, f"the key handler calls {forbidden}"
+    # Full call names: `em_http.error` answers the request, `log.error` would
+    # put the key in the log.
+    calls = [ast.unparse(n.func) for n in ast.walk(fn) if isinstance(n, ast.Call)]
+    for forbidden in ("log.info", "log.warning", "log.debug", "log.error",
+                      "log_device", "broadcast", "_push_event"):
+        assert not any(c == forbidden or c.endswith("." + forbidden) for c in calls), \
+            f"the key handler calls {forbidden}"
     src = (CONTROLLER / "em_api.py").read_text()
     assert 'add_get("/api/devices/{id}/ble_proxy/key", _get_ble_proxy_key)' in src
 

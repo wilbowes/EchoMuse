@@ -55,6 +55,7 @@ from aiohttp import web
 import websockets
 
 import em_db as db
+import em_http
 import em_state
 import em_health
 import em_auth as auth
@@ -505,7 +506,7 @@ async def _error_middleware(request: web.Request, handler):
         raise  # let aiohttp handle its own HTTP exceptions normally
     except Exception as e:
         log.exception(f"Unhandled error in {request.method} {request.path}")
-        return _error("internal_error", "An internal error occurred", 500)
+        return em_http.error("internal_error", "An internal error occurred", 500)
 
 
 # ─── Static / setup ───────────────────────────────────────────────────────────
@@ -600,7 +601,7 @@ async def _redirect_root(request: web.Request) -> web.Response:
 
 async def _get_setup_state(request: web.Request) -> web.Response:
     """GET /api/system/setup-state — public: is first-run setup pending?"""
-    return _ok({"needs_setup": auth.get_bootstrap_token() is not None})
+    return em_http.ok({"needs_setup": auth.get_bootstrap_token() is not None})
 
 
 async def _post_setup(request: web.Request) -> web.Response:
@@ -611,15 +612,15 @@ async def _post_setup(request: web.Request) -> web.Response:
     Returns 201 + {token, role} on success so the client is immediately
     logged in after setup.
     """
-    body = await _json_body(request)
-    token    = _require_str(body, "token")
-    username = _require_str(body, "username")
-    password = _require_str(body, "password")
+    body = await em_http.json_body(request)
+    token    = em_http.require_str(body, "token")
+    username = em_http.require_str(body, "username")
+    password = em_http.require_str(body, "password")
 
     await auth.create_first_admin(token, username, password)
 
     session_token, role = await auth.login(username, password)
-    return _ok({"token": session_token, "role": role}, status=201)
+    return em_http.ok({"token": session_token, "role": role}, status=201)
 
 
 # ─── Auth ─────────────────────────────────────────────────────────────────────
@@ -635,7 +636,7 @@ async def _get_users(request: web.Request) -> web.Response:
     """
     loop  = asyncio.get_event_loop()
     users = await loop.run_in_executor(None, db.get_all_users)
-    return _ok([{
+    return em_http.ok([{
         "id":         u["id"],
         "username":   u["username"],
         "role":       u["role"],
@@ -658,35 +659,35 @@ async def _patch_user(request: web.Request) -> web.Response:
     has no way back in — and this endpoint is the one an admin reaches for
     while tidying up.
     """
-    body = await _json_body(request)
-    role = _require_str(body, "role")
+    body = await em_http.json_body(request)
+    role = em_http.require_str(body, "role")
     if role not in ("admin", "readonly"):
-        return _error("bad_request", "role must be 'admin' or 'readonly'", 400)
+        return em_http.error("bad_request", "role must be 'admin' or 'readonly'", 400)
 
     try:
         user_id = int(request.match_info["id"])
     except ValueError:
-        return _error("bad_request", "user id must be numeric", 400)
+        return em_http.error("bad_request", "user id must be numeric", 400)
 
     loop = asyncio.get_event_loop()
     user = await loop.run_in_executor(None, db.get_user_by_id, user_id)
     if user is None:
-        return _error("user_not_found", f"No user: {user_id}", 404)
+        return em_http.error("user_not_found", f"No user: {user_id}", 404)
 
     if user["role"] == role:
-        return _ok({"id": user_id, "role": role, "changed": False})
+        return em_http.ok({"id": user_id, "role": role, "changed": False})
 
     if user["role"] == "admin":
         admins = await loop.run_in_executor(None, db.admin_count)
         if admins <= 1:
-            return _error(
+            return em_http.error(
                 "last_admin",
                 "This is the only admin — promote someone else first", 409)
 
     await loop.run_in_executor(None, db.set_user_role, user_id, role)
     log.info(f"[api] {request['user']['username']} set "
              f"{user['username']} to {role}")
-    return _ok({"id": user_id, "role": role, "changed": True})
+    return em_http.ok({"id": user_id, "role": role, "changed": True})
 
 
 async def _post_ingress_login(request: web.Request) -> web.Response:
@@ -713,21 +714,21 @@ async def _post_ingress_login(request: web.Request) -> web.Response:
         display_name=request.headers.get("X-Remote-User-Display-Name"),
     )
     if identity is None:
-        return _error("not_authenticated",
+        return em_http.error("not_authenticated",
                       "Home Assistant authentication is not available", 401)
 
     token, role = await auth.login_via_ingress(identity)
-    return _ok({"token": token, "role": role, "via": "ingress"})
+    return em_http.ok({"token": token, "role": role, "via": "ingress"})
 
 
 async def _post_login(request: web.Request) -> web.Response:
     """POST /api/auth/login — {username, password} → {token, role}"""
-    body     = await _json_body(request)
-    username = _require_str(body, "username")
-    password = _require_str(body, "password")
+    body     = await em_http.json_body(request)
+    username = em_http.require_str(body, "username")
+    password = em_http.require_str(body, "password")
 
     token, role = await auth.login(username, password)
-    return _ok({"token": token, "role": role})
+    return em_http.ok({"token": token, "role": role})
 
 
 async def _post_logout(request: web.Request) -> web.Response:
@@ -735,14 +736,14 @@ async def _post_logout(request: web.Request) -> web.Response:
     user = await auth.resolve_session(request)
     if user:
         await auth.logout(user["token"])
-    return _ok({})
+    return em_http.ok({})
 
 
 @auth.require_auth
 async def _get_me(request: web.Request) -> web.Response:
     """GET /api/auth/me — current user info."""
     user = request["user"]
-    return _ok({
+    return em_http.ok({
         "id":       user["id"],
         "username": user["username"],
         "role":     user["role"],
@@ -764,7 +765,7 @@ async def _get_devices(request: web.Request) -> web.Response:
     loop = asyncio.get_event_loop()
     rows = await loop.run_in_executor(None, db.get_all_devices)
     health = await loop.run_in_executor(None, db.latest_health)
-    return _ok([_merge_device(row, health.get(row["device_id"])) for row in rows])
+    return em_http.ok([_merge_device(row, health.get(row["device_id"])) for row in rows])
 
 
 @auth.require_auth
@@ -772,7 +773,7 @@ async def _get_pending(request: web.Request) -> web.Response:
     """GET /api/devices/pending — unapproved devices."""
     loop = asyncio.get_event_loop()
     rows = await loop.run_in_executor(None, db.get_pending_devices)
-    return _ok([_merge_device(row) for row in rows])
+    return em_http.ok([_merge_device(row) for row in rows])
 
 
 @auth.require_auth
@@ -782,8 +783,8 @@ async def _get_device(request: web.Request) -> web.Response:
     loop = asyncio.get_event_loop()
     row = await loop.run_in_executor(None, db.get_device, device_id)
     if row is None:
-        return _error("device_not_found", f"No device: {device_id}", 404)
-    return _ok(_merge_device(row))
+        return em_http.error("device_not_found", f"No device: {device_id}", 404)
+    return em_http.ok(_merge_device(row))
 
 
 @auth.require_auth
@@ -799,12 +800,12 @@ async def _get_device_turns(request: web.Request) -> web.Response:
         since = request.query.get("since")
         since = float(since) if since is not None else None
     except ValueError:
-        return _error("bad_request", "limit/since must be numeric", 400)
+        return em_http.error("bad_request", "limit/since must be numeric", 400)
     loop  = asyncio.get_event_loop()
     turns = await loop.run_in_executor(
         None, lambda: db.get_turns(device_id, limit, since)
     )
-    return _ok(_redact_turns_for(turns, request["user"]))
+    return em_http.ok(_redact_turns_for(turns, request["user"]))
 
 
 def _redact_turns_for(turns: list, user: dict) -> list:
@@ -853,17 +854,17 @@ async def _get_turn_audio(request: web.Request) -> web.Response:
     try:
         turn_id = int(request.match_info["turn"])
     except ValueError:
-        return _error("bad_request", "turn must be an integer", 400)
+        return em_http.error("bad_request", "turn must be an integer", 400)
 
     loop = asyncio.get_event_loop()
     row  = await loop.run_in_executor(None, db.get_device, device_id)
     if row is None:
-        return _error("device_not_found", f"No device: {device_id}", 404)
+        return em_http.error("device_not_found", f"No device: {device_id}", 404)
 
     name = em_recordings.filename(device_id, turn_id)
     path = em_recordings.resolve(device_id, name) if name else None
     if path is None:
-        return _error("no_recording",
+        return em_http.error("no_recording",
                       "No saved audio for this turn", 404)
 
     label = _slug(row["label"] or device_id)
@@ -892,10 +893,10 @@ async def _get_wake_samples(request: web.Request) -> web.Response:
     try:
         limit = min(max(int(request.query.get("limit", 50)), 1), 100)
     except ValueError:
-        return _error("bad_request", "limit must be an integer", 400)
+        return em_http.error("bad_request", "limit must be an integer", 400)
     loop = asyncio.get_event_loop()
     rows = await loop.run_in_executor(None, db.get_wake_samples, device_id, limit)
-    return _ok([dict(row) for row in rows])
+    return em_http.ok([dict(row) for row in rows])
 
 
 @auth.require_admin
@@ -904,15 +905,15 @@ async def _patch_wake_sample(request: web.Request) -> web.Response:
     try:
         sample_id = int(request.match_info["sample"])
     except ValueError:
-        return _error("bad_request", "sample must be an integer", 400)
-    body = await _json_body(request)
+        return em_http.error("bad_request", "sample must be an integer", 400)
+    body = await em_http.json_body(request)
     label = body.get("label")
     if label not in ("wake", "not_wake", "uncertain"):
-        return _error("bad_request", "label must be wake, not_wake, or uncertain", 400)
+        return em_http.error("bad_request", "label must be wake, not_wake, or uncertain", 400)
     loop = asyncio.get_event_loop()
     ok = await loop.run_in_executor(None, db.set_wake_sample_label,
                                     device_id, sample_id, label)
-    return _ok({"id": sample_id, "label": label}) if ok else _error(
+    return em_http.ok({"id": sample_id, "label": label}) if ok else em_http.error(
         "sample_not_found", "No wake sample with that id", 404)
 
 
@@ -922,13 +923,13 @@ async def _delete_wake_sample(request: web.Request) -> web.Response:
     try:
         sample_id = int(request.match_info["sample"])
     except ValueError:
-        return _error("bad_request", "sample must be an integer", 400)
+        return em_http.error("bad_request", "sample must be an integer", 400)
     loop = asyncio.get_event_loop()
     name = await loop.run_in_executor(None, db.delete_wake_sample,
                                       device_id, sample_id)
     if name is None:
-        return _error("sample_not_found", "No wake sample with that id", 404)
-    return _ok({"id": sample_id, "deleted": True})
+        return em_http.error("sample_not_found", "No wake sample with that id", 404)
+    return em_http.ok({"id": sample_id, "deleted": True})
 
 
 @auth.require_admin
@@ -937,13 +938,13 @@ async def _get_wake_sample_audio(request: web.Request) -> web.Response:
     try:
         sample_id = int(request.match_info["sample"])
     except ValueError:
-        return _error("bad_request", "sample must be an integer", 400)
+        return em_http.error("bad_request", "sample must be an integer", 400)
     loop = asyncio.get_event_loop()
     rows = await loop.run_in_executor(None, db.get_wake_samples, device_id, 100)
     row = next((item for item in rows if item["id"] == sample_id), None)
     path = em_wake_samples.resolve(device_id, row["audio_file"]) if row else None
     if path is None:
-        return _error("no_recording", "No saved audio for this sample", 404)
+        return em_http.error("no_recording", "No saved audio for this sample", 404)
     return web.FileResponse(path, headers={
         "Content-Type": "audio/wav",
         "Content-Disposition": f'attachment; filename="{_slug(device_id)}-wake{sample_id}.wav"',
@@ -961,7 +962,7 @@ async def _get_device_activity(request: web.Request) -> web.Response:
     try:
         days = min(int(request.query.get("days", 7)), 180)
     except ValueError:
-        return _error("bad_request", "days must be an integer", 400)
+        return em_http.error("bad_request", "days must be an integer", 400)
     since = time.time() - days * 86400
 
     loop     = asyncio.get_event_loop()
@@ -1092,7 +1093,7 @@ async def _get_device_activity(request: web.Request) -> web.Response:
         "drops":          sum(r["dev_drops"] or 0 for r in counters),
     }
 
-    return _ok({
+    return em_http.ok({
         "days":          days_out,
         "wake_models":   models_out,
         "wake_counters": [dict(r) for r in counters],
@@ -1105,14 +1106,14 @@ async def _get_device_activity(request: web.Request) -> web.Response:
 async def _patch_device(request: web.Request) -> web.Response:
     """PATCH /api/devices/{id} — update label."""
     device_id = request.match_info["id"]
-    body  = await _json_body(request)
+    body  = await em_http.json_body(request)
     label = _require_label(body)
     await _require_unique_label(label, device_id)
 
     loop = asyncio.get_event_loop()
     row = await loop.run_in_executor(None, db.get_device, device_id)
     if row is None:
-        return _error("device_not_found", f"No device: {device_id}", 404)
+        return em_http.error("device_not_found", f"No device: {device_id}", 404)
 
     await loop.run_in_executor(None, db.set_device_label, device_id, label)
     await _push_event({"type": "device_update", "device_id": device_id,
@@ -1123,7 +1124,7 @@ async def _patch_device(request: web.Request) -> web.Response:
     if live is not None and getattr(live, "sendspin_capable", False):
         with contextlib.suppress(Exception):
             await live.send_control({"type": "config", "sendspinName": label})
-    return _ok({"device_id": device_id, "label": label})
+    return em_http.ok({"device_id": device_id, "label": label})
 
 
 # How long to wait for a device to answer sendspin_token_request. It is a
@@ -1146,13 +1147,13 @@ async def _get_ble_proxy_key(request: web.Request) -> web.Response:
     device_id = request.match_info["id"]
     status = em_ble_proxy.get_status(device_id)
     if status is None or not status.get("connections"):
-        return _error("connections_off",
+        return em_http.error("connections_off",
                       "Turn on Bluetooth connections for this Echo first", 409)
     key = await asyncio.get_event_loop().run_in_executor(
         None, db.ensure_ble_proxy_key, device_id)
     if not key:
-        return _error("not_found", "Unknown device", 404)
-    return _ok({"key": key})
+        return em_http.error("not_found", "Unknown device", 404)
+    return em_http.ok({"key": key})
 
 
 @auth.require_admin
@@ -1167,22 +1168,22 @@ async def _get_sendspin_token(request: web.Request) -> web.Response:
     device_id = request.match_info["id"]
     live = em_state.devices.get(device_id)
     if live is None:
-        return _error("device_offline", "The Echo is offline", 409)
+        return em_http.error("device_offline", "The Echo is offline", 409)
     if not getattr(live, "sendspin_capable", False):
-        return _error("unsupported", "This Echo's firmware has no Sendspin player", 409)
+        return em_http.error("unsupported", "This Echo's firmware has no Sendspin player", 409)
     waiter = asyncio.get_event_loop().create_future()
     live.sendspin_token_waiter = waiter
     try:
         await live.send_control({"type": "sendspin_token_request"})
         reply = await asyncio.wait_for(waiter, SENDSPIN_TOKEN_TIMEOUT_S)
     except (asyncio.TimeoutError, Exception):
-        return _error("timeout", "The Echo did not answer", 504)
+        return em_http.error("timeout", "The Echo did not answer", 504)
     finally:
         if live.sendspin_token_waiter is waiter:
             live.sendspin_token_waiter = None
     if reply.get("error") or not reply.get("token"):
-        return _error("sendspin_off", "Turn Sendspin on for this Echo first", 409)
-    return _ok({"token": reply["token"], "clientId": reply.get("clientId")})
+        return em_http.error("sendspin_off", "Turn Sendspin on for this Echo first", 409)
+    return em_http.ok({"token": reply["token"], "clientId": reply.get("clientId")})
 
 
 @auth.require_admin
@@ -1192,7 +1193,7 @@ async def _delete_device(request: web.Request) -> web.Response:
     loop = asyncio.get_event_loop()
     row = await loop.run_in_executor(None, db.get_device, device_id)
     if row is None:
-        return _error("device_not_found", f"No device: {device_id}", 404)
+        return em_http.error("device_not_found", f"No device: {device_id}", 404)
 
     await loop.run_in_executor(None, db.delete_device, device_id)
     # Row gone → reconcile tears down any BT proxy listener/mDNS for it.
@@ -1226,7 +1227,7 @@ async def _delete_device(request: web.Request) -> web.Response:
     # refused and re-provisioning over USB is the intended path.
     await _disconnect_device(device_id)
     await _push_event({"type": "device_deleted", "device_id": device_id})
-    return _ok({})
+    return em_http.ok({})
 
 
 async def _disconnect_device(device_id: str) -> None:
@@ -1263,7 +1264,7 @@ async def _post_approve(request: web.Request) -> web.Response:
     accepted on its next retry (within 30s).
     """
     device_id = request.match_info["id"]
-    body   = await _json_body(request)
+    body   = await em_http.json_body(request)
     label  = _require_label(body)
     await _require_unique_label(label, device_id)
     config = body.get("config")  # optional
@@ -1271,9 +1272,9 @@ async def _post_approve(request: web.Request) -> web.Response:
     loop = asyncio.get_event_loop()
     row = await loop.run_in_executor(None, db.get_device, device_id)
     if row is None:
-        return _error("device_not_found", f"No device: {device_id}", 404)
+        return em_http.error("device_not_found", f"No device: {device_id}", 404)
     if row["approved"]:
-        return _error("already_approved", "Device is already approved", 409)
+        return em_http.error("already_approved", "Device is already approved", 409)
 
     await loop.run_in_executor(None, db.approve_device, device_id, label, config)
     # Approval is the one human decision: it also issues link credentials when
@@ -1281,7 +1282,7 @@ async def _post_approve(request: web.Request) -> web.Response:
     em_pairing.approve(device_id)
     await _push_event({"type": "device_approved", "device_id": device_id,
                        "label": label})
-    return _ok({"device_id": device_id, "label": label})
+    return em_http.ok({"device_id": device_id, "label": label})
 
 
 def _well_typed(device_id: str, config: dict) -> dict:
@@ -1424,10 +1425,10 @@ async def _get_device_config(request: web.Request) -> web.Response:
     loop = asyncio.get_event_loop()
     row = await loop.run_in_executor(None, db.get_device, device_id)
     if row is None:
-        return _error("device_not_found", f"No device: {device_id}", 404)
+        return em_http.error("device_not_found", f"No device: {device_id}", 404)
     config = await loop.run_in_executor(None, db.get_effective_device_config, device_id)
     sections = await loop.run_in_executor(None, db.get_device_config_sections, device_id)
-    return _ok({
+    return em_http.ok({
         "config":            config,
         "config_sections":   sections,
         # Compat view for older readers: no overridden sections == fleet.
@@ -1457,12 +1458,12 @@ async def _post_device_config(request: web.Request) -> web.Response:
     only the in-scope values are updated.
     """
     device_id = request.match_info["id"]
-    body = await _json_body(request)
+    body = await em_http.json_body(request)
 
     loop = asyncio.get_event_loop()
     row = await loop.run_in_executor(None, db.get_device, device_id)
     if row is None:
-        return _error("device_not_found", f"No device: {device_id}", 404)
+        return em_http.error("device_not_found", f"No device: {device_id}", 404)
 
     sections_body     = body.pop("config_sections", None)
     use_global        = body.pop("use_global_config", None)
@@ -1478,10 +1479,10 @@ async def _post_device_config(request: web.Request) -> web.Response:
         )
     else:
         if not isinstance(sections_body, list):
-            return _error("bad_request", "config_sections must be a list", 400)
+            return em_http.error("bad_request", "config_sections must be a list", 400)
         unknown = [s for s in sections_body if s not in sections_mod.SECTIONS]
         if unknown:
-            return _error(
+            return em_http.error(
                 "bad_request",
                 f"Unknown config section(s): {', '.join(map(str, unknown))}. "
                 f"Valid: {', '.join(sections_mod.SECTION_IDS)}.",
@@ -1499,7 +1500,7 @@ async def _post_device_config(request: web.Request) -> web.Response:
     stored_in_scope = {k: v for k, v in stored.items() if k in in_scope}
     dropped = _dropped_keys(body, stored_in_scope)
     if dropped and not explicit_replace:
-        return _error(
+        return em_http.error(
             "would_drop_keys",
             f"This body would delete {len(dropped)} existing setting(s): "
             f"{', '.join(dropped)}. Config POSTs replace rather than "
@@ -1511,7 +1512,7 @@ async def _post_device_config(request: web.Request) -> web.Response:
     # Validated BEFORE anything is written: a refusal must leave the stored
     # config untouched, not half-applied with the bad key rejected later.
     if (err := _validate_console_timeout(body)):
-        return _error("bad_console_timeout", err, 400)
+        return em_http.error("bad_console_timeout", err, 400)
     # Judged against what the device has in force now, so re-sending a value
     # it already has is never refused (em_config_types.problems).
     before = await loop.run_in_executor(
@@ -1519,7 +1520,7 @@ async def _post_device_config(request: web.Request) -> web.Response:
     )
     if (bad := em_config_types.problems(
             {k: v for k, v in body.items() if k in in_scope}, before)):
-        return _error("bad_config_value", "; ".join(bad), 400)
+        return em_http.error("bad_config_value", "; ".join(bad), 400)
 
     # Apply scoping first: set_device_config_sections prunes the values of
     # any section no longer overridden, so what follows writes into an
@@ -1557,7 +1558,7 @@ async def _post_device_config(request: web.Request) -> web.Response:
                        "state": {"config": config,
                                  "config_sections": new_sections,
                                  "use_global_config": not new_sections}})
-    return _ok({"device_id": device_id, "config": config,
+    return em_http.ok({"device_id": device_id, "config": config,
                 "config_sections": new_sections,
                 "use_global_config": not new_sections, "pushed": pushed})
 
@@ -1578,8 +1579,8 @@ async def _post_device_wifi(request: web.Request) -> web.Response:
     event / the "wifi" field on the device object.
     """
     device_id = request.match_info["id"]
-    body = await _json_body(request)
-    ssid = _require_str(body, "ssid")
+    body = await em_http.json_body(request)
+    ssid = em_http.require_str(body, "ssid")
     ssid_hex = str(body.get("ssid_hex") or "")
     psk  = str(body.get("psk") or "")
 
@@ -1590,15 +1591,15 @@ async def _post_device_wifi(request: web.Request) -> web.Response:
     except ValueError as e:
         why = str(e)
     if why:
-        return _error("invalid_credentials", why, 400)
+        return em_http.error("invalid_credentials", why, 400)
 
     live = em_state.devices.get(device_id)
     if live is None:
-        return _error("device_offline", "Device is not connected", 409)
+        return em_http.error("device_offline", "Device is not connected", 409)
 
     st = wifi_state(device_id)
     if st["pending"]:
-        return _error("wifi_change_in_progress",
+        return em_http.error("wifi_change_in_progress",
                       f"A change to \"{st['pending']['ssid']}\" is already "
                       f"in progress", 409)
 
@@ -1614,7 +1615,7 @@ async def _post_device_wifi(request: web.Request) -> web.Response:
                        f'WiFi change to "{ssid}" requested')
     await _push_event({"type": "device_update", "device_id": device_id,
                        "state": {"wifi": st}})
-    return _ok({"device_id": device_id, "ssid": ssid, "status": "switching"},
+    return em_http.ok({"device_id": device_id, "ssid": ssid, "status": "switching"},
                status=202)
 
 
@@ -1630,9 +1631,9 @@ async def _post_device_wifi_scan(request: web.Request) -> web.Response:
     device_id = request.match_info["id"]
     live = em_state.devices.get(device_id)
     if live is None:
-        return _error("device_offline", "Device is not connected", 409)
+        return em_http.error("device_offline", "Device is not connected", 409)
     if getattr(live, "wifi_scan_future", None) is not None:
-        return _error("scan_in_progress", "A scan is already running", 409)
+        return em_http.error("scan_in_progress", "A scan is already running", 409)
 
     fut = asyncio.get_event_loop().create_future()
     live.wifi_scan_future = fut
@@ -1640,14 +1641,14 @@ async def _post_device_wifi_scan(request: web.Request) -> web.Response:
         await live.send_control({"type": "wifi_scan"})
         msg = await asyncio.wait_for(fut, timeout=20)
     except asyncio.TimeoutError:
-        return _error("scan_timeout",
+        return em_http.error("scan_timeout",
                       "Device did not return scan results within 20s "
                       "(old firmware without WiFi support?)", 504)
     finally:
         live.wifi_scan_future = None
     if msg.get("error"):
-        return _error("scan_failed", msg["error"], 502)
-    return _ok({"networks": msg.get("networks") or []})
+        return em_http.error("scan_failed", msg["error"], 502)
+    return em_http.ok({"networks": msg.get("networks") or []})
 
 
 @auth.require_auth
@@ -1664,12 +1665,12 @@ async def _get_device_logs(request: web.Request) -> web.Response:
 
     row = await loop.run_in_executor(None, db.get_device, device_id)
     if row is None:
-        return _error("device_not_found", f"No device: {device_id}", 404)
+        return em_http.error("device_not_found", f"No device: {device_id}", 404)
 
     try:
         limit = int(request.rel_url.query.get("limit", "100"))
     except ValueError:
-        return _error("invalid_param", "limit must be an integer", 400)
+        return em_http.error("invalid_param", "limit must be an integer", 400)
 
     before_param = request.rel_url.query.get("before")
     before_ts = None
@@ -1677,7 +1678,7 @@ async def _get_device_logs(request: web.Request) -> web.Response:
         try:
             before_ts = int(before_param)
         except ValueError:
-            return _error("invalid_param", "before must be a unix ms timestamp", 400)
+            return em_http.error("invalid_param", "before must be a unix ms timestamp", 400)
 
     rows = await loop.run_in_executor(
         None, db.get_device_logs, device_id, limit, before_ts
@@ -1692,7 +1693,7 @@ async def _get_device_logs(request: web.Request) -> web.Response:
         }
         for r in rows
     ]
-    return _ok(entries)
+    return em_http.ok(entries)
 
 
 # ─── OTA: update + rollback ───────────────────────────────────────────────────
@@ -1727,27 +1728,27 @@ async def _post_device_update(request: web.Request) -> web.Response:
         # something useful.
         binary_override = _pending_uploads.get(upload_token)
         if binary_override is None:
-            return _error("invalid_token", "Upload token not found or expired", 404)
+            return em_http.error("invalid_token", "Upload token not found or expired", 404)
         _embedded = _extract_binary_version(binary_override)
         _ver      = _embedded or f"local-{time.strftime('%Y%m%d-%H%M')}"
         release   = {"version": _ver, "url": None}
     else:
         release = await _get_cached_release()
         if release is None:
-            return _error("no_release", "No release information available", 409)
+            return em_http.error("no_release", "No release information available", 409)
 
     loop = asyncio.get_event_loop()
     row  = await loop.run_in_executor(None, db.get_device, device_id)
     if row is None:
-        return _error("device_not_found", f"No device: {device_id}", 404)
+        return em_http.error("device_not_found", f"No device: {device_id}", 404)
 
     live = em_state.devices.get(device_id)
     if live is None:
-        return _error("device_offline", "Device is not connected", 409)
+        return em_http.error("device_offline", "Device is not connected", 409)
 
     if (device_id in _updates_in_progress or device_id in _updates_queued
             or _emos_update_busy(device_id)):
-        return _error("update_in_progress", "An update is already in progress", 409)
+        return em_http.error("update_in_progress", "An update is already in progress", 409)
 
     # Installing what the device is already running costs a transfer, a
     # reboot and a slot — and the fleet endpoint has always skipped it for
@@ -1764,7 +1765,7 @@ async def _post_device_update(request: web.Request) -> web.Response:
     # a wall between an operator and their own device.
     if (release["version"] and row["firmware_ver"] == release["version"]
             and not body.get("force")):
-        return _error(
+        return em_http.error(
             "already_running",
             f"This device is already running {release['version']}. "
             f"Pass force to install it again.",
@@ -1774,7 +1775,7 @@ async def _post_device_update(request: web.Request) -> web.Response:
     if upload_token:
         _pending_uploads.pop(upload_token, None)
     em_tasks.spawn(_run_update(device_id, release, binary_override))
-    return _ok({"status": "started", "version": release["version"]}, status=202)
+    return em_http.ok({"status": "started", "version": release["version"]}, status=202)
 
 
 @auth.require_admin
@@ -1790,22 +1791,22 @@ async def _post_device_rollback(request: web.Request) -> web.Response:
     loop = asyncio.get_event_loop()
     row  = await loop.run_in_executor(None, db.get_device, device_id)
     if row is None:
-        return _error("device_not_found", f"No device: {device_id}", 404)
+        return em_http.error("device_not_found", f"No device: {device_id}", 404)
 
     if not row["firmware_previous"]:
-        return _error("no_rollback_available",
+        return em_http.error("no_rollback_available",
                       "No previous version recorded — cannot roll back", 404)
 
     live = em_state.devices.get(device_id)
     if live is None:
-        return _error("device_offline", "Device is not connected", 409)
+        return em_http.error("device_offline", "Device is not connected", 409)
 
     if (device_id in _updates_in_progress or device_id in _updates_queued
             or _emos_update_busy(device_id)):
-        return _error("update_in_progress", "An update is already in progress", 409)
+        return em_http.error("update_in_progress", "An update is already in progress", 409)
 
     em_tasks.spawn(_run_rollback(device_id, row["firmware_previous"]))
-    return _ok({"status": "started", "rolling_back_to": row["firmware_previous"]}, status=202)
+    return em_http.ok({"status": "started", "rolling_back_to": row["firmware_previous"]}, status=202)
 
 
 @auth.require_admin
@@ -1822,12 +1823,12 @@ async def _post_upload_binary(request: web.Request) -> web.Response:
         reader = await request.multipart()
         field  = await reader.next()
         if field is None or field.name != "binary":
-            return _error("invalid_upload", "Expected multipart field 'binary'", 400)
+            return em_http.error("invalid_upload", "Expected multipart field 'binary'", 400)
         binary = await field.read()
         if not binary:
-            return _error("empty_upload", "Uploaded binary is empty", 400)
+            return em_http.error("empty_upload", "Uploaded binary is empty", 400)
         if len(binary) > UPLOAD_MAX_BYTES:
-            return _error(
+            return em_http.error(
                 "too_large",
                 f"Binary is {len(binary) / 1024 / 1024:.1f} MB, over the "
                 f"{UPLOAD_MAX_BYTES // 1024 // 1024} MB limit",
@@ -1851,7 +1852,7 @@ async def _post_upload_binary(request: web.Request) -> web.Response:
         # makes the refusal something you see coming instead of something you
         # find out afterwards. None means the binary carries no recognisable
         # version — shown as unknown rather than guessed at.
-        return _ok({"upload_token": token, "size": len(binary),
+        return em_http.ok({"upload_token": token, "size": len(binary),
                     "version": version})
     except web.HTTPException:
         # aiohttp's own — HTTPRequestEntityTooLarge above all, raised by the
@@ -1862,7 +1863,7 @@ async def _post_upload_binary(request: web.Request) -> web.Response:
         raise
     except Exception as e:
         log.error(f"[api] Upload error: {e}")
-        return _error("upload_failed", str(e), 500)
+        return em_http.error("upload_failed", str(e), 500)
 
 
 # ─── Custom wake-word models ─────────────────────────────────────────────────
@@ -1876,7 +1877,7 @@ async def _get_oww_models(request: web.Request) -> web.Response:
     Custom models discovered in the data volume's oww_models/ dir.
     `path` is the value to store in owwModel config.
     """
-    return _ok({
+    return em_http.ok({
         "models": em_oww_models.scan(),
         "dir":    str(em_oww_models.models_dir()),
     })
@@ -1895,17 +1896,17 @@ async def _post_oww_model_upload(request: web.Request) -> web.Response:
         reader = await request.multipart()
         field  = await reader.next()
         if field is None or field.name != "model":
-            return _error("invalid_upload", "Expected multipart field 'model'", 400)
+            return em_http.error("invalid_upload", "Expected multipart field 'model'", 400)
         fname = em_oww_models.safe_model_filename(field.filename or "")
         if fname is None:
-            return _error("invalid_filename",
+            return em_http.error("invalid_filename",
                           "Model must be a .onnx file with a simple name "
                           "(letters, digits, _ - . only)", 400)
         data = await field.read()
         if not data:
-            return _error("empty_upload", "Uploaded model is empty", 400)
+            return em_http.error("empty_upload", "Uploaded model is empty", 400)
         if len(data) > em_oww_models.MAX_MODEL_BYTES:
-            return _error("too_large", "Model exceeds 20 MB limit", 413)
+            return em_http.error("too_large", "Model exceeds 20 MB limit", 413)
 
         # Before anything is written: a model that cannot run is refused with
         # the reason, where it used to fail later in the wake listener (#869).
@@ -1913,7 +1914,7 @@ async def _post_oww_model_upload(request: web.Request) -> web.Response:
             None, em_oww_check.problem, data)
         if why:
             log.info(f"[api] Wake model refused: {fname}: {why}")
-            return _error("invalid_model",
+            return em_http.error("invalid_model",
                           f"This file cannot run as a wake word model: {why}.", 400)
 
         directory = em_oww_models.models_dir()
@@ -1931,10 +1932,10 @@ async def _post_oww_model_upload(request: web.Request) -> web.Response:
             raise
         log.info(f"[api] Wake model installed: {fname} ({len(data):,} bytes)")
         entry = next((m for m in em_oww_models.scan() if m["file"] == fname), None)
-        return _ok({"model": entry}, status=201)
+        return em_http.ok({"model": entry}, status=201)
     except Exception as e:
         log.error(f"[api] Model upload error: {e}")
-        return _error("upload_failed", str(e), 500)
+        return em_http.error("upload_failed", str(e), 500)
 
 
 @auth.require_admin
@@ -1948,10 +1949,10 @@ async def _delete_oww_model(request: web.Request) -> web.Response:
     """
     fname = em_oww_models.safe_model_filename(request.match_info["file"])
     if fname is None:
-        return _error("invalid_filename", "Bad model filename", 400)
+        return em_http.error("invalid_filename", "Bad model filename", 400)
     path = em_oww_models.models_dir() / fname
     if not path.is_file():
-        return _error("not_found", "No such model", 404)
+        return em_http.error("not_found", "No such model", 404)
 
     def _configs() -> dict[str, dict]:
         out = {"global": db.get_global_device_config()}
@@ -1962,12 +1963,12 @@ async def _delete_oww_model(request: web.Request) -> web.Response:
     configs = await asyncio.get_running_loop().run_in_executor(None, _configs)
     users = em_oww_models.in_use_by(str(path), configs)
     if users:
-        return _error("model_in_use",
+        return em_http.error("model_in_use",
                       f"Model is selected by: {', '.join(users)}", 409)
 
     path.unlink()
     log.info(f"[api] Wake model deleted: {fname}")
-    return _ok({"deleted": fname})
+    return em_http.ok({"deleted": fname})
 
 
 # ─── OTA background tasks ─────────────────────────────────────────────────────
@@ -2445,23 +2446,23 @@ async def _post_emos_upload(request: web.Request) -> web.Response:
         reader = await request.multipart()
         field = await reader.next()
         if field is None or field.name != "payload":
-            return _error("invalid_upload",
+            return em_http.error("invalid_upload",
                           "Expected multipart field 'payload'", 400)
         raw = await field.read()
     except web.HTTPException:
         raise
     except Exception as e:
         log.error(f"[api] emOS payload upload error: {e}")
-        return _error("upload_failed", str(e), 500)
+        return em_http.error("upload_failed", str(e), 500)
     if not raw:
-        return _error("empty_upload", "Uploaded payload is empty", 400)
+        return em_http.error("empty_upload", "Uploaded payload is empty", 400)
     if len(raw) > UPLOAD_MAX_BYTES:
-        return _error("too_large", "Payload is over the upload limit", 413)
+        return em_http.error("too_large", "Payload is over the upload limit", 413)
     try:
         payload = await asyncio.get_event_loop().run_in_executor(
             None, em_emos_build.read_payload_bundle, raw)
     except em_emos_build.BuildError as e:
-        return _error("bad_payload", f"That is not a usable emOS payload: {e}", 400)
+        return em_http.error("bad_payload", f"That is not a usable emOS payload: {e}", 400)
 
     version = payload["version"] or f"local-{time.strftime('%Y%m%d-%H%M')}"
     token = str(_uuid.uuid4())
@@ -2473,7 +2474,7 @@ async def _post_emos_upload(request: web.Request) -> web.Response:
         await asyncio.sleep(600)
         _pending_emos_uploads.pop(token, None)
     em_tasks.spawn(_expire())
-    return _ok({"upload_token": token, "version": version,
+    return em_http.ok({"upload_token": token, "version": version,
                 "files": sorted(payload["files"])})
 
 
@@ -2498,37 +2499,37 @@ async def _post_device_emos_update(request: web.Request) -> web.Response:
     loop = asyncio.get_event_loop()
     row = await loop.run_in_executor(None, db.get_device, device_id)
     if row is None:
-        return _error("device_not_found", f"No device: {device_id}", 404)
+        return em_http.error("device_not_found", f"No device: {device_id}", 404)
     live = em_state.devices.get(device_id)
     if live is None:
-        return _error("device_offline", "Device is not connected", 409)
+        return em_http.error("device_offline", "Device is not connected", 409)
     # Refused here as well as greyed out in the panel: this is a plain POST.
     if live.android_userspace:
-        return _error("not_emos", "This device is not running emOS", 409)
+        return em_http.error("not_emos", "This device is not running emOS", 409)
     if (_emos_update_busy(device_id) or device_id in _updates_in_progress
             or device_id in _updates_queued):
-        return _error("update_in_progress", "An update is already in progress", 409)
+        return em_http.error("update_in_progress", "An update is already in progress", 409)
 
     override = None
     token = body.get("upload_token")
     if token:
         override = _pending_emos_uploads.get(token)
         if override is None:
-            return _error("invalid_token", "Upload token not found or expired", 404)
+            return em_http.error("invalid_token", "Upload token not found or expired", 404)
         version = override[1]
     else:
         release = await _fetch_latest_emos_release()
         if release is None:
-            return _error("no_release", "No emOS release information available", 409)
+            return em_http.error("no_release", "No emOS release information available", 409)
         version = release["version"]
         if not em_emos_update.can_target(version):
-            return _error(
+            return em_http.error(
                 "release_too_old",
                 f"emOS {version} predates updating over the network: its init "
                 f"cannot roll a failed update back by itself.", 409)
         if (not em_emos_update.update_available(row["emos_version"], version)
                 and not body.get("force")):
-            return _error(
+            return em_http.error(
                 "already_running",
                 f"This device runs emOS {row['emos_version'] or 'unknown'}; "
                 f"{version} is not an update for it. Pass force to install "
@@ -2537,7 +2538,7 @@ async def _post_device_emos_update(request: web.Request) -> web.Response:
     if token:
         _pending_emos_uploads.pop(token, None)
     em_tasks.spawn(_run_emos_update(device_id, override))
-    return _ok({"status": "started", "version": version}, status=202)
+    return em_http.ok({"status": "started", "version": version}, status=202)
 
 
 async def _emos_update_failed(device_id: str, reason: str) -> None:
@@ -3538,8 +3539,8 @@ async def _get_latest_release(request: web.Request) -> web.Response:
     """GET /api/releases/latest — latest GitHub release, from cache."""
     release = await _get_cached_release()
     if release is None:
-        return _error("no_release", "No release information available", 404)
-    return _ok(release)
+        return em_http.error("no_release", "No release information available", 404)
+    return em_http.ok(release)
 
 
 @auth.require_admin
@@ -3549,8 +3550,8 @@ async def _post_check_release(request: web.Request) -> web.Response:
     # Same button, same question: the Updates tab shows emOS beside firmware.
     await _fetch_latest_emos_release()
     if release is None:
-        return _error("no_release", "Could not fetch release from GitHub", 502)
-    return _ok(release)
+        return em_http.error("no_release", "Could not fetch release from GitHub", 502)
+    return em_http.ok(release)
 
 
 @auth.require_admin
@@ -3575,7 +3576,7 @@ async def _post_deploy_all(request: web.Request) -> web.Response:
     if upload_token:
         binary_override = _pending_uploads.pop(upload_token, None)
         if binary_override is None:
-            return _error("invalid_token", "Upload token not found or expired", 404)
+            return em_http.error("invalid_token", "Upload token not found or expired", 404)
         # Read the version OUT of the binary, as the single-device path does.
         # Labelling it `local-<timestamp>` made every uploaded binary look
         # like a version no device had ever run, so the already_current skip
@@ -3590,7 +3591,7 @@ async def _post_deploy_all(request: web.Request) -> web.Response:
     else:
         release = await _get_cached_release()
         if release is None:
-            return _error("no_release", "No release information available", 409)
+            return em_http.error("no_release", "No release information available", 409)
 
     started = []
     skipped = []
@@ -3616,7 +3617,7 @@ async def _post_deploy_all(request: web.Request) -> web.Response:
         em_tasks.spawn(_run_update(device_id, release, binary_override))
         started.append(device_id)
 
-    return _ok({
+    return em_http.ok({
         "version": release["version"],
         "started": started,
         "skipped": skipped,
@@ -3675,7 +3676,7 @@ async def _get_provision_debloat_packages(request: web.Request) -> web.Response:
         for line in _read_payload("debloat_packages.txt").splitlines()
         if line.strip() and not line.strip().startswith("#")
     ]
-    return _ok({"packages": packages})
+    return em_http.ok({"packages": packages})
 
 
 @auth.require_admin
@@ -3694,11 +3695,11 @@ async def _get_provision_latest_binary(request: web.Request) -> web.Response:
     """
     release = await _get_cached_release()
     if release is None:
-        return _error("no_release", "No release information available", 404)
+        return em_http.error("no_release", "No release information available", 404)
 
     binary = await _fetch_binary(release["url"], release.get("version", ""))
     if binary is None:
-        return _error("fetch_failed", "Could not download binary from GitHub", 502)
+        return em_http.error("fetch_failed", "Could not download binary from GitHub", 502)
 
     return web.Response(
         body=binary,
@@ -3797,14 +3798,14 @@ async def _post_provision_tls_credentials(request: web.Request) -> web.Response:
     wizard can install them over adb before the device's first contact.
     """
     if _tls_dir is None:
-        return _error("tls_unavailable",
+        return em_http.error("tls_unavailable",
                       "Device-link TLS is not active on this controller", 503)
-    body      = await _json_body(request)
-    device_id = _require_str(body, "device_id")
+    body      = await em_http.json_body(request)
+    device_id = em_http.require_str(body, "device_id")
 
     loop  = asyncio.get_event_loop()
     token = await loop.run_in_executor(None, db.ensure_device_token, device_id)
-    return _ok({
+    return em_http.ok({
         "ca_pem": em_pki.ca_pem(_tls_dir),
         "token":  token,
         "dir":    DEVICE_TLS_DIR,
@@ -3823,7 +3824,7 @@ async def _get_provision_controller_endpoints(request: web.Request) -> web.Respo
     """
     loop = asyncio.get_event_loop()
     data = await loop.run_in_executor(None, _controller_endpoints_file)
-    return _ok({
+    return em_http.ok({
         "content":     data.decode("ascii") if data else None,
         "md5":         em_endpoints.md5(data) if data else None,
         "path":        em_endpoints.DEVICE_PATH,
@@ -3841,7 +3842,7 @@ async def _post_pair(request: web.Request) -> web.Response:
     connect is issued them when it next dials within its window.
     """
     if _tls_dir is None:
-        return _error("tls_unavailable",
+        return em_http.error("tls_unavailable",
                       "Device-link TLS is not active on this controller", 503)
     device_id = request.match_info["id"]
     live = em_state.devices.get(device_id)
@@ -3852,14 +3853,14 @@ async def _post_pair(request: web.Request) -> web.Response:
     can_ask = live is None or getattr(live, "pairing_capable", False)
     admin_started = (not can_ask) and not getattr(live, "secure", False)
     if em_pairing.pending_request(device_id) is None and not admin_started:
-        return _error("no_pair_request",
+        return em_http.error("no_pair_request",
                       "This Echo has not asked to pair. Hold its action button "
                       "for 5 seconds, then approve it here.", 409)
     em_pairing.approve(device_id)
     if live is not None:
         em_tasks.spawn(_issue_credentials(device_id))
     log.info(f"[api] {request['user']['username']} approved pairing for {device_id}")
-    return _ok({"approved": True, "connected": live is not None})
+    return em_http.ok({"approved": True, "connected": live is not None})
 
 
 @auth.require_admin
@@ -3879,7 +3880,7 @@ async def _post_debloat(request: web.Request) -> web.Response:
     device_id = request.match_info["id"]
     live = em_state.devices.get(device_id)
     if live is None:
-        return _error("device_offline", f"Device not connected: {device_id}", 409)
+        return em_http.error("device_offline", f"Device not connected: {device_id}", 409)
 
     # Refused server-side, not merely greyed out in the dashboard. This is a
     # plain POST with a session token, so a dashboard-only rule protects
@@ -3890,7 +3891,7 @@ async def _post_debloat(request: web.Request) -> web.Response:
     # fails, TRANSFER_OK never comes, and the transfer holds that device's
     # shell lock for its full timeout.
     if not live.android_userspace:
-        return _error(
+        return em_http.error(
             "not_android",
             "This device is not running Android, so there is nothing to "
             "debloat — the payload is a package list and a Magisk boot script.",
@@ -3901,7 +3902,7 @@ async def _post_debloat(request: web.Request) -> web.Response:
     # _sync_start_script does not either. Releasing it from out here could close
     # a session a concurrent caller had opened.
     em_tasks.spawn(_sync_debloat(live, device_id))
-    return _ok({"started": True})
+    return em_http.ok({"started": True})
 
 
 async def _issue_credentials(device_id: str) -> None:
@@ -3970,7 +3971,7 @@ async def _get_system_status(request: web.Request) -> web.Response:
         db.fleet_base_os(), db.get_config("device_approval", "strict")))
     release = await _get_cached_release()
 
-    return _ok({
+    return em_http.ok({
         "controller_version": CONTROLLER_VERSION,
         # This controller's device address and ports — what a new entry in
         # the controller address list starts from.
@@ -4044,7 +4045,7 @@ async def _get_system_config(request: web.Request) -> web.Response:
     config = await loop.run_in_executor(None, db.get_all_config)
     # Don't expose schema_version — internal detail
     config.pop("schema_version", None)
-    return _ok(config)
+    return em_http.ok(config)
 
 
 @auth.require_admin
@@ -4061,7 +4062,7 @@ async def _patch_system_config(request: web.Request) -> web.Response:
         "update_check_interval",
         "github_repo",
     }
-    body = await _json_body(request)
+    body = await em_http.json_body(request)
     loop = asyncio.get_event_loop()
 
     updated = {}
@@ -4074,12 +4075,12 @@ async def _patch_system_config(request: web.Request) -> web.Response:
         updated[key] = value
 
     if unknown:
-        return _error(
+        return em_http.error(
             "unknown_config_key",
             f"Unknown or immutable config key(s): {', '.join(unknown)}",
             400,
         )
-    return _ok(updated)
+    return em_http.ok(updated)
 
 
 # ─── Global device config ─────────────────────────────────────────────────────
@@ -4089,7 +4090,7 @@ async def _get_global_config(request: web.Request) -> web.Response:
     """GET /api/global/config — fleet-wide default device config."""
     loop = asyncio.get_event_loop()
     config = await loop.run_in_executor(None, db.get_global_device_config)
-    return _ok(_redact_console_pw(config))
+    return em_http.ok(_redact_console_pw(config))
 
 
 # The console password record never leaves the controller. Hashing before
@@ -4180,7 +4181,7 @@ async def _post_global_config(request: web.Request) -> web.Response:
     keys is refused with 409 unless it sets replace=true — see
     _dropped_keys.
     """
-    config = await _json_body(request)
+    config = await em_http.json_body(request)
     loop = asyncio.get_event_loop()
 
     explicit_replace = bool(config.pop("replace", False))
@@ -4189,19 +4190,19 @@ async def _post_global_config(request: web.Request) -> web.Response:
     stored = await loop.run_in_executor(None, db.get_global_device_config_raw)
     _resolve_console_pw(config, stored)
     if (err := _validate_console_timeout(config)):
-        return _error("bad_console_timeout", err, 400)
+        return em_http.error("bad_console_timeout", err, 400)
     if (bad := em_config_types.problems(config, stored)):
-        return _error("bad_config_value", "; ".join(bad), 400)
+        return em_http.error("bad_config_value", "; ".join(bad), 400)
     endpoints_before = stored.get("controllerEndpoints") or []
     if "controllerEndpoints" in config:
         eps, err = em_endpoints.normalise(
             config["controllerEndpoints"], _link["port"], _link["tls_port"])
         if err:
-            return _error("bad_controller_endpoints", f"Controller address list {err}.", 400)
+            return em_http.error("bad_controller_endpoints", f"Controller address list {err}.", 400)
         config["controllerEndpoints"] = eps
     dropped = _dropped_keys(config, stored)
     if dropped and not explicit_replace:
-        return _error(
+        return em_http.error(
             "would_drop_keys",
             f"This body would delete {len(dropped)} existing setting(s): "
             f"{', '.join(dropped)}. Config POSTs replace rather than merge — "
@@ -4241,7 +4242,7 @@ async def _post_global_config(request: web.Request) -> web.Response:
         if row["approved"]:
             await em_ble_proxy.reconcile(row["device_id"])
 
-    return _ok({"config": config, "pushed_to": pushed})
+    return em_http.ok({"config": config, "pushed_to": pushed})
 
 
 # ─── Auth — change password ───────────────────────────────────────────────────
@@ -4256,27 +4257,27 @@ async def _post_change_password(request: web.Request) -> web.Response:
     Verifies current password before accepting the new one.
     """
     user = request["user"]
-    body = await _json_body(request)
-    current_password = _require_str(body, "current_password")
-    new_password     = _require_str(body, "new_password")
+    body = await em_http.json_body(request)
+    current_password = em_http.require_str(body, "current_password")
+    new_password     = em_http.require_str(body, "new_password")
 
     if len(new_password) < 8:
-        return _error("invalid_input", "New password must be at least 8 characters", 400)
+        return em_http.error("invalid_input", "New password must be at least 8 characters", 400)
 
     loop = asyncio.get_event_loop()
     db_user = await loop.run_in_executor(None, db.get_user_by_id, user["id"])
     if db_user is None:
-        return _error("user_not_found", "User not found", 404)
+        return em_http.error("user_not_found", "User not found", 404)
 
     if not await auth.verify_password_async(current_password, db_user["password_hash"]):
-        return _error("invalid_credentials", "Current password is incorrect", 401)
+        return em_http.error("invalid_credentials", "Current password is incorrect", 401)
 
     new_hash = await auth.hash_password_async(new_password)
     revoked = await loop.run_in_executor(
         None, lambda: db.update_user_password(
             user["id"], new_hash, keep_session=user["token"]))
     log.info(f"[api] Password changed for user: {user['username']}")
-    return _ok({"ok": True, "sessions_ended": revoked})
+    return em_http.ok({"ok": True, "sessions_ended": revoked})
 
 
 # ─── Live events WebSocket ────────────────────────────────────────────────────
@@ -4665,7 +4666,7 @@ async def _get_controller_release(request: web.Request) -> web.Response:
                 "latest_controller_published_at")})
         version = stored["latest_controller_version"]
         if not version:
-            return _ok({"version": None, "current": CONTROLLER_VERSION,
+            return em_http.ok({"version": None, "current": CONTROLLER_VERSION,
                         "status": "unknown", "available": False})
         data = {
             "version":      version,
@@ -4675,7 +4676,7 @@ async def _get_controller_release(request: web.Request) -> web.Response:
             "release_url":  "",
             **_compare_versions(CONTROLLER_VERSION, version),
         }
-    return _ok(data)
+    return em_http.ok(data)
 
 
 
@@ -5258,7 +5259,7 @@ async def _get_oww_assets(request: web.Request) -> web.Response:
         # Not an error: the state is simply unknowable, and saying "not
         # installed" for an offline device would be a guess that reads as fact.
         payload.update({"status": "unknown", "installed": None, "free_mb": None})
-        return _ok(payload)
+        return em_http.ok(payload)
 
     state = await _oww_device_state(live)
     plan = em_oww_assets.plan_sync(desired, state["installed"], state["free_mb"])
@@ -5273,7 +5274,7 @@ async def _get_oww_assets(request: web.Request) -> web.Response:
                    else "outdated" if plan.keep
                    else "absent"),
     })
-    return _ok(payload)
+    return em_http.ok(payload)
 
 
 @auth.require_admin
@@ -5282,11 +5283,11 @@ async def _post_oww_assets(request: web.Request) -> web.Response:
     device_id = request.match_info["id"]
     live = em_state.devices.get(device_id)
     if live is None:
-        return _error("device_offline", "Device is not connected", 409)
+        return em_http.error("device_offline", "Device is not connected", 409)
     result = await _sync_oww_assets(live, device_id)
     if not result.get("ok"):
-        return _error("sync_failed", result.get("error", "sync failed"), 500)
-    return _ok(result)
+        return em_http.error("sync_failed", result.get("error", "sync failed"), 500)
+    return em_http.ok(result)
 
 
 
@@ -5304,7 +5305,7 @@ async def _get_provision_oww_manifest(request: web.Request) -> web.Response:
         None, db.get_global_device_config) or {}
     models = [m for m in [fleet.get("owwModel") or ""] if m]
     desired, problems = em_oww_assets.desired_assets(models)
-    return _ok({
+    return em_http.ok({
         "dir": em_oww_assets.DEVICE_DIR,
         "problems": problems,
         "assets": [{"name": a.name, "size": a.size, "md5": a.md5} for a in desired],
@@ -5327,11 +5328,11 @@ async def _get_provision_oww_asset(request: web.Request) -> web.Response:
         [m for m in [fleet.get("owwModel") or ""] if m])
     asset = next((a for a in desired if a.name == name), None)
     if asset is None:
-        return _error("not_found", f"{name} is not a current asset", 404)
+        return em_http.error("not_found", f"{name} is not a current asset", 404)
     try:
         data = asset.source.read_bytes()
     except OSError as e:
-        return _error("unreadable", str(e), 500)
+        return em_http.error("unreadable", str(e), 500)
     return web.Response(
         body=data,
         content_type="application/octet-stream",
@@ -5477,7 +5478,7 @@ async def _post_provision_diagnostics(request: web.Request) -> web.Response:
     Admin-only and a download rather than a display, the same call the support
     bundle makes: it is meant to be looked at before it is shared.
     """
-    body = await _json_body(request)
+    body = await em_http.json_body(request)
     diag = em_support.build_provision_diagnostics(
         step=body.get("step") or "unknown",
         error=body.get("error") or "",
@@ -5617,7 +5618,7 @@ async def _fetch_emos_payload(arch: str) -> tuple:
     """
     release = await _fetch_latest_emos_release()
     if release is None:
-        return None, {}, "", _error(
+        return None, {}, "", em_http.error(
             "no_emos_release",
             "No published emOS release with an 'init' asset was found. Build "
             "one from emos/ with build.sh and select it by hand, or cut an "
@@ -5629,7 +5630,7 @@ async def _fetch_emos_payload(arch: str) -> tuple:
     if bundle_asset is None:
         # Older release: FireOS 5 is served by the loose init, FireOS 6 cannot be.
         if arch != em_emos_build.ARCH_ARM64:
-            return None, {}, version, _error(
+            return None, {}, version, em_http.error(
                 "no_payload_bundle",
                 f"emOS release {version} predates the payload bundle, so it "
                 f"carries no {arch} init and none of emOS's WiFi tools — a "
@@ -5640,7 +5641,7 @@ async def _fetch_emos_payload(arch: str) -> tuple:
     raw = await _fetch_binary(bundle_asset["url"],
                               f"{version}-{EMOS_PAYLOAD_ASSET}")
     if raw is None:
-        return None, {}, version, _error(
+        return None, {}, version, em_http.error(
             "fetch_failed",
             f"Could not download {EMOS_PAYLOAD_ASSET} from GitHub", 502)
 
@@ -5652,7 +5653,7 @@ async def _fetch_emos_payload(arch: str) -> tuple:
     except em_emos_build.BuildError as e:
         log.error(f"[api] emOS release {version} carries an unusable payload "
                   f"bundle: {e}")
-        return None, {}, version, _error(
+        return None, {}, version, em_http.error(
             "bad_release_asset",
             f"The payload in emOS release {version} is not usable: {e}", 502)
 
@@ -5669,7 +5670,7 @@ def _select_emos_payload(files: dict, arch: str, version: str) -> tuple:
                                      EMOS_INIT_ASSETS[em_emos_build.ARCH_ARM64])
     init = files.get(init_name)
     if init is None:
-        return None, {}, version, _error(
+        return None, {}, version, em_http.error(
             "no_init_for_arch",
             f"emOS release {version} carries no '{init_name}', so there is no "
             f"init for this device's {arch} kernel. Cut a newer emos-v* tag, or "
@@ -5681,7 +5682,7 @@ def _select_emos_payload(files: dict, arch: str, version: str) -> tuple:
     if problems:
         log.error(f"[api] emOS release {version} carries an unusable "
                   f"{init_name}: {'; '.join(problems)}")
-        return None, {}, version, _error(
+        return None, {}, version, em_http.error(
             "bad_release_asset",
             f"The {init_name} in emOS release {version} is not usable: "
             f"{'; '.join(problems)}", 502)
@@ -5701,7 +5702,7 @@ def _select_emos_payload(files: dict, arch: str, version: str) -> tuple:
         if missing:
             # Fatal: Amazon's supplicant cannot run under emOS, so the image
             # would have no WiFi and no way to report it but a cable.
-            return None, {}, version, _error(
+            return None, {}, version, em_http.error(
                 "no_wifi_tools_for_arch",
                 f"emOS release {version} carries no {', '.join(missing)}. A "
                 f"FireOS 6 image needs emOS's own userspace — Amazon's "
@@ -5717,7 +5718,7 @@ async def _fetch_emos_init(arch: str) -> tuple:
     """Just the init, for the download endpoint: (binary, version, error)."""
     release = await _fetch_latest_emos_release()
     if release is None:
-        return None, "", _error(
+        return None, "", em_http.error(
             "no_emos_release",
             "No published emOS release with an 'init' asset was found. Build "
             "one from emos/ with build.sh and select it by hand, or cut an "
@@ -5739,7 +5740,7 @@ async def _fetch_one_init(release: dict, arch: str) -> tuple:
         # plainly rather than falling back to the 64-bit asset, which would
         # build an image that takes the flash and then produces no output at
         # all — the failure this whole path exists to prevent.
-        return None, release["version"], _error(
+        return None, release["version"], em_http.error(
             "no_init_for_arch",
             f"emOS release {release['version']} carries no '{name}' asset, so "
             f"there is no init for this device's {arch} kernel. Cut a newer "
@@ -5748,7 +5749,7 @@ async def _fetch_one_init(release: dict, arch: str) -> tuple:
 
     binary = await _fetch_binary(asset["url"], f"{release['version']}-{name}")
     if binary is None:
-        return None, release["version"], _error(
+        return None, release["version"], em_http.error(
             "fetch_failed", "Could not download the emOS init from GitHub", 502)
 
     problems = em_emos_build.init_binary_problems(binary, arch)
@@ -5757,7 +5758,7 @@ async def _fetch_one_init(release: dict, arch: str) -> tuple:
         # for everyone, not just this download.
         log.error(f"[api] emOS release {release['version']} carries an unusable "
                   f"{name}: {'; '.join(problems)}")
-        return None, release["version"], _error(
+        return None, release["version"], em_http.error(
             "bad_release_asset",
             f"The {name} in emOS release {release['version']} is not usable: "
             f"{'; '.join(problems)}", 502)
@@ -5796,7 +5797,7 @@ async def _get_provision_emos_init(request: web.Request) -> web.Response:
     """
     arch = (request.query.get("arch") or em_emos_build.ARCH_ARM64).strip()
     if arch not in EMOS_INIT_ASSETS:
-        return _error(
+        return em_http.error(
             "bad_arch",
             f"Unknown architecture {arch!r} — expected one of "
             f"{', '.join(sorted(EMOS_INIT_ASSETS))}.", 400)
@@ -5894,11 +5895,11 @@ async def _post_provision_emos_image(request: web.Request) -> web.Response:
         reference = parts.get("reference")
         init_bin = parts.get("init")
         if not reference:
-            return _error("invalid_upload",
+            return em_http.error("invalid_upload",
                           "Expected multipart field 'reference' — the boot "
                           "image read off the device", 400)
         if not init_bin and not parts.get("use_latest_init"):
-            return _error("invalid_upload",
+            return em_http.error("invalid_upload",
                           "Expected multipart field 'init' — the emOS init "
                           "binary — or 'use_latest_init' to resolve it here",
                           400)
@@ -5921,7 +5922,7 @@ async def _post_provision_emos_image(request: web.Request) -> web.Response:
         if want_md5:
             got_md5 = hashlib.md5(reference).hexdigest()
             if got_md5 != want_md5:
-                return _error(
+                return em_http.error(
                     "corrupt_upload",
                     f"The boot image arrived corrupted: the wizard read "
                     f"{want_md5} off the device and {got_md5} arrived. "
@@ -5945,7 +5946,7 @@ async def _post_provision_emos_image(request: web.Request) -> web.Response:
         raw_part = (parts.get("system_part") or "").strip()
         if raw_part:
             if not raw_part.isdigit() or not 1 <= int(raw_part) <= 127:
-                return _error(
+                return em_http.error(
                     "bad_system_part",
                     f"system_part must be an mmcblk0 partition number (1-127), "
                     f"not {raw_part!r}. Nothing has been built.", 400)
@@ -5958,7 +5959,7 @@ async def _post_provision_emos_image(request: web.Request) -> web.Response:
             if not arch:
                 # Refused, not defaulted: an init chosen by guess flashes fine
                 # and then produces no output at all.
-                return _error(
+                return em_http.error(
                     "unknown_reference_arch",
                     "Could not read the kernel architecture out of that boot "
                     "image, so there is no way to tell which init it needs. "
@@ -6014,12 +6015,12 @@ async def _post_provision_emos_image(request: web.Request) -> web.Response:
         # write. 422 rather than 400: the request was well formed, the image
         # is what could not be accepted.
         log.warning(f"[api] emOS build refused: {e}")
-        return _error("build_refused", str(e), 422)
+        return em_http.error("build_refused", str(e), 422)
     except web.HTTPException:
         raise
     except Exception as e:
         log.error(f"[api] emOS build error: {e}")
-        return _error("build_failed", str(e), 500)
+        return em_http.error("build_failed", str(e), 500)
 
 
 @auth.require_admin
@@ -6323,42 +6324,7 @@ async def notify_device_pending(device_id: str, ip: str) -> None:
     })
 
 
-# ─── Response helpers ─────────────────────────────────────────────────────────
-
-def _ok(data, status: int = 200) -> web.Response:
-    return web.Response(
-        status=status,
-        content_type="application/json",
-        body=json.dumps(data),
-    )
-
-
-def _error(code: str, message: str, status: int) -> web.Response:
-    return web.Response(
-        status=status,
-        content_type="application/json",
-        body=json.dumps({"error": message, "code": code}),
-    )
-
-
-# ─── Request helpers ──────────────────────────────────────────────────────────
-
-async def _json_body(request: web.Request) -> dict:
-    """
-    Parse the request body as JSON.
-    Returns 400 if body is missing or not valid JSON.
-    """
-    try:
-        return await request.json()
-    except Exception:
-        raise web.HTTPBadRequest(
-            content_type="application/json",
-            body=json.dumps({
-                "error": "Request body must be valid JSON",
-                "code":  "invalid_json",
-            }),
-        )
-
+# ─── Label checks ─────────────────────────────────────────────────────────────
 
 def _require_label(body: dict) -> str:
     """The body's label, or a 400 naming the rule it broke (em_labels)."""
@@ -6386,20 +6352,6 @@ async def _require_unique_label(label: str, device_id: str) -> None:
             body=json.dumps({"error": f'Another Echo is already called "{other}".',
                              "code": "duplicate_label"}),
         )
-
-
-def _require_str(body: dict, key: str) -> str:
-    """Extract a required string field from a parsed JSON body."""
-    value = body.get(key)
-    if not isinstance(value, str) or not value.strip():
-        raise web.HTTPBadRequest(
-            content_type="application/json",
-            body=json.dumps({
-                "error": f"Missing or empty required field: {key}",
-                "code":  "missing_field",
-            }),
-        )
-    return value.strip()
 
 
 # ─── Device state merge ───────────────────────────────────────────────────────

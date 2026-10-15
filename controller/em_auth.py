@@ -37,6 +37,7 @@ import bcrypt
 from aiohttp import web
 
 import em_db as db
+import em_http
 import em_ingressauth
 
 log = logging.getLogger("echomuse.auth")
@@ -276,7 +277,7 @@ def require_auth(handler):
     async def wrapper(request: web.Request) -> web.Response:
         user = await resolve_session(request)
         if user is None:
-            return _error("not_authenticated", "Authentication required", 401)
+            return em_http.error("not_authenticated", "Authentication required", 401)
         request["user"] = user
         return await handler(request)
     return wrapper
@@ -292,9 +293,9 @@ def require_admin(handler):
     async def wrapper(request: web.Request) -> web.Response:
         user = await resolve_session(request)
         if user is None:
-            return _error("not_authenticated", "Authentication required", 401)
+            return em_http.error("not_authenticated", "Authentication required", 401)
         if user["role"] != "admin":
-            return _error("forbidden", "Admin access required", 403)
+            return em_http.error("forbidden", "Admin access required", 403)
         request["user"] = user
         return await handler(request)
     return wrapper
@@ -474,20 +475,10 @@ class AuthError(Exception):
         self.status = status
 
     def to_response(self) -> web.Response:
-        return _error(self.code, self.message, self.status)
+        return em_http.error(self.code, self.message, self.status)
 
 
 # ─── Internal helpers ─────────────────────────────────────────────────────────
-
-def _error(code: str, message: str, status: int) -> web.Response:
-    """Consistent error response shape per spec."""
-    import json
-    return web.Response(
-        status=status,
-        content_type="application/json",
-        body=json.dumps({"error": message, "code": code}),
-    )
-
 
 # A pre-hashed dummy password used to make failed login timing
 # indistinguishable from a successful bcrypt check on a wrong password.
