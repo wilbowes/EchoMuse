@@ -353,7 +353,7 @@ twice, and `code_only` drops comments and docstrings. Widening the off-loop
 DB rule that way found 34 `db.*` calls on the event loop in em_api and
 em_auth that the em_controller-only guard had never looked at.
 
-**Two ratchets keep the split from growing back** (2026-10-16, after em_api
+**Three ratchets keep the split from growing back** (2026-10-16, after em_api
 went from 6,680 lines to 295). `tests/test_layering.py`: only em_controller
 imports em_api, route modules (`em_routes_*`) are imported only by em_api and
 each other, and the base modules (em_state, em_http, em_events, em_shell,
@@ -363,7 +363,10 @@ a module over 1,500 lines or a function over 150 is listed in
 `tests/size_baseline.json` and may not grow, and nothing else may cross those
 caps; after a shrink, `python controller/tools/size_ratchet.py --update`
 keeps the gain. Raising a number in the baseline is allowed, in the same
-change, where a reviewer sees it.
+change, where a reviewer sees it. And CI holds each module's test coverage at
+or above its floor in `tests/coverage_floor.json` (`tools/coverage_floor.py`;
+today's figure less a point, raised and never lowered); a new module needs a
+floor before it merges.
 
 **emOS is C with no test framework, so its off-target tools ARE its suite** —
 `ringsim --check` for the boot ring's invariants, `pwcheck` for the password

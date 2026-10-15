@@ -41,7 +41,12 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq busybox
       - name: Run pytest
         working-directory: controller
-        run: python -m pytest tests/ -v --cov --cov-report=term
+        run: python -m pytest tests/ -v --cov --cov-report=term --cov-report=json:coverage.json
+      # Per-module coverage may only rise (tools/coverage_floor.py). Checked
+      # here and not in the suite: coverage depends on this job's environment.
+      - name: Coverage floors
+        working-directory: controller
+        run: python tools/coverage_floor.py check coverage.json
 
   forge-metadata-tests:
     name: ONNX metadata round trip

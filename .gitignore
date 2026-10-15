@@ -48,4 +48,5 @@ device/tools/speaker_profile/*.wav
 # Coverage artefacts — .coveragerc is checked in, its output is not.
 .coverage
 coverage.out
+coverage.json
 *.cover

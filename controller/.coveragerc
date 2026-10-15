@@ -1,4 +1,5 @@
-# Coverage for the controller suite. Report-only: there is no gate.
+# Coverage for the controller suite. CI gates it per module with floors that
+# only rise (tools/coverage_floor.py, tests/coverage_floor.json, 2026-10-16).
 #
 # Baseline when this was added (#739, 2026-10-03), with the omits below:
 #   10,980 statements, 7,019 missed, 36.1%
