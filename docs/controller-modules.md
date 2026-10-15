@@ -38,6 +38,7 @@ message, looked up in `CONTROL_HANDLERS` (#910).
 | `em_state` | Process-wide state: the device registry, shell sessions, model caches, link ports. |
 | `em_device_view` | How a device is presented: its /api/devices record, WiFi-change and link-refusal state. |
 | `em_device_config` | Saving config: the live push, the drop guard, the console password and timeout. |
+| `em_credentials` | Issuing device-link credentials (token and CA) to an approved Echo over its shell plane. |
 | `em_ingressauth` | Home Assistant ingress: the deployment flag and the trust decision. |
 | `em_config_types` | Config value types. |
 | `em_routes_activity` | Routes: the Activity tab (turns, audio, wake samples). |
@@ -250,6 +251,13 @@ Grouped by where each one lives now.
 | `_resolve_console_pw` | `em_device_config.resolve_console_pw` |
 | `_validate_console_timeout` | `em_device_config.validate_console_timeout` |
 
+### `em_credentials`
+
+| Was in em_api | Now |
+|---|---|
+| `DEVICE_TLS_DIR` | `em_credentials.DEVICE_TLS_DIR` |
+| `_issue_credentials` | `em_credentials.issue_credentials` |
+
 ### `em_ingressauth`
 
 | Was in em_api | Now |
@@ -328,9 +336,7 @@ Grouped by where each one lives now.
 
 | Was in em_api | Now |
 |---|---|
-| `DEVICE_TLS_DIR` | `em_routes_link.DEVICE_TLS_DIR` |
 | `_get_provision_controller_endpoints` | `em_routes_link._get_provision_controller_endpoints` |
-| `_issue_credentials` | `em_routes_link.issue_credentials` |
 | `_post_pair` | `em_routes_link._post_pair` |
 | `_post_provision_tls_credentials` | `em_routes_link._post_provision_tls_credentials` |
 
