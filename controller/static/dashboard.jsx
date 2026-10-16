@@ -248,7 +248,7 @@ function eventAccent(level) {
 
 // ─── Components ───────────────────────────────────────────────────────────────
 
-function Lcd({ label, value, color, size = 16, maxChars }) {
+function Lcd({ label, value, color, size = 'var(--fs-xl)', maxChars }) {
   return (
     <div className="em-lcd">
       {label && <div className="em-lcd__label">{label}</div>}
@@ -398,7 +398,7 @@ function CircleButton({ onClick, title, color, children }) {
       background: 'linear-gradient(180deg,var(--sunken),var(--border))', border: '1px solid var(--muted)',
       borderRadius: '50%', width: 28, height: 28, display: 'flex', alignItems: 'center',
       justifyContent: 'center', cursor: 'pointer', boxShadow: '0 1px 0 var(--sheen) inset',
-      color: color || 'var(--text2)', fontSize: 15, fontWeight: 300, lineHeight: 1,
+      color: color || 'var(--text2)', fontSize: 'var(--fs-xl)', fontWeight: 300, lineHeight: 1,
     }}>{children}</button>
   );
 }
@@ -412,12 +412,12 @@ function Slider({ label, sub, value, min, max, step = 1, unit = '', formatValue,
   // controls leaked past the panel edge on phone widths.
   return (
     <div className="em-field">
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 7, minWidth: 0, gap: 'var(--space-4)' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 'var(--space-3)', minWidth: 0, gap: 'var(--space-4)' }}>
         <div style={{ minWidth: 0 }}>
           <span className={disabled ? 'em-field__label em-field__label--disabled' : 'em-field__label'}>{label}</span>
           {sub && <span className="em-field__aside">{sub}</span>}
         </div>
-        <Lcd value={display} size={12} />
+        <Lcd value={display} size="var(--fs-base)" />
       </div>
       {/* A control whose feature the device lacks is shown disabled WITH the
           reason (in sub), never as one that silently does nothing. */}
@@ -666,7 +666,7 @@ function ControllerEndpointsField({ value, onChange, readOnly = false }) {
 function Select({ label, sub, value, options, onChange, disabled = false }) {
   return (
     <div className="em-field">
-      <div style={{ marginBottom: 7, minWidth: 0 }}>
+      <div style={{ marginBottom: 'var(--space-3)', minWidth: 0 }}>
         <span className="em-field__label">{label}</span>
       </div>
       <div role="radiogroup" aria-label={typeof label === 'string' ? label : undefined}
@@ -684,7 +684,7 @@ function Select({ label, sub, value, options, onChange, disabled = false }) {
         ))}
       </div>
       {sub && (
-        <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-sm)', color: 'var(--muted)', marginTop: 7 }}>
+        <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-sm)', color: 'var(--muted)', marginTop: 'var(--space-4)' }}>
           {sub}
         </div>
       )}
@@ -815,7 +815,7 @@ const SEV = { ok: 'var(--ok)', warn: 'var(--warn)', bad: 'var(--error)', none: '
 // them, instead of being three bare numbers stacked at the end of the panel.
 function MicroMeter({ pct, sev }) {
   return (
-    <div style={{ height:2, borderRadius:1, background:'var(--track)', overflow:'hidden', marginTop:5 }}>
+    <div style={{ height:2, borderRadius:1, background:'var(--track)', overflow:'hidden', marginTop:'var(--space-2)' }}>
       {pct != null && <div style={{ height:'100%', width:`${Math.max(2, Math.min(100, pct))}%`,
         background:SEV[sev] ?? SEV.ok, borderRadius:1, transition:'width 0.6s' }}/>}
     </div>
@@ -844,7 +844,7 @@ function LinkStrip({ minutes }) {
   return (
     <div style={{ marginTop:'var(--space-5)' }}>
       <div style={{ display:'flex', justifyContent:'space-between', fontFamily:"var(--font-mono)",
-                    fontSize:'var(--fs-xs)', color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.08em' }}>
+                    fontSize:'var(--fs-xs)', color:'var(--muted)', textTransform:'uppercase', letterSpacing:'var(--tracking-label)' }}>
         <span>Link quality · last {n} min</span><span>now</span>
       </div>
       <div style={{ display:'flex', gap:'var(--space-1)', marginTop:'var(--space-2)', height:10 }}>
@@ -872,7 +872,7 @@ function StatTile({ label, value, unit, sev = 'ok', pct, glyph, note, sub, grade
   return (
     <div style={{ flex:'1 1 0', minWidth:0 }} title={grade ? `${label}: ${grade}` : undefined}>
       <div style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-xs)', color:'var(--muted)',
-                    textTransform:'uppercase', letterSpacing:'0.08em', whiteSpace:'nowrap' }}>{label}</div>
+                    textTransform:'uppercase', letterSpacing:'var(--tracking-label)', whiteSpace:'nowrap' }}>{label}</div>
       {/* FIXED height, and the glyph is centre-aligned rather than
           baseline-aligned.
 
@@ -883,7 +883,7 @@ function StatTile({ label, value, unit, sev = 'ok', pct, glyph, note, sub, grade
           glyphs are ordinary text. Pinning the height decouples the meters'
           vertical position from whatever a tile puts in this row, so the row
           of meters lines up by construction rather than by coincidence. */}
-      <div style={{ display:'flex', alignItems:'baseline', gap:'var(--space-2)', marginTop:3, height:18 }}>
+      <div style={{ display:'flex', alignItems:'baseline', gap:'var(--space-2)', marginTop:'var(--space-2)', height:18 }}>
         <span style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-base)',
                        color: dim ? 'var(--muted)' : SEV[sev] ?? 'var(--text2)' }}>
           {dim ? '—' : value}
@@ -894,8 +894,8 @@ function StatTile({ label, value, unit, sev = 'ok', pct, glyph, note, sub, grade
                                  alignSelf:'center', flexShrink:0 }}>{glyph}</span>}
       </div>
       <MicroMeter pct={dim ? null : pct} sev={sev}/>
-      {note && <div style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-xs)', color:SEV.bad, marginTop:3 }}>{note}</div>}
-      {!note && sub && <div style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-xs)', color:'var(--muted)', marginTop:3 }}>{sub}</div>}
+      {note && <div style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-xs)', color:SEV.bad, marginTop:'var(--space-1)' }}>{note}</div>}
+      {!note && sub && <div style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-xs)', color:'var(--muted)', marginTop:'var(--space-1)' }}>{sub}</div>}
     </div>
   );
 }
@@ -906,9 +906,9 @@ function StatBar({ label, pct, text }) {
               : pct > 65   ? 'var(--warn)'
               :               'var(--ok)';
   return (
-    <div style={{ marginBottom: 13 }}>
-      <div style={{ display:'flex', justifyContent:'space-between', marginBottom:5 }}>
-        <span style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-sm)', color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.08em' }}>{label}</span>
+    <div style={{ marginBottom: 'var(--space-6)' }}>
+      <div style={{ display:'flex', justifyContent:'space-between', marginBottom:'var(--space-3)' }}>
+        <span style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-sm)', color:'var(--muted)', textTransform:'uppercase', letterSpacing:'var(--tracking-label)' }}>{label}</span>
         <span style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-sm)', color:'var(--text2)' }}>{text ?? '—'}</span>
       </div>
       <div style={{ height:3, borderRadius:'var(--radius-xs)', background:'var(--track)', overflow:'hidden' }}>
@@ -1187,11 +1187,12 @@ function WakeSampleReview({ deviceId, isAdmin }) {
   return <div style={{ marginTop: 'var(--space-8)', borderTop: '1px solid var(--track)', paddingTop: 'var(--space-6)' }}>
     <div className="em-label" style={{ marginBottom: 'var(--space-4)' }}>Wake-word samples · newest 50</div>
     <div style={{ maxHeight: 220, overflowY: 'auto' }}>
-      {samples.map(sample => <div key={sample.id} style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-4)', padding: '5px 2px', borderBottom: '1px solid var(--hairline)', fontFamily: mono, fontSize: 'var(--fs-sm)' }}>
-        <span style={{ color: 'var(--muted)', width: 72, flexShrink: 0 }}>{new Date(sample.ts * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
+      {samples.map(sample => <div key={sample.id} style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-4)', padding: 'var(--space-2) var(--space-1)', borderBottom: '1px solid var(--hairline)', fontFamily: mono, fontSize: 'var(--fs-sm)' }}>
+        <span style={{ color: 'var(--muted)', minWidth: '16ch', flexShrink: 0, whiteSpace: 'nowrap' }}>{new Date(sample.ts * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
         <button onClick={() => play(sample)} title="Play wake sample" style={{ background: 'none', border: 0, color: 'var(--text2)', cursor: 'pointer' }}>{playing === sample.id ? '▮' : '▶'}</button>
         <span style={{ flex: 1, color: 'var(--text2)' }}>{sample.kind}{sample.score != null ? ` · controller ${sample.score.toFixed(3)}` : ''}{sample.threshold != null ? ` / ${sample.threshold.toFixed(2)}` : ''}{sample.device_score != null ? ` · Echo ${sample.device_score.toFixed(3)}` : ''}{sample.trigger_source ? ` · ${sample.trigger_source}` : ''}</span>
-        <select value={sample.label} onChange={e => label(sample, e.target.value)} aria-label="Wake sample label" style={{ fontSize: 'var(--fs-sm)', maxWidth: 105 }}>
+        <select value={sample.label} onChange={e => label(sample, e.target.value)} aria-label="Wake sample label" className="em-inset em-input"
+          style={{ '--em-inset-pad': 'var(--space-1) var(--space-3)', '--em-inset-radius': 'var(--radius-sm)', fontSize: 'var(--fs-sm)', maxWidth: 105 }}>
           <option value="unreviewed">Review…</option><option value="wake">Wake word</option><option value="not_wake">Not wake word</option><option value="uncertain">Unsure</option>
         </select>
         <button onClick={() => download(sample)} title="Download WAV" style={{ background: 'none', border: 0, color: 'var(--muted)', cursor: 'pointer' }}>⤓</button>
@@ -1306,13 +1307,13 @@ function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMis
           {/* Legend */}
           <div style={{ display: 'flex', gap: 'var(--space-7)', marginBottom: 'var(--space-5)' }}>
             {TURN_STAGES.map(s => (
-              <span key={s.key} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontFamily: mono, fontSize: 'var(--fs-xs)', color: 'var(--text2)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+              <span key={s.key} style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--space-2)', fontFamily: mono, fontSize: 'var(--fs-xs)', color: 'var(--text2)', textTransform: 'uppercase', letterSpacing: 'var(--tracking-label)' }}>
                 <span style={{ width: 8, height: 8, borderRadius: 'var(--radius-xs)', background: s.color, display: 'inline-block' }}/>
                 {s.label}
               </span>
             ))}
             {(recordingsOn || anyAudio) && (
-              <span style={{ fontFamily: mono, fontSize: 'var(--fs-xs)', color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginLeft: 'auto' }}>
+              <span style={{ fontFamily: mono, fontSize: 'var(--fs-xs)', color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: 'var(--tracking-label)', marginLeft: 'auto' }}>
                 ▶ hear the mic{anyAudio ? '' : ' — next turn'}
               </span>
             )}
@@ -1327,18 +1328,18 @@ function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMis
             return (
               <div key={i}
                 onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)}
-                style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-5)', padding: '3px 0', cursor: 'default', background: hover === i ? 'var(--hairline)' : 'transparent', borderRadius: 'var(--radius-sm)' }}>
-                <span style={{ fontFamily: mono, fontSize: 'var(--fs-xs)', color: 'var(--muted)', width: 38, flexShrink: 0, textAlign: 'right' }}>{time}</span>
+                style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-5)', padding: 'var(--space-2) 0', cursor: 'default', background: hover === i ? 'var(--hairline)' : 'transparent', borderRadius: 'var(--radius-sm)' }}>
+                <span style={{ fontFamily: mono, fontSize: 'var(--fs-xs)', color: 'var(--muted)', minWidth: '8ch', flexShrink: 0, textAlign: 'right', whiteSpace: 'nowrap' }}>{time}</span>
                 <div style={{ flex: 1, display: 'flex', height: 14, alignItems: 'stretch' }}>
                   {TURN_STAGES.map(s => seg[s.key] > 0 && (
                     <div key={s.key} style={{
                       width: `${seg[s.key] / scale * 100}%`, background: s.color,
-                      borderRadius: 3, marginRight: 'var(--space-1)', minWidth: 3,
+                      borderRadius: 'var(--radius-xs)', marginRight: 'var(--space-1)', minWidth: 3,
                     }}/>
                   ))}
                 </div>
                 <span style={{ fontFamily: mono, fontSize: 'var(--fs-xs)', color: 'var(--text2)', width: 34, flexShrink: 0 }}>{fmtS(seg.shown)}</span>
-                <span style={{ fontFamily: mono, fontSize: 'var(--fs-2xs)', textTransform: 'uppercase', letterSpacing: '0.08em', width: 62, flexShrink: 0, color: failed ? 'var(--warn)' : 'var(--ok)' }}>
+                <span style={{ fontFamily: mono, fontSize: 'var(--fs-2xs)', textTransform: 'uppercase', letterSpacing: 'var(--tracking-label)', width: '18ch', whiteSpace: 'nowrap', flexShrink: 0, color: failed ? 'var(--warn)' : 'var(--ok)' }}>
                   {t.outcome === 'ok' ? 'ok' : (t.outcome || '?').replace(/_/g, ' ')}
                 </span>
                 {/* Saved utterance: listen in place, or download the WAV.
@@ -1471,7 +1472,7 @@ function ConnectivityTab({ device, row }) {
           {row('Network', currentSsid || '—')}
           {row('IP', device.ip && device.ip !== '127.0.0.1' ? device.ip : '—')}
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
-            <span style={{ fontFamily:mono, fontSize:'var(--fs-sm)', color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.08em' }}>Signal</span>
+            <span style={{ fontFamily:mono, fontSize:'var(--fs-sm)', color:'var(--muted)', textTransform:'uppercase', letterSpacing:'var(--tracking-label)' }}>Signal</span>
             <div style={{ display:'flex', alignItems:'center', gap:'var(--space-4)' }}>
               <span style={{ fontFamily:mono, fontSize:'var(--fs-sm)', color:'var(--text2)' }}>{s?.wifiRssi != null ? `${s.wifiRssi} dBm` : '—'}</span>
               <SignalBars rssi={s?.wifiRssi ?? null}/>
@@ -1494,7 +1495,7 @@ function ConnectivityTab({ device, row }) {
             <div style={{ maxHeight:170, overflowY:'auto' }}>
               {networks.map(n => (
                 <div key={n.ssid} {...asButton(() => !busy && setSsid(n.ssid), { pressed: ssid === n.ssid, disabled: busy })}
-                  style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'5px 8px', borderRadius:'var(--radius-md)', cursor: busy ? 'default' : 'pointer', background: ssid === n.ssid ? 'rgba(64,88,120,0.12)' : 'transparent' }}>
+                  style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'var(--space-2) var(--space-4)', borderRadius:'var(--radius-md)', cursor: busy ? 'default' : 'pointer', background: ssid === n.ssid ? 'rgba(64,88,120,0.12)' : 'transparent' }}>
                   <span title={n.ssid} style={{ fontFamily:mono, fontSize:'var(--fs-md)', color: ssid === n.ssid ? 'var(--accent)' : 'var(--text)', ..._ROW_TEXT }}>
                     {n.ssid}{n.ssid === currentSsid ? '  ← current' : ''}
                   </span>
@@ -1514,12 +1515,12 @@ function ConnectivityTab({ device, row }) {
         </div>
         <div className="em-grid2" style={{ display:'grid', gridTemplateColumns:'1fr 1fr auto', gap:'var(--space-6)', alignItems:'end' }}>
           <div>
-            <div style={{ fontFamily:mono, fontSize:'var(--fs-xs)', color:'var(--text2)', letterSpacing:'0.08em', marginBottom:'var(--space-2)' }}>SSID</div>
+            <div style={{ fontFamily:mono, fontSize:'var(--fs-xs)', color:'var(--text2)', letterSpacing:'var(--tracking-label)', marginBottom:'var(--space-2)' }}>SSID</div>
             <input type="text" value={ssid} disabled={busy} onChange={e => setSsid(e.target.value)}
               aria-label="SSID" placeholder="Network name" className="em-inset em-input" style={{ width:'100%' }}/>
           </div>
           <div>
-            <div style={{ fontFamily:mono, fontSize:'var(--fs-xs)', color:'var(--text2)', letterSpacing:'0.08em', marginBottom:'var(--space-2)' }}>Passphrase</div>
+            <div style={{ fontFamily:mono, fontSize:'var(--fs-xs)', color:'var(--text2)', letterSpacing:'var(--tracking-label)', marginBottom:'var(--space-2)' }}>Passphrase</div>
             <div style={{ display:'flex', gap:'var(--space-3)', alignItems:'center' }}>
               <input type={showPsk ? 'text' : 'password'} value={psk} disabled={busy} onChange={e => setPsk(e.target.value)}
                 aria-label="Passphrase" placeholder="WPA passphrase (blank = open)" className="em-inset em-input" style={{ flex:1 }}/>
@@ -2025,7 +2026,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
       {/* Fixed height (not maxHeight): every tab renders in an identical
           frame — content scrolls inside, the window never resizes as you
           move between tabs. */}
-      <div className="em-modal" style={{ width: 'min(900px,95vw)', height: 'min(700px,90vh)', background: 'linear-gradient(170deg,var(--raised),var(--surface))', border: '1px solid var(--border)', borderRadius: 16, boxShadow: '0 24px 80px rgba(0,0,0,0.3),0 2px 0 var(--sheen) inset', display: 'flex', flexDirection: 'column', overflow: 'hidden', animation: 'fadeIn 0.15s ease' }}>
+      <div className="em-modal" style={{ width: 'min(900px,95vw)', height: 'min(700px,90vh)', background: 'linear-gradient(170deg,var(--raised),var(--surface))', border: '1px solid var(--border)', borderRadius: 'var(--radius-dialog)', boxShadow: '0 24px 80px rgba(0,0,0,0.3),0 2px 0 var(--sheen) inset', display: 'flex', flexDirection: 'column', overflow: 'hidden', animation: 'fadeIn 0.15s ease' }}>
         {/* Header */}
         <div className="em-modal-head" style={{ background: 'linear-gradient(180deg,var(--card),var(--bg))', borderBottom: '1px solid var(--border-hard)', padding: 'var(--space-10) var(--space-12) 0', boxShadow: '0 1px 0 var(--sheen) inset' }}>
           <div className="em-modal-headrow" style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-10)', marginBottom: 'var(--space-8)' }}>
@@ -2040,7 +2041,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                       if (e.key === 'Enter') doRename();
                       if (e.key === 'Escape') { setRenaming(false); setRenameValue(device.label || ''); }
                     }}
-                    style={{ fontFamily: "var(--font-sans)", fontSize: 20, fontWeight: 600, padding: 'var(--space-2) var(--space-4)', maxWidth: 280 }}
+                    style={{ fontFamily: "var(--font-sans)", fontSize: 'var(--fs-2xl)', fontWeight: 600, padding: 'var(--space-2) var(--space-4)', maxWidth: 280 }}
                   />
                   <Pill small onClick={doRename} disabled={renameSaving}>{renameSaving ? 'Saving…' : 'Save'}</Pill>
                   <Pill small onClick={() => { setRenaming(false); setRenameValue(device.label || ''); }}>Cancel</Pill>
@@ -2050,14 +2051,14 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                   {...(isAdmin ? asButton(() => setRenaming(true)) : {})}
                   title={isAdmin ? `${device.label || device.device_id} — click to rename` : (device.label || device.device_id)}
                   style={{
-                    fontFamily: "var(--font-sans)", fontSize: 26, color: 'var(--text)', fontWeight: 600,
-                    letterSpacing: '-0.02em', lineHeight: 1, cursor: isAdmin ? 'pointer' : 'default',
+                    fontFamily: "var(--font-sans)", fontSize: 'var(--fs-2xl)', color: 'var(--text)', fontWeight: 600,
+                    letterSpacing: 'var(--tracking-tight)', lineHeight: 1, cursor: isAdmin ? 'pointer' : 'default',
                     display: 'inline-block',
                   }}>
-                  {device.label ? _middleEllipsis(device.label, 32) : <span style={{ color: 'var(--muted)', fontSize: 20 }}>{device.device_id.slice(0,8)}…</span>}
+                  {device.label ? _middleEllipsis(device.label, 32) : <span style={{ color: 'var(--muted)' }}>{device.device_id.slice(0,8)}…</span>}
                 </div>
               )}
-              <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-sm)', color: 'var(--muted)', marginTop: 'var(--space-2)', letterSpacing: '0.05em',
+              <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-sm)', color: 'var(--muted)', marginTop: 'var(--space-2)', letterSpacing: 'var(--tracking-text)',
                             whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
                    title={[device.firmware_ver, _kernelTitle(device)].filter(Boolean).join(' · ') || undefined}>
                 {(() => {
@@ -2071,7 +2072,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-5)' }}>
               <div className="em-on-dark" style={{ background: 'linear-gradient(160deg,var(--lcd-face),var(--lcd-deep))', border: '1px solid var(--lcd-line)', borderRadius: 'var(--radius-md)', padding: '5px 12px', boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.5)' }}>
-                <span style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-md)', color: state.lcd, textShadow: `0 0 8px ${state.dot}88`, letterSpacing: '0.05em' }}>{state.label.toUpperCase()}</span>
+                <span style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-md)', color: state.lcd, textShadow: `0 0 8px ${state.dot}88`, letterSpacing: 'var(--tracking-text)' }}>{state.label.toUpperCase()}</span>
               </div>
               {isAdmin && !confirmDelete && (
                 <CircleButton onClick={() => setConfirmDelete(true)} title="Delete device" color="var(--error)">🗑</CircleButton>
@@ -2094,7 +2095,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
               implies, `--notice-bg` for the panel. */}
           {isAdmin && confirmDelete && (
             <div className="em-on-dark" style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--space-5)', marginBottom: 'var(--space-6)', padding: 'var(--space-5) var(--space-7)', background: 'var(--notice-bg)', border: '1px solid var(--notice-line)', borderRadius: 'var(--radius-lg)', fontFamily: "var(--font-sans)", fontSize: 'var(--fs-base)', color: 'var(--text)', lineHeight: 1.5 }}>
-              <span style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xs)', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--warn)', fontWeight: 600, flexShrink: 0 }}>Home Assistant</span>
+              <span style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xs)', textTransform: 'uppercase', letterSpacing: 'var(--tracking-label)', color: 'var(--warn)', fontWeight: 600, flexShrink: 0 }}>Home Assistant</span>
               <span>{_deleteHaWarning(device)}</span>
             </div>
           )}
@@ -2104,7 +2105,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
             // One tab is not a tab bar — it reads as a label and the approval
             // form sat behind a click. Pending devices get a banner instead.
             <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-4)', marginBottom: -1, padding: '9px 14px', background: 'linear-gradient(180deg,var(--accent-tint),var(--surface))', border: '1px solid var(--accent-line)', borderBottom: '1px solid var(--surface)', borderRadius: 'var(--radius-md) var(--radius-md) 0 0', fontFamily: "var(--font-sans)", fontSize: 'var(--fs-base)', color: 'var(--accent-deep)', lineHeight: 1.4 }}>
-              <span style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xs)', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--warn)', fontWeight: 600, flexShrink: 0 }}>Action required</span>
+              <span style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xs)', textTransform: 'uppercase', letterSpacing: 'var(--tracking-label)', color: 'var(--warn)', fontWeight: 600, flexShrink: 0 }}>Action required</span>
               <span>Name this device below, then approve it to add it to your fleet.</span>
             </div>
           )}
@@ -2121,7 +2122,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
           {/* APPROVE */}
           {!device.approved && (
             <div style={{ maxWidth: 400 }}>
-              <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xs)', color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 'var(--space-8)' }}>New Device — Pending Approval</div>
+              <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xs)', color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: 'var(--tracking-heading)', marginBottom: 'var(--space-8)' }}>New Device — Pending Approval</div>
               {row('Serial', device.device_id)}
               {row('IP', device.ip && device.ip !== '127.0.0.1' ? device.ip : '—')}
               {row('First seen', relTime(device.first_seen))}
@@ -2430,7 +2431,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                         ? `Local override (${sections.length} of ${Object.keys(CONFIG_SECTIONS).length})`
                         : 'Following fleet config'}
                     </div>
-                    <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-sm)', color: 'var(--muted)', marginTop: 3 }}>
+                    <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-sm)', color: 'var(--muted)', marginTop: 'var(--space-2)' }}>
                       {sections.length
                         ? `Overriding: ${sections.map(s => SECTION_LABELS[s] || s).join(', ')} — everything else tracks the fleet`
                         : 'Switch any section below to Device to customise just that part'}
@@ -2578,7 +2579,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                   <div style={{ marginTop:'var(--space-7)', borderTop:'1px solid var(--hairline)', paddingTop:'var(--space-5)' }}>
                     <div {...asButton(() => setNotesOpen(o => !o), { expanded: notesOpen })} style={{
                       fontFamily:"var(--font-mono)", fontSize:'var(--fs-xs)', color:'var(--muted)',
-                      textTransform:'uppercase', letterSpacing:'0.15em', cursor:'pointer',
+                      textTransform:'uppercase', letterSpacing:'var(--tracking-heading)', cursor:'pointer',
                       userSelect:'none', display:'flex', alignItems:'center', gap:'var(--space-3)',
                     }}>
                       <span>{notesOpen ? '▾' : '▸'}</span>
@@ -2883,7 +2884,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
           {/* LOGS */}
           {tab === 'logs' && (
             <div>
-              <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xs)', color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 'var(--space-8)' }}>Device logs</div>
+              <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xs)', color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: 'var(--tracking-heading)', marginBottom: 'var(--space-8)' }}>Device logs</div>
               {logsLoading ? (
                 <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-base)', color: 'var(--muted)' }}>Loading…</div>
               ) : logs.length === 0 ? (
@@ -2894,8 +2895,8 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                       "9:05:01 am" is a character shorter than "11:37:57 am", which
                       misaligned every row before ten o'clock. */}
                   <span style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-sm)', color: 'var(--faint)', minWidth: '11ch', whiteSpace: 'nowrap', flexShrink: 0 }}>{new Date(entry.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
-                  <span style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xs)', color: eventAccent(entry.level), textTransform: 'uppercase', letterSpacing: '0.1em', minWidth: 48, flexShrink: 0 }}>{entry.level}</span>
-                  <span style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xs)', color: entry.source === 'device' ? 'var(--lcd-dim)' : 'var(--accent-deep)', textTransform: 'uppercase', letterSpacing: '0.08em', minWidth: 64, flexShrink: 0 }}>{entry.source}</span>
+                  <span style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xs)', color: eventAccent(entry.level), textTransform: 'uppercase', letterSpacing: 'var(--tracking-label)', minWidth: 48, flexShrink: 0 }}>{entry.level}</span>
+                  <span style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xs)', color: entry.source === 'device' ? 'var(--lcd-dim)' : 'var(--accent-deep)', textTransform: 'uppercase', letterSpacing: 'var(--tracking-label)', minWidth: 64, flexShrink: 0 }}>{entry.source}</span>
                   <span style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-md)', color: 'var(--text2)' }}>{entry.message}</span>
                 </div>
               ))}
@@ -2914,21 +2915,21 @@ function Card({ device, onClick }) {
   const isPending = !device.approved;
 
   return (
-    <div {...asButton(onClick)} style={{ background: 'linear-gradient(160deg,var(--card),var(--bg))', border: '1px solid var(--border)', borderRadius: 14, cursor: 'pointer', boxShadow: '0 4px 16px var(--track),0 1px 0 var(--sheen) inset', transition: 'box-shadow 0.15s,transform 0.1s', userSelect: 'none' }}
+    <div {...asButton(onClick)} style={{ background: 'linear-gradient(160deg,var(--card),var(--bg))', border: '1px solid var(--border)', borderRadius: 'var(--radius-card)', cursor: 'pointer', boxShadow: '0 4px 16px var(--track),0 1px 0 var(--sheen) inset', transition: 'box-shadow 0.15s,transform 0.1s', userSelect: 'none' }}
       onMouseEnter={e => { e.currentTarget.style.boxShadow = '0 8px 28px rgba(0,0,0,0.18),0 1px 0 var(--sheen) inset'; e.currentTarget.style.transform = 'translateY(-1px)'; }}
       onMouseLeave={e => { e.currentTarget.style.boxShadow = '0 4px 16px var(--track),0 1px 0 var(--sheen) inset'; e.currentTarget.style.transform = 'translateY(0)'; }}>
-      <div style={{ background: 'linear-gradient(180deg,var(--sunken),var(--sunken))', borderBottom: '1px solid var(--border-hard)', borderRadius: '13px 13px 0 0', padding: 'var(--space-5) var(--space-8)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', boxShadow: '0 1px 0 var(--sheen) inset' }}>
+      <div style={{ background: 'linear-gradient(180deg,var(--sunken),var(--sunken))', borderBottom: '1px solid var(--border-hard)', borderRadius: 'calc(var(--radius-card) - 1px) calc(var(--radius-card) - 1px) 0 0', padding: 'var(--space-5) var(--space-8)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', boxShadow: '0 1px 0 var(--sheen) inset' }}>
         {/* The NAME owns the header row; firmware · OS sits beneath it. Side by
             side, a long version squeezed the name down to two letters — and
             the name is what someone scans the grid for. */}
         <div style={{ minWidth: 0, flex: '1 1 auto' }}>
           <div title={device.label || device.device_id}
-            style={{ fontFamily: "var(--font-sans)", fontSize: 'var(--fs-lg)', color: 'var(--text)', fontWeight: 600, letterSpacing: '-0.01em', ..._ROW_TEXT, display: 'block' }}>
+            style={{ fontFamily: "var(--font-sans)", fontSize: 'var(--fs-lg)', color: 'var(--text)', fontWeight: 600, letterSpacing: 'var(--tracking-tight)', ..._ROW_TEXT, display: 'block' }}>
             {device.label ? _middleEllipsis(device.label, 30) : <span style={{ color: 'var(--muted)', fontSize: 'var(--fs-base)' }}>{device.device_id.slice(0, 8)}…</span>}
           </div>
           {(device.firmware_ver || device.baseOs) && (
             <div title={[device.firmware_ver, _baseOsLabel(device.baseOs), _kernelTitle(device)].filter(Boolean).join(' · ')}
-              style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xs)', color: 'var(--muted)', marginTop: 3, display: 'flex', minWidth: 0 }}>
+              style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xs)', color: 'var(--muted)', marginTop: 'var(--space-2)', display: 'flex', minWidth: 0 }}>
               {/* The tile is narrow: "emOS (64-bit)", and nothing extra for
                   FireOS. The OS never shrinks; the firmware version gives way
                   to it, since the tooltip and the header both carry it whole. */}
@@ -2944,7 +2945,7 @@ function Card({ device, onClick }) {
           // height the text's own; the trimmed paddingRight cancels the
           // trailing letter-space Chrome leaves after the final N, which is
           // what made the word look shunted left inside its own badge.
-          <div className="em-on-dark" style={{ display: 'inline-flex', alignItems: 'center', flexShrink: 0, marginLeft: 'var(--space-4)', background: 'linear-gradient(160deg,var(--lcd-face),var(--lcd-deep))', border: '1px solid var(--lcd-line)', borderRadius: 3, padding: '3px 6px', paddingRight: 'calc(6px - 0.1em)', fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xs)', lineHeight: 1, color: 'var(--accent-lit)', letterSpacing: '0.1em' }}>{isPending ? 'PENDING' : 'PAIRING'}</div>
+          <div className="em-on-dark" style={{ display: 'inline-flex', alignItems: 'center', flexShrink: 0, marginLeft: 'var(--space-4)', background: 'linear-gradient(160deg,var(--lcd-face),var(--lcd-deep))', border: '1px solid var(--lcd-line)', borderRadius: 'var(--radius-sm)', padding: 'var(--space-2) var(--space-3)', paddingRight: 'calc(var(--space-3) - 0.1em)', fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xs)', lineHeight: 1, color: 'var(--accent-lit)', letterSpacing: 'var(--tracking-label)' }}>{isPending ? 'PENDING' : 'PAIRING'}</div>
         )}
       </div>
       <div style={{ display: 'flex', justifyContent: 'center', padding: 'var(--space-10) 0 var(--space-6)' }}>
@@ -2955,13 +2956,13 @@ function Card({ device, onClick }) {
             and a full IP do not fit on one line, and wrapping only when they
             collide left cards in one row with footers of different heights.
             So the IP always has its own line. */}
-        <div className="em-inset" style={{ '--em-inset-radius':'6px', '--em-inset-pad':'7px 12px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3 }}>
-          <span style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-md)', color: state.lcd, letterSpacing: '0.12em', textShadow: `0 0 8px ${state.dot}88`, whiteSpace: 'nowrap' }}>{state.label.toUpperCase()}</span>
+        <div className="em-inset" style={{ '--em-inset-radius':'var(--radius-md)', '--em-inset-pad':'var(--space-4) var(--space-6)', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 'var(--space-2)' }}>
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-md)', color: state.lcd, letterSpacing: 'var(--tracking-label)', textShadow: `0 0 8px ${state.dot}88`, whiteSpace: 'nowrap' }}>{state.label.toUpperCase()}</span>
           {(() => {
             const ip = device.ip && device.ip !== '127.0.0.1' ? device.ip : null;
             return (
               <span title={!device.connected && ip ? 'Last known address' : undefined}
-                    style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xs)', color: 'var(--lcd-dim)', letterSpacing: '0.08em', whiteSpace: 'nowrap' }}>{ip || '—'}</span>
+                    style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xs)', color: 'var(--lcd-dim)', letterSpacing: 'var(--tracking-label)', whiteSpace: 'nowrap' }}>{ip || '—'}</span>
             );
           })()}
         </div>
@@ -3174,14 +3175,14 @@ function AddDeviceTile({ onClick }) {
         border: `2px dashed ${hover ? 'var(--text2)' : 'var(--field-line)'}`,
         // 12 -> 14 to match Card's corner. minHeight is only the floor for an
         // empty fleet; with any device present the grid row sets the height.
-        borderRadius: 14, minHeight: 244, display: 'flex', flexDirection: 'column',
+        borderRadius: 'var(--radius-card)', minHeight: 244, display: 'flex', flexDirection: 'column',
         alignItems: 'center', justifyContent: 'center', gap: 'var(--space-4)', cursor: 'pointer',
         transition: 'border-color 0.15s',
         userSelect: 'none',
       }}
     >
-      <div style={{ fontSize: 28, color: hover ? 'var(--text2)' : 'var(--muted)', lineHeight: 1 }}>+</div>
-      <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xs)', color: hover ? 'var(--text2)' : 'var(--muted)', letterSpacing: '0.12em', textTransform: 'uppercase' }}>Provision Device</div>
+      <div style={{ fontSize: 'var(--fs-3xl)', color: hover ? 'var(--text2)' : 'var(--muted)', lineHeight: 1 }}>+</div>
+      <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xs)', color: hover ? 'var(--text2)' : 'var(--muted)', letterSpacing: 'var(--tracking-label)', textTransform: 'uppercase' }}>Provision Device</div>
     </div>
   );
 }
@@ -3966,7 +3967,7 @@ function WifiPanel({ ready, wifiSsid, setWifiSsid, wifiPsk, setWifiPsk, onScan, 
 
       {/* Manual SSID entry */}
       <div>
-        <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xs)', color: 'var(--text2)', letterSpacing: '0.08em', marginBottom: 'var(--space-2)' }}>SSID</div>
+        <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xs)', color: 'var(--text2)', letterSpacing: 'var(--tracking-label)', marginBottom: 'var(--space-2)' }}>SSID</div>
         <input
           type="text" value={wifiSsid} onChange={e => setWifiSsid(e.target.value)}
           aria-label="SSID" placeholder="Select above or type network name"
@@ -3976,7 +3977,7 @@ function WifiPanel({ ready, wifiSsid, setWifiSsid, wifiPsk, setWifiPsk, onScan, 
 
       {/* Password */}
       <div>
-        <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xs)', color: 'var(--text2)', letterSpacing: '0.08em', marginBottom: 'var(--space-2)' }}>PASSWORD</div>
+        <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xs)', color: 'var(--text2)', letterSpacing: 'var(--tracking-label)', marginBottom: 'var(--space-2)' }}>PASSWORD</div>
         <div style={{ display: 'flex', gap: 'var(--space-3)', alignItems: 'center' }}>
           <input
             type={showPsk ? 'text' : 'password'} value={wifiPsk} onChange={e => setWifiPsk(e.target.value)}
@@ -9433,7 +9434,7 @@ function ScopeChip({ children, tone }) {
   return (
     <span style={{
       fontFamily: "var(--font-mono)", fontSize: 'var(--fs-2xs)', textTransform: 'uppercase',
-      letterSpacing: '0.1em', padding: '3px 8px', borderRadius: 'var(--radius-sm)',
+      letterSpacing: 'var(--tracking-label)', padding: 'var(--space-2) var(--space-4)', borderRadius: 'var(--radius-sm)',
       background: colors.bg, border: `1px solid ${colors.border}`, color: colors.text,
       whiteSpace: 'nowrap',
     }}>{children}</span>
@@ -9538,7 +9539,7 @@ function ScopeToggle({ local, onChange, disabled }) {
       disabled={disabled}
       onClick={() => !disabled && onChange(next)}
       style={{
-        fontFamily: STAGE_MONO, fontSize: 'var(--fs-xs)', letterSpacing: '0.1em',
+        fontFamily: STAGE_MONO, fontSize: 'var(--fs-xs)', letterSpacing: 'var(--tracking-label)',
         textTransform: 'uppercase', padding: 'var(--space-2) var(--space-5)', border: 'none',
         cursor: disabled ? 'default' : 'pointer',
         background: active ? (next ? SCOPE_DEVICE : SCOPE_FLEET) : 'transparent',
@@ -9548,9 +9549,9 @@ function ScopeToggle({ local, onChange, disabled }) {
       }}>{label}</button>
   );
   return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7, opacity: disabled ? 0.5 : 1 }}>
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--space-4)', opacity: disabled ? 0.5 : 1 }}>
       <span style={{
-        fontFamily: STAGE_MONO, fontSize: 'var(--fs-2xs)', letterSpacing: '0.12em',
+        fontFamily: STAGE_MONO, fontSize: 'var(--fs-2xs)', letterSpacing: 'var(--tracking-label)',
         textTransform: 'uppercase', color: 'var(--muted)',
       }}>Scope</span>
       <span style={{
@@ -9592,7 +9593,7 @@ function StageAdvanced({ open, onToggle, disabledStyle, children }) {
       {/* A button, so the keyboard and assistive tech can open it too. */}
       <button type="button" onClick={onToggle} aria-expanded={!!open} style={{
         fontFamily: STAGE_MONO, fontSize: 'var(--fs-xs)', color: 'var(--muted)', textTransform: 'uppercase',
-        letterSpacing: '0.15em', cursor: 'pointer', userSelect: 'none',
+        letterSpacing: 'var(--tracking-heading)', cursor: 'pointer', userSelect: 'none',
         display: 'flex', alignItems: 'center', gap: 'var(--space-3)',
         background: 'none', border: 'none', padding: 0,
       }}>
@@ -9840,7 +9841,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
   // Small header for subsections inside the combined Advanced stage.
   const subHeader = (text, first) => (
     <div style={{ fontFamily: mono, fontSize: 'var(--fs-xs)', color: 'var(--muted)', textTransform: 'uppercase',
-      letterSpacing: '0.15em', marginTop: first ? 0 : 18, marginBottom: 'var(--space-5)' }}>{text}</div>
+      letterSpacing: 'var(--tracking-heading)', marginTop: first ? 0 : 18, marginBottom: 'var(--space-5)' }}>{text}</div>
   );
 
   // Ordered by how often each section gets touched: playback and wake word
@@ -9865,7 +9866,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                 <Pill key={label} small accent={activeEqPreset === label} onClick={() => set('eqBands', vals)}>{label}</Pill>
               ))}
               {!activeEqPreset && (
-                <span style={{ fontFamily: mono, fontSize: 'var(--fs-xs)', color: 'var(--accent)', textTransform: 'uppercase', letterSpacing: '0.1em' }}>· Custom</span>
+                <span style={{ fontFamily: mono, fontSize: 'var(--fs-xs)', color: 'var(--accent)', textTransform: 'uppercase', letterSpacing: 'var(--tracking-label)' }}>· Custom</span>
               )}
             </div>
           </div>
@@ -9984,7 +9985,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                   ? 'linear-gradient(160deg,var(--accent-tint),var(--accent-line))'
                   : 'linear-gradient(160deg,var(--raised),var(--surface))',
                 border: `1px solid ${config.owwModel === m.path ? 'var(--accent)' : 'var(--border-soft)'}`,
-                borderRadius: 'var(--radius-lg)', padding: '8px 22px 8px 10px', position: 'relative', minWidth: 0,
+                borderRadius: 'var(--radius-lg)', padding: 'var(--space-4) 22px var(--space-4) var(--space-5)', position: 'relative', minWidth: 0,
                 cursor: disabled ? 'default' : 'pointer',
                 transition: 'border-color 0.15s, background 0.15s',
               }}>
@@ -10122,7 +10123,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                   ? 'linear-gradient(160deg,var(--accent-tint),var(--accent-line))'
                   : 'linear-gradient(160deg,var(--raised),var(--surface))',
                 border: `1px solid ${currentPreset === key ? 'var(--accent)' : 'var(--border-soft)'}`,
-                borderRadius: 'var(--radius-xl)', padding: '9px 6px 8px',
+                borderRadius: 'var(--radius-xl)', padding: 'var(--space-4) var(--space-3)',
                 cursor: disabled ? 'default' : 'pointer',
                 display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 'var(--space-3)',
                 transition: 'border-color 0.15s, background 0.15s',
@@ -10216,7 +10217,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                 transition: 'border-color 0.15s, background 0.15s',
               }}>
                 <div style={{ fontFamily: "var(--font-sans)", fontSize: 'var(--fs-base)', fontWeight: 600, color: 'var(--text)' }}>{sc.label}</div>
-                <div style={{ display: 'flex', gap: 3, marginTop: 'var(--space-2)' }}>
+                <div style={{ display: 'flex', gap: 'var(--space-2)', marginTop: 'var(--space-2)' }}>
                   {(sc.value === 'custom'
                     ? [config.ledListenColor ?? '#00b400', config.ledThinkColor ?? '#00c800']
                     : sc.swatches
@@ -10576,8 +10577,8 @@ function DeployAllModal({ release, devices, deployState, onStarted, onDismiss, o
 
   return (
     <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(30,28,24,0.45)', zIndex: 60, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-      <div onClick={e => e.stopPropagation()} style={{ background: 'linear-gradient(170deg,var(--raised),var(--surface))', border: '1px solid var(--border)', borderRadius: 14, padding: 'var(--space-14) var(--space-16)', width: 440, maxWidth: '92vw', boxShadow: '0 24px 80px rgba(0,0,0,0.3)' }}>
-        <div style={{ fontFamily: "var(--font-sans)", fontSize: 16, fontWeight: 600, color: 'var(--text)', marginBottom: 'var(--space-2)' }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: 'linear-gradient(170deg,var(--raised),var(--surface))', border: '1px solid var(--border)', borderRadius: 'var(--radius-card)', padding: 'var(--space-14) var(--space-16)', width: 440, maxWidth: '92vw', boxShadow: '0 24px 80px rgba(0,0,0,0.3)' }}>
+        <div style={{ fontFamily: "var(--font-sans)", fontSize: 'var(--fs-xl)', fontWeight: 600, color: 'var(--text)', marginBottom: 'var(--space-2)' }}>
           Deploy to fleet
         </div>
         <div style={{ fontFamily: mono, fontSize: 'var(--fs-sm)', color: 'var(--muted)', marginBottom: 'var(--space-9)' }}>
@@ -10605,14 +10606,14 @@ function DeployAllModal({ release, devices, deployState, onStarted, onDismiss, o
             {(view.started || []).map(id => {
               const s = statusFor(id);
               return (
-                <div key={id} style={{ display: 'flex', justifyContent: 'space-between', fontFamily: mono, fontSize: 'var(--fs-md)', padding: '5px 0', borderBottom: '1px solid var(--hairline)' }}>
+                <div key={id} style={{ display: 'flex', justifyContent: 'space-between', fontFamily: mono, fontSize: 'var(--fs-md)', padding: 'var(--space-2) 0', borderBottom: '1px solid var(--hairline)' }}>
                   <span title={label(byId[id])} style={{ color: 'var(--text2)', ..._ROW_TEXT }}>{_middleEllipsis(label(byId[id]), 28)}</span>
                   <span title={byId[id]?.firmware_ver || undefined} style={{ color: s.color, ..._ROW_SIDE }}>{s.text} {byId[id]?.firmware_ver ? `· ${_middleEllipsis(byId[id].firmware_ver, 16, 7)}` : ''}</span>
                 </div>
               );
             })}
             {(view.skipped || []).map(s => (
-              <div key={s.device_id} style={{ display: 'flex', justifyContent: 'space-between', fontFamily: mono, fontSize: 'var(--fs-md)', padding: '5px 0', borderBottom: '1px solid var(--hairline)' }}>
+              <div key={s.device_id} style={{ display: 'flex', justifyContent: 'space-between', fontFamily: mono, fontSize: 'var(--fs-md)', padding: 'var(--space-2) 0', borderBottom: '1px solid var(--hairline)' }}>
                 <span title={label(byId[s.device_id])} style={{ color: 'var(--muted)', ..._ROW_TEXT }}>{_middleEllipsis(label(byId[s.device_id]), 28)}</span>
                 <span style={{ color: 'var(--muted)', ..._ROW_SIDE }}>skipped — {SKIP_REASONS[s.reason] || s.reason}</span>
               </div>
@@ -10812,12 +10813,12 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
       onClick={e => e.target === e.currentTarget && onClose()}>
       {/* Same fixed frame as the device Detail modal — consistent window
           size across the whole dashboard. */}
-      <div className="em-modal" style={{ width:'min(900px,95vw)', height:'min(700px,90vh)', background:'linear-gradient(170deg,var(--raised),var(--surface))', border:'1px solid var(--border)', borderRadius:16, boxShadow:'0 24px 80px rgba(0,0,0,0.3),0 2px 0 var(--sheen) inset', display:'flex', flexDirection:'column', overflow:'hidden', animation:'fadeIn 0.15s ease' }}>
+      <div className="em-modal" style={{ width:'min(900px,95vw)', height:'min(700px,90vh)', background:'linear-gradient(170deg,var(--raised),var(--surface))', border:'1px solid var(--border)', borderRadius:'var(--radius-dialog)', boxShadow:'0 24px 80px rgba(0,0,0,0.3),0 2px 0 var(--sheen) inset', display:'flex', flexDirection:'column', overflow:'hidden', animation:'fadeIn 0.15s ease' }}>
 
         {/* Header */}
         <div className="em-modal-head" style={{ background:'linear-gradient(180deg,var(--card),var(--bg))', borderBottom:'1px solid var(--border-hard)', padding:'var(--space-10) var(--space-12) 0', boxShadow:'0 1px 0 var(--sheen) inset' }}>
           <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:'var(--space-8)' }}>
-            <div style={{ fontFamily:"var(--font-sans)", fontSize:22, color:'var(--text)', fontWeight:600, letterSpacing:'-0.02em' }}>Settings</div>
+            <div style={{ fontFamily:"var(--font-sans)", fontSize:'var(--fs-2xl)', color:'var(--text)', fontWeight:600, letterSpacing:'var(--tracking-tight)' }}>Settings</div>
             <CircleButton onClick={onClose} title="Close">×</CircleButton>
           </div>
           <TabBar tabs={TABS} current={tab} onSelect={setTab} label={t => TAB_LABELS[t]} />
@@ -10980,7 +10981,7 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
 
           {tab === 'account' && (
             <div style={{ maxWidth: 360 }}>
-              <div style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-xs)', color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.15em', marginBottom:'var(--space-10)' }}>Change Password · {username}</div>
+              <div style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-xs)', color:'var(--muted)', textTransform:'uppercase', letterSpacing:'var(--tracking-heading)', marginBottom:'var(--space-10)' }}>Change Password · {username}</div>
               {[
                 ['Current password', curPw, setCurPw, 'current-password'],
                 ['New password',     newPw, setNewPw, 'new-password'],
@@ -11272,13 +11273,13 @@ function App() {
   const selectedDevice = selected ? devices.find(d => d.device_id === selected) : null;
 
   return (
-    <main className="em-page" style={{ minHeight: '100vh', padding: '32px 36px 60px' }}>
+    <main className="em-page" style={{ minHeight: '100vh', padding: 'var(--space-16) var(--space-18) var(--space-30)' }}>
 
       {/* Header */}
-      <div className="em-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: 36 }}>
+      <div className="em-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: 'var(--space-18)' }}>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--space-7)' }}>
-          <h1 style={{ fontFamily: "var(--font-sans)", fontSize: 28, color: 'var(--text)', fontWeight: 600, letterSpacing: '-0.02em' }}>EchoMuse</h1>
-          <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-sm)', color: 'var(--muted)', letterSpacing: '0.12em', textTransform: 'uppercase' }}>Device Management</div>
+          <h1 style={{ fontFamily: "var(--font-sans)", fontSize: 'var(--fs-3xl)', color: 'var(--text)', fontWeight: 600, letterSpacing: 'var(--tracking-tight)' }}>EchoMuse</h1>
+          <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-sm)', color: 'var(--muted)', letterSpacing: 'var(--tracking-label)', textTransform: 'uppercase' }}>Device Management</div>
           {status?.controller_version && (
             /* Deliberately IN PLACE of the version rather than a banner beside
                it: this is the element that was lying, so it is the element
@@ -11288,7 +11289,7 @@ function App() {
                 title={`This page is running an older build than the controller (${status.controller_version}). Reload to update.`}
                 style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-sm)', color: 'var(--warn)',
                          background: 'none', border: '1px solid var(--warn)', borderRadius: 'var(--radius-sm)',
-                         padding: '1px 6px', cursor: 'pointer' }}>
+                         padding: 'var(--space-1) var(--space-3)', cursor: 'pointer' }}>
                 {status.controller_version} · reload
               </button>
             ) : (
@@ -11332,7 +11333,7 @@ function App() {
         }}>
           <div style={{ display:'flex', alignItems:'center', gap:'var(--space-6)', flexWrap:'wrap' }}>
             <span style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-2xs)', color:'var(--warn)',
-                           textTransform:'uppercase', letterSpacing:'0.15em' }}>
+                           textTransform:'uppercase', letterSpacing:'var(--tracking-heading)' }}>
               Controller update
             </span>
             <span style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-lg)', color:'var(--warn)' }}>
@@ -11345,7 +11346,7 @@ function App() {
               <span {...asButton(() => setCtrlNotesOpen(o => !o), { expanded: ctrlNotesOpen })} style={{
                 fontFamily:"var(--font-mono)", fontSize:'var(--fs-xs)', color:'var(--muted)',
                 cursor:'pointer', userSelect:'none', marginLeft:'auto',
-                textTransform:'uppercase', letterSpacing:'0.15em',
+                textTransform:'uppercase', letterSpacing:'var(--tracking-heading)',
               }}>
                 {ctrlNotesOpen ? '▾' : '▸'} What&apos;s in it
               </span>
@@ -11388,7 +11389,7 @@ function App() {
       )}
 
       {/* Summary */}
-      <div className="em-summary" style={{ display: 'flex', gap: 'var(--space-5)', marginBottom: 36 }}>
+      <div className="em-summary" style={{ display: 'flex', gap: 'var(--space-5)', marginBottom: 'var(--space-18)' }}>
         {[
           ['Online', `${online}/${approved.length}`, online === approved.length ? 'var(--ok)' : 'var(--warn)'],
           ['Active', active, active > 0 ? 'var(--accent)' : 'var(--muted)'],
@@ -11396,15 +11397,15 @@ function App() {
           ['Pending', pending.length, pending.length > 0 ? 'var(--accent-hi)' : 'var(--muted)'],
         ].map(([label, val, c]) => (
           <div key={label} className="em-inset" style={{ flex: 1 }}>
-            <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-2xs)', color: 'var(--lcd-dim)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 'var(--space-3)' }}>{label}</div>
-            <div style={{ fontFamily: "var(--font-mono)", fontSize: 24, color: c, lineHeight: 1, textShadow: `0 0 12px ${c}66` }}>{val}</div>
+            <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-2xs)', color: 'var(--lcd-dim)', textTransform: 'uppercase', letterSpacing: 'var(--tracking-heading)', marginBottom: 'var(--space-3)' }}>{label}</div>
+            <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-2xl)', color: c, lineHeight: 1, textShadow: `0 0 12px ${c}66` }}>{val}</div>
           </div>
         ))}
         {release && (
           <div className="em-summary-release em-inset" style={{ flex: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <div>
-              <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-2xs)', color: 'var(--lcd-dim)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 'var(--space-3)' }}>Latest Release</div>
-              <div style={{ fontFamily: "var(--font-mono)", fontSize: 18, color: 'var(--lcd-green)', lineHeight: 1 }}>{release.version}</div>
+              <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-2xs)', color: 'var(--lcd-dim)', textTransform: 'uppercase', letterSpacing: 'var(--tracking-heading)', marginBottom: 'var(--space-3)' }}>Latest Release</div>
+              <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xl)', color: 'var(--lcd-green)', lineHeight: 1 }}>{release.version}</div>
             </div>
             {/* Actions as ONE flex child, not three.
                 space-between distributes across every child it has, so with
@@ -11475,10 +11476,10 @@ function App() {
       {/* Pending devices */}
       {pending.length > 0 && (
         <>
-          <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xs)', color: 'var(--accent)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 'var(--space-7)' }}>
+          <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xs)', color: 'var(--accent)', textTransform: 'uppercase', letterSpacing: 'var(--tracking-heading)', marginBottom: 'var(--space-7)' }}>
             Pending Approval · {pending.length}
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(190px,1fr))', gap: 'var(--space-6)', marginBottom: 36 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(190px,1fr))', gap: 'var(--space-6)', marginBottom: 'var(--space-18)' }}>
             {pending.map(d => <Card key={d.device_id} device={d} onClick={() => setSelected(d.device_id)}/>)}
           </div>
         </>
@@ -11488,7 +11489,7 @@ function App() {
       {(approved.length > 0 || isAdmin) && (
         <>
           {approved.length > 0 && (
-            <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xs)', color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 'var(--space-7)' }}>
+            <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xs)', color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: 'var(--tracking-heading)', marginBottom: 'var(--space-7)' }}>
               Devices · {approved.length}
             </div>
           )}
@@ -11497,7 +11498,7 @@ function App() {
               collapsing to its own content when it wraps onto a row alone.
               A matching height rather than a matching magic number — the card
               can gain a row without this drifting. */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(190px,1fr))', gridAutoRows: '1fr', gap: 'var(--space-6)', marginBottom: 48 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(190px,1fr))', gridAutoRows: '1fr', gap: 'var(--space-6)', marginBottom: 'var(--space-24)' }}>
             {approved.map(d => <Card key={d.device_id} device={d} onClick={() => setSelected(d.device_id)}/>)}
             {isAdmin && <AddDeviceTile onClick={() => setShowWizard(true)}/>}
           </div>
@@ -11505,13 +11506,13 @@ function App() {
       )}
 
       {devices.length === 0 && !loadError && !isAdmin && (
-        <div style={{ textAlign: 'center', padding: '60px 0', fontFamily: "var(--font-mono)", fontSize: 'var(--fs-base)', color: 'var(--muted)' }}>
+        <div style={{ textAlign: 'center', padding: 'var(--space-30) 0', fontFamily: "var(--font-mono)", fontSize: 'var(--fs-base)', color: 'var(--muted)' }}>
           No devices yet — power on an EchoMuse device to see it appear here
         </div>
       )}
 
       {loadError && (
-        <div style={{ textAlign: 'center', padding: '60px 0', fontFamily: "var(--font-mono)", fontSize: 'var(--fs-base)', color: 'var(--error)' }}>{loadError}</div>
+        <div style={{ textAlign: 'center', padding: 'var(--space-30) 0', fontFamily: "var(--font-mono)", fontSize: 'var(--fs-base)', color: 'var(--error)' }}>{loadError}</div>
       )}
 
       {/* Provisioning wizard */}

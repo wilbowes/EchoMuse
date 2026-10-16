@@ -176,12 +176,24 @@
       --fs-md:  11px;
       --fs-base: 12px;
       --fs-lg:  14px;
+      --fs-xl:  16px;
+      --fs-2xl: 24px;
+      --fs-3xl: 28px;
 
       --radius-xs:  2px;
       --radius-sm:  4px;
       --radius-md:  6px;
       --radius-lg:  8px;
       --radius-xl: 10px;
+      --radius-card:   14px;
+      --radius-dialog: 16px;
+
+      /* Letter-spacing by job: titles, mixed-case mono text, small
+         uppercase labels, section headings. */
+      --tracking-tight:   -0.02em;
+      --tracking-text:     0.05em;
+      --tracking-label:    0.1em;
+      --tracking-heading:  0.15em;
 
       /* Spacing: --space-N is N x 2px, for gaps, padding and margins. A
          2px step because 6, 10 and 14 are among the most used values;
@@ -200,6 +212,9 @@
       --space-12: 24px;
       --space-14: 28px;
       --space-16: 32px;
+      --space-18: 36px;
+      --space-24: 48px;
+      --space-30: 60px;
     }
 
     html, body { height: 100%; background: var(--bg); color: var(--text); }
@@ -259,12 +274,12 @@
       background: linear-gradient(180deg, var(--surface), var(--border-soft));
       color: var(--text); border: 1px solid var(--faint); border-radius: 20px;
       font-family: var(--font-sans); font-size: var(--fs-base); font-weight: 500;
-      padding: 7px 20px; cursor: pointer; white-space: nowrap;
+      padding: var(--space-4) var(--space-10); cursor: pointer; white-space: nowrap;
       transition: all 0.1s;
       box-shadow: 0 1px 0 rgba(255,255,255,0.15) inset, 0 2px 4px rgba(0,0,0,0.2);
     }
-    .em-pill--small { font-size: var(--fs-md); padding: 5px 14px; }
-    .em-pill--big   { font-size: var(--fs-lg); font-weight: 600; padding: 11px 28px; }
+    .em-pill--small { font-size: var(--fs-md); padding: var(--space-3) var(--space-7); }
+    .em-pill--big   { font-size: var(--fs-lg); font-weight: 600; padding: var(--space-6) var(--space-14); }
     .em-pill--accent {
       background: linear-gradient(180deg, var(--accent-hi), var(--accent));
       color: var(--accent-tint); border-color: var(--accent-deep);
@@ -294,19 +309,19 @@
     /* Small uppercase mono heading. */
     .em-label {
       font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--muted);
-      text-transform: uppercase; letter-spacing: 0.15em; margin-bottom: var(--space-6);
+      text-transform: uppercase; letter-spacing: var(--tracking-heading); margin-bottom: var(--space-6);
     }
 
     /* Lit readout panel. */
     .em-lcd {
       background: linear-gradient(160deg, var(--lcd-face), var(--lcd-bg));
-      border: 1px solid var(--lcd-line); border-radius: 5px;
-      padding: 5px 10px; min-width: 54px;
+      border: 1px solid var(--lcd-line); border-radius: var(--radius-md);
+      padding: var(--space-3) var(--space-5); min-width: 54px;
       box-shadow: inset 0 1px 3px rgba(0,0,0,0.5);
     }
     .em-lcd__label {
       font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--lcd-dim);
-      text-transform: uppercase; letter-spacing: 0.15em; margin-bottom: 3px;
+      text-transform: uppercase; letter-spacing: var(--tracking-heading); margin-bottom: 3px;
     }
 
     /* Dark inset surface. Five sites re-typed the same four declarations —
@@ -339,7 +354,7 @@
       padding: var(--space-5) var(--space-7); overflow-y: auto;
     }
     .em-console__line--head {
-      color: var(--accent-lit); letter-spacing: 0.12em; font-weight: 600;
+      color: var(--accent-lit); letter-spacing: var(--tracking-label); font-weight: 600;
       margin-top: var(--space-5); padding-top: var(--space-3);
       border-top: 1px solid var(--lcd-faint);
     }
@@ -363,7 +378,7 @@
     }
     .em-wizard-progress__label {
       font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--muted);
-      letter-spacing: 0.08em; text-transform: uppercase; margin-top: var(--space-3);
+      letter-spacing: var(--tracking-label); text-transform: uppercase; margin-top: var(--space-3);
     }
     .em-wizard-step {
       padding: 5px 12px; display: flex; align-items: flex-start; gap: var(--space-3);
@@ -382,7 +397,7 @@
       font-family: var(--font-mono); font-size: var(--fs-sm); flex-shrink: 0; width: 10px;
     }
     .em-wizard-step__label {
-      font-family: var(--font-mono); font-size: var(--fs-xs); letter-spacing: 0.04em;
+      font-family: var(--font-mono); font-size: var(--fs-xs); letter-spacing: var(--tracking-text);
       line-height: 1.4;
     }
     .em-wizard-step--active .em-wizard-step__label { color: var(--text); font-weight: 600; }
@@ -416,7 +431,7 @@
     .em-wizard-upcoming__item:first-of-type { margin-top: 0; }
     .em-wizard-upcoming__name {
       font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text2);
-      letter-spacing: 0.06em; display: block;
+      letter-spacing: var(--tracking-text); display: block;
     }
     .em-wizard-upcoming__desc {
       font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--muted);
@@ -473,6 +488,9 @@
     .em-input {
       font-family: var(--font-mono); font-size: var(--fs-md); color: var(--text);
       border: 1px solid var(--field-line); min-width: 0;
+      /* The field is dark in both themes, so the browser's own parts (a
+         select's option list, autofill, the arrow) are drawn dark too. */
+      color-scheme: dark;
     }
     .em-input::placeholder { color: var(--muted); }
 
@@ -499,8 +517,8 @@
       background: transparent; color: var(--muted);
       border: 1px solid transparent; border-radius: var(--radius-md) var(--radius-md) 0 0;
       font-family: var(--font-mono); font-size: var(--fs-sm);
-      text-transform: uppercase; letter-spacing: 0.1em;
-      padding: 7px 14px; margin-bottom: -1px; cursor: pointer; transition: color 0.15s;
+      text-transform: uppercase; letter-spacing: var(--tracking-label);
+      padding: var(--space-4) var(--space-7); margin-bottom: -1px; cursor: pointer; transition: color 0.15s;
     }
     .em-tab--active {
       background: linear-gradient(180deg, var(--raised), var(--surface)); color: var(--text);

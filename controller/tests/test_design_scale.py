@@ -13,6 +13,7 @@ What is counted, in the JSX with comments stripped:
   borderRadius: <number|'Npx ...'>  -> var(--radius-*)
   'DM Mono' / 'DM Sans' font stacks  -> var(--font-mono) / var(--font-sans)
   gap / padding / margin: <non-zero number | 'Npx ...'>  -> var(--space-N)
+  letterSpacing: '<n>em'      -> var(--tracking-*)
 
 Exempt, with the reason:
   Shell              xterm.js options are numbers and font names handed to a
@@ -40,10 +41,11 @@ _LITERALS = re.compile(
     r"fontSize:\s*\d"
     r"|borderRadius:\s*(?:\d|'\d)"
     r"|\b(?:gap|rowGap|columnGap|padding\w*|margin\w*):\s*(?:[1-9]|'[^']*[1-9]\d*px)"
+    r"|letterSpacing:\s*'-?[\d.]+em'"
     r"|'DM (?:Mono|Sans)',\s?(?:monospace|sans-serif)")
 _SCALE_BLOCK = ":root {\n      --font-sans:"
 _VAR_DEF = re.compile(r"^\s*(--[a-z0-9-]+)\s*:", re.M)
-_SCALE_USE = re.compile(r"var\((--(?:fs|radius|font|space)-[a-z0-9-]+)\)")
+_SCALE_USE = re.compile(r"var\((--(?:fs|radius|font|space|tracking)-[a-z0-9-]+)\)")
 
 
 def scan() -> dict[str, int]:
