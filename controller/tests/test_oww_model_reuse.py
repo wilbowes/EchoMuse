@@ -148,9 +148,7 @@ def test_a_device_that_goes_private_releases_its_models():
     import asyncio
     import types
 
-    import _oww_stub
-    _oww_stub.install()
-    import em_controller
+    import em_controller   # imports without openwakeword since it became lazy
 
     dev = types.SimpleNamespace(device_id="d1", private_listening=True)
     seen = {}
