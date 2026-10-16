@@ -692,18 +692,38 @@ class MediaSession:
         # difference reported, because none of the changes were reaching the
         # audio at all).
         #
+        # ONE place deciding this, called at construction below AND at the
+        # per-chunk update() further down (and defined here, above the
+        # Passthrough/StreamingEQ branch, because that update() call is
+        # unconditional — a device running output_chain_on_device still
+        # reaches it, against a Passthrough that ignores every kwarg, and
+        # this must exist in that branch too or the call below is a
+        # NameError). Board identity can't change mid-stream, but
+        # device.limiter_threshold/release can (a future live control, or
+        # the fleet default changing), and a value frozen once at stream
+        # start would stop tracking that for every board, not just Radar.
+        # See em_limiter.py — there is no dashboard control for either
+        # today, but nothing here should assume there never will be.
+        is_radar = device.board_id == "radar"
+
+        def _limiter_params():
+            return em_limiter.params_for(device.board_id, device.limiter_threshold,
+                                         device.limiter_release)
+
         # A device that runs the chain itself gets the music untouched.
         if device.output_chain_on_device:
             eq = em_eq.Passthrough()
         else:
+            lim_threshold_db, lim_release_ms = _limiter_params()
             eq = em_eq.StreamingEQ(SPEAKER_RATE, device.eq_bands, device.eq_loudness,
-                                   limiter=em_limiter.Limiter(
-                                       SPEAKER_RATE,
-                                       threshold_db=device.limiter_threshold,
-                                       release_ms=device.limiter_release,
+                                   stock_curve=(device.eq_stock_curve and is_radar),
+                                   limiter=em_limiter.build_limiter(
+                                       SPEAKER_RATE, device.board_id,
+                                       threshold_db=lim_threshold_db,
+                                       release_ms=lim_release_ms,
                                        enabled=device.limiter_enabled),
-                                   guard=em_mbc.BassGuard(
-                                       SPEAKER_RATE,
+                                   guard=em_mbc.build_guard(
+                                       SPEAKER_RATE, device.board_id,
                                        bass_guard_db=device.bass_guard_db,
                                        enabled=device.bass_guard_enabled))
         start_pos = self._pos
@@ -791,11 +811,12 @@ class MediaSession:
                 # each other's most obvious cue, so "I heard nothing" cannot
                 # distinguish a working chain from a config that never
                 # arrived. See em_eq.describe_chain.
+                cur_lim_threshold_db, cur_lim_release_ms = _limiter_params()
                 if eq.update(bands=device.eq_bands,
                              loudness=device.eq_loudness,
                              limiter_enabled=device.limiter_enabled,
-                             limiter_threshold=device.limiter_threshold,
-                             limiter_release=device.limiter_release,
+                             limiter_threshold=cur_lim_threshold_db,
+                             limiter_release=cur_lim_release_ms,
                              guard_enabled=device.bass_guard_enabled,
                              guard_db=device.bass_guard_db):
                     log.info(f"[{self.device_id}] Output chain: "

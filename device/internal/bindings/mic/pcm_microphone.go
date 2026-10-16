@@ -39,6 +39,9 @@ func NewMicrophone() (*PcmMicrophone, error) {
 		return nil, errors.New("mic: capture PCM not found on this board")
 	}
 	device := tinyalsa.NewDevice(capture.Card, capture.Device, pcm.Config{
+		// The shared capture pipeline currently expects Biscuit's seven mic
+		// channels plus stereo loopback. Radar's eight-channel DSP-beam layout
+		// needs a board-specific adapter before this configuration can serve it.
 		Channels:    9,
 		SampleRate:  16000,
 		PeriodSize:  512,

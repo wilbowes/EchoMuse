@@ -55,6 +55,7 @@
  "em_platform.py": 99.0,
  "em_player.py": 87.0,
  "em_process_stats.py": 81.0,
+ "em_radar_tuning.py": 0.0,
  "em_reconcile.py": 24.0,
  "em_recordings.py": 95.0,
  "em_releases.py": 32.0,

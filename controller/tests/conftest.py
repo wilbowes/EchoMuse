@@ -17,3 +17,17 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture
+def radar_tuning():
+    """A Radar's stock tuning, from ECHOMUSE_RADAR_TUNING (a copy of an Echo
+    2's /system/vendor/etc/audio-algorithms). The files are not in this
+    repository, so a test that needs them is skipped without it."""
+    import em_radar_tuning
+    t = em_radar_tuning.current()
+    if t is None:
+        pytest.skip(f"{em_radar_tuning.ENV} not set: needs a copy of a Radar's audio-algorithms")
+    return t

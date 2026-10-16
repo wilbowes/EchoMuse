@@ -2472,6 +2472,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 holdCapable={!device.connected || !!device.buttonHoldCapable}
                 hwEchoRef={device.connected && device.aecRef === 'hw'}
                 hwRefCapable={!device.connected || !!device.aecHwRefCapable}
+                radarCapable={device.connected && device.boardId === 'radar'}
                 onScopeChange={(id, local) => {
                   setSections(prev => local
                     ? [...prev, id]
@@ -3454,7 +3455,17 @@ const _amonetLk = (head) => {
 //             /system's build.prop in recovery, because TWRP answers getprop
 //             with its own ramdisk. FireOS 6 is Android 7.1; v1 boots only
 //             FireOS 5, so a release of 6 or later on this board means v2.
-const _unlockVerdict = ({ release = '', lk = '', twrp = '' }) => {
+// Use the stock identity, including when it is read from /system in TWRP.
+const _provisionBoard = (model = '', name = '') => {
+  if (model.trim().toUpperCase() === 'AEORD' && name.trim() === 'radar_puffin') return 'radar';
+  if (model.trim().toUpperCase() === 'AEOBC' || name.trim() === 'csm_biscuit') return 'biscuit';
+  return '';
+};
+
+const _unlockVerdict = ({ release = '', lk = '', twrp = '', board = 'biscuit' }) => {
+  // Radar has its own unlock and LK. Biscuit's amonet signatures must not be
+  // used to infer Radar's unlock generation.
+  if (board !== 'biscuit') return { v2: false, evidence: [] };
   const evidence = [];
   if (_amonetLk(lk) === 2) evidence.push('amonet 2\'s LK in lk_a');
   const tv = twrp.match(/(\d+)\.(\d+)/);
@@ -4356,6 +4367,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // device has connected, rather than inferring it from the device list
   // having grown.
   const [provSerial, setProvSerial] = useState('');
+  const [provBoard, setProvBoard] = useState('');
   const [initFile, setInitFile]     = useState(null);
   const [emosConsole, setEmosConsole] = useState(null);
   const [wifiSsid, setWifiSsid] = useState('');
@@ -4779,7 +4791,15 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // escrow-build-flash sequence the emOS flow runs is not FireOS-5-specific at
     // any step: it reads the device's own boot image, rebuilds it with an init
     // matching that image's kernel, and writes it back.
-    const unlock = _unlockVerdict({ release: effRelease, lk, twrp });
+    const board = _provisionBoard(model, name);
+    setProvBoard(board);
+    const unlock = _unlockVerdict({ release: effRelease, lk, twrp, board });
+    if (board === 'radar') {
+      if (!isEmos || !effRelease.startsWith('7.')) {
+        throw new Error('Radar provisioning requires the emOS flow and stock FireOS 6. Nothing has been written.');
+      }
+      addLog('Echo 2nd gen (Radar): FireOS 6 detected. Recovery and boot images must be verified before flashing.');
+    }
     if (unlock.v2 && !isEmos) {
       expectDisconnect.current = true;
       try { await c.close(); } catch {}
@@ -4823,17 +4843,16 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // mounts /system at runtime for bionic and tinyalsa. On an unrecognised
     // board that is not a lower chance of working, it is an unknown one, and
     // the failure lands after the boot partition has been written.
-    const boardOk = (model && model.toLowerCase().includes('amazon'))
-                 || (name && name.toLowerCase().includes('biscuit'));
+    const boardOk = !!board;
     if (!boardOk) {
       if (isEmos) {
         expectDisconnect.current = true;
         try { await c.close(); } catch {}
         setAdb(null);
         throw new Error(
-          `This does not look like an Echo Dot 2nd gen (model "${model || 'unknown'}", `
-          + `codename "${name || 'unknown'}"). emOS is built for biscuit and reuses this `
-          + `board's own kernel and /system, so it cannot be installed on anything else. `
+          `Unsupported Echo identity (model "${model || 'unknown'}", `
+          + `codename "${name || 'unknown'}"). This installer supports Biscuit and Radar `
+          + `and requires a recognised stock identity before continuing. `
           + `Use ?flow=fireos if you meant to provision under FireOS.`);
       }
       addLog('Warning: device may not be an Echo Dot 2nd gen — proceeding anyway.', 'warn');
@@ -5375,13 +5394,13 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // actually depend on? Those refuse; any other is reported as a warning and
   // cannot block, so a device's outcome never depends on a slot it does not
   // use.
-  //   amonet 2: BOTH. The slot plan may build from either, and the stock
+  //   Radar / amonet 2: BOTH. The slot plan may build from either, and the stock
   //     image kept in B boots against system_b (#619).
   //   amonet 1: system_a, which must be mmcblk0p13 — an amonet 1 image
   //     carries no emos.system= stamp, so emOS mounts SYSTEM_PART_DEFAULT
   //     (emos/init/init.c). C95 on 2026-09-25 had FireOS 6 in system_b beside
   //     a working FireOS 5 system_a; that is a warning, not a refusal.
-  function donorVerdict({ probe, layout, heads, files }) {
+  function donorVerdict({ probe, layout, heads, files, board = 'biscuit' }) {
     const why = [], seen = [], notes = [];
     if (!probe || !probe.complete) {
       return { ok: false, gen: 0, confirmed: seen, notes, reason:
@@ -5389,15 +5408,26 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         + 'trusted yet. Nothing has been written. Check the cable and try this step again.' };
     }
     const amonet = _amonetLk(probe.lk);
-    const lkSays = amonet ? `lk_a holds amonet ${amonet}'s LK` : 'lk_a holds neither amonet\'s LK';
+    const radarLk = probe.lk.toLowerCase() === '88168858f86f0500';
+    const lkSays = board === 'radar'
+      ? (radarLk ? 'lk_a holds the amonet-radar LK' : 'lk_a does not match amonet-radar v1.0.0')
+      : (amonet ? `lk_a holds amonet ${amonet}'s LK` : 'lk_a holds neither amonet\'s LK');
     const tw = probe.twrp;
     let gen = 0, unreadable = false;
     if (!probe.lk) {
       unreadable = true;
-      why.push('the wizard could not read the lk_a partition, so it cannot tell amonet 1 from amonet 2');
+      why.push(board === 'radar'
+        ? 'the wizard could not read the lk_a partition, so it cannot confirm the Radar unlock'
+        : 'the wizard could not read the lk_a partition, so it cannot tell amonet 1 from amonet 2');
     } else if (!tw) {
       unreadable = true;
       why.push('the wizard could not read the TWRP version');
+    } else if (board === 'radar' && radarLk
+               && /^3\.7\.0(?![0-9])(?!_9-bboe)/.test(tw) && layout === 'v2') {
+      gen = 6;
+    } else if (board === 'radar') {
+      why.push(`the Radar unlock does not add up: ${lkSays}, TWRP is ${tw}, and the boot partitions `
+        + `are laid out for ${layout === 'v2' ? 'the expected Radar layout' : 'an unexpected layout'}`);
     } else if (amonet === 2 && /^3\.7\.0(?![0-9])(?!_9-bboe)/.test(tw) && layout === 'v2') {
       gen = 6;
     } else if (amonet === 1 && /^3\.2\.3(?![0-9])|^3\.7\.0_9-bboe\d+$/.test(tw) && layout === 'v1') {
@@ -5408,7 +5438,9 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         + 'amonet 2 means TWRP 3.7.0 and FireOS 6)');
     }
     if (gen) {
-      seen.push(`amonet ${gen === 6 ? 2 : 1}: ${lkSays}, TWRP ${tw}`);
+      // Radar and Biscuit use different LK images, so label the board-specific
+      // unlock accurately instead of calling Radar amonet-biscuit v2.
+      seen.push(`${board === 'radar' ? 'Radar unlock' : `amonet ${gen === 6 ? 2 : 1}`}: ${lkSays}, TWRP ${tw}`);
       const want = gen === 6
         ? { layout: 'nested', release: '7.', arch: 'arm', label: 'FireOS 6' }
         : { layout: 'root', release: '5.', arch: 'arm64', label: 'FireOS 5' };
@@ -5451,8 +5483,14 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       }
     }
     if (!why.length) return { ok: true, gen, confirmed: seen, notes };
-    const fix = gen === 6
-      ? ' amonet 2 needs FireOS 6 in BOTH slots. If the FireOS 6 flash from the unlock '
+    const fix = unreadable
+      ? ' The Echo is unlocked, since it is in TWRP; this is the wizard failing to read it. '
+        + 'Try this step again, and if it repeats, use Download diagnostics and attach the '
+        + 'file to an issue.'
+      : board === 'radar' && gen === 0
+        ? ' Radar needs the matching amonet-radar LK, TWRP 3.7.0, and FireOS 6 in both slots.'
+      : gen === 6
+      ? ` ${board === 'radar' ? 'Radar' : 'amonet 2'} needs FireOS 6 in BOTH slots. If the FireOS 6 flash from the unlock `
         + 'instructions did not complete for both, finish it, then run this step again.'
       : gen === 5
         ? ' amonet 1 needs FireOS 5 in system_a (mmcblk0p13) and a FireOS 5 kernel to build from.'
@@ -7405,7 +7443,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       await c.shell('rm -f /tmp/em_head.img');
       heads.push({ name: t.name, arch: await _kernelArchOf(head) });
     }
-    const gate = donorVerdict({ probe: donorProbe, layout: boot.layout, heads, files });
+    const gate = donorVerdict({ probe: donorProbe, layout: boot.layout, heads, files, board: provBoard });
     for (const line of gate.confirmed) addLog(`  ✓ ${line}`, 'ok');
     for (const line of gate.notes) addLog(`  ${line}`, 'warn');
     if (!gate.ok) throw new Error(gate.reason);
@@ -7599,11 +7637,17 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // provide one as a side effect of reproducing the boot header's SHA1, and
     // that had to be relaxed for images carrying a stale id.
     fd.append('reference_md5', await _md5Hex(reference));
+    if (!provBoard) throw new Error('Reconnect the device to identify its board before building.');
+    fd.append('board', provBoard);
     // One or the other, never both: the controller resolves the init from the
     // reference's own kernel when asked, and an explicit part wins when the
     // operator picked a file by hand.
     if (initBlob) {
-      fd.append('init', initBlob, 'init');
+      if (initBlob.name.toLowerCase().endsWith('.zip')) {
+        fd.append('payload', initBlob, 'emos-payload.zip');
+      } else {
+        fd.append('init', initBlob, 'init');
+      }
     } else {
       fd.append('use_latest_init', '1');
     }
@@ -7656,7 +7700,8 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     let info = null;
     try { info = JSON.parse(resp.headers.get('X-Build-Info') || 'null'); } catch {}
     if (info) {
-      addLog(`  kernel and device trees carried over from your image `
+      if (info.kernel_patch) addLog('  applied the verified Radar kernel initramfs fix');
+      addLog(`  kernel and device trees built from your image `
            + `(${(info.zimage_size/1024/1024).toFixed(1)} MB + ${info.dtb_size} bytes)`);
       addLog(`  ramdisk ${(info.ramdisk_size/1024).toFixed(0)} KB`);
       addLog(`  cmdline ${info.cmdline}`);
@@ -8156,9 +8201,23 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // reports no SAE, so a [SAE] network can never be joined however correct the
   // password is, and a 5GHz-only one is invisible to it. Both present as an
   // unexplained failure when someone types a name from memory.
+  async function consoleWpaCommand(con) {
+    // Match init's preferred config and ctrl_interface parsing. em-wifi uses
+    // /data/emos/sockets; a fresh wizard install normally uses Android's path.
+    const out = await con.run(
+      'C=/data/emos/wpa.conf; [ -r "$C" ] || C=/data/misc/wifi/wpa_supplicant.conf; '
+      + 'D=$(awk \'/^[ \\t]*ctrl_interface=/ { sub(/^[ \\t]*ctrl_interface=/, ""); '
+      + 'sub(/^DIR=/, ""); sub(/[ \\t].*$/, ""); if ($0 ~ /^\\//) d=$0 } '
+      + 'END { if (d != "") print d }\' "$C" 2>/dev/null); '
+      + 'echo "EMOS_WPA_CTRL=${D:-/data/misc/wifi/sockets}"');
+    const dir = (out.match(/^EMOS_WPA_CTRL=(\/[^\r\n]*)\r?$/m) || [])[1];
+    if (!dir) throw new Error('Could not read the WiFi control socket from the active configuration.');
+    return "wpa_cli -p '" + dir.replace(/'/g, "'\\''") + "' -i wlan0";
+  }
+
   async function scanWifiConsole(con) {
     if (!con) throw new Error('No serial console — re-run the Reboot and Watch step.');
-    const wpa = 'wpa_cli -p /data/misc/wifi/sockets -i wlan0';
+    const wpa = await consoleWpaCommand(con);
     // Early in the boot the supplicant is not answering yet, so wait for it
     // rather than fail a click the operator could not have known was early.
     for (let i = 0; i < 20 && !/PONG/.test(await con.run(`${wpa} ping`)); i++) {
@@ -8195,9 +8254,10 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   async function runEmosWifi(skipJoin) {
     const con = emosConsole;
     if (!con) throw new Error('No serial console — re-run the Reboot and Watch step.');
+    const wpa = await consoleWpaCommand(con);
     if (skipJoin) {
       const st = await con.run(
-        'wpa_cli -p /data/misc/wifi/sockets -i wlan0 status');
+        `${wpa} status`);
       if (!/wpa_state=COMPLETED/.test(st)) {
         throw new Error('Not skipping: the device reports '
           + `${(st.match(/wpa_state=\S+/) || ['nothing readable'])[0]}, so it is `
@@ -8225,22 +8285,16 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     const hidden = !(wifiNetworks || []).some(n => n.ssidHex === ssidHex);
 
     addLog(`Joining ${wifiSsid}…`);
-    // Every call carries -p. wpa_cli defaults to /var/run/wpa_supplicant and
-    // emOS's supplicant is started with -p/data/misc/wifi/sockets (init.c:1202,
-    // and the same path the FireOS flow uses), so without it every command
-    // fails with "Failed to connect to non-global ctrl_ifname: wlan0". Found
-    // by hand on the console 2026-09-06, before this step had ever run — it
-    // would have failed on its first call.
-    //
+    // Use the active config's socket for every operation, including rollback.
     // wpa_cli against emOS's own supplicant — the real radio, so a network
     // this hardware cannot join fails here rather than after a flash. Note
     // this radio reports no SAE, so it genuinely cannot do WPA3 (#82).
-    const id = (await con.run('wpa_cli -p /data/misc/wifi/sockets -i wlan0 add_network')).trim().split('\n').pop().trim();
+    const id = (await con.run(`${wpa} add_network`)).trim().split('\n').pop().trim();
     if (!/^\d+$/.test(id)) throw new Error(`wpa_cli would not add a network (said "${id}").`);
     // Every set_network is checked: a refused one used to pass silently and
     // surface 30s later as "did not associate".
     const setNet = async (field, value) => {
-      const r = await con.run(`wpa_cli -p /data/misc/wifi/sockets -i wlan0 set_network ${id} ${field} ${value}`);
+      const r = await con.run(`${wpa} set_network ${id} ${field} ${value}`);
       if (!/OK/.test(r)) throw new Error(`wpa_cli refused ${field}: ${r.trim() || 'no answer'}`);
     };
     await setNet('ssid', ssidHex);
@@ -8248,12 +8302,12 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     else await setNet('key_mgmt', 'NONE');
     // Not in the last scan: probe for it by name, or it is never found.
     if (hidden) await setNet('scan_ssid', '1');
-    const en = await con.run(`wpa_cli -p /data/misc/wifi/sockets -i wlan0 enable_network ${id}`);
+    const en = await con.run(`${wpa} enable_network ${id}`);
     if (!/OK/.test(en)) throw new Error(`wpa_cli refused to enable the network: ${en.trim()}`);
 
     // save_config keeps NOTHING without update_config=1 in the conf, and says
     // OK either way — so the device would join now and forget on reboot.
-    const saved = await con.run('wpa_cli -p /data/misc/wifi/sockets -i wlan0 save_config');
+    const saved = await con.run(`${wpa} save_config`);
     if (!/OK/.test(saved)) {
       addLog('wpa_cli could not save the network, so this will be forgotten on '
            + 'reboot. Check update_config=1 in wpa_supplicant.conf.', 'warn');
@@ -8293,7 +8347,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     for (let i = 0; i < 12 && !joined; i++) {
       await new Promise(r => setTimeout(r, 2500));
       const st = await con.run(
-        'wpa_cli -p /data/misc/wifi/sockets -i wlan0 status');
+        `${wpa} status`);
       const state = (st.match(/wpa_state=(\S+)/) || [])[1];
       const raw   = (st.match(/^ssid=(.+)$/m) || [])[1];
       onSsid = raw ? _bytesHex(_wpaUnescape(raw.replace(/\r$/, ''))) : null;
@@ -8304,8 +8358,8 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // Associated, but to something else. Removing OUR entry is right: the
     // other network is the one that works, and it was here first.
     if (!joined && onSsid && onSsid !== ssidHex) {
-      await con.run(`wpa_cli -p /data/misc/wifi/sockets -i wlan0 remove_network ${id}`);
-      await con.run('wpa_cli -p /data/misc/wifi/sockets -i wlan0 save_config');
+      await con.run(`${wpa} remove_network ${id}`);
+      await con.run(`${wpa} save_config`);
       await con.run('sync');
       throw new Error(
         `The device associated to "${_ssidText(_hexBytes(onSsid))}" rather than `
@@ -8313,14 +8367,13 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         + `"${wifiSsid}" has been removed again, so nothing has changed.\n\n`
         + 'If the network it is on is the one you want, click '
         + '"Skip (already connected)". To force the new one, remove the old '
-        + 'entry over the console first: wpa_cli -p /data/misc/wifi/sockets '
-        + '-i wlan0 list_networks, then remove_network <id> and save_config.');
+        + `entry over the console first: ${wpa} list_networks, then remove_network <id> and save_config.`);
     }
     if (!joined) {
       addLog('Not associating — removing the network so the device is not left '
            + 'retrying it for ever.', 'warn');
-      await con.run(`wpa_cli -p /data/misc/wifi/sockets -i wlan0 remove_network ${id}`);
-      await con.run('wpa_cli -p /data/misc/wifi/sockets -i wlan0 save_config');
+      await con.run(`${wpa} remove_network ${id}`);
+      await con.run(`${wpa} save_config`);
       await con.run('sync');
       throw new Error(
         `The device did not join "${wifiSsid}" within 30s, and the network has `
@@ -8968,14 +9021,14 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                 <Pill accent onClick={() => runStep(5, true)}>Build with the latest emOS release</Pill>
                 <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', letterSpacing: '0.04em' }}>— or —</div>
                 <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--text2)', letterSpacing: '0.08em' }}>
-                  {stepState[5] === 'error' ? 'SELECT A DIFFERENT INIT' : 'YOUR OWN INIT BINARY (AARCH64, STATIC)'}
+                  {stepState[5] === 'error' ? 'SELECT AN INIT OR PAYLOAD BUNDLE' : 'YOUR OWN INIT OR EMOS PAYLOAD BUNDLE (.ZIP)'}
                 </div>
                 <input
                   type="file"
                   onChange={e => setInitFile(e.target.files[0])}
                   style={{ fontFamily: "'DM Mono',monospace", fontSize: 11 }}
                 />
-                {!!initFile && <Pill onClick={() => runStep(5, false)}>Build with this init</Pill>}
+                {!!initFile && <Pill onClick={() => runStep(5, false)}>Build with this file</Pill>}
               </div>
             )}
 
@@ -9481,7 +9534,7 @@ const STAGE_MONO = "var(--font-mono)";
 // control sitting under a toggle that does not govern it would look fine and
 // be silently wrong.
 const CONFIG_SECTIONS = {
-  "playback": ["eqBands", "eqLoudness", "duckDb", "responseLevel", "limiterEnabled", "limiterThreshold", "limiterRelease", "bassGuardEnabled", "bassGuardDb", "streamReply", "volumeButtonSound"],
+  "playback": ["eqBands", "eqLoudness", "eqStockCurve", "duckDb", "responseLevel", "limiterEnabled", "limiterThreshold", "limiterRelease", "bassGuardEnabled", "bassGuardDb", "streamReply", "volumeButtonSound"],
   "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice", "wakeSound", "wakeSoundLevel", "wakeClipCapture", "wakeClipMinScore"],
   "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "wakeMic", "aecEnabled", "aecDelayMs", "aecTailMs", "aecRefSource", "nsAsr", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "remoteVolumeArc", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
@@ -9651,7 +9704,14 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                             responseLevelCapable = true,
                             wakeMicCapable = true,
                             sendspinCapable = true, sendspinPanel = null,
-                            bleConnectCapable = true, blePanel = null }) {
+                            bleConnectCapable = true, blePanel = null, radarCapable = false }) {
+  // radarCapable defaults FALSE, unlike its neighbours above defaulting
+  // true: those gate a FIRMWARE capability, where "unknown" should not
+  // hide a control someone may be mid-setup for. Board identity is
+  // different — it is reported live only, never persisted (em_api.py), so
+  // "unknown" here genuinely means "could be any board", and showing a
+  // Radar-only control on the strength of not knowing is the "appears to
+  // work" failure this project's own controls are held to elsewhere.
   // emosFleet defaults TRUE for the same reason the capability props above do,
   // and for one more: it gates the console password, which is emOS-only, and
   // disabling a setting because we do not KNOW the fleet has an emOS device
@@ -9874,6 +9934,13 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             <div style={inputStyle}>
               <Toggle label="Speech boost" sub="presence boost for voice" value={config.eqLoudness ?? false} onChange={v => set('eqLoudness', v)}/>
             </div>
+            {radarCapable && (
+              <div style={{ marginTop: 'var(--space-4)', ...inputStyle }}>
+                <Toggle label="Radar's own stock EQ curve"
+                  sub="Amazon's real tuning for this speaker, layered under the bands above"
+                  value={config.eqStockCurve ?? true} onChange={v => set('eqStockCurve', v)}/>
+              </div>
+            )}
             <div style={{ marginTop: 'var(--space-4)', ...inputStyle }}>
               <Toggle label="Speak while the reply is written"
                 sub="faster with a quick model; a slow one may pause"

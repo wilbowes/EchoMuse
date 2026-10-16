@@ -22,6 +22,13 @@
 #
 #   EMOS_SYSTEM_PART=13 ./build.sh boot_a_x.img     # built beside system_a
 #   EMOS_SYSTEM_PART=14 ./build.sh boot_a_x.img     # built beside system_b
+#
+# EMOS_BOARD picks which per-board runtime to link. Today: "biscuit"
+# (default) and "radar". Adding a board is a new boards/<name>.{h,c} and
+# a line in init.c's table -- see controller/CLAUDE.md for the
+# interface. The reference image is the device's OWN boot partition;
+# stamp `emos.board=<name>` onto it by exporting EMOS_BOARD before
+# invoking the script. Default "biscuit" preserves today's behaviour.
 set -e
 
 REF=${1:?usage: build.sh <reference boot_a_x.img> [output.img]}
@@ -75,12 +82,47 @@ esac
 echo "reference kernel is $ARCH: building a matching init"
 CC=${CC:-$NDK/$TRIPLE-clang}
 
+# The board runtime is a separate translation unit so a second board
+# adds boards_<name>.c without touching init.c. EMOS_BOARD selects
+# which one; init.c picks its constants up via the matching header so
+# the same compile rules apply to both translation units. The known
+# boards are the two Amazon MT8163 reference designs emOS has been
+# ported to; a new board is a new boards/<name>.{h,c} pair plus a
+# stamp on the image's cmdline so the kernel hands it the right
+# partition layout.
+EMOS_BOARD=${EMOS_BOARD:-biscuit}
+case "$EMOS_BOARD" in
+    biscuit|radar) ;;
+    *) echo "unknown EMOS_BOARD: $EMOS_BOARD (known: biscuit, radar)" >&2
+       exit 1 ;;
+esac
+BOARD_SRC="$HERE/init/boards/boards_$EMOS_BOARD.c"
+if [ ! -f "$BOARD_SRC" ]; then
+    echo "board runtime not found at $BOARD_SRC" >&2
+    exit 1
+fi
+
+# -g0 keeps DWARF out of the binary; without it the .debug_* sections add
+# ~3 MB to a 35 KB static ELF and we have shipped a 3.4 MB "init" that was
+# actually Android's /system/bin/init placed there by a bug — debug info
+# is the entire reason that mistake was silently bootable. -Os shrinks the
+# text further. llvm-strip then drops what little symbol table survives,
+# because we are not debugging init on hardware and the symbols do not help.
+# Use the NDK strip beside the selected compiler, not an unrelated host
+# strip from PATH. STRIP can override this with another target-capable tool.
 if [ -x "$CC" ]; then
-    "$CC" -static -O2 -Wall -o "$WORK/init" "$HERE/init/init.c"
+    "$CC" -static -Os -g0 -Wall -DEMOS_BOARD="$EMOS_BOARD" -o "$WORK/init" \
+        "$HERE/init/init.c" "$BOARD_SRC"
+    STRIP=${STRIP:-$(dirname "$CC")/llvm-strip}
+    [ -x "$STRIP" ] || { echo "missing target strip tool: $STRIP" >&2; exit 1; }
+    "$STRIP" "$WORK/init"
 else
     echo "building init in the echomuse-compiler image ($CC not found)"
     docker run --rm -v "$HERE":/emos -v "$WORK":/out -w /emos echomuse-compiler \
-        bash -lc "$NDK/$TRIPLE-clang -static -O2 -Wall -o /out/init init/init.c"
+        bash -lc "$NDK/$TRIPLE-clang -static -Os -g0 -Wall \
+            -DEMOS_BOARD=$EMOS_BOARD -o /out/init \
+            init/init.c init/boards/boards_$EMOS_BOARD.c && \
+            $(dirname $NDK/$TRIPLE-clang)/llvm-strip /out/init"
 fi
 
 # The ramdisk is init plus the empty mountpoints it needs. Everything else the
@@ -98,6 +140,23 @@ SUPPLICANT=${SUPPLICANT:-$HERE/prebuilt/wpa_supplicant}
 if [ -f "$SUPPLICANT" ]; then
     install -m 0755 "$SUPPLICANT" "$WORK/root/sbin/wpa_supplicant"
     echo "including wpa_supplicant ($(stat -c%s "$SUPPLICANT") bytes)"
+fi
+
+# Optional FireOS 6 WMT property shim. The stock launcher expects Android's
+# property service; a debug/test build can provide only the properties it
+# needs without making the property service part of emOS.
+#
+# Belt and braces: also REMOVE any shim left in the build tree from a
+# previous run, because init.c routes the wifi bring-up on the presence of
+# this file. A stale shim silently bypasses board_wifi_up() and the kernel's
+# own bring-up hangs in STP init forever. Verified on radar 2026-09-18: the
+# launcher path needs every property the stock HAL reads, the shim provides
+# one, and the result is "wifi tools started" with no wlan0 ever appearing.
+rm -f "$WORK/root/sbin/libwmtprops.so"
+WMT_PROP_SHIM=${WMT_PROP_SHIM:-}
+if [ -f "$WMT_PROP_SHIM" ]; then
+    install -m 0755 "$WMT_PROP_SHIM" "$WORK/root/sbin/libwmtprops.so"
+    echo "including WMT property shim"
 fi
 
 # wpa_cli and em-wifi, the console's way to set WiFi without the wizard. The
@@ -159,7 +218,7 @@ install -m 0755 "$WORK/init" "$WORK/root/init"
 # LK gunzips an AArch64 Image, so the kernel must go back in COMPRESSED — the
 # same bytes the reference image carries. Handing it an uncompressed Image
 # silently doubles the image and does not boot.
-EMOS_SYSTEM_PART="${EMOS_SYSTEM_PART:-}" python3 "$HERE/mkboot.py" "$REF" <(python3 - "$REF" <<'EOF'
+EMOS_BOARD="$EMOS_BOARD" EMOS_SYSTEM_PART="${EMOS_SYSTEM_PART:-}" python3 "$HERE/mkboot.py" "$REF" <(python3 - "$REF" <<'EOF'
 import struct, sys
 ref = open(sys.argv[1], "rb").read()
 ksz = struct.unpack("<I", ref[8:12])[0]
@@ -170,7 +229,10 @@ EOF
 ) "$WORK/ramdisk.gz" "$OUT"
 
 echo
-echo "built $OUT — flash with:"
-echo "  dd if=$OUT of=/dev/block/mmcblk0p10   (boot_a_x on biscuit)"
+echo "built $OUT for board=$EMOS_BOARD — flash with:"
+case "$EMOS_BOARD" in
+    radar) echo "  dd if=$OUT of=/dev/block/mmcblk0p10   (boot_a on radar)";;
+    *)     echo "  dd if=$OUT of=/dev/block/mmcblk0p10   (boot_a_x on $EMOS_BOARD)";;
+esac
 echo "recover with:"
 echo "  dd if=$REF of=/dev/block/mmcblk0p10"

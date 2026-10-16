@@ -281,6 +281,13 @@ DEFAULT_DEVICE_CONFIG = {
     "wakeMic":          0,
     "eqBands":          [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     "eqLoudness":       False,
+    # Radar's own stock curve (FIR, ParametricEQ, OutputTrim), layered under
+    # the 8 bands above rather than instead of them. Read from the Echo's own
+    # files: by the device for its output chain, and by the controller only
+    # with ECHOMUSE_RADAR_TUNING (em_radar_tuning). On by default: without
+    # it a Radar's speaker has no audible bass, and it changes nothing on
+    # any other board.
+    "eqStockCurve":     True,
     # Output limiter. On by default: the EQ chain hard-clipped anything it
     # boosted past full scale (#231), and a default that leaves that in place
     # protects nobody. Threshold/release are config rather than constants

@@ -142,7 +142,7 @@ def test_display_name_matches_openwakeword_own_names():
     """
     The version suffix is a filename convention, so trimming it is a guess
     unless it is checked against the package that invented the convention.
-    openwakeword.MODELS is keyed by the clean name and values point at the
+    openwakeword.models is keyed by the clean name and values point at the
     versioned file, which makes it the authority for every stock model.
 
     Skipped where openwakeword is absent — CI installs pytest/numpy/scipy/
@@ -151,7 +151,10 @@ def test_display_name_matches_openwakeword_own_names():
     """
     openwakeword = pytest.importorskip("openwakeword")
 
-    for name, spec in openwakeword.MODELS.items():
+    models = getattr(openwakeword, "models", None) or getattr(
+        openwakeword, "MODELS", None)
+    assert models is not None, "openwakeword exposes neither .models nor .MODELS"
+    for name, spec in models.items():
         stem = Path(spec["model_path"]).stem
         assert owm.display_name(stem) == name.replace("_", " "), (
             f"display_name({stem!r}) disagrees with openwakeword's own name "

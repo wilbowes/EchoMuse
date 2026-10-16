@@ -342,8 +342,9 @@ async def _get_provision_emos_init(request: web.Request) -> web.Response:
 # tests/test_emos_image_fields.py compares this against what dashboard.jsx
 # appends to the same POST, so the next field to be added has to be read here
 # or fail CI.
-EMOS_IMAGE_FIELDS = ("reference", "init", "reference_md5", "version",
-                     "use_latest_init", "system_part")
+EMOS_IMAGE_FIELDS = ("reference", "init", "payload", "board",
+                     "reference_md5", "version", "use_latest_init",
+                     "system_part")
 
 
 @auth.require_admin
@@ -386,8 +387,11 @@ async def _post_provision_emos_image(request: web.Request) -> web.Response:
                             f"{field.name!r}, which this endpoint does not "
                             f"read")
                 continue
-            if field.name in ("reference", "init"):
+            if field.name in ("reference", "init", "payload"):
                 parts[field.name] = await field.read()
+            elif field.name == "board":
+                parts["board"] = (await field.read()).decode(
+                    errors="replace")[:32].strip()
             elif field.name == "system_part":
                 parts["system_part"] = (await field.read()).decode(
                     errors="replace")[:8]
@@ -402,15 +406,30 @@ async def _post_provision_emos_image(request: web.Request) -> web.Response:
 
         reference = parts.get("reference")
         init_bin = parts.get("init")
+        payload = parts.get("payload")
+        board_id = parts.get("board") or None
         if not reference:
             return em_http.error("invalid_upload",
                           "Expected multipart field 'reference' — the boot "
                           "image read off the device", 400)
-        if not init_bin and not parts.get("use_latest_init"):
+        if not init_bin and not payload and not parts.get("use_latest_init"):
             return em_http.error("invalid_upload",
                           "Expected multipart field 'init' — the emOS init "
-                          "binary — or 'use_latest_init' to resolve it here",
+                          "binary — or 'payload' — an emos-payload.zip — or "
+                          "'use_latest_init' to resolve it here",
                           400)
+
+        # An uploaded payload bundle (init + /sbin tools in one zip) wins over
+        # `use_latest_init` so a developer testing a dev build against a
+        # specific bundle is not silently overridden by the latest release.
+        # Handled before md5 because the bundle's files are not the reference
+        # and not what md5 checks.
+        # The board the wizard identified the device as. Defaults to "biscuit"
+        # when absent so an older wizard keeps working — the packer falls back
+        # the same way (BOARD_DEFAULT) and only diverges from there on an
+        # explicit stamp. An explicit value WINS over both, because the wizard
+        # asks the device and the device is the only authority.
+        board = board_id or "biscuit"
 
         # The escrow arrived intact, checked before anything reads it.
         #
@@ -436,9 +455,45 @@ async def _post_provision_emos_image(request: web.Request) -> web.Response:
                     f"{want_md5} off the device and {got_md5} arrived. "
                     f"Nothing has been built. Re-run the escrow step.", 400)
 
+        arch = em_emos_build.reference_kernel_arch(reference)
+        try:
+            em_emos_build.init_asset_name(arch, board)
+        except em_emos_build.BuildError as exc:
+            return em_http.error("unsupported_board", str(exc), 400)
+        detected = em_emos_build.reference_board_id(reference)
+        # Radar's stock DTB reports only the SoC (mt8163), so its stock
+        # identity must come from the wizard, not a guessed DTB board name.
+        if detected in ("biscuit", "radar") and detected != board:
+            return em_http.error(
+                "board_mismatch",
+                "Stock boot image and selected board disagree", 400)
+
         version = parts.get("version") or "0.1"
         # A hand-picked init carries no WiFi tools, matching emos/build.sh.
         sbin = {}
+
+        if payload:
+            try:
+                bundle = await asyncio.get_event_loop().run_in_executor(
+                    None, em_emos_build.read_payload_bundle, payload)
+            except em_emos_build.BuildError as e:
+                return em_http.error(
+                    "invalid_payload", f"The uploaded payload is not "
+                    f"usable: {e}", 400)
+            if not arch:
+                return em_http.error(
+                    "unknown_reference_arch",
+                    "Could not read the kernel architecture out of that boot "
+                    "image, so there is no way to tell which init it needs. "
+                    "Check the escrow is the whole boot image, or build an init "
+                    "from emos/ with build.sh and select it by hand.", 400)
+            init_bin, sbin, bundle_version, err = em_emos_ota.select_payload(
+                bundle["files"], arch, bundle.get("version") or "0.1", board)
+            if err is not None:
+                return err
+            version = parts.get("version") or bundle_version
+            log.info(f"[api] emOS image: reference kernel is {arch}, using "
+                     f"uploaded bundle for {', '.join(sorted(sbin)) or 'no /sbin'}")
 
         # Which FireOS userspace this reference was read beside, stamped onto
         # the image so emOS mounts that one rather than assuming. The WIZARD
@@ -462,8 +517,7 @@ async def _post_provision_emos_image(request: web.Request) -> web.Response:
 
         # Also keeps ~3.5MB out of a request that has already hit HA ingress's
         # 413 once (2026-09-06).
-        if parts.get("use_latest_init"):
-            arch = em_emos_build.reference_kernel_arch(reference)
+        if parts.get("use_latest_init") and not payload:
             if not arch:
                 # Refused, not defaulted: an init chosen by guess flashes fine
                 # and then produces no output at all.
@@ -473,12 +527,12 @@ async def _post_provision_emos_image(request: web.Request) -> web.Response:
                     "image, so there is no way to tell which init it needs. "
                     "Check the escrow is the whole boot image, or build an init "
                     "from emos/ with build.sh and select it by hand.", 400)
-            init_bin, sbin, init_version, err = await em_emos_ota.fetch_payload(arch)
+            init_bin, sbin, init_version, err = await em_emos_ota.fetch_payload(arch, board)
             if err is not None:
                 return err
             version = parts.get("version") or init_version
             log.info(f"[api] emOS image: reference kernel is {arch}, using "
-                     f"{em_emos_ota.INIT_ASSETS[arch]} from {init_version}"
+                     f"{em_emos_build.init_asset_name(arch, board)} from {init_version}"
                      + (f" plus {', '.join(sorted(sbin))}" if sbin else ""))
 
         loop = asyncio.get_event_loop()
@@ -487,7 +541,7 @@ async def _post_provision_emos_image(request: web.Request) -> web.Response:
         # through this process while somebody provisions a new one.
         info = await loop.run_in_executor(
             None, em_emos_build.build_emos_image, reference, init_bin, version,
-            "", sbin, system_part)
+            "", sbin, system_part, board)
 
         log.info(f"[api] emOS image built"
                  # Not "(older wizard)", which is one of three ways to get

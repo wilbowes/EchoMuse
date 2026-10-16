@@ -1,0 +1,2 @@
+00-23: TLV320AIC3204 Playback tlv320aic32x4-hifi-23 :  : playback 1
+00-24: TLV320AIC3101 Capture tlv320aic3101-codec-24 :  : capture 1

@@ -46,3 +46,36 @@ def test_device_level_above_the_cap_reports_as_full():
 def test_bad_input_does_not_raise():
     assert em_volume.device_level_to_ha(None) == 0.0
     assert em_volume.device_level_to_ha("nonsense") == 0.0
+
+
+# ─── Radar: stock's own volume law ───────────────────────────────────────────
+
+def test_radar_ha_percent_is_stocks_volume_value():
+    """On Radar the HA float is stock's 0-100 volume value, through the
+    mixer table read out of /system/bin/mixer: Alexa 5 (value 54) is -23dB,
+    level 81, as on a stock Echo."""
+    assert em_volume.ha_volume_to_device(0.54, "radar") == 81
+    assert em_volume.ha_volume_to_device(1.0, "radar") == 127
+    assert em_volume.ha_volume_to_device(0.0, "radar") == 0
+    assert em_volume.ha_volume_to_device(0.01, "radar") == 3
+    assert em_volume.ha_volume_to_device(1.5, "radar") == 127
+    assert em_volume.ha_volume_to_device(-0.5, "radar") == 0
+
+
+def test_radar_round_trips_every_ha_percent():
+    for value in range(101):
+        level = em_volume.ha_volume_to_device(value / 100, "radar")
+        assert em_volume.device_level_to_ha(level, "radar") == value / 100
+
+
+def test_radar_level_between_values_reads_as_the_one_below():
+    # Level 50 sits between values 22 (49) and 23 (50)... exactly on 23.
+    assert em_volume.device_level_to_ha(50, "radar") == 0.23
+    # Level 5 sits between values 1 (3) and 2 (7): reads as 1.
+    assert em_volume.device_level_to_ha(5, "radar") == 0.01
+
+
+def test_other_boards_keep_the_proportion():
+    for board in (None, "biscuit"):
+        assert em_volume.ha_volume_to_device(0.5, board) == 64
+        assert em_volume.device_level_to_ha(127, board) == 1.0

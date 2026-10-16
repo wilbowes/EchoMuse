@@ -48,11 +48,20 @@ echo "EchoMuse" > /sys/power/wake_lock
 
 # Mixer controls are named, never numbered: the FireOS 6 kernel shifts ids
 # from ~161 on, so a number can name a different control there (#546).
-# Speaker mixer init
+# Speaker mixer init. Preserve the established sequence on other boards.
+# idme is NUL-terminated; match the complete product ID, not a substring.
+RADAR=0
+if [ "$(busybox tr -d '\000' 2>/dev/null < /proc/idme/device_type_id)" = "A7WXQPH584YP" ]; then
+    RADAR=1
+    tinymix -D 0 "MFP Gpio Mute" On
+    tinymix -D 0 "PCM Playback Volume" 0 0
+fi
 tinymix -D 0 "Audio_I2S1_Setting" On
 tinymix -D 0 "HP DAC Playback Switch" 1 1
-tinymix -D 0 "MFP Gpio Mute" On
-tinymix -D 0 "PCM Playback Volume" 100 100
+if [ "$RADAR" = 0 ]; then
+    tinymix -D 0 "MFP Gpio Mute" On
+    tinymix -D 0 "PCM Playback Volume" 100 100
+fi
 
 # Mic gain — equalised across all four ADCs (A/B/C/D)
 for adc in A B C D; do
@@ -164,6 +173,11 @@ fi
 # the server is down (between OTA slots was the worst case). Idempotent;
 # the server re-enables the amp in its own startup sequence.
 amp_off() {
+    # Radar's physical mute must precede DAC/amp changes, including crashes
+    # that skipped PcmSpeaker.Close. The application releases it after setup.
+    if [ "$RADAR" = 1 ]; then
+        tinymix -D 0 "MFP Gpio Mute" On 2>/dev/null
+    fi
     tinymix -D 0 "PCM Playback Volume" 0 0 2>/dev/null
     tinymix -D 0 "Ext_Speaker_Amp_Switch" Off 2>/dev/null
 }

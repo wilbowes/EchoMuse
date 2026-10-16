@@ -303,12 +303,35 @@ def test_the_mark_names_the_image_by_the_id_init_reads():
 
 def test_init_and_the_controller_agree_on_the_paths():
     src = (REPO / "emos" / "init" / "init.c").read_text()
-    assert f'#define BOOTDEV   "{up.BOOT_DEV}"' in src
+    # BOOTDEV is a per-board alias (set in the board header to BOARD_BOOT_PART,
+    # which is the path the controller knows as up.BOOT_DEV), so the source
+    # carries the macro reference rather than the literal path. The board
+    # headers define BOARD_BOOT_PART to up.BOOT_DEV, checked below.
+    assert "#define BOOTDEV      BOARD_BOOT_PART" in src
     assert f'#define GOODIMG   "{up.GOOD_IMG}"' in src
     assert f'#define BOOTSTATE "{up.BOOT_STATE}"' in src
     assert f'#define TRIALMARK "{up.TRIAL_MARK}"' in src
     assert f"#define TRIAL_SECS {up.TRIAL_SECS}" in src
     assert f"#define MAX_TRIES {up.MAX_TRIES}" in src
+
+
+def test_every_board_header_agrees_with_the_controller():
+    """BOARD_BOOT_PART is the path BOOTDEV resolves to in init.c.
+
+    Every per-board header (radar.h, biscuit.h, ...) must set BOARD_BOOT_PART
+    to up.BOOT_DEV, or a build that uses the wrong board will not know which
+    slot to flash — silently, because the kernel still boots from the slot
+    the install script happened to point at. The shared `boards.h` and
+    `boards_stubs.h` are runtime interface headers, not per-board configs.
+    """
+    skip = {"boards.h", "boards_stubs.h"}
+    for header in (REPO / "emos" / "init" / "boards").glob("*.h"):
+        if header.name in skip:
+            continue
+        src = header.read_text()
+        assert f'BOARD_BOOT_PART   "{up.BOOT_DEV}"' in src, (
+            f"{header.name} sets BOARD_BOOT_PART to something other than "
+            f"{up.BOOT_DEV}; check the slot name matches the controller")
 
 
 def test_the_watch_outlasts_a_full_rollback():

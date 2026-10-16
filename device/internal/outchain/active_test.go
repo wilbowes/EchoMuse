@@ -74,3 +74,49 @@ func TestActivationResetsState(t *testing.T) {
 		t.Fatal("activation carried state from an inactive period")
 	}
 }
+
+// Confirms the override actually reaches the limiter, and that it holds
+// even when Params carries a different value — this is a hard override,
+// not a default (see chain.go's apply), so a config push disagreeing with
+// it must not win.
+func TestRadarChainOverridesLimiterRegardlessOfParams(t *testing.T) {
+	rt := radarTuningForTest(t)
+	radarLimiterThresholdDb, radarLimiterReleaseMs := rt.MBCL.FullBand.LimThresh, rt.MBCL.FullBand.LimRelease
+	c := NewForBoard(48000, "radar", rt)
+	c.SetActive(true)
+	p := DefaultParams()
+	p.LimiterThresholdDb = radarLimiterThresholdDb + 2 // deliberately NOT Radar's
+	p.LimiterReleaseMs = radarLimiterReleaseMs + 130   // deliberately NOT Radar's
+	c.SetParams(p)
+	c.Process(loud(2048)) // takePending -> apply runs here
+
+	lim := c.lim.(*stockLimiter)
+	if lim.thresholdDb != radarLimiterThresholdDb {
+		t.Errorf("lim.thresholdDb = %g, want %g (Params asked for %g)",
+			lim.thresholdDb, radarLimiterThresholdDb, p.LimiterThresholdDb)
+	}
+	if lim.releaseMs != radarLimiterReleaseMs {
+		t.Errorf("lim.releaseMs = %g, want %g (Params asked for %g)",
+			lim.releaseMs, radarLimiterReleaseMs, p.LimiterReleaseMs)
+	}
+}
+
+// And biscuit must be entirely unaffected — Params wins there, same as
+// before this override existed.
+func TestBiscuitChainUsesParamsLimiterUnmodified(t *testing.T) {
+	c := NewForBoard(48000, "biscuit", nil)
+	c.SetActive(true)
+	p := DefaultParams()
+	p.LimiterThresholdDb = -1.0
+	p.LimiterReleaseMs = 150.0
+	c.SetParams(p)
+	c.Process(loud(2048))
+
+	lim := c.lim.(*limiter)
+	if lim.thresholdDb != -1.0 {
+		t.Errorf("lim.thresholdDb = %g, want -1.0 (biscuit must not be overridden)", lim.thresholdDb)
+	}
+	if lim.releaseMs != 150.0 {
+		t.Errorf("lim.releaseMs = %g, want 150.0 (biscuit must not be overridden)", lim.releaseMs)
+	}
+}

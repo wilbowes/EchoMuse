@@ -108,6 +108,22 @@ func (v *softVolume) applyFloat(in []float64, out []byte, tgt float64) {
 	v.cur = tgt
 }
 
+// settleFloat quantises a wide mix that the output chain has already applied
+// the volume to (Radar), and takes the target as settle does.
+func (v *softVolume) settleFloat(in []float64, out []byte) {
+	frames := min(len(in)/2, len(out)/4)
+	for i := 0; i < frames*2; i++ {
+		x := math.Round(in[i])
+		if x > math.MaxInt16 {
+			x = math.MaxInt16
+		} else if x < math.MinInt16 {
+			x = math.MinInt16
+		}
+		binary.LittleEndian.PutUint16(out[i*2:], uint16(int16(x)))
+	}
+	v.settle()
+}
+
 // settle takes the target without a ramp, for a period of silence, where
 // there is nothing to click.
 func (v *softVolume) settle() { v.cur = v.targetGain() }

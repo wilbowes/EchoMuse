@@ -303,8 +303,13 @@ def _project_version() -> str:
 
 
 def _device_model() -> str:
-    from em_esphome import ESPHOME_DEVICE_MODEL
-    return ESPHOME_DEVICE_MODEL
+    # The BT proxy is shared per-device, not per-board: a single Echo
+    # exposes one proxy regardless of whether it is a Dot 2 or an Echo 2,
+    # so model() defaults to None and falls back to the biscuit string
+    # in esphome_device_model(). Keep this on the helper so adding a new
+    # board only edits ESPHOME_BOARD_MODELS.
+    from em_esphome import esphome_device_model
+    return esphome_device_model(None)
 
 
 def _proxy_mac(device_id: str) -> str:

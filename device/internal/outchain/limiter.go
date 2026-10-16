@@ -151,3 +151,11 @@ func (l *limiter) reset() {
 	l.di, l.dqHead, l.dqLen, l.seq = 0, 0, 0, 0
 	l.gainDb = 0
 }
+
+func (l *limiter) setEnabled(on bool) { l.enabled = on }
+
+func (l *limiter) takeStats() (float64, uint64, uint64) {
+	r := l.maxReductionDb
+	l.maxReductionDb = 0
+	return r, l.clipped, l.clippedBypassed
+}

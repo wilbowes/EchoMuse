@@ -20,6 +20,10 @@ type vectorParams struct {
 	LimiterEnabled   bool      `json:"limiterEnabled"`
 	LimiterThreshold float64   `json:"limiterThreshold"`
 	LimiterRelease   float64   `json:"limiterRelease"`
+	StockCurve       bool      `json:"stockCurve"`
+	// VolumeGain is the pre-chain volume a Radar chain takes. Absent on
+	// every case that predates it, and then never set.
+	VolumeGain *float64 `json:"volumeGain"`
 }
 
 func (v vectorParams) params() Params {
@@ -30,6 +34,7 @@ func (v vectorParams) params() Params {
 		LimiterEnabled:     v.LimiterEnabled,
 		LimiterThresholdDb: v.LimiterThreshold,
 		LimiterReleaseMs:   v.LimiterRelease,
+		StockCurve:         v.StockCurve,
 	}
 	copy(p.Bands[:], v.Bands)
 	return p
@@ -40,8 +45,13 @@ type vectorCase struct {
 	Chunk      int    `json:"chunk"`
 	SampleRate int    `json:"sampleRate"`
 	Chunks     int    `json:"chunks"`
-	Schedule   [][2]json.RawMessage
-	Stats      struct {
+	// Board selects the bass guard's tuning (see outchain.NewForBoard).
+	// Absent on every case generated before Radar existed, and
+	// gen_vectors.py omits it for biscuit still — so empty here must mean
+	// biscuit, not "unset", same rule as pkg/board.IDOf.
+	Board    string `json:"board"`
+	Schedule [][2]json.RawMessage
+	Stats    struct {
 		GuardReductionDb   float64 `json:"guardReductionDb"`
 		LimiterReductionDb float64 `json:"limiterReductionDb"`
 		Clipped            uint64  `json:"clipped"`
@@ -112,6 +122,7 @@ func TestMatchesControllerChain(t *testing.T) {
 			}
 
 			sched := map[int]Params{}
+			vols := map[int]float64{}
 			for _, e := range vc.Schedule {
 				var at int
 				var vp vectorParams
@@ -122,14 +133,28 @@ func TestMatchesControllerChain(t *testing.T) {
 					t.Fatal(err)
 				}
 				sched[at] = vp.params()
+				if vp.VolumeGain != nil {
+					vols[at] = *vp.VolumeGain
+				}
 			}
 
-			c := New(vc.SampleRate)
+			boardID := vc.Board
+			if boardID == "" {
+				boardID = "biscuit"
+			}
+			var rt *RadarTuning
+			if boardID == "radar" {
+				rt = radarTuningForTest(t)
+			}
+			c := NewForBoard(vc.SampleRate, boardID, rt)
 			c.SetActive(true)
 			got := make([]int16, 0, len(in))
 			for k := 0; k < vc.Chunks; k++ {
 				if p, ok := sched[k]; ok {
 					c.SetParams(p)
+				}
+				if g, ok := vols[k]; ok {
+					c.SetVolumeGain(g)
 				}
 				buf := stereo(in[k*vc.Chunk : (k+1)*vc.Chunk])
 				c.Process(buf)

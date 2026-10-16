@@ -17,7 +17,7 @@ length are what HA takes but should not be given:
 - Control characters (Unicode category Cc: C0, DEL, C1). A tab or newline
   passes HA and slugs to an underscore, but it is never meant, and it breaks
   every single-line place the label is shown.
-- Lone surrogates (Cs). JSON can carry "\ud800" and json.loads accepts it, but
+- Lone surrogates (Cs). JSON can carry "\\ud800" and json.loads accepts it, but
   the label is later UTF-8 encoded into the mDNS TXT record, and that raises.
 - No letter or number at all. HA builds entity_ids by slugifying
   "<label> Voice Assistant", and an emoji- or punctuation-only label slugs to

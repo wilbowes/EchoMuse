@@ -6,6 +6,9 @@ em_limiter.Limiter). The Go port is held to these sample for sample.
 
     cd controller && python ../device/internal/outchain/testdata/gen_vectors.py
 
+The Radar cases need a Radar's own files: ECHOMUSE_RADAR_TUNING names a copy
+of an Echo 2's /system/vendor/etc/audio-algorithms (see em_radar_tuning).
+
 Processing runs in 2048-sample chunks, the device's period, and every
 parameter change lands on a chunk boundary, as it does on the device. The
 limiter and guard are always INSTANCES with an enabled flag, never None:
@@ -38,6 +41,7 @@ DEFAULTS = {
     "bands": [0.0] * 8, "loudness": False,
     "guardEnabled": True, "guardDb": -30.0,
     "limiterEnabled": True, "limiterThreshold": -1.0, "limiterRelease": 150.0,
+    "stockCurve": False,
 }
 
 
@@ -109,6 +113,38 @@ CASES = [
          [16, {"bands": [0.0] * 8, "loudness": False}],           # back to flat
          [18, {"bands": [-6.0] * 8, "guardEnabled": True}],       # shaped again
      ]},
+    # Radar's own board — crossover 70Hz / threshold -25dB (em_mbc.RADAR_*),
+    # not biscuit's 115Hz / -50dB. speechlike has real content below 70Hz
+    # (the 55Hz tone) specifically so band 1 has something to act on; a
+    # mid-stream guard-depth change proves the board's values, not just the
+    # defaults, stay in force across SetParams.
+    {"name": "radar_board", "signal": "speechlike", "chunks": 6, "seed": 9,
+     "board": "radar",
+     "schedule": [[0, {}], [3, {"guardDb": -15.0}]]},
+    # Radar's stock FIR curve, layered under a shaped 8-band EQ — the full
+    # combination the dashboard actually exposes (Config → Playback →
+    # "Radar's own stock EQ curve" + bands still free to move). stockCurve
+    # is construction-only in StreamingEQ (see its docstring), so unlike
+    # every other case it must not appear in any schedule delta — only at
+    # chunk 0. sweep exercises the FIR's actual shape across the band it
+    # measurably differs in (steep transitions the biquads cannot match),
+    # which speechlike's narrower spectrum would mostly miss.
+    {"name": "radar_stock_curve", "signal": "sweep", "chunks": 6, "seed": 10,
+     "board": "radar",
+     "schedule": [[0, {"stockCurve": True, "bands": [3.0, -2.0, 0, 0, 0, 1.0, 0, -1.0]}],
+                  [3, {"stockCurve": True, "bands": [3.0, -2.0, 0, 0, 0, 1.0, 0, -1.0],
+                       "guardDb": -12.0}]]},
+    # Radar takes the volume AHEAD of the chain (em_eq volume_gain /
+    # outchain.Chain.SetVolumeGain), so MBCL sees the attenuated signal the
+    # way stock's does. Every kind of change: a quiet start, ramps up and
+    # down, and back to unity. volumeGain is only ever written in a delta,
+    # so no other case's manifest gains the key.
+    {"name": "radar_volume", "signal": "speechlike", "chunks": 8, "seed": 11,
+     "board": "radar",
+     "schedule": [[0, {"stockCurve": True, "volumeGain": 0.1}],
+                  [2, {"stockCurve": True, "volumeGain": 0.5}],
+                  [4, {"stockCurve": True, "volumeGain": 1.0}],
+                  [6, {"stockCurve": True, "volumeGain": 0.03}]]},
 ]
 
 
@@ -124,25 +160,44 @@ def render(case):
     """(input int16, output int16, stats) for one case."""
     x = _signal(case["signal"], case["chunks"], case["seed"])
     p0 = _params_at(case["schedule"], 0)
-    lim = em_limiter.Limiter(FS, threshold_db=p0["limiterThreshold"],
-                             release_ms=p0["limiterRelease"],
-                             enabled=p0["limiterEnabled"])
-    guard = em_mbc.BassGuard(FS, bass_guard_db=p0["guardDb"],
-                             enabled=p0["guardEnabled"])
+    board = case.get("board", "biscuit")
+    is_radar = board == "radar"
+
+    # Mirrors em_player.py's _limiter_params: Radar overrides the config
+    # value regardless of what the schedule carries, same reason the real
+    # call site does — board identity can't change mid-stream, so this is
+    # safe to decide once per case rather than per chunk here too.
+    def lim_params(p):
+        return em_limiter.params_for(board, p["limiterThreshold"], p["limiterRelease"])
+
+    lim_threshold_db, lim_release_ms = lim_params(p0)
+    lim = em_limiter.build_limiter(FS, board, threshold_db=lim_threshold_db,
+                                   release_ms=lim_release_ms,
+                                   enabled=p0["limiterEnabled"])
+    guard = em_mbc.build_guard(FS, board, bass_guard_db=p0["guardDb"],
+                               enabled=p0["guardEnabled"])
+    # Radar's chain takes the volume; the device starts it at unity, which
+    # is what every Radar case that never names a volume runs at.
     chain = em_eq.StreamingEQ(FS, p0["bands"], p0["loudness"],
-                              limiter=lim, guard=guard)
+                              limiter=lim, guard=guard,
+                              stock_curve=p0.get("stockCurve", False),
+                              volume_gain=(p0.get("volumeGain", 1.0)
+                                           if is_radar else None))
     out = []
     for c in range(case["chunks"]):
         p = _params_at(case["schedule"], c)
+        cur_lim_threshold_db, cur_lim_release_ms = lim_params(p)
         chain.update(bands=p["bands"], loudness=p["loudness"],
                      limiter_enabled=p["limiterEnabled"],
-                     limiter_threshold=p["limiterThreshold"],
-                     limiter_release=p["limiterRelease"],
+                     limiter_threshold=cur_lim_threshold_db,
+                     limiter_release=cur_lim_release_ms,
                      guard_enabled=p["guardEnabled"], guard_db=p["guardDb"])
+        if is_radar:
+            chain.set_volume_gain(p.get("volumeGain", 1.0))
         out.append(chain.process(x[c * CHUNK:(c + 1) * CHUNK].tobytes()))
     y = np.frombuffer(b"".join(out), dtype=np.int16)
     stats = {
-        "guardReductionDb": float(guard._bass.max_reduction_db),
+        "guardReductionDb": float(guard.raw_max_reduction_db),
         "limiterReductionDb": float(lim.max_reduction_db),
         "clipped": int(lim.clipped),
         "clippedBypassed": int(lim.clipped_bypassed),
@@ -151,11 +206,16 @@ def render(case):
 
 
 def manifest_entry(case, stats):
-    return {"name": case["name"], "chunk": CHUNK, "sampleRate": FS,
-            "chunks": case["chunks"],
-            "schedule": [[at, _params_at(case["schedule"], at)]
-                         for at, _ in case["schedule"]],
-            "stats": stats}
+    entry = {"name": case["name"], "chunk": CHUNK, "sampleRate": FS,
+             "chunks": case["chunks"],
+             "schedule": [[at, _params_at(case["schedule"], at)]
+                          for at, _ in case["schedule"]],
+             "stats": stats}
+    # Omitted for every existing (biscuit) case, so the committed manifest's
+    # unchanged entries stay byte-identical — only the new case gains a key.
+    if case.get("board", "biscuit") != "biscuit":
+        entry["board"] = case["board"]
+    return entry
 
 
 def main():

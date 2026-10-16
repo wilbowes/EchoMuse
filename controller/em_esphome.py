@@ -229,10 +229,40 @@ MDNS_NAME    = os.environ.get("MDNS_NAME", "echomuse")
 # Defaults to the real controller version (version.py) so HA's device page
 # shows the same thing as the dashboard header; env var kept as an override.
 from version import VERSION as _CONTROLLER_VERSION
-# HA's ESPHome integration displays the segment after the dot in
-# project_name as the device Model (overriding DeviceInfo's model field),
-# so carry the hardware model there — not the device label.
-ESPHOME_DEVICE_MODEL = "Echo Dot Gen 2 (biscuit)"
+# Hardware model reported to Home Assistant. The string carries the
+# board name in parentheses — HA shows it verbatim under "Device info"
+# alongside the manufacturer. One binary supports two boards, so the
+# value MUST be derived from the device's own register message rather
+# than baked in: HA would otherwise show "Echo Dot Gen 2" on every
+# Radar, with no signal that anything is wrong. biscuit is the original
+# target and stays the default for firmware that doesn't report `board`.
+# Add a new board here, not at the call site — see CLAUDE.md "Resolve
+# hardware by NAME".
+ESPHOME_BOARD_MODELS: dict[str | None, str] = {
+    None:    "Echo Dot Gen 2 (biscuit)",   # older firmware without `board`
+    "biscuit": "Echo Dot Gen 2 (biscuit)",
+    "radar":   "Echo 2 (radar)",
+}
+
+
+def esphome_device_model(board_id: str | None) -> str:
+    """
+    The ESPHome device model string for a given board.
+
+    Looked up rather than baked in so the project's two boards (biscuit /
+    radar) each show the right name in Home Assistant's device page.
+    Unknown boards — anything beyond the table — fall back to biscuit so a
+    newly-supported board does not silently mis-identify itself; the fix
+    is to add it to ESPHOME_BOARD_MODELS.
+    """
+    if board_id in ESPHOME_BOARD_MODELS:
+        return ESPHOME_BOARD_MODELS[board_id]
+    log.warning(
+        "esphome: unknown board_id %r, defaulting model to biscuit",
+        board_id,
+    )
+    return ESPHOME_BOARD_MODELS[None]
+
 
 ESPHOME_PROJECT_VERSION = os.environ.get(
     "ESPHOME_PROJECT_VERSION", _CONTROLLER_VERSION
@@ -574,7 +604,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         if server is None:
             return
         om = server.output_mute
-        level = (om.mute(em_volume.ha_volume_to_device(server.volume))
+        level = (om.mute(em_volume.ha_volume_to_device(server.volume,
+                                                        server.board_id))
                  if mute else om.unmute())
         log.info(f"[{self._log_name}] output {'mute' if mute else 'unmute'}"
                  f"{'' if level is None else f' → level {level}'}")
@@ -594,18 +625,29 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         """
         if isinstance(msg, api_pb2.DeviceInfoRequest):
             log.debug(f"[{self._log_name}] DeviceInfoRequest from {self.peer}")
+            # The model's hardware suffix follows the device's own board,
+            # so Home Assistant shows "Echo Dot Gen 2 (biscuit)" or "Echo 2
+            # (radar)" instead of one constant for everything. board_id is
+            # set on the owning server by device_connected() before the
+            # TCP listener comes up, so it is in place for HA's first
+            # request after a wizard setup. None (older firmware without
+            # `board` in the register message) defaults to biscuit — see
+            # ESPHOME_BOARD_MODELS.
+            _board_id = (self._owning_server.board_id
+                         if self._owning_server is not None else None)
+            _model = esphome_device_model(_board_id)
             yield api_pb2.DeviceInfoResponse(
                 uses_password=False,
                 name=self.server_name,
                 friendly_name=f"{self.label} Voice Assistant",
                 mac_address=self.mac_address,
                 manufacturer="EchoMuse",
-                model=ESPHOME_DEVICE_MODEL,
+                model=_model,
                 # CRITICAL: dot notation required — HA's manager.py does
                 # project_name.split(".") unconditionally. No dot → IndexError
                 # → device silently never appears in Devices & Services.
                 # (session handoff finding #1)
-                project_name=f"EchoMuse.{ESPHOME_DEVICE_MODEL}",
+                project_name=f"EchoMuse.{_model}",
                 project_version=ESPHOME_PROJECT_VERSION,
                 voice_assistant_feature_flags=self._voice_assistant_flags(),
             )
@@ -752,7 +794,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 # The conversion is em_volume's, not a local `* 175`: the
                 # ceiling is the codec's unity gain, above which the DAC
                 # clips (see em_volume's docstring).
-                level = em_volume.ha_volume_to_device(msg.volume)
+                level = em_volume.ha_volume_to_device(
+                    msg.volume, self._owning_server.board_id)
                 self._owning_server.output_mute.volume_set(level)
                 log.debug(
                     f"[{self._log_name}] MediaPlayerCommandRequest: "
@@ -2483,6 +2526,9 @@ class DeviceESPhomeServer:
         # Injected by device_connected(); applies HA's wake word choice
         # synchronously. None when no device is connected.
         self._set_wake_word = None
+        # The connected device's board (em_controller.Device.board_id), for
+        # em_volume: Radar reads the HA float on its stock volume law.
+        self.board_id: str | None = None
         # Injected by device_connected() — async callable(pcm_bytes) for
         # standalone announce playback (setup wizard, push TTS) when no
         # voice turn is active.
@@ -3264,6 +3310,7 @@ async def device_connected(
     start_conversation=None,
     set_wake_word=None,
     wake_word_enabled: bool = True,
+    board_id=None,
 ) -> None:
     """
     Called by em_controller.handle_control() when an Echo Dot connects.
@@ -3317,6 +3364,25 @@ async def device_connected(
     server._start_conversation = start_conversation
     server._set_wake_word = set_wake_word
     server.wake_word_enabled = bool(wake_word_enabled)
+    # Refresh the mDNS TXT when the device's board arrives — at startup
+    # the Echo hasn't connected yet, so mDNS was published with the
+    # biscuit default. Re-publishing with the right project_name keeps
+    # HA's discovery in step with what DeviceInfoResponse.model now
+    # reports; otherwise a Radar ships "Echo Dot Gen 2 (biscuit)" via
+    # mDNS until the next controller restart.
+    previous_board = server.board_id
+    server.board_id = board_id
+    if (server._mdns_info is not None
+            and board_id is not None
+            and board_id != previous_board):
+        server._mdns_info = _make_device_mdns_info(
+            device_id, server.label, server.port,
+            server.mac_address, board_id=board_id)
+        try:
+            await _azc.async_update_service(server._mdns_info)
+        except Exception as exc:
+            log.warning(
+                f"[{device_id}] mDNS refresh with board={board_id} failed: {exc}")
     if server._server is not None:
         log.debug(f"[esphome.{device_id[-8:]}] device_connected: port {server.port} already listening")
         return
@@ -3570,8 +3636,16 @@ def _mdns_service_name(device_id: str) -> str:
 
 
 def _make_device_mdns_info(device_id: str, label: str, port: int,
-                           mac: str) -> ServiceInfo:
+                           mac: str, board_id: str | None = None) -> ServiceInfo:
     svc_name = _mdns_service_name(device_id)
+    # The mDNS project_name has to agree with what DeviceInfoResponse.model
+    # says — HA keys discovery on mac_address, but the project_name in the
+    # TXT is what tells a re-running config flow "this is the device I have"
+    # (HA shows the part after the dot under Device info on re-imports).
+    # board_id may be None at startup (the Echo hasn't connected yet) and
+    # esphome_device_model() resolves that to the biscuit default; we
+    # re-publish once the device reports its real board.
+    _model = esphome_device_model(board_id)
     return ServiceInfo(
         "_esphomelib._tcp.local.",
         f"{svc_name}._esphomelib._tcp.local.",
@@ -3590,7 +3664,7 @@ def _make_device_mdns_info(device_id: str, label: str, port: int,
             # required to agree, and nothing reports it if they stop.
             "mac": mac.replace(":", "").lower(),
             "network": "ethwifi",
-            "project_name": f"EchoMuse.{ESPHOME_DEVICE_MODEL}",
+            "project_name": f"EchoMuse.{_model}",
             "project_version": ESPHOME_PROJECT_VERSION,
         },
         server=f"{svc_name}.local.",

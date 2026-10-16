@@ -27,6 +27,7 @@ func TestOutputChainKeysApplyIncludingZero(t *testing.T) {
 		Bands: [8]float64{1, 2, 3, 4, 5, 6, 7, 8}, Loudness: true,
 		GuardEnabled: false, GuardDb: -12,
 		LimiterEnabled: false, LimiterThresholdDb: -3, LimiterReleaseMs: 80,
+		StockCurve: true,
 	}
 	if got := d.OutputChain(); got != want {
 		t.Fatalf("got %+v\nwant %+v", got, want)
@@ -52,6 +53,21 @@ func TestOutputChainStartsAtDefaults(t *testing.T) {
 	push(t, d, `{}`)
 	if got := d.OutputChain(); got != outchain.DefaultParams() {
 		t.Fatalf("got %+v", got)
+	}
+}
+
+// eqStockCurve is a pointer like every other output-chain key, so pushing
+// it explicitly false must actually clear a previously-set true — same
+// "survives being set to its zero" rule as the rest of this file.
+func TestOutputChainStockCurveAppliesIncludingFalse(t *testing.T) {
+	d := &Device{}
+	push(t, d, `{"eqStockCurve":true}`)
+	if got := d.OutputChain(); !got.StockCurve {
+		t.Fatalf("got %+v, want StockCurve=true", got)
+	}
+	push(t, d, `{"eqStockCurve":false}`)
+	if got := d.OutputChain(); got.StockCurve {
+		t.Fatalf("got %+v, want StockCurve=false", got)
 	}
 }
 

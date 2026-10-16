@@ -7,8 +7,10 @@ from em_player import MediaSession, SPEAKER_BYTES, PLAYING, PAUSED, IDLE
 class FakeDevice:
     def __init__(self, device_id="office"):
         self.device_id = device_id
+        self.board_id = None
         self.eq_bands = [0.0] * 8
         self.eq_loudness = False
+        self.eq_stock_curve = False
         self.bass_guard_enabled = True
         self.bass_guard_db = -30.0
         self.limiter_enabled = True

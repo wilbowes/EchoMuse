@@ -107,6 +107,12 @@ async def apply_live_config(device_id: str, live, effective: dict) -> None:
         live.eq_bands = effective["eqBands"]
     if "eqLoudness" in effective:
         live.eq_loudness = bool(effective["eqLoudness"])
+    # The Radar-only stock EQ curve toggle — read at every playback
+    # (em_player), so an unsynced live push would change nothing audible
+    # until the device happened to reconnect, the same shape the limiter
+    # and bass-guard mirrors above are checked against.
+    if "eqStockCurve" in effective:
+        live.eq_stock_curve = bool(effective["eqStockCurve"])
     # The output chain is consumed HERE, not on the device — it ignores these
     # five keys entirely — so this mirror is the only thing that carries them.
     # Missing it meant a push wrote the database, sent JSON the device threw

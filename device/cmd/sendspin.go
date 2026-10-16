@@ -9,6 +9,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/client"
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/firewall"
+	"github.com/wilbowes/EchoMuse/internal/outchain"
 	"github.com/wilbowes/EchoMuse/internal/sendspin"
 	"github.com/wilbowes/EchoMuse/pkg/board"
 )
@@ -47,8 +48,25 @@ type deviceVolume interface {
 
 const volumeMax = 127
 
-func levelToPct(level int) int { return sendspin.LevelToPercent(level, volumeMax) }
-func pctToLevel(pct int) int   { return sendspin.PercentToLevel(pct, volumeMax) }
+// On Radar the server's 0-100 is stock's own volume value, read through
+// stock's mixer table (outchain.StockVolumeLevel), exactly as the
+// controller reads HA's slider there. A straight proportion played Music
+// Assistant's 30 at -44.5dB where stock's 30 is -35dB.
+func stockVolumeLaw() bool { return board.IDOf(board.Current()) == "radar" }
+
+func levelToPct(level int) int {
+	if stockVolumeLaw() {
+		return outchain.StockVolumeValue(level)
+	}
+	return sendspin.LevelToPercent(level, volumeMax)
+}
+
+func pctToLevel(pct int) int {
+	if stockVolumeLaw() {
+		return outchain.StockVolumeLevel(pct)
+	}
+	return sendspin.PercentToLevel(pct, volumeMax)
+}
 
 // sendspinVolumeChanged tells the player the device's volume moved, by any
 // route. Wired into the volume change callback.

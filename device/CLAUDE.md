@@ -1156,6 +1156,23 @@ rather than −63.5dB. The speaker is silent until told a volume, and the
 volume controller applies its level the moment it is wired (`SetVolumeApply`),
 starting from 100, which is where Init used to leave the DAC.
 
+**On Radar the volume goes IN FRONT of the output chain, not after it**
+(`outchain.Chain.TakesVolume`, 2026-10-10). Stock attenuates in AudioFlinger,
+before the AFE's FIR and MBCL ever see the signal, so MBCL's compressors only
+engage once the user has turned it up — at an ordinary volume the music sits
+under band 2's −18dB threshold and the stock curve's +10dB of bass passes
+untouched. Applied after the chain, as every board did, those compressors see
+full-scale audio at every volume: porting MBCL's bands 2–4 (8239c66) then held
+the bass down at levels nobody was listening at, measured as bass-over-mids
+falling from +12.9dB to +5.9dB at every volume against a stock model's +16.5dB
+(level 80) to +1.7dB (level 127). The chain ramps the gain per period exactly
+as `softVolume` does, and the speaker then settles `softVolume` instead of
+applying it, so nothing is attenuated twice. Only while the chain is ACTIVE:
+an inactive chain (the controller still processing) keeps the volume after,
+as before. Biscuit is unchanged — its single bass band was tuned in place.
+The stock FIR is then chosen BY that volume, as `AFE.cfg` chooses among
+Radar's five `EQ_*.cfg` curves (controller/CLAUDE.md, the output chain).
+
 **The scale stops at the codec's unity gain, and that ceiling is load-bearing.**
 tinymix ctl 61 is the tlv320aic32x4 DAC *digital* volume: 176 steps of 0.5dB
 spanning −63.5…+24dB, with 0dB at index **127**. The firmware shipped
@@ -1193,6 +1210,26 @@ to go nowhere. Silencing the device is the mute button's job. Explicit `Set()`
 calls are deliberately **not** floored — HA's volume 0.0 must still mean
 silent — and a press from below the floor lands *on* it, so one press always
 reaches audible.
+
+**On Radar the buttons walk stock's own 30 steps instead**
+(`radarVolumeSteps`, 2026-10-10): each Alexa step's value from
+`VolumeCurves.xml`, through the level table read out of stock's
+`/system/bin/mixer`, which is already in this law (0.5dB per step, 127 =
+0dB). That is 30 presses from −62dB to unity where the 4dB band gave 10,
+and a press moves as far as it does on a stock Echo. A level between steps
+moves to the next one; the bottom step is the floor. The controller reads the
+HA slider on the same table on Radar (`em_volume.STOCK_MIXER_LEVELS`), so HA
+54% is Alexa 5 (−23dB). Biscuit keeps the band above: its stock tables have
+not been read.
+
+**The Radar volume arc has a half-bright LED** (`stepArc`, 2026-10-11): 30
+steps over 12 LEDs is two and a half steps to an LED, so whole LEDs alone move
+the ring on 12 of 30 presses. The LED a step has only partly reached glows at
+half brightness (cyan G/B 100 against 200), which moves it on 24 (a step rounds
+up to the next half-LED; the top step fills the ring). That is how stock's
+in-between steps look as described by the owner of the unit; the exact
+brightness is a judgement, not a measured value. Biscuit's band keeps whole
+LEDs.
 
 `volumeButtonSound` is the optional physical-button preview (#637). It plays
 only when the button actually changes the level and both voice and music have

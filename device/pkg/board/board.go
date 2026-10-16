@@ -39,8 +39,12 @@ var Biscuit = &Board{
 	Hardware:     biscuitHardware,
 }
 
+// Radar is the Echo 2nd gen (2017). Identity is verified on NS6572/6436.
+// It has no platform tuning profile; retain the kernel defaults.
+var Radar = &Board{ID: "radar", DeviceTypeID: "A7WXQPH584YP", Hardware: radarHardware}
+
 // Known is every board the firmware can identify.
-var Known = []*Board{Biscuit}
+var Known = []*Board{Biscuit, Radar}
 
 // Detect returns the board beneath root, or nil when none matches. root is ""
 // on a device and a fixture directory in tests.

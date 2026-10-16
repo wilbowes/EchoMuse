@@ -36,10 +36,12 @@ function liftArrow(name) {
   throw new Error(`could not find the end of ${name}`);
 }
 
-const { _unlockVerdict } = await import(
+const { _unlockVerdict, _provisionBoard } = await import(
   "data:text/javascript;base64," + Buffer.from(
-    liftArrow("_amonetLk") + "\n" + liftArrow("_unlockVerdict")
-    + "\nexport { _unlockVerdict };"
+    liftArrow("_amonetLk") + "\n"
+    + liftArrow("_provisionBoard") + "\n"
+    + liftArrow("_unlockVerdict")
+    + "\nexport { _unlockVerdict, _provisionBoard };"
   ).toString("base64"));
 
 const LK_V1 = "8816885824790500";  // amonet 1's lk.bin: MTK magic, then the image length, 358,692
@@ -52,6 +54,12 @@ function check(name, cond, detail) {
   console.error(`FAIL: ${name}${detail ? `\n      ${detail}` : ""}`);
 }
 const v2 = (args) => _unlockVerdict(args).v2;
+
+check("Radar stock identity is recognised", _provisionBoard('AEORD', 'radar_puffin') === 'radar');
+check("Biscuit stock identity is recognised", _provisionBoard('AEOBC', 'csm_biscuit') === 'biscuit');
+check("another Amazon device is refused", _provisionBoard('Amazon Echo', 'unknown') === '');
+check("inconsistent Radar identity is refused", _provisionBoard('AEORD', 'unknown') === '');
+check("Radar FireOS and TWRP do not imply amonet-biscuit", !v2({ board: 'radar', release: '7.1.2', twrp: '3.7.0_9-0', expdb: '88168858' }));
 
 // ── A v1.1.0 device must pass, in every state the wizard can meet it in ──
 check("v1 in TWRP: FireOS 5 on /system, v1's LK, TWRP 3.2.3",

@@ -144,12 +144,12 @@ class _EmosIO:
         await asyncio.sleep(1.0)
         return "" if sent else str(sent)
 
-    async def payload(self, arch: str) -> tuple:
+    async def payload(self, arch: str, board: str = "biscuit") -> tuple:
         if self.override is not None:
             init_bin, sbin, version, err = select_payload(
-                self.override[0], arch, self.override[1])
+                self.override[0], arch, self.override[1], board)
         else:
-            init_bin, sbin, version, err = await fetch_payload(arch)
+            init_bin, sbin, version, err = await fetch_payload(arch, board)
         if err is not None:
             try:
                 reason = json.loads(err.text)["error"]
@@ -281,7 +281,7 @@ SBIN_BOTH_ARCHES = ("em-wifi",)
 PAYLOAD_ASSET = "emos-payload.zip"
 
 
-async def fetch_payload(arch: str) -> tuple:
+async def fetch_payload(arch: str, board: str = "biscuit") -> tuple:
     """Everything an emOS image needs for `arch`, from ONE release.
 
     Returns (init, sbin, version, error) — `sbin` being the /sbin tools the
@@ -293,6 +293,11 @@ async def fetch_payload(arch: str) -> tuple:
     Comes from the release's bundle. A release predating it falls back to its
     loose `init`, which is enough for FireOS 5 — so today's fleet keeps
     provisioning with no new tag. FireOS 6 needs the bundle and says so.
+
+    The board is carried alongside the architecture because Radar's init is
+    named differently from Biscuit's on the same ARM kernel, and a release's
+    `init32` is not interchangeable with a Radar's `init32-radar` even when
+    both target ARM.
     """
     release = await em_releases.fetch_emos()
     if release is None:
@@ -335,17 +340,24 @@ async def fetch_payload(arch: str) -> tuple:
             "bad_release_asset",
             f"The payload in emOS release {version} is not usable: {e}", 502)
 
-    return select_payload(payload["files"], arch, version)
+    return select_payload(payload["files"], arch, version, board)
 
 
-def select_payload(files: dict, arch: str, version: str) -> tuple:
+def select_payload(files: dict, arch: str, version: str,
+                     board: str = "biscuit") -> tuple:
     """Pick the init and /sbin tools for `arch` out of a bundle's files.
 
     Split from fetch_payload so an uploaded bundle (the emOS update's
-    dev path) is selected from by the same rules as a release.
+    dev path and the wizard's /api/provision/emos_image) is selected from
+    by the same rules as a release. The board is carried alongside the
+    architecture because Radar's init is named differently from Biscuit's
+    on the same ARM kernel, and a release's `init32` is not interchangeable
+    with a Radar's `init32-radar` even when both target ARM.
     """
-    init_name = INIT_ASSETS.get(arch,
-                                     INIT_ASSETS[em_emos_build.ARCH_ARM64])
+    try:
+        init_name = em_emos_build.init_asset_name(arch, board)
+    except em_emos_build.BuildError as exc:
+        return None, {}, version, em_http.error("unsupported_board", str(exc), 400)
     init = files.get(init_name)
     if init is None:
         return None, {}, version, em_http.error(
@@ -378,15 +390,10 @@ def select_payload(files: dict, arch: str, version: str) -> tuple:
     if arch == em_emos_build.ARCH_ARM:
         missing = [n for n in SBIN_ASSETS if n not in files]
         if missing:
-            # Fatal: Amazon's supplicant cannot run under emOS, so the image
-            # would have no WiFi and no way to report it but a cable.
             return None, {}, version, em_http.error(
                 "no_wifi_tools_for_arch",
-                f"emOS release {version} carries no {', '.join(missing)}. A "
-                f"FireOS 6 image needs emOS's own userspace — Amazon's "
-                f"supplicant cannot run under emOS and its /system has no "
-                f"busybox — so there is nothing to build a working image "
-                f"from. Cut a newer emos-v* tag.", 404)
+                f"Uploaded payload is missing {', '.join(missing)}. A 32-bit "
+                "emOS image needs its own Wi-Fi tools.", 400)
         sbin.update({n: files[n] for n in SBIN_ASSETS})
 
     return init, sbin, version, None

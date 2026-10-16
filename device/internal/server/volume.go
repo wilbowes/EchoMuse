@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wilbowes/EchoMuse/pkg/board"
 	"github.com/wilbowes/EchoMuse/pkg/led"
 )
 
@@ -40,9 +41,27 @@ const (
 	numLEDs    = 12
 )
 
+// radarVolumeSteps are stock Radar's 30 button steps, as device levels: each
+// Alexa step's value from VolumeCurves.xml (music row), through the level
+// table stock's /system/bin/mixer turns a value into (Mixer_AlgoRampGain) —
+// the same law as ours, 0.5dB per step with 127 = 0dB. Stock has an LED
+// animation for each (volume_step-01 to -30). They replace the 4dB steps
+// above the -40dB floor on Radar: 30 presses from -62dB to unity where those
+// gave 10, so a press moves as far as it does on a stock Echo. Steps are
+// finer in the middle and wider at the bottom, as stock's are. Controller
+// side, em_volume reads the HA slider on the same table.
+var radarVolumeSteps = []int{
+	3, 7, 11, 17, 27, 38, 43, 49, 55, 61,
+	67, 71, 73, 77, 81, 83, 87, 91, 95, 97,
+	99, 103, 107, 111, 115, 117, 119, 123, 125, 127,
+}
+
 type volumeController struct {
-	mu             sync.Mutex
-	level          int
+	mu    sync.Mutex
+	level int
+	// steps is the board's own button ladder (radarVolumeSteps); nil keeps
+	// the volumeStep band above volumeButtonFloor.
+	steps          []int
 	ledCtrl        func() led.Controller // getter so we handle nil during boot
 	timer          *time.Timer
 	displayActive  bool        // volume arc currently on the ring — see DisplayActive
@@ -83,6 +102,9 @@ func newVolumeController(ledGetter func() led.Controller) *volumeController {
 	vc := &volumeController{
 		ledCtrl: ledGetter,
 		level:   volumeBoot,
+	}
+	if board.IDOf(board.Current()) == "radar" {
+		vc.steps = radarVolumeSteps
 	}
 	log.Printf("Volume controller initialised at %d/%d", vc.level, volumeMax)
 	return vc
@@ -175,17 +197,58 @@ func (vc *volumeController) Get() int {
 // StepUp increases volume by one step, within the button band.
 func (vc *volumeController) StepUp() bool {
 	vc.mu.Lock()
-	level := vc.level + volumeStep
+	level, steps := vc.level, vc.steps
 	vc.mu.Unlock()
-	return vc.Set(clampToButtonBand(level), true)
+	if steps != nil {
+		return vc.Set(stepAbove(steps, level), true)
+	}
+	return vc.Set(clampToButtonBand(level+volumeStep), true)
 }
 
 // StepDown decreases volume by one step, within the button band.
 func (vc *volumeController) StepDown() bool {
 	vc.mu.Lock()
-	level := vc.level - volumeStep
+	level, steps := vc.level, vc.steps
 	vc.mu.Unlock()
-	return vc.Set(clampToButtonBand(level), true)
+	if steps != nil {
+		return vc.Set(stepBelow(steps, level), true)
+	}
+	return vc.Set(clampToButtonBand(level-volumeStep), true)
+}
+
+// stepAbove is the first step above level, or the top step. A level between
+// steps (HA can put it anywhere) moves to the next step up, so one press
+// always lands on the ladder.
+func stepAbove(steps []int, level int) int {
+	for _, s := range steps {
+		if s > level {
+			return s
+		}
+	}
+	return steps[len(steps)-1]
+}
+
+// stepBelow is the last step below level, or the bottom step: like the
+// floor in clampToButtonBand, silencing is the mute button's job.
+func stepBelow(steps []int, level int) int {
+	for i := len(steps) - 1; i >= 0; i-- {
+		if steps[i] < level {
+			return steps[i]
+		}
+	}
+	return steps[0]
+}
+
+// stepIndex is how many steps are at or below level: 1..len(steps) on the
+// ladder, 0 below its bottom.
+func stepIndex(steps []int, level int) int {
+	n := 0
+	for _, s := range steps {
+		if s <= level {
+			n++
+		}
+	}
+	return n
 }
 
 // clampToButtonBand holds a stepped level inside [volumeButtonFloor,
@@ -200,6 +263,29 @@ func clampToButtonBand(level int) int {
 		return volumeMax
 	}
 	return level
+}
+
+// stepArc is the volume arc for a stepped ladder, in half-LEDs per LED:
+// 2 full, 1 half-bright, 0 off. 30 steps over 12 LEDs is two and a half
+// steps to an LED, so lighting whole LEDs only moves the ring every second
+// or third press. The LED a step has only partly reached glows at half
+// brightness, so the ring moves on nearly every press: the arc is 2*n
+// half-LEDs, a step rounds up to the next, and the top step fills it. A
+// level below the ladder's bottom (HA can put it there) still shows one
+// half-LED, so a quiet device does not read as off.
+func stepArc(steps []int, level, n int) []int {
+	half := (stepIndex(steps, level)*2*n + len(steps) - 1) / len(steps)
+	if half < 1 {
+		half = 1
+	}
+	if half > 2*n {
+		half = 2 * n
+	}
+	out := make([]int, n)
+	for i := range out {
+		out[i] = min(max(half-2*i, 0), 2)
+	}
+	return out
 }
 
 // showLEDs lights N of 12 LEDs in cyan proportional to volume, then clears after 2s.
@@ -221,13 +307,18 @@ func (vc *volumeController) showLEDs(level int) {
 	if lit > numLEDs {
 		lit = numLEDs
 	}
+	// Whole LEDs in units of two: 2 is full cyan, 1 is the half-bright
+	// LED. The ladder's arc is in half-LEDs; the band's stays whole.
+	units := make([]int, numLEDs)
+	for i := 0; i < lit; i++ {
+		units[i] = 2
+	}
+	if vc.steps != nil {
+		units = stepArc(vc.steps, level, numLEDs)
+	}
 	leds := make([]led.Led, numLEDs)
 	for i := 0; i < numLEDs; i++ {
-		if i < lit {
-			leds[i] = led.Led{ID: i, R: 0, G: 200, B: 200} // cyan
-		} else {
-			leds[i] = led.Led{ID: i, R: 0, G: 0, B: 0}
-		}
+		leds[i] = led.Led{ID: i, R: 0, G: uint8(100 * units[i]), B: uint8(100 * units[i])} // cyan, 200 at full
 	}
 	if err := lc.SetLEDs(leds...); err != nil {
 		log.Printf("Volume LED set failed: %v", err)

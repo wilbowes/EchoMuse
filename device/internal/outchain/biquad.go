@@ -85,6 +85,47 @@ func lowShelf(fc, gainDb, fs float64) biquad {
 	)
 }
 
+// stockSqrt2 is stock's 1.4142 (libasp.so 0x93670), not math.Sqrt2.
+const stockSqrt2 = 1.4142
+
+// stockLowShelf and stockPeak are stock's own biquad design (libasp.so
+// 0x932e8, cases 5 and 4): Zoelzer's, on K = tan(pi*fc/fs) and
+// V = 10^(|gain|/20), mirrored from controller/em_eq.py. The shelf has a
+// fixed slope and takes no Q — stock ignores the cfg's Q there — and the
+// cookbook forms above differ from it by up to 1.3dB around 150-300Hz.
+func stockLowShelf(fc, gainDb, fs float64) biquad {
+	K := math.Tan(math.Pi * fc / fs)
+	K2 := K * K
+	V := math.Pow(10, math.Abs(gainDb)/20)
+	sv := math.Sqrt(V) * stockSqrt2
+	if gainDb >= 0 {
+		n := 1.0 / (K2 + K*stockSqrt2 + 1.0)
+		return biquad{b0: (V*K2 + sv*K + 1.0) * n, b1: 2.0 * (V*K2 - 1.0) * n,
+			b2: (V*K2 - sv*K + 1.0) * n, a1: 2.0 * (K2 - 1.0) * n,
+			a2: (K2 + 1.0 - K*stockSqrt2) * n}
+	}
+	n := 1.0 / (V*K2 + sv*K + 1.0)
+	return biquad{b0: (K2 + K*stockSqrt2 + 1.0) * n, b1: 2.0 * (K2 - 1.0) * n,
+		b2: (K2 - K*stockSqrt2 + 1.0) * n, a1: 2.0 * (V*K2 - 1.0) * n,
+		a2: (V*K2 - sv*K + 1.0) * n}
+}
+
+func stockPeak(fc, gainDb, q, fs float64) biquad {
+	K := math.Tan(math.Pi * fc / fs)
+	K2 := K * K
+	V := math.Pow(10, math.Abs(gainDb)/20)
+	if gainDb >= 0 {
+		n := 1.0 / (K2 + K/q + 1.0)
+		return biquad{b0: (K2 + V*K/q + 1.0) * n, b1: 2.0 * (K2 - 1.0) * n,
+			b2: (K2 - V*K/q + 1.0) * n, a1: 2.0 * (K2 - 1.0) * n,
+			a2: (K2 + 1.0 - K/q) * n}
+	}
+	n := 1.0 / (K2 + V*K/q + 1.0)
+	return biquad{b0: (K2 + K/q + 1.0) * n, b1: 2.0 * (K2 - 1.0) * n,
+		b2: (K2 - K/q + 1.0) * n, a1: 2.0 * (K2 - 1.0) * n,
+		a2: (K2 + 1.0 - V*K/q) * n}
+}
+
 func highShelf(fc, gainDb, fs float64) biquad {
 	A := math.Pow(10, gainDb/40)
 	w0 := 2 * math.Pi * fc / fs

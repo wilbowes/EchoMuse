@@ -456,6 +456,9 @@ func applyOutput(p *outchain.Params, msg ConfigMessage) {
 	if msg.LimiterRelease != nil {
 		p.LimiterReleaseMs = *msg.LimiterRelease
 	}
+	if msg.EqStockCurve != nil {
+		p.StockCurve = *msg.EqStockCurve
+	}
 }
 
 // OutputChain returns the output chain's current configuration.
@@ -617,6 +620,10 @@ type ConfigMessage struct {
 	LimiterEnabled   *bool     `json:"limiterEnabled,omitempty"`
 	LimiterThreshold *float64  `json:"limiterThreshold,omitempty"`
 	LimiterRelease   *float64  `json:"limiterRelease,omitempty"`
+	// EqStockCurve: Radar's own stock FIR curve (outchain.eqFIR), layered
+	// under EqBands above — see controller/em_eq.py's stock_curve. Has no
+	// effect on a board with no loaded curve (every board but Radar).
+	EqStockCurve *bool `json:"eqStockCurve,omitempty"`
 
 	// ListeningAnim: raw led_anim spec for the listening ring (#263).
 	// Carried as raw JSON so this package does not depend on the

@@ -70,6 +70,12 @@ const primePeriods = 24
 var silencePeriod = make([]byte, periodBytes)
 
 type PcmSpeaker struct {
+	radar bool
+	// radarSpeakerBiquad and radarJackBiquad are Radar's two codec filter
+	// profiles, read from the device in Init; nil off Radar, or when the jack
+	// profile could not be read (see radarJackRouting).
+	radarSpeakerBiquad []string
+	radarJackBiquad    []string
 	// pcm is the playback device, found by name (pkg/board) in Init, and
 	// statusFile its substream's status in procfs.
 	pcm        board.PCMAddr
@@ -256,15 +262,16 @@ func (p *PcmSpeaker) OnStreamStats(cb func(StreamStats)) {
 }
 
 func NewPcmSpeaker(echoTap func([]byte), levelTap func(rms float64)) (*PcmSpeaker, error) {
+	boardID := board.IDOf(board.Current())
 	s := &PcmSpeaker{
 		stopCh:        make(chan struct{}),
 		deadCh:        make(chan struct{}),
 		echoTap:       echoTap,
 		levelTap:      levelTap,
-		chain:         outchain.New(48000),
-		chainParams:   outchain.DefaultParams(),
+		chain:         outchain.NewForBoard(48000, boardID, radarTuning(boardID)),
 		chainBuf:      make([]byte, periodBytes),
 		srcBuf:        make([]byte, periodBytes),
+		chainParams:   outchain.DefaultParams(),
 		responseMix:   make([]float64, periodSize*2),
 		responseGains: make([]float64, periodSize),
 	}
@@ -274,19 +281,35 @@ func NewPcmSpeaker(echoTap func([]byte), levelTap func(rms float64)) (*PcmSpeake
 	s.mixer.SetGainImmediate(unityGain)
 	s.response.setDB(0)
 	s.response.cur = 1
+	// Silent until told a volume, like s.vol — a chain that takes the
+	// volume must not play its first period at full scale.
+	s.chain.SetVolumeGain(0)
 	if err := s.Init(); err != nil {
 		return nil, err
 	}
 	return s, nil
 }
 
-func (p *PcmSpeaker) Init() error {
+func (p *PcmSpeaker) Init() (err error) {
+	p.radar = board.Current() == board.Radar
 	pb := board.CurrentLayout().Playback
 	if pb == nil {
 		return errors.New("speaker: playback PCM not found on this board")
 	}
 	p.pcm = *pb
 	p.statusFile = statusPath(pb.Card, pb.Device)
+	if p.radar {
+		defer func() {
+			if err != nil {
+				p.abortRadarStartup()
+			}
+		}()
+		// Mute before stopping a stock media service, but wait for ownership
+		// of the PCM before replacing its codec configuration below.
+		if err = mixer.Set(radarMute, "On"); err != nil {
+			return err
+		}
+	}
 	// Startup order matters for the audible click (2026-07-10): the amp
 	// must come up onto a DAC that is already clocking silence, and the
 	// unmute must come last. The old order (amp on → unmute → open PCM)
@@ -302,6 +325,12 @@ func (p *PcmSpeaker) Init() error {
 	// work to do and is only ever in the way.
 	exec.Command("stop", "media").Run()
 	waitForFreePcm(p.pcm.Card, p.pcm.Device, pcmFreeTimeout)
+	if p.radar {
+		if err = prepareRadarSpeaker(radarDeviceXML); err != nil {
+			return err
+		}
+		p.radarSpeakerBiquad, p.radarJackBiquad = loadRadarJackProfiles(radarDeviceXML)
+	}
 	// Connect the DAC to the output mixer before opening the stream: DAPM
 	// decides what to power at stream open, and an unrouted DAC is powered
 	// down, which presents as a clean "voice stream complete, underruns=0"
@@ -327,6 +356,13 @@ func (p *PcmSpeaker) Init() error {
 	p.session = &session
 
 	go p.silenceLoop()
+	if p.radar {
+		if err = p.startRadarOutput(); err != nil {
+			return err
+		}
+		log.Println("PcmSpeaker initialised — Radar profile loaded, silence settled, hardware unmuted")
+		return nil
+	}
 
 	time.Sleep(100 * time.Millisecond)        // silence reaches the DAC (~2 periods)
 	mixer.Set(mixer.SpeakerAmp, "On")         // enable amp onto a clocked, silent DAC
@@ -405,12 +441,20 @@ func (p *PcmSpeaker) SetJackRouting(inserted bool) {
 	guardBypassed := inserted && p.chainParams.GuardEnabled
 	p.jackMu.Unlock()
 
-	p.applyJackWrites(jackRouting(inserted))
+	p.applyJackWrites(p.jackWrites(inserted))
 	log.Printf("[speaker] jack routing applied (%s)",
 		map[bool]string{true: "external", false: "internal"}[inserted])
 	if guardBypassed {
 		log.Printf("[speaker] output chain: bass guard bypassed while the jack is in use")
 	}
+}
+
+// jackWrites is the routing for a plug position on this board.
+func (p *PcmSpeaker) jackWrites(inserted bool) []mixerWrite {
+	if p.radar {
+		return radarJackRouting(inserted, p.radarSpeakerBiquad, p.radarJackBiquad)
+	}
+	return jackRouting(inserted)
 }
 
 func (p *PcmSpeaker) applyJackWrites(ws []mixerWrite) {
@@ -498,6 +542,11 @@ func (p *PcmSpeaker) WatchJackRouting(ctx context.Context) {
 // rather than hanging.
 func (p *PcmSpeaker) silenceLoop() {
 	defer close(p.deadCh)
+	defer func() {
+		if p.radar {
+			mixer.Set(radarMute, "On")
+		}
+	}()
 	var meter writeLoopMeter // bench builds only; empty otherwise
 	for {
 		select {
@@ -552,10 +601,16 @@ func (p *PcmSpeaker) silenceLoop() {
 		if wideResponse {
 			wide := p.mixer.MixResponse(p.responseMix, voice, music, p.duckTarget.Load(), responseGains)
 			if applied := p.chain.ProcessFloat(wide, responseGains); applied != nil {
-				log.Printf("[speaker] output chain: %s", applied)
+				log.Printf("[speaker] output chain: %s", p.chain.Describe(*applied))
 			}
 			out = voice
-			p.vol.applyFloat(wide, out, response.volumeTarget)
+			// A chain that takes the volume (Radar) has applied it already,
+			// ahead of its compressors.
+			if p.chain.TookVolume() {
+				p.vol.settleFloat(wide, out)
+			} else {
+				p.vol.applyFloat(wide, out, response.volumeTarget)
+			}
 		} else {
 			out = p.mixer.Mix(voice, music, p.duckTarget.Load())
 			process := out != nil
@@ -569,9 +624,18 @@ func (p *PcmSpeaker) silenceLoop() {
 			}
 			if process {
 				if applied := p.chain.Process(out); applied != nil {
-					log.Printf("[speaker] output chain: %s", applied)
+					log.Printf("[speaker] output chain: %s", p.chain.Describe(*applied))
 				}
-				p.vol.apply(out)
+				// On Radar the active chain applies the volume itself, AHEAD
+				// of its compressors (outchain.Chain.TakesVolume), so it must
+				// not be applied again here. softVolume still tracks the
+				// target, so the day the chain goes inactive it carries on
+				// from the right gain.
+				if p.chain.TookVolume() {
+					p.vol.settle()
+				} else {
+					p.vol.apply(out)
+				}
 			} else {
 				p.vol.settle()
 			}
@@ -809,7 +873,11 @@ const dacUnity = "127"
 
 // SetVolume sets the playback volume as a device level (0..127, 0.5dB per
 // step, unity at 127). Takes effect from the next period, ramped across it.
-func (p *PcmSpeaker) SetVolume(level int) { p.vol.set(VolumeGain(level)) }
+func (p *PcmSpeaker) SetVolume(level int) {
+	g := VolumeGain(level)
+	p.vol.set(g)
+	p.chain.SetVolumeGain(g)
+}
 
 // SetResponseGainDB sets the gain applied only to the voice plane, before it is
 // mixed with music. It is relative to the device volume and dynamically capped
@@ -824,9 +892,15 @@ func (p *PcmSpeaker) SetResponseGainDB(db float64) { p.response.setDB(db) }
 // amp-off after every server exit as a belt-and-braces for paths where
 // this never runs (SIGKILL, panic).
 func (p *PcmSpeaker) Close() {
+	if p.radar {
+		mixer.Set(radarMute, "On")
+	}
 	mixer.Set(mixer.PlaybackVolume, "0") // mute
 	mixer.Set(mixer.SpeakerAmp, "Off")   // amp off
 	close(p.stopCh)
+	if p.radar {
+		<-p.deadCh
+	}
 	p.session.Close()
 	log.Println("PcmSpeaker closed — output muted, amp off")
 }

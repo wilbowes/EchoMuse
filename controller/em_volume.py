@@ -30,18 +30,58 @@ def level_to_db(level: int) -> float:
     return (level - DEVICE_VOLUME_MAX) * DB_PER_STEP
 
 
-def device_level_to_ha(level: int) -> float:
-    """Convert a device volume level to an HA float (0.0–1.0)."""
+# Radar's own volume law, read out of its stock firmware. Alexa's volume is
+# a 0-100 value per step (VolumeCurves.xml), and the stock mixer daemon
+# (/system/bin/mixer, Mixer_AlgoRampGain) turns each value into a level in
+# exactly this module's law — 0.5dB per step, 127 = 0dB — through this table:
+# value + 27 from 11 up, a steeper run below. On Radar the HA slider's percent
+# IS that value, so HA 54% plays at the level a stock Echo plays Alexa
+# volume 5 at (-23dB), where a plain proportion put it at -29dB. em_eq reads
+# the same table to pick the stock EQ file for a volume.
+STOCK_MIXER_LEVELS = (
+    0, 3, 7, 11, 17, 20, 27, 30, 32, 35, 36,
+    *range(38, 128),            # values 11..100: value + 27
+)
+assert len(STOCK_MIXER_LEVELS) == 101
+
+
+def _uses_stock_law(board_id) -> bool:
+    return board_id == "radar"
+
+
+def stock_value_for_level(level: int) -> int:
+    """Stock's 0-100 volume value for a device level: the highest value whose
+    mixer level is at or below it."""
+    value = 0
+    for v, lv in enumerate(STOCK_MIXER_LEVELS):
+        if lv <= level:
+            value = v
+    return value
+
+
+def device_level_to_ha(level: int, board_id: str | None = None) -> float:
+    """Convert a device volume level to an HA float (0.0–1.0).
+
+    On Radar the float is stock's volume value / 100 (see
+    STOCK_MIXER_LEVELS); every other board keeps the plain proportion."""
     try:
-        return max(0.0, min(1.0, float(level) / DEVICE_VOLUME_MAX))
+        lv = float(level)
+        if _uses_stock_law(board_id):
+            lv = max(0, min(DEVICE_VOLUME_MAX, int(round(lv))))
+            return stock_value_for_level(lv) / 100.0
+        return max(0.0, min(1.0, lv / DEVICE_VOLUME_MAX))
     except (TypeError, ValueError, ZeroDivisionError):
         return 0.0
 
 
-def ha_volume_to_device(volume: float) -> int:
+def ha_volume_to_device(volume: float, board_id: str | None = None) -> int:
     """Convert an HA volume float (0.0–1.0) to a device volume level.
 
     Clamped to the codec's unity gain, so HA asking for full volume can never
-    put the DAC into positive digital gain.
+    put the DAC into positive digital gain. On Radar the float is read as
+    stock's volume value and goes through its mixer table.
     """
+    if _uses_stock_law(board_id):
+        value = max(0, min(100, round(float(volume) * 100)))
+        return STOCK_MIXER_LEVELS[value]
     return max(0, min(DEVICE_VOLUME_MAX, round(float(volume) * DEVICE_VOLUME_MAX)))

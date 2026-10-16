@@ -1,11 +1,13 @@
 # Boards: how the firmware finds its hardware
 
 The firmware is one binary. At start-up it works out which board it is on,
-looks up where that board's parts are **by name**, and opens what it found.
-Adding a board means describing it in one file; the drivers stay as they are.
+looks up the parts listed for that board **by name**, and opens what it found.
+Board detection and hardware discovery are data-driven; board-specific audio
+formats and startup sequences can still need driver code.
 
-Today only the Echo Dot 2nd gen (`biscuit`) is described. This page is for
-anyone trying the firmware on something else.
+The Echo Dot 2nd gen (`biscuit`) and Echo 2nd gen (`radar`) are described.
+Radar's descriptor lists only its confirmed keys, ring and PCM names. The
+Radar speaker's calibration and mute sequence remains board-specific code.
 
 Related reading: [`porting/README.md`](../porting/README.md) for the scripts
 that profile an unsupported Echo, and
@@ -117,13 +119,14 @@ the steps below ask for.
 
 ## What the description does not cover yet
 
-These are still written for the Dot 2 inside the drivers. A board that
-differs in any of them needs code, and the description will grow to hold
-them as the second board is added.
+These are still written for the Dot 2 inside the drivers unless noted. A
+board that differs in any of them needs code, and the description may grow to
+hold those differences.
 
 - **Microphone format and layout.** The pipeline expects 9 channels of 24-bit
   audio: six mics around the edge, one in the centre, and two channels of
-  playback loopback.
+  playback loopback. Radar's capture PCM reports 8 channels; its mapping into
+  the firmware's 9-channel transport still needs board-specific work.
 - **Audio routes.** `internal/bindings/codec/routes.go` closes ten mixer
   switches by name, all of them the Dot 2's.
 - **Amplifier and volume.** The amp switch, the DAC's unity value (127) and
@@ -131,6 +134,9 @@ them as the second board is added.
 - **Headphone jack.** The detect switch and the two controls written on
   plug-in and removal.
 - **Start-up order.** Some boards need one PCM opened before another.
+- **Radar speaker startup.** Radar loads the local 117-byte speaker filter and
+  uses its physical mute and longer settling sequence in
+  [`radar-speaker.md`](radar-speaker.md).
 - **Android services.** `stop mixer`, `stop media`, `stop ledcontroller` and
   `stop acebutton` are run as they are named on the Dot 2.
 - **CPU core parking** under `/proc/hps`, which is MediaTek's.

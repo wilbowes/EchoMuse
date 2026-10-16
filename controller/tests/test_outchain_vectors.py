@@ -47,7 +47,9 @@ def test_every_case_is_committed():
 
 
 @pytest.mark.parametrize("case", gen.CASES, ids=lambda c: c["name"])
-def test_committed_vectors_match_the_python_chain(case):
+def test_committed_vectors_match_the_python_chain(case, request):
+    if case.get("board") == "radar":
+        request.getfixturevalue("radar_tuning")   # the Echo's files, or skip
     x, y, stats = gen.render(case)
     assert np.array_equal(_read(case["name"], "in"), x)
     assert np.array_equal(_read(case["name"], "out"), y), \

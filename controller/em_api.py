@@ -33,12 +33,8 @@ is in em_state, which both import by name.
 
 import asyncio
 import logging
-import posixpath as _posixpath
-from shlex import quote as _sh_quote
-from typing import Optional
 
 from aiohttp import web
-import websockets
 
 import em_db as db
 import em_events
@@ -48,8 +44,6 @@ import em_http
 import em_state
 import em_auth as auth
 import em_tasks
-import em_tcp
-import em_firmware
 import em_ingressauth
 import em_routes_activity
 import em_routes_auth
@@ -173,7 +167,7 @@ async def _error_middleware(request: web.Request, handler):
         return e.to_response()
     except web.HTTPException:
         raise  # let aiohttp handle its own HTTP exceptions normally
-    except Exception as e:
+    except Exception:
         log.exception(f"Unhandled error in {request.method} {request.path}")
         return em_http.error("internal_error", "An internal error occurred", 500)
 
@@ -291,5 +285,6 @@ async def notify_device_pending(device_id: str, ip: str) -> None:
         "device_id": device_id,
         "ip":        ip,
     })
+
 
 

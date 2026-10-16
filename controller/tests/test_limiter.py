@@ -289,3 +289,75 @@ def test_toggle_midstream_splits_the_two_counters():
         "hot material after the toggle must be visible as bypassed clipping"
     assert lim.clipped == 0, \
         "post-toggle clips must not read as a buggy limiting limiter"
+
+
+# ─── _running_max helper ────────────────────────────────────────────────────
+
+def test_running_max_with_window_one_is_identity():
+    """A 1-sample window cannot reduce: the max of one sample is the sample.
+
+    A window of 0 is nonsensical; the helper short-circuits rather than
+    asking np.lib.stride_tricks to do the impossible.
+    """
+    x = np.array([0.0, 1.0, -2.0, 3.0, -1.0])
+    np.testing.assert_array_equal(L._running_max(x, 1), x)
+    np.testing.assert_array_equal(L._running_max(x, 0), x)
+
+
+# ─── StockLimiter (Radar's MBCL, runnable without the tuning) ───────────────
+
+def test_stock_limiter_clamps_a_hot_signal_to_threshold():
+    """Radar's MBCL full-band limiter uses stock's own coefficients, but the
+    interface and the units (S16) are the same as the built-in Limiter.
+    Testable without ECHOMUSE_RADAR_TUNING."""
+    sl = L.StockLimiter(FS)
+    out = _run(sl, _sine(amp=4.0))
+    assert np.abs(out).max() <= L._CEILING + 1e-6
+
+
+def test_stock_limiter_bypass_does_not_limit_but_still_counts():
+    """Same contract as Limiter's bypass: pass through hot, count to the
+    bypassed counter so the dashboard can show 'this is the backstop'."""
+    sl = L.StockLimiter(FS, enabled=False)
+    hot = _sine(amp=4.0)
+    out = _run(sl, hot)
+    assert sl.clipped == 0
+    assert sl.clipped_bypassed > 0
+    assert np.abs(out).max() > L._CEILING
+
+
+# ─── for_stream / build_limiter / params_for ───────────────────────────────
+
+def test_for_stream_returns_none_when_disabled():
+    """The caller has to short-circuit on None; building a never-used
+    Limiter is a wasted object per music stream."""
+    assert L.for_stream(FS, enabled=False) is None
+
+
+def test_for_stream_returns_a_limiter_when_enabled():
+    assert isinstance(L.for_stream(FS, enabled=True), L.Limiter)
+
+
+def test_params_for_passes_through_non_radar_boards():
+    """A non-Radar device gets the configured values verbatim. The Radar
+    branch reads from the tuning; we don't have it here, but the fallback
+    path is what every other device hits."""
+    threshold, release = L.params_for(None, -3.0, 200.0)
+    assert (threshold, release) == (-3.0, 200.0)
+    threshold, release = L.params_for("biscuit", -6.0, 100.0)
+    assert (threshold, release) == (-6.0, 100.0)
+
+
+def test_build_limiter_returns_a_limiter_for_a_biscuit():
+    """Non-Radar gets the built-in Limiter. Radar gets StockLimiter with
+    tuning-loaded values, but with no tuning the fallback also returns a
+    Limiter."""
+    lim = L.build_limiter(FS, "biscuit", enabled=True)
+    assert isinstance(lim, L.Limiter)
+
+
+def test_build_limiter_respects_disabled():
+    """An enabled=False at build time must produce a never-triggering
+    limiter (not None — the chain needs the object)."""
+    lim = L.build_limiter(FS, "biscuit", enabled=False)
+    assert lim.enabled is False

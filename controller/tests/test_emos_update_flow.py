@@ -186,7 +186,7 @@ class IO:
             self.link = "new"
         return ""
 
-    async def payload(self, arch):
+    async def payload(self, arch, board="biscuit"):
         if self._payload:
             return self._payload
         return new_init(arch), {}, self.version

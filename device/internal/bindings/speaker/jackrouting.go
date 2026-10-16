@@ -114,12 +114,15 @@ func jackRouting(inserted bool) []mixerWrite {
 // was one switch for both outputs, so a jack user chose between thin line-out
 // and an unguarded internal speaker.
 //
-// Only the guard. The limiter stays as configured — it is what stops the EQ
-// hard-clipping what it boosts (#231), and that is as true on a cable as on
-// the driver — and the EQ is the user's.
+// Only the guard, and on Radar the rest of what is tuned for its speaker
+// (Params.Jack): the stock curve and the MBCL bands, whose bass lift would
+// otherwise reach headphones and amplifiers. The limiter stays as configured
+// — it is what stops the EQ hard-clipping what it boosts (#231), and that is
+// as true on a cable as on the driver — and the EQ is the user's.
 func chainForJack(p outchain.Params, inserted bool) outchain.Params {
 	if inserted {
 		p.GuardEnabled = false
+		p.Jack = true
 	}
 	return p
 }

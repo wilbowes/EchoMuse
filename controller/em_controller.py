@@ -451,6 +451,9 @@ class Device:
         # existing fleet exactly as it was.
         self._base_os: str | None = None
         self.kernel_arch: str | None = None
+        # Board detected by device firmware at registration. Used for emOS
+        # payload selection and to cross-check the installed boot image.
+        self.board_id: str | None = None
         # From the register message (schema v28): see em_health.
         self.boot_reason: str | None = None
         # The last eMMC wear row written, as (day, values), so a reading that
@@ -574,6 +577,7 @@ class Device:
         self.last_utterance_pcm: bytes | None = None
         self.eq_bands:      list  = [0.0] * 8
         self.eq_loudness:   bool  = False
+        self.eq_stock_curve: bool = True
         self.bass_guard_enabled: bool  = True
         self.bass_guard_db:      float = em_mbc.DEFAULT_BASS_GUARD_DB
         self.limiter_enabled:   bool  = True
@@ -1552,12 +1556,19 @@ def get_device(device_id: str) -> Device | None:
 
 
 def _limiter_for(device):
-    """Adapter: a Device's limiter config -> em_limiter.for_stream."""
-    return em_limiter.for_stream(
-        SPEAKER_RATE,
-        device.limiter_enabled,
-        device.limiter_threshold,
-        device.limiter_release,
+    """Adapter: a Device's limiter config -> em_limiter.for_stream.
+
+    Radar overrides the config value regardless of what it carries, same
+    reasoning and same override as em_player.py's _limiter_params — this
+    path (voice turns and announcements) had never picked that up, so a
+    Radar device got the generic -1dB/150ms here while its music got the
+    real -3dB/20ms."""
+    if not device.limiter_enabled:
+        return None
+    return em_limiter.build_limiter(
+        SPEAKER_RATE, device.board_id,
+        threshold_db=device.limiter_threshold,
+        release_ms=device.limiter_release,
     )
 
 
@@ -1567,6 +1578,7 @@ def _guard_for(device):
         SPEAKER_RATE,
         device.bass_guard_enabled,
         device.bass_guard_db,
+        device.board_id,
     )
 
 
@@ -5122,6 +5134,8 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         # firmware; stored only when reported so a known value is not erased.
         device.kernel_arch = msg.get("kernel_arch") or None
         device.kernel_release = msg.get("kernel_release") or None
+        board_id = msg.get("board")
+        device.board_id = board_id if board_id in ("biscuit", "radar") else None
         if device.kernel_arch:
             em_dbwriter.submit(db.set_device_kernel, device_id, device.kernel_arch, device.kernel_release or "")
         # How this boot started and the eMMC's wear (schema v28), one row per
@@ -5255,6 +5269,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             await api.notify_pair_request(device_id, "link")
         device.eq_bands      = config.get("eqBands", [0.0] * 8)
         device.eq_loudness   = bool(config.get("eqLoudness", False))
+        device.eq_stock_curve = bool(config.get("eqStockCurve", True))
         device.bass_guard_enabled = bool(config.get("bassGuardEnabled", True))
         device.bass_guard_db      = float(config.get(
             "bassGuardDb", em_mbc.DEFAULT_BASS_GUARD_DB))
@@ -5278,7 +5293,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         # value via volume_state on connect, but this seeds a sane default
         # in the window before that first message arrives.
         device.volume = _device_level_to_ha(
-            int(config.get("startupVolume", 85))
+            int(config.get("startupVolume", 85)), device.board_id
         )
         log.info(f"[control] Config pushed to {device_id} (volume={device.volume:.3f})")
 
@@ -5432,6 +5447,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             ring_alarm=_ring_alarm,
             stop_alarm=_stop_alarm,
             start_conversation=_start_conversation,
+            board_id=device.board_id,
             set_wake_word=_set_wake_word,
             wake_word_enabled=device.wake_word_enabled,
         )

@@ -952,6 +952,41 @@ so tone is constant across volume and there is no volume-banded EQ to copy. A
 measured driver response is the remaining unknown, and the item that needs
 hardware.
 
+**That is biscuit. Radar's are five different curves, and it plays the one
+for its volume** (2026-10-10). `EQ_50/60/70/80/100.cfg` off a Radar boost
+80Hz by +10.1/–/–/+5.4/+1.4dB: a loudness compensation, the bass boost backing
+off as the volume rises. `AFE.cfg`'s `"Volume Boundary": [50,60,70,80,100]`
+selects them on stock's 0–100 MUSIC VOLUME VALUE, the number
+`libaudioCtrl` reads per Alexa step from `VolumeCurves.xml` and the mixer
+daemon hands `libasp`; `libasp` plays the first file whose boundary is at or
+above it. We recover that value from the volume through
+`em_eq.STOCK_MIXER_LEVELS` (mirrored in `outchain`), the per-value attenuation
+read out of `/system/bin/mixer` — our own law, 0.5dB per step with 127 = 0dB,
+and `value + 27` from value 11 up — so from level 38 up the value is simply
+`level − 27`. It first went through Android's speaker volume curve
+(`audio_policy_volumes.xml`), which stock does not use for Alexa audio; that
+put levels 78–81, 88–93, 98–101 and 108–110 one bassier file down.
+Only a chain that takes the volume (`volume_gain`, Radar on the
+device) can select; the controller-side chain has no volume and keeps
+`EQ_50`. A switch crossfades across one period — both curves filter the same
+input history, so it is a change of curve and not of signal.
+
+**Radar's MBCL dynamics are stock's own, read out of `libasp.so`**
+(2026-10-10): `em_mbc.StockCompressor` for the four band compressors and
+`em_limiter.StockLimiter` for the four band limiters and the full-band one,
+mirrored in `outchain/stockcomp.go` / `stocklimiter.go`. The compressor
+detects POWER over 1ms blocks behind a noise-floor gate, smooths the level
+(~43ms up, ~435ms down) and the gain again (~654ms), and applies it to audio
+delayed 16ms; the limiter looks ahead 2ms with a retroactive fade, holds 20
+samples and releases linearly over 180–400ms, so MBCL.cfg's 20 and 80ms
+releases run at 180ms. The peak-detecting, instant-attack `_BandGain` they
+replaced pumped the bass on every kick. Stock's start-up state is ported
+too (level 0.01, over band 1's threshold), so a fresh stream eases in. The
+volume reaches `libasp` as `executeAspCommandWithIntInput(5, vol)`, the
+same 0–100 value the EQ file is chosen on, and stock's crossover tables are
+Butterworth LP/HP plus the allpass that LR4 sums to — what `RadarMultiband`
+already did. Stock switches EQ files instantly; we crossfade one period.
+
 ## Ducking: music and voice are separate planes on the device
 
 **A voice turn DUCKS music; it does not pause it** — on firmware announcing
