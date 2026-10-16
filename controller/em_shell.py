@@ -205,6 +205,35 @@ _TRANSFER_STAGES = {
 }
 
 
+# Lines of base64 to enqueue before handing the event loop back.
+#
+# websockets' send() yields only when the write buffer is full. A firmware
+# heredoc is about 200,000 lines, and while the socket keeps accepting them
+# that loop never returns to anything else. One Dot's upload stalled the
+# loop 2.2s (the base64 encode, now off this loop) and 13.8s (this send) on
+# 2026-10-16, and every other Echo's wake handling waited. 32 lines is about
+# 2.4KB; at the rate that covered a firmware binary, a batch is a couple of
+# milliseconds, inside one 80ms wake frame.
+_SEND_YIELD_LINES = 32
+
+
+def _b64_lines(data: bytes) -> list[str]:
+    """base64 of ``data``, one encodebytes line per entry, newline included.
+
+    The heredoc body. Runs off the event loop: encoding a firmware binary is
+    the 2.2s stall measured with the send.
+    """
+    import base64
+    return base64.encodebytes(data).decode("ascii").splitlines(keepends=True)
+
+
+async def _send_b64_lines(ws, lines: list[str]) -> None:
+    for i, line in enumerate(lines, 1):
+        await ws.send(line)
+        if i % _SEND_YIELD_LINES == 0:
+            await asyncio.sleep(0)
+
+
 def _transfer_failed(stage: str, extra: str = "") -> TransferResult:
     detail = _TRANSFER_STAGES.get(stage, stage)
     if extra:
@@ -235,8 +264,6 @@ async def stream_file(live, data: bytes, dest: str,
     they had before this existed, and the base64 detection below already treats
     a busybox-less device as a contemplated state. Firmware passes True.
     """
-    import base64 as _b64
-
     device_id     = live.device_id
     DELIM         = "__END_B64_42__"
     DETECT_MARKER = "__DETECT_DONE__"
@@ -356,7 +383,7 @@ async def stream_file(live, data: bytes, dest: str,
                         f"transferred WITHOUT verification")
 
         # ── Heredoc transfer ─────────────────────────────────────────────────
-        lines = _b64.encodebytes(data).decode("ascii").splitlines(keepends=True)
+        lines = await asyncio.get_running_loop().run_in_executor(None, _b64_lines, data)
         log.info(f"[api] Transferring {len(data):,} bytes to {dest} "
                  f"({len(lines)} base64 lines via heredoc)")
 
@@ -375,9 +402,9 @@ async def stream_file(live, data: bytes, dest: str,
             f"echo TRANSFER_OK\n"
         )
 
-        # Stream base64 data — each line already ends with \n from encodebytes
-        for line in lines:
-            await ws.send(line)
+        # Each line already ends with \n from encodebytes. The yield is inside
+        # _send_b64_lines: send() does not return to the loop on its own.
+        await _send_b64_lines(ws, lines)
 
         # Close heredoc; shell now executes the decode pipeline
         await ws.send(f"{DELIM}\n")
@@ -414,7 +441,8 @@ async def stream_file(live, data: bytes, dest: str,
         # No `cut`: md5sum prints "<hash>  <path>", and the busybox-less branch
         # is exactly where `busybox cut` would not be there either. A case glob
         # needs no external tool at all.
-        want = hashlib.md5(data).hexdigest()
+        want = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: hashlib.md5(data).hexdigest())
         await ws.send(
             f'GOT=$({md5_cmd} {landing} 2>/dev/null); '
             f'case "$GOT" in {want}*) mv {landing} {dest} && echo VERIFY_OK ;; '

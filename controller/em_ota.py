@@ -32,8 +32,12 @@ in_progress: set[str] = set()
 # 2026-09-02 — measured, in the `[loop] event loop stalled` warnings — and
 # that loop is what sends speaker periods and LED frames, so a device mid
 # response pays for a device being updated. The transfer is base64 over the
-# shell plane and CPU-bound in this process; the fix is to stop doing several
-# at once, not to make one cheaper.
+# shell plane and CPU-bound in this process. Serialising stops several
+# uploads stacking. One upload still has to yield: a single Dot's firmware
+# send stalled this loop 2.2s and 13.8s on 2026-10-16 (the encode, then the
+# heredoc, whose send does not return to the loop while the socket keeps
+# accepting data). em_shell.stream_file encodes and hashes off the loop and
+# yields during the send.
 #
 # A device-level guard cannot do this: `in_progress` stops one device
 # being updated twice, and says nothing about two devices being updated at
