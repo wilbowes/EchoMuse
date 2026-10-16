@@ -287,6 +287,9 @@
       padding: var(--space-7) var(--space-8) var(--space-8);
       box-shadow: 0 1px 0 var(--sheen) inset;
     }
+    /* A panel in a vertical stack of them (Settings): roomier, with the gap
+       below it. */
+    .em-panel--stacked { padding: var(--space-8) var(--space-9); margin-bottom: var(--space-9); }
 
     /* Small uppercase mono heading. */
     .em-label {
@@ -459,8 +462,36 @@
       /* Two-column content grids stack on phones. */
       .em-grid2 { grid-template-columns: 1fr !important; }
     }
-    /* Tab strips scroll horizontally instead of overflowing on any width. */
-    .em-tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+    /* Form fields (Slider, NumberField, PasswordField, Toggle, Select,
+       ControllerEndpointsField): the wrapper, the label, a short aside
+       beside it and a help line under it. Layout particular to one field
+       stays inline in that component. */
+    .em-field { margin-bottom: var(--space-10); min-width: 0; }
+    .em-field__label { font-family: var(--font-mono); font-size: var(--fs-md); color: var(--text2); }
+    .em-field__label--disabled { color: var(--muted); }
+    .em-field__aside { font-family: var(--font-mono); font-size: var(--fs-sm); color: var(--muted); margin-left: var(--space-4); }
+    .em-field__help {
+      font-family: var(--font-mono); font-size: var(--fs-sm); color: var(--muted);
+      line-height: 1.6; margin-bottom: var(--space-4);
+    }
+
+    /* TabBar: the raised folder tabs of the device view and Settings. The
+       strip scrolls horizontally instead of overflowing on any width. */
+    .em-tabs {
+      display: flex; gap: var(--space-1);
+      overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none;
+    }
+    .em-tab {
+      background: transparent; color: var(--muted);
+      border: 1px solid transparent; border-radius: var(--radius-md) var(--radius-md) 0 0;
+      font-family: var(--font-mono); font-size: var(--fs-sm);
+      text-transform: uppercase; letter-spacing: 0.1em;
+      padding: 7px 14px; margin-bottom: -1px; cursor: pointer; transition: color 0.15s;
+    }
+    .em-tab--active {
+      background: linear-gradient(180deg, var(--raised), var(--surface)); color: var(--text);
+      border-color: var(--border-hard); border-bottom-color: var(--surface);
+    }
     .em-tabs::-webkit-scrollbar { display: none; }
     .em-tabs > button { flex-shrink: 0; }
   </style>

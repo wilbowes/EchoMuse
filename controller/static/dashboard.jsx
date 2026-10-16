@@ -411,11 +411,11 @@ function Slider({ label, sub, value, min, max, step = 1, unit = '', formatValue,
   // label row forced narrow grid columns wider than their track — the
   // controls leaked past the panel edge on phone widths.
   return (
-    <div style={{ marginBottom: 'var(--space-10)', minWidth: 0 }}>
+    <div className="em-field">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 7, minWidth: 0, gap: 'var(--space-4)' }}>
         <div style={{ minWidth: 0 }}>
-          <span style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-md)', color: disabled ? 'var(--muted)' : 'var(--text2)' }}>{label}</span>
-          {sub && <span style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-sm)', color: 'var(--muted)', marginLeft: 'var(--space-4)' }}>{sub}</span>}
+          <span className={disabled ? 'em-field__label em-field__label--disabled' : 'em-field__label'}>{label}</span>
+          {sub && <span className="em-field__aside">{sub}</span>}
         </div>
         <Lcd value={display} size={12} />
       </div>
@@ -477,11 +477,11 @@ function NumberField({ label, sub, value, min = 0, max = 100, unit = '',
   };
 
   return (
-    <div style={{ marginBottom: 'var(--space-10)', minWidth: 0 }}>
+    <div className="em-field">
       <div style={{ marginBottom: 'var(--space-3)' }}>
-        <span style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-md)', color: disabled ? 'var(--muted)' : 'var(--text2)' }}>{label}</span>
+        <span className={disabled ? 'em-field__label em-field__label--disabled' : 'em-field__label'}>{label}</span>
       </div>
-      {sub && <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-sm)', color: 'var(--muted)', lineHeight: 1.6, marginBottom: 'var(--space-4)' }}>{sub}</div>}
+      {sub && <div className="em-field__help">{sub}</div>}
       <div style={{ display: 'flex', gap: 'var(--space-4)', alignItems: 'center', minWidth: 0 }}>
         {/* text, not type="number": a number input still ACCEPTS "0.1" and
             "1e3" (and reports an empty string for them in some browsers,
@@ -527,10 +527,10 @@ function Toggle({ label, sub, value, onChange, disabled = false }) {
   // every caller that wanted it had to fake it by neutering `value` and
   // `onChange` at the call site.
   return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-10)', minWidth: 0, gap: 'var(--space-5)' }}>
+    <div className="em-field" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 'var(--space-5)' }}>
       <div style={{ minWidth: 0, flex: 1 }}>
-        <span style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-md)', color: disabled ? 'var(--muted)' : 'var(--text2)' }}>{label}</span>
-        {sub && <span style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-sm)', color: 'var(--muted)', marginLeft: 'var(--space-4)' }}>{sub}</span>}
+        <span className={disabled ? 'em-field__label em-field__label--disabled' : 'em-field__label'}>{label}</span>
+        {sub && <span className="em-field__aside">{sub}</span>}
       </div>
       {/* A switch to assistive tech and the keyboard, not only to a mouse:
           role, state, focus and Space/Enter. Also what release UAT finds it
@@ -580,14 +580,14 @@ function PasswordField({ label, sub, isSet, onChange, disabled = false }) {
   const stop = () => { setEditing(false); setText(''); };
 
   return (
-    <div style={{ marginBottom: 'var(--space-10)', minWidth: 0 }}>
+    <div className="em-field">
       <div style={{ marginBottom: 'var(--space-3)' }}>
-        <span style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-md)', color: disabled ? 'var(--muted)' : 'var(--text2)' }}>{label}</span>
-        <span style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-sm)', color: 'var(--muted)', marginLeft: 'var(--space-4)' }}>
+        <span className={disabled ? 'em-field__label em-field__label--disabled' : 'em-field__label'}>{label}</span>
+        <span className="em-field__aside">
           {disabled ? '' : (isSet ? 'set' : 'not set')}
         </span>
       </div>
-      {sub && <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-sm)', color: 'var(--muted)', lineHeight: 1.6, marginBottom: 'var(--space-4)' }}>{sub}</div>}
+      {sub && <div className="em-field__help">{sub}</div>}
       {!disabled && (editing ? (
         <div style={{ display: 'flex', gap: 'var(--space-4)', alignItems: 'center', flexWrap: 'wrap' }}>
           <input type="password" autoFocus value={text} placeholder="new password"
@@ -631,11 +631,11 @@ function ControllerEndpointsField({ value, onChange, readOnly = false }) {
   const input = { fontFamily: mono, fontSize: 'var(--fs-md)', color: 'var(--text)',
                   border: '1px solid var(--field-line)', minWidth: 0 };
   return (
-    <div style={{ marginBottom: 'var(--space-10)', minWidth: 0 }}>
-      <div style={{ fontFamily: mono, fontSize: 'var(--fs-md)', color: readOnly ? 'var(--muted)' : 'var(--text2)', marginBottom: 'var(--space-3)' }}>
+    <div className="em-field">
+      <div className={readOnly ? 'em-field__label em-field__label--disabled' : 'em-field__label'} style={{ marginBottom: 'var(--space-3)' }}>
         Controller address
       </div>
-      <div style={{ fontFamily: mono, fontSize: 'var(--fs-sm)', color: 'var(--muted)', lineHeight: 1.6, marginBottom: 'var(--space-4)' }}>
+      <div className="em-field__help">
         {readOnly
           ? 'set for the whole fleet on the fleet Config tab'
           : 'for Echos that cannot find this controller by mDNS — a VLAN or a tunnel. Tried in order, then mDNS. Written to connected Echos on save, the rest when they reconnect; used from the next reconnect. Needs firmware v2.16.0 or later.'}
@@ -672,9 +672,9 @@ function ControllerEndpointsField({ value, onChange, readOnly = false }) {
 // entirely, which reads as the feature not existing at all.
 function Select({ label, sub, value, options, onChange, disabled = false }) {
   return (
-    <div style={{ marginBottom: 'var(--space-10)', minWidth: 0 }}>
+    <div className="em-field">
       <div style={{ marginBottom: 7, minWidth: 0 }}>
-        <span style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-md)', color: 'var(--text2)' }}>{label}</span>
+        <span className="em-field__label">{label}</span>
       </div>
       <div role="radiogroup" aria-label={typeof label === 'string' ? label : undefined}
         style={{ display: 'flex', gap: 'var(--space-3)', minWidth: 0 }}>
@@ -2106,11 +2106,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
             </div>
           )}
           {device.approved ? (
-            <div className="em-tabs" style={{ display: 'flex', gap: 'var(--space-1)' }}>
-              {TABS.map(t => (
-                <button key={t} onClick={() => setTab(t)} style={{ background: tab === t ? 'linear-gradient(180deg,var(--raised),var(--surface))' : 'transparent', border: tab === t ? '1px solid var(--border-hard)' : '1px solid transparent', borderBottom: tab === t ? '1px solid var(--surface)' : '1px solid transparent', borderRadius: 'var(--radius-md) var(--radius-md) 0 0', fontFamily: "var(--font-mono)", fontSize: 'var(--fs-sm)', textTransform: 'uppercase', letterSpacing: '0.1em', padding: '7px 14px', cursor: 'pointer', color: tab === t ? 'var(--text)' : 'var(--muted)', marginBottom: -1, transition: 'color 0.15s' }}>{t}</button>
-              ))}
-            </div>
+            <TabBar tabs={TABS} current={tab} onSelect={setTab} />
           ) : (
             // One tab is not a tab bar — it reads as a label and the approval
             // form sat behind a click. Pending devices get a banner instead.
@@ -3138,6 +3134,19 @@ const _ADB = (() => {
 })();
 
 // ── AddDeviceTile ──
+
+// TabBar — the raised folder tabs of the device view and Settings. Its look
+// is .em-tab in dashboard.html, so both strips change together.
+function TabBar({ tabs, current, onSelect, label = t => t }) {
+  return (
+    <div className="em-tabs">
+      {tabs.map(t => (
+        <button key={t} onClick={() => onSelect(t)}
+          className={t === current ? 'em-tab em-tab--active' : 'em-tab'}>{label(t)}</button>
+      ))}
+    </div>
+  );
+}
 
 function AddDeviceTile({ onClick }) {
   const [hover, setHover] = useState(false);
@@ -10795,13 +10804,7 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
             <div style={{ fontFamily:"var(--font-sans)", fontSize:22, color:'var(--text)', fontWeight:600, letterSpacing:'-0.02em' }}>Settings</div>
             <CircleButton onClick={onClose} title="Close">×</CircleButton>
           </div>
-          {/* Same raised folder-tab treatment as the device Detail modal —
-              one tab style across the dashboard. */}
-          <div className="em-tabs" style={{ display:'flex', gap:'var(--space-1)' }}>
-            {TABS.map(t => (
-              <button key={t} onClick={() => setTab(t)} style={{ background: tab === t ? 'linear-gradient(180deg,var(--raised),var(--surface))' : 'transparent', border: tab === t ? '1px solid var(--border-hard)' : '1px solid transparent', borderBottom: tab === t ? '1px solid var(--surface)' : '1px solid transparent', borderRadius: 'var(--radius-md) var(--radius-md) 0 0', fontFamily: "var(--font-mono)", fontSize: 'var(--fs-sm)', textTransform: 'uppercase', letterSpacing: '0.1em', padding: '7px 14px', cursor: 'pointer', color: tab === t ? 'var(--text)' : 'var(--muted)', marginBottom: -1, transition: 'color 0.15s' }}>{TAB_LABELS[t]}</button>
-            ))}
-          </div>
+          <TabBar tabs={TABS} current={tab} onSelect={setTab} label={t => TAB_LABELS[t]} />
         </div>
 
         {/* Body */}
@@ -10843,7 +10846,7 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
                 const hours    = checksOn ? Math.max(1, Math.round(secs / 3600)) : 0;
                 return (
                   <>
-                    <div className="em-panel" style={{ padding:'var(--space-8) var(--space-9)', marginBottom:'var(--space-9)' }}>
+                    <div className="em-panel em-panel--stacked">
                       <div className="em-label" style={{ marginBottom:'var(--space-7)' }}>Updates</div>
                       <Toggle
                         label="Check GitHub for updates"
@@ -10865,7 +10868,7 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
                       )}
                     </div>
 
-                    <div className="em-panel" style={{ padding:'var(--space-8) var(--space-9)', marginBottom:'var(--space-9)' }}>
+                    <div className="em-panel em-panel--stacked">
                       <div className="em-label" style={{ marginBottom:'var(--space-7)' }}>Devices</div>
                       <Select
                         label="New device approval"
@@ -10878,7 +10881,7 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
                         onChange={v => setSysVal('device_approval', v)}/>
                     </div>
 
-                    <div className="em-panel" style={{ padding:'var(--space-8) var(--space-9)', marginBottom:'var(--space-9)' }}>
+                    <div className="em-panel em-panel--stacked">
                       <div className="em-label" style={{ marginBottom:'var(--space-7)' }}>Sessions</div>
                       <NumberField
                         label="Sign-in expiry" unit="days" min={1} max={365}
@@ -10887,7 +10890,7 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
                         onChange={v => setSysVal('session_expiry_days', v)}/>
                     </div>
 
-                    <div className="em-panel" style={{ padding:'var(--space-8) var(--space-9)', marginBottom:'var(--space-9)' }}>
+                    <div className="em-panel em-panel--stacked">
                       <div className="em-label" style={{ marginBottom:'var(--space-7)' }}>Release source</div>
                       <div style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-md)', color:'var(--text2)', marginBottom:'var(--space-3)' }}>
                         GitHub repository
@@ -10991,7 +10994,7 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
                 A single file describing the fleet's state, to attach to a GitHub issue.
               </div>
 
-              <div className="em-panel" style={{ padding:'var(--space-8) var(--space-9)', marginBottom:'var(--space-9)' }}>
+              <div className="em-panel em-panel--stacked">
                 <div className="em-label" style={{ marginBottom:'var(--space-5)' }}>What it contains</div>
                 <div style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-md)', color:'var(--text2)', lineHeight:1.7 }}>
                   Controller and firmware versions, device capabilities, config,

@@ -2462,8 +2462,10 @@ while a value lives at the call site.**
   shadows are correct on both grounds and are deliberately left alone.
 - **Repeated chrome lives in CSS classes** (`.em-pill` with additive
   `--small/--big/--accent/--danger` variants and `:disabled` handled in CSS so
-  it beats every variant; `.em-panel`, `.em-label`, `.em-lcd`, `.em-inset`,
-  `.em-console`, `.em-iconbtn`). One-off layout stays inline, next to the
+  it beats every variant; `.em-panel` and `--stacked`, `.em-label`,
+  `.em-lcd`, `.em-inset`, `.em-console`, `.em-iconbtn`; `.em-tab` behind the
+  `TabBar` component that both tab strips use; `.em-field` with `__label`,
+  `__aside` and `__help` for the six form-field components). One-off layout stays inline, next to the
   markup it positions — moving that into CSS trades an inline object for a
   class name plus a rule in another file, which is not an improvement. Note
   inline styles cannot express `:hover` or `:focus-visible` at all, so until
