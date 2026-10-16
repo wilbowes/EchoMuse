@@ -502,10 +502,7 @@ function NumberField({ label, sub, value, min = 0, max = 100, unit = '',
             setText(String(v));
             commit(String(v));
           }}
-          className="em-inset"
-          style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-md)', width: 84, minWidth: 0,
-                   color: 'var(--text)', border: '1px solid var(--field-line)',
-                   opacity: disabled ? 0.45 : 1 }}/>
+          className="em-inset em-input" style={{ width: 84, opacity: disabled ? 0.45 : 1 }}/>
         {unit && <span style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-sm)', color: 'var(--muted)' }}>{unit}</span>}
       </div>
     </div>
@@ -592,9 +589,7 @@ function PasswordField({ label, sub, isSet, onChange, disabled = false }) {
         <div style={{ display: 'flex', gap: 'var(--space-4)', alignItems: 'center', flexWrap: 'wrap' }}>
           <input type="password" autoFocus value={text} placeholder="new password"
             onChange={e => { setText(e.target.value); onChange(e.target.value); }}
-            className="em-inset"
-            style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-md)', flex: '1 1 180px', minWidth: 0,
-                     color: 'var(--text)', border: '1px solid var(--field-line)' }}/>
+            className="em-inset em-input" style={{ flex: '1 1 180px' }}/>
           <Pill small onClick={() => { onChange('__unchanged__'); stop(); }}>Cancel</Pill>
         </div>
       ) : (
@@ -628,8 +623,6 @@ function ControllerEndpointsField({ value, onChange, readOnly = false }) {
     port: link ? link.port : 8767,
     tlsPort: link ? link.tls_port : 8770,
   }]);
-  const input = { fontFamily: mono, fontSize: 'var(--fs-md)', color: 'var(--text)',
-                  border: '1px solid var(--field-line)', minWidth: 0 };
   return (
     <div className="em-field">
       <div className={readOnly ? 'em-field__label em-field__label--disabled' : 'em-field__label'} style={{ marginBottom: 'var(--space-3)' }}>
@@ -646,17 +639,17 @@ function ControllerEndpointsField({ value, onChange, readOnly = false }) {
       {rows.map((r, i) => (
         <div key={i} style={{ display: 'flex', gap: 'var(--space-4)', alignItems: 'center', flexWrap: 'wrap', marginBottom: 'var(--space-3)' }}>
           <input type="text" autoComplete="off" spellCheck="false" placeholder="IP or hostname"
-            value={r.host ?? ''} disabled={readOnly} className="em-inset"
+            value={r.host ?? ''} disabled={readOnly} className="em-inset em-input"
             onChange={e => put(i, 'host', e.target.value)}
-            style={{ ...input, flex: '3 1 160px' }}/>
+            style={{ flex: '3 1 160px' }}/>
           <input type="text" inputMode="numeric" placeholder="port" title="port"
-            value={r.port ?? ''} disabled={readOnly} className="em-inset"
+            value={r.port ?? ''} disabled={readOnly} className="em-inset em-input"
             onChange={e => put(i, 'port', digits(e.target.value))}
-            style={{ ...input, flex: '1 1 60px' }}/>
+            style={{ flex: '1 1 60px' }}/>
           <input type="text" inputMode="numeric" placeholder="TLS port" title="TLS port (0 = plain)"
-            value={r.tlsPort ?? ''} disabled={readOnly} className="em-inset"
+            value={r.tlsPort ?? ''} disabled={readOnly} className="em-inset em-input"
             onChange={e => put(i, 'tlsPort', digits(e.target.value))}
-            style={{ ...input, flex: '1 1 60px' }}/>
+            style={{ flex: '1 1 60px' }}/>
           {!readOnly && <Pill small danger onClick={() => onChange(rows.filter((_, j) => j !== i))}>Remove</Pill>}
         </div>
       ))}
@@ -1500,7 +1493,7 @@ function ConnectivityTab({ device, row }) {
           {networks && networks.length > 0 && (
             <div style={{ maxHeight:170, overflowY:'auto' }}>
               {networks.map(n => (
-                <div key={n.ssid} onClick={() => !busy && setSsid(n.ssid)}
+                <div key={n.ssid} {...asButton(() => !busy && setSsid(n.ssid), { pressed: ssid === n.ssid, disabled: busy })}
                   style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'5px 8px', borderRadius:'var(--radius-md)', cursor: busy ? 'default' : 'pointer', background: ssid === n.ssid ? 'rgba(64,88,120,0.12)' : 'transparent' }}>
                   <span title={n.ssid} style={{ fontFamily:mono, fontSize:'var(--fs-md)', color: ssid === n.ssid ? 'var(--accent)' : 'var(--text)', ..._ROW_TEXT }}>
                     {n.ssid}{n.ssid === currentSsid ? '  ← current' : ''}
@@ -1523,13 +1516,13 @@ function ConnectivityTab({ device, row }) {
           <div>
             <div style={{ fontFamily:mono, fontSize:'var(--fs-xs)', color:'var(--text2)', letterSpacing:'0.08em', marginBottom:'var(--space-2)' }}>SSID</div>
             <input type="text" value={ssid} disabled={busy} onChange={e => setSsid(e.target.value)}
-              placeholder="Network name" style={{ width:'100%', boxSizing:'border-box' }}/>
+              aria-label="SSID" placeholder="Network name" className="em-inset em-input" style={{ width:'100%' }}/>
           </div>
           <div>
             <div style={{ fontFamily:mono, fontSize:'var(--fs-xs)', color:'var(--text2)', letterSpacing:'0.08em', marginBottom:'var(--space-2)' }}>Passphrase</div>
-            <div style={{ display:'flex', gap:'var(--space-3)' }}>
+            <div style={{ display:'flex', gap:'var(--space-3)', alignItems:'center' }}>
               <input type={showPsk ? 'text' : 'password'} value={psk} disabled={busy} onChange={e => setPsk(e.target.value)}
-                placeholder="WPA passphrase (blank = open)" style={{ flex:1, boxSizing:'border-box' }}/>
+                aria-label="Passphrase" placeholder="WPA passphrase (blank = open)" className="em-inset em-input" style={{ flex:1 }}/>
               <Pill small onClick={() => setShowPsk(v => !v)}>{showPsk ? 'Hide' : 'Show'}</Pill>
             </div>
           </div>
@@ -2054,7 +2047,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 </div>
               ) : (
                 <div
-                  onClick={() => isAdmin && setRenaming(true)}
+                  {...(isAdmin ? asButton(() => setRenaming(true)) : {})}
                   title={isAdmin ? `${device.label || device.device_id} — click to rename` : (device.label || device.device_id)}
                   style={{
                     fontFamily: "var(--font-sans)", fontSize: 26, color: 'var(--text)', fontWeight: 600,
@@ -2134,7 +2127,8 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
               {row('First seen', relTime(device.first_seen))}
               <div style={{ marginTop: 'var(--space-12)', marginBottom: 'var(--space-4)' }}>
                 <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-md)', color: 'var(--text2)', marginBottom: 'var(--space-4)' }}>Label</div>
-                <input type="text" value={approveLabel} maxLength={_MAX_LABEL} onChange={e => setApproveLabel(e.target.value)} placeholder="e.g. Kitchen" onKeyDown={e => e.key === 'Enter' && doApprove()}/>
+                <input type="text" value={approveLabel} maxLength={_MAX_LABEL} onChange={e => setApproveLabel(e.target.value)} placeholder="e.g. Kitchen" onKeyDown={e => e.key === 'Enter' && doApprove()}
+                  aria-label="Label" className="em-inset em-input"/>
                 <div style={{ fontFamily: "var(--font-sans)", fontSize: 'var(--fs-md)', color: 'var(--muted)', marginTop: 'var(--space-3)' }}>
                   Names the device everywhere — the dashboard, and “{approveLabel.trim() || '…'} Voice Assistant” in Home Assistant.
                 </div>
@@ -2582,7 +2576,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     GitHub link covers the rest. */}
                 {needsUpdate && release?.notes && (
                   <div style={{ marginTop:'var(--space-7)', borderTop:'1px solid var(--hairline)', paddingTop:'var(--space-5)' }}>
-                    <div onClick={() => setNotesOpen(o => !o)} style={{
+                    <div {...asButton(() => setNotesOpen(o => !o), { expanded: notesOpen })} style={{
                       fontFamily:"var(--font-mono)", fontSize:'var(--fs-xs)', color:'var(--muted)',
                       textTransform:'uppercase', letterSpacing:'0.15em', cursor:'pointer',
                       userSelect:'none', display:'flex', alignItems:'center', gap:'var(--space-3)',
@@ -2920,7 +2914,7 @@ function Card({ device, onClick }) {
   const isPending = !device.approved;
 
   return (
-    <div onClick={onClick} style={{ background: 'linear-gradient(160deg,var(--card),var(--bg))', border: '1px solid var(--border)', borderRadius: 14, cursor: 'pointer', boxShadow: '0 4px 16px var(--track),0 1px 0 var(--sheen) inset', transition: 'box-shadow 0.15s,transform 0.1s', userSelect: 'none' }}
+    <div {...asButton(onClick)} style={{ background: 'linear-gradient(160deg,var(--card),var(--bg))', border: '1px solid var(--border)', borderRadius: 14, cursor: 'pointer', boxShadow: '0 4px 16px var(--track),0 1px 0 var(--sheen) inset', transition: 'box-shadow 0.15s,transform 0.1s', userSelect: 'none' }}
       onMouseEnter={e => { e.currentTarget.style.boxShadow = '0 8px 28px rgba(0,0,0,0.18),0 1px 0 var(--sheen) inset'; e.currentTarget.style.transform = 'translateY(-1px)'; }}
       onMouseLeave={e => { e.currentTarget.style.boxShadow = '0 4px 16px var(--track),0 1px 0 var(--sheen) inset'; e.currentTarget.style.transform = 'translateY(0)'; }}>
       <div style={{ background: 'linear-gradient(180deg,var(--sunken),var(--sunken))', borderBottom: '1px solid var(--border-hard)', borderRadius: '13px 13px 0 0', padding: 'var(--space-5) var(--space-8)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', boxShadow: '0 1px 0 var(--sheen) inset' }}>
@@ -3135,6 +3129,27 @@ const _ADB = (() => {
 
 // ── AddDeviceTile ──
 
+// asButton — props that make a clickable card or tile operable as a button:
+// focusable, announced as a button, activated by Enter or Space. For
+// elements holding block content, which HTML does not allow inside <button>.
+// `pressed` marks the chosen one of a set, `expanded` a disclosure's state.
+// Keys pressed on a nested control are left to that control.
+function asButton(onActivate, { pressed, expanded, disabled } = {}) {
+  return {
+    role: 'button',
+    tabIndex: disabled ? -1 : 0,
+    'aria-pressed': pressed,
+    'aria-expanded': expanded,
+    'aria-disabled': disabled || undefined,
+    onClick: onActivate,
+    onKeyDown: e => {
+      if (e.target !== e.currentTarget || (e.key !== 'Enter' && e.key !== ' ')) return;
+      e.preventDefault();
+      onActivate(e);
+    },
+  };
+}
+
 // TabBar — the raised folder tabs of the device view and Settings. Its look
 // is .em-tab in dashboard.html, so both strips change together.
 function TabBar({ tabs, current, onSelect, label = t => t }) {
@@ -3152,7 +3167,7 @@ function AddDeviceTile({ onClick }) {
   const [hover, setHover] = useState(false);
   return (
     <div
-      onClick={onClick}
+      {...asButton(onClick)} aria-label="Add device"
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       style={{
@@ -3928,7 +3943,7 @@ function WifiPanel({ ready, wifiSsid, setWifiSsid, wifiPsk, setWifiPsk, onScan, 
             const blocked = n.blocker;
             return (
             <div key={n.ssid}
-              onClick={() => { if (!blocked) setWifiSsid(n.ssid); }}
+              {...asButton(() => { if (!blocked) setWifiSsid(n.ssid); }, { disabled: !!blocked })}
               title={blocked || ''}
               style={{
                 padding: 'var(--space-3) var(--space-5)', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
@@ -3954,18 +3969,19 @@ function WifiPanel({ ready, wifiSsid, setWifiSsid, wifiPsk, setWifiPsk, onScan, 
         <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xs)', color: 'var(--text2)', letterSpacing: '0.08em', marginBottom: 'var(--space-2)' }}>SSID</div>
         <input
           type="text" value={wifiSsid} onChange={e => setWifiSsid(e.target.value)}
-          placeholder="Select above or type network name"
-          style={{ width: '100%', boxSizing: 'border-box' }}
+          aria-label="SSID" placeholder="Select above or type network name"
+          className="em-inset em-input" style={{ width: '100%' }}
         />
       </div>
 
       {/* Password */}
       <div>
         <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xs)', color: 'var(--text2)', letterSpacing: '0.08em', marginBottom: 'var(--space-2)' }}>PASSWORD</div>
-        <div style={{ display: 'flex', gap: 'var(--space-3)' }}>
+        <div style={{ display: 'flex', gap: 'var(--space-3)', alignItems: 'center' }}>
           <input
             type={showPsk ? 'text' : 'password'} value={wifiPsk} onChange={e => setWifiPsk(e.target.value)}
-            placeholder="WPA passphrase" style={{ flex: 1, boxSizing: 'border-box' }}
+            aria-label="Password" placeholder="WPA passphrase"
+            className="em-inset em-input" style={{ flex: 1 }}
             onKeyDown={e => e.key === 'Enter' && wifiSsid && onConnect()}
           />
           <button onClick={() => setShowPsk(v => !v)} style={{
@@ -9949,7 +9965,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-12)', alignItems: 'start' }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-3)', ...inputStyle }}>
             {WW_MODELS.map(m => (
-              <div key={m.value} onClick={() => set('owwModel', m.value)} style={{
+              <div key={m.value} {...asButton(() => set('owwModel', m.value), { pressed: config.owwModel === m.value })} style={{
                 background: config.owwModel === m.value
                   ? 'linear-gradient(160deg,var(--accent-tint),var(--accent-line))'
                   : 'linear-gradient(160deg,var(--raised),var(--surface))',
@@ -9963,7 +9979,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
               </div>
             ))}
             {[...customModels, ...(orphanModel ? [orphanModel] : [])].map(m => (
-              <div key={m.path} onClick={() => set('owwModel', m.path)} style={{
+              <div key={m.path} {...asButton(() => set('owwModel', m.path), { pressed: config.owwModel === m.path })} style={{
                 background: config.owwModel === m.path
                   ? 'linear-gradient(160deg,var(--accent-tint),var(--accent-line))'
                   : 'linear-gradient(160deg,var(--raised),var(--surface))',
@@ -9977,14 +9993,14 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                   {m.missing ? 'missing file' : `custom · ${m.file}`}
                 </div>
                 {!disabled && !m.missing && config.owwModel !== m.path && (
-                  <div onClick={e => { e.stopPropagation(); deleteWakeModel(m); }}
-                    title="Delete model"
+                  <div {...asButton(e => { e.stopPropagation(); deleteWakeModel(m); })}
+                    title="Delete model" aria-label="Delete model"
                     style={{ position: 'absolute', top: 4, right: 7, fontFamily: mono, fontSize: 'var(--fs-md)',
                       color: 'var(--muted)', cursor: 'pointer' }}>×</div>
                 )}
               </div>
             ))}
-            <div onClick={() => { if (!disabled) wwFileRef.current?.click(); }} style={{
+            <div {...asButton(() => { if (!disabled) wwFileRef.current?.click(); }, { disabled })} style={{
               background: 'linear-gradient(160deg,var(--raised),var(--surface))',
               border: '1px dashed var(--border-hard)', borderRadius: 'var(--radius-lg)', padding: 'var(--space-4) var(--space-5)',
               cursor: disabled ? 'default' : 'pointer', opacity: 0.85,
@@ -10101,7 +10117,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
           />
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 'var(--space-3)', ...inputStyle }}>
             {Object.entries(PRESETS).map(([key, p]) => (
-              <div key={key} onClick={() => selectPreset(key)} style={{
+              <div key={key} {...asButton(() => selectPreset(key), { pressed: currentPreset === key })} style={{
                 background: currentPreset === key
                   ? 'linear-gradient(160deg,var(--accent-tint),var(--accent-line))'
                   : 'linear-gradient(160deg,var(--raised),var(--surface))',
@@ -10190,7 +10206,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 'var(--space-12)', alignItems: 'start' }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-3)', ...inputStyle }}>
             {RING_SCENES.map(sc => (
-              <div key={sc.value} onClick={() => set('ledScene', sc.value)} style={{
+              <div key={sc.value} {...asButton(() => set('ledScene', sc.value), { pressed: (config.ledScene ?? 'standard') === sc.value })} style={{
                 background: (config.ledScene ?? 'standard') === sc.value
                   ? 'linear-gradient(160deg,var(--accent-tint),var(--accent-line))'
                   : 'linear-gradient(160deg,var(--raised),var(--surface))',
@@ -10974,7 +10990,7 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
                   <div style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-md)', color:'var(--text2)', marginBottom:'var(--space-3)' }}>{label}</div>
                   <input type="password" value={val} onChange={e => setter(e.target.value)}
                     aria-label={label} autoComplete={purpose}
-                    style={{ width:'100%', boxSizing:'border-box' }}/>
+                    className="em-inset em-input" style={{ width:'100%' }}/>
                 </div>
               ))}
               {pwMsg && (
@@ -11256,12 +11272,12 @@ function App() {
   const selectedDevice = selected ? devices.find(d => d.device_id === selected) : null;
 
   return (
-    <div className="em-page" style={{ minHeight: '100vh', padding: '32px 36px 60px' }}>
+    <main className="em-page" style={{ minHeight: '100vh', padding: '32px 36px 60px' }}>
 
       {/* Header */}
       <div className="em-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: 36 }}>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--space-7)' }}>
-          <div style={{ fontFamily: "var(--font-sans)", fontSize: 28, color: 'var(--text)', fontWeight: 600, letterSpacing: '-0.02em' }}>EchoMuse</div>
+          <h1 style={{ fontFamily: "var(--font-sans)", fontSize: 28, color: 'var(--text)', fontWeight: 600, letterSpacing: '-0.02em' }}>EchoMuse</h1>
           <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-sm)', color: 'var(--muted)', letterSpacing: '0.12em', textTransform: 'uppercase' }}>Device Management</div>
           {status?.controller_version && (
             /* Deliberately IN PLACE of the version rather than a banner beside
@@ -11326,7 +11342,7 @@ function App() {
               running {ctrlRelease.current || status?.controller_version || '—'}
             </span>
             {ctrlRelease.notes && (
-              <span onClick={() => setCtrlNotesOpen(o => !o)} style={{
+              <span {...asButton(() => setCtrlNotesOpen(o => !o), { expanded: ctrlNotesOpen })} style={{
                 fontFamily:"var(--font-mono)", fontSize:'var(--fs-xs)', color:'var(--muted)',
                 cursor:'pointer', userSelect:'none', marginLeft:'auto',
                 textTransform:'uppercase', letterSpacing:'0.15em',
@@ -11548,7 +11564,7 @@ function App() {
           }
         />
       )}
-    </div>
+    </main>
   );
 }
 

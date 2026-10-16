@@ -42,6 +42,9 @@ const KNOWN = new Set(`
   confirm console crypto document encodeURIComponent fetch localStorage
   location navigator parseInt setInterval setTimeout undefined unescape window
 `.split(/\s+/).filter(Boolean));
+// Not a global: Babel compiles a JSX spread attribute ({...asButton(f)})
+// through its _extends helper, which reads `arguments`.
+KNOWN.add("arguments");
 
 function unbound(source) {
   let names = null;

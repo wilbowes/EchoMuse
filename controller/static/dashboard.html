@@ -438,7 +438,11 @@
     /* Keyboard focus. Inline styles cannot express :focus-visible at all, so
        until now there was no focus ring anywhere in the dashboard. */
     .em-iconbtn:focus-visible,
-    .em-pill:focus-visible {
+    .em-pill:focus-visible,
+    .em-tab:focus-visible,
+    .em-input:focus-visible,
+    [role="button"]:focus-visible,
+    [role="switch"]:focus-visible {
       outline: 2px solid var(--accent-hi); outline-offset: 2px;
     }
 
@@ -462,6 +466,16 @@
       /* Two-column content grids stack on phones. */
       .em-grid2 { grid-template-columns: 1fr !important; }
     }
+    /* Text inputs: the inset field. Used WITH .em-inset, which gives the
+       dark panel and turns the text tokens to their dark values, so the
+       field reads the same in both themes. An input with neither gets the
+       browser's white box, which is what eight of them were. */
+    .em-input {
+      font-family: var(--font-mono); font-size: var(--fs-md); color: var(--text);
+      border: 1px solid var(--field-line); min-width: 0;
+    }
+    .em-input::placeholder { color: var(--muted); }
+
     /* Form fields (Slider, NumberField, PasswordField, Toggle, Select,
        ControllerEndpointsField): the wrapper, the label, a short aside
        beside it and a help line under it. Layout particular to one field

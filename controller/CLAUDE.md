@@ -2439,6 +2439,19 @@ while a value lives at the call site.**
   two controllers (before/after) with the same fake Echoes, every view in
   both themes, each element's computed size, spacing, radius, colour and box
   compared; screenshots alone hide a 1px move.
+- **Anything clickable is reachable by keyboard** (#820 audit, 2026-10-16).
+  A `<button>` where the content is text; a card or tile holding block
+  content (which HTML does not allow inside `<button>`) takes
+  `{...asButton(onActivate, { pressed, expanded, disabled })}`: role, tab
+  stop, Enter and Space, and `aria-pressed` for the chosen one of a set.
+  Fourteen were `div onClick` until then, including the device card, so a
+  keyboard user could not open a device. The wizard's emOS/FireOS choice
+  is the one left, until #687 and #358 land. Backdrops that close a dialog
+  stay plain `div`s; Escape is their keyboard path.
+- **A text input is `className="em-inset em-input"`.** One with neither
+  gets the browser's white box; eight did, in dark mode too. Its name comes
+  from a `<label>` or an `aria-label` matching the visible label, never the
+  placeholder alone.
 - **Never concatenate hex alpha onto a colour.** `` `${color}88` `` worked
   only while every value was a literal; the moment call sites became
   `var(--lcd-green)` it produced `var(--lcd-green)88`, invalid CSS that drops
