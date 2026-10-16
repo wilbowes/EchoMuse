@@ -77,3 +77,52 @@ def test_freed_memory_is_returned_without_raising_anywhere(monkeypatch):
     em_process_stats.release_freed_memory()                 # this host
     monkeypatch.setattr(ctypes.util, "find_library", lambda name: None)
     em_process_stats.release_freed_memory()                 # no libc found
+    import ctypes
+    monkeypatch.setattr(ctypes.util, "find_library", lambda name: "libc.so.6")
+
+    def unloadable(name):
+        raise OSError(name)
+    monkeypatch.setattr(ctypes, "CDLL", unloadable)
+    em_process_stats.release_freed_memory()                 # libc will not load
+    monkeypatch.setattr(ctypes, "CDLL", lambda name: object())
+    em_process_stats.release_freed_memory()                 # libc without malloc_trim
+
+
+def test_the_models_directory_of_an_already_imported_package(tmp_path, monkeypatch):
+    import types
+    import em_oww_models
+    (tmp_path / "resources" / "models").mkdir(parents=True)
+    mod = types.ModuleType("openwakeword")
+    mod.__file__ = str(tmp_path / "__init__.py")
+    monkeypatch.setitem(sys.modules, "openwakeword", mod)
+    assert em_oww_models.resources_dir() == tmp_path / "resources" / "models"
+    (tmp_path / "resources" / "models").rmdir()
+    assert em_oww_models.resources_dir() is None            # installed, no models
+
+
+def test_no_models_directory_when_the_package_cannot_be_located(monkeypatch):
+    import importlib.util
+    import types
+    import em_oww_models
+    monkeypatch.delitem(sys.modules, "openwakeword", raising=False)
+
+    def broken(name):
+        raise ValueError(name)
+    monkeypatch.setattr(importlib.util, "find_spec", broken)
+    assert em_oww_models.resources_dir() is None
+    monkeypatch.setattr(importlib.util, "find_spec",
+                        lambda name: types.SimpleNamespace(submodule_search_locations=None))
+    assert em_oww_models.resources_dir() is None            # a module, not a package
+
+
+def test_the_model_class_is_imported_on_first_use(monkeypatch):
+    import types
+    import em_oww_models
+
+    class Model:
+        pass
+    sub = types.ModuleType("openwakeword.model")
+    sub.Model = Model
+    monkeypatch.setitem(sys.modules, "openwakeword", types.ModuleType("openwakeword"))
+    monkeypatch.setitem(sys.modules, "openwakeword.model", sub)
+    assert em_oww_models.model_class() is Model
