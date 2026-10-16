@@ -219,6 +219,28 @@ response generation are the slow steps, especially on modest hardware), and
 where background-noise transcription errors ultimately land. Better mics and
 cleaner audio help; they can't fully substitute for a good STT model.
 
+### Cloud keys and the matching conversation integration
+
+The dashboard's Settings → System → Cloud providers section stores API keys
+on the controller, but those keys answer nothing on their own — the Assist
+pipeline above still owns every voice answer. After saving a key, configure
+the matching conversation integration in Home Assistant (Settings →
+Devices & Services → Add Integration):
+
+| Saved key | HA conversation integration |
+|---|---|
+| Gemini | Google Generative AI |
+| OpenAI | OpenAI Conversation |
+| Claude | Anthropic |
+| Groq, DeepSeek | OpenAI Conversation via its Groq / DeepSeek endpoint (verify in HA UI) |
+| NVIDIA | NVIDIA NIM, OpenAI-compatible endpoint (verify in HA UI) |
+| OpenRouter, AgentRouter, Fluxion | OpenAI-compatible custom endpoint (verify in HA UI) |
+| OpenCode Zen | OpenAI-compatible custom endpoint, base `https://opencode.ai/inference/openai/v1` (verify in HA UI) |
+
+"(verify in HA UI)" means there is no confirmed first-party HA integration
+for that row — check what your Home Assistant version offers before relying
+on it.
+
 ## Stage 9 — The response
 
 The reply audio comes back through the controller and is streamed to the Dot,

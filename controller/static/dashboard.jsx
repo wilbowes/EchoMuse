@@ -10640,6 +10640,210 @@ function DeployAllModal({ release, devices, deployState, onStarted, onDismiss, o
   );
 }
 
+// ─── Cloud providers ─────────────────────────────────────────────────────────
+// API keys and default models for cloud inference providers (Settings →
+// System tab). Controller-only: nothing here is pushed to a device, so this
+// section lives outside CONFIG_SECTIONS and its Python mirror on purpose —
+// a key registered there would become per-device-overridable config, and
+// tests/test_config_sections.py fails on exactly that drift.
+const PROVIDER_SENTINEL = '__unchanged__';
+
+// Which Home Assistant conversation integration answers through each saved
+// key. The controller is a voice-satellite bridge — Assist owns actual voice
+// answers — so a stored key does nothing until HA is pointed at it. Rows
+// marked "(verify in HA UI)" have no confirmed first-party HA integration;
+// any OpenAI-compatible conversation endpoint should take them.
+const HA_CONVERSATION_HINT = {
+  gemini: 'HA: Google Generative AI',
+  groq: 'HA: OpenAI Conversation via its Groq endpoint (verify in HA UI)',
+  openai: 'HA: OpenAI Conversation',
+  claude: 'HA: Anthropic',
+  deepseek: 'HA: OpenAI Conversation via its DeepSeek endpoint (verify in HA UI)',
+  nvidia: 'HA: NVIDIA NIM, OpenAI-compatible endpoint (verify in HA UI)',
+  openrouter: 'HA: OpenAI-compatible custom endpoint (verify in HA UI)',
+  agentrouter: 'HA: OpenAI-compatible custom endpoint (verify in HA UI)',
+  fluxion: 'HA: OpenAI-compatible custom endpoint (verify in HA UI)',
+  opencode_zen: 'HA: OpenAI-compatible custom endpoint, base https://opencode.ai/inference/openai/v1 (verify in HA UI)',
+};
+
+// Whether one provider row differs from what GET /api/system/providers
+// returned. An empty key on a provider with no stored key is "opened the
+// setter but typed nothing yet", not a removal — the untouched box is never
+// a write, the PasswordField rule.
+function providerRowDirty(p, key, model) {
+  const m = model === undefined ? p.default_model : model;
+  if (m !== p.default_model) return true;
+  const k = key === undefined ? PROVIDER_SENTINEL : key;
+  if (k === PROVIDER_SENTINEL) return false;
+  if (k === '' && !p.key_set) return false;
+  return true;
+}
+
+// One entry of the PATCH /api/system/providers body for a row. Untouched
+// keys go back as the sentinel (leave alone); an empty edit on a keyless
+// provider normalises to the sentinel too, so it never reads as a removal.
+function providerPatchRow(p, key, model) {
+  const raw = key === undefined ? PROVIDER_SENTINEL : key;
+  return {
+    id: p.id,
+    key: (raw === '' && !p.key_set) ? PROVIDER_SENTINEL : raw,
+    default_model: model === undefined ? p.default_model : model,
+  };
+}
+
+// One provider: write-only key (PasswordField's set/change/remove), default
+// model picker, per-row Save and Test. Save PATCHes only this row — an
+// untouched key travels as the sentinel, so saving one provider cannot
+// disturb another.
+function ProviderRow({ p, onSaved }) {
+  const [key, setKey] = useState(undefined);     // undefined = untouched
+  const [model, setModel] = useState(undefined); // undefined = untouched
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [asking, setAsking] = useState(false);
+  const [prompt, setPrompt] = useState('');
+  const [saveMsg, setSaveMsg] = useState(null);  // {ok, text}
+  const [testMsg, setTestMsg] = useState(null);  // {ok, text}
+
+  const dirty = providerRowDirty(p, key, model);
+  const models = Array.isArray(p.models) ? p.models : [];
+  const curModel = model === undefined ? (p.default_model || '') : model;
+  // A stored default the server no longer offers still needs a visible,
+  // selected option — same orphan rule as the custom wake-word tiles.
+  const modelOptions = (curModel && !models.includes(curModel)) ? [curModel, ...models] : models;
+
+  async function save() {
+    setSaving(true); setSaveMsg(null);
+    try {
+      const entry = providerPatchRow(p, key, model);
+      await API.patch('/api/system/providers', { providers: [entry] });
+      onSaved(p.id, entry);
+      setKey(undefined); setModel(undefined);
+      setSaveMsg({ ok: true, text: 'Saved' });
+    } catch (e) {
+      setSaveMsg({ ok: false, text: e.error || 'Save failed' });
+    }
+    setSaving(false);
+  }
+
+  async function test() {
+    setTesting(true); setTestMsg(null);
+    try {
+      const r = await API.post('/api/system/providers/test', { id: p.id });
+      setTestMsg({ ok: !!r.ok, text: r.message || (r.ok ? 'OK' : 'Failed') });
+    } catch (e) {
+      setTestMsg({ ok: false, text: e.error || 'Test failed' });
+    }
+    setTesting(false);
+  }
+
+  // One-shot probe of the saved key: no model override (the row's default
+  // applies server-side), nothing logged or persisted — the prompt and the
+  // answer live only in testMsg until the next test/ask overwrites them.
+  async function ask() {
+    setAsking(true); setTestMsg(null);
+    try {
+      const r = await API.post('/api/system/providers/ask', { id: p.id, prompt });
+      setTestMsg({ ok: true, text: r.answer });
+    } catch (e) {
+      setTestMsg({ ok: false, text: e.error || 'Ask failed' });
+    }
+    setAsking(false);
+  }
+
+  return (
+    <div style={{ padding: 'var(--space-5) 0', borderBottom: '1px solid var(--hairline)' }}>
+      <div style={{ fontFamily: 'var(--font-sans)', fontSize: 'var(--fs-lg)', fontWeight: 600, color: 'var(--text)' }}>{p.label || p.id}</div>
+      {HA_CONVERSATION_HINT[p.id] && (
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-sm)', color: 'var(--muted)', marginTop: 'var(--space-2)' }}>
+          {HA_CONVERSATION_HINT[p.id]}
+        </div>
+      )}
+      {/* Remount the key field when the stored state flips, so a saved edit
+          cannot linger in the box looking unsaved. */}
+      <PasswordField key={`${p.id}:${p.key_set ? 'set' : 'unset'}`}
+        label="API key"
+        sub="Stored on this controller only and never shown again. Removing it stops anything that answers through this provider."
+        isSet={!!p.key_set}
+        onChange={v => { setKey(v === PROVIDER_SENTINEL ? undefined : v); setSaveMsg(null); }}/>
+      <div style={{ marginTop: 'var(--space-4)' }}>
+        <span className="em-field__label">Default model</span>
+        {modelOptions.length > 0 ? (
+          <div style={{ marginTop: 'var(--space-3)' }}>
+            <select value={curModel} onChange={e => { setModel(e.target.value); setSaveMsg(null); }}
+              aria-label={`${p.label || p.id} default model`} className="em-inset em-input" style={{ maxWidth: '100%' }}>
+              {modelOptions.map(m => <option key={m} value={m}>{m}</option>)}
+            </select>
+          </div>
+        ) : (
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-md)', color: 'var(--muted)', marginTop: 'var(--space-3)' }}>none offered</div>
+        )}
+      </div>
+      <div style={{ display: 'flex', gap: 'var(--space-5)', marginTop: 'var(--space-5)', alignItems: 'center', flexWrap: 'wrap' }}>
+        {dirty && <Pill small accent disabled={saving} onClick={save}>{saving ? 'Saving…' : 'Save'}</Pill>}
+        <Pill small disabled={testing} onClick={test}>{testing ? 'Testing…' : 'Test connection'}</Pill>
+        <input type="text" autoComplete="off" spellCheck="false" placeholder="Ask this provider…"
+          value={prompt} onChange={e => setPrompt(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter' && prompt.trim() && !asking) ask(); }}
+          aria-label={`${p.label || p.id} ask prompt`} className="em-inset em-input"
+          style={{ flex: '1 1 140px' }}/>
+        <Pill small disabled={asking || !prompt.trim()} onClick={ask}>{asking ? 'Asking…' : 'Ask'}</Pill>
+        {saveMsg && (
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-md)', color: saveMsg.ok ? 'var(--ok)' : 'var(--error)' }}>
+            {saveMsg.ok ? '✓ ' : ''}{saveMsg.text}
+          </span>
+        )}
+        {testMsg && (
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-md)', color: testMsg.ok ? 'var(--ok)' : 'var(--error)' }}>
+            {testMsg.text}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Cloud provider keys and default models. Loaded lazily with the System tab,
+// like loadSystem: the endpoints are admin-only, and a read-only account
+// opening Settings must not take a 401 for a screen it cannot see. The tab
+// itself is admin-only, so no role check here.
+function CloudProvidersPanel() {
+  const [providers, setProviders] = useState(null);
+  const [err, setErr] = useState(null);
+
+  useEffect(() => {
+    API.get('/api/system/providers')
+      .then(r => setProviders(r.providers || []))
+      .catch(e => setErr(e.error || 'Failed to load providers'));
+  }, []);
+
+  function handleSaved(id, entry) {
+    setProviders(prev => (prev || []).map(p => p.id === id ? {
+      ...p,
+      key_set: entry.key === '' ? false : (entry.key === PROVIDER_SENTINEL ? p.key_set : true),
+      default_model: entry.default_model,
+    } : p));
+  }
+
+  return (
+    <div className="em-panel em-panel--stacked">
+      <div className="em-label" style={{ marginBottom: 'var(--space-7)' }}>Cloud providers</div>
+      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-sm)', color: 'var(--muted)', lineHeight: 1.6, marginBottom: 'var(--space-5)' }}>
+        Keys for cloud inference. A key is stored on this controller and never
+        shown again — only whether one is stored. Nothing here is pushed to a device.
+        A saved key answers nothing on its own: voice answers come from Home
+        Assistant&apos;s Assist pipeline, so point its conversation integration
+        at the same provider — each row below names which.
+      </div>
+      {!providers && !err && <div className="help">Loading…</div>}
+      {err && (
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-md)', color: 'var(--error)' }}>{err}</div>
+      )}
+      {(providers || []).map(p => <ProviderRow key={p.id} p={p} onSaved={handleSaved} />)}
+    </div>
+  );
+}
+
 // ─── SettingsPanel ─────────────────────────────────────────────────────────────
 // Gear icon → modal with two tabs: Fleet Config and Account.
 
@@ -10937,6 +11141,8 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
                   </>
                 );
               })()}
+
+              <CloudProvidersPanel />
 
               {sysMsg && (
                 <div style={{ marginTop: 'var(--space-7)', fontFamily: "var(--font-mono)", fontSize: 'var(--fs-md)',

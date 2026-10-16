@@ -59,6 +59,7 @@ import em_routes_events
 import em_routes_link
 import em_routes_oww
 import em_routes_provision
+import em_routes_providers
 import em_routes_shell
 import em_routes_static
 import em_routes_system
@@ -125,6 +126,7 @@ async def create_app() -> web.Application:
 
     # System
     em_routes_system.register(app)
+    em_routes_providers.register(app)
 
     # Provisioning
     em_routes_provision.register(app)

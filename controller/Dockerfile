@@ -149,6 +149,7 @@ COPY em_routes_events.py .
 COPY em_routes_link.py .
 COPY em_routes_oww.py .
 COPY em_routes_provision.py .
+COPY em_routes_providers.py .
 COPY em_routes_shell.py .
 COPY em_routes_static.py .
 COPY em_routes_system.py .
@@ -157,6 +158,9 @@ COPY em_process_stats.py .
 COPY em_device_view.py .
 COPY em_device_config.py .
 COPY em_credentials.py .
+COPY em_providers.py .
+COPY em_provider_keys.py .
+COPY em_provider_query.py .
 COPY em_linkauth.py .
 COPY em_tcp.py .
 COPY em_pacing.py .
