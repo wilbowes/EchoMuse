@@ -3517,6 +3517,7 @@ async def _stream_listen(device: Device):
     nm_max     = 0.0  # highest buffered near-miss score
     dead_streak = 0   # consecutive 10s mic_queue timeouts (resets on any frame)
     stray_stopped_at = 0.0  # last mic_stop sent for a stream up with the wake word off
+    backlog_log = em_listen.BacklogLog()
     try:
         while True:
             # Now that the model is shared via the module cache (#512), a
@@ -3682,6 +3683,18 @@ async def _stream_listen(device: Device):
                 continue
 
             dead_streak = 0
+
+            # Behind by more than a second: skip to the last half-second
+            # (#946). Spliced, not reset: reset() seeds the model with noise.
+            payload, skipped = em_listen.skip_backlog(
+                device.mic_queue, payload, loop.time())
+            if skipped:
+                buf.clear()
+                device.wake_levels.clear()
+                if note := backlog_log.add(skipped, loop.time()):
+                    log.warning(f"[{device.device_id}] OWW: {note}")
+            if payload is None:
+                continue
 
             # VAD sentinel (string; None accepted defensively — the pre-B5
             # encoding) — flush partial audio so OWW never scores across a
