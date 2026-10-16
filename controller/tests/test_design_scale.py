@@ -1,5 +1,5 @@
 """
-The dashboard's type sizes, font families and corner radii come from the
+The dashboard's type sizes, font families, corner radii and spacing come from the
 scale tokens in dashboard.html (#820), the way its colours come from the
 colour tokens (test_design_tokens.py).
 
@@ -12,6 +12,7 @@ What is counted, in the JSX with comments stripped:
   fontSize: <number>          -> var(--fs-*)
   borderRadius: <number|'Npx ...'>  -> var(--radius-*)
   'DM Mono' / 'DM Sans' font stacks  -> var(--font-mono) / var(--font-sans)
+  gap / padding / margin: <non-zero number | 'Npx ...'>  -> var(--space-N)
 
 Exempt, with the reason:
   Shell              xterm.js options are numbers and font names handed to a
@@ -38,10 +39,11 @@ EXEMPT = {"Shell", "LedRing", "DeviceDiagram", "DeviceDiagramMini"}
 _LITERALS = re.compile(
     r"fontSize:\s*\d"
     r"|borderRadius:\s*(?:\d|'\d)"
+    r"|\b(?:gap|rowGap|columnGap|padding\w*|margin\w*):\s*(?:[1-9]|'[^']*[1-9]\d*px)"
     r"|'DM (?:Mono|Sans)',\s?(?:monospace|sans-serif)")
 _SCALE_BLOCK = ":root {\n      --font-sans:"
 _VAR_DEF = re.compile(r"^\s*(--[a-z0-9-]+)\s*:", re.M)
-_SCALE_USE = re.compile(r"var\((--(?:fs|radius|font)-[a-z0-9-]+)\)")
+_SCALE_USE = re.compile(r"var\((--(?:fs|radius|font|space)-[a-z0-9-]+)\)")
 
 
 def scan() -> dict[str, int]:
