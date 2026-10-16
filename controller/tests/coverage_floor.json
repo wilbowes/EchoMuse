@@ -39,6 +39,7 @@
  "em_listen.py": 95.0,
  "em_loglevel.py": 97.0,
  "em_mbc.py": 99.0,
+ "em_micqueue.py": 90.0,
  "em_ns.py": 58.0,
  "em_ota.py": 18.0,
  "em_output_mute.py": 96.0,

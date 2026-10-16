@@ -106,6 +106,7 @@ import em_wake_samples
 import em_oww_warmup
 import em_barge
 import em_listen
+import em_micqueue
 import em_ble_gatt
 import em_wakelevel
 import em_button
@@ -3745,7 +3746,7 @@ async def _stream_listen(device: Device):
                 device.wake_levels.push(rms)
 
                 prediction = await loop.run_in_executor(
-                    None, model.predict, samples
+                    em_micqueue.wake_executor(), model.predict, samples
                 )
                 score = em_oww_models.scalar_score(prediction.get(model_key, 0.0))
                 # Exactly once per chunk the MODEL saw, whatever the score —
@@ -5805,18 +5806,15 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
                     _now if device.mic_gated else device.capture_clock.observe(
                         int.from_bytes(raw[1:3], "big"), _now))
                 q = device.voice_queue if device.oww_paused.is_set() else device.mic_queue
-                try:
-                    q.put_nowait(payload)
-                except asyncio.QueueFull:
-                    # Drop the OLDEST frame, not the newest — keeps the tail of
-                    # the audio contiguous with real time, which is what OWW and
-                    # STT care about. Dropping the newest froze the queue at a
-                    # stale snapshot while fresh speech was discarded.
-                    try:
-                        q.get_nowait()
-                        q.put_nowait(payload)
-                    except (asyncio.QueueEmpty, asyncio.QueueFull):
-                        pass
+                # The wake queue keeps the last half-second once it is backed
+                # up. Dropping one frame at a time left it full, so the
+                # listener scored audio about five seconds old (64 × 80 ms).
+                # The voice queue still drops a single oldest frame, and only
+                # when full.
+                em_micqueue.offer(
+                    q, payload,
+                    keep=em_micqueue.KEEP_FRAMES if q is device.mic_queue else None,
+                )
 
             except asyncio.CancelledError:
                 raise
