@@ -9485,7 +9485,7 @@ const CONFIG_SECTIONS = {
   "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice", "wakeSound", "wakeSoundLevel", "wakeClipCapture", "wakeClipMinScore"],
   "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "wakeMic", "aecEnabled", "aecDelayMs", "aecTailMs", "aecRefSource", "nsAsr", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "remoteVolumeArc", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
-  "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs", "consolePassword", "consoleTimeoutMin", "controllerEndpoints"],
+  "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "maxListenMs", "trailCutoffMs", "listenConfidence", "buttonSingleTapEvent", "buttonMultiTapMs", "consolePassword", "consoleTimeoutMin", "controllerEndpoints"],
   "bluetooth": ["bleProxyEnabled", "bleProxyConnections"],
   "sendspin": ["sendspinEnabled", "sendspinUnpaired"]
 };
@@ -10346,6 +10346,9 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
           <Slider label="Threshold" sub="RMS above this = speech (pre-gain units)" value={config.vadThreshold ?? 0.001} min={0.0001} max={0.02} step={0.0001} onChange={v => set('vadThreshold', v)}/>
           <Slider label="Speech gate" sub="speech needed to open" value={config.vadSpeechMs ?? 160} min={32} max={320} step={32} unit="ms" onChange={v => set('vadSpeechMs', v)}/>
           <Slider label="Silence gate" sub="silence needed to close" value={config.vadSilenceMs ?? 800} min={200} max={2000} step={100} unit="ms" onChange={v => set('vadSilenceMs', v)}/>
+          <Slider label="Max listen" sub="after speech starts, even if the room stays noisy" value={config.maxListenMs ?? 7000} min={2000} max={20000} step={500} unit="ms" onChange={v => set('maxListenMs', v)}/>
+          <Slider label="Trail cutoff" sub="quiet or low-confidence audio that ends the turn" value={config.trailCutoffMs ?? 900} min={200} max={3000} step={100} unit="ms" onChange={v => set('trailCutoffMs', v)}/>
+          <Slider label="Listen confidence" sub="Silero score that still counts as talking" value={config.listenConfidence ?? 0.35} min={0} max={1} step={0.05} onChange={v => set('listenConfidence', v)}/>
         </div>
       </Stage>
 

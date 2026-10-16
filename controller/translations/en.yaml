@@ -88,3 +88,20 @@ configuration:
       silent — no audio and no error, which looks like a deaf Echo. Above
       120 is not accepted, because the ring stops showing that the Echo is
       working at 135 seconds.
+  max_listen_ms:
+    name: Max listen (ms)
+    description: >-
+      How long a turn may run after speech starts, in milliseconds, even
+      while Home Assistant's detector stays open. 7000 is the default.
+      A television that keeps the detector open ends the turn here.
+  trail_cutoff_ms:
+    name: Trail cutoff (ms)
+    description: >-
+      Quiet or low-confidence audio that ends the turn before the max
+      listen, in milliseconds. 900 is the default.
+  listen_confidence:
+    name: Listen confidence
+    description: >-
+      Silero score that still counts as the person talking. 0.35 is the
+      default. Real speech measured 0.72 to 1.00. Audio under this for
+      the trail cutoff ends the turn.

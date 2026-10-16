@@ -59,6 +59,7 @@ SECTIONS: dict[str, dict] = {
         "label": "Advanced",
         "keys": [
             "agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs",
+            "maxListenMs", "trailCutoffMs", "listenConfidence",
             # Already the button-turn section; these decide whether they happen.
             "buttonSingleTapEvent", "buttonMultiTapMs",
             # Fleet-level in practice: a per-device console password would be a

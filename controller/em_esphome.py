@@ -1798,15 +1798,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         listening_since = None      # monotonic; set when the first real frame lands
         turn_start = time.monotonic()
 
-        # Controller-side endpointing, armed only when HA's VAD has been ruled
-        # out — see em_turnclock.ha_vad_stalled_verdict for why the absence of
-        # STT_VAD_START is the discriminator and not a timer. These two marks
-        # are what that verdict reads. Keeping them current costs one RMS over
-        # an 80ms frame for the whole turn rather than only until the first
-        # hit, which is the same arithmetic the barge watcher already runs per
-        # frame throughout playback.
-        first_speech_at = None
-        last_speech_at  = None
+        # Listen cap, trailing silence, and HA's VAD having failed to start.
+        clock = em_turnclock.ListenClock()
 
         # Speech gate (em_speechgate): audio is held until Silero hears speech,
         # so a turn nobody speaks in sends HA nothing to transcribe. Once
@@ -1855,6 +1848,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 # speech in a noisy room that misses the 3×-floor check below.
                 if not speech_seen and self._ha_vad_start.is_set():
                     speech_seen = True
+                    clock.mark_started(time.monotonic())
                     log.debug(f"[{self._log_name}] Speech detected (HA VAD start) — no-speech timeout disarmed")
 
                 give_up, why = em_turnclock.no_speech_verdict(
@@ -1870,17 +1864,11 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     self._no_speech_timeout = True
                     return
 
-                # HA's VAD failed to engage — endpoint the turn ourselves
-                # rather than sitting out HA's 15s cap. This is a real end of
-                # speech, so it takes the same exit as the device sentinel
-                # below: end=True to HA, and the thinking transition, or the
-                # ring stays lit through STT and intent (#370).
-                stalled, stall_why = em_turnclock.ha_vad_stalled_verdict(
-                    now=time.monotonic(), speech_seen=speech_seen,
-                    ha_vad_started=self._ha_vad_start.is_set(),
-                    first_speech_at=first_speech_at,
-                    last_speech_at=last_speech_at,
-                )
+                # Listen cap, trail cutoff, or HA's VAD never engaging.
+                # Same exit as the device sentinel: end=True, then thinking (#370).
+                stalled, stall_why = em_turnclock.endpoint_verdict(
+                    time.monotonic(), speech_seen,
+                    self._ha_vad_start.is_set(), clock, device)
                 if stalled:
                     log.info(f"[{self._log_name}] {stall_why} — sending audio end to HA")
                     if self._trace and self._trace.t_vad_end_ms == -1:
@@ -1977,16 +1965,10 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                         log.info(f"[{self._log_name}] Speech gate {gate.summary()}, p={prob:.2f}")
                         em_tasks.spawn(device.beam_lock())
                 for payload in frames:
-                    # Every frame, not just until the first hit: the controller's
-                    # own endpoint needs to know when speech LAST was, not only
-                    # that it once happened.
-                    if _is_speech(payload):
-                        now = time.monotonic()
-                        last_speech_at = now
-                        if first_speech_at is None:
-                            first_speech_at = now
+                    clock.hear(time.monotonic(), _is_speech(payload),
+                               None if gate is None else prob, device)
 
-                    if gate is None and not speech_seen and last_speech_at is not None:
+                    if gate is None and not speech_seen and clock.last_speech_at is not None:
                         speech_seen = True
                         log.debug(
                             f"[{self._log_name}] Speech detected (above noise floor "

@@ -43,6 +43,9 @@ OPTION_ENV_VARS = {
     "log_levels": "LOG_LEVELS",
     "extra_ca_cert": "EM_EXTRA_CA_CERT",
     "tts_wait_timeout": "EM_TTS_WAIT_TIMEOUT",
+    "max_listen_ms": "EM_MAX_LISTEN_MS",
+    "trail_cutoff_ms": "EM_TRAIL_CUTOFF_MS",
+    "listen_confidence": "EM_LISTEN_CONFIDENCE",
 }
 
 if OPTIONS_PATH.is_file():

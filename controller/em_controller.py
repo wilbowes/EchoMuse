@@ -117,6 +117,7 @@ import em_oww_models
 import em_player
 import em_volume
 import em_speechgate
+import em_turnclock
 import em_timers
 import em_loglevel
 
@@ -5222,6 +5223,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         # wake path, mirrored in both places because that is the rule
         # test_config_mirrors.py enforces and the reason it exists.
         device.wake_sound = bool(config.get("wakeSound", False))
+        em_turnclock.apply_listen(device, config)
         # Resolved against the capability — see em_shadow.effective_mode for
         # why "on" against firmware that cannot trigger must become shadow
         # rather than being honoured.

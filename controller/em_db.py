@@ -34,6 +34,7 @@ from typing import Optional
 
 import em_config_sections
 import em_recordings
+import em_turnclock
 import em_wake_samples
 
 log = logging.getLogger("echomuse.db")
@@ -130,6 +131,10 @@ DEFAULT_DEVICE_CONFIG = {
     # this closes the DB/UI mismatch. Tune up to 1200 if sentences still
     # get clipped; 600 caused the "must finish quickly" behaviour.
     "vadSilenceMs":     900,
+    # Controller-side end of a noisy listen. The device ignores these keys.
+    "maxListenMs":      7000,
+    "trailCutoffMs":    900,
+    "listenConfidence": 0.35,
     # True: a tap fires "single" on the HA event entity instead of starting a
     # turn. Gives up cancel-by-tap; mute still cancels. Hold is unaffected.
     "buttonSingleTapEvent": False,
@@ -1975,19 +1980,19 @@ def get_global_device_config() -> dict:
     """
     row = _q1("SELECT value FROM system_config WHERE key = 'global_device_config'")
     if row is None or not row["value"]:
-        return dict(DEFAULT_DEVICE_CONFIG)
+        return em_turnclock.overlay_fleet(dict(DEFAULT_DEVICE_CONFIG))
     try:
         stored = json.loads(row["value"])
     except (json.JSONDecodeError, TypeError):
         log.warning("[db] Invalid global_device_config JSON — using defaults")
-        return dict(DEFAULT_DEVICE_CONFIG)
+        return em_turnclock.overlay_fleet(dict(DEFAULT_DEVICE_CONFIG))
     if not stored:
-        return dict(DEFAULT_DEVICE_CONFIG)
+        return em_turnclock.overlay_fleet(dict(DEFAULT_DEVICE_CONFIG))
     # Underlay defaults so keys added after the stored config was last
     # saved (e.g. micGainDb) are still pushed with their default value
     # instead of silently falling back to whatever the device binary's
     # env default happens to be.
-    return {**DEFAULT_DEVICE_CONFIG, **stored}
+    return em_turnclock.overlay_fleet({**DEFAULT_DEVICE_CONFIG, **stored})
 
 
 def get_global_device_config_raw() -> dict:

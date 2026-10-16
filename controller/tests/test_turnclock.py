@@ -234,3 +234,152 @@ def test_a_non_positive_wait_falls_back_rather_than_expiring_at_once():
     # "0" would abandon every turn the instant it started.
     assert tc.tts_wait_seconds("0") == tc.TTS_WAIT_DEFAULT
     assert tc.tts_wait_seconds("-30") == tc.TTS_WAIT_DEFAULT
+
+
+def test_listen_cap_is_seven_seconds_after_speech_starts():
+    start = 0.0
+    end, _ = tc.listen_cap_verdict(now=start + 6.9, speech_started_at=start,
+                                   last_confident_at=start + 6.9)
+    assert end is False
+    end, why = tc.listen_cap_verdict(now=start + 7.0, speech_started_at=start,
+                                     last_confident_at=start + 7.0)
+    assert end is True
+    assert "Listen cap" in why
+    assert tc.MAX_LISTEN_S == 7.0
+
+
+def test_trailing_low_confidence_ends_before_the_cap():
+    start = 0.0
+    end, _ = tc.listen_cap_verdict(now=0.8, speech_started_at=start,
+                                   last_confident_at=0.0)
+    assert end is False
+    end, why = tc.listen_cap_verdict(now=0.9, speech_started_at=start,
+                                     last_confident_at=0.0)
+    assert end is True
+    assert "low confidence" in why
+
+
+def test_confident_speech_keeps_the_turn_open_until_the_cap():
+    end, _ = tc.listen_cap_verdict(now=6.0, speech_started_at=0.0,
+                                   last_confident_at=5.5)
+    assert end is False
+
+
+def test_the_limits_are_overridable():
+    end, _ = tc.listen_cap_verdict(now=10.0, speech_started_at=0.0,
+                                   last_confident_at=9.5,
+                                   max_listen_s=20.0, trail_cutoff_s=2.0)
+    assert end is False
+    end, _ = tc.listen_cap_verdict(now=20.0, speech_started_at=0.0,
+                                   last_confident_at=19.0,
+                                   max_listen_s=20.0, trail_cutoff_s=2.0)
+    assert end is True
+
+
+def test_the_cap_fires_while_ha_vad_is_running():
+    class Dev:
+        max_listen_s = 7.0
+        trail_cutoff_s = 0.9
+    clock = tc.ListenClock()
+    clock.speech_started_at = 0.0
+    clock.last_confident_at = 6.9
+    clock.first_speech_at = 0.0
+    clock.last_speech_at = 6.9
+    end, why = tc.endpoint_verdict(7.0, True, True, clock, Dev())
+    assert end is True
+    assert "Listen cap" in why
+
+
+def test_a_quiet_trail_ends_a_turn_ha_already_started():
+    class Dev:
+        max_listen_s = 7.0
+        trail_cutoff_s = 0.9
+    clock = tc.ListenClock()
+    clock.mark_started(1.0)
+    end, why = tc.endpoint_verdict(2.0, True, True, clock, Dev())
+    assert end is True
+    assert "low confidence" in why
+
+
+def test_silero_confidence_ignores_loud_noise():
+    class Dev:
+        listen_confidence = 0.35
+    clock = tc.ListenClock()
+    clock.hear(1.0, speech=True, prob=0.9, device=Dev())
+    clock.hear(1.5, speech=True, prob=0.1, device=Dev())
+    assert clock.speech_started_at == 1.0
+    assert clock.last_confident_at == 1.0
+
+
+def test_without_silero_rms_speech_counts_as_confident():
+    clock = tc.ListenClock()
+    clock.hear(2.0, speech=True, prob=None, device=object())
+    assert clock.last_confident_at == 2.0
+    clock.hear(3.0, speech=False, prob=None, device=object())
+    assert clock.last_confident_at == 2.0
+
+
+def test_addon_env_overlays_fleet_and_a_dot_override_wins(monkeypatch, tmp_path):
+    import em_config_sections
+    import em_db
+    stored = {"maxListenMs": 8000, "trailCutoffMs": 1500,
+              "listenConfidence": 0.35, "vadThreshold": 0.001}
+    monkeypatch.delenv("EM_MAX_LISTEN_MS", raising=False)
+    monkeypatch.delenv("EM_TRAIL_CUTOFF_MS", raising=False)
+    monkeypatch.delenv("EM_LISTEN_CONFIDENCE", raising=False)
+    assert tc.overlay_fleet(stored)["maxListenMs"] == 8000
+    fleet = tc.overlay_fleet(stored, {
+        "EM_MAX_LISTEN_MS": "5000",
+        "EM_TRAIL_CUTOFF_MS": "nope",
+        "EM_LISTEN_CONFIDENCE": "1.5",
+    })
+    assert fleet["maxListenMs"] == 5000
+    assert fleet["trailCutoffMs"] == 900
+    assert fleet["listenConfidence"] == 1.0
+    dot = {"maxListenMs": 12000, "vadThreshold": 0.002}
+    assert em_config_sections.merge(fleet, dot, ["advanced"])["maxListenMs"] == 12000
+    assert em_config_sections.merge(fleet, dot, [])["maxListenMs"] == 5000
+    em_db.init(str(tmp_path / "em.db"))
+    try:
+        monkeypatch.setenv("EM_MAX_LISTEN_MS", "6000")
+        assert em_db.get_global_device_config()["maxListenMs"] == 6000
+    finally:
+        em_db._conn.close()
+        em_db._conn = None
+
+
+def test_apply_listen_is_on_register_and_on_a_live_push():
+    import _sources
+    assert "em_turnclock.apply_listen(device, config)" in _sources.def_source("handle_control")
+    assert "em_turnclock.apply_listen(live, effective)" in _sources.def_source("apply_live_config")
+
+
+def test_endpoint_falls_through_when_the_cap_has_not_fired():
+    class Dev:
+        max_listen_s = 7.0
+        trail_cutoff_s = 0.9
+    clock = tc.ListenClock()
+    clock.speech_started_at = 0.0
+    clock.last_confident_at = 2.9
+    clock.first_speech_at = 0.0
+    clock.last_speech_at = 1.5
+    end, why = tc.endpoint_verdict(3.0, True, False, clock, Dev())
+    assert end is True
+    assert "HA VAD" in why
+
+
+def test_a_bad_confidence_keeps_the_default():
+    out = tc.overlay_fleet({"listenConfidence": 0.2},
+                           {"EM_LISTEN_CONFIDENCE": "high"})
+    assert out["listenConfidence"] == tc.LISTEN_CONFIDENCE
+
+
+def test_apply_listen_copies_seconds():
+    class Dev:
+        pass
+    dev = Dev()
+    tc.apply_listen(dev, {"maxListenMs": 8000, "trailCutoffMs": 400,
+                          "listenConfidence": 0.2})
+    assert dev.max_listen_s == 8.0
+    assert dev.trail_cutoff_s == 0.4
+    assert dev.listen_confidence == 0.2

@@ -106,6 +106,13 @@ options:
   # goes idle while the controller is still waiting, which is the same silent
   # failure from the other side.
   tts_wait_timeout: 30
+  # End a listen this many milliseconds after speech starts, even while
+  # Home Assistant's detector stays open. 7000 is a command, not a conversation.
+  max_listen_ms: 7000
+  # Quiet or low-confidence audio that ends the turn before the cap.
+  trail_cutoff_ms: 900
+  # Silero score that still counts as the person talking.
+  listen_confidence: 0.35
 schema:
   server_host: "str"
   server_ip: "str"
@@ -120,3 +127,6 @@ schema:
   log_levels: "str"
   extra_ca_cert: "str?"
   tts_wait_timeout: "int(5,120)"
+  max_listen_ms: "int(2000,20000)"
+  trail_cutoff_ms: "int(200,3000)"
+  listen_confidence: "float(0,1)"

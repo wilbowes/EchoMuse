@@ -1,7 +1,7 @@
 {
  "files": {
-  "em_controller.py": 6152,
-  "em_db.py": 3355,
+  "em_controller.py": 6154,
+  "em_db.py": 3360,
   "em_esphome.py": 3611
  },
  "functions": {
@@ -10,7 +10,7 @@
   "em_controller._run_post_turn_playback": 172,
   "em_controller._run_voice_locked": 430,
   "em_controller._stream_listen": 645,
-  "em_controller.handle_control": 585,
+  "em_controller.handle_control": 586,
   "em_controller.handle_data": 193,
   "em_db.record_device_stats": 206,
   "em_device_view.merge_device": 177,

@@ -21,6 +21,8 @@ answered `no_speech` to someone who had spoken clearly. The device had
 captured that audio perfectly and TCP was holding it.
 """
 
+import os
+
 # Seconds of quiet, measured from the first real audio frame, before an
 # accidental wake is closed quietly. Matches the device's own noSpeechTimeout.
 NO_SPEECH_TIMEOUT = 5.0
@@ -175,3 +177,154 @@ def ha_vad_stalled_verdict(now, speech_seen, ha_vad_started,
         f"HA VAD never engaged and {quiet:.1f}s quiet since speech "
         f"(controller-side endpoint)"
     )
+
+
+# Hard stop after speech has started. HA's own cap is 15s and the streaming
+# phase has a 20s backstop; under a TV or a fan, HA's VAD starts and never
+# ends, and both of those are too long to stand in front of. 7s is a command,
+# not a conversation.
+MAX_LISTEN_S = 7.0
+
+# How long audio may stay quiet or below listen confidence before the
+# controller ends the turn. Matches the device's vadSilenceMs default.
+TRAIL_CUTOFF_S = 0.9
+
+# Silero probability that still counts as the person talking. Real speech
+# measured 0.72–1.00 and non-speech 0.02–0.03, so a TV that keeps the RMS
+# gate and HA's VAD open sits under this.
+LISTEN_CONFIDENCE = 0.35
+
+
+class ListenClock:
+    """Speech and confidence marks for one turn. All times are monotonic."""
+
+    def __init__(self):
+        self.first_speech_at = None
+        self.last_speech_at = None
+        self.speech_started_at = None
+        self.last_confident_at = None
+
+    def mark_started(self, now):
+        if self.speech_started_at is None:
+            self.speech_started_at = now
+
+    def hear(self, now, speech, prob, device):
+        """One released frame. Held frames are not passed here.
+
+        `prob` is Silero's score, or None when the gate model is absent and
+        RMS speech is the only confidence signal.
+        """
+        if speech:
+            self.last_speech_at = now
+            if self.first_speech_at is None:
+                self.first_speech_at = now
+            self.mark_started(now)
+        limit = getattr(device, "listen_confidence", LISTEN_CONFIDENCE)
+        confident = speech if prob is None else prob >= limit
+        if confident:
+            self.last_confident_at = now
+            self.mark_started(now)
+
+
+def listen_cap_verdict(now, speech_started_at, last_confident_at,
+                       max_listen_s=MAX_LISTEN_S,
+                       trail_cutoff_s=TRAIL_CUTOFF_S):
+    """End the turn once speech has run too long, or gone quiet / unsure.
+
+    No speech start means no end: the no-speech timeout owns that case.
+    The cap is measured from speech start and fires even while HA's VAD is
+    running. The trail is measured from the last confident frame, or from
+    speech start when nothing confident has arrived.
+
+    Returns (end, reason); reason is "" when end is False.
+    """
+    if speech_started_at is None:
+        return False, ""
+    if now - speech_started_at >= max_listen_s:
+        return True, f"Listen cap {max_listen_s:.1f}s after speech start"
+    ref = speech_started_at if last_confident_at is None else last_confident_at
+    quiet = now - ref
+    if quiet >= trail_cutoff_s:
+        return True, (
+            f"Trailing silence / low confidence {quiet:.1f}s "
+            f"(cutoff {trail_cutoff_s:.1f}s)"
+        )
+    return False, ""
+
+
+def endpoint_verdict(now, speech_seen, ha_vad_started, clock, device):
+    """Listen cap and trail first, then HA's VAD having failed to start."""
+    end, why = listen_cap_verdict(
+        now, clock.speech_started_at, clock.last_confident_at,
+        getattr(device, "max_listen_s", MAX_LISTEN_S),
+        getattr(device, "trail_cutoff_s", TRAIL_CUTOFF_S),
+    )
+    if end:
+        return True, why
+    return ha_vad_stalled_verdict(
+        now, speech_seen, ha_vad_started,
+        clock.first_speech_at, clock.last_speech_at,
+    )
+
+
+def _clamp_int(raw, default, lo, hi):
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return min(hi, max(lo, value))
+
+
+def _clamp_float(raw, default, lo, hi):
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    return min(hi, max(lo, value))
+
+
+def listen_limits(config):
+    """(max_listen_s, trail_cutoff_s, listen_confidence) from a config dict."""
+    cfg = config or {}
+    return (
+        _clamp_int(cfg.get("maxListenMs", 7000), 7000, 2000, 20000) / 1000.0,
+        _clamp_int(cfg.get("trailCutoffMs", 900), 900, 200, 3000) / 1000.0,
+        _clamp_float(cfg.get("listenConfidence", LISTEN_CONFIDENCE),
+                     LISTEN_CONFIDENCE, 0.0, 1.0),
+    )
+
+
+def apply_listen(device, config):
+    """Copy the listen limits onto the device. Both registration and a live push."""
+    device.max_listen_s, device.trail_cutoff_s, device.listen_confidence = (
+        listen_limits(config)
+    )
+
+
+def _env_get(env, name):
+    if env is None:
+        env = os.environ
+    raw = env.get(name)
+    if raw is None or str(raw).strip() == "":
+        return None
+    return raw
+
+
+def overlay_fleet(cfg, env=None):
+    """Add-on listen options on top of the stored fleet config.
+
+    Unset variables leave the stored value. A set variable always wins, so
+    saving the fleet page cannot freeze the add-on option at first boot.
+    A Dot that overrides Advanced still wins later, in em_config_sections.merge.
+    """
+    out = dict(cfg)
+    ms = _env_get(env, "EM_MAX_LISTEN_MS")
+    if ms is not None:
+        out["maxListenMs"] = _clamp_int(ms, 7000, 2000, 20000)
+    trail = _env_get(env, "EM_TRAIL_CUTOFF_MS")
+    if trail is not None:
+        out["trailCutoffMs"] = _clamp_int(trail, 900, 200, 3000)
+    conf = _env_get(env, "EM_LISTEN_CONFIDENCE")
+    if conf is not None:
+        out["listenConfidence"] = _clamp_float(conf, LISTEN_CONFIDENCE, 0.0, 1.0)
+    return out
