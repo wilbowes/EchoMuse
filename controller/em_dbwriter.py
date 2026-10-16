@@ -29,12 +29,57 @@ log = logging.getLogger("echomuse.dbwriter")
 _pool = concurrent.futures.ThreadPoolExecutor(
     max_workers=1, thread_name_prefix="em-dbwrite")
 
+# Set once the database is closing. Later submit() calls drop, and the
+# warning is logged once rather than once per write.
+_sealed = False
+_warned = False
+
 
 def submit(fn, *args, **kwargs) -> concurrent.futures.Future:
     """Queue `fn(*args, **kwargs)` on the writer thread; never blocks."""
+    if _sealed:
+        global _warned
+        if not _warned:
+            _warned = True
+            log.warning("[db] closed — dropping queued writes")
+        fut = concurrent.futures.Future()
+        fut.set_result(None)
+        return fut
     fut = _pool.submit(fn, *args, **kwargs)
     fut.add_done_callback(_report)
     return fut
+
+
+def drain(timeout: float = 3.0) -> bool:
+    """Block until work queued so far has finished. False on timeout.
+
+    A sentinel on the same single thread runs after everything submit()
+    queued before this call. Do not call it from the writer thread: the
+    sentinel would wait behind the caller. Shutdown calls it on the loop,
+    after the voice servers have stopped and before the database closes.
+    """
+    if _sealed:
+        return True
+    fut = _pool.submit(lambda: None)
+    try:
+        fut.result(timeout=timeout)
+        return True
+    except concurrent.futures.TimeoutError:
+        log.warning("[db] drain timed out with writes still queued")
+        return False
+
+
+def seal() -> None:
+    """Drop later writes. Idempotent. Queued work already in the pool still runs."""
+    global _sealed
+    _sealed = True
+
+
+def unseal() -> None:
+    """Tests, and db.init(), put the writer back. A live process seals once."""
+    global _sealed, _warned
+    _sealed = False
+    _warned = False
 
 
 def _report(fut: concurrent.futures.Future) -> None:

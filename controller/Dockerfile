@@ -167,6 +167,7 @@ COPY em_esphome.py .
 COPY em_ble_health.py .
 COPY em_config_types.py .
 COPY em_dbwriter.py .
+COPY em_shutdown.py .
 COPY em_tasks.py .
 COPY em_ble_gatt.py .
 COPY em_ble_proxy.py .

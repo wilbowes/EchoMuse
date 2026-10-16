@@ -304,6 +304,15 @@ async def stop(device_id: str) -> None:
         await s.stop()
 
 
+async def stop_all() -> None:
+    """Stop every session. One failure must not skip the rest."""
+    for device_id in list(_sessions):
+        try:
+            await stop(device_id)
+        except Exception:
+            log.warning("player stop failed for %s", device_id, exc_info=True)
+
+
 async def interrupt(device_id: str) -> None:
     """
     A voice turn or announcement is starting: it OWNS the speaker until it

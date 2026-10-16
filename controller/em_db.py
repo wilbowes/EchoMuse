@@ -33,6 +33,7 @@ from contextlib import contextmanager
 from typing import Optional
 
 import em_config_sections
+import em_dbwriter
 import em_recordings
 import em_wake_samples
 
@@ -1299,6 +1300,7 @@ def init(path: str = "echomuse.db") -> None:
     key enforcement, then runs any pending migrations.
     """
     global _db_path, _conn
+    em_dbwriter.unseal()
     _db_path = path
     log.info(f"Opening database: {os.path.abspath(path)}")
     _conn = sqlite3.connect(path, check_same_thread=False)
@@ -1308,6 +1310,21 @@ def init(path: str = "echomuse.db") -> None:
     _conn.commit()
     _migrate(_conn)
     log.info("Database ready")
+
+
+def close() -> None:
+    """Checkpoint and close the connection. A second call is a no-op."""
+    global _conn
+    with _db_lock:
+        conn = _conn
+        _conn = None
+        if conn is None:
+            return
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.Error:
+            log.warning("[db] checkpoint on close failed", exc_info=True)
+        conn.close()
 
 
 @contextmanager

@@ -115,6 +115,7 @@ import em_esphome as esphome
 import em_ble_proxy
 import em_oww_models
 import em_player
+import em_shutdown
 import em_volume
 import em_speechgate
 import em_timers
@@ -6046,6 +6047,8 @@ async def event_loop_lag_monitor(interval: float = 1.0,
 
 
 async def main():
+    stop = asyncio.Event()
+    em_shutdown.install(asyncio.get_running_loop(), stop)
     log.info(f"EchoMuse Controller {CONTROLLER_VERSION}")
     db.init(DB_PATH)
     auth.maybe_generate_bootstrap_token()
@@ -6133,19 +6136,12 @@ async def main():
             await em_ble_proxy.start_ble_proxy_servers(SERVER_HOST)
 
             log.info("EchoMuse Controller ready — waiting for devices")
-            await asyncio.Future()
+            await stop.wait()
 
     finally:
-        await em_ble_proxy.stop_ble_proxy_servers()
-        await esphome.stop_esphome_servers()
-        release_task.cancel()
-        session_prune_task.cancel()
-        loop_lag_task.cancel()
-        mdns_task.cancel()
-        await azc.async_unregister_service(info)
-        await azc.async_close()
-        await runner.cleanup()
-        log.info("EchoMuse Controller stopped")
+        await em_shutdown.finish(
+            (release_task, session_prune_task, loop_lag_task, mdns_task),
+            azc, info, runner)
 
 
 if __name__ == "__main__":
