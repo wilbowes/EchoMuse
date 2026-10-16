@@ -342,3 +342,110 @@ def test_only_a_stream_the_controller_scored_has_a_wake_tail_to_drop():
     assert L.tail_discard(True, False, 3) == 3
     assert L.tail_discard(False, False, 3) == 0
     assert L.tail_discard(False, True, 3) == 0
+
+
+# ── skip_backlog (#946) ──────────────────────────────────────────────────────
+
+import asyncio  # noqa: E402
+
+import _sources  # noqa: E402
+
+
+def _queue(*items):
+    q = asyncio.Queue(maxsize=64)
+    for item in items:
+        q.put_nowait(item)
+    return q
+
+
+def test_a_scorer_keeping_up_skips_nothing():
+    q = _queue(L.Frame(b"b", 9.95))
+    item = L.Frame(b"a", 10.0 - L.SCORING_MAX_LAG_S)
+    assert L.skip_backlog(q, item, 10.0) == (item, 0)
+    assert q.qsize() == 1
+
+
+def test_a_stale_backlog_is_skipped_to_the_last_half_second():
+    now = 20.0
+    fresh = L.Frame(b"f", now - L.SCORING_KEEP_S)
+    q = _queue(*[L.Frame(b"s", now - 4.0 + i * 0.08) for i in range(40)], fresh,
+               L.Frame(b"g", now - 0.1))
+    item, dropped = L.skip_backlog(q, L.Frame(b"x", now - 5.0), now)
+    assert item is fresh
+    assert dropped == 41
+    assert q.qsize() == 1
+
+
+def test_a_stream_boundary_in_the_backlog_is_still_read():
+    q = _queue(L.Frame(b"s", 1.0), "listen_mode", L.Frame(b"t", 1.1))
+    item, dropped = L.skip_backlog(q, L.Frame(b"x", 0.9), 10.0)
+    assert (item, dropped) == ("listen_mode", 2)
+    assert q.qsize() == 1
+
+
+def test_an_all_stale_queue_leaves_nothing_to_score():
+    q = _queue(L.Frame(b"s", 1.0), L.Frame(b"t", 1.1))
+    assert L.skip_backlog(q, L.Frame(b"x", 0.9), 10.0) == (None, 3)
+    assert q.empty()
+
+
+def test_unstamped_audio_is_never_stale():
+    item = b"\x00\x01"
+    assert L.skip_backlog(_queue(), item, 1e9) == (item, 0)
+
+
+def _lag_after_hiccup(skip: bool) -> float:
+    """
+    The worst wait a frame scored 20-60s in had in mic_queue: an Echo sends
+    a frame every 80ms into a 64-frame queue that drops the oldest when full,
+    and the scorer takes 78ms a frame (2.5% faster than real time) with one
+    6s stall at 10s, the shape #946 measured on a Pi with four Dots.
+    """
+    q = asyncio.Queue(maxsize=64)
+    t, next_frame, worst = 0.0, 0.0, 0.0
+
+    def produce_until(until):
+        nonlocal next_frame
+        while next_frame <= until:
+            frame = L.Frame(b"", next_frame)
+            if q.full():
+                q.get_nowait()
+            q.put_nowait(frame)
+            next_frame += 0.08
+
+    while t < 60.0:
+        produce_until(t)
+        if q.empty():
+            t = next_frame
+            continue
+        item = q.get_nowait()
+        if skip:
+            item, _ = L.skip_backlog(q, item, t)
+            if item is None:
+                continue
+        if t >= 20.0:
+            worst = max(worst, t - item.arrived)
+        t += 6.0 if 10.0 <= t < 10.078 else 0.078
+    return worst
+
+
+def test_without_the_skip_one_stall_leaves_every_wake_five_seconds_late():
+    """The bug, reproduced: the queue stays full long after the stall."""
+    assert _lag_after_hiccup(skip=False) > 4.5
+
+
+def test_the_skip_bounds_the_wait_after_a_stall():
+    assert _lag_after_hiccup(skip=True) <= L.SCORING_MAX_LAG_S
+
+
+def test_the_wake_loop_skips_its_backlog():
+    src = _sources.code_only(_sources.def_source("_stream_listen"))
+    assert "em_listen.skip_backlog(device.mic_queue" in src
+
+
+def test_skipping_is_reported_at_most_every_thirty_seconds():
+    log = L.BacklogLog()
+    assert "skipped 3 stale frames (0.2s" in log.add(3, 100.0)
+    assert log.add(10, 101.0) is None
+    assert log.add(2, 129.9) is None
+    assert "skipped 14 stale frames" in log.add(2, 130.0)

@@ -383,6 +383,59 @@ class CaptureClock:
         return max(arrived - MAX_ARB_SLACK_S, min(arrived, captured))
 
 
+# The wake scorer skips audio that has waited this long in mic_queue, keeping
+# only what arrived in the last SCORING_KEEP_S (#946). The queue holds 64
+# frames (5.12s) and drops the OLDEST when full, so once one hiccup filled it
+# a scorer running only just faster than real time never caught up, and every
+# wake was scored ~5s late until a turn drained the queue. Scoring it late
+# buys nothing: a turn drains the backlog before it listens, so the command
+# that followed a late wake was gone anyway, and a late claim loses
+# arbitration to an Echo that was not behind.
+SCORING_MAX_LAG_S = 1.0
+SCORING_KEEP_S = 0.5
+
+
+def skip_backlog(q, item, now: float):
+    """
+    Skip stale audio in the wake scorer's queue: `(next item, frames dropped)`.
+
+    `item` was just taken from `q`. If it is stamped audio that waited more
+    than SCORING_MAX_LAG_S, it and the queued frames that arrived before
+    `now - SCORING_KEEP_S` are dropped, and the first item that is fresh, or
+    is not stamped audio (a stream boundary the loop must still read), is
+    returned in its place; None if that emptied the queue. Otherwise `item`
+    comes back with 0 dropped.
+    """
+    if now - getattr(item, "arrived", now) <= SCORING_MAX_LAG_S:
+        return item, 0
+    dropped = 1
+    while not q.empty():
+        item = q.get_nowait()
+        if now - getattr(item, "arrived", now) <= SCORING_KEEP_S:
+            return item, dropped
+        dropped += 1
+    return None, dropped
+
+
+class BacklogLog:
+    """What the scorer skipped, reported at most once per `every_s`: a scorer
+    that cannot keep up skips about once a second."""
+
+    def __init__(self, every_s: float = 30.0) -> None:
+        self.every_s = every_s
+        self._frames = 0
+        self._at = -1e9
+
+    def add(self, frames: int, now: float) -> str | None:
+        self._frames += frames
+        if now - self._at < self.every_s:
+            return None
+        msg = (f"wake scoring fell behind — skipped {self._frames} stale "
+               f"frames ({self._frames * CaptureClock.FRAME_S:.1f}s of audio)")
+        self._at, self._frames = now, 0
+        return msg
+
+
 def arrival(payload, default: float) -> float:
     """When `payload` arrived; `default` for audio that was never stamped."""
     return getattr(payload, "arrived", default)
