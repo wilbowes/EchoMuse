@@ -16,6 +16,7 @@ import em_esphome
 import em_oww_sync
 import em_scenes
 import em_shadow
+import em_speechgate
 import em_tasks
 
 log = logging.getLogger("echomuse.api")
@@ -82,6 +83,7 @@ async def apply_live_config(device_id: str, live, effective: dict) -> None:
     # it is the one where the setting would otherwise silently do nothing.
     if "wakeSound" in effective:
         live.wake_sound = bool(effective["wakeSound"])
+    em_speechgate.apply(live, effective)
     if "micGainDb" in effective:
         live.mic_gain_db = float(effective["micGainDb"])
     # What a wake's level reading still contains; see em_arbiter.pick.

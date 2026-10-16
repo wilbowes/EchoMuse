@@ -5222,6 +5222,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         # wake path, mirrored in both places because that is the rule
         # test_config_mirrors.py enforces and the reason it exists.
         device.wake_sound = bool(config.get("wakeSound", False))
+        em_speechgate.apply(device, config)
         # Resolved against the capability — see em_shadow.effective_mode for
         # why "on" against firmware that cannot trigger must become shadow
         # rather than being honoured.

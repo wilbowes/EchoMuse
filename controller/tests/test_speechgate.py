@@ -83,6 +83,51 @@ def test_silero_scores_two_chunks_per_frame_and_carries_state():
     assert sess.calls == [0.0, 1.0, 2.0, 3.0]
 
 
+def test_threshold_clamps_and_a_bad_value_keeps_the_default():
+    assert sg.clamp_threshold(0.4) == 0.4
+    assert sg.clamp_threshold(0.05) == sg.GATE_LO
+    assert sg.clamp_threshold(9) == sg.GATE_HI
+    assert sg.clamp_threshold("nope") == sg.THRESHOLD
+    assert sg.clamp_threshold(float("nan")) == sg.THRESHOLD
+
+
+def test_apply_and_threshold_for_use_the_device_score():
+    class Dev:
+        pass
+    dev = Dev()
+    sg.apply(dev, {"speechGateThreshold": 0.33})
+    assert sg.threshold_for(dev) == 0.33
+    sg.apply(dev, {"speechGateThreshold": 9})
+    assert dev.speech_gate_threshold == sg.GATE_HI
+    assert sg.threshold_for(object()) == sg.THRESHOLD
+
+
+def test_addon_env_overlays_the_fleet_score(monkeypatch, tmp_path):
+    import em_db
+    stored = {"speechGateThreshold": 0.4, "vadThreshold": 0.001}
+    monkeypatch.delenv("EM_SPEECH_GATE_THRESHOLD", raising=False)
+    assert sg.overlay(stored)["speechGateThreshold"] == 0.4
+    assert sg.overlay(stored, {"EM_SPEECH_GATE_THRESHOLD": "0.7"})["speechGateThreshold"] == 0.7
+    assert sg.overlay(stored, {"EM_SPEECH_GATE_THRESHOLD": "nope"})["speechGateThreshold"] == 0.5
+    em_db.init(str(tmp_path / "em.db"))
+    try:
+        monkeypatch.setenv("EM_SPEECH_GATE_THRESHOLD", "0.6")
+        assert em_db.get_global_device_config()["speechGateThreshold"] == 0.6
+    finally:
+        em_db._conn.close()
+        em_db._conn = None
+
+
+def test_the_gate_is_built_from_the_device_score():
+    import _sources
+    body = _sources.def_source("em_esphome._stream_mic_audio")
+    assert "em_speechgate.threshold_for(device)" in body
+    reg = _sources.def_source("handle_control")
+    live = _sources.def_source("apply_live_config")
+    assert "em_speechgate.apply(device, config)" in reg
+    assert "em_speechgate.apply(live, effective)" in live
+
+
 def test_a_new_turn_starts_from_clean_state():
     sess = _Session()
     sg.Silero(sess).prob(bytes(2560))

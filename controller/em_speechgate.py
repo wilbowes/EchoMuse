@@ -45,8 +45,12 @@ import numpy as np
 log = logging.getLogger("echomuse")
 
 # Silero's usual operating point. Speech measured 0.72-1.00, non-speech
-# 0.02-0.03, so this is not a tight call on the data we have.
+# 0.02-0.03, so this is not a tight call on the data we have. The add-on
+# option speech_gate_threshold, EM_SPEECH_GATE_THRESHOLD, and per-Dot
+# speechGateThreshold move it inside GATE_LO..GATE_HI. 0.5 is the default.
 THRESHOLD = 0.5
+GATE_LO = 0.2
+GATE_HI = 0.8
 
 # Bound on held audio. The no-speech timeout ends a turn after 5s of audio
 # with no speech, so this is only reached if that stops being true; keeping
@@ -159,3 +163,49 @@ def new_turn() -> Silero | None:
     """A scorer for one turn, or None if the model is unavailable."""
     sess = _get_session()
     return Silero(sess) if sess is not None else None
+
+
+def clamp_threshold(raw, default: float = THRESHOLD) -> float:
+    """A speech-gate score inside GATE_LO..GATE_HI, or `default`."""
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    if value != value:  # NaN
+        return default
+    return min(GATE_HI, max(GATE_LO, value))
+
+
+def apply(device, config) -> None:
+    """Copy speechGateThreshold onto the device. Registration and a live push."""
+    device.speech_gate_threshold = clamp_threshold(
+        (config or {}).get("speechGateThreshold", THRESHOLD))
+
+
+def threshold_for(device) -> float:
+    """The gate score for this turn. Unset uses the default, 0.5."""
+    return clamp_threshold(getattr(device, "speech_gate_threshold", THRESHOLD))
+
+
+def _env_raw(env, name):
+    if env is None:
+        env = os.environ
+    raw = env.get(name)
+    if raw is None or str(raw).strip() == "":
+        return None
+    return raw
+
+
+def overlay(cfg, env=None):
+    """EM_SPEECH_GATE_THRESHOLD on top of a fleet config dict.
+
+    Unset leaves the stored value. A set value always wins, including one
+    that cannot be parsed: that one is the default, so a bad option cannot
+    freeze a previous score in place.
+    """
+    raw = _env_raw(env, "EM_SPEECH_GATE_THRESHOLD")
+    if raw is None:
+        return cfg
+    out = dict(cfg)
+    out["speechGateThreshold"] = clamp_threshold(raw)
+    return out

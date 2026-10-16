@@ -88,3 +88,9 @@ configuration:
       silent — no audio and no error, which looks like a deaf Echo. Above
       120 is not accepted, because the ring stops showing that the Echo is
       working at 135 seconds.
+  speech_gate_threshold:
+    name: Speech gate score
+    description: >-
+      Silero score that releases a turn's audio to Home Assistant. 0.5 is
+      the default. Real speech measured 0.72 to 1.00, and music residue
+      measured 0.02 to 0.03. The range is 0.2 to 0.8.

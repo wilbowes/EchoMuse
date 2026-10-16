@@ -45,6 +45,7 @@ KINDS: dict[str, str] = {
     "vadThreshold": FLOAT,
     "vadSpeechMs": INT,
     "vadSilenceMs": INT,
+    "speechGateThreshold": FLOAT,
     "owwThreshold": FLOAT,
     "owwModel": STR,
     "owwOnDevice": STR,

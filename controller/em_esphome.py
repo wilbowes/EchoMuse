@@ -1814,7 +1814,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         # which ducked-music residue passes. None = model unavailable, and
         # the turn streams ungated exactly as before.
         vad = em_speechgate.new_turn()
-        gate = em_speechgate.SpeechGate() if vad is not None else None
+        gate = em_speechgate.SpeechGate(threshold=em_speechgate.threshold_for(device)) if vad is not None else None
 
         def _is_speech(chunk: bytes) -> bool:
             samples = np.frombuffer(chunk, dtype=np.int16)
