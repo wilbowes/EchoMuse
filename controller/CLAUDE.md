@@ -2427,8 +2427,9 @@ while a value lives at the call site.**
   beside it is chrome and is tokenised.
 - **Type size, font family and corner radius are tokens too** (#820,
   2026-10-16): `--fs-2xs`…`--fs-lg` (8–14px), `--font-mono`/`--font-sans`,
-  `--radius-xs`…`--radius-xl` (2–10px), in a theme-independent `:root`
-  block. Each is a value the dashboard already used, so the conversion moved
+  `--radius-xs`…`--radius-xl` (2–10px), and spacing as `--space-N` = N ×
+  2px (2–32px; a 2px step because 6, 10 and 14 are among the most used
+  values), in a theme-independent `:root` block. Each is a value the dashboard already used, so the conversion moved
   no pixel; `tests/test_design_scale.py` ratchets the literals left per
   component. Exempt: `Shell` (xterm options are canvas settings, a `var()`
   is never resolved there) and the Echo drawings. A radius that is half the
