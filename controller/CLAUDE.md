@@ -2425,6 +2425,19 @@ while a value lives at the call site.**
   xterm theme is a 16-colour contract programs address by index. `deviceState`
   is the subtle one: `dot` is the simulated LED and stays literal, `color`
   beside it is chrome and is tokenised.
+- **Type size, font family and corner radius are tokens too** (#820,
+  2026-10-16): `--fs-2xs`…`--fs-lg` (8–14px), `--font-mono`/`--font-sans`,
+  `--radius-xs`…`--radius-xl` (2–10px), in a theme-independent `:root`
+  block. Each is a value the dashboard already used, so the conversion moved
+  no pixel; `tests/test_design_scale.py` ratchets the literals left per
+  component. Exempt: `Shell` (xterm options are canvas settings, a `var()`
+  is never resolved there) and the Echo drawings. A radius that is half the
+  element's height is that element's shape, not a scale step, so the
+  Toggle's stays literal. The wizard is untouched until #687 and #358 land.
+  **Proof of "no visual change" is a computed-style diff**, not a look:
+  two controllers (before/after) with the same fake Echoes, every view in
+  both themes, each element's computed size, spacing, radius, colour and box
+  compared; screenshots alone hide a 1px move.
 - **Never concatenate hex alpha onto a colour.** `` `${color}88` `` worked
   only while every value was a literal; the moment call sites became
   `var(--lcd-green)` it produced `var(--lcd-green)88`, invalid CSS that drops

@@ -129,7 +129,12 @@ def _theme_blocks() -> dict[str, set[str]]:
 def test_every_var_is_defined():
     """A var() with no definition is invisible, not broken — it renders as
     nothing and reports nothing. This is the failure mode worth a test."""
-    defined = set().union(*_theme_blocks().values())
+    # The scale tokens (type, radius, font) are theme-independent, so they
+    # sit in their own :root block; test_design_scale.py checks that block.
+    html = HTML.read_text()
+    scale = html.index(":root {\n      --font-sans:")
+    defined = set().union(*_theme_blocks().values()) | set(
+        _VAR_DEF.findall(html[scale:html.index("\n    }", scale)]))
     used = set(_VAR_USE.findall(JSX.read_text()))
     missing = used - defined
     assert not missing, (

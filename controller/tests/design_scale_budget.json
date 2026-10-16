@@ -1,0 +1,16 @@
+{
+  "AddDeviceTile": 2,
+  "App": 3,
+  "Card": 3,
+  "CircleButton": 2,
+  "DeployAllModal": 2,
+  "Detail": 5,
+  "DeviceConfigForm": 1,
+  "EqCurve": 2,
+  "LinkStrip": 1,
+  "MicroMeter": 2,
+  "ProvisionWizard": 68,
+  "SettingsPanel": 2,
+  "Toggle": 2,
+  "TurnObservability": 1
+}
