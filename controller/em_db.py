@@ -62,6 +62,10 @@ DEFAULT_DEVICE_CONFIG = {
     # Wake training samples are opt-in; candidates and triggers are saved for admin review.
     "wakeClipCapture":  False,
     "wakeClipMinScore": 0.20,
+    # How many of those clips each device keeps. Retention is disk usage on
+    # the controller, so the count is configurable but clamped (10-500,
+    # em_wake_samples.KEEP_MIN/MAX) — 50 matches KEEP_PER_DEVICE, the default.
+    "wakeClipKeep":     50,
     "adcDigitalGain":   88,
     "adcMicpga":        40,
     # micGainDb: fixed digital gain (dB) the device applies to the full
@@ -1997,6 +2001,23 @@ def _clamp_wake_sample_minimum(config: dict, where: str) -> dict:
     return {**config, "wakeClipMinScore": fixed}
 
 
+def _clamp_wake_clip_keep(config: dict, where: str) -> dict:
+    """Keep the retention count in em_wake_samples' [KEEP_MIN, KEEP_MAX]
+    range. Retention is disk usage on the controller and the clips are
+    speech recorded in someone's home: the count is configurable, the
+    bound is not."""
+    value = config.get("wakeClipKeep")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return config
+    fixed = max(em_wake_samples.KEEP_MIN,
+                min(em_wake_samples.KEEP_MAX, int(value)))
+    if fixed == value:
+        return config
+    log.warning(f"[db] {where}: wakeClipKeep {value} outside "
+                f"[{em_wake_samples.KEEP_MIN}, {em_wake_samples.KEEP_MAX}]; storing {fixed}")
+    return {**config, "wakeClipKeep": fixed}
+
+
 def set_device_config(device_id: str, config: dict) -> None:
     """
     Persist updated config for a device.
@@ -2004,7 +2025,9 @@ def set_device_config(device_id: str, config: dict) -> None:
     The caller is responsible for immediately pushing the config to the
     live device over the control WebSocket if it is currently connected.
     """
-    config = _clamp_wake_sample_minimum(_clamp_wake_threshold(config, device_id), device_id)
+    config = _clamp_wake_clip_keep(
+        _clamp_wake_sample_minimum(_clamp_wake_threshold(config, device_id), device_id),
+        device_id)
     with _tx() as conn:
         conn.execute(
             "UPDATE devices SET config = ? WHERE device_id = ?",
@@ -2115,7 +2138,9 @@ def get_global_device_config_raw() -> dict:
 
 def set_global_device_config(config: dict) -> None:
     """Persist updated fleet-wide default device config."""
-    config = _clamp_wake_sample_minimum(_clamp_wake_threshold(config, "fleet"), "fleet")
+    config = _clamp_wake_clip_keep(
+        _clamp_wake_sample_minimum(_clamp_wake_threshold(config, "fleet"), "fleet"),
+        "fleet")
     with _tx() as conn:
         conn.execute(
             "INSERT OR REPLACE INTO system_config (key, value) VALUES ('global_device_config', ?)",
@@ -2835,8 +2860,24 @@ def get_wake_counters(device_id: str, since: float) -> list[sqlite3.Row]:
     )
 
 
+def _effective_wake_clip_keep(device_id: str) -> int:
+    """The retention bound that prunes this device's samples: wakeClipKeep
+    from the effective config (fleet-inherited, device-overridden), clamped —
+    a value stored before the clamps existed, or by any path that skips them,
+    must not become an unbounded retention."""
+    value = get_effective_device_config(device_id).get("wakeClipKeep")
+    try:
+        return max(em_wake_samples.KEEP_MIN,
+                   min(em_wake_samples.KEEP_MAX, int(value)))
+    except (TypeError, ValueError):
+        return em_wake_samples.KEEP_PER_DEVICE
+
+
 def insert_wake_sample(device_id: str, rec: dict) -> int:
     """Persist metadata for one already-written wake sample; prune by id."""
+    # Read before the write transaction: _tx holds _db_lock for its whole
+    # body and the config read takes the same non-reentrant lock.
+    keep = _effective_wake_clip_keep(device_id)
     with _tx() as conn:
         cur = conn.execute(
             """INSERT INTO wake_samples
@@ -2851,7 +2892,7 @@ def insert_wake_sample(device_id: str, rec: dict) -> int:
         expired = conn.execute(
             """SELECT id, audio_file FROM wake_samples WHERE device_id = ?
                ORDER BY id DESC LIMIT -1 OFFSET ?""",
-            (device_id, em_wake_samples.KEEP_PER_DEVICE),
+            (device_id, keep),
         ).fetchall()
         if expired:
             # Unlink before deleting metadata. If the process stops during

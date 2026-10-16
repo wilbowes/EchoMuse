@@ -33,7 +33,13 @@ TRIGGER_POST_ROLL_SECONDS = 0
 TRIGGER_TAIL_TRIM_SECONDS = 0.2
 TRIGGER_TAIL_TRIM_BYTES = int(TRIGGER_TAIL_TRIM_SECONDS * SAMPLE_RATE * SAMPLE_WIDTH)
 MAX_CLIP_BYTES = 5 * SAMPLE_RATE * SAMPLE_WIDTH
+# Retention is bounded per device, and the bound itself is bounded: an
+# unbounded "keep everything" is unbounded disk, and the clips are speech
+# recorded in someone's home. 50 is the default (the config key wakeClipKeep
+# overrides it per device); 10-500 is the range the clamps allow.
 KEEP_PER_DEVICE = 50
+KEEP_MIN = 10
+KEEP_MAX = 500
 SUBDIR = "wake_samples"
 # Labeling a sample also copies it here, permanently and uncapped - the 50-per-device
 # cap above still applies to the reviewable copy, so a label is what survives it.

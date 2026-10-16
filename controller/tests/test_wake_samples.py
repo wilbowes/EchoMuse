@@ -310,3 +310,41 @@ def test_deleting_device_removes_sample_rows_and_audio(fresh_db, monkeypatch):
     assert observed == [True]
     assert db.get_wake_samples("dev1") == []
     assert not path.exists()
+
+
+def test_retention_follows_the_configured_clip_count(fresh_db):
+    # A device's wakeClipKeep applies only once the wakeword section is
+    # overridden — the same rule every other section-scoped key follows.
+    db.set_device_config_sections("dev1", ["wakeword"])
+    config = db.get_effective_device_config("dev1")
+    config["wakeClipKeep"] = samples.KEEP_PER_DEVICE + 2
+    db.set_device_config("dev1", config)
+    for i in range(samples.KEEP_PER_DEVICE + 5):
+        db.insert_wake_sample("dev1", {
+            "ts": i, "audio_file": samples.filename("dev1"), "kind": "candidate",
+        })
+    assert len(db.get_wake_samples("dev1", samples.KEEP_MAX)) == samples.KEEP_PER_DEVICE + 2
+
+
+def test_wake_clip_keep_is_clamped_on_both_write_paths(fresh_db):
+    config = db.get_effective_device_config("dev1")
+    config["wakeClipKeep"] = 9999
+    db.set_device_config("dev1", config)
+    assert db.get_device_config("dev1")["wakeClipKeep"] == samples.KEEP_MAX
+
+    fleet = db.get_global_device_config()
+    fleet["wakeClipKeep"] = 0
+    db.set_global_device_config(fleet)
+    assert db.get_global_device_config()["wakeClipKeep"] == samples.KEEP_MIN
+
+
+def test_retention_falls_back_to_the_default_on_a_non_numeric_keep(fresh_db):
+    # The write clamps skip non-numbers rather than inventing a value, so a
+    # stored None (or anything a future path fails to clamp) must not become
+    # an unbounded retention — the prune clamps on read, to the default.
+    db.set_device_config("dev1", {"wakeClipKeep": None})
+    for i in range(samples.KEEP_PER_DEVICE + 5):
+        db.insert_wake_sample("dev1", {
+            "ts": i, "audio_file": samples.filename("dev1"), "kind": "candidate",
+        })
+    assert len(db.get_wake_samples("dev1", samples.KEEP_MAX)) == samples.KEEP_PER_DEVICE
