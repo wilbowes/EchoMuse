@@ -1130,7 +1130,7 @@ function turnSegments(t) {
   return { listen, transcribe, respond, shown: listen + transcribe + respond };
 }
 
-function WakeSampleReview({ deviceId, isAdmin }) {
+function WakeSampleReview({ deviceId, isAdmin, keep }) {
   const [samples, setSamples] = useState([]);
   const [playing, setPlaying] = useState(null);
   const [zipError, setZipError] = useState('');
@@ -1140,7 +1140,7 @@ function WakeSampleReview({ deviceId, isAdmin }) {
 
   const load = async () => {
     if (!isAdmin) return;
-    try { setSamples(await API.get(`/api/devices/${deviceId}/wake-samples?limit=50`) || []); }
+    try { setSamples(await API.get(`/api/devices/${deviceId}/wake-samples?limit=${keep ?? 50}`) || []); }
     catch {}
   };
   useEffect(() => {
@@ -1152,7 +1152,7 @@ function WakeSampleReview({ deviceId, isAdmin }) {
       Object.values(urlsRef.current).forEach(URL.revokeObjectURL);
       urlsRef.current = {};
     };
-  }, [deviceId, isAdmin]);
+  }, [deviceId, isAdmin, keep]);
 
   const sampleUrl = async sample => {
     if (urlsRef.current[sample.id]) return urlsRef.current[sample.id];
@@ -1214,7 +1214,7 @@ function WakeSampleReview({ deviceId, isAdmin }) {
   if (!isAdmin || !samples.length) return null;
   return <div style={{ marginTop: 'var(--space-8)', borderTop: '1px solid var(--track)', paddingTop: 'var(--space-6)' }}>
     <div className="em-label" style={{ marginBottom: 'var(--space-4)', display: 'flex', alignItems: 'center' }}>
-      <span style={{ flex: 1 }}>Wake-word samples</span>
+      <span style={{ flex: 1 }}>Wake-word samples · newest {keep ?? 50}</span>
       {zipError && <span role="alert" style={{ color: 'var(--error)', marginRight: 'var(--space-4)' }}>{zipError}</span>}
       <button onClick={downloadZip} title="Download every retained sample as one ZIP, grouped by label" style={{ background: 'none', border: 0, color: 'var(--text2)', cursor: 'pointer' }}>⤓ all (.zip)</button>
     </div>
@@ -1234,7 +1234,7 @@ function WakeSampleReview({ deviceId, isAdmin }) {
   </div>;
 }
 
-function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMisses, stateLabel, stateColor, isAdmin }) {
+function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMisses, stateLabel, stateColor, isAdmin, keep }) {
   const [hover, setHover] = useState(null); // index into `recent`
   const mono = "var(--font-mono)";
 
@@ -1408,7 +1408,7 @@ function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMis
           })()}
         </div>
       )}
-      <WakeSampleReview deviceId={deviceId} isAdmin={isAdmin}/>
+      <WakeSampleReview deviceId={deviceId} isAdmin={isAdmin} keep={keep}/>
     </div>
   );
 }
@@ -2465,6 +2465,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     stateLabel={state.label.toUpperCase()}
                     stateColor={state.lcd}
                     isAdmin={isAdmin}
+                    keep={cfgEff.wakeClipKeep}
                   />
                 </Panel>
               </div>
@@ -9670,7 +9671,7 @@ const STAGE_MONO = "var(--font-mono)";
 // be silently wrong.
 const CONFIG_SECTIONS = {
   "playback": ["eqBands", "eqLoudness", "duckDb", "responseLevel", "limiterEnabled", "limiterThreshold", "limiterRelease", "bassGuardEnabled", "bassGuardDb", "streamReply", "volumeButtonSound"],
-  "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice", "wakeSound", "wakeSoundLevel", "wakeClipCapture", "wakeClipMinScore"],
+  "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice", "wakeSound", "wakeSoundLevel", "wakeClipCapture", "wakeClipMinScore", "wakeClipKeep"],
   "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "wakeMic", "aecEnabled", "aecDelayMs", "aecTailMs", "aecRefSource", "nsAsr", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "remoteVolumeArc", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
   "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs", "consolePassword", "consoleTimeoutMin", "controllerEndpoints"],
@@ -10224,6 +10225,10 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
               <Slider label="Minimum sample score" sub="lower catches more near-misses, but more ordinary speech too"
                 disabled={onDeviceMode(config) !== 'off'}
                 value={config.wakeClipMinScore ?? 0.20} min={0.05} max={0.95} step={0.01} formatValue={v => v.toFixed(2)} onChange={v => set('wakeClipMinScore', v)}/>
+              <Slider label="Clips kept per device" sub="how many captured clips are kept for review — oldest are pruned as new ones arrive"
+                disabled={onDeviceMode(config) !== 'off'}
+                value={config.wakeClipKeep ?? 50} min={10} max={500} step={10} unit="clips"
+                formatValue={v => Math.round(v)} onChange={v => set('wakeClipKeep', Math.round(v))}/>
               {/* Accessibility first: the ring is the only other sign the Echo
                   is listening. Disabled with the reason on firmware that cannot
                   play it, never a switch that saves and stays silent. */}
