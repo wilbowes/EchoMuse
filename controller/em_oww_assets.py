@@ -138,18 +138,10 @@ def runtime_source(runtime_dir: str | Path = RUNTIME_DIR) -> Path | None:
 
 def openwakeword_resources() -> Path | None:
     """
-    The installed openwakeword package's bundled models directory.
-
-    Imported lazily and tolerantly: this module is unit-tested in an
-    environment that deliberately does not have openwakeword (see CLAUDE.md
-    on keeping the test deps to pytest/numpy/scipy).
+    The installed openwakeword package's bundled models directory, or None.
+    Located, never imported (em_oww_models.resources_dir says why).
     """
-    try:
-        import openwakeword  # noqa: F401
-    except Exception:
-        return None
-    d = Path(openwakeword.__file__).parent / "resources" / "models"
-    return d if d.is_dir() else None
+    return em_oww_models.resources_dir()
 
 
 def classifier_source(oww_model: str,

@@ -18,6 +18,7 @@ without stubs.
 from __future__ import annotations
 
 import asyncio
+import weakref
 from typing import TYPE_CHECKING, Any
 
 import em_arbiter
@@ -58,7 +59,8 @@ shell_dashboard: dict[str, Any]            = {}
 # (device_id, model_name[, speex]) would leave a renamed wake word's old model
 # cached for the life of the process — a smaller version of the same leak.
 # Changing the wake word therefore REPLACES the entry, dropping the old model.
-# Evicted on device delete (see forget_oww_models, called from em_api).
+# Evicted on device delete and when the device listens privately (see
+# forget_oww_models).
 #
 # The wake listener and the barge watcher get SEPARATE slots: they build the
 # model differently (the wake listener with enable_speex_noise_suppression, the
@@ -67,12 +69,18 @@ oww_models:       dict[str, tuple[str, bool, "OWWModel"]] = {}   # id -> (name, 
 oww_barge_models: dict[str, tuple[str, "OWWModel"]]       = {}   # id -> (name, model)
 
 
-def forget_oww_models(device_id: str) -> None:
-    """Drop a device's cached OWW models. Called when a device is deleted, so a
-    removed device does not keep its models (and their ONNX sessions) for the
-    life of the process."""
-    oww_models.pop(device_id, None)
-    oww_barge_models.pop(device_id, None)
+# Every wake model built, held weakly: the count of models still alive, for
+# the log line after a release. Being weak, it keeps nothing alive itself.
+live_oww_models: "weakref.WeakSet[OWWModel]" = weakref.WeakSet()
+
+
+def forget_oww_models(device_id: str) -> bool:
+    """Drop a device's cached OWW models. Called when a device is deleted, and
+    when it listens privately (nothing here scores it then), so neither keeps
+    its models (and their ONNX sessions) for the life of the process."""
+    wake = oww_models.pop(device_id, None)
+    barge = oww_barge_models.pop(device_id, None)
+    return wake is not None or barge is not None
 
 
 # One arbiter for the fleet — elects a single responder when one

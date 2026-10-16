@@ -19,7 +19,6 @@ Band centre frequencies and types:
   7: 8000 Hz  — high shelf
 
 All filter design uses the Audio EQ Cookbook by Robert Bristow-Johnson.
-High-pass uses scipy.signal.butter (already a dependency via openwakeword).
 
 Usage:
     import em_eq
@@ -29,10 +28,25 @@ Usage:
 import math
 import logging
 import numpy as np
-from scipy.signal import sosfilt
 
 import em_limiter
 import em_mbc  # noqa: F401  (type reference in signatures)
+
+
+def _signal():
+    """scipy.signal, imported on first use. It is ~90 MB and ~2 s to import,
+    and a controller whose Echoes run their own output chain never filters
+    anything. preload() takes the import off the event loop ahead of need."""
+    import scipy.signal
+    return scipy.signal
+
+
+def preload() -> None:
+    """Import scipy.signal now. Called in a worker thread when an Echo that
+    needs this controller's output chain registers, so the first stream does
+    not stall the event loop on the import."""
+    _signal()
+
 
 log = logging.getLogger("echomuse.eq")
 
@@ -155,7 +169,7 @@ def apply(
 
     samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float64)
     if not flat:
-        samples = sosfilt(build_sos(bands, sample_rate, loudness), samples)
+        samples = _signal().sosfilt(build_sos(bands, sample_rate, loudness), samples)
     # Order matters: the guard removes excursion the driver cannot deliver,
     # THEN the limiter catches what is left. Limiting first would spend gain
     # reduction on bass that is about to be thrown away, pulling down the
@@ -287,7 +301,7 @@ class StreamingEQ:
             return pcm
         samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float64)
         if self._sos is not None:
-            samples, self._zi = sosfilt(self._sos, samples, zi=self._zi)
+            samples, self._zi = _signal().sosfilt(self._sos, samples, zi=self._zi)
         if self._guard is not None:
             samples = self._guard.process(samples)
         if self._limiter is not None:

@@ -50,12 +50,18 @@ measured 0.4dB at the output. Found by measurement, not by reading it.
 """
 
 import numpy as np
-from scipy.signal import butter, sosfilt, sosfreqz
 
 import em_limiter
 
 # Crossover, Hz. Measured off stock (#229), not chosen.
 CROSSOVER_HZ = 115.0
+
+
+def _signal():
+    """scipy.signal on first use; see em_eq._signal and em_eq.preload."""
+    import scipy.signal
+    return scipy.signal
+
 
 # Bass band law, also from stock.
 BASS_RATIO        = 20.0
@@ -88,7 +94,7 @@ def _lr4(fc: float, fs: int, kind: str) -> np.ndarray:
     Clamped below Nyquist so an odd sample rate degrades rather than raising.
     """
     wn = min(fc / (fs * 0.5), 0.99)
-    sos = butter(2, wn, btype=kind, output="sos")
+    sos = _signal().butter(2, wn, btype=kind, output="sos")
     return np.vstack([sos, sos])
 
 
@@ -99,8 +105,8 @@ def crossover_flatness_db(fc: float = CROSSOVER_HZ, fs: int = 48000) -> float:
     Exposed so the flat-sum property is a measurement in the test suite
     rather than a claim in a comment.
     """
-    _, hl = sosfreqz(_lr4(fc, fs, "low"), worN=4096, fs=fs)
-    _, hh = sosfreqz(_lr4(fc, fs, "high"), worN=4096, fs=fs)
+    _, hl = _signal().sosfreqz(_lr4(fc, fs, "low"), worN=4096, fs=fs)
+    _, hh = _signal().sosfreqz(_lr4(fc, fs, "high"), worN=4096, fs=fs)
     mag = np.abs(hl + hh)
     return float(20.0 * np.log10(mag.max() / max(mag.min(), _EPS)))
 
@@ -208,8 +214,8 @@ class BassGuard:
         if samples.size == 0:
             return samples
         x = np.asarray(samples, dtype=np.float64)
-        low, self._zl = sosfilt(self._lp, x, zi=self._zl)
-        high, self._zh = sosfilt(self._hp, x, zi=self._zh)
+        low, self._zl = _signal().sosfilt(self._lp, x, zi=self._zl)
+        high, self._zh = _signal().sosfilt(self._hp, x, zi=self._zh)
         if not self.enabled:
             # Bypassed, but still filtered. LR4's two halves sum MAGNITUDE-
             # flat (crossover_flatness_db measures 0.0000dB); the sum is an

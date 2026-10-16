@@ -107,12 +107,10 @@ def _model_path() -> str | None:
     override = os.environ.get("SPEECH_GATE_MODEL")
     if override:
         return override
-    try:
-        import openwakeword
-    except Exception:
-        return None
-    return os.path.join(os.path.dirname(openwakeword.__file__),
-                        "resources", "models", "silero_vad.onnx")
+    # Located, never imported: see em_oww_models.resources_dir.
+    import em_oww_models
+    d = em_oww_models.resources_dir()
+    return str(d / "silero_vad.onnx") if d else None
 
 
 def _get_session():

@@ -41,11 +41,11 @@ def test_forget_drops_both_slots_and_only_that_device():
     em_state.oww_models.update(a=("m", False, object()), b=("m", False, object()))
     em_state.oww_barge_models.update(a=("m", object()), b=("m", object()))
     try:
-        em_state.forget_oww_models("a")
+        assert em_state.forget_oww_models("a") is True
         assert "a" not in em_state.oww_models
         assert "a" not in em_state.oww_barge_models
         assert "b" in em_state.oww_models and "b" in em_state.oww_barge_models
-        em_state.forget_oww_models("never-seen")   # must not raise
+        assert em_state.forget_oww_models("never-seen") is False   # nothing to free
     finally:
         em_state.oww_models.clear()
         em_state.oww_barge_models.clear()
@@ -67,8 +67,9 @@ def test_wake_listener_acquires_from_cache_not_a_bare_constructor():
     listener = _listener_src()
     assert "_acquire_wake_model(" in listener, \
         "the listener must acquire its model from the cache"
-    assert "OWWModel(" not in listener, \
-        "the listener must not construct OWWModel directly — that is the leak"
+    for ctor in ("OWWModel(", "em_oww_models.model_class()("):
+        assert ctor not in listener, \
+            "the listener must not construct a model directly — that is the leak"
 
 
 def test_reused_model_is_reset_but_a_fresh_one_is_not():
@@ -80,7 +81,7 @@ def test_reused_model_is_reset_but_a_fresh_one_is_not():
     acq = src.index("async def _acquire_wake_model")
     body = src[acq:src.index("async def ", acq + 1)]
     hit = body.index("_reset_wake_model(model)")
-    build = body.index("OWWModel(")
+    build = body.index("em_oww_models.model_class()(")
     assert hit < build, \
         "the cache hit must reset() before the miss path builds a new model"
 
@@ -137,3 +138,54 @@ def test_barge_watcher_uses_the_cache():
         "the barge watcher must acquire its model from the cache"
     assert "OWWModel(" not in watcher, \
         "the barge watcher must not construct OWWModel directly"
+
+
+def test_a_device_that_goes_private_releases_its_models():
+    """Nothing on the controller scores an Echo that listens privately, so
+    holding its models is tens of MB for nothing; on a Pi with every Echo on
+    its own wake word that is most of the controller's memory. They were kept
+    until the device was deleted."""
+    import asyncio
+    import types
+
+    import _oww_stub
+    _oww_stub.install()
+    import em_controller
+
+    dev = types.SimpleNamespace(device_id="d1", private_listening=True)
+    seen = {}
+
+    async def fake_private(d):
+        seen["wake"] = "d1" in em_state.oww_models
+        seen["barge"] = "d1" in em_state.oww_barge_models
+        em_state.devices.pop("d1", None)        # ends the listener's loop
+
+    em_state.devices["d1"] = dev
+    em_state.oww_models["d1"] = ("m", False, object())
+    em_state.oww_barge_models["d1"] = ("m", object())
+    real = em_controller._private_listen
+    em_controller._private_listen = fake_private
+    try:
+        asyncio.run(em_controller.wake_word_listener(dev))
+    finally:
+        em_controller._private_listen = real
+        em_state.devices.pop("d1", None)
+        em_state.oww_models.clear()
+        em_state.oww_barge_models.clear()
+    assert seen == {"wake": False, "barge": False}
+
+
+def test_the_live_count_holds_nothing_alive():
+    """live_oww_models is how a release says whether anything outlived it;
+    being weak, it must not itself keep a model alive."""
+    import gc
+
+    class FakeModel:
+        pass
+
+    m = FakeModel()
+    em_state.live_oww_models.add(m)
+    before = len(em_state.live_oww_models)
+    del m
+    gc.collect()
+    assert len(em_state.live_oww_models) == before - 1

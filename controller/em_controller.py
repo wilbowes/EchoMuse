@@ -68,7 +68,6 @@ import time
 
 import numpy as np
 from aiohttp import web
-from openwakeword.model import Model as OWWModel
 from zeroconf.asyncio import AsyncZeroconf
 from zeroconf import ServiceInfo
 import websockets
@@ -1522,12 +1521,13 @@ async def _acquire_wake_model(device: "Device", name: str, speex: bool):
         return model
     model = await loop.run_in_executor(
         None,
-        lambda: OWWModel(
+        lambda: em_oww_models.model_class()(
             wakeword_models=[name],
             enable_speex_noise_suppression=speex,
         ),
     )
     em_state.oww_models[device.device_id] = (name, speex, model)
+    em_state.live_oww_models.add(model)
     return model
 
 
@@ -1541,9 +1541,10 @@ async def _acquire_barge_model(device: "Device", name: str):
     if cached is not None and cached[0] == name:
         return cached[1]
     model = await asyncio.get_event_loop().run_in_executor(
-        None, lambda: OWWModel(wakeword_models=[name])
+        None, lambda: em_oww_models.model_class()(wakeword_models=[name])
     )
     em_state.oww_barge_models[device.device_id] = (name, model)
+    em_state.live_oww_models.add(model)
     return model
 
 def get_device(device_id: str) -> Device | None:
@@ -3170,6 +3171,15 @@ def _supervise_wake_listener(device: "Device", failures: int = 0) -> asyncio.Tas
     return t
 
 
+async def _after_model_release(device_id: str) -> None:
+    """Hand freed heap back to the OS and say what is still loaded: a model
+    that outlives its release is the #512 leak again, and this line is
+    where it shows."""
+    await asyncio.to_thread(em_process_stats.release_freed_memory)
+    log.info(f"[{device_id}] wake models released; "
+             f"{len(em_state.live_oww_models)} still loaded on this controller")
+
+
 async def wake_word_listener(device: Device):
     """
     Listen for this Echo's wake word, whichever side detects it.
@@ -3184,6 +3194,11 @@ async def wake_word_listener(device: Device):
     """
     while em_state.devices.get(device.device_id) is device:
         if device.private_listening:
+            # Nothing here scores a private Echo, so its cached models (three
+            # ONNX sessions each) are released, not held for the life of the
+            # process; going back to streaming rebuilds them.
+            if em_state.forget_oww_models(device.device_id):
+                em_tasks.spawn(_after_model_release(device.device_id))
             await _private_listen(device)
         else:
             await _stream_listen(device)
@@ -5223,6 +5238,11 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         # arrival is the trigger. Background: shell round trips and possibly a
         # multi-megabyte push, none of which the handshake should wait on.
         em_tasks.spawn(em_reconcile.on_connect(device_id, device))
+        # An Echo without its own output chain is filtered here, which needs
+        # scipy (em_eq._signal): import it in a worker thread now, so the
+        # first stream does not stall the event loop on a ~2 s import.
+        if not device.output_chain_on_device:
+            em_tasks.spawn(asyncio.to_thread(em_eq.preload))
         # An approval (a new device, or an approved pairing) issues link
         # credentials unless this connection already has working ones.
         if em_pairing.approved(device_id):

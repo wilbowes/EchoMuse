@@ -7,6 +7,8 @@ feeds the CPU sampler from its 1s ticker.
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
 import logging
 import os
 import platform
@@ -176,3 +178,19 @@ def controller_stats() -> dict:
         pass
 
     return stats
+
+
+def release_freed_memory() -> None:
+    """Ask glibc to return freed heap to the OS (malloc_trim). Freed memory
+    otherwise stays in the process: three wake models released after a
+    switch to private listening left ~40 MB that this gives back (measured
+    in the controller image, 2026-10-16). Blocking for a few ms, so call it
+    from a worker thread. A no-op where libc has no malloc_trim (musl,
+    macOS)."""
+    name = ctypes.util.find_library("c")
+    try:
+        trim = getattr(ctypes.CDLL(name), "malloc_trim", None) if name else None
+        if trim is not None:
+            trim(0)
+    except OSError:
+        pass
