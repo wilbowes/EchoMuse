@@ -137,6 +137,7 @@ COPY em_barge.py .
 COPY em_earlytts.py .
 COPY em_ns.py .
 COPY em_speechgate.py .
+COPY em_stallwatch.py .
 COPY em_wav.py .
 COPY em_pki.py .
 COPY em_hostip.py .

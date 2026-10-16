@@ -106,6 +106,9 @@ options:
   # goes idle while the controller is still waiting, which is the same silent
   # failure from the other side.
   tts_wait_timeout: 30
+  # Off. On, a stall over one second dumps the blocking stack and names
+  # the turn or upload that was running. The 250 ms stall warning stays.
+  loop_watchdog: false
 schema:
   server_host: "str"
   server_ip: "str"
@@ -120,3 +123,4 @@ schema:
   log_levels: "str"
   extra_ca_cert: "str?"
   tts_wait_timeout: "int(5,120)"
+  loop_watchdog: "bool"

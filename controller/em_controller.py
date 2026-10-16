@@ -117,6 +117,7 @@ import em_oww_models
 import em_player
 import em_volume
 import em_speechgate
+import em_stallwatch
 import em_timers
 import em_loglevel
 
@@ -6027,9 +6028,7 @@ async def event_loop_lag_monitor(interval: float = 1.0,
     loop = asyncio.get_event_loop()
     next_cpu = 0.0
     while True:
-        t0 = loop.time()
-        await asyncio.sleep(interval)
-        lag_ms = (loop.time() - t0 - interval) * 1000
+        lag_ms = await em_stallwatch.measure(loop, interval)
         if lag_ms > em_state.loop_lag_peak_ms:
             em_state.loop_lag_peak_ms = lag_ms
         # Piggyback the controller's CPU sampling on this ticker rather than

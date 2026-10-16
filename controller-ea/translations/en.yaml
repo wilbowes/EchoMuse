@@ -88,3 +88,9 @@ configuration:
       silent — no audio and no error, which looks like a deaf Echo. Above
       120 is not accepted, because the ring stops showing that the Echo is
       working at 135 seconds.
+  loop_watchdog:
+    name: Event-loop stall watchdog
+    description: >-
+      Off. When on, a stall longer than one second dumps the blocking
+      stack and names the turn or upload that was running. The 250
+      millisecond stall warning is unchanged either way.
