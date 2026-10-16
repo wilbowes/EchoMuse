@@ -43,6 +43,7 @@ OPTION_ENV_VARS = {
     "log_levels": "LOG_LEVELS",
     "extra_ca_cert": "EM_EXTRA_CA_CERT",
     "tts_wait_timeout": "EM_TTS_WAIT_TIMEOUT",
+    "arbitration_early_ms": "EM_ARBITRATION_EARLY_MS",
 }
 
 if OPTIONS_PATH.is_file():

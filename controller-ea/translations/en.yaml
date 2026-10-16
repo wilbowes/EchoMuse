@@ -88,3 +88,11 @@ configuration:
       silent — no audio and no error, which looks like a deaf Echo. Above
       120 is not accepted, because the ring stops showing that the Echo is
       working at 135 seconds.
+  arbitration_early_ms:
+    name: Arbitration early exit (ms)
+    description: >-
+      How long a single Echo's wake claim waits before it is granted.
+      80 milliseconds is the default: the nearest Echo answers once it is
+      the only one that heard the wake. 0 waits for the whole arbitration
+      window. A second Echo that claims inside this mark keeps the window
+      open, and the louder one still wins.

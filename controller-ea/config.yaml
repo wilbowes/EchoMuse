@@ -106,6 +106,11 @@ options:
   # goes idle while the controller is still waiting, which is the same silent
   # failure from the other side.
   tts_wait_timeout: 30
+  # Milliseconds a lone wake claim waits before it is granted. 80 lets the
+  # nearest Echo answer without sitting out the whole 250 ms hold. 0 waits
+  # for that whole hold. A second claim inside the early mark keeps the
+  # hold open, so a louder Echo can still take the turn.
+  arbitration_early_ms: 80
 schema:
   server_host: "str"
   server_ip: "str"
@@ -120,3 +125,4 @@ schema:
   log_levels: "str"
   extra_ca_cert: "str?"
   tts_wait_timeout: "int(5,120)"
+  arbitration_early_ms: "int(0,250)"

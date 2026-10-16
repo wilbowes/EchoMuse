@@ -25,6 +25,7 @@ Three pieces:
 
 from __future__ import annotations
 
+import os
 import struct
 from collections import deque
 from dataclasses import dataclass, field
@@ -163,6 +164,29 @@ def arbitration_hold(detectors) -> float:
     detects no longer matters (Wil, 2026-10-05), only that there is someone
     to wait for."""
     return ARB_HOLD_S if sum(1 for d in detectors if d is not None) > 1 else 0.0
+
+
+def arbitration_early(env=None) -> float:
+    """Seconds a lone claim waits before it is granted.
+
+    EM_ARBITRATION_EARLY_MS, default 80. 0 waits out the whole hold. The
+    result is never longer than ARB_HOLD_S. A value that is not a number
+    is the default. contest() treats 0 as "no early exit".
+    """
+    if env is None:
+        env = os.environ
+    raw = env.get("EM_ARBITRATION_EARLY_MS")
+    if raw is None or str(raw).strip() == "":
+        ms = 80
+    else:
+        try:
+            ms = int(float(str(raw).strip()))
+        except (TypeError, ValueError):
+            ms = 80
+    ms = min(250, max(0, ms))
+    if ms <= 0:
+        return 0.0
+    return min(ms / 1000.0, ARB_HOLD_S)
 
 
 def fleet_summary(views) -> dict:

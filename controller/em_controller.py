@@ -3281,7 +3281,7 @@ async def _claim_wake(device: "Device", heard_at: float | None,
         heard_at=heard_at, slack_s=_arbitration_slack(), hold_s=hold,
         level=level[0] if level is not None else None,
         gains=device.adc_gains, over_playback=over_playback,
-    )
+        early_s=em_listen.arbitration_early(),)
     now = asyncio.get_event_loop().time()
     if hold > 0:
         ago = (now - heard_at) * 1000.0 if heard_at is not None else 0.0

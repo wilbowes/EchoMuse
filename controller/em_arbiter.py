@@ -200,7 +200,8 @@ class WakeArbiter:
     async def contest(self, device_id: str, window_s: float,
                       heard_at: float | None = None, slack_s: float = 0.0,
                       hold_s: float = 0.0, level: float | None = None,
-                      gains: tuple | None = None, over_playback: bool = False) -> str:
+                      gains: tuple | None = None, over_playback: bool = False,
+                      early_s: float | None = None) -> str:
         """
         claim(), held so that every Echo that heard the utterance is counted
         and `pick()` chooses the loudest, or failing a usable level the one
@@ -210,6 +211,12 @@ class WakeArbiter:
         (less any time it already spent getting here), then returns the
         winner to every claimant. A claim arriving after the decision meets
         the granted winner exactly as in claim(). `hold_s <= 0` does not wait.
+
+        `early_s` ends that wait once it has passed with only one claim.
+        None and `early_s <= 0` keep the full hold, which is what a caller
+        that omits it does. A second claim before the early mark keeps the
+        hold open until `hold_s`, so a louder Echo still inside the old
+        window can join. `early_s` is never waited past `hold_s`.
         """
         if hold_s <= 0:
             return self.claim(device_id, window_s, heard_at, slack_s)
@@ -233,7 +240,15 @@ class WakeArbiter:
         decided: asyncio.Future = loop.create_future()
         self._contest = (heard, entries, decided)
         try:
-            await asyncio.sleep(max(0.0, heard + hold_s - now))
+            # None and <= 0 are the full hold. A positive early mark grants
+            # a lone claim then; a second claim already in `entries` keeps
+            # the rest of the hold open for anyone else inside the window.
+            limit = hold_s
+            if early_s is not None and early_s > 0:
+                limit = min(early_s, hold_s)
+            await asyncio.sleep(max(0.0, heard + limit - now))
+            if limit < hold_s and len(entries) >= 2:
+                await asyncio.sleep(max(0.0, heard + hold_s - loop.time()))
         finally:
             won, self.last_why = pick(entries)
             winner = won.device_id
