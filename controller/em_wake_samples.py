@@ -34,10 +34,16 @@ TRIGGER_POST_ROLL_SECONDS = 0
 TRIGGER_TAIL_TRIM_SECONDS = 0.2
 TRIGGER_TAIL_TRIM_BYTES = int(TRIGGER_TAIL_TRIM_SECONDS * SAMPLE_RATE * SAMPLE_WIDTH)
 MAX_CLIP_BYTES = 5 * SAMPLE_RATE * SAMPLE_WIDTH
+# Retention is bounded per device, and the bound itself is bounded: an
+# unbounded "keep everything" is unbounded disk, and the clips are speech
+# recorded in someone's home. 50 is the default (the config key wakeClipKeep
+# overrides it per device); 10-500 is the range the clamps allow.
 KEEP_PER_DEVICE = 50
+KEEP_MIN = 10
+KEEP_MAX = 500
 SUBDIR = "wake_samples"
-# Labeling a sample also copies it here, permanently and uncapped - the 50-per-device
-# cap above still applies to the reviewable copy, so a label is what survives it.
+# Labeling a sample also copies it here, permanently and uncapped - the per-device
+# retention (wakeClipKeep) still applies to the reviewable copy, so a label is what survives it.
 ARCHIVE_SUBDIR = "wake_samples_archive"
 ARCHIVE_LABELS = ("wake", "not_wake", "uncertain")
 _NAME_RE = re.compile(r"^(?P<device>[A-Za-z0-9_.-]{1,64})_(?P<token>[a-f0-9]{32})\.wav$")
@@ -140,17 +146,21 @@ def build_zip(device_id: str, rows, db_path: str | None = None) -> bytes | None:
     """One ZIP of the device's retained sample WAVs, one directory per review
     label — the label chosen in the dashboard, with unreviewed clips kept
     under their own. Rows are db.get_wake_samples output (id DESC), so an
-    archive that hits KEEP_PER_DEVICE keeps the newest clips — the archive is
-    built whole in memory, so its bound is the retention constant itself;
-    a row whose file the retention window already pruned is skipped, and an
-    archive that ends up empty returns None so the endpoint can 404 instead
-    of sending nothing."""
+    archive that hits KEEP_MAX keeps the newest clips — the archive is
+    built whole in memory, so its bound is the clamp maximum, never the
+    (configurable) retention, or a raised wakeClipKeep would silently
+    export fewer clips than the device retains. Entries are ZIP_STORED:
+    PCM barely deflates, and ~100 KB per clip at the top of the range is
+    ~50 MB in memory, so the CPU saved by deflating is not worth it.
+    A row whose file the retention window already pruned is skipped, and
+    an archive that ends up empty returns None so the endpoint can 404
+    instead of sending nothing."""
     out = io.BytesIO()
     written = 0
     try:
-        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_STORED) as zf:
             for row in rows:
-                if written >= KEEP_PER_DEVICE:
+                if written >= KEEP_MAX:
                     break
                 path = resolve(device_id, row["audio_file"], db_path)
                 if path is None:
