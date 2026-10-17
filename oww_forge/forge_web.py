@@ -241,6 +241,9 @@ def _wakewords_state() -> list:
                 if not _job.progress_warned:
                     _job.progress_warned = True
                     _job._note(f"\n[forge-ui] no progress for '{name}': {type(e).__name__}: {e}\n")
+        # clips_train counts synthetic and uploaded clips together, and only
+        # the `real_` prefix separates a person's own recordings from the
+        # TTS sets sharing those two directories.
         words.append({
             "name": name,
             "phrases": cfg.get("target_phrase", []),
@@ -250,6 +253,7 @@ def _wakewords_state() -> list:
             "custom_negative_phrases": cfg.get("custom_negative_phrases") or [],
             "clips_train": _count(work / "positive_train"),
             "clips_test": _count(work / "positive_test"),
+            "recordings": len(forge.real_recordings(work)),
             "features_built": (work / "positive_features_train.npy").exists(),
             "model_built": model.exists(),
             "model_size_kb": round(model.stat().st_size / 1e3) if model.exists() else None,

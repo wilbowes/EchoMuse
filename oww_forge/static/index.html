@@ -670,6 +670,14 @@ function wwHead(w, r) {
         <span class="ic ${done[id] ? 'ok' : ''}" aria-hidden="true">${done[id] ? '✓' : i + 1}</span>${label}</a></li>`).join('')}</ol>`;
 }
 
+/* How many of the person's own clips are on disk, and nothing when there are
+   none. Uploads share the two positive directories with the TTS sets, and the
+   `real_` prefix is the only thing telling them apart. */
+function recCount(w) {
+  const n = w.recordings || 0;
+  return n ? `<p class="hint">${n0(n)} recording${n === 1 ? '' : 's'} stored.</p>` : '';
+}
+
 function pageTrain(w) {
   const mine = jobFor(w.name) && state.job.kind === 'build';
   const p = mine ? w.progress : null;
@@ -793,6 +801,7 @@ function pageImprove(w) {
           <p>The biggest improvement. Have each person say the phrase 5 to 10 times into a phone, then add the files.</p>
           <div class="row"><span class="em-pill filebtn ${busy() ? 'is-disabled' : ''}"><input type="file" accept="audio/*" multiple
             data-act="addrec" aria-label="Add recordings" ${dis}>Add recordings…</span></div>
+          ${recCount(w)}
         </section>
         <section class="card" aria-labelledby="c-acc">
           <h3 id="c-acc">Add voices with your accent</h3>
