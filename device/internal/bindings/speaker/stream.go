@@ -27,6 +27,23 @@ var errSpeakerDead = errors.New("speaker: ALSA loop has died")
 //     definitive "the wire could not keep up" signal.
 //   - MaxGapMs: the worst single stall in arrivals, which distinguishes a
 //     uniformly slow link from a briefly stalled one.
+//
+// SpannedReconnect says the three arrival timings above measured the wire's
+// outage rather than the playback, and is the reason they are then zero: a
+// stream's arrival clock is first-frame to last-frame, so a data connection
+// that dropped mid-stream leaves every one of them describing the gap. Found
+// on field data 2026-08-23 (#307): a turn whose buffer never starved
+// (underruns 0, minDepth 24) reported primeWaitMs 351813 — 5.9 minutes to
+// prime a stream carrying four seconds of audio. It is not a degraded
+// average, it destroys one: a single such row swamps every good one, and
+// alerting built on MaxGapMs fires on the artefact instead of the fault.
+//
+// Periods, Underruns, MinDepth and BytesRecv SURVIVE the flag, because they
+// are counts of things that happened rather than clocks: a mid-stream outage
+// genuinely does drain the buffer, and that drain is the audible stutter the
+// margin exists to predict. Only the timings are zeroed, and the flag tells
+// the controller to store them as NULL rather than as a stream measured at
+// zero.
 type StreamStats struct {
 	Periods     uint64 `json:"periods"`
 	Underruns   uint64 `json:"underruns"`
@@ -35,6 +52,9 @@ type StreamStats struct {
 	RecvSpanMs  int64  `json:"recvSpanMs"`
 	MaxGapMs    int64  `json:"maxGapMs"`
 	BytesRecv   uint64 `json:"bytesRecv"`
+	// Omitempty: a stream that spanned no reconnect is the ordinary case, and
+	// absence is exactly what an unflagged stream means on both ends.
+	SpannedReconnect bool `json:"spannedReconnect,omitempty"`
 }
 
 // audioStream is one buffered playback stream: the voice/TTS plane or the
@@ -97,6 +117,11 @@ type audioStream struct {
 	recvLastNs   atomic.Int64
 	recvMaxGapNs atomic.Int64
 	recvBytes    atomic.Uint64
+	// spannedReconnect is set by NoteDataLinkGap while a stream is in flight
+	// and cleared at the start of the next one, so it describes THIS stream
+	// and not the link. Atomic for the same reason as the counters above: set
+	// from the data client's connect goroutine, read by the pump loop.
+	spannedReconnect atomic.Bool
 
 	// When the ALSA goroutine last took a period to play. Atomic because
 	// the mic side reads it (playedWithin) to know whether sound is coming
@@ -144,6 +169,7 @@ func (s *audioStream) pump(period []byte, wireBytes int) (bool, error) {
 		s.recvFirstNs.Store(now)
 		s.recvMaxGapNs.Store(0)
 		s.recvBytes.Store(0)
+		s.spannedReconnect.Store(false)
 	} else if last := s.recvLastNs.Load(); last > 0 {
 		if gap := now - last; gap > s.recvMaxGapNs.Load() {
 			s.recvMaxGapNs.Store(gap)
@@ -287,6 +313,23 @@ func (s *audioStream) take() []byte {
 	}
 }
 
+// NoteDataLinkGap records that the data connection to the controller has just
+// been (re-)established, so a stream still in flight from the previous one
+// arrived across a gap in the wire.
+//
+// Called by the data client on every successful connect rather than only on a
+// reconnect, because "was there a gap" is the question and only the client
+// knows the answer — and it is safe to call on a first connect, because audio
+// only ever arrives over the data plane, so nothing can be in flight before it
+// has been up once. The flag is cleared by the next stream's own first frame.
+//
+// It is deliberately NOT a timer comparison. A gap long enough to notice by
+// the clock is indistinguishable from a slow sender, and a heuristic here
+// would corrupt exactly the rows the flag exists to rescue (#307).
+func (s *audioStream) NoteDataLinkGap() {
+	s.spannedReconnect.Store(true)
+}
+
 // drained is called when the stream was playing and had nothing to give this
 // round. It reports the completed stream's stats when the drain is an EOS,
 // and counts an underrun when it is not.
@@ -307,15 +350,24 @@ func (s *audioStream) drained() *StreamStats {
 		Periods:   s.periods,
 		Underruns: s.underruns,
 		MinDepth:  s.minDepth,
-		MaxGapMs:  s.recvMaxGapNs.Load() / 1e6,
 		BytesRecv: s.recvBytes.Load(),
 	}
-	firstRecv, lastRecv := s.recvFirstNs.Load(), s.recvLastNs.Load()
-	if firstRecv > 0 && lastRecv > firstRecv {
-		st.RecvSpanMs = (lastRecv - firstRecv) / 1e6
-	}
-	if firstRecv > 0 && s.firstPumpNs > firstRecv {
-		st.PrimeWaitMs = (s.firstPumpNs - firstRecv) / 1e6
+	if s.spannedReconnect.Swap(false) {
+		// The arrival clock spans an outage, so the three timings below are a
+		// measurement of the wire's health and not of this stream. Leave them
+		// at zero and say why, rather than reporting the gap as the stream's
+		// delivery margin — the controller stores a flagged row's timings as
+		// NULL, so this is absence rather than a stream measured at zero.
+		st.SpannedReconnect = true
+	} else {
+		st.MaxGapMs = s.recvMaxGapNs.Load() / 1e6
+		firstRecv, lastRecv := s.recvFirstNs.Load(), s.recvLastNs.Load()
+		if firstRecv > 0 && lastRecv > firstRecv {
+			st.RecvSpanMs = (lastRecv - firstRecv) / 1e6
+		}
+		if firstRecv > 0 && s.firstPumpNs > firstRecv {
+			st.PrimeWaitMs = (s.firstPumpNs - firstRecv) / 1e6
+		}
 	}
 	s.periods, s.underruns = 0, 0
 	s.minDepth, s.firstPumpNs = -1, 0
