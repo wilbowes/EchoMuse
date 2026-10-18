@@ -209,6 +209,7 @@ The LED ring tells you what's happening:
 | Light-green segment | Which direction it thinks you're speaking from |
 | Spinning | Thinking (Home Assistant is processing) |
 | Cyan arc | Volume level, shown for 2 seconds after a volume press (even mid-response) |
+| Violet pulse | Identify: you clicked **Identify** on the device's page in the dashboard, to find which Echo a row is. It lasts 6 seconds, and is refused while the Echo is muted or busy |
 | Solid red | Microphones muted. EchoMuse mutes all four microphone chips and refuses to stream audio. It's a software mute: the Dot 2 has no hardware kill switch. Pressing mute mid-conversation also cancels whatever the assistant was doing |
 
 ## Everyday things
