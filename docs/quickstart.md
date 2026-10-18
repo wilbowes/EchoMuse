@@ -178,8 +178,9 @@ Voice Assistant"), with Model "Echo Dot Gen 2 (biscuit)" — the Bluetooth
 proxy, if enabled, shows up separately as `<name> BT Proxy`.
 
 Each device also has a **media player**, an **Action Button** event
-(hold-capable firmware), an **Ambient Light** sensor (where fitted) and a
-read-only **Microphone Muted** sensor. HA's **Wake word** dropdown turns
+(hold-capable firmware), an **Ambient Light** sensor (where fitted), a
+read-only **Microphone Muted** sensor and a **Ring Brightness** number
+(0–100 %). HA's **Wake word** dropdown turns
 detection off and on. See
 [the FAQ](faq.md#can-home-assistant-stop-a-device-listening-or-tell-whether-its-microphone-is-muted).
 

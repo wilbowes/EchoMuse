@@ -124,6 +124,12 @@ async def apply_live_config(device_id: str, live, effective: dict) -> None:
         live.bass_guard_enabled = bool(effective["bassGuardEnabled"])
     if "bassGuardDb" in effective:
         live.bass_guard_db = float(effective["bassGuardDb"])
+    if "ledBrightness" in effective:
+        # The device dims at render, so the push above is the working half.
+        # HA's number entity is the other: without this a dashboard change
+        # leaves HA showing the brightness the ring no longer uses.
+        em_esphome.update_led_brightness(
+            device_id, int(effective["ledBrightness"]))
     live.led_scene = em_scenes.resolve(effective)
     # #263: keep the device's cached listening animation in step when the
     # scene changes live, same push as at registration. Without it the ring

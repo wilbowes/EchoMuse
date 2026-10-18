@@ -262,6 +262,7 @@ MEDIA_PLAYER_KEY = 1
 EVENT_KEY        = 2   # action-button hold, as an HA event entity
 AMBIENT_LUX_KEY  = 3   # TSL2540 ambient light, as an HA sensor
 MIC_MUTED_KEY    = 4   # the mic mute button, as a read-only binary sensor (#438)
+LED_BRIGHTNESS_KEY = 5  # ring brightness percent, as a writable number (#295)
 
 # Press types the event entity advertises. double/triple were parked because
 # detecting them means delaying the single press by the multi-tap window to
@@ -549,6 +550,10 @@ class EchoMuseSatellite(SatelliteServerProtocol):
     def _mic_capable(self) -> bool:
         return self._device_has("mic")
 
+    @property
+    def _led_brightness_capable(self) -> bool:
+        return self._device_has("led_brightness")
+
     def _voice_assistant_flags(self) -> int:
         """
         Feature flags for DeviceInfoResponse, gated on what the device has.
@@ -687,6 +692,21 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     name="Microphone Muted",
                     icon="mdi:microphone-off",
                 )
+            # Ring brightness (#295). Gated on the capability: firmware that
+            # ignores the key would advertise a control that dims nothing,
+            # and someone would write an automation against it.
+            if self._led_brightness_capable:
+                yield api_pb2.ListEntitiesNumberResponse(
+                    object_id="ring_brightness",
+                    key=LED_BRIGHTNESS_KEY,
+                    name="Ring Brightness",
+                    icon="mdi:brightness-6",
+                    unit_of_measurement="%",
+                    min_value=0.0,
+                    max_value=100.0,
+                    step=1.0,
+                    mode=api_pb2.NUMBER_MODE_SLIDER,
+                )
             yield api_pb2.ListEntitiesDoneResponse()
             return
 
@@ -697,6 +717,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # Otherwise HA shows "unknown" until the button is next pressed.
             if self._mic_capable:
                 yield self._mic_muted_msg()
+            if self._led_brightness_capable:
+                yield self._led_brightness_msg()
             return
 
         if isinstance(msg, api_pb2.SubscribeVoiceAssistantRequest):
@@ -815,6 +837,23 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 )
             else:
                 yield self._media_state_msg()
+            return
+
+        if isinstance(msg, api_pb2.NumberCommandRequest):
+            if msg.key != LED_BRIGHTNESS_KEY:
+                log.debug(
+                    f"[{self._log_name}] NumberCommandRequest for unknown "
+                    f"key {msg.key} — ignored"
+                )
+                yield _HANDLED
+                return
+            # HA sends a float; the stored key is an INT, and the device
+            # drops the WHOLE config message on a type mismatch, so rounding
+            # happens here rather than downstream.
+            self._apply_led_brightness(int(round(msg.state)))
+            # Echo the state so HA shows what was accepted — the value is
+            # clamped, and a readback is how it finds out.
+            yield self._led_brightness_msg()
             return
 
         if isinstance(msg, api_pb2.SubscribeHomeassistantServicesRequest):
@@ -1208,6 +1247,13 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             state=bool(srv is not None and srv.mic_muted),
         )
 
+    def _led_brightness_msg(self) -> api_pb2.NumberStateResponse:
+        srv = self._owning_server
+        return api_pb2.NumberStateResponse(
+            key=LED_BRIGHTNESS_KEY,
+            state=float(srv.led_brightness if srv is not None else 100),
+        )
+
     def _apply_wake_word(self, on: bool) -> None:
         """Hand HA's wake word choice to the controller, synchronously."""
         set_fn = (self._owning_server._set_wake_word
@@ -1217,6 +1263,21 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                         f"but device not connected")
             return
         set_fn(on)
+
+    def _apply_led_brightness(self, percent: int) -> None:
+        """Hand HA's ring brightness (#295) to the controller, synchronously.
+
+        Synchronous for the wake word's reason and one of its own: the command
+        handler echoes the state in the same turn, so the value HA reads back
+        must already be the applied one.
+        """
+        set_fn = (self._owning_server._set_led_brightness
+                  if self._owning_server is not None else None)
+        if set_fn is None:
+            log.warning(f"[{self._log_name}] ring brightness change "
+                        f"requested but device not connected")
+            return
+        set_fn(percent)
 
     def _announce_play_cb(self):
         """
@@ -2510,11 +2571,18 @@ class DeviceESPhomeServer:
         # compared against to tell a press from the device's re-report.
         self.mic_muted: bool = False
         self.wake_word_enabled: bool = True
+        # Ring brightness percent (#295), as last stored or applied. On the
+        # server for mic_muted's reason (it outlives a reconnect), and so
+        # HA's first read is the device's real value rather than 100.
+        self.led_brightness: int = 100
         # What HA last read of it, None until it asks (em_wakeword.ha_needs_refresh).
         self.wake_word_told: bool | None = None
         # Injected by device_connected(); applies HA's wake word choice
         # synchronously. None when no device is connected.
         self._set_wake_word = None
+        # Injected by device_connected(); applies HA's ring brightness from
+        # the number entity (#295). None when no device is connected.
+        self._set_led_brightness = None
         # Injected by device_connected() — async callable(pcm_bytes) for
         # standalone announce playback (setup wizard, push TTS) when no
         # voice turn is active.
@@ -3305,6 +3373,8 @@ async def device_connected(
     start_conversation=None,
     set_wake_word=None,
     wake_word_enabled: bool = True,
+    set_led_brightness=None,
+    led_brightness: int = 100,
 ) -> None:
     """
     Called by em_controller.handle_control() when an Echo Dot connects.
@@ -3337,6 +3407,12 @@ async def device_connected(
 
     wake_word_enabled: HA's stored picker choice, set before the port comes
     up so HA's first read is already correct.
+
+    set_led_brightness: callable(percent: int) — applies HA's ring brightness
+    number (#295) synchronously.
+
+    led_brightness: the stored percent, set before the port comes up so HA's
+    first read is the device's real value rather than the 100 default.
     """
     server = _servers.get(device_id)
     if server is None:
@@ -3358,6 +3434,8 @@ async def device_connected(
     server._start_conversation = start_conversation
     server._set_wake_word = set_wake_word
     server.wake_word_enabled = bool(wake_word_enabled)
+    server._set_led_brightness = set_led_brightness
+    server.led_brightness = int(led_brightness)
     if server._server is not None:
         log.debug(f"[esphome.{device_id[-8:]}] device_connected: port {server.port} already listening")
         return
@@ -3388,6 +3466,7 @@ async def device_disconnected(device_id: str) -> None:
     server._stop_alarm = None
     server._start_conversation = None
     server._set_wake_word = None
+    server._set_led_brightness = None
     await server.stop()
     log.info(f"[esphome.{device_id[-8:]}] ESPHome port {server.port} down (device disconnected)")
 
@@ -3536,6 +3615,23 @@ def update_mic_muted(device_id: str, muted: bool) -> None:
     if satellite is None:
         return
     satellite._send_one(satellite._mic_muted_msg())
+
+
+def update_led_brightness(device_id: str, percent: int) -> None:
+    """Record the ring brightness and push it to HA's number entity (#295).
+
+    Pushed even when the value is unchanged: it is one idempotent state
+    message, and a missed change leaves HA showing a brightness the ring is
+    not using.
+    """
+    server = _servers.get(device_id)
+    if server is None:
+        return
+    server.led_brightness = int(percent)
+    satellite = server.get_satellite()
+    if satellite is None:
+        return
+    satellite._send_one(satellite._led_brightness_msg())
 
 
 def update_wake_word(device_id: str, enabled: bool, refresh: bool = False) -> None:

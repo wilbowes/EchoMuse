@@ -73,6 +73,22 @@ type Device struct {
 	// found distracting, but useful as an opt-in accessibility setting (#634).
 	RemoteVolumeArc bool
 
+	// LedBrightness is how bright the ring renders, 0-100 percent (#295),
+	// 100 being exactly the pre-#295 render.
+	//
+	// It lives here rather than in a scene because it belongs to the DEVICE,
+	// not to whatever the ring happens to be showing: it dims the listening
+	// ring, the volume arc, the playback meter and the animations alike, and
+	// it does so at the render rather than by editing each frame's colours.
+	// A per-scene value could not dim a frame the controller painted, and the
+	// controller cannot dim what it does not paint (the meter runs locally on
+	// the speaker's own level).
+	//
+	// The red MUTE ring is deliberately exempt — see internal/server's
+	// brightness.go. Red is how the device says "the mic is muted"; a display
+	// setting that can hide it would be a privacy fault, not a dim ring.
+	LedBrightness int
+
 	// OwwOnDevice selects on-device wake word scoring: "off", "shadow" or
 	// "on".
 	//
@@ -223,6 +239,7 @@ func (d *Device) loadDefaults() {
 	d.WakeSound = envBool("WAKE_SOUND", false)
 	d.WakeSoundLevel = envStr("WAKE_SOUND_LEVEL", "medium")
 	d.RemoteVolumeArc = envBool("REMOTE_VOLUME_ARC", false)
+	d.LedBrightness = clampLedBrightness(envInt("LED_BRIGHTNESS", 100))
 	d.AdcDigitalGain = envInt("ADC_DIGITAL_GAIN", 88)
 	d.AdcMicpga = envInt("ADC_MICPGA", 40)
 	d.MicGainDb = clampMicGainDb(envInt("MIC_GAIN_DB", 24))
@@ -307,6 +324,13 @@ func (d *Device) Apply(msg ConfigMessage) {
 	}
 	if msg.RemoteVolumeArc != nil {
 		d.RemoteVolumeArc = *msg.RemoteVolumeArc
+	}
+	// Pointer typed, and for a stronger reason than the toggles above: 0 is
+	// not merely legitimate, it is the one value that must arrive intact.
+	// "The ring is off" and "this config says nothing about brightness" must
+	// not be the same message, or the darkest setting could never be reached.
+	if msg.LedBrightness != nil {
+		d.LedBrightness = clampLedBrightness(*msg.LedBrightness)
 	}
 	if msg.StartupVolume > 0 {
 		d.StartupVolume = msg.StartupVolume
@@ -394,6 +418,14 @@ func (d *Device) RemoteVolumeArcEnabled() bool {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return d.RemoteVolumeArc
+}
+
+// LedBrightnessPercent returns the ring brightness (0-100) the render path
+// should apply.
+func (d *Device) LedBrightnessPercent() int {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.LedBrightness
 }
 
 const (
@@ -502,6 +534,7 @@ func (d *Device) Snapshot() ConfigMessage {
 	sendspinEnabled := d.SendspinEnabled != nil && *d.SendspinEnabled
 	sendspinUnpaired := d.SendspinUnpaired != nil && *d.SendspinUnpaired
 	remoteVolumeArc := d.RemoteVolumeArc
+	ledBrightness := d.LedBrightness
 	return ConfigMessage{
 		VadThreshold:        d.VadThreshold,
 		VadSpeechMs:         d.VadSpeechMs,
@@ -532,6 +565,7 @@ func (d *Device) Snapshot() ConfigMessage {
 		SendspinUnpaired:    &sendspinUnpaired,
 		SendspinName:        d.SendspinName,
 		RemoteVolumeArc:     &remoteVolumeArc,
+		LedBrightness:       &ledBrightness,
 		ListeningAnim:       d.ListeningAnim,
 	}
 }
@@ -607,6 +641,9 @@ type ConfigMessage struct {
 	VolumeButtonSound *bool `json:"volumeButtonSound,omitempty"`
 	// RemoteVolumeArc: a pointer so "off" is distinguishable from absent.
 	RemoteVolumeArc *bool `json:"remoteVolumeArc,omitempty"`
+	// LedBrightness: a pointer so 0 ("ring off") is distinguishable from
+	// absent. 100 is the pre-#295 render; 0 must actually arrive.
+	LedBrightness *int `json:"ledBrightness,omitempty"`
 
 	// Output chain (internal/outchain). Pointers because zero is a real
 	// setting for every one of them; see applyOutput.
@@ -622,6 +659,19 @@ type ConfigMessage struct {
 	// Carried as raw JSON so this package does not depend on the
 	// animation renderer's types.
 	ListeningAnim json.RawMessage `json:"listeningAnim,omitempty"`
+}
+
+// clampLedBrightness bounds the ring brightness to its percent range. A
+// config push must not be able to store a value the dashboard could not
+// offer, and the renderer's curve is only defined over 0-100.
+func clampLedBrightness(percent int) int {
+	if percent < 0 {
+		return 0
+	}
+	if percent > 100 {
+		return 100
+	}
+	return percent
 }
 
 // clampMicGainDb bounds the fixed mic gain to a sane range: 0dB (unity —

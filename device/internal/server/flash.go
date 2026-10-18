@@ -26,9 +26,7 @@ func (s *Server) flashActive() bool {
 // It acknowledges a gesture that otherwise shows nothing, such as a pairing
 // hold on a connected device.
 func (s *Server) Flash(r, g, b uint8, d time.Duration) {
-	s.ledMu.Lock()
-	lc := s.ledController
-	s.ledMu.Unlock()
+	lc := s.ringLEDs()
 	if lc == nil {
 		return
 	}

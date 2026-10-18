@@ -29,9 +29,12 @@ func (r *recordingRing) last() led.Led {
 
 func testServer(ring *recordingRing) *Server {
 	s := &Server{ledController: ring}
-	get := func() led.Controller { return ring }
-	s.volume = newVolumeController(get)
-	s.mute = newMuteController(get, nil)
+	// The production getters, not the raw ring: the tests must exercise the
+	// same dimming wrapper (and the mute ring's exemption from it) the
+	// device runs. At the default brightness every frame is unchanged.
+	s.volume = newVolumeController(s.ringLEDs)
+	s.mute = newMuteController(func() led.Controller { return ring }, nil)
+	s.volume.showMuteRing = s.mute.showMuteLEDs
 	return s
 }
 
