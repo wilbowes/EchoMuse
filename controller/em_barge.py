@@ -72,6 +72,47 @@ the same way — so a borrowed prefix files a barge inside the wake-word numbers
 and names a wake word this turn never sent. "barge-in" is what a barge turn
 already records as; CONVERSATION_TRIGGER exists for the same reason, so that
 HA-initiated turns are not wake-word turns either.
+
+A BARGE DURING THINKING IS HELD, NOT TAKEN (#195)
+------------------------------------------------
+`decide` says a wake word arrived; it does not say the person meant it. The
+abort it used to trigger the instant the wake word scored is the point of no
+return — HA's pipeline has no resume, so the answer in flight is lost — and a
+wake word spoken over a response by mistake, or thought better of, threw the
+answer away and started a turn that heard nothing and ran 20-46s with the
+device deaf throughout. Bounding that damage is what #195 is.
+
+So during THINKING the interruption is deferred: playback stops (there is
+none yet — the thinking spinner is all that is on the screen), HA's run is
+left alone, the follow-up audio is held, and `FollowUpWindow` decides whether
+somebody is actually talking. Only if they are is HA aborted and the
+interrupting turn started — a second run is never started before the first is
+aborted, which is the invariant #194 established, so this defers the abort
+rather than weakening it.
+
+The window is a TASTE PARAMETER, the add-on option `barge_confirm_ms`
+(`EM_BARGE_CONFIRM_MS`), for the same reason `duckDb` and the LED meter curve
+are: the right value for one room is a person talking immediately after their
+wake word, and for another it is leaving room for a breath. A default tuned at
+a desk would be a guess.
+
+Why the tail matters more than the bar: the frames just after a fire are the
+wake word's OWN audio, several frames above any speech bar, so a rule of
+"speech within 1.5s" fires instantly on an accidental barge and does nothing
+at all. The wake word outlives the frame that scored it — the crossing comes
+as the phrase completes — which is the same fact `VOICE_PREROLL_DISCARD`
+(240ms) exists for on the turn path. Speech is therefore only counted AFTER
+that tail, and what the window is really asking is "did they keep talking?".
+
+Fails towards leaving things alone. If the room is above the bar inside the
+window the interrupting turn is taken (the old behaviour), and if the answer
+starts playing while the window is open, or the frames stop before it is
+answered — the stream dying, the turn unwinding — the barge is dropped and
+nobody was disturbed: the answer HA was already making still arrives.
+
+Not covered here: a barge during PLAYBACK. HA's run has already finished by
+then, so there is nothing to leave alone — stopping the speaker is the whole
+of it, and resuming discarded TTS is a different problem.
 """
 
 from __future__ import annotations
@@ -191,3 +232,107 @@ def cede(*, serves: bool, won_by: str, device_id: str,
     if won_by != device_id:
         return CedeVerdict(True, False, "")
     return CedeVerdict(False, False, "")
+
+
+# ─── The confirmation window (#195) ──────────────────────────────────────────
+
+# Milliseconds a person has, after a thinking-phase crossing, to still be
+# talking. Long enough to leave room for a breath between the wake word and
+# the command, short enough that a genuine barge is not left hanging; the
+# issue proposed ~1.5s and the whole point of the knob is that a desk cannot
+# decide it.
+CONFIRM_DEFAULT_MS = 1500.0
+
+# The ceiling. Past a couple of seconds this stops being a confirmation and
+# becomes "the answer wins unless you say another wake word", and every
+# millisecond of it is latency added to a real interruption. The cap is only
+# here so a typo cannot turn the behaviour into something nobody chose.
+CONFIRM_MAX_MS = 5000.0
+
+# The wake word's own tail, in milliseconds. The crossing does not arrive on
+# the frame the phrase started — it arrives as the phrase completes — so the
+# frames right after it are loud with the wake word itself. Same 240ms as
+# em_esphome.VOICE_PREROLL_DISCARD (3 frames of 80ms), which drops the same
+# audio from the start of the interrupting turn.
+CONFIRM_TAIL_MS = 240.0
+
+
+def confirm_ms(raw, default=CONFIRM_DEFAULT_MS, maximum=CONFIRM_MAX_MS):
+    """The window in milliseconds, from the raw environment string.
+
+    Read at import with whatever an operator typed into the add-on box, so
+    this follows em_turnclock.tts_wait_seconds: it must never raise, and it
+    must never return something that behaves as "off". Anything that is not a
+    positive number is the default — 0 is not "take the barge at once",
+    because the caller has no such state and a window of zero would drop
+    every barge instead.
+    """
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    if value <= 0:
+        return default
+    return min(value, maximum)
+
+
+def speech_bar(floor: float) -> float:
+    """The RMS a frame has to clear to be somebody talking.
+
+    Three times the room's measured noise floor, with an absolute lower
+    bound for the floor-not-yet-warmed case. The turn path applies the same
+    rule to the same 80ms frames (em_esphome's `_is_speech`) — it is the one
+    reading of "speech" this controller has, and the barge window must not
+    invent a second that can disagree with it.
+    """
+    return max(3.0 * floor, 0.004)
+
+
+class FollowUpWindow:
+    """
+    Whether the person who barged in is still talking (#195).
+
+    Opened on the frame that crossed during THINKING — the decision that
+    cannot be undone, because HA's pipeline has no resume — and fed every
+    frame after it. `feed` answers "take" once the room is talking, "drop"
+    when the window closes with nobody there, and "" in between so the caller
+    keeps watching and leaves HA's run alone.
+
+    `opened` and `at` are the frames' CAPTURE times (em_listen.captured). The
+    question is what the room was doing; a link's retransmits must not spend
+    the window that the person's speech was supposed to have, which is the
+    same reason the turn clock measures its no-speech window from the first
+    real frame (#139).
+
+    The tail is skipped for the reason CONFIRM_TAIL_MS exists: the wake
+    word's own audio arrives after the crossing, well above any speech bar,
+    so counting speech from the crossing makes the window fire on the
+    accidental barge it is here to catch — and a rule that always fires is
+    not a rule.
+
+    Not used by a privately listening Echo (`_private_barge`): its crossings
+    arrive as a wake the device decided on, with no audio here to confirm
+    with, and the device's own listen gate already drops a re-trigger while
+    its session is open.
+    """
+
+    def __init__(self, opened: float, confirm_ms: float,
+                 floor: float = 0.0, tail_ms: float = CONFIRM_TAIL_MS):
+        self.opened = opened
+        self.confirm_ms = confirm_ms
+        self._confirm = confirm_ms / 1000.0
+        self._tail = tail_ms / 1000.0
+        self._floor = floor
+
+    def feed(self, rms: float, at: float) -> str:
+        """One frame: "take", "drop", or "" to keep waiting."""
+        since = at - self.opened
+        if since <= self._tail:
+            return ""
+        if since >= self._confirm:
+            return "drop"
+        if rms >= speech_bar(self._floor):
+            return "take"
+        return ""

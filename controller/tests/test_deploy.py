@@ -2012,7 +2012,7 @@ def test_a_barge_that_stands_down_for_no_ha_leaves_the_same_trace_as_a_wake():
     covered is whether the watcher acts on it, and where.
     """
     src = (CONTROLLER / "em_controller.py").read_text()
-    for name in ("_barge_watcher", "_private_barge"):
+    for name in ("_take_barge", "_private_barge"):
         fn = _fn_body(src, name)
         assert "em_barge.cede(" in fn, f"{name} must use the shared decision"
         assert "(not serves) or won_by !=" not in fn, (
@@ -2219,11 +2219,11 @@ def test_a_barge_in_is_arbitrated_like_any_other_wake():
     before anyone talked over the answer.
     """
     src  = (CONTROLLER / "em_controller.py").read_text()
-    body = src[src.index("async def _barge_watcher"):]
+    body = src[src.index("async def _take_barge"):]
     body = body[:body.index("\nasync def ", 1)]
 
     assert "await _claim_wake(" in body, (
-        "the barge watcher must arbitrate — without it a second Echo answers "
+        "the barge path must arbitrate — without it a second Echo answers "
         "the same interrupting utterance"
     )
     # Same ordering rule as the wake path: a device that cannot finish a turn
