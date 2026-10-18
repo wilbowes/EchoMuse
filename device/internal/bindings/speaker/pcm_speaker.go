@@ -151,8 +151,15 @@ type PcmSpeaker struct {
 	// stream — at EOS consume in silenceLoop, flush included. Unlike echoTap
 	// it fires at most once per response, so a setter (OnStreamStats) is
 	// fine: silenceLoop reads it under statsMu only on that cold path.
+	//
+	// startCb, when set, receives the start of a VOICE stream, once, at the
+	// first period written to ALSA (#203). A controller can only see when
+	// audio was SENT, so it estimates this moment from its own first period
+	// and leads the speaker by up to the prime window. Under statsMu for the
+	// same reason statsCb is: read by silenceLoop only on that cold path.
 	statsMu sync.Mutex
 	statsCb func(StreamStats)
+	startCb func()
 
 	// vol is the user's volume, applied to the PCM (swvolume.go); the DAC
 	// is held at unity. cue is a one-shot the device plays itself — the wake
@@ -269,6 +276,20 @@ func (p *PcmSpeaker) MusicPlaneBusy() bool {
 func (p *PcmSpeaker) OnStreamStats(cb func(StreamStats)) {
 	p.statsMu.Lock()
 	p.statsCb = cb
+	p.statsMu.Unlock()
+}
+
+// OnPlaybackStart registers a callback for the moment a VOICE stream begins
+// playing — its first period written to ALSA (#203). Invoked once per stream,
+// on its own goroutine so the network send can never stall the ALSA pump. Safe
+// to call any time after New.
+//
+// Only the voice plane reports: a music stream starting is not a response
+// starting, and the controller keys the Speaking tile and the meter ring on
+// this.
+func (p *PcmSpeaker) OnPlaybackStart(cb func()) {
+	p.statsMu.Lock()
+	p.startCb = cb
 	p.statsMu.Unlock()
 }
 
@@ -572,12 +593,19 @@ func (p *PcmSpeaker) silenceLoop() {
 
 		var voice, music []byte
 		if p.voice.ready(primePeriods) {
-			voice = p.voice.take()
+			// The prime gate has just opened for this stream: the first
+			// period of it is about to reach the DAC, which is the moment
+			// the controller otherwise has to estimate (#203).
+			var first bool
+			voice, first = p.voice.take()
+			if first {
+				p.reportPlaybackStart()
+			}
 		} else if p.voice.playing {
 			p.report(p.voice.drained(), "voice")
 		}
 		if p.music.ready(primePeriods) {
-			music = p.music.take()
+			music, _ = p.music.take()
 		} else if p.music.playing {
 			p.report(p.music.drained(), "music")
 		}
@@ -729,6 +757,18 @@ func (p *PcmSpeaker) pump(out []byte) error {
 		}
 	}
 	return nil
+}
+
+// reportPlaybackStart hands the start of a voice stream to the registered
+// callback. On its own goroutine: this runs on the ALSA pump goroutine and the
+// callback does a network write, which must never cost a period.
+func (p *PcmSpeaker) reportPlaybackStart() {
+	p.statsMu.Lock()
+	cb := p.startCb
+	p.statsMu.Unlock()
+	if cb != nil {
+		go cb()
+	}
 }
 
 // report logs and forwards a completed stream's stats. A nil st is an

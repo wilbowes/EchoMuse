@@ -376,7 +376,7 @@ def test_streamed_playback_waits_for_the_device_not_a_computed_sleep():
     # what the old attribute was called.
     assert "begin_playback()" in fn, \
         "streamed playback must register a playback waiter"
-    assert "playback_ev.wait()" in fn, \
+    assert "playback.ended.wait()" in fn, \
         "streamed playback must await the device's playback_stats"
     assert "end_playback(" in fn, \
         ("the waiter must be retired in a finally, or a cancelled playback "
@@ -424,8 +424,10 @@ def test_meter_ring_is_raised_when_audio_starts_not_at_playback_setup():
     fn = src[src.index("async def post_turn_play_esphome"):]
     fn = fn[:fn.index("\n            # P0-1")]
 
-    assert "_meter_at_playback_start(pcm_chunks" in fn, \
+    assert "on_start=meter_on" in fn, \
         "the meter must be gated on the first audio reaching the device"
+    assert "_meter_at_playback_start" not in fn, \
+        "the wrapper must be applied by the playback, not at setup"
 
     # A meter send is legitimate inside the nested helpers (_meter_on, and the
     # dead-man refresher). What must not exist is one in the function's OWN
@@ -435,6 +437,16 @@ def test_meter_ring_is_raised_when_audio_starts_not_at_playback_setup():
         ("the meter is being raised at playback setup — on the streaming path "
          "that is before HA has returned any audio, leaving the ring dark")
 
+    # And the wrapper is applied AFTER the playback has registered its own
+    # start waiter, so a timer or announcement cannot take that report.
+    stream = src[src.index("async def _run_streaming_post_turn_playback"):]
+    stream = stream[:stream.index("\nasync def ", 1)]
+    assert stream.index("playback = device.begin_playback()") < \
+        stream.index("em_playstart.meter_at_playback_start("), \
+        "the meter must watch the waiter this playback registered"
+    assert "SPEAKER_PRIME_SECONDS" in stream, \
+        "the estimate must track the device's actual prime window"
+
 
 def test_meter_gate_fires_for_responses_shorter_than_the_prime_window():
     """
@@ -443,15 +455,14 @@ def test_meter_gate_fires_for_responses_shorter_than_the_prime_window():
     fire the callback too, or short answers play with no ring at all.
     """
     from pathlib import Path
-    src = (Path(__file__).resolve().parent.parent / "em_controller.py").read_text()
-    fn = src[src.index("async def _meter_at_playback_start"):]
-    fn = fn[:fn.index("\nasync def ", 1)]
+    src = (Path(__file__).resolve().parent.parent / "em_playstart.py").read_text()
+    fn = src[src.index("async def _estimate_at_playback_start"):]
 
     body = fn.split("async for")[1]
-    assert "if not fired:" in body.rsplit("\n", 4)[-4:][0] or "if not fired" in body, \
+    assert "if not fired:" in body, \
         "the generator must fire on exhaustion for sub-prime-length responses"
-    assert "SPEAKER_PRIME_SECONDS" in fn, \
-        "the threshold must track the device's actual prime window"
+    assert "await on_start()" in fn.rsplit("if not fired:", 1)[1], \
+        "exhaustion must raise the meter, not just stop counting"
 
 
 def test_controller_update_is_advisory_only():

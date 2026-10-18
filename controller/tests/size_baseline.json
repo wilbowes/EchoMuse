@@ -1,14 +1,14 @@
 {
  "files": {
-  "em_controller.py": 6323,
+  "em_controller.py": 6360,
   "em_db.py": 3535,
   "em_esphome.py": 3169
  },
  "functions": {
-  "em_controller.Device.__init__": 391,
+  "em_controller.Device.__init__": 397,
   "em_controller._barge_watcher": 293,
-  "em_controller._run_post_turn_playback": 172,
-  "em_controller._run_voice_locked": 434,
+  "em_controller._run_post_turn_playback": 173,
+  "em_controller._run_voice_locked": 437,
   "em_controller._stream_listen": 662,
   "em_controller.handle_control": 589,
   "em_controller.handle_data": 197,

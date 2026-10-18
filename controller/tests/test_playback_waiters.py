@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pytest
 
+import em_playstart
+
 CONTROLLER = Path(__file__).resolve().parents[1]
 
 
@@ -41,12 +43,14 @@ def _playback_api():
         f"em_controller.Device no longer defines {sorted(missing)} — if they "
         "were renamed, update this test to match rather than deleting it"
     )
-    ns: dict = {"asyncio": asyncio, "collections": collections}
+    ns: dict = {"asyncio": asyncio, "collections": collections,
+                "em_playstart": em_playstart}
     exec(compile(ast.Module(body=methods, type_ignores=[]), "<lift>", "exec"), ns)
 
     class Dev:
         def __init__(self):
             self._playback_waiters = collections.deque()
+            self.playback_start = em_playstart.StartReport()
     for name in wanted:
         setattr(Dev, name, ns[name])
     return Dev
@@ -67,14 +71,14 @@ def test_a_report_resolves_only_its_own_playback():
     first, second = d.begin_playback(), d.begin_playback()
 
     d.signal_playback_done()
-    assert first.is_set(), "the first playback's waiter was not resolved"
-    assert not second.is_set(), (
+    assert first.ended.is_set(), "the first playback's waiter was not resolved"
+    assert not second.ended.is_set(), (
         "the second playback woke on a report belonging to the first — this "
         "is the two-Playback-complete-lines-in-one-millisecond bug (#373)"
     )
 
     d.signal_playback_done()
-    assert second.is_set()
+    assert second.ended.is_set()
 
 
 def test_a_cancelled_playback_does_not_steal_the_next_report():
@@ -91,8 +95,8 @@ def test_a_cancelled_playback_does_not_steal_the_next_report():
     live = d.begin_playback()
     d.signal_playback_done()
 
-    assert live.is_set(), "the live playback did not get its own report"
-    assert not abandoned.is_set()
+    assert live.ended.is_set(), "the live playback did not get its own report"
+    assert not abandoned.ended.is_set()
 
 
 def test_end_playback_is_idempotent():
@@ -114,7 +118,7 @@ def test_a_stray_report_is_dropped_not_saved():
     d = Dev()
     d.signal_playback_done()          # nothing waiting
     later = d.begin_playback()
-    assert not later.is_set(), (
+    assert not later.ended.is_set(), (
         "a playback resolved before its audio was sent — a stray report was "
         "saved up instead of dropped"
     )
@@ -137,7 +141,7 @@ def test_reports_resolve_in_order(n):
     evs = [d.begin_playback() for _ in range(n)]
     for i in range(n):
         d.signal_playback_done()
-        assert evs[i].is_set()
-        assert not any(e.is_set() for e in evs[i + 1:]), (
+        assert evs[i].ended.is_set()
+        assert not any(e.ended.is_set() for e in evs[i + 1:]), (
             "a later playback resolved out of order"
         )
