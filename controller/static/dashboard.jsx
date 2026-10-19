@@ -920,14 +920,19 @@ function StatBar({ label, pct, text }) {
 
 
 
-function LedRing({ state, size = 120 }) {
+// `flash` pulses the drawn ring in the violet Identify uses (#860), so the
+// picture flashes in step with the real Echo's ring. The colour lives here with
+// the rest of the ring's literal colours: it is the LED's own, not chrome.
+function LedRing({ state, size = 120, flash = false }) {
+  const flashColor = flash ? '#9646ff' : null;
   const cx = size / 2, cy = size / 2, r = size * 0.38;
   const stateKey = state?.key || 'idle';
   const stateColor = state?.dot || '#aaaaaa';
   const isPending = stateKey === 'pending';
   const isOffline = stateKey === 'offline';
 
-  const ledColor = isPending ? '#c8c8c8'
+  const ledColor = flashColor ? flashColor
+                 : isPending ? '#c8c8c8'
                  : isOffline ? '#d4703a'
                  : stateKey === 'muted' ? '#c04040'
                  : stateKey === 'speaking' ? '#4080d0'
@@ -935,7 +940,7 @@ function LedRing({ state, size = 120 }) {
                  : stateKey === 'thinking' ? '#a08020'
                  : '#3a4a30';
 
-  const shouldPulse = isPending || isOffline;
+  const shouldPulse = isPending || isOffline || !!flashColor;
   const circumference = 2 * Math.PI * (size * 0.38);
   const segLen = circumference / 12 * 0.72;
   const gapLen = circumference / 12 * 0.28;
@@ -967,8 +972,9 @@ function LedRing({ state, size = 120 }) {
           stroke={ledColor} strokeWidth={size*0.045}
           strokeDasharray={`${segLen} ${gapLen}`}
           transform={`rotate(-90 ${cx} ${cy})`}
-          filter={stateKey !== 'idle' ? `url(#glow-${size})` : undefined}
-          style={shouldPulse ? { animation: 'ledpulse 1.8s ease-in-out infinite' } : undefined}
+          filter={stateKey !== 'idle' || flashColor ? `url(#glow-${size})` : undefined}
+          style={flashColor ? { animation: 'em-identify 0.6s ease-in-out infinite' }
+               : shouldPulse ? { animation: 'ledpulse 1.8s ease-in-out infinite' } : undefined}
         />
         <circle cx={cx} cy={cy} r={r} fill="none"
           stroke="#141414" strokeWidth={size*0.065}
@@ -1590,6 +1596,8 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [pairing, setPairing] = useState(false);
+  const [identifying, setIdentifying] = useState(false);
+  const [identifyNote, setIdentifyNote] = useState('');
   const [debloating, setDebloating] = useState(false);
   const [assets, setAssets] = useState(null);
   const [installing, setInstalling] = useState(false);
@@ -1711,6 +1719,23 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
       await API.post(`/api/devices/${device.device_id}/pair`, {});
     } catch(e) { alert(e.error || 'Pairing failed'); }
     setTimeout(() => setPairing(false), 15000);
+  }
+
+  async function doIdentify() {
+    // Flashes this Echo's ring (#860) so a row can be matched to the device in
+    // front of you. The controller refuses with a reason when the ring is not
+    // free (muted, mid-turn, no led_anim), and the reason is shown, never
+    // swallowed: a button that appears to work and lights nothing is worse
+    // than none.
+    setIdentifying(true);
+    setIdentifyNote('');
+    try {
+      const r = await API.post(`/api/devices/${device.device_id}/identify`, {});
+      setTimeout(() => setIdentifying(false), (r.seconds || 6) * 1000);
+    } catch(e) {
+      setIdentifyNote(e.error || 'Identify failed');
+      setIdentifying(false);
+    }
   }
 
   async function doDebloat() {
@@ -2030,7 +2055,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
         {/* Header */}
         <div className="em-modal-head" style={{ background: 'linear-gradient(180deg,var(--card),var(--bg))', borderBottom: '1px solid var(--border-hard)', padding: 'var(--space-10) var(--space-12) 0', boxShadow: '0 1px 0 var(--sheen) inset' }}>
           <div className="em-modal-headrow" style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-10)', marginBottom: 'var(--space-8)' }}>
-            <LedRing state={state} size={72}/>
+            <LedRing state={state} size={72} flash={identifying}/>
             <div style={{ flex: 1, minWidth: 0 }}>
               {renaming ? (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-4)' }}>
@@ -2074,6 +2099,15 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
               <div className="em-on-dark" style={{ background: 'linear-gradient(160deg,var(--lcd-face),var(--lcd-deep))', border: '1px solid var(--lcd-line)', borderRadius: 'var(--radius-md)', padding: '5px 12px', boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.5)' }}>
                 <span style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-md)', color: state.lcd, textShadow: `0 0 8px color-mix(in srgb, ${state.dot} 53%, transparent)`, letterSpacing: 'var(--tracking-text)' }}>{state.label.toUpperCase()}</span>
               </div>
+              {isAdmin && device.approved && device.connected && !confirmDelete && (
+                <span title={!device.ledAnimCapable ? 'This firmware cannot flash its ring on request'
+                              : device.muted ? 'Muted: the ring stays red'
+                              : 'Flash this Echo\u2019s ring so you can find it'}>
+                  <Pill small disabled={identifying || !device.ledAnimCapable || device.muted} onClick={doIdentify}>
+                    {identifying ? 'Flashing\u2026' : 'Identify'}
+                  </Pill>
+                </span>
+              )}
               {isAdmin && !confirmDelete && (
                 <CircleButton onClick={() => setConfirmDelete(true)} title="Delete device" color="var(--error)">🗑</CircleButton>
               )}
@@ -2087,6 +2121,11 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
               <CircleButton onClick={onClose} title="Close">×</CircleButton>
             </div>
           </div>
+          {identifyNote && (
+            <div role="status" style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xs)', color: 'var(--warn)', marginBottom: 'var(--space-4)' }}>
+              {identifyNote}
+            </div>
+          )}
           {/* What deleting leaves behind in Home Assistant (#375). Full width
               and under the header row, not beside Confirm: a sentence that
               fits next to a button is not read, and the port it names is the

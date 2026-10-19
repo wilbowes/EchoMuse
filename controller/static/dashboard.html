@@ -264,6 +264,8 @@
        glyph itself carries the progress. */
     .em-iconbtn--busy > svg { animation: em-spin 0.9s linear infinite; }
     @keyframes em-spin { to { transform: rotate(360deg); } }
+    /* The drawn ring while Identify flashes the real one (#860): 600ms, the pulse period the Echo uses. */
+    @keyframes em-identify { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
     @media (prefers-reduced-motion: reduce) {
       .em-iconbtn--busy > svg { animation: none; opacity: 0.55; }
     }
