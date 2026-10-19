@@ -102,7 +102,16 @@ Note the real buffer cadence: GoTinyAlsa's `GetAudioStream` reads the whole ALSA
 
 The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-free**: every 32ms period is sent continuously (batched into 80ms frames) so openwakeword scores an uninterrupted stream, and no adaptive gain state can drift with room noise. The VAD gate and AGC apply only to bounded `lock_mic` turn streams (button-triggered), which get a fresh `ResetAGC()` per stream.
 
-- **Beamformer** (`internal/beamformer/`) — selects the perimeter mic with the highest onset energy ratio (fast/slow EWMA) at voice turn start, then locks for the duration. Its `extractChannel` also applies the fixed mic gain (`micGainDb`, default +24dB) against the full 24-bit sample before quantising to S16 — captured speech sits at ~−70dBFS, so gain must happen pre-truncation to recover real resolution. `vadThreshold` stays in pre-gain units (the device scales it by the gain internally). **It is a selector, not a summing beamformer, and that is settled — do not propose delay-and-sum.** A frequency-domain implementation (exact FFT phase shifts, no interpolation artefacts) exists in `device/tools/bf_capture` and was measured as only marginally better than mic selection. The reason is the 72mm aperture, not the code: diffuse-field noise coherence is 0.84–0.99 below 1.5kHz where speech energy lives, so a sum has almost nothing uncorrelated to cancel, and 36mm adjacent spacing puts spatial aliasing at 4.76kHz — a working window of roughly 2–4.7kHz. Superdirective/differential beamforming is the only class that works at this aperture and it trades against white-noise gain (20dB+ amplification of sensor self-noise) on unmatched capsules across four ADCs. Full derivation and the coherence table are in SETUP.md's mic-array section (SETUP.md is the architecture reference; the chronological log is JOURNAL.md, the rooting prerequisites docs/rooting.md). **Far-field reach is therefore not a beamforming problem here** — it is room noise floor, distance and placement; the single-channel levers (`nsAsr`, wake model) are the ones that exist
+- **Beamformer** (`internal/beamformer/`) — selects the perimeter mic with the highest onset energy ratio (fast/slow EWMA) at voice turn start, then locks for the duration. Its `extractChannel` also applies the fixed mic gain (`micGainDb`, default +24dB) against the full 24-bit sample before quantising to S16 — captured speech sits at ~−70dBFS, so gain must happen pre-truncation to recover real resolution. `vadThreshold` stays in pre-gain units (the device scales it by the gain internally). **It is a selector, not a summing beamformer, and that is settled — do not propose delay-and-sum.** A frequency-domain implementation (exact FFT phase shifts, no interpolation artefacts) exists in `device/tools/bf_capture` and was measured as only marginally better than mic selection. The reason is the 72mm aperture, not the code: diffuse-field noise coherence is 0.84–0.99 below 1.5kHz where speech energy lives, so a sum has almost nothing uncorrelated to cancel, and 36mm adjacent spacing puts spatial aliasing at 4.76kHz — a working window of roughly 2–4.7kHz. Superdirective/differential beamforming is the only class that works at this aperture and it trades against white-noise gain (20dB+ amplification of sensor self-noise) on unmatched capsules across four ADCs. Full derivation and the coherence table are in SETUP.md's mic-array section (SETUP.md is the architecture reference; the chronological log is JOURNAL.md, the rooting prerequisites docs/rooting.md). **Far-field reach is therefore not a beamforming problem here** — it is room noise floor, distance and placement; the single-channel levers (`nsAsr`, wake model) are the ones that exist. **Reopened by Wil on 2026-10-14** for superdirective, with the metric
+  set as wake word and commands at normal voice in household noise. On quiet
+  captures delay-and-sum gave +1.4dB speech-to-noise over the centre mic and
+  superdirective +2.9dB at diagonal loading 0.1, falling to -4.2dB at 0.001;
+  gain mismatch between the mics is within about 1dB, and correcting it moves
+  nothing (2026-10-19). What does is the quiet-room noise being about a third
+  mic self-noise (magnitude coherence 0.82-0.87 at 150-500Hz, against about
+  0.99 for diffuse sound at 36mm), which superdirective amplifies. So quiet
+  captures cannot rank beams; noisy-room captures (TV at an angle, fan, the
+  Echo's own music) decide, and until they do the selector stays
 - **AEC** (`internal/aec/`) — speexdsp echo canceller (vendored C, SpeexDSP-1.2.1), whole mic path including the wake stream; far-end reference tapped at the speaker ALSA write (every period incl. silence), delayed by `aecDelayMs` — **keep 0**: the mic side's 160ms batch reads absorb the speaker's output latency, and higher values make the echo non-causal (zero cancellation). The mic ALSA ring is only 160ms deep, so >160ms capture stalls silently lose whole batches (~every 20–30s in steady state, load-correlated); an occupancy governor trims the resulting reference backlog **without resetting the filter** — the trim restores the alignment the filter converged against, and the reset that used to live there thrashed convergence to ≤5dB (the v2.7.8 fix). `[aec] att=`/`far:` telemetry logs ~1/s during playback; `[mic] clock/stall` lines track capture loss. `far:` carries `rms`, `mean` and `peak` — **rms alone cannot tell audio from a constant offset**, since both read high, and that ambiguity cost an evening on #117 where the device was writing rms≈4000 to a codec while every speaker stayed silent. `mean≈±rms` with a small peak-to-peak is a DC offset; `mean≈0` with peak well above rms is real audio and the fault is downstream. Note this tap sits after the (L+R)/2 downmix and 3:1 decimation, so DC survives intact but `peak` is mildly smoothed — read it as a floor. It reports only while `aecEnabled`, so a diagnosis that needs it must not have AEC turned off. Default off (`aecEnabled`); ~14dB per response, held across turns
 
   **Implemented (#385), detected rather than assumed.** `beamformer.EchoRef`
@@ -135,7 +144,7 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
   to 23.7dB of the wake sound removed on four turns across three microphones,
   leaving it 7.5-11.1dB below the speech where at the microphone it is 9-12dB
   above, and speech within 0.2dB. The saved echo paths are one file for the seven
-  (`aec_echo_path.bin.mics`), all or nothing on load. **Hardware reference
+  (`aec_echo_path.v2.bin` since #975), all or nothing on load. **Hardware reference
   only**: the software tap's ring is drained once per period and keeps one
   filter on the microphone in use. The beamformer still chooses on RAW
   energy, so playback still biases the choice; choosing on cancelled audio is
@@ -176,8 +185,8 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
   Ch7/Ch8** (measured 2026-08-29 — see SETUP.md's Mic Array section). Those
   two channels are not unconnected mics: they are a stereo loopback of the
   device's own playback, Ch7 left and Ch8 right, present unconditionally with
-  no mixer change. It is the *same signal* as the software tap above — the
-  same bytes we write to ALSA — so the win is not fidelity, it is that the
+  no mixer change. It is every third sample of the bytes we write to ALSA
+  (aliased, see below), so the win is not fidelity, it is that the
   reference arrives **in the same TDM frame as the mic samples**. The offset is
   fixed by hardware at +33 samples (2.06ms, polarity-inverted) instead of being
   inferred, which is what `aecDelayMs`, the occupancy governor and the
@@ -190,6 +199,29 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
   mic's loudest component is the *seventh* harmonic while the reference stays
   a clean fundamental. Unreachable in shipping firmware, since the DAC is held
   at unity (127) — but it is a hard reason never to raise that.
+
+  **It is also ALIASED, so the canceller is never handed it as captured
+  (#975, 2026-10-18).** Ch8 keeps every third sample of the 48kHz output with
+  no anti-aliasing filter: tones at 9, 12, 15 and 20kHz land in ch8 at 7, 4, 1
+  and 4kHz at full level, while the mics, filtered by the codec, show nothing
+  there. Music always has content above 8kHz, so the canceller chased signal
+  the echo does not contain: pink noise through the firmware measured 1dB of
+  cancellation. `internal/aec/dealias.go` finds ch8's position in the
+  firmware's own 48kHz output by exact match (every third sample, ±1 LSB) and
+  hands the canceller those output samples decimated through a 95-tap
+  low-pass: 25dB on VVV, 22dB on 15LE, 17-22dB on C95, and barge-in over loud
+  bass-heavy music at 70% went from 1/5 to 4/5. With no match (nothing feeding
+  the tap, or a board whose loopback is filtered or scaled) ch8 is used as
+  before, so a board needs no setting. **Do not "simplify" this back to ch8**:
+  the plain channel passes every test that plays nothing above 8kHz, and the
+  capture refuses 48kHz, so it cannot be fixed at the source. The search runs
+  on a copy outside the speaker's lock (#866), backs off after three misses
+  and allocates nothing once locked. Saved echo paths learnt against the
+  aliased reference are versioned out (`aec_echo_path.v2.bin`; the old files
+  are deleted at start). Shipped with it: while the canceller is armed the
+  mics are extracted 6dB below `micGainDb` and the 6dB is given back after it
+  (`aecHeadroom`), because at 24dB loud playback clipped the extraction (943
+  samples a minute) and cost a wake word. The overall gain is unchanged.
 - **Barge-in** (controller-side `_barge_watcher`) — wake word spoken during TTS cancels playback (device does a stateful `speaker_flush`: drains buffer + discards until stream EOS, since the rest of the stream is typically still in TCP buffers; controller-side, both `stream_speaker` and the post-playback drain sleep race `cancel_event`). `bargeInThreshold` is used as-is and sits *below* `owwThreshold` by design (0.05–0.10): echo at the mic is ~25dB louder than the person, so speech-over-TTS scores are depressed (~0.3–0.5 observed), while converged self-echo scores 0.002–0.003. **A barge must abort HA's run before starting the interrupting turn** — see the voice backend section in `controller/CLAUDE.md`
 - **AGC** (`internal/processor/`) — lock_mic turns only; release is frozen during silence (RMS speech flag), preventing noise floor amplification. (Device-side RNNoise NS was removed 2026-07-12 — noise suppression is controller-side now: `em_ns.py`/DTLN on the ASR-bound stream, per-device `nsAsr` flag)
 - **VAD** (lock_mic turns only) runs on pre-NS/AGC audio; opens gate after `VAD_SPEECH_MS` of speech, closes after `VAD_SILENCE_MS` of silence, then sends an end-of-speech sentinel
@@ -450,8 +482,11 @@ Requirements and cost: ONNX Runtime plus the three models must be installed at
 — they are **not** in the firmware, since 12.3MB would double the OTA payload
 and both A/B slots. Absence is an ordinary condition, logged once, and the
 device carries on with controller-side wake word. `device/tools/oww_probe`
-verifies a device reproduces Python and reports the real CPU cost. It costs
-~38% of one core permanently on top of the ~18-20% mic-pipeline baseline, so
+verifies a device reproduces Python and reports the real CPU cost. With the
+streaming embedding (#894, `embedding_stream.onnx`, installed with the other
+assets) it costs ~23% of one core on VVV (`oww_probe`, p50 17.3ms), against
+41% for the stock embedding it falls back to when the file is missing or
+disagrees at load; either is on top of the ~18-20% mic-pipeline baseline, so
 **enable it on one device at a time**.
 
 **The scorer pointer must be re-read PER FRAME, never cached for a stream.**

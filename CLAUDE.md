@@ -339,9 +339,14 @@ sh emos/device/em-wifi-check.sh
 ```
 
 Both suites plus `go vet` run in CI on every push/PR
-(`.github/workflows/ci.yml`). The controller suite imports `em_api`,
-`em_controller` and `em_esphome` since #739; openwakeword is stubbed per
-test (`tests/_oww_stub.py`, see `tests/conftest.py`).
+(`.github/workflows/ci.yml`), and so does a headless-Chromium walk of every
+dashboard tab that fails on a browser console error (`uat/`, #978; the
+dashboard-control UAT run is the separate `tools/uat`). Chromium drops
+invalid CSS such as `var(--x)88` with nothing on the console, so that class
+is checked in the source by `test_design_tokens.py` instead. The controller
+suite imports `em_api`, `em_controller` and `em_esphome` since #739;
+openwakeword is stubbed per test (`tests/_oww_stub.py`, see
+`tests/conftest.py`).
 
 **A source guard finds code through `tests/_sources.py`, never by reading one
 file by name** (2026-10-15, ahead of splitting em_controller/em_api into

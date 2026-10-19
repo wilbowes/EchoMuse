@@ -5088,3 +5088,134 @@ whisper stays the speech to text. An instruction to add a quip
 "occasionally", or "one reply in four", produced none from it. "Always, for
 questions about the world", with three example quips and "never a new
 fact", did.
+
+## 2026-10-16 — em_api taken apart, the wake word at half the CPU, and the grit in the stock-sound chain
+
+**The controller split.** From the evening of 10-15 to 02:13 on 10-16, em_api
+went from 6,680 lines to 295 in pure-move PRs (#914–#940): the device shell,
+events, releases, payloads, OTA, emOS OTA, reconcile and wake word asset sync
+became their own modules, and each route area became an `em_routes_*` module.
+`docs/controller-modules.md` (#941) says where each piece went. Three
+ratchets then went in to stop it growing back: `test_layering` (#942), a size
+ratchet on modules and functions (#943) and per-module coverage floors that
+only rise (#944). The split ran on the dev add-on from 07:56 with three Echoes
+connected.
+
+**The wake word at half the CPU (#894).** openWakeWord's embedding model
+recomputes 68 of its 76 mel frames on every 80 ms chunk. A rewritten model
+that takes only the 8 new frames gives identical embeddings, passes the golden
+fixture on the host and on an Echo, and on VVV (`oww_probe`, 30 s) costs
+23.1% of a core against 41.1% (p50 17.3 ms against 29.2 ms). A missing or
+disagreeing file falls back to the stock model.
+
+**Also merged:** the dashboard's type, spacing and radius tokens, shared
+classes, keyboard reach and landmarks for #820 (#947, #955, #949–#951), and
+#952, which loads the wake word and filter libraries only when a feature
+needs them.
+
+**The grit in the stock-sound chain.** On the stock-sound branch Wil heard
+grit at every volume, not only loud. Measured offline with two tones under a
+4 Hz syllable envelope: the volume law and driver correction alone were
+clean, and the upper bands' compressors produced junk at −40 dB at level 25
+with only 1.3 dB of gain reduction, because an instant attack steps the gain
+down on every new peak. A 10 ms attack with a 30 ms hold removed it, and that
+version was kept by ear.
+
+**A five-second wake stall.** A report on #946 traced to the wake scorer's
+input queue: 64 frames of 80 ms is 5.12 s, and dropping the oldest frame keeps
+it full once it falls behind. #957 drops frames that waited over a second and
+keeps the last half-second of a backlog (simulated 5.02 s → 0.38 s). It is
+open.
+
+## 2026-10-18 — a microphone on the bench, a voicing picked by ear, and the echo reference that was aliased all along
+
+**A Yeti Nano on the bench.** The LXC cannot reach `/dev/snd`, so the
+microphone was read over libusb directly, 30 cm from VVV. The bare driver
+measured −17 dB at 250 Hz, −25 at 175 and −31 at 140 relative to 1 kHz,
+nothing usable below 120 Hz, a peak of 8–9 dB at 2.3–4.5 kHz and a 14 dB hole
+at 8–9 kHz. Its distortion below 315 Hz is second harmonic rising with level
+(at 250 Hz, 7.5% at −18 dBFS and 37% at −3) with no hard clipping.
+
+**A voicing picked by ear.** Loudness-matched, beep-numbered A/B files of two
+voices and three songs. Wil picked C (warmer) for voice and a C/E midpoint for
+music, so the voice plane gets its own filter on top. For the 115–500 Hz band
+he picked 3:1 from −16 dB as "more stable"; 2:1 from −10 pumped and 4:1 from
+−20 was thinner.
+
+**The echo reference was aliased.** Barge-in over loud, bass-heavy music
+failed 1 in 5 on both the old and new builds. A raw capture showed the
+reference and the mics agreeing less and less above 400 Hz. Tones played at
+9, 12, 15 and 20 kHz then appeared in ch8, the playback loopback, at 7, 4, 1
+and 4 kHz at full level, while the mics showed nothing: ch8 is every third
+sample of the 48 kHz output with no anti-aliasing filter. Music always has
+content above 8 kHz, so the canceller was chasing signal that never reached
+the mics. The capture refuses 48 kHz. #975 rebuilds the reference from the
+firmware's own output, placed by exact match against ch8: pink noise went
+from 1 dB of cancellation to 25 dB on VVV, 22 dB on 15LE and 17–22 dB on
+C95, and barge-in over the same music to 4 in 5. The mics also gained 6 dB of
+headroom while the canceller is armed: at 24 dB loud playback clipped the
+extraction 943 times a minute and cost a wake word.
+
+## 2026-10-19 — an Echo Spot opened up, a fourth batch and a two-PR rule, and a volume law that steps evenly
+
+**An Echo Spot gen 1 (`rook`, 05EU) on the bench** (#991). It is the same
+MT8163 on the same 64-bit FireOS 5 kernel as the Dot 2, with the same PCM
+names. The boot-image zip from its unlock thread gave no adb: it installs a
+patched `/init.fosflags.sh` in the ramdisk, but `init.rc` runs
+`/system/etc/init.fosflags.sh`, whose `adb_cd.sh` strips adb from
+`persist.sys.usb.config` on every boot of a release-keys build. That was
+shown with one boot before anything on `/system` was changed. One line in
+`adb_cd.sh` gave root adb. The hardware, measured:
+- **Capture:** 6 channels: four mics on ch0–3, and a stereo playback loopback
+  on ch4/5, bit-exact zero in silence and at unity gain.
+- **Mute button:** reported as `KEY_POWER`, so a long press brings up
+  Android's power-off dialog.
+- **Privacy:** a hardware latch. The mics read bit-exact zero, the button's
+  red LED lights, and the kernel reports `privacy_state`. Writing
+  `privacy_trigger` can enter privacy, never leave it.
+- **No LED ring:** a 480×480 round screen instead.
+- **Light sensor:** an OPT3001.
+- **Bluetooth:** a Broadcom BCM43569 over a UART, not MediaTek's.
+
+**A fourth batch, and a rule.** @forming opened nine PRs, #977–#985, in one
+minute on 10-18, after the asks on 10-03 and 10-06 for one or two at a time.
+All nine were read in full:
+- **Merged:** #978, the dashboard console check, planned on #293, with a
+  source test for CSS that Chromium drops without a console error.
+- **Closed:** #982.
+- **Changes requested:** #983, #980.
+- **Waiting on our hardware run or a claimant:** the rest.
+
+Two of the descriptions said tests passed over red CI. CONTRIBUTING now limits
+contributors to two open pull requests at a time (#992). #975 merged the same
+evening.
+
+**A volume law that steps evenly.** On the stock-sound build the volume
+buttons stepped +2.9, +1.9, +2.7, +1.1, +0.3, +3.5 dB and then four presses of
+nothing. There were two causes:
+- **The table:** stock's is front-loaded.
+- **The cap:** the 70% dev cap sat at level 89, which is 70.08%, just past
+  stock's +3.5 dB step.
+
+Through the chain, A-weighted after undoing the correction, music gains less
+than 0.5 dB per dB of input past about +10 dB, so stock's +14.5 dB at the top
+bought compression rather than loudness. The law is now the plain 0.5 dB per
+level lifted 10 dB: every press is 4 dB, and HA, Music Assistant and stored
+volumes mean what they did. It is on VVV for listening.
+
+**Two stalls, neither from the build.**
+- **Music stutter:** VVV's link froze for 6.5 s. Over a minute the access
+  point resent 31.8% of the frames it sent VVV, at −49 dBm, against 0.1–2.2%
+  for other clients on the same radio. Music Assistant's source also stalled
+  for 2.4 s in the same window, with Apple Music rate-limiting it.
+- **Late reply:** the reply was ready 3.9 s into the turn and started
+  playing about 6.5 s late. The Bluetooth scan yields while words go up and
+  while a reply arrives, but nothing holds it off in between. Untested.
+
+**Beam calibration ruled out.** Mic gain mismatch on the quiet captures is
+within about 1 dB, and correcting it, measured or from `miccal`, moves the
+beams by 0.1–1 dB. The quiet-room noise is about a third mic self-noise
+(coherence 0.82–0.87 at 150–500 Hz, against about 0.99 for diffuse sound at
+36 mm), which is what superdirective amplifies. So noisy-room captures,
+booked for 10-20, decide between the beams. On the dev controller over the
+last month, 2 of 44 barge-in turns ended with no speech.
