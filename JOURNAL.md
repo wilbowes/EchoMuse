@@ -5219,3 +5219,55 @@ beams by 0.1–1 dB. The quiet-room noise is about a third mic self-noise
 36 mm), which is what superdirective amplifies. So noisy-room captures,
 booked for 10-20, decide between the beams. On the dev controller over the
 last month, 2 of 44 barge-in turns ended with no speech.
+
+## 2026-10-19, night — the queue cleared, a release gate that checks the build passed, and 2.27.0-ea.1
+
+**The review queue.** Every open pull request and every issue with no reply
+from us was read and answered:
+- @Dutch365 opened eight pull requests from one background agent within
+  seconds, each saying it was "prepared on the fork". #967 (a second
+  Bluetooth proxy start, #904) merged. #965 was closed for #957, which bounds
+  the wait rather than the queue; #968 for #890, which takes its database
+  drain with a co-author credit; #966 because it undid the loudness rule;
+  #970–#972 as settings with no measured need.
+- Merged: #720 (the device ports as add-on options, closing #163), #756 (the
+  forge's count of uploaded recordings), #957 and three Dependabot bumps.
+  Changes requested: #962, #960 (split per check), #754 (below).
+- Two wizard refusals of firebreak's default install, #897 and #900, were
+  already fixed in 2.26.1 by #846. #973 is a real slot-B bug: on amonet 1 the
+  wizard writes emOS to whichever slot booted, while the updater and init's
+  rollback both assume `mmcblk0p10`.
+- 16 issues closed (done, answered, or silent for over a month) and four of
+  ours folded into the issues that keep their work. 151 open became 135.
+
+**#754 would have ended music on a control blip.** It makes the music feed
+look its device up on every chunk and stop when the lookup misses. A closing
+control connection is removed from `em_state.devices` at once, and #315's 5 s
+grace is what keeps the media session alive through that, so a 4 s blip would
+have stopped the track again. Found by reading, not running. Wil's call on
+#751, posted: a replacement data connection closes the old one, and the
+playback session is kept.
+
+**A release could promote an image that failed its checks.**
+`controller-build.yml` pushes `:sha-*` before the kvm64 check and the scan
+run, and the release only checked the image existed. The release now asks the
+Actions API for a successful main build of the commit (#994), and the main
+build also runs the arm64 image under a Cortex-A53 (the Pi 3, and the Pi 4's
+instruction set). Negative controls: an ARMv8.2 `sdot` dies with SIGILL
+(exit 132) under the A53, and the probe refuses a CPU reporting the v8.2
+features. The first main run failed on the harness, not the CPU: pulled as
+`repo@<index digest>`, Docker holds one architecture under that name, so the
+arm64 pull after the amd64 one was refused ("cannot overwrite digest"). The
+local test had used a tag. #996 runs each architecture by its own manifest
+digest.
+
+**2.27.0-ea.1 and v2.19.0-ea.1,** tagged on `50bbbc3` after its main build
+passed, the gate's first real run. Minor rather than point: the controller
+split, on-demand libraries (185 MB to 88 MB) and the streaming embedding are
+in it, with #975's de-aliased echo reference in the firmware, so its GA takes
+the full acceptance run.
+
+**#964's support bundle reported 0 MB free** on a controller whose database
+was 0.9 MB. An add-on's `/data` shares Home Assistant's partition, so
+something else filled it. #995 asks the controller to show free space and
+stop its optional writes below 500 MB.
