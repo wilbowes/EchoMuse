@@ -1,5 +1,45 @@
 # Changelog
 
+## 2.27.0-ea.1 (Early Access)
+
+Lighter on a small controller, and the 5 second wake stall is fixed. Pair with firmware v2.19.0-ea.1, which this controller offers. No database changes.
+
+### New
+
+- **Half the memory when every Echo listens for itself.** The wake word and audio filter libraries now load only when a feature needs them: 185 MB to 88 MB on our controller with three Echoes listening privately (#952).
+- **The wake word scorer does the same work for less CPU.** A streaming version of openWakeWord's embedding model gives identical scores from only the audio that is new. The controller installs it on Echoes running v2.19.0-ea.1 (#893, #894).
+
+### Improved
+
+- The device ports, 8767 and 8770, are add-on options, for a host where something else already holds them (#720).
+- The dashboard can be used from the keyboard, its text fields match the rest of the page, and its sizes and spacing come from one scale (#947, #949, #950, #951, #955).
+- The controller's code is split into modules, with tests that hold each control message to the published device interface. Nothing should look different; please report anything that does (#907–#944).
+- Release images are checked on a Raspberry Pi 3/4's CPU as well as on older x86 CPUs, and a release refuses an image that failed the check (#994, #996).
+- aiohttp 3.14.5 (#989).
+
+### Fixed
+
+- **A wake detected by the controller could be scored about 5 seconds late,** after one stall filled its audio queue. The start of the command was cut off, and a farther Echo could take the turn. Audio that has waited too long is now skipped (#946).
+- **A Bluetooth proxy started twice at controller start dropped that Echo's connection** (#904).
+- **Light-level changes in the first 30 seconds after an Echo connected never reached Home Assistant** (#911).
+- **The dashboard read the database on the controller's main loop,** which delayed speaker audio and LED frames while a tab was open (#912).
+- **An Echo that never came back from an update was reported as "auto-rolled back".** It now says it did not reconnect (#919).
+- The fleet update says "restarting…", not "rebooting…": the Echo restarts its software and does not reboot (#902).
+
+### Known issues
+
+- A command spoken straight on from the wake word loses its first word when the controller detects the wake word (#987).
+- The emOS update refuses an amonet 1 Echo that boots from slot B (#973).
+- An Echo that restarts and rejoins a playing Sendspin group can fall out of sync until the next track.
+- A fleet setting saved while an Echo has its own value for it changes nothing on that Echo, and the fleet page does not say so.
+- Updating an Echo's firmware can stall the controller for a few seconds; a reply playing at that moment may stutter (#770).
+- A turn is occasionally logged as empty although its recording holds clear speech (#815).
+- An emOS Echo on the 32-bit kernel sometimes reconnects without rebooting (#816).
+
+### Thanks
+
+@Dutch365 (#946, #967) and @forming (#720).
+
 ## 2.26.1
 
 Fixes on top of 2.26.0. Pair with firmware v2.18.1, which this controller offers. No database changes.
