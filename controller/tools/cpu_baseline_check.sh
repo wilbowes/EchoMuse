@@ -46,11 +46,27 @@ if [ -z "$qemu" ]; then
   exit 2
 fi
 
+# A multi-arch image is run by its per-architecture manifest digest. Pulled
+# as repo@<index digest>, the local store holds one architecture under that
+# name, so the arm64 pull after the kvm64 one refused with "cannot overwrite
+# digest" (first main run, 2026-10-19). A local image such as CI's
+# echomuse-controller:pr is not in a registry and is run as given.
+ref="$image"
+digest="$(docker buildx imagetools inspect "$image" --format \
+  "{{range .Manifest.Manifests}}{{if eq .Platform.Architecture \"$arch\"}}{{.Digest}}{{end}}{{end}}" \
+  2>/dev/null || true)"
+if [ -n "$digest" ]; then
+  repo="${image%@*}"
+  repo="${repo%:*}"
+  ref="$repo@$digest"
+fi
+echo "running $ref"
+
 run() {
   docker run --rm --init --platform "linux/$arch" \
     -v "$qemu:/qemu:ro" \
     -v "$here/cpu_baseline_probe.py:/probe.py:ro" \
-    -w /app --entrypoint /qemu "$image" -cpu "$cpu" "$@"
+    -w /app --entrypoint /qemu "$ref" -cpu "$cpu" "$@"
 }
 
 echo "== python stack under $cpu"
