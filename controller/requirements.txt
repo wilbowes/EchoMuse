@@ -7,7 +7,7 @@
 # WebSocket server (device connections)
 websockets==17.2
 # HTTP API + dashboard server
-aiohttp==3.14.4
+aiohttp==3.14.5
 # Password hashing
 bcrypt==5.0.0
 # Device-link TLS: CA + server cert generation (em_pki.py). The controller
