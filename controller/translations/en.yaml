@@ -104,3 +104,16 @@ configuration:
       silent — no audio and no error, which looks like a deaf Echo. Above
       120 is not accepted, because the ring stops showing that the Echo is
       working at 135 seconds.
+  barge_confirm_ms:
+    name: Barge-in window (milliseconds)
+    description: >-
+      How long someone has, after their wake word during the thinking
+      phase, to still be talking before the interruption is given up and
+      the answer that was already on its way is kept. Interrupting is
+      final — Home Assistant cannot resume an aborted answer — so this is
+      what stops a wake word spoken over a reply by mistake, or thought
+      better of, from throwing that answer away. Leave room for a breath
+      between the wake word and the command; it is also added, as latency,
+      to every interruption that was meant. The person has to be speaking
+      at the end of the window, so this is not a silence timeout. 1500 by
+      default, at most 5000.

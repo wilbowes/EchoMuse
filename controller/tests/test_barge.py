@@ -11,6 +11,11 @@ Asking for a story cut it off mid-sentence twice in a row (2026-08-20).
 the utterance, or there is no pipeline behind this one — which #414 collapsed
 into one flag and only the first of which was handled the way the wake path
 handles it (#417).
+
+`FollowUpWindow` covers #195's deferral: a wake word during THINKING no longer
+aborts Home Assistant's run on the frame that scores it, because that abort is
+the point of no return — HA's pipeline has no resume. The person is given the
+window to still be talking, and the answer in flight is kept if they are not.
 """
 
 import sys, pathlib
@@ -178,3 +183,134 @@ def test_the_recorded_label_reads_as_a_barge_and_not_a_wake_word():
     label = cede(serves=False).trigger_label
     assert not label.startswith("wakeword")
     assert label.split("(")[0] == "barge-in"
+
+
+# ── #195: holding a thinking-phase barge until somebody is still talking ─────
+
+def window(opened=100.0, confirm=em_barge.CONFIRM_DEFAULT_MS, floor=0.0):
+    return em_barge.FollowUpWindow(opened=opened, confirm_ms=confirm,
+                                   floor=floor)
+
+
+def test_nothing_is_decided_inside_the_wake_words_own_tail():
+    """
+    The frames just after a crossing are the wake word's OWN audio — the
+    crossing arrives as the phrase completes — and they sit several frames
+    above any speech bar. Counting them would make the window fire on the
+    accidental barge it exists to catch, and a rule that always fires is not
+    a rule. Same 240ms as em_esphome.VOICE_PREROLL_DISCARD.
+    """
+    w = window()
+    assert w.feed(0.9, 100.0) == "", "the crossing frame itself"
+    assert w.feed(0.9, 100.239) == "", "last frame inside the tail"
+
+
+def test_speech_just_after_the_tail_takes_the_interrupting_turn():
+    w = window()
+    assert w.feed(0.9, 100.3) == "take"
+
+
+def test_a_quiet_room_leaves_the_answer_alone():
+    """
+    The accidental barge, and the whole point of the window: HA's run was
+    never touched, so its answer still arrives. Quiet frames say nothing while
+    the window is open and the frame that closes it drops the barge.
+    """
+    w = window()
+    assert w.feed(0.0, 100.3) == ""
+    assert w.feed(0.0, 101.0) == ""
+    assert w.feed(0.0, 101.5) == "drop"
+
+
+def test_the_window_is_measured_from_the_crossing_not_from_the_first_frame_fed():
+    """
+    The same accounting as #139 on the turn clock. `opened` and `at` are
+    CAPTURE times, so frames the link delivers late (or in a burst) are placed
+    where the room made them rather than where they arrived — otherwise a
+    stall hands the person a second window nobody granted them.
+    """
+    w = window()
+    assert w.feed(0.0, 101.4) == "", "1.4s of quiet, still inside the window"
+    assert w.feed(0.0, 101.5) == "drop", "measured from the crossing"
+
+
+def test_the_window_closes_on_time_even_if_that_frame_is_loud():
+    """
+    "Take" needs its evidence INSIDE the window: the deadline is what bounds
+    the latency a real interruption pays, so it is checked first and a frame
+    past it drops however loud it is. Somebody who starts talking two seconds
+    after their wake word was not talking over the answer.
+    """
+    assert window().feed(0.9, 101.6) == "drop"
+
+
+def test_the_window_honours_the_configured_length():
+    w = window(confirm=3000.0)
+    assert w.feed(0.0, 102.9) == ""
+    assert w.feed(0.0, 103.0) == "drop"
+
+
+def test_the_bar_is_the_turn_paths_own_reading_of_speech():
+    """
+    em_esphome's `_is_speech` applies the same rule to the same 80ms frames,
+    and two readings of "speech" that can disagree is how the window would
+    take a barge the turn path calls silence. Three times the room's own
+    floor, with an absolute bound for the floor-not-yet-warmed case.
+    """
+    assert em_barge.speech_bar(0.0) == 0.004
+    assert em_barge.speech_bar(0.001) == 0.004, "the room has not warmed up"
+    assert em_barge.speech_bar(0.01) == pytest.approx(0.03)
+    assert em_barge.speech_bar(0.05) == pytest.approx(0.15)
+
+
+def test_a_noisy_room_needs_a_frame_over_its_own_floor():
+    # The floor a device measured, and a frame that is loud in absolute terms
+    # but not against this room — a fan, not a person.
+    w = window(floor=0.05)
+    assert w.feed(0.10, 100.3) == ""
+    assert w.feed(0.16, 100.4) == "take"
+
+
+# ── The window is an option, and cannot be made useless (#195) ───────────────
+
+def test_the_barge_window_default_does_not_move():
+    # The point of #195 is that the window CAN move, not that it moved: every
+    # existing deployment keeps the behaviour it has today.
+    assert em_barge.CONFIRM_DEFAULT_MS == 1500.0
+    assert em_barge.confirm_ms(None) == 1500.0
+    assert em_barge.confirm_ms("") == 1500.0
+
+
+def test_the_barge_window_takes_what_the_add_on_sends():
+    assert em_barge.confirm_ms("2000") == 2000.0
+    assert em_barge.confirm_ms(" 800 ") == 800.0
+    assert em_barge.confirm_ms(900) == 900.0
+
+
+def test_a_typed_barge_window_cannot_stop_the_controller_booting():
+    # Read once at import, with whatever an operator put in the box.
+    for junk in ("fifteen", "1500ms", "1e", "a second and a half", " "):
+        assert em_barge.confirm_ms(junk) == em_barge.CONFIRM_DEFAULT_MS, junk
+    # float() raises TypeError rather than ValueError for these, and either
+    # one reaching the log is a controller that never boots.
+    for not_a_number in (object(), ["1500"], {"ms": 1500}):
+        assert em_barge.confirm_ms(not_a_number) == em_barge.CONFIRM_DEFAULT_MS
+
+
+def test_a_barge_window_can_never_run_past_the_ceiling():
+    """
+    Past a couple of seconds this stops being a confirmation and becomes "the
+    answer wins unless you say another wake word" — and every millisecond of
+    it is latency added to a real interruption.
+    """
+    assert em_barge.confirm_ms("5000") == em_barge.CONFIRM_MAX_MS
+    assert em_barge.confirm_ms("60000") == em_barge.CONFIRM_MAX_MS
+    assert em_barge.CONFIRM_MAX_MS > em_barge.CONFIRM_DEFAULT_MS
+
+
+def test_a_non_positive_barge_window_falls_back_rather_than_taking_or_dropping_everything():
+    # 0 is not "take the barge at once" — no such state exists — and a window
+    # of zero drops every barge. Both are decided here rather than by the
+    # caller.
+    for raw in ("0", "0.0", "-1500"):
+        assert em_barge.confirm_ms(raw) == em_barge.CONFIRM_DEFAULT_MS, raw
