@@ -134,6 +134,10 @@ What we ask for is a person behind the change:
 - **Know what you are sending and why.** You do not need to account for every
   line, but you should understand what the change does, the problem it
   addresses and how it fits the design.
+- **Two open pull requests at a time.** Each one is read in full and some
+  are run on an Echo, so a batch waits longer than two would. Past two,
+  the extra ones are closed without review; open them again when one of
+  yours has merged or closed.
 - **Keep it short and well scoped.** One change per pull request. The
   description and your replies in review can be written with an assistant,
   as ours are. What we ask is that they are concise and easy to follow: a
