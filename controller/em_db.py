@@ -1310,6 +1310,20 @@ def init(path: str = "echomuse.db") -> None:
     log.info("Database ready")
 
 
+def close() -> None:
+    """Checkpoint the WAL and close the connection, at shutdown. Idempotent."""
+    global _conn
+    with _db_lock:
+        conn, _conn = _conn, None
+        if conn is None:
+            return
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.Error as e:
+            log.warning(f"[db] checkpoint on close failed: {e}")
+        conn.close()
+
+
 @contextmanager
 def _tx():
     """

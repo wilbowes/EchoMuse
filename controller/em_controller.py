@@ -90,6 +90,7 @@ import em_linkauth
 import em_pairing
 import em_config_types
 import em_dbwriter
+import em_shutdown
 import em_tasks
 import em_pacing
 import em_platform
@@ -6047,6 +6048,9 @@ async def event_loop_lag_monitor(interval: float = 1.0,
 
 async def main():
     log.info(f"EchoMuse Controller {CONTROLLER_VERSION}")
+    # First, so a stop during startup is held until the ready point below
+    # and not dropped (em_shutdown).
+    stop = em_shutdown.install(asyncio.get_running_loop())
     db.init(DB_PATH)
     auth.maybe_generate_bootstrap_token()
     em_player.init(
@@ -6133,7 +6137,11 @@ async def main():
             await em_ble_proxy.start_ble_proxy_servers(SERVER_HOST)
 
             log.info("EchoMuse Controller ready — waiting for devices")
-            await asyncio.Future()
+            log.info(f"{await stop} received — shutting down")
+            # Started before the servers above are closed: leaving this
+            # block closes every device link, and that is the first thing
+            # that could hang.
+            em_shutdown.backstop(log)
 
     finally:
         await em_ble_proxy.stop_ble_proxy_servers()
@@ -6145,6 +6153,7 @@ async def main():
         await azc.async_unregister_service(info)
         await azc.async_close()
         await runner.cleanup()
+        await em_shutdown.close_database()
         log.info("EchoMuse Controller stopped")
 
 
