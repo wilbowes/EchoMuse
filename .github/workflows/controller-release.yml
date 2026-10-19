@@ -56,6 +56,7 @@ jobs:
       packages: write
       id-token: write       # provenance attestation (Sigstore OIDC)
       attestations: write
+      actions: read         # the main build's result for this commit
 
     steps:
       - name: Checkout
@@ -173,6 +174,24 @@ jobs:
             exit 1
           fi
           echo "found $src"
+
+      # The image existing is not the image passing. The main build pushes
+      # :sha-* first and runs the CPU baseline checks and the scan after, so
+      # an image that SIGILLs on kvm64 or a Pi is published all the same, and
+      # the step above would promote it. Only a successful run counts; a
+      # rerun that went green does.
+      - name: Check the main build passed for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha="$(git rev-parse HEAD)"
+          n="$(gh api "repos/${{ github.repository }}/actions/workflows/controller-build.yml/runs?head_sha=$sha&status=success" --jq '.total_count')"
+          if [ "${n:-0}" -lt 1 ]; then
+            echo "::error::'Controller Build (main)' has not passed for $sha."
+            echo "Fix main, or rerun the build if it failed for a transient reason, then rerun this release."
+            exit 1
+          fi
+          echo "main build passed for $sha"
 
       # NOT imagetools create, and not a rebuild either.
       #

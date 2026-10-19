@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Run a controller image under an emulated Proxmox `kvm64` CPU (#496).
+# Run a controller image under the oldest CPU it has to start on (#496).
 #
-#   controller/tools/cpu_baseline_check.sh <image>
+#   controller/tools/cpu_baseline_check.sh <image>          # amd64, kvm64
+#   controller/tools/cpu_baseline_check.sh <image> arm64    # Cortex-A53
 #
 # WHY: numpy 2.4's x86_64 wheels need x86-64-v2 (SSE4.2, POPCNT), and on a
 # CPU without it the add-on did not start at all. kvm64 is such a CPU and
@@ -23,32 +24,42 @@
 # not fail: it hung at 0% CPU, and in CI that is a job sitting out its
 # timeout rather than a red check. Found on the first negative-control run.
 #
-# amd64 only: arm64 has no equivalent baseline problem here, and kvm64 is
-# an x86 model.
+# arm64 is the same check under a Cortex-A53: ARMv8.0, the Pi 3, and the
+# same feature set as the Pi 4's A72. aarch64 wheels mostly build for
+# ARMv8.0 and pick newer instructions at run time, but nothing made that
+# true here until this ran, and a wheel built for ARMv8.2 would stop a Pi
+# exactly as numpy 2.4 stopped kvm64. qemu is an x86 binary on an x86
+# runner, so it runs as the entrypoint of the arm64 image without binfmt.
 set -euo pipefail
 
-image="${1:?usage: $0 <image>}"
+image="${1:?usage: $0 <image> [amd64|arm64]}"
+arch="${2:-amd64}"
+case "$arch" in
+  amd64) qemu_name=qemu-x86_64-static;  cpu=kvm64 ;;
+  arm64) qemu_name=qemu-aarch64-static; cpu=cortex-a53 ;;
+  *) echo "unknown arch '$arch' (amd64 or arm64)" >&2; exit 2 ;;
+esac
 here="$(cd "$(dirname "$0")" && pwd)"
-qemu="$(command -v qemu-x86_64-static || true)"
+qemu="$(command -v "$qemu_name" || true)"
 if [ -z "$qemu" ]; then
-  echo "qemu-x86_64-static not found (apt-get install qemu-user-static)" >&2
+  echo "$qemu_name not found (apt-get install qemu-user-static)" >&2
   exit 2
 fi
 
 run() {
-  docker run --rm --init --platform linux/amd64 \
+  docker run --rm --init --platform "linux/$arch" \
     -v "$qemu:/qemu:ro" \
     -v "$here/cpu_baseline_probe.py:/probe.py:ro" \
-    -w /app --entrypoint /qemu "$image" -cpu kvm64 "$@"
+    -w /app --entrypoint /qemu "$image" -cpu "$cpu" "$@"
 }
 
-echo "== python stack under kvm64"
-run /usr/local/bin/python3 /probe.py --kvm64
+echo "== python stack under $cpu"
+run /usr/local/bin/python3 /probe.py "--$cpu"
 
 # ffmpeg is spawned as a subprocess, and qemu-user does not follow execve
 # into a child — so the probe above cannot cover it. Decode a second of
 # tone under the same CPU on its own.
-echo "== ffmpeg under kvm64"
+echo "== ffmpeg under $cpu"
 bytes="$(run /usr/bin/ffmpeg -hide_banner -loglevel error \
           -f lavfi -i sine=d=1 -f s16le -ar 48000 -ac 1 - | wc -c)"
 if [ "$bytes" -ne 96000 ]; then

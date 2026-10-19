@@ -257,9 +257,12 @@ them.
 **The release workflow does NOT build — it re-tags the image the main build
 already published for that commit.** `controller-release.yml` looks for
 `:sha-<short>` and fails with "No image published for this commit" if
-`Controller Build (main)` has not finished. So the order is **merge → wait for
-`Controller Build (main)` to go green on the merge commit → then push the
-tag**, and a tag pushed seconds after a merge fails on a race rather than on
+`Controller Build (main)` has not finished. It also refuses a commit whose main
+build did not PASS (2026-10-19): the build pushes `:sha-*` before the CPU
+baseline checks run (kvm64 for amd64, Cortex-A53 for arm64, the Pi 3/4
+floor), so the image existing never meant it starts on those CPUs. So the
+order is **merge → wait for `Controller Build (main)` to go green on the
+merge commit → then push the tag**, and a tag pushed seconds after a merge fails on a race rather than on
 anything being wrong. Hit on 2026-08-28 cutting `2.22.0-ea.4`: the build had
 started 23 seconds earlier and the release checked while it was still pushing.
 The recovery is only `gh run rerun <id>` once the build finishes — the tag,

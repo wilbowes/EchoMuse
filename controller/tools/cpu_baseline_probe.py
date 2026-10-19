@@ -1,13 +1,14 @@
 """Exercise the controller's native dependencies on whatever CPU runs this.
 
-Run by cpu_baseline_check.sh under `qemu-x86_64 -cpu kvm64`, inside the
-built image. See that script for why; this file is only the payload.
+Run by cpu_baseline_check.sh under `qemu-x86_64 -cpu kvm64` or
+`qemu-aarch64 -cpu cortex-a53`, inside the built image. See that script for why; this file is only the payload.
 
 Three parts, and the order matters:
 
 1. Import numpy, then confirm the CPU really is the emulated one. numpy's
-   own runtime CPU detection reads CPUID, so under a genuine kvm64 it must
-   report no SSE4.1/SSE4.2/POPCNT/AVX2. If it reports any of them, qemu
+   own runtime CPU detection reads CPUID (HWCAP on arm64), so under a
+   genuine kvm64 it must report no SSE4.1/SSE4.2/POPCNT/AVX2, and under a
+   Cortex-A53 none of the ARMv8.2 extensions. If it reports any of them, qemu
    ignored `-cpu` and every pass below would be a pass on the host CPU,
    so that is a failure, not a warning.
 2. Import every controller module, the same set CI's import job uses, so
@@ -26,11 +27,19 @@ import traceback
 import numpy as np
 from numpy._core._multiarray_umath import __cpu_features__ as feats
 
-EXPECT_ABSENT = ("SSE41", "SSE42", "POPCNT", "AVX2")
+# What each emulated CPU must NOT have. kvm64 is pre-x86-64-v2; Cortex-A53
+# (Pi 3, and the Pi 4's A72 has the same ARMv8.0 set) has no FP16 arithmetic,
+# dot product or SVE, which are what an ARMv8.2 wheel would use.
+ABSENT_ON = {
+    "--kvm64":      ("SSE41", "SSE42", "POPCNT", "AVX2"),
+    "--cortex-a53": ("ASIMDHP", "ASIMDDP", "ASIMDFHM", "SVE"),
+}
+cpu = next((a for a in sys.argv[1:] if a in ABSENT_ON), "--kvm64")
+EXPECT_ABSENT = ABSENT_ON[cpu]
 present = [f for f in EXPECT_ABSENT if feats.get(f)]
-if "--kvm64" in sys.argv and present:
-    sys.exit(f"harness fault: CPU reports {present}, so this is not kvm64 "
-             f"and a pass would prove nothing")
+if cpu in sys.argv and present:
+    sys.exit(f"harness fault: CPU reports {present}, so this is not "
+             f"{cpu[2:]} and a pass would prove nothing")
 print(f"numpy {np.__version__}; CPU reports "
       f"{', '.join(f for f in EXPECT_ABSENT if f not in present) or 'all'} "
       f"absent of {', '.join(EXPECT_ABSENT)}")
