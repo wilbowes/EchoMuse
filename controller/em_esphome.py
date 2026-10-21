@@ -449,6 +449,9 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._run_finished      = False
         self._ha_ended_early    = False
         self._ha_never_started  = False
+        # TTS_START / ERROR seen this turn — see _ended_without_reply.
+        self._tts_started       = False
+        self._pipeline_error    = False
         # Barge-in run serialisation — the protocol has no run id, so the
         # satellite is what keeps two runs from overlapping on one connection.
         # See em_runbarrier for the whole reasoning; it is a separate module
@@ -933,6 +936,16 @@ class EchoMuseSatellite(SatelliteServerProtocol):
 
     # ── Voice event stream ───────────────────────────────────────────────
 
+    def _ended_without_reply(self) -> bool:
+        """
+        HA finished the intent and ended the run without starting TTS or
+        reporting an error: it chose to say nothing. HA's pipeline skips TTS
+        when the reply is empty, which is what "never mind" (HassNevermind)
+        returns. A TTS_START with no URL after it is still a failure.
+        """
+        return (self._intent_ended and self._run_finished
+                and not self._tts_started and not self._pipeline_error)
+
     def _handle_voice_event(self, msg: api_pb2.VoiceAssistantEventResponse) -> None:
         """
         Dispatch incoming VoiceAssistantEventResponse messages during a
@@ -1025,6 +1038,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
 
         elif event_type == ET.VOICE_ASSISTANT_TTS_START:
             log.info(f"[{self._log_name}] TTS starting")
+            self._tts_started = True
 
         elif event_type == ET.VOICE_ASSISTANT_TTS_END:
             # TTS URL arrives here in some pipeline configurations.
@@ -1148,6 +1162,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             code = data.get("code", "")
             message = data.get("message", "")
             log.warning(f"[{self._log_name}] Pipeline error: {code} — {message}")
+            self._pipeline_error = True
             # C1c fix: if the HA pipeline dies mid-STT, _stream_mic_audio may
             # still be running (waiting on the device's own VAD-end sentinel).
             # Unblock it too, not just the TTS waiter — otherwise the mic
@@ -1377,6 +1392,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         self._run_finished          = False
         self._ha_ended_early        = False
         self._ha_never_started      = False
+        self._tts_started           = False
+        self._pipeline_error        = False
         # Takes ownership of an abort armed during the PREVIOUS turn (at the
         # barge). Deliberately not a plain reset: the arm has to survive this
         # block to reach the turn it protects.
@@ -1594,6 +1611,9 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 # which is not a turn that produced nothing.
                 log.info(f"[{self._log_name}] Turn superseded by Home Assistant")
                 if trace: trace.outcome = "superseded"
+            elif self._ended_without_reply():  # "never mind": not a failure
+                log.info(f"[{self._log_name}] HA ended the turn with no reply")
+                if trace: trace.outcome = "silent_reply"
             else:
                 log.info(f"[{self._log_name}] No TTS audio URL received — turn ended without response")
                 if trace: trace.outcome = "no_tts"
