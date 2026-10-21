@@ -5271,3 +5271,53 @@ the full acceptance run.
 was 0.9 MB. An add-on's `/data` shares Home Assistant's partition, so
 something else filled it. #995 asks the controller to show free space and
 stop its optional writes below 500 MB.
+
+## 2026-10-21 — an issue review that found its own sweep's mistakes, and "never mind" as the way to stop a reply
+
+**The 10-19 sweep closed four issues wrongly.** #688 was closed as "we're not
+adding stop words", under the 10-04 decision about English words matched in
+the transcript to stop a ringing timer. It asked something else: a way to stop
+a reply after a false wake from the TV, and on 09-29 we had said yes to a
+Voice PE-shaped stop detector for it. Wil reopened it on 10-20. #90 was closed
+for "no reply since August" when griley had replied on 08-11 with
+`last_kmsg` and the review was ours; #141 and #325 were closed for silence
+when our own last comment said the fault was unfixed. The rule now: close for
+silence only when the reporter owes the next move, decided per issue after
+reading the thread.
+
+**#90's crash is kernel memory corruption.** griley's log is an oops in
+`anon_vma_interval_tree_remove` ← `unlink_anon_vmas` ← `exit_mmap` as `sh`
+exits, at a garbage address (`e501600000000010`): the sensor read corrupts
+memory and the fault lands later in unrelated code. That fits ruhlmcu's
+watchdog resets (`wdt_by_pass_pwk`) about 90s after reading on two FireOS Dots
+of a new batch, `G090LF107`. Their emOS Dot surviving one read shows nothing,
+since it runs the same kernel. Which attribute does it is not known.
+
+**Stopping a reply: HA already has the Alexa behaviour, narrowly.** Wil's
+view: the natural response to a false wake is the wake word again and "stop"
+or "shut up", and a separately trained cancel word is not intuitive; the
+cancel model is held. On Alexa the cloud does that work; here it is Home
+Assistant. Read in home-assistant/intents and core: `HassNevermind` matches
+"never mind" and "nevermind" in English, its handler returns an empty reply,
+and the pipeline then skips TTS. "Stop" alone matches `HassMediaPause`; "be
+quiet" and "shut up" match nothing. With an LLM agent HA only tries its own
+sentences when "Prefer handling commands locally" is on.
+
+We ended that silent run as `no_tts` with the error cue. #1005 makes it
+`silent_reply`, ending on a brief solid green (Wil, after seeing the thinking
+ring go dark). On VVV, on the dev add-on: two "never mind" turns with nothing
+playing ended `silent_reply` in about 3s. Said over a reply it failed: the
+barge-in fired and cut the reply, but the new turn heard
+`" one quince. Never mind."`, its first 640ms at 63-68dB where a normal wake
+turn's speech gate opens at 560ms and this one opened at 80ms. Most likely the
+reply still playing through the 250ms arbitration hold before the flush. HA
+did not match the sentence and the LLM answered 11s later. Barge-in itself
+was hard to trigger over replies: five windows, peaks 0.414 and 0.315 over the
+0.25 bar without firing (two consecutive frames are needed; per-frame scores
+were not logged), one fired at 0.991. VVV runs #975's de-aliased reference
+and the louder volume law.
+
+Also from the review: #697's fastboot timeouts were TLP's USB autosuspend on
+the host (now in the FAQ); #712's layout was fixed by reinstalling amonet v2
+as a zip from TWRP, a second Echo; #1001 is the third 413 at Build emOS (#800);
+#423's deadlock was fixed by #878 in 2.26.1 and nobody had told the reporter.

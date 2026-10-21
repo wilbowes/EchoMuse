@@ -42,13 +42,28 @@ the Dot to FireOS 6574.1 moves it to `63cb91b`
 Turn **off** any file manager that auto-mounts USB devices. It grabs the
 handshake and makes later adb steps fail with unhelpful errors.
 
+### fastboot sees the Dot, but `getvar` never answers (Linux).
+**Check TLP's USB autosuspend.** On a laptop running TLP, the Dot's fastboot
+device can be suspended between commands, so a query that answered once then
+times out. Add the Dot's fastboot USB ID to TLP's denylist in
+`/etc/tlp.conf` and reboot:
+
+```
+USB_DENYLIST+="0bb4:0c01"
+```
+
+`0bb4:0c01` is what one Dot reported in fastboot; check yours with `lsusb`.
+`systemctl is-active tlp` reading `inactive` does not rule this out, because
+TLP's udev helper still applies the policy
+([#697](https://github.com/wilbowes/EchoMuse/issues/697)).
+
 ### The wizard stops at Escrow Boot Image and mentions `boot_a_x`.
 **The Echo has amonet v1's partition table under a v2 unlock.** Installing
 v2 is meant to put the original table back, and on this Echo it has not. The
 wizard has read and written nothing. Reinstalling FireOS does not change the
 table, so it won't help.
 
-One owner got past it by installing amonet v2 again, as a zip from TWRP
+Two owners got past it by installing amonet v2 again, as a zip from TWRP
 ([#712](https://github.com/wilbowes/EchoMuse/issues/712)). **We have not run
 that ourselves and can't tell you it is safe:** it rewrites the partition
 table and the bootloader, and an Echo on which it fails partway may not
