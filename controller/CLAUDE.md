@@ -320,6 +320,23 @@ a `start=False` then would land on the question's. #794 (@forming) found the
 deadlock and proposed superseding from the announce side; the run-end
 handling made that unnecessary.
 
+**A run that reaches `INTENT_END` and ends with no `TTS_START` and no
+`ERROR` is HA choosing to say nothing, and its outcome is `silent_reply`
+(#688, #1005).** HA's pipeline skips TTS when the reply is empty
+(`assist_pipeline`, "Skip TTS"), and that is what its built-in "never mind"
+(`HassNevermind`, English sentences "never mind"/"nevermind" only) returns.
+It was `no_tts` and ended on the error cue, so the advice for stopping a
+reply worked and then reported a failure. It ends on `done_anim`, a fixed
+solid green for 1s (Wil, 2026-10-21: the thinking ring then dark read as cut
+off). A `TTS_START` with no URL after it stays `no_tts`. With an LLM agent,
+HA only tries its own sentences when "Prefer handling commands locally" is
+on. **Over a reply it is not yet reliable** (VVV, 2026-10-21): the barge-in
+turn's transcript was `" one quince. Never mind."`, its first 640ms loud,
+most likely the reply still playing through the 250ms arbitration hold
+before the flush; with extra words HA does not match the sentence and the
+LLM answered 11s later. Unconfirmed, and the fix (flush at the wake, before
+arbitration) is not built.
+
 **The protocol has NO run identifier, and HA does not serialise runs.**
 `VoiceAssistantEventResponse` is an event type plus a name/value list and
 nothing else, so a client structurally cannot attribute an event to a run: the
