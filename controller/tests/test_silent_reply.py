@@ -99,6 +99,14 @@ def test_the_outcome_is_decided_before_the_no_tts_fallback():
     assert "trace.outcome = 'silent_reply'" in body
 
 
-def test_a_silent_reply_ends_without_a_cue():
-    assert "silent_reply" not in em_controller._OUTCOME_ANIM
+def test_a_silent_reply_ends_on_the_done_cue_not_the_error_cue():
+    assert em_controller._OUTCOME_ANIM["silent_reply"] == "done_anim"
     assert em_controller._OUTCOME_ANIM["no_tts"] == "error_anim"
+
+
+def test_the_done_cue_is_a_brief_solid_green_in_every_scene():
+    import em_scenes
+    for name in ("standard", "airy", "malevolent", "pride"):
+        cue = em_scenes.resolve({"ledScene": name})["done_anim"]
+        assert cue == {"pattern": "solid", "ttlSec": 1,
+                       "colors": [list(em_scenes.DONE_GREEN)]}

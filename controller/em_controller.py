@@ -1600,8 +1600,8 @@ async def leds_off(device: Device):
 
 
 # Turn outcomes that get a distinguishing ring cue at turn end. Everything
-# else ("ok", "cancelled", "barged", "silent_reply") ends silently: the user
-# heard a reply, cut it off, or HA chose to say nothing, so a cue is noise.
+# else ("ok", "cancelled", "barged") ends silently: the user either heard a
+# reply or cut it off themselves, so a cue would be noise.
 #
 # Rhythm carries the meaning, not colour — a new colour would collide with
 # red (mute), orange (link down) or cyan (volume), and the point of the
@@ -1625,6 +1625,9 @@ _OUTCOME_ANIM = {
     # declined, here there is no pipeline — so the cue says so in the colour
     # the device already uses for a missing link. See em_scenes.no_ha_anim.
     "no_ha":         "no_ha_anim",
+    # HA chose to say nothing ("never mind"). Without a cue the ring went
+    # from thinking to dark, which read as cut off. See em_scenes.done_anim.
+    "silent_reply":  "done_anim",
 }
 
 # How long the listening ring is held before the no_ha cue replaces it. The

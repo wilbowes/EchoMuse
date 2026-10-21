@@ -1,6 +1,6 @@
 {
  "files": {
-  "em_controller.py": 6165,
+  "em_controller.py": 6168,
   "em_db.py": 3355,
   "em_esphome.py": 3631
  },
@@ -21,7 +21,7 @@
   "em_ota._run_update_locked": 229,
   "em_player.MediaSession._feed": 318,
   "em_routes_provision._post_provision_emos_image": 182,
-  "em_scenes.resolve": 151,
+  "em_scenes.resolve": 159,
   "em_shell.stream_file": 239
  }
 }
