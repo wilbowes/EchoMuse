@@ -13,7 +13,7 @@ permissions:
 jobs:
   controller-tests:
     name: Controller unit tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -50,7 +50,7 @@ jobs:
 
   forge-metadata-tests:
     name: ONNX metadata round trip
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -62,7 +62,7 @@ jobs:
 
   controller-lint:
     name: Controller lint (undefined names)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -100,10 +100,10 @@ jobs:
 
   dashboard-tests:
     name: Dashboard logic tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # No setup-node step: ubuntu-latest ships a node, and this test needs
+      # No setup-node step: ubuntu-24.04 ships a node, and this test needs
       # nothing beyond the standard library. The dashboard is otherwise
       # untested by construction — it compiles to a single classic script
       # with no module boundary to import across — so this covers the pure
@@ -152,7 +152,7 @@ jobs:
 
   device-tests:
     name: Device Go tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -179,7 +179,7 @@ jobs:
 
   python-deps-audit:
     name: Python dependency audit
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -209,7 +209,7 @@ jobs:
 
   device-vulncheck:
     name: Device Go vulnerability check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -253,7 +253,7 @@ jobs:
 
   controller-image:
     name: Controller image builds
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -344,7 +344,7 @@ jobs:
 
   controller-imports:
     name: Controller modules import and the controller boots
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # WHY THIS EXISTS: the two largest files in the controller have no
@@ -479,7 +479,7 @@ jobs:
 
   dashboard-console-errors:
     name: Dashboard console errors (headless Chromium)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # WHY THIS EXISTS: the dashboard is verified by a person opening it and
@@ -594,7 +594,7 @@ jobs:
 
   device-firmware-build:
     name: Device and emOS builds (pinned compiler)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -689,7 +689,7 @@ jobs:
 
   emos-checks:
     name: emOS init checks (ring and password)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # WHY THIS EXISTS: emos/ is ~1,900 lines of C that until now nothing in
@@ -820,7 +820,7 @@ jobs:
 
   device-vet:
     name: Device go vet
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

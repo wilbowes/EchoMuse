@@ -237,7 +237,13 @@ plain `v2.18.1-ea.1` in slot A so FireOS 5 is covered.
 its version in a trailing comment (`@<sha> # v7.0.1`), which Dependabot's
 github-actions ecosystem keeps current — a mutable tag in a job holding
 `contents: write` or `packages: write` is how a third-party compromise swaps a
-release asset. Every workflow opens with `permissions: contents: read` and
+release asset. Runners are pinned by release (`ubuntu-24.04`), never
+`-latest`: GitHub moved `ubuntu-latest` to 26.04 in October 2026, which has
+no `qemu-user-static`, and the CPU baseline check failed on main from the
+#1005 merge (2026-10-21) until the labels were pinned. Dependabot does not
+bump runner labels, so moving to a new release is a deliberate change.
+`tests/test_workflow_pins.py` holds both rules. Every workflow opens with
+`permissions: contents: read` and
 jobs ask for more. Tag-triggered releases refuse a tag that is not a version
 before it reaches a shell (git allows `$ ( ) ;` in a tag name). The firmware
 `server`, the emOS assets and the controller image carry build-provenance
