@@ -10,6 +10,7 @@
 # Run: sh emos/device/em-wifi-check.sh    (exit 1 on any mismatch)
 set -u
 here=$(dirname "$0")
+# shellcheck disable=SC2034  # read by em-wifi, sourced below
 EM_WIFI_LIB=1
 . "$here/em-wifi"
 

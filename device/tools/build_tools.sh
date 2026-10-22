@@ -6,7 +6,8 @@ BUILD_DIR="$(pwd)/build"
 
 build_tool() {
     local name=$1
-    local tool_dir="$(pwd)/tools/$name"
+    local tool_dir
+    tool_dir="$(pwd)/tools/$name"
 
     echo "Building $name..."
     docker run --rm \

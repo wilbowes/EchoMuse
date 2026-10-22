@@ -83,7 +83,7 @@ echo "Profiling $model into $OUT (root: $ROOT)…" >&2
   echo "profile.sh format 1"
   echo "host date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "root: $ROOT"
-  echo "vendor file contents: $([ $VENDOR = 1 ] && echo INCLUDED — do not post publicly || echo not included)"
+  echo "vendor file contents: $([ "$VENDOR" = 1 ] && echo "INCLUDED — do not post publicly" || echo "not included")"
 } >> "$P"
 [ "$ROOT" = "none" ] && echo "WARNING: no root — partitions, sysfs and mixer reads will be incomplete." >> "$P"
 
