@@ -1510,6 +1510,28 @@ def _reset_wake_model(model) -> "asyncio.Future":
     return asyncio.get_event_loop().run_in_executor(None, model.reset)
 
 
+# openWakeWord's AudioFeatures keeps ~10s of raw audio (160k Python ints) and
+# converts the whole deque to a list on every predict() to take the last
+# ~1.7k samples. Nothing else reads it, and trimming it changes no score
+# (tools/trim_check.py: 1200 frames, 0 differing, max delta 0). This is the
+# idle-CPU hot path the wake loop hits 12.5 times a second per device.
+_OWW_RAW_BUFFER_KEEP = 8 * 1280 + 480  # 8 chunks + the mel tail
+
+
+def _trim_oww_raw_buffer(model):
+    try:
+        pre = model.preprocessor
+        buf = pre.raw_data_buffer
+        if buf.maxlen != _OWW_RAW_BUFFER_KEEP:
+            pre.raw_data_buffer = collections.deque(buf, maxlen=_OWW_RAW_BUFFER_KEEP)
+    except Exception as exc:
+        # Never fail wake-model acquisition over an optimisation, but say when
+        # the buffer is gone (a renamed one) instead of silently paying the copy.
+        log.warning("wake model raw-audio buffer not trimmed (%s) — every "
+                    "predict() keeps copying the full 10s buffer", exc)
+    return model
+
+
 async def _acquire_wake_model(device: "Device", name: str, speex: bool):
     """Return the device's wake model, reusing the cached one when the wake word
     and speex setting are unchanged, else building a fresh one and replacing any
@@ -1524,13 +1546,14 @@ async def _acquire_wake_model(device: "Device", name: str, speex: bool):
     if cached is not None and cached[0] == name and cached[1] == speex:
         model = cached[2]
         await _reset_wake_model(model)
+        _trim_oww_raw_buffer(model)
         return model
     model = await loop.run_in_executor(
         None,
-        lambda: em_oww_models.model_class()(
+        lambda: _trim_oww_raw_buffer(em_oww_models.model_class()(
             wakeword_models=[name],
             enable_speex_noise_suppression=speex,
-        ),
+        )),
     )
     em_state.oww_models[device.device_id] = (name, speex, model)
     em_state.live_oww_models.add(model)
@@ -1547,7 +1570,7 @@ async def _acquire_barge_model(device: "Device", name: str):
     if cached is not None and cached[0] == name:
         return cached[1]
     model = await asyncio.get_event_loop().run_in_executor(
-        None, lambda: em_oww_models.model_class()(wakeword_models=[name])
+        None, lambda: _trim_oww_raw_buffer(em_oww_models.model_class()(wakeword_models=[name]))
     )
     em_state.oww_barge_models[device.device_id] = (name, model)
     em_state.live_oww_models.add(model)
