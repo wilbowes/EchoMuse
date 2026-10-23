@@ -46,6 +46,11 @@ _release_cache: dict = {}
 _release_cache_ts: float = 0.0
 RELEASE_CACHE_TTL = 60  # seconds
 
+# github.com answers an asset download with a 302 whose Content-Security-Policy
+# header is 9,243 bytes (measured 2026-10-24), and aiohttp refuses any header
+# over 8,190 by default, so every download failed before the redirect (#1021).
+DOWNLOAD_MAX_FIELD_SIZE = 64 * 1024
+
 # Controller releases are `controller-v*` TAGS with no GitHub Release behind
 # them — controller-release.yml publishes a GHCR image and nothing else (see
 # "Versioning / releases" in CLAUDE.md). So the notes come from the tag's own
@@ -497,7 +502,9 @@ async def download(download_url: str,
 
     log.info(f"[api] Fetching binary: {download_url}")
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(
+            max_field_size=DOWNLOAD_MAX_FIELD_SIZE,
+        ) as session:
             async with session.get(
                 download_url,
                 timeout=aiohttp.ClientTimeout(total=120),
