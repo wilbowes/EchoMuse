@@ -180,14 +180,14 @@ absent optional fields take prior/default behaviour.
 | `listen_state` | `state` (`local`/`stream`/`degraded`), `reason?` | What the device is doing with its wake stream. Sent on every change and after every `ack` |
 | `listen_end` | `session`, `reason` | The device closed a session itself (`ack_timeout`, `max_open`, `muted`, `link`, `stopped`) |
 | `ambient_light` | `lux` | Light reading, sent on a real change (only if `ambient_light`); the ~30s `stats` report carries it as `ambientLux` |
-| `stats` | hardware and link telemetry (`internal/client/stats.go`, `DeviceStats`) | Every ~30s, plus once on connect. Every field is optional and absence means **not measured**, never zero. `tcpUpRetrans` is the device's own TCP retransmits across its planes since the last report, `tcpUpSegs` the segments sent where the kernel counts them (FireOS 5's 3.18 does not); `ble` carries the scanner's counters, including `yields`/`yieldedMs` for time the scan stood aside for the link |
+| `stats` | hardware and link telemetry (`internal/client/stats.go`, `DeviceStats`) | Every ~30s, plus once on connect. Every field is optional and absence means **not measured**, never zero. `tcpUpRetrans` is the device's own TCP retransmits across its planes since the last report, `tcpUpSegs` the segments sent where the kernel counts them (FireOS 5's 3.18 does not); `ble` carries the scanner's counters, including `yields`/`yieldedMs` for time the scan stood aside for the link; `jack` carries the plug position and the codec controls that follow from it (see below) |
 | `ble_adverts` | `adverts[]` | Batch from the passive BLE scanner. **Legacy path** — send these on `/data` as `0x06` whenever the controller announced `ble_adverts_data`, and use this message only when it did not (#404) |
 | `wifi_scan_result` | `networks[]` of `{ssid, ssid_hex, signal}`, or `error` | Answer to `wifi_scan` |
 | `wifi_result` | `ok`, `ssid`, `error?` | Outcome of a `wifi_change`, re-sent until `wifi_commit` |
 | `pair_request` | — | The owner held the action button on a connected device (only if `pairing`). The controller shows **Approve pairing**; approval issues a rotated token and the CA over the shell plane, then bounces the link |
 | `sendspin_status` | `status` (`sendspin.Status`), or null when the player stopped | The Sendspin player's state as it changes: `state` (`listening`, `connected`, `playing`, `busy` while Home Assistant holds the music plane, `error`), `server`, `paired`, `pairedWith`, `group`, `synced`, `syncErrUs`, `bufferedMs`, player counters. No secrets. The `stats` report carries the same object as `sendspin` |
 | `sendspin_token` | `token`, `clientId`, or `error` | Answer to `sendspin_token_request`. The token (`SP:0…`) carries the device's Sendspin pairing key: the controller hands it to the one waiting request and never logs or stores it |
-| `playback_stats` | `periods`, `underruns`, `stats`, `barge?` | One completed speaker stream (a response or announcement), sent once it has drained. `stats` is the delivery margin (`minDepth`, `primeWaitMs`, `recvSpanMs`, `maxGapMs`, `bytesRecv`, from `speaker.StreamStats`); `periods`/`underruns` are also sent flat for controllers that predate `stats`. `barge` is the on-device scorer's `{peak, bar, frames}` over the stream when it scored one |
+| `playback_stats` | `periods`, `underruns`; `stats` = `periods`, `underruns`, `minDepth`, `primeWaitMs`, `recvSpanMs`, `maxGapMs`, `bytesRecv`, `spannedReconnect?`; `barge` = `{peak, bar, frames}?` | One completed speaker stream (a response or announcement), sent once it has drained. `stats` is the delivery margin (`minDepth`, `primeWaitMs`, `recvSpanMs`, `maxGapMs`, `bytesRecv`, from `speaker.StreamStats`); `periods`/`underruns` are also sent flat for controllers that predate `stats`. `barge` is the on-device scorer's `{peak, bar, frames}` over the stream when it scored one. **`spannedReconnect` means the data connection dropped while this stream was in flight, so the delivery margin measured the outage rather than the playback** — the device sends the three timings as `0` and the controller stores them as NULL. `periods`/`underruns`/`minDepth`/`bytesRecv` survive the flag because they are counts of what happened, not clocks |
 | `log` | `level`, `message` | A device log line for the dashboard and support bundles. The controller persists and pushes it |
 | `pong` | `id`, `mono` when answering a `ping` that carried an `id` | Keepalive reply. `id` echoes the ping's; `mono` is the device's monotonic clock in ms (any fixed origin), which the controller maps onto its own to date `capturedMono`. Unsolicited keepalive pongs carry neither |
 
@@ -221,6 +221,28 @@ exact bytes, reported in each scan result and sent back in `wifi_change` when
 the network came from a scan. A `wifi_change` without it means the UTF-8 of
 `ssid`. `psk` is empty for an open network, 8–63 printable ASCII characters,
 or a raw 64-hex PSK. Firmware that predates `ssid_hex` ignores it.
+
+### `jack` on the stats report
+
+The 3.5mm jack's plug position and the codec state that follows from it:
+`inserted` (`/sys/class/switch/h2w`), `speakerAmp` (`Ext_Speaker_Amp_Switch`),
+`driverGain` (`HP Driver Gain Volume`), `dacL`/`dacR` (the `HPL`/`HPR` output
+mixer `L_DAC`/`R_DAC` switches) and `driftReapplies`, the running count of
+routing controls the device has had to rewrite because something else moved
+them.
+
+Two things a controller must know. **Every value is read back off the mixer,
+not the value the device last wrote** — Android's audio HAL rewrites this codec
+underneath a running device, so a report of the firmware's own intentions
+describes a state that left minutes ago. And **every field is nullable, and
+null means not measurable**: a board with no accdet switch reports
+`inserted: null` rather than `false`, because `false` is a real reading (an
+empty jack) and is the answer a support bundle must not invent. `driverGain`
+takes the same care — `0` is the floor of that control's range and is exactly
+the fault worth seeing, so a flat `0` must not stand in for a read that
+failed. `driftReapplies` counts since the device booted, so a value climbing
+across ticks is the signal that another writer is winning. Absent entirely
+from firmware too old to report it.
 
 ## `/data` — binary frames
 
