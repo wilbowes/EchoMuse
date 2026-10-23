@@ -24,7 +24,7 @@ import (
 // approval installs new ones and bounces the link, and a redial that still
 // carried `pairing` would raise a second request for a device already paired.
 const (
-	PairHoldDuration = 5 * time.Second
+	PairHoldDuration = 7 * time.Second
 	pairWindow       = 2 * time.Minute
 	// How often a request is repeated while the window is open, on a live link
 	// (pair_request) or by redialling. The controller drops a request 30s

@@ -52,7 +52,8 @@ const (
 func main() {
 	in := flag.String("in", "", "raw capture (.s24)")
 	out := flag.String("out", "", "output directory")
-	tail := flag.Int("tail", 300, "speex filter tail for the software tap, ms; no effect here, the hardware reference keeps 64")
+	tail := flag.Int("tail", -1, "speex filter tail, ms. Ignored on the hardware reference this tool uses, which keeps 64ms; passing a value other than 64 is refused")
+	micFlag := flag.Int("mic", -1, "microphone channel (0-7) throughout; default ch6. Ignored if -mics is given")
 	gainDb := flag.Float64("gain", 24, "mic gain, dB (micGainDb)")
 	load := flag.String("load", "", "start from a saved echo path (aec.ExportState) instead of cold")
 	save := flag.String("save", "", "write the echo path learnt by the end of this run")
@@ -64,6 +65,16 @@ func main() {
 		flag.Usage()
 		os.Exit(2)
 	}
+	tailMs := *tail
+	if tailMs < 0 {
+		tailMs = 64
+	}
+	if *tail != -1 && *tail != 64 {
+		log.Fatalf("-tail has no effect on the hardware reference this tool uses (the canceller keeps 64ms); pass 64 or omit it")
+	}
+	if *micFlag >= 0 && *mics == "" {
+		*mics = fmt.Sprintf("0:%d", *micFlag)
+	}
 	raw, err := os.ReadFile(*in)
 	if err != nil {
 		log.Fatal(err)
@@ -74,7 +85,7 @@ func main() {
 
 	bf := beamformer.New()
 	c := aec.New()
-	c.SetParams(true, 0, *tail)
+	c.SetParams(true, 0, tailMs)
 	c.SetHardwareRef(true)
 	gain := math.Pow(10, *gainDb/20)
 	if *load != "" {
@@ -91,7 +102,7 @@ func main() {
 	step := batch * frameBytes
 	if *prime {
 		pb, pc := beamformer.New(), aec.New()
-		pc.SetParams(true, 0, *tail)
+		pc.SetParams(true, 0, tailMs)
 		pc.SetHardwareRef(true)
 		var primed []byte
 		for pass := 0; pass < 2; pass++ {

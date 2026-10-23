@@ -701,7 +701,7 @@ func TestOwnRandomAddress(t *testing.T) {
 
 func TestScanPausesWhileConnecting(t *testing.T) {
 	f := newFakeCtl()
-	f.peer(peerA).delay = 150 * time.Millisecond
+	f.peer(peerA).delay = 1 * time.Second
 	m := session(t, f, nil).Conns()
 	if _, err := m.Connect(peerA, 1); err != nil {
 		t.Fatal(err)

@@ -204,6 +204,13 @@ def up(image: str) -> None:
         "-e", "DB_PATH=/app/data/echomuse.db", "-e", "DEVICE_APPROVAL=strict",
         "-e", "VOICE_MODE=esphome", "-e", "MDNS_NAME=em-uat", "-e", "LOG_LEVEL=DEBUG",
         "-v", f"{data}:/app/data", image], check=True, capture_output=True)
+    # The browser container (README) is part of `up`, not a separate step.
+    subprocess.run(["docker", "rm", "-f", BROWSER], capture_output=True)
+    subprocess.run([
+        "docker", "run", "-d", "--name", BROWSER, "--network", "host", "--ipc", "host",
+        PLAYWRIGHT_IMAGE, "sh", "-c",
+        "pip install -q playwright==1.49.1 && playwright run-server --port 3111 --host 127.0.0.1"],
+        check=True, capture_output=True)
 
     def setup_token():
         logs = subprocess.run(["docker", "logs", CONTAINER], capture_output=True, text=True)
@@ -219,6 +226,13 @@ def up(image: str) -> None:
 
 
 def attach(serial: str) -> None:
+    # If the rig already holds this Echo's row from a previous attach,
+    # drop it first so the approval below cannot 409 (#861).
+    if device(serial) is not None:
+        try:
+            api("DELETE", f"/api/devices/{serial}")
+        except Exception:
+            pass
     echo = Echo(serial)
     try:
         # Aside once: a second attach must not overwrite the originals with

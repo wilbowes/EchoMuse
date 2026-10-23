@@ -28,13 +28,14 @@ var errSpeakerDead = errors.New("speaker: ALSA loop has died")
 //   - MaxGapMs: the worst single stall in arrivals, which distinguishes a
 //     uniformly slow link from a briefly stalled one.
 type StreamStats struct {
-	Periods     uint64 `json:"periods"`
-	Underruns   uint64 `json:"underruns"`
-	MinDepth    int    `json:"minDepth"`
-	PrimeWaitMs int64  `json:"primeWaitMs"`
-	RecvSpanMs  int64  `json:"recvSpanMs"`
-	MaxGapMs    int64  `json:"maxGapMs"`
-	BytesRecv   uint64 `json:"bytesRecv"`
+	Periods          uint64 `json:"periods"`
+	Underruns        uint64 `json:"underruns"`
+	MinDepth         int    `json:"minDepth"`
+	PrimeWaitMs      int64  `json:"primeWaitMs"`
+	RecvSpanMs       int64  `json:"recvSpanMs"`
+	MaxGapMs         int64  `json:"maxGapMs"`
+	BytesRecv        uint64 `json:"bytesRecv"`
+	SpannedReconnect bool   `json:"spannedReconnect"`
 }
 
 // audioStream is one buffered playback stream: the voice/TTS plane or the
@@ -304,11 +305,12 @@ func (s *audioStream) drained() *StreamStats {
 	// Natural end of stream, or a flush (which sets eosPending so its drain
 	// is not miscounted as an underrun).
 	st := &StreamStats{
-		Periods:   s.periods,
-		Underruns: s.underruns,
-		MinDepth:  s.minDepth,
-		MaxGapMs:  s.recvMaxGapNs.Load() / 1e6,
-		BytesRecv: s.recvBytes.Load(),
+		Periods:          s.periods,
+		Underruns:        s.underruns,
+		MinDepth:         s.minDepth,
+		MaxGapMs:         s.recvMaxGapNs.Load() / 1e6,
+		BytesRecv:        s.recvBytes.Load(),
+		SpannedReconnect: s.recvMaxGapNs.Load() > 1e9,
 	}
 	firstRecv, lastRecv := s.recvFirstNs.Load(), s.recvLastNs.Load()
 	if firstRecv > 0 && lastRecv > firstRecv {

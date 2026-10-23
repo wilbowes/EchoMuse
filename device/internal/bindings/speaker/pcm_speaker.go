@@ -91,6 +91,7 @@ type PcmSpeaker struct {
 	jackMu       sync.Mutex
 	jackInserted bool
 	jackKnown    bool
+	jackDrift    atomic.Int64
 	chainParams  outchain.Params
 	// deadCh is closed by silenceLoop on any exit so a pump call can return
 	// an error rather than block indefinitely waiting for a dead consumer.
@@ -510,6 +511,20 @@ func (p *PcmSpeaker) ReconcileJackRouting() int {
 //
 // Runs regardless of plug position: the HAL's rewrite is not specific to the
 // jack, and a gain left at the floor is just as wrong for the internal driver.
+// JackInserted reports the plug position last applied (and whether one has been
+// observed at all). Safe for concurrent use.
+func (p *PcmSpeaker) JackInserted() (bool, bool) {
+	p.jackMu.Lock()
+	defer p.jackMu.Unlock()
+	return p.jackInserted, p.jackKnown
+}
+
+// JackDriftCount is the number of mixer controls rewritten by the reconciler
+// since boot (#621).
+func (p *PcmSpeaker) JackDriftCount() int {
+	return int(p.jackDrift.Load())
+}
+
 func (p *PcmSpeaker) WatchJackRouting(ctx context.Context) {
 	t := time.NewTicker(JackReconcileInterval)
 	defer t.Stop()
@@ -521,6 +536,7 @@ func (p *PcmSpeaker) WatchJackRouting(ctx context.Context) {
 		case <-t.C:
 			if n := p.ReconcileJackRouting(); n > 0 {
 				corrected += n
+				p.jackDrift.Add(int64(n))
 				// Logged per event rather than counted silently: the RATE is
 				// the diagnostic, and it is the only place the HAL's
 				// interference is visible at all.
