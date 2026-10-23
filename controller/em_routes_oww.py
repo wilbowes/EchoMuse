@@ -71,6 +71,12 @@ async def _post_oww_model_upload(request: web.Request) -> web.Response:
             return em_http.error("empty_upload", "Uploaded model is empty", 400)
         if len(data) > em_oww_models.MAX_MODEL_BYTES:
             return em_http.error("too_large", "Model exceeds 20 MB limit", 413)
+        try:
+            import em_disk
+            if not em_disk.optional_writes_allowed(str(em_oww_models.models_dir())):
+                return em_http.error("low_disk", "Not enough free disk space to store this model", 507)
+        except Exception:
+            pass
 
         # Before anything is written: a model that cannot run is refused with
         # the reason, where it used to fail later in the wake listener (#869).

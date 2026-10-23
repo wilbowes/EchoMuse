@@ -34,7 +34,7 @@ SECTIONS: dict[str, dict] = {
             "owwModel", "owwThreshold", "owwSpeexNs",
             "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs",
             "owwOnDevice", "wakeSound", "wakeSoundLevel",
-            "wakeClipCapture", "wakeClipMinScore",
+            "wakeClipCapture", "wakeClipMinScore", "wakeClipKeep",
         ],
     },
     "microphones": {
@@ -50,6 +50,7 @@ SECTIONS: dict[str, dict] = {
         "label": "Ring",
         "keys": [
             "ledScene", "ledListenColor", "ledThinkColor",
+            "ledBrightness",
             "remoteVolumeArc",
             "meterAttack", "meterDecay", "meterFloor",
             "meterGamma", "meterRef", "meterCurve",

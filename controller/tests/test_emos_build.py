@@ -927,7 +927,7 @@ def test_em_wifi_writes_a_conf_the_wifi_user_can_read():
     five seconds, and the device sits at boot stage 11 with a perfectly
     correct conf and the right password.
 
-    Measured on G090LF11803611NF, 2026-09-21 — em-wifi reported the join and
+    Measured on G090LF0000001017, 2026-09-21 — em-wifi reported the join and
     the device dropped off the network seconds later. Root ignores
     permissions, so one mode serves both bases.
     """

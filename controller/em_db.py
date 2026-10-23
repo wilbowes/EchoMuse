@@ -62,6 +62,7 @@ DEFAULT_DEVICE_CONFIG = {
     # Wake training samples are opt-in; candidates and triggers are saved for admin review.
     "wakeClipCapture":  False,
     "wakeClipMinScore": 0.20,
+    "wakeClipKeep":     50,
     "adcDigitalGain":   88,
     "adcMicpga":        40,
     # micGainDb: fixed digital gain (dB) the device applies to the full
@@ -298,6 +299,7 @@ DEFAULT_DEVICE_CONFIG = {
     "ledScene":         "standard",
     "ledListenColor":   "#00b400",
     "ledThinkColor":    "#00c800",
+    "ledBrightness":    1.0,
     # Opt-in accessibility feedback for volume changes made from HA, the
     # dashboard, automations, or another remote source. Physical buttons show
     # the cyan arc regardless; mute and boot restore stay silent.
@@ -1149,6 +1151,12 @@ MIGRATIONS: list[str] = [
 
     UPDATE system_config SET value = '31' WHERE key = 'schema_version';
     """,
+    """
+    -- #307: a flag for a stream whose delivery spanned a reconnect.
+    ALTER TABLE turns ADD COLUMN spanned_reconnect INTEGER;
+
+    UPDATE system_config SET value = '32' WHERE key = 'schema_version';
+    """,
 ]
 
 # Post-migration fixups that need Python rather than SQL. Keyed by the schema
@@ -1895,6 +1903,31 @@ def _clamp_wake_sample_minimum(config: dict, where: str) -> dict:
     return {**config, "wakeClipMinScore": fixed}
 
 
+def _clamp_wake_clip_keep(config: dict, where: str) -> dict:
+    """Clamp wakeClipKeep to [10, 500]."""
+    value = config.get("wakeClipKeep")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return config
+    fixed = max(10, min(500, value))
+    if fixed == value:
+        return config
+    log.warning(f"[db] {where}: wakeClipKeep {value} outside [10, 500]; storing {fixed}")
+    return {**config, "wakeClipKeep": fixed}
+
+
+def effective_wake_clip_keep(device_id: str) -> int:
+    """Resolve the effective wakeClipKeep for a device (fleet inheritance),
+    clamped to [10, 500], default 50."""
+    try:
+        cfg = get_effective_device_config(device_id) or {}
+    except Exception:
+        cfg = {}
+    value = cfg.get("wakeClipKeep", 50)
+    if isinstance(value, bool) or not isinstance(value, int):
+        value = 50
+    return max(10, min(500, value))
+
+
 def set_device_config(device_id: str, config: dict) -> None:
     """
     Persist updated config for a device.
@@ -1902,7 +1935,7 @@ def set_device_config(device_id: str, config: dict) -> None:
     The caller is responsible for immediately pushing the config to the
     live device over the control WebSocket if it is currently connected.
     """
-    config = _clamp_wake_sample_minimum(_clamp_wake_threshold(config, device_id), device_id)
+    config = _clamp_wake_clip_keep(_clamp_wake_sample_minimum(_clamp_wake_threshold(config, device_id), device_id), device_id)
     with _tx() as conn:
         conn.execute(
             "UPDATE devices SET config = ? WHERE device_id = ?",
@@ -2013,7 +2046,7 @@ def get_global_device_config_raw() -> dict:
 
 def set_global_device_config(config: dict) -> None:
     """Persist updated fleet-wide default device config."""
-    config = _clamp_wake_sample_minimum(_clamp_wake_threshold(config, "fleet"), "fleet")
+    config = _clamp_wake_clip_keep(_clamp_wake_sample_minimum(_clamp_wake_threshold(config, "fleet"), "fleet"), "fleet")
     with _tx() as conn:
         conn.execute(
             "INSERT OR REPLACE INTO system_config (key, value) VALUES ('global_device_config', ?)",
@@ -2599,15 +2632,19 @@ def set_turn_playback(turn_id: int, periods: int, underruns: int,
     """
     stats = stats or {}
     with _tx() as conn:
+        spanned = stats.get("spannedReconnect")
+        if spanned is None:
+            spanned = stats.get("spanned_reconnect")
         conn.execute(
             "UPDATE turns SET playback_periods = ?, underruns = ?, "
             "min_depth = ?, prime_wait_ms = ?, recv_span_ms = ?, "
-            "max_gap_ms = ?, bytes_recv = ? WHERE id = ?",
+            "max_gap_ms = ?, bytes_recv = ?, spanned_reconnect = ? WHERE id = ?",
             (
                 periods, underruns,
                 stats.get("minDepth"), stats.get("primeWaitMs"),
                 stats.get("recvSpanMs"), stats.get("maxGapMs"),
                 stats.get("bytesRecv"),
+                1 if spanned else (0 if spanned is not None else None),
                 turn_id,
             ),
         )
@@ -2746,10 +2783,11 @@ def insert_wake_sample(device_id: str, rec: dict) -> int:
              _py(rec.get("device_score")), rec.get("trigger_source")),
         )
         sample_id = cur.lastrowid
+        keep = effective_wake_clip_keep(device_id)
         expired = conn.execute(
             """SELECT id, audio_file FROM wake_samples WHERE device_id = ?
                ORDER BY id DESC LIMIT -1 OFFSET ?""",
-            (device_id, em_wake_samples.KEEP_PER_DEVICE),
+            (device_id, keep),
         ).fetchall()
         if expired:
             # Unlink before deleting metadata. If the process stops during
@@ -2770,7 +2808,7 @@ def get_wake_samples(device_id: str, limit: int = 50) -> list[sqlite3.Row]:
         """SELECT id, device_id, ts, audio_file, kind, label, model, score,
                   threshold, device_score, trigger_source
            FROM wake_samples WHERE device_id = ? ORDER BY id DESC LIMIT ?""",
-        (device_id, max(1, min(int(limit), 100000))),
+        (device_id, max(1, min(int(limit), 500))),
     )
 
 

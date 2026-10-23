@@ -3425,6 +3425,15 @@ service echomuse /data/local/bin/start_server.sh
 // writes its kaeru payload to expdb (88 16 88 58 at its start), and a v1
 // written over v2 can leave it there (#845). Find lk_a by its kernel
 // GPT name: under both amonet TWRPs, by-name lk_a is a decoy file in tmpfs.
+// BusyBox 1.22's od (TWRP 3.2.3) has no -A, so every read uses plain
+// `od -tx1` and strips whatever offset it prints here.
+const _odHex = (out) => (out || '')
+  .split('\n')
+  .map(line => line.replace(/^[0-9a-f]{6,}\s+/i, ''))
+  .join('')
+  .replace(/[^0-9a-f]/gi, '')
+  .toLowerCase();
+
 const _amonetLk = (head) => {
   const h = head.toLowerCase();
   if (h === '8816885824790500') return 1;
@@ -4767,13 +4776,13 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       const u = await c.shell(
         'P=""; for u in /sys/block/mmcblk0/mmcblk0p*/uevent; do '
         + 'grep -qx "PARTNAME=lk_a" "$u" 2>/dev/null && { d=${u%/uevent}; P="/dev/block/${d##*/}"; }; done; '
-        + 'echo "LK=$([ -n "$P" ] && dd if="$P" bs=8 count=1 2>/dev/null | od -An -tx1 | tr -d \' \\n\')"; '
+        + 'echo "LK=$([ -n "$P" ] && dd if="$P" bs=8 count=1 2>/dev/null | od -tx1)"; '
         + 'echo "TWRP=$(getprop ro.twrp.version)"; '
         + 'echo "TWRPLOG=$(grep -m1 -o \'Starting TWRP [0-9][^ ]*\' /tmp/recovery.log 2>/dev/null)"; '
         + 'echo _UNLOCKCHK');
       if (u.includes('_UNLOCKCHK')) {
         const pick = k => ((u.match(new RegExp('^' + k + '=(.*)$', 'm')) || [])[1] || '').trim();
-        lk   = pick('LK');
+        lk   = _odHex(pick('LK'));
         twrp = pick('TWRP') || pick('TWRPLOG').replace(/^Starting TWRP /, '');
       }
       addLog(`Unlock check: TWRP ${twrp || 'unknown'}, lk_a ${lk || 'unreadable'}`);

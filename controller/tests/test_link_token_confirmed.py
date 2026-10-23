@@ -13,7 +13,7 @@ import pytest
 import em_db as db
 
 CONTROLLER = Path(__file__).resolve().parents[1]
-DEV = "G090LF1180571VVV"
+DEV = "G090LF0000001219"
 
 
 @pytest.fixture()
