@@ -249,6 +249,7 @@ def merge_device(row, boot: dict | None = None) -> dict:
         "volumeCueCapable": getattr(live, "volume_cue_capable", False) if live else False,
         "wakeMicCapable": getattr(live, "wake_mic_capable", False) if live else False,
         "remoteVolumeArcCapable": getattr(live, "remote_volume_arc_capable", False) if live else False,
+        "ledBrightnessCapable": getattr(live, "led_brightness_capable", False) if live else False,
         "responseLevelCapable": getattr(live, "response_level_capable", False) if live else False,
         # Sendspin player (#89): whether the firmware has one, and its status
         # (no secrets; the pairing token is its own request).

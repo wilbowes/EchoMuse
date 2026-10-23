@@ -55,6 +55,12 @@ type volumeController struct {
 	// back to the listening/thinking/playing animation instead of going
 	// dark. The muted → red-ring case stays here either way.
 	onDisplayExpire func()
+	// showMuteRing paints the red mute ring, wired by the server to
+	// mute.go's painter. It goes there rather than being rebuilt here
+	// because the red ring is the ONE ring exempt from the ledBrightness
+	// setting (#295) and this controller paints through the dimmed one —
+	// at brightness 0 a locally built red frame would be invisible.
+	showMuteRing func()
 }
 
 // DisplayActive reports whether the volume arc is currently on the ring.
@@ -244,14 +250,11 @@ func (vc *volumeController) showLEDs(level int) {
 		vc.mu.Lock()
 		vc.displayActive = false
 		expire := vc.onDisplayExpire
+		showMuteRing := vc.showMuteRing
 		vc.mu.Unlock()
-		if vc.isMuted != nil && vc.isMuted() {
-			// Restore mute indicator — red ring
-			leds := make([]led.Led, numLEDs)
-			for i := 0; i < numLEDs; i++ {
-				leds[i] = led.Led{ID: i, R: 180, G: 0, B: 0}
-			}
-			lc.SetLEDs(leds...)
+		if vc.isMuted != nil && vc.isMuted() && showMuteRing != nil {
+			// Restore the mute indicator — red ring, through mute.go.
+			showMuteRing()
 		} else if expire != nil {
 			// Hand back to whatever the controller last painted —
 			// listening/thinking/playing ring mid-turn, all-off when idle.

@@ -75,6 +75,12 @@ type Server struct {
 	// atomic because config pushes and volume commands arrive on independent
 	// control callbacks. Physical buttons bypass it and always show the arc.
 	remoteVolumeArc atomic.Bool
+
+	// ledBrightness is the ring brightness percent (#295). A pointer so the
+	// zero value means "nothing has set it" — 0 is a real brightness and
+	// cannot double as unset. Read on every ring frame (~40ms), so atomic
+	// rather than mutexed. See brightness.go.
+	ledBrightness atomic.Pointer[int]
 }
 
 func NewServer(buttonController buttons.Controller, microphone mic.Microphone, speaker speaker.Speaker) *Server {
@@ -86,17 +92,21 @@ func NewServer(buttonController buttons.Controller, microphone mic.Microphone, s
 
 	// Volume controller uses a getter so it handles the nil-during-boot window safely
 	server.volume = newVolumeController(func() led.Controller {
-		server.ledMu.Lock()
-		defer server.ledMu.Unlock()
-		return server.ledController
+		return server.ringLEDs()
 	})
 
-	// Mute controller — same LED getter pattern
+	// Mute controller — same LED getter pattern, but the RAW controller:
+	// the red ring is exempt from ledBrightness (#295), see brightness.go.
 	server.mute = newMuteController(func() led.Controller {
 		server.ledMu.Lock()
 		defer server.ledMu.Unlock()
 		return server.ledController
 	}, nil)
+
+	// When the volume window expires over a muted device, the red ring is
+	// restored by mute.go rather than rebuilt here — the one painter of it
+	// the brightness setting must not touch.
+	server.volume.showMuteRing = server.mute.showMuteLEDs
 
 	// Give volume controller access to mute state so it can restore the red ring
 	server.volume.isMuted = func() bool {
@@ -383,9 +393,7 @@ func (s *Server) SetDirectionLEDs(angleDeg float64) {
 		return
 	}
 
-	s.ledMu.Lock()
-	lc := s.ledController
-	s.ledMu.Unlock()
+	lc := s.ringLEDs()
 	if lc == nil {
 		return
 	}
@@ -479,7 +487,7 @@ func (s *Server) SetLEDs(leds []led.Led, listeningHint *bool) {
 	}
 	s.listeningLEDs = listeningRing
 	s.baseLEDsMu.Unlock()
-	if s.flashActive() || suppressPaint(s.volume.DisplayActive(), s.mute.IsMuted(), s.LinkDown()) {
+	if s.ringHeld() {
 		return
 	}
 	s.paintBaseLEDs()
@@ -505,11 +513,10 @@ func suppressPaint(volumeActive, muted, linkDown bool) bool {
 	return muted && !linkDown
 }
 
-// paintBaseLEDs paints the ring from the stored controller state.
+// paintBaseLEDs paints the ring from the stored controller state, dimmed by
+// ledBrightness (#295) like every other non-mute frame.
 func (s *Server) paintBaseLEDs() {
-	s.ledMu.Lock()
-	lc := s.ledController
-	s.ledMu.Unlock()
+	lc := s.ringLEDs()
 	if lc == nil {
 		return
 	}
