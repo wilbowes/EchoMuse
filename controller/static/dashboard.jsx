@@ -3272,7 +3272,229 @@ function _bannerMode(banner) {
   return 'unknown';
 }
 
-const _MODE_NAME = { twrp: 'TWRP recovery', android: 'Android' };
+// `serial` is in here for resumeStepFrom, which refuses a resume into the emOS
+// flow's two console steps on the grounds that _bannerMode can never report a
+// mode — and a refusal that prints "undefined" is a refusal nobody reads.
+const _MODE_NAME = { twrp: 'TWRP recovery', android: 'Android', serial: 'the serial console' };
+
+// ── #100: where a reconnected device ACTUALLY is ────────────────────────────
+//
+// The wizard's step pointer is the wizard's own memory, and it survives reboots
+// the device did not: the Dot's only power source is the micro-USB port
+// carrying data, so pulling the cable powers it off, and `reboot recovery` is a
+// one-shot BCB flag, so a replug is a cold boot into Android whatever phase the
+// pointer is in. A pointer left at "Pre-seed Root DB" while the device has been
+// running Android for ten minutes makes the next four steps run against a device
+// that has had them for ten minutes, and nothing on the screen says so.
+//
+// So on reconnect: probe the device, REPORT what was found, and move the
+// pointer only where the evidence is unambiguous. Four rules, each of which
+// fails the expensive way round if broken.
+//
+//  - Report before acting. A wrong inference that moves somebody silently is
+//    worse than no inference at all, so every reading comes back and is printed
+//    whatever the verdict is, and the pointer moves only after the report is
+//    out. #101 already tells the operator the mode is wrong; this tells them
+//    what the device has, and either moves the pointer afterwards or says why
+//    it did not.
+//  - The resume point is the FIRST step that is not positively proven, never
+//    the last one that is. Resuming at the last proven step is what makes a
+//    half-finished step invisible: an interrupted asset push leaves three of the
+//    four files present, so presence is not proof and md5 is. Undershooting is
+//    free — a step re-run is idempotent and its own log says it found nothing
+//    to do — while overshooting drops a step nobody ran.
+//  - A probe that could not run is NOT a pass. Every reading is tri-state and
+//    the third state is `unknown`, for the reason `_CLEARCHK`, `_WRITEOK`,
+//    `_BCBRC` and `_wipeVerdict` all exist: `readlink` with stderr discarded
+//    returns the same empty string for "the symlink is gone" and for "`su` is
+//    not working", and the install step logged "Cleared." after every command
+//    had failed (measured 2026-09-06).
+//  - Nothing here ever decides a step needs REDOING. If a step the pointer has
+//    already passed has lost its evidence that is reported and the pointer stays
+//    put. Re-running steps against a device whose /data has been wiped, or that
+//    has been re-provisioned, is how work gets destroyed, and this wizard writes
+//    a boot partition.
+//
+// Three inputs describe the flow rather than being read from it: `steps` and
+// `stepMode` (the two flows number the same step IDs differently — install_em is
+// 11 in the FireOS flow and 3 in emOS — so any index held in here would be a
+// second thing to keep in step with `_WIZARD_STEPS`), and `window`, the steps
+// whose completion is observable from the OTHER mode. `window` is an argument
+// rather than a constant because that is a property of the FLOW: the FireOS
+// flow has five such steps and the emOS flow has none, its escrow and its flash
+// being observable only from inside recovery. A flow that passes nothing is
+// told nothing is inferable, which is the answer that cannot skip a
+// boot-partition write.
+const _RESUME_DONE = 'done';
+const _RESUME_MARK = { done: '✓', 'not done': '✗', unknown: '?' };
+
+function resumeStepFrom({ steps, stepMode, mode, window: win = [], probes, debloat, oww, current = 0 }) {
+  const isWindowStep = (id) => win.includes(id);
+  // Unreadable is null throughout, and null is never true.
+  const p = (name) => (probes && probes[name] != null ? probes[name] : null);
+  const yes = (text, re) => (text == null ? null : re.test(text));
+
+  // The SELinux cmdline patch, read off the property the cmdline commits:
+  // androidboot.* properties are write-once and the FIRST occurrence wins, and
+  // LK splices the image cmdline ahead of its own enforce, so on FireOS
+  // ro.boot.selinux reads permissive exactly when the patched image booted
+  // (measured 2026-09-06, 0C95 and 71VVV).
+  const cmdline = yes(p('props'), /\[ro\.boot\.selinux\]: \[permissive\]/);
+  // Root, by the same `su -c id` runVerifyRoot gates on.
+  const root    = yes(p('root'), /uid=0\(/);
+  // The init.rc entries Patch Boot Image adds. init sets init.svc.<name> for
+  // every service it CREATES, so this reads the service having been defined
+  // whether or not it is running — a device provisioned as far as Verify Root
+  // answers "exited", because start_server.sh does not exist yet.
+  const initSvc = yes(p('services'), /\[init\.svc\.echomuse\]/);
+
+  // `pm list packages` lists ENABLED packages only, so a package step 8
+  // disabled and one step 9 hid are both simply absent from the output — which
+  // is the "which of the listed packages are still visible" question
+  // em_payloads.sync_debloat already asks, answered the same way.
+  //
+  // pm has to have ANSWERED for any of it to mean anything, and `pm path
+  // android` is the readiness question waitForFramework already gates on. An
+  // empty grep from a package manager that refused is not a device with nothing
+  // installed — it is a question that was not asked (#91's distinction, one
+  // level up).
+  const pmOk = yes(p('pm_ready'), /package:/);
+  const visible = pmOk === true
+    ? new Set((p('packages') || '').split('\n')
+              .map(l => l.trim().replace(/^package:/, ''))
+              .filter(Boolean))
+    : null;
+  const stillVisible = (list) => (list && visible ? list.filter(x => visible.has(x)) : null);
+  const alexaLeft   = stillVisible(_ALEXA_PKGS);
+  const debloatLeft = stillVisible(debloat);
+  // Three states, and the middle one matters: pm answered and the packages are
+  // still there is a different report from pm not answering.
+  const pkgState = (left) => (left === null ? null : left.length === 0);
+
+  // WiFi, by the same wpa_cli the step waits on and skipWifiIfConnected checks.
+  // Three answers because there are three: COMPLETED, something else, and a
+  // supplicant socket that did not answer at all — which is not a device that
+  // is not on a network.
+  const wpa = p('wpa_status');
+  const wifi = wpa == null ? null
+    : /wpa_state=COMPLETED/.test(wpa) ? true
+    : /wpa_state=/.test(wpa)      ? false
+    : null;
+
+  // Install EchoMuse: the binary the step copied AND the symlink it pointed at
+  // it. Either alone is what an interrupted step leaves behind.
+  const srv  = p('server');
+  const link = srv == null ? null : (srv.match(/_SERVERCHK[ \t]*\r?\n(\S*)/) || [])[1];
+  const server = srv == null || !srv.includes('_SERVERCHK') ? null
+    : link === 'server_a' && srv.includes('_SERVERA=yes');
+
+  // Wake word assets: every file md5-matched against the manifest, never counted
+  // present. A device with three of the four fails at dlopen naming nothing, and
+  // it is exactly the state a cable pull mid-push leaves.
+  const assets  = (oww && oww.assets && oww.assets.length) ? oww.assets : null;
+  const matched = assets ? assets.filter(a => oww.found && oww.found[a.name] === a.md5) : null;
+  const owwOk   = matched ? matched.length === assets.length : null;
+
+  const pkgText = (what, left, total) => (
+    left === null ? `could not read which ${what} packages are still visible`
+    : left.length  ? `${left.length} of ${total} ${what} packages are still visible`
+    : `none of the ${total} ${what} packages are still visible`);
+
+  // The OUTCOME of the whole recovery window, which is all Android can see of
+  // it: every check inside that window is a `su` call or a look at /data that
+  // Android answers from the recovery ramdisk's own answers. Root alone would be
+  // enough to skip the window and it is not enough — a device rooted by hand
+  // from docs/rooting.md runs root too, and its ramdisk has never heard of
+  // start_server.sh, so resuming past Patch Boot Image on it provisions a Dot
+  // that appears in the dashboard and never answers. All three, or not done.
+  //
+  // Which steps it speaks for is the `window` argument, not the step modes: from
+  // inside recovery `su` does not exist and getprop answers with the ramdisk's
+  // own values, so none of this can be read there at all, and a step outside the
+  // window has no reading of its own to fall back on.
+  const windowDone = root === true && cmdline === true && initSvc === true;
+
+  // Evidence per step ID, because the two flows share the IDs and nothing else.
+  // The two connection steps are proven by the live ADB handle this probe is
+  // running over — asking a reconnect whether it connected is the same question
+  // twice. Everything else is a reading, and anything with no reading is unknown.
+  const byId = {
+    connect_android: true,
+    reconnect: true,
+    verify_root:   root,
+    disable_alexa: pkgState(alexaLeft),
+    debloat:       pkgState(debloatLeft),
+    wifi:          wifi,
+    install_em:    server,
+    install_oww:   owwOk,
+  };
+
+  // One mapping from the tri-state to what the report and the rail say, so a
+  // reading and the step it backs cannot disagree about how sure we are.
+  const stateOf = (v) => v === true ? _RESUME_DONE : v === false ? 'not done' : 'unknown';
+
+  const findings = steps.map((s, i) => {
+    const value = isWindowStep(s.id) ? windowDone : (byId[s.id] ?? null);
+    return { id: s.id, label: s.label, index: i, state: stateOf(value) };
+  });
+
+  const readings = [
+    { state: stateOf(cmdline), text: cmdline === true
+        ? 'the boot image cmdline is SELinux-permissive'
+        : cmdline === false
+          ? 'the boot image cmdline is NOT SELinux-permissive'
+          : 'could not read the boot image cmdline' },
+    { state: stateOf(root), text: root === true  ? 'root works (su -c id returned uid=0)'
+        : root === false ? 'no root yet (su -c id did not return uid=0)'
+        : 'could not tell whether root works' },
+    { state: stateOf(initSvc), text: initSvc === true
+        ? 'init has the EchoMuse service, so Patch Boot Image\'s init.rc entries are on this device'
+        : initSvc === false
+          ? 'init has NO EchoMuse service — Patch Boot Image\'s init.rc entries are not on this device'
+          : 'could not read the init service list' },
+    { state: stateOf(pkgState(alexaLeft)), text: pkgText('Alexa', alexaLeft, _ALEXA_PKGS.length) },
+    { state: stateOf(pkgState(debloatLeft)), text: pkgText('debloat', debloatLeft, (debloat || []).length) },
+    { state: stateOf(wifi), text: wifi === true  ? 'associated to a network (wpa_state=COMPLETED)'
+        : wifi === false ? 'associated to nothing, or still scanning'
+        : 'could not reach the WiFi supplicant' },
+    { state: stateOf(server), text: server === true  ? '/data/local/bin/server links to server_a, which exists'
+        : server === false ? 'the EchoMuse binary or its symlink is missing'
+        : 'could not read the EchoMuse install' },
+    { state: stateOf(owwOk), text: matched === null ? 'could not read the wake word assets'
+        : `${matched.length} of ${assets.length} wake word assets match by md5` },
+  ];
+
+  const first = findings.findIndex(f => f.state !== _RESUME_DONE);
+  const at = (i, extra) => ({
+    index: i, stepId: i < 0 ? null : steps[i].id, findings, readings,
+    moved: false, reason: extra,
+  });
+
+  if (first < 0) {
+    return at(-1, 'every step of this flow has its evidence on this device — there is nothing to resume at.');
+  }
+  const label = steps[first].label;
+  // Never resume to a step whose required mode the device is not in. In Android
+  // /dev/block/other-boot is amonet's unlock payload rather than a kernel, so a
+  // TWRP step run here writes over the unlock — classifyBootTarget refuses
+  // that write, and this is what keeps the wizard from walking anybody toward
+  // it. It also covers an unknown banner, which is not evidence of a mode.
+  const need = stepMode[first];
+  if (mode !== need) {
+    return at(first, `${label} is step ${first + 1} and runs in ${_MODE_NAME[need] || need}, `
+      + `but the device is in ${_MODE_NAME[mode] || 'a mode that could not be read from its banner'}. `
+      + 'The step pointer has been left where it is.');
+  }
+  // And never backwards.
+  if (first <= current) {
+    return at(first, first === current
+      ? `the wizard is already on ${label}, which has no evidence either way.`
+      : `${label} is step ${first + 1} and the wizard is already on step ${current + 1}. `
+        + 'Nothing here decides a step needs doing again, so the step pointer has been left where it is.');
+  }
+  return { ...at(first), moved: true,
+    reason: `resuming at step ${first + 1}/${steps.length}, ${label} — steps 1–${first} already have their evidence on this device.` };
+}
 
 // The userspace a device runs, as the tile and the detail header show it.
 // FireOS native is FireOS 5 only (the FireOS flow refuses anything newer), so
@@ -3827,6 +4049,18 @@ const _WIZARD_STEPS = [
   // also much better suited to 15MB than the shell plane.
   { id: 'install_oww',     label: 'Wake Word Assets',  desc: 'Push the ONNX runtime and wake models (~15MB) used for on-device wake word detection.' },
 ];
+
+// The FireOS steps whose completion is OBSERVABLE from the other mode — steps 1
+// to 5, all of them in TWRP and none of them readable from Android. What
+// Android can see is their OUTCOME: root works, the cmdline is permissive, init
+// has the service. That is what resumeStepFrom is told about them by.
+//
+// Named by ID rather than by position, the same reason `INPUT_STEPS` is a set of
+// IDs, so the two flows cannot drift when either gains a step. The emOS flow has
+// no such list and passes none: its escrow and its flash are observable only
+// from inside recovery, and a flow told its escrow was done by an Android root
+// shell would skip the one partition write this wizard performs.
+const _RESUME_WINDOW = ['connect_twrp', 'patch_boot', 'install_magisk', 'preseed_db', 'reboot'];
 
 // Transcript styling only — copy uses e.msg verbatim.
 function _wizardLogClass(msg, type) {
@@ -4512,6 +4746,34 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // TWRP steps only, and harmless elsewhere: which partition the boot image
     // write would have gone to.
     boot_target:   'readlink -f /dev/block/other-boot 2>&1',
+  };
+  // What resumeStepFrom asks the device, and how much of it is already asked.
+  //
+  // Six of the seven are the diagnostics probes BY REFERENCE, so each command
+  // the wizard runs against a device still has one definition. This is not the
+  // diagnostics list grown: that one is an allowlist in em_support.py, so a
+  // probe added to it is silently dropped from every diagnostics upload until
+  // that allowlist learns it, which is a Python change and not this fix's to
+  // make. `pm_ready` is here for the same command rather than for the
+  // diagnostics — resumeStepFrom needs to know whether pm ANSWERED before an
+  // empty `grep -i amazon` may be read as "nothing is installed".
+  //
+  // The one new command is the EchoMuse install, and it carries a sentinel for
+  // the `_CLEARCHK` reason: `readlink` with stderr discarded returns the same
+  // empty string for "the symlink is gone" and for "`su` is not working". The
+  // `if [ -f ]` answers the binary's presence as yes/no rather than by listing
+  // it, because this device prints error TEXT for a missing path rather than
+  // empty output.
+  const _RESUME_PROBES = {
+    props:      _PROVISION_PROBES.props,
+    root:       _PROVISION_PROBES.root,
+    pm_ready:   _PROVISION_PROBES.pm_ready,
+    packages:   _PROVISION_PROBES.packages,
+    wpa_status: _PROVISION_PROBES.wpa_status,
+    services:   _PROVISION_PROBES.services,
+    server:     'su -c "echo _SERVERCHK; readlink /data/local/bin/server; '
+              + 'if [ -f /data/local/bin/server_a ]; then echo _SERVERA=yes; '
+              + 'else echo _SERVERA=no; fi" 2>/dev/null',
   };
 
   // The emOS serial steps have no ADB, so they ask over the console instead.
@@ -5904,6 +6166,91 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     return c;
   }
 
+  // Where is this device actually? Probe it, say what was found, and move the
+  // step pointer only where the evidence is unambiguous (#100). The decision is
+  // resumeStepFrom's, and the rules it works to are written there; this is the
+  // part that has to hold a device.
+  //
+  // FireOS only, and that is a real limitation rather than an oversight: the
+  // evidence the issue's table rests on is Android-side (root, the cmdline, the
+  // init service, pm, the supplicant, /data), and the emOS flow passes through
+  // its recovery window into a serial console with no ADB to read any of it
+  // over. Its steps 7 and 8 run on that console, so there is no moment at which
+  // a probe here could speak for them either. Guessing would be worse than
+  // saying nothing, on the flow that writes the boot partition.
+  async function resumeFromDeviceState(c, mode) {
+    addLog('Working out where this device actually is…');
+    const probes = {};
+    for (const [name, cmd] of Object.entries(_RESUME_PROBES)) {
+      try {
+        // Bounded per probe, for collectProvisionDiagnostics' reason: the
+        // device has just lost and regained a USB link and may be half gone,
+        // and one unanswered command must not cost every other reading.
+        probes[name] = await Promise.race([
+          c.shell(cmd),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 8000)),
+        ]);
+      } catch {
+        probes[name] = null;   // unreadable, which is not evidence
+      }
+    }
+
+    // Both package lists are the CONTROLLER's, and both are the lists the steps
+    // themselves use. Either failing to load leaves its step unproven rather
+    // than guessed at — the same default as an unreadable probe.
+    let debloat = null;
+    try {
+      const resp = await fetch(ingressPath('/api/provision/debloat_packages'),
+                               { headers: { Authorization: `Bearer ${token}` } });
+      if (resp.ok) debloat = (await resp.json()).packages || null;
+      else addLog(`Could not fetch the debloat package list (${resp.status}).`, 'warn');
+    } catch (e) {
+      addLog(`Could not fetch the debloat package list: ${e.message}`, 'warn');
+    }
+
+    // md5 over presence, through the same md5sum the asset step verifies with
+    // and the same manifest it verifies against, so "installed" here means what
+    // it means there.
+    let oww = null;
+    try {
+      const manifest = await API.get('/api/provision/oww_assets');
+      const tools = await deviceTools(c);
+      const found = {};
+      for (const a of (manifest.assets || [])) {
+        try {
+          found[a.name] = (await c.shell(
+            `su -c "${tools.md5sum} ${manifest.dir}/${a.name}" 2>/dev/null`))
+            .trim().split(/\s+/)[0] || null;
+        } catch (e) { found[a.name] = null; }
+      }
+      oww = { assets: manifest.assets || [], found };
+    } catch (e) {
+      addLog(`Could not read the wake word assets: ${e.message}`, 'warn');
+    }
+
+    const r = resumeStepFrom({ steps: STEPS, stepMode: STEP_MODE, window: _RESUME_WINDOW,
+                             mode, probes, debloat, oww, current: step });
+
+    // Report first, in full, whatever the verdict is. A wrong inference that
+    // moves somebody silently is worse than no inference, and this transcript
+    // is the record somebody reads and pastes. Only a positive reading is
+    // logged as fine; "could not read" and "not there" both want attention, and
+    // they mean different things.
+    addLog('── Where this device actually is ──', 'head');
+    for (const g of r.readings) {
+      addLog(`  ${_RESUME_MARK[g.state]} ${g.text}`,
+             g.state === _RESUME_DONE ? undefined : 'warn');
+    }
+    addLog(`  → ${r.reason}`, r.moved ? 'ok' : 'warn');
+
+    if (r.moved) {
+      // Tick what the evidence proved, so the rail agrees with the pointer
+      // instead of showing a list of empty circles behind step 9.
+      r.findings.forEach((f, i) => { if (i < r.index && f.state === _RESUME_DONE) markStep(i, 'done'); });
+      setStep(r.index);
+    }
+  }
+
   // Re-establish ADB from ANY step, without running that step.
   //
   // Reconnecting used to be reachable only from the three connection steps, so
@@ -5940,6 +6287,10 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                + 'your amonet version — R0rt1z2\'s XDA thread has it.', 'warn');
         }
       }
+      // The mode mismatch above is the symptom; this is the cause. The wizard
+      // kept a step pointer across a power cut the device did not survive, so
+      // ask the device where it is rather than assuming it is where we left it.
+      if (!isEmos) await resumeFromDeviceState(c, got);
     } catch (e) {
       addLog(`Reconnect failed: ${e.message}`, 'error');
     }

@@ -139,6 +139,7 @@ jobs:
           node controller/tests/wake_sensitivity.test.mjs
           node controller/tests/login_lcd.test.mjs
           node controller/tests/delete_ha_warning.test.mjs
+          node controller/tests/resume_step.test.mjs
       # The one dashboard test that needs a parser: esbuild compiles a name
       # that is defined nowhere without complaint, and the page then throws
       # when that component renders. Pinned by sha256, like every other
