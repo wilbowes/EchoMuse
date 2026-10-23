@@ -227,6 +227,13 @@ def build_ramdisk(init_binary: bytes, version: str, build_id: str = "",
     populates /sbin from whatever busybox it finds, and if it fails, DHCP on
     FireOS 6 fails with it. A symlink in the archive costs nine bytes and does
     not depend on a stage having run.
+
+    `emos-svc` is written here for the same reason and is NOT optional: it is
+    the symlink to `/init` that makes `/emos-svc stop|start|restart|status`
+    reachable at all (#560). The tool is the same static binary and dispatches
+    on the name it was invoked under, so an image without this entry has no
+    service control and no way to tell that from a typo. `emos/build.sh` writes
+    the same link into the ramdisk it builds by hand.
     """
     if not init_binary:
         raise BuildError("no init binary was supplied")
@@ -258,6 +265,11 @@ def build_ramdisk(init_binary: bytes, version: str, build_id: str = "",
     out.write(_newc_entry("etc/os-release", _S_IFREG | 0o644, os_release, ino))
     ino += 1
     out.write(_newc_entry("init", _S_IFREG | 0o755, init_binary, ino))
+    ino += 1
+    # #560: `/emos-svc ...` is a link to the init binary, which dispatches on
+    # the name it was invoked under. Beside `init` rather than in /sbin because
+    # /sbin is conditional (see below) and service control is not.
+    out.write(_newc_entry("emos-svc", _S_IFLNK | 0o777, b"init", ino))
     ino += 1
 
     # /sbin only if something goes in it: build.sh produces none for FireOS 5,

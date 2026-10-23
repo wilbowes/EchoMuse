@@ -276,6 +276,8 @@ jobs:
           /tmp/serialcheck
           cc -O2 -o /tmp/trialcheck emos/init/trialcheck.c
           /tmp/trialcheck
+          cc -O2 -Wall -o /tmp/svccheck emos/init/svccheck.c
+          /tmp/svccheck
           sh emos/device/em-wifi-check.sh
 
       # Same rule as the firmware release: the notes come from the ANNOTATED

@@ -676,6 +676,36 @@ reparent to init and nobody else collects them), respawns with backoff, and on
   script owns the A/B slot symlink and fast-exit backoff the OTA system depends
   on. Starting the binary would silently bypass firmware rollback.
 
+### Taking one service down: `/emos-svc`
+
+`/emos-svc stop|start|restart|status [name]` holds or releases one supervised
+service, or every service when no name is given. A `stop` sends `SIGTERM`
+rather than `SIGKILL`, so `start_server.sh` still runs its own graceful
+shutdown and puts the amp off; the service is then held down, and the
+supervisor's next pass skips it as though it were not there. `restart` clears
+the hold and signals, so the service comes back on the next pass. With no
+name, every service is covered.
+
+```
+/emos-svc status            # each service: pid, state, fails, backoff
+/emos-svc stop echomuse     # hold EchoMuse down for maintenance
+/emos-svc start echomuse    # clear the hold; it starts within a second
+```
+
+The tool is `/init` under another name — a symlink the build writes into the
+ramdisk — and it only runs as a tool when it is not PID 1. It writes one line
+to `/run/emos-svc`, the FIFO init holds open, and prints the answer that comes
+back on a FIFO of its own; `status` is answered to the caller because the
+service table belongs to PID 1 and the console is another process.
+
+**Holds are not persisted.** A reboot brings every service back, deliberately:
+a permanent disable on a device with no working adb is too easy to turn into a
+brick. `/emos-svc` needs an image from this release or later. An older image
+has no symlink, so the command is simply not found; and it must never be
+spelled `/init stop`, which on an image built before this one reboots the
+device into a boot mode called "stop". A current image refuses any boot mode
+it does not know, so the wrong spelling there fails without rebooting.
+
 ## Logs, crashes and storage
 
 The device runs for years on eMMC that cannot be replaced, so **routine logging

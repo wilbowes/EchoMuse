@@ -803,6 +803,20 @@ jobs:
               sys.exit(1)
           print(f"{n} vectors agree")
           PY
+      # The service control channel (#560). Three ways it fails on hardware
+      # and nowhere else: the tool's open of the control FIFO is ENXIO unless
+      # init is HOLDING the other end, so a supervisor that opens-and-closes
+      # answers "no supervisor listening" to nearly every call; a `restart`
+      # that leaves the hold set is a slow `stop`; and `status` printed in PID 1
+      # is seen by nobody, because the person who typed it is another process.
+      # svccheck runs the real tool in a child and the real poll in the parent,
+      # over a real FIFO, and asks the supervisor's OWN predicate
+      # (svc_should_start) whether a stopped service would be respawned — the
+      # silent undoing of a stop that this whole command exists to prevent.
+      - name: A stopped service stays stopped, and answers the caller
+        run: |
+          cc -O2 -Wall -o /tmp/svccheck emos/init/svccheck.c
+          /tmp/svccheck
       # mkboot.py cannot be exercised without a reference boot image, which is
       # the one input we never ship — it comes off the user's own device. So
       # this is the same undefined-name check the controller gets, for the
