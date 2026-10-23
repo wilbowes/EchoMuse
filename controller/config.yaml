@@ -104,6 +104,20 @@ options:
   # goes idle while the controller is still waiting, which is the same silent
   # failure from the other side.
   tts_wait_timeout: 30
+  # Milliseconds a person has, after a wake word during the thinking phase, to
+  # still be talking before the interruption is given up and the answer in
+  # flight is kept (#195). Acting on the crossing at once is a point of no
+  # return — Home Assistant's pipeline has no resume — so a wake word spoken
+  # over a reply by mistake used to throw the answer away and start a turn that
+  # heard nothing, leaving the Echo deaf for its whole length. This is the
+  # window in which somebody who meant it is still heard: leave room for a
+  # breath between the wake word and the command, at the cost of exactly that
+  # much latency on a real interruption. The person has to be TALKING at the
+  # end of it — the wake word's own tail is discarded, so this is not a
+  # silence timeout. The ceiling is em_barge.CONFIRM_MAX_MS: past a couple of
+  # seconds the answer wins unless you say another wake word, and every
+  # millisecond is latency added to a real interruption.
+  barge_confirm_ms: 1500
 schema:
   server_host: "str"
   server_port: "int(1,65535)"
@@ -120,3 +134,6 @@ schema:
   log_levels: "str"
   extra_ca_cert: "str?"
   tts_wait_timeout: "int(5,120)"
+  # Floor is the wake word's own tail (em_barge.CONFIRM_TAIL_MS, 240ms): a
+  # window that ends inside it can never take a barge, only drop them.
+  barge_confirm_ms: "int(250,5000)"

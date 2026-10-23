@@ -1,12 +1,12 @@
 {
  "files": {
-  "em_controller.py": 6206,
+  "em_controller.py": 6315,
   "em_db.py": 3355,
   "em_esphome.py": 3648
  },
  "functions": {
   "em_controller.Device.__init__": 390,
-  "em_controller._barge_watcher": 293,
+  "em_controller._barge_watcher": 237,
   "em_controller._run_post_turn_playback": 172,
   "em_controller._run_voice_locked": 431,
   "em_controller._stream_listen": 658,

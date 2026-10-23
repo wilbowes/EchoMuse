@@ -1720,6 +1720,30 @@ async def leds_spin_green(device: Device, stop_event: asyncio.Event):
 # ─── Voice pipeline ───────────────────────────────────────────────────────────
 
 
+# How long a person has, after a thinking-phase crossing, to still be talking
+# before the interruption is given up and the answer in flight is kept (#195).
+# The add-on option is `barge_confirm_ms` (`EM_BARGE_CONFIRM_MS`); the window,
+# its default and its ceiling live in em_barge so the test suite reaches them.
+BARGE_CONFIRM_MS = em_barge.confirm_ms(os.environ.get("EM_BARGE_CONFIRM_MS"))
+
+
+def _drop_barge(device: Device, score: float, why: str) -> None:
+    """
+    A thinking-phase crossing that was held and then given up (#195).
+
+    Nobody is left disadvantaged by this — HA's run was never touched, so its
+    answer still arrives — which is why it is a log line and a record rather
+    than a cue. It is recorded for the reason a barge with no trace is
+    invisible: "it ignored my wake word" is otherwise indistinguishable from a
+    device that heard nothing, and the drop rate is what tells us whether the
+    window is worth the latency it adds to a real interruption.
+    """
+    log.info(f"[{device.device_id}] Barge-in dropped — {why} "
+             f"(score={score:.3f}); HA's answer was not disturbed")
+    em_dbwriter.submit(db.log_device, device.device_id, "info", "controller",
+                       f"Barge-in dropped ({why})")
+
+
 async def _barge_watcher(device: Device, playback_started: asyncio.Event):
     """
     Wake-word watcher spanning the thinking AND playback phases (barge-in,
@@ -1751,8 +1775,13 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
     On detection: set barge_detected + cancel_event. During playback that
     aborts stream_speaker and the drain sleep, plus a device speaker_flush
     so the interruption is audible immediately (not after ~1.4s of queued
-    TTS). During thinking there's no audio to flush — instead the in-flight
-    HA pipeline is cancelled (local-only; any late HA result is discarded).
+    TTS). During thinking the crossing is HELD for the confirmation window
+    instead (#195): no audio is playing yet, so the whole cost of acting at
+    once is an abort HA cannot undo, and a wake word spoken over a reply by
+    mistake threw the answer away and ran a turn that heard nothing. Frames
+    keep being scored while the window is open, and `_take_barge` runs only
+    once em_barge hears somebody still talking — a second run is still never
+    started before the first is aborted.
     """
     loop = asyncio.get_event_loop()
     # Reused across reconnects via the module cache (#512): a new Device is
@@ -1805,6 +1834,12 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
     rms_sum = 0.0
     rms_max = 0.0
     levels = em_wakelevel.LevelRing()
+    # The confirmation window (#195): set when a thinking-phase crossing is
+    # held rather than taken, with the crossing's own details beside it —
+    # score, threshold, reason and capture time — because the frame that
+    # confirms the interruption is not the frame that heard the wake word.
+    followup = None
+    held_barge = (0.0, 0.0, "", None)
     try:
         while True:
             payload = await device.voice_queue.get()
@@ -1837,29 +1872,66 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                 # mid-sentence (measured 2026-08-20).
                 threshold = (device.barge_threshold if in_playback
                              else device.oww_threshold)
-                fired, fire_note = em_barge.decide(
-                    score=score,
-                    prev_score=prev_score,
-                    in_playback=in_playback,
-                    barge_threshold=device.barge_threshold,
-                    wake_threshold=device.oww_threshold,
-                )
-                if fired and not trusted:
-                    log.info(
-                        f"[{device.device_id}] Barge watcher: {fire_note} "
-                        f"ignored — openwakeword warm-up, "
-                        f"{warmup.progress()} chunks since reset"
+                fired, fire_note = False, ""
+                if followup is not None:
+                    # A held thinking-phase crossing (#195). Nothing
+                    # arbitrates or fires while the window is open: the
+                    # crossing that opened it is the only wake word here, and
+                    # a second one scoring a frame or two later is its own
+                    # tail (the device's listen gate drops the equivalent for
+                    # a private Echo). HA's run is untouched until em_barge
+                    # says the room is talking.
+                    if in_playback:
+                        # The answer got here before the window did. The
+                        # person did not interrupt it — it had not started —
+                        # and playback is now the thing they hear.
+                        _drop_barge(device, held_barge[0],
+                                    "the answer started playing")
+                        followup = None
+                    else:
+                        verdict = followup.feed(rms, heard)
+                        if verdict == "take":
+                            held_score, threshold, fire_note, fired_heard = held_barge
+                            log.info(
+                                f"[{device.device_id}] Barge-in held: speech "
+                                f"{1000 * (heard - followup.opened):.0f}ms after the "
+                                f"crossing (window {BARGE_CONFIRM_MS:.0f}ms) — "
+                                f"taking the interrupting turn"
+                            )
+                            await _take_barge(
+                                device, score=held_score, threshold=threshold,
+                                note=fire_note, heard=fired_heard, levels=levels,
+                                in_playback=False,
+                            )
+                            return
+                        if verdict == "drop":
+                            _drop_barge(device, held_barge[0],
+                                        f"nothing said for {BARGE_CONFIRM_MS:.0f}ms")
+                            followup = None
+                if followup is None:
+                    fired, fire_note = em_barge.decide(
+                        score=score,
+                        prev_score=prev_score,
+                        in_playback=in_playback,
+                        barge_threshold=device.barge_threshold,
+                        wake_threshold=device.oww_threshold,
                     )
-                    fired = False
-                if fired and not em_wakeword.wake_allowed(
-                        mic_muted=device.muted,
-                        enabled=device.wake_word_enabled):
-                    # The stream is up for a turn HA or the button started.
-                    # An Echo detecting its own wake word drops this crossing
-                    # itself; this is the same rule for the ones scored here.
-                    log.info(f"[{device.device_id}] barge {score:.3f} suppressed — "
-                             f"{'muted' if device.muted else 'wake word off'}")
-                    fired = False
+                    if fired and not trusted:
+                        log.info(
+                            f"[{device.device_id}] Barge watcher: {fire_note} "
+                            f"ignored — openwakeword warm-up, "
+                            f"{warmup.progress()} chunks since reset"
+                        )
+                        fired = False
+                    if fired and not em_wakeword.wake_allowed(
+                            mic_muted=device.muted,
+                            enabled=device.wake_word_enabled):
+                        # The stream is up for a turn HA or the button started.
+                        # An Echo detecting its own wake word drops this crossing
+                        # itself; this is the same rule for the ones scored here.
+                        log.info(f"[{device.device_id}] barge {score:.3f} suppressed — "
+                                 f"{'muted' if device.muted else 'wake word off'}")
+                        fired = False
                 # A playback barge fires on the second of two frames; the
                 # utterance was heard at the first.
                 fired_heard = (prev_heard if in_playback and prev_heard is not None
@@ -1874,135 +1946,31 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                             f"(threshold {threshold:.2f})"
                         )
                 if fired:
-                    phase = "playback" if in_playback else "thinking"
-                    log.info(
-                        f"[{device.device_id}] Barge-in: wake word during {phase} "
-                        f"({fire_note}) — cancelling turn"
-                    )
-                    em_dbwriter.submit(db.log_device,
-                        device.device_id, "info", "device",
-                        f"Barge-in during {phase} (score={score:.3f})"
-                    )
-                    device.barge_detected = True
-                    device.barge_decided.clear()
-
-                    # Arbitrate, exactly as a wake crossing does. Until
-                    # 2026-09-02 this path claimed nothing, so on a fleet with
-                    # two Echoes in earshot a barge-in produced TWO answers:
-                    # this device started its interrupting turn while an idle
-                    # neighbour heard the same utterance on its ordinary wake
-                    # listener and claimed an unopposed arbiter. Reported by
-                    # Wil, and it is the exact failure em_arbiter exists to
-                    # prevent — including the self-feeding loop where each
-                    # device transcribes the other's TTS as a follow-up.
-                    #
-                    # The original wake's claim cannot cover this: claim() is
-                    # bounded by window_s (300-700ms), not held until
-                    # release(), so it expired seconds ago.
-                    #
-                    # Same ORDER as the wake path — can_serve_turn before the
-                    # claim, so a device that cannot finish a turn never takes
-                    # one. HA can drop mid-turn, which is exactly when a user
-                    # talks over an answer that stopped making sense.
-                    #
-                    # Known asymmetry, deliberately not corrected here: this
-                    # device is scoring through its own playback, ~25dB down,
-                    # so it is handicapped against an idle neighbour and will
-                    # sometimes lose an utterance it was nearer to. The
-                    # consequence is that the neighbour answers and this
-                    # device only stops talking — one responder either way,
-                    # which is the bug being fixed. Giving the barged device
-                    # precedence is a SECOND rule that can disagree with the
-                    # first, and would need a way to revoke a claim a
-                    # neighbour has already started a turn on.
-                    if in_playback:  # before the claim, as in _private_barge
-                        esphome.note_barged(device.device_id)
-                        await device.send_control({"type": "speaker_flush"})
-                    serves = esphome.can_serve_turn(device.device_id)
-                    won_by = device.device_id
-                    if serves and device.wake_arb_ms > 0 and len(em_state.devices) > 1:
-                        # Capture time already carries the link's least
-                        # delay; its smoothed RTT would count it twice.
-                        won_by = await _claim_wake(
-                            device, fired_heard, levels.measure(device.mic_gain_db),
-                            over_playback=True)
-                    verdict = em_barge.cede(
-                        serves=serves, won_by=won_by,
-                        device_id=device.device_id, score=score,
-                    )
-                    device.barge_ceded = verdict.ceded
-                    if device.barge_ceded:
+                    if not in_playback:
+                        # HELD, not taken (#195). The abort this used to do
+                        # immediately is the point of no return — HA's
+                        # pipeline has no resume, so a wake word spoken over
+                        # a reply by mistake, or thought better of, threw the
+                        # answer away and then ran a turn that heard nothing.
+                        # The follow-up audio is already arriving; em_barge
+                        # decides whether anybody is actually talking.
+                        followup = em_barge.FollowUpWindow(
+                            opened=fired_heard,
+                            confirm_ms=BARGE_CONFIRM_MS,
+                            floor=getattr(device, "noise_floor", 0.0),
+                        )
+                        held_barge = (score, threshold, fire_note, fired_heard)
                         log.info(
-                            f"[{device.device_id}] Barge-in ceded to "
-                            f"{won_by if serves else 'nothing — no HA'} "
-                            f"(score={score:.3f}) — stopping playback, not "
-                            f"taking the turn"
+                            f"[{device.device_id}] Barge-in: wake word during "
+                            f"thinking ({fire_note}) — held"
+                            f" {BARGE_CONFIRM_MS:.0f}ms for speech; HA's answer "
+                            f"is not disturbed yet"
                         )
-                        em_dbwriter.submit(db.log_device,
-                            device.device_id, "info", "controller",
-                            "Barge-in ceded to another device (arbitration)"
-                            if serves else
-                            "Barge-in heard but no HA connection",
-                        )
-
-                    # Wake detail for the interrupting turn's persistent
-                    # record — popped when the turn loop re-enters
-                    # trigger_voice_turn with trigger "barge-in". Set BEFORE
-                    # the no_ha branch below, which carries this one off
-                    # instead.
-                    device.last_wake = {
-                        "model":       barge_pred_key,
-                        "score":       round(float(score), 4),
-                        "threshold":   float(threshold),
-                        "noise_floor": round(device.noise_floor, 5),
-                    }
-                    if verdict.no_ha:
-                        # The same stand-down the wake listener gets for the
-                        # same reason (#417), for the same two reasons: a barge
-                        # with no trace is indistinguishable from a device that
-                        # heard nothing, so an HA outage stays invisible in the
-                        # activity history; and the cue reports the DEVICE's
-                        # state rather than how the turn ended.
-                        #
-                        # Only CARRIED here. The turn loop's ceded branch is
-                        # where it is recorded, because this block runs before
-                        # anything below can unwind the turn: the interrupted
-                        # turn's own _persist_turn then overwrites the outcome
-                        # with "barged", and _leds_turn_end — which
-                        # cleanup_esphome ends on, and which owns the ring —
-                        # reads that. Recording here meant the row was right
-                        # and the cue never fired.
-                        #
-                        # So: barge_detected stays SET (the loop's branch
-                        # needs it, and needs barge_ceded and cancel_event to
-                        # survive to it), and the reason travels beside the wake
-                        # detail for the branch to consume.
-                        device.barge_no_ha = (verdict.trigger_label,
-                                              device.last_wake)
-                        device.last_wake = None
-                    device.cancel_event.set()
-                    device.barge_decided.set()
-                    if in_playback:
-                        # HA's run is normally over by now (RUN_END follows
-                        # TTS_END, and we only reach playback at TTS_END), but
-                        # a barge in the first milliseconds of audio can beat
-                        # it. Serialise anyway — the interrupting turn is the
-                        # thing that pays if we lose that race.
-                        esphome.abort_ha_run(device.device_id)
-                    else:
-                        # Nothing is playing — HA is mid-pipeline, and an
-                        # interrupting turn is about to start on the same
-                        # connection. The protocol carries no run id, so the
-                        # old run MUST be aborted upstream first or its tail
-                        # events land on the new turn and kill it
-                        # (pipeline_refused, 5 of 5 attempts, 2026-08-17).
-                        esphome.cancel_voice_turn(
-                            device.device_id, abort_ha=True, reason="barged")
-                    # Wake sound for a barge that won, after the flush; a
-                    # private Echo plays its own on the session's listen_ack.
-                    if not device.barge_ceded and getattr(device, "wake_sound", False) \
-                            and device.wake_cue_capable:
-                        await device.play_cue("wake")
+                        continue
+                    await _take_barge(
+                        device, score=score, threshold=threshold, note=fire_note,
+                        heard=fired_heard, levels=levels, in_playback=True,
+                    )
                     return
     finally:
         device.barge_decided.set()
@@ -2013,6 +1981,147 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
             f"rms mean={rms_mean:.4f} max={rms_max:.4f} "
             f"(device noise floor {getattr(device, 'noise_floor', 0.0):.4f})"
         )
+
+
+async def _take_barge(device: Device, *, score: float, threshold: float,
+                      note: str, heard, levels, in_playback: bool) -> None:
+    """
+    Take the interrupting turn: arbitrate, cede or not, and cancel the turn
+    that was running (#194, #417).
+
+    Extracted from `_barge_watcher` for #195, where the same action is
+    reached from two frames — the one that crossed and the later one that
+    confirms somebody is still talking — and a barge has to behave
+    identically whichever reached it. `heard` is the crossing frame's
+    capture time and `levels` the watcher's RMS ring, both needed for the
+    arbitration claim.
+    """
+    phase = "playback" if in_playback else "thinking"
+    log.info(
+        f"[{device.device_id}] Barge-in: wake word during {phase} "
+        f"({note}) — cancelling turn"
+    )
+    em_dbwriter.submit(db.log_device,
+        device.device_id, "info", "device",
+        f"Barge-in during {phase} (score={score:.3f})"
+    )
+    device.barge_detected = True
+
+    # Arbitrate, exactly as a wake crossing does. Until
+    # 2026-09-02 this path claimed nothing, so on a fleet with
+    # two Echoes in earshot a barge-in produced TWO answers:
+    # this device started its interrupting turn while an idle
+    # neighbour heard the same utterance on its ordinary wake
+    # listener and claimed an unopposed arbiter. Reported by
+    # Wil, and it is the exact failure em_arbiter exists to
+    # prevent — including the self-feeding loop where each
+    # device transcribes the other's TTS as a follow-up.
+    #
+    # The original wake's claim cannot cover this: claim() is
+    # bounded by window_s (300-700ms), not held until
+    # release(), so it expired seconds ago.
+    #
+    # Same ORDER as the wake path — can_serve_turn before the
+    # claim, so a device that cannot finish a turn never takes
+    # one. HA can drop mid-turn, which is exactly when a user
+    # talks over an answer that stopped making sense.
+    #
+    # Known asymmetry, deliberately not corrected here: this
+    # device is scoring through its own playback, ~25dB down,
+    # so it is handicapped against an idle neighbour and will
+    # sometimes lose an utterance it was nearer to. The
+    # consequence is that the neighbour answers and this
+    # device only stops talking — one responder either way,
+    # which is the bug being fixed. Giving the barged device
+    # precedence is a SECOND rule that can disagree with the
+    # first, and would need a way to revoke a claim a
+    # neighbour has already started a turn on.
+    serves = esphome.can_serve_turn(device.device_id)
+    won_by = device.device_id
+    if serves and device.wake_arb_ms > 0 and len(em_state.devices) > 1:
+        # Capture time already carries the link's least
+        # delay; its smoothed RTT would count it twice.
+        won_by = await _claim_wake(
+            device, heard, levels.measure(device.mic_gain_db),
+            over_playback=True)
+    verdict = em_barge.cede(
+        serves=serves, won_by=won_by,
+        device_id=device.device_id, score=score,
+    )
+    device.barge_ceded = verdict.ceded
+    if device.barge_ceded:
+        log.info(
+            f"[{device.device_id}] Barge-in ceded to "
+            f"{won_by if serves else 'nothing — no HA'} "
+            f"(score={score:.3f}) — stopping playback, not "
+            f"taking the turn"
+        )
+        em_dbwriter.submit(db.log_device,
+            device.device_id, "info", "controller",
+            "Barge-in ceded to another device (arbitration)"
+            if serves else
+            "Barge-in heard but no HA connection",
+        )
+
+    # Wake detail for the interrupting turn's persistent
+    # record — popped when the turn loop re-enters
+    # trigger_voice_turn with trigger "barge-in". Set BEFORE
+    # the no_ha branch below, which carries this one off
+    # instead.
+    device.last_wake = {
+        "model":       em_oww_models.prediction_key(device.oww_model),
+        "score":       round(float(score), 4),
+        "threshold":   float(threshold),
+        "noise_floor": round(device.noise_floor, 5),
+    }
+    if verdict.no_ha:
+        # The same stand-down the wake listener gets for the
+        # same reason (#417), for the same two reasons: a barge
+        # with no trace is indistinguishable from a device that
+        # heard nothing, so an HA outage stays invisible in the
+        # activity history; and the cue reports the DEVICE's
+        # state rather than how the turn ended.
+        #
+        # Only CARRIED here. The turn loop's ceded branch is
+        # where it is recorded, because this block runs before
+        # anything below can unwind the turn: the interrupted
+        # turn's own _persist_turn then overwrites the outcome
+        # with "barged", and _leds_turn_end — which
+        # cleanup_esphome ends on, and which owns the ring —
+        # reads that. Recording here meant the row was right
+        # and the cue never fired.
+        #
+        # So: barge_detected stays SET (the loop's branch
+        # needs it, and needs barge_ceded and cancel_event to
+        # survive to it), and the reason travels beside the wake
+        # detail for the branch to consume.
+        device.barge_no_ha = (verdict.trigger_label,
+                              device.last_wake)
+        device.last_wake = None
+    device.cancel_event.set()
+    if in_playback:
+        await device.send_control({"type": "speaker_flush"})
+        # HA's run is normally over by now (RUN_END follows
+        # TTS_END, and we only reach playback at TTS_END), but
+        # a barge in the first milliseconds of audio can beat
+        # it. Serialise anyway — the interrupting turn is the
+        # thing that pays if we lose that race.
+        esphome.abort_ha_run(device.device_id)
+    else:
+        # Nothing is playing — HA is mid-pipeline, and an
+        # interrupting turn is about to start on the same
+        # connection. The protocol carries no run id, so the
+        # old run MUST be aborted upstream first or its tail
+        # events land on the new turn and kill it
+        # (pipeline_refused, 5 of 5 attempts, 2026-08-17).
+        esphome.cancel_voice_turn(
+            device.device_id, abort_ha=True, reason="barged")
+    # Wake sound for a barge that won, after the flush so it
+    # is not heard over the reply it interrupts. A private
+    # Echo plays its own on the barge session's listen_ack.
+    if not device.barge_ceded and getattr(device, "wake_sound", False) \
+            and device.wake_cue_capable:
+        await device.play_cue("wake")
 
 
 async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None:
