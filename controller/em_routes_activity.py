@@ -27,6 +27,7 @@ def register(app: web.Application) -> None:
     app.router.add_get("/api/devices/{id}/activity",      _get_device_activity)
     app.router.add_get("/api/devices/{id}/turns/{turn}/audio", _get_turn_audio)
     app.router.add_get("/api/devices/{id}/wake-samples", _get_wake_samples)
+    app.router.add_get("/api/devices/{id}/wake-samples/zip", _get_wake_sample_zip)
     app.router.add_patch("/api/devices/{id}/wake-samples/{sample}", _patch_wake_sample)
     app.router.add_delete("/api/devices/{id}/wake-samples/{sample}", _delete_wake_sample)
     app.router.add_get("/api/devices/{id}/wake-samples/{sample}/audio", _get_wake_sample_audio)
@@ -195,6 +196,29 @@ async def _get_wake_sample_audio(request: web.Request) -> web.Response:
         "Content-Disposition": f'attachment; filename="{_slug(device_id)}-wake{sample_id}.wav"',
         "Cache-Control": "private, max-age=60",
     })
+
+
+@auth.require_admin
+async def _get_wake_sample_zip(request: web.Request) -> web.Response:
+    """GET /api/devices/{id}/wake-samples/zip — every retained sample WAV for
+    one device as a single archive, one directory per review label. Pruned
+    files are skipped inside em_wake_samples.build_zip; an archive with
+    nothing left is a 404, since retention makes "no files yet" ordinary."""
+    device_id = request.match_info["id"]
+    loop = asyncio.get_event_loop()
+    rows = await loop.run_in_executor(
+        None, db.get_wake_samples, device_id, em_wake_samples.KEEP_PER_DEVICE)
+    data = await loop.run_in_executor(
+        None, em_wake_samples.build_zip, device_id, rows)
+    if data is None:
+        return em_http.error("no_recording", "No saved audio for this device", 404)
+    return web.Response(
+        body=data,
+        headers={
+            "Content-Type":        "application/zip",
+            "Content-Disposition": f'attachment; filename="wake-samples-{_slug(device_id)}.zip"',
+        },
+    )
 
 
 @auth.require_auth
