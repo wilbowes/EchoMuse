@@ -1,13 +1,5 @@
 # Changelog
 
-## 2.26.2
-
-One fix on top of 2.26.1, released from 2.26.1's own code. Pair with firmware v2.18.1, which this controller offers. No database changes.
-
-### Fixed
-
-- **Firmware and emOS updates failed to download.** GitHub's download link now sends a header longer than the controller would accept, so "Update" did nothing and the log showed `Got more than 8190 bytes`. Release checks were unaffected, which is why the update was still offered (#1021).
-
 ## 2.27.0-ea.1 (Early Access)
 
 Lighter on a small controller, and the 5 second wake stall is fixed. Pair with firmware v2.19.0-ea.1, which this controller offers. No database changes.
@@ -47,6 +39,14 @@ Lighter on a small controller, and the 5 second wake stall is fixed. Pair with f
 ### Thanks
 
 @Dutch365 (#946, #967) and @forming (#720).
+
+## 2.26.2
+
+One fix on top of 2.26.1, released from 2.26.1's own code. Pair with firmware v2.18.1, which this controller offers. No database changes.
+
+### Fixed
+
+- **Firmware and emOS updates failed to download.** GitHub's download link now sends a header longer than the controller would accept, so "Update" did nothing and the log showed `Got more than 8190 bytes`. Release checks were unaffected, which is why the update was still offered (#1021).
 
 ## 2.26.1
 

@@ -51,8 +51,31 @@ REPO = CONTROLLER.parent
 # Files a pull-only add-on needs. EA carries no build context at all — it
 # pulls the same published image as GA, differing only in which tag — so
 # there is no Dockerfile and no source here to fall out of step.
-PRESENTATION = ("translations/en.yaml", "icon.png", "logo.png",
-                "CHANGELOG.md")
+PRESENTATION = ("translations/en.yaml", "icon.png", "logo.png")
+
+
+def _changelog_sections(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """(preamble, [(heading line, whole section text)]) split on `## `."""
+    parts = re.split(r"(?m)^(?=## )", text)
+    return parts[0], [(sec.split("\n", 1)[0], sec) for sec in parts[1:]]
+
+
+def channel_changelog(ga_text: str, channel_text: str) -> str:
+    """
+    GA's changelog with the channel's own sections ahead of it.
+
+    Supervisor shows a GA user the whole of controller/CHANGELOG.md, so an EA
+    release's notes there read as part of the next GA, which does not contain
+    that code (2.26.2 was cut from 2.26.1 with 2.27.0-ea.1 already listed
+    above it). EA notes are written in the channel's own file; any section
+    whose heading GA also has comes from GA, so a GA release that takes an
+    EA's notes into its own file drops them here too.
+    """
+    preamble, ga = _changelog_sections(ga_text)
+    _, channel = _changelog_sections(channel_text)
+    ga_heads = {head for head, _ in ga}
+    ahead = [sec for head, sec in channel if head not in ga_heads]
+    return preamble + "".join(ahead) + "".join(sec for _, sec in ga)
 
 
 class Channel:
@@ -190,6 +213,13 @@ def generate(ch: Channel) -> dict[str, str]:
     ga_docs = CONTROLLER / "DOCS.md"
     if ga_docs.is_file():
         out["DOCS.md"] = ch.docs_banner + ga_docs.read_text(encoding="utf-8")
+
+    ga_log = CONTROLLER / "CHANGELOG.md"
+    if ga_log.is_file():
+        own = ch.path / "CHANGELOG.md"
+        out["CHANGELOG.md"] = channel_changelog(
+            ga_log.read_text(encoding="utf-8"),
+            own.read_text(encoding="utf-8") if own.is_file() else "")
     return out
 
 
