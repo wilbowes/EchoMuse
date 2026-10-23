@@ -1,7 +1,7 @@
 {
  "files": {
-  "em_controller.py": 6206,
-  "em_db.py": 3355,
+  "em_controller.py": 6250,
+  "em_db.py": 3376,
   "em_esphome.py": 3648
  },
  "functions": {
@@ -13,7 +13,7 @@
   "em_controller.handle_control": 585,
   "em_controller.handle_data": 193,
   "em_db.record_device_stats": 206,
-  "em_device_view.merge_device": 177,
+  "em_device_view.merge_device": 178,
   "em_esphome.EchoMuseSatellite._handle_voice_event": 225,
   "em_esphome.EchoMuseSatellite._stream_mic_audio": 374,
   "em_esphome.EchoMuseSatellite.handle_message": 345,

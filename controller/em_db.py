@@ -3025,6 +3025,27 @@ def record_device_stats(device_id: str, stats: dict) -> None:
         )
 
 
+def get_link_rollups(since: float) -> list[dict]:
+    """
+    Every device's hourly link-latency rollups from `since` (epoch s), oldest
+    first, as plain dicts — one query for the whole fleet, because a link
+    health verdict (#301) is graded against the fleet's own recorded hours
+    and not against a number chosen in advance.
+
+    Only the columns that verdict reads: the idle RTT excursion counts and
+    the hour's worst. The rates are worked out by em_link_health rather than
+    here, so how a rate is defined lives in one place.
+    """
+    return [
+        dict(r) for r in _q(
+            "SELECT device_id, hour_ts, rtt_excursions_idle, rtt_samples_idle,"
+            " rtt_max_ms FROM device_metrics WHERE hour_ts >= ?"
+            " ORDER BY device_id, hour_ts",
+            (since,),
+        )
+    ]
+
+
 def get_device_metrics(device_id: str, since: float) -> list[dict]:
     """
     Hourly hardware metrics for a device from `since` (epoch s), oldest

@@ -130,6 +130,7 @@ jobs:
           node controller/tests/donor_gate.test.mjs
           node controller/tests/device_line.test.mjs
           node controller/tests/link_row.test.mjs
+          node controller/tests/link_health.test.mjs
           node controller/tests/device_tools.test.mjs
           node controller/tests/wipe_verdict.test.mjs
           node controller/tests/artifact_verdict.test.mjs

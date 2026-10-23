@@ -77,6 +77,7 @@ import em_db as db
 import em_events
 import em_credentials
 import em_device_view
+import em_link_health
 import em_process_stats
 import em_reconcile
 from version import VERSION as CONTROLLER_VERSION
@@ -6061,6 +6062,47 @@ async def _mdns_refresh_loop(azc: AsyncZeroconf, info: ServiceInfo) -> None:
             log.warning(f"mDNS refresh failed: {e}")
 
 
+# How often every open dashboard is told about a link verdict that moved
+# (#301). The verdict is measured in hours, so this is not about freshness —
+# it is how the warning CLEARS: without a push that follows the verdict, a
+# link that recovers keeps its triangle until somebody reloads the page, which
+# is how a health indicator teaches people to stop believing it.
+LINK_VERDICT_REFRESH_S = 600
+
+
+async def _link_verdict_loop() -> None:
+    """
+    Push each device's link verdict as it changes (#301).
+
+    Read from the same em_device_view.link_health the API serves, so the flag
+    on screen and the sentence behind it are one operation — the rule the
+    design on #301 asks for, and the reason this is a push rather than the
+    dashboard refetching. Nothing is pushed while no dashboard is open: the
+    snapshot on connect carries the verdict anyway.
+    """
+    loop = asyncio.get_event_loop()
+    last: dict[str, dict] = {}
+    while True:
+        await asyncio.sleep(LINK_VERDICT_REFRESH_S)
+        if not em_events.clients:
+            continue
+        try:
+            now = await loop.run_in_executor(None, em_device_view.link_health)
+        except Exception as e:
+            log.warning(f"[health] link verdict refresh failed: {e}")
+            continue
+        for device_id, verdict in em_link_health.changed(last, now):
+            if verdict is None:
+                del last[device_id]
+            else:
+                last[device_id] = verdict
+            await em_events.push({
+                "type":      "device_update",
+                "device_id": device_id,
+                "state":     {"linkHealth": verdict},
+            })
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 async def event_loop_lag_monitor(interval: float = 1.0,
@@ -6154,6 +6196,7 @@ async def main():
         + (f" (tls_port={SERVER_TLS_PORT})" if tls_ctx else "")
     )
     mdns_task = asyncio.create_task(_mdns_refresh_loop(azc, info))
+    link_verdict_task = asyncio.create_task(_link_verdict_loop())
 
     log.info(f"WebSocket server starting on {SERVER_HOST}:{SERVER_PORT}")
 
@@ -6196,6 +6239,7 @@ async def main():
         session_prune_task.cancel()
         loop_lag_task.cancel()
         mdns_task.cancel()
+        link_verdict_task.cancel()
         await azc.async_unregister_service(info)
         await azc.async_close()
         await runner.cleanup()

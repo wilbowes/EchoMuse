@@ -18,6 +18,7 @@ import em_emos_ota
 import em_emos_update
 import em_esphome
 import em_health
+import em_link_health
 import em_ota
 import em_pairing
 import em_releases
@@ -145,7 +146,30 @@ def _health_json(boot: dict | None) -> dict | None:
     }
 
 
-def merge_device(row, boot: dict | None = None) -> dict:
+def link_health(now: float | None = None) -> dict[str, dict]:
+    """
+    Every device's link verdict, from one read of the fleet's rollups.
+
+    Blocking — one SQLite read of up to HISTORY_DAYS of hourly rows — so
+    callers run it in an executor, like every other database read in a
+    handler. One place rather than one call per route: /api/devices, the
+    single-device GET and the events socket's snapshot all carry the same
+    verdict. A page that computed its own would be free to disagree with the
+    push that replaced it, and the dashboard merges the two into one object.
+    """
+    now = time.time() if now is None else now
+    rows = db.get_link_rollups(now - em_link_health.HISTORY_DAYS * 86400)
+    return em_link_health.verdicts(rows, now)
+
+
+# The long view of the same link (#301). `linkQuality` below is a ten-minute
+# window and answers "how is it now", so a link failing over weeks reads fine
+# every time anyone looks. `link_verdict` is the device's entry from
+# link_health() — the rolling verdict over its recorded hours, computed at read
+# time so no stored flag can drift from the data behind it. None for a device
+# that has recorded nothing at all; the levels it does carry include "not
+# measured yet".
+def merge_device(row, boot: dict | None = None, link_verdict: dict | None = None) -> dict:
     """
     Merge a DB device row with live in-memory state.
 
@@ -195,6 +219,7 @@ def merge_device(row, boot: dict | None = None) -> dict:
         # what a user hears. None until measured, and when offline.
         "linkQuality":      (live.tcp_minutes.summary(time.time())
                              if live and getattr(live, "tcp_minutes", None) else None),
+        "linkHealth":       link_verdict,
         # Volume is persisted device state, not config (see
         # em_config_sections.STATE_KEYS): the live level while connected,
         # otherwise the last one the device reported, so an offline device
