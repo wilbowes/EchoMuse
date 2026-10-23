@@ -56,6 +56,58 @@ func TestOncePlayingTheGateStaysOutOfTheWay(t *testing.T) {
 	}
 }
 
+func TestTheFirstPeriodOfAStreamIsReportedOnce(t *testing.T) {
+	// #203: playback_started. A controller only ever sees audio ARRIVING, so
+	// it estimates the start from the first period it put on the socket and
+	// leads the speaker by up to the prime window. This is the moment audio
+	// actually begins, and it must be reported once per STREAM: per period
+	// would be a message every ~42ms of every response, and again after each
+	// drain would claim a second start mid-reply.
+	s, _ := newTestStream(64)
+	pumpN(t, s, 30)
+	if !s.ready(24) {
+		t.Fatal("precondition: primed")
+	}
+	if _, first := s.take(); !first {
+		t.Fatal("the first period of a stream is where playback starts")
+	}
+	for i := 0; i < 10; i++ {
+		if _, first := s.take(); first {
+			t.Fatal("playback start reported again mid-stream")
+		}
+	}
+	// The sender fell behind: this drains to injected silence mid-response
+	// and the loop picks up again — still one start.
+	if s.drained() != nil {
+		t.Fatal("precondition: this drain is an underrun, not the end of the stream")
+	}
+	if _, first := s.take(); first {
+		t.Fatal("an underrun mid-response must not report a second start")
+	}
+}
+
+func TestTheNextStreamStartsAgain(t *testing.T) {
+	s, _ := newTestStream(64)
+	pumpN(t, s, 30)
+	s.ready(24)
+	s.take()
+	s.take()
+	s.endStream()
+	for s.ready(24) {
+		s.take()
+	}
+	if st := s.drained(); st == nil {
+		t.Fatal("precondition: EOS ends the stream")
+	}
+	pumpN(t, s, 30)
+	if !s.ready(24) {
+		t.Fatal("precondition: the next stream primes")
+	}
+	if _, first := s.take(); !first {
+		t.Fatal("the next response never reported that it started playing")
+	}
+}
+
 func TestANaturalEndReportsStatsRatherThanAnUnderrun(t *testing.T) {
 	s, _ := newTestStream(64)
 	pumpN(t, s, 2)

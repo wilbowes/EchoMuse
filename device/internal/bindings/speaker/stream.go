@@ -256,9 +256,17 @@ func (s *audioStream) ready(prime int) bool {
 
 // take removes one period, updating the consumption-side accounting.
 // Only called when ready() said so, and only from the ALSA goroutine.
-func (s *audioStream) take() []byte {
+//
+// The second result is true for the FIRST period of its stream — the moment
+// this plane actually starts playing, as against the moment audio started
+// ARRIVING on the wire. A controller has only the arrival, so it estimates the
+// start from the first period it put on the socket and leads the speaker by up
+// to the prime window; this is the ALSA write, which is also where the level
+// tap the meter ring renders is read (#203).
+func (s *audioStream) take() ([]byte, bool) {
 	select {
 	case period := <-s.ch:
+		first := s.periods == 0
 		s.playing = true
 		s.periods++
 		s.lastTakeNs.Store(time.Now().UnixNano())
@@ -281,9 +289,9 @@ func (s *audioStream) take() []byte {
 		if s.firstPumpNs == 0 {
 			s.firstPumpNs = time.Now().UnixNano()
 		}
-		return period
+		return period, first
 	default:
-		return nil
+		return nil, false
 	}
 }
 
