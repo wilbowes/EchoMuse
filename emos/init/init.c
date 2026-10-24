@@ -50,54 +50,137 @@
 #define TRAIL_OFF 1024
 
 
-/* Every device node this system needs, created by hand.
+/* Device nodes, made from what the kernel says it registered.
  *
  * There is no devtmpfs on this kernel — Android's /dev is a tmpfs populated by
- * ueventd from uevents, and we do not run ueventd. Numbers were read off a
- * running FireOS device, never guessed. The firmware resolves input devices by
- * NAME via /proc/bus/input/devices, so the node numbering here only has to
- * make them openable, not meaningful: event2 is the volume button on biscuit
- * and something else entirely on other boards.
+ * ueventd from uevents, and we do not run ueventd. So we read the same thing
+ * ueventd would: every registered device has /sys/dev/{char,block}/MAJ:MIN,
+ * and its uevent gives MAJOR, MINOR, DEVNAME and, for the few that want
+ * something other than root-only, DEVMODE. That is devtmpfs's own recipe.
+ *
+ * It replaced a table of numbers read off a biscuit, which was right on
+ * biscuit and wrong everywhere else: majors such as ttyGS's are allocated at
+ * boot, so on the Echo Dot 3 ttyGS0 is 246:0 and 247:0 is the jack detector.
+ * The console's shell opened that and the USB console sat silent (41C8,
+ * 2026-10-24). The sound minors differ by board as well.
+ *
+ * A device registered after a walk has no node until the next one, so init
+ * walks again where drivers are known to appear: around the WiFi chip's
+ * bring-up, and while waiting for the console's tty. A walk only adds nodes,
+ * so repeating it is safe.
  */
-struct node { const char *path; int major, minor; };
+/* Overridable so devcheck.c can drive the walk off-target. */
+#ifndef SYSDEV
+#define SYSDEV  "/sys/dev"
+#endif
+#ifndef DEVROOT
+#define DEVROOT "/dev"
+#endif
 
-static const struct node nodes[] = {
-    { "/dev/input/event0", 13, 64 },   /* ACCDET  */
-    { "/dev/input/event1", 13, 65 },   /* mtk-kpd */
-    { "/dev/input/event2", 13, 66 },   /* keys    */
+/* Where one uevent's node goes and what it is. 0 on success; -1 for a device
+ * with no node, or a name we refuse to turn into a path. */
+static int uevent_node(const char *ev, int block, char *path, size_t plen,
+                       unsigned *maj, unsigned *min, mode_t *mode)
+{
+    int have_maj = 0, have_min = 0;
+    const char *name = NULL;
+    size_t nlen = 0;
+    *mode = 0600;
+    for (const char *l = ev; *l; ) {
+        const char *e = strchr(l, '\n');
+        size_t len = e ? (size_t)(e - l) : strlen(l);
+        if (len > 6 && !strncmp(l, "MAJOR=", 6)) {
+            *maj = (unsigned)strtoul(l + 6, NULL, 10);
+            have_maj = 1;
+        } else if (len > 6 && !strncmp(l, "MINOR=", 6)) {
+            *min = (unsigned)strtoul(l + 6, NULL, 10);
+            have_min = 1;
+        } else if (len > 8 && !strncmp(l, "DEVNAME=", 8)) {
+            name = l + 8;
+            nlen = len - 8;
+        } else if (len > 8 && !strncmp(l, "DEVMODE=", 8)) {
+            unsigned long m = strtoul(l + 8, NULL, 8);
+            if (m <= 0777)
+                *mode = (mode_t)m;
+        }
+        l += len + (e ? 1 : 0);
+    }
+    if (!have_maj || !have_min || !name || !nlen)
+        return -1;
+    /* The name becomes a path under /dev, so it may not climb out of it. */
+    if (name[0] == '/')
+        return -1;
+    for (size_t i = 0; i < nlen; i++) {
+        if (name[i] <= ' ' || name[i] > '~')
+            return -1;
+        if (name[i] == '.' && (i == 0 || name[i - 1] == '/') &&
+            i + 1 < nlen && name[i + 1] == '.' &&
+            (i + 2 == nlen || name[i + 2] == '/'))
+            return -1;
+    }
+    int n = snprintf(path, plen, "%s/%s%.*s", DEVROOT, block ? "block/" : "",
+                     (int)nlen, name);
+    return n > 0 && (size_t)n < plen ? 0 : -1;
+}
 
-    { "/dev/snd/controlC0", 116,  2 },
-    { "/dev/snd/seq",       116,  1 },
-    { "/dev/snd/timer",     116, 33 },
-    { "/dev/snd/pcmC0D0p",  116,  3 }, { "/dev/snd/pcmC0D1c",  116,  4 },
-    { "/dev/snd/pcmC0D2p",  116,  5 }, { "/dev/snd/pcmC0D2c",  116,  6 },
-    { "/dev/snd/pcmC0D3p",  116,  7 }, { "/dev/snd/pcmC0D3c",  116,  8 },
-    { "/dev/snd/pcmC0D4p",  116,  9 }, { "/dev/snd/pcmC0D4c",  116, 10 },
-    { "/dev/snd/pcmC0D5p",  116, 11 }, { "/dev/snd/pcmC0D5c",  116, 12 },
-    { "/dev/snd/pcmC0D6p",  116, 13 }, { "/dev/snd/pcmC0D6c",  116, 14 },
-    { "/dev/snd/pcmC0D7p",  116, 15 }, { "/dev/snd/pcmC0D7c",  116, 16 },
-    { "/dev/snd/pcmC0D8p",  116, 17 }, { "/dev/snd/pcmC0D9c",  116, 18 },
-    { "/dev/snd/pcmC0D10p", 116, 19 }, { "/dev/snd/pcmC0D11p", 116, 20 },
-    { "/dev/snd/pcmC0D12c", 116, 21 }, { "/dev/snd/pcmC0D13c", 116, 22 },
-    { "/dev/snd/pcmC0D14p", 116, 23 }, { "/dev/snd/pcmC0D15c", 116, 24 },
-    { "/dev/snd/pcmC0D16c", 116, 25 }, { "/dev/snd/pcmC0D17p", 116, 26 },
-    { "/dev/snd/pcmC0D17c", 116, 27 }, { "/dev/snd/pcmC0D18p", 116, 28 },
-    { "/dev/snd/pcmC0D19p", 116, 29 }, { "/dev/snd/pcmC0D20p", 116, 30 },
-    { "/dev/snd/pcmC0D21p", 116, 31 }, { "/dev/snd/pcmC0D21c", 116, 34 },
-    { "/dev/snd/pcmC0D22p", 116, 35 }, { "/dev/snd/pcmC0D22c", 116, 36 },
-    { "/dev/snd/pcmC0D23p", 116, 37 }, /* speaker */
-    { "/dev/snd/pcmC0D24c", 116, 38 }, /* the 9-channel mic array */
-    { "/dev/snd/pcmC0D25p", 116, 39 },
+/* mkdir -p for the directories above a node, e.g. /dev/snd. */
+static void mkparents(const char *path)
+{
+    char d[160];
+    snprintf(d, sizeof d, "%s", path);
+    for (char *s = d + 1; *s; s++) {
+        if (*s != '/')
+            continue;
+        *s = 0;
+        mkdir(d, 0755);
+        *s = '/';
+    }
+}
 
-    /* MediaTek combo chip (WiFi + BT). wmtdetect is registered by the kernel
-     * at boot; the other three chrdevs do not exist until wmt_loader has
-     * detected the chip, but a node is only a pair of numbers, so creating
-     * them up front is harmless and keeps all the numbering in one table. */
-    { "/dev/wmtdetect", 154, 0 },
-    { "/dev/stpwmt",    190, 0 },
-    { "/dev/wmtWifi",   153, 0 },
-    { "/dev/stpbt",     192, 0 },
-};
+/* Make a node for every registered device that lacks one. Returns how many
+ * were made. */
+static int mknodes(void)
+{
+    static const char *const kinds[] = { "char", "block" };
+    int made = 0;
+    /* mknod's mode is masked by the umask: under 022 /dev/null comes out 0644,
+     * which is how dhcpcd's hook script once could not write to it. The mask
+     * is put back afterwards because every child inherits it, and a PID 1
+     * left at 0 made the syslog and anything a shell created world-writable. */
+    mode_t old = umask(0);
+    for (int k = 0; k < 2; k++) {
+        char dir[64];
+        snprintf(dir, sizeof dir, "%s/%s", SYSDEV, kinds[k]);
+        DIR *d = opendir(dir);
+        if (!d)
+            continue;
+        struct dirent *de;
+        while ((de = readdir(d))) {
+            if (de->d_name[0] == '.')
+                continue;
+            char p[160], ev[512], path[160];
+            snprintf(p, sizeof p, "%s/%s/uevent", dir, de->d_name);
+            int fd = open(p, O_RDONLY);
+            if (fd < 0)
+                continue;
+            ssize_t n = read(fd, ev, sizeof ev - 1);
+            close(fd);
+            if (n <= 0)
+                continue;
+            ev[n] = 0;
+            unsigned ma, mi;
+            mode_t mode;
+            if (uevent_node(ev, k, path, sizeof path, &ma, &mi, &mode))
+                continue;
+            mkparents(path);
+            if (mknod(path, (k ? S_IFBLK : S_IFCHR) | mode, makedev(ma, mi)) == 0)
+                made++;
+        }
+        closedir(d);
+    }
+    umask(old);
+    return made;
+}
 
 /* ── The boot progress ring ──────────────────────────────────────────────────
  *
@@ -751,6 +834,10 @@ static void netlog(const char *fmt, ...);
 static int  readint(const char *path);
 
 /* Overridable so trialcheck.c can point them at files and run off-target. */
+/* boot_a_x, so emOS can reflash itself over the network. It is also the
+ * recovery target, so verify any write to it by dropping caches and reading
+ * BACK — a dd here can complete at page-cache speed, verify against that same
+ * cache, and be lost on the next reboot. Real writes run at about 9MB/s. */
 #ifndef BOOTDEV
 #define BOOTDEV   "/dev/block/mmcblk0p10"
 #endif
@@ -2099,6 +2186,8 @@ static void net_main(void)
 
     waitpid(spawn(loader), &st, 0);
     netlog("wmt_loader status=%d\n", st);
+    /* wmt_loader's chip detection is what registers stpwmt and stpbt. */
+    netlog("wmt: nodes after loader=%d\n", mknodes());
 
     /* FireOS 6's wmt_launcher does not work here (see wmt_bringup above), so
      * on that layout emOS configures the HIF and answers patch searches
@@ -2114,6 +2203,7 @@ static void net_main(void)
     }
     sleep(2);
 
+    mknodes();                          /* wmtWifi, once the chip is up */
     int r = wr("/dev/wmtWifi", "1");
     netlog("wmtWifi=1 rc=%d errno=%d\n", r, r ? errno : 0);
 
@@ -2350,17 +2440,6 @@ int main(int argc, char **argv)
     if (getpid() != 1)
         return tool_main(argc, argv);
 
-    /* mknod's mode is masked by the umask, so without this every node below
-     * comes out 0644 no matter what it asks for — which is how dhcpcd's hook
-     * script ended up unable to open /dev/null for writing.
-     *
-     * It is restored to 022 as soon as the nodes exist, and that matters more
-     * than it looks: umask is INHERITED by every child, so leaving it at 0
-     * made PID 1 hand a permissive mask to every process on the device. The
-     * syslog and anything a spawned shell created came out world-writable
-     * (-rw-rw-rw-). Narrow the window to the thing that needs it. */
-    umask(0);
-
     mkdir("/dev", 0755);
     mkdir("/proc", 0755);
     mkdir("/sys", 0755);
@@ -2387,42 +2466,11 @@ int main(int argc, char **argv)
     mount("debugfs", "/sys/kernel/debug", "debugfs", 0, NULL);
     mkdir("/dev/block", 0755);
 
-    /* Every device node is created by hand.
-     *
-     * This kernel has no devtmpfs — Android's /dev is a plain tmpfs populated
-     * by ueventd from uevents, and we are not running ueventd. Nothing appears
-     * on its own. The block nodes worked only because they were mknod'd
-     * explicitly; /dev/ttyGS0 was assumed and therefore absent, which is why
-     * the gadget reached CONFIGURED with nothing listening on it.
-     *
-     * 247:0 is ttyGS0, read off a running FireOS device rather than guessed.
-     */
-    mknod(CACHE, S_IFBLK | 0600, makedev(179, 15));
-    /* boot_a_x, so emOS can reflash itself over the network: the device has
-     * curl, busybox and dd, which turns a flash cycle from a TWRP trip into
-     * about thirty seconds. It is also the recovery target, so verify any
-     * write to it by dropping caches and reading BACK — a dd here can complete
-     * at page-cache speed, verify against that same cache, and be lost on the
-     * next reboot. Real writes to this eMMC run at about 9MB/s. */
-    mknod("/dev/block/mmcblk0p10", S_IFBLK | 0600, makedev(179, 10));
-    mknod("/dev/null",    S_IFCHR | 0666, makedev(1, 3));
-    mknod("/dev/zero",    S_IFCHR | 0666, makedev(1, 5));
-    mknod("/dev/tty",     S_IFCHR | 0666, makedev(5, 0));
-    mknod("/dev/console", S_IFCHR | 0600, makedev(5, 1));
-    mknod("/dev/ptmx",    S_IFCHR | 0666, makedev(5, 2));
-    /* wpa_supplicant refuses to start without both of these. */
-    mknod("/dev/random",  S_IFCHR | 0666, makedev(1, 8));
-    mknod("/dev/urandom", S_IFCHR | 0666, makedev(1, 9));
-    mknod(TTY,            S_IFCHR | 0600, makedev(247, 0));
+    /* Every device node, from sysfs -- see mknodes(). Before anything else,
+     * because the boot trail is written to a raw partition node. */
+    int nodes = mknodes();
     mkdir("/dev/pts", 0755);
     mount("devpts", "/dev/pts", "devpts", 0, NULL);
-    mkdir("/dev/input", 0755);
-    mkdir("/dev/snd", 0755);
-    for (unsigned i = 0; i < sizeof nodes / sizeof nodes[0]; i++)
-        mknod(nodes[i].path, S_IFCHR | 0600,
-              makedev(nodes[i].major, nodes[i].minor));
-
-    umask(022);   /* nodes exist; every child inherits a sane mask from here */
 
     snprintf(buf, sizeof buf, "EM64-INIT-OK acm-console\n");
     write_at(0, buf, strlen(buf));
@@ -2433,7 +2481,8 @@ int main(int argc, char **argv)
         close(fd);
         if (n > 0) write_at(512, buf, n);
     }
-    note("stage=mounts done devtmpfs_rc=%d tty=%d\n", dtr, access(TTY, F_OK));
+    note("stage=mounts done devtmpfs_rc=%d nodes=%d tty=%d\n", dtr, nodes,
+         access(TTY, F_OK));
     led_claim();
     led_step();                                  /* 1: mounts and device nodes */
 
@@ -2454,7 +2503,6 @@ int main(int argc, char **argv)
     int sysp = cmdline_system_part(cmdl);
     char sysdev[48];
     snprintf(sysdev, sizeof sysdev, "/dev/block/mmcblk0p%d", sysp);
-    mknod(sysdev, S_IFBLK | 0600, makedev(179, sysp));
     int r = mount(sysdev, "/system", "ext4", MS_RDONLY, NULL);
 
     /* FireOS 6 is SYSTEM-AS-ROOT: the partition's root is the Android root
@@ -2500,7 +2548,6 @@ int main(int argc, char **argv)
      * there. /system stays read-only — nothing here should be able to damage
      * the Android install we still rely on for recovery. */
     mkdir("/data", 0755);
-    mknod("/dev/block/mmcblk0p16", S_IFBLK | 0600, makedev(179, 16));
 
     /* Check /data before mounting it read-write.
      *
@@ -2728,6 +2775,8 @@ int main(int argc, char **argv)
 
     for (int i = 0; i < 15; i++) {
         sleep(1);
+        if (access(TTY, F_OK))
+            mknodes();                  /* registered with the gadget */
         char tag[32];
         snprintf(tag, sizeof tag, "wait=%d tty=%d", i, access(TTY, F_OK));
         rdstate(tag);

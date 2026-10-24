@@ -120,7 +120,7 @@ Once emOS is running and on the network, flashing no longer needs TWRP:
 ## What the boot actually does
 
 `init/init.c` is a static AArch64 binary, PID 1, ~500 lines. In order: mount
-`proc`/`sys`/`devpts`; create every device node by hand; mount `/system`
+`proc`/`sys`/`devpts`; create every device node from sysfs; mount `/system`
 read-only and `/data` read-write; build the `/etc` symlink farm; link busybox's
 applets; preserve the previous boot's kernel log; bring up the USB serial
 console; then supervise the service table below. `/data` is checked with
@@ -137,8 +137,11 @@ every one of them is a comment in the source rather than folklore:
    broken instrument reads exactly like a broken subject.
 2. **There is no devtmpfs.** Android's `/dev` is a tmpfs populated by `ueventd`
    from uevents, and we do not run `ueventd`, so nothing appears on its own.
-   Every node is `mknod`'d from numbers read off a running device, never
-   guessed.
+   init reads what `ueventd` would — `/sys/dev/{char,block}/*/uevent`, with
+   its `DEVNAME` and `DEVMODE` — and makes each node from that. It was a table
+   of numbers read off a biscuit until the Echo Dot 3, where those numbers are
+   other devices: its `ttyGS0` is 246:0 and 247:0 is the jack detector, so the
+   console sat silent (2026-10-24). `devcheck.c` pins the parser.
 3. **MUSB must be put in device mode** — write `1` to
    `/sys/devices/platform/mt_usb/cmode`. `cmode 2` is charging-only, and the
    gadget above it reports `DISCONNECTED` forever no matter how correctly it is
