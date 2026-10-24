@@ -5467,3 +5467,56 @@ four compressor bands at 70/200/3250 Hz, which map one to one onto the
 chain's bass guard and three upper bands. The stock-sound voicing moved into
 board data on a local branch so radar keeps the plain chain until its own is
 heard; a candidate fitted to these numbers is built and not yet played.
+
+## 2026-10-24 — a 9KB header, the Dot's own voicing in Early Access, and an approval that cut off its own install
+
+**Every download from a GitHub release failed on GA, and the dashboard still
+offered the update.** github.com now answers a release-asset download with a
+302 whose Content-Security-Policy header is 9,243 bytes; aiohttp refuses a
+header field over 8,190 by default. So every firmware OTA, wizard firmware
+step and emOS update died with "Got more than 8190 bytes" before the redirect
+was followed, while api.github.com's short headers kept release polling
+working. The change was GitHub's, some time between about 10-16 and 10-23.
+It went out as 2.26.2 from `release/2.26.2` (the first GA hotfix branch,
+2.26.1 plus the fix, bench-checked on the UAT rig), and the same fix is on
+main (#1021, #1022).
+
+**Early Access 2.27.0-ea.2 / v2.19.0-ea.2 is out, on 683cd60.** It carries
+the Dot's own voicing (#1026, part of #229, which stays open for field
+feedback), the second-sourced tsl2584tsv light sensor read over IIO (#1008,
+#90), the 7 s pairing hold (#1012, #841), and radar. Schema v32 resets the
+old Speech and Music presets and cannot be undone by an older controller,
+and the notes say so. Before the tags, voice turns on all four bench Echoes
+and a 7 s hold on VVV, which reached HA as a long press.
+
+**Radar panicked on every connect under the stock-sound build** (#1028).
+`DefaultParams` asks for the stock profile on every board and the output
+chain clears it only on its own copy, so `refreshStock` switched the stock
+volume law on for a board with no voicing and dereferenced nil. 035T restarted
+four times before it was found. The law now needs a voicing.
+
+**An approval cut off the install it started** (#1029). Approving a device
+bounces its link about 3 s after connect to hand over credentials, which
+landed in the middle of 035T's first wake word push: `Hey_Verona.onnx` arrived
+truncated ("md5 mismatch"), and the reconcile's 15-minute stamp, taken before
+the work, turned away the redial and every reconnect after it. The dashboard's
+**Install assets** then installed the file and told the user to restart the
+Echo, since nothing sent the config the scorer is built from; restarting the
+firmware over the console was what got it listening. A run that does not
+finish now gives the stamp back (an immediate rerun if the device has already
+redialled, otherwise a retry on the next connect after 60 s), and an install
+is followed by the config.
+
+**Radar's candidate voicing, modelled against stock** (07MU restored to stock
+FireOS 6, its chain read off the unit, the real Go chain rendered offline):
+at matched loudness the tone is within ±2 dB of stock from 125 Hz to 2 kHz,
+5–7 dB under it at 3.15 kHz, and about 4.5 dB quieter at 100%; a 10/12/14 dB
+ceiling narrows that to −3.6/−2.9/−2.2 dB. Not shipped: radar keeps the plain
+chain until it is measured in a second placement.
+
+Also: the "never mind" ring takes the scene's colour instead of a fixed green
+(#1030). For #1013, hostap 2.10 skips the deauth at deinit when WoWLAN is
+configured (`wpa_supplicant.c`), and the FireOS conf sets
+`wowlan_triggers=disconnect` where emOS's sets none. The controller build now
+also runs on `controller-ea/**` changes (#1027): 2.27.0-ea.2's release-prep
+commit had no image.

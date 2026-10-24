@@ -297,7 +297,11 @@ merge commit → then push the tag**, and a tag pushed seconds after a merge fai
 anything being wrong. Hit on 2026-08-28 cutting `2.22.0-ea.4`: the build had
 started 23 seconds earlier and the release checked while it was still pushing.
 The recovery is only `gh run rerun <id>` once the build finishes — the tag,
-the commit and the annotation are all fine and must not be re-cut.
+the commit and the annotation are all fine and must not be re-cut. **The build runs on `controller-ea/**` changes too** (#1027): an EA
+release-prep commit touches only the channel's pin and changelog, and before
+that it got no `:sha-*` image. A commit touching neither tree, such as a
+firmware-only fix, still gets none, so a controller tag on one needs a
+`workflow_dispatch` of the build first (2.27.0-ea.2 on 683cd60).
 
 **`--cleanup=verbatim` is not optional if the notes use Markdown headings.**
 `git tag -a` defaults to `--cleanup=strip`, which treats a line beginning with

@@ -238,7 +238,10 @@ plain chain with its own bass band and does not announce `stock_sound`, and
 the plain law. While the chain runs on the device and no plug is in the jack,
 the order is volume → user EQ → driver correction → bass guard + three upper
 compressor bands → limiter (`outchain`, with `speaker.refreshStock` choosing
-the law). With a plug in, or behind a controller that processes the audio
+the law). **The law is on only with a voicing** (`stockLawOn`, #1028):
+`DefaultParams` asks for the profile on every board, and the chain clears it
+only on its own copy, so radar applied the law with a nil voicing and
+panicked on every connect (035T, 2026-10-24, four restarts). With a plug in, or behind a controller that processes the audio
 itself, the plain chain and the old law stay, because the correction is for
 this driver and nothing else.
 
@@ -696,7 +699,7 @@ Stock models are required by definition and never evictable.
 
 **Reconcile-on-connect** (`em_oww_sync.reconcile`, reached through
 `em_reconcile.on_connect` — see controller/CLAUDE.md for the other two payloads
-that ride with it) closes the offline case, and three rules keep it from doing
+that ride with it) closes the offline case, and four rules keep it from doing
 harm:
 
 - **Failure to LOOK is not evidence of absence.** Any error reading the
@@ -710,6 +713,11 @@ harm:
   never waits on an install.
 - **Quiet when there is nothing to do.** Devices reconnect often on this
   fleet, so the ordinary path is one shell round trip and no log line.
+- **An install is followed by the config** (`em_oww_sync.push_config`,
+  #1029): the firmware builds its scorer from the config push, so a model
+  installed without one sits unused. The dashboard's **Install assets** said
+  "restart the device" for this until 2026-10-24, and the reconcile's own
+  repair path already re-pushed; now both do.
 
 Presence is judged by **md5, not filename**: a re-trained custom model keeps
 its name, and counting that as installed leaves the device scoring against a
