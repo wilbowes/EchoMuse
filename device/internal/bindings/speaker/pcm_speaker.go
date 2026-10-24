@@ -337,7 +337,7 @@ func (p *PcmSpeaker) Init() error {
 	// into silence. See the codec package.
 	codec.EnsureRoutes()
 	p.applyJackWrites(p.out.setup())
-	mixer.Set(mixer.PlaybackVolume, "0") // mute before touching amp or stream
+	p.applyJackWrites([]mixerWrite{p.out.mute()}) // before touching amp or stream
 
 	device := tinyalsa.NewDevice(p.pcm.Card, p.pcm.Device, pcm.Config{
 		Channels:         2,
@@ -359,10 +359,10 @@ func (p *PcmSpeaker) Init() error {
 	go p.silenceLoop()
 
 	p.waitRunning(pcmRunTimeout)
-	time.Sleep(100 * time.Millisecond)        // silence reaches the DAC (~2 periods)
-	mixer.Set(mixer.SpeakerAmp, "On")         // enable amp onto a clocked, silent DAC
-	time.Sleep(50 * time.Millisecond)         // let amp settle
-	mixer.Set(mixer.PlaybackVolume, dacUnity) // unmute: volume is applied in software
+	time.Sleep(100 * time.Millisecond)             // silence reaches the DAC (~2 periods)
+	p.applyJackWrites(p.out.amp(true))             // enable amp onto a clocked, silent DAC
+	time.Sleep(50 * time.Millisecond)              // let amp settle
+	p.applyJackWrites([]mixerWrite{p.out.unity()}) // unmute: volume is applied in software
 	// Last, so the DAC's step happens behind it: the quietest order of the
 	// ones measured on radar's mics (2026-10-23).
 	if err := p.out.releaseMute(); err != nil {
@@ -509,13 +509,14 @@ func (p *PcmSpeaker) ReconcileJackRouting() int {
 	}
 
 	current := map[string]string{}
-	for _, ctl := range []string{ctlSpeakerAmp, ctlHPDriverGain, ctlDacMux} {
+	jack := p.out.spec.Jack
+	for _, ctl := range jackControls(jack) {
 		if v, err := mixer.Get(ctl); err == nil {
 			current[ctl] = v
 		} // a failed read is not evidence of drift
 	}
 
-	drift := jackRoutingDrift(inserted, current)
+	drift := jackRoutingDrift(jack, inserted, current)
 	if len(drift) == 0 {
 		return 0
 	}
@@ -929,12 +930,6 @@ func (p *PcmSpeaker) Flush() { p.voice.flush() }
 // non-seekable stream that audio cannot be recovered.
 func (p *PcmSpeaker) FlushMusic() { p.music.flush() }
 
-// dacUnity is the DAC digital volume's 0dB index. The DAC stays here while
-// audio is live and the user's volume is applied to the PCM (swvolume.go);
-// Init and Close still use the control to mute around amp and stream
-// changes.
-const dacUnity = "127"
-
 // SetVolume sets the playback volume as a device level (0..127, 0.5dB per
 // step, unity at 127). Takes effect from the next period, ramped across it.
 func (p *PcmSpeaker) SetVolume(level int) {
@@ -990,8 +985,8 @@ func (p *PcmSpeaker) SetResponseGainDB(db float64) { p.response.setDB(db) }
 // this never runs (SIGKILL, panic).
 func (p *PcmSpeaker) Close() {
 	p.out.holdMute()
-	mixer.Set(mixer.PlaybackVolume, "0") // mute
-	mixer.Set(mixer.SpeakerAmp, "Off")   // amp off
+	p.applyJackWrites([]mixerWrite{p.out.mute()})
+	p.applyJackWrites(p.out.amp(false))
 	close(p.stopCh)
 	p.session.Close()
 	log.Println("PcmSpeaker closed — output muted, amp off")

@@ -1,67 +1,16 @@
 package speaker
 
 import (
-	"github.com/wilbowes/EchoMuse/internal/bindings/mixer"
 	"github.com/wilbowes/EchoMuse/internal/outchain"
 	"github.com/wilbowes/EchoMuse/pkg/board"
 )
 
-// Jack routing: the codec state each plug position needs.
+// Jack routing: the codec state each plug position needs, from the board's
+// table (pkg/board, where each value's measurement is recorded).
 //
 // Here rather than in pcm_speaker.go because that file is ARM-only (build tag
 // `server`) and the mapping is worth pinning on the host — it is a table of
 // measured values, and a typo in one of them is silence rather than an error.
-//
-// MEASURED 2026-09-03 against a stock FireOS 5.5.5.4 Dot (root, no EchoMuse)
-// driving the same cable, by diffing all 239 mixer controls across an insert
-// on both devices. Stock changed five controls; we changed one.
-
-// The controls, by name: the internal driver's amp, the jack's output stage,
-// and the DAC mux in front of the jack.
-const (
-	ctlSpeakerAmp   = mixer.SpeakerAmp
-	ctlHPDriverGain = mixer.HPDriverGain
-	ctlDacMux       = mixer.DacMux
-)
-
-// The DAC mux, #566. With a plug in, stock reads On and we read Off, and the
-// jack sat 20-30dB below line level with HP Driver Gain already correct.
-// Writing On restored stock's level (@Kozikodi, 2026-09-29, FireOS 5.5.5.4 on
-// two Dots, diffed against stock playing the same cable). The board's DT has
-// no extamp-dacmux pinctrl states, so AudDrv_GPIO_probe logs "fail -19" at
-// boot on stock as well — the control works regardless.
-//
-// Stock also leaves it On with the jack empty. That case is NOT measured on
-// the internal speaker, so removal writes Off: the state every Dot has played
-// its speaker in until now.
-const (
-	dacMuxJack     = "On"
-	dacMuxInternal = "Off"
-)
-
-// HP driver gain values, as mixer indices on a 0..35 range that maps to
-// -6dB..+29dB.
-//
-// hpGainInternal is what both a stock Dot and ours sit at with nothing
-// plugged in. hpGainJack is stock's value with a plug in.
-//
-// The gap is the whole bug. Something drops this control to 0 — the FLOOR of
-// the range, -6dB — when a plug goes in, and on a stock device the audio HAL
-// then raises it to 11. We had nothing that did, so the external output sat at
-// minimum gain: measured inaudible at 0, and audible immediately on writing
-// 11 with music playing. It reads as "the jack does not work" rather than as
-// "the jack is quiet", which is why it survived so long.
-//
-// NOT accdet, despite what this project's docs said for a month. Amazon's
-// accdet driver (accdet_amzn.c) only reads a GPIO and calls switch_set_state
-// on /sys/class/switch/h2w — it writes no mixer control and touches no codec
-// register. Everything attributed to it is Android's audio HAL reacting to
-// that switch state, which is also why it keeps happening: see
-// reconcileJackRouting.
-const (
-	hpGainInternal = "6"
-	hpGainJack     = "11"
-)
 
 // mixerWrite sets one control, by name.
 type mixerWrite struct {
@@ -69,41 +18,35 @@ type mixerWrite struct {
 	Args []string
 }
 
+func writesOf(ctls []board.Ctl) []mixerWrite {
+	ws := make([]mixerWrite, len(ctls))
+	for i, c := range ctls {
+		ws[i] = mixerWrite{Ctl: c.Name, Args: c.Values}
+	}
+	return ws
+}
+
 // jackRouting returns the mixer writes that put the codec into the state a
-// given plug position needs.
-//
-// Three controls, deliberately. Stock also clears Right Channel Only and sets
-// Ignore Ramp Up on insert, and NEITHER is copied here:
-//
-//   - Right Channel Only selects which codec channel carries the signal, and
-//     our wire is mono — toStereo duplicates L into R — so both channels carry
-//     the same samples whichever way it is set. It becomes real the day the
-//     wire carries stereo, and not before.
-//   - Ignore Ramp Up has not been measured on this hardware at all. Copying a
-//     stock value whose effect is unknown is how you ship a change that cannot
-//     be defended when it turns out to do something else.
-//
-// The amp goes off first on insert and on last on removal, so nothing is
-// switched under a playing speaker. On biscuit the other controls are
-// independent and the order is moot; on radar the filter swap goes between
-// (output.jack).
-func jackRouting(inserted bool) []mixerWrite {
+// given plug position needs, in the board's order: the amp off first on
+// insert and on last on removal.
+func jackRouting(j board.Jack, inserted bool) []mixerWrite {
 	if inserted {
-		// Something is in the jack, so the internal driver must be silent —
-		// otherwise the Dot plays to the room while the cable carries the
-		// same audio somewhere else.
-		return []mixerWrite{
-			{Ctl: ctlSpeakerAmp, Args: []string{"Off"}},
-			{Ctl: ctlHPDriverGain, Args: []string{hpGainJack, hpGainJack}},
-			{Ctl: ctlDacMux, Args: []string{dacMuxJack}},
+		return writesOf(j.Insert)
+	}
+	return writesOf(j.Remove)
+}
+
+// jackControls is every control the jack table writes, for reading back.
+func jackControls(j board.Jack) []string {
+	var names []string
+	seen := map[string]bool{}
+	for _, c := range append(append([]board.Ctl{}, j.Insert...), j.Remove...) {
+		if !seen[c.Name] {
+			seen[c.Name] = true
+			names = append(names, c.Name)
 		}
 	}
-	// Nothing in the jack: the internal driver is the only output there is.
-	return []mixerWrite{
-		{Ctl: ctlHPDriverGain, Args: []string{hpGainInternal, hpGainInternal}},
-		{Ctl: ctlDacMux, Args: []string{dacMuxInternal}},
-		{Ctl: ctlSpeakerAmp, Args: []string{"On"}},
-	}
+	return names
 }
 
 // chainForJack returns the output chain configuration a plug position needs:
@@ -154,9 +97,9 @@ func chainForJack(p outchain.Params, inserted bool) outchain.Params {
 // read failed, and "failure to look is not evidence of absence" applies here
 // exactly as it does to the controller's asset reconcile — rewriting on a
 // failed read would rewrite it every interval forever.
-func jackRoutingDrift(inserted bool, current map[string]string) []mixerWrite {
+func jackRoutingDrift(j board.Jack, inserted bool, current map[string]string) []mixerWrite {
 	var out []mixerWrite
-	for _, w := range jackRouting(inserted) {
+	for _, w := range jackRouting(j, inserted) {
 		got, ok := current[w.Ctl]
 		if !ok {
 			continue

@@ -117,6 +117,13 @@ def resolve(configured: str, capabilities, reported: str | None,
     not sent one on this connection.
     """
     caps = set(capabilities or ())
+    if caps and "mic" not in caps:
+        # Every firmware has announced "mic"; one that does not has no
+        # microphone it can read (a board whose capture is not supported
+        # yet). It neither streams nor listens in any mode, and saying it
+        # streams because the mode is "off" would be untrue.
+        return ListenView(STATE_DEGRADED, False,
+                          reported_reason or "no microphone it can read — speaker only")
     if configured == "off":
         return ListenView(STATE_CONTROLLER, True)
     if configured == "shadow":

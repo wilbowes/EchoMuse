@@ -44,8 +44,10 @@ package als
 import (
 	"context"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -314,11 +316,32 @@ func Lux() *int {
 	if err != nil {
 		return nil
 	}
-	n, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	if err != nil {
+	n, ok := parseLux(string(b))
+	if !ok {
 		return nil
 	}
 	return &n
+}
+
+// luxText is what a lux attribute holds: a whole number (tsl2540's als_lux,
+// "309"), or an IIO processed value, which the kernel prints as
+// "<int>.<micro>" (IIO_VAL_INT_PLUS_MICRO: the Dot 3's tsl2572 reads
+// "3.636000"). Nothing else: ParseFloat alone would also take "NaN", "Inf",
+// exponents and hex floats, none of which a driver prints.
+var luxText = regexp.MustCompile(`^[0-9]{1,9}(\.[0-9]{1,9})?$`)
+
+// parseLux reads a lux attribute to whole lux, rounded. A negative value is
+// not a reading.
+func parseLux(s string) (int, bool) {
+	s = strings.TrimSpace(s)
+	if !luxText.MatchString(s) {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, false
+	}
+	return int(math.Round(f)), true
 }
 
 // ── Change watching ──────────────────────────────────────────────────────────

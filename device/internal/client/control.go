@@ -41,6 +41,19 @@ var Version = "dev"
 // stepped — which the controller does on every ack (time_ms).
 var monoEpoch = time.Now()
 
+// micUnavailable is why this device has no microphone, "" when it has one.
+// Set once at startup, before any connection.
+var micUnavailable atomic.Value
+
+// SetMicUnavailable records that the device runs without a microphone.
+func SetMicUnavailable(reason string) { micUnavailable.Store(reason) }
+
+// MicUnavailable is why the device has no microphone, "" when it has one.
+func MicUnavailable() string {
+	s, _ := micUnavailable.Load().(string)
+	return s
+}
+
 // MonoMs is t on this process's monotonic clock, in ms. It rides ping replies
 // and wakes so the controller can map it onto its own clock through the
 // cleanest exchange it has seen (em_listen.DeviceClock) and date a wake by
@@ -1301,11 +1314,14 @@ func capabilities() []string {
 	// "sendspin": this firmware can be a Sendspin player (internal/sendspin),
 	// switched by sendspinEnabled. Whether it is running, and paired, is the
 	// sendspin status, for the aec_hw_ref reason.
-	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons",
+	caps := []string{"speaker", "leds", "led_anim", "buttons",
 		"oww_shadow", "oww_trigger", "button_hold", "audio_mix",
 		"aec_hw_ref", "oww_local_only", "output_chain", "wake_cue", "volume_cue", "remote_volume_arc",
 		"response_level", "wake_mic", "pairing",
 		"wake_word_off", "sendspin", "ble_connect"}
+	if MicUnavailable() == "" {
+		caps = append(caps, "mic")
+	}
 	if board.CurrentLayout().Speaker.Voicing != nil {
 		caps = append(caps, "stock_sound")
 	}

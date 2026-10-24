@@ -135,6 +135,7 @@ def test_push_config_sends_the_effective_config(monkeypatch):
 
 class Shadow:
     oww_shadow_capable = True
+    mic_capable = True
     android_userspace = False
 
     async def send_control(self, msg):

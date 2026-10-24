@@ -118,7 +118,7 @@ func (o output) setup() []mixerWrite {
 // speaker never plays through the jack's filter, nor the jack through the
 // speaker's correction.
 func (o output) jack(inserted bool) []mixerWrite {
-	ws := jackRouting(inserted)
+	ws := jackRouting(o.spec.Jack, inserted)
 	if o.speakerFilter == nil {
 		return ws
 	}
@@ -144,6 +144,27 @@ func (o output) holdMute() {
 	if o.spec.AmpMute != "" {
 		mixer.Set(o.spec.AmpMute, "On")
 	}
+}
+
+// mute and unity are the hardware volume's silent and 0dB settings.
+func (o output) mute() mixerWrite {
+	return mixerWrite{Ctl: o.spec.Volume.Control, Args: []string{o.spec.Volume.Mute}}
+}
+
+func (o output) unity() mixerWrite {
+	return mixerWrite{Ctl: o.spec.Volume.Control, Args: []string{o.spec.Volume.Unity}}
+}
+
+// amp switches the amplifier, nothing on a board that has no switch.
+func (o output) amp(on bool) []mixerWrite {
+	if o.spec.AmpSwitch == "" {
+		return nil
+	}
+	v := "Off"
+	if on {
+		v = "On"
+	}
+	return []mixerWrite{{Ctl: o.spec.AmpSwitch, Args: []string{v}}}
 }
 
 // guardBand is a board's bass band as the output chain takes it; a board

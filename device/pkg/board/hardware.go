@@ -16,10 +16,11 @@ import (
 // firmware always has, and tells us. A part with no fallback is not opened by
 // number at all.
 type Hardware struct {
-	// DotKeys carries the action and mute buttons; VolumeKeys the volume
-	// pair. Input device names, as /proc/bus/input/devices gives them.
-	DotKeys    Input
-	VolumeKeys Input
+	// Keys are the input devices the buttons arrive on, by the names
+	// /proc/bus/input/devices gives them. What a key means is its code, not
+	// the device it came from: biscuit splits action+mute from volume, the
+	// Dot 3 splits action+volume from mute.
+	Keys []Input
 	// LEDRing is the ring driver's i2c client, by its sysfs `name`.
 	LEDRing I2C
 	// MuteLEDGPIO is the sysfs GPIO number of the LED under the mute button,
@@ -28,9 +29,15 @@ type Hardware struct {
 	// never assumed for a board that has not stated it.
 	MuteLEDGPIO string
 	// Capture is the mic array's PCM and Playback the speaker's, by the id
-	// /proc/asound/pcm lists.
+	// /proc/asound/pcm lists. A Capture with no name is a board whose mics
+	// the firmware cannot read yet: it runs without them, button-only.
 	Capture  PCM
 	Playback PCM
+	// Routes are the codec switches that must be closed for audio to flow,
+	// and InputGains the mic input levels, written once before either PCM
+	// opens (internal/bindings/codec).
+	Routes     []Ctl
+	InputGains []Ctl
 	// LightSensors are the ambient light sensors the board may carry, in the
 	// order to try them; empty means the board has none. More than one when
 	// the part is second-sourced (#90).
@@ -47,6 +54,16 @@ type Hardware struct {
 
 // Speaker is a board's playback path where it differs between boards.
 type Speaker struct {
+	// AmpSwitch turns the speaker amplifier on, "" when the board has none
+	// to switch.
+	AmpSwitch string
+	// Volume is the hardware volume the speaker sits at unity on while
+	// audio is live (the user's level is applied in software), and mutes
+	// with around stream and amp changes.
+	Volume Volume
+	// Jack is what each plug position writes; the speaker reconciles the
+	// same controls against Android's HAL rewriting them.
+	Jack Jack
 	// AmpMute is a mixer switch that silences the amplifier while On. The
 	// codec driver sets it at every stream open and close, so the speaker
 	// releases it once its stream runs. "" when the board has none: biscuit
@@ -61,6 +78,19 @@ type Speaker struct {
 	BassGuard BassBand
 	// Voicing is nil until the board's driver has been measured.
 	Voicing *Voicing
+}
+
+// Volume is a hardware volume control and its silent and 0dB values.
+type Volume struct {
+	Control     string
+	Mute, Unity string
+}
+
+// Jack is the mixer writes for a plug going in and coming out, in order. The
+// speaker's amplifier goes off first on Insert and on last on Remove, so
+// nothing is switched under a playing speaker.
+type Jack struct {
+	Insert, Remove []Ctl
 }
 
 // CodecFilter is a byte control whose values are read from the audio HAL's
@@ -126,12 +156,16 @@ type PCMAddr struct{ Card, Device int }
 // biscuitHardware: names read off VVV (FireOS 5.5.5.4) on 2026-10-04, numbers
 // as every build before this one opened them.
 var biscuitHardware = &Hardware{
-	DotKeys:     Input{Name: "mtk-kpd", Fallback: "/dev/input/event1"},
-	VolumeKeys:  Input{Name: "keys", Fallback: "/dev/input/event2"},
+	Keys: []Input{
+		{Name: "mtk-kpd", Fallback: "/dev/input/event1"}, // action, mute
+		{Name: "keys", Fallback: "/dev/input/event2"},    // volume
+	},
 	LEDRing:     I2C{Driver: "is31fl3236", Fallback: "/sys/devices/soc/11007000.i2c/i2c-0/0-003f"},
 	MuteLEDGPIO: "444",
 	Capture:     PCM{Name: "TLV320AIC3101 Capture", Fallback: &PCMAddr{0, 24}},
 	Playback:    PCM{Name: "TLV320AIC3204 Playback", Fallback: &PCMAddr{0, 23}},
+	Routes:      tlvRoutes,
+	InputGains:  tlvInputGains,
 	// Which one is fitted differs by batch (#90). Never the 2584's
 	// calibrated_lux: reading it corrupts kernel memory.
 	LightSensors: []LightSensor{
@@ -140,8 +174,11 @@ var biscuitHardware = &Hardware{
 	},
 	// MediaTek's combo-chip (WMT) Bluetooth node.
 	HCI: "/dev/stpbt",
-	// Read off biscuit's MBCL.cfg (#229).
 	Speaker: Speaker{
+		AmpSwitch: tlvAmp,
+		Volume:    tlvVolume,
+		Jack:      tlvJack,
+		// Read off biscuit's MBCL.cfg (#229).
 		BassGuard: BassBand{CrossoverHz: 115, ThresholdDb: -50},
 		Voicing:   biscuitVoicing,
 	},
@@ -152,15 +189,19 @@ var biscuitHardware = &Hardware{
 // differs is the speaker. No number fallbacks: radar has no builds from
 // before boards were told apart.
 var radarHardware = &Hardware{
-	DotKeys:    Input{Name: "mtk-kpd"},
-	VolumeKeys: Input{Name: "keys"},
+	Keys:       []Input{{Name: "mtk-kpd"}, {Name: "keys"}},
 	LEDRing:    I2C{Driver: "is31fl3236"},
 	Capture:    PCM{Name: "TLV320AIC3101 Capture"},
 	Playback:   PCM{Name: "TLV320AIC3204 Playback"},
+	Routes:     tlvRoutes,
+	InputGains: tlvInputGains,
 	// Only the 2540 has been seen on radar (035T, 07MU).
 	LightSensors: []LightSensor{{Driver: "tsl2540", Attr: "als_lux", Bus: BusI2C}},
 	HCI:          "/dev/stpbt",
 	Speaker: Speaker{
+		AmpSwitch: tlvAmp,
+		Volume:    tlvVolume,
+		Jack:      tlvJack,
 		// Measured on 035T: the driver logs amp_mute=1 at every stream
 		// open and close, and the speaker is silent until this is Off.
 		AmpMute: "MFP Gpio Mute",
@@ -179,6 +220,43 @@ var radarHardware = &Hardware{
 	},
 }
 
+// donutHardware: read off 41C8 (FireOS 6.5.7.5, NS6575) on 2026-10-24. An
+// MT8167 board with its own audio layout: two tlv320aic3101 channels on a
+// 4-channel TDM capture and a TAS2770 amplifier on DL1. No number fallbacks.
+var donutHardware = &Hardware{
+	// gpio-keys carries action (KEY_HELP) and volume; Amazon's privacy
+	// driver delivers the mute button.
+	Keys:    []Input{{Name: "gpio-keys"}, {Name: "gpio-privacy"}},
+	LEDRing: I2C{Driver: "is31fl3236"},
+	// The mute LED is the privacy driver's (gpio 494), lit without us, and
+	// gpio444 here is SoC pin 57 in its audio function: exporting it kills
+	// the amplifier until reboot (@shortgame11's port). So none is stated.
+	//
+	// The mics are "TDM_Capture", 4 channels of S32_LE at 16kHz, which the
+	// capture path does not read yet, so no capture is stated and the board
+	// runs button-only.
+	Playback:   PCM{Name: "DL1_Playback"},
+	Routes:     donutRoutes,
+	InputGains: donutInputGains,
+	// The i2c bus also lists an opt3001 at 0-0044 with no driver bound.
+	// Never calibrated_lux, as on biscuit's tsl2584.
+	LightSensors: []LightSensor{{Driver: "tsl2572", Attr: "in_illuminance0_input", Bus: BusIIO}},
+	// /dev/stpbt exists, but the radio behind it reads differently from
+	// biscuit's (@technotiger on #527), so the proxy is off until measured.
+	Speaker: Speaker{
+		Volume: donutVolume,
+		Jack:   donutJack,
+		// Stock's speaker path, written before the stream opens.
+		Setup: []Ctl{
+			{"Audio Amp Playback Volume", []string{"0", "0"}},
+			{"LINEOUT Mux", []string{"VOICE_AMP"}},
+			{"HPOUT Mux", []string{"OPEN"}},
+		},
+		// Biscuit's band until the Dot 3's driver is measured.
+		BassGuard: BassBand{CrossoverHz: 115, ThresholdDb: -50},
+	},
+}
+
 // Layout is a board's Hardware resolved on the running device: what the
 // bindings open.
 type Layout struct {
@@ -187,9 +265,10 @@ type Layout struct {
 	// boards were told apart.
 	Board *Board
 
-	DotKeys    string // /dev/input/eventN, "" when not found
-	VolumeKeys string
-	LEDRing    string // sysfs directory, "" when not found
+	// Keys are the input devices found, /dev/input/eventN, in the board's
+	// order; a device not found is left out and reported.
+	Keys    []string
+	LEDRing string // sysfs directory, "" when not found
 	// MuteLEDGPIO is "" when the board has no mute LED GPIO to drive.
 	MuteLEDGPIO string
 	Capture     *PCMAddr // nil when not found
@@ -200,9 +279,10 @@ type Layout struct {
 	// switched on.
 	LightSensors []LightSensor
 	HCI          string
-	// Speaker is the board's statement too; its filter is read by the
-	// speaker, which owns the codec.
-	Speaker Speaker
+	// Routes, InputGains and Speaker are the board's statements too, written
+	// by the codec and the speaker.
+	Routes, InputGains []Ctl
+	Speaker            Speaker
 
 	// Notes has one line per part saying how it was found, for the log.
 	Notes []string
@@ -218,7 +298,8 @@ func Resolve(root string, b *Board) *Layout {
 	if b != nil && b.Hardware != nil {
 		hw = b.Hardware
 	}
-	l := &Layout{Board: b, MuteLEDGPIO: hw.MuteLEDGPIO, LightSensors: hw.LightSensors, HCI: hw.HCI, Speaker: hw.Speaker}
+	l := &Layout{Board: b, MuteLEDGPIO: hw.MuteLEDGPIO, LightSensors: hw.LightSensors, HCI: hw.HCI,
+		Routes: hw.Routes, InputGains: hw.InputGains, Speaker: hw.Speaker}
 	note := func(part, want, got string, err error) {
 		var line string
 		switch {
@@ -253,8 +334,11 @@ func Resolve(root string, b *Board) *Layout {
 		note(part, want.Name, got, err)
 		return a
 	}
-	l.DotKeys = input("dot keys", hw.DotKeys)
-	l.VolumeKeys = input("volume keys", hw.VolumeKeys)
+	for _, k := range hw.Keys {
+		if p := input("keys", k); p != "" {
+			l.Keys = append(l.Keys, p)
+		}
+	}
 	dir, err := I2CDevice(root, hw.LEDRing.Driver)
 	if err != nil {
 		dir = hw.LEDRing.Fallback

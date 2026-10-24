@@ -238,10 +238,11 @@ async def reconcile(device_id: str, live) -> bool:
     effective = await loop.run_in_executor(
         None, db.get_effective_device_config, device_id
     )
-    # Firmware that cannot load a runtime can use none of this. The wake word
-    # MODE is deliberately not checked: every device carries the full set, so
-    # a mode switch never waits on an install (em_oww_assets.reconcile_action).
-    if not live.oww_shadow_capable:
+    # Firmware that cannot load a runtime can use none of this, and neither can
+    # an Echo with no microphone it can read. The wake word MODE is
+    # deliberately not checked: every device carries the full set, so a mode
+    # switch never waits on an install (em_oww_assets.reconcile_action).
+    if not live.oww_shadow_capable or not live.mic_capable:
         return True
     mode_off = em_shadow.normalise_mode(effective.get("owwOnDevice")) == em_shadow.MODE_OFF
 

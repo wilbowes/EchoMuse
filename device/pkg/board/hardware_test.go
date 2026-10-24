@@ -20,8 +20,8 @@ func TestBiscuitResolvesToTheNumbersItAlwaysUsed(t *testing.T) {
 		t.Fatalf("fixture detected as %v", IDOf(b))
 	}
 	l := Resolve(biscuitFOS5, b)
-	if l.DotKeys != "/dev/input/event1" || l.VolumeKeys != "/dev/input/event2" {
-		t.Errorf("keys: dot %q volume %q", l.DotKeys, l.VolumeKeys)
+	if want := []string{"/dev/input/event1", "/dev/input/event2"}; !reflect.DeepEqual(l.Keys, want) {
+		t.Errorf("keys %q, want %q", l.Keys, want)
 	}
 	if want := filepath.Join(biscuitFOS5, "/sys/bus/i2c/devices/0-003f"); l.LEDRing != want {
 		t.Errorf("led ring %q, want %q", l.LEDRing, want)
@@ -58,8 +58,8 @@ func TestRadarResolvesByNameOnly(t *testing.T) {
 		t.Fatalf("fixture detected as %v", IDOf(b))
 	}
 	l := Resolve(radarFOS6, b)
-	if l.DotKeys != "/dev/input/event1" || l.VolumeKeys != "/dev/input/event2" {
-		t.Errorf("keys: dot %q volume %q", l.DotKeys, l.VolumeKeys)
+	if want := []string{"/dev/input/event1", "/dev/input/event2"}; !reflect.DeepEqual(l.Keys, want) {
+		t.Errorf("keys %q, want %q", l.Keys, want)
 	}
 	if want := filepath.Join(radarFOS6, "/sys/bus/i2c/devices/0-003f"); l.LEDRing != want {
 		t.Errorf("led ring %q, want %q", l.LEDRing, want)
@@ -77,6 +77,83 @@ func TestRadarResolvesByNameOnly(t *testing.T) {
 	}
 	if l.Speaker.AmpMute == "" || l.Speaker.Filter == nil {
 		t.Errorf("speaker %+v: radar is silent without its amp mute and filter", l.Speaker)
+	}
+}
+
+// testdata/donut-fireos6 is 41C8 (FireOS 6.5.7.5, NS6575) on 2026-10-24.
+// Its own layout: no part shares biscuit's input or PCM names.
+const donutFOS6 = "testdata/donut-fireos6"
+
+func TestDonutResolvesByNameOnly(t *testing.T) {
+	b := Detect(donutFOS6)
+	if b != Donut {
+		t.Fatalf("fixture detected as %v", IDOf(b))
+	}
+	l := Resolve(donutFOS6, b)
+	if want := []string{"/dev/input/event3", "/dev/input/event1"}; !reflect.DeepEqual(l.Keys, want) {
+		t.Errorf("keys %q, want %q", l.Keys, want)
+	}
+	if want := filepath.Join(donutFOS6, "/sys/bus/i2c/devices/0-003f"); l.LEDRing != want {
+		t.Errorf("led ring %q, want %q", l.LEDRing, want)
+	}
+	if l.Playback == nil || *l.Playback != (PCMAddr{0, 6}) {
+		t.Errorf("playback %+v, want card 0 device 6", l.Playback)
+	}
+	// The capture path reads 9 channels of S24_3LE and the Dot 3 has 4 of
+	// S32_LE, so it runs without mics and the controller is told why.
+	if l.Capture != nil || len(l.Problems) != 1 || !strings.HasPrefix(l.Problems[0], "capture:") {
+		t.Errorf("capture %+v, problems %q", l.Capture, l.Problems)
+	}
+	if l.MuteLEDGPIO != "" || l.HCI != "" {
+		t.Errorf("mute LED gpio %q, hci %q: neither is measured on the Dot 3", l.MuteLEDGPIO, l.HCI)
+	}
+	if l.Speaker.AmpSwitch != "" || l.Speaker.Volume.Unity != "255" {
+		t.Errorf("speaker %+v: the TAS2770 has no amp switch and unity at 255", l.Speaker)
+	}
+}
+
+// A board's codec state is all it has to make sound with: no routes is a
+// powered-down codec, no volume a speaker at the kernel's level, and a jack
+// table whose two sides touch different controls is one the reconciler can
+// only half check.
+func TestEveryBoardStatesItsCodec(t *testing.T) {
+	for _, b := range Known {
+		hw := b.Hardware
+		if len(hw.Routes) == 0 {
+			t.Errorf("%s: no codec routes", b.ID)
+		}
+		v := hw.Speaker.Volume
+		if v.Control == "" || v.Mute == "" || v.Unity == "" || v.Mute == v.Unity {
+			t.Errorf("%s: volume %+v", b.ID, v)
+		}
+		j := hw.Speaker.Jack
+		if len(j.Insert) == 0 || len(j.Insert) != len(j.Remove) {
+			t.Fatalf("%s: jack %+v", b.ID, j)
+		}
+		in := map[string]bool{}
+		for _, c := range j.Insert {
+			in[c.Name] = true
+		}
+		for _, c := range j.Remove {
+			if !in[c.Name] {
+				t.Errorf("%s: jack removal writes %q, which insertion does not", b.ID, c.Name)
+			}
+		}
+		all := append(append(append(append([]Ctl{}, hw.Routes...), hw.InputGains...), j.Insert...), j.Remove...)
+		for _, c := range append(all, hw.Speaker.Setup...) {
+			if c.Name == "" || len(c.Values) == 0 {
+				t.Errorf("%s: empty write %+v", b.ID, c)
+			}
+		}
+		// The amp is the first thing silenced on insert and the last thing
+		// restored on removal, whichever control silences it.
+		amp := hw.Speaker.AmpSwitch
+		if amp == "" {
+			amp = v.Control
+		}
+		if j.Insert[0].Name != amp || j.Remove[len(j.Remove)-1].Name != amp {
+			t.Errorf("%s: the jack must silence %q first and restore it last", b.ID, amp)
+		}
 	}
 }
 
@@ -103,8 +180,8 @@ func TestPartsAreFoundWhereverTheyEnumerate(t *testing.T) {
 		"/sys/bus/i2c/devices/3-003f/name": "is31fl3236\n",
 	})
 	l := Resolve(root, Biscuit)
-	if l.DotKeys != "/dev/input/event5" || l.VolumeKeys != "/dev/input/event0" {
-		t.Errorf("keys: dot %q volume %q", l.DotKeys, l.VolumeKeys)
+	if want := []string{"/dev/input/event5", "/dev/input/event0"}; !reflect.DeepEqual(l.Keys, want) {
+		t.Errorf("keys %q, want %q", l.Keys, want)
 	}
 	if l.Capture == nil || *l.Capture != (PCMAddr{0, 0}) {
 		t.Errorf("capture %+v", l.Capture)
@@ -121,7 +198,7 @@ func TestPartsAreFoundWhereverTheyEnumerate(t *testing.T) {
 // has always used, and every part says so.
 func TestBiscuitFallsBackToItsNumbersAndSaysSo(t *testing.T) {
 	l := Resolve(t.TempDir(), Biscuit)
-	if l.DotKeys != "/dev/input/event1" || l.VolumeKeys != "/dev/input/event2" ||
+	if !reflect.DeepEqual(l.Keys, []string{"/dev/input/event1", "/dev/input/event2"}) ||
 		l.LEDRing != "/sys/devices/soc/11007000.i2c/i2c-0/0-003f" ||
 		l.Capture == nil || *l.Capture != (PCMAddr{0, 24}) ||
 		l.Playback == nil || *l.Playback != (PCMAddr{0, 23}) {
@@ -144,7 +221,7 @@ func TestUnknownBoardKeepsBiscuitsLayout(t *testing.T) {
 	if l.Board != nil {
 		t.Errorf("Board = %v, want nil", l.Board.ID)
 	}
-	if l.DotKeys != "/dev/input/event1" || l.MuteLEDGPIO != "444" {
+	if len(l.Keys) != 2 || l.Keys[0] != "/dev/input/event1" || l.MuteLEDGPIO != "444" {
 		t.Errorf("layout %+v", l)
 	}
 }
@@ -153,13 +230,13 @@ func TestUnknownBoardKeepsBiscuitsLayout(t *testing.T) {
 // states no mute LED GPIO has none driven.
 func TestNoFallbackMeansNotAvailable(t *testing.T) {
 	other := &Board{ID: "other", Hardware: &Hardware{
-		DotKeys:  Input{Name: "gpio-keys"},
+		Keys:     []Input{{Name: "gpio-keys"}},
 		LEDRing:  I2C{Driver: "is31fl3236"},
 		Capture:  PCM{Name: "TDM_Capture"},
 		Playback: PCM{Name: "DL1_Playback"},
 	}}
 	l := Resolve(biscuitFOS5, other)
-	if l.DotKeys != "" || l.VolumeKeys != "" || l.Capture != nil || l.Playback != nil {
+	if len(l.Keys) != 0 || l.Capture != nil || l.Playback != nil {
 		t.Errorf("parts this device does not have were resolved: %+v", l)
 	}
 	if l.MuteLEDGPIO != "" {
@@ -262,5 +339,82 @@ func TestI2CDevice(t *testing.T) {
 	}
 	if _, err := I2CDevice(root, "absent"); err == nil {
 		t.Error("an absent name must be an error")
+	}
+}
+
+// The routes biscuit and radar need, both ends: the capture DIFFERENTIAL
+// inputs into all four ADCs (the single-ended "IN2" switches beside them are
+// the wrong ones), and the DAC into the output mixer. A wrong name is silence
+// rather than an error, and either end alone is a device whose every log
+// looks healthy.
+func TestTLVRoutesCoverBothEndsOfTheAudioPath(t *testing.T) {
+	want := map[string]bool{
+		"HPR Output Mixer R_DAC Switch": true,
+		"HPL Output Mixer L_DAC Switch": true,
+	}
+	for _, adc := range []string{"A", "B", "C", "D"} {
+		for _, side := range []string{"L", "R"} {
+			want["ADC_"+adc+" "+map[string]string{"L": "Left", "R": "Right"}[side]+" Ip Select ADC_"+adc+" DIF1_"+side+" switch"] = true
+		}
+	}
+	checkTable(t, tlvRoutes, want, "1")
+}
+
+// A level, not a route, so a wrong one is quieter rather than silent: every
+// channel of every ADC, and OFF, as the HAL leaves it (#806).
+func TestTLVInputGainsCoverEveryChannelAndAreOff(t *testing.T) {
+	want := map[string]bool{}
+	for _, adc := range []string{"A", "B", "C", "D"} {
+		for _, side := range []string{"L", "R"} {
+			want["ADC_"+adc+" DIF1_"+side+" Input Gain"] = true
+		}
+	}
+	checkTable(t, tlvInputGains, want, "0")
+}
+
+func checkTable(t *testing.T, table []Ctl, want map[string]bool, value string) {
+	t.Helper()
+	got := map[string]bool{}
+	for _, c := range table {
+		if got[c.Name] {
+			t.Errorf("%s listed twice", c.Name)
+		}
+		if len(c.Values) != 1 || c.Values[0] != value {
+			t.Errorf("%s: %v, want %q", c.Name, c.Values, value)
+		}
+		got[c.Name] = true
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("table %v\nwant  %v", got, want)
+	}
+}
+
+// Biscuit's jack, measured against stock (codec.go). A gain left unset, or
+// set to 0 (the floor of 0..35), is a silent jack; the pair takes both
+// channels; the DAC mux goes On with a plug in (#566) and Off without.
+func TestTLVJackIsStocks(t *testing.T) {
+	value := func(ctls []Ctl, name string) []string {
+		for _, c := range ctls {
+			if c.Name == name {
+				return c.Values
+			}
+		}
+		return nil
+	}
+	cases := []struct {
+		ctls      []Ctl
+		gain, mux string
+	}{{tlvJack.Insert, "11", "On"}, {tlvJack.Remove, "6", "Off"}}
+	for _, c := range cases {
+		g := value(c.ctls, "HP Driver Gain Volume")
+		if len(g) != 2 || g[0] != c.gain || g[1] != c.gain {
+			t.Errorf("HP driver gain %v, want %s on both channels", g, c.gain)
+		}
+		if m := value(c.ctls, "Audio_DacMux_Setting"); len(m) != 1 || m[0] != c.mux {
+			t.Errorf("DAC mux %v, want %s", m, c.mux)
+		}
+	}
+	if tlvJack.Insert[0].Values[0] != "Off" || tlvJack.Remove[2].Values[0] != "On" {
+		t.Errorf("amp: insert %v, remove %v", tlvJack.Insert[0], tlvJack.Remove[2])
 	}
 }

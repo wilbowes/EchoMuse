@@ -36,7 +36,7 @@ func NewMicrophone() (*PcmMicrophone, error) {
 	// The capture PCM is found by name (pkg/board), never by device number.
 	capture := board.CurrentLayout().Capture
 	if capture == nil {
-		return nil, errors.New("mic: capture PCM not found on this board")
+		return nil, errors.New("no microphone this firmware can read on this board")
 	}
 	device := tinyalsa.NewDevice(capture.Card, capture.Device, pcm.Config{
 		Channels:    9,

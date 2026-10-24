@@ -32,14 +32,14 @@ func TestSetPassesNameAndValues(t *testing.T) {
 	f := &fake{}
 	Use(f)
 	defer Use(unavailable{})
-	if err := Set(PlaybackVolume, "100", "100"); err != nil {
+	if err := Set("PCM Playback Volume", "100", "100"); err != nil {
 		t.Fatal(err)
 	}
 	want := [][]string{{"PCM Playback Volume", "100", "100"}}
 	if !reflect.DeepEqual(f.sets, want) {
 		t.Fatalf("got %v", f.sets)
 	}
-	if err := Set(SpeakerAmp); err == nil {
+	if err := Set("Ext_Speaker_Amp_Switch"); err == nil {
 		t.Fatal("a write with no value must be refused")
 	}
 }
@@ -48,7 +48,7 @@ func TestFailuresAreReturnedEveryTime(t *testing.T) {
 	Use(&fake{fail: true})
 	defer Use(unavailable{})
 	for i := 0; i < 3; i++ {
-		if Set(SpeakerAmp, "On") == nil {
+		if Set("Ext_Speaker_Amp_Switch", "On") == nil {
 			t.Fatalf("attempt %d: error swallowed", i)
 		}
 	}
@@ -56,10 +56,10 @@ func TestFailuresAreReturnedEveryTime(t *testing.T) {
 
 func TestHostBuildHasNoBackend(t *testing.T) {
 	Use(unavailable{})
-	if Set(SpeakerAmp, "On") == nil {
+	if Set("Ext_Speaker_Amp_Switch", "On") == nil {
 		t.Fatal("a build with no mixer must not report success")
 	}
-	if _, err := Get(SpeakerAmp); err == nil {
+	if _, err := Get("Ext_Speaker_Amp_Switch"); err == nil {
 		t.Fatal("a build with no mixer must not report a value")
 	}
 }
