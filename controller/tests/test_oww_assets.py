@@ -602,3 +602,18 @@ def test_no_install_asks_for_a_restart():
     route = _sources.code_only(_sources.def_source("em_routes_oww._post_oww_assets"))
     assert "em_oww_sync.push_config(" in route, (
         "the dashboard's install must tell the device to rebuild its scorer")
+
+
+def test_runtime_dir_env_override(monkeypatch):
+    # A controller run from source has no /app. The override must move the
+    # runtime, and an empty value (a blank line in .env) must not replace
+    # the image's path with "".
+    import importlib
+    try:
+        monkeypatch.setenv("EM_OWW_RUNTIME_DIR", "/opt/em/oww_runtime")
+        assert importlib.reload(A).RUNTIME_DIR == "/opt/em/oww_runtime"
+        monkeypatch.setenv("EM_OWW_RUNTIME_DIR", "")
+        assert importlib.reload(A).RUNTIME_DIR == "/app/models/oww_runtime"
+    finally:
+        monkeypatch.delenv("EM_OWW_RUNTIME_DIR", raising=False)
+        importlib.reload(A)
