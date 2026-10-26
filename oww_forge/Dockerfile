@@ -10,7 +10,7 @@
 # without re-checking train.py's import.
 
 # Pinned by the multi-arch index digest; Dependabot moves it with the tag.
-FROM python:3.11-slim@sha256:e88e9763f943ec1834f992a4b51e0f24500486803e8bc534e5767af9ea65f6ce
+FROM python:3.11-slim@sha256:b7a9e5f6a93d6d4a31f129bbd4bdee69efccb6ded0fb230d78aafaf37af98377
 
 ARG GPU=0
 
