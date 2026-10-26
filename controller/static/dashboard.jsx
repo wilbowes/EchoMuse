@@ -5564,6 +5564,24 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         }
         const show = ms => [...ms].sort()
           .map(([n, d]) => `${n} → ${d}`).join(', ');
+        // _x on the kernel and the bare name on a different partition, with no
+        // _amonet, is amonet v1's table under a v2 unlock whose restore never
+        // ran (#712, #1056). Still refused, but it is a known state with a
+        // known way out, so say so rather than ask for a report. Any other
+        // shape (#598's bare and _x on one partition) keeps asking.
+        const keys = [...aliasDevs.keys()];
+        const mixed = keys.every(n => n.endsWith('_x')
+          && bare.has(n.slice(0, -2)) && bare.get(n.slice(0, -2)) !== aliasDevs.get(n));
+        if (mixed) {
+          return { ok: false, target, names, reason:
+            `The by-name map carries ${show(aliasDevs)}`
+            + (bare.size ? ` and ${show(bare)}` : '')
+            + ', which is amonet v1\'s partition table under a v2 unlock. Installing v2 '
+            + 'should have restored the original table, and on this Echo it has not. '
+            + 'Nothing has been read or written. Reflashing FireOS will not change it. '
+            + 'See the FAQ: https://github.com/wilbowes/EchoMuse/blob/main/docs/faq.md'
+            + '#the-wizard-stops-at-escrow-boot-image-and-mentions-boot_a_x' };
+        }
         return { ok: false, target, names, reason:
           `/dev/block/other-boot does not exist, but the by-name map carries `
           + `${show(aliasDevs)} — which belongs to the older amonet layout, `
