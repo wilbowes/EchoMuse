@@ -738,7 +738,8 @@ async def run_update(io) -> str:
     await io.step(f"Building emOS {version} for this device's {arch} kernel")
     try:
         info = await io.offload(build.build_emos_image, reference, init_bin,
-                                version, "", sbin, None)
+                                version, "", sbin, None,
+                                getattr(io, "board", None))
     except build.BuildError as e:
         raise Refused(f"{e}" + UNCHANGED)
     image = info["image"]

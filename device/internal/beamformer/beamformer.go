@@ -1,14 +1,13 @@
-// Package beamformer implements directional mic selection for the
-// Echo Dot Gen 2 (biscuit) 7-microphone array.
+// Package beamformer implements directional mic selection over a board's
+// microphone array.
 //
-// # Mic geometry (confirmed empirically, 2026-05)
+// # Mic geometry
 //
-// 6 perimeter mics at r=36mm, 60° intervals, 30° offset from 12 o'clock.
-// 1 centre mic. Ch7 and Ch8 are NOT mics: they are a stereo loopback of the
-// device's own playback — the hardware echo reference (see echoRefCh below
-// and SETUP.md's Mic Array section, measured 2026-08-29).
+// The array is the board's (pkg/board MicArray): its edge microphones with
+// their angles, the centre one if it has one, and any loopback channel in the
+// same frame. Biscuit's, confirmed empirically 2026-05:
 //
-//	Ch0 → MK1 → 330°  (11 o'clock)  confirmed empirically 2026-05
+//	Ch0 → MK1 → 330°  (11 o'clock)
 //	Ch1 → MK2 →  30°  ( 1 o'clock)
 //	Ch2 → MK3 →  90°  ( 3 o'clock)
 //	Ch3 → MK4 → 150°  ( 5 o'clock)
@@ -25,13 +24,14 @@
 // gets a meaningful onset ratio the instant beamforming is turned on.
 //
 // Output channel is determined by lock state, not by the config flag:
-//   - Unlocked: always ch6 (centre/omni). Covers OWW listening and any turn
-//     where Lock() was a no-op (beamforming disabled).
+//   - Unlocked: the wake microphone, the centre one unless wakeMic picks an
+//     edge one. Covers OWW listening and any turn where Lock() was a no-op
+//     (beamforming disabled).
 //   - Locked: the perimeter mic selected at Lock() time, or the mic nearest
 //     to BeamAngle if a fixed steering direction is configured.
 //
 // BeamformingEnabled only gates Lock() — if false, Lock() is a no-op and
-// the device stays on ch6 for both OWW and voice turns.
+// the device stays on the wake microphone for both OWW and voice turns.
 //
 // # Direction estimation
 //
@@ -51,32 +51,14 @@ package beamformer
 import (
 	"log"
 	"math"
+
+	"github.com/wilbowes/EchoMuse/pkg/board"
 )
 
 const (
 	// ALSA stream parameters — must match pcm_microphone.go
-	nChannels    = 9
 	sampleRate   = 16000
-	byteSample   = 3                      // S24_3LE
-	frameSize    = nChannels * byteSample // 27 bytes per frame
 	periodFrames = 512
-
-	// Number of candidate steering directions — one per perimeter mic
-	nDirections = 6
-
-	// Centre mic channel — used for wake word detection (omnidirectional)
-	centreCh = 6
-	// NumMics is the number of microphone channels, ch0-ch6.
-	NumMics = 7
-
-	// Hardware echo reference — NOT a microphone. Ch7 and Ch8 are a stereo
-	// loopback of the device's own playback, arriving in the same TDM frame
-	// as the mic samples, and the internal driver plays the RIGHT channel
-	// only (measured 2026-08-29: left silent gives 55dB less at the mic; see
-	// SETUP.md's Mic Array section). So ch8 is the reference and ch7 carries
-	// a signal the speaker never emits — using ch7 would be cancelling
-	// against audio nobody heard.
-	echoRefCh = 8
 
 	// Smoothing constants
 	smoothAlpha   = 0.9   // fast smoother (~320ms time constant at 32ms/period)
@@ -93,43 +75,26 @@ const (
 	burstTopN      = 8  // periods averaged for a direction's burst (~256ms)
 )
 
-// micAngles defines the physical angle (degrees, clockwise from 12 o'clock)
-// for each ALSA channel. Index = channel number.
-// Confirmed empirically 2026-05 via tone injection + analyse_capture.py.
-var micAngles = [7]float64{
-	330, // ch0 — MK1
-	30,  // ch1 — MK2
-	90,  // ch2 — MK3
-	150, // ch3 — MK4
-	210, // ch4 — MK5
-	270, // ch5 — MK6
-	0,   // ch6 — MK7 centre
-}
-
-// candidateAngles are the steering directions tested for direction estimation.
-// One per perimeter mic, matching the mic positions exactly.
-var candidateAngles = [nDirections]float64{330, 30, 90, 150, 210, 270}
-
-// directionToChannel maps candidateAngles index → ALSA channel number for
-// the perimeter mic at that direction.
-//
-//	candidateAngles[0]=330° → ch0 (MK1)
-//	candidateAngles[1]=30°  → ch1 (MK2)
-//	candidateAngles[2]=90°  → ch2 (MK3)
-//	candidateAngles[3]=150° → ch3 (MK4)
-//	candidateAngles[4]=210° → ch4 (MK5)
-//	candidateAngles[5]=270° → ch5 (MK6)
-var directionToChannel = [nDirections]int{0, 1, 2, 3, 4, 5}
-
 // Beamformer holds direction estimation state and locked mic selection.
 type Beamformer struct {
+	// The array, from the board. A direction is an index into perimeter:
+	// candidateAngles[d] is its angle and directionToChannel[d] its channel.
+	nDirections        int
+	nMics              int
+	frameSize          int // bytes per frame, every channel
+	sampleBytes        int // bytes per sample: 3 for S24_3LE, 4 for S32_LE
+	centreCh           int // -1 when the board has no centre microphone
+	echoRefCh          int // -1 when the frame carries no loopback
+	candidateAngles    []float64
+	directionToChannel []int
+
 	// energySmooth: fast EWMA of per-direction HF energy (~320ms time constant).
 	// Tracks speech onset.
-	energySmooth [nDirections]float64
+	energySmooth []float64
 
 	// energyBaseline: slow EWMA of per-direction HF energy (~10s time constant).
 	// Tracks steady background noise (TV, fan, etc.).
-	energyBaseline [nDirections]float64
+	energyBaseline []float64
 
 	// baselineReady counts periods until baseline is initialised (~3s warmup).
 	baselineReady int
@@ -139,13 +104,13 @@ type Beamformer struct {
 	// period while unlocked; frozen during a locked turn so a follow-up
 	// continuation lock still sees the window around the last utterance
 	// rather than only what came after it.
-	energyHistory [historyPeriods][nDirections]float64
+	energyHistory [historyPeriods][]float64
 	historyIdx    int
 	historyCount  int
 
-	// wakeMic selects the unlocked output: 0 = centre (ch6), 1-6 = MK1-MK6
-	// (ch0-5). Set from the streaming goroutine that calls Process, so it
-	// needs no lock.
+	// wakeMic selects the unlocked output: 0 = the centre microphone, 1-N =
+	// the edge microphones in steering order (MK1-MK6 on biscuit). Set from
+	// the streaming goroutine that calls Process, so it needs no lock.
 	wakeMic int
 
 	// lockedChannel is the ALSA channel selected at gate open.
@@ -163,29 +128,58 @@ type Beamformer struct {
 	// warm. Only the analysis path reuses buffers — extractChannel still
 	// returns a fresh allocation per period because data.go's preroll
 	// ring retains those slices across periods.
-	chanBuf [nDirections][]float32
-	hfBuf   [nDirections][]float32
+	chanBuf [][]float32
+	hfBuf   [][]float32
 
 	// micBuf holds the microphones MicChannels extracts beside the one in
 	// use, reused across periods: nothing keeps them past the canceller.
-	micBuf [NumMics][]byte
+	micBuf [][]byte
 }
 
-// New creates a Beamformer.
-func New() *Beamformer {
-	b := &Beamformer{lockedChannel: -1}
-	for ci := 0; ci < nDirections; ci++ {
-		b.chanBuf[ci] = make([]float32, periodFrames)
-		b.hfBuf[ci] = make([]float32, periodFrames)
+// New creates a Beamformer for a board's microphone array.
+func New(a board.MicArray) *Beamformer {
+	n := len(a.Perimeter)
+	b := &Beamformer{
+		lockedChannel:      -1,
+		nDirections:        n,
+		nMics:              a.NumMics(),
+		frameSize:          a.Channels * a.Format.Bytes(),
+		sampleBytes:        a.Format.Bytes(),
+		centreCh:           a.Centre,
+		echoRefCh:          a.EchoRef,
+		candidateAngles:    make([]float64, n),
+		directionToChannel: make([]int, n),
+		energySmooth:       make([]float64, n),
+		energyBaseline:     make([]float64, n),
+		chanBuf:            make([][]float32, n),
+		hfBuf:              make([][]float32, n),
+		micBuf:             make([][]byte, a.NumMics()),
+	}
+	for d, m := range a.Perimeter {
+		b.candidateAngles[d], b.directionToChannel[d] = m.Angle, m.Ch
+		b.chanBuf[d] = make([]float32, periodFrames)
+		b.hfBuf[d] = make([]float32, periodFrames)
+	}
+	for i := range b.energyHistory {
+		b.energyHistory[i] = make([]float64, n)
 	}
 	return b
+}
+
+// NumMics is how many channels of each frame are microphones.
+func (b *Beamformer) NumMics() int { return b.nMics }
+
+// sampleOff is where channel ch's 24 bits start in a frame. An S32_LE sample
+// carries them in its top three bytes, so it is read as S24_3LE one byte in.
+func (b *Beamformer) sampleOff(ch int) int {
+	return ch*b.sampleBytes + b.sampleBytes - 3
 }
 
 // Lock selects the mic with the highest energy onset relative to its noise
 // floor baseline and holds it until Unlock.
 //
 // enabled is the BeamformingEnabled config flag. If false, Lock() is a no-op
-// and the beamformer continues outputting ch6 (centre/omni). This means the
+// and the beamformer continues outputting the wake mic. This means the
 // config flag only gates directional selection — not whether smoothers run.
 // Smoothers always run so the baseline is warm if beamforming is later enabled.
 //
@@ -195,10 +189,10 @@ func New() *Beamformer {
 // are meaningless when energyBaseline is near zero.
 func (b *Beamformer) Lock(enabled bool) {
 	if !enabled {
-		// Beamforming disabled — stay on ch6 (lockedChannel remains -1).
+		// Beamforming disabled — stay on the wake mic (lockedChannel remains -1).
 		// Smoothers are still running, so if beamforming is turned on later
 		// the baseline will already be warmed up.
-		log.Printf("[beam] Lock() called but beamforming disabled — staying on ch6 (omni)")
+		log.Printf("[beam] Lock() called but beamforming disabled — staying on ch%d", b.omniChannel())
 		return
 	}
 	if b.lockedChannel >= 0 {
@@ -214,7 +208,7 @@ func (b *Beamformer) Lock(enabled bool) {
 		// baseline. Immune to the detection latency that made live onset
 		// ratios pick a decayed, often unrelated direction.
 		bestScore = b.burstRatio(0)
-		for di := 1; di < nDirections; di++ {
+		for di := 1; di < b.nDirections; di++ {
 			r := b.burstRatio(di)
 			if r > bestScore {
 				bestScore = r
@@ -222,11 +216,11 @@ func (b *Beamformer) Lock(enabled bool) {
 			}
 		}
 		log.Printf("[beam] locked to ch%d (%.0f°) burst_ratio=%.2f (lock-back over %d periods)",
-			directionToChannel[best], candidateAngles[best], bestScore, b.historyCount)
+			b.directionToChannel[best], b.candidateAngles[best], bestScore, b.historyCount)
 	case b.baselineReady >= 100:
 		// History not populated yet (fresh start) — live onset ratio.
 		bestScore = b.onsetRatio(0)
-		for di := 1; di < nDirections; di++ {
+		for di := 1; di < b.nDirections; di++ {
 			r := b.onsetRatio(di)
 			if r > bestScore {
 				bestScore = r
@@ -234,22 +228,22 @@ func (b *Beamformer) Lock(enabled bool) {
 			}
 		}
 		log.Printf("[beam] locked to ch%d (%.0f°) onset_ratio=%.2f",
-			directionToChannel[best], candidateAngles[best], bestScore)
+			b.directionToChannel[best], b.candidateAngles[best], bestScore)
 	default:
 		// Baseline not ready — use raw smooth energy to avoid picking a
 		// direction based on a near-zero baseline inflating the ratio
 		bestScore = b.energySmooth[0]
-		for di := 1; di < nDirections; di++ {
+		for di := 1; di < b.nDirections; di++ {
 			if b.energySmooth[di] > bestScore {
 				bestScore = b.energySmooth[di]
 				best = di
 			}
 		}
 		log.Printf("[beam] locked to ch%d (%.0f°) energy=%.4f (baseline not ready)",
-			directionToChannel[best], candidateAngles[best], bestScore)
+			b.directionToChannel[best], b.candidateAngles[best], bestScore)
 	}
 
-	b.lockedChannel = directionToChannel[best]
+	b.lockedChannel = b.directionToChannel[best]
 }
 
 // onsetRatio returns energySmooth[di] / energyBaseline[di].
@@ -301,21 +295,26 @@ func (b *Beamformer) burstRatio(di int) float64 {
 	return burst / baseline
 }
 
-// SetWakeMic picks the mic the unlocked path reads: 0 = centre, 1-6 = MK1-MK6.
-// Anything else keeps the centre. Call from the goroutine that calls Process.
+// SetWakeMic picks the mic the unlocked path reads: 0 = centre, 1-N = the
+// edge microphones in steering order. Anything else keeps the centre. Call
+// from the goroutine that calls Process.
 func (b *Beamformer) SetWakeMic(m int) {
-	if m < 0 || m > nDirections {
+	if m < 0 || m > b.nDirections {
 		m = 0
 	}
 	b.wakeMic = m
 }
 
-// omniChannel is the ALSA channel the unlocked path reads.
+// omniChannel is the ALSA channel the unlocked path reads. A board with no
+// centre microphone listens on its first edge one.
 func (b *Beamformer) omniChannel() int {
-	if b.wakeMic >= 1 && b.wakeMic <= nDirections {
-		return directionToChannel[b.wakeMic-1]
+	if b.wakeMic >= 1 && b.wakeMic <= b.nDirections {
+		return b.directionToChannel[b.wakeMic-1]
 	}
-	return centreCh
+	if b.centreCh < 0 {
+		return b.directionToChannel[0]
+	}
+	return b.centreCh
 }
 
 // Unlock releases the locked mic selection.
@@ -339,9 +338,10 @@ func (b *Beamformer) Unlock() {
 // config state. The flag only affects Lock() behaviour (see Lock() docs).
 //
 // Output channel is determined by lock state alone:
-//   - Unlocked (lockedChannel == -1): always ch6 (centre/omni). This covers
-//     OWW listening and any voice turn where Lock() was a no-op (beamforming
-//     disabled). ch6 is equidistant from all directions — no directional bias.
+//   - Unlocked (lockedChannel == -1): the wake microphone (omniChannel). This
+//     covers OWW listening and any voice turn where Lock() was a no-op
+//     (beamforming disabled). A centre one is equidistant from all
+//     directions — no directional bias.
 //   - Locked, steerAngle >= 0 (fixed-beam): mic nearest to steerAngle. Config-
 //     driven direction, ignores the energy-based lock channel.
 //   - Locked, steerAngle < 0 (auto): the perimeter mic selected at Lock() time.
@@ -349,7 +349,7 @@ func (b *Beamformer) Unlock() {
 // angle is the estimated dominant source direction (0–360°, clockwise from
 // 12 o'clock), or -1 when unlocked.
 func (b *Beamformer) Process(raw []byte, steerAngle float64, gain float64) (mono []byte, angle float64) {
-	if len(raw) < periodFrames*frameSize {
+	if len(raw) < periodFrames*b.frameSize {
 		return b.extractChannel(raw, b.omniChannel(), gain), -1
 	}
 
@@ -360,7 +360,7 @@ func (b *Beamformer) Process(raw []byte, steerAngle float64, gain float64) (mono
 	b.bandDiff()
 	hfChannels := b.hfBuf
 
-	for di := range candidateAngles {
+	for di := range b.candidateAngles {
 		energy := hfEnergy(hfChannels, di)
 		b.energySmooth[di] = smoothAlpha*b.energySmooth[di] + (1-smoothAlpha)*energy
 
@@ -388,15 +388,15 @@ func (b *Beamformer) Process(raw []byte, steerAngle float64, gain float64) (mono
 		b.baselineReady++
 	}
 
-	// Unlocked: always ch6 (omni). Covers OWW listening and disabled-beamforming
-	// voice turns. No directional bias, no channel splices.
+	// Unlocked: the wake microphone. Covers OWW listening and
+	// disabled-beamforming voice turns. No channel splices.
 	if b.lockedChannel < 0 {
 		return b.extractChannel(raw, b.omniChannel(), gain), -1
 	}
 
 	// Locked — select output channel and reported angle.
 	bestDir := 0
-	for di := 1; di < nDirections; di++ {
+	for di := 1; di < b.nDirections; di++ {
 		if b.energySmooth[di] > b.energySmooth[bestDir] {
 			bestDir = di
 		}
@@ -404,10 +404,10 @@ func (b *Beamformer) Process(raw []byte, steerAngle float64, gain float64) (mono
 
 	if steerAngle >= 0 {
 		// Fixed-beam: config-driven direction, ignores energy-based lock
-		angle = candidateAngles[nearestDirection(steerAngle)]
+		angle = b.candidateAngles[b.nearestDirection(steerAngle)]
 	} else {
 		// Auto: use the channel selected at Lock() time
-		angle = candidateAngles[bestDir]
+		angle = b.candidateAngles[bestDir]
 	}
 
 	return b.extractChannel(raw, b.OutputChannel(steerAngle), gain), angle
@@ -421,7 +421,7 @@ func (b *Beamformer) OutputChannel(steerAngle float64) int {
 	case b.lockedChannel < 0:
 		return b.omniChannel()
 	case steerAngle >= 0:
-		return directionToChannel[nearestDirection(steerAngle)]
+		return b.directionToChannel[b.nearestDirection(steerAngle)]
 	}
 	return b.lockedChannel
 }
@@ -429,11 +429,11 @@ func (b *Beamformer) OutputChannel(steerAngle float64) int {
 // MicChannels returns every microphone of one raw buffer as S16_LE mono with
 // the mic gain applied, indexed by channel, for the per-microphone echo
 // canceller. selected is what Process returned for sel and is passed through
-// as that entry; the other six are valid until the next call. Their clipped
+// as that entry; the others are valid until the next call. Their clipped
 // samples are not counted: ClippedSamples describes the audio in use.
 func (b *Beamformer) MicChannels(raw []byte, gain float64, sel int, selected []byte) [][]byte {
-	out := make([][]byte, NumMics)
-	n := len(raw) / frameSize * 2
+	out := make([][]byte, b.nMics)
+	n := len(raw) / b.frameSize * 2
 	for ch := range out {
 		if ch == sel {
 			out[ch] = selected
@@ -443,16 +443,16 @@ func (b *Beamformer) MicChannels(raw []byte, gain float64, sel int, selected []b
 			b.micBuf[ch] = make([]byte, n)
 		}
 		out[ch] = b.micBuf[ch][:n]
-		extractInto(out[ch], raw, ch, gain)
+		extractInto(out[ch], raw, b.frameSize, b.sampleOff(ch), gain)
 	}
 	return out
 }
 
 // hfEnergy returns the mean squared HF energy for direction di.
-// hfChannels is indexed 0–5 by direction (matching decodeChannels output),
-// not by ALSA channel number — directionToChannel maps direction→channel
-// for audio extraction, but hfChannels uses direction as the index directly.
-func hfEnergy(hfChannels [6][]float32, di int) float64 {
+// hfChannels is indexed by direction (matching decodeChannels output), not
+// by ALSA channel number — directionToChannel maps direction→channel for
+// audio extraction, but hfChannels uses direction as the index directly.
+func hfEnergy(hfChannels [][]float32, di int) float64 {
 	n := len(hfChannels[0])
 	var energy float64
 	for _, v := range hfChannels[di] {
@@ -466,7 +466,7 @@ func hfEnergy(hfChannels [6][]float32, di int) float64 {
 // (fs/4), zero at 0Hz and 8kHz. Reuses hfBuf across periods (§3.5) — the
 // first two samples are cleared explicitly since the loop never writes them.
 func (b *Beamformer) bandDiff() {
-	for ci := 0; ci < nDirections; ci++ {
+	for ci := 0; ci < b.nDirections; ci++ {
 		in, out := b.chanBuf[ci], b.hfBuf[ci]
 		out[0], out[1] = 0, 0
 		for i := 2; i < len(in); i++ {
@@ -475,14 +475,14 @@ func (b *Beamformer) bandDiff() {
 	}
 }
 
-// decodeChannels decodes all 6 perimeter channels from a raw S24_3LE period
+// decodeChannels decodes every perimeter channel from a raw period
 // into chanBuf as float32 normalised to [-1, 1]. Reuses chanBuf across
 // periods (§3.5) — every element is overwritten, no clearing needed.
 func (b *Beamformer) decodeChannels(raw []byte) {
 	for i := 0; i < periodFrames; i++ {
-		base := i * frameSize
-		for ci := 0; ci < nDirections; ci++ {
-			offset := base + ci*byteSample
+		base := i * b.frameSize
+		for ci := 0; ci < b.nDirections; ci++ {
+			offset := base + b.sampleOff(b.directionToChannel[ci])
 			b.chanBuf[ci][i] = decodeS24Sample(raw[offset], raw[offset+1], raw[offset+2])
 		}
 	}
@@ -512,16 +512,16 @@ func decodeS24Sample(b0, b1, b2 byte) float32 {
 // the old upper-2-bytes behaviour bit-exactly. Samples outside int16
 // range are clamped and counted in clippedSamples.
 func (b *Beamformer) extractChannel(raw []byte, ch int, gain float64) []byte {
-	out := make([]byte, len(raw)/frameSize*2)
-	b.clippedSamples += extractInto(out, raw, ch, gain)
+	out := make([]byte, len(raw)/b.frameSize*2)
+	b.clippedSamples += extractInto(out, raw, b.frameSize, b.sampleOff(ch), gain)
 	return out
 }
 
 // extractInto is extractChannel's conversion into a buffer the caller owns
 // (len(raw)/frameSize samples), returning how many samples it clamped.
-func extractInto(out, raw []byte, ch int, gain float64) (clipped uint64) {
+// offset0 is the channel's sampleOff.
+func extractInto(out, raw []byte, frameSize, offset0 int, gain float64) (clipped uint64) {
 	n := len(raw) / frameSize
-	offset0 := ch * byteSample
 	gainQ := int64(gain*4096.0 + 0.5)
 	for i := 0; i < n; i++ {
 		base := i*frameSize + offset0
@@ -543,7 +543,7 @@ func extractInto(out, raw []byte, ch int, gain float64) (clipped uint64) {
 	return clipped
 }
 
-// EchoRef extracts the hardware echo reference (ch8) from the same raw
+// EchoRef extracts the hardware echo reference (ch8 on biscuit) from the same raw
 // period the mic channels come from, as 16kHz mono S16 — the AEC's far-end
 // input, sample-aligned with the near-end by construction because both
 // arrive in one TDM frame off one ADC clock.
@@ -556,14 +556,14 @@ func extractInto(out, raw []byte, ch int, gain float64) (clipped uint64) {
 // merely cancel badly, it teaches the adaptive filter a distorted echo
 // path.
 //
-// Returns nil when the buffer is short, which callers read as "no hardware
-// reference this period" and fall back rather than cancelling against
-// silence.
+// Returns nil when the buffer is short or the board's frame carries no
+// loopback, which callers read as "no hardware reference this period" and
+// fall back rather than cancelling against silence.
 func (b *Beamformer) EchoRef(raw []byte) []byte {
-	if len(raw) < frameSize {
+	if b.echoRefCh < 0 || len(raw) < b.frameSize {
 		return nil
 	}
-	return b.extractChannel(raw, echoRefCh, 1.0)
+	return b.extractChannel(raw, b.echoRefCh, 1.0)
 }
 
 // ClippedSamples returns the running count of samples clamped by the mic
@@ -573,11 +573,11 @@ func (b *Beamformer) ClippedSamples() uint64 {
 }
 
 // nearestDirection returns the index into candidateAngles closest to angleDeg.
-func nearestDirection(angleDeg float64) int {
+func (b *Beamformer) nearestDirection(angleDeg float64) int {
 	best := 0
-	bestDiff := math.Abs(angleDiff(angleDeg, candidateAngles[0]))
-	for i := 1; i < nDirections; i++ {
-		d := math.Abs(angleDiff(angleDeg, candidateAngles[i]))
+	bestDiff := math.Abs(angleDiff(angleDeg, b.candidateAngles[0]))
+	for i := 1; i < b.nDirections; i++ {
+		d := math.Abs(angleDiff(angleDeg, b.candidateAngles[i]))
 		if d < bestDiff {
 			bestDiff = d
 			best = i
@@ -596,7 +596,6 @@ func angleDiff(a, b float64) float64 {
 }
 
 // CandidateAngles returns the steering angles used for direction estimation.
-// Exposed for LED mapping in cmd/server.go.
-func CandidateAngles() [nDirections]float64 {
-	return candidateAngles
+func (b *Beamformer) CandidateAngles() []float64 {
+	return b.candidateAngles
 }

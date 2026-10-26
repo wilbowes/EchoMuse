@@ -71,7 +71,7 @@ func (c *Canceller) micsPath() string { return c.statePath + ".mics" }
 
 func (c *Canceller) exportMicsLocked() ([]byte, error) {
 	out := append([]byte(micsMagic), 0, 0)
-	binary.LittleEndian.PutUint16(out[len(micsMagic):], NumMics)
+	binary.LittleEndian.PutUint16(out[len(micsMagic):], uint16(len(c.micStates)))
 	for _, st := range c.micStates {
 		b, err := c.exportStateLocked(st)
 		if err != nil {
@@ -87,11 +87,11 @@ func (c *Canceller) importMicsLocked(b []byte) error {
 	if len(b) < len(micsMagic)+2 || string(b[:len(micsMagic)]) != micsMagic {
 		return errors.New("aec: not a set of saved echo paths")
 	}
-	if n := binary.LittleEndian.Uint16(b[len(micsMagic):]); n != NumMics {
+	if n := binary.LittleEndian.Uint16(b[len(micsMagic):]); int(n) != len(c.micStates) {
 		return errors.New("aec: saved for a different number of microphones")
 	}
 	b = b[len(micsMagic)+2:]
-	var parts [NumMics][]byte
+	parts := make([][]byte, len(c.micStates))
 	for i := range parts {
 		if len(b) < 4 {
 			return errors.New("aec: saved echo paths are truncated")
@@ -131,7 +131,7 @@ func (c *Canceller) loadMicsLocked() {
 		log.Printf("[aec] saved per-microphone echo paths refused, starting cold: %v", err)
 		return
 	}
-	log.Printf("[aec] loaded the saved echo paths for %d microphones (%d bytes)", NumMics, len(b))
+	log.Printf("[aec] loaded the saved echo paths for %d microphones (%d bytes)", len(c.micStates), len(b))
 }
 
 // maybeSaveMicsLocked is maybeSaveLocked for the per-microphone paths, on

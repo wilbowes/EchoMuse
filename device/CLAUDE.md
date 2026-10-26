@@ -91,7 +91,7 @@ per-sample interpolation, `music_flush` vs `speaker_flush` — are under
 Each mic buffer passes through, in order:
 
 ```
-raw 9ch S24_3LE → beamformer + fixed mic gain (micGainDb, applied to 24-bit samples) → mono S16_LE → [AEC] → [AGC] → [VAD gate] → /data WebSocket
+raw frame (the board's MicArray: biscuit 9ch S24_3LE, Dot 3 4ch S32_LE) → beamformer (a mic selector) + fixed mic gain (micGainDb, applied to 24-bit samples) → mono S16_LE → [AEC] → [AGC] → [VAD gate] → /data WebSocket
 ```
 
 On the hardware reference the AEC stage cancels **all seven microphones**
@@ -305,8 +305,8 @@ input devices, the ring's i2c driver, the mic and speaker PCM stream names,
 the light sensor and its lux attribute, the mute LED GPIO and the Bluetooth
 HCI device. `board.Resolve` finds them (`/proc/bus/input/devices`,
 `/proc/asound/pcm`, `/sys/bus/i2c/devices/*/name`) once per process, and the
-bindings open `board.CurrentLayout()`. Biscuit and radar (the Echo gen 2,
-never "Dot 3": that is donut) are registered.
+bindings open `board.CurrentLayout()`. Biscuit, radar (the Echo gen 2,
+never "Dot 3": that is donut) and donut (the Echo Dot 3rd gen) are registered.
 
 - **Biscuit keeps its old numbers as a FALLBACK, and a new board must not get
   one.** The fallback exists so a FireOS build that names a part differently
@@ -363,12 +363,44 @@ ramps for ~1.25s in prepare on BOTH boards (RUNNING after it), so biscuit's
 start now waits for it too and starts ~1.1s later than before #1016.
 `Ignore Ramp Up` On skips the ramp and clicks; it was tried and rejected.
 
-**Still biscuit's, inside the drivers:** the 9-channel S24 capture layout,
-`codec.Routes`, the amp switch and DAC unity, the jack tables and the Android
-`stop <service>` names. Radar needed none of them changed. The Dot 3 (donut)
-needs behaviour as well as data, from reading its port's diff (nothing
-verified on hardware of ours): a 48kHz capture opened before the mic, no amp
-switch, unity at 255, 4-channel S32 capture, a different radio.
+**The capture is board data too (#1037, #1038, #1040, 2026-10-25).**
+`Hardware.Mics` is a `MicArray`: the channel count, the sample format
+(S24LE3, or S32LE read as its top three bytes), the edge microphones in
+steering order with each one's channel and angle, the centre channel or -1,
+and an in-frame loopback channel or -1. Microphones are channels 0 to
+NumMics-1, which is how the canceller indexes its per-microphone filters; a
+board test holds every array to it. The beamformer and canceller are sized
+from it (`beamformer.New(array)`, `aec.New(nMics)`), and with no centre
+microphone the wake word listens on the first edge one. Proven unchanged on
+biscuit by replaying a VVV capture through main and the branch: byte-identical
+mic, reference and cancelled output.
+
+**The Dot 3 (donut, 41C8)** has one microphone beside each button and none in
+the centre: with volume up at 12 o'clock, ch0 by volume up, ch1 by action at 3,
+ch2 by volume down at 6, ch3 by mute at 9 (one tap per hole, each 10-25dB
+above the rest). Its TDM is 4ch S32_LE at 16kHz on two tlv320aic3101, and:
+
+- **`Loopback` (`DL1_AWB_Record`, 48kHz x2) must be OPEN AND DELIVERING
+  before the microphones open**, or the TAS2770 loses its clock until reboot.
+  The mic binding opens it, waits for its first audio, and retries for 4s
+  because `stop mixer` returns before Amazon's mixer lets the PCM go (the
+  first open on 41C8 failed at once). A board that states a loopback the
+  kernel does not list gets NO microphones, never an open in the wrong order.
+  It is drained and unused until it becomes the hardware AEC reference: it
+  carries exactly the samples played (correlation 1.0 per channel), in 16ms
+  periods in step with the TDM's.
+- **`MicMutes`** are the board's ADC mutes; the donut has only ADC_A and ADC_B
+  fitted.
+- **`RingLED0`** is the angle of the ring's LED 0 in the microphones' frame:
+  240 on biscuit, 195 on the donut, whose LEDs straddle the hours, LED 0 the
+  first clockwise past 6 o'clock (`ringLEDFor`).
+- The idme `miccal.0-3` values are not applied: read as Q30 they are within
+  0.3dB of each other, and stock's config names a Q14 default, so the format
+  is unconfirmed.
+- The TAS2770 plays left and right equally (biscuit and radar: right only).
+
+**Still biscuit's, inside the drivers:** the amp switch and DAC unity, the
+jack tables and the Android `stop <service>` names.
 
 ## Private listening (the default since 2026-09-21)
 

@@ -14,6 +14,7 @@ instead: an ANDROID! header, an MTK-wrapped kernel of zImage + appended DTBs,
 and a raw ramdisk.
 """
 
+import gzip
 import re
 import hashlib
 import importlib.util
@@ -52,7 +53,7 @@ CMDLINE = b"bootopt=64S3,32N2,64N2 androidboot.selinux=enforce"
 
 
 def make_reference(zimage=b"ZIMAGE" * 400, dtbs=None, ramdisk=b"RAMDISK" * 300,
-                   mtk_pad=b"\x00"):
+                   mtk_pad=b"\x00", cmdline=CMDLINE):
     """A boot image shaped like biscuit's, assembled the way the device's is.
 
     `mtk_pad` is the byte after the kernel header's name field. Amazon's own
@@ -69,7 +70,7 @@ def make_reference(zimage=b"ZIMAGE" * 400, dtbs=None, ramdisk=b"RAMDISK" * 300,
     hdr += struct.pack("<10I", len(kernel), KADDR, len(ramdisk), RADDR,
                        0, SADDR, TAGS, eb.PAGE, HDRV, OSV)
     hdr += b"\0" * 16
-    hdr += CMDLINE.ljust(512, b"\0")
+    hdr += cmdline.ljust(512, b"\0")
     digest = hashlib.sha1()
     for region in (kernel, ramdisk, b""):
         digest.update(region)
@@ -949,3 +950,99 @@ def test_em_wifi_writes_a_conf_the_wifi_user_can_read():
             "em-wifi sets the conf 0600 unconditionally again; that mode is "
             "only acceptable after chown has failed"
         )
+
+
+# ── Donut: LK keeps 199 bytes of cmdline, and the ramdisk rides on initrd= ───
+
+# 41C8's stock cmdline, which is exactly what its LK keeps.
+DONUT_CMDLINE = (
+    b"bootopt=64S3,32N2,64N2 lowmemorykiller.minfree=1536,2048,4096,8192,"
+    b"16384,16384 lowmemorykiller.adj=0,100,200,300,900,906 "
+    b"buildvariant=userdebug "
+    b"veritykeyid=id:f3530e18f64d11fc25eb2dd762979f078de990bf")
+
+
+def donut_reference(cmdline=DONUT_CMDLINE):
+    """An arm64 kernel naming skip_initramfs, compressed loosely enough that
+    zlib fits it back, under the donut's stock cmdline."""
+    body = (b"ARM\x64 Linux version 4.4.22+ " + b"filler " * 3000
+            + b"skip_initramfs\0" + b"more " * 3000)
+    z = gzip.compress(body, compresslevel=1, mtime=0)
+    return make_reference(zimage=z, cmdline=cmdline)
+
+
+def _ramdisk_size(image):
+    return struct.unpack("<I", image[16:20])[0]
+
+
+def test_the_donut_cmdline_is_stock_lks_199_bytes():
+    assert len(DONUT_CMDLINE) == 199
+    assert eb.CMDLINE_RECIPES["donut"].limit == 199
+
+
+def test_a_donut_image_carries_bootopt_its_ramdisk_and_its_system():
+    info = eb.build_emos_image(donut_reference(), fake_init(), "emos-v0.12",
+                               system_part=14, board="donut")
+    rs = _ramdisk_size(info["image"])
+    assert info["cmdline"] == (
+        f"bootopt=64S3,32N2,64N2 initrd={RADDR:#x},{rs} "
+        f"emos.system=/dev/block/mmcblk0p14")
+    assert "ramoops" not in info["cmdline"]
+    assert info["kernel_patched"]
+
+
+def test_a_donut_rebuild_restamps_the_ramdisk_size_and_keeps_its_system():
+    first = eb.build_emos_image(donut_reference(), fake_init(), "emos-v0.12",
+                                system_part=14, board="donut")["image"]
+    again = eb.build_emos_image(first, fake_init(size=65536), "emos-v0.13",
+                                board="donut")
+    rs = _ramdisk_size(again["image"])
+    assert rs != _ramdisk_size(first)
+    assert again["cmdline"] == (
+        f"bootopt=64S3,32N2,64N2 emos.system=/dev/block/mmcblk0p14 "
+        f"initrd={RADDR:#x},{rs}")
+
+
+def test_a_donut_image_rebuilt_without_its_board_is_refused():
+    first = eb.build_emos_image(donut_reference(), fake_init(), "emos-v0.12",
+                                system_part=14, board="donut")["image"]
+    with pytest.raises(eb.BuildError, match="board is not known"):
+        eb.build_emos_image(first, fake_init(), "emos-v0.13")
+
+
+def test_a_ramdisk_that_reaches_reserved_memory_is_refused(monkeypatch):
+    monkeypatch.setitem(eb.CMDLINE_RECIPES, "donut", eb.CmdlineRecipe(
+        keep=("bootopt=",), limit=199, ramdisk_end=RADDR + 16))
+    with pytest.raises(eb.BuildError, match="reserves"):
+        eb.build_emos_image(donut_reference(), fake_init(), "emos-v0.12",
+                            board="donut")
+
+
+def _bootopt_for(total, rs_digits, system):
+    """A bootopt= long enough that the built cmdline is `total` bytes."""
+    rest = len(f" initrd={RADDR:#x},") + rs_digits + len(system)
+    return b"bootopt=" + b"x" * (total - rest - len("bootopt="))
+
+
+@pytest.mark.parametrize("total, ok", [(199, True), (200, False)])
+def test_lks_limit_is_kept_to_the_byte(total, ok):
+    probe = eb.build_emos_image(donut_reference(), fake_init(), "emos-v0.12",
+                                board="donut")
+    digits = len(str(_ramdisk_size(probe["image"])))
+    system = " emos.system=/dev/block/mmcblk0p14"
+    ref = donut_reference(cmdline=_bootopt_for(total, digits, system))
+    if ok:
+        info = eb.build_emos_image(ref, fake_init(), "emos-v0.12",
+                                   system_part=14, board="donut")
+        assert len(info["cmdline"]) == 199
+    else:
+        with pytest.raises(eb.BuildError, match="keeps only 199"):
+            eb.build_emos_image(ref, fake_init(), "emos-v0.12",
+                                system_part=14, board="donut")
+
+
+def test_boards_without_a_recipe_keep_their_cmdline():
+    info = eb.build_emos_image(make_reference(), fake_init(), "emos-v0.12")
+    assert info["cmdline"].startswith(CMDLINE.decode())
+    assert eb.RAMOOPS_CMDLINE in info["cmdline"]
+    assert eb.INITRD_KEY not in info["cmdline"]

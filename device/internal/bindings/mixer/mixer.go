@@ -21,14 +21,7 @@ import (
 	"sync"
 )
 
-// Control names on biscuit. Measured present, and unique, on the FireOS 5 and
-// FireOS 6 kernels (2026-09-17).
-const (
-	SpeakerAmp     = "Ext_Speaker_Amp_Switch"
-	PlaybackVolume = "PCM Playback Volume" // DAC digital volume, 0.5dB steps, 127 = 0dB
-	HPDriverGain   = "HP Driver Gain Volume"
-	DacMux         = "Audio_DacMux_Setting" // jack line level (#566); measured on FireOS 5 only
-)
+// The controls each board writes, by name, are its own (pkg/board).
 
 // Backend is the device implementation. Values are strings as tinymix prints
 // and accepts them: enum names, "On"/"Off" for switches, decimal integers,

@@ -31,6 +31,8 @@ func TestDetectMatchesDeviceTypeExactly(t *testing.T) {
 		"\x00A3S5BH2HU6VAYF": nil,
 		"A3S5BH2HU6VAYF":     Biscuit,
 		"A7WXQPH584YP\x00":   Radar,
+		"A32DOYMUN6DTXA\x00": Donut,
+		"A32DOYMUN6DTX":      nil,
 		"A7WXQPH584YPX":      nil,
 		"A3S5BH2HU6VAYFX":    nil,
 		"a3s5bh2hu6vayf":     nil,

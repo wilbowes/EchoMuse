@@ -5520,3 +5520,62 @@ configured (`wpa_supplicant.c`), and the FireOS conf sets
 `wowlan_triggers=disconnect` where emOS's sets none. The controller build now
 also runs on `controller-ea/**` changes (#1027): 2.27.0-ea.2's release-prep
 commit had no image.
+
+## 2026-10-25 — the Dot 3 on emOS, and hearing its own wake word
+
+**The Dot 3 (donut, 41C8) boots emOS, and the reason it would not was two
+things in its bootloader** (#1034-#1036, from disassembly of its LK the night
+of 10-24). LK copies the boot header's cmdline into a 200-byte buffer, and
+stock's is already 199 bytes, so every appended parameter, `emos.system=`
+included, was silently dropped. And LK hands the kernel a ramdisk only in
+recovery mode, though it copies one to the header's address every boot. So the
+donut's image carries a short cmdline of its own: stock's `bootopt=` (kaeru
+reads it to pick the 64-bit kernel), `emos.system=`, and `initrd=` pointing at
+that copy for arm64's early initrd. The packer builds it, and its own output
+booted. The boot ring was wrong too: init drove biscuit's sysfs path for the
+ring, so on the donut the kernel's spinner ran for the whole boot. It now finds the `is31fl3236` by name, and
+reads the spinner's colours off the ring (the donut's are darker blues) so
+the handover waits for the head to reach the bottom on every board.
+
+**emOS had been destroying the cache filesystem on every boot.** Its trail was
+written raw from byte 1024 of cache, which is ext4's superblock. Biscuit's
+cache recovers from a backup group; the donut's 32 MB cache has none and would
+not mount again. The raw trail now stays in the first 1 KB, the padding ext4
+never touches, and the whole trail is a fixed 3 KB file on `/data`, written
+one block per line with no journal commit (Wil: minimise eMMC wear).
+
+**A warm reboot out of emOS hung the donut's next boot before init, and it was
+the ring.** Every hang followed a boot whose init still used biscuit's ring
+path, so the kernel's spinner was animating over i2c when the reset hit; none
+has followed since. Ruled out first: uptime, the read-only remount, WiFi down,
+kernel threads (all ignore signals), and the packer's GNU gzip kernel, which
+had looked guilty because its first test followed such a boot.
+
+**The donut reads its microphones and hears its own wake word** (#1037,
+#1038, #1040). The capture layout became board data, proven unchanged on
+biscuit by replaying a VVV capture through both: byte-identical. The donut's
+is 4 channels of S32 with one microphone beside each button and none in the
+centre (a tap on each hole), and its playback loopback must be running before
+the microphones open, or the amplifier loses its clock until reboot. On 41C8
+under FireOS: "Hey Jarvis" scored 0.99, 0.73 and 0.53 on its own microphone,
+mute held, and capture ran 60.2 s of audio in 60.0 s. The wake models would
+not install at first: the controller's transfer looked only for busybox or
+Python to decode with, and the donut's FireOS has neither, though its own
+`base64` works (#1039). The loopback carries exactly the samples played, so it
+is the hardware echo reference still to be wired in.
+
+**The donut's stock sound, read off 41C8 and measured once.** Stock lifts the
+bass about 20 dB at 80-160 Hz up to 60% volume and eases it to 9 dB at 100%,
+cuts 7 dB at 2.5 kHz, and lifts the treble 16-19 dB above 8 kHz; its
+compressor runs at 70/500/7500 Hz with +5 dB in. A 19-second sweep at
+-15 dBFS through its own four microphones agrees with stock's EQ below 2 kHz;
+above it the microphones, on top of the unit, disagree with each other by
+5-9 dB. A candidate voicing fitted to stock's 70% curve (0.43 dB RMS) matches
+stock's loudness at 100% in the model and is within 3 dB on tone; it waits on
+a listen.
+
+**Open:** the first FireOS boot after emOS on 41C8 had no WiFi, with a stale
+root-owned control socket left by emOS's supplicant in
+`/data/misc/wifi/sockets/`. Removing it alone did not bring WiFi back; the
+reboot after it did, so the socket and the WiFi chip's state after a warm
+reboot are both still in the frame.

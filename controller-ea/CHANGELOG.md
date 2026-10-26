@@ -79,6 +79,14 @@ Lighter on a small controller, and the 5 second wake stall is fixed. Pair with f
 
 @Dutch365 (#946, #967) and @forming (#720).
 
+## 2.26.3
+
+One fix on top of 2.26.2, released from 2.26.2's own code. Pair with firmware v2.18.1, which this controller offers. No database changes.
+
+### Fixed
+
+- **The wizard's emOS step failed with HTTP 413 behind a reverse proxy.** The boot image went to the controller in one 9 MB request, which nginx and similar proxies refuse by default. It now goes in 512 KB pieces, so the proxy's upload limit no longer matters (#1010, #800). Thanks @Maximo1970 (#769), @itm1960 and @jfiger (#1001).
+
 ## 2.26.2
 
 One fix on top of 2.26.1, released from 2.26.1's own code. Pair with firmware v2.18.1, which this controller offers. No database changes.

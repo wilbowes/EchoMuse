@@ -135,24 +135,29 @@ int main(void)
     want_cmdline("a decoy before the real one",
                  "ro xandroidboot.serialno=DECOY androidboot.serialno=" REAL, REAL);
 
-    printf("\nidme_type_is() -- /proc/idme/device_type_id\n");
+    printf("\nboard_of() -- /proc/idme/device_type_id\n");
     {
-        static const struct { const char *what, *raw; int radar; } t[] = {
+        static const char *const name[] = { "biscuit", "radar", "donut" };
+        static const struct { const char *what, *raw; enum board want; } t[] = {
             /* Read off 035T on 2026-10-23: 12 characters and a NUL. */
-            { "radar, as the kernel gives it", "A7WXQPH584YP\0", 1 },
-            { "radar with a newline",          "A7WXQPH584YP\n", 1 },
-            { "biscuit",                       "A3S5BH2HU6VAYF\0", 0 },
-            { "radar's id with a suffix",      "A7WXQPH584YPX", 0 },
-            { "a prefix of radar's id",        "A7WXQPH584Y", 0 },
-            { "lower case",                    "a7wxqph584yp", 0 },
-            { "a leading NUL",                 "\0A7WXQPH584YP", 0 },
-            { "empty",                         "", 0 },
+            { "radar, as the kernel gives it", "A7WXQPH584YP\0", BOARD_RADAR },
+            { "radar with a newline",          "A7WXQPH584YP\n", BOARD_RADAR },
+            /* Read off 41C8 on 2026-10-25. */
+            { "donut, as the kernel gives it", "A32DOYMUN6DTXA\0", BOARD_DONUT },
+            { "donut with a newline",          "A32DOYMUN6DTXA\n", BOARD_DONUT },
+            { "biscuit",                       "A3S5BH2HU6VAYF\0", BOARD_BISCUIT },
+            { "radar's id with a suffix",      "A7WXQPH584YPX", BOARD_BISCUIT },
+            { "a prefix of radar's id",        "A7WXQPH584Y", BOARD_BISCUIT },
+            { "a prefix of donut's id",        "A32DOYMUN6DTX", BOARD_BISCUIT },
+            { "lower case",                    "a7wxqph584yp", BOARD_BISCUIT },
+            { "a leading NUL",                 "\0A7WXQPH584YP", BOARD_BISCUIT },
+            { "empty",                         "", BOARD_BISCUIT },
         };
         for (size_t i = 0; i < sizeof t / sizeof t[0]; i++) {
-            int got = idme_type_is(t[i].raw, RADAR_TYPE_ID);
-            printf("%s  %-44s -> %s\n", got == t[i].radar ? "ok  " : "FAIL",
-                   t[i].what, got ? "radar" : "not radar");
-            fails += got != t[i].radar;
+            enum board got = board_of(t[i].raw);
+            printf("%s  %-44s -> %s\n", got == t[i].want ? "ok  " : "FAIL",
+                   t[i].what, name[got]);
+            fails += got != t[i].want;
         }
     }
 

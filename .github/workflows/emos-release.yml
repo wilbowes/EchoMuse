@@ -276,7 +276,7 @@ jobs:
             emos/build/wpa/em-wifi emos/build/bb/busybox
 
       # The off-target checks, against the exact source being published. All
-      # four of them: each drives a parser or an invariant whose failure is
+      # of them: each drives a parser or an invariant whose failure is
       # silent on hardware, which is the criterion in CLAUDE.md for having one.
       - name: Off-target checks
         run: |
@@ -294,6 +294,8 @@ jobs:
           /tmp/serialcheck
           cc -O2 -o /tmp/trialcheck emos/init/trialcheck.c
           /tmp/trialcheck
+          cc -O2 -o /tmp/devcheck emos/init/devcheck.c
+          /tmp/devcheck
           sh emos/device/em-wifi-check.sh
 
       # Same rule as the firmware release: the notes come from the ANNOTATED

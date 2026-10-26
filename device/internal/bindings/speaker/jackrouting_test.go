@@ -1,76 +1,34 @@
 package speaker
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/wilbowes/EchoMuse/internal/outchain"
+	"github.com/wilbowes/EchoMuse/pkg/board"
 )
 
-// The values here are measurements off a stock FireOS Dot, not preferences.
-// Pinning them means a later edit has to disagree with the hardware on
-// purpose rather than by accident.
+// The table's values are pinned in pkg/board. These test what the speaker
+// does with a table, on biscuit's, the one measured against a stock Dot.
 
-func TestJackRoutingMutesInternalDriverWhenSomethingIsPluggedIn(t *testing.T) {
-	got := jackRouting(true)
-	if len(got) != 3 {
-		t.Fatalf("want 3 writes, got %d: %+v", len(got), got)
-	}
-	if got[0].Ctl != ctlSpeakerAmp || got[0].Args[0] != "Off" {
-		t.Errorf("internal amp must be Off with a plug in, got ctl %s = %v", got[0].Ctl, got[0].Args)
-	}
-}
+const (
+	amp  = "Ext_Speaker_Amp_Switch"
+	gain = "HP Driver Gain Volume"
+	mux  = "Audio_DacMux_Setting"
+)
 
-// Last, so nothing is switched under a playing speaker.
-func TestJackRoutingEnablesInternalDriverWhenNothingIsPluggedIn(t *testing.T) {
-	got := jackRouting(false)
-	if last := got[len(got)-1]; last.Ctl != ctlSpeakerAmp || last.Args[0] != "On" {
-		t.Errorf("internal amp must come On last with the jack empty, got ctl %s = %v", last.Ctl, last.Args)
-	}
-}
+var biscuitJack = board.Biscuit.Hardware.Speaker.Jack
 
-// The regression this whole change exists for: accdet leaves the jack's
-// output stage at the floor of its range on insert, and nothing of ours used
-// to raise it. A gain that is not set, or set to 0, is silence.
-func TestJackRoutingRaisesTheJackOutputStageOnInsert(t *testing.T) {
-	in := jackRouting(true)
-	out := jackRouting(false)
-
-	find := func(ws []mixerWrite) *mixerWrite {
-		for i := range ws {
-			if ws[i].Ctl == ctlHPDriverGain {
-				return &ws[i]
-			}
-		}
-		return nil
+// In the board's order: the amp off first with a plug in, on last without,
+// so nothing is switched under a playing speaker.
+func TestJackRoutingFollowsTheBoardsOrder(t *testing.T) {
+	in := jackRouting(biscuitJack, true)
+	if len(in) != 3 || in[0].Ctl != amp || in[0].Args[0] != "Off" {
+		t.Errorf("insert %+v", in)
 	}
-
-	gi, go_ := find(in), find(out)
-	if gi == nil || go_ == nil {
-		t.Fatal("HP driver gain must be set for BOTH positions — leaving it unset on either side is how the jack went silent")
-	}
-	if gi.Args[0] != hpGainJack {
-		t.Errorf("plug in: want gain %s (stock's value), got %s", hpGainJack, gi.Args[0])
-	}
-	if go_.Args[0] != hpGainInternal {
-		t.Errorf("plug out: want gain %s restored, got %s", hpGainInternal, go_.Args[0])
-	}
-	if gi.Args[0] == "0" {
-		t.Error("gain 0 is the FLOOR of the 0..35 range, which is the bug, not a setting")
-	}
-}
-
-// Both channels take the same value: the control is a pair (L, R) and
-// tinymix writes it as two arguments. One argument sets only the left.
-func TestJackRoutingWritesBothChannelsOfTheGainPair(t *testing.T) {
-	for _, inserted := range []bool{true, false} {
-		for _, w := range jackRouting(inserted) {
-			if w.Ctl != ctlHPDriverGain {
-				continue
-			}
-			if len(w.Args) != 2 || w.Args[0] != w.Args[1] {
-				t.Errorf("inserted=%v: gain needs two equal args, got %v", inserted, w.Args)
-			}
-		}
+	out := jackRouting(biscuitJack, false)
+	if last := out[len(out)-1]; last.Ctl != amp || last.Args[0] != "On" {
+		t.Errorf("removal %+v", out)
 	}
 }
 
@@ -78,50 +36,48 @@ func TestJackRoutingWritesBothChannelsOfTheGainPair(t *testing.T) {
 // row on an ordinary device. Nothing here may depend on the previous state.
 func TestJackRoutingIsIdempotent(t *testing.T) {
 	for _, inserted := range []bool{true, false} {
-		a, b := jackRouting(inserted), jackRouting(inserted)
-		if len(a) != len(b) {
-			t.Fatalf("inserted=%v: not deterministic", inserted)
+		if a, b := jackRouting(biscuitJack, inserted), jackRouting(biscuitJack, inserted); !reflect.DeepEqual(a, b) {
+			t.Errorf("inserted=%v: %+v then %+v", inserted, a, b)
 		}
-		for i := range a {
-			if a[i].Ctl != b[i].Ctl || len(a[i].Args) != len(b[i].Args) {
-				t.Errorf("inserted=%v: write %d differs between calls", inserted, i)
-			}
-		}
+	}
+}
+
+// Every control either side writes is read back, once.
+func TestJackControlsAreBothSidesOnce(t *testing.T) {
+	if got, want := jackControls(biscuitJack), []string{amp, gain, mux}; !reflect.DeepEqual(got, want) {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }
 
 func TestJackRoutingDriftRewritesOnlyWhatMoved(t *testing.T) {
 	// Gain clobbered back to the floor, amp still correct — the exact state
 	// measured after a mediaserver restart with a plug in.
-	drift := jackRoutingDrift(true, map[string]string{
-		ctlSpeakerAmp:   "Off",
-		ctlHPDriverGain: "0",
-	})
-	if len(drift) != 1 || drift[0].Ctl != ctlHPDriverGain {
+	drift := jackRoutingDrift(biscuitJack, true, map[string]string{amp: "Off", gain: "0"})
+	if len(drift) != 1 || drift[0].Ctl != gain {
 		t.Fatalf("want only the gain rewritten, got %+v", drift)
+	}
+	// FireOS 5's mediaserver puts the mux back too.
+	drift = jackRoutingDrift(biscuitJack, true, map[string]string{amp: "Off", gain: "11", mux: "Off"})
+	if len(drift) != 1 || drift[0].Ctl != mux || drift[0].Args[0] != "On" {
+		t.Errorf("want only the mux rewritten On, got %+v", drift)
 	}
 }
 
 func TestJackRoutingDriftIsSilentWhenNothingMoved(t *testing.T) {
-	if d := jackRoutingDrift(true, map[string]string{
-		ctlSpeakerAmp:   "Off",
-		ctlHPDriverGain: hpGainJack,
-		ctlDacMux:       dacMuxJack,
-	}); len(d) != 0 {
+	if d := jackRoutingDrift(biscuitJack, true, map[string]string{amp: "Off", gain: "11", mux: "On"}); len(d) != 0 {
 		t.Errorf("want no writes on a correct codec, got %+v", d)
 	}
 }
 
-// A control we could not READ must not be treated as drifted. Rewriting on a
-// failed read would spawn tinymix every interval forever on any device whose
-// output we cannot parse — the same "failure to look is not evidence of
-// absence" rule the controller's asset reconcile follows.
+// A control we could not READ must not be treated as drifted: rewriting on a
+// failed read would rewrite it every interval forever ("failure to look is
+// not evidence of absence", as in the controller's asset reconcile).
 func TestJackRoutingDriftSkipsUnreadableControls(t *testing.T) {
-	if d := jackRoutingDrift(true, map[string]string{}); len(d) != 0 {
+	if d := jackRoutingDrift(biscuitJack, true, map[string]string{}); len(d) != 0 {
 		t.Errorf("want no writes when nothing could be read, got %+v", d)
 	}
-	d := jackRoutingDrift(true, map[string]string{ctlHPDriverGain: "0"})
-	if len(d) != 1 || d[0].Ctl != ctlHPDriverGain {
+	d := jackRoutingDrift(biscuitJack, true, map[string]string{gain: "0"})
+	if len(d) != 1 || d[0].Ctl != gain {
 		t.Errorf("want only the readable, drifted control, got %+v", d)
 	}
 }
@@ -173,45 +129,5 @@ func TestChainForJackDoesNotModifyTheStoredParams(t *testing.T) {
 	chainForJack(in, true)
 	if !in.GuardEnabled {
 		t.Errorf("stored params were modified")
-	}
-}
-
-// #566: with the mux Off the jack plays 20-30dB under line level even at the
-// right HP gain. Insert must set it On (stock's value); removal returns it to
-// Off, the only state the internal speaker has been tested in.
-func TestJackRoutingSetsTheDacMuxForEachPosition(t *testing.T) {
-	for _, tc := range []struct {
-		inserted bool
-		want     string
-	}{{true, "On"}, {false, "Off"}} {
-		var got *mixerWrite
-		for _, w := range jackRouting(tc.inserted) {
-			if w.Ctl == ctlDacMux {
-				w := w
-				got = &w
-			}
-		}
-		if got == nil {
-			t.Fatalf("inserted=%v: DAC mux not written", tc.inserted)
-		}
-		if got.Args[0] != tc.want {
-			t.Errorf("inserted=%v: want DAC mux %s, got %s", tc.inserted, tc.want, got.Args[0])
-		}
-	}
-	if ctlDacMux != "Audio_DacMux_Setting" {
-		t.Errorf("control name is the kernel's, got %q", ctlDacMux)
-	}
-}
-
-// If the HAL puts the mux back (FireOS 5's mediaserver rewrites the codec
-// every 60-90s), reconcile must catch it like it catches the gain.
-func TestJackRoutingDriftRestoresTheDacMux(t *testing.T) {
-	d := jackRoutingDrift(true, map[string]string{
-		ctlSpeakerAmp:   "Off",
-		ctlHPDriverGain: hpGainJack,
-		ctlDacMux:       "Off",
-	})
-	if len(d) != 1 || d[0].Ctl != ctlDacMux || d[0].Args[0] != "On" {
-		t.Errorf("want only the mux rewritten On, got %+v", d)
 	}
 }

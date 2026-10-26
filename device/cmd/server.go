@@ -41,6 +41,7 @@ import (
 	"github.com/wilbowes/EchoMuse/pkg/board"
 	pkgbuttons "github.com/wilbowes/EchoMuse/pkg/buttons"
 	"github.com/wilbowes/EchoMuse/pkg/led"
+	pkgmic "github.com/wilbowes/EchoMuse/pkg/mic"
 )
 
 const usage = `usage: server [command]
@@ -135,15 +136,23 @@ func main() {
 		log.Fatalf("Failed to initialize Button controller: %v", err)
 	}
 
-	microphone, err := mic.NewMicrophone()
-	if err != nil {
-		log.Fatalf("Failed to initialize Microphone: %v", err)
+	// A board whose mics this firmware cannot read runs without them as a
+	// speaker, rather than exiting into start_server.sh's rollback: no "mic"
+	// capability, listen_state degraded with the reason, and the controller
+	// starts no turn from the button (em_button.NO_MIC).
+	var micIn pkgmic.Microphone
+	var micSub pkgmic.Subscribable
+	if microphone, err := mic.NewMicrophone(); err != nil {
+		log.Printf("[mic] %v — running without microphones", err)
+		client.SetMicUnavailable("no microphone this firmware can read — speaker only")
+	} else {
+		micIn, micSub = microphone, microphone
 	}
 
 	// AEC canceller — far end fed by the speaker's echo tap, near end run
 	// by the data client on the mono mic stream. Starts disabled; armed by
 	// applyAecConfig from env defaults below and on every config push.
-	canceller := aec.New()
+	canceller := aec.New(board.CurrentLayout().Mics.NumMics())
 
 	// The level tap drives the energy-reactive LED ring ("meter" pattern).
 	// The Server doesn't exist yet when the speaker starts its pump loop,
@@ -158,7 +167,7 @@ func main() {
 		log.Fatalf("Failed to initialize PCM Speaker: %v", err)
 	}
 
-	s := server.NewServer(buttonController, microphone, pcmSpeaker)
+	s := server.NewServer(buttonController, micIn, pcmSpeaker)
 	srvPtr.Store(s)
 
 	// Local duck at the device's own wake crossing, confirmed or released by
@@ -199,7 +208,7 @@ func main() {
 
 	ctx := context.Background()
 
-	dataClient := client.NewDataClient(deviceID, microphone, pcmSpeaker, canceller)
+	dataClient := client.NewDataClient(deviceID, micSub, pcmSpeaker, canceller)
 	canceller.SetStatePath(aec.DefaultStatePath) // saved echo path: loaded on the hardware reference
 	aec.RemoveLegacyState()
 	applyAecConfig(canceller, dataClient) // arm from env defaults before any config push
@@ -1540,6 +1549,7 @@ func onWakeCrossing(cc *client.ControlClient, dc *client.DataClient,
 func syncListenState(dc *client.DataClient, cc *client.ControlClient, force bool) {
 	snap := config.Get().Snapshot()
 	state, reason := listen.Resolve(
+		client.MicUnavailable(),
 		snap.OwwOnDevice == config.OnDeviceOn,
 		cc.HasFeature(client.FeatureListenSession),
 		dc.ShadowScorer() != nil,

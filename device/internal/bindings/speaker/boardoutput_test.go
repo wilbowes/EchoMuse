@@ -38,6 +38,7 @@ var testSpec = board.Speaker{
 		Speaker: "ext_speaker_output", Jack: "ext_headphone_output",
 	},
 	Setup: []board.Ctl{{Name: "DRC", Values: []string{"Disabled"}}},
+	Jack:  biscuitJack,
 }
 
 func reader(content string) func(string) ([]byte, error) {
@@ -119,22 +120,22 @@ func TestJackSwapsTheFilterWhileTheAmpIsOff(t *testing.T) {
 		return -1
 	}
 	in, out := o.jack(true), o.jack(false)
-	if f, a := pos(in, "filter"), pos(in, ctlSpeakerAmp); f < 0 || a < 0 || f < a || in[f].Args[0] != "5" {
+	if f, a := pos(in, "filter"), pos(in, amp); f < 0 || a < 0 || f < a || in[f].Args[0] != "5" {
 		t.Errorf("insert %+v", in)
 	}
-	if f, a := pos(out, "filter"), pos(out, ctlSpeakerAmp); f < 0 || a < 0 || f > a || out[f].Args[0] != "1" {
+	if f, a := pos(out, "filter"), pos(out, amp); f < 0 || a < 0 || f > a || out[f].Args[0] != "1" {
 		t.Errorf("removal %+v", out)
 	}
 }
 
-// A board without a filter or a mute is biscuit: exactly the shared table.
-func TestOutputWithoutAFilterIsTheSharedTable(t *testing.T) {
-	o, err := loadOutput(board.Speaker{}, nil)
+// A board without a filter or a mute plays its jack table exactly.
+func TestOutputWithoutAFilterIsTheBoardsTable(t *testing.T) {
+	o, err := loadOutput(board.Speaker{Jack: biscuitJack}, nil)
 	if err != nil || len(o.setup()) != 0 {
 		t.Fatalf("setup %+v, %v", o.setup(), err)
 	}
 	for _, in := range []bool{true, false} {
-		got, want := o.jack(in), jackRouting(in)
+		got, want := o.jack(in), jackRouting(biscuitJack, in)
 		if len(got) != len(want) {
 			t.Errorf("inserted=%v: %+v, want %+v", in, got, want)
 		}
@@ -156,5 +157,34 @@ func TestGuardBandFollowsTheBoard(t *testing.T) {
 	}
 	if guardBand(board.Biscuit.Hardware.Speaker.BassGuard) != outchain.DefaultGuardBand {
 		t.Error("biscuit's band must be the default the controller's em_mbc also runs")
+	}
+}
+
+// Each board mutes and unmutes its own volume control at its own values, and
+// a board with no amp switch has nothing written for it: the Dot 3's TAS2770
+// is silenced by its volume, and biscuit's 127 there would be -64dB.
+func TestOutputUsesTheBoardsVolumeAndAmp(t *testing.T) {
+	for _, c := range []struct {
+		b           *board.Board
+		unity, amps string
+	}{
+		{board.Biscuit, "127", "Ext_Speaker_Amp_Switch"},
+		{board.Radar, "127", "Ext_Speaker_Amp_Switch"},
+		{board.Donut, "255", ""},
+	} {
+		o := output{spec: c.b.Hardware.Speaker}
+		if m, u := o.mute(), o.unity(); m.Ctl != "PCM Playback Volume" || m.Args[0] != "0" || u.Args[0] != c.unity {
+			t.Errorf("%s: mute %+v unity %+v", c.b.ID, m, u)
+		}
+		on, off := o.amp(true), o.amp(false)
+		if c.amps == "" {
+			if on != nil || off != nil {
+				t.Errorf("%s: amp writes %+v %+v on a board with no switch", c.b.ID, on, off)
+			}
+			continue
+		}
+		if len(on) != 1 || on[0].Ctl != c.amps || on[0].Args[0] != "On" || off[0].Args[0] != "Off" {
+			t.Errorf("%s: amp %+v %+v", c.b.ID, on, off)
+		}
 	}
 }

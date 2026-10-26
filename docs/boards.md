@@ -39,13 +39,14 @@ protocol a board has to speak.
 
 | Part | Named by | Looked up in |
 |---|---|---|
-| Action and mute keys, volume keys | input device name | `/proc/bus/input/devices` |
+| Buttons | input device names, a list; a key means what its code says, whichever device carried it | `/proc/bus/input/devices` |
 | LED ring | i2c driver name | `/sys/bus/i2c/devices/*/name` |
 | Microphone and speaker PCMs | ALSA stream name | `/proc/asound/pcm` |
-| Ambient light sensor | i2c driver name, plus the attribute that reads lux | `/sys/bus/i2c/devices/*/name` |
+| Ambient light sensor | driver name on the i2c or IIO bus, plus the attribute that reads lux | `/sys/bus/i2c/devices/*/name`, `/sys/bus/iio/devices/*/name` |
 | Mute button LED | sysfs GPIO number | stated by the board |
 | Bluetooth controller | HCI device path | stated by the board |
-| Speaker | amp mute control, codec filter, bass band | stated by the board (`Speaker`) |
+| Codec routes and mic input levels | mixer control names and values | stated by the board (`Routes`, `InputGains`) |
+| Speaker | amp switch, hardware volume and its mute and 0dB values, the jack table, amp mute control, codec filter, bass band | stated by the board (`Speaker`) |
 
 The firmware prints the result at start-up, one `[board]` line per part.
 
@@ -123,20 +124,23 @@ These are still written for the Dot 2 inside the drivers. A board that
 differs in any of them needs code, and the description will grow to hold
 them as the second board is added.
 
-- **Microphone format and layout.** The pipeline expects 9 channels of 24-bit
-  audio: six mics around the edge, one in the centre, and two channels of
-  playback loopback.
-- **Audio routes.** `internal/bindings/codec/routes.go` closes ten mixer
-  switches by name, all of them the Dot 2's.
-- **Amplifier and volume.** The amp switch, the DAC's unity value (127) and
-  the click-free start-up order. A board can add a hardware mute, a codec
-  filter and controls written once at start-up (`Speaker`); the order around
-  them is shared.
-- **Headphone jack.** The detect switch and the three controls written on
-  plug-in and removal. A board's codec filter is swapped with the plug.
-- **Start-up order.** Some boards need one PCM opened before another.
-- **Android services.** `stop mixer`, `stop media`, `stop ledcontroller` and
-  `stop acebutton` are run as they are named on the Dot 2.
+- **Microphone format.** The layout is the board's (`Mics`: the channel
+  count, each edge microphone's channel and angle, the centre one if any, and
+  a loopback channel if the frame carries one), but the samples must be the
+  Dot 2's S24_3LE or the Dot 3's S32_LE (24 bits in the top three bytes),
+  with the microphones on channels 0 onwards. A board
+  whose capture is different states no capture PCM and runs as a speaker: no
+  `mic` capability, its listening reported as degraded with the reason, and
+  no voice turn from the button.
+- **The ADC mute.** Mute writes the Dot 2's eight ADC mute controls by name.
+- **The speaker's start-up order** around the amp, the volume and a board's
+  hardware mute, which is shared.
+- **Start-up order.** Some boards need one PCM opened before another. The
+  one case handled is a playback loopback opened before the microphones
+  (`Loopback`).
+- **Android services.** `stop mixer`, `stop media` and `stop ledcontroller`
+  are run as they are named on the Dot 2. Amazon's button service is
+  `acebutton` on FireOS 5 and `acebuttond` on FireOS 6, and both are stopped.
 - **CPU core parking** under `/proc/hps`, which is MediaTek's.
 - **WiFi.** `wlan0` and wpa_supplicant. What differs here is FireOS against
   emOS, which the firmware already handles.
@@ -201,8 +205,9 @@ What this page says about boards other than the Dot 2 comes from people who
 put the firmware on their own hardware and wrote down what they found:
 
 - **Echo Dot 3rd gen:** @shortgame11 (the first working port, and the
-  findings about the amplifier, its clock and GPIO 444), @technotiger
-  (profile and probe runs).
+  findings about the amplifier, its clock and GPIO 444, and that the speaker
+  route is decided at stream open), @technotiger (profile and probe runs,
+  and that its Bluetooth radio reads differently from the Dot 2's).
 - **Echo 2nd gen:** @vithurshanselvarajah and @jcsnider (the port, emOS on
   it, the 9-channel capture and the speaker bring-up), @sascha-hemi (the
   jack's filter swap, and that the Dot 2's bass guard removed its bass),
@@ -244,3 +249,34 @@ ch7 and ch8 the playback loopback. The fixture is
 
 No mute button LED is stated (`MuteLEDGPIO` empty), and there is no thermal
 profile, so emOS runs the kernel's defaults.
+
+## The Echo Dot 3rd gen (`donut`)
+
+Read from one unit (41C8, stock FireOS 6.5.7.5, build NS6575) on 2026-10-24.
+An MT8167 board with its own layout; no input device or PCM shares the Dot
+2's name. The fixture is `device/pkg/board/testdata/donut-fireos6/`.
+
+- **Buttons.** `gpio-keys` carries the action button (`KEY_HELP`) and the
+  volume pair, and autorepeats while a key is held; `gpio-privacy`, Amazon's
+  privacy driver, delivers the mute button. The mute LED is the privacy
+  driver's own, so the board states no mute LED GPIO: GPIO 444 here is an
+  audio pin, and exporting it silences the amplifier until reboot.
+- **Speaker.** `DL1_Playback` into a TAS2770, which has no amp switch. Its
+  digital volume (`PCM Playback Volume`, 0dB at 255) is held at unity and is
+  what silences it. Routes, the speaker path and the headphone path are read
+  from the unit's own `/system/vendor/etc/mixer_paths.xml`. The firmware runs
+  the Dot 2's 2048-frame period on it.
+- **Microphones.** `TDM_Capture`, 4 channels of S32_LE at 16kHz (24 bits
+  used), one microphone per corner and none in the centre, on two
+  tlv320aic3101 (ADC_A and ADC_B, which are also the only mutes). The wake
+  word listens on the first corner clockwise from the action button, ch1.
+  The playback loopback is its own PCM, `DL1_AWB_Record`, 2 channels of S16
+  at 48kHz, and it **must be open before the microphones**: the other way
+  round the amplifier loses its clock until reboot. The board states it as
+  `Loopback`; if it is not found the microphones are not opened at all.
+  Echo cancellation uses the software reference for now.
+- **Light sensor.** tsl2572 on the IIO bus, `in_illuminance0_input`, which
+  reads lux as a decimal. The i2c bus also lists an opt3001 with no driver
+  bound.
+- **Bluetooth.** `/dev/stpbt` exists, but the radio behind it reads
+  differently from the Dot 2's, so no HCI device is stated yet.

@@ -112,7 +112,7 @@ func TestEveryMicrophoneConverges(t *testing.T) {
 // The software tap has one ring, drained once per period: it keeps one
 // filter, on the microphone in use.
 func TestSoftwareTapCancelsOnlyTheActiveMicrophone(t *testing.T) {
-	c := New()
+	c := New(NumMics)
 	c.SetParams(true, 0, 200)
 	signal := synth(4 * FrameSize)
 	echoes := sevenEchoes(signal)
@@ -121,7 +121,7 @@ func TestSoftwareTapCancelsOnlyTheActiveMicrophone(t *testing.T) {
 		mics[ch] = toBytes(echoes[ch][:FrameSize])
 	}
 	c.WriteFar(to48kStereo(signal[:FrameSize]))
-	want := New()
+	want := New(NumMics)
 	want.SetParams(true, 0, 200)
 	want.WriteFar(to48kStereo(signal[:FrameSize]))
 	if got := c.ProcessMicsWithRef(mics, 2, nil); !bytes.Equal(got, want.Process(mics[2])) {
@@ -171,7 +171,7 @@ func TestMicrophoneEchoPathsAreSavedAndLoaded(t *testing.T) {
 	}
 	writeState(c.micsPath(), b, 20)
 
-	fresh := New()
+	fresh := New(NumMics)
 	fresh.SetStatePath(path)
 	fresh.SetParams(true, 0, 64)
 	fresh.SetHardwareRef(true)
@@ -215,7 +215,7 @@ func TestMicrophoneEchoPathsRefuseWhatDoesNotFit(t *testing.T) {
 
 // The states exist only with the hardware reference, and go when it does.
 func TestMicrophoneStatesFollowTheHardwareReference(t *testing.T) {
-	c := New()
+	c := New(NumMics)
 	c.SetParams(true, 0, 200)
 	if c.micStates[0] != nil {
 		t.Fatal("per-microphone states built on the software tap")

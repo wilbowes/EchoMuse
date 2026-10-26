@@ -20,8 +20,8 @@ def test_radar_is_its_own_model():
 
 
 def test_a_board_newer_than_the_controller_is_not_called_biscuit():
-    assert em_boards.model("donut") == "Echo (donut)"
-    assert em_boards.known("donut")
+    assert em_boards.model("rook") == "Echo (rook)"
+    assert em_boards.known("rook")
 
 
 def test_every_model_survives_project_name_split():

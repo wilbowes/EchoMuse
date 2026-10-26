@@ -41,6 +41,7 @@ import (
 
 	"github.com/wilbowes/EchoMuse/internal/aec"
 	"github.com/wilbowes/EchoMuse/internal/beamformer"
+	"github.com/wilbowes/EchoMuse/pkg/board"
 )
 
 const (
@@ -72,8 +73,9 @@ func main() {
 		log.Fatal(err)
 	}
 
-	bf := beamformer.New()
-	c := aec.New()
+	arr := board.BiscuitMics()
+	bf := beamformer.New(arr)
+	c := aec.New(arr.NumMics())
 	c.SetParams(true, 0, *tail)
 	c.SetHardwareRef(true)
 	gain := math.Pow(10, *gainDb/20)
@@ -90,7 +92,7 @@ func main() {
 	var mic, ref, speex []byte
 	step := batch * frameBytes
 	if *prime {
-		pb, pc := beamformer.New(), aec.New()
+		pb, pc := beamformer.New(arr), aec.New(arr.NumMics())
 		pc.SetParams(true, 0, *tail)
 		pc.SetHardwareRef(true)
 		var primed []byte
@@ -164,8 +166,8 @@ func parseMics(spec string) (micPlan, error) {
 	for _, part := range strings.Split(spec, ",") {
 		var from float64
 		var ch int
-		if _, err := fmt.Sscanf(part, "%g:%d", &from, &ch); err != nil || ch < 0 || ch >= beamformer.NumMics {
-			return nil, fmt.Errorf("-mics: %q is not seconds:channel with a channel of 0-%d", part, beamformer.NumMics-1)
+		if _, err := fmt.Sscanf(part, "%g:%d", &from, &ch); err != nil || ch < 0 || ch >= board.BiscuitMics().NumMics() {
+			return nil, fmt.Errorf("-mics: %q is not seconds:channel with a channel of 0-%d", part, board.BiscuitMics().NumMics()-1)
 		}
 		if len(p) > 0 && from <= p[len(p)-1].from {
 			return nil, fmt.Errorf("-mics: times must increase, at %q", part)

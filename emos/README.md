@@ -120,7 +120,7 @@ Once emOS is running and on the network, flashing no longer needs TWRP:
 ## What the boot actually does
 
 `init/init.c` is a static AArch64 binary, PID 1, ~500 lines. In order: mount
-`proc`/`sys`/`devpts`; create every device node by hand; mount `/system`
+`proc`/`sys`/`devpts`; create every device node from sysfs; mount `/system`
 read-only and `/data` read-write; build the `/etc` symlink farm; link busybox's
 applets; preserve the previous boot's kernel log; bring up the USB serial
 console; then supervise the service table below. `/data` is checked with
@@ -137,8 +137,11 @@ every one of them is a comment in the source rather than folklore:
    broken instrument reads exactly like a broken subject.
 2. **There is no devtmpfs.** Android's `/dev` is a tmpfs populated by `ueventd`
    from uevents, and we do not run `ueventd`, so nothing appears on its own.
-   Every node is `mknod`'d from numbers read off a running device, never
-   guessed.
+   init reads what `ueventd` would — `/sys/dev/{char,block}/*/uevent`, with
+   its `DEVNAME` and `DEVMODE` — and makes each node from that. It was a table
+   of numbers read off a biscuit until the Echo Dot 3, where those numbers are
+   other devices: its `ttyGS0` is 246:0 and 247:0 is the jack detector, so the
+   console sat silent (2026-10-24). `devcheck.c` pins the parser.
 3. **MUSB must be put in device mode** — write `1` to
    `/sys/devices/platform/mt_usb/cmode`. `cmode 2` is charging-only, and the
    gadget above it reports `DISCONNECTED` forever no matter how correctly it is
@@ -242,9 +245,16 @@ There is no UART without opening the case. Three channels exist instead — and
 the LED ring is the first of them, since init takes it off the kernel's own
 `is31fl3236` boot animation and drives it as a progress bar (above):
 
-- **The progress trail.** init writes a marker at offset 0 of the cache
-  partition, `/proc/version` at 512, and an append-only trail at 1024, flushed
-  after every step. It is what turned "nothing happened" into
+- **The progress trail.** init writes it line by line, flushed after every
+  step, to two places. The first 1024 bytes of the cache partition hold the
+  start of it, up to and including mounting `/data`: that is the padding before
+  ext4's superblock, which ext4 never touches, so the cache stays a valid
+  filesystem for FireOS (from 1024 on, the old trail destroyed the superblock
+  every boot, and the Dot 3's cache has no backup to recover from). Read it
+  with `dd if=/dev/block/mmcblk0p15 bs=1024 count=1 | strings`. Once `/data`
+  is mounted the whole trail, including the kernel version, is in
+  `/data/emos/trail`, a fixed 3 KB padded with NULs so that each line costs
+  one block and no journal commit (`strings` it). It is what turned "nothing happened" into
   "`ttyGS0` open failed errno=2" and then into a shell, in three boots.
 - **`/proc/last_kmsg`.** There is no pstore on this kernel, but MediaTek's
   ram_console publishes the *previous* boot's kernel log here across a warm
@@ -916,8 +926,6 @@ is not proof it rebooted — compare uptime or a build fingerprint.
   is a Linux 4.17 addition on a 3.18 kernel. Both cfg80211 and the wlan
   driver are built in, so there is no module to replace — it is a kernel
   build, which puts it on the same fork as the arm64 kernel work.
-- The boot trail is a fixed-size buffer rewritten in place, so a shorter trail
-  leaves the tail of the previous boot's behind and can be misread.
 - **A device on emOS cannot start the wizard directly, and nothing in the
   wizard says so** — but since 0.4 there is a one-command way round it, so
   this is an unhelpful error rather than the dead end it was.

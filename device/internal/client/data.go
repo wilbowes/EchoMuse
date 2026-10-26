@@ -18,6 +18,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/processor"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/ort"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/shadow"
+	"github.com/wilbowes/EchoMuse/pkg/board"
 	"github.com/wilbowes/EchoMuse/pkg/mic"
 	"github.com/wilbowes/EchoMuse/pkg/speaker"
 )
@@ -317,7 +318,7 @@ func NewDataClient(deviceID string, microphone mic.Subscribable, spk speaker.Spe
 		mic:        microphone,
 		spk:        spk,
 		readyCh:    make(chan string, 1),
-		beam:       beamformer.New(),
+		beam:       beamformer.New(board.CurrentLayout().Mics),
 		proc:       processor.New(),
 		aec:        canceller,
 		listenGate: listen.New(0, 0, 0),

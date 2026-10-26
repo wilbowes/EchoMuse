@@ -742,6 +742,13 @@ jobs:
           /tmp/cmdlinecheck
           cc -O2 -o /tmp/serialcheck emos/init/serialcheck.c
           /tmp/serialcheck
+      # Every node in /dev comes from the kernel's uevents. A node with the
+      # wrong numbers opens something else: on the Echo Dot 3 the old table's
+      # ttyGS0 was the jack detector, and the USB console sat silent.
+      - name: Device nodes are made the way the kernel describes them
+        run: |
+          cc -O2 -o /tmp/devcheck emos/init/devcheck.c
+          /tmp/devcheck
       # The trial mark is written by the controller and read by init, and it
       # decides whether an image updated over the network is rolled back. Read
       # as absent, a broken image is promoted; a leftover read as live rolls a

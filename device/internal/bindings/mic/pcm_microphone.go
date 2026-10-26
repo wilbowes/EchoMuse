@@ -17,7 +17,7 @@ import (
 	pkgmic "github.com/wilbowes/EchoMuse/pkg/mic"
 )
 
-// rawTap receives every raw 9-channel batch, and is nil in release builds.
+// rawTap receives every raw capture batch, and is nil in release builds.
 // Only rawtap_bench.go sets it (build tag bench): it records the mics to
 // disk, which release firmware must be unable to do.
 var rawTap func([]byte)
@@ -25,28 +25,35 @@ var rawTap func([]byte)
 // PcmMicrophone opens the ALSA device once and fans out to multiple subscribers.
 // Callers register via Listen(); each gets their own buffered channel.
 type PcmMicrophone struct {
-	device *tinyalsa.AlsaDevice
-	mu     sync.Mutex
-	subs   []chan []byte
+	device        *tinyalsa.AlsaDevice
+	bytesPerFrame int
+	mu            sync.Mutex
+	subs          []chan []byte
 }
 
 // NewMicrophone returns the pre-configured microphone alsa device and starts
 // the permanent ALSA read loop.
 func NewMicrophone() (*PcmMicrophone, error) {
 	// The capture PCM is found by name (pkg/board), never by device number.
-	capture := board.CurrentLayout().Capture
+	layout := board.CurrentLayout()
+	capture := layout.Capture
 	if capture == nil {
-		return nil, errors.New("mic: capture PCM not found on this board")
+		return nil, errors.New("no microphone this firmware can read on this board")
 	}
-	device := tinyalsa.NewDevice(capture.Card, capture.Device, pcm.Config{
-		Channels:    9,
+	cfg := pcm.Config{
+		Channels:    layout.Mics.Channels,
 		SampleRate:  16000,
 		PeriodSize:  512,
 		PeriodCount: 5,
 		Format:      tinyalsa.PCM_FORMAT_S24_3LE,
-	})
+	}
+	if layout.Mics.Format == board.S32LE {
+		cfg.Format = tinyalsa.PCM_FORMAT_S32_LE
+	}
+	device := tinyalsa.NewDevice(capture.Card, capture.Device, cfg)
 	m := &PcmMicrophone{
-		device: &device,
+		device:        &device,
+		bytesPerFrame: layout.Mics.Channels * layout.Mics.Format.Bytes(),
 	}
 	if err := m.Init(); err != nil {
 		return nil, err
@@ -66,8 +73,71 @@ func (p *PcmMicrophone) Init() error {
 	// own noise floor — with a perfectly healthy ALSA clock, which is what
 	// makes it so hard to see. See the codec package.
 	codec.EnsureRoutes()
+	if err := openLoopback(board.CurrentLayout()); err != nil {
+		return err
+	}
 	go p.readLoop()
 	return nil
+}
+
+// openLoopback opens the board's playback loopback, if it states one, and
+// returns once it is delivering audio, so that it is running before the
+// microphones open: the Dot 3's amplifier loses its clock until reboot the
+// other way round (41C8, 2026-10-24). It is read and dropped for as long as
+// the process runs; nothing uses it yet.
+//
+// It is retried for a few seconds because "stop mixer" returns before
+// Amazon's mixer has let the PCM go, and the first open then fails at once
+// (41C8, 2026-10-25).
+func openLoopback(l *board.Layout) error {
+	if l.Loopback == nil {
+		return nil
+	}
+	for try := 1; ; try++ {
+		stream, err := startLoopback(l)
+		if err == nil {
+			log.Printf("mic: loopback open at card %d device %d, before the microphones (try %d)",
+				l.Loopback.Card, l.Loopback.Device, try)
+			go func() {
+				for range stream {
+				}
+			}()
+			return nil
+		}
+		if try == loopbackTries {
+			return err
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+const loopbackTries = 8
+
+// startLoopback opens the loopback once and waits for its first audio.
+func startLoopback(l *board.Layout) (chan []byte, error) {
+	dev := tinyalsa.NewDevice(l.Loopback.Card, l.Loopback.Device, pcm.Config{
+		Channels:    l.LoopbackChs,
+		SampleRate:  l.LoopbackRate,
+		PeriodSize:  768,
+		PeriodCount: 10,
+		Format:      tinyalsa.PCM_FORMAT_S16_LE,
+	})
+	stream := make(chan []byte, 4)
+	go func() {
+		if err := dev.GetAudioStream(dev.DeviceConfig, stream); err != nil {
+			log.Printf("mic: loopback stream error: %v", err)
+		}
+		close(stream)
+	}()
+	select {
+	case _, ok := <-stream:
+		if !ok {
+			return nil, errors.New("the loopback that must open before the microphones did not start")
+		}
+	case <-time.After(2 * time.Second):
+		return nil, errors.New("the loopback that must open before the microphones delivered nothing in 2s")
+	}
+	return stream, nil
 }
 
 // readLoop opens the ALSA device and reads periods forever, fanning each
@@ -114,7 +184,7 @@ func (p *PcmMicrophone) readLoop() {
 	}()
 
 	rate := int64(p.device.DeviceConfig.SampleRate)
-	bytesPerFrame := p.device.DeviceConfig.Channels * 3 // S24_3LE
+	bytesPerFrame := p.bytesPerFrame
 	var (
 		firstArrival time.Time
 		lastArrival  time.Time

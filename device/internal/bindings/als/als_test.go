@@ -324,3 +324,42 @@ func TestNothingReadsCalibratedLux(t *testing.T) {
 		t.Fatalf("walked %d files under %s, expected the whole module", files, root)
 	}
 }
+
+// From what the drivers print: a whole number (tsl2540 als_lux), or IIO's
+// IIO_VAL_INT_PLUS_MICRO "%d.%06d" (tsl2572 in_illuminance0_input, read off
+// 41C8 as "3.636000"), with the newline sysfs appends. Rounded to whole lux;
+// 0 is a real reading (a covered sensor).
+func TestParseLux(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+		ok   bool
+	}{
+		{"309\n", 309, true},
+		{"0\n", 0, true},
+		{"3.636000\n", 4, true},
+		{"56.973000", 57, true},
+		{"0.499999", 0, true},
+		{"0.500000", 1, true},
+		{"0.000000", 0, true},
+		{"123456789.999999", 123456790, true},
+		{"-0.500000", 0, false}, // IIO prints negatives this way; not light
+		{"-3", 0, false},
+		{"NaN", 0, false},
+		{"Inf", 0, false},
+		{"1e3", 0, false},
+		{"0x1p3", 0, false},
+		{"1.", 0, false},
+		{".5", 0, false},
+		{"1,5", 0, false},
+		{"", 0, false},
+		{"\n", 0, false},
+		{"1234567890", 0, false}, // past any sensor's range, and int32
+	}
+	for _, c := range cases {
+		got, ok := parseLux(c.in)
+		if ok != c.ok || got != c.want {
+			t.Errorf("parseLux(%q) = %d, %v; want %d, %v", c.in, got, ok, c.want, c.ok)
+		}
+	}
+}

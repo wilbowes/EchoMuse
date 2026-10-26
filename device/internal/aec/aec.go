@@ -69,10 +69,6 @@ const (
 	// cover the delay error between the speaker write and the mic batches.
 	hwTailMs = 64
 
-	// NumMics is how many microphones the hardware-reference path cancels:
-	// every channel a turn can be given (see micStates).
-	NumMics = 7
-
 	// quietHold is how many silent reference frames pass before the unused
 	// microphones rest. The filter sees two frames of far-end history at
 	// the 64ms tail, so by then every state's history is the silence the
@@ -103,7 +99,7 @@ type Canceller struct {
 	// another. All seven adapt on every period, so whichever one a turn
 	// picks has already learnt its own path. Costs 6.04ms per 32ms period on
 	// the device, 19% of a core (JOURNAL 2026-10-03).
-	micStates       [NumMics]*C.SpeexEchoState
+	micStates       []*C.SpeexEchoState // one per microphone, by channel
 	lastMicsSaveTry time.Time
 	// farQuiet counts consecutive bit-exact silent reference frames, and
 	// micFrames the per-microphone cancellations run. Past quietHold the
@@ -283,8 +279,11 @@ func (c *Canceller) RefSource() string {
 }
 
 // New returns a disabled Canceller. Call SetParams (config push) to arm it.
-func New() *Canceller {
-	return &Canceller{dealias: newDealias()}
+//
+// nMics is how many microphones the hardware-reference path cancels: every
+// channel a turn can be given (see micStates), the board's MicArray.NumMics.
+func New(nMics int) *Canceller {
+	return &Canceller{dealias: newDealias(), micStates: make([]*C.SpeexEchoState, nMics)}
 }
 
 // SetParams applies config. On the software tap, any change to delay or tail
@@ -656,8 +655,8 @@ func (c *Canceller) noteAttLocked(micRMS, outRMS, refRMS float64, useHW bool, mi
 }
 
 // ProcessMicsWithRef cancels EVERY microphone against the hardware reference
-// and returns the cancelled audio of the one in use (#814). mics holds
-// NumMics buffers of the same period, indexed by channel; active is the
+// and returns the cancelled audio of the one in use (#814). mics holds one
+// buffer per microphone of the same period, indexed by channel; active is the
 // channel the pipeline is reading. See micStates for why one filter is not
 // enough.
 //
@@ -676,7 +675,7 @@ func (c *Canceller) ProcessMicsWithRef(mics [][]byte, active int, ref []byte) []
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	mono := mics[active]
-	ok := c.enabled && c.hwRef && c.micStates[0] != nil && len(mics) == NumMics &&
+	ok := c.enabled && c.hwRef && c.micStates[0] != nil && len(mics) == len(c.micStates) &&
 		len(mono) > 0 && len(mono)%(FrameSize*2) == 0 && len(ref) == len(mono)
 	for _, m := range mics {
 		ok = ok && len(m) == len(mono)
@@ -703,8 +702,8 @@ func (c *Canceller) ProcessMicsWithRef(mics [][]byte, active int, ref []byte) []
 		c.hwFrames++
 		// The active microphone last, so mic and res still hold its frame
 		// for the telemetry below.
-		for k := 1; k <= NumMics; k++ {
-			m := (active + k) % NumMics
+		for k := 1; k <= len(mics); k++ {
+			m := (active + k) % len(mics)
 			if m != active && c.farQuiet > quietHold {
 				continue
 			}

@@ -1048,6 +1048,12 @@ class Device:
         return self.timer_alarm_hold_t > asyncio.get_event_loop().time()
 
     @property
+    def mic_capable(self) -> bool:
+        """Announces "mic" (every firmware did until boards without supported
+        capture). Capabilities not yet known are not read as no mic."""
+        return not self.capabilities or "mic" in self.capabilities
+
+    @property
     def button_hold_capable(self) -> bool:
         """Measures hold time — and so was offered the HA event entity."""
         return "button_hold" in (self.capabilities or [])
@@ -3213,7 +3219,9 @@ async def wake_word_listener(device: Device):
     a superseded connection ends this loop.
     """
     while em_state.devices.get(device.device_id) is device:
-        if device.private_listening:
+        if not device.mic_capable:
+            await _no_mic(device)
+        elif device.private_listening:
             # Nothing here scores a private Echo, so its cached models (three
             # ONNX sessions each) are released, not held for the life of the
             # process; going back to streaming rebuilds them.
@@ -3222,6 +3230,13 @@ async def wake_word_listener(device: Device):
             await _private_listen(device)
         else:
             await _stream_listen(device)
+
+
+async def _no_mic(device: Device) -> None:
+    """No microphone it can read: no mic_start, no scorer, until superseded."""
+    log.info(f"[{device.device_id}] no microphone — not listening; speaker only")
+    while em_state.devices.get(device.device_id) is device and not device.mic_capable:
+        await asyncio.sleep(1.0)
 
 
 async def _private_listen(device: Device) -> None:
@@ -4235,6 +4250,7 @@ async def handle_button_event(device: Device, event: dict):
             tap_event=(
                 device.button_single_tap_event and device.button_hold_capable
             ),
+            has_mic=device.mic_capable,
         )
 
         if action == em_button.HOLD:
@@ -4254,6 +4270,12 @@ async def handle_button_event(device: Device, event: dict):
                 f"[{device.device_id}] Dot button tap "
                 f"{device.tap_burst.count} in burst (window {window_ms}ms)"
             )
+            return
+
+        if action == em_button.NO_MIC:
+            log.info(f"[{device.device_id}] Dot button tap — no microphone, no turn")
+            if device.led_anim_capable and (anim := device.led_scene.get("error_anim")):
+                await device.send_led_anim(anim)
             return
 
         if action == em_button.BLOCKED:

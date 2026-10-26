@@ -262,6 +262,47 @@ static void check_run(void)
     ck(!lit, "the ring is handed back dark");
 }
 
+/* orbit_odd_one and orbit_learn against frames read off real kernels: the
+ * head is found whatever the board's blues, and the colours are taken from
+ * the ring rather than assumed. */
+static void put_frame(const char *hex)
+{
+    int fd = open(LEDDIR "/frame", O_WRONLY | O_TRUNC);
+    write(fd, hex, strlen(hex));
+    close(fd);
+}
+
+static void check_orbit_join(void)
+{
+    unsigned char f[LED_N][3];
+    static const struct { const char *what, *hex; int odd; } t[] = {
+        /* 41C8, 2026-10-25, sampled with boot_animation re-enabled. */
+        { "donut orbit, head at physical 9",
+          "0000c10000c10000c10000c10000c10000c10000c10000c10000c100ffc10000c10000c1", 9 },
+        { "donut orbit, head at physical 0",
+          "00ffc10000c10000c10000c10000c10000c10000c10000c10000c10000c10000c10000c1", 0 },
+        { "biscuit orbit, head at physical 1",
+          "0000ff00ffff0000ff0000ff0000ff0000ff0000ff0000ff0000ff0000ff0000ff0000ff", 1 },
+        { "a dark ring",
+          "000000000000000000000000000000000000000000000000000000000000000000000000", -1 },
+        { "two lit segments",
+          "00ffc100ffc10000c10000c10000c10000c10000c10000c10000c10000c10000c10000c1", -1 },
+        { "short read", "0000c10000c1", -1 },
+    };
+    for (size_t i = 0; i < sizeof t / sizeof t[0]; i++) {
+        put_frame(t[i].hex);
+        int got = frame_read(f) ? orbit_odd_one(f) : -1;
+        ck(got == t[i].odd, t[i].what);
+    }
+    unsigned char ground[3], head[3];
+    memcpy(ground, C_ORBIT, 3); memcpy(head, C_HEAD, 3);
+    put_frame(t[0].hex);
+    orbit_learn();
+    ck(C_ORBIT[2] == 0xc1 && C_HEAD[1] == 0xff && C_HEAD[2] == 0xc1,
+       "orbit_learn takes the donut's blues off the ring");
+    memcpy(C_ORBIT, ground, 3); memcpy(C_HEAD, head, 3);
+}
+
 int main(int argc, char **argv)
 {
     /* led_write opens the frame O_WRONLY with no O_CREAT, which is correct for
@@ -281,6 +322,7 @@ int main(int argc, char **argv)
            nframes, sim_now_us / 1000, handover_frames, boot_frames);
     ck(nframes > 100, "the animation actually produced frames");
     check_run();
+    check_orbit_join();
     printf("\n%s\n", fails ? "FAILED" : "all ok");
     return fails ? 1 : 0;
 }
