@@ -200,20 +200,41 @@ def test_the_event_handler_consults_the_barrier_before_anything_else():
     )
 
 
+def _barge_action() -> str:
+    """
+    Everything a barge can do: the watcher and `_take_barge` together.
+
+    #195 split them — the window decides whether the interruption is taken,
+    and `_take_barge` is where taking it cancels the turn — so a rule that
+    looks only at the watcher reads the decision and misses the abort.
+    """
+    watcher = CONTROLLER_SRC[CONTROLLER_SRC.index("async def _barge_watcher"):]
+    watcher = watcher[: watcher.index("\nasync def ", 10)]
+    take = CONTROLLER_SRC[CONTROLLER_SRC.index("async def _take_barge"):]
+    take = take[: take.index("\nasync def ", 10)]
+    return watcher + take
+
+
 def test_barge_serialises_in_both_phases():
     """
     Thinking starts another turn on this connection, so HA's run must be
     aborted first. Playback must serialise too: RUN_END follows TTS_END, so a
     barge in the first milliseconds of audio can beat it.
     """
-    watcher = CONTROLLER_SRC[CONTROLLER_SRC.index("async def _barge_watcher"):]
-    watcher = watcher[: watcher.index("\nasync def ", 10)]
-    assert "abort_ha=True" in watcher, (
+    barge = _barge_action()
+    assert "abort_ha=True" in barge, (
         "barge during thinking must abort HA's pipeline before the "
         "interrupting turn starts"
     )
-    assert "abort_ha_run" in watcher, (
+    assert "abort_ha_run" in barge, (
         "barge during playback must serialise against the interrupting turn"
+    )
+    # Both ways a barge can be decided — the frame that crossed, and the one
+    # that confirmed somebody is still talking — go through the same action,
+    # so neither can cancel a turn without this serialisation.
+    assert barge.count("await _take_barge(") == 2, (
+        "a barge decision that does not reach _take_barge cancels without "
+        "aborting HA's run first"
     )
 
 

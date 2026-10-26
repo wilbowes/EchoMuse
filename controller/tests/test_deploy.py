@@ -192,6 +192,43 @@ def test_addon_default_reply_wait_matches_the_controller():
     )
 
 
+def test_addon_default_barge_window_matches_the_controller():
+    """
+    Same shape again, for #195. config.yaml ships the value a fresh add-on
+    install meets, so a default that drifts from em_barge's silently hands out
+    a confirmation window nobody chose.
+
+    The RANGE is pinned for the reason the reply wait's is: the schema
+    enforces the ceiling in the add-on UI, em_barge clamps it for the
+    standalone container, and both have to mean the same number — otherwise
+    the add-on accepts a window the controller then quietly shortens.
+    """
+    import sys
+    sys.path.insert(0, str(CONTROLLER))
+    import em_barge
+
+    config = (CONTROLLER / "config.yaml").read_text()
+
+    default = re.search(r"^\s*barge_confirm_ms:\s*([0-9.]+)", config, re.M)
+    assert default, "config.yaml has no barge_confirm_ms option"
+    assert float(default.group(1)) == em_barge.CONFIRM_DEFAULT_MS, (
+        f"config.yaml ships barge_confirm_ms {default.group(1)} but "
+        f"em_barge.CONFIRM_DEFAULT_MS is {em_barge.CONFIRM_DEFAULT_MS}"
+    )
+
+    rng = re.search(r'^\s*barge_confirm_ms:\s*"int\((\d+),(\d+)\)"',
+                    config, re.M)
+    assert rng, "schema has no barge_confirm_ms range"
+    assert float(rng.group(2)) == em_barge.CONFIRM_MAX_MS, (
+        f"schema caps barge_confirm_ms at {rng.group(2)} but "
+        f"em_barge.CONFIRM_MAX_MS is {em_barge.CONFIRM_MAX_MS} — the add-on "
+        f"would accept a window the controller then clamps"
+    )
+    # A window that ends inside the wake word's own tail can only ever drop a
+    # barge, never take one: the schema must not offer it.
+    assert float(rng.group(1)) > em_barge.CONFIRM_TAIL_MS
+
+
 def test_addon_image_is_published_not_built_on_the_user_machine():
     """
     Without an `image:` key Supervisor builds the Dockerfile on whatever
@@ -2012,7 +2049,7 @@ def test_a_barge_that_stands_down_for_no_ha_leaves_the_same_trace_as_a_wake():
     covered is whether the watcher acts on it, and where.
     """
     src = (CONTROLLER / "em_controller.py").read_text()
-    for name in ("_barge_watcher", "_private_barge"):
+    for name in ("_take_barge", "_private_barge"):
         fn = _fn_body(src, name)
         assert "em_barge.cede(" in fn, f"{name} must use the shared decision"
         assert "(not serves) or won_by !=" not in fn, (
@@ -2219,11 +2256,11 @@ def test_a_barge_in_is_arbitrated_like_any_other_wake():
     before anyone talked over the answer.
     """
     src  = (CONTROLLER / "em_controller.py").read_text()
-    body = src[src.index("async def _barge_watcher"):]
+    body = src[src.index("async def _take_barge"):]
     body = body[:body.index("\nasync def ", 1)]
 
     assert "await _claim_wake(" in body, (
-        "the barge watcher must arbitrate — without it a second Echo answers "
+        "the barge path must arbitrate — without it a second Echo answers "
         "the same interrupting utterance"
     )
     # Same ordering rule as the wake path: a device that cannot finish a turn

@@ -916,6 +916,7 @@ These are set once, on the server, and need a controller restart to change:
 | `REQUIRE_DEVICE_TLS` | Set to `1` **only after every device shows "wss (TLS)"** on its Status tab — from then on the controller rejects unencrypted or tokenless device connections. |
 | `EM_EXTRA_CA_CERT` | Path to a PEM CA certificate to trust — needed if Home Assistant, or a media server you stream from, is served over HTTPS with your own internal certificate authority. See below. |
 | `EM_TTS_WAIT_TIMEOUT` | Seconds to wait for Home Assistant's reply to begin before giving up on the turn — default 30, at most 120. Raise it if your conversation agent uses tools and needs longer. The add-on has the same setting as **Reply wait (seconds)**. |
+| `EM_BARGE_CONFIRM_MS` | Milliseconds someone has, after their wake word while Home Assistant is thinking, to still be talking before the interruption is given up and the answer already on its way is kept — default 1500, at most 5000. Interrupting is final, so this is what stops an accidental wake word from throwing that answer away. The add-on has the same setting as **Barge-in window (milliseconds)**. |
 
 See `.env.example` for the complete list with comments.
 
