@@ -6,6 +6,10 @@ It holds the rules. The why behind them (incidents, measurements, worked
 examples, dates) is in `docs/history/root.md` under the same headings; read
 the matching section there before changing that area or a rule.
 
+**Before diagnosing a fault, reopening a decision or changing a default, grep
+`docs/history/` and `JOURNAL.md` for the symptom, setting or function name.**
+The stories behind the rules are no longer loaded; this is how they are found.
+
 ## What this is
 
 EchoMuse repurposes Amazon Echo Dot Gen 2 (FireOS 5 / Android 5.1, codename "biscuit") as an open-source voice assistant satellite:
