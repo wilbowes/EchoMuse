@@ -103,9 +103,9 @@ check("a port of 0 is reported as 0, not treated as absent",
 // A pending device has no label until it is approved, and the header shows its
 // serial in that state. The warning falls back to the serial for the same
 // reason, so it reads as a name rather than as a hole in a sentence.
-const unlabelled = _deleteHaWarning({ device_id: "G090LF11803611NF", esphome_port: 16101 });
+const unlabelled = _deleteHaWarning({ device_id: "G090LF0000001017", esphome_port: 16101 });
 check("an unlabelled device is named by its serial",
-      unlabelled.includes("G090LF11803611NF"), unlabelled);
+      unlabelled.includes("G090LF0000001017"), unlabelled);
 // Nothing that reads as a hole: no doubled space where the name would be, no
 // empty quotes, and the sentence still closes.
 check("an unlabelled device does not read as broken",

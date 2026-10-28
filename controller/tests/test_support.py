@@ -45,7 +45,7 @@ ACCOUNTS = {SECRETS["username"]: "admin", "wil": "admin", "sam": "readonly"}
 
 def _bundle():
     device = Row({
-        "device_id": "G090LF1180130NJG",
+        "device_id": "G090LF0000000F16",
         "label": SECRETS["label"],
         "approved": 1,
         "firmware_ver": "v2.9.13",
@@ -54,12 +54,12 @@ def _bundle():
         "esphome_noise_psk": SECRETS["psk"],
     })
     turn = Row({
-        "id": 1, "device_id": "G090LF1180130NJG", "outcome": "ok",
+        "id": 1, "device_id": "G090LF0000000F16", "outcome": "ok",
         "wake_score": 0.98, "total_ms": 1200,
         "stt_text": SECRETS["speech"],
     })
     metric = Row({
-        "device_id": "G090LF1180130NJG", "hour_ts": 0, "rtt_samples": 100,
+        "device_id": "G090LF0000000F16", "hour_ts": 0, "rtt_samples": 100,
         "rtt_excursions": 20, "wifi_bssid_last": SECRETS["bssid"],
         "wifi_ssid": SECRETS["ssid"],
     })
@@ -71,9 +71,9 @@ def _bundle():
         turns=[turn],
         metrics=[metric],
         counters=[],
-        device_configs={"G090LF1180130NJG": {"owwModel": "hey_mycroft_v0.1",
+        device_configs={"G090LF0000000F16": {"owwModel": "hey_mycroft_v0.1",
                                              "some_token": SECRETS["token"]}},
-        live_state={"G090LF1180130NJG": {
+        live_state={"G090LF0000000F16": {
             "connected": True,
             "capabilities": ["mic", "ambient_light"],
             # A whole stats dict — the path that actually leaked in a REAL
@@ -97,7 +97,7 @@ def _bundle():
             # quote and URL rules both miss them. Found by auditing a real
             # bundle against the live database — the synthetic fixture had
             # no such line, which is exactly why it passed.
-            f"Device connected: G090LF1180130NJG v=v2.9.13 at {SECRETS['ip']} caps=[mic]",
+            f"Device connected: G090LF0000000F16 v=v2.9.13 at {SECRETS['ip']} caps=[mic]",
             f"associated bssid {SECRETS['bssid']} freq 5805",
             f"Shell session opened by {SECRETS['username']}",
             "Shell session closed by wil",
@@ -153,7 +153,7 @@ def test_the_useful_diagnostics_survive():
     """
     b = _bundle()
     d = b["devices"][0]
-    assert d["device_id"] == "G090LF1180130NJG", "serials correlate everything"
+    assert d["device_id"] == "G090LF0000000F16", "serials correlate everything"
     assert d["firmware_ver"] == "v2.9.13"
     assert d["live"]["capabilities"] == ["mic", "ambient_light"], \
         "capabilities decide which HA entities exist — the #62 question"
@@ -581,7 +581,7 @@ def test_the_ring_ignores_the_dashboards_own_http_chatter():
 _RAW_PROPS = """
 [ro.product.model]: [AEOBC]
 [ro.build.version.incremental]: [272.6.8.0_user_680767620]
-[ro.serialno]: [G090LF1180570SPJ]
+[ro.serialno]: [G090LF0000001118]
 [persist.sys.usb.config]: [mtp,adb]
 [net.hostname]: [SamsPhone-Bedroom]
 [wifi.interface]: [wlan0]
@@ -664,7 +664,7 @@ def test_props_are_allowlisted_not_filtered():
     d = _diag(probes={"props": _RAW_PROPS})
     props = d["probes"]["props"]
     assert props["ro.build.version.incremental"] == "272.6.8.0_user_680767620"
-    assert props["ro.serialno"] == "G090LF1180570SPJ"
+    assert props["ro.serialno"] == "G090LF0000001118"
     assert "net.hostname" not in props
     assert "dhcp.wlan0.ipaddress" not in props
 
@@ -674,7 +674,7 @@ def test_serials_are_kept():
     Same call as the support bundle: nothing correlates without them, and
     they identify the reporter's own hardware to them.
     """
-    assert "G090LF1180570SPJ" in json.dumps(_diag(probes={"props": _RAW_PROPS}))
+    assert "G090LF0000001118" in json.dumps(_diag(probes={"props": _RAW_PROPS}))
 
 
 def test_an_unlisted_probe_is_dropped_whole():
@@ -864,11 +864,11 @@ def test_devices_carry_their_userspace_and_kernel():
     #566's bundle could not say which kernel the device booted. A device that
     never reported them (old firmware) simply has no such key."""
     reported = Row({
-        "device_id": "G090LF1180130NJG", "approved": 1,
+        "device_id": "G090LF0000000F16", "approved": 1,
         "base_os": "emos", "kernel_arch": "armv7l",
         "kernel_release": "3.18.19-gecb8cb46060-dirty",
     })
-    old = Row({"device_id": "G090LF1180440EFF", "approved": 1})
+    old = Row({"device_id": "G090LF0000000D13", "approved": 1})
     bundle = S.build(
         controller_version="v2.24.1", devices=[reported, old],
         fleet_config={}, schema_version=26, turns=[], metrics=[], counters=[],

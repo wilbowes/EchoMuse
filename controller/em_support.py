@@ -133,6 +133,7 @@ _STATS_FIELDS = (
     "wifiRssi", "linkSpeedMbps", "wifiFreqMhz", "txBytes", "rxBytes",
     "cpuTempC", "maxTempC", "coresOnline", "coresTotal", "thermalCoreLimit",
     "ambientLux", "owwShadow",
+    "jackInserted", "jackMixer", "jackDriftCount",
 )
 
 _COUNTER_FIELDS = (

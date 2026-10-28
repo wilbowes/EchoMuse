@@ -33,10 +33,10 @@ def test_serials_differing_only_in_stripped_characters_no_longer_collide():
     batch differing in the trailing letters became the same address and Home
     Assistant treated two Echoes as one.
     """
-    a = db.esphome_mac_for("G090LF1180440C9K")
-    b = db.esphome_mac_for("G090LF1180440C9R")
-    assert db._legacy_serialno_to_mac("G090LF1180440C9K") == \
-           db._legacy_serialno_to_mac("G090LF1180440C9R")   # the old bug
+    a = db.esphome_mac_for("G090LF0000000C9K")
+    b = db.esphome_mac_for("G090LF0000000C9R")
+    assert db._legacy_serialno_to_mac("G090LF0000000C9K") == \
+           db._legacy_serialno_to_mac("G090LF0000000C9R")   # the old bug
     assert a != b
 
 
@@ -49,7 +49,7 @@ def test_every_address_is_a_valid_locally_administered_unicast_mac():
     Guaranteed by the fixed prefix rather than by masking, so there is no bit
     for a later change to forget.
     """
-    for serial in ("G090LF1180440C95", "G0K0XY1180440C9K", "x", "", "ZZZZ"):
+    for serial in ("G090LF0000000B12", "G0K0XY1180440C9K", "x", "", "ZZZZ"):
         mac = db.esphome_mac_for(serial)
         first = int(mac.split(":")[0], 16)
         assert first & 0x02, f"{mac} is not locally administered"
@@ -59,17 +59,17 @@ def test_every_address_is_a_valid_locally_administered_unicast_mac():
 
 def test_the_derivation_is_stable():
     """It has to survive restarts and rebuilds, or HA loses the device."""
-    assert db.esphome_mac_for("G090LF1180440C95") == \
-           db.esphome_mac_for("G090LF1180440C95")
+    assert db.esphome_mac_for("G090LF0000000B12") == \
+           db.esphome_mac_for("G090LF0000000B12")
 
 
 # ── Assign once, then never move ──────────────────────────────────────────────
 
 def test_a_mac_is_assigned_once_and_kept(fresh_db):
-    db.register_new_device("G090LF1180440C95", "10.0.0.9", "v2.12.0")
-    first = db.get_esphome_mac("G090LF1180440C95")
-    assert first == db.get_esphome_mac("G090LF1180440C95")
-    row = db.get_device("G090LF1180440C95")
+    db.register_new_device("G090LF0000000B12", "10.0.0.9", "v2.12.0")
+    first = db.get_esphome_mac("G090LF0000000B12")
+    assert first == db.get_esphome_mac("G090LF0000000B12")
+    row = db.get_device("G090LF0000000B12")
     assert row["esphome_mac"] == first
 
 
@@ -79,13 +79,13 @@ def test_a_stored_mac_wins_over_the_derivation(fresh_db):
     keeps the identity Home Assistant already holds, whatever the current
     derivation would say.
     """
-    db.register_new_device("G090LF1180440C95", "10.0.0.9", "v2.12.0")
+    db.register_new_device("G090LF0000000B12", "10.0.0.9", "v2.12.0")
     with db._tx() as conn:
         conn.execute("UPDATE devices SET esphome_mac = ? WHERE device_id = ?",
-                     ("DE:AD:BE:EF:00:01", "G090LF1180440C95"))
-    assert db.get_esphome_mac("G090LF1180440C95") == "DE:AD:BE:EF:00:01"
-    assert db.get_esphome_mac("G090LF1180440C95") != \
-           db.esphome_mac_for("G090LF1180440C95")
+                     ("DE:AD:BE:EF:00:01", "G090LF0000000B12"))
+    assert db.get_esphome_mac("G090LF0000000B12") == "DE:AD:BE:EF:00:01"
+    assert db.get_esphome_mac("G090LF0000000B12") != \
+           db.esphome_mac_for("G090LF0000000B12")
 
 
 def test_an_unregistered_device_still_gets_an_answer(fresh_db):
@@ -137,7 +137,7 @@ def test_a_device_with_a_unique_identity_keeps_it(tmp_path):
     registered these devices under the old value; a new one orphans the device
     row and every automation referencing its entities.
     """
-    serials = ["G090LF1180440C95", "G0K0XY1180440C11"]
+    serials = ["G090LF0000000B12", "G0K0XY1180440C11"]
     macs = _legacy_fleet(tmp_path, serials)
     for s in serials:
         assert macs[s] == db._legacy_serialno_to_mac(s)
@@ -150,7 +150,7 @@ def test_a_colliding_pair_is_split_and_the_oldest_keeps_its_identity(tmp_path):
     actually holds — and the other, which was being overwritten, gets a new
     identity and appears properly for the first time.
     """
-    a, b = "G090LF1180440C9K", "G090LF1180440C9R"
+    a, b = "G090LF0000000C9K", "G090LF0000000C9R"
     assert db._legacy_serialno_to_mac(a) == db._legacy_serialno_to_mac(b)
     macs = _legacy_fleet(tmp_path, [a, b])
     assert macs[a] == db._legacy_serialno_to_mac(a)      # oldest keeps it
@@ -159,8 +159,8 @@ def test_a_colliding_pair_is_split_and_the_oldest_keeps_its_identity(tmp_path):
 
 
 def test_the_migration_leaves_every_device_with_a_distinct_identity(tmp_path):
-    serials = ["G090LF1180440C95", "G090LF1180440C9K", "G090LF1180440C9R",
-               "G090LF1180440FRK", "G090LF1180440FRR"]
+    serials = ["G090LF0000000B12", "G090LF0000000C9K", "G090LF0000000C9R",
+               "G090LF0000000E15", "G090LF0000000E14"]
     macs = _legacy_fleet(tmp_path, serials)
     assert len(set(macs.values())) == len(serials)
 
@@ -176,7 +176,7 @@ def test_migrations_are_append_only():
     rather than edited — which is the mistake this guards, and the one that
     broke every stats write and disconnect-looped the fleet when it happened.
     """
-    assert len(db.MIGRATIONS) == 32
+    assert len(db.MIGRATIONS) == 33
     # v30 is its own entry (emos_version, emos_build), not appended onto v29.
     assert "emos_version" in db.MIGRATIONS[29]
     assert "emos_version" not in db.MIGRATIONS[28]

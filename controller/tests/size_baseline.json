@@ -1,8 +1,8 @@
 {
  "files": {
-  "em_controller.py": 6239,
-  "em_db.py": 3411,
-  "em_esphome.py": 3652
+  "em_controller.py": 6258,
+  "em_db.py": 3453,
+  "em_esphome.py": 3687
  },
  "functions": {
   "em_controller.Device.__init__": 390,
@@ -11,7 +11,7 @@
   "em_controller._run_voice_locked": 431,
   "em_controller._stream_listen": 658,
   "em_controller.handle_control": 588,
-  "em_controller.handle_data": 193,
+  "em_controller.handle_data": 202,
   "em_db.record_device_stats": 206,
   "em_device_view.merge_device": 178,
   "em_esphome.EchoMuseSatellite._handle_voice_event": 225,
@@ -22,6 +22,6 @@
   "em_player.MediaSession._feed": 318,
   "em_routes_provision._post_provision_emos_image": 157,
   "em_scenes.resolve": 159,
-  "em_shell.stream_file": 239
+  "em_shell.stream_file": 238
  }
 }

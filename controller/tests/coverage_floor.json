@@ -22,6 +22,7 @@
  "em_dbwriter.py": 92.0,
  "em_device_config.py": 16.0,
  "em_device_view.py": 40.0,
+ "em_disk.py": 95.0,
  "em_earlytts.py": 99.0,
  "em_emos_build.py": 92.0,
  "em_emos_ota.py": 22.0,

@@ -68,6 +68,7 @@ KINDS: dict[str, str] = {
     "wakeSoundLevel": STR,
     "volumeButtonSound": BOOL,
     "remoteVolumeArc": BOOL,
+    "ledBrightness": FLOAT,
     "eqBands": FLOAT_LIST,
     "eqLoudness": BOOL,
     "bassGuardEnabled": BOOL,
@@ -85,6 +86,7 @@ KINDS: dict[str, str] = {
     "saveUtterances": BOOL,
     "wakeClipCapture": BOOL,
     "wakeClipMinScore": FLOAT,
+    "wakeClipKeep":     INT,
 }
 
 

@@ -36,10 +36,11 @@ function liftArrow(name) {
   throw new Error(`could not find the end of ${name}`);
 }
 
-const { _unlockVerdict } = await import(
+const { _unlockVerdict, _odHex } = await import(
   "data:text/javascript;base64," + Buffer.from(
-    liftArrow("_amonetLk") + "\n" + liftArrow("_unlockVerdict")
-    + "\nexport { _unlockVerdict };"
+    liftArrow("_odHex") + "\n" + liftArrow("_amonetLk") + "\n"
+    + liftArrow("_unlockVerdict")
+    + "\nexport { _odHex, _unlockVerdict };"
   ).toString("base64"));
 
 const LK_V1 = "8816885824790500";  // amonet 1's lk.bin: MTK magic, then the image length, 358,692
@@ -73,6 +74,15 @@ check("amonet 2's LK in lk_a is v2",
   v2({ release: "5.1.1", lk: LK_V2, twrp: "3.2.3-0" }));
 check("the header is matched whatever the hex case",
   v2({ lk: LK_V2.toUpperCase() }));
+
+// ── `od` output is read with and without an offset column ──
+// TWRP 3.2.3 ships BusyBox 1.22, whose od has no -A, so the read is plain
+// `od -tx1` and the offset it prints is stripped here (#903).
+check("od with an offset column", _odHex("0000000 88 16 88 58 24 79 05 00") === LK_V1,
+  _odHex("0000000 88 16 88 58 24 79 05 00"));
+check("od without an offset column", _odHex("88 16 88 58 24 79 05 00") === LK_V1);
+check("od output split by whitespace", _odHex("0000000 88 16 88 58\n24 79 05 00") === LK_V1);
+check("empty od output is empty", _odHex("") === "");
 check("TWRP 3.7 is v2", v2({ twrp: "3.7.0_9-0" }));
 check("TWRP 3.10 is compared as a number, not a string", v2({ twrp: "3.10.0" }));
 check("TWRP 4.0 is v2", v2({ twrp: "4.0.0" }));
@@ -97,6 +107,9 @@ check("runConnectAndroid calls _unlockVerdict",
   /_unlockVerdict\(\{\s*release:\s*effRelease/.test(connect));
 check("in recovery the release comes from /system, not TWRP's getprop",
   /effRelease\s*=\s*\(sys && sys\.release\)/.test(connect));
+const lkLine = (connect.match(/dd if="\$P"[^\n]*/) || [""])[0];
+check("lk_a is read with an od BusyBox 1.22 accepts, not -A",
+  /od -tx1/.test(lkLine) && !/od -An/.test(lkLine), lkLine);
 
 if (failures) {
   console.error(`\n${failures} failure(s)`);

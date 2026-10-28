@@ -62,6 +62,7 @@ import hmac
 import json
 import logging
 import os
+import signal
 import socket
 import struct
 import time
@@ -5792,6 +5793,15 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
             await ws.close()
             return
 
+        # A reconnect can arrive before the controller notices the old data
+        # connection is dead. Close the one it replaces instead of leaving
+        # it open until the WebSocket ping timeout (#751).
+        old = device.data_ws
+        if old is not None and old is not ws:
+            try:
+                await old.close()
+            except Exception:
+                pass
         device.data_ws = ws
         # The connection bridge rides this plane: ask what the device holds
         # now that there is somewhere for the answer to arrive.
@@ -6220,7 +6230,16 @@ async def main():
             await em_ble_proxy.start_ble_proxy_servers(SERVER_HOST)
 
             log.info("EchoMuse Controller ready — waiting for devices")
-            await asyncio.Future()
+            # Stop cleanly on SIGTERM/SIGINT instead of being force-killed
+            # after the supervisor's timeout (#889).
+            stop_event = asyncio.Event()
+            loop = asyncio.get_event_loop()
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                try:
+                    loop.add_signal_handler(sig, stop_event.set)
+                except NotImplementedError:
+                    pass
+            await stop_event.wait()
 
     finally:
         await em_ble_proxy.stop_ble_proxy_servers()

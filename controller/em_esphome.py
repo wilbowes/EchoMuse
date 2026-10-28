@@ -1236,11 +1236,23 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         waiting for one here, unlike VoiceAssistantAnnounceRequest. Two ways
         to announce, one of which has a completion contract.
         """
+        async def _play(pcm):
+            cb = self._announce_play_cb()
+            for _ in range(20):
+                if cb is not None:
+                    break
+                await asyncio.sleep(0.05)
+                cb = self._announce_play_cb()
+            if cb is None:
+                log.warning(f"[{self._log_name}] no playback callback set")
+                return
+            await cb(pcm)
+
         try:
             await em_announce.play_media(
                 media_id,
                 fetch=_fetch_tts_audio,
-                play=self._announce_play_cb(),
+                play=_play,
                 log_name=self._log_name,
             )
         except Exception as e:
@@ -1288,10 +1300,25 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # restart.
             self._send_one(self._media_state_msg())
 
+        async def _play(pcm):
+            # Wait briefly for the playback callback rather than resolving it
+            # once at task start: device_connected() may not have run yet
+            # (#219).
+            cb = self._announce_play_cb()
+            for _ in range(20):
+                if cb is not None:
+                    break
+                await asyncio.sleep(0.05)
+                cb = self._announce_play_cb()
+            if cb is None:
+                log.warning(f"[{self._log_name}] no playback callback set (standalone announce)")
+                return
+            await cb(pcm)
+
         await em_announce.run(
             media_id,
             fetch=_fetch_tts_audio,
-            play=self._announce_play_cb(),
+            play=_play,
             on_finished=reply,
             log_name=self._log_name,
             preannounce_media_id=preannounce_media_id,
@@ -2983,6 +3010,13 @@ async def _save_utterance(device, turn_id: int, turn_record: dict) -> None:
     if not pcm:
         return
     try:
+        import em_disk
+        if not em_disk.optional_writes_allowed("."):
+            log.info(f"[{device.device_id}] Skipping utterance save: low disk space")
+            return
+    except Exception:
+        pass
+    try:
         name = await asyncio.get_running_loop().run_in_executor(
             None, em_recordings.save, device.device_id, turn_id, pcm
         )
@@ -3031,6 +3065,7 @@ async def _persist_turn(device, turn_record: dict) -> None:
             turn_record["recv_span_ms"]  = pstats.get("recvSpanMs")
             turn_record["max_gap_ms"]    = pstats.get("maxGapMs")
             turn_record["bytes_recv"]    = pstats.get("bytesRecv")
+            turn_record["spanned_reconnect"] = pstats.get("spannedReconnect")
             if pending[4] is not None and pending[4] >= 0:
                 turn_record["delivery_ms"] = pending[4]
             turn_record["send_ms"] = device.playback_send_ms
