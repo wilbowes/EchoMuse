@@ -140,10 +140,12 @@ def test_reads_see_committed_writes_only(fresh_db):
     _seed("dev0")
 
     seen_partial = []
+    reads = []
     stop = threading.Event()
 
     def reader() -> None:
         while not stop.is_set():
+            reads.append(1)
             for row in db.get_all_devices():
                 if row["device_id"] == "probe" and row["label"] is None:
                     seen_partial.append(dict(row))
@@ -167,6 +169,7 @@ def test_reads_see_committed_writes_only(fresh_db):
         stop.set()
         t.join(timeout=10)
 
+    assert reads, "the reader thread never ran — this test proved nothing"
     assert not seen_partial, (
         f"a reader observed a partially-applied transaction {len(seen_partial)} "
         f"times — a read reached the connection inside a write"
