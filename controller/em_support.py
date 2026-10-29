@@ -394,11 +394,95 @@ def _pick(row: Any, fields: tuple[str, ...]) -> dict:
     return {f: row[f] for f in fields if f in keys}
 
 
+def _pick_dict(d: Any, fields: tuple[str, ...]) -> dict | None:
+    if not isinstance(d, dict):
+        return None
+    return {k: d[k] for k in fields if k in d}
+
+
+# The BLE scanner's counters (bluetooth.Stats). bdAddr is the Echo's own radio
+# address, so it stays out with the other network identifiers.
+_BLE_STATS_FIELDS = (
+    "scanning", "advertsSeen", "advertsSent", "uniqueAddrs", "hciErrors",
+    "yields", "yieldedMs", "restarts",
+)
+_BLE_MUSIC_FIELDS = (
+    "bursts", "scanMs", "cut", "nearMisses", "lowMarginMs", "reserveMs",
+    "starved", "starvedMs",
+)
+
+
 def redact_stats(stats: Any) -> dict | None:
     """Project a device's live stats onto the allowlist, dropping the rest."""
     if not isinstance(stats, dict):
         return None
-    return {k: stats[k] for k in _STATS_FIELDS if k in stats}
+    out = {k: stats[k] for k in _STATS_FIELDS if k in stats}
+    ble = _pick_dict(stats.get("ble"), _BLE_STATS_FIELDS)
+    if ble is not None:
+        music = _pick_dict(stats["ble"].get("music"), _BLE_MUSIC_FIELDS)
+        if music is not None:
+            ble["music"] = music
+        out["ble"] = ble
+    return out
+
+
+# What the dashboard showed for a device, from em_device_view.merge_device, so
+# a bundle says what the person filing it was looking at. Until format 3 it
+# carried none of this: whether Home Assistant was connected to the satellite
+# (#349, the Echo that lights up and never answers), what the Echo reported
+# about its listening, whether the link was TLS or refused, and why an update
+# failed were all on screen and missing from the file.
+_VIEW_FIELDS = (
+    "wake_word", "aecRef", "androidUserspace", "linkTls", "linkTokenIssued",
+    "firmware_update", "update_in_progress", "update_queued",
+    "emosLatest", "emosUpdateAvailable", "emos_update_in_progress",
+    "emos_update_queued", "emos_update_stage",
+)
+_VIEW_NESTED = {
+    "listen": ("state", "streams", "reason"),
+    "voiceSatellite": ("port", "listening", "haConnected"),
+    "linkQuality": ("verdict", "lossPct", "minutes"),
+    "bleProxy": ("port", "listening", "haConnected", "haSubscribed",
+                 "advertsReceived", "advertsForwarded", "advertsSeen",
+                 "hciRestarts", "hciErrors", "connections", "encrypted",
+                 "slotsFree"),
+    # clientId, server and group name the player and its peers.
+    "sendspin": ("state", "paired", "pairedWith", "synced", "syncErrUs",
+                 "bufferedMs", "volume", "muted", "delayMs", "unpairedAccess"),
+}
+# Free text: refusal and failure reasons can quote what they failed on.
+_VIEW_TEXT = ("linkRefused", "update_error", "emos_update_error")
+
+
+def _scrub_text(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    lines = sanitise_log([value])
+    return lines[0] if lines else "<redacted>"
+
+
+def redact_view(view: Any) -> dict:
+    """Project merge_device's output onto the allowlist."""
+    if not isinstance(view, dict):
+        return {}
+    out = {k: view[k] for k in _VIEW_FIELDS if k in view}
+    for key, fields in _VIEW_NESTED.items():
+        if key in view:
+            out[key] = _pick_dict(view[key], fields)
+    for key in _VIEW_TEXT:
+        if key in view:
+            out[key] = _scrub_text(view[key])
+    out["pairRequested"] = bool(view.get("pairRequest"))
+    # The last WiFi change's outcome, without the network it was to.
+    wifi = view.get("wifi") if isinstance(view.get("wifi"), dict) else {}
+    last = wifi.get("last_result") if isinstance(wifi.get("last_result"), dict) else None
+    out["wifiChange"] = {
+        "pending": bool(wifi.get("pending")),
+        "last": None if last is None else {
+            "ok": last.get("ok"), "at": last.get("at"),
+            "error": _scrub_text(last.get("error"))},
+    }
+    return out
 
 
 # The latest boot and wear rows (schema v28), by name for the allowlist's reason.
@@ -448,6 +532,7 @@ def build(
     device_log: list[str],
     accounts: dict[str, str] | None = None,
     controller_stats: dict | None = None,
+    views: dict[str, dict] | None = None,
 ) -> dict:
     """
     Assemble the bundle. Pure — callers do the I/O, so this is testable
@@ -457,7 +542,8 @@ def build(
         "generated_at": int(time.time()),
         # 2: controller_log_tail became the CONTROLLER's log; the relayed
         # per-device lines moved to device_log_tail.
-        "format": 2,
+        # 3: devices[].view, what the dashboard showed (redact_view).
+        "format": 3,
         "redaction": (
             "Allowlisted fields only. Contains no speech, no transcripts, no "
             "audio, no device labels, no account names, and no network "
@@ -502,6 +588,7 @@ def build(
         # oddly right now": capabilities decide which HA entities exist,
         # and connected/link tell you whether to trust anything else.
         entry["live"] = live_state.get(did, {})
+        entry["view"] = redact_view((views or {}).get(did))
         bundle["devices"].append(entry)
 
     return bundle
@@ -769,3 +856,4 @@ def build_provision_diagnostics(
     if transcript:
         out["transcript"] = [ln for t in transcript for ln in _scrub(str(t))]
     return out
+
