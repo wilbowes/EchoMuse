@@ -602,6 +602,7 @@ func main() {
 			st.Ble = bleScanner.Stats()
 			st.OwwShadow = shadowStats(dataClient)
 			st.AecRef = canceller.RefSource()
+			st.Jack = pcmSpeaker.JackState()
 			st.Sendspin = sendspinStatus()
 			controlClient.SendStats(st)
 		}()
@@ -855,6 +856,7 @@ func main() {
 				snaps = append(snaps, sn)
 			}
 			st.TcpUpRetrans, st.TcpUpSegs = upLoss.Drain(snaps...)
+			st.Jack = pcmSpeaker.JackState()
 			st.Sendspin = sendspinStatus()
 			controlClient.SendStats(st)
 			if tick%10 == 0 {

@@ -85,3 +85,12 @@ func write(ctls []board.Ctl) (failed int) {
 	}
 	return failed
 }
+
+// The two playback routes, named so a caller that needs to READ them back has
+// one copy of the string. A DAPM route left open is silence rather than an
+// error — the DAC powers down and playback still reports a perfectly clean
+// stream — so its state is worth reporting (#587, #621).
+const (
+	HPLDacSwitch = "HPL Output Mixer L_DAC Switch"
+	HPRDacSwitch = "HPR Output Mixer R_DAC Switch"
+)
