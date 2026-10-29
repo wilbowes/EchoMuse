@@ -63,9 +63,23 @@ type Hardware struct {
 	LightSensors []LightSensor
 	// HCI is the Bluetooth controller's raw HCI character device, "" when
 	// the board has none the firmware can drive. A node of the same name
-	// can exist on a board whose radio is not behind it, so this is stated
-	// per board and never assumed.
+	// can exist on a board whose driver behaves differently behind it, so
+	// this is stated per board and never assumed.
 	HCI string
+	// HCIPollRead says HCI's driver returns 0 bytes from read() when no
+	// packet is queued, blocking mode included, so the node is waited on
+	// with poll(2) and a zero-byte read means "nothing yet". os.File
+	// reports that read as EOF, which ended every session on the Dot 3 at
+	// its first command. False for a driver that blocks in read(): there a
+	// missing poll handler would call the node always readable, leave Read
+	// blocked in read() holding its lock, and hold Close until the next HCI
+	// event, which after the scan is disabled may never come.
+	HCIPollRead bool
+	// HCIDaemons are the vendor's own Bluetooth daemons, by Android init
+	// service name, that hold HCI open on FireOS (the node has one owner)
+	// and are stopped before each open. Empty where Android's Bluetooth
+	// stack holds it instead and is disabled rather than stopped.
+	HCIDaemons []string
 	// Speaker is what the playback path needs beyond the codec routes, amp
 	// switch and jack table every board shares.
 	Speaker Speaker
@@ -370,8 +384,13 @@ var donutHardware = &Hardware{
 	// The i2c bus also lists an opt3001 at 0-0044 with no driver bound.
 	// Never calibrated_lux, as on biscuit's tsl2584.
 	LightSensors: []LightSensor{{Driver: "tsl2572", Attr: "in_illuminance0_input", Bus: BusIIO}},
-	// /dev/stpbt exists, but the radio behind it reads differently from
-	// biscuit's (@technotiger on #527), so the proxy is off until measured.
+	// MediaTek's combo-chip node as on biscuit, but its driver (btmtk_fops
+	// in the kernel log) returns 0 bytes from read() when nothing is queued
+	// (@technotiger on #527), so it is read through poll. Amazon's daemons
+	// hold it on FireOS; stock's Bluedroid is not what has it open.
+	HCI:         "/dev/stpbt",
+	HCIPollRead: true,
+	HCIDaemons:  []string{"btmanagerd", "btclient_ble", "btclient"},
 	Speaker: Speaker{
 		Volume: donutVolume,
 		Jack:   donutJack,
@@ -413,9 +432,12 @@ type Layout struct {
 	// LightSensors and HCI are the board's own statements, not resolved here:
 	// the sensor is looked for by internal/bindings/als, which retries, and
 	// the HCI device is opened by internal/bluetooth only when the proxy is
-	// switched on.
+	// switched on, read the way HCIPollRead says, after HCIDaemons are
+	// stopped.
 	LightSensors []LightSensor
 	HCI          string
+	HCIPollRead  bool
+	HCIDaemons   []string
 	// Routes, InputGains and Speaker are the board's statements too, written
 	// by the codec and the speaker.
 	Routes, InputGains []Ctl
@@ -435,7 +457,8 @@ func Resolve(root string, b *Board) *Layout {
 	if b != nil && b.Hardware != nil {
 		hw = b.Hardware
 	}
-	l := &Layout{Board: b, MuteLEDGPIO: hw.MuteLEDGPIO, LightSensors: hw.LightSensors, HCI: hw.HCI,
+	l := &Layout{Board: b, MuteLEDGPIO: hw.MuteLEDGPIO, LightSensors: hw.LightSensors,
+		HCI: hw.HCI, HCIPollRead: hw.HCIPollRead, HCIDaemons: hw.HCIDaemons,
 		Routes: hw.Routes, InputGains: hw.InputGains, Speaker: hw.Speaker}
 	note := func(part, want, got string, err error) {
 		var line string

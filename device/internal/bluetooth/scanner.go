@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/wilbowes/EchoMuse/internal/platform"
 	"github.com/wilbowes/EchoMuse/pkg/board"
 )
 
@@ -276,9 +277,10 @@ func (s *Scanner) run(stopCh, doneCh chan struct{}) {
 // or on transport/watchdog error.
 func (s *Scanner) session(stopCh chan struct{}) error {
 	s.ensureBluedroidDisabled()
+	stopHCIDaemons()
 
 	// Opening triggers WMT BT function-on + firmware patch download.
-	f, err := os.OpenFile(devPath(), os.O_RDWR, 0)
+	f, err := openHCI()
 	if err != nil {
 		return fmt.Errorf("open %s: %w", devPath(), err)
 	}
@@ -494,6 +496,17 @@ func (s *Scanner) ensureBluedroidDisabled() {
 	if s.bluedroidDisabled {
 		return
 	}
+	// pm and settings are the Android framework, and so is the stack they
+	// disable. Without it — emOS, whose init starts no zygote, or a FireOS
+	// whose /system was patched so that it never starts (a Dot 3, #527) —
+	// no Android Bluetooth stack can run and there is nothing to disable;
+	// running pm anyway logged four "not found" lines and then claimed
+	// success.
+	if !androidFramework(platform.Base(), "") {
+		s.bluedroidDisabled = true
+		log.Println("[ble] no Android framework here: its Bluetooth stack cannot run, nothing to disable")
+		return
+	}
 	pkgs := []string{
 		"com.android.bluetooth",
 		"com.amazon.device.csmbluetooth.service",
@@ -512,6 +525,22 @@ func (s *Scanner) ensureBluedroidDisabled() {
 	}
 	s.bluedroidDisabled = true
 	log.Println("[ble] Android Bluetooth stack disabled (persistent)")
+}
+
+// androidFramework reports whether the Android framework that pm and
+// settings run in exists beneath root: FireOS booted, and app_process, which
+// runs them, present. emOS mounts Amazon's /system for its linker and shell,
+// so the binary alone does not say the framework is up.
+func androidFramework(base, root string) bool {
+	if base != platform.FireOS {
+		return false
+	}
+	for _, p := range []string{"/system/bin/app_process", "/system/bin/app_process32", "/system/bin/app_process64"} {
+		if _, err := os.Stat(root + p); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func envIntDefault(key string, def int) int {

@@ -43,6 +43,12 @@ func TestBiscuitResolvesToTheNumbersItAlwaysUsed(t *testing.T) {
 	if !reflect.DeepEqual(l.LightSensors, wantALS) || l.HCI != "/dev/stpbt" {
 		t.Errorf("light sensors %+v, hci %q", l.LightSensors, l.HCI)
 	}
+	// Biscuit's driver blocks in read(), and os.File has read it since the
+	// proxy was written; Bluedroid is what holds the node there, and it is
+	// disabled, not stopped.
+	if l.HCIPollRead || len(l.HCIDaemons) != 0 {
+		t.Errorf("hci poll read %v, daemons %q: biscuit reads its node as a file", l.HCIPollRead, l.HCIDaemons)
+	}
 	if len(l.Problems) != 0 {
 		t.Errorf("parts not found by name on the fixture: %v", l.Problems)
 	}
@@ -111,8 +117,16 @@ func TestDonutResolvesByNameOnly(t *testing.T) {
 	if l.Mics.NumMics() != 4 || l.Mics.Format != S32LE || len(l.MicMutes) != 4 {
 		t.Errorf("mics %+v, mutes %q", l.Mics, l.MicMutes)
 	}
-	if l.MuteLEDGPIO != "" || l.HCI != "" {
-		t.Errorf("mute LED gpio %q, hci %q: neither is measured on the Dot 3", l.MuteLEDGPIO, l.HCI)
+	if l.MuteLEDGPIO != "" {
+		t.Errorf("mute LED gpio %q on a board whose mute LED is the privacy driver's", l.MuteLEDGPIO)
+	}
+	// Its driver returns 0 bytes when nothing is queued, so the node is
+	// read through poll, and Amazon's daemons hold it on FireOS.
+	if l.HCI != "/dev/stpbt" || !l.HCIPollRead {
+		t.Errorf("hci %q, poll read %v: the Dot 3's node must be read through poll", l.HCI, l.HCIPollRead)
+	}
+	if want := []string{"btmanagerd", "btclient_ble", "btclient"}; !reflect.DeepEqual(l.HCIDaemons, want) {
+		t.Errorf("hci daemons %q, want %q", l.HCIDaemons, want)
 	}
 	if l.Speaker.AmpSwitch != "" || l.Speaker.Volume.Unity != "255" {
 		t.Errorf("speaker %+v: the TAS2770 has no amp switch and unity at 255", l.Speaker)

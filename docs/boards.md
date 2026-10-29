@@ -161,10 +161,12 @@ or not the chip is soldered on. The Dot 2 lists two light sensors and has
 one. A name with a working attribute behind it is a part; a name alone is
 not.
 
-**A device node existing does not mean the hardware is behind it.**
-`/dev/stpbt` is MediaTek's combo-chip Bluetooth node. It is present on the
-Dot 3 too, where the radio is a different chip. That is why each board states
-its Bluetooth device.
+**A device node existing does not say how it behaves.** `/dev/stpbt` is
+MediaTek's combo-chip Bluetooth node on the Dot 2 and the Dot 3 both, but the
+Dot 3's driver returns 0 bytes from `read()` when nothing is queued where the
+Dot 2's blocks, and reading it as a file ended every session at its first
+command. That is why each board states its Bluetooth device and how it is
+read.
 
 **Resolve keys by device name, not by what a device claims to support.** On
 the Dot 2 both input devices advertise the volume-down key, and only one of
@@ -278,5 +280,10 @@ An MT8167 board with its own layout; no input device or PCM shares the Dot
 - **Light sensor.** tsl2572 on the IIO bus, `in_illuminance0_input`, which
   reads lux as a decimal. The i2c bus also lists an opt3001 with no driver
   bound.
-- **Bluetooth.** `/dev/stpbt` exists, but the radio behind it reads
-  differently from the Dot 2's, so no HCI device is stated yet.
+- **Bluetooth.** `/dev/stpbt`, MediaTek's node as on the Dot 2, but its
+  driver (`btmtk_fops_*` in the kernel log) returns 0 bytes from `read()`
+  when nothing is queued, so the firmware reads it through `poll(2)`. On
+  FireOS Amazon's `btmanagerd`, `btclient_ble` and `btclient` hold the node
+  and are stopped before each open. Measured on one unit (stock FireOS
+  6.5.7.5, 2026-10-24): the proxy ran with 0 HCI errors, and Home Assistant
+  saw 24 BLE devices through it in 30 s against 7 through its own adapter.
