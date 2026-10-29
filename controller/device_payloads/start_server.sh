@@ -60,7 +60,19 @@ for adc in A B C D; do
     tinymix -D 0 "ADC_$adc MICPGA Volume Ctrl" 40 40
 done
 
-kill $(ps | grep ledcontroller | grep -v grep) 2>/dev/null
+# Kill by PID only. `kill $(ps | grep ledcontroller)` handed kill every field
+# of the line, so it also signalled the PPID and whatever VSIZE/RSS happened
+# to equal a live PID. The PID is the first numeric field in both layouts
+# this runs under: toolbox (USER PID PPID ...) and busybox (PID USER ...).
+ps | while read -r line; do
+    case "$line" in *ledcontroller*) ;; *) continue ;; esac
+    for f in $line; do
+        case "$f" in
+            ''|*[!0-9]*) ;;
+            *) kill "$f" 2>/dev/null; break ;;
+        esac
+    done
+done
 
 # ── Log size cap ──────────────────────────────────────────────────────────────
 # /tmp is RAM-backed and everything below only ever appends — without a cap
