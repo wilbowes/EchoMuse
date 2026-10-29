@@ -857,3 +857,33 @@ jobs:
             echo "::error::not gofmt-formatted -- run: gofmt -w cmd internal pkg tools"
             exit 1
           fi
+
+  shell-lint:
+    name: Shell lint (shellcheck)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      # shellcheck-py rather than apt: the runner image's shellcheck moves
+      # with Ubuntu, and a new release adds checks, so the same tree would
+      # turn red with no change in it (#822).
+      - name: Install shellcheck
+        run: pip install shellcheck-py==0.11.0.1
+      # Every *.sh plus any extensionless file with a shell #!, because the
+      # device scripts that matter most (emos/device/em-wifi) have no
+      # extension. Gated at WARNING: errors were already zero on 2026-10-15,
+      # and the warnings were fixed rather than carried. One of them was a
+      # live bug: start_server.sh passed whole ps lines to kill. Notes (style
+      # and info) are not gated.
+      - name: Run shellcheck
+        run: |
+          {
+            git ls-files '*.sh'
+            git ls-files | grep -v '\.' | while read -r f; do
+              [ -f "$f" ] && head -1 "$f" | grep -qE '^#!.*[/ ](ba|mk)?sh\b' && echo "$f"
+            done
+          } | sort -u > /tmp/shell-scripts
+          cat /tmp/shell-scripts
+          xargs shellcheck --severity=warning < /tmp/shell-scripts

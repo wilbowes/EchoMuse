@@ -242,7 +242,7 @@ fi
 
 echo ""
 n=0
-while IFS="$(printf '\t')" read -r sig flags hex width ssid; do
+while IFS="$(printf '\t')" read -r sig flags _hex width ssid; do
     n=$((n + 1))
     case "$(security_of "$flags")" in
         psk)  note="" ;;
