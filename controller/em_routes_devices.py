@@ -17,6 +17,7 @@ from aiohttp import web
 
 import em_auth as auth
 import em_ble_proxy
+import em_bt_audio
 import em_config_sections as sections_mod
 import em_config_types
 import em_db as db
@@ -53,6 +54,8 @@ def register(app: web.Application) -> None:
     app.router.add_get("/api/devices/{id}/logs",          _get_device_logs)
     app.router.add_post("/api/devices/{id}/wifi",         _post_device_wifi)
     app.router.add_post("/api/devices/{id}/wifi/scan",    _post_device_wifi_scan)
+    app.router.add_get("/api/devices/{id}/bt_audio",      _get_bt_audio)
+    app.router.add_post("/api/devices/{id}/bt_audio",     _post_bt_audio)
 
 
 @auth.require_auth
@@ -496,6 +499,53 @@ async def _post_device_wifi_scan(request: web.Request) -> web.Response:
     if msg.get("error"):
         return em_http.error("scan_failed", msg["error"], 502)
     return em_http.ok({"networks": msg.get("networks") or []})
+
+
+@auth.require_auth
+async def _get_bt_audio(request: web.Request) -> web.Response:
+    """
+    GET /api/devices/{id}/bt_audio — the Bluetooth speaker panel's state:
+    whether this Echo's firmware can do it (and why not), the stream status
+    and the paired speakers. Asked of a connected device afresh, so the panel
+    never shows a state a missed message left stale.
+    """
+    device_id = request.match_info["id"]
+    live = em_state.devices.get(device_id)
+    if live is None:
+        return em_http.ok({"capable": False, "reason": "offline",
+                           "state": em_bt_audio.state(device_id)})
+    if not em_bt_audio.capable(live):
+        return em_http.ok({"capable": False, "reason": "firmware", "state": None})
+    with contextlib.suppress(asyncio.TimeoutError):
+        await em_bt_audio.request(live, {"action": "status"})
+    return em_http.ok({"capable": True, "state": em_bt_audio.state(device_id)})
+
+
+@auth.require_admin
+async def _post_bt_audio(request: web.Request) -> web.Response:
+    """
+    POST /api/devices/{id}/bt_audio — {action: discover|pair|forget|status,
+    addr?, name?, seconds?}. Waits for the device's answer: discovery and
+    pairing take seconds, and the panel shows the result, not a guess.
+    """
+    device_id = request.match_info["id"]
+    live = em_state.devices.get(device_id)
+    if live is None:
+        return em_http.error("device_offline", "Device is not connected", 409)
+    if not em_bt_audio.capable(live):
+        return em_http.error("not_capable",
+                             "This Echo's firmware cannot drive a Bluetooth speaker", 409)
+    req, problem = em_bt_audio.validate(await em_http.json_body(request))
+    if problem:
+        return em_http.error("bad_request", problem, 400)
+    try:
+        msg = await em_bt_audio.request(live, req)
+    except asyncio.TimeoutError:
+        return em_http.error("bt_timeout", "The Echo did not answer in time", 504)
+    if msg.get("error"):
+        return em_http.error("bt_failed", msg["error"], 502)
+    return em_http.ok({k: msg.get(k) for k in ("results", "addr", "paired", "status")
+                       if msg.get(k) is not None})
 
 
 @auth.require_auth

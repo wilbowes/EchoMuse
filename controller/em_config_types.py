@@ -62,6 +62,8 @@ KINDS: dict[str, str] = {
     "aecRefSource": STR,
     "bleProxyEnabled": BOOL,
     "bleProxyConnections": BOOL,
+    "btAudioEnabled": BOOL,
+    "btSpeaker": STR,
     "sendspinEnabled": BOOL,
     "sendspinUnpaired": BOOL,
     "wakeSound": BOOL,

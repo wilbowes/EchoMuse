@@ -114,6 +114,7 @@ import em_wakeword
 import em_tap_burst
 import em_esphome as esphome
 import em_ble_proxy
+import em_bt_audio
 import em_oww_models
 import em_player
 import em_volume
@@ -5072,11 +5073,11 @@ CONTROL_HANDLERS = {
     "listen_end":       _on_listen_end,
     "ble_adverts":      _on_ble_adverts,
     "wifi_scan_result": _on_wifi_scan_result,
+    "bt_audio_result":  em_bt_audio.on_result,
     "log":              _on_log,
     "pair_request":     _on_pair_request,
     "pong":             _on_pong,
 }
-
 
 
 async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):

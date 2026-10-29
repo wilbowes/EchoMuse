@@ -77,6 +77,12 @@ SECTIONS: dict[str, dict] = {
         "label": "Sendspin",
         "keys": ["sendspinEnabled", "sendspinUnpaired"],
     },
+    # Its own section because the speaker is per Echo: inheriting btSpeaker
+    # from the fleet would send every Echo's music to one speaker.
+    "btaudio": {
+        "label": "Bluetooth speaker",
+        "keys": ["btAudioEnabled", "btSpeaker"],
+    },
 }
 
 # Keys that live in the config dict but are NOT user-facing settings, and so
