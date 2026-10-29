@@ -21,6 +21,43 @@ import em_recordings
 import em_state
 import em_support
 
+# Disk space thresholds (MB)
+FREE_SPACE_LOW_MB = 500
+FREE_SPACE_CRITICAL_MB = 100
+
+# Internal tracking of free space and warnings
+_current_free_space_mb: float | None = None
+_prev_free_space_mb: float | None = None
+_low_space_logged = False
+_critical_space_logged = False
+
+
+def _update_free_space_tracking(free_mb: float) -> None:
+    """
+    Update internal free space tracking and log warnings when crossing thresholds.
+    """
+    global _current_free_space_mb, _prev_free_space_mb, _low_space_logged, _critical_space_logged
+    _prev_free_space_mb = _current_free_space_mb
+    _current_free_space_mb = free_mb
+
+    logger = logging.getLogger(__name__)
+    if _prev_free_space_mb is not None:
+        # Low space threshold (500 MB)
+        if _prev_free_space_mb >= FREE_SPACE_LOW_MB and free_mb < FREE_SPACE_LOW_MB:
+            logger.warning("Free disk space dropped below %d MB (%d MB)", FREE_SPACE_LOW_MB, free_mb)
+            _low_space_logged = True
+        elif _prev_free_space_mb < FREE_SPACE_LOW_MB and free_mb >= FREE_SPACE_LOW_MB:
+            logger.info("Free disk space recovered above %d MB (%d MB)", FREE_SPACE_LOW_MB, free_mb)
+            _low_space_logged = False
+
+        # Critical space threshold (100 MB)
+        if _prev_free_space_mb >= FREE_SPACE_CRITICAL_MB and free_mb < FREE_SPACE_CRITICAL_MB:
+            logger.warning("Free disk space dropped below %d MB (%d MB)", FREE_SPACE_CRITICAL_MB, free_mb)
+            _critical_space_logged = True
+        elif _prev_free_space_mb < FREE_SPACE_CRITICAL_MB and free_mb >= FREE_SPACE_CRITICAL_MB:
+            logger.info("Free disk space recovered above %d MB (%d MB)", FREE_SPACE_CRITICAL_MB, free_mb)
+            _critical_space_logged = False
+
 
 # Import time, which is startup: em_controller imports this module before it
 # serves anything. Close enough to process start for "how long has it been up",
@@ -163,6 +200,8 @@ def controller_stats() -> dict:
         usage = shutil.disk_usage(db_path.parent)
         stats["data_used_mb"] = round(usage.used / 1048576.0, 1)
         stats["data_free_mb"] = round(usage.free / 1048576.0, 1)
+        # Update free space tracking and log warnings
+        _update_free_space_tracking(stats["data_free_mb"])
     except OSError:
         pass
     try:
@@ -178,6 +217,46 @@ def controller_stats() -> dict:
         pass
 
     return stats
+
+
+def get_free_space_mb() -> float | None:
+    """Return the current free disk space in MB, or None if unknown."""
+    return _current_free_space_mb
+
+
+def is_low_space() -> bool:
+    """Return True if free disk space is below the low threshold (500 MB)."""
+    if _current_free_space_mb is None:
+        return False
+    return _current_free_space_mb < FREE_SPACE_LOW_MB
+
+
+def is_critical_space() -> bool:
+    """Return True if free disk space is below the critical threshold (100 MB)."""
+    if _current_free_space_mb is None:
+        return False
+    return _current_free_space_mb < FREE_SPACE_CRITICAL_MB
+
+
+def should_allow_write(write_type: str) -> tuple[bool, str]:
+    """
+    Determine whether a write operation of the given type is allowed based on free space.
+
+    Returns (allowed, reason). If allowed is True, reason is empty.
+    """
+    # Essential writes that are always allowed
+    if write_type in ("settings", "turns", "logs", "database"):
+        return True, ""
+
+    # Optional writes that are skipped when low space
+    if write_type in ("utterance", "wake_clip", "model_upload", "firmware_cache"):
+        if is_low_space():
+            return False, f"Free disk space below {FREE_SPACE_LOW_MB} MB"
+        if is_critical_space():
+            return False, f"Free disk space below {FREE_SPACE_CRITICAL_MB} MB"
+
+    # Default deny for unknown types
+    return False, f"Unknown write type: {write_type}"
 
 
 def release_freed_memory() -> None:
