@@ -62,6 +62,7 @@ import hmac
 import json
 import logging
 import os
+import signal
 import socket
 import struct
 import time
@@ -6130,6 +6131,25 @@ async def event_loop_lag_monitor(interval: float = 1.0,
             )
 
 
+async def _until_stopped() -> None:
+    """Return on SIGTERM or SIGINT, so main()'s teardown runs. In a container
+    we are PID 1 (em_start execs us), and the kernel drops a signal PID 1 has
+    no handler for: `docker stop` used to SIGKILL us after its grace period."""
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, stop.set)
+    await stop.wait()
+    log.info("Shutting down")
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.remove_signal_handler(sig)
+
+
+def _close_db() -> None:
+    em_dbwriter.drain()
+    db.close()
+
+
 async def main():
     log.info(f"EchoMuse Controller {CONTROLLER_VERSION}")
     db.init(DB_PATH)
@@ -6220,7 +6240,7 @@ async def main():
             await em_ble_proxy.start_ble_proxy_servers(SERVER_HOST)
 
             log.info("EchoMuse Controller ready — waiting for devices")
-            await asyncio.Future()
+            await _until_stopped()
 
     finally:
         await em_ble_proxy.stop_ble_proxy_servers()
@@ -6232,6 +6252,7 @@ async def main():
         await azc.async_unregister_service(info)
         await azc.async_close()
         await runner.cleanup()
+        await asyncio.get_running_loop().run_in_executor(None, _close_db)
         log.info("EchoMuse Controller stopped")
 
 

@@ -1366,6 +1366,28 @@ def init(path: str = "echomuse.db") -> None:
     log.info("Database ready")
 
 
+def close() -> None:
+    """
+    Fold the WAL back into the database and close it, at shutdown.
+
+    A kill does not need this to stay intact (WAL replays on the next open),
+    but it leaves echomuse.db complete on its own, so a copy of just that file
+    (a backup, a move to another host) has every write in it. Safe to call
+    twice; any db call after it fails the init assertion.
+    """
+    global _conn
+    with _db_lock:
+        if _conn is None:
+            return
+        try:
+            _conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.Error as e:
+            log.warning(f"WAL checkpoint at shutdown failed: {e}")
+        _conn.close()
+        _conn = None
+    log.info("Database closed")
+
+
 @contextmanager
 def _tx():
     """
