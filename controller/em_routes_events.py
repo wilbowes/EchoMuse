@@ -47,9 +47,11 @@ async def _ws_events(request: web.Request) -> web.WebSocketResponse:
         # immediate state without waiting for the first push event.
         loop = asyncio.get_event_loop()
         rows = await loop.run_in_executor(None, db.get_all_devices)
+        link = await loop.run_in_executor(None, em_device_view.link_health)
         await ws.send_str(json.dumps({
             "type":    "snapshot",
-            "devices": [em_device_view.merge_device(r) for r in rows],
+            "devices": [em_device_view.merge_device(r, link_verdict=link.get(r["device_id"]))
+                        for r in rows],
         }))
 
         async for msg in ws:

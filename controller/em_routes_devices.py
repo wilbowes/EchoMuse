@@ -61,7 +61,9 @@ async def _get_devices(request: web.Request) -> web.Response:
     loop = asyncio.get_event_loop()
     rows = await loop.run_in_executor(None, db.get_all_devices)
     health = await loop.run_in_executor(None, db.latest_health)
-    return em_http.ok([em_device_view.merge_device(row, health.get(row["device_id"])) for row in rows])
+    link = await loop.run_in_executor(None, em_device_view.link_health)
+    return em_http.ok([em_device_view.merge_device(row, health.get(row["device_id"]),
+                                                   link.get(row["device_id"])) for row in rows])
 
 
 @auth.require_auth
@@ -80,7 +82,9 @@ async def _get_device(request: web.Request) -> web.Response:
     row = await loop.run_in_executor(None, db.get_device, device_id)
     if row is None:
         return em_http.error("device_not_found", f"No device: {device_id}", 404)
-    return em_http.ok(em_device_view.merge_device(row))
+    link = await loop.run_in_executor(None, em_device_view.link_health)
+    return em_http.ok(em_device_view.merge_device(
+        row, link_verdict=link.get(device_id)))
 
 
 @auth.require_admin

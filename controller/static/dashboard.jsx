@@ -212,6 +212,70 @@ function _levelColor(level) {
        : level === 'ok' ? 'var(--ok)' : undefined;
 }
 
+// #301: the one line the device page shows about its link's last hours, from
+// the controller's own verdict over them (em_link_health). This is the data
+// the page did not have at all: the meters and the loss strip below are "now",
+// where a link failing over weeks reads fine every time anyone looks.
+//
+// null when there is no verdict to show. "Not enough history yet" and "not
+// measured recently" are the quiet states of a device the page is already
+// describing as new or offline, and a line that is always on is one nobody
+// reads — so those pass through as nothing rather than as a diagnosis.
+function _linkHealthDetail(health) {
+  const level = health && health.level;
+  if (level !== 'ok' && level !== 'warn' && level !== 'error') return null;
+  return {
+    sev:  level === 'error' ? 'bad' : level,
+    text: health.text,
+    note: health.note,
+  };
+}
+
+// #301: the one sentence a tooltip has to carry — the reason AND the number,
+// which is what the issue asks for ("12% of pings delayed over 200 ms, worst
+// 4.8 s", not "unhealthy"). Read through _linkHealthDetail with everything
+// else, so a marker can never say something the Status tab's line does not.
+function healthReason(device) {
+  const lh = _linkHealthDetail(device && device.linkHealth);
+  if (!lh) return null;
+  return lh.note ? `${lh.text} — ${lh.note}` : lh.text;
+}
+
+// The verdict as the page's own severity: 'ok' | 'warn' | 'bad', or null when
+// the controller could not make a verdict. Health is a SECOND axis beside
+// deviceState()'s ranking — a device can be listening and unhealthy at once —
+// so nothing here feeds deviceState() and nothing there feeds this.
+function linkHealthSev(device) {
+  const lh = _linkHealthDetail(device && device.linkHealth);
+  return lh ? lh.sev : null;
+}
+
+// The inheritance rule from #301: a container is as bad as the worst thing
+// under it and never worse — three warnings do not become an error — and a
+// part with nothing to say (null) cannot raise one.
+function worstHealthSev(...sevs) {
+  const rank = { ok: 0, warn: 1, bad: 2 };
+  let worst = null;
+  for (const sev of sevs) {
+    if (sev == null) continue;
+    if (worst === null || rank[sev] > rank[worst]) worst = sev;
+  }
+  return worst;
+}
+
+// Which tabs hold something to report, read from the subsections under them
+// rather than from the source: the tile asks this, so a second source inherits
+// upward instead of needing an indicator of its own. One source today — the
+// link verdict, which lives in the Status tab's Resources panel.
+function tabHealthSev(device) {
+  return { status: linkHealthSev(device) };
+}
+
+// The device tile: the worst thing behind any of its tabs, or nothing at all.
+function tileHealthSev(device) {
+  return worstHealthSev(...Object.values(tabHealthSev(device)));
+}
+
 function relTime(ts) {
   if (!ts) return '—';
   const d = Date.now() - ts * 1000;
@@ -240,6 +304,24 @@ function deviceState(d) {
   if (d.thinking)   return { key: 'thinking',  label: 'Thinking',  color: 'var(--warn)', dot: '#a08020', lcd: 'var(--lcd-thinking)' };
   if (d.listening)  return { key: 'listening', label: 'Listening', color: 'var(--ok)', dot: '#40906a', lcd: 'var(--lcd-listening)' };
   return               { key: 'idle',      label: 'Idle',      color: 'var(--muted)', dot: '#aaaaaa', lcd: 'var(--lcd-dim)' };
+}
+
+// #301: the one warning triangle the tile, the tab and the subsection share.
+// The triangle is only wayfinding — the reason and the number are what the
+// tooltip and a screen reader carry, so it is never a bare icon — and it takes
+// focus, so the keyboard reaches the same sentence the mouse does. Both
+// colours are tokens the app defines in both themes; an undefined var() would
+// render as nothing, which for this indicator looks exactly like health.
+// (Below deviceState rather than above the pure helpers: the token ratchet
+// attributes every literal hex to the nearest preceding component, and the
+// simulated-LED dots beside it are deviceState's.)
+function HealthMark({ sev, reason, style }) {
+  if (sev !== 'warn' && sev !== 'bad') return null;
+  return (
+    <span tabIndex={0} role="img" aria-label={`Link health: ${reason}`}
+      title={`Link health: ${reason}`}
+      style={{ color: SEV[sev], fontSize: 'var(--fs-sm)', lineHeight: 1, flexShrink: 0, cursor: 'help', ...style }}>⚠</span>
+  );
 }
 
 function eventAccent(level) {
@@ -380,11 +462,12 @@ function SectionLabel({ children, style }) {
 }
 
 // Panel — bordered card grouping related controls. Gives tab content a
-// consistent visual structure instead of floating elements.
-function Panel({ label, children, style }) {
+// consistent visual structure instead of floating elements. `mark` is the
+// optional heading indicator (#301) — the subsection the problem lives in.
+function Panel({ label, children, style, mark = null }) {
   return (
     <div className="em-panel" style={style}>
-      {label && <SectionLabel>{label}</SectionLabel>}
+      {label && <SectionLabel>{label}{mark}</SectionLabel>}
       {children}
     </div>
   );
@@ -2106,7 +2189,9 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
             </div>
           )}
           {device.approved ? (
-            <TabBar tabs={TABS} current={tab} onSelect={setTab} />
+            <TabBar tabs={TABS} current={tab} onSelect={setTab}
+              mark={t => <HealthMark sev={tabHealthSev(device)[t]} reason={healthReason(device)}
+                                     style={{ marginLeft: 'var(--space-3)' }}/>} />
           ) : (
             // One tab is not a tab bar — it reads as a label and the approval
             // form sat behind a click. Pending devices get a banner instead.
@@ -2285,7 +2370,9 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                       </div>
                     )}
                   </Panel>
-                  <Panel label="Resources">
+                  <Panel label="Resources"
+                    mark={<HealthMark sev={linkHealthSev(device)} reason={healthReason(device)}
+                                      style={{ marginLeft: 'var(--space-3)' }}/>}>
                     <StatBar label="CPU"     pct={s?.cpuPct}    text={cpuText}/>
                     <StatBar label="RAM"     pct={ramPct}        text={ramText}/>
                     <StatBar label="Storage" pct={stoPct}        text={stoText}/>
@@ -2347,6 +2434,29 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                       />
                     </div>
                     {lq && <LinkStrip minutes={lq.minutes}/>}
+                    {(() => {
+                      const lh = _linkHealthDetail(device.linkHealth);
+                      if (!lh) return null;
+                      // Below the meters rather than beside them: the meters
+                      // are "now", this is the last hours, and the count of
+                      // hours over the bar is the only part that can say
+                      // "getting worse" — a single reading cannot.
+                      return (
+                        <div style={{ marginTop:'var(--space-6)', display:'flex', gap:'var(--space-4)', alignItems:'baseline' }}>
+                          {/* Not colour alone and not a bare icon: the glyph
+                              and the words beside it carry the meaning, the
+                              colour only reinforces it. */}
+                          <span aria-hidden="true" style={{ color: SEV[lh.sev], flexShrink:0 }}>{lh.sev === 'ok' ? '✓' : '⚠'}</span>
+                          <span style={{ minWidth:0 }}>
+                            <span style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-xs)', fontWeight:600,
+                                           color: lh.sev === 'ok' ? 'var(--muted)' : SEV[lh.sev] }}>{lh.text}</span>
+                            <div style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-xs)', color:'var(--muted)', marginTop:'var(--space-1)' }}>
+                              Link health · {lh.note}
+                            </div>
+                          </span>
+                        </div>
+                      );
+                    })()}
                     {!s && <div style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-xs)', color:'var(--muted)', marginTop:'var(--space-4)' }}>waiting for device stats…</div>}
                   </Panel>
                 </div>
@@ -2945,6 +3055,10 @@ function Card({ device, onClick }) {
             </div>
           )}
         </div>
+        {/* #301: the tile's warning, the top of the propagation. The tab and
+            the panel below say which door it is behind. */}
+        <div style={{ display: 'flex', alignItems: 'center', flexShrink: 0 }}>
+        <HealthMark sev={tileHealthSev(device)} reason={healthReason(device)} />
         {(isPending || device.pairRequest) && (
           // Chrome sized this box off the DM Mono line box rather than the
           // glyphs, so 1px symmetric padding rendered visibly bottom-heavy
@@ -2954,6 +3068,7 @@ function Card({ device, onClick }) {
           // what made the word look shunted left inside its own badge.
           <div className="em-on-dark" style={{ display: 'inline-flex', alignItems: 'center', flexShrink: 0, marginLeft: 'var(--space-4)', background: 'linear-gradient(160deg,var(--lcd-face),var(--lcd-deep))', border: '1px solid var(--lcd-line)', borderRadius: 'var(--radius-sm)', padding: 'var(--space-2) var(--space-3)', paddingRight: 'calc(var(--space-3) - 0.1em)', fontFamily: "var(--font-mono)", fontSize: 'var(--fs-xs)', lineHeight: 1, color: 'var(--accent-lit)', letterSpacing: 'var(--tracking-label)' }}>{isPending ? 'PENDING' : 'PAIRING'}</div>
         )}
+        </div>
       </div>
       <div style={{ display: 'flex', justifyContent: 'center', padding: 'var(--space-10) 0 var(--space-6)' }}>
         <LedRing state={state} size={120}/>
@@ -3159,13 +3274,15 @@ function asButton(onActivate, { pressed, expanded, disabled } = {}) {
 }
 
 // TabBar — the raised folder tabs of the device view and Settings. Its look
-// is .em-tab in dashboard.html, so both strips change together.
-function TabBar({ tabs, current, onSelect, label = t => t }) {
+// is .em-tab in dashboard.html, so both strips change together. `mark` is the
+// optional per-tab indicator (#301): a tab shows the worst severity of
+// anything under it, so the tile above it can inherit instead of guessing.
+function TabBar({ tabs, current, onSelect, label = t => t, mark = null }) {
   return (
     <div className="em-tabs">
       {tabs.map(t => (
         <button key={t} onClick={() => onSelect(t)}
-          className={t === current ? 'em-tab em-tab--active' : 'em-tab'}>{label(t)}</button>
+          className={t === current ? 'em-tab em-tab--active' : 'em-tab'}>{label(t)}{mark && mark(t)}</button>
       ))}
     </div>
   );
