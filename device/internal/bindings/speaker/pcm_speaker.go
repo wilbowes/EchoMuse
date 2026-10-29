@@ -186,6 +186,8 @@ type PcmSpeaker struct {
 	// pulled rather than pushed because it must place audio in TIME, and
 	// only this loop knows when the period it is building reaches the DAC.
 	src       atomic.Pointer[sourceBox]
+	sink      atomic.Pointer[sinkBox] // music to a Bluetooth speaker instead
+	sinkBuf   []byte                  // toSink's alone
 	srcBuf    []byte
 	srcLastNs atomic.Int64 // last period the source played
 	dacStep   dacStepLog   // pullSource's alone
@@ -583,6 +585,9 @@ func (p *PcmSpeaker) silenceLoop() {
 		}
 		if music == nil && !p.music.playing && !p.music.isActive() {
 			music = p.pullSource()
+		}
+		if p.toSink(music) {
+			music = nil
 		}
 
 		var response responsePeriod

@@ -162,6 +162,13 @@ type Device struct {
 	// device at the other end.
 	BleProxyConnections *bool
 
+	// Bluetooth speaker output (A2DP, internal/bluetooth). Enabled keeps the
+	// radio up for BR/EDR; Speaker is the paired address music goes to, a
+	// pointer because "" (no speaker: music stays on the Echo) must reach
+	// the device. Default off.
+	BtAudioEnabled *bool
+	BtSpeaker      *string
+
 	// Sendspin player (internal/sendspin, #89). Both default off: the player
 	// opens a listening port and an mDNS record, so it runs only where
 	// someone asked for it. Unpaired lets an approved but unpaired server
@@ -350,6 +357,12 @@ func (d *Device) Apply(msg ConfigMessage) {
 	if msg.BleProxyConnections != nil {
 		d.BleProxyConnections = msg.BleProxyConnections
 	}
+	if msg.BtAudioEnabled != nil {
+		d.BtAudioEnabled = msg.BtAudioEnabled
+	}
+	if msg.BtSpeaker != nil {
+		d.BtSpeaker = msg.BtSpeaker
+	}
 	if msg.SendspinEnabled != nil {
 		d.SendspinEnabled = msg.SendspinEnabled
 	}
@@ -498,6 +511,11 @@ func (d *Device) Snapshot() ConfigMessage {
 		bleProxyEnabled = *d.BleProxyEnabled
 	}
 	bleProxyConnections := d.BleProxyConnections != nil && *d.BleProxyConnections
+	btAudioEnabled := d.BtAudioEnabled != nil && *d.BtAudioEnabled
+	btSpeaker := ""
+	if d.BtSpeaker != nil {
+		btSpeaker = *d.BtSpeaker
+	}
 	volumeButtonSound := d.VolumeButtonSound
 	sendspinEnabled := d.SendspinEnabled != nil && *d.SendspinEnabled
 	sendspinUnpaired := d.SendspinUnpaired != nil && *d.SendspinUnpaired
@@ -528,6 +546,8 @@ func (d *Device) Snapshot() ConfigMessage {
 		AecRefSource:        d.AecRefSource,
 		BleProxyEnabled:     &bleProxyEnabled,
 		BleProxyConnections: &bleProxyConnections,
+		BtAudioEnabled:      &btAudioEnabled,
+		BtSpeaker:           &btSpeaker,
 		SendspinEnabled:     &sendspinEnabled,
 		SendspinUnpaired:    &sendspinUnpaired,
 		SendspinName:        d.SendspinName,
@@ -597,6 +617,8 @@ type ConfigMessage struct {
 	AecRefSource        string   `json:"aecRefSource,omitempty"`
 	BleProxyEnabled     *bool    `json:"bleProxyEnabled,omitempty"`
 	BleProxyConnections *bool    `json:"bleProxyConnections,omitempty"`
+	BtAudioEnabled      *bool    `json:"btAudioEnabled,omitempty"`
+	BtSpeaker           *string  `json:"btSpeaker,omitempty"`
 	SendspinEnabled     *bool    `json:"sendspinEnabled,omitempty"`
 	SendspinUnpaired    *bool    `json:"sendspinUnpaired,omitempty"`
 	SendspinName        string   `json:"sendspinName,omitempty"`

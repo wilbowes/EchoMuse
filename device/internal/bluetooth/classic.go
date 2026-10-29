@@ -212,6 +212,12 @@ func (c *Classic) updateScanEnable() {
 	}
 }
 
+// Running reports whether BR/EDR is up on a radio session.
+func (c *Classic) Running() bool {
+	_, err := c.running()
+	return err == nil
+}
+
 func (c *Classic) running() (*hciHost, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
