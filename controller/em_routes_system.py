@@ -14,6 +14,7 @@ from aiohttp import web
 
 import em_auth as auth
 import em_db as db
+import em_device_view
 import em_http
 import em_ingressauth
 import em_player
@@ -176,7 +177,7 @@ async def _get_support_bundle(request: web.Request) -> web.Response:
 
     since = time.time() - 24 * 3600
     turns, metrics, counters = [], [], []
-    device_configs, live_state, logs = {}, {}, []
+    device_configs, live_state, views, logs = {}, {}, {}, []
 
     health = await loop.run_in_executor(None, db.latest_health)
     for row in rows:
@@ -184,6 +185,8 @@ async def _get_support_bundle(request: web.Request) -> web.Response:
         device_configs[did] = await loop.run_in_executor(
             None, db.get_effective_device_config, did)
         live = em_state.devices.get(did)
+        # On the loop, as the dashboard calls it: it reads live device state.
+        views[did] = em_device_view.merge_device(row, health.get(did))
         live_state[did] = {
             "connected":    live is not None,
             # Capabilities decide which HA entities are advertised at all,
@@ -245,6 +248,7 @@ async def _get_support_bundle(request: web.Request) -> web.Response:
         accounts={u["username"]: u["role"] for u in
                   await loop.run_in_executor(None, db.get_all_users)},
         controller_stats=await loop.run_in_executor(None, em_process_stats.controller_stats),
+        views=views,
     )
     body = em_support.to_json(bundle)
     stamp = time.strftime("%Y%m%d-%H%M%S")
