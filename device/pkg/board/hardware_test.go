@@ -43,6 +43,9 @@ func TestBiscuitResolvesToTheNumbersItAlwaysUsed(t *testing.T) {
 	if !reflect.DeepEqual(l.LightSensors, wantALS) || l.HCI != "/dev/stpbt" {
 		t.Errorf("light sensors %+v, hci %q", l.LightSensors, l.HCI)
 	}
+	if l.DHCPService != "" {
+		t.Errorf("dhcp service %q: the framework runs DHCP on biscuit", l.DHCPService)
+	}
 	if len(l.Problems) != 0 {
 		t.Errorf("parts not found by name on the fixture: %v", l.Problems)
 	}
@@ -113,6 +116,9 @@ func TestDonutResolvesByNameOnly(t *testing.T) {
 	}
 	if l.MuteLEDGPIO != "" || l.HCI != "" {
 		t.Errorf("mute LED gpio %q, hci %q: neither is measured on the Dot 3", l.MuteLEDGPIO, l.HCI)
+	}
+	if l.DHCPService != "dhcpcd_wlan0" {
+		t.Errorf("dhcp service %q: no framework runs DHCP on the Dot 3's FireOS", l.DHCPService)
 	}
 	if l.Speaker.AmpSwitch != "" || l.Speaker.Volume.Unity != "255" {
 		t.Errorf("speaker %+v: the TAS2770 has no amp switch and unity at 255", l.Speaker)

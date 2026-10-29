@@ -20,10 +20,14 @@ func onBase(t *testing.T, base, androidBody, emosBody string) {
 	t.Helper()
 	dir := t.TempDir()
 
-	oldBase, oldA, oldE := baseOS, androidConfP, emosConfP
-	t.Cleanup(func() { baseOS, androidConfP, emosConfP = oldBase, oldA, oldE })
+	oldBase, oldA, oldE, oldDHCP := baseOS, androidConfP, emosConfP, dhcpServiceOf
+	t.Cleanup(func() { baseOS, androidConfP, emosConfP, dhcpServiceOf = oldBase, oldA, oldE, oldDHCP })
 
 	baseOS = func() string { return base }
+	// Never the host's own board: board.CurrentLayout would read this
+	// machine's /proc. Cases whose board runs DHCP itself say so
+	// (onDHCPBoard).
+	dhcpServiceOf = func() string { return "" }
 	androidConfP = filepath.Join(dir, "wpa_supplicant.conf")
 	emosConfP = filepath.Join(dir, "wpa.conf")
 

@@ -41,6 +41,17 @@
 // confMode, and note that 0600 there strands a FireOS 5 device on its next
 // boot.
 //
+// A board whose profile states a DHCPService (pkg/board's Hardware) on FireOS
+// is a third case. The Echo Dot 3rd gen is the one so far: it runs FireOS 6
+// with Alexa's apps disabled, so there is no WiFi framework and `svc wifi`
+// cannot run (it needs app_process). Amazon's p2p_supplicant service owns
+// wlan0 and the stated init service (dhcpcd_wlan0) does DHCP. So the change
+// writes the conf, asks the running supplicant to re-read it, and stops and
+// starts that DHCP service itself for the switch, depending on nothing else to
+// do so — see reloadConfDHCP. The same board on emOS is not this case: there
+// em-wifi and init own the supplicant, and the emOS sequence applies. The
+// safety model below is the same on all three.
+//
 // Safety model (the connection to the controller dies mid-change, so the
 // device owns the whole sequence):
 //
@@ -76,6 +87,7 @@ import (
 	"time"
 
 	"github.com/wilbowes/EchoMuse/internal/platform"
+	"github.com/wilbowes/EchoMuse/pkg/board"
 )
 
 const (
@@ -109,6 +121,15 @@ const (
 	// 5s retry cadence; generous because a false negative reverts a
 	// perfectly good network change.
 	reconnectTimeout = 90 * time.Second
+	// A board that runs DHCP itself starts it from nothing once associated
+	// (reloadConfDHCP clears the lease on purpose), where the other paths'
+	// client already holds one, so it is given longer.
+	ownDHCPIPTimeout = 30 * time.Second
+
+	// Where Amazon's dhcpcd keeps leases. dhcpcd 6 names them
+	// dhcpcd-<iface>.lease, or dhcpcd-<iface>-<ssid>.lease when it knows the
+	// SSID; both are removed.
+	dhcpDir = "/data/misc/dhcp"
 )
 
 // Result is the outcome of a change attempt, reported to the controller
@@ -154,9 +175,32 @@ var (
 	// is not root and cannot hand a file to AID_WIFI, and the uid it asks for
 	// is the whole assertion.
 	chownFile = os.Chown
+
+	// The board's DHCP statement, and the commands that path runs,
+	// indirected for the same reason: a host test can neither be that board
+	// nor stop a service.
+	dhcpServiceOf = func() string { return board.CurrentLayout().DHCPService }
+	dhcpDirP      = dhcpDir
+	runCommand    = func(name string, args ...string) error {
+		out, err := exec.Command(name, args...).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("%s %s: %v (%s)", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	}
+	wpaCliExec = func(args ...string) (string, error) {
+		out, err := exec.Command("wpa_cli", args...).CombinedOutput()
+		return string(out), err
+	}
 )
 
 func onEmOS() bool { return baseOS() == platform.EmOS }
+
+// ownsDHCP is the third case of the package comment: FireOS as the base, on a
+// board whose profile states the init service that runs DHCP. The board alone
+// does not decide it — the same board on emOS takes the emOS sequence like
+// any other board there.
+func ownsDHCP() bool { return !onEmOS() && dhcpServiceOf() != "" }
 
 // confPaths says where the supplicant's config is read from and written to.
 //
@@ -231,9 +275,7 @@ func sockDir() string {
 // ─── Queries ──────────────────────────────────────────────────────────────────
 
 func wpaCli(args ...string) (string, error) {
-	full := append([]string{"-p", sockDir(), "-i", iface}, args...)
-	out, err := exec.Command("wpa_cli", full...).CombinedOutput()
-	return string(out), err
+	return wpaCliExec(append([]string{"-p", sockDir(), "-i", iface}, args...)...)
 }
 
 // CurrentSSID returns the associated SSID for display, or "" when not
@@ -367,6 +409,17 @@ func composeConf(ssid []byte, psk string) string {
 			pskLine(psk),
 			"\tkey_mgmt=WPA-PSK",
 		)
+		if ownsDHCP() {
+			// Protected management frames, OPTIONAL. A TP-Link in WPA2/WPA3
+			// mixed mode refused the Dot 3 until it was set (association
+			// completed with pmf=1, 2026-10-22), and optional still joins a
+			// router without them (measured on the same unit). Required (2)
+			// would lock it out of plain WPA2. Keyed on the same statement
+			// as the rest of the Dot 3's path, since that is where it was
+			// measured; the Dot 2's conf, and the emOS conf, are left as
+			// they were.
+			network = append(network, "\tieee80211w=1")
+		}
 	}
 	network = append(network, "\tpriority=1", "}")
 
@@ -584,6 +637,10 @@ func retireSupplicant() error {
 // are absent, so the disable fails and takes the change with it — and nothing
 // else writes the file, so there is no save to lose a write to. Write, then
 // retire the supplicant for init's supervisor to replace, as em-wifi does.
+//
+// A board that runs DHCP itself (ownsDHCP) has neither a framework to bounce
+// nor emOS's init to restart the supplicant; its road is reloadConfDHCP. The
+// base is asked first: that board on emOS is emOS.
 func reloadConf(content string) error {
 	if onEmOS() {
 		if err := writeConf(content); err != nil {
@@ -591,6 +648,9 @@ func reloadConf(content string) error {
 		}
 		leaveOnDeinit()
 		return retireSupplicant()
+	}
+	if ownsDHCP() {
+		return reloadConfDHCP(content)
 	}
 	if err := disableWifi(); err != nil {
 		return err
@@ -601,6 +661,78 @@ func reloadConf(content string) error {
 		return err
 	}
 	return enableWifi()
+}
+
+// reloadConfDHCP is reloadConf where the firmware runs DHCP itself (the Echo
+// Dot 3rd gen under FireOS), which has no WiFi framework to bounce (see the
+// package comment). Three steps, in this order:
+//
+//  1. Write the conf. Nothing rewrites it behind us here: the framework that
+//     clobbers a conf written while WiFi is up on the Dot 2 is not running.
+//  2. `wpa_cli reconfigure`: the running supplicant re-reads it, drops the
+//     current network and joins the new one. A failure is logged, not
+//     returned. The conf on disk is what the supplicant reads when it next
+//     starts, and the association gate decides whether the change worked,
+//     so a supplicant that is down (startup recovery) cannot strand a restore.
+//  3. Clear the address. Stop dhcpcd, delete its leases and remove the IPv4
+//     address. The address would otherwise pass the IP gate on the OLD
+//     network's lease, and the lease would be offered to the new network's
+//     router, which ignored it on a guest network (no IPv4 within 40s,
+//     2026-10-22). After this the client can only ask afresh.
+//
+// Reconfigure comes before the stop so that nothing restarts DHCP on the old
+// network once the lease is gone. DHCP is started again by startDHCP once
+// associated, in the change, the revert and the startup recovery alike.
+func reloadConfDHCP(content string) error {
+	if err := writeConf(content); err != nil {
+		return err
+	}
+	if out, err := wpaCli("reconfigure"); err != nil || !strings.Contains(out, "OK") {
+		log.Printf("[wifi] reconfigure did not answer OK (%v, %q) — the conf on disk stands",
+			err, strings.TrimSpace(out))
+	}
+	dropAddress()
+	return nil
+}
+
+// dropAddress stops DHCP on wlan0, deletes its leases and removes the IPv4
+// address. Both service steps are Amazon's init services (`stop` and `start`
+// of the profile's DHCPService). Best effort: each failure is logged, and the
+// gates downstream are what judge the outcome.
+func dropAddress() {
+	if err := runCommand("stop", dhcpServiceOf()); err != nil {
+		log.Printf("[wifi] %v", err)
+	}
+	leases, _ := filepath.Glob(filepath.Join(dhcpDirP, "dhcpcd-"+iface+"*.lease*"))
+	for _, l := range leases {
+		if err := os.Remove(l); err != nil {
+			log.Printf("[wifi] remove %s: %v", l, err)
+		}
+	}
+	if err := runCommand("ifconfig", iface, "0.0.0.0"); err != nil {
+		log.Printf("[wifi] %v", err)
+	}
+}
+
+// startDHCP starts the board's stated DHCP service once a network is joined.
+// A no-op elsewhere, where the framework or emOS's init runs DHCP. Init
+// ignores `start` for a service already running, so a second start is
+// harmless.
+func startDHCP() {
+	if !ownsDHCP() {
+		return
+	}
+	if err := runCommand("start", dhcpServiceOf()); err != nil {
+		log.Printf("[wifi] %v", err)
+	}
+}
+
+// ipWait is how long the IP gate waits; see ownDHCPIPTimeout.
+func ipWait() time.Duration {
+	if ownsDHCP() {
+		return ownDHCPIPTimeout
+	}
+	return ipTimeout
 }
 
 func waitFor(what string, timeout time.Duration, cond func() bool) bool {
@@ -750,7 +882,9 @@ func Change(ssidBytes []byte, psk string, connected func() bool) {
 			_ = os.Remove(markerPath)
 			_ = os.Remove(backupPath())
 		}
-		waitFor("re-association after revert", associateTimeout, associated)
+		if waitFor("re-association after revert", associateTimeout, associated) {
+			startDHCP()
+		}
 		setResult(Result{OK: false, SSID: ssid, Error: reason})
 	}
 
@@ -764,9 +898,10 @@ func Change(ssidBytes []byte, psk string, connected func() bool) {
 		return
 	}
 	log.Printf("[wifi] associated to %q", ssid)
+	startDHCP()
 
-	if !waitFor("IPv4 address", ipTimeout, func() bool { return currentIPv4() != "" }) {
-		revert(fmt.Sprintf("associated to %q but no IP within %s (DHCP problem?)", ssid, ipTimeout))
+	if !waitFor("IPv4 address", ipWait(), func() bool { return currentIPv4() != "" }) {
+		revert(fmt.Sprintf("associated to %q but no IP within %s (DHCP problem?)", ssid, ipWait()))
 		return
 	}
 	log.Printf("[wifi] got IP %s", currentIPv4())
@@ -815,6 +950,16 @@ func RecoverIfPending() {
 	if err := reloadConf(string(backup)); err != nil {
 		log.Printf("[wifi] startup restore failed: %v — leaving marker for next start", err)
 		return
+	}
+	if ownsDHCP() {
+		// The restore cleared the address (reloadConfDHCP), so DHCP is
+		// ours to start again. Not waited for here: this runs before the
+		// control client.
+		go func() {
+			if waitFor("re-association after startup restore", associateTimeout, associated) {
+				startDHCP()
+			}
+		}()
 	}
 	_ = os.Remove(markerPath)
 	_ = os.Remove(from)

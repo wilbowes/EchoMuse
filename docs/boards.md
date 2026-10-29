@@ -280,3 +280,19 @@ An MT8167 board with its own layout; no input device or PCM shares the Dot
   bound.
 - **Bluetooth.** `/dev/stpbt` exists, but the radio behind it reads
   differently from the Dot 2's, so no HCI device is stated yet.
+- **WiFi change.** On FireOS there is no WiFi framework (Alexa's apps are
+  disabled), so the dashboard's WiFi change cannot bounce `svc wifi` as it
+  does on the Dot 2. The firmware writes the conf, asks Amazon's running
+  supplicant to re-read it (`wpa_cli reconfigure`), stops Amazon's
+  `dhcpcd_wlan0` service, deletes wlan0's leases and clears the address, then
+  starts the service again once associated. The lease is cleared because a
+  lease carried to another subnet left the Echo without IPv4 (a TP-Link guest
+  network, 2026-10-22); the IP gate waits 30 s there instead of 20 s. The
+  generated network block asks for optional protected management frames
+  (`ieee80211w=1`): a WPA2/WPA3 mixed router refused the Dot 3 without it,
+  and with it the Dot 3 still joined a router that offers none. Backup,
+  pending marker, the gates and rollback are the same as on every board. The
+  board states the service as `DHCPService` in its profile; the firmware
+  branches on that statement, not on the board. On emOS none of this
+  applies: em-wifi and emOS's init own the supplicant, and the change takes
+  the emOS sequence.

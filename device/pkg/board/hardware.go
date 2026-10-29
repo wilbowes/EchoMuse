@@ -66,6 +66,12 @@ type Hardware struct {
 	// can exist on a board whose radio is not behind it, so this is stated
 	// per board and never assumed.
 	HCI string
+	// DHCPService is the Android init service that runs DHCP on wlan0 where
+	// no WiFi framework does: the Dot 3's FireOS has Alexa's apps disabled,
+	// so `svc wifi` cannot run, and the firmware stops and restarts this
+	// service around a WiFi change and watches it for a stall. "" where the
+	// framework (biscuit's FireOS 5) or emOS's init owns DHCP.
+	DHCPService string
 	// Speaker is what the playback path needs beyond the codec routes, amp
 	// switch and jack table every board shares.
 	Speaker Speaker
@@ -372,6 +378,9 @@ var donutHardware = &Hardware{
 	LightSensors: []LightSensor{{Driver: "tsl2572", Attr: "in_illuminance0_input", Bus: BusIIO}},
 	// /dev/stpbt exists, but the radio behind it reads differently from
 	// biscuit's (@technotiger on #527), so the proxy is off until measured.
+	// Amazon's dhcpcd service, since nothing else runs DHCP once Alexa's
+	// apps are disabled; the WiFi change stops and starts it.
+	DHCPService: "dhcpcd_wlan0",
 	Speaker: Speaker{
 		Volume: donutVolume,
 		Jack:   donutJack,
@@ -416,6 +425,7 @@ type Layout struct {
 	// switched on.
 	LightSensors []LightSensor
 	HCI          string
+	DHCPService  string
 	// Routes, InputGains and Speaker are the board's statements too, written
 	// by the codec and the speaker.
 	Routes, InputGains []Ctl
@@ -436,7 +446,7 @@ func Resolve(root string, b *Board) *Layout {
 		hw = b.Hardware
 	}
 	l := &Layout{Board: b, MuteLEDGPIO: hw.MuteLEDGPIO, LightSensors: hw.LightSensors, HCI: hw.HCI,
-		Routes: hw.Routes, InputGains: hw.InputGains, Speaker: hw.Speaker}
+		DHCPService: hw.DHCPService, Routes: hw.Routes, InputGains: hw.InputGains, Speaker: hw.Speaker}
 	note := func(part, want, got string, err error) {
 		var line string
 		switch {
