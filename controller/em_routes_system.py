@@ -15,6 +15,7 @@ from aiohttp import web
 import em_auth as auth
 import em_db as db
 import em_device_view
+import em_diag_snapshot
 import em_http
 import em_ingressauth
 import em_player
@@ -178,6 +179,13 @@ async def _get_support_bundle(request: web.Request) -> web.Response:
     since = time.time() - 24 * 3600
     turns, metrics, counters = [], [], []
     device_configs, live_state, views, logs = {}, {}, {}, []
+    # Each Echo's own snapshot, asked of all of them at once: a slow one costs
+    # the bundle its timeout, not the sum of them.
+    lives = {r["device_id"]: em_state.devices.get(r["device_id"]) for r in rows}
+    snapshots = dict(zip(lives, await asyncio.gather(
+        *(em_diag_snapshot.request(lv) for lv in lives.values()))))
+    ssids = {did: (getattr(lv, "stats", None) or {}).get("wifiSsid")
+             for did, lv in lives.items() if lv is not None}
 
     health = await loop.run_in_executor(None, db.latest_health)
     for row in rows:
@@ -249,6 +257,8 @@ async def _get_support_bundle(request: web.Request) -> web.Response:
                   await loop.run_in_executor(None, db.get_all_users)},
         controller_stats=await loop.run_in_executor(None, em_process_stats.controller_stats),
         views=views,
+        snapshots=snapshots,
+        ssids=ssids,
     )
     body = em_support.to_json(bundle)
     stamp = time.strftime("%Y%m%d-%H%M%S")

@@ -533,6 +533,8 @@ def build(
     accounts: dict[str, str] | None = None,
     controller_stats: dict | None = None,
     views: dict[str, dict] | None = None,
+    snapshots: dict[str, dict] | None = None,
+    ssids: dict[str, str] | None = None,
 ) -> dict:
     """
     Assemble the bundle. Pure — callers do the I/O, so this is testable
@@ -542,7 +544,8 @@ def build(
         "generated_at": int(time.time()),
         # 2: controller_log_tail became the CONTROLLER's log; the relayed
         # per-device lines moved to device_log_tail.
-        # 3: devices[].view, what the dashboard showed (redact_view).
+        # 3: devices[].view, what the dashboard showed (redact_view), and
+        # devices[].snapshot, the Echo's own hardware state (redact_snapshot).
         "format": 3,
         "redaction": (
             "Allowlisted fields only. Contains no speech, no transcripts, no "
@@ -589,6 +592,8 @@ def build(
         # and connected/link tell you whether to trust anything else.
         entry["live"] = live_state.get(did, {})
         entry["view"] = redact_view((views or {}).get(did))
+        entry["snapshot"] = redact_snapshot((snapshots or {}).get(did),
+                                            (ssids or {}).get(did))
         bundle["devices"].append(entry)
 
     return bundle
@@ -857,3 +862,76 @@ def build_provision_diagnostics(
         out["transcript"] = [ln for t in transcript for ln in _scrub(str(t))]
     return out
 
+
+# ─── An Echo's own snapshot (em_diag_snapshot, format 3) ────────────────────
+#
+# The Echo sends it raw; this is the only way it reaches a bundle. Each part
+# goes through the scrubber already written for that output (the wizard's
+# wpa_cli and net.log parsers, which carry the SSID edge cases), every string
+# goes through _scrub, and the Echo's own SSID, which the controller knows
+# from stats, is replaced wherever it still appears.
+
+_SNAPSHOT_IDME = ("device_type_id", "board_id", "product_name", "productid", "alscal")
+_SNAPSHOT_FILES = ("/proc/asound/cards", "/proc/asound/pcm")
+_SNAPSHOT_ERRORS = ("kernel", "wpaStatus") + _SNAPSHOT_FILES
+_SNAPSHOT_MIXER_MAX = 300
+# A backstop for the device's own filter: the MTK WiFi driver names networks
+# in prose.
+_KERNEL_NETWORK = re.compile(r"ssid|wlan|wifi|wpa|80211", re.I)
+
+
+def _scrub_one(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    return " ".join(_scrub(value)) or ""
+
+
+def _lines(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [ln for v in value if isinstance(v, str) for ln in _scrub(v)]
+
+
+def _without(obj: Any, needle: str) -> Any:
+    if isinstance(obj, str):
+        return obj.replace(needle, "<network>")
+    if isinstance(obj, list):
+        return [_without(v, needle) for v in obj]
+    if isinstance(obj, dict):
+        return {k: _without(v, needle) for k, v in obj.items()}
+    return obj
+
+
+def redact_snapshot(result: Any, ssid: str | None = None) -> dict | None:
+    """Project an Echo's diag snapshot onto the allowlist, scrubbed."""
+    if not isinstance(result, dict):
+        return None
+    out: dict = {"status": result.get("status")}
+    snap = result.get("snapshot")
+    if out["status"] != "ok" or not isinstance(snap, dict):
+        return out
+    board = snap.get("board") if isinstance(snap.get("board"), dict) else {}
+    out["board"] = {"id": _scrub_one(board.get("id")),
+                    "notes": _lines(board.get("notes")),
+                    "problems": _lines(board.get("problems"))}
+    idme = snap.get("idme") if isinstance(snap.get("idme"), dict) else {}
+    out["idme"] = {k: _scrub_one(idme[k]) for k in _SNAPSHOT_IDME if k in idme}
+    mixer = snap.get("mixer") if isinstance(snap.get("mixer"), list) else []
+    out["mixer"] = [
+        {**{k: _scrub_one(c[k]) for k in ("name", "want", "got", "err") if k in c},
+         **({"match": c["match"]} if isinstance(c.get("match"), bool) else {})}
+        for c in mixer[:_SNAPSHOT_MIXER_MAX] if isinstance(c, dict)]
+    files = snap.get("files") if isinstance(snap.get("files"), dict) else {}
+    out["files"] = {k: _scrub(files[k]) for k in _SNAPSHOT_FILES
+                    if isinstance(files.get(k), str)}
+    out["kernel"] = [ln for ln in _lines(snap.get("kernel"))
+                     if not _KERNEL_NETWORK.search(ln)]
+    wpa = snap.get("wpaStatus")
+    out["wpa_status"] = _probe_wpa_status(wpa) if isinstance(wpa, str) else None
+    net = snap.get("netLog")
+    out["net_log"] = (_probe_net_log("\n".join(v for v in net if isinstance(v, str)))
+                      if isinstance(net, list) else None)
+    errors = snap.get("errors") if isinstance(snap.get("errors"), dict) else {}
+    out["errors"] = {k: _scrub_one(errors[k]) for k in _SNAPSHOT_ERRORS if k in errors}
+    # A name of one to three characters would replace parts of every word.
+    return _without(out, ssid) if ssid and len(ssid) >= 4 else out

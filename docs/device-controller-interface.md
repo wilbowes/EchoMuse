@@ -126,6 +126,7 @@ below (`capabilities()` in `control.go`):
 | `wake_word_off` | always | Honours `wakeWordEnabled: false` (Home Assistant's "No wake word"): a wake crossing is reported as a shadow cross and opens no session and no turn. The button still works. Without it the controller declines "No wake word" for an Echo in `listen_state` `local` |
 | `pairing` | always | Asks to pair itself when its owner holds the action button 7 s while it has no controller link or one over plain (5 s, on any link, before v2.19.0; an Echo on wss is already paired, and its hold reaches HA as a long press): a `pair_request` every 5 s on a live link, or otherwise registers with `"pairing": true` on every dial for the 2-minute window, falling back to plain (without its token) when wss cannot connect. The window closes early once new credentials land, so the redial they cause does not ask again. Without it the controller offers the admin a **Pair** action instead, since the device cannot ask |
 | `ble_connect` | always | Can hold Bluetooth LE connections for the controller and speak GATT over them (#656): up to three links, requests and results as `0x08` frames on `/data`. Acts only while `bleProxyEnabled` and `bleProxyConnections` are both on, and only against a controller announcing `ble_connect` back |
+| `diag_snapshot` | always | Answers `diag_request` with a `diag_snapshot`: board identity and how its parts were found, the mixer controls the board writes read back beside the value it writes (`match`), `/proc/asound/{cards,pcm}`, idme hardware fields (not the serial or MACs), audio-driver kernel lines, `wpa_cli status` and emOS's `/run/net.log` (`internal/diag`). Fixed reads; nothing in the request names a path or command. Sent raw; the controller redacts it before a support bundle (`em_support.redact_snapshot`). Without it a bundle says `unsupported` for that Echo |
 
 **`aec_hw_ref` is a capability with a runtime companion, and both are needed.**
 The capability says the firmware knows *how* to use a hardware echo reference.
@@ -185,6 +186,7 @@ absent optional fields take prior/default behaviour.
 | `stats` | hardware and link telemetry (`internal/client/stats.go`, `DeviceStats`) | Every ~30s, plus once on connect. Every field is optional and absence means **not measured**, never zero. `tcpUpRetrans` is the device's own TCP retransmits across its planes since the last report, `tcpUpSegs` the segments sent where the kernel counts them (FireOS 5's 3.18 does not); `ble` carries the scanner's counters, including `yields`/`yieldedMs` for time the scan stood aside for the link |
 | `ble_adverts` | `adverts[]` | Batch from the passive BLE scanner. **Legacy path** — send these on `/data` as `0x06` whenever the controller announced `ble_adverts_data`, and use this message only when it did not (#404) |
 | `wifi_scan_result` | `networks[]` of `{ssid, ssid_hex, signal}`, or `error` | Answer to `wifi_scan` |
+| `diag_snapshot` | `id`, `snapshot` | Answer to `diag_request` (only if `diag_snapshot`), echoing its `id`. One collection at a time; a request arriving during one is dropped and times out at the controller |
 | `wifi_result` | `ok`, `ssid`, `error?` | Outcome of a `wifi_change`, re-sent until `wifi_commit` |
 | `pair_request` | — | The owner held the action button on a connected device (only if `pairing`). The controller shows **Approve pairing**; approval issues a rotated token and the CA over the shell plane, then bounces the link |
 | `sendspin_status` | `status` (`sendspin.Status`), or null when the player stopped | The Sendspin player's state as it changes: `state` (`listening`, `connected`, `playing`, `busy` while Home Assistant holds the music plane, `error`), `server`, `paired`, `pairedWith`, `group`, `synced`, `syncErrUs`, `bufferedMs`, player counters. No secrets. The `stats` report carries the same object as `sendspin` |
@@ -211,6 +213,7 @@ absent optional fields take prior/default behaviour.
 | `duck` | `on` | Duck music under a voice turn (turn start/end) |
 | `config` | `ConfigMessage` fields | Push configuration (see below) |
 | `wifi_scan` | — | Scan for networks; answered with `wifi_scan_result` |
+| `diag_request` | `id` | Collect the support-bundle snapshot; answered with `diag_snapshot`. Sent only to a device announcing `diag_snapshot`, only while a bundle is built |
 | `wifi_change` / `wifi_commit` | `ssid`, `ssid_hex?`, `psk` / — | Switch WiFi with auto-rollback; commit finalises |
 | `shell_open` / `shell_close` | `pty?` | Ask the device to dial `/shell` (`pty:true` = interactive) / close it |
 | `play_cue` | `cue` | Play a cue the device generates itself. Only `"wake"` today, sent when `wakeSound` is on and a wake outside a private-listening session has won arbitration; unknown names are ignored |
