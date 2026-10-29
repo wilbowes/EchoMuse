@@ -37,6 +37,12 @@ def submit(fn, *args, **kwargs) -> concurrent.futures.Future:
     return fut
 
 
+def drain() -> None:
+    """Run every queued write, then refuse new ones; for shutdown, before
+    the database closes."""
+    _pool.shutdown(wait=True)
+
+
 def _report(fut: concurrent.futures.Future) -> None:
     if fut.cancelled():
         return
