@@ -37,6 +37,12 @@ const (
 // maxLen data bytes each: the first with the start flag an LE host must use
 // (PB=00), the rest as continuations (PB=01).
 func fragmentACL(handle, cid uint16, payload []byte, maxLen int) [][]byte {
+	return fragmentACLPB(handle, cid, payload, maxLen, 0x0)
+}
+
+// fragmentACLPB is fragmentACL with the first fragment's packet boundary flag
+// given: 00 on LE, 10 (automatically flushable) on BR/EDR.
+func fragmentACLPB(handle, cid uint16, payload []byte, maxLen int, firstPB uint16) [][]byte {
 	frame := make([]byte, 4+len(payload))
 	binary.LittleEndian.PutUint16(frame[0:2], uint16(len(payload)))
 	binary.LittleEndian.PutUint16(frame[2:4], cid)
@@ -50,9 +56,9 @@ func fragmentACL(handle, cid uint16, payload []byte, maxLen int) [][]byte {
 		if n > maxLen {
 			n = maxLen
 		}
-		hf := handle & 0x0FFF
+		hf := handle&0x0FFF | firstPB<<12
 		if !first {
-			hf |= 0x1 << 12
+			hf = handle&0x0FFF | 0x1<<12
 		}
 		pkt := make([]byte, 5+n)
 		pkt[0] = h4TypeACL

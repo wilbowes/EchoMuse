@@ -108,6 +108,14 @@ type Scanner struct {
 	conns    *ConnManager
 	connHold atomic.Bool
 
+	// BR/EDR, for a Bluetooth speaker. The transport runs while the proxy
+	// or audio wants it; the LE scan only for the proxy.
+	classic   *Classic
+	audioOn   bool                    // under mu
+	live      atomic.Pointer[Classic] // attached to the running session
+	scanOff   atomic.Bool             // the session is up for audio alone
+	sessionOn bool                    // under mu: the run loop is up
+
 	bluedroidDisabled bool
 }
 
@@ -124,6 +132,11 @@ func NewScanner(onBatch BatchCallback) *Scanner {
 			s.poke()
 		}
 	})
+	s.conns.other = func(pkt []byte) {
+		if c := s.live.Load(); c != nil {
+			c.handle(pkt)
+		}
+	}
 	return s
 }
 
@@ -167,6 +180,64 @@ func (s *Scanner) Enabled() bool {
 	return s.enabled
 }
 
+// SetClassic gives the scanner the BR/EDR side. Call it once, before
+// SetAudioEnabled.
+func (s *Scanner) SetClassic(c *Classic) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.classic = c
+	c.onBusy = s.poke
+}
+
+// SetAudioEnabled keeps the transport up for BR/EDR (a Bluetooth speaker)
+// whether or not the proxy is on.
+func (s *Scanner) SetAudioEnabled(on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.classic == nil || on == s.audioOn {
+		return
+	}
+	if on && devPath() == "" {
+		s.noDeviceOnce.Do(func() {
+			log.Println("[ble] this board states no Bluetooth device — not started")
+		})
+		return
+	}
+	if s.sessionOn {
+		// The session attaches Classic only at its start: restart it.
+		s.stopLocked()
+	}
+	s.audioOn = on
+	s.scanOff.Store(!s.enabled)
+	s.reconcileLocked()
+}
+
+func (s *Scanner) reconcileLocked() {
+	want := s.enabled || s.audioOn
+	if want == s.sessionOn {
+		return
+	}
+	if want {
+		s.stopCh = make(chan struct{})
+		s.doneCh = make(chan struct{})
+		s.sessionOn = true
+		go s.run(s.stopCh, s.doneCh)
+		return
+	}
+	s.stopLocked()
+}
+
+func (s *Scanner) stopLocked() {
+	if !s.sessionOn {
+		return
+	}
+	stopCh, doneCh := s.stopCh, s.doneCh
+	s.stopCh, s.doneCh = nil, nil
+	s.sessionOn = false
+	close(stopCh)
+	<-doneCh
+}
+
 // SetMusicDuty attaches the duty whose account Stats reports.
 func (s *Scanner) SetMusicDuty(d *MusicDuty) { s.duty.Store(d) }
 
@@ -198,18 +269,17 @@ func (s *Scanner) SetEnabled(enabled bool) {
 		return
 	}
 	s.enabled = enabled
-	if enabled {
-		s.stopCh = make(chan struct{})
-		s.doneCh = make(chan struct{})
-		go s.run(s.stopCh, s.doneCh)
-		log.Println("[ble] scanner enabled")
-		return
+	s.scanOff.Store(!enabled)
+	if s.sessionOn {
+		// The session is up for audio as well: start or stop the scan in it.
+		s.poke()
 	}
-	stopCh, doneCh := s.stopCh, s.doneCh
-	s.stopCh, s.doneCh = nil, nil
-	close(stopCh)
-	<-doneCh
-	log.Println("[ble] scanner disabled")
+	s.reconcileLocked()
+	if enabled {
+		log.Println("[ble] scanner enabled")
+	} else {
+		log.Println("[ble] scanner disabled")
+	}
 }
 
 // Stats returns the current diagnostics snapshot.
@@ -232,7 +302,7 @@ func (s *Scanner) Stats() Stats {
 		music = &st
 	}
 	return Stats{
-		Scanning:    s.scanning.Load(),
+		Scanning:    s.scanning.Load() && !s.scanOff.Load(),
 		AdvertsSeen: s.advertsSeen.Load(),
 		AdvertsSent: s.advertsSent.Load(),
 		UniqueAddrs: uniqueCount,
@@ -301,6 +371,24 @@ func (s *Scanner) serve(rw io.ReadWriteCloser, stopCh chan struct{}) error {
 	}
 	s.conns.attach(host)
 	defer s.conns.detach()
+	s.mu.Lock()
+	classic := s.classic
+	if !s.audioOn {
+		classic = nil
+	}
+	s.mu.Unlock()
+	if classic != nil {
+		pool, poolLen, shared := s.conns.pool()
+		if !shared {
+			pool = nil
+		}
+		s.live.Store(classic)
+		classic.attach(host, pool, poolLen)
+		defer func() {
+			s.live.Store(nil)
+			classic.detach()
+		}()
+	}
 	if cc, err := sendCmd(opReadBdAddr, nil); err == nil {
 		s.bdAddrMu.Lock()
 		s.bdAddr = formatBdAddr(cc.params)
@@ -342,7 +430,10 @@ func (s *Scanner) serve(rw io.ReadWriteCloser, stopCh chan struct{}) error {
 	}
 	// A session that starts while the link is busy (the watchdog re-init,
 	// or the proxy being enabled mid-turn) holds the scan until it is not.
-	wantScan := func() bool { return !s.yieldWant.Load() && !s.connHold.Load() }
+	wantScan := func() bool {
+		return !s.scanOff.Load() && !s.yieldWant.Load() && !s.connHold.Load() &&
+			(classic == nil || !classic.Busy())
+	}
 	if wantScan() {
 		if err := setScan(true); err != nil {
 			return err

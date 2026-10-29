@@ -128,6 +128,14 @@ type ConnManager struct {
 
 	hold func(bool) // pauses the scan while a connection is being made
 
+	// other receives every packet that is not an LE link's: BR/EDR events,
+	// ACL data on handles this manager does not hold, and Number Of
+	// Completed Packets (whose handles may be either's). Runs on the reader.
+	other func(pkt []byte)
+	// sharedPool is true when LE has no buffers of its own and uses the
+	// BR/EDR ones, so the two sides must draw on one count.
+	sharedPool bool
+
 	connectTimeout time.Duration
 	attTimeout     time.Duration
 	idleAfter      time.Duration
@@ -178,14 +186,14 @@ func (m *ConnManager) SetOwnAddress(addr []byte) {
 
 // attach starts serving links on a freshly reset controller.
 func (m *ConnManager) attach(h *hciHost) {
-	aclLen, aclNum := 27, 1
+	aclLen, aclNum, shared := 27, 1, false
 	if cc, err := h.Cmd(opLEReadBufferSize, nil); err == nil && len(cc.params) >= 3 &&
 		binary.LittleEndian.Uint16(cc.params[0:2]) != 0 && cc.params[2] != 0 {
 		aclLen, aclNum = int(binary.LittleEndian.Uint16(cc.params[0:2])), int(cc.params[2])
 	} else if cc, err := h.Cmd(opReadBufferSize, nil); err == nil && len(cc.params) >= 5 {
 		// No LE buffers of its own: LE shares the BR/EDR ones (the MT6627).
 		if l, n := int(binary.LittleEndian.Uint16(cc.params[0:2])), int(binary.LittleEndian.Uint16(cc.params[3:5])); l > 0 && n > 0 {
-			aclLen, aclNum = l, n
+			aclLen, aclNum, shared = l, n, true
 		}
 	}
 	m.mu.Lock()
@@ -203,10 +211,18 @@ func (m *ConnManager) attach(h *hciHost) {
 	m.host, m.stop = h, make(chan struct{})
 	m.conns = map[uint16]*leConn{}
 	m.sem = make(chan struct{}, aclNum)
-	m.aclLen, m.ownRandom = aclLen, random
+	m.aclLen, m.ownRandom, m.sharedPool = aclLen, random, shared
 	stop := m.stop
 	m.mu.Unlock()
 	go m.run(h, stop)
+}
+
+// pool returns the ACL buffer count and size, and whether they are the
+// BR/EDR buffers that Classic must share.
+func (m *ConnManager) pool() (chan struct{}, int, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.sem, m.aclLen, m.sharedPool
 }
 
 // detach ends every link: the session that carried them is over.
@@ -312,6 +328,10 @@ func (m *ConnManager) handle(h *hciHost, reasm *aclReassembler, pkt []byte) {
 		return
 	}
 	if pkt[0] == h4TypeACL {
+		if len(pkt) >= 3 && m.other != nil && m.byHandle(binary.LittleEndian.Uint16(pkt[1:3])&0x0FFF) == nil {
+			m.other(pkt)
+			return
+		}
 		if handle, cid, payload, ok := reasm.Feed(pkt); ok {
 			if c := m.byHandle(handle); c != nil {
 				m.onL2CAP(h, c, cid, payload)
@@ -350,6 +370,8 @@ func (m *ConnManager) handle(h *hciHost, reasm *aclReassembler, pkt []byte) {
 			if m.OnDisconnect != nil {
 				m.OnDisconnect(c.addr, pkt[6])
 			}
+		} else if m.other != nil {
+			m.other(pkt)
 		}
 	case evtNumCompletedPackets:
 		// count(1), then handle(2) + completed(2) each
@@ -369,6 +391,9 @@ func (m *ConnManager) handle(h *hciHost, reasm *aclReassembler, pkt []byte) {
 			}
 		}
 		m.mu.Unlock()
+		if m.other != nil {
+			m.other(pkt)
+		}
 	case evtLEMeta:
 		if cc, ok := parseConnComplete(pkt); ok {
 			m.onConnComplete(h, cc)
@@ -394,6 +419,10 @@ func (m *ConnManager) handle(h *hciHost, reasm *aclReassembler, pkt []byte) {
 				// What was wanted changed while this one was in flight.
 				go m.applyInterval(h, c)
 			}
+		}
+	default:
+		if m.other != nil {
+			m.other(pkt)
 		}
 	}
 }
