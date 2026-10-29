@@ -18,11 +18,11 @@ func TestSanitiseSerial(t *testing.T) {
 		want string
 	}{
 		// procfs hands this back with no trailing newline at all.
-		{"idme, no newline", "G090LF11752215LE", "G090LF11752215LE"},
-		{"trailing newline", "G090LF11752215LE\n", "G090LF11752215LE"},
-		{"trailing NUL", "G090LF11752215LE\x00", "G090LF11752215LE"},
-		{"NUL then garbage", "G090LF11752215LE\x00\xff\xff", "G090LF11752215LE"},
-		{"surrounding space", "  G090LF11752215LE \r\n", "G090LF11752215LE"},
+		{"idme, no newline", "G090LF0000000A11", "G090LF0000000A11"},
+		{"trailing newline", "G090LF0000000A11\n", "G090LF0000000A11"},
+		{"trailing NUL", "G090LF0000000A11\x00", "G090LF0000000A11"},
+		{"NUL then garbage", "G090LF0000000A11\x00\xff\xff", "G090LF0000000A11"},
+		{"surrounding space", "  G090LF0000000A11 \r\n", "G090LF0000000A11"},
 
 		// An unreadable or unpopulated field must read as absent. Returning
 		// something plausible-looking is worse than "unknown-device", which at
@@ -57,10 +57,10 @@ func TestSerialFromIdme(t *testing.T) {
 	// Exactly what the device gives: 16 characters, no newline. Read off
 	// G090LF11752215LE on 2026-09-15.
 	idmePath = filepath.Join(dir, "serial")
-	if err := os.WriteFile(idmePath, []byte("G090LF11752215LE"), 0o644); err != nil {
+	if err := os.WriteFile(idmePath, []byte("G090LF0000000A11"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := serialFromIdme(), "G090LF11752215LE"; got != want {
+	if got, want := serialFromIdme(), "G090LF0000000A11"; got != want {
 		t.Errorf("idme serial: got %q, want %q", got, want)
 	}
 
@@ -97,8 +97,8 @@ func TestSerialFromCmdline(t *testing.T) {
 		}
 	}
 
-	write("console=tty0 androidboot.serialno=G090LF11752215LE androidboot.bootreason=rtc\n")
-	if got, want := serialFromCmdline(), "G090LF11752215LE"; got != want {
+	write("console=tty0 androidboot.serialno=G090LF0000000A11 androidboot.bootreason=rtc\n")
+	if got, want := serialFromCmdline(), "G090LF0000000A11"; got != want {
 		t.Errorf("cmdline serial: got %q, want %q", got, want)
 	}
 

@@ -166,6 +166,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize PCM Speaker: %v", err)
 	}
+	globalPcmSpeaker = pcmSpeaker
 
 	s := server.NewServer(buttonController, micIn, pcmSpeaker)
 	srvPtr.Store(s)
@@ -948,7 +949,7 @@ func collectStats() client.DeviceStats {
 	tx, rx, txErr, txDrop, rxCrc := netDeltas()
 	speed, freq, bssid := linkInfo()
 	cpuC, maxC, coreLimit := thermals()
-	return client.DeviceStats{
+	st := client.DeviceStats{
 		AmbientLux:       als.Lux(),
 		CPUTempC:         cpuC,
 		MaxTempC:         maxC,
@@ -972,6 +973,18 @@ func collectStats() client.DeviceStats {
 		RxCrcErrors:      rxCrc,
 		Emmc:             emmcForStats(),
 	}
+	// Jack state (#621): plug position and the codec controls as read back,
+	// plus how many times the reconciler had to fight the HAL. NULL when the
+	// device has no jack detect switch (absent hardware reads as "no data").
+	if inserted, ok := jack.Inserted(), jack.Present(); ok {
+		b := inserted
+		st.JackInserted = &b
+	}
+	if globalPcmSpeaker != nil {
+		st.JackMixer = globalPcmSpeaker.JackMixerState()
+		st.JackDriftCount = globalPcmSpeaker.JackDriftCount()
+	}
+	return st
 }
 
 // ─── Network telemetry ────────────────────────────────────────────────────────
@@ -1471,6 +1484,7 @@ const speakerRate = 48000
 // new wake, and is dropped.
 // localDuck is set in main before any wake can cross.
 var localDuck *speaker.LocalDuck
+var globalPcmSpeaker *speaker.PcmSpeaker
 
 func onWakeCrossing(cc *client.ControlClient, dc *client.DataClient,
 	spk *speaker.PcmSpeaker, srv *server.Server,
