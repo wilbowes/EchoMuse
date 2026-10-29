@@ -694,6 +694,14 @@ func main() {
 		controlClient.SendPlaybackStats(st.Periods, st.Underruns, st, barge)
 	})
 
+	// The START of that stream (#203): the first period the speaker actually
+	// writes to ALSA, so the controller's Speaking tile and playback meter
+	// ring key off the device rather than estimating from the first period
+	// they put on the socket — an estimate that leads the speaker by up to
+	// the prime window. Only firmware announcing `playback_start` sends it,
+	// and the controller only listens on that capability.
+	pcmSpeaker.OnPlaybackStart(controlClient.SendPlaybackStarted)
+
 	// WiFi change — the executor owns the whole switch/rollback sequence
 	// (internal/wifi); the reconnect gate polls IsConnected. The outcome
 	// is sent as wifi_result with at-least-once delivery: retried on a

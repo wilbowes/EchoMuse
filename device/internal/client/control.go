@@ -1314,11 +1314,18 @@ func capabilities() []string {
 	// "sendspin": this firmware can be a Sendspin player (internal/sendspin),
 	// switched by sendspinEnabled. Whether it is running, and paired, is the
 	// sendspin status, for the aec_hw_ref reason.
+	// "playback_start": this firmware reports when a voice stream begins
+	// playing (playback_started), rather than leaving the controller to
+	// estimate that moment from the first period it put on the socket — an
+	// estimate that leads the speaker by up to the prime window (#203). Only
+	// this side knows: the first period written to ALSA is the instant the
+	// barge-in threshold keys off and the level tap the meter ring renders is
+	// read. Old controllers ignore the message and keep estimating.
 	caps := []string{"speaker", "leds", "led_anim", "buttons",
 		"oww_shadow", "oww_trigger", "button_hold", "audio_mix",
 		"aec_hw_ref", "oww_local_only", "output_chain", "wake_cue", "volume_cue", "remote_volume_arc",
 		"response_level", "wake_mic", "pairing",
-		"wake_word_off", "sendspin", "ble_connect"}
+		"wake_word_off", "sendspin", "playback_start", "ble_connect"}
 	if MicUnavailable() == "" {
 		caps = append(caps, "mic")
 	}
@@ -1411,6 +1418,25 @@ func (c *ControlClient) SendWifiResult(ok bool, ssid, errMsg string) {
 		"ssid":  ssid,
 		"error": errMsg,
 	})
+}
+
+// SendPlaybackStarted reports that a voice stream has begun playing: the
+// first period of it written to ALSA (#203).
+//
+// It exists because the controller can only see when audio was SENT — a socket
+// write completes near-instantly however slow the link is, and the device
+// deliberately holds a new stream until roughly a second is queued
+// (primePeriods, pcm_speaker.go) or EOS arrives. So the controller's estimate
+// of "the user is hearing this now" leads the speaker by up to the prime
+// window; the ALSA write is the only place that knows.
+//
+// No payload, deliberately. The device's wall clock is not trustworthy before
+// NTP, as for every other event reported from here, and a stream id would be
+// state this one-message-per-playback report does not need: the device starts
+// one stream at a time and reports in that order. Safe for concurrent use —
+// silently drops if not connected.
+func (c *ControlClient) SendPlaybackStarted() {
+	_ = c.writeJSON(map[string]string{"type": "playback_started"})
 }
 
 // SendPlaybackStats reports one completed speaker stream: periods played,
