@@ -11,14 +11,8 @@ told the user it had failed.
 These drive the real event handler with the messages HA sends.
 """
 
-import _oww_stub
-
-_oww_stub.install()
-try:
-    import em_controller
-    import em_esphome
-finally:
-    _oww_stub.uninstall()
+import em_controller
+import em_esphome
 
 from _sources import code_only, def_source  # noqa: E402
 from esphome.vendor import api_pb2  # noqa: E402

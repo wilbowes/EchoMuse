@@ -12,19 +12,9 @@ import asyncio
 
 import pytest
 
-import _oww_stub
-
-_oww_stub.install()
-
-import em_controller  # noqa: E402 — must follow the stub
-import em_state  # noqa: E402
-from _sources import code_only, def_source  # noqa: E402
-
-
-@pytest.fixture(autouse=True, scope="module")
-def _drop_the_stub():
-    yield
-    _oww_stub.uninstall()
+import em_controller
+import em_state
+from _sources import code_only, def_source
 
 
 def _barging_device(events, monkeypatch):

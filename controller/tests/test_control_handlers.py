@@ -19,21 +19,9 @@ from pathlib import Path
 
 import pytest
 
-import _oww_stub
-
-_oww_stub.install()
-
-import em_controller  # noqa: E402 — must follow the stub
+import em_controller
 
 SPEC = Path(__file__).resolve().parents[2] / "docs" / "device-controller-interface.md"
-
-
-@pytest.fixture(autouse=True, scope="module")
-def _drop_the_stub():
-    # See test_device_speaking.py: a stub left in sys.modules makes other
-    # tests' importorskip("openwakeword") succeed against it.
-    yield
-    _oww_stub.uninstall()
 
 
 def _device(device_id="dev1"):

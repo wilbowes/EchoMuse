@@ -16,11 +16,7 @@ import asyncio
 
 import pytest
 
-import _oww_stub
-
-_oww_stub.install()
-
-import em_controller  # noqa: E402 — must follow the stub
+import em_controller
 
 
 @pytest.fixture(autouse=True)
@@ -35,15 +31,6 @@ def pushed():
     em_controller._push_device_state = lambda device: _record(pushed, device)
     yield pushed
     em_controller._push_device_state = original
-    # em_controller is already imported and holds its own reference to the stub
-    # Model, so the stub itself is no longer needed — and sys.modules is global.
-    # Four tests in test_oww_assets.py and test_oww_models.py call
-    # `pytest.importorskip("openwakeword")` to skip when the real package is
-    # absent; leaving the stub installed makes that check succeed, they stop
-    # skipping, and they fail on the missing MODELS table. That failure is four
-    # steps removed from anything to do with openwakeword, which is the worst
-    # kind of test failure to hand someone.
-    _oww_stub.uninstall()
 
 
 async def _record(pushed, device):
