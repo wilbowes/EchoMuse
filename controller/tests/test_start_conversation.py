@@ -28,26 +28,15 @@ import asyncio
 import re
 from pathlib import Path
 
+import _sources
 import em_announce
 
 CONTROLLER = Path(__file__).resolve().parents[1]
 ESPHOME_SRC = (CONTROLLER / "em_esphome.py").read_text()
 CONTROLLER_SRC = (CONTROLLER / "em_controller.py").read_text()
 
-
-def _strip_py_comments(src: str) -> str:
-    """
-    Comments AND docstrings. A guard that strips only `#` lines matches the
-    prose explaining the rule it is enforcing and passes whatever the code
-    does — this tree has done that three times now.
-    """
-    src = re.sub(r'"""(?:.|\n)*?"""', "", src)
-    src = re.sub(r"'''(?:.|\n)*?'''", "", src)
-    return "\n".join(re.sub(r"#.*$", "", line) for line in src.splitlines())
-
-
-ESPHOME_CODE = _strip_py_comments(ESPHOME_SRC)
-CONTROLLER_CODE = _strip_py_comments(CONTROLLER_SRC)
+ESPHOME_CODE = _sources.code_only(ESPHOME_SRC)
+CONTROLLER_CODE = _sources.code_only(CONTROLLER_SRC)
 
 
 def fetch_returning(pcm):
@@ -186,7 +175,7 @@ def test_start_conversation_is_gated_on_the_microphone():
     )
     gate = ESPHOME_CODE[ESPHOME_CODE.index("def _voice_assistant_flags"):]
     gate = gate[: gate.index("\n    def ", 10)]
-    assert '_device_has("mic")' in gate
+    assert "_device_has('mic')" in gate
 
 
 def test_device_info_advertises_the_per_device_flags():
@@ -282,7 +271,7 @@ def test_the_trigger_is_neither_a_wake_word_nor_a_button():
     borrowing either label puts turns nobody spoke a wake word for into the
     wake-word numbers.
     """
-    label = re.search(r'CONVERSATION_TRIGGER = "([^"]+)"', ESPHOME_CODE)
+    label = re.search(r"CONVERSATION_TRIGGER = '([^']+)'", ESPHOME_CODE)
     assert label, "CONVERSATION_TRIGGER is not defined"
     assert not label.group(1).startswith("wakeword")
     assert label.group(1) != "button"

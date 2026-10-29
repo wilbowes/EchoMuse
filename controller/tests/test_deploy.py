@@ -1230,7 +1230,7 @@ def test_role_changes_refuse_to_strand_the_install():
     the one an admin reaches for while tidying up.
 
     """
-    body = _strip_prose(_sources.def_source("_patch_user"))
+    body = _sources.code_only(_sources.def_source("_patch_user"))
 
     assert "admin_count" in body, "must count admins before demoting one"
     assert "last_admin" in body, "must refuse to remove the final admin"
@@ -2055,20 +2055,6 @@ def test_every_outcome_cue_names_a_scene_key_that_exists():
         assert key in scene, f"_OUTCOME_ANIM names {key}, which no scene defines"
 
 
-def _strip_prose(src: str) -> str:
-    """
-    Drop comments and string literals from a source slice.
-
-    A guard that greps for the thing it forbids finds the comment explaining
-    it and passes anyway — three separate tests in this tree have done exactly
-    that. The prose below this function's subject is unusually chatty about
-    locks, so strip it before asserting on code.
-    """
-    src = re.sub(r'""".*?"""', "", src, flags=re.S)
-    src = re.sub(r"#.*", "", src)
-    return src
-
-
 def test_firmware_updates_are_serialised_across_the_whole_controller():
     """
     Three concurrent OTAs stalled the event loop for 11.1 seconds (measured
@@ -2081,7 +2067,7 @@ def test_firmware_updates_are_serialised_across_the_whole_controller():
     has to be a global lock taken inside `_run_update`, so both entry points —
     the fleet deploy and a hand-clicked single update — go through it.
     """
-    body = _strip_prose(_sources.def_source("em_ota.run_update"))
+    body = _sources.code_only(_sources.def_source("em_ota.run_update"))
 
     assert "queue.acquire()" in body, (
         "run_update must take the global OTA lock — a per-device guard does "
@@ -2097,7 +2083,7 @@ def test_firmware_updates_are_serialised_across_the_whole_controller():
     assert acquire < work, (
         "the lock must be acquired BEFORE the update work starts"
     )
-    inner = _strip_prose(_sources.def_source("em_ota._run_update_locked"))
+    inner = _sources.code_only(_sources.def_source("em_ota._run_update_locked"))
     assert "_stream_binary_to_slot" in inner, (
         "the transfer must live inside the locked half"
     )
@@ -2135,7 +2121,7 @@ def test_a_queued_update_is_reported_as_queued_not_as_in_progress():
         "waiting from working"
     )
 
-    body = _strip_prose(_sources.def_source("em_ota.run_update"))
+    body = _sources.code_only(_sources.def_source("em_ota.run_update"))
     add     = body.index("queued.add")
     acquire = body.index("queue.acquire()")
     assert add < acquire, "a device must be marked queued BEFORE it waits"
@@ -2305,7 +2291,7 @@ def test_the_connect_handler_reconciles_all_three_payloads():
     reconcile_oww_assets directly is what left the other two with no trigger
     that reaches a device on current firmware.
     """
-    src = _strip_prose((CONTROLLER / "em_controller.py").read_text())
+    src = _sources.code_only((CONTROLLER / "em_controller.py").read_text())
     assert "em_reconcile.on_connect(" in src, (
         "the connect handler must call em_reconcile.on_connect"
     )
@@ -2322,7 +2308,7 @@ def test_the_reconcile_runs_the_three_payloads_sequentially():
     All three talk to one device over one shell plane. Gathering them contends
     for a single session for no gain — nothing is on a critical path here.
     """
-    fn = _strip_prose(_sources.def_source("em_reconcile._reconcile_payloads"))
+    fn = _sources.code_only(_sources.def_source("em_reconcile._reconcile_payloads"))
 
     for step in ("em_oww_sync.reconcile", "em_payloads.sync_start_script", "em_payloads.sync_debloat"):
         assert step in fn, f"{step} must run on connect"
@@ -2337,7 +2323,7 @@ def test_one_failing_payload_does_not_skip_the_others():
     wake word models, so each step is caught individually rather than the loop
     being wrapped in one try.
     """
-    fn = _strip_prose(_sources.def_source("em_reconcile._reconcile_payloads"))
+    fn = _sources.code_only(_sources.def_source("em_reconcile._reconcile_payloads"))
     body = fn[fn.index("for name"):]
     assert "try:" in body and "except Exception" in body, (
         "each step must be caught inside the loop, not around it"
@@ -2351,10 +2337,10 @@ def test_the_reconcile_is_debounced_and_claimed_before_the_work():
     multi-megabyte push, and a device that reconnects mid-run must not start a
     second one against the same shell plane.
     """
-    fn  = _strip_prose(_sources.def_source("em_reconcile.on_connect"))
+    fn  = _sources.code_only(_sources.def_source("em_reconcile.on_connect"))
     assert "_due(" in fn, "the reconcile must be debounced per device"
 
-    decide = _strip_prose(_sources.def_source("em_reconcile._due"))
+    decide = _sources.code_only(_sources.def_source("em_reconcile._due"))
     stamp  = decide.index("stamps[device_id] = now")
     ret    = decide.index("return True")
     assert stamp < ret, "claim the debounce before returning, not after the work"
@@ -2367,7 +2353,7 @@ def test_emos_crash_logs_are_checked_on_connect_before_the_debounce():
     only for a device that positively reported emOS, which is what saves the
     ram console.
     """
-    fn = _strip_prose(_sources.def_source("em_reconcile.on_connect"))
+    fn = _sources.code_only(_sources.def_source("em_reconcile.on_connect"))
     assert "_collect_crash_log(" in fn
     assert fn.index("_collect_crash_log(") < fn.index("_due(")
     gate = fn[:fn.index("_collect_crash_log(")]
@@ -2379,7 +2365,7 @@ def test_the_crash_log_marker_is_written_only_after_a_complete_read():
     The marker says "this boot was examined". Writing it before the read
     completed would lose a crash to a dropped shell session.
     """
-    fn = _strip_prose(_sources.def_source("em_reconcile._collect_crash_log"))
+    fn = _sources.code_only(_sources.def_source("em_reconcile._collect_crash_log"))
     read = fn.index("cat {kmsg}")
     assert fn.index("em_shell.OK_MARK not in out") > read
     assert fn.index("summarise(") > fn.index("em_shell.OK_MARK not in out")
@@ -2391,7 +2377,7 @@ def test_deleting_a_device_forgets_its_debounce():
     A re-added device is the one whose payloads are least likely to be right;
     inheriting the deleted row's stamp would skip its first reconcile.
     """
-    fn = _strip_prose(_sources.def_source("_delete_device"))
+    fn = _sources.code_only(_sources.def_source("_delete_device"))
     assert "em_reconcile.forget(device_id)" in fn
 
 
@@ -2404,7 +2390,7 @@ def test_the_payload_syncs_tell_a_missing_file_from_a_silent_device():
     date" event that is not true.
     """
     for name in ("sync_start_script", "sync_debloat"):
-        fn = _strip_prose(_sources.def_source(name))
+        fn = _sources.code_only(_sources.def_source(name))
         assert "em_shell.OK_MARK" in fn, (
             f"{name} must be able to tell a missing file from a silent device"
         )
@@ -2425,14 +2411,14 @@ def test_the_payload_syncs_tell_a_missing_file_from_a_silent_device():
 # nothing guarded.
 
 def test_the_update_endpoint_refuses_a_version_the_device_already_runs():
-    fn = _strip_prose(_sources.def_source("_post_device_update"))
+    fn = _sources.code_only(_sources.def_source("_post_device_update"))
 
-    assert 'row["firmware_ver"] == release["version"]' in fn, (
+    assert "row['firmware_ver'] == release['version']" in fn, (
         "the update endpoint must compare the target against what the device "
         "is already running"
     )
     assert "already_running" in fn, "the refusal needs a named error code"
-    assert 'body.get("force")' in fn, (
+    assert "body.get('force')" in fn, (
         "re-flashing the same version repairs a corrupt slot — force must "
         "exist, or this is a wall between an operator and their own device"
     )
@@ -2444,7 +2430,7 @@ def test_a_refused_update_does_not_consume_the_uploaded_binary():
     Popping first meant a refusal cost an 11MB re-upload to act on the very
     advice the refusal had just given.
     """
-    fn = _strip_prose(_sources.def_source("_post_device_update"))
+    fn = _sources.code_only(_sources.def_source("_post_device_update"))
 
     assert "_pending_uploads.get(upload_token)" in fn, (
         "peek the token — every refusal below it must leave it usable"
@@ -2462,7 +2448,7 @@ def test_the_fleet_endpoint_reads_the_version_out_of_an_uploaded_binary():
     no device had ever run — so `already_current` could never fire for one and
     a fleet push re-flashed every device with what it was already running.
     """
-    fn  = _strip_prose(_sources.def_source("_post_deploy_all"))
+    fn  = _sources.code_only(_sources.def_source("_post_deploy_all"))
 
     assert "em_ota.extract_binary_version(binary_override)" in fn, (
         "the fleet path must read the uploaded binary's own version"
@@ -2477,9 +2463,9 @@ def test_the_upload_endpoint_reports_what_was_uploaded():
     The version rides back so the dashboard can warn at the point of deciding
     rather than after the operator has committed.
     """
-    fn = _strip_prose(_sources.def_source("_post_upload_binary"))
+    fn = _sources.code_only(_sources.def_source("_post_upload_binary"))
     assert "em_ota.extract_binary_version(binary)" in fn
-    assert '"version": version' in fn
+    assert "'version': version" in fn
 
 
 # ─── The emOS provisioning flow ───────────────────────────────────────────────
@@ -2778,7 +2764,7 @@ def test_the_emos_build_endpoint_stores_nothing():
     care never to redistribute. Keeping a copy would mean holding a device
     image for no reason.
     """
-    fn = _strip_prose(_sources.def_source("_post_provision_emos_image"))
+    fn = _sources.code_only(_sources.def_source("_post_provision_emos_image"))
     for writer in ("open(", "write_bytes", "Path(", "tempfile"):
         assert writer not in fn, (
             f"the emOS build endpoint must not persist anything (found {writer!r})")
@@ -2796,21 +2782,21 @@ def test_the_emos_and_firmware_release_namespaces_cannot_select_each_other():
     failure if it broke would be the OTA offering an aarch64 init to a fleet
     of armv7a devices as a firmware update.
     """
-    fw = _strip_prose(_sources.def_source("fetch_firmware"))
+    fw = _sources.code_only(_sources.def_source("fetch_firmware"))
     assert "_choose_firmware_release(" in fw, \
         "the firmware poll must select through version.choose_firmware_release"
     vsrc = (CONTROLLER / "version.py").read_text()
     node = next(n for n in ast.parse(vsrc).body
                 if isinstance(n, ast.FunctionDef) and n.name == "choose_firmware_release")
-    chooser = _strip_prose(ast.get_source_segment(vsrc, node))
-    assert 'startswith("v")' in chooser and '"server"' in chooser, \
+    chooser = _sources.code_only(ast.get_source_segment(vsrc, node))
+    assert "startswith('v')" in chooser and "'server'" in chooser, \
         "the firmware poll must select on a v* tag AND a server asset"
 
-    emos = _strip_prose(_sources.def_source("fetch_emos"))
+    emos = _sources.code_only(_sources.def_source("fetch_emos"))
     assert "choose_release(" in emos, \
         "the emOS poll must select through em_emos_update.choose_release"
-    chooser = _strip_prose(_sources.def_source("choose_release"))
-    assert 'startswith("emos-v")' in chooser and '"init"' in chooser, \
+    chooser = _sources.code_only(_sources.def_source("choose_release"))
+    assert "startswith('emos-v')" in chooser and "'init'" in chooser, \
         "the emOS poll must select on an emos-v* tag AND an init asset"
 
     workflow = (CONTROLLER.parent / ".github" / "workflows" / "emos-release.yml").read_text()
@@ -2826,7 +2812,7 @@ def test_the_emos_init_is_verified_before_it_is_served():
     ways to get an init, and a check at only one is a way in that does not
     verify.
     """
-    resolver = _strip_prose(_sources.def_source("em_emos_ota._fetch_one_init"))
+    resolver = _sources.code_only(_sources.def_source("em_emos_ota._fetch_one_init"))
     assert "init_binary_problems" in resolver, (
         "the init must be checked for architecture/static before it is served")
     assert "bad_release_asset" in resolver
@@ -2836,13 +2822,13 @@ def test_the_emos_init_is_verified_before_it_is_served():
 
     # Every route to an init goes through that one function, so none of them can
     # serve an unchecked one.
-    assert "_fetch_one_init" in _strip_prose(_sources.def_source("em_emos_ota.fetch_init")), \
+    assert "_fetch_one_init" in _sources.code_only(_sources.def_source("em_emos_ota.fetch_init")), \
         "the download endpoint's resolver must go through _fetch_one_init"
-    assert "_fetch_one_init" in _strip_prose(_sources.def_source("em_emos_ota.fetch_payload")), \
+    assert "_fetch_one_init" in _sources.code_only(_sources.def_source("em_emos_ota.fetch_payload")), \
         "the image endpoint's resolver must go through _fetch_one_init"
     for name, want in (("_get_provision_emos_init", "em_emos_ota.fetch_init"),
                        ("_post_provision_emos_image", "em_emos_ota.fetch_payload")):
-        fn = _strip_prose(_sources.def_source(name))
+        fn = _sources.code_only(_sources.def_source(name))
         assert want in fn, f"{name} must resolve through {want}"
 
 
@@ -3012,9 +2998,9 @@ def test_the_wifi_tools_go_only_into_a_32_bit_image():
     """
     ota = (CONTROLLER / "em_emos_ota.py").read_text()
     # The gate is in select_payload, which fetch_payload hands the release to.
-    assert "select_payload(" in _strip_prose(
+    assert "select_payload(" in _sources.code_only(
         _sources.def_source("em_emos_ota.fetch_payload"))
-    fn = _strip_prose(_sources.def_source("em_emos_ota.select_payload"))
+    fn = _sources.code_only(_sources.def_source("em_emos_ota.select_payload"))
     assert "ARCH_ARM" in fn, (
         "the WiFi tools must be gated on the reference's kernel architecture")
     assert "no_wifi_tools_for_arch" in fn, (
@@ -3093,7 +3079,7 @@ def test_every_debloat_push_asks_which_userspace_the_device_booted():
     Asserted per call site rather than by counting, so a fourth one has to
     answer the question too.
     """
-    # Parsed, not grepped, so _strip_prose is neither needed nor wanted: an
+    # Parsed, not grepped, so code_only is neither needed nor wanted: an
     # AST contains no comments at all, and stripping them first breaks the
     # parse on any line whose prose was load-bearing to the syntax. Every
     # module, so a call site that moves out of em_api is still asked.

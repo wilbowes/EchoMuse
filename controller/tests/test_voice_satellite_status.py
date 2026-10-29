@@ -26,20 +26,6 @@ import _sources
 CONTROLLER = Path(__file__).resolve().parents[1]
 
 
-def _strip_py_comments(src: str) -> str:
-    """
-    Comments AND docstrings. Stripping only `#` lines is the version of this
-    helper that fails: the prose explaining why a field is absent names the
-    field, so the guard matches its own rationale and passes whatever the
-    code does. Written the wrong way first, caught by this file's own
-    fourth-state test, and left documented because it is now the third time
-    a source guard in this tree has done it.
-    """
-    src = re.sub(r'"""(?:.|\n)*?"""', "", src)
-    src = re.sub(r"'''(?:.|\n)*?'''", "", src)
-    return "\n".join(re.sub(r"#.*$", "", line) for line in src.splitlines())
-
-
 def _strip_js_comments(src: str) -> str:
     src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
     return "\n".join(re.sub(r"//.*$", "", line) for line in src.splitlines())
@@ -61,7 +47,7 @@ def test_get_status_reads_what_the_turn_path_reads():
     exactly this reason and cost a release.
     """
     body = _fn_source(CONTROLLER / "em_esphome.py",
-                      "def get_status(", _strip_py_comments)
+                      "def get_status(", _sources.code_only)
     assert "_servers.get(device_id)" in body, \
         "server presence must be read from the same registry get_server uses"
     assert "get_satellite()" in body, \
@@ -77,10 +63,10 @@ def test_status_has_no_fourth_state():
     never be reached.
     """
     body = _fn_source(CONTROLLER / "em_esphome.py",
-                      "def get_status(", _strip_py_comments)
+                      "def get_status(", _sources.code_only)
     assert "haSubscribed" not in body
     for field in ("port", "listening", "haConnected"):
-        assert f'"{field}"' in body, f"get_status must report {field}"
+        assert f"'{field}'" in body, f"get_status must report {field}"
 
 
 def test_api_exposes_it_beside_the_bt_proxy():
@@ -88,8 +74,8 @@ def test_api_exposes_it_beside_the_bt_proxy():
     Same payload, same shape, one poll. If this drops out, the dashboard
     silently falls back to rendering nothing rather than erroring.
     """
-    body = _strip_py_comments(_sources.def_source("merge_device"))
-    assert '"voiceSatellite"' in body
+    body = _sources.code_only(_sources.def_source("merge_device"))
+    assert "'voiceSatellite'" in body
     assert "em_esphome.get_status(device_id)" in body
 
 
