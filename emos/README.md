@@ -394,8 +394,9 @@ writes WiFi over the console *after* emOS is running, so init holds at stage
 11, starts no supplicant, and picks the file up the moment it appears. A conf
 that is present and not working turns the ring red after two minutes.
 
-**`em-wifi` sets the network from the console** — scan, pick a number, type a
-password, and it waits to see an address before claiming success. WPA3 and WEP
+**`em-wifi` sets the network from the console** — scan, pick a number (or `h`
+and type a hidden network's name), type a password, and it waits to see an
+address before claiming success. WPA3 and WEP
 networks are listed and refused with the reason rather than offered and then
 failing at association. That is the way back for a device that has moved house
 or come back from FireOS, without a full re-provision.

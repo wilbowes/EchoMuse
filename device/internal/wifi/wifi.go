@@ -368,7 +368,9 @@ func composeConf(ssid []byte, psk string) string {
 			"\tkey_mgmt=WPA-PSK",
 		)
 	}
-	network = append(network, "\tpriority=1", "}")
+	// scan_ssid=1 always: without it the supplicant only joins a network that
+	// beacons its name, so one hidden after setup is lost at the next boot.
+	network = append(network, "\tscan_ssid=1", "\tpriority=1", "}")
 
 	lines := []string{
 		"ctrl_interface=" + sockDir(),

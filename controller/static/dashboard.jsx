@@ -6371,11 +6371,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     const ssidConf = _confSsid(ssidB);
 
     // What the scan said about this network, if it was picked from the list.
-    // A typed SSID that no scan saw is treated as hidden, which needs
-    // scan_ssid=1 or wpa_supplicant never probes for it and sits in SCANNING
-    // indefinitely.
     const known  = (wifiNetworks || []).find(n => n.ssid === ssid);
-    const hidden = !known;
     const security = known ? known.security : (psk ? 'wpa2' : 'open');
 
     const blocker = securityBlocker(security);
@@ -6389,7 +6385,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
            + `${known.bands.length ? ', ' + known.bands.join(' + ') : ''}`
            + `, ${known.signal} dBm`);
     } else {
-      addLog(`"${ssid}" was not in the last scan — configuring it as a hidden network.`, 'warn');
+      addLog(`"${ssid}" was not in the last scan — treating it as hidden.`, 'warn');
     }
 
     // Android 5.1's WifiAutoJoinController blocks auto-join after enough
@@ -6450,10 +6446,10 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
             ? ['\tkey_mgmt=NONE']
             : [/^[0-9a-fA-F]{64}$/.test(psk) ? `\tpsk=${psk.toLowerCase()}` : `\tpsk="${psk}"`,
                '\tkey_mgmt=WPA-PSK']),
-      // Without this, wpa_supplicant only ever joins networks that appear in
-      // a passive scan, so a hidden SSID never associates and reports nothing
-      // more useful than SCANNING.
-      ...(hidden ? ['\tscan_ssid=1'] : []),
+      // Always, not only for an SSID the scan missed: without it the
+      // supplicant joins only a network that beacons its name, so one hidden
+      // after setup is lost at the next boot.
+      '\tscan_ssid=1',
       '\tpriority=1',
       '}',
       '',
@@ -8333,7 +8329,6 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // shell: an SSID or password with a quote in it used to break the command.
     const ssidHex = _bytesHex(ssidB);
     const pskHex = wifiPsk ? await _wpaPsk(wifiPsk, ssidB) : '';
-    const hidden = !(wifiNetworks || []).some(n => n.ssidHex === ssidHex);
 
     addLog(`Joining ${wifiSsid}…`);
     // Every call carries -p. wpa_cli defaults to /var/run/wpa_supplicant and
@@ -8357,8 +8352,8 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     await setNet('ssid', ssidHex);
     if (pskHex) await setNet('psk', pskHex);
     else await setNet('key_mgmt', 'NONE');
-    // Not in the last scan: probe for it by name, or it is never found.
-    if (hidden) await setNet('scan_ssid', '1');
+    // Probe by name always, or a network hidden after setup is never found.
+    await setNet('scan_ssid', '1');
     const en = await con.run(`wpa_cli -p /data/misc/wifi/sockets -i wlan0 enable_network ${id}`);
     if (!/OK/.test(en)) throw new Error(`wpa_cli refused to enable the network: ${en.trim()}`);
 
