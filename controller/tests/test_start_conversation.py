@@ -19,9 +19,9 @@ its answer future), so the run ends after STT_END with no INTENT_END and no
 TTS — while our RUN_END guard waits for INTENT_END. Questions get answered
 correctly and the device then sits out the 30s TTS wait and records a timeout.
 
-Pure-logic and source-shape only: the suite does not import em_esphome
-(zeroconf, aiohttp, the database), which is why the sequencing that CAN be
-tested lives in em_announce.
+Pure-logic and source-shape only: the sequencing that can be tested lives in
+em_announce, and what is left here is the satellite's wiring, which needs a
+connection and a device.
 """
 
 import asyncio

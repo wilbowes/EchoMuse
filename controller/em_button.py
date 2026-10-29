@@ -2,8 +2,8 @@
 em_button.py — what an Action-button press means, as a pure decision
 
 Split out of `em_controller.handle_button_event` for the same reason as
-`em_linkauth`: the test suite does not import `em_controller`, so this was
-policy with no coverage — and it silently lost a gesture for the whole life
+`em_linkauth`: policy as a pure decision is testable on its own, and as a
+branch of the connection handler it silently lost a gesture for the whole life
 of the hold feature (see below).
 
 The rule the device used to enforce, and no longer does:

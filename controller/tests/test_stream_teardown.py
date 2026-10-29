@@ -22,9 +22,9 @@ reached. Killing first breaks both pipes, so those awaits raise instead.
 This is an AST check rather than a text search, for the reason recorded in
 test_deploy.py's source-guard notes: a grep for the call finds the comment
 explaining it and passes anyway, which has now happened several times in this
-suite. It is also the only shape available — the suite does not import
-em_esphome (aiohttp, a database and a device), so the ordering cannot be
-exercised directly.
+suite. It is also the only shape available — the teardown it guards runs
+against a device and a live stream, so the ordering cannot be exercised
+directly.
 """
 
 import ast

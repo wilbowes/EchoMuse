@@ -26,7 +26,8 @@ the dashboard tests cover `chooseBootSlots` (which resolves the value
 correctly), and no test crossed the boundary between them. So this one asserts
 across it: what dashboard.jsx appends must be what em_routes_provision.py reads.
 
-Pure source analysis — the suite cannot import em_api, which needs aiohttp.
+Pure source analysis — the two halves are written in different languages
+(dashboard.jsx and em_routes_provision.py), so no single import can hold both.
 The Python side is read with `ast` and the JS side from the function body, so
 a comment naming a field cannot satisfy either half (see the
 source-guards-match-their-own-prose rule).

@@ -1,10 +1,10 @@
 """
 em_loglevel.py — the LOG_LEVELS string, parsed and applied.
 
-Split out of `em_controller` for the reason `em_linkauth` is: the test suite
-cannot import em_controller, so a decision living there is a decision nobody
-can test. What is here is a string parse and a `setLevel`, which needs none
-of the aiohttp/zeroconf/openwakeword stack.
+Split out of `em_controller` for the reason `em_linkauth` is: a pure decision is
+testable on its own, and a rule living in the connection handler is one nobody
+can exercise without a device. What is here is a string parse and a
+`setLevel`, which needs none of the aiohttp/zeroconf/openwakeword stack.
 
 LOG_LEVELS is a comma-separated list of `name=LEVEL` pairs:
 

@@ -12,8 +12,8 @@ raises `ValueError: negative count` the moment the flush pushes the
 remainder past a period. Measured on the 2026-08-25 soak as one turn ending
 `tts_error` with `tts_bytes=0`, ~1.7s after playback had started.
 
-The suite cannot import `em_controller`, so the numbers come from the
-importable half of the chain and the ordering is pinned against the source.
+The numbers come from the importable half of the chain, and the ordering —
+which lives in a turn that needs a device — is pinned against the source.
 """
 
 import ast

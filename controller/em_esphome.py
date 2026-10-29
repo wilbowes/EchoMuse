@@ -459,7 +459,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         # Barge-in run serialisation — the protocol has no run id, so the
         # satellite is what keeps two runs from overlapping on one connection.
         # See em_runbarrier for the whole reasoning; it is a separate module
-        # because the test suite cannot import this one.
+        # because the ordering is decidable without a connection or a device.
         self._barrier = em_runbarrier.RunBarrier()
         # Set on VOICE_ASSISTANT_INTENT_END when HA requests conversation
         # continuation (continue_conversation == "1"). Read by trigger_voice_turn

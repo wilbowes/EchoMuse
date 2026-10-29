@@ -1,9 +1,9 @@
 """When a voice turn should stop waiting, as a pure function.
 
 Split out of `em_esphome._stream_mic_audio` for the reason `em_button.decide`
-and `em_linkauth.decide` were: the test suite does not import em_esphome, so
-this was timing logic with two clocks and two limits and no coverage — and it
-cost a real voice turn (#139) before anyone looked at it.
+and `em_linkauth.decide` were: timing logic with two clocks and two limits
+belongs in a pure function with its own tests, and it cost a real voice turn
+(#139) before anyone looked at it.
 
 THE TWO CLOCKS ANSWER DIFFERENT QUESTIONS, and conflating them is the bug this
 module exists to prevent:

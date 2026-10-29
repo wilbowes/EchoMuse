@@ -76,17 +76,17 @@ jobs:
       - name: Install pyflakes
         run: pip install pyflakes
       # Why this job exists, in one sentence: `time.monotonic()` was added to
-      # em_controller.py, which does not import time, and the resulting
-      # NameError killed the wake word listener on the first detection --
-      # fleet-wide, in production, on a line no test could reach because the
-      # wake loop needs openwakeword and a real utterance to execute.
+      # em_controller.py, which did not import time at the time, and the
+      # resulting NameError killed the wake word listener on the first
+      # detection -- fleet-wide, in production, on a line no test could reach
+      # because the wake loop needs openwakeword and a real utterance.
       #
       # pyflakes finds that class of bug in milliseconds without importing
-      # anything, which is what makes it worth a job: the controller's heavy
-      # modules (em_controller, em_api, em_esphome) are deliberately NOT
-      # imported by the test suite, so every rarely-taken branch in them is
-      # untested by construction. Undefined names are the failure mode that
-      # punishes hardest -- silent until executed, then fatal.
+      # anything, which is what makes it worth a job: the suite imports
+      # em_controller, em_api and em_esphome, but a branch it does not execute
+      # still ships unexecuted, and the wake loop is one of them (it needs
+      # openwakeword and a real utterance). Undefined names are the failure
+      # mode that punishes hardest -- silent until executed, then fatal.
       #
       # Scoped to undefined names ONLY, on purpose. The codebase has pre-existing
       # unused-variable and f-string warnings that are not worth a churn commit,
@@ -354,14 +354,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # WHY THIS EXISTS: the two largest files in the controller have no
-      # test that so much as imports them. controller/CLAUDE.md records the
-      # constraint honestly — the suite cannot import em_controller or
-      # em_esphome, which is why em_linkauth, em_runbarrier, em_barge and
-      # em_turnclock were split out as pure modules with real coverage.
-      # That split is right and should continue. What it leaves behind is a
-      # blind spot: em_controller.py is ~4000 lines that nothing in CI ever
-      # parses beyond `pyflakes`, and em_api.py is not far behind.
+      # WHY THIS EXISTS: the suite imports em_controller and em_esphome, but an
+      # import is one line of a 4,000-line file — the branches that need a live
+      # device, a real audio dialect and the asyncio wiring between them are
+      # not executed by any test. em_linkauth, em_runbarrier, em_barge and
+      # em_turnclock are pulled out as pure modules for exactly that reason, and
+      # that split is right and should continue. What is left behind is a blind
+      # spot: `pyflakes` catches an undefined name in them, and the rest of the
+      # file reaches a human's eyes only when this job boots it below.
       #
       # PR #280 walked straight into it — the control-plane dispatch chain
       # re-indented inside a try/except, +498/-389, in exactly that file.

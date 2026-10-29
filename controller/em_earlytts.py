@@ -1,8 +1,8 @@
 """
 em_earlytts.py — when a voice turn may start speaking before HA has finished the reply
 
-Pure (asyncio only), so it can be tested: the suite cannot import em_esphome.
-See em_barge for the same reasoning.
+Pure (asyncio only), so the whole rule is testable without the satellite's
+connection, its audio stream or a device. See em_barge for the same reasoning.
 
 WHY A TURN CAN START SPEAKING BEFORE TTS_END
 --------------------------------------------

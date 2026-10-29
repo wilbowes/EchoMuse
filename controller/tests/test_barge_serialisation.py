@@ -18,9 +18,9 @@ turn started and the "HA ended a run it never started" branch read it as
 terminal.
 
 The state machine lives in `em_runbarrier` rather than in `em_esphome` for the
-reason `em_linkauth.decide` does: this suite cannot import `em_esphome` (it
-pulls in zeroconf, aiohttp and the database), so logic that lives there has no
-coverage. Both of this machine's failure modes are silent — swallow too little
+reason `em_linkauth.decide` does: the ordering is decidable without a
+connection, so logic that lives inside the satellite has no test that can
+reach it. Both of this machine's failure modes are silent — swallow too little
 and the interrupting turn dies, swallow too much and the satellite goes deaf —
 which is exactly the shape that should not be sitting untested inside a big
 async method.

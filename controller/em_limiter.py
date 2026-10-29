@@ -309,7 +309,7 @@ def for_stream(sample_rate: int,
     Lives here rather than in em_controller so em_player can use it too
     without importing em_controller, which would be circular. It takes plain
     values rather than a Device for the same reason every other pure module
-    in this tree does: the test suite cannot import em_controller.
+    in this tree does: the state it keeps is the limiter's, not a connection's.
     """
     if not enabled:
         return None

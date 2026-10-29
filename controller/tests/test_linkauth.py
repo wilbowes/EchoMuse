@@ -2,7 +2,7 @@
 The device-link auth decision.
 
 Untested by construction until now, because the decision lived inside
-em_controller and the suite deliberately does not import that module. What it
+em_controller's connection handler, which no test drove end to end. What it
 cost: deleting a device removed its row, the token is a column on that row, so
 `expected` went to None while the device carried on presenting the credential
 it still had on disk. That was rejected on all three planes, including the

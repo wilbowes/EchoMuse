@@ -366,8 +366,8 @@ def for_stream(sample_rate: int,
     Build one for a stream, or None when disabled.
 
     Takes plain values rather than a Device, for em_limiter.for_stream's
-    reason: em_player cannot import em_controller, and the test suite cannot
-    import either.
+    reason: em_player cannot import em_controller, and a builder that takes
+    plain values is one a test can feed.
     """
     if not enabled:
         return None

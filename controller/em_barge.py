@@ -1,8 +1,9 @@
 """
 em_barge.py — when a wake-word score during a response counts as a barge-in.
 
-Pure, so it can be tested: the suite cannot import em_controller, and this
-decision shipped untested and wrong. See em_linkauth for the same reasoning.
+Pure, so it can be tested from its own edges: as a branch of the connection
+handler's barge watcher this decision shipped untested and wrong. See
+em_linkauth for the same reasoning.
 
 WHY A SINGLE FRAME IS NOT ENOUGH
 --------------------------------
@@ -182,9 +183,9 @@ def cede(*, serves: bool, won_by: str, device_id: str,
       neighbour is running.
 
     Split out of `_barge_watcher` and `_private_barge` for the reason
-    `em_linkauth` and `em_turnclock` were: the suite cannot import
-    em_controller, so this was a decision with no coverage — and a copy at
-    each of those two call sites is two copies that can disagree.
+    `em_linkauth` and `em_turnclock` were: a decision made of scores and
+    thresholds belongs in a function with its own tests, and a copy at each of
+    those two call sites is two copies that can disagree.
     """
     if not serves:
         return CedeVerdict(True, True, f"barge-in({score:.3f})")

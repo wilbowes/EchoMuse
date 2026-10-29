@@ -29,11 +29,10 @@ abort, discard every event until the next RUN_START, which is necessarily ours �
 HA emits RUN_START only when it creates a pipeline, we created exactly one more,
 and the connection is processed in order.
 
-Split out of em_esphome for the reason em_linkauth and em_button.decide are: the
-test suite does not import em_esphome (zeroconf, aiohttp, the database), so
-logic living there has no coverage, and this is a state machine whose two
-failure modes are both silent — swallow too little and the interrupting turn
-dies; swallow too much and the satellite goes deaf.
+Split out of em_esphome for the reason em_linkauth and em_button.decide are:
+the ordering is decidable without a connection or a device, and this is a
+state machine whose two failure modes are both silent — swallow too little and
+the interrupting turn dies; swallow too much and the satellite goes deaf.
 """
 
 

@@ -8,10 +8,10 @@ as idle: the same thing a working device renders as. Measured on the
 production controller, 23 wake events in 14 hours could not start a turn
 while all three tiles read healthy throughout.
 
-These guards pin the three things that would each silently undo it. The
-suite cannot import em_esphome (it pulls in aiohttp via em_api), which is
-why this is source inspection rather than a call — the same constraint
-that put em_barge and em_runbarrier in their own modules.
+These guards pin the three things that would each silently undo it. Each one
+lives on a path that needs a live HA connection and a device, which is why
+this is source inspection rather than a call — the same reason em_barge and
+em_runbarrier are separate pure modules rather than flags inside the turn.
 
 Comments are stripped before every source assertion. Three guards in this
 tree have matched the comment explaining a rule instead of the code

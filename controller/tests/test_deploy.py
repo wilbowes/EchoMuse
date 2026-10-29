@@ -1415,8 +1415,8 @@ def test_wake_word_phrase_is_sent_and_matches_what_we_advertise():
     phrase and the advertised name must come from ONE function or they drift
     apart and HA silently matches neither.
 
-    Source-shape assertions: this suite does not import em_esphome, which
-    needs aiohttp and the protobufs.
+    Source-shape assertions: the phrase is assembled inside the satellite's
+    entity list, which needs a connection to reach.
     """
     src = (CONTROLLER / "em_esphome.py").read_text()
 
@@ -1780,8 +1780,8 @@ def test_the_speaking_push_cannot_fail_a_speaker_stream():
 
 # ── The wake listener must not be able to die quietly ─────────────────────────
 #
-# Source-shape tests, because the suite cannot import em_controller — which is
-# precisely why this had no coverage. On 2026-08-20 a device went deaf with no
+# Source-shape tests, because the supervisor lives inside handle_control,
+# which is why this had no coverage. On 2026-08-20 a device went deaf with no
 # error line and stayed that way until the add-on was restarted: the listener
 # is started with create_task and catches only CancelledError, so any other
 # exception ends it, and the connection handler holding a reference means
@@ -1913,8 +1913,8 @@ def test_deleting_a_device_drops_its_satellite():
 
 # ── The ring must say something when there is nothing to talk to ──────────────
 #
-# Source-shape, because the suite cannot import em_controller. A turn with no
-# HA behind it ends in milliseconds, so without a cue the ring lights and
+# Source-shape, because the cue is played from a turn, which needs a device.
+# A turn with no HA behind it ends in milliseconds, so without a cue the ring lights and
 # clears too fast to register and the device reads as broken at exactly the
 # moment it is working — the same failure ack_anim was added for, and the one
 # the ESPHome port-collision incident presented as ("the wake word stopped
@@ -1943,9 +1943,9 @@ def test_a_device_with_no_ha_stands_down_before_it_can_claim():
     no_ha — nothing answers, and the one that was ready is the one that went
     dark.
 
-    Source-shape because the suite cannot import em_controller, and the
-    ordering is the whole guard: a check placed after the claim would leave
-    the claim taken.
+    Source-shape because the ordering runs inside a wake turn, which needs a
+    device, and the ordering is the whole guard: a check placed after the claim
+    would leave the claim taken.
     """
     src = (CONTROLLER / "em_controller.py").read_text()
     body = src[src.index("async def wake_word_listener"):]
@@ -2007,9 +2007,9 @@ def test_a_barge_that_stands_down_for_no_ha_leaves_the_same_trace_as_a_wake():
     turn. So the watcher only CARRIES the reason across, and the loop's ceded
     branch records it, by then with nothing left to overwrite it.
 
-    Source-shape because the suite cannot import em_controller, and the
-    decision itself is already covered by `em_barge.cede` — what is not
-    covered is whether the watcher acts on it, and where.
+    Source-shape because the watcher acts inside a live turn, and the decision
+    itself is already covered by `em_barge.cede` — what is not covered is
+    whether the watcher acts on it, and where.
     """
     src = (CONTROLLER / "em_controller.py").read_text()
     for name in ("_barge_watcher", "_private_barge"):

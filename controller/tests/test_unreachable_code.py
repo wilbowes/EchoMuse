@@ -10,8 +10,8 @@ handler and took the whole device connection down with it. Measured
 2026-08-20 as a device disconnecting and reconnecting on every barge-in.
 
 Nothing caught it. It is valid Python, pyflakes does not report unreachable
-code, and the test suite cannot import em_controller at all — which is
-precisely where it was hiding. An AST walk costs nothing and covers the
+code, and no test executes `_run_voice_locked` — a turn needs a device — which
+is precisely where it was hiding. An AST walk costs nothing and covers the
 whole class rather than the one instance.
 """
 

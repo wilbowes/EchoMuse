@@ -4012,10 +4012,10 @@ async def _stream_listen(device: Device):
                         # the device's shadow crossing at turn-persist time.
                         # em_shadow.now() rather than a clock of our own: both
                         # sides of that subtraction must come from one place,
-                        # and this module does not import time (it uses the
-                        # event loop's clock) — reaching for time.monotonic()
-                        # here raised NameError on the first wake detection and
-                        # killed the listener for the rest of the process.
+                        # and that place is em_shadow's. An earlier version
+                        # reached for time.monotonic() here, in a module that
+                        # did not import time yet, and the NameError killed the
+                        # listener for the rest of the process.
                         #
                         # For a device-triggered wake this is the CROSSING
                         # instant, not now: the device reported how long ago it

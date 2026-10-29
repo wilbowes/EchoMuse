@@ -23,8 +23,8 @@ code reads fine either way: the reply must not come early, and it must always
 come.
 
 The sequencing lives in `em_announce` rather than `em_esphome` so this suite can
-reach it — the suite does not import `em_esphome` (zeroconf, aiohttp, the
-database). Async tests run through `asyncio.run()`, the idiom the rest of the
+reach it — the satellite's announce path needs a connection, a device and the
+database. Async tests run through `asyncio.run()`, the idiom the rest of the
 suite uses; pytest-asyncio is not in the test environment and this is not worth
 adding it for.
 """
