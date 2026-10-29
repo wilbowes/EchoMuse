@@ -2464,6 +2464,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 wakeCueCapable={!device.connected || !!device.wakeCueCapable}
                 volumeCueCapable={!device.connected || !!device.volumeCueCapable}
                 remoteVolumeArcCapable={!device.connected || !!device.remoteVolumeArcCapable}
+                ledBrightnessCapable={!device.connected || !!device.ledBrightnessCapable}
                 responseLevelCapable={!device.connected || !!device.responseLevelCapable}
                 stockSoundCapable={device.connected && !!device.stockSoundCapable}
                 wakeMicCapable={!device.connected || !!device.wakeMicCapable}
@@ -9597,7 +9598,7 @@ const CONFIG_SECTIONS = {
   "playback": ["eqBands", "eqLoudness", "duckDb", "responseLevel", "limiterEnabled", "limiterThreshold", "limiterRelease", "bassGuardEnabled", "bassGuardDb", "streamReply", "volumeButtonSound"],
   "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice", "wakeSound", "wakeSoundLevel", "wakeClipCapture", "wakeClipMinScore"],
   "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "wakeMic", "aecEnabled", "aecDelayMs", "aecTailMs", "aecRefSource", "nsAsr", "saveUtterances"],
-  "ring": ["ledScene", "ledListenColor", "ledThinkColor", "remoteVolumeArc", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
+  "ring": ["ledScene", "ledListenColor", "ledThinkColor", "remoteVolumeArc", "ledBrightness", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
   "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs", "consolePassword", "consoleTimeoutMin", "controllerEndpoints"],
   "bluetooth": ["bleProxyEnabled", "bleProxyConnections"],
   "sendspin": ["sendspinEnabled", "sendspinUnpaired"]
@@ -9761,6 +9762,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                             emosFleet = true, wakeCueCapable = true,
                             volumeCueCapable = true,
                             remoteVolumeArcCapable = true,
+                            ledBrightnessCapable = true,
                             responseLevelCapable = true,
                             stockSoundCapable = false,
                             wakeMicCapable = true,
@@ -10362,6 +10364,11 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             disabled={!remoteVolumeArcCapable}
             value={config.remoteVolumeArc ?? false}
             onChange={v => set('remoteVolumeArc', v)}/>
+        </div>
+        <div style={{ marginTop: 'var(--space-7)', ...inputStyle }}>
+          <Slider label="Ring brightness" sub={ledBrightnessCapable ? 'dims every ring frame at render — listening, meter, animations, volume arc (mute ring stays full)' : 'needs newer firmware on this Echo'}
+            disabled={!ledBrightnessCapable}
+            value={config.ledBrightness ?? 100} min={0} max={100} unit="%" onChange={v => set('ledBrightness', v)}/>
         </div>
         <StageAdvanced open={advRing} onToggle={() => setAdvRing(o => !o)} disabledStyle={inputStyle}>
           <div style={{ fontFamily: mono, fontSize: 'var(--fs-sm)', color: 'var(--text2)', lineHeight: 1.6, marginBottom: 'var(--space-6)' }}>

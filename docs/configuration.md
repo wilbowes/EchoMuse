@@ -602,6 +602,20 @@ and the cyan volume arc. The directional "which mic is listening" highlight
 also adapts automatically: it brightens the scene's ring colour rather than
 painting green.
 
+**Ring brightness** dims the ring to anywhere from **0 %** (off) to **100 %**
+(full). It is applied to the frame as it is painted, so it covers everything
+the ring shows — the listening ring, the thinking spinner, the volume arc, the
+playback meter, animations, and the link pulse — rather than just the scene
+you happen to have selected. It is per device, next to the scene, and Home
+Assistant shows it as a **Ring Brightness** number entity.
+
+The red mute ring is the one exception: it always paints at full brightness,
+because turning the ring down must not be able to hide the fact that the
+microphones are off. At 0 % every other frame is black and the mute ring is
+still red. The percentage is turned into light through a 2.2 gamma, so "50 %"
+looks half as bright rather than the ~73 % a plain multiply would give — the
+same curve the playback meter uses.
+
 The volume arc holds the ring for about two seconds so a turn animation
 can't wipe it the instant it appears — but **pressing the action button
 cancels it immediately**, so adjusting the volume and then talking to the

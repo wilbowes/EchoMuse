@@ -76,6 +76,7 @@ from websockets.asyncio.server import ServerConnection as WebSocketServerProtoco
 import em_db as db
 import em_events
 import em_credentials
+import em_device_config
 import em_device_view
 import em_process_stats
 import em_reconcile
@@ -88,6 +89,7 @@ import em_pki
 import em_hostip
 import em_linkauth
 import em_pairing
+import em_config_sections
 import em_config_types
 import em_dbwriter
 import em_tasks
@@ -1131,6 +1133,11 @@ class Device:
     def remote_volume_arc_capable(self) -> bool:
         """Whether remote volume changes can show the cyan level arc (#634)."""
         return "remote_volume_arc" in (self.capabilities or [])
+
+    @property
+    def led_brightness_capable(self) -> bool:
+        """Whether the ring brightness is a configurable setting (#295)."""
+        return "led_brightness" in (self.capabilities or [])
 
     @property
     def response_level_capable(self) -> bool:
@@ -5505,6 +5512,46 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                     "state":     {"wake_word_enabled": t.enabled},
                 })
             em_tasks.spawn(_follow())
+
+        def _set_led_brightness(percent: int, _d=_device_ref) -> None:
+            # HA's ring brightness number (#295). Applied to what HA reads
+            # back before returning (see _apply_led_brightness), then stored
+            # the way the dashboard slider stores it — in the device's own
+            # config, with the ring section marked as OVERRIDDEN. A value in
+            # a section the device inherits is silently ignored, so writing
+            # the key alone would leave the slider doing nothing.
+            percent = max(0, min(100, int(percent)))
+            esphome.update_led_brightness(_d.device_id, percent)
+
+            async def _follow() -> None:
+                sections = await loop.run_in_executor(
+                    None, db.get_device_config_sections, _d.device_id)
+                if "ring" not in sections:
+                    sections = em_config_sections.normalise([*sections, "ring"])
+                    await loop.run_in_executor(
+                        None, db.set_device_config_sections,
+                        _d.device_id, sections)
+                stored = await loop.run_in_executor(
+                    None, db.get_device_config, _d.device_id)
+                await loop.run_in_executor(
+                    None, db.set_device_config, _d.device_id,
+                    {**stored, "ledBrightness": percent})
+                config = await loop.run_in_executor(
+                    None, db.get_effective_device_config, _d.device_id)
+                await em_device_config.apply_live_config(
+                    _d.device_id, _d, config)
+                # The dashboard's config form is server-rendered from the
+                # DB, so it has to be told: HA changed something it did not
+                # send through the API.
+                await em_events.push({
+                    "type":      "device_update",
+                    "device_id": _d.device_id,
+                    "state":     {"config": config,
+                                  "config_sections": sections,
+                                  "use_global_config": not sections},
+                })
+            em_tasks.spawn(_follow())
+
         # Capabilities before the servers come up: they decide which HA
         # entities are advertised, and advertising is a one-shot at
         # ListEntities time.
@@ -5518,6 +5565,8 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             stop_alarm=_stop_alarm,
             start_conversation=_start_conversation,
             set_wake_word=_set_wake_word,
+            set_led_brightness=_set_led_brightness,
+            led_brightness=int(config.get("ledBrightness", 100)),
             wake_word_enabled=device.wake_word_enabled,
         )
         # #776: firmware that can honour the stored choice again (an upgrade)

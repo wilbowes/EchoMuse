@@ -169,6 +169,9 @@ func main() {
 
 	s := server.NewServer(buttonController, micIn, pcmSpeaker)
 	srvPtr.Store(s)
+	// The boot value for the ring (#295), so a device with no controller
+	// still honours LED_BRIGHTNESS; a config push replaces it on connect.
+	s.SetLEDBrightness(config.Get().LedBrightnessPercent())
 
 	// Local duck at the device's own wake crossing, confirmed or released by
 	// the controller's duck message (OnDuck below).
@@ -620,6 +623,9 @@ func main() {
 	controlClient.OnConfigApplied(func(msg config.ConfigMessage) {
 		applyHardwareConfig(msg)
 		s.SetRemoteVolumeArc(config.Get().RemoteVolumeArcEnabled())
+		// The merged config, not the partial message: a push that does not
+		// mention brightness must not reset it to a default.
+		s.SetLEDBrightness(config.Get().LedBrightnessPercent())
 		pcmSpeaker.SetResponseGainDB(config.Get().ResponseGainDB())
 		// The merged config, not the partial message, for the reason given
 		// above. Active is re-read from the ack on every push: a reconnect

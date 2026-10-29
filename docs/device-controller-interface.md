@@ -119,6 +119,7 @@ below (`capabilities()` in `control.go`):
 | `volume_cue` | always | Can generate a `volumeButtonSound` preview at the newly selected level after a physical-button change, or repeat it for another Volume Up press at maximum; only while voice and music are idle |
 | `wake_mic` | always | Reads `wakeMic` (0 = the centre microphone, 1 to 6 = perimeter MK1 to MK6) and listens for the wake word on that microphone. For a unit whose centre microphone has failed (#705). Without it the controller shows the setting disabled. |
 | `remote_volume_arc` | always | Can show the cyan level arc for changed, non-zero remote volume commands when the opt-in `remoteVolumeArc` setting is on. Physical buttons remain unconditional; mute, boot restore, and duplicate state syncs remain silent |
+| `led_brightness` | always | Dims the ring at render from `ledBrightness` (0-100 %, 100 = unchanged). Because it is applied to the frame rather than to one animation, it covers the controller's frames and the device's own — listening ring, volume arc, playback meter, animations and the link pulse. The red mute ring is exempt by design: red means the mic is muted, and no display setting may hide that. It drives Home Assistant's "Ring Brightness" number entity as well as the dashboard slider |
 | `response_level` | always | Can boost the voice plane relative to device volume with `responseLevel` (`low` / `medium` / `high` = 0 / +6 / +12dB). The boost is applied before voice/music mixing and capped so it plus device volume never exceeds unity |
 | `stock_sound` | always | Voices its own speaker while it runs the output chain with no plug in the jack: its own volume law, driver correction and compressor bands, with no key to turn them off. Keeps the bass guard on while it does, whatever `bassGuardEnabled` says; the controller hides that switch for such a device |
 | `ambient_light` | only if the sensor is actually readable (`als.Present()`) | Reports light readings |
@@ -388,6 +389,7 @@ sendspinEnabled, sendspinUnpaired, sendspinName,
 eqBands, eqLoudness, limiterEnabled, limiterThreshold, limiterRelease,
 bassGuardEnabled, bassGuardDb,
 ledScene, ledListenColor, ledThinkColor,
+ledBrightness,
 meterAttack, meterDecay, meterFloor, meterGamma, meterRef, meterCurve,
 wakeArbitrationMs, duckDb, responseLevel,
 buttonSingleTapEvent, buttonMultiTapMs,
