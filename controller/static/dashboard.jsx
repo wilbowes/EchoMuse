@@ -1571,6 +1571,17 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   // Empty = follows the fleet entirely, which is what use_global_config
   // meant before per-section scoping.
   const [sections, setSections] = useState(device.config_sections ?? []);
+  // Bluetooth speaker state, asked of the Echo itself (GET .../bt_audio):
+  // whether its firmware can, the stream status and the paired speakers.
+  const [btInfo, setBtInfo] = useState(null);
+  useEffect(() => {
+    if (!device.connected) { setBtInfo(null); return; }
+    let live = true;
+    API.get(`/api/devices/${device.device_id}/bt_audio`)
+      .then(r => { if (live) setBtInfo(r); })
+      .catch(() => { if (live) setBtInfo(null); });
+    return () => { live = false; };
+  }, [device.device_id, device.connected]);
   const [logs, setLogs] = useState([]);
   const [logsLoading, setLogsLoading] = useState(false);
   const [pushLog, setPushLog] = useState([]);
@@ -2474,6 +2485,15 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 bleConnectCapable={!device.connected || !!device.bleConnectCapable}
                 blePanel={device.connected && device.bleConnectCapable
                   ? <BleProxyKey deviceId={device.device_id} status={device.bleProxy} isAdmin={isAdmin}/>
+                  : null}
+                btAudioCapable={!device.connected || !!(btInfo && btInfo.capable)}
+                btReason={btInfo && btInfo.reason === 'firmware' ? 'needs newer firmware on this Echo' : ''}
+                btPanel={device.connected && btInfo && btInfo.capable
+                  ? <BtSpeakerPanel deviceId={device.device_id} info={btInfo} isAdmin={isAdmin}
+                      onRefresh={setBtInfo}
+                      selected={config.btSpeaker ?? ''}
+                      canSelect={isAdmin && sections.includes('btaudio')}
+                      onSelect={v => setConf('btSpeaker', v)}/>
                   : null}
                 mixCapable={!device.connected || !!device.audioMixCapable}
                 holdCapable={!device.connected || !!device.buttonHoldCapable}
@@ -9600,7 +9620,8 @@ const CONFIG_SECTIONS = {
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "remoteVolumeArc", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
   "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs", "consolePassword", "consoleTimeoutMin", "controllerEndpoints"],
   "bluetooth": ["bleProxyEnabled", "bleProxyConnections"],
-  "sendspin": ["sendspinEnabled", "sendspinUnpaired"]
+  "sendspin": ["sendspinEnabled", "sendspinUnpaired"],
+  "btaudio": ["btAudioEnabled", "btSpeaker"]
 };
 
 // Display labels for the section ids, and the reverse key -> section index
@@ -9608,6 +9629,7 @@ const CONFIG_SECTIONS = {
 const SECTION_LABELS = {
   playback: 'Playback', wakeword: 'Wake word', microphones: 'Microphones',
   ring: 'Ring', advanced: 'Advanced', bluetooth: 'Bluetooth', sendspin: 'Sendspin',
+  btaudio: 'Bluetooth speaker',
 };
 const KEY_SECTION = {};
 Object.entries(CONFIG_SECTIONS).forEach(([sid, keys]) => {
@@ -9765,7 +9787,8 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                             stockSoundCapable = false,
                             wakeMicCapable = true,
                             sendspinCapable = true, sendspinPanel = null,
-                            bleConnectCapable = true, blePanel = null }) {
+                            bleConnectCapable = true, blePanel = null,
+                            btAudioCapable = true, btReason = '', btPanel = null }) {
   // emosFleet defaults TRUE for the same reason the capability props above do,
   // and for one more: it gates the console password, which is emOS-only, and
   // disabling a setting because we do not KNOW the fleet has an emOS device
@@ -10488,6 +10511,21 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             onChange={v => set('sendspinUnpaired', v)}/>
         </div>
       </Stage>
+      {/* 08 BLUETOOTH SPEAKER */}
+      <Stage n="08" title="Bluetooth speaker"
+        chips={<ScopeChip tone="device">Device</ScopeChip>}
+        desc="Plays music from this Echo on a paired Bluetooth speaker. Replies and alerts stay on the Echo. The Echo cannot cancel the speaker's sound from its microphones, so the wake word works less well over loud music. Shares the Bluetooth radio with the proxy, which pauses while music streams. Early Access, not yet tested on many speakers."
+        scope={scopeEl('btaudio')} dim={secStyle('btaudio')}
+        after={(config.btAudioEnabled ?? false) ? btPanel : null}>
+        <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 var(--space-12)', ...inputStyle }}>
+          <Toggle label="Bluetooth speaker"
+            sub={btAudioCapable ? 'music goes to the speaker you pair below'
+              : (btReason || 'needs newer firmware on this Echo')}
+            disabled={!btAudioCapable}
+            value={config.btAudioEnabled ?? false}
+            onChange={v => set('btAudioEnabled', v)}/>
+        </div>
+      </Stage>
     </div>
   );
 }
@@ -10600,6 +10638,93 @@ function SendspinPairing({ deviceId, status, isAdmin }) {
         </div>
       )}
       {token && <div style={{ color: 'var(--muted)', fontSize: 'var(--fs-sm)' }}>In Music Assistant, pair this player with the token. Anyone with it can pair with this Echo.</div>}
+      {error && <div style={{ color: 'var(--error)' }}>{error}</div>}
+    </div>
+  );
+}
+
+
+// BtSpeakerPanel: one Echo's Bluetooth speakers. Pairing and discovery are
+// asked of the Echo and take seconds; choosing a speaker is the btSpeaker
+// setting, saved with the rest of the form.
+function BtSpeakerPanel({ deviceId, info, isAdmin, onRefresh, selected, canSelect, onSelect }) {
+  const mono = "var(--font-mono)";
+  const [found, setFound] = useState(null);
+  const [busy, setBusy] = useState('');
+  const [error, setError] = useState('');
+  const state = (info && info.state) || {};
+  const status = state.status || {};
+  const paired = state.paired || [];
+
+  const act = async (label, body) => {
+    setBusy(label); setError('');
+    try {
+      const r = await API.post(`/api/devices/${deviceId}/bt_audio`, body);
+      onRefresh({ ...info, state: { status: r.status || status, paired: r.paired || paired } });
+      return r;
+    } catch (e) {
+      setError(e.error || e.message || 'The Echo could not do that');
+      return null;
+    } finally {
+      setBusy('');
+    }
+  };
+  const discover = async () => {
+    const r = await act('discover', { action: 'discover', seconds: 10 });
+    if (r) setFound((r.results || []).filter(d => !paired.some(p => p.addr === d.addr)));
+  };
+  const pair = async d => {
+    const r = await act(`pair:${d.addr}`, { action: 'pair', addr: d.addr, name: d.name || '' });
+    if (r) {
+      setFound(f => (f || []).filter(x => x.addr !== d.addr));
+      if (canSelect) onSelect(d.addr);
+    }
+  };
+  const forget = async p => {
+    const r = await act(`forget:${p.addr}`, { action: 'forget', addr: p.addr });
+    if (r && selected && selected.toUpperCase() === p.addr.toUpperCase()) onSelect('');
+  };
+
+  const LINE = {
+    idle: 'No speaker chosen', connecting: 'Connecting', ready: 'Connected, waiting for music',
+    streaming: 'Playing', offline: 'Not connected',
+  };
+  let line = LINE[status.state] || status.state || 'Starting';
+  if (status.name || status.addr) line += ` · ${status.name || status.addr}`;
+  const isSel = a => selected && selected.toUpperCase() === a.toUpperCase();
+  const row = { display: 'flex', gap: 'var(--space-4)', alignItems: 'center', flexWrap: 'wrap', minWidth: 0 };
+
+  return (
+    <div style={{ fontFamily: mono, fontSize: 'var(--fs-md)', color: 'var(--text2)', display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
+      <div>{line}{status.codec && <span style={{ color: 'var(--muted)' }}> · {status.codec}</span>}</div>
+      {status.error && status.state !== 'streaming' && <div style={{ color: 'var(--muted)' }}>{status.error}</div>}
+      {paired.length === 0 && <div style={{ color: 'var(--muted)' }}>No paired speakers yet.</div>}
+      {paired.map(p => (
+        <div key={p.addr} style={row}>
+          <span>{p.name || p.addr}</span>
+          {isSel(p.addr)
+            ? <span style={{ color: 'var(--ok)' }}>in use</span>
+            : canSelect && <Pill small onClick={() => onSelect(p.addr)}>Use</Pill>}
+          {isAdmin && <Pill small disabled={!!busy} onClick={() => forget(p)}>{busy === `forget:${p.addr}` ? 'Forgetting…' : 'Forget'}</Pill>}
+        </div>
+      ))}
+      {isAdmin && (
+        <div style={row}>
+          <Pill small disabled={!!busy} onClick={discover}>{busy === 'discover' ? 'Looking for speakers…' : 'Find speakers'}</Pill>
+          <span style={{ color: 'var(--muted)', fontSize: 'var(--fs-sm)' }}>put the speaker in pairing mode first</span>
+        </div>
+      )}
+      {found && found.length === 0 && <div style={{ color: 'var(--muted)' }}>No speakers found in pairing mode.</div>}
+      {found && found.map(d => (
+        <div key={d.addr} style={row}>
+          <span>{d.name || d.addr}</span>
+          <span style={{ color: 'var(--muted)' }}>{d.rssi ? `${d.rssi} dBm` : ''}</span>
+          <Pill small disabled={!!busy} onClick={() => pair(d)}>{busy === `pair:${d.addr}` ? 'Pairing…' : 'Pair'}</Pill>
+        </div>
+      ))}
+      {isAdmin && !canSelect && paired.length > 0 && (
+        <div style={{ color: 'var(--muted)', fontSize: 'var(--fs-sm)' }}>Set this section to Device to choose a speaker.</div>
+      )}
       {error && <div style={{ color: 'var(--error)' }}>{error}</div>}
     </div>
   );

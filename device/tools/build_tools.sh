@@ -49,6 +49,7 @@ build_module_tool oww_probe
 build_module_tool mixer_probe "-tags server"   # needs the tinyalsa mixer backend
 build_module_tool vad_probe  # Silero VAD correctness + paced CPU
 build_module_tool ble_probe "-tags bench"  # BLE scan cost to WiFi; needs the server stopped
+build_module_tool bt_audio_probe  # Bluetooth speaker: discover, pair, stream; needs the server stopped
 
 echo ""
 echo "Deploy:"

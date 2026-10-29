@@ -1,0 +1,6 @@
+# name          rate  channels  sbcenc flags
+mono44_8x16     44100 1         -s 8 -B 16 -b 32
+joint48_8x16    48000 2         -j -s 8 -B 16 -b 51
+stereo32_4x8    32000 2         -S -s 4 -B 8 -b 40
+dual16_4x4      16000 2         -d -s 4 -B 4 -b 20
+joint44_4x12    44100 2         -j -S -s 4 -B 12 -b 35

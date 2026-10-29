@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -353,6 +354,24 @@ func main() {
 	})
 	applyBleConfig(bleScanner, bleBridge)
 
+	// Bluetooth speaker output (A2DP). BR/EDR shares the radio session with
+	// the proxy; music goes to the speaker only while a stream is open, and
+	// to the Echo's own speaker otherwise. Voice always stays here.
+	btClassic := bluetooth.NewClassic(bluetooth.KeyPath, btLocalName(deviceID))
+	bleScanner.SetClassic(btClassic)
+	btA2DP := bluetooth.NewA2DP(btClassic)
+	btA2DP.OnStatus = func(st bluetooth.A2DPStatus) {
+		controlClient.SendBtAudio(map[string]interface{}{"action": "status", "status": st, "paired": btClassic.Paired()})
+	}
+	btA2DP.OnButton = func(op string) {
+		controlClient.SendBtAudio(map[string]interface{}{"action": "button", "op": op})
+	}
+	pcmSpeaker.SetMusicSink(btA2DP)
+	controlClient.OnBtAudio(func(req client.BtAudioRequest) {
+		go handleBtAudio(req, btClassic, btA2DP, controlClient)
+	})
+	applyBtConfig(bleScanner, btClassic, btA2DP)
+
 	// The BLE scan costs this device's WiFi dearly (see Scanner.Yield), so it
 	// stops whenever the link carries something that cannot wait: the user's
 	// words going up (a button turn, or a private-listening session), a reply
@@ -600,6 +619,7 @@ func main() {
 		go func() {
 			st := collectStats()
 			st.Ble = bleScanner.Stats()
+			st.BtAudio = btAudioStats(btA2DP)
 			st.OwwShadow = shadowStats(dataClient)
 			st.AecRef = canceller.RefSource()
 			st.Sendspin = sendspinStatus()
@@ -636,6 +656,7 @@ func main() {
 		}
 		applyAecConfig(canceller, dataClient)
 		applyBleConfig(bleScanner, bleBridge)
+		applyBtConfig(bleScanner, btClassic, btA2DP)
 		applySendspinConfig(pcmSpeaker, controlClient, s, deviceID)
 		applyShadowConfig(dataClient, controlClient, pcmSpeaker, s)
 		syncListenState(dataClient, controlClient, false)
@@ -845,6 +866,7 @@ func main() {
 		for range ticker.C {
 			st := collectStats()
 			st.Ble = bleScanner.Stats()
+			st.BtAudio = btAudioStats(btA2DP)
 			st.OwwShadow = shadowStats(dataClient)
 			st.AecRef = canceller.RefSource()
 			var snaps []client.TCPSnap
@@ -890,6 +912,7 @@ func main() {
 	sig := <-sigCh
 	log.Printf("Received %v — shutting down (muting output, amp off)", sig)
 	bleScanner.SetEnabled(false) // scan off + /dev/stpbt closed so the chip idles
+	bleScanner.SetAudioEnabled(false)
 	// "restart", not "shutdown": this is an OTA or a supervisor restart far
 	// more often than a power-off, and restart asks the server to redial.
 	if c := sendspinPlayer(); c != nil {
@@ -1569,6 +1592,96 @@ func applyBleConfig(scanner *bluetooth.Scanner, bridge *bluetooth.Bridge) {
 	sendspinProxy(scanner.Enabled())
 	// Connections live inside the scan session, so they need the proxy on.
 	bridge.SetEnabled(proxy && snap.BleProxyConnections != nil && *snap.BleProxyConnections)
+}
+
+// btEnabled reports the btAudioEnabled setting.
+func btEnabled() bool {
+	snap := config.Get().Snapshot()
+	return snap.BtAudioEnabled != nil && *snap.BtAudioEnabled
+}
+
+// applyBtConfig follows btAudioEnabled and btSpeaker. The speaker's name is
+// the one kept with its pairing.
+func applyBtConfig(scanner *bluetooth.Scanner, classic *bluetooth.Classic, a2dp *bluetooth.A2DP) {
+	snap := config.Get().Snapshot()
+	on := btEnabled()
+	scanner.SetAudioEnabled(on)
+	target := ""
+	if on && snap.BtSpeaker != nil {
+		target = *snap.BtSpeaker
+	}
+	name := ""
+	for _, p := range classic.Paired() {
+		if strings.EqualFold(p.Addr, target) {
+			name = p.Name
+		}
+	}
+	a2dp.Select(target, name)
+}
+
+// btLocalName is what a speaker lists the Echo as: EchoMuse and the serial's
+// last four characters, the way Echoes are named in anything published.
+func btLocalName(serial string) string {
+	if len(serial) > 4 {
+		serial = serial[len(serial)-4:]
+	}
+	return "EchoMuse " + serial
+}
+
+func btAudioStats(a2dp *bluetooth.A2DP) interface{} {
+	if !btEnabled() {
+		return nil
+	}
+	return a2dp.Status()
+}
+
+// handleBtAudio runs one bt_audio request and answers it. Discovery and
+// pairing take seconds, so this runs off the control reader.
+func handleBtAudio(req client.BtAudioRequest, classic *bluetooth.Classic, a2dp *bluetooth.A2DP, cc *client.ControlClient) {
+	reply := map[string]interface{}{"action": req.Action, "id": req.ID}
+	fail := func(err error) {
+		reply["error"] = err.Error()
+		cc.SendBtAudio(reply)
+	}
+	if !btEnabled() && req.Action != "status" {
+		fail(errors.New("Bluetooth audio is off on this Echo"))
+		return
+	}
+	switch req.Action {
+	case "discover":
+		secs := req.Seconds
+		if secs <= 0 || secs > 30 {
+			secs = 10
+		}
+		found, err := classic.Discover(time.Duration(secs) * time.Second)
+		if err != nil {
+			fail(err)
+			return
+		}
+		reply["results"] = found
+	case "pair":
+		if _, err := classic.Pair(req.Addr, req.Name); err != nil {
+			fail(err)
+			return
+		}
+		reply["addr"] = req.Addr
+	case "forget":
+		if err := classic.Forget(req.Addr); err != nil {
+			fail(err)
+			return
+		}
+		if strings.EqualFold(a2dp.Status().Addr, req.Addr) {
+			a2dp.Select("", "")
+		}
+		reply["addr"] = req.Addr
+	case "status":
+	default:
+		fail(fmt.Errorf("unknown bt_audio action %q", req.Action))
+		return
+	}
+	reply["paired"] = classic.Paired()
+	reply["status"] = a2dp.Status()
+	cc.SendBtAudio(reply)
 }
 
 func allLEDs(r, g, b uint8) []led.Led {

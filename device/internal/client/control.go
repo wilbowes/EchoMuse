@@ -139,6 +139,7 @@ type ControlClient struct {
 	wifiChangeCallback    WifiChangeCallback
 	wifiCommitCallback    StateCallback
 	wifiScanCallback      StateCallback
+	btAudioCallback       func(BtAudioRequest)
 	listenCallback        ListenCallback
 
 	conn    *websocket.Conn
@@ -208,6 +209,7 @@ func (c *ControlClient) OnDuck(cb func(on bool))                  { c.duckCallba
 func (c *ControlClient) OnWifiChange(cb WifiChangeCallback)       { c.wifiChangeCallback = cb }
 func (c *ControlClient) OnWifiCommit(cb StateCallback)            { c.wifiCommitCallback = cb }
 func (c *ControlClient) OnWifiScan(cb StateCallback)              { c.wifiScanCallback = cb }
+func (c *ControlClient) OnBtAudio(cb func(BtAudioRequest))        { c.btAudioCallback = cb }
 
 // OnSendspinToken answers the controller's request for the Sendspin pairing
 // token, which the dashboard shows for pasting into Music Assistant. Asked
@@ -974,6 +976,14 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 				c.wifiScanCallback()
 			}
 
+		case "bt_audio":
+			// Bluetooth speaker management: discover, pair, forget, status.
+			// The answer comes back as bt_audio_result.
+			var req BtAudioRequest
+			if err := json.Unmarshal(raw, &req); err == nil && c.btAudioCallback != nil {
+				c.btAudioCallback(req)
+			}
+
 		// Private-listening sessions (docs/listening.md). A message about a
 		// session that is not the open one is ignored further down, by the
 		// gate: it is a late message about a session already gone.
@@ -1328,6 +1338,12 @@ func capabilities() []string {
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}
+	// "bt_audio": this firmware can stream music to a paired Bluetooth
+	// speaker (A2DP) on a board that states a Bluetooth node. Whether a
+	// speaker is connected is runtime state, on bt_audio_result and stats.
+	if board.CurrentLayout().HCI != "" {
+		caps = append(caps, "bt_audio")
+	}
 	return caps
 }
 
@@ -1595,6 +1611,22 @@ func (c *ControlClient) SendBleAdverts(adverts interface{}) {
 		"type":    "ble_adverts",
 		"adverts": adverts,
 	})
+}
+
+// BtAudioRequest is a bt_audio message from the controller.
+type BtAudioRequest struct {
+	Action  string `json:"action"` // discover, pair, forget, status
+	Addr    string `json:"addr,omitempty"`
+	Name    string `json:"name,omitempty"`
+	Seconds int    `json:"seconds,omitempty"`
+	ID      string `json:"id,omitempty"` // echoed, so a reply finds its request
+}
+
+// SendBtAudio reports a bt_audio result or a state change. Dropped when not
+// connected: the next status or stats report carries the state again.
+func (c *ControlClient) SendBtAudio(result map[string]interface{}) {
+	result["type"] = "bt_audio_result"
+	_ = c.writeJSON(result)
 }
 
 // SendWifiScanResult reports scan results (or a scan error) upstream.

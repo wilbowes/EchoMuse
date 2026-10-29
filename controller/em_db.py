@@ -252,6 +252,9 @@ DEFAULT_DEVICE_CONFIG = {
     # (em_ble_proxy): a connection can operate the device at the other end,
     # and the port had no authentication.
     "bleProxyConnections": False,
+    # Bluetooth speaker (em_bt_audio); btSpeaker is a paired address, "" none.
+    "btAudioEnabled": False,
+    "btSpeaker": "",
     # sendspinEnabled: the device runs a Sendspin player (#89) that Music
     # Assistant connects to directly for synchronised multi-room audio.
     # Default off: it opens a listening port and an mDNS record on the Echo.

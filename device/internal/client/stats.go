@@ -33,6 +33,9 @@ type DeviceStats struct {
 	// Ble carries the BLE scanner diagnostics snapshot (bluetooth.Stats),
 	// nil when the proxy has never been enabled this boot.
 	Ble interface{} `json:"ble,omitempty"`
+	// BtAudio is the Bluetooth speaker's state (bluetooth.A2DPStatus), only
+	// while Bluetooth audio is enabled.
+	BtAudio interface{} `json:"btAudio,omitempty"`
 	// Thermals and CPU topology. CoresOnline is what makes CPUPct legible:
 	// that figure comes from the aggregate /proc/stat line, so it is a share
 	// of ONLINE capacity — the same absolute work reads as half the percentage
