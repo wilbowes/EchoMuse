@@ -63,6 +63,12 @@ def test_one_echo_cannot_answer_for_another():
     assert _run(go()) == {"status": "timeout"}
 
 
+def test_a_reply_nobody_asked_for_is_ignored():
+    # A late answer to a request that already timed out, or a made-up id.
+    _run(D.on_snapshot(Live(), {"id": "stale", "snapshot": {}}))
+    assert not D._waiting
+
+
 def _raw():
     return {"status": "ok", "snapshot": {
         "board": {"id": "biscuit", "notes": [f"wlan at {IP}"], "problems": []},
