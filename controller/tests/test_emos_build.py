@@ -712,6 +712,39 @@ def test_busybox_brings_a_udhcpc_symlink():
     assert not target.startswith(b"/"), "the link target must be relative"
 
 
+def test_the_ramdisk_carries_the_emos_svc_tool():
+    """#560. `/emos-svc stop|start|restart|status [name]` is the same static
+    binary as /init, reached under another name: init dispatches on the invoked
+    NAME precisely so that a word typed there cannot be read as a boot mode.
+    Nothing on the device creates the link, so an image built without it has no
+    service control, and the only way to take a service down stays
+    `kill -STOP 1` — pausing the whole supervisor, which is what the bench test
+    had to do."""
+    import gzip
+    raw = gzip.decompress(eb.build_ramdisk(fake_init(), "0.1"))
+    entries = {n: (m, i, d) for n, m, i, d, _ in _newc_entries(raw)}
+
+    assert "emos-svc" in entries, "no /emos-svc — the image has no service control"
+    mode, _, target = entries["emos-svc"]
+    assert mode & eb._S_IFLNK == eb._S_IFLNK, \
+        f"emos-svc must be a symlink, not mode {mode:o}"
+    assert target == b"init", f"emos-svc must point at init, not {target!r}"
+    # Relative, so it resolves inside the ramdisk that is the root filesystem
+    # rather than against a path that only exists once the boot has got there.
+    assert not target.startswith(b"/"), "the link target must be relative"
+
+    # The other packer, which no test here can run: emos/build.sh needs a
+    # reference boot image and the NDK. Asserted against its EXECUTABLE lines,
+    # so the comment explaining the link cannot satisfy this — two packers of
+    # one archive can disagree without either being wrong on its own, which is
+    # the whole reason this file exists.
+    script = (REPO / "emos" / "build.sh").read_text()
+    body = "\n".join(l for l in script.splitlines()
+                     if l.strip() and not l.lstrip().startswith("#"))
+    assert 'ln -sf init "$WORK/root/emos-svc"' in body, \
+        "emos/build.sh does not create /emos-svc"
+
+
 def test_no_udhcpc_symlink_without_busybox():
     """A dangling /sbin/udhcpc would make init exec something that is not
     there, which reads as a DHCP failure rather than as a missing binary."""

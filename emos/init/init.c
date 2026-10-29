@@ -2596,6 +2596,37 @@ static void rdstate(const char *tag)
 static void svc_add(const char *name, char *const *argv, const char *req,
                     const char *after);
 static void supervise(void);
+static void svc_open_control(void);
+static int  svc_tool_main(int argc, char **argv);
+
+/* #560: where `emos-svc` talks to PID 1.
+ *
+ * The control FIFO is created by init at boot and HELD OPEN for the life of
+ * the process: the tool opens it O_WRONLY | O_NONBLOCK, which fails ENXIO
+ * unless somebody has the other end open, so a poll that opened and closed it
+ * once a second (the first attempt at this) answered "no supervisor
+ * listening" to nearly every call. Defect #1 of that attempt, and the reason
+ * this file has to hold the descriptor rather than just the path.
+ *
+ * The reply FIFO is made per call by the tool itself and named by its pid,
+ * which is how the answer gets back to the process that asked: init writes to
+ * it and the caller reads it and prints it. Defect #3 of that attempt was
+ * printing the status from PID 1, where the person at the console sees
+ * nothing.
+ *
+ * Both live in /run, so a reboot takes the holds and the FIFOs with it — the
+ * same non-persistence the holds themselves have, and deliberately so.
+ */
+#ifndef SVC_FIFO
+#define SVC_FIFO       "/run/emos-svc"
+#endif
+#ifndef SVC_REPLY_FIFO
+#define SVC_REPLY_FIFO "/run/emos-svc.%d"
+#endif
+
+/* How long the tool waits for init's answer before saying so. init polls the
+ * FIFO once a second, so this is a hundred times the expected round trip. */
+#define SVC_ANSWER_MS 5000
 
 /* Run as anything other than PID 1, this binary is a small tool instead of an
  * init. It is the obvious place for the reboot: it is already static, already
@@ -2609,22 +2640,69 @@ static void supervise(void);
  * take the tool path and never boot — a brick produced by an argument nobody
  * typed. PID 1 is what "am I the init" actually means.
  */
+
+/* The boot modes `/init <word>` may reboot into (#560).
+ *
+ * This used to reboot into WHATEVER word it was given, so anything that
+ * reached the tool path with a verb — `/init stop echomuse` — rebooted the
+ * device instead of stopping anything. A word that is not on this list is now
+ * refused: a typo at a console should not reboot somebody's Echo.
+ *
+ * `recovery` is the only mode this project names anywhere, and both halves of
+ * it are in the tree: emos/tools/emreboot.c sends the same string, and
+ * emos/README.md documents `/init recovery` as the way to TWRP. Anything else
+ * would be a mode guessed at rather than confirmed — add it here with the
+ * device and the path that confirms it.
+ */
+static const char *const boot_modes[] = { "recovery" };
+
+static int is_boot_mode(const char *word)
+{
+    for (size_t i = 0; i < sizeof(boot_modes) / sizeof(boot_modes[0]); i++)
+        if (!strcmp(word, boot_modes[i]))
+            return 1;
+    return 0;
+}
+
 static int tool_main(int argc, char **argv)
 {
-    const char *mode = (argc > 1) ? argv[1] : "recovery";
+    /* #560: dispatch on the INVOKED NAME, not on argv[1].
+     *
+     * `emos-svc` is a symlink to /init that only a new image creates, so a
+     * device still running an older build has no way to reach the service
+     * verbs — and an older build cannot be made to reboot by them either,
+     * because it has no emos-svc to invoke. The name is the discriminator
+     * precisely because the file underneath is the same one.
+     */
+    const char *argv0 = argv[0] ? argv[0] : "";
+    const char *base = strrchr(argv0, '/');
+    base = base ? base + 1 : argv0;
+    if (!strcmp(base, "emos-svc"))
+        return svc_tool_main(argc, argv);
 
     if (argc > 1 && (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help"))) {
         dprintf(1, "usage: %s [mode]    (default: recovery)\n"
-                   "reboots into the named boot mode; \"recovery\" is TWRP\n",
+                   "reboots into a known boot mode; \"recovery\" is TWRP\n",
                 argv[0]);
         return 0;
     }
 
-    dprintf(1, "rebooting into \"%s\"...\n", mode);
-    reboot_into(mode);
-    dprintf(2, "the kernel refused the boot mode \"%s\": %s\n",
-            mode, strerror(errno));
-    return 1;
+    {
+        const char *mode = (argc > 1) ? argv[1] : "recovery";
+        if (!is_boot_mode(mode)) {
+            dprintf(2, "\"%s\" is not a boot mode this build knows; not "
+                       "rebooting into it. Known:", mode);
+            for (size_t i = 0; i < sizeof(boot_modes) / sizeof(boot_modes[0]); i++)
+                dprintf(2, " %s", boot_modes[i]);
+            dprintf(2, "\n");
+            return 1;
+        }
+        dprintf(1, "rebooting into \"%s\"...\n", mode);
+        reboot_into(mode);
+        dprintf(2, "the kernel refused the boot mode \"%s\": %s\n",
+                mode, strerror(errno));
+        return 1;
+    }
 }
 
 int main(int argc, char **argv)
@@ -2826,6 +2904,12 @@ int main(int argc, char **argv)
     mkdir("/tmp", 01777);          /* rootfs is a ramdisk: RAM-backed, as on stock */
     mkdir("/run", 0755);
     mount("tmpfs", "/run", "tmpfs", 0, "size=4m");
+
+    /* #560: the service-control FIFO. Made here rather than on first use, and
+     * held open for the life of PID 1 — the tool's open is ENXIO unless the
+     * other end is held, so the holding has to be init's, not a poll's. In
+     * /run, so a reboot removes it along with the holds it carries. */
+    svc_open_control();
 
     mkdir("/data/emos", 0755);
 
@@ -3085,9 +3169,14 @@ struct svc {
     time_t       started;
     int          fails;  /* consecutive fast exits */
     int          gone;   /* logged as not-installed; stop trying */
+    int          held;   /* #560: `emos-svc stop`; not run until `start` */
+    int          stopping; /* #560: SIGTERM sent by us, so the exit is not a crash */
 };
 static struct svc svcs[MAX_SVC];
 static int nsvc;
+
+/* init's end of the control FIFO, held open from boot (see svc_open_control). */
+static int svc_fd = -1;
 
 static volatile sig_atomic_t want_shutdown;
 
@@ -3119,6 +3208,512 @@ static int svc_backoff(int fails)
         return 2;
     int b = 2 << (fails - 1);
     return b > 60 ? 60 : b;
+}
+
+/* ── Service control (#560) ──────────────────────────────────────────────────
+ *
+ * `/emos-svc stop|start|restart|status [name]`, the same static binary run as
+ * a tool, writing one line to a FIFO that PID 1 reads. Before this the only
+ * way to take a service down for maintenance was to pause the supervisor with
+ * `kill -STOP`, which is what the #557 bench test had to do; `stop` instead
+ * sends SIGTERM so start_server.sh still runs its graceful shutdown and puts
+ * the amp off.
+ *
+ * A HOLD DOES NOT SURVIVE A REBOOT, deliberately. A persistent disable on a
+ * device with no working adb is too easy to leave as a brick, and the
+ * maintenance window it would serve has ended by then anyway. Nothing here
+ * writes `held` anywhere; the field starts 0 and lives in /run-adjacent
+ * process memory like the rest of the table.
+ *
+ * The requests are handled by the supervisor loop rather than by a fork of the
+ * tool, because the tool is a different process and the service table is PID
+ * 1's. The tool writes and waits; the state change happens where the state is.
+ */
+
+/* What a request asks for. Parsed here, applied by svc_apply. */
+enum svc_op { SVC_OP_NONE, SVC_OP_STOP, SVC_OP_START, SVC_OP_RESTART,
+              SVC_OP_STATUS };
+
+struct svc_req {
+    enum svc_op op;
+    char name[32];   /* empty = every service */
+    int  reply;      /* pid whose reply FIFO to answer on; 0 = nobody asked */
+};
+
+/*
+ * Parse one request line, which is:
+ *
+ *     <verb> <name|-> <reply-pid>
+ *
+ * The tool writes all three fields; a person at the console may write the
+ * first two, in which case the answer goes to init's own stdout. `-` is how
+ * the tool spells "every service", because sscanf's field splitting would
+ * swallow an empty one.
+ *
+ * An unrecognised verb is refused rather than guessed at: this reaches init
+ * through a FIFO, and acting on a word we did not understand is how a typo
+ * becomes a stopped Echo. Pure, so svccheck can drive it.
+ */
+static int svc_parse(const char *line, struct svc_req *out)
+{
+    char verb[16] = {0}, name[32] = {0};
+    int fields, reply = 0;
+
+    out->op = SVC_OP_NONE;
+    out->name[0] = '\0';
+    out->reply = 0;
+    if (!line)
+        return -1;
+
+    fields = sscanf(line, "%15s %31s %d", verb, name, &reply);
+    if (fields < 1)
+        return -1;
+
+    /* The name and the reply pid are kept even when the verb is refused, so
+     * the refusal can be delivered to whoever asked for it. */
+    if (fields >= 2 && strcmp(name, "-"))
+        snprintf(out->name, sizeof(out->name), "%s", name);
+    if (fields >= 3 && reply > 0)
+        out->reply = reply;
+
+    if      (!strcmp(verb, "stop"))     out->op = SVC_OP_STOP;
+    else if (!strcmp(verb, "start"))    out->op = SVC_OP_START;
+    else if (!strcmp(verb, "restart"))  out->op = SVC_OP_RESTART;
+    else if (!strcmp(verb, "status"))   out->op = SVC_OP_STATUS;
+    else return -1;
+
+    return 0;
+}
+
+/* Is this a service this device supervises? A name that matches nothing is a
+ * mistake rather than "every service" — a typo that stops the Echo is worse
+ * than one that does nothing — and only init can answer it, because the table
+ * is init's and the tool is a different process. */
+static int svc_known(const char *name)
+{
+    if (!name[0])
+        return 1;                 /* no name given: every service */
+    for (int i = 0; i < nsvc; i++)
+        if (!strcmp(svcs[i].name, name))
+            return 1;
+    return 0;
+}
+
+/* Which services a request covers. `name` is "" for every service. */
+static int svc_selected(const struct svc *s, const struct svc_req *r)
+{
+    return r->name[0] == '\0' || !strcmp(s->name, r->name);
+}
+
+/* Ask a service to exit. SIGTERM, not SIGKILL: start_server.sh has a graceful
+ * shutdown that puts the amp off, and a kill would leave the speaker driven.
+ *
+ * `stopping` marks the exit as ours so the reaper does not read it as a crash,
+ * and the pid is left set: a service that does not take the hint is still
+ * running, and starting a second one beside it is not what "stop" means. */
+static void svc_stop_now(struct svc *s)
+{
+    if (s->pid > 0) {
+        s->stopping = 1;
+        kill(s->pid, SIGTERM);
+    }
+}
+
+/*
+ * Apply a parsed request to the table. It changes state and signals; it does
+ * not fork and it does not clear a pid it has only asked to exit, because both
+ * of those belong to the supervisor loop.
+ */
+static void svc_apply(const struct svc_req *r)
+{
+    for (int i = 0; i < nsvc; i++) {
+        struct svc *s = &svcs[i];
+        if (!svc_selected(s, r))
+            continue;
+        switch (r->op) {
+        case SVC_OP_STOP:
+            s->held = 1;
+            svc_stop_now(s);
+            break;
+        case SVC_OP_START:
+            /* Clear the fast-exit count too, or a service stopped during a
+             * crash loop starts into the backoff that loop earned. `gone` goes
+             * with it: a service marked absent at boot is being asked for
+             * again by hand, and answering "released" while the supervisor
+             * goes on skipping it is the silent success this command exists to
+             * avoid. If the prerequisite is still missing the next pass logs
+             * it and marks the service gone again. */
+            s->held = 0;
+            s->fails = 0;
+            s->started = 0;
+            s->gone = 0;
+            break;
+        case SVC_OP_RESTART:
+            /* A restart is a stop whose hold is cleared again on the way in.
+             * The first version of this shared the stop path and left `held`
+             * set, so `restart` was a slow `stop`: nothing ever brought the
+             * service back, and only a `start` or a reboot would. */
+            s->held = 0;
+            s->fails = 0;
+            s->started = 0;
+            s->gone = 0;
+            svc_stop_now(s);
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+/* What the caller is told happened, in the verb's own terms. "released", not
+ * "started": the hold is cleared here and the supervisor launches it on its
+ * next pass, up to a second later. */
+static const char *svc_result_word(enum svc_op op)
+{
+    switch (op) {
+    case SVC_OP_STOP:    return "held";
+    case SVC_OP_START:   return "released";
+    case SVC_OP_RESTART: return "restarting";
+    default:             return "done";
+    }
+}
+
+/* pid, state, fast-exit count and the backoff it earns: what "is this thing
+ * working" needs, and none of it is a path or a filename.
+ *
+ * A name filters the listing, the way it filters a stop. Every other verb
+ * honours the name it was given, and this is the command somebody runs while
+ * deciding whether a maintenance window worked: `status echomuse` printing the
+ * console's line beside it reads as though that line were echomuse's. */
+static void svc_print_status(int out, const struct svc_req *r)
+{
+    for (int i = 0; i < nsvc; i++) {
+        const struct svc *s = &svcs[i];
+        if (!svc_selected(s, r))
+            continue;
+        const char *state = s->gone ? "absent"
+                          : s->held ? "held"
+                          : s->pid > 0 ? "running"
+                          : "waiting";
+        dprintf(out, "%-10s %-8s pid=%-6ld fails=%d backoff=%lds\n",
+                s->name, state, (long)(s->pid > 0 ? s->pid : 0), s->fails,
+                (long)svc_backoff(s->fails));
+    }
+}
+
+/*
+ * Where the answer to a request goes, and the end of it.
+ *
+ * The tool names a FIFO of its own by pid and opens it BEFORE it writes the
+ * request, so by the time this runs there is a reader at the other end. A
+ * request typed by hand at the console named nobody, and that one answers on
+ * init's own stdout, which on this device is the console and the log ring; an
+ * open that fails falls back the same way, because an answer in the log beats
+ * an answer lost.
+ *
+ * The answer ends at a NUL byte rather than at EOF, and the tool reads until
+ * it sees one: the tool holds the write end of its own FIFO open so that the
+ * FIFO cannot read as closed before init has opened its end, and with that
+ * writer held open no EOF ever arrives. Removing the FIFO is init's job,
+ * because a caller that dies mid-request is not around to do it.
+ */
+static int svc_answer_open(int replypid, char *path, size_t cap)
+{
+    int fd;
+
+    path[0] = '\0';
+    if (replypid <= 0)
+        return 1;
+    snprintf(path, cap, SVC_REPLY_FIFO, replypid);
+    fd = open(path, O_WRONLY | O_NONBLOCK);
+    if (fd < 0) {
+        note("svc: no reply fifo %s (%s)\n", path, strerror(errno));
+        path[0] = '\0';
+        return 1;
+    }
+    return fd;
+}
+
+static void svc_answer_close(int fd, const char *path)
+{
+    static const char end = 0;
+
+    if (fd <= 2)
+        return;                   /* init's own stdout: leave it be */
+    /* The NUL is what tells the caller the answer is complete; a write that
+     * fails leaves it waiting out its timeout, so say so rather than let it
+     * read as init having gone quiet. */
+    if (write(fd, &end, 1) != 1)
+        note("svc: could not end the answer on %s (%s)\n", path,
+             strerror(errno));
+    close(fd);
+    unlink(path);
+}
+
+/*
+ * One request line, start to finish: judge it, act on it, answer whoever
+ * asked. `line` has had its newline removed by the poll below.
+ */
+static void svc_request(char *line)
+{
+    struct svc_req r;
+    char path[64];
+    int ok, out;
+
+    ok = svc_parse(line, &r) == 0;
+    /* Opened before the request is judged: a refusal is an answer too, and the
+     * caller is waiting for it either way. */
+    out = svc_answer_open(r.reply, path, sizeof path);
+
+    if (!ok) {
+        /* The verb alone, not the whole line: the reply pid is this protocol's
+         * own bookkeeping, and quoting it back reads as though the person who
+         * typed the command typed it too. */
+        char verb[16] = {0};
+        sscanf(line, "%15s", verb);
+        dprintf(out, "error: not a request: \"%s\"\n", verb[0] ? verb : line);
+    } else if (!svc_known(r.name))
+        dprintf(out, "error: no service named \"%s\"\n", r.name);
+    else if (r.op == SVC_OP_STATUS)
+        svc_print_status(out, &r);
+    else {
+        svc_apply(&r);
+        dprintf(out, "%s %s\n", r.name[0] ? r.name : "every service",
+                svc_result_word(r.op));
+    }
+
+    svc_answer_close(out, path);
+}
+
+/*
+ * init's end of the control FIFO: created and opened once, at boot, and never
+ * closed. That is the whole of defect #1 — the tool's open is ENXIO unless
+ * somebody holds the other end, so the holding has to outlive the poll.
+ *
+ * 0600 because the FIFO is a root-only maintenance channel; /run is tmpfs, so
+ * it is gone at reboot with everything it holds.
+ */
+static void svc_open_control(void)
+{
+    if (mkfifo(SVC_FIFO, 0600) != 0 && errno != EEXIST) {
+        note("svc: cannot create %s (%s)\n", SVC_FIFO, strerror(errno));
+        return;
+    }
+    svc_fd = open(SVC_FIFO, O_RDONLY | O_NONBLOCK);
+    if (svc_fd < 0)
+        note("svc: cannot open %s (%s); service control is unavailable\n",
+             SVC_FIFO, strerror(errno));
+}
+
+/* Take the requests off the control FIFO and answer them. Called once a second
+ * from the supervisor loop, so it must not block: init's end is O_NONBLOCK and
+ * this handles whatever has arrived.
+ *
+ * EVERY complete line in the read is acted on. Two requests written close
+ * together arrive in one read, and acting on only the first (the first version
+ * of this) drops the second caller into the five-second answer timeout for a
+ * change that never happened — the same silent failure as a stop that nothing
+ * takes. A request is one short line and a FIFO write of that size is atomic,
+ * so a line never arrives in two halves. */
+static void svc_poll(void)
+{
+    char buf[256];
+    ssize_t n;
+
+    if (svc_fd < 0)
+        return;
+    n = read(svc_fd, buf, sizeof buf - 1);
+    if (n <= 0)
+        return;
+    buf[n] = '\0';
+
+    for (char *line = buf; *line; ) {
+        char *nl = strchr(line, '\n');
+        if (nl)
+            *nl = '\0';
+        if (*line)
+            svc_request(line);
+        if (!nl)
+            break;                /* no newline: still a request */
+        line = nl + 1;
+    }
+}
+
+/*
+ * Whether the supervisor should launch this service now.
+ *
+ * Split out of supervise() so svccheck can drive it. The test is only worth
+ * anything if it asks the same question the loop does — a check that restates
+ * the condition in its own words goes on passing when the condition is removed
+ * from the loop, which is the failure it exists to catch: a held service
+ * relaunched, a stop the tool reported as applied and nothing took.
+ *
+ * The `req`/`after` checks stay in the loop, because they touch the filesystem
+ * and the two have different shapes: a missing `req` is permanent and marks
+ * the service gone, a missing `after` is temporary and is retried.
+ */
+static int svc_should_start(const struct svc *s, time_t now)
+{
+    if (s->pid > 0 || s->gone)
+        return 0;
+    /* A held service is not a failed one and is not ours to run until
+     * `start` clears the hold. Checked before the backoff so a stop cannot be
+     * read as a fast exit either. */
+    if (s->held)
+        return 0;
+    if (now - s->started < svc_backoff(s->fails))
+        return 0;
+    return 1;
+}
+
+/*
+ * What a service's exit means, called by the reaper in supervise() for every
+ * child it collects. Split out for the same reason svc_should_start was: a
+ * stop that counts as a crash hands the next `start` a backoff for a failure
+ * that never happened, and that is invisible until somebody tries to start
+ * the service again.
+ */
+static void svc_exit(struct svc *s, time_t now)
+{
+    s->pid = -1;
+    if (s->stopping) {
+        /* The exit we asked for. Not a crash, so not a backoff either. */
+        s->stopping = 0;
+        s->fails = 0;
+    } else if (now - s->started < FAST_EXIT) {
+        if (++s->fails == 3)
+            note("svc %s failing fast, backing off\n", s->name);
+    } else
+        s->fails = 0;
+}
+
+/*
+ * The tool half: write one request to init, wait for the answer, print it.
+ *
+ * It applies nothing itself — the service table belongs to PID 1 and this is a
+ * different process — and it cannot print the status itself for the same
+ * reason. That is why the answer travels back over a FIFO: the first attempt
+ * printed the status in PID 1, where the person who typed the command never
+ * saw it, and this is the fix for that.
+ */
+
+/*
+ * Wait for init's answer, which ends at a NUL byte.
+ *
+ * The deadline is the point. A maintenance command that waits forever on a
+ * device with no adb is another way to need a reflash, and "init is not
+ * answering" is by definition one of the things this command runs into.
+ */
+static int svc_read_answer(int fd, char *buf, size_t cap)
+{
+    size_t got = 0;
+    int left = SVC_ANSWER_MS;
+
+    while (left > 0 && got < cap - 1) {
+        struct pollfd p = { .fd = fd, .events = POLLIN };
+        long t0 = mono_ms();
+        if (poll(&p, 1, left) <= 0)
+            break;
+        left -= (int)(mono_ms() - t0);
+        ssize_t n = read(fd, buf + got, cap - 1 - got);
+        if (n <= 0)
+            break;
+        got += (size_t)n;
+        if (memchr(buf, 0, got))
+            break;
+    }
+    buf[got] = '\0';
+    return (int)got;
+}
+
+static int svc_tool_main(int argc, char **argv)
+{
+    char line[96], path[64], answer[1024];
+    int ctl, fd, n;
+
+    if (argc > 1 && (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help"))) {
+        dprintf(1, "usage: %s stop|start|restart|status [name]\n"
+                   "holds or releases a supervised service; with no name, "
+                   "every service.\nA hold lasts until the next reboot.\n",
+                argv[0]);
+        return 0;
+    }
+    if (argc < 2 || argc > 3) {
+        dprintf(2, "usage: %s stop|start|restart|status [name]\n", argv[0]);
+        return 2;
+    }
+    if (argc == 3 && !argv[2][0]) {
+        /* An empty name would reach init as no name at all and be answered
+         * against the wrong field, so refuse it here where the message can
+         * still make sense. */
+        dprintf(2, "%s: empty service name; name one, or omit it to cover "
+                   "every service\n", argv[0]);
+        return 2;
+    }
+
+    /* Compose the request before anything is created, so a request that will
+     * be refused leaves nothing behind. snprintf reports how long the line
+     * WOULD have been, so a verb or a name too long for the buffer would
+     * otherwise be written to the FIFO from past the end of it. */
+    n = snprintf(line, sizeof line, "%s %s %d\n", argv[1],
+                 argc == 3 ? argv[2] : "-", (int)getpid());
+    if (n < 0 || n >= (int)sizeof line) {
+        dprintf(2, "%s: request too long\n", argv[0]);
+        return 2;
+    }
+
+    /* Our own answer FIFO, named by our pid, made and opened BEFORE the
+     * request goes out: init opens it the moment it reads the request, and an
+     * answer that arrives before there is a reader is an answer lost. */
+    if (snprintf(path, sizeof path, SVC_REPLY_FIFO, (int)getpid()) >=
+        (int)sizeof path) {
+        dprintf(2, "reply fifo path too long: %s\n", SVC_REPLY_FIFO);
+        return 1;
+    }
+    unlink(path);                 /* left by a dead process with our pid */
+    if (mkfifo(path, 0600) != 0) {
+        dprintf(2, "%s: %s\n", path, strerror(errno));
+        return 1;
+    }
+    /* O_RDWR, not O_RDONLY: holding the write end ourselves keeps the FIFO
+     * from reading as closed before init has opened its end, which is also why
+     * the answer ends at a NUL rather than at EOF. Nothing here unlinks the
+     * FIFO on a failure path — init unlinks it when it answers, and one left
+     * behind by a request init never saw is in /run, and is removed by the
+     * next call that reuses the pid. */
+    fd = open(path, O_RDWR | O_NONBLOCK);
+    if (fd < 0) {
+        dprintf(2, "%s: %s\n", path, strerror(errno));
+        return 1;
+    }
+
+    /* O_NONBLOCK on the open so that a supervisor which is not there fails
+     * here instead of blocking a console forever; with init holding the other
+     * end it succeeds immediately. */
+    ctl = open(SVC_FIFO, O_WRONLY | O_NONBLOCK);
+    if (ctl < 0) {
+        dprintf(2, "no emOS supervisor listening on %s (%s); is init "
+                   "running?\n", SVC_FIFO, strerror(errno));
+        return 1;
+    }
+    if (write(ctl, line, (size_t)n) != n) {
+        dprintf(2, "%s: %s\n", SVC_FIFO, strerror(errno));
+        return 1;
+    }
+    close(ctl);
+
+    n = svc_read_answer(fd, answer, sizeof answer);
+    if (n <= 0) {
+        dprintf(2, "%s answered nothing in %ds; is init running?\n",
+                SVC_FIFO, SVC_ANSWER_MS / 1000);
+        return 1;
+    }
+
+    /* init prefixes a refusal with "error:", and that is what decides the exit
+     * status. The text goes to the caller either way. */
+    int bad = !strncmp(answer, "error:", 6);
+    dprintf(bad ? 2 : 1, "%s", answer);
+    return bad;
 }
 
 /* The console is the one service that needs a controlling terminal, and it
@@ -3563,6 +4158,7 @@ static void console_banner(void)
         "\r\n"
         "   logs: /run/net.log  /run/messages  /tmp/server.log\r\n"
         "   /init recovery   reboot into TWRP  (Amazon's reboot cannot)\r\n"
+        "   /emos-svc stop|start|restart|status [name]   hold/release a service\r\n"
         "\r\n",
         *ver ? ver : "emOS",
         host,
@@ -3691,22 +4287,18 @@ static void supervise(void)
         pid_t d;
         while ((d = waitpid(-1, &st, WNOHANG)) > 0)
             for (int i = 0; i < nsvc; i++)
-                if (svcs[i].pid == d) {
-                    svcs[i].pid = -1;
-                    if (time(NULL) - svcs[i].started < FAST_EXIT) {
-                        if (++svcs[i].fails == 3)
-                            note("svc %s failing fast, backing off\n",
-                                 svcs[i].name);
-                    } else
-                        svcs[i].fails = 0;
-                }
+                if (svcs[i].pid == d)
+                    svc_exit(&svcs[i], time(NULL));
+
+        /* #560: a service request, if one is queued. Before the respawn scan,
+         * so a stop is in force by the time we come to look for something to
+         * start. */
+        svc_poll();
 
         time_t now = time(NULL);
         for (int i = 0; i < nsvc; i++) {
             struct svc *s = &svcs[i];
-            if (s->pid > 0 || s->gone)
-                continue;
-            if (now - s->started < svc_backoff(s->fails))
+            if (!svc_should_start(s, now))
                 continue;
             /* Ordering, not just presence: a service with `after` waits for
              * it and keeps waiting, where a missing `req` means give up. */
