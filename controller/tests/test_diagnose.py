@@ -32,7 +32,7 @@ def _view(**over):
 
 
 def _bundle(*, view=None, live=None, config=None, turns=(), metrics=(),
-            counters=(), stats=None, device=None):
+            counters=(), stats=None, device=None, snapshot=None):
     row = {"device_id": DID, "approved": 1, "firmware_ver": "v2.27.0"}
     row.update(device or {})
     lv = {"connected": True, "capabilities": CAPS}
@@ -44,7 +44,8 @@ def _bundle(*, view=None, live=None, config=None, turns=(), metrics=(),
         live_state={DID: lv}, controller_log=[], device_log=[],
         controller_stats=stats or {"data_free_mb": 40000, "mem_available_mb": 900,
                                    "mem_total_mb": 2000, "cpu_pct_5m": 8},
-        views={DID: view if view is not None else _view()})
+        views={DID: view if view is not None else _view()},
+        snapshots={DID: snapshot or {"status": "unsupported"}})
     # Through JSON, as the tool reads it from a file.
     return json.loads(S.to_json(built))
 
@@ -175,3 +176,30 @@ def test_the_tool_warns_on_an_old_format(tmp_path, capsys):
     bundle_check.main([str(path)])
     assert "format 2" in capsys.readouterr().err
 
+
+def _snap(**over):
+    snap = {"board": {"id": "biscuit", "notes": [], "problems": []},
+            "mixer": [{"name": "DIF1 Switch", "want": "1", "got": "On", "match": True},
+                      {"name": "Amp Switch", "got": "On"}],
+            "kernel": ["mt-snd-card: probe ok"]}
+    snap.update(over)
+    return {"status": "ok", "snapshot": snap}
+
+
+def test_a_healthy_snapshot_has_no_findings():
+    assert D.check(_bundle(snapshot=_snap())) == []
+
+
+def test_a_route_that_did_not_take_is_found():
+    # #546: every write succeeded, and the reads show they landed elsewhere.
+    snap = _snap(mixer=[{"name": "DIF1 Switch", "want": "On", "got": "Off", "match": False},
+                        {"name": "HPR Switch", "err": "no control named"}])
+    found = {f["rule"]: f for f in D.check(_bundle(snapshot=snap))}
+    assert found["mixer_mismatch"]["evidence"]["controls"] == ["DIF1 Switch: Off (writes On)"]
+    assert found["mixer_missing"]["evidence"]["controls"] == ["HPR Switch"]
+
+
+def test_board_problems_and_deferred_probes():
+    snap = _snap(board={"id": "biscuit", "problems": ["keys: by number"]},
+                 kernel=["tas2770 3-004c: probe deferred"])
+    assert _rules(_bundle(snapshot=snap)) == ["board_parts", "driver_deferred"]

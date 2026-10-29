@@ -139,6 +139,7 @@ type ControlClient struct {
 	wifiChangeCallback    WifiChangeCallback
 	wifiCommitCallback    StateCallback
 	wifiScanCallback      StateCallback
+	diagCallback          func(id string)
 	listenCallback        ListenCallback
 
 	conn    *websocket.Conn
@@ -208,6 +209,10 @@ func (c *ControlClient) OnDuck(cb func(on bool))                  { c.duckCallba
 func (c *ControlClient) OnWifiChange(cb WifiChangeCallback)       { c.wifiChangeCallback = cb }
 func (c *ControlClient) OnWifiCommit(cb StateCallback)            { c.wifiCommitCallback = cb }
 func (c *ControlClient) OnWifiScan(cb StateCallback)              { c.wifiScanCallback = cb }
+
+// OnDiagRequest answers a support bundle's diag_request with
+// SendDiagSnapshot, echoing its id.
+func (c *ControlClient) OnDiagRequest(cb func(id string)) { c.diagCallback = cb }
 
 // OnSendspinToken answers the controller's request for the Sendspin pairing
 // token, which the dashboard shows for pasting into Music Assistant. Asked
@@ -974,6 +979,14 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 				c.wifiScanCallback()
 			}
 
+		case "diag_request":
+			var req struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(raw, &req); err == nil && c.diagCallback != nil {
+				c.diagCallback(req.ID)
+			}
+
 		// Private-listening sessions (docs/listening.md). A message about a
 		// session that is not the open one is ignored further down, by the
 		// gate: it is a late message about a session already gone.
@@ -1314,11 +1327,14 @@ func capabilities() []string {
 	// "sendspin": this firmware can be a Sendspin player (internal/sendspin),
 	// switched by sendspinEnabled. Whether it is running, and paired, is the
 	// sendspin status, for the aec_hw_ref reason.
+	//
+	// "diag_snapshot": this firmware answers diag_request with the hardware
+	// and network state a support bundle carries (internal/diag).
 	caps := []string{"speaker", "leds", "led_anim", "buttons",
 		"oww_shadow", "oww_trigger", "button_hold", "audio_mix",
 		"aec_hw_ref", "oww_local_only", "output_chain", "wake_cue", "volume_cue", "remote_volume_arc",
 		"response_level", "wake_mic", "pairing",
-		"wake_word_off", "sendspin", "ble_connect"}
+		"wake_word_off", "sendspin", "diag_snapshot", "ble_connect"}
 	if MicUnavailable() == "" {
 		caps = append(caps, "mic")
 	}
@@ -1604,6 +1620,15 @@ func (c *ControlClient) SendWifiScanResult(networks interface{}, errMsg string) 
 		"type":     "wifi_scan_result",
 		"networks": networks,
 		"error":    errMsg,
+	})
+}
+
+// SendDiagSnapshot answers a diag_request. snapshot is marshalled as-is.
+func (c *ControlClient) SendDiagSnapshot(id string, snapshot any) {
+	_ = c.writeJSON(map[string]any{
+		"type":     "diag_snapshot",
+		"id":       id,
+		"snapshot": snapshot,
 	})
 }
 

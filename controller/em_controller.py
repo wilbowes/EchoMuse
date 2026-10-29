@@ -77,6 +77,7 @@ import em_db as db
 import em_events
 import em_credentials
 import em_device_view
+import em_diag_snapshot
 import em_process_stats
 import em_reconcile
 from version import VERSION as CONTROLLER_VERSION
@@ -5075,6 +5076,7 @@ CONTROL_HANDLERS = {
     "log":              _on_log,
     "pair_request":     _on_pair_request,
     "pong":             _on_pong,
+    "diag_snapshot":    em_diag_snapshot.on_snapshot,
 }
 
 

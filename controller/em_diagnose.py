@@ -212,9 +212,40 @@ def _turns(d: dict, ctx: dict) -> list[dict]:
     return out
 
 
+def _snapshot(d: dict, ctx: dict) -> list[dict]:
+    """The Echo's own hardware snapshot (em_diag_snapshot)."""
+    snap = d.get("snapshot") or {}
+    if snap.get("status") != "ok":
+        return []
+    out = []
+    # #546: a valid write to the wrong control fails nothing and is silent.
+    # The Echo decides the match: a switch written "1" reads back "On".
+    wrong = [c for c in snap.get("mixer") or () if c.get("match") is False]
+    if wrong:
+        out.append(_finding(d["name"], "mixer_mismatch", FACT,
+                            f"{len(wrong)} mixer control(s) read back different "
+                            "from what the board writes",
+                            controls=[f"{c['name']}: {c['got']} (writes {c['want']})"
+                                      for c in wrong]))
+    missing = [c["name"] for c in snap.get("mixer") or () if c.get("err")]
+    if missing:
+        out.append(_finding(d["name"], "mixer_missing", FACT,
+                            "mixer controls the board writes do not exist on "
+                            "this kernel", controls=missing))
+    problems = (snap.get("board") or {}).get("problems") or []
+    if problems:
+        out.append(_finding(d["name"], "board_parts", FACT,
+                            "parts were not found by name", problems=problems))
+    deferred = [ln for ln in snap.get("kernel") or () if "defer" in ln.lower()]
+    if deferred:
+        out.append(_finding(d["name"], "driver_deferred", SUGGESTS,
+                            "an audio driver deferred its probe", lines=deferred[-5:]))
+    return out
+
+
 DEVICE_RULES: tuple[Callable[[dict, dict], list[dict]], ...] = (
     _offline, _ha_not_connected, _listening, _link, _settings_ignored,
-    _updates, _hardware, _turns,
+    _updates, _hardware, _turns, _snapshot,
 )
 
 

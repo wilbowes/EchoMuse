@@ -236,6 +236,11 @@ func wpaCli(args ...string) (string, error) {
 	return string(out), err
 }
 
+// Status is `wpa_cli status` as printed, for the support bundle's snapshot
+// (internal/diag). It carries the SSID and addresses; the controller keeps
+// only its allowlisted keys.
+func Status() (string, error) { return wpaCli("status") }
+
 // CurrentSSID returns the associated SSID for display, or "" when not
 // associated.
 func CurrentSSID() string {

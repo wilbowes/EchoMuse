@@ -32,6 +32,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/client"
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/cue"
+	"github.com/wilbowes/EchoMuse/internal/diag"
 	"github.com/wilbowes/EchoMuse/internal/listen"
 	"github.com/wilbowes/EchoMuse/internal/platform"
 	"github.com/wilbowes/EchoMuse/internal/server"
@@ -726,6 +727,24 @@ func main() {
 				return
 			}
 			controlClient.SendWifiScanResult(nets, "")
+		}()
+	})
+
+	// Support bundle snapshot (internal/diag). One at a time: a second request
+	// while one runs is dropped, and the controller times it out.
+	var diagBusy atomic.Bool
+	controlClient.OnDiagRequest(func(id string) {
+		if !diagBusy.CompareAndSwap(false, true) {
+			return
+		}
+		go func() {
+			defer diagBusy.Store(false)
+			snap := diag.Collect(diag.Sources{
+				Mixer:   mixer.Get,
+				Kernel:  diag.KernelLog,
+				WpaStat: wifi.Status,
+			}, board.CurrentLayout())
+			controlClient.SendDiagSnapshot(id, snap)
 		}()
 	})
 
