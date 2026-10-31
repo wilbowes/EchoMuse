@@ -949,6 +949,24 @@ def test_firmware_transfer_is_verified_by_md5_not_by_an_exit_status():
     )
 
 
+def test_the_firmware_upload_leaves_the_event_loop():
+    """One upload stalled the loop for the base64 encode and again for the send.
+
+    The encode and the md5 are CPU on the whole binary, so they run in the
+    executor. The heredoc send yields, because websockets' send does not
+    while the buffer has room. Serialising uploads does not cover this: the
+    stall was a single device.
+    """
+    fn = _sources.def_source("stream_file")
+    assert "run_in_executor(None, _b64_lines, data)" in fn
+    assert "_send_b64_lines" in fn
+    md5 = fn.index("hashlib.md5(data).hexdigest()")
+    window = fn[max(0, md5 - 180):md5]
+    assert "run_in_executor" in window, (
+        "the md5 of a firmware binary has to run off the event loop"
+    )
+
+
 def test_a_corrupt_binary_never_reaches_the_symlink_flip():
     """
     The real win of verifying is not the error message, it is the ordering:
