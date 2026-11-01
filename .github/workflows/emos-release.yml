@@ -294,6 +294,8 @@ jobs:
           /tmp/serialcheck
           cc -O2 -o /tmp/trialcheck emos/init/trialcheck.c
           /tmp/trialcheck
+          cc -O2 -o /tmp/dnscheck emos/init/dnscheck.c
+          /tmp/dnscheck
           cc -O2 -o /tmp/devcheck emos/init/devcheck.c
           /tmp/devcheck
           sh emos/device/em-wifi-check.sh

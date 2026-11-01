@@ -747,6 +747,12 @@ jobs:
           /tmp/cmdlinecheck
           cc -O2 -o /tmp/serialcheck emos/init/serialcheck.c
           /tmp/serialcheck
+      # DNS comes from the DHCP lease (#1066), by RFC 2131/2132/3396. A wrong
+      # parse keeps the address and the controller and loses only names.
+      - name: DNS is taken from the lease, by the spec
+        run: |
+          cc -O2 -o /tmp/dnscheck emos/init/dnscheck.c
+          /tmp/dnscheck
       # Every node in /dev comes from the kernel's uevents. A node with the
       # wrong numbers opens something else: on the Echo Dot 3 the old table's
       # ttyGS0 was the jack detector, and the USB console sat silent.

@@ -2902,10 +2902,10 @@ def test_the_emos_release_workflow_asserts_what_it_publishes():
     assert "32-bit LSB executable, ARM" in wf, \
         "the release must assert init32 is a 32-bit ARM binary"
     assert "statically linked" in wf, "the release must assert the inits are static"
-    # All four off-target checks run against the source being published. Each
-    # one drives a parser or an invariant whose failure is silent on hardware.
+    # The off-target checks run against the source being published. Each one
+    # drives a parser or an invariant whose failure is silent on hardware.
     for check in ("ringsim --check", "pwcheck", "tmoutcheck", "wpacheck",
-                  "cmdlinecheck"):
+                  "cmdlinecheck", "dnscheck"):
         assert check in wf, f"the release must run {check}"
     # The bundle is what carries everything but the compat init, so a release
     # that skipped building it would publish an empty-handed payload.
