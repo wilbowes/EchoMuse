@@ -3475,12 +3475,15 @@ const _unlockVerdict = ({ release = '', lk = '', twrp = '' }) => {
 
 // Which Echo this is, from the identity /system reports (in TWRP, read off
 // /system by readFireosBuild, since TWRP answers getprop with its own). The
-// boards the firmware knows (device/pkg/board); '' is neither. Biscuit keeps
-// the match this wizard has always used, so no Dot that passed before fails.
+// boards the firmware knows (device/pkg/board); '' is neither, and the wizard
+// refuses it. A model naming Amazon still passes as biscuit, but only when no
+// codename was read: every Echo's brand is Amazon, and a Dot 3 (AEODN /
+// donut_puffin) must never reach biscuit's boot patch.
 const _echoBoard = (model = '', name = '') => {
   const m = model.trim(), n = name.trim().toLowerCase();
   if (m.toUpperCase() === 'AEORD' || n === 'radar_puffin') return 'radar';
-  if (m.toLowerCase().includes('amazon') || n.includes('biscuit')) return 'biscuit';
+  if (n.includes('biscuit')) return 'biscuit';
+  if (!n && m.toLowerCase().includes('amazon')) return 'biscuit';
   return '';
 };
 
@@ -4849,29 +4852,26 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         `Expected ${isEmos ? 'FireOS 5 or 6 (Android 5.x or 7.x)' : 'FireOS 5 (Android 5.x)'}`
         + `, got Android ${effRelease}. Wrong device?`);
     }
-    // The emOS flow REFUSES a board it does not recognise, where the FireOS
-    // flow warns. The difference is what each one goes on to do: the FireOS
-    // path patches and boots the device's own Android, so a near-miss board
-    // has a fair chance of working, while emOS replaces the userspace and
-    // mounts /system at runtime for bionic and tinyalsa. On an unrecognised
-    // board that is not a lower chance of working, it is an unknown one, and
-    // the failure lands after the boot partition has been written.
+    // Both flows REFUSE a board they do not recognise. emOS replaces the
+    // userspace and mounts /system at runtime for bionic and tinyalsa; the
+    // FireOS flow patches the boot image with biscuit's assumptions. On an
+    // unrecognised board either one fails after the boot partition has been
+    // written. The FireOS flow used to warn and carry on, and its release
+    // check is skipped when TWRP cannot read /system, so a Dot 3 in recovery
+    // reached the patch.
     if (board === 'radar') {
       addLog('Echo 2nd gen (radar): expecting FireOS 6 in both slots. The Escrow Boot Image '
            + 'step checks that before anything is written, and is the way back — keep that file.', 'warn');
     }
     if (!board) {
-      if (isEmos) {
-        expectDisconnect.current = true;
-        try { await c.close(); } catch {}
-        setAdb(null);
-        throw new Error(
-          `This does not look like an Echo Dot 2nd gen or an Echo 2nd gen (model `
-          + `"${model || 'unknown'}", codename "${name || 'unknown'}"). emOS reuses the `
-          + `board's own kernel and /system, so it is built only for those two. `
-          + `Use ?flow=fireos if you meant to provision a Dot under FireOS.`);
-      }
-      addLog('Warning: device may not be an Echo Dot 2nd gen — proceeding anyway.', 'warn');
+      expectDisconnect.current = true;
+      try { await c.close(); } catch {}
+      setAdb(null);
+      throw new Error(
+        `This does not look like an Echo Dot 2nd gen or an Echo 2nd gen (model `
+        + `"${model || 'unknown'}", codename "${name || 'unknown'}"). Nothing has been `
+        + `written. The wizard sets up only those two, because it reuses the board's `
+        + `own kernel and boot image.`);
     }
     // The untested-build case stays a WARNING in both flows, deliberately, and
     // it is the one place the two agree to be lenient: emOS mounts this
