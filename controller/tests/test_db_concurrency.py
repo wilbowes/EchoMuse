@@ -88,9 +88,11 @@ def test_reads_racing_writes_do_not_raise_sqlite_misuse(fresh_db):
     with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
         writer_futures = [pool.submit(writer, i) for i in range(len(devices))]
         reader_futures = [pool.submit(reader, i) for i in range(len(devices))]
-        for f in writer_futures:
-            f.result(timeout=120)
-        stop.set()
+        try:
+            for f in writer_futures:
+                f.result(timeout=120)
+        finally:
+            stop.set()
         for f in reader_futures:
             f.result(timeout=120)
 
