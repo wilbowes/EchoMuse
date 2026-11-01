@@ -36,13 +36,23 @@ check("radar with stray whitespace", _echoBoard(" AEORD\n", "radar_puffin\r"), "
 // What the old check accepted stays biscuit.
 check("biscuit, from /system", _echoBoard("AEOBC", "csm_biscuit"), "biscuit");
 check("TWRP's own biscuit strings", _echoBoard("Echo Dot 2nd Gen", "omni_biscuit"), "biscuit");
-check("a model naming Amazon", _echoBoard("Amazon Echo Dot", ""), "biscuit");
+check("a model naming Amazon, no codename read", _echoBoard("Amazon Echo Dot", ""), "biscuit");
 
 // Nothing else.
 check("Dot 3 (donut)", _echoBoard("", "donut_puffin"), "");
+// Read off 41C8 (stock FireOS 6) on 2026-11-01; ro.product.brand is Amazon.
+check("Dot 3, from /system", _echoBoard("AEODN", "donut_puffin"), "");
+check("Dot 3 with a model naming Amazon", _echoBoard("Amazon Echo Dot", "donut_puffin"), "");
+check("Dot 3 under a TWRP build", _echoBoard("Echo Dot 3rd Gen", "omni_donut"), "");
 check("Spot (rook)", _echoBoard("AEORK", "rook_puffin"), "");
 check("an unread identity", _echoBoard("", ""), "");
 check("a codename merely containing radar", _echoBoard("", "radar_puffin_x"), "");
+
+// The detect step refuses '' in BOTH flows. The FireOS flow used to warn
+// and carry on, and a Dot 3 in TWRP (release unread) reached biscuit's patch.
+const refusal = src.slice(src.indexOf("    if (!board) {"), src.indexOf("\n    }\n", src.indexOf("    if (!board) {")));
+check("an unknown board is refused", /throw new Error\(/.test(refusal), true);
+check("in every flow", /isEmos|addLog\(/.test(refusal), false);
 
 console.log(fails ? `\n${fails} failure(s)` : "echo_board: all ok");
 if (fails) process.exit(1);
