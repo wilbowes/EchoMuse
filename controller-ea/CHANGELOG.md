@@ -1,5 +1,40 @@
 # Changelog
 
+## 2.27.0-ea.3 (Early Access)
+
+The Echo gen 2 sounds like stock, Echoes find their way back after a network outage, and emOS gets its DNS from your router. Pair with firmware v2.19.0-ea.3 and emOS emos-v0.11-ea.2, which this controller offers.
+
+### New
+
+- **The Echo gen 2 (radar) has its own voicing.** With firmware v2.19.0-ea.3 its speaker is corrected for its driver and, like stock, gets more bass and presence as the volume goes down. It was tuned against a stock radar at 30, 60 and 90% (#1077).
+
+### Improved
+
+- The controller stops cleanly in about two seconds on `docker stop` or an add-on restart, and closes its database first; before, it was killed after ten (#1073).
+- Support bundles include what the dashboard showed and point out common problems they find.
+- The setup wizard refuses an Echo it does not recognise in the FireOS flow too, so an unsupported model is never patched as a Dot. The Echo Dot 3rd gen is not supported yet.
+- The wizard names the amonet v1 layout under an amonet 2 unlock, and links to the FAQ for it (#1056).
+- `EM_OWW_RUNTIME_DIR` can move the wake word runtime off `/app` (#1042).
+- The "never mind" ring takes your LED scene's colour.
+
+### Fixed
+
+- **A WiFi change to a hidden network never joined it,** and an Echo set up before its network was hidden could not rejoin after a restart. Needs firmware v2.19.0-ea.3 and emOS emos-v0.11-ea.2 (#1068).
+- **A wake word install cut off at connect was not retried,** and one started from the dashboard needed a restart (#1029).
+
+### Known issues
+
+- A command spoken straight on from the wake word can lose its first word (#987, #1070).
+- Both 3.5 mm jack channels can be silent on emOS (#999).
+- The emOS update refuses an amonet 1 Echo that boots from slot B (#973).
+- An Echo that restarts and rejoins a playing Sendspin group can fall out of sync until the next track.
+- A fleet setting saved while an Echo has its own value for it changes nothing on that Echo, and the fleet page does not say so.
+- A turn is occasionally logged as empty although its recording holds clear speech (#815).
+
+### Thanks
+
+@wazootyman (#1077), @Majorhub (#1073), @scragnog (#1042) and @SP3NGL3R (#1056).
+
 ## 2.27.0-ea.2 (Early Access)
 
 The Dot's new sound, the Echo gen 2 (radar), and release downloads work again. Pair with firmware v2.19.0-ea.2, which this controller offers.
