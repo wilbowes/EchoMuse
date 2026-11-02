@@ -394,8 +394,13 @@ with no known mechanism; do not call it the cause.
 - **Never above codec unity**: `DEVICE_VOLUME_MAX`/`volumeMax` = 127 (pinned),
   conversion in **one** place (`em_volume.py`). `Ext_Amp_Gain` (ctl 13) is inert;
   `HP Driver Gain Volume` (ctl 62) is live but a taste call.
-- Buttons step 4dB over `volumeButtonFloor` (47)…127; explicit `Set()` is not
-  floored (HA 0.0 = silent); a press from below lands on the floor.
+- Buttons step 1dB (2 levels) over `volumeButtonFloor` (57)…127: 36 levels,
+  one per ring state (12 LEDs × 3 brightnesses, `arcLEDs`); a press snaps to
+  the grid. HA and Sendspin percentages map onto the same grid (1% = floor,
+  `PercentToLevel` = `em_volume.ha_volume_to_device`, shared vectors in
+  `server/testdata/volume_law.json`); Sendspin echoes its own command back
+  (`PercentEcho`). Explicit `Set()` is not floored (HA 0.0 = silent); a press
+  from below lands on the floor.
 - `volumeButtonSound`: only on a button-made change after 100ms of quiet, never
   for HA sets; `VolumeCue` gets `speaker.VolumeGain(newLevel)` baked in once,
   bypasses EQ/chain; Up at ceiling replays, Down at floor is silent; presses
