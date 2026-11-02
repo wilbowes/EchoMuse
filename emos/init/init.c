@@ -1759,46 +1759,247 @@ static int run_wait(char *const argv[])
     return st;
 }
 
-/* Write /etc/resolv.conf pointing at the default gateway.
+/* /etc/resolv.conf from the DHCP lease (#1066).
  *
  * The device has NO working DNS otherwise: FireOS keeps resolvers in Android
  * properties rather than a file, there is no /system/etc/resolv.conf at all,
  * and dhcpcd's "could not set property" lines are it failing to publish them
- * to a property service we do not run. Nothing noticed for a long time because
- * EchoMuse finds its controller over mDNS and connects by IP.
+ * to a property service we do not run.
  *
- * The gateway is an ASSUMPTION, not a lease value: parsing dhcpcd's binary
- * lease would be the correct source, and on the overwhelming majority of home
- * networks the router that served DHCP is also the resolver. Stated here so
- * that whoever hits the exception knows exactly which line lied to them.
+ * The servers come from the lease, DHCP option 6 (RFC 2132 3.8), from
+ * whichever client this layout runs: Amazon's dhcpcd keeps the raw DHCPACK in
+ * DHCPCD_LEASE, and the udhcpc hook writes $dns to UDHCPC_DNS. The gateway is
+ * used only when the lease names no server, as before #1066, where it was
+ * always used and a network whose router serves no DNS resolved nothing.
+ * init is the one writer; update_resolv() runs every turn of net_main's loop,
+ * so a renewal or a WiFi change reaches the file within one turn.
  */
+#ifndef RESOLV_CONF
+#define RESOLV_CONF  "/etc/resolv.conf"
+#endif
+#ifndef DHCPCD_LEASE
+#define DHCPCD_LEASE "/data/misc/dhcp/dhcpcd-wlan0.lease"
+#endif
+#ifndef UDHCPC_DNS
+#define UDHCPC_DNS   "/run/udhcpc-dns"
+#endif
+#ifndef DHCPCD_LEASE_DIR
+#define DHCPCD_LEASE_DIR "/data/misc/dhcp"
+#endif
+#define AID_DHCP 1014
+
+/* The directory dhcpcd keeps DHCPCD_LEASE in, as Android's init.rc makes it
+ * (`mkdir /data/misc/dhcp 0770 dhcp dhcp`). Nothing else makes it under emOS,
+ * and the wizard wipes /data, so on a fresh install dhcpcd (which drops to the
+ * dhcp user) had nowhere to write a lease and the DNS fell back to the gateway
+ * silently -- seen on C95. Writes only what differs: a chown to the same owner
+ * still dirties the inode, and this runs every boot (eMMC wear). */
+static int lease_dir_ready(const char *dir, uid_t uid, gid_t gid)
+{
+    struct stat sb;
+    if (stat(dir, &sb) != 0) {
+        if (mkdir(dir, 0770) != 0 || stat(dir, &sb) != 0)
+            return -1;
+    }
+    if (!S_ISDIR(sb.st_mode))
+        return -1;
+    if ((sb.st_uid != uid || sb.st_gid != gid) && chown(dir, uid, gid) != 0)
+        return -1;
+    if ((sb.st_mode & 07777) != 0770 && chmod(dir, 0770) != 0)
+        return -1;
+    return 0;
+}
+/* MAXNS in bionic, musl and glibc: a fourth nameserver line is ignored. */
+#define RESOLV_MAXNS 3
+
 static char gwip[32];
 
-static void write_resolv_conf(void)
+/* Append an address to ns[] unless it is unusable or already there. */
+static int add_ns(uint32_t *ns, int n, int max, const unsigned char *a)
+{
+    uint32_t v = (uint32_t)a[0] << 24 | a[1] << 16 | a[2] << 8 | a[3];
+    if (v == 0 || v == 0xffffffffu || n >= max)
+        return n;
+    for (int i = 0; i < n; i++)
+        if (ns[i] == v)
+            return n;
+    ns[n] = v;
+    return n + 1;
+}
+
+/* Collect option `code` from one area of a DHCP message, concatenating
+ * repeated instances (RFC 3396). Returns the new length of buf, or -1 for an
+ * option that runs past the end of the area. *overload picks up option 52. */
+static int dhcp_area(const unsigned char *a, size_t len, int code,
+                     unsigned char *buf, int have, int cap, int *overload)
+{
+    size_t i = 0;
+    while (i < len) {
+        int t = a[i];
+        if (t == 0) { i++; continue; }          /* pad */
+        if (t == 255) break;                    /* end */
+        if (i + 1 >= len || i + 2 + a[i + 1] > len)
+            return -1;
+        int l = a[i + 1];
+        if (t == code) {
+            if (have + l > cap)
+                return -1;
+            memcpy(buf + have, a + i + 2, l);
+            have += l;
+        } else if (t == 52 && overload && l == 1) {
+            *overload = a[i + 2];
+        }
+        i += 2 + l;
+    }
+    return have;
+}
+
+/* The DNS servers in a raw DHCP reply (RFC 2131 message, RFC 2132 option 6),
+ * at most max, in the order given. Options are read from the options field,
+ * then file and sname when option 52 overloads them (RFC 3396 7's order).
+ * Anything malformed reads as no servers, so the caller falls back. */
+static int lease_dns(const unsigned char *b, size_t n, uint32_t *ns, int max)
+{
+    static const unsigned char magic[4] = { 99, 130, 83, 99 };
+    if (n < 240 || b[0] != 2 || memcmp(b + 236, magic, 4) != 0)
+        return 0;
+    unsigned char buf[255 * 3];
+    int overload = 0;
+    int have = dhcp_area(b + 240, n - 240, 6, buf, 0, sizeof buf, &overload);
+    if (have >= 0 && (overload & 1))
+        have = dhcp_area(b + 108, 128, 6, buf, have, sizeof buf, NULL);
+    if (have >= 0 && (overload & 2))
+        have = dhcp_area(b + 44, 64, 6, buf, have, sizeof buf, NULL);
+    if (have <= 0 || have % 4)
+        return 0;
+    int c = 0;
+    for (int i = 0; i < have; i += 4)
+        c = add_ns(ns, c, max, buf + i);
+    return c;
+}
+
+/* The servers in udhcpc's $dns: dotted quads separated by spaces. A token
+ * that is not exactly a.b.c.d is skipped. */
+static int text_dns(const char *s, uint32_t *ns, int max)
+{
+    int c = 0;
+    while (*s) {
+        while (*s == ' ' || *s == '\t' || *s == '\n')
+            s++;
+        if (!*s)
+            break;
+        unsigned char a[4];
+        int ok = 1, k = 0;
+        for (; k < 4 && ok; k++) {
+            int v = 0, d = 0;
+            while (*s >= '0' && *s <= '9' && d < 4) { v = v * 10 + (*s++ - '0'); d++; }
+            if (d == 0 || d > 3 || v > 255) ok = 0;
+            a[k] = (unsigned char)v;
+            if (k < 3) { if (*s == '.') s++; else ok = 0; }
+        }
+        if (ok && (*s == 0 || *s == ' ' || *s == '\t' || *s == '\n'))
+            c = add_ns(ns, c, max, a);
+        while (*s && *s != ' ' && *s != '\t' && *s != '\n')
+            s++;
+    }
+    return c;
+}
+
+/* resolv.conf's text: the lease's servers, else the gateway, else nothing. */
+static int resolv_text(const uint32_t *ns, int n, const char *gw, char *out, size_t sz)
+{
+    size_t o = 0;
+    out[0] = 0;
+    for (int i = 0; i < n && o < sz; i++)
+        o += snprintf(out + o, sz - o, "nameserver %u.%u.%u.%u\n",
+                      ns[i] >> 24, (ns[i] >> 16) & 0xff, (ns[i] >> 8) & 0xff, ns[i] & 0xff);
+    if (n == 0 && gw[0])
+        o += snprintf(out + o, sz - o, "nameserver %s\n", gw);
+    return o < sz ? (int)o : -1;
+}
+
+static void read_gateway(char *out, size_t sz)
 {
     FILE *f = fopen("/proc/net/route", "r");
+    out[0] = 0;
     if (!f)
         return;
     char line[256], iface[32];
     unsigned dest, gw;
     while (fgets(line, sizeof line, f)) {
         if (sscanf(line, "%31s %x %x", iface, &dest, &gw) == 3 && dest == 0 && gw) {
-            snprintf(gwip, sizeof gwip, "%u.%u.%u.%u",
+            snprintf(out, sz, "%u.%u.%u.%u",
                      gw & 0xff, (gw >> 8) & 0xff, (gw >> 16) & 0xff, (gw >> 24) & 0xff);
             break;
         }
     }
     fclose(f);
-    if (!gwip[0])
+}
+
+/* dhcpcd's lease survives reboots in /data, so the one there at boot may be
+ * another network's. It is believed only once dhcpcd has rewritten it. */
+static struct stat lease_at_boot;
+static int lease_at_boot_ok;
+
+static void lease_snapshot(void)
+{
+    lease_at_boot_ok = stat(DHCPCD_LEASE, &lease_at_boot) == 0;
+}
+
+static int lease_fresh(const struct stat *st)
+{
+    return !lease_at_boot_ok || st->st_ino != lease_at_boot.st_ino
+        || st->st_size != lease_at_boot.st_size
+        || st->st_mtime != lease_at_boot.st_mtime;
+}
+
+/* The servers this boot's lease names, from either client. */
+static int current_dns(uint32_t *ns, int max)
+{
+    char txt[512];
+    int fd = open(UDHCPC_DNS, O_RDONLY);
+    if (fd >= 0) {
+        ssize_t r = read(fd, txt, sizeof txt - 1);
+        close(fd);
+        txt[r > 0 ? r : 0] = 0;
+        return text_dns(txt, ns, max);
+    }
+    struct stat st;
+    if (stat(DHCPCD_LEASE, &st) != 0 || !lease_fresh(&st))
+        return 0;
+    unsigned char b[4096];
+    fd = open(DHCPCD_LEASE, O_RDONLY);
+    if (fd < 0)
+        return 0;
+    ssize_t r = read(fd, b, sizeof b);
+    close(fd);
+    return r > 0 ? lease_dns(b, (size_t)r, ns, max) : 0;
+}
+
+/* Rewrite resolv.conf when what it should say has changed. /etc is the
+ * ramdisk, but an unchanged file is still left alone. */
+static void update_resolv(void)
+{
+    static char last[256];
+    uint32_t ns[RESOLV_MAXNS];
+    int n = current_dns(ns, RESOLV_MAXNS);
+    /* gwip is also ntpd's server, so a turn with no route keeps the last. */
+    char gw[32];
+    read_gateway(gw, sizeof gw);
+    if (gw[0])
+        memcpy(gwip, gw, sizeof gwip);
+    char want[256];
+    if (resolv_text(ns, n, gw, want, sizeof want) <= 0 || strcmp(want, last) == 0)
         return;
-    int fd = open("/etc/resolv.conf", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    int fd = open(RESOLV_CONF ".tmp", O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0)
         return;
-    char buf[64];
-    int n = snprintf(buf, sizeof buf, "nameserver %s\n", gwip);
-    write(fd, buf, n);
+    ssize_t w = write(fd, want, strlen(want));
     close(fd);
-    netlog("resolv.conf nameserver %s\n", gwip);
+    if (w != (ssize_t)strlen(want) || rename(RESOLV_CONF ".tmp", RESOLV_CONF) != 0)
+        return;
+    memcpy(last, want, sizeof last);
+    netlog("resolv.conf from %s: %s", n ? "the lease" : "the gateway", want);
 }
 
 /* Outbound-only packet filter, applied BEFORE the interface comes up.
@@ -2283,6 +2484,24 @@ static int sdio_wifi_bringup(void)
     return 0;
 }
 
+/* The udhcpc hook. $dns goes to a file for update_resolv(), written whole
+ * and renamed so init never reads half of it; written even when empty, so a
+ * new network without DNS falls back to its own gateway rather than keeping
+ * the last one's servers. The old default route is removed first: a second
+ * `route add default` fails, and kept the previous network's. $router may
+ * list several; the first is used. Returns snprintf's length. */
+static int udhcpc_hook(char *out, size_t sz, const char *bbp)
+{
+    return snprintf(out, sz,
+             "#!/system/bin/sh\n"
+             "[ \"$1\" = bound ] || [ \"$1\" = renew ] || exit 0\n"
+             "%s ifconfig $interface $ip netmask $subnet\n"
+             "if [ -n \"$router\" ]; then %s route del default 2>/dev/null;"
+             " %s route add default gw ${router%%%% *}; fi\n"
+             "echo \"$dns\" > " UDHCPC_DNS ".tmp && %s mv " UDHCPC_DNS ".tmp " UDHCPC_DNS "\n",
+             bbp, bbp, bbp, bbp);
+}
+
 #define UDHCPC_SCRIPT "/tmp/udhcpc.sh"
 
 /* 24 turns of a 5s loop = two minutes. */
@@ -2344,16 +2563,13 @@ static void net_main(void)
      *
      * FireOS 5 keeps dhcpcd: it works on the fleet today. */
     /* Sized generously: the busybox path is itself up to ~40 bytes and appears
-     * twice, and snprintf truncates SILENTLY -- a short buffer here cost a
+     * four times, and snprintf truncates SILENTLY -- a short buffer here cost a
      * boot with an address but no default route, because the line that adds
      * it was cut in half. */
-    char udhcpc_script[512];
-    snprintf(udhcpc_script, sizeof udhcpc_script,
-             "#!/system/bin/sh\n"
-             "[ \"$1\" = bound ] || [ \"$1\" = renew ] || exit 0\n"
-             "%s ifconfig $interface $ip netmask $subnet\n"
-             "[ -n \"$router\" ] && %s route add default gw $router\n",
-             bbp, bbp);
+    char udhcpc_script[1024];
+    int sl = udhcpc_hook(udhcpc_script, sizeof udhcpc_script, bbp);
+    if (sl >= (int)sizeof udhcpc_script)
+        netlog("udhcpc script truncated (%d bytes)\n", sl);
     /* Not wr(): that is for sysfs and opens O_WRONLY without O_CREAT, so it
      * cannot make a file that does not exist yet. */
     int sfd = open(UDHCPC_SCRIPT, O_WRONLY | O_CREAT | O_TRUNC, 0755);
@@ -2371,6 +2587,10 @@ static void net_main(void)
     char *dhcp_fos6[] = { "/sbin/udhcpc", "-B", "-f", "-i", "wlan0",
                           "-s", (char *)UDHCPC_SCRIPT, NULL };
     char **dhcp = vendor ? dhcp_fos6 : dhcp_fos5;
+    if (!vendor && lease_dir_ready(DHCPCD_LEASE_DIR, AID_DHCP, AID_DHCP) != 0)
+        netlog("%s not usable (errno=%d): DNS will come from the gateway\n",
+               DHCPCD_LEASE_DIR, errno);
+    lease_snapshot();
     int st = 0, r;
 
     pid_t launcher = -1;
@@ -2571,9 +2791,10 @@ static void net_main(void)
                         write_state(0);
                         promote_good();
                     }
-                    write_resolv_conf();
+                    update_resolv();
                     ntp = spawn(ntpd);
                 }
+                update_resolv();
             } else if (++dry >= 4) {
                 kill(dhc, SIGTERM);
                 dry = 0;
