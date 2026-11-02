@@ -22,6 +22,7 @@
 #define RESOLV_CONF  "/tmp/emos-dnscheck.resolv"
 #define DHCPCD_LEASE "/tmp/emos-dnscheck.lease"
 #define UDHCPC_DNS   "/tmp/emos-dnscheck.udhcpc"
+#define DHCPCD_LEASE_DIR "/tmp/emos-dnscheck.d"
 #define main         init_main_unused
 
 #include "init.c"
@@ -271,5 +272,32 @@ int main(void)
     }
 
     printf(failures ? "\n%d failure(s)\n" : "\ndnscheck: all ok\n", failures);
+    /* --- the lease directory dhcpcd writes into ------------------------- */
+    {
+        struct stat sb;
+        uid_t u = getuid();
+        gid_t g = getgid();
+        rmdir(DHCPCD_LEASE_DIR);
+        expect("lease dir: made when missing",
+               lease_dir_ready(DHCPCD_LEASE_DIR, u, g) == 0 && stat(DHCPCD_LEASE_DIR, &sb) == 0
+                   && S_ISDIR(sb.st_mode) && (sb.st_mode & 07777) == 0770, "not 0770");
+        chmod(DHCPCD_LEASE_DIR, 0700);
+        expect("lease dir: mode put right",
+               lease_dir_ready(DHCPCD_LEASE_DIR, u, g) == 0 && stat(DHCPCD_LEASE_DIR, &sb) == 0
+                   && (sb.st_mode & 07777) == 0770, "mode left wrong");
+        struct stat before;
+        stat(DHCPCD_LEASE_DIR, &before);
+        sleep(1);
+        lease_dir_ready(DHCPCD_LEASE_DIR, u, g);
+        stat(DHCPCD_LEASE_DIR, &sb);
+        expect("lease dir: nothing written when already right",
+               sb.st_ctime == before.st_ctime, "ctime moved");
+        rmdir(DHCPCD_LEASE_DIR);
+        put(DHCPCD_LEASE_DIR, "x", 1);
+        expect("lease dir: a file in the way is refused",
+               lease_dir_ready(DHCPCD_LEASE_DIR, u, g) != 0, "accepted a file");
+        unlink(DHCPCD_LEASE_DIR);
+    }
+
     return failures != 0;
 }

@@ -1783,6 +1783,32 @@ static int run_wait(char *const argv[])
 #ifndef UDHCPC_DNS
 #define UDHCPC_DNS   "/run/udhcpc-dns"
 #endif
+#ifndef DHCPCD_LEASE_DIR
+#define DHCPCD_LEASE_DIR "/data/misc/dhcp"
+#endif
+#define AID_DHCP 1014
+
+/* The directory dhcpcd keeps DHCPCD_LEASE in, as Android's init.rc makes it
+ * (`mkdir /data/misc/dhcp 0770 dhcp dhcp`). Nothing else makes it under emOS,
+ * and the wizard wipes /data, so on a fresh install dhcpcd (which drops to the
+ * dhcp user) had nowhere to write a lease and the DNS fell back to the gateway
+ * silently -- seen on C95. Writes only what differs: a chown to the same owner
+ * still dirties the inode, and this runs every boot (eMMC wear). */
+static int lease_dir_ready(const char *dir, uid_t uid, gid_t gid)
+{
+    struct stat sb;
+    if (stat(dir, &sb) != 0) {
+        if (mkdir(dir, 0770) != 0 || stat(dir, &sb) != 0)
+            return -1;
+    }
+    if (!S_ISDIR(sb.st_mode))
+        return -1;
+    if ((sb.st_uid != uid || sb.st_gid != gid) && chown(dir, uid, gid) != 0)
+        return -1;
+    if ((sb.st_mode & 07777) != 0770 && chmod(dir, 0770) != 0)
+        return -1;
+    return 0;
+}
 /* MAXNS in bionic, musl and glibc: a fourth nameserver line is ignored. */
 #define RESOLV_MAXNS 3
 
@@ -2561,6 +2587,9 @@ static void net_main(void)
     char *dhcp_fos6[] = { "/sbin/udhcpc", "-B", "-f", "-i", "wlan0",
                           "-s", (char *)UDHCPC_SCRIPT, NULL };
     char **dhcp = vendor ? dhcp_fos6 : dhcp_fos5;
+    if (!vendor && lease_dir_ready(DHCPCD_LEASE_DIR, AID_DHCP, AID_DHCP) != 0)
+        netlog("%s not usable (errno=%d): DNS will come from the gateway\n",
+               DHCPCD_LEASE_DIR, errno);
     lease_snapshot();
     int st = 0, r;
 
