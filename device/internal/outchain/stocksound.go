@@ -47,11 +47,17 @@ func (v *VoiceFilter) Reset() {
 }
 
 // correction is the voicing's peaks and shelf, then the notch and an LR4
-// high-pass under them (em_eq.correction_sos's order).
-type correction struct{ s []biquad }
+// high-pass under them (em_eq.correction_sos's order), then the filters whose
+// gain follows the volume.
+type correction struct {
+	s      []biquad
+	vol    []biquad
+	stages []board.VolumeEQ
+	fs     float64
+}
 
 func newCorrection(fs float64, v *board.Voicing) correction {
-	var c correction
+	c := correction{fs: fs}
 	if v == nil {
 		return c
 	}
@@ -62,12 +68,26 @@ func newCorrection(fs float64, v *board.Voicing) correction {
 		peaking(v.Notch.Hz, v.Notch.Db, v.Notch.Q, fs))
 	hp := butter2(v.HighpassHz, fs, true)
 	c.s = append(c.s, hp, hp)
+	c.stages = v.ByVolume
+	c.vol = make([]biquad, len(v.ByVolume))
+	c.setVolume(100)
 	return c
+}
+
+// setVolume redesigns the volume filters for a volume in percent, keeping
+// their state so the change does not click.
+func (c *correction) setVolume(percent float64) {
+	for i, st := range c.stages {
+		c.vol[i].setCoeffs(peaking(st.Hz, st.GainAt(percent), st.Q, c.fs))
+	}
 }
 
 func (c *correction) step(x float64) float64 {
 	for i := range c.s {
 		x = c.s[i].step(x)
+	}
+	for i := range c.vol {
+		x = c.vol[i].step(x)
 	}
 	return x
 }
@@ -75,6 +95,9 @@ func (c *correction) step(x float64) float64 {
 func (c *correction) reset() {
 	for i := range c.s {
 		c.s[i].reset()
+	}
+	for i := range c.vol {
+		c.vol[i].reset()
 	}
 }
 

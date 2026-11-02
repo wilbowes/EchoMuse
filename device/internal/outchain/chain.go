@@ -98,6 +98,11 @@ type Chain struct {
 	mu      sync.Mutex
 	pending *Params // set by SetParams, taken by Process
 
+	// volume is the device level the voicing's volume filters follow, set
+	// by SetVolume; volApplied is the one they were last designed for.
+	volume     atomic.Int64
+	volApplied int64
+
 	// Owned by the ALSA goroutine.
 	params  Params
 	voicing *board.Voicing // nil: StockSound is never in force
@@ -127,6 +132,8 @@ func NewFor(sampleRate int, band GuardBand, v *board.Voicing) *Chain {
 		lim:     newLimiter(fs),
 		idle:    true,
 	}
+	c.volume.Store(127)
+	c.volApplied = 127
 	c.apply(DefaultParams())
 	return c
 }
@@ -176,6 +183,10 @@ func (c *Chain) apply(p Params) {
 	}
 	c.lim.setParams(p.LimiterThresholdDb, p.LimiterReleaseMs, c.fs)
 }
+
+// SetVolume tells the chain the device level (0..127), for a voicing whose
+// EQ follows the volume. It takes effect at the next period.
+func (c *Chain) SetVolume(level int) { c.volume.Store(int64(level)) }
 
 // takePending applies a queued SetParams. Returns the params that are now in
 // force and whether they changed.
@@ -359,6 +370,10 @@ func (c *Chain) ProcessWide(in []float64, out []byte) (applied *Params) {
 func (c *Chain) beginProcess() (applied *Params, active bool) {
 	if p, changed := c.takePending(); changed {
 		applied = &p
+	}
+	if lv := c.volume.Load(); lv != c.volApplied {
+		c.volApplied = lv
+		c.corr.setVolume(float64(min(max(lv, 0), 127)) * 100 / 127)
 	}
 	active = c.active.Load()
 	if active != c.running {
