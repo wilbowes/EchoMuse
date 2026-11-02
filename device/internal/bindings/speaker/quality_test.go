@@ -119,6 +119,7 @@ func qRender(t *testing.T, sp board.Speaker, plugged bool, level int, x []float6
 	params := outchain.DefaultParams()
 	c := outchain.NewFor(qFs, guardBand(sp.BassGuard), sp.Voicing)
 	c.SetActive(true)
+	c.SetVolume(level)
 	c.SetParams(chainForJack(params, plugged))
 	stock := stockLawOn(sp.Voicing, true, params, plugged)
 

@@ -946,6 +946,7 @@ func (p *PcmSpeaker) FlushMusic() { p.music.flush() }
 // step, unity at 127). Takes effect from the next period, ramped across it.
 func (p *PcmSpeaker) SetVolume(level int) {
 	p.volLevel.Store(int64(level))
+	p.chain.SetVolume(level)
 	p.applyVolumeLaw()
 }
 

@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/wilbowes/EchoMuse/pkg/board"
 )
 
 // vectorParams is the manifest's parameter object, as em_db names the keys.
@@ -325,5 +327,42 @@ func TestStockSoundKeepsTheGuardOn(t *testing.T) {
 	c.apply(p)
 	if c.guard.enabled {
 		t.Error("plain chain: guard should follow config")
+	}
+}
+
+// A voicing's volume EQ follows SetVolume from the next period, and leaves
+// a voicing without one untouched.
+func TestVolumeEQFollowsSetVolume(t *testing.T) {
+	v := *board.BiscuitVoicing()
+	v.ByVolume = []board.VolumeEQ{{Hz: 1000, Q: 1, Gains: []board.VolumeGain{{Percent: 50, Db: 10}, {Percent: 90, Db: 0}}}}
+	level := func(vc *board.Voicing, lv int) float64 {
+		c := NewFor(48000, DefaultGuardBand, vc)
+		c.SetActive(true)
+		c.SetVolume(lv)
+		p := DefaultParams()
+		p.GuardEnabled, p.LimiterEnabled = false, false
+		c.SetParams(p)
+		const n = 48000
+		buf := make([]byte, n*4)
+		for i := 0; i < n; i++ {
+			s := int16(300 * math.Sin(2*math.Pi*1000*float64(i)/48000))
+			binary.LittleEndian.PutUint16(buf[i*4:], uint16(s))
+			binary.LittleEndian.PutUint16(buf[i*4+2:], uint16(s))
+		}
+		c.Process(buf)
+		var sum float64
+		for i := n / 2; i < n; i++ {
+			x := float64(int16(binary.LittleEndian.Uint16(buf[i*4:])))
+			sum += x * x
+		}
+		return 10 * math.Log10(sum/float64(n/2))
+	}
+	low, high := level(&v, 57), level(&v, 127) // 45%, 100%
+	if d := low - high; math.Abs(d-10) > 0.5 {
+		t.Errorf("1kHz at 45%% vs 100%%: %+.2fdB, want +10", d)
+	}
+	b := board.BiscuitVoicing()
+	if d := level(b, 57) - level(b, 127); math.Abs(d) > 1e-9 {
+		t.Errorf("biscuit moved %+.3gdB with volume through its chain", d)
 	}
 }

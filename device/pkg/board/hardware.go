@@ -335,6 +335,7 @@ var radarHardware = &Hardware{
 		// Radar's own MBCL.cfg band 1: 0-70Hz, 20:1 from -25dB. Biscuit's
 		// band removed the woofer's bass at any normal level.
 		BassGuard: BassBand{CrossoverHz: 70, ThresholdDb: -25},
+		Voicing:   radarVoicing,
 	},
 }
 
