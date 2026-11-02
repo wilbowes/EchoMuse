@@ -10,7 +10,7 @@
 # add-on build on a kvm64 host died here ("NumPy was built with baseline
 # optimizations: (X86_V2)"), while CI's v2-capable runners never saw it. The
 # output hash is unchanged with 2.3.5 (checked on linux/amd64).
-FROM python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704 AS silero
+FROM python:3.12-slim@sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159 AS silero
 COPY tools/silero_typed.py /tmp/
 RUN pip install --no-cache-dir --root-user-action=ignore onnx==1.20.1 numpy==2.3.5 && \
     python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/silero_vad.onnx', '/tmp/in.onnx')" && \
@@ -25,7 +25,7 @@ RUN pip install --no-cache-dir --root-user-action=ignore onnx==1.20.1 numpy==2.3
 # input is the file the openwakeword package ships, and the final stage checks
 # the package's copy against the same hash, so the two models a device is
 # given cannot come from different embedding models without the build failing.
-FROM python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704 AS oww_stream
+FROM python:3.12-slim@sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159 AS oww_stream
 COPY tools/oww_stream.py /tmp/
 RUN pip install --no-cache-dir --root-user-action=ignore onnx==1.20.1 numpy==2.3.5 && \
     python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/embedding_model.onnx', '/tmp/in.onnx')" && \
@@ -35,7 +35,7 @@ RUN pip install --no-cache-dir --root-user-action=ignore onnx==1.20.1 numpy==2.3
 
 # Base pinned by the multi-arch index digest, so every build of a given commit
 # starts from the same bytes; Dependabot moves the digest weekly with the tag.
-FROM python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704
+FROM python:3.12-slim@sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159
 # Links the GHCR package page back to the repo (and lets the package inherit
 # the repo's public visibility once connected).
 LABEL org.opencontainers.image.source="https://github.com/wilbowes/EchoMuse" \
