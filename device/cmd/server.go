@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -95,6 +96,8 @@ func main() {
 	}
 	log.SetOutput(os.Stdout)
 	log.Printf("EchoMuse %s starting", client.Version)
+	// Before anything dials: emOS has no netd for bionic's resolver.
+	platform.UseResolverFor(net.DefaultResolver, platform.Base())
 
 	deviceID := client.GetSerialNo()
 	log.Printf("Device ID: %s", deviceID)
