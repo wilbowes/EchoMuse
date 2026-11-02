@@ -253,6 +253,29 @@ static void check_run(void)
     }
     ck(off == 0, "the ring ahead of the head is dark");
 
+    /* A segment the head has left fades from the head down to the trail and
+     * never through dark. It once did: the segment behind took the head's glow
+     * over black and only became trail when the head reached the next one, so
+     * every segment blinked off and back on as the head passed. */
+    int dip = 0;
+    const int tl = C_ORBIT[0] * 30 + C_ORBIT[1] * 59 + C_ORBIT[2] * 11;
+    for (int i = handover_frames; i < boot_frames; i++) {
+        int h = frames[i].head_q / SUB, fr = frames[i].head_q % SUB;
+        for (int p = 0; p < LED_N && p <= h; p++) {
+            if (p == h && fr < SUB / 2)
+                continue;                 /* still the head itself */
+            const unsigned char *c = frames[i].rgb[p];
+            if (c[0] * 30 + c[1] * 59 + c[2] * 11 < tl) {
+                if (dip < 4)
+                    printf("  frame %d (%ldms) head_q=%d led %d = %02x%02x%02x\n",
+                           i, frames[i].t / 1000, frames[i].head_q, p,
+                           c[0], c[1], c[2]);
+                dip++;
+            }
+        }
+    }
+    ck(dip == 0, "a segment the head has left never dims below the trail");
+
     /* The ring must be handed back dark. A ring left lit is the thing the fade
      * exists to prevent — anything shown after this is the firmware's. */
     int lit = 0;

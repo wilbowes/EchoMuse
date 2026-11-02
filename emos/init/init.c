@@ -534,10 +534,16 @@ static void anim_render(int head_q, int still, int failed, int trail)
      * the first version of this — put the tail and the ground two shades of
      * the same blue apart, and on the device that read as no progress bar at
      * all (Wil, from video, 2026-09-05). The handover is covered by fading the
-     * ring out rather than by keeping it lit; see anim_handover. */
+     * ring out rather than by keeping it lit; see anim_handover.
+     *
+     * The trail includes segment i itself: once the head is past the midpoint
+     * that segment is the far one, taking the head's glow over whatever is
+     * beneath it. Over dark it faded to black and blinked back on as trail
+     * when the head reached the next segment; over the trail it fades straight
+     * down to blue. While the head is nearer, i is drawn as the head anyway. */
     int i = head_q / SUB, fr = head_q % SUB;
     for (int p = 0; p < LED_N; p++) {
-        if (trail && p < i)
+        if (trail && p <= i)
             memcpy(f[p], C_ORBIT, 3);
         else
             memset(f[p], 0, 3);
