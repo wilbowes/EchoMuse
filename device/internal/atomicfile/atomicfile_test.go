@@ -62,9 +62,15 @@ func TestWriteFailureKeepsTheOldFile(t *testing.T) {
 	}
 }
 
-func TestWriteMissingDirectory(t *testing.T) {
-	if err := Write(filepath.Join(t.TempDir(), "absent", "f"), []byte("x"), 0o600); err == nil {
-		t.Fatal("want an error")
+// A firmware not started by start_server.sh finds no /data/local/etc/echomuse,
+// and the echo path and Bluetooth keys must still save.
+func TestWriteMakesAMissingDirectory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "local", "etc", "echomuse", "bt_paired.json")
+	if err := Write(path, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write into a missing directory: %v", err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "x" {
+		t.Fatalf("got %q, %v", got, err)
 	}
 }
 

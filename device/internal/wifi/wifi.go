@@ -81,7 +81,11 @@ import (
 const (
 	androidConf = "/data/misc/wifi/wpa_supplicant.conf"
 	emosConf    = "/data/emos/wpa.conf"
-	markerPath  = "/data/local/tmp/echomuse_wifi_pending"
+	// Beside the firmware's other state, so one directory holds all of it.
+	markerPath = "/data/local/etc/echomuse/wifi_pending"
+	// Where firmware before 2026-11 kept it. A change in flight across an
+	// OTA leaves it there, so it is read and cleared as well.
+	legacyMarkerPath = "/data/local/tmp/echomuse_wifi_pending"
 
 	// Fallback, and the default on FireOS. Mirrors WPA_CTRL_DEFAULT in
 	// emos/init/init.c; the real value comes from sockDir.
@@ -149,6 +153,8 @@ var (
 	baseOS       = platform.Base
 	androidConfP = androidConf
 	emosConfP    = emosConf
+	markerP      = markerPath
+	legacyMarkP  = legacyMarkerPath
 	emosSuppP    = emosSupp
 	// Indirected so the ownership rules are testable off-target: a test host
 	// is not root and cannot hand a file to AID_WIFI, and the uid it asks for
@@ -420,12 +426,12 @@ func confMode() (mode os.FileMode, wifiOwned bool) {
 	return 0o660, true
 }
 
-// writeMarker creates the marker's directory first. Android's init.rc makes
-// /data/local/tmp on every boot and emOS's init does not, so on an Echo that
-// never ran FireOS the directory is absent and every WiFi change was refused
-// (#632). 0771 is Android's own mode for it; an existing one is left alone.
+// writeMarker creates the marker's directory first: a missing directory
+// refused every WiFi change once (#632, when the marker was in
+// /data/local/tmp, which emOS's init does not make). An existing one is left
+// alone.
 func writeMarker(path string, data []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o771); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
 	return os.WriteFile(path, data, 0o600)
@@ -686,7 +692,7 @@ func PendingResult() *Result {
 // acks failure results too — the revert already removed marker/backup,
 // so the removes are harmless no-ops there.
 func Commit() {
-	_ = os.Remove(markerPath)
+	clearMarker()
 	_ = os.Remove(backupPath())
 	mu.Lock()
 	pending = nil
@@ -735,7 +741,7 @@ func Change(ssidBytes []byte, psk string, connected func() bool) {
 		return
 	}
 	mk, _ := json.Marshal(marker{NewSSID: ssid, StartedAt: time.Now().Unix()})
-	if err := writeMarker(markerPath, mk); err != nil {
+	if err := writeMarker(markerP, mk); err != nil {
 		setResult(Result{OK: false, SSID: ssid, Error: fmt.Sprintf("cannot write pending marker: %v", err)})
 		return
 	}
@@ -749,7 +755,7 @@ func Change(ssidBytes []byte, psk string, connected func() bool) {
 		if restoreErr != nil {
 			log.Printf("[wifi] REVERT FAILED: %v — marker left for recovery on restart", restoreErr)
 		} else {
-			_ = os.Remove(markerPath)
+			clearMarker()
 			_ = os.Remove(backupPath())
 		}
 		waitFor("re-association after revert", associateTimeout, associated)
@@ -784,11 +790,25 @@ func Change(ssidBytes []byte, psk string, connected func() bool) {
 	setResult(Result{OK: true, SSID: ssid})
 }
 
+// readMarker returns the pending-change marker, ours or the legacy one.
+func readMarker() ([]byte, error) {
+	if mk, err := os.ReadFile(markerP); err == nil {
+		return mk, nil
+	}
+	return os.ReadFile(legacyMarkP)
+}
+
+// clearMarker removes both. Removing a file that is not there writes nothing.
+func clearMarker() {
+	_ = os.Remove(markerP)
+	_ = os.Remove(legacyMarkP)
+}
+
 // RecoverIfPending restores the pre-change config if a previous change
 // never got committed (crash, power cycle, or a failed revert). Call
 // once at process start, before the control client runs.
 func RecoverIfPending() {
-	mk, err := os.ReadFile(markerPath)
+	mk, err := readMarker()
 	if err != nil {
 		return // no pending change — the normal case
 	}
@@ -811,14 +831,14 @@ func RecoverIfPending() {
 		// restore from — clear the marker and carry on with whatever conf
 		// is in place.
 		log.Printf("[wifi] no backup to restore (%v) — clearing marker", err)
-		_ = os.Remove(markerPath)
+		clearMarker()
 		return
 	}
 	if err := reloadConf(string(backup)); err != nil {
 		log.Printf("[wifi] startup restore failed: %v — leaving marker for next start", err)
 		return
 	}
-	_ = os.Remove(markerPath)
+	clearMarker()
 	_ = os.Remove(from)
 	setResult(Result{OK: false, SSID: m.NewSSID, Error: "device restarted before the change was confirmed — previous network restored"})
 }
