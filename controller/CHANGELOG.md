@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.26.4
+
+One fix on top of 2.26.3. Pair with firmware v2.18.1, which this controller offers. No database changes.
+
+### Fixed
+
+- **The wizard's Build emOS step said no emOS release existed.** The controller read only the 10 newest GitHub releases, and newer Early Access releases had pushed the latest emOS release off that list. It now reads 100 (#1090). Thanks @alexwoolfson and @merlinschumacher.
+
 ## 2.26.3
 
 One fix on top of 2.26.2, released from 2.26.2's own code. Pair with firmware v2.18.1, which this controller offers. No database changes.
