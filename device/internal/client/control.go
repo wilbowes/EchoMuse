@@ -377,7 +377,7 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 					targetIdx+1, passLen, targetAttempts+1, maxStaticAttempts, server.Addr)
 			} else {
 				// The list is exhausted for this pass: one bounded mDNS
-				// browse, never the indefinitely-retrying FindServer — that
+				// browse, never an indefinitely-retrying one — that
 				// would park the device there and defeat the point of
 				// having somewhere to fall through TO. maxMDNSAttempts (not
 				// maxStaticAttempts) below is what keeps this to one try.
@@ -395,34 +395,7 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 				c.disconnectedCallback()
 			}
 
-			// Fast path: try the last-known controller address before mDNS.
-			// Speeds up ordinary reconnects, and after a WiFi network change
-			// it's what makes a controller on a different subnet reachable at
-			// all (multicast rarely crosses subnets, so mDNS alone would fail
-			// the change's reconnect gate and revert a working network).
-			// The probe targets the plain port — it's a reachability check,
-			// not a plane choice; connect() re-decides ws vs wss every dial.
-			server = c.lastKnownServer()
-			if server != nil && server.TLSPort == 0 && loadLinkCreds().tlsConf != nil {
-				// CA installed but the cached endpoint predates the
-				// controller's TLS listener (e.g. controller upgraded, or an
-				// approval just installed credentials, mid-run). One fresh browse so
-				// the tls_port TXT is picked up; keep the cached endpoint if
-				// mDNS fails — after a WiFi change the controller can sit on
-				// another subnet where multicast doesn't reach.
-				if found, err := discovery.FindServerOnce(ctx); err == nil && found != nil {
-					server = found
-				}
-			}
-			if server != nil && probeTCP(server.Addr, 3*time.Second) {
-				log.Printf("[control] Last-known controller %s reachable — skipping mDNS", server.Addr)
-			} else {
-				found, err := discovery.FindServer(ctx)
-				if err != nil {
-					return err
-				}
-				server = found
-			}
+			server, dialErr = c.findController(ctx)
 		}
 
 		var err error
@@ -534,6 +507,52 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 			}
 		}
 	}
+}
+
+// Seams for the discovery tests.
+var (
+	browseOnce = discovery.FindServerOnce
+	reachable  = probeTCP
+)
+
+// findController is one discovery round when no static list is configured:
+// the last-known controller if it answers, else one mDNS browse. A round that
+// finds nothing returns an error, and Run waits and comes back here, so the
+// last-known address is tried again every round (#1081).
+//
+// It used to fall into discovery.FindServer, which browses forever. One
+// failed probe mid-outage then parked the device on mDNS for good, and mDNS
+// is often what a router restart leaves broken, so an Echo whose controller
+// came back at the same address stayed orange until power-cycled.
+//
+// The last-known address speeds up ordinary reconnects, and after a WiFi
+// network change it's what makes a controller on a different subnet
+// reachable at all (multicast rarely crosses subnets, so mDNS alone would
+// fail the change's reconnect gate and revert a working network). The probe
+// targets the plain port — it's a reachability check, not a plane choice;
+// connect() re-decides ws vs wss every dial.
+func (c *ControlClient) findController(ctx context.Context) (*discovery.ServerInfo, error) {
+	server := c.lastKnownServer()
+	if server != nil && server.TLSPort == 0 && loadLinkCreds().tlsConf != nil {
+		// CA installed but the cached endpoint predates the controller's TLS
+		// listener (e.g. controller upgraded, or an approval just installed
+		// credentials, mid-run). One fresh browse so the tls_port TXT is
+		// picked up; keep the cached endpoint if mDNS fails — after a WiFi
+		// change the controller can sit on another subnet where multicast
+		// doesn't reach.
+		if found, err := browseOnce(ctx); err == nil && found != nil {
+			server = found
+		}
+	}
+	if server != nil && reachable(server.Addr, 3*time.Second) {
+		log.Printf("[control] Last-known controller %s reachable — skipping mDNS", server.Addr)
+		return server, nil
+	}
+	found, err := browseOnce(ctx)
+	if err != nil || found == nil {
+		return nil, fmt.Errorf("no controller found via mDNS this round")
+	}
+	return found, nil
 }
 
 // staticHealthyDuration is how long a connection has to stay up before Run
