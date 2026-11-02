@@ -63,6 +63,8 @@ def test_passphrase_check(psk, ok):
 
 def test_the_conf_gets_hex_and_a_raw_read_password():
     s = SCRIPT.read_text()
-    assert "printf '        ssid=%s\\n' \"$ssid_hex\"" in s
+    assert "printf '        ssid=%s\\n' \"$1\"" in s
+    assert 'network_block "$ssid_hex"' in s
+    assert "printf '        scan_ssid=1\\n'" in s
     assert "IFS= read -r psk" in s
     assert 'echo "        ssid=' not in s, "the SSID is written unescaped again"

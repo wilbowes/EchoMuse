@@ -201,7 +201,8 @@ every new install stops until the wizard's WiFi step. Red means a saved
 network did not connect within two minutes. Neither is a failed flash.
 
 If the wizard can't open the console to finish, open it yourself (below) and
-run `em-wifi`: it scans, you pick a network by number and type the password
+run `em-wifi`: it scans, you pick a network by number (or `h` to type a
+hidden network's name) and type the password
 ([#810](https://github.com/wilbowes/EchoMuse/issues/810),
 [#825](https://github.com/wilbowes/EchoMuse/issues/825)).
 

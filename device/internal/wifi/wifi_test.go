@@ -222,6 +222,17 @@ func TestComposeConfOpenNetwork(t *testing.T) {
 	}
 }
 
+// A network that beaconed at setup may be hidden later; without scan_ssid=1
+// the supplicant never probes for it and the Echo stays off the air.
+func TestComposeConfProbesForHiddenNetworks(t *testing.T) {
+	onBase(t, platform.EmOS, "", "ctrl_interface="+emosDir+"\n")
+	for _, psk := range []string{"12345678", ""} {
+		if conf := composeConf([]byte("net"), psk); !strings.Contains(conf, "\tscan_ssid=1\n") {
+			t.Errorf("psk %q: no scan_ssid=1:\n%s", psk, conf)
+		}
+	}
+}
+
 // The MT8163 driver reports WoWLAN as enabled, so hostap 2.10 ends without a
 // deauth unless wowlan_disconnect_on_deinit is set, and the stale link it
 // leaves refuses the next supplicant's PTK for minutes. Our supplicant gets
