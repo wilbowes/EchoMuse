@@ -146,7 +146,12 @@ INGRESS_GATEWAY_IP = "172.30.32.2"
 # tags, GHCR image only). /releases/latest returns whichever was published
 # most recently — _fetch_latest_release filters the list for the newest
 # release that is actually a device firmware release.
-GITHUB_API_URL = "https://api.github.com/repos/{repo}/releases?per_page=10"
+#
+# 100 is GitHub's maximum page. The newest GA release of each kind has to be
+# on this one page, and EA prereleases of firmware and emOS sit ahead of it:
+# at 10, the two EA releases of 2026-11-02 pushed emos-v0.10 to 12th and every
+# GA emOS install failed at Build emOS (#1090).
+GITHUB_API_URL = "https://api.github.com/repos/{repo}/releases?per_page=100"
 
 # How long to cache GitHub release info in memory (seconds).
 # DB is the persistent cache; this avoids hitting the DB on every
