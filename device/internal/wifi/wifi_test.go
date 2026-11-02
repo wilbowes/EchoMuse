@@ -340,10 +340,10 @@ func TestEmosConfIsReadableByTheSupplicantThatReadsIt(t *testing.T) {
 	}
 }
 
-// #632: an Echo that never ran FireOS has no /data/local/tmp, because only
-// Android's init.rc creates it, and the marker write refused every WiFi change.
+// #632: a missing directory refused every WiFi change, so the marker's
+// directory is made when it is absent.
 func TestMarkerIsWrittenWhenItsDirectoryIsMissing(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "data", "local", "tmp", "echomuse_wifi_pending")
+	path := filepath.Join(t.TempDir(), "data", "local", "etc", "echomuse", "wifi_pending")
 	if err := writeMarker(path, []byte(`{"new_ssid":"x"}`)); err != nil {
 		t.Fatalf("writeMarker into a missing directory: %v", err)
 	}
@@ -353,5 +353,37 @@ func TestMarkerIsWrittenWhenItsDirectoryIsMissing(t *testing.T) {
 	}
 	if err := writeMarker(path, []byte("again")); err != nil {
 		t.Fatalf("writeMarker into an existing directory: %v", err)
+	}
+}
+
+// A change in flight across the OTA that moved the marker left it in
+// /data/local/tmp. It is still found, and clearing removes both.
+func TestTheLegacyMarkerIsFoundAndCleared(t *testing.T) {
+	dir := t.TempDir()
+	oldM, oldL := markerP, legacyMarkP
+	t.Cleanup(func() { markerP, legacyMarkP = oldM, oldL })
+	markerP = filepath.Join(dir, "etc", "wifi_pending")
+	legacyMarkP = filepath.Join(dir, "tmp", "echomuse_wifi_pending")
+
+	if _, err := readMarker(); err == nil {
+		t.Fatal("no marker anywhere, but readMarker found one")
+	}
+	if err := writeMarker(legacyMarkP, []byte("old")); err != nil {
+		t.Fatal(err)
+	}
+	if mk, err := readMarker(); err != nil || string(mk) != "old" {
+		t.Fatalf("legacy marker not found: %q, %v", mk, err)
+	}
+	if err := writeMarker(markerP, []byte("new")); err != nil {
+		t.Fatal(err)
+	}
+	if mk, _ := readMarker(); string(mk) != "new" {
+		t.Fatalf("ours should win over the legacy one, got %q", mk)
+	}
+	clearMarker()
+	for _, p := range []string{markerP, legacyMarkP} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s survived clearMarker", p)
+		}
 	}
 }
