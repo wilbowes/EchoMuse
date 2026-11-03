@@ -192,6 +192,26 @@ async def cached_firmware() -> Optional[dict]:
     return await fetch_firmware()
 
 
+async def firmware_to_install() -> Optional[dict]:
+    """
+    The release an install should send: asked of GitHub now, the cache only
+    if GitHub cannot answer.
+
+    cached_firmware refreshes by AGE, so a release published since the last
+    poll is invisible to it until the next one. Right after an add-on update
+    that is the release the user updated for: on 2026-11-03 an OTA pressed a
+    minute after updating the EA add-on to 2.27.0-ea.4 sent firmware
+    v2.19.0-ea.3. emOS installs already fetch fresh (fetch_emos); this is the
+    firmware's equivalent. An install is a deliberate request and downloads
+    from GitHub anyway, so it is not gated on the update interval.
+    """
+    fresh = await fetch_firmware()
+    if fresh:
+        return fresh
+    log.warning("[api] GitHub did not answer; installing the cached release")
+    return await cached_firmware()
+
+
 async def fetch_firmware(force: bool = False) -> Optional[dict]:
     """
     Poll the GitHub releases API and update the DB cache.

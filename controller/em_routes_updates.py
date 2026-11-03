@@ -93,7 +93,7 @@ async def _post_device_update(request: web.Request) -> web.Response:
         _ver      = _embedded or f"local-{time.strftime('%Y%m%d-%H%M')}"
         release   = {"version": _ver, "url": None}
     else:
-        release = await em_releases.cached_firmware()
+        release = await em_releases.firmware_to_install()
         if release is None:
             return em_http.error("no_release", "No release information available", 409)
 
@@ -399,7 +399,7 @@ async def _post_deploy_all(request: web.Request) -> web.Response:
             "url": None,
         }
     else:
-        release = await em_releases.cached_firmware()
+        release = await em_releases.firmware_to_install()
         if release is None:
             return em_http.error("no_release", "No release information available", 409)
 
