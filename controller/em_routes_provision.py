@@ -109,7 +109,7 @@ async def _get_provision_latest_binary(request: web.Request) -> web.Response:
     /api/devices/{id}/update fleet-OTA path (that requires a live
     WebSocket session). Reuses the same cache/fetch machinery as OTA.
     """
-    release = await em_releases.cached_firmware()
+    release = await em_releases.firmware_to_install()
     if release is None:
         return em_http.error("no_release", "No release information available", 404)
 

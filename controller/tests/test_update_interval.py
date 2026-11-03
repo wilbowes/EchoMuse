@@ -132,3 +132,38 @@ def test_a_stale_cache_is_refreshed_when_enabled(stored, fetches):
                   latest_binary_url="u", last_update_check="0")
     asyncio.run(em_releases.cached_firmware())
     assert fetches == ["firmware"]
+
+
+def test_an_install_asks_github_even_when_the_cache_is_fresh(stored, monkeypatch):
+    """
+    2026-11-03: an OTA pressed a minute after updating the EA add-on sent the
+    previous firmware, because the cache was younger than the interval and
+    the release had been published since the last poll.
+    """
+    stored.update(update_check_interval="3600", latest_version="v2.19.0-ea.3",
+                  latest_binary_url="u", last_update_check="9999999999")
+    new = {"version": "v2.19.0-ea.4", "url": "u4"}
+
+    async def github(force=False):
+        return new
+    monkeypatch.setattr(em_releases, "fetch_firmware", github)
+    assert asyncio.run(em_releases.firmware_to_install()) == new
+
+
+def test_an_install_falls_back_to_the_cache_when_github_cannot_answer(stored, fetches):
+    stored.update(update_check_interval="3600", latest_version="v2.19.0-ea.3",
+                  latest_binary_url="u", last_update_check="9999999999")
+    got = asyncio.run(em_releases.firmware_to_install())
+    assert got["version"] == "v2.19.0-ea.3"
+    assert fetches == ["firmware"]
+
+
+def test_every_firmware_install_route_asks_github_first():
+    """The routes that send firmware to an Echo use firmware_to_install; only
+    the metadata reads may serve the cache."""
+    import _sources
+    for name in ("_post_device_update", "_post_deploy_all",
+                 "_get_provision_latest_binary"):
+        src = _sources.code_only(_sources.def_source(name))
+        assert "firmware_to_install()" in src, name
+        assert "cached_firmware()" not in src, name
