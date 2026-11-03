@@ -405,6 +405,9 @@ with no known mechanism; do not call it the cause.
   for HA sets; `VolumeCue` gets `speaker.VolumeGain(newLevel)` baked in once,
   bypasses EQ/chain; Up at ceiling replays, Down at floor is silent; presses
   replace the in-flight cue. Dashboard gates on `volume_cue`, not `wake_cue`.
+  **Per-board level is `Voicing.CueTrimDb`** (radar −6, after the unity cap):
+  the 350Hz tone skips the chain, and radar's woofer plays it in full where
+  biscuit's driver barely does.
 - **Volume is state, not a setting**: no dashboard control,
   `em_config_sections.STATE_KEYS`, read-only on Status.
 - **Volume persists controller-side** (`startupVolume`), restored by
