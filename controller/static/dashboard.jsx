@@ -8559,8 +8559,8 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       }
       addLog(`  ✓ ${a.name}`);
     }
-    addLog('Wake word assets installed. On-device scoring is off by default — '
-         + 'enable it per device under Config → Wake word.', 'ok');
+    addLog('Wake word assets installed. Where the wake word runs is set per '
+         + 'device under Config → Wake word.', 'ok');
 
     // The finishing reboot lives in the LAST step, deliberately — it closes
     // the ADB connection, so any step after it can never run. Keeping it on
