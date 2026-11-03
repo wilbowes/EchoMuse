@@ -953,7 +953,7 @@ func (p *PcmSpeaker) SetVolume(level int) {
 func (p *PcmSpeaker) applyVolumeLaw() {
 	level := int(p.volLevel.Load())
 	if p.stock.Load() {
-		p.vol.set(StockVolumeGain(level, p.voicing.CeilingDb))
+		p.vol.set(StockVolumeGain(level, p.voicing))
 	} else {
 		p.vol.set(VolumeGain(level))
 	}

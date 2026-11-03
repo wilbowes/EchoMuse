@@ -37,6 +37,10 @@ type Voicing struct {
 	// range drives the compressors rather than the DAC.
 	CeilingDb float64
 
+	// DbPerLevel is the law's slope below the ceiling; 0 is the plain 0.5.
+	// A steeper slope lowers the button floor without moving full volume.
+	DbPerLevel float64
+
 	// CueTrimDb lowers the volume button tone on this board's driver. The
 	// tone is a 350Hz beep mixed after the chain: biscuit's small driver
 	// barely reproduces 350Hz, radar's woofer plays it in full, so at one
@@ -162,7 +166,11 @@ var radarVoicing = &Voicing{
 		}},
 	},
 	CeilingDb: 7,
-	CueTrimDb: -6, // set by ear on 035T
+	// The button floor (level 57) at -33dB, ea.3's floor: at the plain slope
+	// it was -28dB, and with the low-volume EQ's lift a reply there was loud
+	// on 035T (Wil, 2026-11-03).
+	DbPerLevel: 40.0 / 70,
+	CueTrimDb:  -6, // set by ear on 035T
 }
 
 // BiscuitVoicing is biscuit's voicing, for the output chain's tests and its
