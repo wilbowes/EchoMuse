@@ -230,6 +230,24 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
 
 - **VAD** (lock_mic turns only) runs on pre-NS/AGC audio; opens gate after `VAD_SPEECH_MS` of speech, closes after `VAD_SILENCE_MS` of silence, then sends an end-of-speech sentinel
 
+- **2026-11-03, the Dot 3 woke 1 time in 5 beside the radar's 5 of 5** (41C8
+  and 035T side by side, normal voice, "Hey Verona"). Not mic gain: on the one
+  wake both heard the Dot 3 was louder by only 1.2 dB, noise floors matched
+  (0.0074 vs 0.0066-0.0122), and a raw capture puts its four mics at -65 dBFS
+  against a Dot 2's -63..-65 in the same quiet room. Its wake stream is ONE
+  corner mic (ch1, no centre mic), so the leading suspect is the body shading
+  that mic from a talker on another side; not yet tested per corner. Its high
+  clip count (29,631 in 13 min, against hundreds on a Dot 2) came while it
+  played, i.e. its own speaker into its mics.
+- **2026-11-03, superdirective beams are the direction** (Wil), for the Dot 2
+  and the Dot 3, still gated on noisy-room captures. The 10-14 "noisy" run
+  (`log-noisy.txt`) was SYNTHETIC: quiet-room takes with their own noise
+  raised 12-30 dB, so a real TV/fan/music/own-reply capture has never been
+  made. Commercial devices (Echo, HomePod, XMOS-based satellites) cancel echo
+  per mic, form fixed directional beams and score the wake word per beam or
+  best stream; none uses one raw mic or a plain sum. Tooling for the capture:
+  `device/tools/capture_session` with the bench raw tap.
+
 ### The speaker's voicing (stock sound, #229, 2026-10)
 
 **Firmware that announces `stock_sound` always voices its own speaker; there
@@ -304,6 +322,14 @@ own files that informed it stay off the repo (Amazon's).
 | `internal/wifi/` | Safe WiFi network change with auto-rollback (wifi_change/wifi_commit/wifi_scan control messages; pending-marker recovery at startup). Reload path is `svc wifi disable/enable` ONLY — see package comment for the hardware-proven constraints. **An SSID is 0–32 arbitrary BYTES and is handled as bytes** (`ssid.go`): decoded from wpa_cli's printf_encode, carried as `ssid_hex`, compared as bytes, and written quoted when wpa_supplicant's quoted form can hold it (it reads to the LAST `"`, so quotes and backslashes are literal) or as hex when not. Until 2026-09-19 every path refused `"` and `\`, trimmed spaces, and wrote escaped text back as a different network — and the emOS wizard put SSIDs into a shell command |
 | `internal/bluetooth/` | BLE proxy — raw HCI passive scan over `/dev/stpbt` (single-owner, so Android's Bluedroid is durably `pm disable`d first), parsed into adverts and forwarded to the controller. `emit.go` decides which of them are worth sending; see "The BLE proxy" below, and read it before changing the scan cadence or the filtering |
 | `pkg/led/`, `pkg/mic/`, `pkg/speaker/`, `pkg/buttons/` | Hardware abstractions (interfaces) |
+
+- **2026-11-02, FireOS's WifiService rewrites `wpa_supplicant.conf` from
+  memory on `svc wifi enable`**, so restoring a backed-up conf by copying it
+  and toggling WiFi does nothing (VVV lost its network that way). Change WiFi
+  through the firmware's own wifi change path, never by copying the conf.
+- 2026-11-02: on 64-bit emOS (no busybox payload) the shell's `nslookup` and
+  `wget` are Amazon's bionic builds, which resolve through netd's
+  `dnsproxyd` and so fail; the firmware resolves since #1085. Debugging only.
 
 ## Boards: hardware is found by name (#541, 2026-10-04)
 
@@ -422,6 +448,20 @@ above the rest). Its TDM is 4ch S32_LE at 16kHz on two tlv320aic3101, and:
 **Still biscuit's, inside the drivers:** the amp switch and DAC unity, the
 jack tables and the Android `stop <service>` names.
 
+- **2026-11-03, the Dot 3 runs EchoMuse under emOS** (41C8): packer image
+  from its own stock boot_a + the emos-v0.11-ea.2 release init, firmware
+  v2.19.0-ea.4 installed as the wizard does, started by init through
+  `start_server.sh`; registered, a full voice turn, ambient light and mute
+  work. The packer refuses the 16 MB partition as its reference: trim it to
+  the image's own length from the header first (9,336,832 bytes here), as the
+  wizard does.
+- **The Dot 3's eMMC cannot report wear.** H4G2a is eMMC 4.5 (EXT_CSD_REV 6);
+  the life-time bytes 267-269 arrived in 5.0 and read 00 00 00, the spec's
+  "not defined". "Not reported by this part" is the right answer.
+- The Dot 3's boot reason after a plain `adb reboot` is `wdt_by_pass_pwk`,
+  which the dashboard shows as a warning: its normal reboot misread as a
+  fault (not fixed).
+
 ## Private listening (the default since 2026-09-21)
 
 **The spec is `docs/listening.md`; this is what the firmware does to meet it.**
@@ -515,6 +555,12 @@ absent — never to `on`, which would leave the controller waiting for wakes the
 firmware has no code to send while no longer acting on its own. That is a wrong
 answer rather than the old behaviour, which is the line the whole capability
 rule is drawn along.
+
+- **2026-11-03, a custom wake model that "stops" after a turn (#1094) kept
+  scoring**: the Echo scored every frame of the dead stretches (about 15,700
+  frames in 22 minutes, 0 drops, 55-74 ms inference); the model's scores just
+  never crossed 0.50 again. Read `wake_counters.dev_frames`/`dev_drops` before
+  calling a stall.
 
 ### `on` — the device decides, the controller keeps watching
 
@@ -1389,6 +1435,13 @@ thought to watch. Idle sits at 31–34°C, nowhere near throttling.
 **`thermalCoreLimit` (`num_limit_thermal`) is the sharpest throttling signal
 this SoC offers** — below `coresTotal` means the governor is already capping
 capacity, which bites well before any temperature reading looks alarming.
+
+- **2026-11-03, the Dot 3's `cpuPct` (18-20%) is not an outlier.** With the
+  on-device wake word running on both, it is about 36% of a core (2 cores
+  online) against the radar's 45% (15% of 3); inference 33 ms vs 19 ms. A
+  muted Echo scores nothing, so compare unmuted. Its load average (~3.6 at
+  86% idle) is Amazon kernel threads asleep in D state (`GCPU`, `fuse_log`,
+  `entropy_thread`), counted in load, using no CPU.
 
 ## Volume / mute persistence
 

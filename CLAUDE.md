@@ -9,6 +9,9 @@ the matching section there before changing that area or a rule.
 **Before diagnosing a fault, reopening a decision or changing a default, grep
 `docs/history/` and `JOURNAL.md` for the symptom, setting or function name.**
 The stories behind the rules are no longer loaded; this is how they are found.
+JOURNAL.md is an archive to 2026-10-25. **A finding that produces no commit**
+(a measurement, a cause ruled out, a hardware fact) **goes in
+`docs/history/<area>.md` as a dated bullet under the matching heading.**
 
 ## What this is
 

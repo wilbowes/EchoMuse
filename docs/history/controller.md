@@ -225,6 +225,10 @@ arrive at a controller whose DB does not know them, and are allowed through
 because `em_linkauth` **ignores** a token for a device with nothing on
 record; they appear as pending and are approved onto fresh config.
 
+- 2026-11-03: the EA and dev add-ons cannot run at once: both take the
+  device ports 8767/8770 on the host network, so whichever starts second
+  errors. Satellite ports differ by channel; the device link does not.
+
 ### Voice backend
 
 The controller impersonates ESPHome voice satellites: one asyncio TCP listener per device on ports 16001+ (persisted in the device registry, never reused). Home Assistant's built-in ESPHome integration dials in and drives voice turns via Assist. Implemented in `em_esphome.py` on top of the protocol layer in `controller/esphome/` (`frame_protocol.py`, `satellite_server.py`, vendored aioesphomeapi protobufs in `esphome/vendor/`). Servers are created at startup for every approved device **and on demand** when a device approved after boot first connects (`_register_device_server` — idempotent on purpose: the startup loop and `device_connected()` race, first creation wins). HA naming: friendly name is `<label> Voice Assistant` (BT proxy: `<label> BT Proxy`); `project_name` carries `ESPHOME_DEVICE_MODEL` after the dot because HA displays that segment as the device Model, overriding DeviceInfo's `model` field. (A legacy `claracore` WebSocket backend was removed 2026-07-12 — ESPHome/HA is the only voice path.)
@@ -643,6 +647,12 @@ the same `meter_anim` a reply gets, for the clip's known length, and clears it
 after; not while a voice turn or a ringing timer owns the ring
 (`em_scenes.announcement_ring`). Until then the opening message of a
 `start_conversation` played with the ring dark.
+
+- **2026-11-03, HA's "Set up voice assistant" failing with `required key not
+  provided @ data['entity_id']`** after a satellite was deleted and re-added
+  was a STALE BROWSER TAB: the dialog looks the satellite up in the page's
+  `hass.entities`. HA's registry and `assist_satellite/get_configuration` were
+  correct throughout; a refresh fixed it.
 
 ### HA entities beyond the voice satellite
 

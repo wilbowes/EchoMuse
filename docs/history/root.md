@@ -330,3 +330,9 @@ image was built beside, two devices sharing a serial). `emos/device/em-wifi-chec
 in the pinned compiler image, and
 asserts the result is static — a dynamically linked PID 1 produces no output
 at all, which is indistinguishable from a kernel that never started.
+
+- **2026-11-03, JOURNAL.md stopped at 2026-10-25** and is the archive before
+  that date. The why of a change is in its commit; the why of a rule is here
+  under its heading; a finding that produced no commit (a measurement, a
+  cause ruled out, a hardware fact) goes here too, as a dated bullet under the
+  matching heading. Those are the "do not look there again" facts.

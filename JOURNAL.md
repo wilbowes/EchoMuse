@@ -5579,3 +5579,9 @@ root-owned control socket left by emOS's supplicant in
 `/data/misc/wifi/sockets/`. Removing it alone did not bring WiFi back; the
 reboot after it did, so the socket and the WiFi chip's state after a warm
 reboot are both still in the frame.
+
+---
+
+**Archived 2026-11-03.** No entries after 2026-10-25. Findings since then
+are in `docs/history/` as dated bullets under the heading they belong to; the
+why of each change is in its commit.
