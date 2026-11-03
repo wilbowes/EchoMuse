@@ -3047,6 +3047,9 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown",
                         await device.mic_start_turn()
                     else:
                         await device.mic_start()
+                    # Wake sound (#1095): the mic is open for an answer, with no wake word said.
+                    if getattr(device, "wake_sound", False) and device.wake_cue_capable:
+                        await device.play_cue("wake")
                     # Fresh stream starts with the VAD gate closed — the
                     # user must speak again from zero, same onset cost
                     # as any post-mic_stop restart. Acceptable for v1 of
