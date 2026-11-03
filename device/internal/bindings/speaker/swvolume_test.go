@@ -15,7 +15,7 @@ func TestVolumeGainIsTheCodecLaw(t *testing.T) {
 	}{
 		{127, 1.0},
 		{87, 0.1},  // -20dB
-		{47, 0.01}, // -40dB, the button floor
+		{47, 0.01}, // -40dB
 		{175, 1.0}, // never above unity: the DAC saturated there
 		{0, 0},     // HA's 0.0 is silence
 		{-3, 0},

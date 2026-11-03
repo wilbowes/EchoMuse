@@ -46,3 +46,12 @@ func TestRadarBassFollowsVolumeDown(t *testing.T) {
 		t.Error("biscuit has no volume EQ; adding one changes its heard voicing")
 	}
 }
+
+// Radar's button floor (level 57, internal/server volume.go) is at -33dB,
+// ea.3's floor; the plain slope put it at -28dB, loud on 035T.
+func TestRadarButtonFloor(t *testing.T) {
+	v := radarVoicing
+	if got := float64(57-127)*v.DbPerLevel + v.CeilingDb; math.Abs(got+33) > 1e-9 {
+		t.Errorf("radar floor %v dB, want -33", got)
+	}
+}

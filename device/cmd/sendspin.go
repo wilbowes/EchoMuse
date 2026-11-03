@@ -11,6 +11,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/firewall"
 	"github.com/wilbowes/EchoMuse/internal/sendspin"
+	"github.com/wilbowes/EchoMuse/internal/server"
 	"github.com/wilbowes/EchoMuse/pkg/board"
 )
 
@@ -39,18 +40,19 @@ func sendspinPlayer() *sendspin.Client {
 }
 
 // deviceVolume is the Echo's one volume: the level HA and the buttons move,
-// 0..127 with unity at 127. Server volume is mapped onto it with the same
-// proportion as HA's percentage (controller em_volume), so the same volume
-// reads the same number in Music Assistant and in Home Assistant.
+// 0..127 with unity at 127. Server volume is mapped onto it with the same law
+// as HA's percentage (server.PercentToLevel, controller em_volume), so the
+// same volume reads the same number in Music Assistant and in Home Assistant.
 type deviceVolume interface {
 	VolumeLevel() int
 	SetVolume(level int)
 }
 
-const volumeMax = 127
+// ssVolume converts Sendspin's percentage, echoing a server's own command.
+var ssVolume server.PercentEcho
 
-func levelToPct(level int) int { return sendspin.LevelToPercent(level, volumeMax) }
-func pctToLevel(pct int) int   { return sendspin.PercentToLevel(pct, volumeMax) }
+func pctToLevel(pct int) int   { return ssVolume.ToLevel(pct) }
+func levelToPct(level int) int { return ssVolume.ToPercent(level) }
 
 // sendspinVolumeChanged tells the player the device's volume moved, by any
 // route. Wired into the volume change callback.

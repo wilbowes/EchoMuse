@@ -125,7 +125,7 @@ func qRender(t *testing.T, sp board.Speaker, plugged bool, level int, x []float6
 
 	var vol softVolume
 	if stock {
-		vol.set(StockVolumeGain(level, sp.Voicing.CeilingDb))
+		vol.set(StockVolumeGain(level, sp.Voicing))
 	} else {
 		vol.set(VolumeGain(level))
 	}
