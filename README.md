@@ -12,6 +12,8 @@
 [Discord](https://discord.gg/Bb5GfuV7Sa) ·
 [r/echomuse](https://www.reddit.com/r/echomuse/)**
 
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-echomuse-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/echomuse)
+
 <!-- Demo video goes here. -->
 
 EchoMuse makes a second-hand Echo Dot a voice satellite for
