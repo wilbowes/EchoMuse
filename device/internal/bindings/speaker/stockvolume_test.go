@@ -66,11 +66,24 @@ func TestResponseCapNeverCuts(t *testing.T) {
 // the level the music will play at.
 func TestCueFollowsTheLawInForce(t *testing.T) {
 	for _, level := range []int{1, 47, 89, 127} {
-		if got, want := CueVolumeGain(level, board.BiscuitVoicing()), StockVolumeGain(level, ceiling); got != want {
+		if got, want := CueVolumeGain(level, board.BiscuitVoicing()), math.Min(StockVolumeGain(level, ceiling), 1); got != want {
 			t.Errorf("stock, level %d: %v, want %v", level, got, want)
 		}
 		if got, want := CueVolumeGain(level, nil), VolumeGain(level); got != want {
 			t.Errorf("plain, level %d: %v, want %v", level, got, want)
+		}
+	}
+}
+
+// A board's CueTrimDb lowers the tone at every level, the top included.
+func TestCueTrim(t *testing.T) {
+	v := *board.BiscuitVoicing()
+	v.CueTrimDb = -6
+	trim := math.Pow(10, -6.0/20)
+	for _, level := range []int{57, 89, 127} {
+		want := math.Min(StockVolumeGain(level, v.CeilingDb), 1) * trim
+		if got := CueVolumeGain(level, &v); math.Abs(got-want) > 1e-12 {
+			t.Errorf("level %d: %v, want %v", level, got, want)
 		}
 	}
 }

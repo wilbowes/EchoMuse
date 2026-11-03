@@ -143,10 +143,11 @@ func StockVolumeGain(level int, ceilingDb float64) float64 {
 // CueVolumeGain is the volume tone's gain for a level under the law in force
 // (v is the voicing when the stock-sound law is, else nil), so the tone tracks
 // what the music does. The cue is mixed after the chain, so VolumeCue caps it
-// at unity: past the ceiling's unity point the tone stops rising.
+// at unity: past the ceiling's unity point the tone stops rising. The
+// board's CueTrimDb is applied after the cap, so the trim holds at the top.
 func CueVolumeGain(level int, v *board.Voicing) float64 {
 	if v != nil {
-		return StockVolumeGain(level, v.CeilingDb)
+		return math.Min(StockVolumeGain(level, v.CeilingDb), 1) * math.Pow(10, v.CueTrimDb/20)
 	}
 	return VolumeGain(level)
 }
