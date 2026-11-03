@@ -1,5 +1,32 @@
 # Changelog
 
+## 2.27.0-ea.4 (Early Access)
+
+Volume steps like stock, and Home Assistant's 1% is just audible. Pair with firmware v2.19.0-ea.4 and emOS emos-v0.11-ea.2, which this controller offers.
+
+### Improved
+
+- **The volume buttons step 1 dB through 36 levels, and the ring shows all of them,** with three brightnesses for each of the 12 LEDs, as stock does. Before, each press was 4 dB. Needs firmware v2.19.0-ea.4; older firmware keeps its old steps.
+- **Home Assistant's 1% is now just audible.** 0% is silent, 1% is the quietest button step and 100% the loudest; before, the bottom 37% was near-silent. A percentage from HA or Sendspin lands on a button step, so the ring matches. **An HA automation that sets a volume, say 30%, will play louder than before.**
+- On the Echo gen 2 (radar), the quietest step is set lower to suit its bigger speaker, and the volume button tone is 6 dB lower, where its woofer made it stand out above the music.
+
+### Fixed
+
+- **The wizard's Build emOS step said no emOS release existed.** The controller read only the 10 newest GitHub releases, and Early Access releases had pushed the latest emOS release off that list. It now reads 100 (#1090). Also in GA 2.26.4.
+
+### Known issues
+
+- A command spoken straight on from the wake word can lose its first word (#987, #1070).
+- Both 3.5 mm jack channels can be silent on emOS (#999).
+- The emOS update refuses an amonet 1 Echo that boots from slot B (#973).
+- An Echo that restarts and rejoins a playing Sendspin group can fall out of sync until the next track.
+- A fleet setting saved while an Echo has its own value for it changes nothing on that Echo, and the fleet page does not say so.
+- A turn is occasionally logged as empty although its recording holds clear speech (#815).
+
+### Thanks
+
+@alexwoolfson and @merlinschumacher (#1090).
+
 ## 2.27.0-ea.3 (Early Access)
 
 The Echo gen 2 sounds like stock, Echoes find their way back after a network outage, and emOS gets its DNS from your router. Pair with firmware v2.19.0-ea.3 and emOS emos-v0.11-ea.2, which this controller offers.
