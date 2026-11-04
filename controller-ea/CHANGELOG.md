@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.27.0-ea.5 (Early Access)
+
+A follow-up question now plays the wake sound, and a firmware install sends the release you just saw. Controller only: pair with firmware v2.19.0-ea.4 and emOS emos-v0.11-ea.2, which this controller offers.
+
+### Improved
+
+- **When Home Assistant asks a follow-up question, the Echo plays the wake sound as it opens the mic for your answer,** so you can tell it is waiting. It follows the same "Wake sound" setting and needs firmware that can play it (#1095).
+
+### Fixed
+
+- **A firmware install straight after a controller update could send the previous firmware.** Installs now ask GitHub for the latest release first, and use the controller's cached list only if GitHub cannot answer (#1098).
+- The setup wizard no longer says on-device wake word scoring is off by default. It is on by default; the wizard now says where the setting is (#1101).
+
+### Known issues
+
+- A command spoken straight on from the wake word can lose its first word (#987, #1070).
+- Both 3.5 mm jack channels can be silent on emOS (#999).
+- The emOS update refuses an amonet 1 Echo that boots from slot B (#973).
+- An Echo that restarts and rejoins a playing Sendspin group can fall out of sync until the next track.
+- A fleet setting saved while an Echo has its own value for it changes nothing on that Echo, and the fleet page does not say so.
+- A turn is occasionally logged as empty although its recording holds clear speech (#815).
+
+### Thanks
+
+@LukasScarfe (#1095).
+
 ## 2.27.0-ea.4 (Early Access)
 
 Volume steps like stock, and Home Assistant's 1% is just audible. Pair with firmware v2.19.0-ea.4 and emOS emos-v0.11-ea.2, which this controller offers.
