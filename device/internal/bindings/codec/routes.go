@@ -16,16 +16,15 @@
 // a device with no Android, against a stock FireOS Dot running the same
 // firmware:
 //
-//	        stock   ours     meaning
-//	0012      85      05     NADC clock divider, bit7 = powered
-//	0013      83      03     MADC clock divider
-//	0026      11      00     ADC flags: left+right converting
-//	003f      d6      16     DAC data path, bit7/6 = left/right powered
-//	0089      30      00     output driver power
-//	008c/8d   08      00     HPL/HPR output mixer routing
+//	          stock   ours     meaning
+//	  0012      85      05     NADC clock divider, bit7 = powered
+//	  0013      83      03     MADC clock divider
+//	  0026      11      00     ADC flags: left+right converting
+//	  003f      d6      16     DAC data path, bit7/6 = left/right powered
+//	  0089      30      00     output driver power
+//	  008c/8d   08      00     HPL/HPR output mixer routing
 //
-// Writing the board's routes (pkg/board) took every one of those to stock's
-// exact value.
+// Applying the routes below took every one of those to stock's exact value.
 //
 // This is written unconditionally, on FireOS as well, and that is deliberate:
 // the values are the ones the HAL would set anyway, so a device that still has
@@ -39,49 +38,75 @@ import (
 	"sync"
 
 	"github.com/wilbowes/EchoMuse/internal/bindings/mixer"
-	"github.com/wilbowes/EchoMuse/pkg/board"
 )
+
+// Write sets one mixer control, found by name.
+type Write struct {
+	Name  string
+	Value string
+}
+
+// The two playback routes in Routes, named so a caller that needs to READ them
+// back has one copy of the string. A DAPM route left open is silence rather
+// than an error — the DAC powers down and playback still reports a perfectly
+// clean stream — so its state is worth reporting (#587, #621).
+const (
+	HPLDacSwitch = "HPL Output Mixer L_DAC Switch"
+	HPRDacSwitch = "HPR Output Mixer R_DAC Switch"
+)
+
+// Routes is every DAPM switch that must be closed for audio to flow.
+//
+// By NAME, never by control id (#546). These were ids until 2026-09-17, and on
+// the FireOS 6 kernel every one of them named a different control: the eight
+// capture writes closed the single-ended IN2 inputs, and the two playback
+// writes hit input-mixer switches. Each was a valid write, so nothing failed.
+//
+// CAPTURE: the microphone array reaches the codec on the DIFFERENTIAL inputs,
+// not the single-ended ones. Nothing routed DIF1 into any of the four ADCs, so
+// all four sat powered down. Note the neighbouring "ADC_x DIF1_L/R Input Gain"
+// controls are a DIFFERENT thing in the same register block and were the first
+// thing tried; changing them does nothing, and they are not listed here.
+//
+// PLAYBACK: the DAC was not connected to the output mixer, so it powered down
+// with the firmware streaming correctly into it.
+var Routes = []Write{
+	{"ADC_D Right Ip Select ADC_D DIF1_R switch", "1"},
+	{"ADC_D Left Ip Select ADC_D DIF1_L switch", "1"},
+	{"ADC_C Right Ip Select ADC_C DIF1_R switch", "1"},
+	{"ADC_C Left Ip Select ADC_C DIF1_L switch", "1"},
+	{"ADC_B Right Ip Select ADC_B DIF1_R switch", "1"},
+	{"ADC_B Left Ip Select ADC_B DIF1_L switch", "1"},
+	{"ADC_A Right Ip Select ADC_A DIF1_R switch", "1"},
+	{"ADC_A Left Ip Select ADC_A DIF1_L switch", "1"},
+
+	{HPRDacSwitch, "1"},
+	{HPLDacSwitch, "1"},
+}
 
 var once sync.Once
 
-// EnsureRoutes writes the board's routes, then its input gains, exactly once
-// per process.
+// EnsureRoutes applies Routes exactly once per process.
 //
 // Called from both the microphone and the speaker Init, because either may run
 // first and each needs the routes closed BEFORE it opens its PCM — DAPM decides
 // what to power at stream open.
+//
+// A control that does not resolve is now a loud failure rather than a write to
+// whatever happens to hold that id on this kernel.
 func EnsureRoutes() {
 	once.Do(func() {
-		l := board.CurrentLayout()
-		apply(l.Routes, l.InputGains)
-	})
-}
-
-// apply writes each table and counts what failed. A control that does not
-// resolve is a loud failure rather than a write to whatever holds that id on
-// this kernel (#546).
-func apply(routes, gains []board.Ctl) {
-	if failed := write(routes); failed > 0 {
-		log.Printf("[codec] %d of %d DAPM routes failed — audio may be silent",
-			failed, len(routes))
-	} else {
-		log.Printf("[codec] %d DAPM routes closed", len(routes))
-	}
-	// Separately counted: a route that fails is silence, an input gain that
-	// fails is a microphone at the wrong level, and the log should say which.
-	if failed := write(gains); failed > 0 {
-		log.Printf("[codec] %d of %d input gains failed — microphones may read at the wrong level",
-			failed, len(gains))
-	} else {
-		log.Printf("[codec] %d input gains set", len(gains))
-	}
-}
-
-func write(ctls []board.Ctl) (failed int) {
-	for _, c := range ctls {
-		if err := mixer.Set(c.Name, c.Values...); err != nil {
-			failed++
+		var failed int
+		for _, w := range Routes {
+			if err := mixer.Set(w.Name, w.Value); err != nil {
+				failed++
+			}
 		}
-	}
-	return failed
+		if failed > 0 {
+			log.Printf("[codec] %d of %d DAPM routes failed — audio may be silent",
+				failed, len(Routes))
+		} else {
+			log.Printf("[codec] %d DAPM routes closed", len(Routes))
+		}
+	})
 }

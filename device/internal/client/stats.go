@@ -74,6 +74,15 @@ type DeviceStats struct {
 	// rather than per tick: wear moves in 10% steps over years, and a device
 	// can run for months without the reboot that the register copy needs.
 	Emmc interface{} `json:"emmc,omitempty"`
+	// Jack is the plug position and the codec state it implies, read back off
+	// the hardware (speaker.JackReport), nil only on firmware too old to say.
+	// Every field INSIDE it is nullable for the same reason as AmbientLux
+	// above: 0 is a real reading — the jack gain's floor is 0, and it is
+	// exactly the fault worth seeing — so absent must not mean zero.
+	//
+	// Typed as an interface, like Ble/OwwShadow/Sendspin above, so this
+	// package takes no dependency on the driver that produces it.
+	Jack interface{} `json:"jack"`
 	// The base OS deliberately does NOT ride this message — it is a static
 	// property of the boot and goes out once, on registration (control.go).
 	// It was here first and that was the bug: the payload reconcile asks for
@@ -113,5 +122,6 @@ func (c *ControlClient) SendStats(s DeviceStats) {
 		"aecRef":           s.AecRef,
 		"sendspin":         s.Sendspin,
 		"emmc":             s.Emmc,
+		"jack":             s.Jack,
 	})
 }

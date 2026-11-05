@@ -4613,6 +4613,11 @@ async def _on_stats(device: Device, msg: dict) -> None:
         # allowlist: it is a state, not a metric, and
         # the hourly rollup averages numbers.
         "aecRef":        msg.get("aecRef"),
+        # The 3.5mm jack's plug position and the codec controls that follow
+        # from it, read back off the hardware (#621). Also a state, not a
+        # metric, and absent entirely from firmware too old to report it — so
+        # a bundle can say the device had none.
+        "jack":          msg.get("jack"),
     }
     # Shadow summary → hourly rollup. Present only while the
     # device is scoring, so its presence is also the "was it

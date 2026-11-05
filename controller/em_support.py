@@ -133,6 +133,11 @@ _STATS_FIELDS = (
     "wifiRssi", "linkSpeedMbps", "wifiFreqMhz", "txBytes", "rxBytes",
     "cpuTempC", "maxTempC", "coresOnline", "coresTotal", "thermalCoreLimit",
     "ambientLux", "owwShadow",
+    # jack is the 3.5mm plug position and the codec controls that follow from
+    # it (#621), read back off the device's hardware. A state, not a metric,
+    # and every field inside it nullable — so what a bundle needs from it is
+    # there being, not its shape.
+    "jack",
 )
 
 _COUNTER_FIELDS = (

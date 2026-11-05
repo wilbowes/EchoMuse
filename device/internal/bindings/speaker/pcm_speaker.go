@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/wilbowes/EchoMuse/internal/bindings/codec"
+	"github.com/wilbowes/EchoMuse/internal/bindings/jack"
 	"github.com/wilbowes/EchoMuse/internal/bindings/mixer"
 	"github.com/wilbowes/EchoMuse/internal/outchain"
 	"github.com/wilbowes/EchoMuse/pkg/board"
@@ -92,7 +93,14 @@ type PcmSpeaker struct {
 	jackMu       sync.Mutex
 	jackInserted bool
 	jackKnown    bool
-	chainParams  outchain.Params
+	// jackDriftReapplies counts the control corrections the reconcile loop has
+	// had to make since the process started. Atomic because the stats tick
+	// reads it from another goroutine. Reported rather than only logged
+	// because it separates "the HAL is fighting us" from "nothing is
+	// happening" — identical from the outside, opposite investigations — and a
+	// climbing count is the evidence, which one log line cannot show.
+	jackDriftReapplies atomic.Int64
+	chainParams        outchain.Params
 	// deadCh is closed by silenceLoop on any exit so a pump call can return
 	// an error rather than block indefinitely waiting for a dead consumer.
 	deadCh chan struct{}
@@ -531,21 +539,53 @@ func (p *PcmSpeaker) ReconcileJackRouting() int {
 func (p *PcmSpeaker) WatchJackRouting(ctx context.Context) {
 	t := time.NewTicker(JackReconcileInterval)
 	defer t.Stop()
-	var corrected int
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 			if n := p.ReconcileJackRouting(); n > 0 {
-				corrected += n
+				total := p.jackDriftReapplies.Add(int64(n))
 				// Logged per event rather than counted silently: the RATE is
 				// the diagnostic, and it is the only place the HAL's
-				// interference is visible at all.
-				log.Printf("[speaker] jack routing drifted — %d control(s) rewritten (total %d)", n, corrected)
+				// interference is visible at all. The running total also
+				// rides the stats report, because a single event says the HAL
+				// is awake and only the trend says it is winning.
+				log.Printf("[speaker] jack routing drifted — %d control(s) rewritten (total %d)", n, total)
 			}
 		}
 	}
+}
+
+// JackState reads the plug position and the controls that follow from it back
+// off the hardware, for the periodic stats report (#621).
+//
+// A READ, not the value this firmware last wrote: Android's audio HAL rewrites
+// the codec underneath us, so a report of our own intentions would describe a
+// state the codec left minutes ago.
+//
+// Nil is never returned: a device with no accdet switch and a device whose
+// mixer cannot be read both report an object whose fields are absent, which is
+// the distinction the support bundle needs. A device that cannot answer at all
+// is not one reading "nothing plugged in".
+func (p *PcmSpeaker) JackState() *JackReport {
+	detect, detectOK := jack.State()
+	current := map[string]string{}
+	spec := p.out.spec.Jack
+	for _, ctl := range jackReadBack(namesOf(spec.Insert), namesOf(spec.Remove)) {
+		if v, err := mixer.Get(ctl); err == nil {
+			current[ctl] = v
+		}
+	}
+	return jackReport(detect, detectOK, current, p.jackDriftReapplies.Load())
+}
+
+func namesOf(ctls []board.Ctl) []string {
+	names := make([]string, len(ctls))
+	for i, c := range ctls {
+		names[i] = c.Name
+	}
+	return names
 }
 
 // silenceLoop is the ALSA write path: every period, take what each plane has
