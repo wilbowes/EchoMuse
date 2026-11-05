@@ -143,6 +143,7 @@ jobs:
           node controller/tests/kernel_label.test.mjs
           node controller/tests/wifi_ssid.test.mjs
           node controller/tests/wake_sensitivity.test.mjs
+          node controller/tests/wake_keep.test.mjs
           node controller/tests/login_lcd.test.mjs
           node controller/tests/delete_ha_warning.test.mjs
       # The one dashboard test that needs a parser: esbuild compiles a name

@@ -1124,16 +1124,27 @@ function turnSegments(t) {
   return { listen, transcribe, respond, shown: listen + transcribe + respond };
 }
 
-function WakeSampleReview({ deviceId, isAdmin }) {
+// Mirrors em_db's wakeClipKeep clamp and default, so the panel's title and
+// page size never claim a retention the API would refuse.
+const wakeKeepFor = v => {
+  const n = Number(v);
+  return v == null || !Number.isFinite(n)
+    ? 50
+    : Math.max(10, Math.min(500, Math.trunc(n)));
+};
+const wakeKeepTitle = v => `Wake-word samples · newest ${wakeKeepFor(v)}`;
+
+function WakeSampleReview({ deviceId, isAdmin, wakeClipKeep }) {
   const [samples, setSamples] = useState([]);
   const [playing, setPlaying] = useState(null);
   const audioRef = useRef(null);
   const urlsRef = useRef({});
   const mono = "var(--font-mono)";
+  const keep = wakeKeepFor(wakeClipKeep);
 
   const load = async () => {
     if (!isAdmin) return;
-    try { setSamples(await API.get(`/api/devices/${deviceId}/wake-samples?limit=50`) || []); }
+    try { setSamples(await API.get(`/api/devices/${deviceId}/wake-samples?limit=${keep}`) || []); }
     catch {}
   };
   useEffect(() => {
@@ -1145,7 +1156,7 @@ function WakeSampleReview({ deviceId, isAdmin }) {
       Object.values(urlsRef.current).forEach(URL.revokeObjectURL);
       urlsRef.current = {};
     };
-  }, [deviceId, isAdmin]);
+  }, [deviceId, isAdmin, keep]);
 
   const sampleUrl = async sample => {
     if (urlsRef.current[sample.id]) return urlsRef.current[sample.id];
@@ -1191,7 +1202,7 @@ function WakeSampleReview({ deviceId, isAdmin }) {
 
   if (!isAdmin || !samples.length) return null;
   return <div style={{ marginTop: 'var(--space-8)', borderTop: '1px solid var(--track)', paddingTop: 'var(--space-6)' }}>
-    <div className="em-label" style={{ marginBottom: 'var(--space-4)' }}>Wake-word samples · newest 50</div>
+    <div className="em-label" style={{ marginBottom: 'var(--space-4)' }}>{wakeKeepTitle(wakeClipKeep)}</div>
     <div style={{ maxHeight: 220, overflowY: 'auto' }}>
       {samples.map(sample => <div key={sample.id} style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-4)', padding: 'var(--space-2) var(--space-1)', borderBottom: '1px solid var(--hairline)', fontFamily: mono, fontSize: 'var(--fs-sm)' }}>
         <span style={{ color: 'var(--muted)', minWidth: '16ch', flexShrink: 0, whiteSpace: 'nowrap' }}>{new Date(sample.ts * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
@@ -1208,7 +1219,7 @@ function WakeSampleReview({ deviceId, isAdmin }) {
   </div>;
 }
 
-function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMisses, stateLabel, stateColor, isAdmin }) {
+function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMisses, stateLabel, stateColor, isAdmin, wakeClipKeep }) {
   const [hover, setHover] = useState(null); // index into `recent`
   const mono = "var(--font-mono)";
 
@@ -1382,7 +1393,7 @@ function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMis
           })()}
         </div>
       )}
-      <WakeSampleReview deviceId={deviceId} isAdmin={isAdmin}/>
+      <WakeSampleReview deviceId={deviceId} isAdmin={isAdmin} wakeClipKeep={wakeClipKeep}/>
     </div>
   );
 }
@@ -2406,6 +2417,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     stateLabel={state.label.toUpperCase()}
                     stateColor={state.lcd}
                     isAdmin={isAdmin}
+                    wakeClipKeep={cfgEff.wakeClipKeep}
                   />
                 </Panel>
               </div>
@@ -9590,7 +9602,7 @@ const STAGE_MONO = "var(--font-mono)";
 // be silently wrong.
 const CONFIG_SECTIONS = {
   "playback": ["eqBands", "eqLoudness", "duckDb", "responseLevel", "limiterEnabled", "limiterThreshold", "limiterRelease", "bassGuardEnabled", "bassGuardDb", "streamReply", "volumeButtonSound"],
-  "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice", "wakeSound", "wakeSoundLevel", "wakeClipCapture", "wakeClipMinScore"],
+  "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice", "wakeSound", "wakeSoundLevel", "wakeClipCapture", "wakeClipMinScore", "wakeClipKeep"],
   "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "wakeMic", "aecEnabled", "aecDelayMs", "aecTailMs", "aecRefSource", "nsAsr", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "remoteVolumeArc", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
   "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs", "consolePassword", "consoleTimeoutMin", "controllerEndpoints"],
@@ -10144,6 +10156,9 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
               <Slider label="Minimum sample score" sub="lower catches more near-misses, but more ordinary speech too"
                 disabled={onDeviceMode(config) !== 'off'}
                 value={config.wakeClipMinScore ?? 0.20} min={0.05} max={0.95} step={0.01} formatValue={v => v.toFixed(2)} onChange={v => set('wakeClipMinScore', v)}/>
+              <Slider label="Samples kept" sub="clips retained per Echo before the oldest is pruned"
+                disabled={onDeviceMode(config) !== 'off'}
+                value={wakeKeepFor(config.wakeClipKeep)} min={10} max={500} step={10} formatValue={v => `${v} clips`} onChange={v => set('wakeClipKeep', v)}/>
               {/* Accessibility first: the ring is the only other sign the Echo
                   is listening. Disabled with the reason on firmware that cannot
                   play it, never a switch that saves and stays silent. */}

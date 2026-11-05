@@ -136,7 +136,7 @@ def _slug(text: str) -> str:
 async def _get_wake_samples(request: web.Request) -> web.Response:
     device_id = request.match_info["id"]
     try:
-        limit = min(max(int(request.query.get("limit", 50)), 1), 100)
+        limit = min(max(int(request.query.get("limit", 50)), 1), db.WAKE_CLIP_KEEP_MAX)
     except ValueError:
         return em_http.error("bad_request", "limit must be an integer", 400)
     loop = asyncio.get_event_loop()
@@ -185,7 +185,8 @@ async def _get_wake_sample_audio(request: web.Request) -> web.Response:
     except ValueError:
         return em_http.error("bad_request", "sample must be an integer", 400)
     loop = asyncio.get_event_loop()
-    rows = await loop.run_in_executor(None, db.get_wake_samples, device_id, 100)
+    rows = await loop.run_in_executor(None, db.get_wake_samples, device_id,
+                                      db.WAKE_CLIP_KEEP_MAX)
     row = next((item for item in rows if item["id"] == sample_id), None)
     path = em_wake_samples.resolve(device_id, row["audio_file"]) if row else None
     if path is None:

@@ -33,9 +33,10 @@ TRIGGER_POST_ROLL_SECONDS = 0
 TRIGGER_TAIL_TRIM_SECONDS = 0.2
 TRIGGER_TAIL_TRIM_BYTES = int(TRIGGER_TAIL_TRIM_SECONDS * SAMPLE_RATE * SAMPLE_WIDTH)
 MAX_CLIP_BYTES = 5 * SAMPLE_RATE * SAMPLE_WIDTH
-KEEP_PER_DEVICE = 50
+# Default retention; a device's wakeClipKeep (10-500) decides the real cap.
+DEFAULT_KEEP_PER_DEVICE = 50
 SUBDIR = "wake_samples"
-# Labeling a sample also copies it here, permanently and uncapped - the 50-per-device
+# Labeling a sample also copies it here, permanently and uncapped - the per-device
 # cap above still applies to the reviewable copy, so a label is what survives it.
 ARCHIVE_SUBDIR = "wake_samples_archive"
 ARCHIVE_LABELS = ("wake", "not_wake", "uncertain")

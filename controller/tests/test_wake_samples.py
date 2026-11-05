@@ -137,14 +137,14 @@ def test_sample_labels_are_scoped_and_validated(fresh_db):
 
 
 def test_retention_is_bounded_per_device(fresh_db):
-    for i in range(samples.KEEP_PER_DEVICE + 3):
+    for i in range(samples.DEFAULT_KEEP_PER_DEVICE + 3):
         db.insert_wake_sample("dev1", {
             "ts": i, "audio_file": samples.filename("dev1"), "kind": "candidate",
             "score": .3, "threshold": .5,
         })
     rows = db.get_wake_samples("dev1", 100)
-    assert len(rows) == samples.KEEP_PER_DEVICE
-    assert rows[0]["ts"] == samples.KEEP_PER_DEVICE + 2
+    assert len(rows) == samples.DEFAULT_KEEP_PER_DEVICE
+    assert rows[0]["ts"] == samples.DEFAULT_KEEP_PER_DEVICE + 2
 
 
 def test_retention_unlinks_audio_while_its_row_still_exists(fresh_db, monkeypatch):
@@ -153,7 +153,7 @@ def test_retention_unlinks_audio_while_its_row_still_exists(fresh_db, monkeypatc
     db.insert_wake_sample("dev1", {
         "ts": 0, "audio_file": first, "kind": "candidate",
     })
-    for i in range(1, samples.KEEP_PER_DEVICE):
+    for i in range(1, samples.DEFAULT_KEEP_PER_DEVICE):
         db.insert_wake_sample("dev1", {
             "ts": i, "audio_file": samples.filename("dev1"), "kind": "candidate",
         })
@@ -171,18 +171,18 @@ def test_retention_unlinks_audio_while_its_row_still_exists(fresh_db, monkeypatc
 
     monkeypatch.setattr(samples, "unlink", check_then_unlink)
     db.insert_wake_sample("dev1", {
-        "ts": samples.KEEP_PER_DEVICE, "audio_file": samples.filename("dev1"),
+        "ts": samples.DEFAULT_KEEP_PER_DEVICE, "audio_file": samples.filename("dev1"),
         "kind": "candidate",
     })
 
     assert observed == [True]
     assert not samples.resolve("dev1", first)
-    assert len(db.get_wake_samples("dev1", 100)) == samples.KEEP_PER_DEVICE
+    assert len(db.get_wake_samples("dev1", 100)) == samples.DEFAULT_KEEP_PER_DEVICE
 
 
 def test_retention_keeps_metadata_when_audio_cannot_be_unlinked(fresh_db, monkeypatch):
     names = []
-    for i in range(samples.KEEP_PER_DEVICE):
+    for i in range(samples.DEFAULT_KEEP_PER_DEVICE):
         name = samples.filename("dev1")
         names.append(name)
         db.insert_wake_sample("dev1", {
@@ -192,12 +192,12 @@ def test_retention_keeps_metadata_when_audio_cannot_be_unlinked(fresh_db, monkey
 
     with pytest.raises(OSError, match="could not remove expired wake sample"):
         db.insert_wake_sample("dev1", {
-            "ts": samples.KEEP_PER_DEVICE,
+            "ts": samples.DEFAULT_KEEP_PER_DEVICE,
             "audio_file": samples.filename("dev1"), "kind": "candidate",
         })
 
     rows = db.get_wake_samples("dev1", 100)
-    assert len(rows) == samples.KEEP_PER_DEVICE
+    assert len(rows) == samples.DEFAULT_KEEP_PER_DEVICE
     assert {row["audio_file"] for row in rows} == set(names)
 
 
@@ -264,7 +264,7 @@ def test_archive_survives_retention_pruning_of_the_original(fresh_db):
     assert db.set_wake_sample_label("dev1", row_id, "not_wake")
     archived = samples.archive_dir("not_wake") / name
 
-    for i in range(1, samples.KEEP_PER_DEVICE + 2):
+    for i in range(1, samples.DEFAULT_KEEP_PER_DEVICE + 2):
         db.insert_wake_sample("dev1", {
             "ts": i, "audio_file": samples.filename("dev1"), "kind": "candidate",
         })
