@@ -92,8 +92,8 @@ check("the TWRP version appears in the evidence",
 // Comments stripped first: a guard that greps for a call also finds the
 // comment explaining it, and passes on the prose.
 const code = src.split("\n").filter(l => !l.trim().startsWith("//")).join("\n");
-const connect = code.slice(code.indexOf("async function runConnectAndroid"));
-check("runConnectAndroid calls _unlockVerdict",
+const connect = code.slice(code.indexOf("async function runConnectDevice"));
+check("runConnectDevice calls _unlockVerdict",
   /_unlockVerdict\(\{\s*release:\s*effRelease/.test(connect));
 check("in recovery the release comes from /system, not TWRP's getprop",
   /effRelease\s*=\s*\(sys && sys\.release\)/.test(connect));

@@ -82,10 +82,13 @@ for (const m of ["DATA=", "LEFT=", "CACHE=", "_WIPECHK"]) {
 }
 check("runWipeData decides with _wipeVerdict", /_wipeVerdict\(probe\)/.test(runner));
 
-// ── It runs where it must: inside step 1, in the emOS flow only ──
+// ── It runs where it must: at the end of Connect to TWRP, in the emOS flow only ──
 // On FireOS 5 a data wipe takes f1r30s's state with it and the wizard does
-// not reinstall it, so the FireOS flow must never reach runWipeData.
-const calls = src.match(/runConnectTwrp\(\);\s*\n\s*if \(wipeData\) await runWipeData\(c\);/g) || [];
+// not reinstall it, so the FireOS flow must never reach runWipeData. The
+// identity gate comes first, so a registered Echo is refused before its /data
+// is gone.
+const calls = src.match(
+  /runConnectTwrp\(\);\s*\n\s*await runConnectDevice\(c\);\s*\n\s*if \(wipeData\) await runWipeData\(c\);/g) || [];
 check("exactly one flow runs the wipe straight after Connect to TWRP", calls.length === 1,
   `found ${calls.length}`);
 const emosSwitch = src.slice(src.indexOf("if (isEmos) switch (stepIdx)"),

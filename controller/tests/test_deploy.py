@@ -2508,16 +2508,20 @@ def test_the_emos_flow_drops_every_android_only_step():
     about to be replaced; Debloat's package list targets that same userspace
     and its service.d script lives in the image being overwritten.
 
+    Connect Device goes too (#454): it existed to identify the device under
+    Android and reboot it to recovery, and both work in TWRP, so the flow
+    opens there and step 0 runs the same identity gate.
+
     Patch Boot Image is the one that matters most: it is the most dangerous
     step in the wizard, because in the wrong mode it writes over the amonet
     unlock payload.
     """
     ids = set(_step_ids("_EMOS_STEPS"))
     for gone in ("patch_boot", "install_magisk", "preseed_db", "verify_root",
-                 "disable_alexa", "debloat"):
+                 "disable_alexa", "debloat", "connect_android"):
         assert gone not in ids, (
             f"'{gone}' is an Android-only step and must not be in the emOS flow")
-    assert len(ids) == 9, f"the emOS flow is nine steps, found {len(ids)}: {ids}"
+    assert len(ids) == 8, f"the emOS flow is eight steps, found {len(ids)}: {ids}"
 
 
 def test_the_emos_flow_escrows_before_it_flashes():
@@ -2556,7 +2560,7 @@ def test_the_fireos_flow_escrows_before_it_patches():
         assert at < writes[0], f"{marker} must come before the partition write"
 
     # And the restore is offered on the TWRP steps that follow the escrow.
-    assert "(isEmos ? (step === 6 || step === 7) : (step >= 2 && step <= 4))" in src, (
+    assert "(isEmos ? (step === 5 || step === 6) : (step >= 2 && step <= 4))" in src, (
         "the FireOS flow must offer the restore on a failed TWRP step")
 
 
@@ -3048,7 +3052,7 @@ def test_a_v2_device_is_refused_by_the_fireos_flow_and_accepted_by_emos():
     image that cannot boot.
     """
     jsx = (CONTROLLER / "static" / "dashboard.jsx").read_text()
-    fn = _js_fn_body(jsx, "runConnectAndroid")
+    fn = _js_fn_body(jsx, "runConnectDevice")
 
     assert "unlock.v2 && !isEmos" in fn, (
         "the hard refusal must be gated on NOT being the emOS flow — emOS "

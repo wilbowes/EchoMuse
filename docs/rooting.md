@@ -127,7 +127,7 @@ from a device already in that state; it does not run the exploit.
 
 **This matters before you start, because they are not equally reversible.**
 
-- **emOS** — the current default. Nine steps, all inside TWRP. It escrows your
+- **emOS** — the current default. Eight steps, all inside TWRP. It escrows your
   boot partition and hands you the file, then replaces that partition with an
   image built from your own kernel and device trees plus our init. The result
   runs no Amazon userspace at all. See [`emos/README.md`](../emos/README.md).
@@ -151,7 +151,7 @@ accepts it. From TWRP there are two ways back to FireOS:
   That erases `/data`, taking EchoMuse, its configuration and its credentials
   with it.
 
-Keep the escrowed boot image the emOS flow hands you at step 3. Writing it back
+Keep the escrowed boot image the emOS flow hands you at step 2. Writing it back
 takes about ten seconds, leaves `/data` alone, and is the undo for everything
 below.
 
