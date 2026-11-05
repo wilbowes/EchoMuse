@@ -697,11 +697,13 @@ grouped into `single`, `double` or `triple`. The cost is that *every* tap is
 delayed by this window, because a tap can only be called single once no
 second one follows.
 
-**Use 350ms.** Below about 300ms it fights both human timing — double taps
-land roughly 150–400ms apart — and network jitter, because the gap is
-currently measured when the taps reach the controller rather than on the
-device. On a busy or distant device you may need more. Zero disables
-grouping, and a tap fires `single` immediately.
+**Use 350ms.** On firmware announcing `button_gap` the gap between taps is
+measured on the Echo itself (#115), so the window compares against how fast
+you actually tapped; what it still has to cover is human timing — double taps
+land roughly 150–400ms apart. On older firmware the gap is measured when the
+taps reach the controller, where link jitter dominates, and 350ms is needed
+to be reliable at all. Zero disables grouping, and a tap fires `single`
+immediately.
 
 ### Turn processing
 

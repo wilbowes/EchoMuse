@@ -1060,6 +1060,12 @@ class Device:
         return "button_hold" in (self.capabilities or [])
 
     @property
+    def button_gap_capable(self) -> bool:
+        """Measures the press-to-press gap itself (#115), so the multi-tap
+        window compares against the user's timing rather than the link's."""
+        return "button_gap" in (self.capabilities or [])
+
+    @property
     def oww_shadow_capable(self) -> bool:
         """
         Whether this firmware can score the wake word on-device at all.
@@ -4269,10 +4275,19 @@ async def handle_button_event(device: Device, event: dict):
                 esphome.send_button_event(device.device_id, "single")
                 return
 
-            device.tap_burst.tap(window_ms)
+            # The device stamps each press and reports the gap to the
+            # previous one; arrival times carry the link's RTT jitter, which
+            # decides a 150ms burst on this fleet (#115). Only firmware
+            # announcing button_gap sends it — on anything else the coalescer
+            # falls back to timing the burst on arrival, as it always did.
+            gap_ms = event.get("gapMs")
+            if not device.button_gap_capable or not isinstance(gap_ms, int):
+                gap_ms = None
+            device.tap_burst.tap(window_ms, gap_ms)
             log.info(
                 f"[{device.device_id}] Dot button tap "
-                f"{device.tap_burst.count} in burst (window {window_ms}ms)"
+                f"{device.tap_burst.count} in burst (window {window_ms}ms, "
+                f"gap {gap_ms if gap_ms is not None else 'from arrival'})"
             )
             return
 

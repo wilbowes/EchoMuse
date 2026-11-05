@@ -108,6 +108,7 @@ func (e *EvDevController) SubscribeToButton(callback buttons.ButtonClickCallback
 				ClickType: k.Code,
 				Down:      k.Down,
 				HeldMs:    k.HeldMs,
+				GapMs:     k.GapMs,
 			})
 		}
 	}

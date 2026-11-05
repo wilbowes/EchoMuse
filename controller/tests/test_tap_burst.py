@@ -117,3 +117,55 @@ def test_burst_state_resets_between_bursts():
 
     run(main())
     assert sent == ["double", "single"]
+
+
+# ── The device's own gap (#115) ──────────────────────────────────────────────
+
+def test_a_device_gap_past_the_window_ends_the_burst_without_waiting():
+    """
+    Two taps the link delivered together but the user made half a second
+    apart are two singles. The first must fire as soon as the second arrives:
+    the device has already said the burst is over, and waiting for the
+    arrival clock is the jitter the device measured it out of.
+    """
+    sent, emit = _collector()
+
+    async def main():
+        c = TapCoalescer(emit)
+        c.tap(WINDOW_MS)
+        c.tap(WINDOW_MS, gap_ms=WINDOW_MS + 500)
+        assert sent == ["single"], "the first tap waited for a burst the device ended"
+        await asyncio.sleep(WINDOW_MS / 1000 * 2)
+
+    run(main())
+    assert sent == ["single", "single"]
+
+
+def test_a_device_gap_inside_the_window_joins_the_burst():
+    sent, emit = _collector()
+
+    async def main():
+        c = TapCoalescer(emit)
+        c.tap(WINDOW_MS)
+        c.tap(WINDOW_MS, gap_ms=WINDOW_MS)
+        await asyncio.sleep(WINDOW_MS / 1000 * 2)
+
+    run(main())
+    assert sent == ["double"]
+
+
+def test_without_a_device_gap_arrival_time_still_decides():
+    """
+    Firmware predating the capability sends no gap, so the same taps are
+    judged on arrival as they always were: delivered together is a double.
+    """
+    sent, emit = _collector()
+
+    async def main():
+        c = TapCoalescer(emit)
+        c.tap(WINDOW_MS)
+        c.tap(WINDOW_MS, gap_ms=None)
+        await asyncio.sleep(WINDOW_MS / 1000 * 2)
+
+    run(main())
+    assert sent == ["double"]

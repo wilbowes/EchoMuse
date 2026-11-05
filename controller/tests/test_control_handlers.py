@@ -194,8 +194,79 @@ def test_a_pair_request_is_shown_to_the_admin(monkeypatch):
     assert seen == [("dev1", "link")]
 
 
-# ── pong ────────────────────────────────────────────────────────────────────
+# ── The action button's multi-tap gap (#115) ────────────────────────────────
 
+WINDOW_MS = 60
+
+
+@pytest.fixture
+def button_events(monkeypatch):
+    sent = []
+
+    def fire(device_id, event_type):
+        sent.append(event_type)
+    monkeypatch.setattr(em_controller.esphome, "send_button_event", fire)
+    return sent
+
+
+def _tap_device(capabilities, window_ms=WINDOW_MS):
+    d = _device()
+    d.capabilities = capabilities
+    d.button_single_tap_event = True
+    d.button_multi_tap_ms = window_ms
+    return d
+
+
+async def _tap(device, gap_ms=None):
+    msg = {"type": "button", "clickType": 138, "down": False, "heldMs": 10}
+    if gap_ms is not None:
+        msg["gapMs"] = gap_ms
+    await em_controller.handle_button_event(device, msg)
+
+
+def test_the_device_gap_separates_taps_the_link_delivered_together(button_events):
+    """A jittery link can deliver a 500ms-apart pair 1ms apart. The firmware's
+    own gap says they were never a burst, so the first fires immediately."""
+    d = _tap_device(["mic", "button_hold", "button_gap"])
+
+    async def go():
+        await _tap(d)
+        await _tap(d, gap_ms=500)
+        assert button_events == ["single"], "the first tap waited for a burst the device ended"
+        await asyncio.sleep(WINDOW_MS / 1000 * 2)
+
+    _run(go())
+    assert button_events == ["single", "single"]
+
+
+def test_without_the_capability_the_arrival_clock_still_decides(button_events):
+    """Older firmware ignores gapMs because it never sends it — a device that
+    does send it without the capability is not trusted either, and falls back
+    to the arrival timing rather than to a wrong answer."""
+    d = _tap_device(["mic", "button_hold"])
+
+    async def go():
+        await _tap(d)
+        await _tap(d, gap_ms=500)
+        await asyncio.sleep(WINDOW_MS / 1000 * 2)
+
+    _run(go())
+    assert button_events == ["double"]
+
+
+def test_a_zero_window_still_fires_every_tap_on_its_own(button_events):
+    """0 disables grouping, and the device gap must not reintroduce it."""
+    d = _tap_device(["mic", "button_hold", "button_gap"], window_ms=0)
+
+    async def go():
+        await _tap(d)
+        await _tap(d, gap_ms=500)
+
+    _run(go())
+    assert button_events == ["single", "single"]
+
+
+# ── pong ────────────────────────────────────────────────────────────────────
 def test_a_solicited_pong_records_one_rtt_sample():
     async def go():
         d = _device()

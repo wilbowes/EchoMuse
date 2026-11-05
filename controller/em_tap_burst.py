@@ -12,6 +12,12 @@ once as single/double/triple. Anything beyond three reports as triple:
 HA only knows the event types advertised at connect time, so there is no
 "quadruple" to send.
 
+Where the firmware reports the press-to-press gap it measured itself
+(`gapMs`, #115), that decides whether a tap joins the burst. The window
+restart still happens on arrival and only answers "has the burst stopped",
+which is a question where being late costs nothing; arrival times are far
+too jittery on this fleet to decide whether two taps belong together.
+
 Pure asyncio, no imports from the rest of the controller — unit-tested in
 tests/test_tap_burst.py.
 """
@@ -52,8 +58,24 @@ class TapCoalescer:
         """Taps recorded so far in the current burst. For tests/diagnostics."""
         return self._count
 
-    def tap(self, window_ms: int) -> None:
-        """Record a tap and (re)start the window."""
+    def tap(self, window_ms: int, gap_ms: int | None = None) -> None:
+        """
+        Record a tap and (re)start the window.
+
+        `gap_ms` is the device's own press-to-press time where the firmware
+        reports it (#115). Arrival times carry the link's RTT jitter, which on
+        this fleet has run from 1ms to 9s, so a gap measured here is dominated
+        by the network rather than by how fast the user tapped. The device
+        value alone decides whether this tap joins the burst; the expiry timer
+        stays here, since it only answers "has the burst stopped".
+        """
+        if gap_ms is not None and self._count and gap_ms > window_ms:
+            # The burst ended inside the device's clock. Waiting for the
+            # controller's window would hold the first event past a gap the
+            # device already measured as too long.
+            if self._timer is not None:
+                self._timer.cancel()
+            self._fire()
         self._count += 1
         if self._timer is not None:
             self._timer.cancel()
@@ -68,8 +90,7 @@ class TapCoalescer:
             self._timer = None
         self._count = 0
 
-    async def _expire(self, window_ms: int) -> None:
-        await asyncio.sleep(window_ms / 1000)
+    def _fire(self) -> None:
         n = min(self._count, MAX_TAP_COUNT)
         # Reset before emitting: a tap landing during the send would
         # otherwise join a burst already reported and be lost.
@@ -78,3 +99,7 @@ class TapCoalescer:
         if not self._enabled():
             return
         self._emit(TAP_EVENT_NAMES[n])
+
+    async def _expire(self, window_ms: int) -> None:
+        await asyncio.sleep(window_ms / 1000)
+        self._fire()

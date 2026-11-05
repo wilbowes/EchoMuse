@@ -1333,8 +1333,14 @@ func capabilities() []string {
 	// "sendspin": this firmware can be a Sendspin player (internal/sendspin),
 	// switched by sendspinEnabled. Whether it is running, and paired, is the
 	// sendspin status, for the aec_hw_ref reason.
+	//
+	// "button_gap": this firmware measures the gap between two presses of the
+	// action button on its own monotonic clock and sends it as gapMs, so the
+	// controller decides a multi-tap burst by how fast the user tapped (#115)
+	// rather than by arrival times, which carry the link's RTT jitter.
+	// Without it the controller keeps timing taps on arrival.
 	caps := []string{"speaker", "leds", "led_anim", "buttons",
-		"oww_shadow", "oww_trigger", "button_hold", "audio_mix",
+		"oww_shadow", "oww_trigger", "button_hold", "button_gap", "audio_mix",
 		"aec_hw_ref", "oww_local_only", "output_chain", "wake_cue", "volume_cue", "remote_volume_arc",
 		"response_level", "wake_mic", "pairing",
 		"wake_word_off", "sendspin", "ble_connect"}
@@ -1351,7 +1357,7 @@ func capabilities() []string {
 }
 
 func (c *ControlClient) SendButton(event buttons.ButtonClickEvent) {
-	log.Printf("[control] SendButton: clickType=%d down=%v heldMs=%d muted=%v", event.ClickType, event.Down, event.HeldMs, event.Muted)
+	log.Printf("[control] SendButton: clickType=%d down=%v heldMs=%d gapMs=%d muted=%v", event.ClickType, event.Down, event.HeldMs, event.GapMs, event.Muted)
 	msg := map[string]interface{}{
 		"type":      "button",
 		"clickType": int(event.ClickType),
@@ -1368,6 +1374,13 @@ func (c *ControlClient) SendButton(event buttons.ButtonClickEvent) {
 		"button": map[string]string{
 			"type": string(event.Button.Type),
 		},
+	}
+	// The gap since the previous press of the same button, measured at the
+	// press (#115). Omitted when there was no earlier press, so the
+	// controller falls back to timing the burst on arrival — never merging
+	// taps it has not measured.
+	if event.GapMs > 0 {
+		msg["gapMs"] = event.GapMs
 	}
 	if err := c.writeJSON(msg); err != nil {
 		log.Printf("[control] SendButton failed: %v", err)

@@ -111,6 +111,7 @@ below (`capabilities()` in `control.go`):
 | `oww_shadow` | always | Can score the wake word locally and **report** (never act) |
 | `oww_trigger` | always | Can **act** on its own wake detection — kept separate from `oww_shadow` on purpose (see below) |
 | `button_hold` | always | Emits long-press (`heldMs`) |
+| `button_gap` | always | Measures the gap between two presses of the action button on its own monotonic clock and sends it as `gapMs` on the release, so multi-tap is decided by how fast the user tapped rather than by arrival times carrying the link's RTT jitter (#115). Without it the controller times the burst on arrival |
 | `audio_mix` | always | Holds music on its own frame types and mixes it under voice rather than pausing |
 | `oww_local_only` | always | Can listen **privately**: score its own wake word and send nothing until it fires. Whether it is doing so is `listen_state` — see [listening.md](listening.md) |
 | `aec_hw_ref` | always | Can take the AEC far-end reference from a playback loopback in the mic capture itself, and falls back to the software tap at the ALSA write when the board has none |
@@ -156,8 +157,8 @@ that only relays scoring announces `oww_shadow` alone.
 
 The controller reads capabilities via `@property` gates on the `Device` class
 (`controller/em_controller.py`): `led_anim_capable`, `audio_mix_capable`,
-`button_hold_capable`, `oww_shadow_capable`, `oww_trigger_capable`,
-`aec_hw_ref_capable`, plus direct
+`button_hold_capable`, `button_gap_capable`, `oww_shadow_capable`,
+`oww_trigger_capable`, `aec_hw_ref_capable`, plus direct
 membership checks for the base four (`mic`/`speaker`/`leds`/`buttons`). Every
 string the controller checks must be one the device can send, and every string
 the device sends must be one the controller understands — both directions are
@@ -174,7 +175,7 @@ absent optional fields take prior/default behaviour.
 | `type` | Payload | Meaning |
 |--------|---------|---------|
 | `register` | see above | Handshake, sent once at connect |
-| `button` | `clickType`, `down`, `heldMs`, `muted`, `button.type` | Button press/release; `heldMs` only if `button_hold` |
+| `button` | `clickType`, `down`, `heldMs`, `muted`, `button.type`, `gapMs` | Button press/release; `heldMs` only if `button_hold`; `gapMs` (time since the previous press of the same button) only on a release and only if `button_gap` |
 | `mute_state` | `muted` | Mute toggled (mute is device-sovereign — see `device/CLAUDE.md`) |
 | `volume_state` | `level` | Volume changed; controller persists it as `startupVolume` |
 | `oww_shadow_cross` | score/threshold/age fields | Shadow-mode wake crossing (report only) |

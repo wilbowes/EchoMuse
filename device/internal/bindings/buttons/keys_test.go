@@ -1,6 +1,7 @@
 package buttons
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -86,5 +87,55 @@ func TestOnlyTheVolumePairIsVolume(t *testing.T) {
 		if isVolume(c) != want {
 			t.Errorf("isVolume(%d) = %v", c, !want)
 		}
+	}
+}
+
+// The multi-tap window has to compare the user's press-to-press timing (#115),
+// never when the events happened to be handed on. The sleeps below are the
+// link's jitter: each bears no relation to its tap's simulated time, so a gap
+// taken anywhere but the press would not come out as 0, 120, 260.
+func TestTapGapsComeFromThePressesNotFromTheSend(t *testing.T) {
+	k := newKeyState()
+	t0 := time.Unix(1789, 0)
+	taps := []struct {
+		at     time.Duration
+		hold   time.Duration
+		jitter time.Duration
+	}{
+		{0, 60 * time.Millisecond, 5 * time.Millisecond},
+		{120 * time.Millisecond, 60 * time.Millisecond, 40 * time.Millisecond},
+		{380 * time.Millisecond, 40 * time.Millisecond, time.Millisecond},
+	}
+	var gaps []int64
+	for _, tap := range taps {
+		k.handle(uint16(buttons.DotClick), keyPress, t0.Add(tap.at))
+		time.Sleep(tap.jitter)
+		ev, ok := k.handle(uint16(buttons.DotClick), keyRelease, t0.Add(tap.at+tap.hold))
+		if !ok {
+			t.Fatalf("release at %v was not an event", tap.at+tap.hold)
+		}
+		gaps = append(gaps, ev.GapMs)
+	}
+	if want := []int64{0, 120, 260}; !slices.Equal(gaps, want) {
+		t.Fatalf("gaps %v, want %v — a gap taken at send time would follow the "+
+			"sleeps instead of the presses", gaps, want)
+	}
+}
+
+// A volume press between two taps of the action button must not reset the
+// action button's burst: per-key state is why holding one button does not end
+// another, and the gap follows the same rule.
+func TestTapGapsArePerKey(t *testing.T) {
+	k := newKeyState()
+	t0 := time.Unix(1789, 0)
+	k.handle(uint16(buttons.DotClick), keyPress, t0)
+	k.handle(uint16(buttons.DotClick), keyRelease, t0.Add(50*time.Millisecond))
+	k.handle(uint16(buttons.VolumeUpClick), keyPress, t0.Add(100*time.Millisecond))
+	k.handle(uint16(buttons.VolumeUpClick), keyRelease, t0.Add(150*time.Millisecond))
+	k.handle(uint16(buttons.DotClick), keyPress, t0.Add(200*time.Millisecond))
+	ev, ok := k.handle(uint16(buttons.DotClick), keyRelease, t0.Add(250*time.Millisecond))
+	if !ok || ev.GapMs != 200 {
+		t.Fatalf("gap %d (event %+v), want 200 — the volume press is not a tap "+
+			"of the action button", ev.GapMs, ev)
 	}
 }

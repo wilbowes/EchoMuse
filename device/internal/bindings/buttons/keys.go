@@ -19,6 +19,10 @@ type keyEvent struct {
 	Code   buttons.ClickType
 	Down   bool
 	HeldMs int64 // on release, how long the key was down
+	// GapMs is the press-to-press time, carried on the RELEASE so the
+	// controller decides a multi-tap burst by the user's timing rather than
+	// by when the two messages arrived (#115).
+	GapMs int64
 }
 
 // keyState turns one input device's key events into presses and releases.
@@ -26,11 +30,19 @@ type keyEvent struct {
 // mute on biscuit, action and volume on the Dot 3), and pressing one while
 // holding the other must not end the first.
 type keyState struct {
-	downAt map[buttons.ClickType]time.Time
+	keys map[buttons.ClickType]keyTimes
+}
+
+// keyTimes is a key's last press and the gap that preceded it, kept after
+// release so the next press can be measured against it.
+type keyTimes struct {
+	down  bool
+	at    time.Time
+	gapMs int64
 }
 
 func newKeyState() *keyState {
-	return &keyState{downAt: map[buttons.ClickType]time.Time{}}
+	return &keyState{keys: map[buttons.ClickType]keyTimes{}}
 }
 
 // handle returns the press or release an event makes, false for none: an
@@ -43,20 +55,25 @@ func (k *keyState) handle(code uint16, value int32, now time.Time) (keyEvent, bo
 	if code == 0 {
 		return keyEvent{}, false
 	}
-	t, held := k.downAt[c]
+	p := k.keys[c]
 	switch value {
 	case keyPress:
-		if held {
+		if p.down {
 			return keyEvent{}, false
 		}
-		k.downAt[c] = now
+		gap := int64(0)
+		if !p.at.IsZero() {
+			gap = now.Sub(p.at).Milliseconds()
+		}
+		k.keys[c] = keyTimes{down: true, at: now, gapMs: gap}
 		return keyEvent{Code: c, Down: true}, true
 	case keyRelease:
-		if !held {
+		if !p.down {
 			return keyEvent{}, false
 		}
-		delete(k.downAt, c)
-		return keyEvent{Code: c, HeldMs: now.Sub(t).Milliseconds()}, true
+		p.down = false
+		k.keys[c] = p
+		return keyEvent{Code: c, HeldMs: now.Sub(p.at).Milliseconds(), GapMs: p.gapMs}, true
 	}
 	return keyEvent{}, false // keyRepeat, or a value evdev does not define
 }

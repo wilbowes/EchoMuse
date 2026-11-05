@@ -16,6 +16,11 @@ type ButtonClickEvent struct {
 	// excursions past 1600ms, which would make controller-side timing of a
 	// ~750ms gesture report noise as intent.
 	HeldMs int64 `json:"heldMs,omitempty"`
+	// GapMs is the time since the previous press of the same button, set on
+	// RELEASE (0 on a press and on the first tap of a burst). It exists for
+	// the same reason as HeldMs: the multi-tap window has to measure how fast
+	// the user tapped, and arrival times carry the link's RTT jitter (#115).
+	GapMs int64 `json:"gapMs,omitempty"`
 	// Muted is the mic mute state at the instant of the press. Sent so the
 	// controller judges the gesture against the state it actually happened
 	// in, rather than against whatever the last mute_state message left

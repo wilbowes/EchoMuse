@@ -94,6 +94,34 @@ func TestHeldMsIsOmittedOnAPressAndPresentOnARelease(t *testing.T) {
 	}
 }
 
+// `gapMs` is the device-measured press-to-press time (#115), and it carries
+// omitempty for the same reason heldMs does: a press, and the first tap of a
+// burst, have nothing to measure against. The controller must fall back to
+// arrival timing there rather than read an absent field as a zero gap.
+func TestGapMsIsOmittedWhenThereWasNoEarlierPress(t *testing.T) {
+	press, err := json.Marshal(ButtonClickEvent{
+		Button: Button{Type: DotButton}, ClickType: DotClick, Down: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(press), "gapMs") {
+		t.Errorf("press marshals gapMs: %s — it was not measured yet", press)
+	}
+
+	release, err := json.Marshal(ButtonClickEvent{
+		Button: Button{Type: DotButton}, ClickType: DotClick, Down: false,
+		HeldMs: 60, GapMs: 120,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(release), `"gapMs":120`) {
+		t.Errorf("release dropped gapMs: %s — the controller would fall back to "+
+			"arrival timing on every tap", release)
+	}
+}
+
 // `muted` is always sent, with no omitempty. It is the mic state at the instant
 // of the press, and the controller judges the gesture against it — so a mute
 // that was not reported leaves the controller deciding from a stale view. An

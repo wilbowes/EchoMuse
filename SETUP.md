@@ -342,7 +342,7 @@ No-speech branch (device's 0x05 sentinel — see WebSocket Protocol below):
 
 A tap on the action button triggers the same pipeline directly, bypassing wake word detection. A second tap cancels at any stage. A *hold* (≥`BUTTON_HOLD_MS`) is a separate gesture that fires an HA event instead of starting a turn, and is measured on the device.
 
-Under `buttonSingleTapEvent` the tap becomes an HA event too, and the button stops starting turns entirely; `buttonMultiTapMs` groups taps into single/double/triple at the cost of delaying every tap by that window. The hold's timing is measured on the device precisely because control-plane RTT here is jittery (26.4% of probes over 200ms on one device, max 9255ms); the multi-tap window is not, which is why it needs ≥350ms to be reliable — see issue #115.
+Under `buttonSingleTapEvent` the tap becomes an HA event too, and the button stops starting turns entirely; `buttonMultiTapMs` groups taps into single/double/triple at the cost of delaying every tap by that window. Both the hold and the multi-tap gap are measured on the device, because control-plane RTT here is jittery (26.4% of probes over 200ms on one device, max 9255ms); firmware announcing `button_gap` sends the press-to-press gap with each release, and older firmware falls back to timing the burst on arrival, which is why it needs ≥350ms — see issue #115.
 
 ---
 

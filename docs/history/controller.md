@@ -697,20 +697,28 @@ directions.
   **`buttonSingleTapEvent` is gated on `button_hold`** — the event entity is
   only advertised for a hold-capable device, so on older firmware the setting
   is refused rather than leaving the button inert.
-  **Multi-tap repeats the mistake `heldMs` exists to avoid** (#115). The hold
-  is timed on the device; the multi-tap window is timed at the CONTROLLER, on
-  arrival, so the gap it measures is the real gap plus the RTT difference
-  between the two taps. Measured on Test Device: 2566 probes, **26.4% over
-  200ms**, min 1ms, max 9255ms — so a genuine 120ms double-tap routinely
-  arrives >150ms apart and reads as two singles, and a slow-then-fast pair can
-  merge taps that were never a burst. `buttonMultiTapMs: 350` is reliable
-  here for double and triple and 150 is not, but that is a value that clears
-  today's jitter, not one derived from anything. The fix is for the device to
-  report the gap since the previous tap from its own monotonic clock; the
-  expiry timer can stay controller-side, since it only answers "has the burst
-  stopped", where being late costs nothing. **Do not rewrite the coalescer** —
-  per-tap window restart, `enabled()` re-checked at expiry rather than at tap
-  time, and count reset before emit are all correct.
+  **Multi-tap used to repeat the mistake `heldMs` exists to avoid** (#115).
+  The hold is timed on the device; the multi-tap window was timed at the
+  CONTROLLER, on arrival, so the gap it measured was the real gap plus the
+  RTT difference between the two taps. Measured on Test Device: 2566 probes,
+  **26.4% over 200ms**, min 1ms, max 9255ms — so a genuine 120ms double-tap
+  routinely arrived >150ms apart and read as two singles, and a slow-then-fast
+  pair could merge taps that were never a burst. Firmware announcing
+  `button_gap` now stamps each press from its own monotonic clock and sends
+  `gapMs` on the release, and the coalescer decides membership with that
+  value; a quarter-second of network jitter can no longer change the answer.
+  The expiry timer stays controller-side, because it only answers "has the
+  burst stopped", where being late costs nothing — so a tap whose device gap
+  says the burst has ended fires the previous burst immediately, while one
+  that arrives after the controller's window has already fired cannot be
+  merged back. Without `button_gap` the arrival clock still decides, which is
+  the old behaviour and why older firmware needs `buttonMultiTapMs: 350` and
+  not 150. The default stays 0: 350 was suggested in the issue as a value for
+  turning multi-tap on, but a default that enables grouping would delay every
+  tap on every device, and it is a choice made together with
+  `buttonSingleTapEvent`. **Do not rewrite the coalescer** — per-tap window
+  restart, `enabled()` re-checked at expiry rather than at tap time, and count
+  reset before emit are all correct.
   **Mute blocks the voice TURN, not the gesture.** A hold fires `long` while
   muted; only the tap-starts-a-turn path is refused (`em_button.decide`, with
   the mute state read off the press itself — the device sends `muted` on every
