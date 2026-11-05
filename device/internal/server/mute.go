@@ -21,6 +21,10 @@ type muteController struct {
 	// onMuteChange: that one is the controller-notification hook wired by
 	// cmd, this one is internal.
 	persist func()
+	// onUnmute hands the ring back after the red mute ring is cleared. The
+	// server points it at restoreAfterUnmute so the idle ring can be the
+	// no-wake-word pattern instead of black.
+	onUnmute func()
 }
 
 func newMuteController(ledGetter func() led.Controller, onMuteChange func(muted bool)) *muteController {
@@ -56,12 +60,13 @@ func (m *muteController) Toggle() {
 	// completes (SubscribeToButton starts the evdev goroutines first).
 	cb := m.onMuteChange
 	persist := m.persist
+	onUnmute := m.onUnmute
 	m.mu.Unlock()
 
 	if muted {
 		m.applyMute()
 	} else {
-		m.applyUnmute()
+		m.applyUnmute(onUnmute)
 	}
 	if persist != nil {
 		persist()
@@ -111,10 +116,14 @@ func (m *muteController) applyMute() {
 	setMuteButtonLED(true)
 }
 
-func (m *muteController) applyUnmute() {
+func (m *muteController) applyUnmute(onUnmute func()) {
 	log.Println("Mute: mic unmuted")
 	setAdcMute("0")
-	m.clearLEDs()
+	if onUnmute != nil {
+		onUnmute()
+	} else {
+		m.clearLEDs()
+	}
 	setMuteButtonLED(false)
 }
 

@@ -622,6 +622,7 @@ func main() {
 	// the (partial) message so unmentioned fields keep their values.
 	controlClient.OnConfigApplied(func(msg config.ConfigMessage) {
 		applyHardwareConfig(msg)
+		s.SetWakeWordOff(!config.Get().WakeWordOn())
 		s.SetRemoteVolumeArc(config.Get().RemoteVolumeArcEnabled())
 		pcmSpeaker.SetResponseGainDB(config.Get().ResponseGainDB())
 		// The merged config, not the partial message, for the reason given

@@ -50,7 +50,7 @@ expiry.
 | 3 | **Link state** | Orange sine pulse (disconnected) / white slow pulse (pending approval) | Until link resolves | Device-local | `cmd/server.go:161,174` |
 | 4 | **Turn / media animation** | `solid` · `spin` · `rotate` · `pulse` · `meter` · `off`, scene-coloured | Until replaced or `ttlSec` expires (30s listening / 135s spinner / per-response for the meter) | Controller-specified, device-rendered | `animator.go:53` |
 | 5 | **Direction overlay** | Base ring colour brightened toward white at the beam angle | While listening ring is up | Device-local, requires `listeningLEDs` | `server.go:269` |
-| 6 | **Idle** | All off | — | — | — |
+| 6 | **Idle** | All off; every other LED dim red while the wake word is off (#990) | — | Device-local | `server.go:paintBaseLEDs` |
 
 ### Suppression rules [today]
 

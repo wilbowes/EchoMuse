@@ -192,7 +192,7 @@ def test_the_api_readout_is_the_stored_choice():
 
 
 def test_turning_the_wake_word_off_paints_nothing_on_the_ring():
-    """No ring indicator (#286); HA driving the idle ring is #66."""
+    """The controller paints nothing; the Echo paints its own idle ring (#990). HA driving the idle ring is #66."""
     src = CONTROLLER.read_text()
     setter = _block(src, "def _set_wake_word(", "        # Capabilities before")
     assert "await leds_" not in setter

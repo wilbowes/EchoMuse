@@ -32,6 +32,7 @@ func testServer(ring *recordingRing) *Server {
 	get := func() led.Controller { return ring }
 	s.volume = newVolumeController(get)
 	s.mute = newMuteController(get, nil)
+	s.mute.onUnmute = s.restoreAfterUnmute
 	return s
 }
 

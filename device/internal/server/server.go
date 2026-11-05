@@ -56,6 +56,11 @@ type Server struct {
 	// compound decision with anything else it guards. See SetLinkDown.
 	linkDown atomic.Bool
 
+	// wakeWordOff is true while the controller's wake word picker says "No
+	// wake word" (#990). The idle ring is then painted from here, so it does
+	// not depend on a controller message arriving.
+	wakeWordOff atomic.Bool
+
 	// flash holds the ring for a one-shot acknowledgement (flash.go).
 	flash   flashState
 	flashMu sync.Mutex
@@ -98,6 +103,10 @@ func NewServer(buttonController buttons.Controller, microphone mic.Microphone, s
 		defer server.ledMu.Unlock()
 		return server.ledController
 	}, nil)
+
+	// Unmute clears the red ring the same way it always has; with the wake
+	// word off it goes back to the device-painted idle ring instead of black.
+	server.mute.onUnmute = server.restoreAfterUnmute
 
 	// Give volume controller access to mute state so it can restore the red ring
 	server.volume.isMuted = func() bool {
@@ -143,7 +152,7 @@ func NewServer(buttonController buttons.Controller, microphone mic.Microphone, s
 		server.ledMu.Lock()
 		server.ledController = ledController
 		server.ledMu.Unlock()
-		clearLeds(ledController)
+		server.paintBaseLEDs()
 
 		// Discrete red LED under the mic-off button (GPIO, separate from
 		// the ring) — export + off. Non-fatal: an unmuted boot without a
@@ -200,6 +209,21 @@ func (s *Server) SetVolume(level int) {
 // the silent boot-time SeedVolume path.
 func (s *Server) SetRemoteVolumeArc(enabled bool) {
 	s.remoteVolumeArc.Store(enabled)
+}
+
+// SetWakeWordOff records whether the wake word is set to "No wake word"
+// (#990). The idle ring then shows the dim red alternating pattern, painted
+// here rather than sent by the controller. Repainting waits behind the same
+// owners as any other paint: a turn's frame is already on the ring, and
+// mute, the volume arc, a flash and the link pulse outrank the idle layer.
+func (s *Server) SetWakeWordOff(off bool) {
+	if s.wakeWordOff.Swap(off) == off {
+		return
+	}
+	if s.flashActive() || s.volume.DisplayActive() || s.mute.IsMuted() || s.LinkDown() {
+		return
+	}
+	s.paintBaseLEDs()
 }
 
 // SeedVolume restores the controller's stored startupVolume — the source of
@@ -287,6 +311,14 @@ func (s *Server) RestoreMuteRing() {
 		return
 	}
 	s.mute.showMuteLEDs()
+}
+
+// restoreAfterUnmute clears the red mute ring to the idle state. It paints
+// directly rather than through restoreRing: a mute press is deliberate, so a
+// volume arc still holding the ring must not leave a stale red up after the
+// mic is live.
+func (s *Server) restoreAfterUnmute() {
+	s.paintIdleLEDs()
 }
 
 // SetLinkDown records whether the device currently has a controller session.
@@ -513,7 +545,9 @@ func suppressPaint(volumeActive, muted, linkDown bool) bool {
 	return muted && !linkDown
 }
 
-// paintBaseLEDs paints the ring from the stored controller state.
+// paintBaseLEDs paints the ring from the stored controller state. An idle
+// ring is replaced by the no-wake-word pattern while that is set: the
+// controller's "off" still means idle, and idle has its own look now.
 func (s *Server) paintBaseLEDs() {
 	s.ledMu.Lock()
 	lc := s.ledController
@@ -529,7 +563,39 @@ func (s *Server) paintBaseLEDs() {
 		leds[i] = base[i]
 		leds[i].ID = i
 	}
+	if s.wakeWordOff.Load() && allDark(leds) {
+		s.paintIdleLEDs()
+		return
+	}
 	if err := lc.SetLEDs(leds...); err != nil {
 		log.Printf("SetLEDs error: %v", err)
 	}
+}
+
+// paintIdleLEDs paints the idle ring: the no-wake-word pattern while that is
+// set, otherwise all off.
+func (s *Server) paintIdleLEDs() {
+	s.ledMu.Lock()
+	lc := s.ledController
+	s.ledMu.Unlock()
+	if lc == nil {
+		return
+	}
+	if !s.wakeWordOff.Load() {
+		clearLeds(lc)
+		return
+	}
+	if err := lc.SetLEDs(led.WakeWordOffFrame()...); err != nil {
+		log.Printf("SetLEDs error: %v", err)
+	}
+}
+
+// allDark reports whether the frame is the controller's idle state.
+func allDark(leds []led.Led) bool {
+	for _, l := range leds {
+		if l.R != 0 || l.G != 0 || l.B != 0 {
+			return false
+		}
+	}
+	return true
 }
