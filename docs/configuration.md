@@ -875,11 +875,16 @@ override:
 - Each entry is an IP address or a host name, with the device port and the
   encrypted (TLS) port. They start as this controller's own; a TLS port of `0`
   means that address has no encrypted listener.
-- Echos try the addresses in order, twice each, then look for the controller
-  by mDNS once before starting again. A wrong address therefore slows a
-  reconnect down; it cannot leave an Echo unable to find its controller.
+- Echos try the addresses in order, twice each; then the controller they last
+  registered with; then they look for the controller by mDNS once before
+  starting again. A wrong address therefore slows a reconnect down; it cannot
+  leave an Echo unable to find its controller.
+- A controller restart or a bad link is a reconnect, not a rediscovery: after a
+  successful registration the Echo keeps dialling that address for about two
+  minutes before it falls back to the list. This is what a routine controller
+  update looks like, and it never browses mDNS.
 - Saving writes the list to every connected Echo straight away; the rest get
-  it when they next connect. An Echo uses it from its next reconnect, with no
+  it when they next connect. An Echo re-reads it on every reconnect, with no
   restart. The provisioning wizard writes it to a new Echo as it stands when
   the wizard runs.
 - Needs firmware v2.16.0 or later. Older firmware ignores it and uses mDNS.

@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-func TestStaticRetryDelay(t *testing.T) {
+func TestRetryDelay(t *testing.T) {
 	tests := []struct {
 		passNum int
 		want    time.Duration
@@ -20,8 +20,8 @@ func TestStaticRetryDelay(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		if got := staticRetryDelay(tt.passNum); got != tt.want {
-			t.Errorf("staticRetryDelay(%d) = %v, want %v", tt.passNum, got, tt.want)
+		if got := retryDelay(tt.passNum); got != tt.want {
+			t.Errorf("retryDelay(%d) = %v, want %v", tt.passNum, got, tt.want)
 		}
 	}
 }

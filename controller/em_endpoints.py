@@ -3,10 +3,11 @@ em_endpoints.py — the controller address list devices dial before mDNS
 ======================================================================
 
 `controllerEndpoints` is a fleet-only setting (Config → Advanced): an ordered
-list of addresses an Echo tries before falling back to mDNS. The firmware
-half is #166 (v2.16.0+): the device reads
+list of addresses an Echo tries before falling back. The firmware half is
+#166 (v2.16.0+), with the last-known tier from #106: the device reads
 /data/local/etc/echomuse/controller.json fresh on every dial, tries each entry
-twice, then makes one bounded mDNS attempt. This module validates the setting
+twice, then the controller it last registered with, then makes one bounded
+mDNS attempt. This module validates the setting
 and renders that file; em_api delivers it over the shell plane and the
 provisioning wizard writes it over adb.
 

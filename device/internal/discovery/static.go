@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -12,7 +13,7 @@ import (
 // StaticControllerPath is the optional persistent controller endpoint list.
 // Useful when a device reaches its controller through a routed tunnel or an
 // isolated VLAN where mDNS cannot cross (mDNS is link-local); when absent,
-// callers fall back to ordinary mDNS discovery.
+// callers fall back to the last-known controller and then to mDNS.
 const StaticControllerPath = "/data/local/etc/echomuse/controller.json"
 
 type staticEndpoint struct {
@@ -28,10 +29,10 @@ type staticControllerConfig struct {
 	// falls through to the next one instead of being retried forever.
 	Endpoints []staticEndpoint `json:"endpoints"`
 
-	// MDNS controls whether the list is followed by one bounded mDNS
-	// attempt once every entry has failed. A *bool so "absent" (→ true)
-	// is distinguishable from an explicit false: mDNS is the safety net
-	// that keeps a device from being permanently stranded by a stale
+	// MDNS controls whether the last-known controller is followed by one
+	// bounded mDNS attempt once every entry has failed. A *bool so "absent"
+	// (→ true) is distinguishable from an explicit false: mDNS is the safety
+	// net that keeps a device from being permanently stranded by a stale
 	// list, so it defaults ON. false is the deliberate opt-out for a
 	// pinned test fleet that must never reach a different controller by
 	// accident (device-side only, per #106 — a controller-side switch
@@ -82,26 +83,11 @@ func configuredEndpointsFromPath(path string) (*StaticConfig, error) {
 
 	servers := make([]*ServerInfo, 0, len(cfg.Endpoints))
 	for i, ep := range cfg.Endpoints {
-		host := strings.TrimSpace(ep.Host)
-		if host == "" {
-			return nil, fmt.Errorf("%s: endpoints[%d]: host is required", path, i)
+		server, err := serverFromEndpoint(ep)
+		if err != nil {
+			return nil, fmt.Errorf("%s: endpoints[%d]: %w", path, i, err)
 		}
-		if ep.Port < 1 || ep.Port > 65535 {
-			return nil, fmt.Errorf("%s: endpoints[%d]: port must be between 1 and 65535", path, i)
-		}
-		if ep.TLSPort < 0 || ep.TLSPort > 65535 {
-			return nil, fmt.Errorf("%s: endpoints[%d]: tls_port must be 0 or between 1 and 65535", path, i)
-		}
-		// No type field: host is parsed as an IP and resolved as a DNS name
-		// if that fails — resolution happens implicitly at dial time, so a
-		// static address, a backup address and a DNS name genuinely need no
-		// distinguishing here.
-		servers = append(servers, &ServerInfo{
-			Host:    host,
-			Port:    ep.Port,
-			Addr:    net.JoinHostPort(host, strconv.Itoa(ep.Port)),
-			TLSPort: ep.TLSPort,
-		})
+		servers = append(servers, server)
 	}
 
 	mdns := true
@@ -109,4 +95,29 @@ func configuredEndpointsFromPath(path string) (*StaticConfig, error) {
 		mdns = *cfg.MDNS
 	}
 	return &StaticConfig{Endpoints: servers, MDNS: mdns}, nil
+}
+
+// serverFromEndpoint is the one validation of a single entry, shared with the
+// last-known file so both are checked to exactly the same standard.
+func serverFromEndpoint(ep staticEndpoint) (*ServerInfo, error) {
+	host := strings.TrimSpace(ep.Host)
+	if host == "" {
+		return nil, errors.New("host is required")
+	}
+	if ep.Port < 1 || ep.Port > 65535 {
+		return nil, errors.New("port must be between 1 and 65535")
+	}
+	if ep.TLSPort < 0 || ep.TLSPort > 65535 {
+		return nil, errors.New("tls_port must be 0 or between 1 and 65535")
+	}
+	// No type field: host is parsed as an IP and resolved as a DNS name if
+	// that fails — resolution happens implicitly at dial time, so a static
+	// address, a backup address and a DNS name genuinely need no
+	// distinguishing here.
+	return &ServerInfo{
+		Host:    host,
+		Port:    ep.Port,
+		Addr:    net.JoinHostPort(host, strconv.Itoa(ep.Port)),
+		TLSPort: ep.TLSPort,
+	}, nil
 }

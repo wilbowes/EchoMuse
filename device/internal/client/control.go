@@ -153,12 +153,11 @@ type ControlClient struct {
 	features  map[string]bool
 
 	// serverBaseURL is the WebSocket base URL actually in use
-	// ("ws://host:port" or "wss://host:tlsport"), set on successful
-	// connect. Used by the shell dialler to connect back to the
-	// controller on the same plane. lastServer keeps the discovered
-	// controller info (incl. TLS port) for the mDNS-skipping fast path.
+	// ("ws://host:port" or "wss://host:tlsport"), set once the control
+	// WebSocket is open. Used by the shell dialler to connect back to the
+	// controller on the same plane. The endpoint itself is remembered only
+	// after registration is accepted (rememberController).
 	serverBaseURL string
-	lastServer    *discovery.ServerInfo
 	serverAddrMu  sync.RWMutex
 
 	// shellCancel cancels a running shell session when shell_close is received.
@@ -248,11 +247,12 @@ func refusedByTLS(err error) bool {
 	return errors.As(err, &v)
 }
 
-// maxStaticAttempts is how many consecutive dial failures one configured
-// endpoint gets before Run moves to the next target in the pass. 1 would
-// tour the whole list on a single transient blip — a brief drop on the
-// endpoint actually in front of the device costing a lap through every
-// backup before trying it again, which is slower than just retrying it.
+// maxStaticAttempts is how many consecutive dial failures one endpoint — a
+// configured address or the last-known controller — gets before Run moves to
+// the next target in the pass. 1 would tour the whole list on a single
+// transient blip — a brief drop on the endpoint actually in front of the
+// device costing a lap through every backup before trying it again, which is
+// slower than just retrying it.
 //
 // maxMDNSAttempts is the same idea for the bounded mDNS slot at the end of a
 // pass, and is deliberately 1, not maxStaticAttempts: the "don't abandon the
@@ -265,22 +265,22 @@ const (
 	maxMDNSAttempts   = 1
 )
 
-// staticBackoff is the per-attempt wait after a failed static pass, indexed
-// by how many full passes (every configured endpoint, then one bounded mDNS
-// try) have failed in a row. Modelled on how VoIP phones hunt for DHCP
-// options and a config server (settled design, #106): two fast passes so a
-// genuinely brief blip resolves quickly, then a widening backoff so a
-// controller that is really gone isn't hammered. Holds at the last value.
+// retryBackoff is the per-attempt wait after a failed pass, indexed by how
+// many failures (full passes, sticky reconnects, refusals) have happened in a
+// row. Modelled on how VoIP phones hunt for DHCP options and a config server
+// (settled design, #106): two fast passes so a genuinely brief blip resolves
+// quickly, then a widening backoff so a controller that is really gone isn't
+// hammered. Holds at the last value.
 //
 // Applied per attempt, not per pass, so the wall-clock time to tour the
 // whole list scales with how many endpoints are configured — a pass at the
 // 60s tier costs roughly (len(endpoints)+1)*60s, not a flat 60s. Chosen
 // deliberately over a per-pass wait: it keeps individual dials evenly
-// spaced regardless of backoff tier, and a static list is expected to stay
+// spaced regardless of backoff tier, and a list is expected to stay
 // short (the design's own examples show two or three entries), where the
 // difference is seconds, not minutes. Reconsider this if a real deployment
 // configures a long list.
-var staticBackoff = []time.Duration{
+var retryBackoff = []time.Duration{
 	5 * time.Second,
 	5 * time.Second,
 	10 * time.Second,
@@ -288,20 +288,17 @@ var staticBackoff = []time.Duration{
 	60 * time.Second,
 }
 
-func staticRetryDelay(passNum int) time.Duration {
-	if passNum >= len(staticBackoff) {
-		return staticBackoff[len(staticBackoff)-1]
+func retryDelay(passNum int) time.Duration {
+	if passNum >= len(retryBackoff) {
+		return retryBackoff[len(retryBackoff)-1]
 	}
-	return staticBackoff[passNum]
+	return retryBackoff[passNum]
 }
 
 func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
-	// Position within a configured static pass — a pass being every
-	// endpoint in order plus one bounded mDNS attempt, computed as passLen
-	// below. All three are in-memory only: losing them across a restart is
-	// harmless since the file is re-read every attempt anyway, and a fresh
-	// process restarting the pass from the top is the documented
-	// behaviour, not a bug.
+	// Position within a discovery pass — every plan endpoint in order plus
+	// one bounded mDNS attempt. All of it is in-memory only: a fresh process
+	// starting a pass at the top is the documented behaviour, not a bug.
 	targetIdx := 0
 	targetAttempts := 0
 	passNum := 0
@@ -312,6 +309,16 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 	// as a red/orange flicker. A dial that actually fails shows orange from
 	// the failure branch below.
 	held := false
+
+	// pinned is the endpoint that last registered, and pinnedAt when the link
+	// to it ended. Every drop reconnects to that endpoint alone for
+	// discovery.StickyGrace before the cascade starts again from the top: a
+	// controller restart, an add-on update or a bad link all come back at the
+	// same address, and rediscovering for them browses the link that is
+	// already the problem.
+	var pinned *discovery.ServerInfo
+	var pinnedAt time.Time
+	stickyAttempts := 0
 
 	for {
 		if ctx.Err() != nil {
@@ -324,40 +331,38 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 		// file has to take effect on the very next reconnect, not at
 		// process start.
 		//
-		// A parse/validation error deliberately fails OPEN to mDNS below,
-		// same as an absent file: the overriding goal is that a device is
-		// never left unable to reach a controller, and that includes a typo
-		// in the config it cannot fix itself. This also applies to a pinned
-		// mdns:false fleet — a broken file there browses too. TLS
+		// A parse/validation error deliberately fails OPEN to the rest of the
+		// hierarchy, same as an absent file: the overriding goal is that a
+		// device is never left unable to reach a controller, and that includes
+		// a typo in the config it cannot fix itself. This also applies to a
+		// pinned mdns:false fleet — a broken file there browses too. TLS
 		// verification bounds the blast radius (a browsed-to controller
 		// outside the fleet's CA is refused), so the failure mode is a
 		// delayed reconnect to the RIGHT controller, not a connection to
 		// the wrong one. Revisit if that stops being true.
 		static, staticErr := discovery.ConfiguredEndpoints()
 		if staticErr != nil {
-			log.Printf("[control] Static controller config invalid — using mDNS: %v", staticErr)
+			log.Printf("[control] Static controller config invalid — falling back to the last-known controller and mDNS: %v", staticErr)
 		}
-		usingStatic := static != nil && len(static.Endpoints) > 0
+		plan := discovery.NewPlan(static, discovery.LoadLastKnown())
 
-		// A pass is every configured endpoint in order, plus one bounded
-		// mDNS attempt at the end unless the config opts out — the settled
-		// resolution order from #106 is "configured list → mDNS, unless
-		// mdns:false", collapsed here since the persisted last-known tier
-		// is a separate, not-yet-built piece. Meaningless (0) when not
-		// usingStatic.
-		var passLen int
-		if usingStatic {
-			passLen = len(static.Endpoints)
-			if static.MDNS {
-				passLen++
-			}
+		sticky := plan.StickTo(pinned, pinnedAt, time.Now(), loadLinkCreds().tlsConf != nil)
+		if sticky == nil && pinned != nil {
+			// The grace ran out, or the endpoint is no longer in the config:
+			// start the cascade over at the top with a fresh backoff.
+			pinned, stickyAttempts, passNum = nil, 0, 0
 		}
 
 		var server *discovery.ServerInfo
 		var dialErr error
 
-		if usingStatic {
-			if targetIdx >= passLen {
+		if sticky != nil {
+			server = sticky
+			if stickyAttempts == 0 {
+				log.Printf("[control] Reconnecting to the last controller %s without rediscovering", server.Addr)
+			}
+		} else {
+			if targetIdx >= plan.Len() {
 				// A config edit mid-pass can shrink the list out from under
 				// an in-flight index — restart the pass rather than index
 				// out of range.
@@ -371,17 +376,17 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 				c.disconnectedCallback()
 			}
 
-			if targetIdx < len(static.Endpoints) {
-				server = static.Endpoints[targetIdx]
-				log.Printf("[control] Static endpoint %d/%d (attempt %d/%d): %s",
-					targetIdx+1, passLen, targetAttempts+1, maxStaticAttempts, server.Addr)
-			} else {
-				// The list is exhausted for this pass: one bounded mDNS
-				// browse, never an indefinitely-retrying one — that
+			if targetIdx < len(plan.Endpoints) {
+				server = plan.Endpoints[targetIdx]
+				log.Printf("[control] Endpoint %d/%d (attempt %d/%d): %s",
+					targetIdx+1, plan.Len(), targetAttempts+1, maxStaticAttempts, server.Addr)
+			} else if plan.MDNS {
+				// The endpoints are exhausted for this pass: one bounded
+				// mDNS browse, never an indefinitely-retrying one — that
 				// would park the device there and defeat the point of
 				// having somewhere to fall through TO. maxMDNSAttempts (not
 				// maxStaticAttempts) below is what keeps this to one try.
-				log.Printf("[control] Static list exhausted — one mDNS attempt (%d/%d)",
+				log.Printf("[control] Endpoint list exhausted — one mDNS attempt (%d/%d)",
 					targetAttempts+1, maxMDNSAttempts)
 				found, err := discovery.FindServerOnce(ctx)
 				if err != nil || found == nil {
@@ -389,17 +394,13 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 				} else {
 					server = found
 				}
+			} else {
+				dialErr = fmt.Errorf("no controller endpoints configured and mDNS is off")
 			}
-		} else {
-			if !held && c.disconnectedCallback != nil {
-				c.disconnectedCallback()
-			}
-
-			server, dialErr = c.findController(ctx)
 		}
 
 		var err error
-		var healthy bool
+		var registered bool
 		if server != nil {
 			dataCtx, cancelData := context.WithCancel(ctx)
 			go func() {
@@ -408,20 +409,27 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 				}
 			}()
 
-			healthy, err = c.connect(ctx, server, data)
+			registered, err = c.connect(ctx, server, data)
 
 			cancelData()
 		} else {
-			// The bounded mDNS slot came up empty this round — no server to
-			// dial, so treat it exactly like any other failed target rather
-			// than special-casing "nothing to try." healthy stays false: no
-			// connection was even attempted.
+			// A pass with nothing to dial is treated exactly like any other
+			// failed target rather than special-cased: registered stays
+			// false, because no connection was even attempted.
 			err = dialErr
 		}
 
 		wasHeld := held
 		refused := errors.Is(err, errRefused)
 		held = err == errPending || refused
+
+		if registered {
+			// Pending approval counts: the device found the right controller,
+			// so the endpoint is pinned and persisted for the next start.
+			pinned, pinnedAt = server, time.Now()
+			targetIdx, targetAttempts, passNum, stickyAttempts = 0, 0, 0, 0
+		}
+
 		switch err {
 		case errPending:
 			// A pairing request is repeated by redialling, and the controller
@@ -431,13 +439,6 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 				wait = pairRepeat
 			}
 			log.Printf("[control] Device pending approval — retrying in %s", wait)
-			if usingStatic {
-				// The endpoint answered, and registration itself worked —
-				// pending-approval is success for discovery purposes.
-				// Falling through here would send a device waiting for its
-				// own approval off hunting for a different controller.
-				targetAttempts, passNum = 0, 0
-			}
 			if c.pendingCallback != nil {
 				c.pendingCallback()
 			}
@@ -448,41 +449,39 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 			case <-time.After(wait):
 			}
 		default:
-			if usingStatic {
-				if healthy {
-					// A connection that lasted staticHealthyDuration is a
-					// real recovery rather than a connect-then-drop flap, so
-					// restart the pass at the top and reset the backoff.
-					// Without this the device drifts down the list and never
-					// climbs back to its preferred endpoint.
-					//
-					// Test healthy, not err == nil: connect's read loop
-					// always exits with an error, so err == nil never fires.
-					targetIdx, targetAttempts, passNum = 0, 0, 0
-				} else {
-					targetAttempts++
-					maxAttempts := maxStaticAttempts
-					if targetIdx == len(static.Endpoints) {
-						maxAttempts = maxMDNSAttempts
-					}
-					if targetAttempts >= maxAttempts {
-						targetAttempts = 0
-						targetIdx++
-						if targetIdx >= passLen {
-							targetIdx = 0
-							passNum++
-						}
+			wait := retryDelay(passNum)
+			switch {
+			case registered:
+				// The link dropped after registering. The pin above starts
+				// the sticky grace, so the next dial goes back to the same
+				// endpoint.
+			case sticky != nil:
+				stickyAttempts++
+				wait = retryDelay(stickyAttempts)
+				if stickyAttempts == stickyRingAttempts && !held && c.disconnectedCallback != nil {
+					// A controller restart is back well before this; reaching
+					// it means the controller is really gone.
+					c.disconnectedCallback()
+				}
+			default:
+				targetAttempts++
+				maxAttempts := maxStaticAttempts
+				if targetIdx >= len(plan.Endpoints) {
+					maxAttempts = maxMDNSAttempts
+				}
+				if targetAttempts >= maxAttempts {
+					targetAttempts = 0
+					targetIdx++
+					if targetIdx >= plan.Len() {
+						targetIdx = 0
+						passNum++
 					}
 				}
-			}
-
-			wait := 5 * time.Second
-			if usingStatic {
-				wait = staticRetryDelay(passNum)
+				wait = retryDelay(passNum)
 			}
 			// A pairing device asks by redialling, and the controller forgets
-			// a request 30s after its last repeat; the static backoff reaches
-			// 60s.
+			// a request 30s after its last repeat; the cascade's backoff
+			// reaches 60s.
 			if c.Pairing() {
 				wait = pairRepeat
 			}
@@ -491,12 +490,11 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 			}
 			if refused && c.refusedCallback != nil {
 				c.refusedCallback()
-			} else if (!usingStatic || wasHeld) && c.disconnectedCallback != nil {
-				// The static path already showed this once at the top of
-				// the pass; re-showing it here on every single target would
-				// reintroduce the per-endpoint flashing the pass-level check
-				// above exists to avoid. Except straight after a held
-				// state, which skipped the pass-level one.
+			} else if wasHeld && c.disconnectedCallback != nil {
+				// The cascade already showed this once at the top of the
+				// pass; re-showing it on every single target would reintroduce
+				// the per-endpoint flashing that check exists to avoid.
+				// Except straight after a held state, which skipped it.
 				c.disconnectedCallback()
 			}
 			select {
@@ -509,68 +507,27 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 	}
 }
 
-// Seams for the discovery tests.
-var (
-	browseOnce = discovery.FindServerOnce
-	reachable  = probeTCP
-)
+// stickyRingAttempts is how many consecutive sticky reconnects fail before the
+// ring admits the controller is not coming straight back. A restart is back
+// well before the third (5s + 5s + 10s), so the orange pulse still means an
+// outage rather than a routine update.
+const stickyRingAttempts = 3
 
-// findController is one discovery round when no static list is configured:
-// the last-known controller if it answers, else one mDNS browse. A round that
-// finds nothing returns an error, and Run waits and comes back here, so the
-// last-known address is tried again every round (#1081).
-//
-// It used to fall into discovery.FindServer, which browses forever. One
-// failed probe mid-outage then parked the device on mDNS for good, and mDNS
-// is often what a router restart leaves broken, so an Echo whose controller
-// came back at the same address stayed orange until power-cycled.
-//
-// The last-known address speeds up ordinary reconnects, and after a WiFi
-// network change it's what makes a controller on a different subnet
-// reachable at all (multicast rarely crosses subnets, so mDNS alone would
-// fail the change's reconnect gate and revert a working network). The probe
-// targets the plain port — it's a reachability check, not a plane choice;
-// connect() re-decides ws vs wss every dial.
-func (c *ControlClient) findController(ctx context.Context) (*discovery.ServerInfo, error) {
-	server := c.lastKnownServer()
-	if server != nil && server.TLSPort == 0 && loadLinkCreds().tlsConf != nil {
-		// CA installed but the cached endpoint predates the controller's TLS
-		// listener (e.g. controller upgraded, or an approval just installed
-		// credentials, mid-run). One fresh browse so the tls_port TXT is
-		// picked up; keep the cached endpoint if mDNS fails — after a WiFi
-		// change the controller can sit on another subnet where multicast
-		// doesn't reach.
-		if found, err := browseOnce(ctx); err == nil && found != nil {
-			server = found
-		}
+// rememberController records the endpoint that just registered: a dropped link
+// reconnects to it before rediscovering, and the next process start tries it
+// after the configured list.
+func rememberController(server *discovery.ServerInfo) {
+	if err := discovery.SaveLastKnown(server); err != nil {
+		log.Printf("[control] Could not save the last-known controller: %v", err)
 	}
-	if server != nil && reachable(server.Addr, 3*time.Second) {
-		log.Printf("[control] Last-known controller %s reachable — skipping mDNS", server.Addr)
-		return server, nil
-	}
-	found, err := browseOnce(ctx)
-	if err != nil || found == nil {
-		return nil, fmt.Errorf("no controller found via mDNS this round")
-	}
-	return found, nil
 }
 
-// staticHealthyDuration is how long a connection has to stay up before Run
-// treats it as a genuine recovery rather than a connect-then-drop flap. Set
-// comfortably above one keepalive round trip (wsPingInterval, 20s) so a
-// connection that resets the pass/backoff state has actually proven itself,
-// not just completed a handshake before dying again.
-const staticHealthyDuration = 30 * time.Second
-
 // connect dials server and runs the control-plane read loop until it exits.
-// The bool return reports whether the connection stayed up at least
-// staticHealthyDuration before that happened — false at every early return
-// (a dial failure, a registration error, errPending: nothing before
-// c.connectedCallback fires counts as "connected" yet), computed for real
-// only at the read loop's exit, the one place a healthy connection can
-// still end up back here.
+// The bool return reports whether registration was accepted — a pending
+// approval counts, because the device found the right controller — and that is
+// what pins the endpoint and persists it as the last-known one. Every early
+// return before the registration reply is false.
 func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInfo, data *DataClient) (bool, error) {
-	var connectedAt time.Time
 
 	// Credentials are re-read on every dial: an approval installs them
 	// mid-run, and the very next reconnect should pick them up without a
@@ -611,11 +568,11 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 	}
 	defer conn.Close()
 
-	// Store base URL for outbound shell connections + the discovered
-	// server for the reconnect fast path.
+	// Store base URL for outbound shell connections. The endpoint is pinned
+	// only after registration is accepted: a dial that completes the
+	// WebSocket handshake and is then refused is not a controller to keep.
 	c.serverAddrMu.Lock()
 	c.serverBaseURL = baseURL
-	c.lastServer = server
 	c.serverAddrMu.Unlock()
 
 	reg := map[string]interface{}{
@@ -709,7 +666,11 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 
 	switch first.Type {
 	case "pending":
-		return false, errPending
+		// Pending approval counts as success for discovery: the device found
+		// the right controller, and falling through here would send a device
+		// waiting for its approval off hunting for a different one.
+		rememberController(server)
+		return true, errPending
 	case "refused":
 		return false, errRefused
 	case "ack":
@@ -739,6 +700,7 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 		return false, fmt.Errorf("unexpected first message: %s", first.Type)
 	}
 
+	rememberController(server)
 	log.Printf("[control] Registered as %s (version %s)", c.deviceID, Version)
 
 	// Handshake complete — now safe to publish conn for concurrent use.
@@ -760,7 +722,6 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 	if c.connectedCallback != nil {
 		c.connectedCallback()
 	}
-	connectedAt = time.Now()
 	data.NotifyReady(baseURL)
 
 	// Keepalive — same mechanism as the data client (see wsPingInterval in
@@ -799,7 +760,7 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 	for {
 		var raw json.RawMessage
 		if err := conn.ReadJSON(&raw); err != nil {
-			return time.Since(connectedAt) >= staticHealthyDuration, err
+			return true, err
 		}
 		conn.SetReadDeadline(time.Now().Add(wsPongWait))
 
@@ -1634,23 +1595,6 @@ func (c *ControlClient) writeJSON(v interface{}) error {
 	}
 	c.conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
 	return c.conn.WriteJSON(v)
-}
-
-func (c *ControlClient) lastKnownServer() *discovery.ServerInfo {
-	c.serverAddrMu.RLock()
-	defer c.serverAddrMu.RUnlock()
-	return c.lastServer
-}
-
-// probeTCP reports whether addr (host:port) accepts a TCP connection
-// within timeout.
-func probeTCP(addr string, timeout time.Duration) bool {
-	conn, err := net.DialTimeout("tcp", addr, timeout)
-	if err != nil {
-		return false
-	}
-	conn.Close()
-	return true
 }
 
 // idmePath is Amazon's ID Manager, exported by their kernel driver. It holds
