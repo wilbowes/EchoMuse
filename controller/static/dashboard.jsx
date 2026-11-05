@@ -3831,8 +3831,11 @@ async function _sha256Hex(buf) {
 const _WIZARD_STEPS = [
   { id: 'connect_android', label: 'Connect Device',     desc: 'Connect the Echo Dot via USB. Device should be on and booted into Android. Appears as "AEOBC" in the USB picker.' },
   { id: 'connect_twrp',    label: 'Connect to TWRP',   desc: 'Wait for TWRP recovery to appear, then reconnect. Appears as "Echo" in the USB picker.' },
-  { id: 'patch_boot',      label: 'Patch Boot Image',  desc: 'Apply SELinux permissive patch and add init.rc service entries.' },
-  { id: 'install_magisk',  label: 'Install Magisk',    desc: 'Flash Magisk 17.3 for persistent root access.' },
+  // irreversible: a partition WRITE. There is no undo button for a half-finished
+  // dd, and the readback that proves it landed cannot run against a cancelled
+  // one — so Cancel is withheld rather than offered and then useless.
+  { id: 'patch_boot',      label: 'Patch Boot Image',  desc: 'Apply SELinux permissive patch and add init.rc service entries.', irreversible: true },
+  { id: 'install_magisk',  label: 'Install Magisk',    desc: 'Flash Magisk 17.3 for persistent root access.', irreversible: true },
   { id: 'preseed_db',      label: 'Pre-seed Root DB',  desc: 'Grant root to ADB shell without a screen prompt.' },
   { id: 'reboot',          label: 'Reboot to Android', desc: 'Reboot device to Android.' },
   { id: 'reconnect',       label: 'Reconnect',         desc: 'Re-connect ADB as soon as the device appears as "AEOBC" in the USB picker — no need to wait for it to finish booting, the next step does that.' },
@@ -3905,10 +3908,30 @@ const _EMOS_STEPS = [
   { id: 'install_em',      label: 'Install EchoMuse',  desc: 'Push the server binary, startup script and TLS credentials to /data, which survives the boot-partition write.' },
   { id: 'install_oww',     label: 'Wake Word Assets',  desc: 'Push the ONNX runtime and wake models (~15MB) used for on-device wake word detection.' },
   { id: 'build_emos',      label: 'Build emOS',        desc: 'The controller repacks your own escrowed image with the emOS init, reusing your kernel and device trees.' },
-  { id: 'flash_emos',      label: 'Flash and Verify',  desc: 'Write the built image to the boot partition and read it back to confirm it landed.' },
+  { id: 'flash_emos',      label: 'Flash and Verify',  desc: 'Write the built image to the boot partition and read it back to confirm it landed.', irreversible: true },
   { id: 'reboot_watch',    label: 'Reboot and Watch',  desc: 'Reboot into emOS and follow the first boot over the USB serial console while the ring fills.' },
   { id: 'wifi_register',   label: 'Configure WiFi',    desc: 'Scan and join a network using the device’s own radio, then wait for it to register with the controller.' },
 ];
+
+// Whether Cancel is offered at all for the step now running (#269).
+//
+// Withheld during a partition WRITE. Abandoning mid-write leaves the operator
+// with a device whose boot partition is in an unknown state and no way to tell
+// from the panel which half of it landed — and the step's own readback, the
+// thing that proves the write was clean, cannot run against a cancelled step.
+// Cancelling is still available everywhere else, where it genuinely means
+// "stop doing this" rather than "stop doing this halfway through something
+// destructive".
+//
+// Named steps rather than an index, so adding a step cannot shift which one is
+// protected — _STEP_MODE is index-keyed and the same class of mistake there
+// writes over the amonet unlock payload.
+function _wizardCancelable(stepId) {
+  if (!stepId) return true;
+  const list = _EMOS_STEPS.some(s => s.id === stepId) ? _EMOS_STEPS : _WIZARD_STEPS;
+  const step = list.find(s => s.id === stepId);
+  return !step || !step.irreversible;
+}
 
 // ── WifiPanel ──
 
@@ -9210,7 +9233,22 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                 networks={wifiNetworks}
                 onConnect={() => { if (wifiSsid) runStep(10); }}
                 onSkip={skipWifiIfConnected}
-                onAbort={() => { markStep(10, 'error'); addLog('WiFi skipped — provision incomplete.', 'warn'); }}
+                onAbort={() => {
+                  /* A DEFINED END STATE (#269), not "provision incomplete."
+                   * By this point the firmware is installed and the image is
+                   * written, so the device is not half-provisioned — it is a
+                   * working Echo with no network. Saying what that means is
+                   * the difference between an operator who retries WiFi from
+                   * the device and one who starts the whole wizard again, or
+                   * reflashes for no reason. */
+                  markStep(10, 'error');
+                  addLog('WiFi setup skipped. The device is flashed and ' +
+                         'EchoMuse is installed — only the network is missing. ' +
+                         'Finish it on the device itself: it will be waiting for ' +
+                         'WiFi, or connect it to a hotspot with the Echo in range ' +
+                         'and configure it from the dashboard once it is online.',
+                         'warn');
+                }}
               />
             )}
 
@@ -9220,10 +9258,29 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                 that has stopped answering while still enumerated, say — and
                 without this the only way out is reloading the page, which
                 loses the transcript the operator would otherwise paste into
-                an issue. */}
-            {running && (
+                an issue.
+
+                Withheld during a partition WRITE (#269). Abandoning one
+                leaves a device whose boot partition is in an unknown state
+                and no way to tell from here which half of it landed — and
+                the readback that proves a write was clean cannot run against
+                a cancelled step. Offered everywhere else, where it means
+                "stop doing this" rather than "stop doing this halfway through
+                something destructive". */}
+            {running && _wizardCancelable(cur.id) && (
               <div style={{ marginBottom: 10, display: 'flex', gap: 8 }}>
                 <Pill danger onClick={() => abandonStep('Step cancelled.')}>Cancel step</Pill>
+              </div>
+            )}
+            {/* Said rather than just withheld: a control that vanishes is
+                indistinguishable from one that is broken, and this is asked
+                for often enough that silence would read as a bug. */}
+            {running && !_wizardCancelable(cur.id) && (
+              <div style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-sm)', color:'var(--warn)', marginBottom:'var(--space-5)' }}>
+                Cancel is not available during this step — it writes a partition,
+                and stopping part-way through leaves nothing to tell whether it
+                landed. Unplug the device to abandon it, and use Restore from
+                TWRP if it did not come back.
               </div>
             )}
 
