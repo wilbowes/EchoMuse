@@ -67,7 +67,7 @@ function partition({ kernel, ramdisk, second = 0, page = 2048,
 
 const upTo = (n, page) => Math.ceil(n / page) * page;
 
-// G090LF1180440C95, slot A. The patched FireOS kernel this fleet runs.
+// G090LF2B3C4D5E6F, slot A. The patched FireOS kernel this fleet runs.
 {
   const k = 5792865, r = 2182034;
   const got = _bootImageLength(partition({ kernel: k, ramdisk: r }));
@@ -78,7 +78,7 @@ const upTo = (n, page) => Math.ceil(n / page) * page;
         `${got} of ${PARTITION}`);
 }
 
-// G090LF11803611NF, slot A — the device the 413 was measured on.
+// G090LF3C4D5E6F7A, slot A — the device the 413 was measured on.
 {
   const k = 0x586461, r = 0x214bcb;
   const got = _bootImageLength(partition({ kernel: k, ramdisk: r }));

@@ -1,7 +1,7 @@
 import asyncio, secrets, sqlite3, sys, time, base64, re
 import websockets
 
-DEVICE = "G090LF11803611NF"
+DEVICE = "G090LF3C4D5E6F7A"
 
 def _resolve_db() -> str:
     # #270: the container keeps its database at /app/data, the HA add-on at

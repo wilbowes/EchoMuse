@@ -63,8 +63,8 @@ static void want_cmdline(const char *what, const char *line, const char *expect)
     }
 }
 
-/* Read off G090LF11752215LE on 2026-09-15. */
-#define REAL "G090LF11752215LE"
+/* Read off G090LF1A2B3C4D5E on 2026-09-15. */
+#define REAL "G090LF1A2B3C4D5E"
 
 int main(void)
 {

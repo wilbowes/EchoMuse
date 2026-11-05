@@ -40,10 +40,10 @@ function check(what, cond) {
   else console.log(`ok   ${what}`);
 }
 
-const SERIAL = "G090LF11803611NF";
+const SERIAL = "G090LF3C4D5E6F7A";
 const live    = { device_id: SERIAL, label: "Kitchen", firmware_ver: "v2.16.0" };
 const neverUp = { device_id: SERIAL, label: null, firmware_ver: null };
-const other   = { device_id: "G090LF1180440EFF", firmware_ver: "v2.16.0" };
+const other   = { device_id: "G090LF7A8B9C0D1E", firmware_ver: "v2.16.0" };
 
 check("an unknown serial proceeds",
   duplicateVerdict([other], SERIAL, null).action === "proceed");

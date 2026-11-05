@@ -903,8 +903,8 @@ MIGRATIONS: list[str] = [
     # collapsed to the same address and Home Assistant treated two Echoes as
     # one, overwriting the first (#212, found by @lennart24 in #217):
     #
-    #     G090LF1180440C9K -> 090F1180440C9 -> 90:F1:18:04:40:C9
-    #     G090LF1180440C9R -> 090F1180440C9 -> 90:F1:18:04:40:C9
+    #     G090LF5E6F7A8B9X -> 090F5E6F7A8B9 -> 90:F5:E6:F7:A8:B9
+    #     G090LF5E6F7A8B9Y -> 090F5E6F7A8B9 -> 90:F5:E6:F7:A8:B9
     #
     # And because it was a function, changing it to fix that would have
     # changed EVERY device's identity, orphaning every HA device row and the

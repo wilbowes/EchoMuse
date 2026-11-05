@@ -3068,7 +3068,7 @@ int main(int argc, char **argv)
      * no property service — and then the LITERAL string "android". So the
      * hostname was set correctly on every boot and every prompt still read
      * root@android. Measured on EFF 2026-09-21: `hostname` answered
-     * em-G090LF1180440EFF while $HOSTNAME in the same shell was "android".
+     * em-G090LF7A8B9C0D1E while $HOSTNAME in the same shell was "android".
      *
      * The fix is to put HOSTNAME in the environment init hands its children,
      * which makes mkshrc's `: ${HOSTNAME:=...}` a no-op. Both envp arrays
