@@ -33,6 +33,8 @@ import os
 import re
 from pathlib import Path
 
+import em_disk
+
 log = logging.getLogger("echomuse.firmware")
 
 FIRMWARE_SUBDIR = "firmware"
@@ -141,6 +143,11 @@ def write(version: str, data: bytes, db_path: str | None = None) -> bool:
     """
     path = cache_path(version, db_path)
     if path is None or not data:
+        return False
+    if not em_disk.optional_writes_allowed(db_path):
+        log.warning(f"[firmware] could not cache {version}: free space is "
+                    f"{em_disk.free_mb(db_path):.0f} MB, below the "
+                    f"{em_disk.DISK_WARN_MB} MB mark for optional writes")
         return False
     part = _sidecar(path, ".part")
     try:

@@ -120,7 +120,7 @@ _CONTROLLER_STAT_FIELDS = (
     "uptime_s", "cpu_pct_1m", "cpu_pct_5m", "cpu_pct_1h", "cpu_pct_life",
     "rss_mb", "mem_total_mb", "mem_available_mb",
     "mem_limit_mb", "load_1", "load_5", "load_15", "cpu_count",
-    "data_used_mb", "data_free_mb", "db_mb", "recordings_mb",
+    "data_used_mb", "data_free_mb", "disk_state", "db_mb", "recordings_mb",
     "loop_lag_peak_ms", "python", "platform", "container",
 )
 

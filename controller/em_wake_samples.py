@@ -9,6 +9,7 @@ from __future__ import annotations
 import collections
 import io
 import json
+import logging
 import os
 import re
 import shutil
@@ -16,6 +17,10 @@ import time
 import uuid
 import wave
 from pathlib import Path
+
+import em_disk
+
+log = logging.getLogger("echomuse.wakesamples")
 
 SAMPLE_RATE = 16000
 SAMPLE_WIDTH = 2
@@ -81,6 +86,11 @@ def encode_wav(pcm: bytes) -> bytes:
 def save(device_id: str, name: str, pcm: bytes, db_path: str | None = None) -> bool:
     if parse_filename(name) != device_id or not pcm:
         return False
+    if not em_disk.optional_writes_allowed(db_path):
+        log.warning(f"[wake] Not saving {name}: free space is "
+                    f"{em_disk.free_mb(db_path):.0f} MB, below the "
+                    f"{em_disk.DISK_WARN_MB} MB mark for optional writes")
+        return False
     directory = samples_dir(db_path)
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / name
@@ -101,6 +111,11 @@ def archive(device_id: str, name: str, label: str, meta: dict, db_path: str | No
     """Copy a labeled sample plus its metadata into the permanent archive.
     Best-effort: a False return should not fail the label call itself."""
     if parse_filename(name) != device_id or label not in ARCHIVE_LABELS:
+        return False
+    if not em_disk.new_writes_allowed(db_path):
+        log.warning(f"[wake] Not archiving {name}: free space is "
+                    f"{em_disk.free_mb(db_path):.0f} MB, below the "
+                    f"{em_disk.DISK_REFUSE_MB} MB mark for new writes")
         return False
     src = samples_dir(db_path) / name
     if not src.is_file():

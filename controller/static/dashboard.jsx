@@ -10801,6 +10801,15 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
   // chosen interval to the default.
   const lastInterval = useRef(3600);
 
+  // Free space and the disk guard's state (#995). Loaded when the tab opens
+  // rather than with the panel: the value changes over a long-lived page.
+  const [disk, setDisk] = useState(null);
+  function loadDisk() {
+    API.get('/api/system/status')
+       .then(s => setDisk(s))
+       .catch(() => setDisk(null));
+  }
+
   function loadSystem() {
     API.get('/api/system/config')
        .then(c => {
@@ -10810,7 +10819,7 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
        })
        .catch(e => setSysMsg({ ok: false, text: e.error || 'Failed to load system settings' }));
   }
-  useEffect(() => { if (tab === 'system') loadSystem(); }, [tab]);
+  useEffect(() => { if (tab === 'system') { loadSystem(); loadDisk(); } }, [tab]);
 
   const sysVal = (k, d) => sysEdit[k] ?? sys?.[k] ?? d;
   function setSysVal(k, v) { setSysEdit(p => ({ ...p, [k]: String(v) })); setSysMsg(null); }
@@ -10962,6 +10971,40 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
                 const hours    = checksOn ? Math.max(1, Math.round(secs / 3600)) : 0;
                 return (
                   <>
+                    <div className="em-panel em-panel--stacked">
+                      <div className="em-label" style={{ marginBottom:'var(--space-7)' }}>Storage</div>
+                      <div style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-md)', color:'var(--text2)' }}>
+                        {disk?.data_free_mb == null ? 'Free space unavailable'
+                          : disk.data_free_mb >= 1024
+                            ? `${(disk.data_free_mb / 1024).toFixed(1)} GB free`
+                            : `${Math.round(disk.data_free_mb)} MB free`}
+                      </div>
+                      {disk?.disk_state === 'warn' && (
+                        <div role="status" className="em-ctrl-update" style={{
+                          marginTop:'var(--space-7)', padding:'var(--space-6) var(--space-8)',
+                          background:'var(--notice-bg)', border:'1px solid var(--notice-line)',
+                          borderRadius:'var(--radius-lg)', fontFamily:"var(--font-mono)",
+                          fontSize:'var(--fs-sm)', color:'var(--warn)', lineHeight:1.6,
+                        }}>
+                          Below {disk.disk_warn_mb} MB. New utterances and wake clips are not
+                          saved; custom model uploads and firmware caching are refused.
+                          Everything resumes once free space clears the mark.
+                        </div>
+                      )}
+                      {disk?.disk_state === 'refuse' && (
+                        <div role="status" className="em-ctrl-update" style={{
+                          marginTop:'var(--space-7)', padding:'var(--space-6) var(--space-8)',
+                          background:'var(--notice-bg)', border:'1px solid var(--notice-line)',
+                          borderRadius:'var(--radius-lg)', fontFamily:"var(--font-mono)",
+                          fontSize:'var(--fs-sm)', color:'var(--warn)', lineHeight:1.6,
+                        }}>
+                          Below {disk.disk_refuse_mb} MB. Only database writes continue —
+                          settings, turns and logs. Recordings, model uploads and firmware
+                          caching are refused.
+                        </div>
+                      )}
+                    </div>
+
                     <div className="em-panel em-panel--stacked">
                       <div className="em-label" style={{ marginBottom:'var(--space-7)' }}>Updates</div>
                       <Toggle

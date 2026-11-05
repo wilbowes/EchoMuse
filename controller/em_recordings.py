@@ -36,6 +36,8 @@ import re
 import wave
 from pathlib import Path
 
+import em_disk
+
 log = logging.getLogger("echomuse.recordings")
 
 RECORDINGS_SUBDIR = "recordings"
@@ -123,6 +125,11 @@ def save(device_id: str, turn_id: int, pcm: bytes,
     """
     name = filename(device_id, turn_id)
     if name is None or not pcm:
+        return None
+    if not em_disk.optional_writes_allowed(db_path):
+        log.warning(f"[recordings] Not saving {name}: free space is "
+                    f"{em_disk.free_mb(db_path):.0f} MB, below the "
+                    f"{em_disk.DISK_WARN_MB} MB mark for optional writes")
         return None
     directory = recordings_dir(db_path)
     directory.mkdir(parents=True, exist_ok=True)

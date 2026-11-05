@@ -14,6 +14,7 @@ from aiohttp import web
 
 import em_auth as auth
 import em_db as db
+import em_disk
 import em_http
 import em_oww_assets
 import em_oww_check
@@ -71,6 +72,18 @@ async def _post_oww_model_upload(request: web.Request) -> web.Response:
             return em_http.error("empty_upload", "Uploaded model is empty", 400)
         if len(data) > em_oww_models.MAX_MODEL_BYTES:
             return em_http.error("too_large", "Model exceeds 20 MB limit", 413)
+
+        free = em_disk.free_mb()
+        if not em_disk.new_writes_allowed():
+            return em_http.error(
+                "disk_full",
+                f"Free space is {free:.0f} MB; new writes are refused below "
+                f"{em_disk.DISK_REFUSE_MB} MB. Nothing was installed.", 507)
+        if not em_disk.optional_writes_allowed():
+            return em_http.error(
+                "low_disk",
+                f"Free space is {free:.0f} MB; optional writes pause below "
+                f"{em_disk.DISK_WARN_MB} MB. Nothing was installed.", 507)
 
         # Before anything is written: a model that cannot run is refused with
         # the reason, where it used to fail later in the wake listener (#869).

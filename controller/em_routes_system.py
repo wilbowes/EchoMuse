@@ -15,6 +15,7 @@ from aiohttp import web
 import em_auth as auth
 import em_db as db
 import em_device_view
+import em_disk
 import em_http
 import em_ingressauth
 import em_player
@@ -50,9 +51,16 @@ async def _get_system_status(request: web.Request) -> web.Response:
     fleet_base_os, approval_mode = await loop.run_in_executor(None, lambda: (
         db.fleet_base_os(), db.get_config("device_approval", "strict")))
     release = await em_releases.cached_firmware()
+    stats   = await loop.run_in_executor(None, em_process_stats.controller_stats)
 
     return em_http.ok({
         "controller_version": CONTROLLER_VERSION,
+        # Free space beside the database and the write guard's state, read
+        # once here so the System panel shows what the guards act on.
+        "data_free_mb":   stats.get("data_free_mb"),
+        "disk_state":     stats.get("disk_state"),
+        "disk_warn_mb":   em_disk.DISK_WARN_MB,
+        "disk_refuse_mb": em_disk.DISK_REFUSE_MB,
         # This controller's device address and ports — what a new entry in
         # the controller address list starts from.
         "link": dict(em_state.link),

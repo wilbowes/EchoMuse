@@ -17,9 +17,16 @@ import time
 from pathlib import Path
 from typing import Any
 
+import em_disk
 import em_recordings
 import em_state
 import em_support
+
+log = logging.getLogger("echomuse.stats")
+
+# The last free-space state a stats read saw, so a mark is logged once when it
+# is crossed rather than on every read.
+_last_disk_state: str | None = None
 
 
 # Import time, which is startup: em_controller imports this module before it
@@ -76,6 +83,23 @@ def _proc_meminfo() -> dict[str, float]:
     except OSError:
         pass
     return out
+
+
+def _note_disk_state(state: str, free: float) -> None:
+    """Log a free-space mark once, when the stats read crosses it."""
+    global _last_disk_state
+    previous, _last_disk_state = _last_disk_state, state
+    if previous == state:
+        return
+    if state == em_disk.REFUSE:
+        log.warning(f"[stats] free disk space is {free:.0f} MB — new writes "
+                    f"are refused below {em_disk.DISK_REFUSE_MB} MB; only "
+                    f"database writes continue")
+    elif state == em_disk.WARN:
+        log.warning(f"[stats] free disk space is {free:.0f} MB — optional "
+                    f"writes are paused below {em_disk.DISK_WARN_MB} MB")
+    elif previous is not None:
+        log.info(f"[stats] free disk space is {free:.0f} MB — writes resumed")
 
 
 def controller_stats() -> dict:
@@ -161,8 +185,11 @@ def controller_stats() -> dict:
     db_path = Path(os.environ.get("DB_PATH", "echomuse.db")).resolve()
     try:
         usage = shutil.disk_usage(db_path.parent)
+        free = usage.free / 1048576.0
         stats["data_used_mb"] = round(usage.used / 1048576.0, 1)
-        stats["data_free_mb"] = round(usage.free / 1048576.0, 1)
+        stats["data_free_mb"] = round(free, 1)
+        stats["disk_state"] = em_disk.classify(free)
+        _note_disk_state(stats["disk_state"], stats["data_free_mb"])
     except OSError:
         pass
     try:
