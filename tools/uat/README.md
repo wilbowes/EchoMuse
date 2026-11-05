@@ -18,17 +18,15 @@ python3 rig.py detach <serial> && python3 rig.py down
   never reaches other Echoes; the attached Echo reaches it through an endpoint
   file with `mdns: false`. `detach` restores the Echo's own credentials and
   endpoint file exactly.
-- **`rig.py up` does not start the browser yet**, though `down` removes it.
-  Start it once per run:
-  `docker run -d --name em-uat-browser --network host --ipc host mcr.microsoft.com/playwright/python:v1.49.1-noble sh -c "pip install -q playwright==1.49.1 && playwright run-server --port 3111 --host 127.0.0.1"`.
-- **Attach only to a rig that does not know the Echo.** `attach` moves the
-  Echo's credentials aside and then approves it; on a rig that still holds
-  its row the approval answers 409 with the Echo already cut off from its own
-  controller. `rig.py up` again (it starts from an empty database), then
-  attach.
 - **The browser runs in a container** (`mcr.microsoft.com/playwright/python`,
-  `playwright run-server` on :3111); the host needs only the client,
+  `playwright run-server` on :3111); `rig.py up` starts it with the controller
+  and `down` removes it. The host needs only the client,
   `pip install playwright==1.49.1`.
+- **Attach is repeatable.** On a rig that already holds the Echo's approved
+  row, `attach` leaves the Echo alone and prints its state; an approval that
+  another attach won in the meantime answers 409 `already_approved`, which
+  `attach` counts as success. After `detach`, run `up` before attaching that
+  Echo again.
 - **The Echo reports what it got.** Firmware writes `/tmp/em-config.json`
   after every config push: what it received and what it is running. A control
   is `applied` when the running value changed, `received` when it arrived but

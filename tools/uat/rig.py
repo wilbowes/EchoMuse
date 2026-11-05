@@ -1,10 +1,10 @@
 """
 Release UAT rig: an isolated controller, a USB Echo attached to it, a browser.
 
-    rig.py up --image IMAGE      controller container + admin account
+    rig.py up --image IMAGE      controller and browser containers + admin account
     rig.py attach SERIAL         point a USB Echo at it, approve it (repeat per Echo)
     rig.py detach SERIAL         put the Echo back exactly as it was
-    rig.py down                  remove the controller container
+    rig.py down                  remove both containers
 
 The controller runs on a Docker BRIDGE network, not the host's: its mDNS then
 stays inside the container, so no other Echo on the LAN can discover it and
@@ -30,6 +30,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -193,7 +194,8 @@ def _hex(text: str) -> str:
 # ─── Commands ────────────────────────────────────────────────────────────────
 
 def up(image: str) -> None:
-    subprocess.run(["docker", "rm", "-f", CONTAINER], capture_output=True)
+    for c in (CONTAINER, BROWSER):
+        subprocess.run(["docker", "rm", "-f", c], capture_output=True)
     data = STATE / "controller-data"
     subprocess.run(["rm", "-rf", str(data)])
     data.mkdir(parents=True)
@@ -204,6 +206,12 @@ def up(image: str) -> None:
         "-e", "DB_PATH=/app/data/echomuse.db", "-e", "DEVICE_APPROVAL=strict",
         "-e", "VOICE_MODE=esphome", "-e", "MDNS_NAME=em-uat", "-e", "LOG_LEVEL=DEBUG",
         "-v", f"{data}:/app/data", image], check=True, capture_output=True)
+    subprocess.run([
+        "docker", "run", "-d", "--name", BROWSER,
+        "--network", "host", "--ipc", "host", PLAYWRIGHT_IMAGE,
+        "sh", "-c", "pip install -q playwright==1.49.1 && "
+                    "playwright run-server --port 3111 --host 127.0.0.1"],
+        check=True, capture_output=True)
 
     def setup_token():
         logs = subprocess.run(["docker", "logs", CONTAINER], capture_output=True, text=True)
@@ -216,9 +224,32 @@ def up(image: str) -> None:
               {"token": one_time, "username": "uat", "password": password}, token="")
     _save_state(image=image, username="uat", password=password, token=res["token"])
     print(f"controller up: {image}, dashboard {API}, admin 'uat' (password in {STATE})")
+    print("browser up: ws://127.0.0.1:3111/")
+
+
+def approve(serial: str) -> None:
+    """Approve the Echo's row; one already approved is the wanted outcome."""
+    try:
+        api("POST", f"/api/devices/{serial}/approve", {"label": f"UAT {serial[-4:]}"})
+    except urllib.error.HTTPError as e:
+        body = json.loads(e.read() or b"{}")
+        if e.code != 409 or body.get("code") != "already_approved":
+            raise
 
 
 def attach(serial: str) -> None:
+    known = device(serial)
+    if known and known.get("approved"):
+        # Moving its credentials aside for a rig that already has its row
+        # strands the Echo: the approval that would issue them back is a 409.
+        _save_state(serials=sorted(set(_state().get("serials") or []) | {serial}))
+        print(f"{serial} already approved on this rig: firmware "
+              f"{known.get('firmware_ver')}, "
+              f"{'connected' if known.get('connected') else 'not connected'}")
+        if not known.get("connected"):
+            print("the rig still holds its row: run `rig.py up` for an empty "
+                  "database before attaching it again")
+        return
     echo = Echo(serial)
     try:
         # Aside once: a second attach must not overwrite the originals with
@@ -241,7 +272,7 @@ def attach(serial: str) -> None:
         echo.close()
     wait_for(f"{serial} to reach the rig", lambda: device(serial), 120)
     # Labels must be unique (#650), and there is one per attached Echo.
-    api("POST", f"/api/devices/{serial}/approve", {"label": f"UAT {serial[-4:]}"})
+    approve(serial)
     d = wait_for(f"{serial} connected", lambda: (device(serial) or {}).get("connected")
                  and device(serial), 180)
     _save_state(serials=sorted(set(_state().get("serials") or []) | {serial}))
