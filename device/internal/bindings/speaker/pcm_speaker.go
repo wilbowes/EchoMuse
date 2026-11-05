@@ -572,7 +572,7 @@ func (p *PcmSpeaker) JackState() *JackReport {
 	detect, detectOK := jack.State()
 	current := map[string]string{}
 	spec := p.out.spec.Jack
-	for _, ctl := range jackReadBack(namesOf(spec.Insert), namesOf(spec.Remove)) {
+	for _, ctl := range jackReadBack(namesOf(spec.Insert), namesOf(spec.Remove), namesOf(board.CurrentLayout().Routes)) {
 		if v, err := mixer.Get(ctl); err == nil {
 			current[ctl] = v
 		}

@@ -1,7 +1,7 @@
 package speaker
 
 import (
-	"github.com/wilbowes/EchoMuse/internal/bindings/codec"
+	"strings"
 )
 
 // The jack read-back: what the controller can see about the plug and the codec
@@ -39,22 +39,28 @@ type JackReport struct {
 }
 
 // jackReadBack is every control the report carries: the board's jack table,
-// plus the two playback DAC routes. The routes are not in the reconcile's
-// table on purpose — a route left open is silence rather than an error, and
-// writing to it every 30s would paper over a fault instead of reporting it.
-func jackReadBack(insert, remove []string) []string {
+// plus the playback DAC routes from its route table. The routes are not in the
+// reconcile's table on purpose — a route left open is silence rather than an
+// error, and writing to it every 30s would paper over a fault instead of
+// reporting it.
+func jackReadBack(insert, remove, routes []string) []string {
 	var names []string
 	seen := map[string]bool{}
-	for _, c := range append(append([]string{}, insert...), remove...) {
-		if !seen[c] {
+	add := func(c string) {
+		if c != "" && !seen[c] {
 			seen[c] = true
 			names = append(names, c)
 		}
 	}
-	for _, c := range []string{codec.HPLDacSwitch, codec.HPRDacSwitch} {
-		if !seen[c] {
-			seen[c] = true
-			names = append(names, c)
+	for _, c := range insert {
+		add(c)
+	}
+	for _, c := range remove {
+		add(c)
+	}
+	for _, c := range routes {
+		if strings.Contains(c, "Output Mixer") && strings.HasSuffix(c, "DAC Switch") {
+			add(c)
 		}
 	}
 	return names

@@ -1,9 +1,9 @@
 package speaker
 
 import (
+	"strings"
 	"testing"
 
-	"github.com/wilbowes/EchoMuse/internal/bindings/codec"
 	"github.com/wilbowes/EchoMuse/pkg/board"
 )
 
@@ -13,10 +13,10 @@ import (
 
 func TestJackReportReadsBackWhatTheCodecIsActuallyDoing(t *testing.T) {
 	r := jackReport(1, true, map[string]string{
-		"Ext_Speaker_Amp_Switch": "Off",
-		"HP Driver Gain Volume":  "11",
-		codec.HPLDacSwitch:       "1",
-		codec.HPRDacSwitch:       "1",
+		"Ext_Speaker_Amp_Switch":        "Off",
+		"HP Driver Gain Volume":         "11",
+		"HPL Output Mixer L_DAC Switch": "1",
+		"HPR Output Mixer R_DAC Switch": "1",
 	}, 7)
 
 	if r.Inserted == nil || !*r.Inserted {
@@ -28,7 +28,7 @@ func TestJackReportReadsBackWhatTheCodecIsActuallyDoing(t *testing.T) {
 	if got := r.Controls["HP Driver Gain Volume"]; got != "11" {
 		t.Errorf("want the gain as read back, got %q", got)
 	}
-	if r.Controls[codec.HPLDacSwitch] != "1" || r.Controls[codec.HPRDacSwitch] != "1" {
+	if r.Controls["HPL Output Mixer L_DAC Switch"] != "1" || r.Controls["HPR Output Mixer R_DAC Switch"] != "1" {
 		t.Errorf("want both DAC routes as read back, got %v", r.Controls)
 	}
 	if r.DriftReapplies != 7 {
@@ -66,13 +66,15 @@ func TestJackReportDistinguishesZeroGainFromNoReading(t *testing.T) {
 // The reconcile may only ever rewrite the board's jack pair. A DAC route that
 // has gone open is reported, not papered over by writing to it every 30s.
 func TestJackReadBackCoversMoreThanTheReconcileDoes(t *testing.T) {
-	names := jackReadBack([]string{"Ext_Speaker_Amp_Switch"}, []string{"Ext_Speaker_Amp_Switch"})
+	names := jackReadBack(
+		[]string{"Ext_Speaker_Amp_Switch"}, []string{"Ext_Speaker_Amp_Switch"},
+		[]string{"HPR Output Mixer R_DAC Switch", "HPL Output Mixer L_DAC Switch", "ADC_A DIF1_L Input Gain"})
 	if len(names) != 3 {
 		t.Fatalf("want the one board control plus both DAC routes, got %v", names)
 	}
 	j := board.Jack{Insert: []board.Ctl{{Name: "Ext_Speaker_Amp_Switch", Values: []string{"0"}}}}
 	for _, w := range jackRouting(j, true) {
-		if w.Ctl == codec.HPLDacSwitch || w.Ctl == codec.HPRDacSwitch {
+		if strings.Contains(w.Ctl, "DAC Switch") {
 			t.Errorf("the reconcile must not write %s", w.Ctl)
 		}
 	}
