@@ -3439,6 +3439,12 @@ const _amonetLk = (head) => {
   return 0;
 };
 
+// The eight bytes a probe pulled off lk_a, as the hex _amonetLk reads. '' when
+// the file was absent or short: a probe that could not run is not an LK.
+const _lkHead = (bytes) => (bytes && bytes.length >= 8)
+  ? [...bytes.subarray(0, 8)].map(b => b.toString(16).padStart(2, '0')).join('')
+  : '';
+
 // Was this Echo unlocked with amonet-biscuit v2.0.0 or later? v2.0.0
 // (R0rt1z2, 10 Sep 2026) writes a newer preloader, LK and TrustZone, and
 // FireOS 5 does not boot on them — so neither does EchoMuse, emOS included,
@@ -4772,18 +4778,24 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // amonet v2.0.0 — see _unlockVerdict. lk_a and the TWRP version can only
     // be read in recovery (lk_a needs root); in Android the release is the
     // evidence, and a v2 device that boots Android is necessarily on FireOS 6.
+    //
+    // lk_a's bytes come back as a small file and are decoded here, the way the
+    // emOS gate reads them: amonet 1's TWRP 3.2.3 carries BusyBox 1.22.1,
+    // whose `od` has no -A, so the `od -An -tx1` pipeline this used to run
+    // failed on exactly the recovery this check was added for (#903).
     let lk = '', twrp = '';
     if (inRecovery) {
       const u = await c.shell(
         'P=""; for u in /sys/block/mmcblk0/mmcblk0p*/uevent; do '
         + 'grep -qx "PARTNAME=lk_a" "$u" 2>/dev/null && { d=${u%/uevent}; P="/dev/block/${d##*/}"; }; done; '
-        + 'echo "LK=$([ -n "$P" ] && dd if="$P" bs=8 count=1 2>/dev/null | od -An -tx1 | tr -d \' \\n\')"; '
+        + 'rm -f /tmp/em_lk.bin; [ -n "$P" ] && dd if="$P" of=/tmp/em_lk.bin bs=8 count=1 2>/dev/null; '
         + 'echo "TWRP=$(getprop ro.twrp.version)"; '
         + 'echo "TWRPLOG=$(grep -m1 -o \'Starting TWRP [0-9][^ ]*\' /tmp/recovery.log 2>/dev/null)"; '
         + 'echo _UNLOCKCHK');
       if (u.includes('_UNLOCKCHK')) {
         const pick = k => ((u.match(new RegExp('^' + k + '=(.*)$', 'm')) || [])[1] || '').trim();
-        lk   = pick('LK');
+        lk   = _lkHead(await c.pull('/tmp/em_lk.bin'));
+        await c.shell('rm -f /tmp/em_lk.bin');
         twrp = pick('TWRP') || pick('TWRPLOG').replace(/^Starting TWRP /, '');
       }
       addLog(`Unlock check: TWRP ${twrp || 'unknown'}, lk_a ${lk || 'unreadable'}`);
@@ -7447,9 +7459,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       await c.shell(`dd if=${donorProbe.lkDev} of=/tmp/em_lk.bin bs=8 count=1 2>/dev/null`);
       const e = await c.pull('/tmp/em_lk.bin');
       await c.shell('rm -f /tmp/em_lk.bin');
-      if (e && e.length >= 8) {
-        donorProbe.lk = [...e.subarray(0, 8)].map(b => b.toString(16).padStart(2, '0')).join('');
-      }
+      donorProbe.lk = _lkHead(e);
     }
     addLog(`  lk_a (${donorProbe.lkDev || 'not found'}): ${donorProbe.lk || 'unreadable'}`);
     const toCheck = plan

@@ -36,10 +36,11 @@ function liftArrow(name) {
   throw new Error(`could not find the end of ${name}`);
 }
 
-const { _unlockVerdict } = await import(
+const { _unlockVerdict, _lkHead } = await import(
   "data:text/javascript;base64," + Buffer.from(
-    liftArrow("_amonetLk") + "\n" + liftArrow("_unlockVerdict")
-    + "\nexport { _unlockVerdict };"
+    liftArrow("_amonetLk") + "\n" + liftArrow("_lkHead") + "\n"
+    + liftArrow("_unlockVerdict")
+    + "\nexport { _unlockVerdict, _lkHead };"
   ).toString("base64"));
 
 const LK_V1 = "8816885824790500";  // amonet 1's lk.bin: MTK magic, then the image length, 358,692
@@ -88,6 +89,28 @@ check("all three signs are reported, so the message says why",
 check("the TWRP version appears in the evidence",
   both.evidence.some(e => e.includes("3.7.0_9-0")), JSON.stringify(both.evidence));
 
+// ── The step-1 probe's decode: what the bytes pulled off lk_a become ──
+// Step 1 copies eight bytes of lk_a to a file and decodes them here, so the
+// test is over the bytes that really arrive, not over the hex in a string.
+const lkBytes = (hex) => new Uint8Array(hex.match(/../g).map(h => parseInt(h, 16)));
+const V1_BYTES = lkBytes(LK_V1), V2_BYTES = lkBytes(LK_V2);
+check("the eight bytes of amonet 1's LK decode to its header",
+  _lkHead(V1_BYTES) === LK_V1, _lkHead(V1_BYTES));
+check("a longer read decodes only the header",
+  _lkHead(new Uint8Array([...V1_BYTES, 0x0a, 0x0b])) === LK_V1);
+check("amonet 1's header off lk_a is recognised, so v1 in TWRP is not refused",
+  !v2({ release: "5.1.1", lk: _lkHead(V1_BYTES), twrp: "3.2.3-0" }));
+check("v2's header read the same way is still refused",
+  v2({ release: "5.1.1", lk: _lkHead(V2_BYTES), twrp: "3.2.3-0" }));
+// The fallback the issue cares about: TWRP 3.2.3 with the probe unreadable is
+// still a working amonet 1 device, so it must pass on the TWRP version.
+check("no lk_a pulled at all: unreadable, not an LK", _lkHead(new Uint8Array(0)) === "");
+check("a short read proves nothing", _lkHead(V1_BYTES.subarray(0, 4)) === "");
+check("lk_a unreadable falls back on TWRP 3.2.3, which v1 installs",
+  !v2({ release: "5.1.1", lk: _lkHead(new Uint8Array(0)), twrp: "3.2.3-0" }));
+check("lk_a unreadable but TWRP 3.7 present is still evidence of v2",
+  v2({ release: "5.1.1", lk: _lkHead(new Uint8Array(0)), twrp: "3.7.0_9-0" }));
+
 // ── The connect step actually consults it, with the release from /system ──
 // Comments stripped first: a guard that greps for a call also finds the
 // comment explaining it, and passes on the prose.
@@ -97,6 +120,20 @@ check("runConnectAndroid calls _unlockVerdict",
   /_unlockVerdict\(\{\s*release:\s*effRelease/.test(connect));
 check("in recovery the release comes from /system, not TWRP's getprop",
   /effRelease\s*=\s*\(sys && sys\.release\)/.test(connect));
+
+// ── But the probe it reads must be able to RUN on amonet 1 ──
+// It used to pipe lk_a through `od -An -tx1`, which TWRP 3.2.3's BusyBox
+// 1.22.1 rejects ("invalid option -- A"), so on the recovery amonet 1
+// installs the check never ran and the step fell back on the TWRP version
+// (#903). Sliced to the one function: `od -An` still appears elsewhere.
+const step1 = code.slice(code.indexOf("async function runConnectAndroid"),
+                         code.indexOf("async function runConnectTwrp"));
+check("the slice really is step 1", step1.includes("_UNLOCKCHK") && step1.length > 1000);
+check("step 1 no longer decodes lk_a with od on the device", !/\bod\b/.test(step1));
+check("step 1 copies lk_a's eight bytes to a file instead",
+  /dd if="\$P" of=\/tmp\/em_lk\.bin bs=8 count=1/.test(step1));
+check("step 1 decodes the pulled bytes in the browser",
+  /_lkHead\(await c\.pull\('\/tmp\/em_lk\.bin'\)\)/.test(step1));
 
 if (failures) {
   console.error(`\n${failures} failure(s)`);
