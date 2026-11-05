@@ -22,6 +22,7 @@ Device WebSocket protocol:
      "version": "v2.0.1", "capabilities": [...]}
     {"type": "button", "clickType": 138, "down": false}
     {"type": "log", "level": "info", "message": "..."}
+    {"type": "playback_started"}          (only if playback_start)
     {"type": "playback_stats", "periods": 123, "underruns": 0}
     {"type": "listen_state", "state": "local", "reason": ""}
     {"type": "oww_wake", "score": .9, "threshold": .5, "ageMs": 80,
@@ -93,6 +94,7 @@ import em_config_types
 import em_dbwriter
 import em_tasks
 import em_pacing
+import em_playstart
 import em_platform
 import em_boards
 import em_tcp
@@ -782,6 +784,12 @@ class Device:
         # previous one, so the hazard those calls guarded against is gone by
         # construction rather than by discipline.
         self._playback_waiters: collections.deque = collections.deque()
+        # The start-of-audio half of the above (#203): per-playback waiters
+        # the device's `playback_started` resolves, on firmware announcing
+        # `playback_start`. Same queue shape for the same reason — the meter
+        # ring is raised from this report, and one playback's start must
+        # resolve only its own waiter. em_playstart holds the queue.
+        self.playback_start = em_playstart.StartReport()
         # Outcome of the most recently persisted turn, set by em_esphome and
         # consumed once by the turn loop's ring cleanup (see _leds_turn_end).
         self.last_turn_outcome: str | None = None
@@ -1037,6 +1045,22 @@ class Device:
         was only ever "immediate" for audio not yet sent.
         """
         return "output_chain" in (self.capabilities or [])
+
+    @property
+    def playback_start_capable(self) -> bool:
+        """
+        Whether this firmware reports the moment a voice stream starts
+        playing (#203), rather than leaving the controller to estimate it from
+        the first period it puts on the wire.
+
+        The device is the only side that knows: it is the instant its ALSA
+        write begins, which is also what its barge-in threshold keys off.
+        Without the report the estimate is kept — it errs by up to the prime
+        window, which is a tile that looks responsive, where assuming the
+        report would leave the tile dark through the whole response on every
+        device already in the field.
+        """
+        return "playback_start" in (self.capabilities or [])
 
     @property
     def timer_alarm_ringing(self) -> bool:
@@ -1326,9 +1350,10 @@ class Device:
         - **True is still a controller-side ESTIMATE** — the first period put
           on the wire. The device holds audio until roughly
           SPEAKER_PRIME_SECONDS is queued (primePeriods, pcm_speaker.go), so
-          the tile leads the speaker by up to that much. Closing that gap needs
-          the DEVICE to report the moment it starts, which no released firmware
-          does; `playback_stats` is the only playback message it sends.
+          the tile leads the speaker by up to that much. Firmware announcing
+          `playback_start` reports when its ALSA write begins (#203), but that
+          report raises the playback meter ring (`em_playstart`); it does not
+          move this flag, which is set where the audio is sent.
 
         Guarded rather than plain, because one caller is stream_speaker's
         finally, which is also reached when barge-in cancels the task
@@ -2813,6 +2838,8 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown",
                         leds_spin_green(device, stop_spin)
                     )
                 meter_refresh_task = None
+                _meter_task = None
+                _meter_ev = None
                 if device.led_anim_capable:
                     # Playback ring: throb with the response's live audio
                     # level (device-side "meter" pattern, RMS measured at
@@ -2854,7 +2881,15 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown",
                             _refresh_meter_dead_man()
                         )
 
-                    pcm_chunks = _meter_at_playback_start(pcm_chunks, _meter_on)
+                    prime_bytes = int(SPEAKER_PRIME_SECONDS * SPEAKER_RATE * 2)
+                    if device.playback_start_capable:
+                        pcm_chunks, _meter_task, _meter_ev = em_playstart.meter_at_playback_start(
+                            pcm_chunks, _meter_on, prime_bytes,
+                            report=device.playback_start)
+                    else:
+                        _meter_task = None
+                        _meter_ev = None
+                        pcm_chunks = _meter_at_playback_start(pcm_chunks, _meter_on)
 
                 if device.private_listening:
                     # Nothing is streaming (closed at end of speech), and the
@@ -2905,6 +2940,12 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown",
                         await asyncio.gather(
                             meter_refresh_task, return_exceptions=True
                         )
+                    if _meter_task is not None:
+                        _meter_task.cancel()
+                        await asyncio.gather(
+                            _meter_task, return_exceptions=True
+                        )
+                    device.playback_start.end(_meter_ev)
 
             # P0-1: no mic_start_turn() here on the initial (wake/button)
             # entry — for a wake turn the stream is already running on
@@ -4831,6 +4872,19 @@ async def _on_playback_stats(device: Device, msg: dict) -> None:
         )
 
 
+async def _on_playback_started(device: Device, msg: dict) -> None:
+    """Device reports that a voice stream began playing (#203).
+
+    The device's ALSA write beginning is the only witness; it is the instant
+    the barge-in threshold keys off and the level tap the meter renders is
+    read. Resolves the oldest outstanding per-playback waiter in
+    device.playback_start, so the meter ring is raised from the device rather
+    than from the first period sent, which leads the speaker by the prime
+    window.
+    """
+    device.playback_start.signal()
+
+
 async def _on_oww_shadow_cross(device: Device, msg: dict) -> None:
     device_id = device.device_id
     # On-device scoring reached the wake threshold. Recorded
@@ -5070,6 +5124,7 @@ CONTROL_HANDLERS = {
     "sendspin_token":   _on_sendspin_token,
     "wifi_result":      _on_wifi_result,
     "playback_stats":   _on_playback_stats,
+    "playback_started": _on_playback_started,
     "oww_shadow_cross": _on_oww_shadow_cross,
     "oww_wake":         _on_oww_wake,
     "listen_state":     _on_listen_state,

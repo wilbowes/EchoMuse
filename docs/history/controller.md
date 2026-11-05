@@ -2456,7 +2456,9 @@ to play. That is the same mistake the LED ring made until 2026-07-24, in the
 same file. `True` is still a controller-side **estimate** — the first period on
 the wire — and leads the speaker by up to `SPEAKER_PRIME_SECONDS`, because the
 device holds audio until primed. Closing that needs the device to report the
-start; `playback_stats` is the only playback message the firmware sends (#203).
+start. Firmware announcing `playback_start` now does, and the playback METER
+RING is raised from it (#203); `Device.speaking`'s True edge is unchanged and
+still estimates from the first period on the wire.
 
 **`speaking` and `thinking` are mutually exclusive and starting to speak clears
 `thinking`.** Both reach the dashboard and `speaking` outranks `thinking`, so a
