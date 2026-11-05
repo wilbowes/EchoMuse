@@ -2905,7 +2905,7 @@ def test_the_emos_release_workflow_asserts_what_it_publishes():
     # The off-target checks run against the source being published. Each one
     # drives a parser or an invariant whose failure is silent on hardware.
     for check in ("ringsim --check", "pwcheck", "tmoutcheck", "wpacheck",
-                  "cmdlinecheck", "dnscheck"):
+                  "cmdlinecheck", "dnscheck", "dhcpcheck"):
         assert check in wf, f"the release must run {check}"
     # The bundle is what carries everything but the compat init, so a release
     # that skipped building it would publish an empty-handed payload.

@@ -2510,6 +2510,30 @@ static int udhcpc_hook(char *out, size_t sz, const char *bbp)
 
 #define UDHCPC_SCRIPT "/tmp/udhcpc.sh"
 
+/* The client's argv, with the address check ON.
+ *
+ * Both clients accept whatever address the server offers unless asked to
+ * probe it first: busybox udhcpc only does it with -a, and -A (--noarp) clears
+ * DHCPCD_ARP in Amazon's dhcpcd. That is how #871's Echo kept a duplicate
+ * address for a day, with the controller's mDNS "failed verification" as the
+ * only clue. RFC 2131 §4.4.1: ARP-probe the offer, DHCPDECLINE a conflict, so
+ * the server hands out a free one. The line it leaves in the trail is the
+ * client's own -- udhcpc's "offered address is in use (got ARP reply),
+ * declining" in /run/net.log through spawn(), dhcpcd's "<iface>: hardware
+ * address <mac> claims <ip>" in /run/messages through syslogd. -L because -A
+ * also cleared DHCPCD_IPV4LL: dropping -A alone would let a network with no
+ * DHCP server hand dhcpcd a 169.254 address, which has_ip() reads as the
+ * network being up.
+ */
+static char **dhcp_argv(int vendor)
+{
+    static char *fos5[] = { "/system/bin/dhcpcd", "-BKL", "-f",
+                            "/system/etc/dhcpcd/dhcpcd.conf", "wlan0", NULL };
+    static char *fos6[] = { "/sbin/udhcpc", "-B", "-f", "-a", "-i", "wlan0",
+                            "-s", (char *)UDHCPC_SCRIPT, NULL };
+    return vendor ? fos6 : fos5;
+}
+
 /* 24 turns of a 5s loop = two minutes. */
 #define WIFI_FAIL_TURNS 24
 
@@ -2588,11 +2612,7 @@ static void net_main(void)
         netlog("udhcpc script create failed errno=%d\n", errno);
     }
 
-    char *dhcp_fos5[] = { "/system/bin/dhcpcd", "-ABK", "-f",
-                          "/system/etc/dhcpcd/dhcpcd.conf", "wlan0", NULL };
-    char *dhcp_fos6[] = { "/sbin/udhcpc", "-B", "-f", "-i", "wlan0",
-                          "-s", (char *)UDHCPC_SCRIPT, NULL };
-    char **dhcp = vendor ? dhcp_fos6 : dhcp_fos5;
+    char **dhcp = dhcp_argv(vendor);
     if (!vendor && lease_dir_ready(DHCPCD_LEASE_DIR, AID_DHCP, AID_DHCP) != 0)
         netlog("%s not usable (errno=%d): DNS will come from the gateway\n",
                DHCPCD_LEASE_DIR, errno);

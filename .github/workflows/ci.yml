@@ -753,6 +753,14 @@ jobs:
         run: |
           cc -O2 -o /tmp/dnscheck emos/init/dnscheck.c
           /tmp/dnscheck
+      # Both DHCP clients take whatever address the server offers unless told
+      # to probe it first (#871). A duplicate address leaves the Echo dropping
+      # its controller link every 1-3 minutes with "failed verification" as the
+      # only clue, which reads as a controller fault.
+      - name: The DHCP client declines an address another host answers for
+        run: |
+          cc -O2 -o /tmp/dhcpcheck emos/init/dhcpcheck.c
+          /tmp/dhcpcheck
       # Every node in /dev comes from the kernel's uevents. A node with the
       # wrong numbers opens something else: on the Echo Dot 3 the old table's
       # ttyGS0 was the jack detector, and the USB console sat silent.

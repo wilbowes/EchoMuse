@@ -138,6 +138,13 @@ for d in telnetd httpd inetd ftpd tftpd dnsd udhcpd dhcprelay tcpsvd udpsvd \
         echo "listening daemon $d is still built in -- refusing" >&2; exit 1; }
 done
 
+# udhcpc's -a is what makes a FireOS 6 device ARP-probe the address it is
+# offered and DHCPDECLINE a conflict (#871). Without FEATURE_UDHCPC_ARPING the
+# flag is an invalid option: udhcpc exits and the device never gets an address,
+# and nothing else here would notice.
+grep -qx 'CONFIG_FEATURE_UDHCPC_ARPING=y' .config || {
+    echo "udhcpc cannot ARP-probe an offered address -- refusing" >&2; exit 1; }
+
 # PROVE the binary came from the source we are about to publish.
 #
 # The tarball is only sufficient as "complete corresponding source" because we
