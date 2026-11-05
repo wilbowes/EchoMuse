@@ -94,9 +94,9 @@ def test_a_barge_while_thinking_sends_no_flush(monkeypatch):
 
 
 def test_the_stream_watcher_flushes_before_it_claims():
-    # The watcher is a scoring loop over live audio, so its order is pinned
-    # in the source: exactly one flush, ahead of the claim.
-    src = code_only(def_source("_barge_watcher"))
+    # Both take paths share `_take_barge` (#195), so its order is pinned in
+    # the source: exactly one flush, ahead of the claim.
+    src = code_only(def_source("_take_barge"))
     assert src.count("speaker_flush") == 1
     assert src.index("speaker_flush") < src.index("_claim_wake(")
 
@@ -177,7 +177,7 @@ def test_a_private_barge_marks_the_turn_before_it_flushes(monkeypatch):
 
 
 def test_the_stream_watcher_marks_the_turn_before_it_flushes():
-    src = code_only(def_source("_barge_watcher"))
+    src = code_only(def_source("_take_barge"))
     assert src.index("esphome.note_barged(device.device_id)") < src.index("speaker_flush")
 
 

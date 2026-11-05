@@ -2019,6 +2019,13 @@ async def _take_barge(device: Device, *, score: float, threshold: float,
         f"Barge-in during {phase} (score={score:.3f})"
     )
     device.barge_detected = True
+    device.barge_decided.clear()
+    if in_playback:
+        # Before the claim, whose hold would put reply audio in the session.
+        # Marked first: the reply can end inside the hold and the turn record
+        # `ok` before abort_ha_run runs.
+        esphome.note_barged(device.device_id)
+        await device.send_control({"type": "speaker_flush"})
 
     # Arbitrate, exactly as a wake crossing does. Until
     # 2026-09-02 this path claimed nothing, so on a fleet with
@@ -2113,7 +2120,6 @@ async def _take_barge(device: Device, *, score: float, threshold: float,
         device.last_wake = None
     device.cancel_event.set()
     if in_playback:
-        await device.send_control({"type": "speaker_flush"})
         # HA's run is normally over by now (RUN_END follows
         # TTS_END, and we only reach playback at TTS_END), but
         # a barge in the first milliseconds of audio can beat
