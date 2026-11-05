@@ -272,3 +272,36 @@ def test_programmatic_sessions_do_not_mark_the_dashboard_flag():
         )
 
     asyncio.run(main())
+
+
+def test_b64_lines_are_the_heredoc_body():
+    import base64
+    data = bytes(range(256)) * 3
+    lines = em_shell._b64_lines(data)
+    assert "".join(lines) == base64.encodebytes(data).decode("ascii")
+    assert lines and all(line.endswith("\n") for line in lines)
+
+
+def test_a_firmware_send_lets_another_wake_run():
+    """send() does not yield while the socket accepts data.
+
+    A firmware heredoc is hundreds of thousands of those calls. Without an
+    explicit yield, a wake on any other Dot waits until the upload finishes.
+    """
+    async def main():
+        ran = []
+
+        class WS:
+            async def send(self, data):
+                return None
+
+        async def wake():
+            ran.append(1)
+
+        task = asyncio.create_task(wake())
+        lines = ["x\n"] * (em_shell._SEND_YIELD_LINES + 1)
+        await em_shell._send_b64_lines(WS(), lines)
+        assert ran, "the upload held the loop until the heredoc was finished"
+        await task
+
+    asyncio.run(main())
