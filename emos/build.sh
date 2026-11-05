@@ -154,6 +154,15 @@ BUILD_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 HOME_URL="https://github.com/wilbowes/EchoMuse"
 OSREL
 install -m 0755 "$WORK/init" "$WORK/root/init"
+
+# #560: `/emos-svc stop|start|restart|status [name]`, for taking one service
+# down without pausing the whole supervisor. The tool IS this init: it
+# dispatches on the name it was invoked under, so an older image — which has no
+# `emos-svc` — answers "not found" instead of reading `stop` as a boot mode.
+# That is why the link is created here, by the build, rather than by anything
+# at runtime: a missing link is a feature that is not on the device at all.
+# controller/em_emos_build.py writes the same entry into the ramdisk it packs.
+ln -sf init "$WORK/root/emos-svc"
 ( cd "$WORK/root" && find . | cpio -o -H newc 2>/dev/null | gzip -9 ) > "$WORK/ramdisk.gz"
 
 # LK gunzips an AArch64 Image, so the kernel must go back in COMPRESSED — the
