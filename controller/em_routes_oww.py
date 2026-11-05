@@ -39,12 +39,32 @@ async def _get_oww_models(request: web.Request) -> web.Response:
     GET /api/oww_models
 
     Custom models discovered in the data volume's oww_models/ dir.
-    `path` is the value to store in owwModel config.
+    `path` is the value to store in owwModel config; `used_by` names the
+    fleet default or the Echoes (by label) that select it.
     """
+    models = em_oww_models.scan()
+    configs, labels = await _model_scopes()
+    for m in models:
+        m["used_by"] = em_oww_models.display_users(
+            em_oww_models.in_use_by(m["path"], configs), labels)
     return em_http.ok({
-        "models": em_oww_models.scan(),
+        "models": models,
         "dir":    str(em_oww_models.models_dir()),
     })
+
+
+def _read_model_scopes() -> tuple[dict[str, dict], dict[str, str]]:
+    configs = {"global": db.get_global_device_config()}
+    labels: dict[str, str] = {}
+    for row in db.get_all_devices():
+        configs[row["device_id"]] = db.get_device_config(row["device_id"])
+        labels[row["device_id"]] = row["label"] or row["device_id"]
+    return configs, labels
+
+
+async def _model_scopes() -> tuple[dict[str, dict], dict[str, str]]:
+    return await asyncio.get_running_loop().run_in_executor(
+        None, _read_model_scopes)
 
 
 @auth.require_admin
@@ -66,6 +86,13 @@ async def _post_oww_model_upload(request: web.Request) -> web.Response:
             return em_http.error("invalid_filename",
                           "Model must be a .onnx file with a simple name "
                           "(letters, digits, _ - . only)", 400)
+        present = {m["file"] for m in em_oww_models.scan()}
+        if fname not in present and len(present) >= em_oww_models.MAX_MODELS:
+            return em_http.error(
+                "model_limit",
+                f"The controller keeps at most {em_oww_models.MAX_MODELS} "
+                "custom wake word models. Delete one before uploading "
+                "another.", 409)
         data = await field.read()
         if not data:
             return em_http.error("empty_upload", "Uploaded model is empty", 400)
@@ -118,17 +145,13 @@ async def _delete_oww_model(request: web.Request) -> web.Response:
     if not path.is_file():
         return em_http.error("not_found", "No such model", 404)
 
-    def _configs() -> dict[str, dict]:
-        out = {"global": db.get_global_device_config()}
-        for row in db.get_all_devices():
-            out[row["device_id"]] = db.get_device_config(row["device_id"])
-        return out
-
-    configs = await asyncio.get_running_loop().run_in_executor(None, _configs)
+    configs, labels = await _model_scopes()
     users = em_oww_models.in_use_by(str(path), configs)
     if users:
-        return em_http.error("model_in_use",
-                      f"Model is selected by: {', '.join(users)}", 409)
+        return em_http.error(
+            "model_in_use",
+            "Model is selected by: "
+            + ", ".join(em_oww_models.display_users(users, labels)), 409)
 
     path.unlink()
     log.info(f"[api] Wake model deleted: {fname}")

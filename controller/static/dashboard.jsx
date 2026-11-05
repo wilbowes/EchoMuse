@@ -198,6 +198,36 @@ function wwModelLabel(v) {
   return v.replace(/_v[\d.]+$/, '').replace(/_/g, ' ');
 }
 
+// Custom models: the ones in use first, then by name, so the list reads as
+// "what is running" before "what is left over".
+function sortWakeModels(models) {
+  return [...models].sort((a, b) =>
+    (b.used_by?.length ? 1 : 0) - (a.used_by?.length ? 1 : 0)
+    || a.name.localeCompare(b.name));
+}
+
+function wakeModelUse(m) {
+  return m.used_by?.length
+    ? `used by ${m.used_by.join(', ')}`
+    : 'not used — safe to delete';
+}
+
+function wakeModelMeta(m) {
+  if (!m || !m.size) return '';
+  const size = m.size >= 1048576
+    ? `${(m.size / 1048576).toFixed(1)} MB`
+    : `${Math.round(m.size / 1024)} KB`;
+  const when = new Date(m.mtime * 1000).toLocaleDateString(
+    [], { day: 'numeric', month: 'short', year: 'numeric' });
+  return `${size} · uploaded ${when}`;
+}
+
+// A failed call says why (a model in use names its users); a code alone tells
+// the operator nothing.
+function _wakeModelError(e, fallback) {
+  return (e && e.error) || fallback;
+}
+
 function uptime(s) {
   if (!s) return '—';
   const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
@@ -9845,7 +9875,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
       const resp = await API.upload('/api/oww_models/upload', file, 'model');
       await loadCustomModels();
       if (resp.model?.path) set('owwModel', resp.model.path);
-    } catch (e) { alert(e.error || 'Model upload failed'); }
+    } catch (e) { alert(_wakeModelError(e, 'Model upload failed')); }
   }
 
   async function deleteWakeModel(m) {
@@ -9853,7 +9883,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
     try {
       await API.del(`/api/oww_models/${encodeURIComponent(m.file)}`);
       await loadCustomModels();
-    } catch (e) { alert(e.error || 'Delete failed'); }
+    } catch (e) { alert(_wakeModelError(e, 'Delete failed')); }
   }
 
   // A selected custom model that no longer exists on disk (or a bare-metal
@@ -10078,7 +10108,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                 <div title={m.value} style={{ fontFamily: mono, fontSize: 'var(--fs-xs)', color: 'var(--text2)', marginTop: 'var(--space-1)', ..._ROW_TEXT, display: 'block' }}>{m.value}</div>
               </div>
             ))}
-            {[...customModels, ...(orphanModel ? [orphanModel] : [])].map(m => (
+            {[...sortWakeModels(customModels), ...(orphanModel ? [orphanModel] : [])].map(m => (
               <div key={m.path} {...asButton(() => set('owwModel', m.path), { pressed: config.owwModel === m.path })} style={{
                 background: config.owwModel === m.path
                   ? 'linear-gradient(160deg,var(--accent-tint),var(--accent-line))'
@@ -10090,9 +10120,14 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
               }}>
                 <div title={wwModelLabel(m.path)} style={{ fontFamily: "var(--font-sans)", fontSize: 'var(--fs-base)', fontWeight: 600, color: 'var(--text)', ..._ROW_TEXT, display: 'block' }}>{wwModelLabel(m.path)}</div>
                 <div title={m.file} style={{ fontFamily: mono, fontSize: 'var(--fs-xs)', color: m.missing ? 'var(--error)' : 'var(--muted)', marginTop: 'var(--space-1)', ..._ROW_TEXT, display: 'block' }}>
-                  {m.missing ? 'missing file' : `custom · ${m.file}`}
+                  {m.missing ? 'missing file' : wakeModelMeta(m)}
                 </div>
-                {!disabled && !m.missing && config.owwModel !== m.path && (
+                {!m.missing && (
+                  <div title={wakeModelUse(m)} style={{ fontFamily: mono, fontSize: 'var(--fs-xs)', color: m.used_by?.length ? 'var(--text2)' : 'var(--muted)', marginTop: 'var(--space-1)', ..._ROW_TEXT, display: 'block' }}>
+                    {wakeModelUse(m)}
+                  </div>
+                )}
+                {!disabled && !m.missing && !m.used_by?.length && (
                   <div {...asButton(e => { e.stopPropagation(); deleteWakeModel(m); })}
                     title="Delete model" aria-label="Delete model"
                     style={{ position: 'absolute', top: 4, right: 7, fontFamily: mono, fontSize: 'var(--fs-md)',

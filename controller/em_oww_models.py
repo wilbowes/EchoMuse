@@ -30,6 +30,12 @@ _STEM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 MAX_MODEL_BYTES = 20 * 1024 * 1024  # stock models are ~1 MB; 20 MB is generous
 
+# A backstop for a script or a training loop, not a hand-use limit: a model
+# is ~200 KB, so disk is not the reason.
+MAX_MODELS = 32
+
+FLEET_DEFAULT = "Fleet default"
+
 
 def prediction_key(model_name: str) -> str:
     """
@@ -149,6 +155,16 @@ def in_use_by(model_path: str, configs: dict[str, dict]) -> list[str]:
         if str(Path(ref).resolve()) == target:
             users.append(scope)
     return users
+
+
+def display_users(users: list[str], labels: dict[str, str]) -> list[str]:
+    """
+    Name the scopes `in_use_by` returned: the fleet default as such, a
+    device by its label. A device with no label yet falls back to its id,
+    which is what every other screen shows for it.
+    """
+    return [FLEET_DEFAULT if u == "global" else labels.get(u) or u
+            for u in users]
 
 
 def resources_dir() -> Path | None:

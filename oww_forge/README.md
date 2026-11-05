@@ -288,7 +288,11 @@ curl -X POST http://<controller>:8768/api/oww_models/upload \
 
 Dropping a file into `controller/data/oww_models/` by hand works too —
 `GET /api/oww_models` scans the directory per request, so it shows up on
-the next dashboard load.
+the next dashboard load. It also says who uses each model (`used_by`: the
+fleet default, or the Echoes by label), its upload time and its size. The
+list is capped at 32: an upload past that is refused with `409 model_limit`
+and a message saying to delete one first. The cap is a backstop for a
+script or a training loop, not a hand-use limit.
 
 `owwModel` stores the **file path** for custom models (stock models stay
 plain names). Note openwakeword keys its prediction dict by the filename
