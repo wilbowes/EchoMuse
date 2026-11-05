@@ -29,6 +29,7 @@ func (r *recordingSpeaker) Flush()                  {}
 func (r *recordingSpeaker) EndMusicStream()         {}
 func (r *recordingSpeaker) FlushMusic()             {}
 func (r *recordingSpeaker) SetDuck(float64)         {}
+func (r *recordingSpeaker) NoteDataLinkGap()        {}
 func (r *recordingSpeaker) Close()                  {}
 func (r *recordingSpeaker) PumpMusic(b []byte) error {
 	r.mu.Lock()
