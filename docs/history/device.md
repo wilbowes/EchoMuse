@@ -534,6 +534,21 @@ push and every connect.
   Dropping the ALSA ring on the cut is the untried next step; it needs a
   GoTinyAlsa change and would click ducked music.
 
+- **The beam lock ends with the listen session** (2026-11-06). Since private
+  listening (09-21) the controller locked the beam at `listen_ack` and
+  unlocked after the whole turn, reply included, so barge-ins were heard
+  through whichever edge mic the turn had picked; streaming had released it
+  at the reply's mic restart. On 15LE the same 2 m spot barged 4/4 with a
+  near-side lock (ch0/ch5) and 0/4 with a far-side one (ch3/ch4), which is
+  "works during thinking, not during the reply" (no echo while thinking).
+  The device now unlocks when the session closes and ignores a lock with no
+  session open (`beamStep`); the controller sends `beam_unlock` after its
+  turn closes for older firmware. This restores the old behaviour (the
+  centre mic through the reply); it is not shown to be the best mic. On a
+  bench of 32 labelled wake words mixed into a recorded reply, every mic
+  scored 9-38% barge recall at 1-2m, and +12dB of voice only reached 70%:
+  the residual echo after the ~11dB canceller is what loses the wake word.
+
 - **Older controllers keep the old behaviour.** Without `listen_session` the
   state is `stream` in every mode, because an old controller only acts on a
   device wake when stream frames are arriving.
