@@ -54,3 +54,12 @@ Two run anywhere, with the test venv:
   issue is the reporter's data: never commit one.
 - **config_map.py** — regenerates `docs/config-keys.md` from the code;
   `tests/test_config_map.py` fails until it is run after a key changes.
+
+And one needs openwakeword, so neither the test venv nor CI can run it:
+
+- **trim_check.py** — whether the controller's trim of openwakeword's 10 s
+  raw-audio buffer (`_trim_oww_raw_buffer`, #176) changes any score, and what
+  it saves per predict: it builds a stock and a trimmed model over the same
+  audio from `device/internal/wakeword/testdata/vad_fixture.pcm` and compares
+  every prediction. Run from the repo root where openwakeword is installed
+  (a dev box or the controller image): `python controller/tools/trim_check.py`.
