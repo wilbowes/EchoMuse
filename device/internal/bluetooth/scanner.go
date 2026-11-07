@@ -301,10 +301,22 @@ func (s *Scanner) serve(rw io.ReadWriteCloser, stopCh chan struct{}) error {
 	}
 	s.conns.attach(host)
 	defer s.conns.detach()
+	// The factory address, before anything is advertised or connected
+	// (bdaddr.go). A chip that refuses it keeps its default and still scans.
+	want := factoryBdAddr()
+	if want != nil {
+		if _, err := sendCmd(opMTKWriteBdAddr, bdAddrParams(want)); err != nil {
+			log.Printf("[ble] factory address not loaded: %v", err)
+		}
+	}
 	if cc, err := sendCmd(opReadBdAddr, nil); err == nil {
+		got := formatBdAddr(cc.params)
 		s.bdAddrMu.Lock()
-		s.bdAddr = formatBdAddr(cc.params)
+		s.bdAddr = got
 		s.bdAddrMu.Unlock()
+		if want != nil && got != formatBdAddr(bdAddrParams(want)) {
+			log.Printf("[ble] factory address written but the chip reads %s", got)
+		}
 	}
 	// 320/30 = ~9% radio duty, the standard passive-scan cadence (matches
 	// ESPHome's esp32_ble_tracker default). The original 100/50 (50% duty)
