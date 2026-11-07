@@ -256,5 +256,8 @@ def test_the_endpoint_installs_what_can_run_and_nothing_else(tmp_path, monkeypat
 
 def test_the_upload_is_checked_before_anything_is_written():
     body = _sources.def_source("_post_oww_model_upload")
-    assert body.index("em_oww_check.problem, data") < body.index("mkstemp")
+    # classify, not problem: the check now also names the engine kind, and
+    # the livekit_v2 rule is part of what a model must pass before the
+    # upload lands (em_oww_check).
+    assert body.index("em_oww_check.classify, data") < body.index("mkstemp")
     assert '"invalid_model"' in body
