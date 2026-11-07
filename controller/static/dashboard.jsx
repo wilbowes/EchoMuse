@@ -9844,7 +9844,15 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
     try {
       const resp = await API.upload('/api/oww_models/upload', file, 'model');
       await loadCustomModels();
-      if (resp.model?.path) set('owwModel', resp.model.path);
+      if (resp.model?.path) {
+        set('owwModel', resp.model.path);
+        // Uploading and selecting a livekit_v2 model moves the device to
+        // controller-side detection — the mode the controller forces on save
+        // and on connect (em_shadow.forced_mode). Moving the panel now keeps
+        // it from showing a mode that a save would silently rewrite.
+        if (resp.model.kind === 'livekit_v2' && onDeviceMode(config) !== 'off')
+          set('owwOnDevice', 'off');
+      }
     } catch (e) { alert(e.error || 'Model upload failed'); }
   }
 
@@ -9862,6 +9870,21 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
     && !customModels.some(m => m.path === config.owwModel)
     ? { name: wwModelLabel(config.owwModel), file: config.owwModel.split('/').pop(), path: config.owwModel, missing: true }
     : null;
+
+  // The kind of the selected model, from the GET's per-entry classification.
+  // A livekit_v2 file can never run on an Echo — its ONNX graph streams its
+  // own state and the firmware's loader takes openwakeword embedding windows
+  // only — so while one is selected the "On this Echo" mode is not offered
+  // (the controller forces off anyway: em_shadow.forced_mode). A missing or
+  // never-scanned path reads as 'oww', which is what the controller treats
+  // it as too (em_oww_models.model_kind).
+  const wwKind = customModels.find(m => m.path === config.owwModel)?.kind || 'oww';
+  const livekitModel = wwKind === 'livekit_v2';
+  // The mode the controller will actually run, forced or not: everything in
+  // this panel that asks "controller-side?" asks this, so a stored "on" that
+  // the livekit model overrides never leaves half the panel in on-device
+  // clothes (clip capture, the runtime hint).
+  const wwMode = livekitModel ? 'off' : onDeviceMode(config);
 
   // Sensitivity runs Precise -> Eager left to right, which is the reverse of
   // the threshold it sets, so the track carries the threshold reflected about
@@ -10092,6 +10115,12 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                 <div title={m.file} style={{ fontFamily: mono, fontSize: 'var(--fs-xs)', color: m.missing ? 'var(--error)' : 'var(--muted)', marginTop: 'var(--space-1)', ..._ROW_TEXT, display: 'block' }}>
                   {m.missing ? 'missing file' : `custom · ${m.file}`}
                 </div>
+                {m.kind === 'livekit_v2' && (
+                  <div title="LiveKit WakeWord v2: no Echo can score this model, so the controller listens instead and streams stay open"
+                       style={{ display: 'inline-block', marginTop: 'var(--space-1)', padding: 'var(--space-1) var(--space-3)',
+                                borderRadius: 'var(--radius-sm)', border: '1px solid var(--accent)',
+                                fontFamily: mono, fontSize: 'var(--fs-xs)', color: 'var(--accent)' }}>controller-side</div>
+                )}
                 {!disabled && !m.missing && config.owwModel !== m.path && (
                   <div {...asButton(e => { e.stopPropagation(); deleteWakeModel(m); })}
                     title="Delete model" aria-label="Delete model"
@@ -10106,7 +10135,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
               cursor: disabled ? 'default' : 'pointer', opacity: 0.85,
             }}>
               <div style={{ fontFamily: "var(--font-sans)", fontSize: 'var(--fs-base)', fontWeight: 600, color: 'var(--text2)' }}>+ Custom model</div>
-              <div style={{ fontFamily: mono, fontSize: 'var(--fs-xs)', color: 'var(--muted)', marginTop: 'var(--space-1)' }}>upload .onnx (oww_forge)</div>
+              <div style={{ fontFamily: mono, fontSize: 'var(--fs-xs)', color: 'var(--muted)', marginTop: 'var(--space-1)' }}>upload .onnx (oww_forge or livekit v2)</div>
               <input ref={wwFileRef} type="file" accept=".onnx" style={{ display: 'none' }}
                 onChange={e => { uploadWakeModel(e.target.files[0]); e.target.value = ''; }}/>
             </div>
@@ -10136,13 +10165,13 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
               </div>
               <Slider label="Arbitration window" sub="ms within which Echoes that hear you count as one request, and one answers; 0 disables" value={config.wakeArbitrationMs ?? 700} min={0} max={2000} step={50} unit="ms" onChange={v => set('wakeArbitrationMs', v)}/>
               <Toggle label="Save wake-word samples"
-                sub={onDeviceMode(config) === 'off'
+                sub={wwMode === 'off'
                   ? 'saves clips for review in Activity'
                   : "only works with wake word detection On the controller"}
-                disabled={onDeviceMode(config) !== 'off'}
+                disabled={wwMode !== 'off'}
                 value={config.wakeClipCapture ?? false} onChange={v => set('wakeClipCapture', v)}/>
               <Slider label="Minimum sample score" sub="lower catches more near-misses, but more ordinary speech too"
-                disabled={onDeviceMode(config) !== 'off'}
+                disabled={wwMode !== 'off'}
                 value={config.wakeClipMinScore ?? 0.20} min={0.05} max={0.95} step={0.01} formatValue={v => v.toFixed(2)} onChange={v => set('wakeClipMinScore', v)}/>
               {/* Accessibility first: the ring is the only other sign the Echo
                   is listening. Disabled with the reason on firmware that cannot
@@ -10170,7 +10199,9 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                   scores and reports without being able to act on it. */}
               <Select
                 label="Wake word detection"
-                sub={!shadowCapable
+                sub={livekitModel
+                  ? 'this model runs on the controller only — no Echo can score a LiveKit v2 file, so streams stay open'
+                  : !shadowCapable
                   ? 'needs newer firmware on this Echo — the controller listens for now'
                   : onDeviceMode(config) === 'on'
                     ? (localCapable
@@ -10179,7 +10210,8 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                     : onDeviceMode(config) === 'shadow'
                       ? 'diagnostic: streams all the time, and both the Echo and the controller score it so Activity can compare them'
                       : 'streams the microphone to the controller all the time, on your network, and the controller listens for the wake word'}
-                value={onDeviceMode(config)}
+                value={wwMode}
+                disabled={livekitModel}
                 options={[
                   // Needs the runtime + models installed as well as the
                   // capability, which the Updates tab does — an Echo without
@@ -10196,7 +10228,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                   {listenStatusText(listen)}
                 </div>
               )}
-              {onDeviceMode(config) !== 'off' && shadowCapable && (
+              {wwMode !== 'off' && shadowCapable && (
                 <div className="em-label" style={{ marginTop: 'var(--space-3)', color: 'var(--muted)' }}>
                   Needs the wake word runtime installed on this Echo (Updates tab) — costs ~0.4 of a core while it runs.
                 </div>              )}
