@@ -24,6 +24,7 @@ import em_esphome
 import em_events
 import em_oww_assets
 import em_ota
+import em_oww_models
 import em_shadow
 import em_shell
 import em_state
@@ -70,10 +71,19 @@ def wanted_models(device_id: str) -> list[str]:
     The configured one is pinned and therefore first. Nothing else is added:
     extra slots exist so that models a user has already installed survive a
     switch, not so the controller can push models nobody asked for.
+
+    A livekit_v2 model is never wanted: the firmware's ONNX loader takes
+    openwakeword embedding windows and nothing else
+    (em_oww_check.livekit_shape_problem), so the file could only ever sit on
+    the device unused. The controller scores such models itself —
+    em_shadow.forced_mode has already put the device on the controller's
+    wake word by the time any install path runs.
     """
     cfg = db.get_effective_device_config(device_id) or {}
     model = (cfg.get("owwModel") or "").strip()
-    return [model] if model else []
+    if not model or em_oww_models.is_livekit_model(model):
+        return []
+    return [model]
 
 
 def hold_back_model(live, effective: dict):
@@ -108,6 +118,12 @@ def hold_back_model(live, effective: dict):
     """
     new_model = (effective.get("owwModel") or "").strip()
     if not new_model or new_model == live.oww_model:
+        return effective, None
+    if em_oww_models.is_livekit_model(new_model):
+        # Nothing to wait for: that file will never be installed anywhere
+        # (wanted_models refuses it), and holding the change back would keep
+        # the device on its old wake word for an install that cannot happen.
+        # forced_mode has already routed this model's scoring here.
         return effective, None
     if not live.oww_shadow_capable:
         return effective, None
@@ -179,7 +195,10 @@ async def install_then_switch(device_id: str, model: str) -> None:
                  f"— dropping the switch to {model}")
         return
 
-    await live.send_control({"type": "config", **em_config_types.well_typed(device_id, effective)})
+    config = await asyncio.get_event_loop().run_in_executor(
+        None, em_shadow.forced_config,
+        em_config_types.well_typed(device_id, effective))
+    await live.send_control({"type": "config", **config})
     live.oww_model = model
     await em_esphome.update_oww_model(device_id, model)
     await em_events.push_log(
@@ -200,7 +219,10 @@ async def push_config(device_id: str, live) -> None:
     effective = await loop.run_in_executor(
         None, db.get_effective_device_config, device_id
     )
-    await live.send_control({"type": "config", **em_config_types.well_typed(device_id, effective)})
+    # forced_config: the stored mode may predate a switch to a livekit_v2
+    # model, and this push rebuilds the device's scorer — see em_shadow.
+    config = await loop.run_in_executor(None, em_shadow.forced_config, effective)
+    await live.send_control({"type": "config", **em_config_types.well_typed(device_id, config)})
 
 
 async def reconcile(device_id: str, live) -> bool:
@@ -308,7 +330,10 @@ async def reconcile(device_id: str, live) -> bool:
     # next restart (#893).
     stream_arrived = em_oww_assets.STREAM_NAME in (result.get("pushed") or [])
     if action == "deaf" or stream_arrived:
-        await live.send_control({"type": "config", **em_config_types.well_typed(device_id, effective)})
+        # forced_config for the same reason as push_config — this is a fresh
+        # read of the stored config and it rebuilds the device's scorer.
+        config = await loop.run_in_executor(None, em_shadow.forced_config, effective)
+        await live.send_control({"type": "config", **em_config_types.well_typed(device_id, config)})
     if action == "deaf":
         await em_events.push_log(
             device_id, "info", "controller",

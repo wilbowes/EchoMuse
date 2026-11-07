@@ -116,6 +116,7 @@ import em_tap_burst
 import em_esphome as esphome
 import em_ble_proxy
 import em_oww_models
+import em_wake_engine
 import em_player
 import em_volume
 import em_speechgate
@@ -1559,14 +1560,24 @@ async def _acquire_wake_model(device: "Device", name: str, speex: bool):
     if cached is not None and cached[0] == name and cached[1] == speex:
         model = cached[2]
         await _reset_wake_model(model)
-        _trim_oww_raw_buffer(model)
+        if hasattr(model, "preprocessor"):
+            # The trim is an openwakeword AudioFeatures detail; a livekit_v2
+            # engine has no preprocessor/raw_data_buffer. Asked by attribute
+            # rather than by model_kind because this runs on the event loop,
+            # and a cold kind cache would load the file here.
+            _trim_oww_raw_buffer(model)
         return model
     model = await loop.run_in_executor(
         None,
-        lambda: _trim_oww_raw_buffer(em_oww_models.model_class()(
-            wakeword_models=[name],
-            enable_speex_noise_suppression=speex,
-        )),
+        lambda: (em_wake_engine.build_livekit(name)
+                 if em_oww_models.is_livekit_model(name)
+                 # A livekit_v2 file cannot load in openwakeword at all, and
+                 # owwOnDevice is forced off while one is selected — the
+                 # controller is the only side that scores it (em_shadow).
+                 else _trim_oww_raw_buffer(em_oww_models.model_class()(
+                     wakeword_models=[name],
+                     enable_speex_noise_suppression=speex,
+                 ))),
     )
     em_state.oww_models[device.device_id] = (name, speex, model)
     em_state.live_oww_models.add(model)
@@ -1583,7 +1594,10 @@ async def _acquire_barge_model(device: "Device", name: str):
     if cached is not None and cached[0] == name:
         return cached[1]
     model = await asyncio.get_event_loop().run_in_executor(
-        None, lambda: _trim_oww_raw_buffer(em_oww_models.model_class()(wakeword_models=[name]))
+        None,
+        lambda: (em_wake_engine.build_livekit(name)
+                 if em_oww_models.is_livekit_model(name)
+                 else _trim_oww_raw_buffer(em_oww_models.model_class()(wakeword_models=[name]))),
     )
     em_state.oww_barge_models[device.device_id] = (name, model)
     em_state.live_oww_models.add(model)
@@ -5303,6 +5317,12 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         # than restarting a moment later; a rename sends it alone.
         if device.sendspin_capable and row["label"]:
             config = {**config, "sendspinName": row["label"]}
+        # A livekit_v2 model can never run on an Echo (em_shadow.forced_config):
+        # push the mode the controller actually honours, so the device never
+        # arms a scorer for a classifier it will never be given
+        # (em_oww_sync.wanted_models), and the mirror below reads the same.
+        # The kind lookup may load the model file — executor thread.
+        config = await loop.run_in_executor(None, em_shadow.forced_config, config)
         await device.send_control({"type": "config", **config})
         device.oww_threshold = float(config.get("owwThreshold", OWW_THRESHOLD))
         device.oww_model     = config.get("owwModel", f"{OWW_MODEL}_v0.1")

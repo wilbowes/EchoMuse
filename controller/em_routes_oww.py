@@ -39,10 +39,20 @@ async def _get_oww_models(request: web.Request) -> web.Response:
     GET /api/oww_models
 
     Custom models discovered in the data volume's oww_models/ dir.
-    `path` is the value to store in owwModel config.
+    `path` is the value to store in owwModel config, and `kind` says which
+    engine runs it ("oww" or "livekit_v2") so the dashboard can show what a
+    model costs before it is selected. Classification may load a model file,
+    so the list is built in an executor thread — which also warms the kind
+    cache every later on-loop question (wanted_models, hold-back, mode) hits.
     """
+    def _scan() -> list[dict]:
+        entries = em_oww_models.scan()
+        for entry in entries:
+            entry["kind"] = em_oww_models.model_kind(entry["path"])
+        return entries
+
     return em_http.ok({
-        "models": em_oww_models.scan(),
+        "models": await asyncio.get_running_loop().run_in_executor(None, _scan),
         "dir":    str(em_oww_models.models_dir()),
     })
 
@@ -52,7 +62,8 @@ async def _post_oww_model_upload(request: web.Request) -> web.Response:
     """
     POST /api/oww_models/upload (multipart: field name "model", .onnx file)
 
-    Installs an openWakeWord model into the persisted models dir. The
+    Installs a wake model into the persisted models dir — openwakeword
+    format or LiveKit WakeWord v2, whichever `classify` identifies. The
     file lands atomically (tmp + rename) so a wake-listener reload can
     never see a half-written model.
     """
@@ -74,8 +85,10 @@ async def _post_oww_model_upload(request: web.Request) -> web.Response:
 
         # Before anything is written: a model that cannot run is refused with
         # the reason, where it used to fail later in the wake listener (#869).
-        why = await asyncio.get_running_loop().run_in_executor(
-            None, em_oww_check.problem, data)
+        # A livekit_v2 model passes on its own rules and is installed as the
+        # controller-only model it is (em_shadow.forced_mode).
+        kind, why = await asyncio.get_running_loop().run_in_executor(
+            None, em_oww_check.classify, data)
         if why:
             log.info(f"[api] Wake model refused: {fname}: {why}")
             return em_http.error("invalid_model",
@@ -94,8 +107,16 @@ async def _post_oww_model_upload(request: web.Request) -> web.Response:
             except OSError:
                 pass
             raise
-        log.info(f"[api] Wake model installed: {fname} ({len(data):,} bytes)")
-        entry = next((m for m in em_oww_models.scan() if m["file"] == fname), None)
+        log.info(f"[api] Wake model installed: {fname} ({len(data):,} bytes)"
+                 + (f" [{kind}]" if kind else ""))
+
+        def _entry() -> dict | None:
+            entry = next((m for m in em_oww_models.scan() if m["file"] == fname), None)
+            if entry is not None:
+                entry["kind"] = em_oww_models.model_kind(entry["path"])
+            return entry
+
+        entry = await asyncio.get_running_loop().run_in_executor(None, _entry)
         return em_http.ok({"model": entry}, status=201)
     except Exception as e:
         log.error(f"[api] Model upload error: {e}")

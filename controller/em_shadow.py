@@ -23,6 +23,8 @@ usable comparisons.
 import collections
 import time
 
+import em_oww_models
+
 # ── owwOnDevice modes ────────────────────────────────────────────────────────
 #
 # Mirrors device/internal/config/config.go. Both ends normalise independently
@@ -238,6 +240,47 @@ class PendingWake:
     def peek(self) -> bool:
         """Whether a wake is waiting. Diagnostics only — does not consume."""
         return self._wake is not None
+
+
+def forced_mode(configured, model_kind: str) -> str:
+    """
+    The owwOnDevice value an Echo may be SENT given the model it is being
+    configured with. A livekit_v2 model can only be "off": the firmware's
+    ONNX Runtime feeds openwakeword's [N, window, 96] embedding windows and
+    rejects anything else, and the v2 graph carries its own state through a
+    dozen input/output tensor pairs (em_oww_check.livekit_shape_problem) — no
+    Echo will ever score one, and em_oww_sync.wanted_models refuses to give
+    it the file. Honouring "on" or "shadow" would leave a device scoring a
+    model it cannot load: deaf, while every panel reported it healthy — the
+    #191 failure by construction rather than by accident. The controller
+    scores the model instead, which is the mode this already means.
+
+    Everything else passes through unnormalised: effective_mode normalises
+    at the point of use, and echoing a stored oddity back as "off" would
+    rewrite a choice this rule says nothing about.
+    """
+    return MODE_OFF if model_kind == em_oww_models.KIND_LIVEKIT else configured
+
+
+def forced_config(config: dict) -> dict:
+    """
+    `forced_mode` applied to a whole config dict: every site that pushes
+    `{"type": "config", ...}` to an Echo routes the dict through this, so a
+    livekit_v2 model never reaches a device as "on" — the sync install, the
+    reconcile, and the connect push all re-read the STORED config, where a
+    saved "on" outlives the model swap until a save touches it.
+
+    May load the model file (em_oww_models.model_kind): call off the event
+    loop when the kind cache may be cold. Everything else passes through
+    unchanged, by identity — a fleet-wide dict copy on every push for a
+    rule that fires on one kind of file would rewrite nothing.
+    """
+    if not config:
+        return config
+    kind = em_oww_models.model_kind(config.get("owwModel") or "")
+    if kind != em_oww_models.KIND_LIVEKIT:
+        return config
+    return {**config, "owwOnDevice": forced_mode(config.get("owwOnDevice"), kind)}
 
 
 def effective_mode(configured, trigger_capable: bool) -> str:

@@ -28,7 +28,94 @@ MODELS_SUBDIR = "oww_models"
 # dict key from the filename, and the dashboard shows it as the label.
 _STEM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
-MAX_MODEL_BYTES = 20 * 1024 * 1024  # stock models are ~1 MB; 20 MB is generous
+# 20 MB against a 7.4 MB LiveKit v2 model is 12.6 MB of headroom, and
+# aiohttp's transport cap (em_api.create_app) sits above this one either way.
+MAX_MODEL_BYTES = 20 * 1024 * 1024
+
+# The two engines a wake model can belong to. `oww` is openwakeword's format:
+# one float input of [N, window, 96] embedding frames, one score per call.
+# `livekit_v2` is the LiveKit WakeWord streaming format: the ONNX graph carries
+# its own state (it takes raw audio chunks and re-emits its state tensors), so
+# openwakeword cannot load it and neither can the Echo's firmware — only the
+# `livekit-wakeword` Python client can, which is why selecting such a model
+# forces owwOnDevice off (em_shadow.forced_mode).
+KIND_OWW = "oww"
+KIND_LIVEKIT = "livekit_v2"
+
+LIVEKIT_FORMAT = "livekit-wakeword-v2"  # the ONNX metadata `format` its trainer stamps
+LIVEKIT_CHUNK = 1280                   # 80 ms at 16 kHz, the v2 graph's audio input
+
+
+def classify_signature(inputs: list[tuple[str, list, str]],
+                       metadata: dict[str, str]) -> str | None:
+    """
+    Which engine a model with this ONNX signature belongs to, or None when
+    neither can load it. `inputs` is [(name, shape, type)] as onnxruntime
+    reports them; a dimension is an int, or str/None when dynamic.
+
+    The livekit rule is the input its OWN loader insists on — livekit.wakeword
+    .model refuses any session without an input named "chunk" as "not a
+    streaming wake word model" — and the trainer stamps `format` into the
+    metadata, so either alone identifies v2. The openwakeword rule is the
+    signature em_oww_check exists to validate: exactly one float input whose
+    last dimension is the 96-wide embedding. Checked in that order: the livekit
+    shapes ([1, 1280] audio, state tensors) never match the openwakeword rule
+    and vice versa, so the two cannot disagree about a real file.
+    """
+    for name, shape, kind in inputs:
+        if (name == "chunk" and kind == "tensor(float)" and len(shape) == 2
+                and shape[-1] == LIVEKIT_CHUNK):
+            return KIND_LIVEKIT
+    if metadata.get("format") == LIVEKIT_FORMAT:
+        return KIND_LIVEKIT
+    if (len(inputs) == 1 and inputs[0][2] == "tensor(float)"
+            and len(inputs[0][1]) == 3 and inputs[0][1][-1] == 96):
+        return KIND_OWW
+    return None
+
+
+# Classified kinds keyed by (resolved path, mtime_ns, size): retraining rewrites
+# the file under the same name, and the kind must follow the bytes.
+_kind_cache: dict[tuple[str, int, int], str] = {}
+
+
+def model_kind(model_name: str) -> str:
+    """
+    Which engine an `owwModel` value points at: KIND_LIVEKIT or KIND_OWW.
+
+    Stock names ("hey_jarvis_v0.1") are openwakeword's by definition. A custom
+    file is classified from its signature and cached per (path, mtime, size).
+    Classification loads the model through onnxruntime: ~30 ms for an
+    openwakeword classifier, ~120 ms for a 7.4 MB livekit_v2 one (measured), so
+    call it from an executor thread when the cache may be cold — the wake
+    listener's acquire does, and the /api/oww_models read warms every file in
+    the dir. Anything that cannot be classified is KIND_OWW: a missing file
+    fails the listener's load and reverts, as it has since #869, and
+    defaulting an unknown file to openwakeword keeps that behaviour rather
+    than inventing a new one.
+    """
+    name = (model_name or "").strip()
+    if not name.endswith(".onnx"):
+        return KIND_OWW
+    try:
+        st = Path(name).stat()
+    except OSError:
+        return KIND_OWW
+    key = (str(Path(name).resolve()), st.st_mtime_ns, st.st_size)
+    kind = _kind_cache.get(key)
+    if kind is None:
+        import em_oww_check  # imports this module; only reached on a cold cache
+        kind = em_oww_check.classify(Path(name).read_bytes())[0] or KIND_OWW
+        _kind_cache[key] = kind
+    return kind
+
+
+def is_livekit_model(model_name: str) -> bool:
+    """Whether this `owwModel` value names a LiveKit v2 file — the question
+    every on-device path asks before touching a model (install, hold-back,
+    mode). Call off the event loop when the kind cache may be cold, see
+    model_kind."""
+    return model_kind(model_name) == KIND_LIVEKIT
 
 
 def prediction_key(model_name: str) -> str:

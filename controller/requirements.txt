@@ -71,6 +71,12 @@ speexdsp-ns==0.1.2
 # swap in onnxruntime-gpu==1.20.1 (the Dockerfile does this automatically
 # when built with --build-arg GPU=1).
 onnxruntime==1.20.1
+# LiveKit WakeWord v2 — the client that scores livekit_v2 .onnx models the
+# controller-side (em_wake_engine.build_livekit); the Echo's ONNX Runtime
+# cannot load that format at all. Pure Python, and its only real
+# dependencies are the numpy and onnxruntime above, so it costs the image
+# nothing new — the import itself stays lazy, inside the engine build.
+livekit-wakeword==2.0.0
 # Protobuf runtime — required by esphome/vendor/api_pb2.py (vendored from
 # aioesphomeapi==45.3.1). Not pulled in transitively since we vendor only
 # the two generated files rather than depending on the full aioesphomeapi package.

@@ -1285,6 +1285,45 @@ single written ladder. `docs/audio-states.md` §2 is the nearest thing.
 | `em_ble_gatt.py` | Bluetooth CONNECTIONS through an Echo (#656). `GattLink` is one Echo's bridge (the `0x08` data-plane JSON: request ids, results, slots); `GattProxy` maps one Home Assistant connection's ESPHome Bluetooth messages onto it. Takes the protobuf module as an argument, so the suite needs none. Rules that are Home Assistant's, each confirmed against its real client: the characteristic handle is the VALUE handle; a write without response is never answered with an error (errors match on address+handle and would fail the next request); a disconnect gets exactly one `connected=false`; HA writes the CCCD itself. **Events are queued behind results**, because a result wakes its task a loop step later and "write ok, then disconnected" otherwise reaches HA reversed |
 | `esphome/` | ESPHome native API protocol layer (framing, handshake, vendored protobufs). `noise.py` + the encrypted half of `frame_protocol.py` are ESPHome's API encryption, responder side, used ONLY by a Bluetooth proxy with connections on. `noise.py` is held to a published vector; `tools/noise_client_check.py` and `tools/gatt_client_check.py` run `aioesphomeapi` itself against a listener (two processes: its `api.proto` collides with our vendored one). Run both after touching either file |
 
+## LiveKit WakeWord v2 models: the controller scores them, an Echo never can
+
+An `owwModel` is now two possible engines, named by `em_oww_models.model_kind`
+and decided from the ONNX file itself (`em_oww_check.classify`, cached per
+`path+mtime+size`): `oww` — openwakeword's format, one float input of
+`[N, window, 96]` embedding frames — and `livekit_v2`, a streaming graph that
+carries its own state between frames: audio in as `chunk` (1280 samples at
+16 kHz), one score out, and every state tensor re-emitted as `<input>_out`.
+The discriminator is the `chunk` input the livekit loader itself insists on,
+backed by the `format` metadata its trainer stamps; the two shapes are
+disjoint, and the two real trained models for one phrase (one per format)
+are the fixtures that pin it.
+
+A v2 file **cannot** run on an Echo: the firmware's ONNX loader feeds the
+openwakeword feature graphs and embedding windows and nothing else
+(`em_oww_check.livekit_shape_problem` lists what it would need instead — a
+dozen state tensors and a zero-initialised first frame). So while one is
+selected, `em_shadow.forced_mode` says the mode the device may be SENT is
+`off`, and `forced_config` applies it at every point that pushes stored
+config to a device — connect, `apply_live_config`, the install switch,
+`push_config`, reconcile — not only at save. `wanted_models` and
+`em_oww_assets.desired_assets` never offer the file to a device, so
+`on`/`shadow` would not degrade to "device scoring nothing": the scorer is
+never given the file, and the dashboard disables the toggle rather than
+showing one a save would rewrite. The controller side runs the file through
+`em_wake_engine.build_livekit` — one `WakeWordModel` per device stream, fed
+the listener's existing consecutive 1280-sample int16 chunks, keyed per
+model by the file stem exactly as openwakeword keys it, so the listener's
+score read did not change. `owwSpeexNs` has no meaning for a v2 model: the
+v2 graph is trained on raw audio and the client has no speex stage.
+
+Upload validates the kind first (the openwakeword rule from #869 stands
+unchanged; a v2 file must instead pair every state input to a `_out`
+output, size its state statically, and run its first two silent frames)
+and the receipt and `GET /api/oww_models` carry `kind` so the dashboard can
+badge a tile "controller-side" before anything is selected. The size cap
+went 5 MB → 20 MB for the 7.4 MB v2 file.
+
+
 ## Fleet vs device scoping (schema v8)
 
 The wire contract for the config push — which keys exist and which the device

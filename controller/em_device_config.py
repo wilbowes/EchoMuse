@@ -8,6 +8,7 @@ config routes.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import em_config_types
@@ -37,6 +38,13 @@ async def apply_live_config(device_id: str, live, effective: dict) -> None:
     locally until the classifier is actually on it — see em_oww_sync.hold_back_model.
     """
     effective = em_config_types.well_typed(device_id, effective)
+    # A livekit_v2 model can never run on an Echo, so the mode the device is
+    # SENT is the forced one — its scorer stands down, and the mirror below
+    # reads the same value the wire carries (em_shadow.forced_config). The
+    # kind lookup may load the model file, so it runs in an executor thread;
+    # the result also warms the cache hold_back_model asks it for.
+    effective = await asyncio.get_event_loop().run_in_executor(
+        None, em_shadow.forced_config, effective)
     effective, pending_model = em_oww_sync.hold_back_model(live, effective)
     await live.send_control({"type": "config", **effective})
     if "owwThreshold" in effective:

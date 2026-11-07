@@ -32,7 +32,7 @@ jobs:
       # ships, so the suite cannot pass against a library we do not run, and
       # a Dependabot bump there reaches this job with no second edit.
       - name: Install test dependencies
-        run: pip install -c controller/requirements.txt pytest pytest-cov numpy scipy pyyaml aiohttp websockets bcrypt zeroconf protobuf cryptography onnxruntime onnx==1.20.1
+        run: pip install -c controller/requirements.txt pytest pytest-cov numpy scipy pyyaml aiohttp websockets bcrypt zeroconf protobuf cryptography onnxruntime onnx==1.20.1 livekit-wakeword
       # test_emos_update_flow.py runs the emOS update's device commands in a
       # real shell, with busybox as the device has it. Without one the test
       # would skip, so it fails under CI instead — a skipped check of what is

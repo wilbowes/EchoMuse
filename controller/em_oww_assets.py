@@ -281,6 +281,15 @@ def desired_assets(models: list[str],
         if not stem or stem in seen:
             continue
         seen.add(stem)
+        if em_oww_models.is_livekit_model(model):
+            # Not a device asset: the firmware's ONNX loader takes
+            # openwakeword embedding windows and nothing else
+            # (em_oww_check.livekit_shape_problem). And NOT a problem — the
+            # file is fine, the controller just scores it itself
+            # (em_shadow.forced_mode). Skipping it here is what keeps the
+            # provisioning wizard, the field sync, and plan_sync's eviction
+            # all saying the same thing about it.
+            continue
         src = classifier_source(model, resources, models_dir)
         if src is None:
             problems.append(f"wake model '{model}' has no .onnx the device could use")
