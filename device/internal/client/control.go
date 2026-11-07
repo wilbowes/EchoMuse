@@ -1347,6 +1347,9 @@ func capabilities() []string {
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}
+	if thermalReadable() {
+		caps = append(caps, "thermal")
+	}
 	return caps
 }
 
