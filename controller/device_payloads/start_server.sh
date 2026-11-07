@@ -132,6 +132,22 @@ sup_log() {
 
 sup_log "boot slot=$(readlink /data/local/bin/server 2>/dev/null)"
 
+# ── User boot scripts (opt-in, per device) ───────────────────────────────────
+# This script is md5-synced from the controller on every connect, so an edit
+# made on the device does not survive, and emOS's init runs nothing else from
+# /data. A device that wants something of its own at boot puts a *.sh in this
+# folder, which no sync touches (docs/boot-scripts.md). No folder means nothing
+# runs, which is every device by default.
+# Each runs in the background on its own, so one that hangs or fails holds up
+# neither the server nor the others. Init restarting this script runs them
+# again, so a script has to be idempotent.
+for script in /data/local/etc/echomuse/boot.d/*.sh; do
+    [ -f "$script" ] || continue
+    name=${script##*/}
+    /system/bin/sh "$script" > "/tmp/boot-$name.log" 2>&1 &
+    sup_log "boot script $name pid=$!"
+done
+
 # ── Board tuning (emOS only) ─────────────────────────────────────────────────
 # Without Android nothing applies the vendor's thermal profile or hotplug
 # thresholds, so the firmware does it once per boot (pkg/board). On FireOS
