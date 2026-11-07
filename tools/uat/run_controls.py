@@ -32,6 +32,7 @@ import time
 
 from playwright.sync_api import sync_playwright
 
+import baseline
 import inventory
 import rig
 
@@ -163,6 +164,11 @@ def run(only: set | None, out: str):
     serials = state.get("serials") or []
     if not serials:
         raise SystemExit("no Echo attached: rig.py attach SERIAL first")
+    # Every UAT starts from the same config, or its results compare with nothing.
+    base, diffs = baseline.check(rig.api, [sn[-4:] for sn in serials])
+    if diffs:
+        raise SystemExit("rig is not at the config baseline (baseline.py --apply):\n  "
+                         + "\n  ".join(diffs))
     controls_all = [c for c in inventory.controls() if c["in"] == "DeviceConfigForm"]
     controls = [c for c in controls_all
                 if c["key"]
@@ -269,7 +275,7 @@ def run(only: set | None, out: str):
     for echo in echoes.values():
         echo.close()
     json.dump({"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-               "image": state.get("image"),
+               "image": state.get("image"), "baseline": base,
                "echoes": {sn: e.base for sn, e in echoes.items()}, "controls": results},
               open(out, "w"), indent=1)
     return results

@@ -14,6 +14,11 @@ python3 report.py <version> --controls controls.json --a11y a11y.json
 python3 rig.py detach <serial> && python3 rig.py down
 ```
 
+- **One config every run** (`baseline.json`): the shipped defaults plus a
+  short list of exceptions, each with its reason, and every Echo following the
+  fleet. `up` applies it, `run_controls.py` refuses to start without it, and
+  the report records its hash. `baseline.py --check|--apply` does the same for
+  any controller.
 - **Isolated.** The controller runs on a Docker bridge network, so its mDNS
   never reaches other Echoes; the attached Echo reaches it through an endpoint
   file with `mdns: false`. `detach` restores the Echo's own credentials and

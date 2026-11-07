@@ -1,0 +1,17 @@
+{
+  "_comment": "UAT config baseline: the controller's shipped defaults (em_db.DEFAULT_DEVICE_CONFIG) with only these exceptions. Every UAT Echo follows the fleet (config_sections []). Add an exception only with a reason; tests/test_uat_baseline.py refuses one that names an unknown key or repeats the default.",
+  "exceptions": {
+    "owwModel": {
+      "value": "/data/oww_models/Hey_Verona.onnx",
+      "why": "The test house runs other assistants; the default hey_jarvis model would answer for them."
+    },
+    "saveUtterances": {
+      "value": true,
+      "why": "Recordings are the evidence for the empty-turn and wake checks (#815)."
+    }
+  },
+  "site_keys": {
+    "_comment": "Left as the site has them: secrets and addresses, never part of the baseline.",
+    "keys": ["consolePassword", "controllerEndpoints"]
+  }
+}
