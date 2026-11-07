@@ -4664,6 +4664,9 @@ async def _on_stats(device: Device, msg: dict) -> None:
     # nothing per-frame is the standing rule here.
     if "ambientLux" in msg:
         esphome.update_ambient_lux(device_id, msg.get("ambientLux"))
+    # Temperatures the same way, on the same tick.
+    if "cpuTempC" in msg or "maxTempC" in msg:
+        esphome.update_temperatures(device_id, msg.get("cpuTempC"), msg.get("maxTempC"))
     # Fold into the persistent hourly rollup (CPU/RAM/storage/
     # RSSI trends) — one cheap upsert per ~30s report. The
     # last_seen refresh rides the same executor hop: a stats
