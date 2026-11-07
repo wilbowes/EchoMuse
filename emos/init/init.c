@@ -2508,6 +2508,30 @@ static int udhcpc_hook(char *out, size_t sz, const char *bbp)
              bbp, bbp, bbp, bbp);
 }
 
+/* The donut's Bluetooth is the same MT7668 behind its own module, which
+ * FireOS loads and nothing here did, so /dev/stpbt never existed under emOS.
+ * Loaded after WiFi (measured on 41C8, 2026-11-07: the ROM patch downloads
+ * from SDIO_FW_DIR in ~280ms with wlan0 up, and the link stayed up), and the
+ * node made from the uevent it registers (BT_chrdev, DEVNAME=stpbt). A
+ * failure costs Bluetooth only: WiFi is already up and the firmware's
+ * scanner reports the missing node. */
+static void sdio_bt_bringup(void)
+{
+    static const char mod[] = "/system/lib/modules/btmtksdio.ko";
+    int fd = open(mod, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        netlog("bt: open %s failed errno=%d\n", mod, errno);
+        return;
+    }
+    long m = syscall(SYS_finit_module, fd, "", 0);
+    int e = errno;
+    close(fd);
+    netlog("bt: load %s rc=%ld errno=%d\n", mod, m, m ? e : 0);
+    if (m && e != EEXIST)
+        return;
+    netlog("bt: nodes after load=%d\n", mknodes());
+}
+
 #define UDHCPC_SCRIPT "/tmp/udhcpc.sh"
 
 /* 24 turns of a 5s loop = two minutes. */
@@ -2603,6 +2627,8 @@ static void net_main(void)
     if (sdio) {
         if (sdio_wifi_bringup())
             netlog("wifi: module load failed, wlan0 will not appear\n");
+        else
+            sdio_bt_bringup();
     } else {
         waitpid(spawn(loader), &st, 0);
         netlog("wmt_loader status=%d\n", st);
