@@ -139,6 +139,40 @@ if 'emOS' not in s:
                 '#define PRIV_NETLINK_H\n#include <linux/netlink.h>\n#include <linux/rtnetlink.h>',1)
     open(p,'w').write(s)
 PY
+# 5. Never select an AP by its WPA (pre-RSN) element. The MediaTek driver
+#    panics building that association -- a NULL dereference in
+#    rsnGenerateWPAIE, from assocSendReAssocReqFrame -- and the Echo reboots,
+#    over and over while a WPA-only AP is the strongest for its SSID (#1144).
+#    Skipping the WPA IE loop in wpa_supplicant_ssid_bss_match() leaves such
+#    a BSS with no proto match, so it is skipped ("no WPA/RSN proto match")
+#    like any other mismatch; a mixed WPA/WPA2 AP still matches through its
+#    RSN element first, and set_suites() picks RSN for it already. Done here,
+#    not as proto=RSN in the conf, so every conf already on a device is
+#    covered without a flash write, including one FireOS 6 left behind.
+#    em-wifi and the dashboard wizard refuse WPA-only networks by name.
+#    (Step 3 left us in the source tree.)
+python3 - <<'PYEOF'
+p='wpa_supplicant/events.c'
+s=open(p).read()
+old = """\twpa_ie = wpa_bss_get_vendor_ie(bss, WPA_IE_VENDOR_TYPE);
+\twhile ((ssid->proto & WPA_PROTO_WPA) && wpa_ie) {"""
+new = """\twpa_ie = wpa_bss_get_vendor_ie(bss, WPA_IE_VENDOR_TYPE);
+\t/* emOS: the driver panics associating by WPA (pre-RSN), #1144.
+\t * See tools/build-wpa-supplicant.sh. */
+\tif (debug_print && wpa_ie && !rsn_ie && (ssid->proto & WPA_PROTO_WPA))
+\t\twpa_dbg(wpa_s, MSG_DEBUG,
+\t\t\t"   skip WPA IE - WPA without RSN is not supported");
+\twhile (EMOS_ALLOW_WPA_PROTO && (ssid->proto & WPA_PROTO_WPA) && wpa_ie) {"""
+if 'EMOS_ALLOW_WPA_PROTO' not in s:
+    assert s.count(old) == 1, "events.c WPA IE match site not found"
+    s = s.replace(old, new, 1)
+    inc = '#include "includes.h"\n'
+    assert inc in s, "events.c includes.h not found"
+    s = s.replace(inc, inc + '\n#define EMOS_ALLOW_WPA_PROTO 0\n', 1)
+    open(p,'w').write(s)
+    print("events.c patched (no WPA-only BSS selection)")
+PYEOF
+
 cd wpa_supplicant
 cat > .config <<'CFG'
 CONFIG_DRIVER_NL80211=y

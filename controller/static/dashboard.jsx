@@ -3769,6 +3769,7 @@ const _nvramRecord = (data) => {
 // Module scope so WifiPanel and the wizard's step runners share one set.
 const _SECURITY_LABEL = {
   wpa2: 'WPA2', wpa3: 'WPA3', open: 'Open', wep: 'WEP', enterprise: 'Enterprise',
+  wpa1: 'WPA', owe: 'Enhanced Open', other: 'Unsupported',
 };
 
 const _MAGISK_FILENAME = 'Magisk-v17.3.zip';
@@ -6263,11 +6264,13 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       // cannot show it stay two networks.
       const existing = networks.find(n => n.ssidHex === ssidHex);
       if (!existing) {
-        networks.push({ ssid, ssidHex, signal, freq, flags, bands: band ? [band] : [] });
+        networks.push({ ssid, ssidHex, signal, freq, flags, apFlags: [flags],
+                        bands: band ? [band] : [] });
       } else {
         // Same SSID on more than one AP or band. Keep the strongest for the
         // headline numbers, but remember every band it was seen on.
         if (band && !existing.bands.includes(band)) existing.bands.push(band);
+        existing.apFlags.push(flags);
         if (signal > existing.signal) {
           existing.signal = signal;
           existing.freq = freq;
@@ -6277,8 +6280,14 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     }
     // Derived here rather than in the panel, so WifiPanel stays presentational
     // and the same objects can be reused by the failure diagnostics.
+    // Joinable if ANY of its APs is: the supplicant picks among them (and
+    // skips a WPA-only one, #1144), so one old AP must not lock out an SSID
+    // whose other APs work. Otherwise the strongest AP's reason is shown.
     for (const n of networks) {
-      n.security = classifySecurity(n.flags);
+      const classes = n.apFlags.map(classifySecurity);
+      n.security = classes.includes('wpa2') ? 'wpa2'
+                 : classes.includes('open') ? 'open'
+                 : classifySecurity(n.flags);
       n.securityLabel = _SECURITY_LABEL[n.security] || n.security;
       n.blocker = securityBlocker(n.security);
     }
@@ -6289,17 +6298,26 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // What can this device actually join?
   //
   // Measured on hardware (`wpa_cli get_capability key_mgmt`): NONE,
-  // IEEE8021X, WPA-EAP, WPA-PSK. There is no SAE, so WPA3-Personal is not a
-  // configuration problem, it is impossible on this radio — hence 'wpa3'
-  // being refused outright rather than attempted. Mixed WPA2/WPA3 APs
-  // advertise both and are joinable through the WPA2 half.
+  // IEEE8021X, WPA-EAP, WPA-PSK. No SAE, so WPA3-Personal is impossible on
+  // this radio; mixed WPA2/WPA3 joins through the WPA2 half. PSK counts only
+  // under WPA2/RSN: the driver panics associating to a WPA-only AP (#1144).
+  // PSK-SHA256 and FT/PSK alone are AKMs the driver does not list.
+  //
+  // Same rule as em-wifi's security_of(); the cases both are tested against
+  // are emos/device/wifi-security-cases.txt. 'wpa2' and 'enterprise' here are
+  // em-wifi's psk and eap.
   function classifySecurity(flags) {
-    const f = (flags || '').toUpperCase();
-    const hasPsk = f.includes('WPA-PSK') || f.includes('WPA2-PSK') || f.includes('PSK');
+    const f = (flags || '').toUpperCase()
+      .replace(/PSK-SHA256/g, 'PSKSHA256').replace(/FT\/PSK/g, 'FTPSK');
+    const brackets = f.split(']');
+    const psk = b => /[-+]PSK[-+]/.test(b);
+    if (brackets.some(b => /^\[(WPA2|RSN)-/.test(b) && psk(b))) return 'wpa2';
+    if (brackets.some(b => /^\[WPA-/.test(b) && psk(b))) return 'wpa1';
+    if (f.includes('SAE')) return 'wpa3';
     if (f.includes('EAP')) return 'enterprise';
-    if (f.includes('SAE') && !hasPsk) return 'wpa3';
-    if (hasPsk) return 'wpa2';
+    if (/[-+]OWE[-+]/.test(f)) return 'owe';
     if (f.includes('WEP')) return 'wep';
+    if (/\[(WPA|WPA2|RSN|OSEN)-/.test(f)) return 'other';
     return 'open';
   }
 
@@ -6309,8 +6327,18 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       return 'WPA3 only. This Dot has no SAE support, so it cannot join. '
            + 'Enable WPA2 compatibility mode on the router or hotspot.';
     }
+    if (security === 'wpa1') {
+      return 'WPA only. This Dot\'s WiFi driver crashes joining it. '
+           + 'Set the router to WPA2, or mixed WPA/WPA2.';
+    }
     if (security === 'enterprise') {
       return 'Enterprise (802.1X). The wizard cannot configure this.';
+    }
+    if (security === 'owe') {
+      return 'Enhanced Open (OWE). This Dot cannot join it.';
+    }
+    if (security === 'other') {
+      return 'Security this Dot cannot join. It joins WPA2 with a password, or open.';
     }
     if (security === 'wep') {
       return 'WEP. The wizard cannot configure this.';

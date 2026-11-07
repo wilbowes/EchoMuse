@@ -1,0 +1,56 @@
+# What this radio can join, by wpa_supplicant scan flags. One case per line:
+# <class><TAB><flags>. Read by emos/device/em-wifi-check.sh (em-wifi's
+# security_of) and controller/tests/wifi_scan.test.mjs (the dashboard
+# wizard's classifySecurity), so the two cannot disagree.
+#
+# Flag grammar: wpa_supplicant_ie_txt() in wpa_supplicant/ctrl_iface.c,
+# hostap 2.10 (what emOS builds): [<proto>-<AKM>+<AKM>...-<cipher>+...(-preauth)],
+# proto WPA, WPA2, RSN (mesh) or OSEN, then [WEP], [OWE-TRANS...], [WPS], [ESS].
+# The driver lists key_mgmt NONE IEEE8021X WPA-EAP WPA-PSK, and panics building
+# a WPA (pre-RSN) association (#1144).
+#
+# Classes: psk, open, wpa1, wpa3, eap, owe, wep, other.
+
+# Joinable with a password: PSK under WPA2/RSN.
+psk	[WPA2-PSK-CCMP][ESS]
+psk	[WPA-PSK-TKIP][WPA2-PSK-CCMP][WPS][ESS]
+psk	[WPA-PSK-CCMP+TKIP][WPA2-PSK-CCMP+TKIP][ESS]
+psk	[WPA2-PSK-TKIP+CCMP-preauth][ESS]
+psk	[WPA2-PSK-CCMP][SAE-CCMP][ESS]
+# WPA2/WPA3 transition mode joins through the WPA2 half.
+psk	[WPA2-PSK+SAE-CCMP][ESS]
+psk	[WPA2-PSK+FT/PSK+SAE+FT/SAE-CCMP][ESS]
+# PSK offered alongside the SHA256 variant: plain PSK is enough.
+psk	[WPA2-PSK+PSK-SHA256-CCMP][ESS]
+
+# Open, including the open half of an Enhanced Open transition pair.
+open	[ESS]
+open
+open	[WPS][ESS]
+open	[OWE-TRANS-OPEN][ESS]
+
+# WPA only, no RSN: the driver panics associating (#1144).
+wpa1	[WPA-PSK-CCMP][ESS]
+wpa1	[WPA-PSK-TKIP][ESS]
+wpa1	[WPA-PSK-CCMP+TKIP][WPS][ESS]
+
+# Not joinable, each for its own reason.
+wpa3	[WPA2-SAE-CCMP][ESS]
+wpa3	[WPA2-SAE+FT/SAE-CCMP][ESS]
+wpa3	[SAE-CCMP][ESS]
+wpa3	[RSN-SAE-CCMP][MESH]
+eap	[WPA2-EAP-CCMP][ESS]
+eap	[WPA2-EAP-SUITE-B-192-GCMP-256][ESS]
+eap	[WPA2-FT/EAP+EAP-SHA256-CCMP][ESS]
+eap	[WPA-EAP-TKIP][ESS]
+owe	[WPA2-OWE-CCMP][OWE-TRANS][ESS]
+wep	[WEP][ESS]
+# PSK-only variants the driver does not list; a token test that saw "PSK"
+# inside them would offer a network that then fails at association.
+other	[WPA2-PSK-SHA256-CCMP][ESS]
+other	[WPA2-FT/PSK-CCMP][ESS]
+other	[WPA2-FT/PSK+PSK-SHA256-CCMP][ESS]
+other	[WPA2-DPP-CCMP][ESS]
+other	[OSEN-OSEN-CCMP][ESS]
+# An RSN element wpa_supplicant could not parse.
+other	[WPA2-?][ESS]

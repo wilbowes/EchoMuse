@@ -11,7 +11,7 @@
 set -u
 
 # What a scan result's security flags let this device join: psk, open, or the
-# reason it cannot (wpa3, eap, owe, wep, other).
+# reason it cannot (wpa1, wpa3, eap, owe, wep, other).
 #
 # The flags are wpa_supplicant's own text, and the grammar is fixed by
 # wpa_supplicant_ie_txt() in ctrl_iface.c (hostap 2.10, what emOS builds):
@@ -35,10 +35,23 @@ set -u
 # Anything else that is not open -- EAP, OWE, DPP -- used to fall through to
 # key_mgmt=NONE, labelled "(open)", and fail at association saying nothing.
 # emos/device/em-wifi-check.sh drives this function against each form.
+# PSK counts only under WPA2/RSN. A network offering PSK under WPA alone (no
+# RSN element) is wpa1: the driver panics building that association, in
+# rsnGenerateWPAIE, and the Echo reboots (#1144). Mixed WPA/WPA2 joins as WPA2.
+#
+# The cases are emos/device/wifi-security-cases.txt, shared with the
+# dashboard wizard's classifier.
 security_of() {
     f=$(printf '%s' "$1" | sed -e 's/PSK-SHA256/PSKSHA256/g' -e 's#FT/PSK#FTPSK#g')
+    rsn=$(printf '%s' "$f" | tr ']' '\n' | grep -E '^\[(WPA2|RSN)-' | tr '\n' ']')
+    wpa=$(printf '%s' "$f" | tr ']' '\n' | grep -E '^\[WPA-' | tr '\n' ']')
+    case "$rsn" in
+        *-PSK-*|*-PSK+*|*+PSK-*|*+PSK+*) echo psk; return ;;
+    esac
+    case "$wpa" in
+        *-PSK-*|*-PSK+*|*+PSK-*|*+PSK+*) echo wpa1; return ;;
+    esac
     case "$f" in
-        *-PSK-*|*-PSK+*|*+PSK-*|*+PSK+*) echo psk ;;
         *SAE*)                           echo wpa3 ;;
         *EAP*)                           echo eap ;;
         *-OWE-*|*-OWE+*|*+OWE-*|*+OWE+*) echo owe ;;
@@ -268,6 +281,7 @@ while IFS="$(printf '\t')" read -r sig flags hex width ssid; do
     case "$(security_of "$flags")" in
         psk)  note="" ;;
         open) note=" (open)" ;;
+        wpa1) note=" (WPA only - not supported)" ;;
         wpa3) note=" (WPA3 - not supported)" ;;
         eap)  note=" (enterprise - not supported)" ;;
         owe)  note=" (Enhanced Open - not supported)" ;;
@@ -318,6 +332,11 @@ case "$security" in
         echo "$ssid is WPA3 only, which this device cannot join. Its driver"
         echo "does not do SAE and the kernel is too old to let us do it instead."
         echo "A WPA2/WPA3 mixed network works; so does a WPA2 one."
+        exit 1 ;;
+    wpa1)
+        echo "$ssid offers only WPA, the older standard before WPA2. This"
+        echo "device's WiFi driver crashes joining it. Set the router to"
+        echo "WPA2, or mixed WPA/WPA2."
         exit 1 ;;
     psk|open) ;;
     *)

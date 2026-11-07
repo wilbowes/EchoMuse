@@ -58,7 +58,7 @@ const code = [
   "export { parseScanResults, classifySecurity, securityBlocker };",
 ].join("\n");
 
-const { parseScanResults } = await import(
+const { parseScanResults, classifySecurity, securityBlocker } = await import(
   "data:text/javascript;base64," + Buffer.from(code).toString("base64"));
 
 // Real wpa_cli output shape: bssid \t frequency \t signal \t flags \t ssid
@@ -108,6 +108,34 @@ check("open network is classified", by("CoffeeShop").security, "open");
 check("open network is joinable", by("CoffeeShop").blocker, null);
 check("enterprise is refused", typeof by("CorpWiFi").blocker, "string");
 check("WEP is refused", typeof by("OldRouter").blocker, "string");
+
+// One SSID served by a mixed WPA/WPA2 AP and a stronger WPA-only one, as in
+// #1144: joinable through the mixed AP, so the WPA-only one must not lock
+// the whole SSID out.
+const SPLIT = [
+  "aa:bb:cc:00:01:01\t2437\t-40\t[WPA-PSK-CCMP][ESS]\tHouse",
+  "aa:bb:cc:00:01:02\t2462\t-70\t[WPA-PSK-CCMP+TKIP][WPA2-PSK-CCMP+TKIP][ESS]\tHouse",
+  "aa:bb:cc:00:02:01\t2412\t-50\t[WPA-PSK-TKIP][ESS]\tOldOnly",
+].join("\n");
+const split = parseScanResults(SPLIT);
+check("an SSID with any WPA2 AP is joinable", split.find(n => n.ssid === "House").blocker, null);
+check("headline numbers stay the strongest AP's", split.find(n => n.ssid === "House").signal, -40);
+check("a WPA-only SSID is classified", split.find(n => n.ssid === "OldOnly").security, "wpa1");
+check("a WPA-only SSID is refused", typeof split.find(n => n.ssid === "OldOnly").blocker, "string");
+
+// The cases em-wifi's security_of() is tested against (em-wifi-check.sh):
+// the wizard and the console must agree on what this radio can join.
+const AS_WIZARD = { psk: "wpa2", eap: "enterprise" };
+const cases = readFileSync(join(HERE, "..", "..", "emos", "device", "wifi-security-cases.txt"), "utf8")
+  .split("\n").filter(l => l && !l.startsWith("#"));
+check("shared cases read", cases.length >= 30, true);
+for (const line of cases) {
+  const [cls, flags = ""] = line.split("\t");
+  const want = AS_WIZARD[cls] || cls;
+  check(`shared: ${flags || "(none)"} -> ${want}`, classifySecurity(flags), want);
+  check(`shared: ${flags || "(none)"} ${want === "wpa2" || want === "open" ? "offered" : "refused"}`,
+        securityBlocker(want) === null, want === "wpa2" || want === "open");
+}
 
 check("header row is skipped", nets.some(n => n.ssid === "ssid"), false);
 check("sorted by signal", nets[0].ssid, "HomeNet");
