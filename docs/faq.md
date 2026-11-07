@@ -11,10 +11,11 @@ faults worth checking before you file, and
 
 ## Rooting and unlocking
 
-### Should I use amonet v1.1.0 or v2.0.0?
-**Either works.** v1.1.0 leaves the Echo on FireOS 5, where you can install
-emOS or keep FireOS with root. v2.0.0 moves it to FireOS 6, where EchoMuse
-offers emOS. [firebreak](rooting.md#unlocking-with-firebreak) moves a Dot
+### Should I unlock my Dot to FireOS 5 or FireOS 6?
+**Either works.** firebreak's `unlock fireos5` leaves the Dot on FireOS 5,
+where you can install emOS or keep FireOS with root. `unlock fireos6`, the
+default, leaves it on FireOS 6, where EchoMuse offers emOS. An Echo 2nd gen
+has FireOS 6 only. [firebreak](rooting.md#unlocking-with-firebreak) moves a Dot
 between them.
 
 More in [rooting](rooting.md).
@@ -73,7 +74,7 @@ start. Ask on the XDA thread first and quote the wizard's error line.
 Sideload it again. It generally works on the second attempt.
 
 ### Deeper questions about the unlock itself.
-For a failed firebreak run, run it again with `--report` and paste what it
+For a failed firebreak run, run `uvx firebreak@latest report` and paste what it
 prints in `#support-device-unlocking` on the Discord. amonet itself is
 R0rt1z2's work, and the [XDA thread](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/) is the reference for it.
 
