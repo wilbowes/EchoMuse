@@ -411,3 +411,22 @@ def test_the_upload_endpoint_installs_a_livekit_model_and_says_so(tmp_path,
     assert l_status == 200
     assert [(m["file"], m["kind"]) for m in l_body["models"]] == [
         (LK_SAMPLE.name, models.KIND_LIVEKIT)]
+
+
+def test_model_kind_resolves_bare_filenames(monkeypatch, tmp_path):
+    """`owwModel` stores the tile's bare filename, not a path — model_kind
+    must resolve it against models_dir(). Before this, a bare name stat'ed
+    from the controller's CWD, failed, and silently reported KIND_OWW: the
+    on-device force-off (forced_mode, wanted_models, hold-back) never fired
+    for exactly the models that must never reach a device."""
+    db = tmp_path / "echomuse.db"
+    db.touch()
+    monkeypatch.setenv("DB_PATH", str(db))
+    mdir = models.models_dir()
+    mdir.mkdir(parents=True, exist_ok=True)
+    (mdir / "hey_jarvo_livekit.onnx").write_bytes(LK_SAMPLE.read_bytes())
+    (mdir / "hey_jarvo.onnx").write_bytes(OWW_SAMPLE.read_bytes())
+    assert models.model_kind("hey_jarvo_livekit.onnx") == models.KIND_LIVEKIT
+    assert models.model_kind("hey_jarvo.onnx") == models.KIND_OWW
+    assert models.is_livekit_model("hey_jarvo_livekit.onnx")
+    assert models.model_kind("missing_model.onnx") == models.KIND_OWW

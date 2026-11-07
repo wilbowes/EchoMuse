@@ -97,15 +97,25 @@ def model_kind(model_name: str) -> str:
     name = (model_name or "").strip()
     if not name.endswith(".onnx"):
         return KIND_OWW
+    path = Path(name)
     try:
-        st = Path(name).stat()
+        st = path.stat()
     except OSError:
-        return KIND_OWW
-    key = (str(Path(name).resolve()), st.st_mtime_ns, st.st_size)
+        # `owwModel` stores a bare filename (the scan tile's `file`), which
+        # only resolves against the model directory — stat'ing it from the
+        # controller's CWD fails and used to fall back to KIND_OWW silently,
+        # un-forcing on-device mode for exactly the models that must never
+        # run on a device. Resolve against models_dir() before giving up.
+        path = models_dir() / path.name
+        try:
+            st = path.stat()
+        except OSError:
+            return KIND_OWW
+    key = (str(path.resolve()), st.st_mtime_ns, st.st_size)
     kind = _kind_cache.get(key)
     if kind is None:
         import em_oww_check  # imports this module; only reached on a cold cache
-        kind = em_oww_check.classify(Path(name).read_bytes())[0] or KIND_OWW
+        kind = em_oww_check.classify(path.read_bytes())[0] or KIND_OWW
         _kind_cache[key] = kind
     return kind
 
