@@ -472,6 +472,7 @@ func (d *DataClient) useLoopbackRef(on bool) {
 		return
 	}
 	d.hwRefOn = on
+	d.aec.SetRefClean(on) // echoref low-passes it; nothing for dealias to repair
 	d.aec.SetHardwareRef(on)
 	if on {
 		log.Printf("[aec] loopback aligned (offset %d samples) — using it as the reference",
