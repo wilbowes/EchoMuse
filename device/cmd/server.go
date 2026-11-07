@@ -822,6 +822,31 @@ func main() {
 		}
 	}()
 
+	// CPU profile on SIGUSR2, the same way: 30 s to /tmp/cpu.pprof, pulled
+	// over the shell proxy. For "where does this board's CPU go" (the donut
+	// idles at ~19% of two cores against the radar's ~9%, 2026-11-07).
+	cpuCh := make(chan os.Signal, 1)
+	signal.Notify(cpuCh, syscall.SIGUSR2)
+	go func() {
+		for range cpuCh {
+			const path = "/tmp/cpu.pprof"
+			f, err := os.Create(path)
+			if err != nil {
+				log.Printf("[pprof] create %s: %v", path, err)
+				continue
+			}
+			if err := pprof.StartCPUProfile(f); err != nil {
+				log.Printf("[pprof] cpu: %v", err)
+				f.Close()
+				continue
+			}
+			time.Sleep(30 * time.Second)
+			pprof.StopCPUProfile()
+			f.Close()
+			log.Printf("[pprof] cpu profile written to %s", path)
+		}
+	}()
+
 	log.Println("Ready")
 	time.Sleep(2 * time.Second)
 
