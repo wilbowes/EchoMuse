@@ -1157,6 +1157,18 @@ MIGRATIONS: list[str] = [
     """
     UPDATE system_config SET value = '32' WHERE key = 'schema_version';
     """,
+
+    # v33 — whether the boot before this one ended cleanly, from the emOS
+    # kernel log it saved (em_crashlog.is_clean). MediaTek reports every
+    # software restart as wdt_by_pass_pwk, so the boot reason alone cannot
+    # tell an ordinary reboot from a watchdog reset; this can. 1 clean, 0 not,
+    # NULL never examined (FireOS, older init, a log already handled before
+    # this column existed).
+    """
+    ALTER TABLE device_boots ADD COLUMN prev_clean INTEGER;
+
+    UPDATE system_config SET value = '33' WHERE key = 'schema_version';
+    """,
 ]
 
 # Post-migration fixups that need Python rather than SQL. Keyed by the schema
@@ -1881,6 +1893,17 @@ def record_boot(device_id: str, boot_id: str, firmware_ver: Optional[str],
         )
 
 
+def set_boot_prev_clean(device_id: str, boot_id: str, clean: bool) -> None:
+    """Record whether the boot before `boot_id` ended cleanly. The row exists
+    once the register message was written; if it does not, nothing is
+    recorded, and the boot reason stands alone."""
+    with _tx() as conn:
+        conn.execute(
+            "UPDATE device_boots SET prev_clean = ? WHERE device_id = ? AND boot_id = ?",
+            (1 if clean else 0, device_id, boot_id),
+        )
+
+
 def record_wear(device_id: str, day: str, values: tuple) -> None:
     """Upsert the day's eMMC reading: the latest reading of the day wins."""
     with _tx() as conn:
@@ -1903,7 +1926,8 @@ def latest_health() -> dict[str, dict]:
     """Each device's latest boot and latest wear reading merged into one dict,
     keyed by device_id: one pass for the device list, not a query per device."""
     out: dict[str, dict] = {}
-    for r in _q("""SELECT b.device_id, b.first_seen AS boot_at, b.boot_reason, b.firmware_ver
+    for r in _q("""SELECT b.device_id, b.first_seen AS boot_at, b.boot_reason, b.firmware_ver,
+                          b.prev_clean
                    FROM device_boots b
                    JOIN (SELECT device_id, MAX(first_seen) AS t FROM device_boots
                          GROUP BY device_id) m
