@@ -582,6 +582,22 @@ func (d *DataClient) NotifyReady(serverAddr string) {
 	}
 }
 
+// beamStep decides one batch's beam lock from the pending request. local is
+// a wake stream listening locally, where the lock follows the listen session:
+// a lock with no session open is ignored, and the session closing unlocks.
+func beamStep(req int32, local, open, wasOpen bool) (lock, unlock bool) {
+	switch req {
+	case beamReqLock:
+		lock = !local || open
+	case beamReqUnlock:
+		unlock = true
+	}
+	if local && wasOpen && !open {
+		lock, unlock = false, true
+	}
+	return lock, unlock
+}
+
 // RequestBeamLock asks the running mic stream to lock the beamformer onto
 // the best perimeter mic (respecting BeamformingEnabled config). Safe to call
 // from any goroutine; consumed by streamMic on its next period. A later
@@ -1074,8 +1090,9 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 	// allocation each period, so nothing aliases them.
 	preroll := make([][]byte, 0, prerollBudgetMs/160+1) // capacity hint at the real batch cadence
 	var seqNum uint16
-	var periodCount uint64 // periodic RMS diagnostic
-	var lastClipped uint64 // clip count at last diag line
+	var periodCount uint64  // periodic RMS diagnostic
+	var sessionWasOpen bool // listen session open at the previous batch (beam lock rule below)
+	var lastClipped uint64  // clip count at last diag line
 
 	// Memoized linear mic gain — recomputed only when the config dB value
 	// changes (config push mid-stream). Sentinel forces computation on the
@@ -1232,11 +1249,22 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			// this goroutine because Beamformer methods aren't safe to call
 			// from the control handler. Lock() no-ops if already locked or
 			// if beamforming is disabled in config.
-			switch atomic.SwapInt32(&d.beamReq, beamReqNone) {
-			case beamReqLock:
-				turnBeam := snap.BeamformingEnabled != nil && *snap.BeamformingEnabled
-				d.beam.Lock(turnBeam)
-			case beamReqUnlock:
+			//
+			// Listening locally, the lock lasts only as long as the session:
+			// it is there to capture the command. Held through the reply, the
+			// wake stream heard barge-ins through whichever edge mic the turn
+			// had picked, and one on the far side left the voice under the
+			// echo (0/4 against 4/4 near side, 15LE, 2026-11-06). Streaming
+			// never had this: the reply's mic restart released the lock. A
+			// lock asked for with no session open is late, and ignored.
+			_, sessionOpen := d.listenGate.IsOpen()
+			lock, unlock := beamStep(atomic.SwapInt32(&d.beamReq, beamReqNone),
+				!lockMic && d.ListenState() == ListenLocal, sessionOpen, sessionWasOpen)
+			sessionWasOpen = sessionOpen
+			if lock {
+				d.beam.Lock(snap.BeamformingEnabled != nil && *snap.BeamformingEnabled)
+			}
+			if unlock {
 				d.beam.Unlock()
 			}
 
