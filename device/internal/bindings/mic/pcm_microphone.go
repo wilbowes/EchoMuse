@@ -83,8 +83,8 @@ func (p *PcmMicrophone) Init() error {
 // openLoopback opens the board's playback loopback, if it states one, and
 // returns once it is delivering audio, so that it is running before the
 // microphones open: the Dot 3's amplifier loses its clock until reboot the
-// other way round (41C8, 2026-10-24). It is read and dropped for as long as
-// the process runs; nothing uses it yet.
+// other way round (41C8, 2026-10-24). It is read for as long as the process
+// runs; nothing uses its audio yet.
 //
 // It is retried for a few seconds because "stop mixer" returns before
 // Amazon's mixer has let the PCM go, and the first open then fails at once
@@ -98,10 +98,7 @@ func openLoopback(l *board.Layout) error {
 		if err == nil {
 			log.Printf("mic: loopback open at card %d device %d, before the microphones (try %d)",
 				l.Loopback.Card, l.Loopback.Device, try)
-			go func() {
-				for range stream {
-				}
-			}()
+			go drainLoopback(stream, l.LoopbackRate, 2*l.LoopbackChs)
 			return nil
 		}
 		if try == loopbackTries {
@@ -112,6 +109,29 @@ func openLoopback(l *board.Layout) error {
 }
 
 const loopbackTries = 8
+
+// drainLoopback reads the loopback for the life of the process and logs the
+// mic loop's audio-vs-wall ledger for it once a minute (see readLoop's note
+// on what the sign means).
+func drainLoopback(stream chan []byte, rate, bytesPerFrame int) {
+	var first, last time.Time
+	var frames int64
+	for audio := range stream {
+		now := time.Now()
+		if first.IsZero() {
+			first, last = now, now
+			continue // the ledger starts at the first arrival, as the mic's does
+		}
+		frames += int64(len(audio) / bytesPerFrame)
+		if now.Sub(last) >= time.Minute {
+			wall := now.Sub(first)
+			audioDur := time.Duration(frames) * time.Second / time.Duration(rate)
+			log.Printf("[mic] loopback clock: %.1fs audio over %.1fs wall (skew %+dms)",
+				audioDur.Seconds(), wall.Seconds(), (wall - audioDur).Milliseconds())
+			last = now
+		}
+	}
+}
 
 // startLoopback opens the loopback once and waits for its first audio.
 func startLoopback(l *board.Layout) (chan []byte, error) {
@@ -124,7 +144,11 @@ func startLoopback(l *board.Layout) (chan []byte, error) {
 	})
 	stream := make(chan []byte, 4)
 	go func() {
-		if err := dev.GetAudioStream(dev.DeviceConfig, stream); err != nil {
+		// A period per read, the ring as slack. A whole-ring read is lapped
+		// by the hardware and silently repeats stale audio: 144 ms and 32 ms
+		// discontinuities a minute on 41C8 (2026-11-07), which no echo
+		// reference survives.
+		if err := dev.GetAudioStreamChunked(dev.DeviceConfig, 768, 7680, stream); err != nil {
 			log.Printf("mic: loopback stream error: %v", err)
 		}
 		close(stream)
