@@ -23,6 +23,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strings"
@@ -108,7 +109,7 @@ type GattResult struct {
 }
 
 type gattSession struct {
-	f       *os.File
+	f       io.ReadWriteCloser
 	events  chan []byte
 	backlog [][]byte
 	reasm   aclReassembler
@@ -438,7 +439,7 @@ func (s *gattSession) connect(t GattTarget, intervalMs int) error {
 // still up.
 func GattProbe(o GattOptions) (GattResult, error) {
 	var res GattResult
-	f, err := os.OpenFile(devPath(), os.O_RDWR, 0)
+	f, err := openHCI()
 	if err != nil {
 		return res, fmt.Errorf("open %s: %w", devPath(), err)
 	}
@@ -586,7 +587,7 @@ type Seen struct {
 // target and its address type can be picked. Active, to collect the names
 // that only a scan response carries.
 func ScanList(d time.Duration, logf func(format string, args ...any)) ([]Seen, error) {
-	f, err := os.OpenFile(devPath(), os.O_RDWR, 0)
+	f, err := openHCI()
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", devPath(), err)
 	}
