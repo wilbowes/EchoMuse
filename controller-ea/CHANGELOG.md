@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.27.0-ea.6 (Early Access)
+
+Wake word scoring on the controller uses less CPU. Controller only: pair with firmware v2.19.0-ea.4 and emOS emos-v0.11-ea.2, which this controller offers.
+
+### Improved
+
+- **Scoring the wake word on the controller takes about 39% less CPU per streaming Echo,** with identical scores. This helps most with Echoes set to "On the controller" or with older firmware (#176, #1108).
+- The controller image moves to the current Python 3.12 base image (#1088).
+
+### Known issues
+
+- A command spoken straight on from the wake word can lose its first word (#987, #1070).
+- Both 3.5 mm jack channels can be silent on emOS (#999).
+- The emOS update refuses an amonet 1 Echo that boots from slot B (#973).
+- An Echo that restarts and rejoins a playing Sendspin group can fall out of sync until the next track.
+- A fleet setting saved while an Echo has its own value for it changes nothing on that Echo, and the fleet page does not say so.
+- A turn is occasionally logged as empty although its recording holds clear speech (#815).
+
+### Thanks
+
+@forming (#1108).
+
 ## 2.27.0-ea.5 (Early Access)
 
 A follow-up question now plays the wake sound, and a firmware install sends the release you just saw. Controller only: pair with firmware v2.19.0-ea.4 and emOS emos-v0.11-ea.2, which this controller offers.
