@@ -285,5 +285,9 @@ An MT8167 board with its own layout; no input device or PCM shares the Dot
   when nothing is queued, so the firmware reads it through `poll(2)`
   (@Starker3, #1044). Measured on one unit under stock FireOS 6.5.7.5
   (2026-10-24): the proxy ran with 0 HCI errors, and Home Assistant saw 24
-  BLE devices through it in 30 s against 7 through its own adapter. The Dot
-  3 runs emOS only; there it is not measured yet.
+  BLE devices through it in 30 s against 7 through its own adapter. The
+  driver is a module, `btmtksdio.ko`, for the MT7668 that also carries the
+  WiFi; emOS loads it after the WiFi modules and makes the node from its
+  uevent. Measured on 41C8 under emOS (2026-11-07): the scan starts about
+  30 s after power-on with no HCI errors, and Home Assistant takes adverts
+  through the Echo's proxy.
