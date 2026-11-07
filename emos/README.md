@@ -865,7 +865,9 @@ reflashing.
 
 Remote shell is the controller's outbound-dialled `/shell/{device_id}` plane,
 not sshd. If someone genuinely needs sshd it is dropbear, per-device opt-in,
-off by default — not a listener every device carries.
+off by default — not a listener every device carries. Such an opt-in is a
+[boot script](../docs/boot-scripts.md), which opens its own port and starts its
+own daemon; dropbear is the worked example there.
 
 ## Flashing safely
 
