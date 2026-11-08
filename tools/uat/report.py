@@ -98,6 +98,9 @@ def build(version: str, controls: dict, a11y: dict, human: dict | None) -> str:
             # The last four characters only, as the table heads use: the report is published, and
             # a serial is the Echo's identity on its owner's network.
             + ", ".join(f"`…{sn[-4:]}` ({b})" for sn, b in echoes.items()) + ".",
+            f"- Config baseline `{controls.get('baseline') or 'not recorded'}` "
+            "(tools/uat/baseline.json: shipped defaults plus its listed exceptions; "
+            "every Echo following the fleet).",
             f"- Controls run {controls.get('at')}; accessibility scan {a11y.get('at')}.",
             "- Each control: changed in the browser, saved, read back from the API, "
             "then checked on the Echo (`/tmp/em-config.json`: received, and applied "
