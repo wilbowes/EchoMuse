@@ -273,7 +273,7 @@ section above are not repeated.
 | `em_endpoints.py` | `controller.json`; fleet sync removes only `managed_by` files, the wizard any |
 | `em_wifi.py` | SSID/PSK rules mirroring `ssid.go` and `_ssidProblem`/`_pskProblem` |
 | `em_tcp.py` | Thin-stream TCP, `TCP_INFO` loss, Link grade |
-| `em_health.py` | eMMC wear, boot reason (v28) |
+| `em_health.py` | eMMC wear, boot reason (v28). MediaTek reboots through the watchdog, so a watchdog reason with a clean saved kernel log is a clean restart (`device_boots.prev_clean`, v33); a log never read stays a warning |
 | `em_dbwriter.py` | **No coroutine calls `db.*`** (`tests/test_db_off_loop.py`): `submit` writes, `run_in_executor` reads |
 | `em_tasks.py` | **No discarded `create_task`; `Event.wait()` tasks torn down in a `finally`** (`tests/test_tasks.py`) |
 | `em_output_mute.py` | HA mute = volume 0 + remembered level; 0 never persisted as `startupVolume` |

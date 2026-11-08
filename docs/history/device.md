@@ -22,6 +22,9 @@ The Echo Dot runs FireOS 5 (API 22). Standard Go cross-compilation won't work �
 # signal-interrupted WRITEI returns, so the rest of the buffer was silently
 # dropped — ~15 audible clicks an hour per device, on every playback path,
 # before; 0 after. Don't repoint it upstream until that one is there too.
+# Fork PR #4 (2026-11-08) added GetAudioStreamChunked for the donut loopback
+# (#1139), merged with a merge commit so 990b29c, the commit EchoMuse pins,
+# stays reachable from the fork's master; a squash would orphan the pin.
 git submodule update --init
 
 # Build the compiler Docker image (from device/)
@@ -432,6 +435,24 @@ above the rest). Its TDM is 4ch S32_LE at 16kHz on two tlv320aic3101, and:
   carries exactly the samples played (correlation 1.0 per channel), in 16ms
   periods in step with the TDM's.
 
+- **2026-11-07, it became the AEC reference (#1139, #1140, 41C8).** Read as a
+  whole ring per `pcm_read` (`GetAudioStream`), the loopback-to-echo delay
+  jumped 144 ms and then 32 ms within one minute of speech: a read completes
+  only when the ring is full, a late reader is lapped, and tinyalsa restarts
+  on EPIPE without a word. With `GetAudioStreamChunked` (768-frame reads, the
+  same ring, 160 ms slices out) there was no jump in 50 s and three 16 ms
+  single-period slips in a second play, which a tracker can follow. Between
+  slips the delay held to half a millisecond, hence a slow search (1/s,
+  decimated) and two agreeing searches before a move. Live: lead 3.9 ms
+  (correlation 0.84), cancellation 26.3 / 27.6 / 27.3 dB against the software
+  tap's 8.5-17. **The first live run cancelled 0 dB**: the lead was inverted,
+  the reference 4 ms BEHIND the echo, and the unit test asserted the same
+  wrong sign, so it passed. The live check caught it; the test now checks
+  samples against first principles. Also learned: the canceller runs only
+  during a stream, so anything that must be warm before a turn (the aligner)
+  has to run from the capture loop. `tools/echoref_replay` caught every jump
+  the offline analysis found on four raw captures.
+
 - **`MicMutes`** are the board's ADC mutes; the donut has only ADC_A and ADC_B
   fitted.
 
@@ -461,6 +482,21 @@ jack tables and the Android `stop <service>` names.
 - The Dot 3's boot reason after a plain `adb reboot` is `wdt_by_pass_pwk`,
   which the dashboard shows as a warning: its normal reboot misread as a
   fault (not fixed).
+- **2026-11-08, fixed by #1135 (schema v33).** MediaTek sends its own software
+  restarts through the watchdog, so every reboot of a donut or an emOS Dot
+  reports `wdt_by_pass_pwk`. The previous boot's saved kernel log
+  (`em_crashlog`) now decides: it is stored as `device_boots.prev_clean`, and a
+  watchdog reason with a clean log reads "(clean restart)". 41C8 and C95 both
+  save `/proc/last_kmsg` under emOS; 41C8's last restart ends `reboot:
+  Restarting system`.
+- **2026-11-07, Bluetooth on the donut under emOS (#1134).** Two things were
+  missing. emOS loaded only the WiFi modules, so `btmtksdio.ko` never loaded
+  and `/dev/stpbt` never existed; init now loads it after them and makes the
+  node from its uevent (a failure costs Bluetooth only). And the driver's
+  `read()` returns 0 bytes when nothing is queued, which `os.File` reads as
+  EOF, ending every session at its first command; the poll reader is
+  @Starker3's from #1044 (co-author), on @technotiger's diagnosis in #527.
+  41C8: the scan starts ~30 s after boot, no HCI errors, adverts reach HA.
 
 ## Private listening (the default since 2026-09-21)
 
@@ -1299,6 +1335,19 @@ like caution and are not:**
 The plane is chosen **per batch** in `cmd/server.go`, not once at
 registration: the control connection can drop and re-register against a
 different controller without the scanner callback being rebuilt.
+
+### Each Echo's own Bluetooth address (#1136, 2026-11-07)
+
+Amazon writes each Echo's address into idme and its own stack loads it after
+power-on. Nothing did under emOS or under our scanner, so every Dot 2
+reported the NVRAM default `00:00:46:81:63:01` (seen fleet-wide 2026-09-22)
+and the donut a different default. A passive scan does not care; a
+connection, pairing or the A2DP speaker output does, since two Echoes with
+one address cannot both be one device's peer. The write is `0xFC1A`, six
+bytes little-endian, the command Linux's `btmtk` uses for set_bdaddr. It does
+not survive an HCI Reset or a power cycle, so it follows the reset that opens
+every session. On C95 and 41C8 the chip read back exactly the idme address
+and HA kept taking adverts through the proxy.
 
 ### The emission gate (`emit.go`) — derived from what HA reads, not from taste
 
