@@ -544,6 +544,33 @@ jobs:
           echo "::error::controller did not report ready within 90s"
           docker logs em-uat
           exit 1
+      # The dashboard reads /api/releases/latest on load, and on a fresh
+      # database that endpoint answers only after the controller has fetched
+      # GitHub's releases list, unauthenticated. From a shared runner IP that
+      # fetch fails intermittently (rate limit), the endpoint 404s, the browser
+      # logs it and the walk fails on a PR that touched nothing (#1148 three
+      # times in a row, feat/donut-bt on 2026-11-07). Seeding the cache with
+      # last_update_check = now makes the endpoint answer from the database for
+      # the hour, as it does on any controller that has polled once; the poll
+      # loop's own fetch may still fail, harmlessly. update_check_interval is
+      # left alone, so the Updates panel renders its normal state, not "checks
+      # off". Written with sqlite3 rather than em_db, whose init() runs the
+      # migrations; `-i` or the heredoc never reaches python.
+      - name: Seed the release cache, so the walk does not depend on GitHub
+        run: |
+          docker exec -i em-uat python - <<'EOF'
+          import os, sqlite3, time
+          db = sqlite3.connect(os.environ["DB_PATH"])
+          with db:
+              db.executemany(
+                  "INSERT OR REPLACE INTO system_config (key, value) VALUES (?, ?)",
+                  [("latest_version", "v0.0.0"),
+                   ("latest_binary_url",
+                    "https://github.com/wilbowes/EchoMuse/releases/download/v0.0.0/server"),
+                   ("latest_notes", "Seeded by CI; never downloaded."),
+                   ("last_update_check", str(time.time()))])
+          print("release cache seeded")
+          EOF
       # The browser is the PINNED PLAYWRIGHT IMAGE BY DIGEST, which is the whole
       # reason for a container rather than `npx playwright install`: the digest
       # addresses the exact Chromium build (the script prints which), so this
@@ -593,6 +620,11 @@ jobs:
               npm install --no-save --silent playwright@1.63.0
               cp /uat/console_check.mjs .
               node console_check.mjs'
+      # A console problem is a symptom; the controller log says why (a failed
+      # fetch, a traceback). Without it the 404 above could only be inferred.
+      - name: Controller log, on failure
+        if: failure()
+        run: docker logs em-uat 2>&1 | tail -n 300
       - name: Stop the controller
         if: always()
         run: |
