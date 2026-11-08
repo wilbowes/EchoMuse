@@ -195,7 +195,17 @@ type Canceller struct {
 
 	// dealias rebuilds ch8 from the output without its aliases (dealias.go).
 	dealias *dealias
+	// refClean says the caller's reference is already low-passed (the
+	// donut's aligned loopback), so dealias has nothing to repair and its
+	// searches, which can never match, are skipped.
+	refClean atomic.Bool
 }
+
+// SetRefClean marks the caller-supplied reference as already free of
+// aliases. Only the Dot 2's ch8 (every third output sample, unfiltered)
+// needs dealias; a board whose reference was decimated through a low-pass
+// sets this.
+func (c *Canceller) SetRefClean(on bool) { c.refClean.Store(on) }
 
 // SetHardwareRef selects the far-end source. True takes it from ch8 of the
 // mic capture; false uses the software tap at the speaker ALSA write.
@@ -486,7 +496,7 @@ func (c *Canceller) Process(mono []byte) []byte {
 // passes through uncancelled rather than being cancelled against silence —
 // which would be indistinguishable from a working AEC with nothing playing.
 func (c *Canceller) ProcessWithRef(mono, ref []byte) []byte {
-	if ref != nil {
+	if ref != nil && !c.refClean.Load() {
 		ref = c.dealias.clean(ref)
 	}
 	return c.process(mono, ref)
@@ -669,7 +679,7 @@ func (c *Canceller) ProcessMicsWithRef(mics [][]byte, active int, ref []byte) []
 	if active < 0 || active >= len(mics) {
 		return nil
 	}
-	if ref != nil {
+	if ref != nil && !c.refClean.Load() {
 		ref = c.dealias.clean(ref)
 	}
 	c.mu.Lock()
