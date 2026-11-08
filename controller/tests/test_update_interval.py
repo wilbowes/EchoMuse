@@ -167,3 +167,37 @@ def test_every_firmware_install_route_asks_github_first():
         src = _sources.code_only(_sources.def_source(name))
         assert "firmware_to_install()" in src, name
         assert "cached_firmware()" not in src, name
+
+
+class _NoGitHub:
+    """aiohttp.ClientSession stand-in that records any attempt and refuses it."""
+    attempts = 0
+
+    def __init__(self, *a, **k):
+        type(self).attempts += 1
+        raise OSError("no network in this test")
+
+
+@pytest.mark.parametrize("interval,expect_attempt", [("0", False), ("-1", False), ("3600", True)])
+def test_a_dashboard_visit_asks_github_for_the_controller_release_only_when_enabled(
+        monkeypatch, stored, interval, expect_attempt):
+    # GET /api/releases/controller calls fetch_controller() without force on
+    # every dashboard visit; with checks disabled that must not reach GitHub.
+    stored["update_check_interval"] = interval
+    monkeypatch.setattr(em_releases, "_controller_cache", {})
+    monkeypatch.setattr(em_releases, "_controller_cache_ts", 0.0)
+    monkeypatch.setattr(_NoGitHub, "attempts", 0)
+    monkeypatch.setattr(em_releases.aiohttp, "ClientSession", _NoGitHub)
+    assert asyncio.run(em_releases.fetch_controller()) is None
+    assert (_NoGitHub.attempts > 0) is expect_attempt
+
+
+def test_a_forced_controller_fetch_still_asks_when_disabled(monkeypatch, stored):
+    # force is the poll loop's (gated on the interval itself), so the guard
+    # must not swallow it.
+    stored["update_check_interval"] = "0"
+    monkeypatch.setattr(em_releases, "_controller_cache", {})
+    monkeypatch.setattr(_NoGitHub, "attempts", 0)
+    monkeypatch.setattr(em_releases.aiohttp, "ClientSession", _NoGitHub)
+    asyncio.run(em_releases.fetch_controller(force=True))
+    assert _NoGitHub.attempts == 1
