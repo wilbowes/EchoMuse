@@ -2809,13 +2809,13 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown",
                         leds_spin_green(device, stop_spin)
                     )
                 if device.private_listening:
-                    # End of speech is where a private Echo stops sending:
-                    # close the session, or end the bounded turn stream of a
-                    # button press or follow-up. Either way it goes back to
-                    # listening locally, which is also how it hears a
-                    # barge-in (_private_barge) — so no watcher here.
+                    # End of speech: close the session (and its beam lock,
+                    # or barges are heard on the turn's edge mic) or end a
+                    # button/follow-up stream; back to local listening,
+                    # which hears a barge-in itself (_private_barge).
                     if device.listen_session is not None:
                         await device.listen_close(reason="end_of_speech")
+                        await device.beam_unlock()
                     else:
                         await device.mic_stop()
                     return
@@ -2881,11 +2881,11 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown",
                     pcm_chunks = _meter_at_playback_start(pcm_chunks, _meter_on)
 
                 if device.private_listening:
-                    # Nothing is streaming (closed at end of speech), and the
-                    # Echo hears a barge-in itself. Defensive for a turn that
-                    # reached TTS without an end of speech.
+                    # Defensive, for a turn that reached TTS without an end
+                    # of speech: close as end of speech would have.
                     if device.listen_session is not None:
                         await device.listen_close(reason="playback")
+                        await device.beam_unlock()
                 elif device.barge_in_enabled:
                     # Barge-in (§3.2): keep the mic running through
                     # playback — the device's AEC subtracts the speaker
