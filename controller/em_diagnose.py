@@ -158,7 +158,7 @@ def _updates(d: dict, ctx: dict) -> list[dict]:
 def _hardware(d: dict, ctx: dict) -> list[dict]:
     boot = d.get("live", {}).get("boot") or {}
     out = []
-    summary = em_health.boot_summary(boot.get("boot_reason"))
+    summary = em_health.boot_summary(boot.get("boot_reason"), boot.get("prev_clean"))
     if summary and summary["level"] == "warn":
         out.append(_finding(d["name"], "unplanned_boot", FACT,
                             "its last boot was unplanned", reason=summary["text"]))
