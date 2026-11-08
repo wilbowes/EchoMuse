@@ -458,6 +458,7 @@ class Device:
         self.kernel_arch: str | None = None
         # From the register message (schema v28): see em_health.
         self.boot_reason: str | None = None
+        self.boot_id: str | None = None
         # The last eMMC wear row written, as (day, values), so a reading that
         # has not changed since is not rewritten every stats tick.
         self.wear_written: tuple | None = None
@@ -5240,8 +5241,9 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         # boot_id: a device re-registers on every redial. Held live too, so
         # the dashboard shows them without a query. Absent on older firmware.
         device.boot_reason = msg.get("boot_reason") or None
-        if isinstance(msg.get("boot_id"), str) and msg["boot_id"]:
-            em_dbwriter.submit(db.record_boot, device_id, msg["boot_id"],
+        device.boot_id = msg["boot_id"] if isinstance(msg.get("boot_id"), str) and msg["boot_id"] else None
+        if device.boot_id:
+            em_dbwriter.submit(db.record_boot, device_id, device.boot_id,
                                msg.get("version"), device.boot_reason)
         _note_wear(device, msg.get("emmc"))
         # Link-security telemetry for the dashboard: True when this control
