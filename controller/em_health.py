@@ -18,6 +18,10 @@ _PRE_EOL = {1: "normal", 2: "warning", 3: "urgent"}
 # Boot reasons that mean the previous boot did not end on purpose. Matched as
 # substrings: the bootloader's spellings vary (wdt_by_pass_pwk, kernel_panic).
 _UNPLANNED = ("wdt", "watchdog", "panic", "crash", "thermal")
+# Of those, the ones MediaTek also gives an ordinary software restart, which
+# it routes through the watchdog: every reboot of a donut or an emOS Dot reads
+# wdt_by_pass_pwk. Only these are overruled by a clean kernel log.
+_WATCHDOG = ("wdt", "watchdog")
 
 
 def life_label(est: int | None) -> str | None:
@@ -60,13 +64,21 @@ def emmc_summary(row: dict | None) -> dict | None:
     return {"text": " · ".join(parts), "level": level}
 
 
-def boot_summary(reason: str | None) -> dict | None:
-    """{text, level}: an unplanned boot (watchdog, panic) is a warning."""
+def boot_summary(reason: str | None, prev_clean=None) -> dict | None:
+    """{text, level}: an unplanned boot (watchdog, panic) is a warning.
+
+    `prev_clean` is device_boots.prev_clean: 1 when the previous boot's
+    kernel log ends in an orderly restart. That overrules a watchdog reason
+    only, since MediaTek reports its own restarts that way; a panic, crash or
+    thermal reason stays a warning, and anything but 1 changes nothing."""
     if not reason:
         return None
     low = reason.lower()
-    level = "warn" if any(k in low for k in _UNPLANNED) else "ok"
-    return {"text": reason, "level": level}
+    unplanned = [k for k in _UNPLANNED if k in low]
+    if unplanned and prev_clean == 1 and not isinstance(prev_clean, bool) \
+            and all(k in _WATCHDOG for k in unplanned):
+        return {"text": f"{reason} (clean restart)", "level": "ok"}
+    return {"text": reason, "level": "warn" if unplanned else "ok"}
 
 
 def wear_values(emmc) -> tuple | None:

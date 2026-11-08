@@ -138,7 +138,7 @@ def _health_json(boot: dict | None) -> dict | None:
         return None
     return {
         "emmc":       em_health.emmc_summary(boot),
-        "bootReason": em_health.boot_summary(boot.get("boot_reason")),
+        "bootReason": em_health.boot_summary(boot.get("boot_reason"), boot.get("prev_clean")),
         "bootAt":     boot.get("boot_at"),
         "wearDay":    boot.get("day"),
         "emmcPart":   " ".join(x for x in (boot.get("emmc_name"), boot.get("emmc_date")) if x) or None,
