@@ -19,6 +19,7 @@ on unmute, so with the wake word off `on_mic_mute` takes it back down.
 
 from __future__ import annotations
 
+import asyncio
 from typing import NamedTuple
 
 
@@ -94,6 +95,28 @@ def ha_needs_refresh(*, told: bool | None, enabled: bool) -> bool:
     never otherwise. `told` is what it last read, None if it has not asked:
     it will read the current value when it does."""
     return told is not None and told != enabled
+
+
+
+# How long HA gets to apply a configuration read before the second bounce.
+SELECT_REREAD_DELAY_S = 1.0
+
+
+def reread_stale_select(server, disconnect) -> None:
+    """After a model switch with the wake word on, make HA read the
+    configuration a second time (#1151).
+
+    HA's select keeps its option by the wake word's name. On the first read
+    after the switch the old name is gone, so it falls back to "No wake word";
+    it adopts the device's active wake word only from "No wake word", which
+    the second read does (esphome/select.py). HA reads the configuration only
+    at connect, so the second read takes a second bounce. With the wake word
+    off the first read is already right, and update_oww_model leaves the flag
+    clear."""
+    if server is None or not server.ha_select_stale:
+        return
+    server.ha_select_stale = False
+    asyncio.get_running_loop().call_later(SELECT_REREAD_DELAY_S, disconnect)
 
 
 def on_request(*, want: bool, enabled: bool, mic_muted: bool) -> Transition:
