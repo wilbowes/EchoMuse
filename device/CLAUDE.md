@@ -23,6 +23,9 @@ go test ./...                                     # host, pure-Go logic only
 - **GoTinyAlsa stays on the fork** until upstream has its playback fix
   (WriteFrames blocks signals around `pcm_write`, #707) — else a
   signal-interrupted write silently drops the rest of the buffer (clicks).
+  It also carries `GetAudioStreamChunked` (fork #4, #1139). **Merge fork PRs
+  with a merge commit, never squash**: the pinned commit must stay reachable
+  from the fork's master.
 - **The compiler base (`compiler/Dockerfile`, Go 1.24.0, NDK 21.4.7075529) is
   pinned by DIGEST and must stay so**: `release.yml` rebuilds it on every tag,
   and a drifted compiler shows first as a binary the hardware refuses to run,
@@ -84,6 +87,19 @@ raw frame (the board's MicArray: biscuit 9ch S24_3LE, Dot 3 4ch S32_LE) → beam
   - **Software tap** (no loopback): `aecDelayMs` **keep 0** (higher is
     non-causal). Capture stalls lose whole batches; the occupancy governor trims
     the backlog **without resetting the filter**.
+  - **Loopback on its own PCM (donut, #1140)**: `internal/echoref` measures the
+    echo delay from the audio (decimated cross-correlation ~1/s while playing),
+    returns the reference `Lead` 4ms AHEAD of the echo, moves only on two
+    agreeing searches, drops the lock after 3 misses. Fed from the capture
+    loop every batch, so it is locked before a turn (the canceller runs only
+    during a stream). **Used only while locked, both ways; never latched** —
+    a hardware path with no reference passes audio uncancelled. `aecRefSource:
+    sw` forces the software tap. **Test the lead against first principles,
+    never the code's own derivation** (an inverted lead passed its own test).
+  - **That loopback is read a period at a time** (`GetAudioStreamChunked`,
+    #1139): a whole-ring read is lapped by a late reader and MediaTek's memif
+    repeats stale audio with no error. The mic streams still read whole rings
+    (cost unmeasured).
   - `[aec] far:` logs only while `aecEnabled`; read `mean` beside `rms`
     (`mean≈±rms` is a DC offset, not audio).
 - **Barge-in** (controller `_barge_watcher`): device `speaker_flush` drains and
@@ -134,7 +150,8 @@ raw frame (the board's MicArray: biscuit 9ch S24_3LE, Dot 3 4ch S32_LE) → beam
 | `internal/outchain/` | EQ → bass guard → limiter on the mix at the ALSA write, bit-exact to `testdata/gen_vectors.py`. Inactive until the ack carries `output_chain` (never runs twice). No `%` per sample: 32-bit ARM Go has no divide |
 | `internal/sendspin/` | Sendspin player (#89): pull scheduler (`SetMusicSource`), consulted only while `0x04` is empty. **Speaks aiosendspin 9.1.1's wire** (§6.4 of `docs/audio-states.md`); re-run `tools/sendspin_interop/run.sh` before trusting an MA upgrade. `internal/firewall` opens 8928 before `Start` and closes it on every stop (emOS drops inbound). `OutputClock` gates readings over 3ms off prediction |
 | `internal/wifi/` | WiFi change with rollback; reload is `svc wifi disable/enable` ONLY. **SSIDs are 0–32 BYTES** (`ssid.go`): `ssid_hex`, byte compare, quoted or hex. Never in a shell command |
-| `internal/bluetooth/` | HCI passive scan over `/dev/stpbt` (Bluedroid `pm disable`d first); `emit.go` filters |
+| `internal/bluetooth/` | HCI passive scan over `/dev/stpbt` (Bluedroid `pm disable`d first, Android only); `emit.go` filters; the factory address is loaded every session (below) |
+| `internal/echoref/` | Aligns a loopback that is its own PCM with the mics (donut); `tools/echoref_replay` replays raw captures through it |
 | `pkg/led/`, `pkg/mic/`, `pkg/speaker/`, `pkg/buttons/` | Hardware interfaces |
 
 ## Boards: hardware is found by name (#541, 2026-10-04)
@@ -170,7 +187,10 @@ in `pkg/board/hardware.go`, found once by `board.Resolve`, opened via
   open AND delivering before the mics open**, or the TAS2770 loses its clock
   until reboot; the binding waits for audio, retries 4s, and a stated loopback
   the kernel lacks means NO mics. `MicMutes` = ADC_A, ADC_B. `RingLED0` 240
-  biscuit / 195 donut (`ringLEDFor`). idme `miccal` not applied.
+  biscuit / 195 donut (`ringLEDFor`). idme `miccal` not applied. The loopback
+  is the AEC reference once `echoref` locks. Bluetooth is `btmtksdio.ko`,
+  loaded by emOS init after the WiFi modules; its `read()` returns 0 when
+  empty, so `HCIPollRead` (board data) reads through `poll(2)`.
 - Still biscuit's inside drivers: amp switch, DAC unity, jack tables, `stop
   <service>` names.
 
@@ -352,6 +372,15 @@ and cadence: `controller/CLAUDE.md`). **Scanning costs its own Echo's WiFi.**
 - In `DataClient.SendBleAdverts`: **an unsendable batch is DROPPED**, never sent
   on the control plane; **nothing is sent during a BOUNDED TURN — the turn, not
   `micActive`** (`advertsYieldToTurn`). The plane is chosen **per batch**.
+
+### Each Echo's own Bluetooth address (#1136, 2026-11-07)
+
+The chip boots with an NVRAM default every Dot 2 shares. After the reset that
+opens each session, idme `bt_mac_addr` goes to the chip by MediaTek `0xFC1A`
+(btmtk's set_bdaddr) and is read back; a mismatch is logged. **Sent every
+session: the chip does not keep it.** A missing, malformed, all-zero, all-ones
+or group-bit address is never sent. Proven on C95 and 41C8 under emOS; not run
+on radar or FireOS.
 
 ### The emission gate (`emit.go`) — derived from what HA reads, not from taste
 

@@ -276,7 +276,11 @@ An MT8167 board with its own layout; no input device or PCM shares the Dot
   at 48kHz, and it **must be open before the microphones**: the other way
   round the amplifier loses its clock until reboot. The board states it as
   `Loopback`; if it is not found the microphones are not opened at all.
-  Echo cancellation uses the software reference for now.
+  It is also the echo canceller's reference, once the firmware has measured
+  the echo delay from the audio, and the software reference until then:
+  26-28 dB of cancellation against 8.5-17 dB (41C8, 2026-11-07). The firmware
+  reads it a period at a time, because a whole-buffer read repeated stale
+  audio.
 - **Light sensor.** tsl2572 on the IIO bus, `in_illuminance0_input`, which
   reads lux as a decimal. The i2c bus also lists an opt3001 with no driver
   bound.
@@ -291,3 +295,7 @@ An MT8167 board with its own layout; no input device or PCM shares the Dot
   uevent. Measured on 41C8 under emOS (2026-11-07): the scan starts about
   30 s after power-on with no HCI errors, and Home Assistant takes adverts
   through the Echo's proxy.
+- **Bluetooth address.** Each Echo's own, from idme `bt_mac_addr`, is loaded
+  into the chip at the start of every Bluetooth session; without it every
+  Dot 2 shares one default address. A new board gets this if its idme has
+  the address.
