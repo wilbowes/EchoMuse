@@ -263,7 +263,7 @@ EVENT_KEY        = 2   # action-button hold, as an HA event entity
 AMBIENT_LUX_KEY  = 3   # TSL2540 ambient light, as an HA sensor
 MIC_MUTED_KEY    = 4   # the mic mute button, as a read-only binary sensor (#438)
 CPU_TEMP_KEY     = 5   # the CPU thermal zone (cpuTempC), as an HA sensor
-MAX_TEMP_KEY     = 6   # the hottest thermal zone (maxTempC), as an HA sensor
+MAX_TEMP_KEY     = 6   # the hottest thermal zone now (maxTempC), as an HA sensor
 
 # Press types the event entity advertises. double/triple were parked because
 # detecting them means delaying the single press by the multi-tap window to
@@ -685,10 +685,12 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     device_class="illuminance",
                     state_class=1,   # STATE_CLASS_MEASUREMENT
                 )
+            # The chip, not the room: diagnostics, off until enabled in HA.
             if self._thermal_capable:
                 for object_id, key, name in (
                     ("cpu_temperature", CPU_TEMP_KEY, "CPU Temperature"),
-                    ("max_temperature", MAX_TEMP_KEY, "Max Temperature"),
+                    ("hottest_zone_temperature", MAX_TEMP_KEY,
+                     "Hottest Zone Temperature"),
                 ):
                     yield api_pb2.ListEntitiesSensorResponse(
                         object_id=object_id,
@@ -698,6 +700,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                         accuracy_decimals=1,
                         device_class="temperature",
                         state_class=1,   # STATE_CLASS_MEASUREMENT
+                        entity_category=api_pb2.ENTITY_CATEGORY_DIAGNOSTIC,
+                        disabled_by_default=True,
                     )
             # Read-only (#438): a writable entity would be a remote unmute.
             if self._mic_capable:

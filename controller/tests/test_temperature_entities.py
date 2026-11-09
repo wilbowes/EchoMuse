@@ -1,11 +1,14 @@
 """
 The Echo's temperatures as Home Assistant sensors, the way ambient light is.
 
-The wiring is read as source, like test_mic_muted_and_wake_word.py. The push
-is run for real where zeroconf is installed.
+The wiring is read as source through _sources, so a function moving to
+another module cannot leave a guard passing on nothing. The push is run for
+real where zeroconf is installed.
 
 - The entities exist only on firmware announcing `thermal`. Older firmware
   reports the same stats fields, so the push has to check as well.
+- They read the chip, not the room: diagnostics, disabled by default.
+- "Hottest Zone", not "Max": it is the hottest zone now, not a running peak.
 - Keys are append-only: HA keys its registry on them.
 - A reading the device could not take is missing_state, never 0.
 """
@@ -15,54 +18,71 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parent.parent.parent
-ESPHOME = ROOT / "controller" / "em_esphome.py"
-CONTROLLER = ROOT / "controller" / "em_controller.py"
-CONTROL_GO = ROOT / "device" / "internal" / "client" / "control.go"
+import _sources
+
+DEVICE = Path(__file__).resolve().parents[2] / "device"
 
 
-def _block(src: str, start: str, end: str) -> str:
-    i = src.index(start)
-    return src[i:src.index(end, i)]
+def _thermal_entities() -> str:
+    """The ListEntities block that advertises the temperature sensors."""
+    code = _sources.all_code()
+    assert code.count("self._thermal_capable:") == 1
+    gate = code.index("self._thermal_capable:")
+    start = code.rindex("isinstance(msg, api_pb2.ListEntitiesRequest)", 0, gate)
+    return code[start:code.index("ListEntitiesDoneResponse()", gate)]
 
 
 def test_the_keys_are_appended():
-    src = ESPHOME.read_text()
-    assert re.search(r"^CPU_TEMP_KEY\s*=\s*5\b", src, re.M)
-    assert re.search(r"^MAX_TEMP_KEY\s*=\s*6\b", src, re.M)
+    code = _sources.all_code()
+    assert re.search(r"^CPU_TEMP_KEY\s*=\s*5$", code, re.M)
+    assert re.search(r"^MAX_TEMP_KEY\s*=\s*6$", code, re.M)
 
 
 def test_the_entities_are_gated_on_the_capability():
-    src = ESPHOME.read_text()
-    entities = _block(src, "isinstance(msg, api_pb2.ListEntitiesRequest)",
-                      "ListEntitiesDoneResponse()")
+    entities = _thermal_entities()
     gate = entities.index("if self._thermal_capable:")
     assert gate < entities.index("CPU_TEMP_KEY") < entities.index("MAX_TEMP_KEY")
-    assert 'device_class="temperature"' in entities
-    assert 'unit_of_measurement="°C"' in entities
+    assert "device_class='temperature'" in entities
+    assert "unit_of_measurement='°C'" in entities
+
+
+def test_the_entities_are_diagnostics_disabled_by_default():
+    sensors = _thermal_entities().split("if self._thermal_capable:")[1]
+    assert "entity_category=api_pb2.ENTITY_CATEGORY_DIAGNOSTIC" in sensors
+    assert "disabled_by_default=True" in sensors
+
+
+def test_the_second_sensor_is_the_hottest_zone():
+    entities = _thermal_entities()
+    assert "'hottest_zone_temperature', MAX_TEMP_KEY, 'Hottest Zone Temperature'" \
+        in entities
+    assert "Max Temperature" not in entities
 
 
 def test_the_firmware_announces_what_the_controller_checks():
-    assert '"thermal"' in _block(CONTROL_GO.read_text(),
-                                 "func capabilities() []string", "\n}\n")
+    hits = [p for p in DEVICE.rglob("*.go")
+            if "func capabilities() []string" in p.read_text()]
+    assert len(hits) == 1, hits
+    src = hits[0].read_text()
+    start = src.index("func capabilities() []string")
+    assert '"thermal"' in src[start:src.index("\n}\n", start)]
 
 
 def test_a_missing_reading_is_never_sent_as_zero():
-    push = _block(ESPHOME.read_text(), "def update_temperatures(", "\ndef ")
+    push = _sources.code_only(_sources.def_source("update_temperatures"))
     assert "missing_state=celsius is None" in push
 
 
 def test_the_push_checks_the_capability():
     """Old firmware sends cpuTempC with no entity on the other end."""
-    push = _block(ESPHOME.read_text(), "def update_temperatures(", "\ndef ")
+    push = _sources.code_only(_sources.def_source("update_temperatures"))
     assert "_thermal_capable" in push
 
 
 def test_the_stats_report_reaches_the_push():
-    stats = _block(CONTROLLER.read_text(), "async def _on_stats(",
-                   "async def _on_playback_stats(")
-    assert 'esphome.update_temperatures(device_id, msg.get("cpuTempC"), ' \
-           'msg.get("maxTempC"))' in stats
+    stats = _sources.code_only(_sources.def_source("_on_stats"))
+    assert "esphome.update_temperatures(device_id, msg.get('cpuTempC'), " \
+           "msg.get('maxTempC'))" in stats
 
 
 class _Satellite:
