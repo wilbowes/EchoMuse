@@ -48,6 +48,7 @@ KINDS: dict[str, str] = {
     "owwThreshold": FLOAT,
     "owwModel": STR,
     "owwOnDevice": STR,
+    "owwMinFrames": INT,
     "bargeInEnabled": BOOL,
     "bargeInThreshold": FLOAT,
     "duckDb": FLOAT,
