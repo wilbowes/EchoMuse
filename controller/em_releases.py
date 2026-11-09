@@ -321,6 +321,11 @@ async def fetch_controller(force: bool = False) -> Optional[dict]:
         return _controller_cache
 
     loop = asyncio.get_running_loop()
+    # Disabled (#159) means no outbound call from a dashboard visit either:
+    # GET /api/releases/controller asks without `force` and falls back to
+    # the stored release. Only the poll loop forces, and it is gated already.
+    if not force and await loop.run_in_executor(None, check_interval) <= 0:
+        return _controller_cache or None
     repo = await loop.run_in_executor(
         None, db.get_config, "github_repo", "wilbowes/EchoMuse")
     headers = {"Accept": "application/vnd.github+json"}

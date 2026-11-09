@@ -728,6 +728,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 active_wake_words=[self.oww_model_id] if enabled else [],
                 max_active_wake_words=1,
             )
+            em_wakeword.reread_stale_select(srv, self.disconnect)
             return
 
         if isinstance(msg, api_pb2.VoiceAssistantSetConfiguration):
@@ -2512,6 +2513,7 @@ class DeviceESPhomeServer:
         self.wake_word_enabled: bool = True
         # What HA last read of it, None until it asks (em_wakeword.ha_needs_refresh).
         self.wake_word_told: bool | None = None
+        self.ha_select_stale = False  # em_wakeword.reread_stale_select
         # Injected by device_connected(); applies HA's wake word choice
         # synchronously. None when no device is connected.
         self._set_wake_word = None
@@ -3287,6 +3289,7 @@ async def update_oww_model(device_id: str, model_id: str) -> None:
     server.oww_model_info = model_info
     satellite = server.get_satellite()
     if satellite is not None:
+        server.ha_select_stale = server.wake_word_enabled  # #1151
         log.info(f"[{device_id}] OWW model → {model_id} — bouncing HA "
                  f"connection to refresh the wake word configuration")
         satellite.disconnect()

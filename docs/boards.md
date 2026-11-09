@@ -161,10 +161,12 @@ or not the chip is soldered on. The Dot 2 lists two light sensors and has
 one. A name with a working attribute behind it is a part; a name alone is
 not.
 
-**A device node existing does not mean the hardware is behind it.**
-`/dev/stpbt` is MediaTek's combo-chip Bluetooth node. It is present on the
-Dot 3 too, where the radio is a different chip. That is why each board states
-its Bluetooth device.
+**A device node existing does not say how it behaves.** `/dev/stpbt` is
+MediaTek's combo-chip Bluetooth node on the Dot 2 and the Dot 3 both, but the
+Dot 3's driver returns 0 bytes from `read()` when nothing is queued where the
+Dot 2's blocks, and reading it as a file ended every session at its first
+command. That is why each board states its Bluetooth device and how it is
+read.
 
 **Resolve keys by device name, not by what a device claims to support.** On
 the Dot 2 both input devices advertise the volume-down key, and only one of
@@ -274,9 +276,26 @@ An MT8167 board with its own layout; no input device or PCM shares the Dot
   at 48kHz, and it **must be open before the microphones**: the other way
   round the amplifier loses its clock until reboot. The board states it as
   `Loopback`; if it is not found the microphones are not opened at all.
-  Echo cancellation uses the software reference for now.
+  It is also the echo canceller's reference, once the firmware has measured
+  the echo delay from the audio, and the software reference until then:
+  26-28 dB of cancellation against 8.5-17 dB (41C8, 2026-11-07). The firmware
+  reads it a period at a time, because a whole-buffer read repeated stale
+  audio.
 - **Light sensor.** tsl2572 on the IIO bus, `in_illuminance0_input`, which
   reads lux as a decimal. The i2c bus also lists an opt3001 with no driver
   bound.
-- **Bluetooth.** `/dev/stpbt` exists, but the radio behind it reads
-  differently from the Dot 2's, so no HCI device is stated yet.
+- **Bluetooth.** `/dev/stpbt`, MediaTek's node as on the Dot 2, but its
+  driver (`btmtk_fops_*` in the kernel log) returns 0 bytes from `read()`
+  when nothing is queued, so the firmware reads it through `poll(2)`
+  (@Starker3, #1044). Measured on one unit under stock FireOS 6.5.7.5
+  (2026-10-24): the proxy ran with 0 HCI errors, and Home Assistant saw 24
+  BLE devices through it in 30 s against 7 through its own adapter. The
+  driver is a module, `btmtksdio.ko`, for the MT7668 that also carries the
+  WiFi; emOS loads it after the WiFi modules and makes the node from its
+  uevent. Measured on 41C8 under emOS (2026-11-07): the scan starts about
+  30 s after power-on with no HCI errors, and Home Assistant takes adverts
+  through the Echo's proxy.
+- **Bluetooth address.** Each Echo's own, from idme `bt_mac_addr`, is loaded
+  into the chip at the start of every Bluetooth session; without it every
+  Dot 2 shares one default address. A new board gets this if its idme has
+  the address.

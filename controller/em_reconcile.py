@@ -16,6 +16,8 @@ import re
 import time
 
 import em_crashlog
+import em_db as db
+import em_dbwriter
 import em_emos_ota
 import em_events
 import em_oww_sync
@@ -99,7 +101,12 @@ async def _collect_crash_log(live, device_id: str) -> None:
         log.info(f"[api] [{device_id}] crash log: read incomplete, will retry "
                  f"on the next connect")
         return
-    msg = em_crashlog.summarise(out[:out.rindex(em_shell.OK_MARK)])
+    text = out[:out.rindex(em_shell.OK_MARK)]
+    # On this boot's row: the log explains how this boot's reason came about.
+    if getattr(live, "boot_id", None):
+        em_dbwriter.submit(db.set_boot_prev_clean, device_id, live.boot_id,
+                           em_crashlog.is_clean(text))
+    msg = em_crashlog.summarise(text)
     if msg:
         log.warning(f"[api] [{device_id}] previous boot did not end cleanly — "
                     f"kernel log saved to the device's log events")

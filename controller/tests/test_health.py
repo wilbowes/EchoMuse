@@ -55,6 +55,21 @@ def test_unplanned_boots_are_warnings():
     assert em_health.boot_summary(None) is None
 
 
+# MediaTek routes its own restarts through the watchdog, so a clean kernel log
+# overrules a watchdog reason, and nothing else: not a panic, not a crash, not
+# a log that was never read.
+def test_a_clean_restart_overrules_only_a_watchdog_reason():
+    ok = em_health.boot_summary("wdt_by_pass_pwk", 1)
+    assert ok == {"text": "wdt_by_pass_pwk (clean restart)", "level": "ok"}
+    assert em_health.boot_summary("watchdog", 1)["level"] == "ok"
+    for clean in (None, 0, True, "1", 2):
+        assert em_health.boot_summary("wdt_by_pass_pwk", clean)["level"] == "warn", clean
+    for r in ("kernel_panic", "crash", "thermal", "wdt_panic"):
+        assert em_health.boot_summary(r, 1)["level"] == "warn", r
+    assert em_health.boot_summary("power_key", 1) == {"text": "power_key", "level": "ok"}
+    assert em_health.boot_summary(None, 1) is None
+
+
 def test_wear_values_keep_only_well_typed_readings():
     e = {"rev": 7, "preEol": 1, "lifeA": 1, "lifeB": 2, "name": "FJ25AB", "date": "08/2017"}
     assert em_health.wear_values(e) == (7, 1, 1, 2, "FJ25AB", "08/2017", None)
@@ -97,6 +112,19 @@ def test_wear_is_one_row_per_day_with_the_latest_reading(tmp_path):
     h = em_db.latest_health()["D"]
     assert (h["day"], h["emmc_life_a"]) == ("2026-10-02", 2)
     assert em_health.emmc_summary(h) == {"text": "10–20% used · normal", "level": "ok"}
+
+
+def test_the_clean_verdict_lands_on_its_own_boot(tmp_path):
+    _db(tmp_path)
+    em_db.record_boot("D", "boot-1", "v2.19.0", "wdt_by_pass_pwk")
+    assert em_db.latest_health()["D"]["prev_clean"] is None
+    em_db.set_boot_prev_clean("D", "boot-1", True)
+    assert em_db.latest_health()["D"]["prev_clean"] == 1
+    em_db.set_boot_prev_clean("D", "boot-1", False)
+    assert em_db.latest_health()["D"]["prev_clean"] == 0
+    # A boot with no row records nothing, and adds no row.
+    em_db.set_boot_prev_clean("D", "boot-9", True)
+    assert _count("device_boots") == 1
 
 
 def test_health_merges_boot_and_wear(tmp_path):
