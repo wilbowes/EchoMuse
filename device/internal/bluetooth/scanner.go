@@ -106,23 +106,54 @@ type Scanner struct {
 
 	// conns holds the LE connections (#656). connHold is its request to
 	// pause the scan while one is being made; it shares yieldSig.
-	conns    *ConnManager
-	connHold atomic.Bool
+	// connPaused is the session loop's answer that the scan is off, tagged
+	// with the holdGen of the hold it answers.
+	conns      *ConnManager
+	connHold   atomic.Bool
+	holdGen    atomic.Uint64
+	connPaused chan uint64
 
 	bluedroidDisabled bool
 }
 
 func NewScanner(onBatch BatchCallback) *Scanner {
 	s := &Scanner{
-		onBatch:  onBatch,
-		unique:   make(map[string]time.Time),
-		pending:  make(map[string]Advert),
-		gate:     newEmitGate(),
-		yieldSig: make(chan struct{}, 1),
+		onBatch:    onBatch,
+		unique:     make(map[string]time.Time),
+		pending:    make(map[string]Advert),
+		gate:       newEmitGate(),
+		yieldSig:   make(chan struct{}, 1),
+		connPaused: make(chan uint64, 1),
 	}
 	s.conns = newConnManager(func(hold bool) {
-		if s.connHold.Swap(hold) != hold {
-			s.poke()
+		if !hold {
+			if s.connHold.Swap(false) {
+				s.poke()
+			}
+			return
+		}
+		// The pause must land before the create is sent (#859): the loop
+		// acts on yieldSig only when it gets to it, and a connect that beats
+		// it ends with the scan never paused. Wait for its answer, bounded so
+		// a session that is ending cannot hang the connect.
+		// The generation, set before the hold, tells this hold's answer
+		// from one the loop meant for an earlier hold.
+		g := s.holdGen.Add(1)
+		s.connHold.Store(true)
+		s.poke()
+		t := time.NewTimer(cmdTimeout)
+		defer t.Stop()
+		for {
+			select {
+			case v := <-s.connPaused:
+				if v == g {
+					return
+				}
+				s.poke() // an earlier hold's answer; ask again
+			case <-t.C:
+				log.Printf("[ble] scan not paused within %s; connecting anyway", cmdTimeout)
+				return
+			}
 		}
 	})
 	return s
@@ -399,6 +430,17 @@ func (s *Scanner) serve(rw io.ReadWriteCloser, stopCh chan struct{}) error {
 				disarm()
 				if want {
 					watchdog.Reset(watchdogQuiet)
+				}
+			}
+			if !scanOn {
+				// The generation first: read with the hold after it, it is
+				// that hold's.
+				g := s.holdGen.Load()
+				if s.connHold.Load() {
+					select {
+					case s.connPaused <- g:
+					default:
+					}
 				}
 			}
 		case <-host.active:
