@@ -334,6 +334,32 @@ own files that informed it stay off the repo (Amazon's).
   `wget` are Amazon's bionic builds, which resolve through netd's
   `dnsproxyd` and so fail; the firmware resolves since #1085. Debugging only.
 
+- **2026-11-10, Sendspin asks for stereo Opus** (Wil: stereo from the
+  source, downmixed on the device where the output is mono). libopus 1.5.2
+  decoder, fixed point with NEON, measured on VVV at 1.3GHz with 60s of
+  synthetic audio: stereo 128k **2.14%** of one core, 160k 2.22%, mono 64k
+  speech 1.42%, music and speech at once 3.53-3.62%, three identical runs.
+  Mono FLAC, what it replaces, was 3.28% (PR #271), at about three times the
+  bytes. Firmware +193KB. Built from libopus's own source lists with the NDK
+  clang in echomuse-compiler: no cmake; the encoder needs OPUS_SOURCES_FLOAT
+  (analysis.c), the decoder alone does not.
+- **2026-11-10, Music Assistant 2.10.9 pins aiosendspin 10.2.1** (dev: 10.3.0),
+  not the 9.1.1 the interop test was written against. 10.x always sends the
+  13-byte chunk header; renames `decode_token` to `decode_psk_token` with the
+  `SP:0` token format unchanged (an Echo's token still pairs); and wants
+  `client_id` in a `PairingAttempt`. The interop test now runs both versions.
+- **2026-11-10, left/right pairs survive a stereo request.** MA 2.10.9
+  (`controllers/streams/audio.py`) pans a left or right player with
+  `pan=stereo|c0=FL|c1=FL` when the format is stereo, so the Echo gets its own
+  side on both channels and the average is that side. From the code; by ear
+  owed.
+- **2026-11-10, under 10.x a stream started before the player's clock syncs
+  loses its first ~2s** to a snap (first period played 1.95-2.0s after the
+  stream's start, one snap, every run; complete once synced). 9.1.1 synced
+  before the interop test's first stream, 10.x does not. Bites a cold start
+  only (MA connects and plays at once). Not fixed: the player should hold
+  playback for sync rather than skip.
+
 ## Boards: hardware is found by name (#541, 2026-10-04)
 
 **`docs/boards.md` is the guide for anyone trying a new board; this is what

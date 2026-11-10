@@ -80,6 +80,9 @@ var errProtocol = errors.New("sendspin: protocol error")
 // run drives the connection to its end. Every exit path closes the socket.
 func (s *session) run() {
 	defer s.close()
+	// s.dec is only touched from this goroutine (the reader), so it is
+	// freed here rather than in close, which other goroutines call.
+	defer func() { s.dec.close() }()
 	s.ws.SetReadLimit(maxReadBytes)
 	if err := s.handshake(); err != nil {
 		log.Printf("[sendspin] %s: handshake failed: %v", s.remote, err)
@@ -177,8 +180,11 @@ func (s *session) dispatch(env envelope) error {
 	case "stream/clear":
 		var r streamRoles
 		json.Unmarshal(env.Payload, &r)
-		if r.covers("player") && s.isAdmitted() {
-			s.c.player.clear()
+		if r.covers("player") {
+			s.dec.reset()
+			if s.isAdmitted() {
+				s.c.player.clear()
+			}
 		}
 	case "stream/end":
 		var r streamRoles
@@ -473,6 +479,7 @@ func (s *session) timeSync(stop <-chan struct{}) {
 }
 
 func (s *session) onStreamStart(f streamFormat) {
+	s.dec.close()
 	d, err := newDecoder(f)
 	if err != nil {
 		log.Printf("[sendspin] %v", err)
@@ -492,6 +499,7 @@ func (s *session) endStream() {
 	if s.streaming && s.isAdmitted() {
 		s.c.player.clear()
 	}
+	s.dec.close()
 	s.dec, s.streaming = nil, false
 	s.c.changed()
 }
