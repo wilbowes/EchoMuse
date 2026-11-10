@@ -3482,6 +3482,9 @@ const _unlockVerdict = ({ release = '', lk = '', twrp = '' }) => {
 const _echoBoard = (model = '', name = '') => {
   const m = model.trim(), n = name.trim().toLowerCase();
   if (m.toUpperCase() === 'AEORD' || n === 'radar_puffin') return 'radar';
+  // Read off 41C8 (stock FireOS 6), 2026-11-01. TWRP's own strings are not
+  // trusted here: in recovery the identity is read off /system.
+  if (m.toUpperCase() === 'AEODN' || n === 'donut_puffin') return 'donut';
   if (n.includes('biscuit')) return 'biscuit';
   if (!n && m.toLowerCase().includes('amazon')) return 'biscuit';
   return '';
@@ -4807,14 +4810,17 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // Radar runs emOS only: FireOS 6 on it is Amazon's headless build, which
     // EchoMuse does not drive. Its one unlock (amonet-radar) has none of
     // amonet-biscuit's generations, so _unlockVerdict is biscuit's alone.
-    if (board === 'radar' && !isEmos) {
+    // The donut likewise: its FireOS 6 is the same headless build, and its
+    // unlock (kaeru) leaves no amonet LK to read.
+    const emosOnly = { radar: 'an Echo 2nd gen (radar)', donut: 'an Echo Dot 3rd gen (donut)' };
+    if (emosOnly[board] && !isEmos) {
       expectDisconnect.current = true;
       try { await c.close(); } catch {}
       setAdb(null);
-      throw new Error('This is an Echo 2nd gen (radar), which EchoMuse supports on emOS only. '
+      throw new Error(`This is ${emosOnly[board]}, which EchoMuse supports on emOS only. `
         + 'Nothing has been written. Use the emOS flow.');
     }
-    const unlock = board === 'radar' ? { v2: false, evidence: [] }
+    const unlock = emosOnly[board] ? { v2: false, evidence: [] }
                                      : _unlockVerdict({ release: effRelease, lk, twrp });
     if (unlock.v2 && !isEmos) {
       expectDisconnect.current = true;
@@ -4859,6 +4865,10 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // written. The FireOS flow used to warn and carry on, and its release
     // check is skipped when TWRP cannot read /system, so a Dot 3 in recovery
     // reached the patch.
+    if (board === 'donut') {
+      addLog('Echo Dot 3rd gen (donut): expecting FireOS 6 in both slots. The Escrow Boot Image '
+           + 'step checks that before anything is written, and is the way back — keep that file.', 'warn');
+    }
     if (board === 'radar') {
       addLog('Echo 2nd gen (radar): expecting FireOS 6 in both slots. The Escrow Boot Image '
            + 'step checks that before anything is written, and is the way back — keep that file.', 'warn');
@@ -4868,10 +4878,10 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       try { await c.close(); } catch {}
       setAdb(null);
       throw new Error(
-        `This does not look like an Echo Dot 2nd gen or an Echo 2nd gen (model `
-        + `"${model || 'unknown'}", codename "${name || 'unknown'}"). Nothing has been `
-        + `written. The wizard sets up only those two, because it reuses the board's `
-        + `own kernel and boot image.`);
+        `This does not look like an Echo Dot 2nd gen, an Echo 2nd gen or an Echo Dot `
+        + `3rd gen (model "${model || 'unknown'}", codename "${name || 'unknown'}"). `
+        + `Nothing has been written. The wizard sets up only those three, because it `
+        + `reuses the board's own kernel and boot image.`);
     }
     // The untested-build case stays a WARNING in both flows, deliberately, and
     // it is the one place the two agree to be lenient: emOS mounts this
@@ -5308,6 +5318,13 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
           'etc/firmware/WIFI_RAM_CODE_8163', 'etc/firmware/WMT_SOC.cfg'],
       6: ['bin/sh', 'bin/linker', 'bin/e2fsck', 'vendor/bin/wmt_loader', 'vendor/bin/wmt_launcher',
           'vendor/firmware/WIFI_RAM_CODE_8163', 'vendor/firmware/WMT_SOC.cfg'],
+      // The Dot 3's WiFi is an MT7668 on SDIO, which init brings up from these
+      // two modules (sdio_wifi_bringup) rather than biscuit's MT6620 tools. Its
+      // firmware is loaded by the kernel from /system/vendor/firmware, by name
+      // the driver chooses, so it is not listed. Bluetooth's btmtksdio.ko is
+      // not required: emOS without it still serves voice.
+      donut: ['bin/sh', 'bin/linker', 'bin/e2fsck',
+              'lib/modules/wlan_mt76x8_sdio_prealloc.ko', 'lib/modules/wlan_mt76x8_sdio.ko'],
     };
   }
 
@@ -5324,7 +5341,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // (2026-09-25), and the kernel publishes the GPT names whatever a recovery
   // does with its links.
   function _donorProbeScript(files) {
-    const all = [...new Set([...files[5], ...files[6]])].join(' ');
+    const all = [...new Set(Object.values(files).flat())].join(' ');
     return (
       'part() { for u in /sys/block/mmcblk0/mmcblk0p*/uevent; do '
       + 'if grep -qx "PARTNAME=$1" "$u" 2>/dev/null; then d=${u%/uevent}; echo "/dev/block/${d##*/}"; return; fi; done; '
@@ -5426,21 +5443,25 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         'The check of this Echo\'s partitions did not finish, so nothing about it can be '
         + 'trusted yet. Nothing has been written. Check the cable and try this step again.' };
     }
-    const radar = board === 'radar';
+    // Radar and donut each have one unlock of their own (amonet-radar, kaeru),
+    // neither of which leaves amonet-biscuit's LK, so the LK is not read as
+    // evidence for them. Being in TWRP with an A/B layout is the unlock.
+    const radar = board === 'radar', donut = board === 'donut', own = radar || donut;
+    const ownName = radar ? 'Echo 2nd gen (radar)' : 'Echo Dot 3rd gen (donut)';
     const amonet = _amonetLk(probe.lk);
     const lkSays = amonet ? `lk_a holds amonet ${amonet}'s LK` : 'lk_a holds neither amonet\'s LK';
     const tw = probe.twrp;
     let gen = 0, unreadable = false;
-    if (!radar && !probe.lk) {
+    if (!own && !probe.lk) {
       unreadable = true;
       why.push('the wizard could not read the lk_a partition, so it cannot tell amonet 1 from amonet 2');
     } else if (!tw) {
       unreadable = true;
       why.push('the wizard could not read the TWRP version');
-    } else if (radar) {
+    } else if (own) {
       if (layout === 'v2') gen = 6;
       else why.push('the boot partitions carry amonet-biscuit\'s renamed (_x) entries, '
-        + 'which an Echo 2nd gen should never have');
+        + `which an ${ownName} should never have`);
     } else if (amonet === 2 && /^3\.7\.0(?![0-9])(?!_9-bboe)/.test(tw) && layout === 'v2') {
       gen = 6;
     } else if (amonet === 1 && /^3\.2\.3(?![0-9])|^3\.7\.0_9-bboe\d+$/.test(tw) && layout === 'v1') {
@@ -5451,11 +5472,15 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         + 'amonet 2 means TWRP 3.7.0 and FireOS 6)');
     }
     if (gen) {
-      seen.push(radar ? `Echo 2nd gen (radar) unlock, TWRP ${tw}`
+      seen.push(own ? `${ownName} unlock, TWRP ${tw}`
                       : `amonet ${gen === 6 ? 2 : 1}: ${lkSays}, TWRP ${tw}`);
+      // The donut runs its 32-bit FireOS 6 on a 64-bit kernel
+      // (em_emos_build.FIREOS6_BOARDS), so its kernel says nothing about the
+      // generation; on biscuit and radar it decides it.
       const want = gen === 6
-        ? { layout: 'nested', release: '7.', arch: 'arm', label: 'FireOS 6' }
+        ? { layout: 'nested', release: '7.', arch: donut ? 'arm64' : 'arm', label: 'FireOS 6' }
         : { layout: 'root', release: '5.', arch: 'arm64', label: 'FireOS 5' };
+      const need = files[donut ? 'donut' : gen];
       const other = gen === 6 ? 'FireOS 5' : 'FireOS 6';
       const needed = gen === 6 ? ['a', 'b'] : ['a'];
       for (const x of ['a', 'b']) {
@@ -5468,7 +5493,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         else if (s.layout !== want.layout || !s.release.startsWith(want.release)) {
           problem = `system_${x} holds ${what}, which is ${other}, not ${want.label}`;
         } else {
-          const missing = files[gen].filter(f => s.files[f] !== 'yes');
+          const missing = need.filter(f => s.files[f] !== 'yes');
           if (missing.length) problem = `system_${x} (${what}) is missing ${missing.join(', ')}`;
         }
         if (!problem && gen === 5 && x === 'a' && s.node !== '/dev/block/mmcblk0p13') {
@@ -5482,21 +5507,22 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
           why.push(problem);
         } else {
           seen.push(`system_${x}: ${what}${s.build ? ` (${s.build})` : ''}, `
-                  + `all ${files[gen].length} files emOS uses present`);
+                  + `all ${need.length} files emOS uses present`);
         }
       }
       if (!heads || !heads.length) why.push('there is no stock boot image to build from');
       for (const h of heads || []) {
         if (!h.arch) why.push(`the kernel in ${h.name} could not be identified as 32- or 64-bit`);
         else if (h.arch !== want.arch) {
-          why.push(`${h.name} holds a ${h.arch === 'arm' ? '32-bit (FireOS 6)' : '64-bit (FireOS 5)'} `
+          why.push(donut ? `${h.name} holds a 32-bit kernel, not the 64-bit kernel an ${ownName} runs`
+                         : `${h.name} holds a ${h.arch === 'arm' ? '32-bit (FireOS 6)' : '64-bit (FireOS 5)'} `
                  + `kernel, not ${want.label}'s`);
         } else seen.push(`${h.name}: ${want.label} kernel (${h.arch === 'arm' ? '32' : '64'}-bit)`);
       }
     }
     if (!why.length) return { ok: true, gen, confirmed: seen, notes };
     const fix = gen === 6
-      ? ` ${radar ? 'An Echo 2nd gen' : 'amonet 2'} needs FireOS 6 in BOTH slots. If the FireOS 6 flash from the unlock `
+      ? ` ${own ? `An ${ownName}` : 'amonet 2'} needs FireOS 6 in BOTH slots. If the FireOS 6 flash from the unlock `
         + 'instructions did not complete for both, finish it, then run this step again.'
       : gen === 5
         ? ' amonet 1 needs FireOS 5 in system_a (mmcblk0p13) and a FireOS 5 kernel to build from.'

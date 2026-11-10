@@ -443,6 +443,13 @@ FireOS, board sent with the build; **read off the device, never the page**.
 `donorVerdict` skips biscuit's bootloader fingerprint. Restoring to stock:
 finish on `_b`.
 
+### Donut (2026-11-10, not yet run on hardware)
+
+As radar: `AEODN`/`donut_puffin` from `/system`, emOS only, no LK fingerprint
+(kaeru). Its 32-bit FireOS 6 runs on a **64-bit** kernel, so the gate wants
+arm64 for it, and its WiFi files are the SDIO modules
+(`_emosSystemFiles().donut`), not MT6620's tools.
+
 ### The emOS flow, and what a run against real hardware found
 
 Every check must be able to fail:
