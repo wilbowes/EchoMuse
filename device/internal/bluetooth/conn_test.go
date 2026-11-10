@@ -52,6 +52,8 @@ type fakeCtl struct {
 	connecting string
 	updates    []uint16      // every LE Connection Update's interval, 1.25ms units
 	updateLag  time.Duration // before an update completes
+
+	scanAtCreate []byte // the scan state as each Create Connection arrived
 }
 
 func newFakeCtl() *fakeCtl {
@@ -181,6 +183,11 @@ func (f *fakeCtl) command(op uint16, params []byte) {
 		addr := mac.String()
 		f.mu.Lock()
 		f.created = append(f.created, append([]byte(nil), params...))
+		on := byte(0)
+		if len(f.scan) > 0 {
+			on = f.scan[len(f.scan)-1]
+		}
+		f.scanAtCreate = append(f.scanAtCreate, on)
 		f.connecting = addr
 		p := f.peers[addr]
 		f.mu.Unlock()
@@ -285,7 +292,7 @@ func (f *fakeCtl) received(t *testing.T, p *fakePeer, n int) ([][]byte, []uint16
 }
 
 // session runs a scanner session on the fake and waits for the connection
-// manager to be attached.
+// manager to be attached and the session to be up.
 func session(t *testing.T, f *fakeCtl, setup func(*Scanner)) *Scanner {
 	t.Helper()
 	s := NewScanner(nil)
@@ -305,7 +312,9 @@ func session(t *testing.T, f *fakeCtl, setup func(*Scanner)) *Scanner {
 	})
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		if free, _ := s.Conns().Slots(); free == MaxConnSlots {
+		// Scanning too: the manager attaches before the scan first starts,
+		// and a connect in between finds no scan to pause (#859).
+		if free, _ := s.Conns().Slots(); free == MaxConnSlots && s.scanning.Load() {
 			return s
 		}
 		if time.Now().After(deadline) {
@@ -710,8 +719,56 @@ func TestScanPausesWhileConnecting(t *testing.T) {
 	for {
 		f.mu.Lock()
 		scan := append([]byte(nil), f.scan...)
+		atCreate := append([]byte(nil), f.scanAtCreate...)
 		f.mu.Unlock()
 		if bytes.Equal(scan, []byte{1, 0, 1}) {
+			if !bytes.Equal(atCreate, []byte{0}) {
+				t.Fatalf("scan state at each create %v, want off", atCreate)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("scan enable history %v, want on, off for the connect, on", scan)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// A session loop busy past a whole connect still pauses the scan for it
+// (#859): the create waits for the loop to say the scan is off.
+func TestScanPausesBeforeCreateWhileLoopBusy(t *testing.T) {
+	f := newFakeCtl()
+	f.peer(peerA)
+	s := session(t, f, nil)
+	// Stall the loop in its next flush.
+	s.batchMu.Lock()
+	time.Sleep(2 * flushInterval)
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.Conns().Connect(peerA, 1)
+		done <- err
+	}()
+	var err error
+	select {
+	case err = <-done: // the connect beat the loop
+		s.batchMu.Unlock()
+	case <-time.After(200 * time.Millisecond):
+		s.batchMu.Unlock()
+		err = <-done
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		f.mu.Lock()
+		scan := append([]byte(nil), f.scan...)
+		atCreate := append([]byte(nil), f.scanAtCreate...)
+		f.mu.Unlock()
+		if bytes.Equal(scan, []byte{1, 0, 1}) {
+			if !bytes.Equal(atCreate, []byte{0}) {
+				t.Fatalf("scan state at each create %v, want off", atCreate)
+			}
 			return
 		}
 		if time.Now().After(deadline) {

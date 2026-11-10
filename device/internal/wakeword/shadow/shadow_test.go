@@ -618,6 +618,147 @@ func TestNormalBarStillFiresOnOneFrame(t *testing.T) {
 	})
 }
 
+// TestNormalBarMinFramesNeedsConsecutiveFrames: with SetMinFrames(2) a wake
+// needs two frames in a row at the normal bar, so a one-frame spike (a click, a
+// consonant in passing speech) does not cross while a held score still does.
+func TestNormalBarMinFramesNeedsConsecutiveFrames(t *testing.T) {
+	var mu sync.Mutex
+	var crosses int
+	inf := &fakeInferer{}
+	s := NewScorer(inf, 0.5, func(float32, float32, time.Time) {
+		mu.Lock()
+		crosses++
+		mu.Unlock()
+	})
+	defer s.Close()
+	s.SetMinFrames(2)
+
+	inf.set(0.0, 0)
+	pushAll(t, s, wakeword.FeatWindow+1)
+	// Alternate above and below the bar: never two in a row.
+	for i := 0; i < 6; i++ {
+		inf.set(0.9, 0)
+		pushAll(t, s, 1)
+		inf.set(0.0, 0)
+		pushAll(t, s, 1)
+	}
+	if got := s.peek().Crossings; got != 0 {
+		t.Fatalf("crossed %d times on isolated frames with minFrames=2", got)
+	}
+	inf.set(0.9, 0)
+	pushAll(t, s, 2)
+	waitFor(t, "a two-frame crossing", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return crosses == 1
+	})
+}
+
+// TestNormalBarMinFramesCountsToN: the rule is "N in a row", not just two.
+func TestNormalBarMinFramesCountsToN(t *testing.T) {
+	var mu sync.Mutex
+	var crosses int
+	inf := &fakeInferer{}
+	s := NewScorer(inf, 0.5, func(float32, float32, time.Time) {
+		mu.Lock()
+		crosses++
+		mu.Unlock()
+	})
+	defer s.Close()
+	s.SetMinFrames(3)
+
+	inf.set(0.0, 0)
+	pushAll(t, s, wakeword.FeatWindow+1)
+	inf.set(0.9, 0)
+	pushAll(t, s, 2)
+	if got := s.peek().Crossings; got != 0 {
+		t.Fatalf("crossed after 2 frames with minFrames=3")
+	}
+	pushAll(t, s, 1)
+	waitFor(t, "a three-frame crossing", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return crosses == 1
+	})
+}
+
+// TestNormalBarMinFramesDatesFromTheFirstFrame: as at the barge bar, the
+// private session starts from the crossing's date, so a multi-frame wake is
+// dated from the first frame of the run, not the frame that completed it.
+func TestNormalBarMinFramesDatesFromTheFirstFrame(t *testing.T) {
+	got := make(chan time.Time, 1)
+	inf := &fakeInferer{}
+	s := NewScorer(inf, 0.5, func(_, _ float32, at time.Time) { got <- at })
+	defer s.Close()
+	s.SetMinFrames(2)
+	inf.set(0.0, 0)
+	pushAll(t, s, wakeword.FeatWindow+1)
+	inf.set(0.9, 0)
+	first := time.Now().Add(-500 * time.Millisecond)
+	b := make([]byte, wakeword.ChunkSamples*2)
+	s.PushBytesAt(b, first)
+	s.PushBytesAt(b, first.Add(80*time.Millisecond))
+	select {
+	case at := <-got:
+		if !at.Equal(first) {
+			t.Fatalf("crossing dated %v after the first frame, want 0", at.Sub(first))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no crossing")
+	}
+}
+
+// TestMinFramesIsCapped: a value past MaxMinFrames is held to it, so a typo
+// in OWW_MIN_FRAMES cannot leave an Echo that never wakes.
+func TestMinFramesIsCapped(t *testing.T) {
+	var mu sync.Mutex
+	var crosses int
+	inf := &fakeInferer{}
+	s := NewScorer(inf, 0.5, func(float32, float32, time.Time) {
+		mu.Lock()
+		crosses++
+		mu.Unlock()
+	})
+	defer s.Close()
+	s.SetMinFrames(50)
+
+	inf.set(0.0, 0)
+	pushAll(t, s, wakeword.FeatWindow+1)
+	inf.set(0.9, 0)
+	pushAll(t, s, MaxMinFrames)
+	waitFor(t, "a crossing at the cap", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return crosses == 1
+	})
+}
+
+// TestMinFramesDoesNotChangeTheBargeBar: the barge bar keeps its own two-frame
+// rule whatever minFrames is, so a larger value cannot make barge-in sluggish.
+func TestMinFramesDoesNotChangeTheBargeBar(t *testing.T) {
+	var mu sync.Mutex
+	var crosses int
+	inf := &fakeInferer{}
+	s := NewScorer(inf, 0.5, func(float32, float32, time.Time) {
+		mu.Lock()
+		crosses++
+		mu.Unlock()
+	})
+	defer s.Close()
+	s.SetMinFrames(3)
+	s.SetBargeThreshold(0.10, func() bool { return true })
+
+	inf.set(0.0, 0)
+	pushAll(t, s, wakeword.FeatWindow+1)
+	inf.set(0.2, 0)
+	pushAll(t, s, 2)
+	waitFor(t, "a two-frame barge crossing", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return crosses == 1
+	})
+}
+
 // TestCrossingReportsCaptureTime: the time handed to the callback is when the
 // crossing frame was captured, not when inference got round to it. The queue
 // holds up to 640ms, and arbitration and the private-listening session both
