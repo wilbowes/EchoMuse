@@ -708,6 +708,31 @@ func TestNormalBarMinFramesDatesFromTheFirstFrame(t *testing.T) {
 	}
 }
 
+// TestMinFramesIsCapped: a value past MaxMinFrames is held to it, so a typo
+// in OWW_MIN_FRAMES cannot leave an Echo that never wakes.
+func TestMinFramesIsCapped(t *testing.T) {
+	var mu sync.Mutex
+	var crosses int
+	inf := &fakeInferer{}
+	s := NewScorer(inf, 0.5, func(float32, float32, time.Time) {
+		mu.Lock()
+		crosses++
+		mu.Unlock()
+	})
+	defer s.Close()
+	s.SetMinFrames(50)
+
+	inf.set(0.0, 0)
+	pushAll(t, s, wakeword.FeatWindow+1)
+	inf.set(0.9, 0)
+	pushAll(t, s, MaxMinFrames)
+	waitFor(t, "a crossing at the cap", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return crosses == 1
+	})
+}
+
 // TestMinFramesDoesNotChangeTheBargeBar: the barge bar keeps its own two-frame
 // rule whatever minFrames is, so a larger value cannot make barge-in sluggish.
 func TestMinFramesDoesNotChangeTheBargeBar(t *testing.T) {

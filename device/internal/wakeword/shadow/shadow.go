@@ -268,15 +268,21 @@ func (s *Scorer) SetThreshold(t float32) {
 	s.mu.Unlock()
 }
 
+// MaxMinFrames caps SetMinFrames. Deliberate wakes held 4-6 frames on #294's
+// Echo, and hey_computer held 0-2 (#1094), so a larger value turns the wake
+// word off for some models without saying so.
+const MaxMinFrames = 4
+
 // SetMinFrames sets how many consecutive 80ms frames must clear the normal
 // wake bar before it crosses. 1, or anything below it, keeps the single-frame
-// rule. It never applies at the barge-in bar, which always needs two frames.
+// rule; above MaxMinFrames is held to it. It never applies at the barge-in
+// bar, which always needs two frames.
 //
 // A real wake word holds its score for several frames, while a click or a
 // consonant in passing TV speech can spike for one (#294, #838).
 func (s *Scorer) SetMinFrames(n int) {
 	s.mu.Lock()
-	s.minFrames = n
+	s.minFrames = min(n, MaxMinFrames)
 	s.mu.Unlock()
 }
 
