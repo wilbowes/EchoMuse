@@ -332,13 +332,21 @@ async def scenario_unpaired() -> None:
         await until(lambda: (c := server.get_client(cid)) is not None and c.is_connected, 10, "never connected")
         await server.trust_unpaired(cid)
         await until(lambda: player_available(server, cid), 15, "approved unpaired client never available")
-        # Under 10.x the player can be available before its clock is: a
-        # stream started then loses its first ~2s to a snap (a separate
-        # fault, docs/history/device.md 2026-11-10). This scenario is about sync.
-        await client.wait("status", 10, lambda e: e.get("synced"))
+        # 10.x keeps a player out of a stream until its first client/state,
+        # then joins it late, skipping by its lead: a stream started in that
+        # window loses ~2s on any spec client (docs/history/device.md,
+        # 2026-11-10). Start once the server has the state, as Music
+        # Assistant does for a player it is already connected to.
+        awaits = getattr(server.get_client(cid), "awaits_role_state", lambda _f: False)
+        await until(lambda: not awaits("player"), 5, "server never received the player's state")
         n0 = len(client.events)
         _, start_us = await stream(server, cid, 5)
-        check_sync(client.periods(n0), start_us, "unpaired sync")
+        periods = client.periods(n0)
+        first_ms = (periods[0]["rawUs"] - start_us) / 1000 if periods else None
+        print(f"   first sample played {first_ms:.0f}ms after it was due" if periods else "   nothing played")
+        if first_ms is None or abs(first_ms) > 100:
+            raise Fail(f"the stream's first audio played {first_ms}ms after it was due")
+        check_sync(periods, start_us, "unpaired sync")
     finally:
         await client.stop()
         await server.close()
@@ -421,7 +429,8 @@ async def scenario_opus() -> None:
         await until(lambda: (c := server.get_client(cid)) is not None and c.is_connected, 10, "never connected")
         await server.trust_unpaired(cid)
         await until(lambda: player_available(server, cid), 15, "never available")
-        await client.wait("status", 10, lambda e: e.get("synced"))
+        awaits = getattr(server.get_client(cid), "awaits_role_state", lambda _f: False)
+        await until(lambda: not awaits("player"), 5, "server never received the player's state")
         amp = 32767 * 10 ** (-12 / 20)
         group = server.get_client(cid).group
         st = group.start_stream()

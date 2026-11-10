@@ -353,12 +353,20 @@ own files that informed it stay off the repo (Amazon's).
   `pan=stereo|c0=FL|c1=FL` when the format is stereo, so the Echo gets its own
   side on both channels and the average is that side. From the code; by ear
   owed.
-- **2026-11-10, under 10.x a stream started before the player's clock syncs
-  loses its first ~2s** to a snap (first period played 1.95-2.0s after the
-  stream's start, one snap, every run; complete once synced). 9.1.1 synced
-  before the interop test's first stream, 10.x does not. Bites a cold start
-  only (MA connects and plays at once). Not fixed: the player should hold
-  playback for sync rather than skip.
+- **2026-11-10, under 10.x a stream that starts before the player's first
+  `client/state` loses ~its lead (~1.8-2s for us).** Not the clock and not a
+  drop on the device: 10.x keeps a role "awaiting state" out of every stream
+  (`SendspinClient.join_active_stream`), and when the state arrives joins it
+  to the running stream as a late joiner at now + that role's lead
+  (`get_late_join_target_timestamp_us`); the skipped audio is never sent.
+  Timeline (interop, ms after activation): stream started 52, our state 78,
+  first chunk stamped 1.86s past the stream's start. Generic to every spec
+  client (the spec holds the first state until the clock converges); ours
+  loses more because we ask for a 2s lead. Narrowed, spec-aligned: the
+  clock now converges in two round trips (onTime asks again at once) where
+  the 200ms ladder took ~250ms. Wil: keep spec-aligned, no early state. Real
+  exposure: MA starting a stream within ~80ms of connecting. The fix belongs
+  upstream: hold a stream whose members all await state rather than skip.
 
 ## Boards: hardware is found by name (#541, 2026-10-04)
 
