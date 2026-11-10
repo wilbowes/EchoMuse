@@ -348,6 +348,15 @@ own files that informed it stay off the repo (Amazon's).
   13-byte chunk header; renames `decode_token` to `decode_psk_token` with the
   `SP:0` token format unchanged (an Echo's token still pairs); and wants
   `client_id` in a `PairingAttempt`. The interop test now runs both versions.
+- **2026-11-10, `client/state` carries the delay under both names.** 9.1.1
+  reads `static_delay_ms`, 10.x `output_delay_ms` (it maps the old key, logs
+  "non-compliant client ... pre-rename" twice per connection, key and
+  `set_static_delay`, and aiosendspin #393 plans to stop accepting them).
+  Neither handshake identifies the server, and 9.1.1 rejects an unknown
+  command name, so the command keeps its 9.1.1 name. MA moved to 10.x in
+  2.10.7 (2026-10-17); 2.10.0-2.10.6 run 9.1.1. Drop the old names when
+  supporting those stops being worth the warnings. Interop now checks the
+  delay round trip on both.
 - **2026-11-10, left/right pairs survive a stereo request.** MA 2.10.9
   (`controllers/streams/audio.py`) pans a left or right player with
   `pan=stereo|c0=FL|c1=FL` when the format is stereo, so the Echo gets its own

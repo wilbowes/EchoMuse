@@ -435,6 +435,7 @@ func (s *session) sendState() {
 			Volume:            set.Volume,
 			Muted:             set.Muted,
 			StaticDelayMs:     set.StaticDelayMs,
+			OutputDelayMs:     set.StaticDelayMs,
 			RequiredLeadMs:    requiredLeadMs,
 			MinBufferMs:       s.c.minBufferMs(),
 			SupportedCommands: []string{"set_static_delay"},

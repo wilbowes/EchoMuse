@@ -258,6 +258,19 @@ async def scenario_pair_and_play() -> None:
         await until(lambda: server.get_client(cid).role("player@v1").volume == 100, 5,
                     "volume did not return to 100")
 
+        # Delay from the server: the Echo applies it and reports it back
+        # under the name this server reads (9.1.1 static_delay_ms, 10.x
+        # output_delay_ms; the Echo sends both).
+        role = server.get_client(cid).role("player@v1")
+        set_delay = getattr(role, "set_output_delay", None) or role.set_static_delay
+        reported = lambda: getattr(role, "output_delay_ms", getattr(role, "static_delay_ms", None))
+        set_delay(120)
+        await client.wait("settings", 5, lambda e: e["delayMs"] == 120)
+        await until(lambda: reported() == 120, 5, f"server reads the delay as {reported()}, not 120")
+        set_delay(0)
+        await until(lambda: reported() == 0, 5, "delay did not return to 0")
+        print("   delay 120ms: applied, and read back by the server")
+
         # stream/clear (a seek): the buffer empties and play resumes in sync.
         st.clear()
         n2 = len(client.events)
