@@ -1957,6 +1957,17 @@ Build does for firmware.
   reads `3.18.19+`. The WPA-only refusal stays as a cheap precaution.
 - FireOS 5's shell has no `sed`, `head`, `grep` or `which` on the path, and VVV
   has no `/data/local/bin/busybox`; probes there use shell builtins.
+- **VVV's own FireOS-native boot image builds into emOS offline**, read
+  read-only off p10 (md5 equal on the device and here): 7,979,008 bytes,
+  Magisk-patched FireOS 5, arm64, a true header id, and the packer's roundtrip
+  reproduces it byte for byte. `/proc/version`'s whole line is in its
+  decompressed kernel, which is how `em_emos_migrate.running_kernel` proves p10
+  is the image that booted (FireOS has no os-release to compare). Built with
+  emos-v0.11's released `init`: kernel and header bytes 8-16 and 20-64
+  identical, cmdline = FireOS's + the ramoops block, `/sbin` carries only
+  `em-wifi` (so Amazon's supplicant stays). The firmware runs as root on
+  FireOS 5 (`/data/local/bin/server`), so the shell plane can read and write
+  p10; `/system/bin/busybox` is on its path.
 
 ## Provisioning wizard (`dashboard.jsx`, `_WIZARD_STEPS`)
 
