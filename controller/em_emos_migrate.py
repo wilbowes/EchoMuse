@@ -566,3 +566,58 @@ async def _watch(io, version, new_build, asked):
         f"restarting. An amber ring means it is restoring FireOS; if it stays "
         f"off the network it needs TWRP and a USB cable, and the FireOS image "
         f"kept on the controller.")
+
+
+def settle_cmd() -> str:
+    """On FireOS: anything a migration left, in one round trip. Nothing at all
+    on an Echo that never had /data/emos, which is nearly every connect."""
+    return (f"if [ -d /data/emos ]; then "
+            f"echo HDR_BEGIN; busybox dd if={up.BOOT_DEV} bs={up.BLOCK} count=1 "
+            f"2>/dev/null | busybox base64; echo HDR_END; "
+            f"{up.status_cmd()}; else echo NOEMOS; echo {up.OK}; fi")
+
+
+def settle_verdict(out: str):
+    """(verdict, status) for a FireOS Echo's settle reply.
+
+    "none"        nothing of a migration here.
+    "pending"     emOS is written and the mark names it: the Echo has not
+                  restarted yet. The mark stays, so the trial still applies.
+    "rolled_back" init put FireOS back (its record says so).
+    "incomplete"  a mark or a pushed image, and FireOS on the partition.
+    "unknown"     the reply did not finish.
+    """
+    out = (out or "").replace("\r", "")
+    if up.OK not in out:
+        return "unknown", {}
+    if "NOEMOS" in out:
+        return "none", {}
+    st = up.parse_status(out)
+    hdr = up._b64(up._between(out, "HDR_BEGIN", "HDR_END"))
+    if st["rollback"]:
+        return "rolled_back", st
+    if st["mark"] and len(hdr) >= 596 and up.is_ours(hdr) \
+            and st["mark"]["id"] == up.stored_id(hdr):
+        return "pending", st
+    if st["mark"] or st["leftover"]:
+        return "incomplete", st
+    return "none", st
+
+
+async def settle_on_fireos(sh):
+    """Report, and tidy, what a migration nobody was watching left on a FireOS
+    Echo. Returns (message or "", log level)."""
+    verdict, st = settle_verdict(await sh(settle_cmd(), 30.0))
+    if verdict in ("none", "unknown"):
+        return "", "info"
+    if verdict == "pending":
+        return (f"emOS {st['mark'].get('version', '')} is written to this "
+                f"Echo and starts at its next restart.").replace("  ", " "), "info"
+    await sh(up.CONFIRM_CMD, 30.0)
+    if verdict == "rolled_back":
+        tries = st["rollback"].get("tries")
+        return (f"A migration to emOS was rolled back after {tries} "
+                f"unconfirmed boots: the Echo put FireOS back and is running "
+                f"it."), "warn"
+    return ("A migration to emOS did not complete: the Echo is on FireOS. "
+            "What it left behind was removed."), "warn"

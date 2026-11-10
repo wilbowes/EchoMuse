@@ -7,18 +7,28 @@ queue it waits in (em_ota.queue, like firmware), the state the Updates tab
 shows, the check run on every emOS connect that confirms or reports the last
 update, and fetching the release's init and payload for it and for the
 provisioning wizard. See "emOS update" in controller/CLAUDE.md.
+
+It also carries the migration from FireOS 5 (em_emos_migrate): the same
+queue, state and panel fields, an io that keeps the FireOS image on the
+controller (`escrow_path`), and the check run on a FireOS connect that reports
+a migration nobody was watching (`settle_fireos`).
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import os
+import re
 import time
+from pathlib import Path
 
 import em_db as db
 import em_dbwriter
 import em_emos_build
+import em_emos_migrate
 import em_emos_update
 import em_events
 import em_http
@@ -49,6 +59,52 @@ stage: dict[str, str] = {}
 # An emOS update holds the queue through the reboot and, when the new image
 # fails, through init's whole trial and rollback.
 MAX_HOLD_S = em_emos_update.WATCH_S + 600.0
+# A migration's watch is longer: FireOS's own boot comes after the rollback.
+MIGRATE_HOLD_S = em_emos_migrate.WATCH_S + 600.0
+
+# The FireOS boot image a migration read off each Echo, beside the DB like
+# oww_models/. The way back for an image that fails before init: TWRP, a
+# cable, and this file. One per Echo, replaced only by a verified newer read.
+ESCROW_SUBDIR = "fireos_escrow"
+_SAFE_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def escrow_dir(db_path: str | None = None) -> Path:
+    if db_path is None:
+        db_path = os.environ.get("DB_PATH", "echomuse.db")
+    return Path(db_path).resolve().parent / ESCROW_SUBDIR
+
+
+def escrow_path(device_id: str) -> Path | None:
+    """The kept FireOS image for this Echo, or None."""
+    if not _SAFE_ID.fullmatch(device_id or ""):
+        return None
+    p = escrow_dir() / f"{device_id}.img"
+    return p if p.is_file() else None
+
+
+def write_escrow(device_id: str, data: bytes, md5: str) -> str:
+    """Keep `data` as this Echo's FireOS image. "" once it reads back with
+    `md5`, else why. Written beside and renamed, so a failed write never
+    replaces a good copy. Blocking: run it off the loop."""
+    if not _SAFE_ID.fullmatch(device_id or ""):
+        return "the device id is not usable as a file name"
+    d = escrow_dir()
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        part = d / f"{device_id}.img.part"
+        with open(part, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        if hashlib.md5(part.read_bytes()).hexdigest() != md5:
+            part.unlink(missing_ok=True)
+            return "the copy did not read back intact"
+        (d / f"{device_id}.img.md5").write_text(md5 + "\n")
+        part.replace(d / f"{device_id}.img")
+    except OSError as e:
+        return f"{e.strerror or e}"
+    return ""
 
 
 def busy(device_id: str) -> bool:
@@ -56,20 +112,32 @@ def busy(device_id: str) -> bool:
             or device_id in queued)
 
 
-async def _update_failed(device_id: str, reason: str) -> None:
+async def _update_failed(device_id: str, reason: str,
+                         what: str = "emOS update") -> None:
     """Every abort path comes through here, as _update_failed's do."""
     errors[device_id] = reason
     # The controller's own log as well as the device's: on C95's first run
     # the only trace here was the file transfer, with no outcome either way.
-    log.warning(f"[api] [{device_id}] emOS update failed: {reason}")
+    log.warning(f"[api] [{device_id}] {what} failed: {reason}")
     await em_events.push_log(device_id, "error", "controller",
-                          f"emOS update: {reason}")
+                          f"{what}: {reason}")
     await em_events.push({"type": "device_emos_update_failed",
                        "device_id": device_id, "error": reason})
 
 
 async def run_update(device_id: str, override: tuple | None = None) -> None:
     """Background task: queue behind `em_ota.queue`, then update under a cap."""
+    await _queued(device_id, lambda: _run_update_locked(device_id, override),
+                  MAX_HOLD_S, "emOS update")
+
+
+async def run_migration(device_id: str) -> None:
+    """Background task: migrate a FireOS 5 Echo to emOS, queued like an update."""
+    await _queued(device_id, lambda: _run_migration_locked(device_id),
+                  MIGRATE_HOLD_S, "Migration to emOS")
+
+
+async def _queued(device_id: str, make, hold: float, what: str) -> None:
     errors.pop(device_id, None)
     queued.add(device_id)
     try:
@@ -79,16 +147,15 @@ async def run_update(device_id: str, override: tuple | None = None) -> None:
 
     in_progress.add(device_id)
     try:
-        await asyncio.wait_for(_run_update_locked(device_id, override),
-                               timeout=MAX_HOLD_S)
+        await asyncio.wait_for(make(), timeout=hold)
     except asyncio.TimeoutError:
         await _update_failed(
             device_id,
-            f"abandoned after {MAX_HOLD_S:.0f}s so the queue could "
-            f"continue — the device may still be mid-update")
+            f"abandoned after {hold:.0f}s so the queue could "
+            f"continue — the device may still be mid-update", what)
     except Exception as e:
-        log.exception(f"[api] emOS update error for {device_id}: {e}")
-        await _update_failed(device_id, f"exception: {e}")
+        log.exception(f"[api] {what} error for {device_id}: {e}")
+        await _update_failed(device_id, f"exception: {e}", what)
     finally:
         in_progress.discard(device_id)
         stage.pop(device_id, None)
@@ -190,6 +257,52 @@ class _EmosIO:
             return "gone"
         self.live = current
         return "new"
+
+
+class _MigrateIO(_EmosIO):
+    """_EmosIO plus somewhere to keep the FireOS image."""
+
+    async def escrow(self, data: bytes, md5: str) -> str:
+        return await self.offload(write_escrow, self.device_id, data, md5)
+
+    async def step(self, msg: str, log: bool = True) -> None:
+        stage[self.device_id] = msg
+        if log:
+            _emos_log.info(f"[api] [{self.device_id}] migration to emOS: {msg}")
+            await em_events.push_log(self.device_id, "info", "controller",
+                                  f"Migration to emOS: {msg}")
+
+
+async def _run_migration_locked(device_id: str) -> None:
+    live = em_state.devices.get(device_id)
+    if live is None:
+        return await _update_failed(
+            device_id, "the Echo disconnected before the migration started",
+            "Migration to emOS")
+    try:
+        version = await em_emos_migrate.run_migration(
+            _MigrateIO(device_id, live, None))
+    except em_emos_update.Refused as e:
+        return await _update_failed(device_id, str(e), "Migration to emOS")
+    errors.pop(device_id, None)
+    log.info(f"[api] [{device_id}] migrated to emOS {version}")
+    await em_events.push_log(device_id, "info", "controller",
+                          f"✓ Migrated to emOS {version}")
+    await em_events.push({"type": "device_emos_updated",
+                       "device_id": device_id, "version": version})
+
+
+async def settle_fireos(live, device_id: str) -> None:
+    """On a FireOS connect: report and tidy a migration nobody watched
+    (em_emos_migrate.settle_on_fireos). Logs, never raises."""
+    if busy(device_id):
+        return
+    sh = lambda cmd, timeout: _emos_sh(live, cmd, timeout)
+    msg, level = await em_emos_migrate.settle_on_fireos(sh)
+    if msg:
+        getattr(log, "warning" if level == "warn" else "info")(
+            f"[api] [{device_id}] {msg}")
+        await em_events.push_log(device_id, level, "controller", msg)
 
 
 async def _run_update_locked(device_id: str, override: tuple | None) -> None:

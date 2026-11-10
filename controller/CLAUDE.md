@@ -416,6 +416,20 @@ read-back after `drop_caches`, undone from `boot-good.img` on mismatch.
 - Radar shares biscuit's 32-bit init; `keep_initramfs` is checked by
   structure, never kernel hash.
 
+### Migration from FireOS 5 (`em_emos_migrate`, `POST .../emos_migrate`)
+
+**Irreversible, as above, on an Echo that has never booted emOS.** The update's
+sequence and io from a FireOS image. Only amonet 1 / FireOS 5.1.1 / slot `_a`,
+by GPT name and LK bytes; the image is proved running by `/proc/version`'s line
+inside its kernel; `migrated_problems` allows only the ramdisk and ramoops to
+change. Before any write: the FireOS image escrowed beside the DB
+(`fireos_escrow/`, download `GET .../fireos_image`), then a verified
+`boot-good.img` of it; earlier-emOS leftovers cleared (`boot.state`, a
+`wpa.conf` renamed). **No WiFi writer**: FireOS 5's emOS runs Amazon's
+supplicant on Android's conf; the pre-flight only proves the conf holds the
+associated network (keys dropped on the device). A FireOS connect runs
+`settle_fireos` (debounced reconcile step); a `pending` verdict keeps the mark.
+
 ## Provisioning wizard (`dashboard.jsx`, `_WIZARD_STEPS`)
 
 **Irreversible territory: boot partitions on hardware nobody is watching.

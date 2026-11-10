@@ -148,6 +148,7 @@ class FireOS(fl.Device):
             ("/proc/version", f"{r}/proc_version"),
             ("/data/misc/wifi/", f"{r}/data/misc/wifi/"),
             ("mkdir -p /data/emos", f"mkdir -p {r}/data/emos"),
+            ("[ -d /data/emos ]", f"[ -d {r}/data/emos ]"),
         ):
             cmd = cmd.replace(a, b)
         return super().run(cmd)
