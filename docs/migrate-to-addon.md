@@ -49,7 +49,7 @@ Turning off `require_device_tls` does **not** rescue this. Devices decide to
 use TLS from the mDNS record the controller advertises, not from that setting.
 
 Recovering means going to each Dot. On firmware v2.17.0 or later, hold its
-action button for 5 seconds and approve the pairing request in the dashboard.
+action button for 7 seconds (5 before v2.19.0) and approve the pairing request in the dashboard.
 On older firmware, or with `require_device_tls` on, connect it over USB and
 push fresh credentials. Copying four files avoids it.
 

@@ -138,7 +138,7 @@ def _health_json(boot: dict | None) -> dict | None:
         return None
     return {
         "emmc":       em_health.emmc_summary(boot),
-        "bootReason": em_health.boot_summary(boot.get("boot_reason")),
+        "bootReason": em_health.boot_summary(boot.get("boot_reason"), boot.get("prev_clean")),
         "bootAt":     boot.get("boot_at"),
         "wearDay":    boot.get("day"),
         "emmcPart":   " ".join(x for x in (boot.get("emmc_name"), boot.get("emmc_date")) if x) or None,
@@ -250,6 +250,7 @@ def merge_device(row, boot: dict | None = None) -> dict:
         "wakeMicCapable": getattr(live, "wake_mic_capable", False) if live else False,
         "remoteVolumeArcCapable": getattr(live, "remote_volume_arc_capable", False) if live else False,
         "responseLevelCapable": getattr(live, "response_level_capable", False) if live else False,
+        "stockSoundCapable": getattr(live, "stock_sound_capable", False) if live else False,
         # Sendspin player (#89): whether the firmware has one, and its status
         # (no secrets; the pairing token is its own request).
         "sendspinCapable": getattr(live, "sendspin_capable", False) if live else False,

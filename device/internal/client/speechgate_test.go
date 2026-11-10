@@ -10,6 +10,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/wilbowes/EchoMuse/internal/aec"
+	"github.com/wilbowes/EchoMuse/pkg/board"
 )
 
 // The fake mic is loud and patterned, which the RMS threshold calls speech —
@@ -73,7 +74,7 @@ func runTurn(t *testing.T, scorer speechScorer, useScorer bool) (audio int, noSp
 
 	mic := newFanoutMic()
 	defer mic.close()
-	d := NewDataClient("gate-test", mic, nil, aec.New())
+	d := NewDataClient("gate-test", mic, nil, aec.New(board.BiscuitMics().NumMics()))
 	if useScorer {
 		d.newSpeechStream = func() speechScorer { return scorer }
 	} else {

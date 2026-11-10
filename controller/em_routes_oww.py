@@ -183,4 +183,6 @@ async def _post_oww_assets(request: web.Request) -> web.Response:
     result = await em_oww_sync.sync(live, device_id)
     if not result.get("ok"):
         return em_http.error("sync_failed", result.get("error", "sync failed"), 500)
+    if result.get("pushed") and em_state.devices.get(device_id) is live:
+        await em_oww_sync.push_config(device_id, live)
     return em_http.ok(result)

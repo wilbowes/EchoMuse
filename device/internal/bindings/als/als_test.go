@@ -1,8 +1,13 @@
 package als
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -95,10 +100,12 @@ func fakeBus(t *testing.T, devices map[string]bool) {
 	status = Status{Code: StatusUnknown}
 	mu.Unlock()
 
-	old := i2cGlob
+	old, oldIIO, oldCal := i2cGlob, iioGlob, alscalPath
 	i2cGlob = filepath.Join(root, "*", "name")
+	iioGlob = filepath.Join(t.TempDir(), "*", "name") // empty unless fakeIIO
+	alscalPath = filepath.Join(root, "no-alscal")
 	t.Cleanup(func() {
-		i2cGlob = old
+		i2cGlob, iioGlob, alscalPath = old, oldIIO, oldCal
 		mu.Lock()
 		path, lastScan, reported = "", time.Time{}, false
 		status = Status{Code: StatusUnknown}
@@ -195,5 +202,164 @@ func TestStatusRefreshesAcrossScans(t *testing.T) {
 	mu.Unlock()
 	if got := Report(); got.Code != StatusNoChip {
 		t.Fatalf("second scan: code = %q, want %q", got.Code, StatusNoChip)
+	}
+}
+
+// fakeIIO puts a tsl2584tsv on the IIO bus, as the G090LF096 batch has it
+// (#90), with the idme calibration string `alscal` ("" for none).
+func fakeIIO(t *testing.T, alscal string) string {
+	t.Helper()
+	root := t.TempDir()
+	dir := filepath.Join(root, "iio:device0")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"name":               "tsl2584tsv\n",
+		"illuminance0_input": "57\n",
+		"calibrated_lux":     "72\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	iioGlob = filepath.Join(root, "*", "name")
+	if alscal != "" {
+		alscalPath = filepath.Join(root, "alscal")
+		if err := os.WriteFile(alscalPath, []byte(alscal), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// A ams_0_0 baseline as the factory writes it, ahead of the 400 lux point.
+const alscalWithBaseline = " ams_0_0=3,0,1 ams_400_0=272,316.667,35"
+
+// The second-sourced batch: the 2540's name is listed with nothing behind
+// it, and the 2584 answers on IIO.
+func TestSecondSourceReadsIIO(t *testing.T) {
+	fakeBus(t, map[string]bool{"tsl2540": false})
+	dir := fakeIIO(t, alscalWithBaseline)
+	got := Report()
+	if got.Code != StatusOK || got.Path != filepath.Join(dir, "illuminance0_input") {
+		t.Fatalf("got %+v, want ok at %s/illuminance0_input", got, dir)
+	}
+	var sawIIO bool
+	for _, s := range got.Seen {
+		sawIIO = sawIIO || s == "iio:tsl2584tsv"
+	}
+	if !sawIIO {
+		t.Fatalf("Seen = %v, want the IIO device listed", got.Seen)
+	}
+	if v := Lux(); v == nil || *v != 57 {
+		t.Fatalf("Lux() = %v, want 57 from illuminance0_input", v)
+	}
+}
+
+// Without ams_0_0 every lit read leaks the copied string and logs two lines.
+// An unreadable string cannot show it is there either.
+func TestSecondSourceWithoutBaselineIsNotRead(t *testing.T) {
+	for name, alscal := range map[string]string{
+		"no ams_0_0":    " ams_400_0=272,316.667,35",
+		"no idme value": "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			fakeBus(t, map[string]bool{"tsl2540": false})
+			fakeIIO(t, alscal)
+			got := Report()
+			if got.Code != StatusUnsafe || got.Detail == "" {
+				t.Fatalf("got %+v, want %q with a detail", got, StatusUnsafe)
+			}
+			if Present() || Lux() != nil {
+				t.Fatal("a sensor that is unsafe to read must not be read")
+			}
+		})
+	}
+}
+
+// Where both answer, the board's order decides: the 2540 first.
+func TestFirstListedSensorWins(t *testing.T) {
+	fakeBus(t, map[string]bool{"tsl2540": true})
+	fakeIIO(t, alscalWithBaseline)
+	if got := Report(); filepath.Base(got.Path) != "als_lux" {
+		t.Fatalf("path = %q, want the tsl2540's als_lux", got.Path)
+	}
+}
+
+// calibrated_lux kfree()s a pointer strsep() has moved, and the corruption
+// surfaces later as an oops or a watchdog reset (#90). No firmware source may
+// name it in code; comments explaining why are fine, so string literals are
+// what is checked.
+func TestNothingReadsCalibratedLux(t *testing.T) {
+	root, err := filepath.Abs("../../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
+		t.Fatalf("%s is not the module root: %v", root, err)
+	}
+	var files int
+	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+			return err
+		}
+		f, err := parser.ParseFile(token.NewFileSet(), p, nil, parser.SkipObjectResolution)
+		if err != nil {
+			return err
+		}
+		files++
+		ast.Inspect(f, func(n ast.Node) bool {
+			if lit, ok := n.(*ast.BasicLit); ok && strings.Contains(lit.Value, "calibrated_lux") {
+				t.Errorf("%s names calibrated_lux", p)
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files < 50 {
+		t.Fatalf("walked %d files under %s, expected the whole module", files, root)
+	}
+}
+
+// From what the drivers print: a whole number (tsl2540 als_lux), or IIO's
+// IIO_VAL_INT_PLUS_MICRO "%d.%06d" (tsl2572 in_illuminance0_input, read off
+// 41C8 as "3.636000"), with the newline sysfs appends. Rounded to whole lux;
+// 0 is a real reading (a covered sensor).
+func TestParseLux(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+		ok   bool
+	}{
+		{"309\n", 309, true},
+		{"0\n", 0, true},
+		{"3.636000\n", 4, true},
+		{"56.973000", 57, true},
+		{"0.499999", 0, true},
+		{"0.500000", 1, true},
+		{"0.000000", 0, true},
+		{"123456789.999999", 123456790, true},
+		{"-0.500000", 0, false}, // IIO prints negatives this way; not light
+		{"-3", 0, false},
+		{"NaN", 0, false},
+		{"Inf", 0, false},
+		{"1e3", 0, false},
+		{"0x1p3", 0, false},
+		{"1.", 0, false},
+		{".5", 0, false},
+		{"1,5", 0, false},
+		{"", 0, false},
+		{"\n", 0, false},
+		{"1234567890", 0, false}, // past any sensor's range, and int32
+	}
+	for _, c := range cases {
+		got, ok := parseLux(c.in)
+		if ok != c.ok || got != c.want {
+			t.Errorf("parseLux(%q) = %d, %v; want %d, %v", c.in, got, ok, c.want, c.ok)
+		}
 	}
 }

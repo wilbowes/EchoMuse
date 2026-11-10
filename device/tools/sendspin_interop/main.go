@@ -71,7 +71,8 @@ func main() {
 	var cur atomic.Pointer[sendspin.Client]
 	cur.Store(c)
 
-	// stdin carries commands from run.sh: "external on|off", "quit".
+	// stdin carries commands from run.sh: "external on|off", "volume N",
+	// "buffer N", "relink", "quit".
 	quit := make(chan struct{})
 	go func() {
 		sc := bufio.NewScanner(os.Stdin)
@@ -103,6 +104,11 @@ func main() {
 				var v int
 				if _, err := fmt.Sscanf(sc.Text(), "volume %d", &v); err == nil {
 					cur.Load().SetVolume(v)
+					continue
+				}
+				// "buffer N": the BLE proxy asking for N ms of headroom.
+				if _, err := fmt.Sscanf(sc.Text(), "buffer %d", &v); err == nil {
+					cur.Load().SetMinBuffer(time.Duration(v) * time.Millisecond)
 					continue
 				}
 			case "quit":

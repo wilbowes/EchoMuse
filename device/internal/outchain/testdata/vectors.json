@@ -23,7 +23,8 @@
      "guardDb": -30.0,
      "limiterEnabled": true,
      "limiterThreshold": -1.0,
-     "limiterRelease": 150.0
+     "limiterRelease": 150.0,
+     "stockSound": false
     }
    ]
   ],
@@ -58,7 +59,8 @@
      "guardDb": -30.0,
      "limiterEnabled": true,
      "limiterThreshold": -1.0,
-     "limiterRelease": 150.0
+     "limiterRelease": 150.0,
+     "stockSound": false
     }
    ]
   ],
@@ -93,7 +95,8 @@
      "guardDb": -30.0,
      "limiterEnabled": false,
      "limiterThreshold": -1.0,
-     "limiterRelease": 150.0
+     "limiterRelease": 150.0,
+     "stockSound": false
     }
    ]
   ],
@@ -128,7 +131,8 @@
      "guardDb": -30.0,
      "limiterEnabled": true,
      "limiterThreshold": -6.0,
-     "limiterRelease": 40.0
+     "limiterRelease": 40.0,
+     "stockSound": false
     }
    ]
   ],
@@ -163,7 +167,8 @@
      "guardDb": -30.0,
      "limiterEnabled": false,
      "limiterThreshold": -1.0,
-     "limiterRelease": 150.0
+     "limiterRelease": 150.0,
+     "stockSound": false
     }
    ]
   ],
@@ -198,7 +203,8 @@
      "guardDb": -30.0,
      "limiterEnabled": true,
      "limiterThreshold": -1.0,
-     "limiterRelease": 150.0
+     "limiterRelease": 150.0,
+     "stockSound": false
     }
    ]
   ],
@@ -233,7 +239,8 @@
      "guardDb": -30.0,
      "limiterEnabled": true,
      "limiterThreshold": -12.0,
-     "limiterRelease": 150.0
+     "limiterRelease": 150.0,
+     "stockSound": false
     }
    ],
    [
@@ -254,7 +261,8 @@
      "guardDb": -30.0,
      "limiterEnabled": false,
      "limiterThreshold": -12.0,
-     "limiterRelease": 150.0
+     "limiterRelease": 150.0,
+     "stockSound": false
     }
    ],
    [
@@ -275,7 +283,8 @@
      "guardDb": -30.0,
      "limiterEnabled": true,
      "limiterThreshold": 0.0,
-     "limiterRelease": 150.0
+     "limiterRelease": 150.0,
+     "stockSound": false
     }
    ]
   ],
@@ -284,6 +293,114 @@
    "limiterReductionDb": 13.678477429886595,
    "clipped": 0,
    "clippedBypassed": 0
+  }
+ },
+ {
+  "name": "stock_speech",
+  "chunk": 2048,
+  "sampleRate": 48000,
+  "chunks": 8,
+  "schedule": [
+   [
+    0,
+    {
+     "bands": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     "loudness": false,
+     "guardEnabled": true,
+     "guardDb": -30.0,
+     "limiterEnabled": true,
+     "limiterThreshold": -1.0,
+     "limiterRelease": 150.0,
+     "stockSound": true
+    }
+   ]
+  ],
+  "stats": {
+   "guardReductionDb": 40.0,
+   "limiterReductionDb": 1.2423056318144026,
+   "clipped": 0,
+   "clippedBypassed": 0
+  }
+ },
+ {
+  "name": "stock_bursts_silence",
+  "chunk": 2048,
+  "sampleRate": 48000,
+  "chunks": 8,
+  "schedule": [
+   [
+    0,
+    {
+     "bands": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     "loudness": false,
+     "guardEnabled": true,
+     "guardDb": -30.0,
+     "limiterEnabled": true,
+     "limiterThreshold": -1.0,
+     "limiterRelease": 150.0,
+     "stockSound": true
+    }
+   ]
+  ],
+  "stats": {
+   "guardReductionDb": 36.09772855239778,
+   "limiterReductionDb": 9.482395030299514,
+   "clipped": 0,
+   "clippedBypassed": 0
+  }
+ },
+ {
+  "name": "stock_bypassed",
+  "chunk": 2048,
+  "sampleRate": 48000,
+  "chunks": 6,
+  "schedule": [
+   [
+    0,
+    {
+     "bands": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ],
+     "loudness": false,
+     "guardEnabled": false,
+     "guardDb": -30.0,
+     "limiterEnabled": false,
+     "limiterThreshold": -1.0,
+     "limiterRelease": 150.0,
+     "stockSound": true
+    }
+   ]
+  ],
+  "stats": {
+   "guardReductionDb": 40.0,
+   "limiterReductionDb": 0.0,
+   "clipped": 0,
+   "clippedBypassed": 1193
   }
  },
  {
@@ -310,7 +427,8 @@
      "guardDb": -30.0,
      "limiterEnabled": true,
      "limiterThreshold": -1.0,
-     "limiterRelease": 150.0
+     "limiterRelease": 150.0,
+     "stockSound": false
     }
    ],
    [
@@ -331,7 +449,8 @@
      "guardDb": -30.0,
      "limiterEnabled": true,
      "limiterThreshold": -1.0,
-     "limiterRelease": 150.0
+     "limiterRelease": 150.0,
+     "stockSound": false
     }
    ],
    [
@@ -352,7 +471,8 @@
      "guardDb": -30.0,
      "limiterEnabled": false,
      "limiterThreshold": -1.0,
-     "limiterRelease": 150.0
+     "limiterRelease": 150.0,
+     "stockSound": false
     }
    ],
    [
@@ -373,7 +493,8 @@
      "guardDb": -30.0,
      "limiterEnabled": true,
      "limiterThreshold": -8.0,
-     "limiterRelease": 150.0
+     "limiterRelease": 150.0,
+     "stockSound": false
     }
    ],
    [
@@ -394,7 +515,8 @@
      "guardDb": -10.0,
      "limiterEnabled": true,
      "limiterThreshold": -8.0,
-     "limiterRelease": 150.0
+     "limiterRelease": 150.0,
+     "stockSound": false
     }
    ],
    [
@@ -415,7 +537,8 @@
      "guardDb": -10.0,
      "limiterEnabled": true,
      "limiterThreshold": -8.0,
-     "limiterRelease": 150.0
+     "limiterRelease": 150.0,
+     "stockSound": false
     }
    ],
    [
@@ -436,7 +559,8 @@
      "guardDb": -10.0,
      "limiterEnabled": true,
      "limiterThreshold": -8.0,
-     "limiterRelease": 600.0
+     "limiterRelease": 600.0,
+     "stockSound": false
     }
    ],
    [
@@ -457,7 +581,8 @@
      "guardDb": -10.0,
      "limiterEnabled": true,
      "limiterThreshold": -8.0,
-     "limiterRelease": 600.0
+     "limiterRelease": 600.0,
+     "stockSound": false
     }
    ],
    [
@@ -478,7 +603,8 @@
      "guardDb": -10.0,
      "limiterEnabled": true,
      "limiterThreshold": -8.0,
-     "limiterRelease": 600.0
+     "limiterRelease": 600.0,
+     "stockSound": false
     }
    ]
   ],

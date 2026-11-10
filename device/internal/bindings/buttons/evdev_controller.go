@@ -34,11 +34,17 @@ func (e *EvDevController) SetMuteCallback(cb func()) {
 	e.muteCallback = cb
 }
 
-// Init the button listeners
-// Kills alexa's native button functions
+// Init stops Amazon's button daemon, which is acebutton on FireOS 5 and
+// acebuttond on FireOS 6. Both are asked, since missing the one that exists
+// leaves Amazon acting on every press alongside us; it fails only if neither
+// stop could run.
 func (e *EvDevController) Init() error {
-	cmd := exec.Command("stop", "acebutton")
-	return cmd.Run()
+	errA := exec.Command("stop", "acebutton").Run()
+	errB := exec.Command("stop", "acebuttond").Run()
+	if errA != nil && errB != nil {
+		return errA
+	}
+	return nil
 }
 
 func (e *EvDevController) SubscribeToButton(callback buttons.ButtonClickCallback) (*buttons.EventSubscription, error) {
@@ -48,116 +54,66 @@ func (e *EvDevController) SubscribeToButton(callback buttons.ButtonClickCallback
 
 	// The input devices are found by name (pkg/board): eventN is enumeration
 	// order, and the wrong device opens without error and reads nothing.
-	layout := board.CurrentLayout()
-	if layout.DotKeys == "" || layout.VolumeKeys == "" {
+	keys := board.CurrentLayout().Keys
+	if len(keys) == 0 {
 		return nil, errors.New("buttons: input devices not found on this board")
 	}
-	dotBtn := e.GetDotButton()
-	volBtn := e.GetVolumeButton()
-	dotDevice, err := evdev.Open(layout.DotKeys)
-	if err != nil {
-		return nil, err
-	}
-	volDevice, err := evdev.Open(layout.VolumeKeys)
-	if err != nil {
-		return nil, err
+	var devices []*evdev.InputDevice
+	for _, path := range keys {
+		d, err := evdev.Open(path)
+		if err != nil {
+			for _, open := range devices {
+				open.Release()
+			}
+			return nil, err
+		}
+		devices = append(devices, d)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	eventSub := buttons.NewEventSubscription(cancel)
 
-	readBtn := func(btn buttons.Button, btnDevice *evdev.InputDevice) {
-		defer btnDevice.Release()
-
-		beforeClickType := buttons.ClickType(0)
-		beforeDown := false
-		// When each click type was pressed, so a release can report how long
-		// it was held. Keyed by click type because the dot device carries the
-		// mute button too, and interleaving the two must not attribute one
-		// button's hold to the other.
-		downAt := map[buttons.ClickType]time.Time{}
-
-		for {
-			if ctx.Err() != nil {
-				return
-			}
-
-			inputEvent, err := btnDevice.ReadOne()
+	read := func(dev *evdev.InputDevice) {
+		defer dev.Release()
+		state := newKeyState()
+		for ctx.Err() == nil {
+			ev, err := dev.ReadOne()
 			if err != nil {
 				return
 			}
-
-			// Only key events. Every key press is followed immediately by
-			// an EV_SYN separator whose Code and Value are both 0 — and
-			// without this filter that SYN fell through to the Code==0
-			// branch, took the previous click type, computed Value==1 as
-			// FALSE, and fired a "release" microseconds after the press.
-			//
-			// So the button has always acted on the SYN rather than on the
-			// real release, which is why it felt instant and why the actual
-			// release (a genuine transition to 0) was then swallowed as a
-			// no-change. Invisible until something needed to know how long
-			// the button was held: heldMs came out at ~0 every time.
-			if inputEvent.Type != evdev.EV_KEY {
+			// Key events only: each press is followed by an EV_SYN whose code
+			// and value are both 0.
+			if ev.Type != evdev.EV_KEY {
 				continue
 			}
-
-			clickType := buttons.ClickType(inputEvent.Code)
-			if inputEvent.Code != 0 {
-				beforeClickType = clickType
-			} else {
-				clickType = beforeClickType
-			}
-
-			down := inputEvent.Value == 1
-			if beforeDown == down {
+			k, ok := state.handle(ev.Code, ev.Value, time.Now())
+			if !ok {
 				continue
 			}
-			beforeDown = down
-
-			// Intercept volume events on volume device
-			if btn.Type == buttons.VolumeButton && !down {
-				switch clickType {
-				case buttons.VolumeUpClick:
-					if e.volumeCallback != nil {
-						e.volumeCallback("up")
-					}
-				case buttons.VolumeDownClick:
-					if e.volumeCallback != nil {
-						e.volumeCallback("down")
-					}
+			if isVolume(k.Code) {
+				if !k.Down && e.volumeCallback != nil {
+					e.volumeCallback(map[buttons.ClickType]string{
+						buttons.VolumeUpClick: "up", buttons.VolumeDownClick: "down"}[k.Code])
 				}
 				continue
 			}
-
-			// Intercept mute on dot device
-			if btn.Type == buttons.DotButton && !down && clickType == buttons.MuteClick {
-				if e.muteCallback != nil {
+			if k.Code == buttons.MuteClick {
+				if !k.Down && e.muteCallback != nil {
 					e.muteCallback()
 				}
 				continue
 			}
-
-			var heldMs int64
-			if down {
-				downAt[clickType] = time.Now()
-			} else if t, ok := downAt[clickType]; ok {
-				heldMs = time.Since(t).Milliseconds()
-				delete(downAt, clickType)
-			}
-
 			callback(buttons.ButtonClickEvent{
-				Button:    btn,
-				ClickType: clickType,
-				Down:      down,
-				HeldMs:    heldMs,
+				Button:    e.GetDotButton(),
+				ClickType: k.Code,
+				Down:      k.Down,
+				HeldMs:    k.HeldMs,
 			})
 		}
 	}
-
-	go readBtn(dotBtn, dotDevice)
-	go readBtn(volBtn, volDevice)
-
+	for _, d := range devices {
+		go read(d)
+	}
 	return eventSub, nil
 }
 

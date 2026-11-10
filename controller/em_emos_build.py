@@ -33,8 +33,10 @@ import hashlib
 import io
 import json
 import struct
+import subprocess
 import zipfile
 import zlib
+from dataclasses import dataclass
 
 MTK_MAGIC = 0x58881688
 PAGE = 2048
@@ -433,10 +435,156 @@ def _stamp_cmdline_key(cmdline: bytes, key: str, value: str) -> bytes:
     return b" ".join(kept)
 
 
+# ── Radar: the kernel must not skip our ramdisk ─────────────────────────────
+#
+# Radar's LK appends `skip_initramfs` to the cmdline (it is not in the image's
+# own), and its A/B kernel then ignores the ramdisk and boots /system's init:
+# the emOS image flashes and FireOS comes up. Biscuit's LK does not append it.
+# The kernel cannot be told not to skip, so its copy of the parameter's name is
+# renamed and the word LK appends becomes an unknown argument, which init
+# ignores (it keys on getpid() == 1). Done to the user's own kernel, here, at
+# build time; nothing of Amazon's is carried.
+#
+# #687 pinned this to one kernel's SHA-256 (NS6572), which refused both kernels
+# on our unit (NS6575, two different builds in its two slots). It is held to
+# structure instead, each part of which fails closed: one gzip stream that
+# decodes to its end and is a Linux kernel, the name exactly once, and the
+# result the same length with every byte outside the stream unchanged. The
+# length cannot move because the decompressor reads the stream's size from
+# its last four bytes at a fixed address, so the recompressed stream is padded
+# back out through the gzip FNAME field, the one header extension the kernel's
+# gunzip skips (lib/decompress_inflate.c).
+SKIP_INITRAMFS = b"skip_initramfs\0"
+KEEP_INITRAMFS = b"keep_initramfs\0"
+# Boards whose bootloader appends skip_initramfs.
+SKIPS_INITRAMFS = {"radar", "donut"}
+# Boards whose userspace is FireOS 6 whatever their kernel: the donut runs a
+# 32-bit FireOS 6 on an arm64 kernel, so the kernel's arch, which is all the
+# reference image shows, reads it as FireOS 5 (em_emos_ota.select_payload).
+FIREOS6_BOARDS = {"radar", "donut"}
+
+
+# ── Donut: what its LK keeps of the cmdline, and when it passes a ramdisk ───
+#
+# Read out of the Dot 3's LK by disassembly and confirmed on 41C8, 2026-10-24.
+#
+#   - LK copies the header's cmdline with snprintf(buf, 200, "%s", ...), so
+#     199 bytes survive and the rest is dropped without a word. Stock's is
+#     exactly 199, which is why everything appended to it vanished.
+#   - It tells the kernel about a ramdisk (linux,initrd-* in /chosen) only in
+#     recovery mode, and appends skip_initramfs otherwise. It still COPIES the
+#     ramdisk to the header's ramdisk_addr on every boot, so `initrd=addr,size`
+#     on the cmdline (arm64's early_initrd) is how the kernel finds it, and the
+#     kernel needs radar's skip_initramfs rename too.
+#   - The device tree already reserves ramoops (0x44410000), so none is added,
+#     and a ramdisk loaded at 0x44000000 has to end below it.
+#   - Of stock's cmdline only `bootopt=` is kept: kaeru reads it to choose a
+#     64-bit kernel. The rest is for Android's userspace.
+@dataclass(frozen=True)
+class CmdlineRecipe:
+    keep: tuple          # prefixes of the reference's parameters to keep
+    limit: int           # bytes of cmdline the bootloader keeps
+    ramdisk_end: int     # the first address the ramdisk may not reach
+
+
+CMDLINE_RECIPES = {
+    "donut": CmdlineRecipe(keep=("bootopt=",), limit=199,
+                           ramdisk_end=0x44410000),
+}
+INITRD_KEY = "initrd="
+
+
+def _recipe_cmdline(cmdline: bytes, recipe: CmdlineRecipe, raddr: int,
+                    rsize: int) -> bytes:
+    """The reference's cmdline cut down to what `recipe` keeps, plus where
+    the ramdisk is. An emOS image's own `emos.system=` is kept, so a rebuild
+    that is not told the partition keeps the one it had."""
+    if raddr + rsize > recipe.ramdisk_end:
+        raise BuildError(
+            f"the ramdisk ({rsize} bytes at {raddr:#x}) would run into memory "
+            f"the device reserves at {recipe.ramdisk_end:#x}")
+    keep = tuple(k.encode() for k in recipe.keep) + (SYSTEM_CMDLINE_KEY.encode(),)
+    toks = [t for t in cmdline.split() if t.startswith(keep)]
+    toks.append(f"{INITRD_KEY}{raddr:#x},{rsize}".encode())
+    return b" ".join(toks)
+
+
+def _gnu_gzip9(data: bytes) -> bytes | None:
+    """`gzip -n -9`, or None where there is no gzip to run."""
+    try:
+        return subprocess.run(["gzip", "-n", "-9", "-c"], input=data,
+                              capture_output=True, check=True,
+                              timeout=120).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _fitting_gzip(raw: bytes, size: int) -> bytes:
+    """`raw` gzipped into at most `size` bytes, any shortfall to be padded.
+
+    Python's zlib first: it is what radar's images have always been built
+    with, so they stay byte-identical. Where it does not fit, GNU gzip -9,
+    which is what kbuild compressed these kernels with: it reproduces the
+    stock stream to the byte on radar and on both of the donut's kernels, so
+    renaming a parameter of the same length can only leave it a few bytes
+    shorter. zlib comes out 2,486 bytes OVER on the donut (41C8, 2026-10-24).
+    """
+    tried = []
+    for new in (gzip.compress(raw, compresslevel=9, mtime=0), _gnu_gzip9(raw)):
+        if new is None:
+            continue
+        if new[3] == 0 and 0 <= size - len(new) <= 65536:
+            return new
+        tried.append(len(new))
+    raise BuildError(
+        f"the patched kernel does not fit its original space "
+        f"({' or '.join(map(str, tried))} bytes against {size})")
+
+
+def keep_initramfs(zimage: bytes) -> bytes:
+    """`zimage` with its kernel's skip_initramfs parameter renamed. A kernel
+    already renamed (an emOS image rebuilt) is returned unchanged."""
+    off = zimage.find(b"\x1f\x8b\x08")
+    if off < 0:
+        raise BuildError("the kernel has no gzip stream to patch")
+    d = zlib.decompressobj(31)
+    try:
+        raw = d.decompress(zimage[off:])
+    except zlib.error as e:
+        raise BuildError(f"the kernel's gzip stream does not decode: {e}")
+    if not d.eof or b"Linux version" not in raw:
+        raise BuildError("the kernel's gzip stream is not a whole Linux kernel")
+    skips, keeps = raw.count(SKIP_INITRAMFS), raw.count(KEEP_INITRAMFS)
+    if skips == 0 and keeps == 1:
+        return zimage
+    if skips != 1 or keeps != 0:
+        raise BuildError(
+            f"the kernel names skip_initramfs {skips} times (keep_initramfs "
+            f"{keeps}); expected once, so it is not a kernel this understands")
+    size = len(zimage) - off - len(d.unused_data)
+    new = _fitting_gzip(raw.replace(SKIP_INITRAMFS, KEEP_INITRAMFS), size)
+    slack = size - len(new)
+    # Exactly the original size needs no pad; anything shorter takes one.
+    stream = (new if slack == 0 else
+              new[:3] + b"\x08" + new[4:10] + b"p" * (slack - 1) + b"\0" + new[10:])
+    out = zimage[:off] + stream + zimage[off + size:]
+    if (len(out) != len(zimage) or gzip.decompress(stream)
+            != raw.replace(SKIP_INITRAMFS, KEEP_INITRAMFS)):
+        raise BuildError("the patched kernel did not verify")
+    return out
+
+
 def pack(parts: dict, zimage: bytes, dtbs: bytes, ramdisk: bytes,
-         extra_cmdline: str = RAMOOPS_CMDLINE, system_part: int = None) -> bytes:
-    """Assemble a boot image from its parts, using the reference's own header."""
+         extra_cmdline: str = RAMOOPS_CMDLINE, system_part: int = None,
+         recipe: CmdlineRecipe = None) -> bytes:
+    """Assemble a boot image from its parts, using the reference's own header.
+
+    With a `recipe` the cmdline is the board's (see CMDLINE_RECIPES) and
+    `extra_cmdline` is not used."""
     cmdline = parts["cmdline"]
+    if recipe is not None:
+        cmdline = _recipe_cmdline(cmdline, recipe, parts["raddr"], len(ramdisk))
+        extra_cmdline = ""
     # Appended only if it is not already there.
     #
     # The reference is normally a FireOS image, which carries none of this. But
@@ -461,6 +609,10 @@ def pack(parts: dict, zimage: bytes, dtbs: bytes, ramdisk: bytes,
         raise BuildError(
             f"the kernel command line is too long for the 512-byte field "
             f"({len(cmdline)} bytes)")
+    if recipe is not None and len(cmdline) > recipe.limit:
+        raise BuildError(
+            f"the kernel command line is {len(cmdline)} bytes and this "
+            f"device's bootloader keeps only {recipe.limit}")
 
     kernel = mtk_wrap(zimage + dtbs, b"KERNEL", parts.get("mtkhdr", b""))
 
@@ -607,7 +759,7 @@ def init_binary_problems(init_binary: bytes, arch: str = ARCH_ARM64) -> list:
 
 def build_emos_image(reference: bytes, init_binary: bytes, version: str,
                      build_id: str = "", sbin: dict = None,
-                     system_part: int = None) -> dict:
+                     system_part: int = None, board: str = None) -> dict:
     """Build the image, refusing rather than warning at every gate.
 
     Returns the image and what went into it, so the wizard can show the user
@@ -619,6 +771,10 @@ def build_emos_image(reference: bytes, init_binary: bytes, version: str,
     system_a/system_b through TWRP's by-name map, which is the one place those
     names exist. Omitted, the image carries no stamp and emOS falls back to the
     partition it hardcoded before this existed, so older behaviour is kept.
+
+    `board` is the device's own identity, as the wizard read it or as its
+    firmware reported it; a board in SKIPS_INITRAMFS gets its kernel patched
+    (keep_initramfs), and one in CMDLINE_RECIPES gets that cmdline.
     """
     # Against the REFERENCE's kernel, not a constant: the same function builds
     # for both, and only the user's own image knows which.
@@ -678,9 +834,21 @@ def build_emos_image(reference: bytes, init_binary: bytes, version: str,
             "flash something assembled by a parser already shown to be wrong."
             + detail)
 
+    recipe = CMDLINE_RECIPES.get(board)
+    if recipe is None and any(t.startswith(INITRD_KEY.encode())
+                              for t in parts["cmdline"].split()):
+        # An emOS image for a board with a recipe, rebuilt without knowing the
+        # board: the ramdisk's size on its cmdline would go stale and the
+        # kernel would not find the new one.
+        raise BuildError(
+            "This image gives its ramdisk's size on the kernel command line, "
+            "and the device's board is not known, so the size cannot be "
+            "updated. Refusing rather than build an image that cannot boot.")
     ramdisk = build_ramdisk(init_binary, version, build_id, sbin)
-    image = pack(parts, parts["zimage"], parts["dtbs"], ramdisk,
-                 system_part=system_part)
+    zimage = (keep_initramfs(parts["zimage"]) if board in SKIPS_INITRAMFS
+              else parts["zimage"])
+    image = pack(parts, zimage, parts["dtbs"], ramdisk,
+                 system_part=system_part, recipe=recipe)
     return dict(
         image=image,
         md5=hashlib.md5(image).hexdigest(),
@@ -689,6 +857,7 @@ def build_emos_image(reference: bytes, init_binary: bytes, version: str,
         reference_md5=hashlib.md5(reference).hexdigest(),
         reference_size=len(reference),
         zimage_size=len(parts["zimage"]),
+        kernel_patched=zimage != parts["zimage"],
         dtb_size=len(parts["dtbs"]),
         ramdisk_size=len(ramdisk),
         kernel_addr=parts["kaddr"],

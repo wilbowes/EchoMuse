@@ -168,12 +168,28 @@ the first half-second of the *next* user's command.
 
 The Echo keeps a ring of recent processed audio (`ringMs`, 2s) with the
 capture time of every 80 ms frame. A wake reports the capture time of the
-frame that crossed; the session starts with every ringed frame captured
-**after** it, then continues live. The controller sends all of it to speech
+frame that crossed; the session starts **260 ms before** it
+(`listen.WakeLead`), then continues live. The scorer crosses a few frames into
+a command run on from the wake word, and starting at the crossing cut its
+first word: "time is it?" for "what time is it", on 5 of 9 VVV captures
+(2026-10-23). Offsets of 240–280 ms gave all nine whole with no "Jarvis"; the
+sweep's margin is ±20 ms on one speaker. The lead is counted in frames back
+from the crossing frame, because the mic hands frames over in 160 ms pairs
+whose stamps jitter by tens of milliseconds. A barge-in's crossing is dated
+from the first of its two frames; dated from the second, its session started a
+frame late and "stop" reached speech to text as "Nope". In those captures what this adds is
+the end of the wake word. The controller sends all of it to speech
 to text: `VOICE_PREROLL_DISCARD` (240 ms) applies only to a stream the
 controller scored itself, because on a session it removed the first word of a
 command spoken straight after the wake word (`em_listen.tail_discard`).
-A wake spoken over a reply opens a session the same way and is treated the same.
+A wake spoken over a reply opens a session the same way and is treated the
+same. The Echo cuts its own reply at the crossing (`listen.CutReplyOnBarge`),
+but it goes on sounding for up to ~210 ms, the ALSA ring plus one period, and
+that audio is sent. Dropping it was tried (2026-10-23) and removed: it fixed
+"Oh, never mind" after a pause following the wake word, but that case was
+clean without it once the session started earlier and the Echo cut its own
+reply, and with it a command run on from the wake word lost its first words
+("it." for "what time is it").
 
 Timestamps come from one `time.Now()` taken when the frame is handed to both
 the scorer and the ring, so the scorer's queue delay (up to 640 ms when busy)

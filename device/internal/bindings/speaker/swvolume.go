@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"math"
 	"sync/atomic"
+
+	"github.com/wilbowes/EchoMuse/pkg/board"
 )
 
 // Volume is applied here, to the PCM, and the DAC's own digital volume
@@ -111,3 +113,45 @@ func (v *softVolume) applyFloat(in []float64, out []byte, tgt float64) {
 // settle takes the target without a ramp, for a period of silence, where
 // there is nothing to click.
 func (v *softVolume) settle() { v.cur = v.targetGain() }
+
+// The stock-sound profile's volume law (em_volume.stock_level_db, #229): the
+// 0.5dB-per-level law (Voicing.DbPerLevel where set) lifted by Voicing.CeilingDb, so full
+// volume drives the output chain's compressors and limiter. Applied BEFORE
+// the chain, so near the top it exceeds unity on purpose. Stock's own 31-step
+// table was dropped: front-loaded, with uneven button steps and a top 30%
+// that bought compression rather than loudness (em_volume has the
+// measurement).
+
+// StockVolumeDb is the gain in dB for a level under the stock-sound law of
+// voicing v; ok is false for level 0, which is silence.
+func StockVolumeDb(level int, v *board.Voicing) (db float64, ok bool) {
+	if level <= 0 {
+		return 0, false
+	}
+	slope := v.DbPerLevel
+	if slope == 0 {
+		slope = 0.5
+	}
+	return float64(min(level, 127)-127)*slope + v.CeilingDb, true
+}
+
+// StockVolumeGain is StockVolumeDb as a linear gain, 0 for level 0.
+func StockVolumeGain(level int, v *board.Voicing) float64 {
+	db, ok := StockVolumeDb(level, v)
+	if !ok {
+		return 0
+	}
+	return math.Pow(10, db/20)
+}
+
+// CueVolumeGain is the volume tone's gain for a level under the law in force
+// (v is the voicing when the stock-sound law is, else nil), so the tone tracks
+// what the music does. The cue is mixed after the chain, so VolumeCue caps it
+// at unity: past the ceiling's unity point the tone stops rising. The
+// board's CueTrimDb is applied after the cap, so the trim holds at the top.
+func CueVolumeGain(level int, v *board.Voicing) float64 {
+	if v != nil {
+		return math.Min(StockVolumeGain(level, v), 1) * math.Pow(10, v.CueTrimDb/20)
+	}
+	return VolumeGain(level)
+}

@@ -222,6 +222,56 @@ func TestComposeConfOpenNetwork(t *testing.T) {
 	}
 }
 
+// A network that beaconed at setup may be hidden later; without scan_ssid=1
+// the supplicant never probes for it and the Echo stays off the air.
+func TestComposeConfProbesForHiddenNetworks(t *testing.T) {
+	onBase(t, platform.EmOS, "", "ctrl_interface="+emosDir+"\n")
+	for _, psk := range []string{"12345678", ""} {
+		if conf := composeConf([]byte("net"), psk); !strings.Contains(conf, "\tscan_ssid=1\n") {
+			t.Errorf("psk %q: no scan_ssid=1:\n%s", psk, conf)
+		}
+	}
+}
+
+// The MT8163 driver reports WoWLAN as enabled, so hostap 2.10 ends without a
+// deauth unless wowlan_disconnect_on_deinit is set, and the stale link it
+// leaves refuses the next supplicant's PTK for minutes. Our supplicant gets
+// the field; Amazon's, which may predate it, never does.
+func TestEmosConfLeavesOnDeinitOnlyForOurSupplicant(t *testing.T) {
+	const line = "\nwowlan_disconnect_on_deinit=1\n"
+	for _, tc := range []struct {
+		name    string
+		base    string
+		ownSupp bool
+		want    bool
+	}{
+		{"emOS with its own supplicant", platform.EmOS, true, true},
+		{"emOS on a FireOS 5 image, Amazon's supplicant", platform.EmOS, false, false},
+		{"FireOS", platform.FireOS, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			onBase(t, tc.base, "ctrl_interface="+androidDir+"\n", "ctrl_interface="+emosDir+"\n")
+			supp := filepath.Join(t.TempDir(), "wpa_supplicant")
+			if tc.ownSupp {
+				if err := os.WriteFile(supp, []byte("#!/bin/sh\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			old := emosSuppP
+			t.Cleanup(func() { emosSuppP = old })
+			emosSuppP = supp
+
+			conf := composeConf([]byte("net"), "12345678")
+			if got := strings.Contains(conf, line); got != tc.want {
+				t.Errorf("wowlan_disconnect_on_deinit present=%v, want %v:\n%s", got, tc.want, conf)
+			}
+			if tc.want && strings.Index(conf, line) > strings.Index(conf, "network={") {
+				t.Errorf("the field is global and must come before the network block:\n%s", conf)
+			}
+		})
+	}
+}
+
 // The conf we write on emOS has to be readable by whichever supplicant init
 // will start, and the two run as different users. Writing it root-only on a
 // FireOS 5 image left Amazon's supplicant unable to open it: it exited at
@@ -290,10 +340,10 @@ func TestEmosConfIsReadableByTheSupplicantThatReadsIt(t *testing.T) {
 	}
 }
 
-// #632: an Echo that never ran FireOS has no /data/local/tmp, because only
-// Android's init.rc creates it, and the marker write refused every WiFi change.
+// #632: a missing directory refused every WiFi change, so the marker's
+// directory is made when it is absent.
 func TestMarkerIsWrittenWhenItsDirectoryIsMissing(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "data", "local", "tmp", "echomuse_wifi_pending")
+	path := filepath.Join(t.TempDir(), "data", "local", "etc", "echomuse", "wifi_pending")
 	if err := writeMarker(path, []byte(`{"new_ssid":"x"}`)); err != nil {
 		t.Fatalf("writeMarker into a missing directory: %v", err)
 	}
@@ -303,5 +353,37 @@ func TestMarkerIsWrittenWhenItsDirectoryIsMissing(t *testing.T) {
 	}
 	if err := writeMarker(path, []byte("again")); err != nil {
 		t.Fatalf("writeMarker into an existing directory: %v", err)
+	}
+}
+
+// A change in flight across the OTA that moved the marker left it in
+// /data/local/tmp. It is still found, and clearing removes both.
+func TestTheLegacyMarkerIsFoundAndCleared(t *testing.T) {
+	dir := t.TempDir()
+	oldM, oldL := markerP, legacyMarkP
+	t.Cleanup(func() { markerP, legacyMarkP = oldM, oldL })
+	markerP = filepath.Join(dir, "etc", "wifi_pending")
+	legacyMarkP = filepath.Join(dir, "tmp", "echomuse_wifi_pending")
+
+	if _, err := readMarker(); err == nil {
+		t.Fatal("no marker anywhere, but readMarker found one")
+	}
+	if err := writeMarker(legacyMarkP, []byte("old")); err != nil {
+		t.Fatal(err)
+	}
+	if mk, err := readMarker(); err != nil || string(mk) != "old" {
+		t.Fatalf("legacy marker not found: %q, %v", mk, err)
+	}
+	if err := writeMarker(markerP, []byte("new")); err != nil {
+		t.Fatal(err)
+	}
+	if mk, _ := readMarker(); string(mk) != "new" {
+		t.Fatalf("ours should win over the legacy one, got %q", mk)
+	}
+	clearMarker()
+	for _, p := range []string{markerP, legacyMarkP} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s survived clearMarker", p)
+		}
 	}
 }

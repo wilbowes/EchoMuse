@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -41,6 +42,7 @@ import (
 	"github.com/wilbowes/EchoMuse/pkg/board"
 	pkgbuttons "github.com/wilbowes/EchoMuse/pkg/buttons"
 	"github.com/wilbowes/EchoMuse/pkg/led"
+	pkgmic "github.com/wilbowes/EchoMuse/pkg/mic"
 )
 
 const usage = `usage: server [command]
@@ -72,7 +74,9 @@ func main() {
 				fmt.Println(n)
 			}
 			fmt.Printf("mute led gpio: %q\n", layout.MuteLEDGPIO)
-			fmt.Printf("light sensor: %q (%s)\n", layout.LightSensor.Driver, layout.LightSensor.Attr)
+			for _, ls := range layout.LightSensors {
+				fmt.Printf("light sensor: %q (%s, %s)\n", ls.Driver, ls.Attr, ls.Bus)
+			}
 			fmt.Printf("bluetooth hci: %q\n", layout.HCI)
 			os.Exit(0)
 		case "version", "--version", "-v":
@@ -92,6 +96,8 @@ func main() {
 	}
 	log.SetOutput(os.Stdout)
 	log.Printf("EchoMuse %s starting", client.Version)
+	// Before anything dials: emOS has no netd for bionic's resolver.
+	platform.UseResolverFor(net.DefaultResolver, platform.Base())
 
 	deviceID := client.GetSerialNo()
 	log.Printf("Device ID: %s", deviceID)
@@ -133,15 +139,23 @@ func main() {
 		log.Fatalf("Failed to initialize Button controller: %v", err)
 	}
 
-	microphone, err := mic.NewMicrophone()
-	if err != nil {
-		log.Fatalf("Failed to initialize Microphone: %v", err)
+	// A board whose mics this firmware cannot read runs without them as a
+	// speaker, rather than exiting into start_server.sh's rollback: no "mic"
+	// capability, listen_state degraded with the reason, and the controller
+	// starts no turn from the button (em_button.NO_MIC).
+	var micIn pkgmic.Microphone
+	var micSub pkgmic.Subscribable
+	if microphone, err := mic.NewMicrophone(); err != nil {
+		log.Printf("[mic] %v — running without microphones", err)
+		client.SetMicUnavailable("no microphone this firmware can read — speaker only")
+	} else {
+		micIn, micSub = microphone, microphone
 	}
 
 	// AEC canceller — far end fed by the speaker's echo tap, near end run
 	// by the data client on the mono mic stream. Starts disabled; armed by
 	// applyAecConfig from env defaults below and on every config push.
-	canceller := aec.New()
+	canceller := aec.New(board.CurrentLayout().Mics.NumMics())
 
 	// The level tap drives the energy-reactive LED ring ("meter" pattern).
 	// The Server doesn't exist yet when the speaker starts its pump loop,
@@ -156,7 +170,7 @@ func main() {
 		log.Fatalf("Failed to initialize PCM Speaker: %v", err)
 	}
 
-	s := server.NewServer(buttonController, microphone, pcmSpeaker)
+	s := server.NewServer(buttonController, micIn, pcmSpeaker)
 	srvPtr.Store(s)
 
 	// Local duck at the device's own wake crossing, confirmed or released by
@@ -197,7 +211,7 @@ func main() {
 
 	ctx := context.Background()
 
-	dataClient := client.NewDataClient(deviceID, microphone, pcmSpeaker, canceller)
+	dataClient := client.NewDataClient(deviceID, micSub, pcmSpeaker, canceller)
 	canceller.SetStatePath(aec.DefaultStatePath) // saved echo path: loaded on the hardware reference
 	aec.RemoveLegacyState()
 	applyAecConfig(canceller, dataClient) // arm from env defaults before any config push
@@ -353,6 +367,7 @@ func main() {
 		t := time.NewTicker(100 * time.Millisecond)
 		defer t.Stop()
 		duty := bluetooth.NewMusicDuty()
+		bleScanner.SetMusicDuty(duty)
 		for now := range t.C {
 			// Synced music (Sendspin) is music too: it streams for hours
 			// and has its own buffer, so it gets the same bursts.
@@ -368,10 +383,11 @@ func main() {
 		}
 	}()
 
-	// A 5 s hold of the action button asks to pair (client/pairing.go). The
-	// white flash says the hold registered: on a connected device nothing
-	// else changes on the ring until an admin approves.
-	pairHold := client.NewPairHold(func() {
+	// A 7 s hold of the action button asks to pair, unless the Echo is on
+	// the encrypted link (client/pairing.go, #841). The white flash says the
+	// hold registered: on a connected device nothing else changes on the
+	// ring until an admin approves.
+	pairHold := client.NewPairHold(controlClient.PairingNeeded, func() {
 		s.Flash(150, 150, 150, 400*time.Millisecond)
 		controlClient.StartPairing()
 	})
@@ -512,7 +528,7 @@ func main() {
 	// Refused — a controller answered and would not accept this device's
 	// credentials. Orange like disconnected, since it is a link problem, but
 	// alternating odd and even LEDs, so it reads differently: this one the
-	// owner can fix, by holding the action button 5 s to pair.
+	// owner can fix, by holding the action button 7 s to pair.
 	controlClient.OnRefused(func() {
 		s.StopAnim()
 		if pulseKind == "refused" {
@@ -540,6 +556,9 @@ func main() {
 				controlClient.SendLog("warn", "[board] not identified — using biscuit's layout")
 			}
 			for _, p := range layout.Problems {
+				controlClient.SendLog("warn", "[board] "+p)
+			}
+			for _, p := range pcmSpeaker.Problems() {
 				controlClient.SendLog("warn", "[board] "+p)
 			}
 		})
@@ -1307,6 +1326,7 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 	if sc := dc.ShadowScorer(); sc != nil && shadowState.model == model &&
 		shadowState.streamSig == streamSig {
 		sc.SetThreshold(threshold)
+		sc.SetMinFrames(snap.OwwMinFrames)
 		if snap.BargeInEnabled != nil && *snap.BargeInEnabled && spk != nil {
 			sc.SetBargeThreshold(float32(snap.BargeInThreshold), speakerPlaying(spk))
 		} else {
@@ -1335,6 +1355,7 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 		shadowState.mode, shadowState.model = mode, model
 		return
 	}
+	sc.SetMinFrames(snap.OwwMinFrames)
 	// Mirror the controller's barge-in behaviour: while the speaker is
 	// streaming its wake bar drops to bargeInThreshold, and a device scoring
 	// against the normal threshold would disagree on every barge-in.
@@ -1353,6 +1374,12 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 	}
 	log.Printf("[shadow] on-device wake word scoring (%s, threshold %.2f, %s) — %s",
 		sc.Info(), threshold, bargeNote, actsOnCrossings(mode))
+}
+
+// replyStillHeard reports whether a voice reply is queued, arriving or still
+// coming out of the speaker.
+func replyStillHeard(spk *speaker.PcmSpeaker) bool {
+	return spk.VoiceAudible(0) || time.Now().Before(spk.VoiceSoundingUntil())
 }
 
 // speakerPlaying is when the wake bar drops to bargeInThreshold: a response,
@@ -1415,12 +1442,12 @@ func playWakeCue(spk *speaker.PcmSpeaker) {
 
 // playVolumeCue previews the newly selected device volume. PlayCue is mixed
 // after software volume (so wake sounds can stay absolute), therefore these
-// samples carry the device-volume gain themselves.
+// samples carry the device-volume gain themselves, under the law in force.
 func playVolumeCue(spk *speaker.PcmSpeaker, level int) {
 	if spk == nil {
 		return
 	}
-	spk.PlayCue(cue.VolumeCue(speakerRate, speaker.VolumeGain(level)))
+	spk.PlayCue(cue.VolumeCue(speakerRate, spk.CueGain(level)))
 }
 
 // speakerRate mirrors the speaker binding's rate, declared here so this file
@@ -1501,11 +1528,17 @@ func onWakeCrossing(cc *client.ControlClient, dc *client.DataClient,
 		}
 	}
 	// Duck with the ring, not a round trip later. Music only: a reply being
-	// barged over is cut by the controller's speaker_flush, not ducked.
+	// barged over is cut, not ducked.
 	if spk != nil && localDuck != nil && spk.MusicAudible(0) {
 		localDuck.Start(config.Get().DuckDb)
 	}
 	barge := spk != nil && spk.VoiceAudible(wakeword.ScoreSpan)
+	// Cut only a reply still to be heard: queued, arriving or playing out.
+	// barge stays true for ScoreSpan after the reply ends (the model's window
+	// still holds it), and a cut there flushed a silent speaker.
+	if listen.CutReplyOnBarge(spk, barge && replyStillHeard(spk), config.Get().Snapshot().BargeInEnabled) {
+		log.Printf("[listen] barge %.3f over the reply — cut here", score)
+	}
 	level, peak, ok := dc.WakeLevel(at)
 	var lv *client.WakeLevel
 	if ok {
@@ -1521,6 +1554,7 @@ func onWakeCrossing(cc *client.ControlClient, dc *client.DataClient,
 func syncListenState(dc *client.DataClient, cc *client.ControlClient, force bool) {
 	snap := config.Get().Snapshot()
 	state, reason := listen.Resolve(
+		client.MicUnavailable(),
 		snap.OwwOnDevice == config.OnDeviceOn,
 		cc.HasFeature(client.FeatureListenSession),
 		dc.ShadowScorer() != nil,
@@ -1537,6 +1571,7 @@ func applyBleConfig(scanner *bluetooth.Scanner, bridge *bluetooth.Bridge) {
 	snap := config.Get().Snapshot()
 	proxy := snap.BleProxyEnabled != nil && *snap.BleProxyEnabled
 	scanner.SetEnabled(proxy)
+	sendspinProxy(scanner.Enabled())
 	// Connections live inside the scan session, so they need the proxy on.
 	bridge.SetEnabled(proxy && snap.BleProxyConnections != nil && *snap.BleProxyConnections)
 }

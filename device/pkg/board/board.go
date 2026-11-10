@@ -39,8 +39,25 @@ var Biscuit = &Board{
 	Hardware:     biscuitHardware,
 }
 
+// Radar is the Echo 2nd gen (full size, 2017). Its id was read off 035T
+// (FireOS 6). No Tuning: emOS runs the kernel's thermal defaults, which are
+// the stricter side.
+var Radar = &Board{
+	ID:           "radar",
+	DeviceTypeID: "A7WXQPH584YP",
+	Hardware:     radarHardware,
+}
+
+// Donut is the Echo Dot 3rd gen (MT8167, 2018). Its id was read off 41C8
+// (FireOS 6). No Tuning.
+var Donut = &Board{
+	ID:           "donut",
+	DeviceTypeID: "A32DOYMUN6DTXA",
+	Hardware:     donutHardware,
+}
+
 // Known is every board the firmware can identify.
-var Known = []*Board{Biscuit}
+var Known = []*Board{Biscuit, Radar, Donut}
 
 // Detect returns the board beneath root, or nil when none matches. root is ""
 // on a device and a fixture directory in tests.

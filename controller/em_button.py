@@ -34,6 +34,10 @@ HOLD = "hold"
 # (buttonSingleTapEvent). Ordered before the mute check for the same reason a
 # hold is: it is not speech, so the mute has no opinion about it.
 TAP_EVENT = "tap_event"
+# A tap on an Echo with no microphone it can read (a board whose capture the
+# firmware does not support yet). A turn would stream nothing and time out,
+# so none is started and the ring shows the error cue.
+NO_MIC = "no_mic"
 # A tap while muted. Does nothing at all.
 BLOCKED = "blocked"
 # A tap during an active turn cancels it.
@@ -49,6 +53,7 @@ def decide(
     muted: bool,
     turn_active: bool,
     tap_event: bool = False,
+    has_mic: bool = True,
 ) -> str:
     """
     Classify a dot-button RELEASE.
@@ -62,11 +67,16 @@ def decide(
     by the caller: the event entity is only advertised for a hold-capable
     device, so ungated this would classify taps as events nothing receives —
     and make TURN and CANCEL unreachable. An inert button.
+
+    `has_mic` false is a device that does not announce "mic". Holds and tap
+    events still reach HA, since they are not speech; only the turn goes.
     """
     if held_ms >= hold_ms:
         return HOLD
     if tap_event:
         return TAP_EVENT
+    if not has_mic:
+        return NO_MIC
     if muted:
         return BLOCKED
     if turn_active:

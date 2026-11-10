@@ -32,14 +32,14 @@ func TestSetPassesNameAndValues(t *testing.T) {
 	f := &fake{}
 	Use(f)
 	defer Use(unavailable{})
-	if err := Set(PlaybackVolume, "100", "100"); err != nil {
+	if err := Set("PCM Playback Volume", "100", "100"); err != nil {
 		t.Fatal(err)
 	}
 	want := [][]string{{"PCM Playback Volume", "100", "100"}}
 	if !reflect.DeepEqual(f.sets, want) {
 		t.Fatalf("got %v", f.sets)
 	}
-	if err := Set(SpeakerAmp); err == nil {
+	if err := Set("Ext_Speaker_Amp_Switch"); err == nil {
 		t.Fatal("a write with no value must be refused")
 	}
 }
@@ -48,7 +48,7 @@ func TestFailuresAreReturnedEveryTime(t *testing.T) {
 	Use(&fake{fail: true})
 	defer Use(unavailable{})
 	for i := 0; i < 3; i++ {
-		if Set(SpeakerAmp, "On") == nil {
+		if Set("Ext_Speaker_Amp_Switch", "On") == nil {
 			t.Fatalf("attempt %d: error swallowed", i)
 		}
 	}
@@ -56,10 +56,10 @@ func TestFailuresAreReturnedEveryTime(t *testing.T) {
 
 func TestHostBuildHasNoBackend(t *testing.T) {
 	Use(unavailable{})
-	if Set(SpeakerAmp, "On") == nil {
+	if Set("Ext_Speaker_Amp_Switch", "On") == nil {
 		t.Fatal("a build with no mixer must not report success")
 	}
-	if _, err := Get(SpeakerAmp); err == nil {
+	if _, err := Get("Ext_Speaker_Amp_Switch"); err == nil {
 		t.Fatal("a build with no mixer must not report a value")
 	}
 }
@@ -89,6 +89,25 @@ func TestBoolValue(t *testing.T) {
 	for _, s := range []string{"", "2", "true", "ON "} {
 		if _, ok := boolValue(s); ok {
 			t.Errorf("%q accepted", s)
+		}
+	}
+}
+
+func TestByteValues(t *testing.T) {
+	if b, err := byteValues("f", []string{"0", "128", "255"}, 3); err != nil || string(b) != "\x00\x80\xff" {
+		t.Fatalf("got %v, %v", b, err)
+	}
+	for _, bad := range [][]string{
+		{"7"},                // one value is never spread over a filter
+		{"1", "2"},           // short
+		{"1", "2", "3", "4"}, // long
+		{"1", "256", "3"},    // out of range
+		{"1", "-1", "3"},
+		{"1", "0x10", "3"},
+		{"1", "", "3"},
+	} {
+		if _, err := byteValues("f", bad, 3); err == nil {
+			t.Errorf("%q accepted", bad)
 		}
 	}
 }

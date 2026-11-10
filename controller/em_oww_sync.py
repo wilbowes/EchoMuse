@@ -189,7 +189,21 @@ async def install_then_switch(device_id: str, model: str) -> None:
     log.info(f"[api] [{device_id}] wake word switched to {model} after install")
 
 
-async def reconcile(device_id: str, live) -> None:
+async def push_config(device_id: str, live) -> None:
+    """
+    Re-send the device its effective config, which is what makes it rebuild
+    its scorer from what is now installed. The dashboard's install said
+    "restart the device" for this, and the Echo stayed deaf until someone did
+    (035T, 2026-10-24).
+    """
+    loop = asyncio.get_event_loop()
+    effective = await loop.run_in_executor(
+        None, db.get_effective_device_config, device_id
+    )
+    await live.send_control({"type": "config", **em_config_types.well_typed(device_id, effective)})
+
+
+async def reconcile(device_id: str, live) -> bool:
     """
     On connect: make sure the device has every asset it should, whatever its
     wake word mode (em_oww_assets.reconcile_action).
@@ -216,16 +230,20 @@ async def reconcile(device_id: str, live) -> None:
     Runs as a background task: it is a shell round trip and possibly a
     multi-megabyte push over a link measured at 5-7% packet loss, and nothing
     about the connect handshake should wait on it.
+
+    Returns whether the device is now as it should be, so em_reconcile can
+    retry a run that was cut off rather than wait out its debounce.
     """
     loop = asyncio.get_event_loop()
     effective = await loop.run_in_executor(
         None, db.get_effective_device_config, device_id
     )
-    # Firmware that cannot load a runtime can use none of this. The wake word
-    # MODE is deliberately not checked: every device carries the full set, so
-    # a mode switch never waits on an install (em_oww_assets.reconcile_action).
-    if not live.oww_shadow_capable:
-        return
+    # Firmware that cannot load a runtime can use none of this, and neither can
+    # an Echo with no microphone it can read. The wake word MODE is
+    # deliberately not checked: every device carries the full set, so a mode
+    # switch never waits on an install (em_oww_assets.reconcile_action).
+    if not live.oww_shadow_capable or not live.mic_capable:
+        return True
     mode_off = em_shadow.normalise_mode(effective.get("owwOnDevice")) == em_shadow.MODE_OFF
 
     desired, _ = em_oww_assets.desired_assets(wanted_models(device_id))
@@ -234,13 +252,13 @@ async def reconcile(device_id: str, live) -> None:
     except Exception as e:
         log.info(f"[api] [{device_id}] oww reconcile: could not read the device "
                  f"({e}) — leaving it as configured")
-        return
+        return False
 
     missing = em_oww_assets.missing_selected_classifier(desired, state["installed"])
     gaps = em_oww_assets.missing_assets(desired, state["installed"])
     action = em_oww_assets.reconcile_action(mode_off, missing, gaps)
     if action == "none":
-        return
+        return True
 
     # The mode is never changed here: a device missing its model keeps it,
     # answers the button, and hears its wake word again once this installs.
@@ -265,7 +283,7 @@ async def reconcile(device_id: str, live) -> None:
 
     live = em_state.devices.get(device_id)
     if live is None:
-        return
+        return False
 
     if not result.get("ok"):
         if action == "deaf":
@@ -281,7 +299,7 @@ async def reconcile(device_id: str, live) -> None:
             # nothing today. A log line is the right weight.
             log.warning(f"[api] [{device_id}] oww reconcile: could not install "
                         f"the missing assets ({result.get('error')})")
-        return
+        return False
 
     # The device builds its scorer from the config push, so it needs telling
     # when what it builds from has changed: a classifier it was deaf without
@@ -297,6 +315,7 @@ async def reconcile(device_id: str, live) -> None:
             f"Wake word model {missing} installed — listening for its wake word again"
         )
         log.info(f"[api] [{device_id}] oww reconcile: {missing} installed")
+    return True
 
 
 async def sync(live, device_id: str, progress=None) -> dict:
@@ -409,9 +428,8 @@ async def _sync_locked(live, device_id: str, progress=None) -> dict:
     if sel:
         await em_shell.run(live, f"touch {em_oww_assets.device_path(sel.name)}")
 
-    # Only the wake word needs a restart: the scorer is built once, while the
-    # speech gate's model is picked up by the next turn.
-    restart = any(a.kind not in ("vad", "stream") for a in plan.push)
-    await say("info", f"installed {len(pushed)} file(s)"
-                      + (" — restart the device to start scoring" if restart else ""))
+    # No restart is owed: the device rebuilds its scorer from a config push,
+    # sent by whichever caller installed something it scores with
+    # (reconcile, install_then_switch, the dashboard's install via push_config).
+    await say("info", f"installed {len(pushed)} file(s)")
     return {"ok": True, "pushed": pushed, "pruned": plan.prune, "problems": problems}

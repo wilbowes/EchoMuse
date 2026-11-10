@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/wilbowes/EchoMuse/internal/platform"
 	"github.com/wilbowes/EchoMuse/pkg/board"
 )
 
@@ -54,6 +55,8 @@ type Stats struct {
 	YieldedMs   uint64 `json:"yieldedMs"`
 	Restarts    uint64 `json:"restarts"`
 	BdAddr      string `json:"bdAddr,omitempty"`
+	// Music is the burst duty's account (MusicDuty), once one is attached.
+	Music *DutyStats `json:"music,omitempty"`
 }
 
 // BatchCallback receives batched advertisements for upstream delivery.
@@ -85,6 +88,7 @@ type Scanner struct {
 	hciErrors   atomic.Uint64
 	restarts    atomic.Uint64
 	scanning    atomic.Bool
+	duty        atomic.Pointer[MusicDuty]
 	yields      atomic.Uint64 // times the scan stopped for the link
 	yieldedMs   atomic.Uint64 // total time it spent stopped
 	bdAddrMu    sync.Mutex
@@ -102,23 +106,54 @@ type Scanner struct {
 
 	// conns holds the LE connections (#656). connHold is its request to
 	// pause the scan while one is being made; it shares yieldSig.
-	conns    *ConnManager
-	connHold atomic.Bool
+	// connPaused is the session loop's answer that the scan is off, tagged
+	// with the holdGen of the hold it answers.
+	conns      *ConnManager
+	connHold   atomic.Bool
+	holdGen    atomic.Uint64
+	connPaused chan uint64
 
 	bluedroidDisabled bool
 }
 
 func NewScanner(onBatch BatchCallback) *Scanner {
 	s := &Scanner{
-		onBatch:  onBatch,
-		unique:   make(map[string]time.Time),
-		pending:  make(map[string]Advert),
-		gate:     newEmitGate(),
-		yieldSig: make(chan struct{}, 1),
+		onBatch:    onBatch,
+		unique:     make(map[string]time.Time),
+		pending:    make(map[string]Advert),
+		gate:       newEmitGate(),
+		yieldSig:   make(chan struct{}, 1),
+		connPaused: make(chan uint64, 1),
 	}
 	s.conns = newConnManager(func(hold bool) {
-		if s.connHold.Swap(hold) != hold {
-			s.poke()
+		if !hold {
+			if s.connHold.Swap(false) {
+				s.poke()
+			}
+			return
+		}
+		// The pause must land before the create is sent (#859): the loop
+		// acts on yieldSig only when it gets to it, and a connect that beats
+		// it ends with the scan never paused. Wait for its answer, bounded so
+		// a session that is ending cannot hang the connect.
+		// The generation, set before the hold, tells this hold's answer
+		// from one the loop meant for an earlier hold.
+		g := s.holdGen.Add(1)
+		s.connHold.Store(true)
+		s.poke()
+		t := time.NewTimer(cmdTimeout)
+		defer t.Stop()
+		for {
+			select {
+			case v := <-s.connPaused:
+				if v == g {
+					return
+				}
+				s.poke() // an earlier hold's answer; ask again
+			case <-t.C:
+				log.Printf("[ble] scan not paused within %s; connecting anyway", cmdTimeout)
+				return
+			}
 		}
 	})
 	return s
@@ -155,6 +190,17 @@ func (s *Scanner) Yield(yield bool) {
 	}
 	s.poke()
 }
+
+// Enabled reports whether the scanner is on: asked for, and the board has a
+// device to scan with.
+func (s *Scanner) Enabled() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.enabled
+}
+
+// SetMusicDuty attaches the duty whose account Stats reports.
+func (s *Scanner) SetMusicDuty(d *MusicDuty) { s.duty.Store(d) }
 
 // batchKey coalesces identical broadcasts: same address AND same payload
 // collapse to one entry (latest RSSI wins). Distinct payloads from the same
@@ -212,6 +258,11 @@ func (s *Scanner) Stats() Stats {
 	s.bdAddrMu.Lock()
 	bdAddr := s.bdAddr
 	s.bdAddrMu.Unlock()
+	var music *DutyStats
+	if d := s.duty.Load(); d != nil {
+		st := d.Stats()
+		music = &st
+	}
 	return Stats{
 		Scanning:    s.scanning.Load(),
 		AdvertsSeen: s.advertsSeen.Load(),
@@ -222,6 +273,7 @@ func (s *Scanner) Stats() Stats {
 		YieldedMs:   s.yieldedMs.Load(),
 		Restarts:    s.restarts.Load(),
 		BdAddr:      bdAddr,
+		Music:       music,
 	}
 }
 
@@ -258,7 +310,7 @@ func (s *Scanner) session(stopCh chan struct{}) error {
 	s.ensureBluedroidDisabled()
 
 	// Opening triggers WMT BT function-on + firmware patch download.
-	f, err := os.OpenFile(devPath(), os.O_RDWR, 0)
+	f, err := openHCI()
 	if err != nil {
 		return fmt.Errorf("open %s: %w", devPath(), err)
 	}
@@ -281,10 +333,22 @@ func (s *Scanner) serve(rw io.ReadWriteCloser, stopCh chan struct{}) error {
 	}
 	s.conns.attach(host)
 	defer s.conns.detach()
+	// The factory address, before anything is advertised or connected
+	// (bdaddr.go). A chip that refuses it keeps its default and still scans.
+	want := factoryBdAddr()
+	if want != nil {
+		if _, err := sendCmd(opMTKWriteBdAddr, bdAddrParams(want)); err != nil {
+			log.Printf("[ble] factory address not loaded: %v", err)
+		}
+	}
 	if cc, err := sendCmd(opReadBdAddr, nil); err == nil {
+		got := formatBdAddr(cc.params)
 		s.bdAddrMu.Lock()
-		s.bdAddr = formatBdAddr(cc.params)
+		s.bdAddr = got
 		s.bdAddrMu.Unlock()
+		if want != nil && got != formatBdAddr(bdAddrParams(want)) {
+			log.Printf("[ble] factory address written but the chip reads %s", got)
+		}
 	}
 	// 320/30 = ~9% radio duty, the standard passive-scan cadence (matches
 	// ESPHome's esp32_ble_tracker default). The original 100/50 (50% duty)
@@ -366,6 +430,17 @@ func (s *Scanner) serve(rw io.ReadWriteCloser, stopCh chan struct{}) error {
 				disarm()
 				if want {
 					watchdog.Reset(watchdogQuiet)
+				}
+			}
+			if !scanOn {
+				// The generation first: read with the hold after it, it is
+				// that hold's.
+				g := s.holdGen.Load()
+				if s.connHold.Load() {
+					select {
+					case s.connPaused <- g:
+					default:
+					}
 				}
 			}
 		case <-host.active:
@@ -474,6 +549,17 @@ func (s *Scanner) ensureBluedroidDisabled() {
 	if s.bluedroidDisabled {
 		return
 	}
+	// pm and settings are the Android framework, and so is the stack they
+	// disable. Without it — emOS, whose init starts no zygote, or a FireOS
+	// whose /system was patched so that it never starts (a Dot 3, #527) —
+	// no Android Bluetooth stack can run and there is nothing to disable;
+	// running pm anyway logged four "not found" lines and then claimed
+	// success.
+	if !androidFramework(platform.Base(), "") {
+		s.bluedroidDisabled = true
+		log.Println("[ble] no Android framework here: its Bluetooth stack cannot run, nothing to disable")
+		return
+	}
 	pkgs := []string{
 		"com.android.bluetooth",
 		"com.amazon.device.csmbluetooth.service",
@@ -492,6 +578,22 @@ func (s *Scanner) ensureBluedroidDisabled() {
 	}
 	s.bluedroidDisabled = true
 	log.Println("[ble] Android Bluetooth stack disabled (persistent)")
+}
+
+// androidFramework reports whether the Android framework that pm and
+// settings run in exists beneath root: FireOS booted, and app_process, which
+// runs them, present. emOS mounts Amazon's /system for its linker and shell,
+// so the binary alone does not say the framework is up.
+func androidFramework(base, root string) bool {
+	if base != platform.FireOS {
+		return false
+	}
+	for _, p := range []string{"/system/bin/app_process", "/system/bin/app_process32", "/system/bin/app_process64"} {
+		if _, err := os.Stat(root + p); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func envIntDefault(key string, def int) int {

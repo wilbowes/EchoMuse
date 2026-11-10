@@ -336,12 +336,18 @@ dev "dmesg" | grep -v -iE 'ssid|associat|password|psk' >> "$P" || true
 # The serial is replaced wherever it appears — cmdline, dmesg, file contents.
 serial=$(dev "getprop ro.serialno" | tr -cd 'A-Za-z0-9')
 [ -n "$serial" ] || serial=$(dev "getprop ro.boot.serialno" | tr -cd 'A-Za-z0-9')
+# On MediaTek (MT8167, the Dot 3) /proc/cpuinfo's Serial is the chip's unique
+# ID, the value fastboot gives as unlock_code. All zeros (the Dot 2) is no ID.
+cpuserial=$(dev "cat /proc/cpuinfo" | sed -n 's/^Serial[[:space:]]*:[[:space:]]*//p' | tr -cd 'A-Za-z0-9')
+case "$cpuserial" in *[1-9A-Za-z]*) ;; *) cpuserial= ;; esac
 # The raw device tree is many small files; the serial is scrubbed from them too.
 for f in "$P" "$OUT"/files/* $(find "$OUT/files/device-tree" -type f 2>/dev/null); do
   case "$f" in *.gz) continue ;; esac
   [ -f "$f" ] || continue
   LC_ALL=C sed -E \
     -e "${serial:+s/$serial/<serial>/g}" \
+    -e "${cpuserial:+s/$cpuserial/<cpu-serial>/Ig}" \
+    -e 's/^(Serial[[:space:]]*:).*/\1 <redacted>/' \
     -e 's/([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}/<mac>/g' \
     -e 's/\b([0-9]{1,3}\.){3}[0-9]{1,3}\b/<ipv4>/g' \
     -e 's/(serialno|serial|macaddr|mac_addr|btaddr|wifimac)=[^ ]*/\1=<redacted>/Ig' \
@@ -350,13 +356,14 @@ done
 
 # Last line of defence. Masking only catches what it knows to look for, and a
 # board once published its whole idme block through the device tree. If the
-# device's own serial survives anywhere, the archive is not made at all.
-if [ -n "$serial" ] && LC_ALL=C grep -a -r -l "$serial" "$OUT" >/dev/null 2>&1; then
-  echo "STOPPED: the device serial is still present in:" >&2
-  LC_ALL=C grep -a -r -l "$serial" "$OUT" >&2
+# device's own serial or chip ID survives anywhere, the archive is not made.
+for id in $serial $cpuserial; do
+  LC_ALL=C grep -a -r -i -l "$id" "$OUT" >/dev/null 2>&1 || continue
+  echo "STOPPED: the device serial or chip ID is still present in:" >&2
+  LC_ALL=C grep -a -r -i -l "$id" "$OUT" >&2
   echo "No archive was made. Please report this on #527 instead of posting the files." >&2
   exit 1
-fi
+done
 tar -czf "$OUT.tar.gz" -C "$(dirname "$OUT")" "$(basename "$OUT")"
 echo "Done: $OUT.tar.gz" >&2
 echo "Read profile.txt before posting it — redaction masks what it knows to look for." >&2

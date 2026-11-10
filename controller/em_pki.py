@@ -9,7 +9,7 @@ mount persists them across container rebuilds):
     ca.pem / ca.key         — the EchoMuse controller CA (what devices pin)
     server.pem / server.key — leaf cert presented on the TLS listener
 
-Design constraints (see CLAUDE.md "TLS device link"):
+Design constraints (see CLAUDE.md "Device-link TLS + token auth"):
 
 - Devices verify the chain against the pinned CA only — no system roots,
   no IP SANs. The leaf carries a fixed DNS SAN (TLS_SERVER_NAME); devices

@@ -44,8 +44,10 @@ package als
 import (
 	"context"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -60,9 +62,14 @@ import (
 // sensor, not about the cost of any single scan.
 const RetryInterval = 30 * time.Second
 
-// i2cGlob is where the bus is enumerated. A variable only so the tests can
-// point it at a fixture directory — nothing reassigns it at runtime.
-var i2cGlob = "/sys/bus/i2c/devices/*/name"
+// Where each bus is enumerated, and where the 2584's factory calibration is
+// read. Variables only so the tests can point them at fixtures — nothing
+// reassigns them at runtime.
+var (
+	i2cGlob    = "/sys/bus/i2c/devices/*/name"
+	iioGlob    = "/sys/bus/iio/devices/*/name"
+	alscalPath = "/proc/device-tree/idme/alscal/value"
+)
 
 // Status codes. Stable identifiers, because the controller and dashboard key
 // off them; the human-readable part rides in Detail.
@@ -75,12 +82,12 @@ const (
 	// in the field.
 	StatusNoChip = "no_chip"
 	// StatusNoAttribute — the name is listed but no als_lux appeared, so the
-	// driver's probe found nothing to talk to. This is the ordinary reading
-	// for a batch that was fitted the OTHER ALS (#90) — the Detail text
-	// calls it an unbound driver, which reads as our fault and is not; it is
-	// corrected alongside the IIO fallback rather than on its own, so the
-	// wording changes once, with the behaviour it describes.
+	// driver's probe found nothing to talk to, and no second-sourced part
+	// was found either (#90).
 	StatusNoAttribute = "no_attribute"
+	// StatusUnsafe — the tsl2584tsv is there, but reading it would leak
+	// kernel memory on every read, so it is left alone. See baselineSafe.
+	StatusUnsafe = "unsafe"
 	// StatusUnknown — the bus could not be enumerated. Distinct from
 	// "nothing found", which is a positive result.
 	StatusUnknown = "unknown"
@@ -141,21 +148,15 @@ func resolve() string {
 	}
 	lastScan = time.Now()
 
-	// Which sensor, and which of its attributes reads lux, is the board's
-	// (pkg/board). biscuit: tsl2540, als_lux.
-	sensor := board.CurrentLayout().LightSensor
-	driverName, luxAttr := sensor.Driver, sensor.Attr
-	if driverName == "" {
+	// Which sensors, and which attribute of each reads lux, is the board's
+	// (pkg/board). biscuit: tsl2540 on i2c, else tsl2584tsv on IIO.
+	sensors := board.CurrentLayout().LightSensors
+	if len(sensors) == 0 {
 		status = Status{Code: StatusNoChip, Detail: "this board states no ambient light sensor"}
 		return ""
 	}
 
-	names, err := filepath.Glob(i2cGlob)
-	if err != nil {
-		status = Status{Code: StatusUnknown, Detail: "could not enumerate the i2c bus"}
-		return ""
-	}
-	// Record what IS on the bus, so an absence can be diagnosed remotely
+	// Record what IS on each bus, so an absence can be diagnosed remotely
 	// from a log line instead of a round trip asking someone to run i2c
 	// commands on a device they just flashed.
 	//
@@ -165,67 +166,119 @@ func resolve() string {
 	// a broken one's is the entire point of the field, so a partial list from
 	// the healthy side defeats it. Caught on hardware; the fixtures could not
 	// see it because none of them had devices sorting after the match.
-	seen := make([]string, 0, len(names))
-	nameMatched := false
-	found := ""
-	for _, n := range names {
-		b, err := os.ReadFile(n)
-		if err != nil {
-			continue
-		}
-		got := strings.TrimSpace(string(b))
-		seen = append(seen, got)
-		if got != driverName {
-			continue
-		}
-		nameMatched = true
-		p := filepath.Join(filepath.Dir(n), luxAttr)
-		// A matching name is not enough: the name is board-file data and
-		// is present whether or not the chip is, so als_lux existing is
-		// what separates a fitted sensor from a declared one.
-		if _, err := os.Stat(p); err != nil {
-			continue
-		}
-		if found == "" {
-			found = p
-		}
+	i2c, err := scanBus(i2cGlob)
+	if err != nil {
+		status = Status{Code: StatusUnknown, Detail: "could not enumerate the i2c bus"}
+		return ""
 	}
-	if found != "" {
-		path = found
-		status = Status{Code: StatusOK, Path: found, Seen: seen}
-		log.Printf("[als] ambient light sensor at %s", path)
-		return path
+	iio, _ := scanBus(iioGlob) // no IIO bus is an ordinary absence
+	seen := make([]string, 0, len(i2c)+len(iio))
+	for _, d := range i2c {
+		seen = append(seen, d.name)
+	}
+	for _, d := range iio {
+		seen = append(seen, "iio:"+d.name)
+	}
+
+	var listed, unsafe *board.LightSensor
+	for i := range sensors {
+		ls := &sensors[i]
+		devs := i2c
+		if ls.Bus == board.BusIIO {
+			devs = iio
+		}
+		for _, d := range devs {
+			if d.name != ls.Driver {
+				continue
+			}
+			if listed == nil {
+				listed = ls
+			}
+			p := filepath.Join(d.dir, ls.Attr)
+			// A matching name is not enough: the i2c name is board-file
+			// data and is present whether or not the chip is, so the
+			// attribute existing is what separates a fitted sensor from a
+			// declared one.
+			if _, err := os.Stat(p); err != nil {
+				continue
+			}
+			if !baselineSafe(ls.Driver) {
+				unsafe = ls
+				continue
+			}
+			path = p
+			status = Status{Code: StatusOK, Path: p, Seen: seen}
+			log.Printf("[als] ambient light sensor at %s", path)
+			return path
+		}
 	}
 	// Record the verdict on EVERY scan, not only the first. The log line
 	// below is deliberately once-only, but a status that went stale would
 	// report an old answer for a device whose bus has since changed.
-	if nameMatched {
+	switch {
+	case unsafe != nil:
+		status = Status{
+			Code: StatusUnsafe,
+			Detail: unsafe.Driver + " found, but its factory calibration has no ams_0_0 baseline " +
+				"and each read would leak kernel memory, so it is not read",
+			Seen: seen,
+		}
+	case listed != nil:
 		status = Status{
 			Code:   StatusNoAttribute,
-			Detail: driverName + " is on the i2c bus but exposes no " + luxAttr + " attribute — the driver has not bound",
+			Detail: listed.Driver + " is listed but exposes no " + listed.Attr + ", and no other light sensor was found",
 			Seen:   seen,
 		}
-	} else {
+	default:
 		status = Status{
 			Code:   StatusNoChip,
-			Detail: "no " + driverName + " on the i2c bus — this hardware revision appears not to have the sensor fitted",
+			Detail: "no " + sensors[0].Driver + " on the i2c bus — this hardware revision appears not to have the sensor fitted",
 			Seen:   seen,
 		}
 	}
 	if !reported {
 		reported = true
-		// The two failures need opposite fixes and look identical from the
-		// controller, so name which one it is: no chip on the bus at all,
-		// versus the chip present with no driver attribute bound to it.
-		if nameMatched {
-			log.Printf("[als] %s found but no %s attribute — driver not bound; "+
-				"ambient light unavailable", driverName, luxAttr)
-		} else {
-			log.Printf("[als] no %s on i2c (saw: %s) — ambient light unavailable, "+
-				"rechecking every %s", driverName, strings.Join(seen, ","), RetryInterval)
-		}
+		log.Printf("[als] %s (saw: %s) — ambient light unavailable, rechecking every %s",
+			status.Detail, strings.Join(seen, ","), RetryInterval)
 	}
 	return ""
+}
+
+type busDevice struct{ name, dir string }
+
+// scanBus reads the sysfs `name` of every device the glob matches.
+func scanBus(glob string) ([]busDevice, error) {
+	names, err := filepath.Glob(glob)
+	if err != nil {
+		return nil, err
+	}
+	devs := make([]busDevice, 0, len(names))
+	for _, n := range names {
+		b, err := os.ReadFile(n)
+		if err != nil {
+			continue
+		}
+		devs = append(devs, busDevice{strings.TrimSpace(string(b)), filepath.Dir(n)})
+	}
+	return devs, nil
+}
+
+// baselineSafe reports whether reading this driver's lux leaves the kernel
+// intact.
+//
+// The vendor tsl2584tsv driver (drivers/misc/tsl2583.c, CONFIG_AMS_ADJUST_
+// WITH_BASELINE, compiled into FireOS 5 and 6) calls get_baseline() on every
+// lit illuminance0_input read. It kstrdup()s the idme `alscal` string and,
+// when that has no `ams_0_0`, returns without freeing it and logs two lines:
+// a leak per read, and the ram_console flood the 5s poll exists to avoid.
+// Its calibrated_lux attribute is worse, kfree()ing a pointer strsep() has
+// moved, and is never read (#90). An unreadable string is not proof.
+func baselineSafe(driver string) bool {
+	if driver != "tsl2584tsv" {
+		return true
+	}
+	b, err := os.ReadFile(alscalPath)
+	return err == nil && strings.Contains(string(b), "ams_0_0")
 }
 
 // Present reports whether this device has a readable ambient light sensor.
@@ -263,11 +316,32 @@ func Lux() *int {
 	if err != nil {
 		return nil
 	}
-	n, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	if err != nil {
+	n, ok := parseLux(string(b))
+	if !ok {
 		return nil
 	}
 	return &n
+}
+
+// luxText is what a lux attribute holds: a whole number (tsl2540's als_lux,
+// "309"), or an IIO processed value, which the kernel prints as
+// "<int>.<micro>" (IIO_VAL_INT_PLUS_MICRO: the Dot 3's tsl2572 reads
+// "3.636000"). Nothing else: ParseFloat alone would also take "NaN", "Inf",
+// exponents and hex floats, none of which a driver prints.
+var luxText = regexp.MustCompile(`^[0-9]{1,9}(\.[0-9]{1,9})?$`)
+
+// parseLux reads a lux attribute to whole lux, rounded. A negative value is
+// not a reading.
+func parseLux(s string) (int, bool) {
+	s = strings.TrimSpace(s)
+	if !luxText.MatchString(s) {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, false
+	}
+	return int(math.Round(f)), true
 }
 
 // ── Change watching ──────────────────────────────────────────────────────────

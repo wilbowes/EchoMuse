@@ -117,6 +117,13 @@ def resolve(configured: str, capabilities, reported: str | None,
     not sent one on this connection.
     """
     caps = set(capabilities or ())
+    if caps and "mic" not in caps:
+        # Every firmware has announced "mic"; one that does not has no
+        # microphone it can read (a board whose capture is not supported
+        # yet). It neither streams nor listens in any mode, and saying it
+        # streams because the mode is "off" would be untrue.
+        return ListenView(STATE_DEGRADED, False,
+                          reported_reason or "no microphone it can read — speaker only")
     if configured == "off":
         return ListenView(STATE_CONTROLLER, True)
     if configured == "shadow":
@@ -183,8 +190,8 @@ def tail_discard(is_wakeword: bool, on_session: bool, frames: int) -> int:
     """Frames to drop from the start of a turn as the wake word's tail.
 
     A stream the controller scored still holds the end of the word. A session
-    does not: the Echo starts it after the frame that crossed, so dropping
-    more removed the first word of a command run on from the wake word.
+    is trimmed on the Echo (listen.WakeLead), so dropping more removed the
+    first word of a command run on from the wake word.
     """
     return frames if is_wakeword and not on_session else 0
 

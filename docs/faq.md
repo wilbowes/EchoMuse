@@ -11,10 +11,11 @@ faults worth checking before you file, and
 
 ## Rooting and unlocking
 
-### Should I use amonet v1.1.0 or v2.0.0?
-**Either works.** v1.1.0 leaves the Echo on FireOS 5, where you can install
-emOS or keep FireOS with root. v2.0.0 moves it to FireOS 6, where EchoMuse
-offers emOS. [firebreak](rooting.md#unlocking-with-firebreak) moves a Dot
+### Should I unlock my Dot to FireOS 5 or FireOS 6?
+**Either works.** firebreak's `unlock fireos5` leaves the Dot on FireOS 5,
+where you can install emOS or keep FireOS with root. `unlock fireos6`, the
+default, leaves it on FireOS 6, where EchoMuse offers emOS. An Echo 2nd gen
+has FireOS 6 only. [firebreak](rooting.md#unlocking-with-firebreak) moves a Dot
 between them.
 
 More in [rooting](rooting.md).
@@ -42,13 +43,28 @@ the Dot to FireOS 6574.1 moves it to `63cb91b`
 Turn **off** any file manager that auto-mounts USB devices. It grabs the
 handshake and makes later adb steps fail with unhelpful errors.
 
+### fastboot sees the Dot, but `getvar` never answers (Linux).
+**Check TLP's USB autosuspend.** On a laptop running TLP, the Dot's fastboot
+device can be suspended between commands, so a query that answered once then
+times out. Add the Dot's fastboot USB ID to TLP's denylist in
+`/etc/tlp.conf` and reboot:
+
+```
+USB_DENYLIST+="0bb4:0c01"
+```
+
+`0bb4:0c01` is what one Dot reported in fastboot; check yours with `lsusb`.
+`systemctl is-active tlp` reading `inactive` does not rule this out, because
+TLP's udev helper still applies the policy
+([#697](https://github.com/wilbowes/EchoMuse/issues/697)).
+
 ### The wizard stops at Escrow Boot Image and mentions `boot_a_x`.
 **The Echo has amonet v1's partition table under a v2 unlock.** Installing
 v2 is meant to put the original table back, and on this Echo it has not. The
 wizard has read and written nothing. Reinstalling FireOS does not change the
 table, so it won't help.
 
-One owner got past it by installing amonet v2 again, as a zip from TWRP
+Two owners got past it by installing amonet v2 again, as a zip from TWRP
 ([#712](https://github.com/wilbowes/EchoMuse/issues/712)). **We have not run
 that ourselves and can't tell you it is safe:** it rewrites the partition
 table and the bootloader, and an Echo on which it fails partway may not
@@ -58,7 +74,7 @@ start. Ask on the XDA thread first and quote the wizard's error line.
 Sideload it again. It generally works on the second attempt.
 
 ### Deeper questions about the unlock itself.
-For a failed firebreak run, run it again with `--report` and paste what it
+For a failed firebreak run, run `uvx firebreak@latest report` and paste what it
 prints in `#support-device-unlocking` on the Discord. amonet itself is
 R0rt1z2's work, and the [XDA thread](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/) is the reference for it.
 
@@ -186,7 +202,8 @@ every new install stops until the wizard's WiFi step. Red means a saved
 network did not connect within two minutes. Neither is a failed flash.
 
 If the wizard can't open the console to finish, open it yourself (below) and
-run `em-wifi`: it scans, you pick a network by number and type the password
+run `em-wifi`: it scans, you pick a network by number (or `h` to type a
+hidden network's name) and type the password
 ([#810](https://github.com/wilbowes/EchoMuse/issues/810),
 [#825](https://github.com/wilbowes/EchoMuse/issues/825)).
 
@@ -624,7 +641,8 @@ our word for it.
 ### Is the link between device and controller encrypted?
 Yes, once the Echo is paired. Approving a new Echo pairs it. An Echo already
 on `plain ws` (its Status tab Link row) pairs when you hold its action button
-for 5 seconds and then approve it in the dashboard; on firmware too old to ask,
+for 7 seconds (5 on firmware before v2.19.0) and then approve it in the
+dashboard; on firmware too old to ask,
 the Status tab offers **Pair** instead. **The ESPHome connection to Home Assistant is
 still plaintext**, including mic audio —
 [#341](https://github.com/wilbowes/EchoMuse/issues/341).

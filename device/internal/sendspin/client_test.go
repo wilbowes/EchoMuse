@@ -57,16 +57,3 @@ func TestWithoutADeviceVolumeTheServerVolumeIsAGain(t *testing.T) {
 		t.Errorf("gain %d, want %d", c.player.gainTarget, volumeGain(50, false))
 	}
 }
-
-// The Echo's scale is 0..127 (unity at 127); HA maps it proportionally and
-// so must this, so one volume reads one number everywhere.
-func TestVolumeMappingRoundTrips(t *testing.T) {
-	for pct := 0; pct <= 100; pct++ {
-		if got := LevelToPercent(PercentToLevel(pct, 127), 127); got != pct {
-			t.Errorf("%d%% -> %d -> %d%%", pct, PercentToLevel(pct, 127), got)
-		}
-	}
-	if PercentToLevel(100, 127) != 127 || LevelToPercent(127, 127) != 100 || PercentToLevel(0, 127) != 0 {
-		t.Error("endpoints")
-	}
-}

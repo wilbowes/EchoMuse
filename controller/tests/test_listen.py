@@ -33,6 +33,20 @@ def test_degraded_does_not_stream_and_says_why():
     assert v.private
 
 
+def test_an_echo_with_no_mic_is_degraded_in_every_mode():
+    """A board whose capture the firmware cannot read announces no "mic".
+    It is not streaming in controller mode, whatever the configuration says."""
+    caps = NEW - {"mic"}
+    for mode in ("off", "shadow", "on"):
+        v = L.resolve(mode, caps, "degraded", "no microphone this firmware can read on this board")
+        assert v.state == L.STATE_DEGRADED and v.streams is False, mode
+        assert "microphone" in v.reason
+        assert L.detector(v, True) is None
+    assert "microphone" in L.resolve("off", caps, None).reason
+    # Not knowing the capabilities yet is not the same as having none.
+    assert L.resolve("off", set(), None).state == L.STATE_CONTROLLER
+
+
 def test_old_firmware_is_shown_streaming():
     v = L.resolve("on", OLD, "local")   # a stray report must not override
     assert v.state == L.STATE_LEGACY and v.streams is True

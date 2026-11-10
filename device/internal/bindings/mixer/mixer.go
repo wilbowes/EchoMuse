@@ -17,20 +17,15 @@ package mixer
 import (
 	"fmt"
 	"log"
+	"strconv"
 	"sync"
 )
 
-// Control names on biscuit. Measured present, and unique, on the FireOS 5 and
-// FireOS 6 kernels (2026-09-17).
-const (
-	SpeakerAmp     = "Ext_Speaker_Amp_Switch"
-	PlaybackVolume = "PCM Playback Volume" // DAC digital volume, 0.5dB steps, 127 = 0dB
-	HPDriverGain   = "HP Driver Gain Volume"
-	DacMux         = "Audio_DacMux_Setting" // jack line level (#566); measured on FireOS 5 only
-)
+// The controls each board writes, by name, are its own (pkg/board).
 
 // Backend is the device implementation. Values are strings as tinymix prints
-// and accepts them: enum names, "On"/"Off" for switches, decimal integers.
+// and accepts them: enum names, "On"/"Off" for switches, decimal integers,
+// and one decimal 0-255 per byte of a byte control.
 type Backend interface {
 	Set(name string, values []string) error
 	Get(name string) (string, error)
@@ -113,4 +108,21 @@ func spread(name string, values []string, n int) ([]string, error) {
 		return nil, fmt.Errorf("mixer: %q takes %d values, got %d", name, n, len(values))
 	}
 	return values, nil
+}
+
+// byteValues parses a byte control's values. Exactly one per byte, never
+// spread: one byte repeated across a filter is not a filter.
+func byteValues(name string, values []string, n int) ([]byte, error) {
+	if n < 1 || len(values) != n {
+		return nil, fmt.Errorf("mixer: %q takes %d bytes, got %d", name, n, len(values))
+	}
+	out := make([]byte, n)
+	for i, s := range values {
+		v, err := strconv.ParseUint(s, 10, 8)
+		if err != nil {
+			return nil, fmt.Errorf("mixer: %q: bad byte %q", name, s)
+		}
+		out[i] = byte(v)
+	}
+	return out, nil
 }

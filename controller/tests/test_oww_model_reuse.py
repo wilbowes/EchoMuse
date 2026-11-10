@@ -150,7 +150,7 @@ def test_a_device_that_goes_private_releases_its_models():
 
     import em_controller   # imports without openwakeword since it became lazy
 
-    dev = types.SimpleNamespace(device_id="d1", private_listening=True)
+    dev = types.SimpleNamespace(device_id="d1", private_listening=True, mic_capable=True)
     seen = {}
 
     async def fake_private(d):

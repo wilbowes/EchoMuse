@@ -318,10 +318,66 @@ async def scenario_unpaired() -> None:
         await server.close()
 
 
+async def live_lead(server: SendspinServer, client: Client, cid: str, seconds: float) -> float:
+    """Stream a live source (radio, Spotify) at real-time pace; returns the
+    median buffered lead the client reported over the last half."""
+    group = server.get_client(cid).group
+    st = group.start_stream()
+    st.set_live_source(True)
+    fmt = AudioFormat(sample_rate=RATE, bit_depth=16, channels=1)
+    chunk = RATE // 50
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    n0 = len(client.events)
+    k = 0
+    while k < seconds * RATE:
+        st.prepare_audio(sawtooth(k, chunk), fmt)
+        await st.commit_audio()
+        k += chunk
+        await asyncio.sleep(max(0.0, t0 + k / RATE - loop.time()))
+    st.stop()
+    leads = [e["bufferedMs"] for e in client.events[n0:]
+             if e.get("event") == "status" and e.get("bufferedMs")]
+    tail = leads[len(leads) // 2:]
+    if not tail:
+        raise Fail("client reported no buffered lead")
+    return statistics.median(tail)
+
+
+async def scenario_live_buffer() -> None:
+    print("== a live source is buffered to the player's min_buffer_ms, and a raise takes effect (#1004)")
+    server = SendspinServer(asyncio.get_running_loop(), Identity.generate(), "interop-server",
+                            pairing_store=InMemoryServerPairingStore())
+    client = Client("-unpaired")
+    ready = await client.start("/tmp/live-buffer.json")
+    cid = ready["clientId"]
+    try:
+        server.connect_to_client(URL)
+        await until(lambda: (c := server.get_client(cid)) is not None and c.is_connected, 10, "never connected")
+        await server.trust_unpaired(cid)
+        await until(lambda: player_available(server, cid), 15, "never available")
+        base = await live_lead(server, client, cid, 8)
+        print(f"   default: {base:.0f}ms buffered")
+        if not 1500 <= base <= 2600:
+            raise Fail(f"live lead {base:.0f}ms at the default, want ~2000")
+        await client.command("buffer 4000")
+        role = server.get_client(cid).role("player@v1")
+        await until(lambda: role.min_buffer_ms == 4000, 5, "server never saw min_buffer_ms 4000")
+        raised = await live_lead(server, client, cid, 10)
+        print(f"   raised: {raised:.0f}ms buffered")
+        if raised < 3500:
+            raise Fail(f"live lead {raised:.0f}ms after asking for 4000")
+        await client.command("buffer 0")
+        await until(lambda: role.min_buffer_ms == 2000, 5, "min_buffer_ms not restored to 2000")
+    finally:
+        await client.stop()
+        await server.close()
+
+
 async def main() -> int:
     logging.basicConfig(level=logging.WARNING)
     failed = 0
-    for sc in (scenario_pair_and_play, scenario_unpaired):
+    for sc in (scenario_pair_and_play, scenario_unpaired, scenario_live_buffer):
         try:
             await sc()
             print("   PASS")

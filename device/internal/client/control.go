@@ -41,6 +41,19 @@ var Version = "dev"
 // stepped — which the controller does on every ack (time_ms).
 var monoEpoch = time.Now()
 
+// micUnavailable is why this device has no microphone, "" when it has one.
+// Set once at startup, before any connection.
+var micUnavailable atomic.Value
+
+// SetMicUnavailable records that the device runs without a microphone.
+func SetMicUnavailable(reason string) { micUnavailable.Store(reason) }
+
+// MicUnavailable is why the device has no microphone, "" when it has one.
+func MicUnavailable() string {
+	s, _ := micUnavailable.Load().(string)
+	return s
+}
+
 // MonoMs is t on this process's monotonic clock, in ms. It rides ping replies
 // and wakes so the controller can map it onto its own clock through the
 // cleanest exchange it has seen (em_listen.DeviceClock) and date a wake by
@@ -128,8 +141,9 @@ type ControlClient struct {
 	wifiScanCallback      StateCallback
 	listenCallback        ListenCallback
 
-	conn   *websocket.Conn
-	connMu sync.Mutex
+	conn    *websocket.Conn
+	connTLS bool // conn is over wss; guarded by connMu
+	connMu  sync.Mutex
 
 	// features is what the CONTROLLER announced on the ack. Guarded by its
 	// own mutex rather than connMu: HasFeature is read on the scanner's
@@ -363,7 +377,7 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 					targetIdx+1, passLen, targetAttempts+1, maxStaticAttempts, server.Addr)
 			} else {
 				// The list is exhausted for this pass: one bounded mDNS
-				// browse, never the indefinitely-retrying FindServer — that
+				// browse, never an indefinitely-retrying one — that
 				// would park the device there and defeat the point of
 				// having somewhere to fall through TO. maxMDNSAttempts (not
 				// maxStaticAttempts) below is what keeps this to one try.
@@ -381,34 +395,7 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 				c.disconnectedCallback()
 			}
 
-			// Fast path: try the last-known controller address before mDNS.
-			// Speeds up ordinary reconnects, and after a WiFi network change
-			// it's what makes a controller on a different subnet reachable at
-			// all (multicast rarely crosses subnets, so mDNS alone would fail
-			// the change's reconnect gate and revert a working network).
-			// The probe targets the plain port — it's a reachability check,
-			// not a plane choice; connect() re-decides ws vs wss every dial.
-			server = c.lastKnownServer()
-			if server != nil && server.TLSPort == 0 && loadLinkCreds().tlsConf != nil {
-				// CA installed but the cached endpoint predates the
-				// controller's TLS listener (e.g. controller upgraded, or an
-				// approval just installed credentials, mid-run). One fresh browse so
-				// the tls_port TXT is picked up; keep the cached endpoint if
-				// mDNS fails — after a WiFi change the controller can sit on
-				// another subnet where multicast doesn't reach.
-				if found, err := discovery.FindServerOnce(ctx); err == nil && found != nil {
-					server = found
-				}
-			}
-			if server != nil && probeTCP(server.Addr, 3*time.Second) {
-				log.Printf("[control] Last-known controller %s reachable — skipping mDNS", server.Addr)
-			} else {
-				found, err := discovery.FindServer(ctx)
-				if err != nil {
-					return err
-				}
-				server = found
-			}
+			server, dialErr = c.findController(ctx)
 		}
 
 		var err error
@@ -522,6 +509,52 @@ func (c *ControlClient) Run(ctx context.Context, data *DataClient) error {
 	}
 }
 
+// Seams for the discovery tests.
+var (
+	browseOnce = discovery.FindServerOnce
+	reachable  = probeTCP
+)
+
+// findController is one discovery round when no static list is configured:
+// the last-known controller if it answers, else one mDNS browse. A round that
+// finds nothing returns an error, and Run waits and comes back here, so the
+// last-known address is tried again every round (#1081).
+//
+// It used to fall into discovery.FindServer, which browses forever. One
+// failed probe mid-outage then parked the device on mDNS for good, and mDNS
+// is often what a router restart leaves broken, so an Echo whose controller
+// came back at the same address stayed orange until power-cycled.
+//
+// The last-known address speeds up ordinary reconnects, and after a WiFi
+// network change it's what makes a controller on a different subnet
+// reachable at all (multicast rarely crosses subnets, so mDNS alone would
+// fail the change's reconnect gate and revert a working network). The probe
+// targets the plain port — it's a reachability check, not a plane choice;
+// connect() re-decides ws vs wss every dial.
+func (c *ControlClient) findController(ctx context.Context) (*discovery.ServerInfo, error) {
+	server := c.lastKnownServer()
+	if server != nil && server.TLSPort == 0 && loadLinkCreds().tlsConf != nil {
+		// CA installed but the cached endpoint predates the controller's TLS
+		// listener (e.g. controller upgraded, or an approval just installed
+		// credentials, mid-run). One fresh browse so the tls_port TXT is
+		// picked up; keep the cached endpoint if mDNS fails — after a WiFi
+		// change the controller can sit on another subnet where multicast
+		// doesn't reach.
+		if found, err := browseOnce(ctx); err == nil && found != nil {
+			server = found
+		}
+	}
+	if server != nil && reachable(server.Addr, 3*time.Second) {
+		log.Printf("[control] Last-known controller %s reachable — skipping mDNS", server.Addr)
+		return server, nil
+	}
+	found, err := browseOnce(ctx)
+	if err != nil || found == nil {
+		return nil, fmt.Errorf("no controller found via mDNS this round")
+	}
+	return found, nil
+}
+
 // staticHealthyDuration is how long a connection has to stay up before Run
 // treats it as a genuine recovery rather than a connect-then-drop flap. Set
 // comfortably above one keepalive round trip (wsPingInterval, 20s) so a
@@ -547,7 +580,7 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 	plan := dialPlan(creds.tlsConf != nil, server.TLSPort, pairing)
 	if len(plan) == 0 {
 		// A CA and no TLS listener: plain would be a downgrade (pairing.go).
-		return false, fmt.Errorf("CA installed but %s advertises no tls_port — not dialling plain; hold the action button 5s to pair", server.Addr)
+		return false, fmt.Errorf("CA installed but %s advertises no tls_port — not dialling plain; hold the action button 7s to pair", server.Addr)
 	}
 
 	var conn *websocket.Conn
@@ -623,7 +656,7 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 		// nothing about it needs re-reporting every 30 seconds.
 		"base_os": platform.Base(),
 		// Which board detection matched (pkg/board), "unknown" when none did.
-		// Unread by current controllers, so safe to add unnegotiated.
+		// The controller names the model in Home Assistant from it.
 		"board": board.IDOf(board.Current()),
 	}
 	// The running kernel, `uname -m` and `uname -r`. Generic across boards, and
@@ -715,10 +748,12 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 
 	c.connMu.Lock()
 	c.conn = conn
+	c.connTLS = attempt.tls
 	c.connMu.Unlock()
 	defer func() {
 		c.connMu.Lock()
 		c.conn = nil
+		c.connTLS = false
 		c.connMu.Unlock()
 	}()
 
@@ -1279,9 +1314,15 @@ func capabilities() []string {
 	// "response_level": this firmware can apply the configured relative gain
 	// to the voice plane before it is mixed with music (#636).
 	//
+	// "stock_sound": this firmware voices this board's speaker (#229) and
+	// keeps the bass guard on while it does, whatever bassGuardEnabled says,
+	// so the dashboard hides that switch. Only on a board with a Voicing; the
+	// jack still gets the plain chain.
+	//
 	// "pairing": this firmware asks to pair itself when its owner holds the
-	// action button 5 s (pairing.go). Without it the controller offers the
-	// admin a Pair action instead, since the device cannot ask.
+	// action button 7 s while not on the encrypted link (pairing.go).
+	// Without it the controller offers the admin a Pair action instead,
+	// since the device cannot ask.
 	//
 	// "ble_connect": this firmware can hold Bluetooth LE connections for the
 	// controller and speak GATT over them (#656), exchanging requests and
@@ -1292,11 +1333,17 @@ func capabilities() []string {
 	// "sendspin": this firmware can be a Sendspin player (internal/sendspin),
 	// switched by sendspinEnabled. Whether it is running, and paired, is the
 	// sendspin status, for the aec_hw_ref reason.
-	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons",
+	caps := []string{"speaker", "leds", "led_anim", "buttons",
 		"oww_shadow", "oww_trigger", "button_hold", "audio_mix",
 		"aec_hw_ref", "oww_local_only", "output_chain", "wake_cue", "volume_cue", "remote_volume_arc",
 		"response_level", "wake_mic", "pairing",
 		"wake_word_off", "sendspin", "ble_connect"}
+	if MicUnavailable() == "" {
+		caps = append(caps, "mic")
+	}
+	if board.CurrentLayout().Speaker.Voicing != nil {
+		caps = append(caps, "stock_sound")
+	}
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}

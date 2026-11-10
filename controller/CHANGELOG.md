@@ -1,44 +1,92 @@
 # Changelog
 
-## 2.27.0-ea.1 (Early Access)
+## 2.27.0
 
-Lighter on a small controller, and the 5 second wake stall is fixed. Pair with firmware v2.19.0-ea.1, which this controller offers. No database changes.
+The Dot's own voicing, the Echo 2nd gen, volume steps like stock, and half the memory on a small controller. Pair with firmware v2.19.0 and emOS v0.11, which this controller offers.
+
+### Before you update
+
+**This release changes the database (schema v32), and it cannot be undone.** A backup is written beside it first. The first start resets the old Speech and Music EQ presets to Flat and turns Speech boost off, on every Echo and in fleet settings; a custom EQ curve is kept. An older controller refuses the migrated database and does not start, so going back to 2.26 means restoring that backup or a backup of the add-on taken before this update.
+
+**An HA automation that sets a volume, say 30%, will play louder than before** (see the volume change below).
 
 ### New
 
-- **Half the memory when every Echo listens for itself.** The wake word and audio filter libraries now load only when a feature needs them: 185 MB to 88 MB on our controller with three Echoes listening privately (#952).
-- **The wake word scorer does the same work for less CPU.** A streaming version of openWakeWord's embedding model gives identical scores from only the audio that is new. The controller installs it on Echoes running v2.19.0-ea.1 (#893, #894).
+- **The Dot plays with its own voicing.** With firmware v2.19.0 the Echo Dot's speaker is corrected for its driver and compressed in three bands as stock is. Flat, Warm and Clear in the EQ are now relative to it, and Speaker protection is no longer shown for these Echoes, since the voicing needs it on. Speech boost is gone: a filter on voice replies does that job (#229).
+- **The Echo 2nd gen (radar).** The setup wizard puts emOS on it (emOS only: the FireOS route refuses radar), it has its own voicing, tuned against a stock radar at 30, 60 and 90%, and Home Assistant shows each Echo's own model instead of calling every one a Dot (#687, #1077).
+- **Volume steps like stock.** The buttons step 1 dB through 36 levels, and the ring shows all of them, with three brightnesses for each of the 12 LEDs. Home Assistant's 1% is now just audible: 0% is silent, 1% is the quietest button step and 100% the loudest, where before the bottom 37% was near-silent. A percentage from HA or Sendspin lands on a button step, so the ring matches. On the radar the quietest step is lower and the button tone 6 dB quieter, to suit its bigger speaker. Needs firmware v2.19.0; older firmware keeps its old steps.
+- **Half the memory when every Echo listens for itself.** The wake word and audio filter libraries load only when a feature needs them: 185 MB to 88 MB on our controller with three Echoes listening privately (#952).
+- **Wake word scoring takes less CPU,** with identical scores: on the Echo, a streaming version of openWakeWord's embedding model works from only the new audio (#893, #894); on the controller, about 39% less per streaming Echo (#176, #1108).
 
 ### Improved
 
+- When Home Assistant asks a follow-up question, the Echo plays the wake sound as it opens the mic for your answer. It follows the "Wake sound" setting (#1095).
+- "Never mind" ends on a brief ring in your LED scene's colour, not the error sound (#688).
+- The controller stops cleanly in about two seconds on `docker stop` or an add-on restart, and closes its database first; before, it was killed after ten (#1073).
 - The device ports, 8767 and 8770, are add-on options, for a host where something else already holds them (#720).
 - The dashboard can be used from the keyboard, its text fields match the rest of the page, and its sizes and spacing come from one scale (#947, #949, #950, #951, #955).
+- The setup wizard refuses an Echo it does not recognise in the FireOS flow too, so an unsupported model is never patched as a Dot, and names the amonet v1 layout under an amonet 2 unlock (#1056). The Echo Dot 3rd gen is not supported yet.
+- Support bundles include what the dashboard showed and point out common problems they find.
+- `EM_OWW_RUNTIME_DIR` can move the wake word runtime off `/app` (#1042).
+- The EQ curve lines each band's point up with its fader.
 - The controller's code is split into modules, with tests that hold each control message to the published device interface. Nothing should look different; please report anything that does (#907–#944).
-- Release images are checked on a Raspberry Pi 3/4's CPU as well as on older x86 CPUs, and a release refuses an image that failed the check (#994, #996).
-- aiohttp 3.14.5 (#989).
+- Release images are checked on a Raspberry Pi 3/4's CPU as well as on older x86 CPUs (#994, #996). Python 3.12 base image refreshed and aiohttp 3.14.5 (#1088, #989).
 
 ### Fixed
 
-- **A wake detected by the controller could be scored about 5 seconds late,** after one stall filled its audio queue. The start of the command was cut off, and a farther Echo could take the turn. Audio that has waited too long is now skipped (#946).
-- **A Bluetooth proxy started twice at controller start dropped that Echo's connection** (#904).
-- **Light-level changes in the first 30 seconds after an Echo connected never reached Home Assistant** (#911).
-- **The dashboard read the database on the controller's main loop,** which delayed speaker audio and LED frames while a tab was open (#912).
-- **An Echo that never came back from an update was reported as "auto-rolled back".** It now says it did not reconnect (#919).
-- The fleet update says "restarting…", not "rebooting…": the Echo restarts its software and does not reboot (#902).
+- **A wake detected by the controller could be scored about 5 seconds late,** after one stall filled its audio queue. The start of the command was cut off, and a farther Echo could take the turn (#946).
+- **A WiFi change to a hidden network never joined it,** and an Echo set up before its network was hidden could not rejoin after a restart. Needs firmware v2.19.0 and emOS v0.11 (#1068).
+- **A firmware install straight after a controller update could send the previous firmware** (#1098).
+- **Talking over a reply let up to 250 ms more of it into your command,** so "never mind" could reach Home Assistant with the reply's last words in front of it (#688).
+- **A wake word install cut off at connect was not retried,** and one started from the dashboard needed a restart (#1029).
+- A Bluetooth proxy started twice at controller start dropped that Echo's connection (#904).
+- Light-level changes in the first 30 seconds after an Echo connected never reached Home Assistant (#911).
+- The dashboard read the database on the controller's main loop, which delayed speaker audio and LED frames while a tab was open (#912).
+- An Echo that never came back from an update was reported as "auto-rolled back"; it now says it did not reconnect (#919).
+- The setup wizard said on-device wake word scoring is off by default. It is on (#1101).
 
 ### Known issues
 
-- A command spoken straight on from the wake word loses its first word when the controller detects the wake word (#987).
+- On the Echo Dot, a voice reply can crackle at 90% volume and above.
+- With music playing on one Echo, a nearer Echo of a different model can lose the wake word to it.
+- A command spoken straight on from the wake word can lose its first word (#987, #1070).
+- Both 3.5 mm jack channels can be silent on emOS (#999).
 - The emOS update refuses an amonet 1 Echo that boots from slot B (#973).
 - An Echo that restarts and rejoins a playing Sendspin group can fall out of sync until the next track.
 - A fleet setting saved while an Echo has its own value for it changes nothing on that Echo, and the fleet page does not say so.
-- Updating an Echo's firmware can stall the controller for a few seconds; a reply playing at that moment may stutter (#770).
 - A turn is occasionally logged as empty although its recording holds clear speech (#815).
-- An emOS Echo on the 32-bit kernel sometimes reconnects without rebooting (#816).
+
+### Checked
+
+Full UAT on four Echoes (FireOS 5, emOS 32-bit, emOS 64-bit, Echo 2nd gen), 2026-11-08: pass, 45 dashboard controls and 16 guided steps. Report: docs/uat-results/2.27.0.md.
 
 ### Thanks
 
-@Dutch365 (#946, #967) and @forming (#720).
+@vithurshanselvarajah, @jcsnider, @sascha-hemi and @colin715 (#687), @wazootyman (#1077), @jmealo (#688), @LukasScarfe (#1095), @forming (#720, #1108), @Dutch365 (#946, #967), @Majorhub (#1073), @scragnog (#1042) and @SP3NGL3R (#1056).
+
+## 2.26.4
+
+One fix on top of 2.26.3. Pair with firmware v2.18.1, which this controller offers. No database changes.
+
+### Fixed
+
+- **The wizard's Build emOS step said no emOS release existed.** The controller read only the 10 newest GitHub releases, and newer Early Access releases had pushed the latest emOS release off that list. It now reads 100 (#1090). Thanks @alexwoolfson and @merlinschumacher.
+
+## 2.26.3
+
+One fix on top of 2.26.2, released from 2.26.2's own code. Pair with firmware v2.18.1, which this controller offers. No database changes.
+
+### Fixed
+
+- **The wizard's emOS step failed with HTTP 413 behind a reverse proxy.** The boot image went to the controller in one 9 MB request, which nginx and similar proxies refuse by default. It now goes in 512 KB pieces, so the proxy's upload limit no longer matters (#1010, #800). Thanks @Maximo1970 (#769), @itm1960 and @jfiger (#1001).
+
+## 2.26.2
+
+One fix on top of 2.26.1, released from 2.26.1's own code. Pair with firmware v2.18.1, which this controller offers. No database changes.
+
+### Fixed
+
+- **Firmware and emOS updates failed to download.** GitHub's download link now sends a header longer than the controller would accept, so "Update" did nothing and the log showed `Got more than 8190 bytes`. Release checks were unaffected, which is why the update was still offered (#1021).
 
 ## 2.26.1
 

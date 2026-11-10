@@ -1,0 +1,5 @@
+*.json
+!corpus.example.json
+__pycache__/
+*.raw
+*.wav

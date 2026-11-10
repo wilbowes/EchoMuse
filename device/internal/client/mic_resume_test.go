@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/wilbowes/EchoMuse/internal/aec"
+	"github.com/wilbowes/EchoMuse/pkg/board"
 )
 
 // The device went deaf on any data-plane drop the CONTROL plane survived.
@@ -20,7 +21,7 @@ import (
 
 func newTestClient(t *testing.T) *DataClient {
 	t.Helper()
-	return NewDataClient("resume-test", newFanoutMic(), nil, aec.New())
+	return NewDataClient("resume-test", newFanoutMic(), nil, aec.New(board.BiscuitMics().NumMics()))
 }
 
 func micIntent(d *DataClient) (want, active bool) {

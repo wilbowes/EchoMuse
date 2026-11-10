@@ -69,3 +69,62 @@ func TestNoBindingOpensHardwareByNumber(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// What differs between boards is stated in a profile and read by the
+// bindings; nothing outside this package asks WHICH board it is running on.
+// A branch on identity puts one board's behaviour where the next board's
+// author cannot see it, and is how a port becomes a pile of special cases.
+// Reporting the id (IDOf in a log or the register message) is fine.
+func TestNothingBranchesOnBoardIdentity(t *testing.T) {
+	boards := map[string]bool{}
+	for _, b := range Known {
+		boards[b.ID] = true
+	}
+	root := filepath.Join("..", "..")
+	fset := token.NewFileSet()
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case "build", "tools", "testdata", "compiler", "board":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+			return nil
+		}
+		f, err := parser.ParseFile(fset, p, nil, parser.SkipObjectResolution)
+		if err != nil {
+			return err
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.SelectorExpr:
+				if x, ok := n.X.(*ast.Ident); ok && x.Name == "board" {
+					for _, b := range Known {
+						if strings.EqualFold(n.Sel.Name, b.ID) {
+							t.Errorf("%s: board.%s; state the difference in the profile", fset.Position(n.Pos()), n.Sel.Name)
+						}
+					}
+				}
+			case *ast.BinaryExpr:
+				if n.Op != token.EQL && n.Op != token.NEQ {
+					return true
+				}
+				for _, side := range []ast.Expr{n.X, n.Y} {
+					if lit, ok := side.(*ast.BasicLit); ok && lit.Kind == token.STRING && boards[strings.Trim(lit.Value, "`\"")] {
+						t.Errorf("%s: compares against board id %s; state the difference in the profile", fset.Position(n.Pos()), lit.Value)
+					}
+				}
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}

@@ -913,3 +913,72 @@ def test_the_bundle_says_what_was_actually_being_logged():
         )
         assert level in ("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG",
                          "NOTSET"), f"{name} has an unrenderable level {level!r}"
+
+
+# ─── What the dashboard showed (format 3) ──────────────────────────────────
+
+def _view():
+    """merge_device's shape, with an identifier in every place one could hide."""
+    return {
+        "label": SECRETS["label"], "ip": SECRETS["ip"],
+        "wake_word": True, "aecRef": "software", "linkTls": False,
+        "linkTokenIssued": True,
+        "listen": {"state": "degraded", "streams": False, "reason": "no_model"},
+        "voiceSatellite": {"port": 6053, "listening": True, "haConnected": False},
+        "linkQuality": {"verdict": "poor", "lossPct": 6.1, "minutes": [0.0, 6.1]},
+        "linkRefused": f"token mismatch from {SECRETS['ip']}",
+        "update_error": f"push failed: '{SECRETS['ssid']}' {SECRETS['bssid']}",
+        "pairRequest": {"at": 1.0, "ip": SECRETS["ip"]},
+        "sendspin": {"state": "playing", "synced": True, "clientId": SECRETS["token"],
+                     "server": SECRETS["ip"], "group": SECRETS["label"]},
+        "bleProxy": {"haConnected": True, "connections": 1, "peer": SECRETS["bssid"]},
+        "wifi": {"pending": None, "last_result": {
+            "ok": False, "ssid": SECRETS["ssid"], "at": 5.0,
+            "error": f"could not join '{SECRETS['ssid']}'"}},
+    }
+
+
+def test_the_view_leaks_nothing_identifying():
+    bundle = S.build(
+        controller_version="v2.27.0", devices=[Row({"device_id": "G090"})],
+        fleet_config={}, schema_version=33, turns=[], metrics=[], counters=[],
+        device_configs={}, live_state={}, controller_log=[], device_log=[],
+        views={"G090": _view()})
+    text = S.to_json(bundle)
+    for name in ("label", "ip", "ssid", "bssid", "token"):
+        assert SECRETS[name] not in text, f"{name} leaked through the view"
+
+
+def test_the_view_keeps_what_explains_a_fault():
+    out = S.redact_view(_view())
+    # #349: the Echo lights up and nothing answers.
+    assert out["voiceSatellite"]["haConnected"] is False
+    assert out["listen"] == {"state": "degraded", "streams": False, "reason": "no_model"}
+    assert out["linkQuality"]["verdict"] == "poor"
+    assert out["linkRefused"] == "token mismatch from <ip>"
+    assert out["pairRequested"] is True
+    assert out["sendspin"] == {"state": "playing", "synced": True}
+    assert out["wifiChange"]["last"]["ok"] is False
+    assert "join" in out["wifiChange"]["last"]["error"]
+
+
+def test_a_missing_view_is_empty_not_an_error():
+    assert S.redact_view(None) == {}
+
+
+def test_view_fields_match_what_the_dashboard_builds():
+    """An allowlisted key merge_device does not produce is dropped silently,
+    the way the metric sums were."""
+    import _sources
+    src = _sources.def_source("merge_device")
+    produced = set(re.findall(r'"(\w+)":\s', src))
+    wanted = set(S._VIEW_FIELDS) | set(S._VIEW_NESTED) | set(S._VIEW_TEXT) | {"pairRequest", "wifi"}
+    assert not wanted - produced, sorted(wanted - produced)
+
+
+def test_ble_stats_keep_the_counters_and_lose_the_address():
+    out = S.redact_stats({"cpuPct": 5, "ble": {
+        "scanning": True, "advertsSeen": 40, "bdAddr": SECRETS["bssid"],
+        "music": {"bursts": 3, "starvedMs": 0, "peer": SECRETS["bssid"]}}})
+    assert out["ble"] == {"scanning": True, "advertsSeen": 40,
+                          "music": {"bursts": 3, "starvedMs": 0}}

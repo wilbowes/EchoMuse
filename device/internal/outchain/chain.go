@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"github.com/wilbowes/EchoMuse/pkg/board"
 )
 
 // Params is the chain's whole configuration. Defaults match
@@ -18,6 +20,11 @@ type Params struct {
 	LimiterEnabled     bool
 	LimiterThresholdDb float64
 	LimiterReleaseMs   float64
+	// StockSound adds the board's voicing: the driver correction and the
+	// three compressor bands above the guard (#229). It has no effect on a
+	// board with no voicing. The device's volume law and order change with
+	// it; see speaker.PcmSpeaker.
+	StockSound bool
 }
 
 // DefaultParams mirrors the controller's defaults, so a device that has not
@@ -29,6 +36,9 @@ func DefaultParams() Params {
 		LimiterEnabled:     true,
 		LimiterThresholdDb: -1,
 		LimiterReleaseMs:   150,
+		// Always on for the speaker (#229); there is no key to turn it
+		// off. chainForJack clears it while a plug is in.
+		StockSound: true,
 	}
 }
 
@@ -59,7 +69,11 @@ func (p Params) String() string {
 	if p.LimiterEnabled {
 		lim = fmt.Sprintf("%gdB/%gms", math.Min(p.LimiterThresholdDb, 0), p.LimiterReleaseMs)
 	}
-	return fmt.Sprintf("eq=%s speech_boost=%s guard=%s limiter=%s", eqs, boost, guard, lim)
+	out := fmt.Sprintf("eq=%s speech_boost=%s guard=%s limiter=%s", eqs, boost, guard, lim)
+	if p.StockSound {
+		out += " stock_sound=on"
+	}
+	return out
 }
 
 // Chain runs EQ → bass guard → limiter on stereo S16_LE periods.
@@ -84,25 +98,42 @@ type Chain struct {
 	mu      sync.Mutex
 	pending *Params // set by SetParams, taken by Process
 
+	// volume is the device level the voicing's volume filters follow, set
+	// by SetVolume; volApplied is the one they were last designed for.
+	volume     atomic.Int64
+	volApplied int64
+
 	// Owned by the ALSA goroutine.
 	params  Params
+	voicing *board.Voicing // nil: StockSound is never in force
 	eq      eq
 	guard   *bassGuard
+	corr    correction
 	lim     *limiter
 	idle    bool // state is all zero and input is silence
 	running bool // active on the previous period
 }
 
-// New builds a chain at the given sample rate, inactive, with DefaultParams.
+// New builds a chain at the given sample rate, inactive, with DefaultParams
+// and biscuit's bass band and voicing.
 func New(sampleRate int) *Chain {
+	return NewFor(sampleRate, DefaultGuardBand, board.BiscuitVoicing())
+}
+
+// NewFor is New with the board's own bass band and voicing (nil for none).
+func NewFor(sampleRate int, band GuardBand, v *board.Voicing) *Chain {
 	fs := float64(sampleRate)
 	c := &Chain{
-		fs:    fs,
-		eq:    eq{fs: fs},
-		guard: newBassGuard(fs),
-		lim:   newLimiter(fs),
-		idle:  true,
+		fs:      fs,
+		voicing: v,
+		eq:      eq{fs: fs},
+		guard:   newBassGuard(fs, band),
+		corr:    newCorrection(fs, v),
+		lim:     newLimiter(fs),
+		idle:    true,
 	}
+	c.volume.Store(127)
+	c.volApplied = 127
 	c.apply(DefaultParams())
 	return c
 }
@@ -125,13 +156,37 @@ func (c *Chain) SetParams(p Params) {
 }
 
 func (c *Chain) apply(p Params) {
+	// Cleared rather than ignored, so everything downstream (the speaker's
+	// volume law, the log line) reads what is in force.
+	p.StockSound = p.StockSound && c.voicing != nil
 	c.params = p
 	c.eq.set(p.Bands, p.Loudness)
-	c.guard.enabled = p.GuardEnabled
+	// The voicing was tuned with the guard on, and drives the chain past
+	// full scale near the top, so the profile does not let it be turned off.
+	c.guard.enabled = p.GuardEnabled || p.StockSound
 	c.guard.floorDb = math.Min(p.GuardDb, 0)
+	if p.StockSound {
+		c.guard.floorDb = math.Min(c.guard.floorDb, c.voicing.BassFloorDb)
+	}
 	c.lim.enabled = p.LimiterEnabled
+	// The profile's extra filters start cold when it turns on (one phase
+	// step at a rare config change), and are dropped when it turns off so
+	// the default path stays bit-exact.
+	switch {
+	case p.StockSound && c.guard.upper == nil:
+		c.guard.upper = newUpperBands(c.fs, c.voicing)
+		c.guard.hold = newHoldMin(c.voicing.BassHoldMs, c.fs)
+		c.corr.reset()
+	case !p.StockSound:
+		c.guard.upper = nil
+		c.guard.hold = nil
+	}
 	c.lim.setParams(p.LimiterThresholdDb, p.LimiterReleaseMs, c.fs)
 }
+
+// SetVolume tells the chain the device level (0..127), for a voicing whose
+// EQ follows the volume. It takes effect at the next period.
+func (c *Chain) SetVolume(level int) { c.volume.Store(int64(level)) }
 
 // takePending applies a queued SetParams. Returns the params that are now in
 // force and whether they changed.
@@ -143,8 +198,9 @@ func (c *Chain) takePending() (Params, bool) {
 	if p == nil {
 		return c.params, false
 	}
-	changed := *p != c.params
+	prev := c.params
 	c.apply(*p)
+	changed := c.params != prev
 	return c.params, changed
 }
 
@@ -178,6 +234,9 @@ func (c *Chain) Process(buf []byte) (applied *Params) {
 		x := (float64(l) + float64(r)) / 2
 
 		x = c.eq.step(x)
+		if c.params.StockSound {
+			x = c.corr.step(x)
+		}
 		x = c.guard.step(x)
 		x = c.lim.step(x)
 
@@ -234,6 +293,9 @@ func (c *Chain) ProcessFloat(buf []float64, fullScales []float64) (applied *Para
 		}
 		x := (l + r) / (2 * scale)
 		x = c.eq.step(x)
+		if c.params.StockSound {
+			x = c.corr.step(x)
+		}
 		x = c.guard.step(x)
 		x = c.lim.step(x)
 		if x > ceiling {
@@ -256,9 +318,62 @@ func (c *Chain) ProcessFloat(buf []float64, fullScales []float64) (applied *Para
 	return applied
 }
 
+// ProcessWide runs the chain over a stereo period at its TRUE level, which
+// may exceed full scale, and writes S16 to out. It is the stock-sound
+// profile's entry point: the volume is applied BEFORE the chain there, as on
+// stock, and near the top it puts the signal over full scale on purpose for the
+// compressors and limiter to bring back. Only the chain's output is clipped.
+// len(out) must be 2*len(in) bytes (stereo S16 for stereo float).
+func (c *Chain) ProcessWide(in []float64, out []byte) (applied *Params) {
+	applied, active := c.beginProcess()
+	frames := min(len(in)/2, len(out)/4)
+	silentIn, silentOut := true, true
+	for i := 0; i < frames; i++ {
+		l, r := in[i*2], in[i*2+1]
+		if l != 0 || r != 0 {
+			silentIn = false
+		}
+		x := (l + r) / 2
+		if active {
+			x = c.eq.step(x)
+			if c.params.StockSound {
+				x = c.corr.step(x)
+			}
+			x = c.guard.step(x)
+			x = c.lim.step(x)
+		}
+		if x > ceiling {
+			x = ceiling
+		} else if x < -fullScale {
+			x = -fullScale
+		}
+		s := int16(x)
+		if s != 0 {
+			silentOut = false
+		}
+		lo, hi := byte(uint16(s)), byte(uint16(s)>>8)
+		off := i * 4
+		out[off], out[off+1], out[off+2], out[off+3] = lo, hi, lo, hi
+	}
+	if !active {
+		return applied
+	}
+	if silentIn && silentOut {
+		c.reset()
+		c.idle = true
+	} else {
+		c.idle = false
+	}
+	return applied
+}
+
 func (c *Chain) beginProcess() (applied *Params, active bool) {
 	if p, changed := c.takePending(); changed {
 		applied = &p
+	}
+	if lv := c.volume.Load(); lv != c.volApplied {
+		c.volApplied = lv
+		c.corr.setVolume(float64(min(max(lv, 0), 127)) * 100 / 127)
 	}
 	active = c.active.Load()
 	if active != c.running {
@@ -272,6 +387,7 @@ func (c *Chain) beginProcess() (applied *Params, active bool) {
 
 func (c *Chain) reset() {
 	c.eq.reset()
+	c.corr.reset()
 	c.guard.reset()
 	c.lim.reset()
 	c.idle = true

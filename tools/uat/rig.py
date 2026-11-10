@@ -215,7 +215,10 @@ def up(image: str) -> None:
     res = api("POST", "/api/setup",
               {"token": one_time, "username": "uat", "password": password}, token="")
     _save_state(image=image, username="uat", password=password, token=res["token"])
-    print(f"controller up: {image}, dashboard {API}, admin 'uat' (password in {STATE})")
+    import baseline
+    baseline.apply(api)
+    print(f"controller up: {image}, dashboard {API}, admin 'uat' (password in {STATE}), "
+          f"config baseline {baseline.check(api)[0]}")
 
 
 def attach(serial: str) -> None:

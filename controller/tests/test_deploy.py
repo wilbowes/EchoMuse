@@ -2322,7 +2322,7 @@ def test_the_reconcile_runs_the_three_payloads_sequentially():
     All three talk to one device over one shell plane. Gathering them contends
     for a single session for no gain — nothing is on a critical path here.
     """
-    fn = _strip_prose(_sources.def_source("em_reconcile.on_connect"))
+    fn = _strip_prose(_sources.def_source("em_reconcile._reconcile_payloads"))
 
     for step in ("em_oww_sync.reconcile", "em_payloads.sync_start_script", "em_payloads.sync_debloat"):
         assert step in fn, f"{step} must run on connect"
@@ -2337,7 +2337,7 @@ def test_one_failing_payload_does_not_skip_the_others():
     wake word models, so each step is caught individually rather than the loop
     being wrapped in one try.
     """
-    fn = _strip_prose(_sources.def_source("em_reconcile.on_connect"))
+    fn = _strip_prose(_sources.def_source("em_reconcile._reconcile_payloads"))
     body = fn[fn.index("for name"):]
     assert "try:" in body and "except Exception" in body, (
         "each step must be caught inside the loop, not around it"
@@ -2807,7 +2807,10 @@ def test_the_emos_and_firmware_release_namespaces_cannot_select_each_other():
         "the firmware poll must select on a v* tag AND a server asset"
 
     emos = _strip_prose(_sources.def_source("fetch_emos"))
-    assert 'startswith("emos-v")' in emos and '"init"' in emos, \
+    assert "choose_release(" in emos, \
+        "the emOS poll must select through em_emos_update.choose_release"
+    chooser = _strip_prose(_sources.def_source("choose_release"))
+    assert 'startswith("emos-v")' in chooser and '"init"' in chooser, \
         "the emOS poll must select on an emos-v* tag AND an init asset"
 
     workflow = (CONTROLLER.parent / ".github" / "workflows" / "emos-release.yml").read_text()
@@ -2899,10 +2902,10 @@ def test_the_emos_release_workflow_asserts_what_it_publishes():
     assert "32-bit LSB executable, ARM" in wf, \
         "the release must assert init32 is a 32-bit ARM binary"
     assert "statically linked" in wf, "the release must assert the inits are static"
-    # All four off-target checks run against the source being published. Each
-    # one drives a parser or an invariant whose failure is silent on hardware.
+    # The off-target checks run against the source being published. Each one
+    # drives a parser or an invariant whose failure is silent on hardware.
     for check in ("ringsim --check", "pwcheck", "tmoutcheck", "wpacheck",
-                  "cmdlinecheck"):
+                  "cmdlinecheck", "dnscheck"):
         assert check in wf, f"the release must run {check}"
     # The bundle is what carries everything but the compat init, so a release
     # that skipped building it would publish an empty-handed payload.

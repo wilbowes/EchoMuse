@@ -597,6 +597,26 @@ for (const fn of ["runEscrowBoot", "runPatchBoot"]) {
         /boot_a → \/dev\/block\/mmcblk0p10/.test(v.reason), v.reason);
 }
 
+// #712, #1056: _x aliases with no other-boot is amonet v1's table under a v2
+// unlock. Still refused, but named as that and pointed at the FAQ, which has
+// the way out; an _amonet alias is not that state and keeps asking for a report.
+{
+  const lines = ["TARGET=/dev/block/other-boot", "ISBLK=no", "SUFFIX=_b",
+                 "SLOTDEV=/dev/block/mmcblk0p18", "SLOTBLK=yes", ANDROID].join("\n");
+  const v = classifyBootTarget(lines);
+  check("mixed v1/v2 table is refused", v.ok === false, JSON.stringify(v));
+  check("mixed v1/v2 refusal names the state", /amonet v1's partition table under a v2 unlock/.test(v.reason), v.reason);
+  check("mixed v1/v2 refusal links the FAQ", /docs\/faq\.md#the-wizard-stops-at-escrow-boot-image/.test(v.reason), v.reason);
+  check("mixed v1/v2 refusal shows both resolutions",
+        /boot_a_x → \/dev\/block\/mmcblk0p10/.test(v.reason)
+        && /boot_a → \/dev\/block\/mmcblk0p17/.test(v.reason), v.reason);
+
+  const amonet = lines + "\nNAME boot_a_amonet /dev/block/mmcblk0p17";
+  const a = classifyBootTarget(amonet);
+  check("an _amonet alias is still refused", a.ok === false, JSON.stringify(a));
+  check("an _amonet alias still asks for a report", /not a state/.test(a.reason), a.reason);
+}
+
 if (failures) {
   console.error(`\n${failures} check(s) failed.`);
   process.exit(1);

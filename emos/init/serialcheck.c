@@ -1,4 +1,7 @@
-/* Prove init.c resolves the device serial, and refuses a corrupt one.
+/* Prove init.c resolves the device serial, and refuses a corrupt one; and that
+ * it tells radar from biscuit by idme's device type, which picks radar's WiFi
+ * bring-up (a wrong answer is a radar with no WiFi, or biscuit sent radar's
+ * ioctls).
  *
  * The whole fleet is keyed on the serial. Getting it wrong is the quiet kind of
  * wrong: a device that cannot resolve one registers as "unknown", and a second
@@ -131,6 +134,32 @@ int main(void)
                  "ro other=androidboot.serialno=" REAL, "");
     want_cmdline("a decoy before the real one",
                  "ro xandroidboot.serialno=DECOY androidboot.serialno=" REAL, REAL);
+
+    printf("\nboard_of() -- /proc/idme/device_type_id\n");
+    {
+        static const char *const name[] = { "biscuit", "radar", "donut" };
+        static const struct { const char *what, *raw; enum board want; } t[] = {
+            /* Read off 035T on 2026-10-23: 12 characters and a NUL. */
+            { "radar, as the kernel gives it", "A7WXQPH584YP\0", BOARD_RADAR },
+            { "radar with a newline",          "A7WXQPH584YP\n", BOARD_RADAR },
+            /* Read off 41C8 on 2026-10-25. */
+            { "donut, as the kernel gives it", "A32DOYMUN6DTXA\0", BOARD_DONUT },
+            { "donut with a newline",          "A32DOYMUN6DTXA\n", BOARD_DONUT },
+            { "biscuit",                       "A3S5BH2HU6VAYF\0", BOARD_BISCUIT },
+            { "radar's id with a suffix",      "A7WXQPH584YPX", BOARD_BISCUIT },
+            { "a prefix of radar's id",        "A7WXQPH584Y", BOARD_BISCUIT },
+            { "a prefix of donut's id",        "A32DOYMUN6DTX", BOARD_BISCUIT },
+            { "lower case",                    "a7wxqph584yp", BOARD_BISCUIT },
+            { "a leading NUL",                 "\0A7WXQPH584YP", BOARD_BISCUIT },
+            { "empty",                         "", BOARD_BISCUIT },
+        };
+        for (size_t i = 0; i < sizeof t / sizeof t[0]; i++) {
+            enum board got = board_of(t[i].raw);
+            printf("%s  %-44s -> %s\n", got == t[i].want ? "ok  " : "FAIL",
+                   t[i].what, name[got]);
+            fails += got != t[i].want;
+        }
+    }
 
     printf("\n%s\n", fails ? "FAILED" : "all ok");
     return fails ? 1 : 0;

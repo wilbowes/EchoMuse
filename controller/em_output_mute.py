@@ -19,11 +19,12 @@ Pure: the caller sends the levels it returns and persists only what it is
 told to.
 """
 
+import em_volume
 
-# One press of the Echo's volume-up button, in device levels (4dB; volumeStep
-# in device/internal/server/volume.go).
-BUTTON_STEP = 8
-DEVICE_MAX = 127
+
+# One press of the Echo's volume-up button, in device levels.
+BUTTON_STEP = em_volume.VOLUME_STEP
+DEVICE_MAX = em_volume.DEVICE_VOLUME_MAX
 
 
 class OutputMute:
@@ -63,7 +64,7 @@ class OutputMute:
 
         A non-zero level while muted is the Echo's volume-up button. The
         device stepped up from the 0 we sent, which lands on its button
-        floor (47, near silent) — not what a volume-up on a muted player
+        floor (em_volume.VOLUME_FLOOR, barely audible) — not what a volume-up on a muted player
         means. So it unmutes one step above the level from before the mute
         (UAT 2026-09-27: it came back at 37%, and 47 replaced the stored
         volume). Volume-down from 0 stays 0 and stays muted.

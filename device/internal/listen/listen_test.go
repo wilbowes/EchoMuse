@@ -11,9 +11,13 @@ func at(i int) time.Time { return t0.Add(time.Duration(i) * frameDur) }
 
 func pcm(tag byte) []byte {
 	b := make([]byte, FrameBytes)
-	b[0] = tag
+	b[0], b[FrameBytes-1] = tag, tag
 	return b
 }
+
+// tag reads a frame's index from its last byte, which the wake lead's
+// silencing of the first frame never reaches.
+func tag(f []byte) byte { return f[FrameBytes-1] }
 
 // fill pushes frames 0..n-1 into a closed gate, tagging each with its index.
 func fill(t *testing.T, g *Gate, n int) {
@@ -33,10 +37,11 @@ func TestClosedGateSendsNothing(t *testing.T) {
 	}
 }
 
-func TestOpenSendsOnlyFramesAfterTheCrossing(t *testing.T) {
+func TestSessionStartsWakeLeadBeforeTheCrossing(t *testing.T) {
 	g := New(0, 0, 0)
 	fill(t, g, 10)
-	// The wake word's last frame was frame 6; frames 7, 8, 9 are the command.
+	// The crossing was frame 6. 260ms back is 20ms into frame 3, so frame 3
+	// is sent with its first 60ms silenced, then 4..9 and the live 10.
 	s, ok := g.Open(at(6), at(9))
 	if !ok || s == 0 {
 		t.Fatalf("Open = %d, %v", s, ok)
@@ -47,11 +52,57 @@ func TestOpenSendsOnlyFramesAfterTheCrossing(t *testing.T) {
 	}
 	var got []byte
 	for _, f := range out {
-		got = append(got, f[0])
+		got = append(got, tag(f))
 	}
-	want := []byte{7, 8, 9, 10}
+	want := []byte{3, 4, 5, 6, 7, 8, 9, 10}
 	if string(got) != string(want) {
 		t.Fatalf("sent %v, want %v", got, want)
+	}
+	pad := FrameBytes * 3 / 4 // 60 of 80ms
+	for i, b := range out[0][:pad] {
+		if b != 0 {
+			t.Fatalf("byte %d of the first frame is %d, want silence", i, b)
+		}
+	}
+	if out[1][0] != 4 {
+		t.Fatal("silenced a frame after the first")
+	}
+	if len(g.frames) > 0 {
+		t.Fatal("ring kept frames after open")
+	}
+}
+
+// The mic hands frames over in pairs stamped microseconds apart, with the
+// pairs 130-190ms apart, so the lead is counted in frames from the crossing.
+func TestWakeLeadCountsFramesNotTime(t *testing.T) {
+	g := New(0, 0, 0)
+	batch := t0
+	for i := 0; i < 10; i++ {
+		if i%2 == 0 {
+			batch = batch.Add(190 * time.Millisecond) // a slow batch
+		}
+		g.Push(pcm(byte(i)), batch.Add(time.Duration(i%2)*time.Microsecond))
+	}
+	cross := g.frames[6].at
+	g.Open(cross, cross)
+	out, _, _ := g.Push(pcm(10), cross.Add(time.Second))
+	if tag(out[0]) != 3 || len(out) != 8 {
+		t.Fatalf("started at frame %d with %d frames, want 3 and 8", tag(out[0]), len(out))
+	}
+}
+
+// Silencing the first frame must not write into the ring's own buffer, which
+// other readers (the bench dump) still hold.
+func TestWakeLeadDoesNotTouchTheRingedFrame(t *testing.T) {
+	g := New(0, 0, 0)
+	frames := make([][]byte, 10)
+	for i := range frames {
+		frames[i] = pcm(byte(i))
+		g.Push(frames[i], at(i))
+	}
+	g.Open(at(6), at(9))
+	if frames[3][0] != 3 {
+		t.Fatal("the ringed frame was silenced in place")
 	}
 }
 
@@ -142,9 +193,9 @@ func TestCloseAnyAndReopenStartsFromTheRing(t *testing.T) {
 		t.Fatal("closed twice")
 	}
 	fill(t, g, 3)
-	g.Open(at(0), at(3))
+	g.Open(at(2), at(3))
 	out, _, _ := g.Push(pcm(3), at(3))
-	if len(out) != 3 { // frames 1, 2 and the live 3
+	if len(out) != 4 { // the refilled 0, 1, 2 and the live 3
 		t.Fatalf("got %d frames", len(out))
 	}
 }

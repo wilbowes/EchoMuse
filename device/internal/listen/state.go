@@ -10,6 +10,10 @@ const (
 
 // Resolve decides what the device does with its wake stream.
 //
+// A device with no microphone (micErr says why) is DEGRADED whatever was
+// asked: it can neither stream nor listen, and reporting either would be a
+// statement about listening that is not true.
+//
 // Private listening needs all three: the operator asked for on-device wake
 // word (owwOnDevice=on), the controller understands sessions, and a scorer is
 // loaded. The first two missing mean STREAM, which is what the device did
@@ -17,8 +21,11 @@ const (
 // missing means DEGRADED, never stream: a device asked to listen privately
 // that cannot score must not quietly start sending its microphone instead.
 // The button still works, and scorerErr says why to whoever looks.
-func Resolve(onDevice bool, controllerHasSessions bool, scorerLoaded bool,
+func Resolve(micErr string, onDevice bool, controllerHasSessions bool, scorerLoaded bool,
 	scorerErr string) (state, reason string) {
+	if micErr != "" {
+		return StateDegraded, micErr
+	}
 	if !onDevice || !controllerHasSessions {
 		return StateStream, ""
 	}

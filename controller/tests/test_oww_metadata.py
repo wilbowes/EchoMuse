@@ -84,7 +84,8 @@ def test_same_id_metadata_change_refreshes_connection(monkeypatch):
     tree = ast.parse(source.read_text())
     function = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "update_oww_model")
     satellite = SimpleNamespace(disconnect=Mock())
-    server = SimpleNamespace(oww_model_id="robot", oww_model_info=metadata.WakeWord("Old"), get_satellite=lambda: satellite)
+    server = SimpleNamespace(oww_model_id="robot", oww_model_info=metadata.WakeWord("Old"), get_satellite=lambda: satellite,
+                             wake_word_enabled=True, ha_select_stale=False)
     current = metadata.WakeWord("Hallo", ("de",))
     monkeypatch.setattr(metadata, "resolve", lambda name: current)
     scope = {"asyncio": asyncio, "em_oww_models": em_oww_models, "em_oww_metadata": metadata,
@@ -103,7 +104,8 @@ def test_newer_refresh_wins_when_reads_finish_out_of_order(monkeypatch):
     function = next(n for n in ast.parse(source.read_text()).body
                     if isinstance(n, ast.AsyncFunctionDef) and n.name == "update_oww_model")
     satellite = SimpleNamespace(disconnect=Mock())
-    server = SimpleNamespace(oww_model_id="initial", oww_model_info=metadata.WakeWord("Initial"), get_satellite=lambda: satellite)
+    server = SimpleNamespace(oww_model_id="initial", oww_model_info=metadata.WakeWord("Initial"), get_satellite=lambda: satellite,
+                             wake_word_enabled=True, ha_select_stale=False)
     async def run():
         first_started, release_first = asyncio.Event(), asyncio.Event()
         async def read(_function, model):

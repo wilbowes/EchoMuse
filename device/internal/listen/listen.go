@@ -44,6 +44,13 @@ const (
 	// DefaultMaxOpen bounds every session, acknowledged or not. Above the
 	// controller's own 20s streaming cap so it never ends a healthy turn.
 	DefaultMaxOpen = 30 * time.Second
+	// WakeLead is how far before the crossing a session starts. The scorer
+	// crosses a few frames into the command when it is run on from the wake
+	// word, so starting at the crossing clipped it: "time is it?", "joke.",
+	// "the office light." on 5 of 9 VVV captures (2026-10-23). 240-280ms
+	// gave all 9 whole with no "Jarvis"; this is the middle. Barge-ins,
+	// dated from their first frame, were whole from 180 to 340ms.
+	WakeLead = 260 * time.Millisecond
 )
 
 // Reason says why a session ended. Sent to the controller on listen_end.
@@ -137,8 +144,8 @@ func (g *Gate) Push(pcm []byte, at time.Time) (out [][]byte, session uint32, end
 }
 
 // Open starts a session for a wake whose last frame was captured at crossAt.
-// The session begins with every ringed frame captured AFTER it, so the command
-// follows the wake word with no gap and no repeat.
+// The session begins WakeLead before it, so a command run on from the wake
+// word arrives whole; the part of the first frame before WakeLead is silenced.
 //
 // ok is false when a session is already open: a wake word spoken inside an
 // open session is just words, and must not start a second one.
@@ -153,10 +160,28 @@ func (g *Gate) Open(crossAt, now time.Time) (session uint32, ok bool) {
 		g.nextID = 1
 	}
 	g.startLocked(g.nextID, now)
-	for _, f := range g.frames {
-		if f.at.After(crossAt) {
-			g.backlog = append(g.backlog, f.pcm)
+	// Counted in frames back from the crossing frame, not by time: the mic
+	// reads 160ms batches, so two frames carry near-equal stamps and batches
+	// land 130-190ms apart, which moved a time-based start by a frame.
+	cross := -1
+	for i, f := range g.frames {
+		if !f.at.After(crossAt) {
+			cross = i
 		}
+	}
+	n := int((WakeLead + frameDur - 1) / frameDur)
+	start := cross + 1 - n
+	pad := int((time.Duration(n)*frameDur-WakeLead)*FrameBytes/frameDur) &^ 1
+	if start < 0 {
+		start, pad = 0, 0
+	}
+	for i, f := range g.frames[start:] {
+		pcm := f.pcm
+		if i == 0 && pad > 0 {
+			pcm = append([]byte(nil), pcm...)
+			clear(pcm[:pad])
+		}
+		g.backlog = append(g.backlog, pcm)
 	}
 	g.frames = g.frames[:0]
 	return g.session, true

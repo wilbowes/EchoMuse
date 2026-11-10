@@ -4,8 +4,8 @@ The firmware is one binary. At start-up it works out which board it is on,
 looks up where that board's parts are **by name**, and opens what it found.
 Adding a board means describing it in one file; the drivers stay as they are.
 
-Today only the Echo Dot 2nd gen (`biscuit`) is described. This page is for
-anyone trying the firmware on something else.
+Two boards are described: the Echo Dot 2nd gen (`biscuit`) and the Echo 2nd
+gen (`radar`). This page is for anyone trying the firmware on something else.
 
 Related reading: [`porting/README.md`](../porting/README.md) for the scripts
 that profile an unsupported Echo, and
@@ -39,12 +39,14 @@ protocol a board has to speak.
 
 | Part | Named by | Looked up in |
 |---|---|---|
-| Action and mute keys, volume keys | input device name | `/proc/bus/input/devices` |
+| Buttons | input device names, a list; a key means what its code says, whichever device carried it | `/proc/bus/input/devices` |
 | LED ring | i2c driver name | `/sys/bus/i2c/devices/*/name` |
 | Microphone and speaker PCMs | ALSA stream name | `/proc/asound/pcm` |
-| Ambient light sensor | i2c driver name, plus the attribute that reads lux | `/sys/bus/i2c/devices/*/name` |
+| Ambient light sensor | driver name on the i2c or IIO bus, plus the attribute that reads lux | `/sys/bus/i2c/devices/*/name`, `/sys/bus/iio/devices/*/name` |
 | Mute button LED | sysfs GPIO number | stated by the board |
 | Bluetooth controller | HCI device path | stated by the board |
+| Codec routes and mic input levels | mixer control names and values | stated by the board (`Routes`, `InputGains`) |
+| Speaker | amp switch, hardware volume and its mute and 0dB values, the jack table, amp mute control, codec filter, bass band | stated by the board (`Speaker`) |
 
 The firmware prints the result at start-up, one `[board]` line per part.
 
@@ -65,7 +67,8 @@ led ring: "is31fl3236" at /sys/bus/i2c/devices/0-003f
 capture: "TLV320AIC3101 Capture" at card 0 device 24
 playback: "TLV320AIC3204 Playback" at card 0 device 23
 mute led gpio: "444"
-light sensor: "tsl2540" (als_lux)
+light sensor: "tsl2540" (als_lux, i2c)
+light sensor: "tsl2584tsv" (illuminance0_input, iio)
 bluetooth hci: "/dev/stpbt"
 ```
 
@@ -121,18 +124,23 @@ These are still written for the Dot 2 inside the drivers. A board that
 differs in any of them needs code, and the description will grow to hold
 them as the second board is added.
 
-- **Microphone format and layout.** The pipeline expects 9 channels of 24-bit
-  audio: six mics around the edge, one in the centre, and two channels of
-  playback loopback.
-- **Audio routes.** `internal/bindings/codec/routes.go` closes ten mixer
-  switches by name, all of them the Dot 2's.
-- **Amplifier and volume.** The amp switch, the DAC's unity value (127) and
-  the click-free start-up order.
-- **Headphone jack.** The detect switch and the two controls written on
-  plug-in and removal.
-- **Start-up order.** Some boards need one PCM opened before another.
-- **Android services.** `stop mixer`, `stop media`, `stop ledcontroller` and
-  `stop acebutton` are run as they are named on the Dot 2.
+- **Microphone format.** The layout is the board's (`Mics`: the channel
+  count, each edge microphone's channel and angle, the centre one if any, and
+  a loopback channel if the frame carries one), but the samples must be the
+  Dot 2's S24_3LE or the Dot 3's S32_LE (24 bits in the top three bytes),
+  with the microphones on channels 0 onwards. A board
+  whose capture is different states no capture PCM and runs as a speaker: no
+  `mic` capability, its listening reported as degraded with the reason, and
+  no voice turn from the button.
+- **The ADC mute.** Mute writes the Dot 2's eight ADC mute controls by name.
+- **The speaker's start-up order** around the amp, the volume and a board's
+  hardware mute, which is shared.
+- **Start-up order.** Some boards need one PCM opened before another. The
+  one case handled is a playback loopback opened before the microphones
+  (`Loopback`).
+- **Android services.** `stop mixer`, `stop media` and `stop ledcontroller`
+  are run as they are named on the Dot 2. Amazon's button service is
+  `acebutton` on FireOS 5 and `acebuttond` on FireOS 6, and both are stopped.
 - **CPU core parking** under `/proc/hps`, which is MediaTek's.
 - **WiFi.** `wlan0` and wpa_supplicant. What differs here is FireOS against
   emOS, which the firmware already handles.
@@ -153,10 +161,12 @@ or not the chip is soldered on. The Dot 2 lists two light sensors and has
 one. A name with a working attribute behind it is a part; a name alone is
 not.
 
-**A device node existing does not mean the hardware is behind it.**
-`/dev/stpbt` is MediaTek's combo-chip Bluetooth node. It is present on the
-Dot 3 too, where the radio is a different chip. That is why each board states
-its Bluetooth device.
+**A device node existing does not say how it behaves.** `/dev/stpbt` is
+MediaTek's combo-chip Bluetooth node on the Dot 2 and the Dot 3 both, but the
+Dot 3's driver returns 0 bytes from `read()` when nothing is queued where the
+Dot 2's blocks, and reading it as a file ended every session at its first
+command. That is why each board states its Bluetooth device and how it is
+read.
 
 **Resolve keys by device name, not by what a device claims to support.** On
 the Dot 2 both input devices advertise the volume-down key, and only one of
@@ -197,9 +207,13 @@ What this page says about boards other than the Dot 2 comes from people who
 put the firmware on their own hardware and wrote down what they found:
 
 - **Echo Dot 3rd gen:** @shortgame11 (the first working port, and the
-  findings about the amplifier, its clock and GPIO 444), @technotiger
-  (profile and probe runs).
-- **Echo 2nd gen:** @vithurshanselvarajah and @jcsnider.
+  findings about the amplifier, its clock and GPIO 444, and that the speaker
+  route is decided at stream open), @technotiger (profile and probe runs,
+  and that its Bluetooth radio reads differently from the Dot 2's).
+- **Echo 2nd gen:** @vithurshanselvarajah and @jcsnider (the port, emOS on
+  it, the 9-channel capture and the speaker bring-up), @sascha-hemi (the
+  jack's filter swap, and that the Dot 2's bass guard removed its bass),
+  @colin715 (test runs).
 - **Echo Show 5:** @imduffy15.
 
 ## Where the Dot 2's values came from
@@ -209,3 +223,79 @@ emOS with the FireOS 6 (32-bit) kernel and one on emOS with the FireOS 5
 (64-bit) kernel. All three report the same names at the same numbers. The
 first unit's output is the fixture at
 `device/pkg/board/testdata/biscuit-fireos5/`.
+
+## The Echo 2nd gen (`radar`)
+
+Read from one unit (035T, stock FireOS 6, build NS6575) on 2026-10-23, and
+checked against the port in #687. Every input device, PCM and i2c client is
+the Dot 2's, by name and by number, and so is the microphone layout: the
+same 9 channels, ch0 to ch5 clockwise around the ring, ch6 in the centre,
+ch7 and ch8 the playback loopback. The fixture is
+`device/pkg/board/testdata/radar-fireos6/`. What differs is the speaker:
+
+- **A hardware mute, `MFP Gpio Mute`.** The codec driver sets it at every
+  stream open and close and keeps it through an underrun, and the speaker is
+  silent until it is released. The firmware releases it once the stream runs.
+  The Dot 2 has a control of the same name that drives nothing.
+- **A codec filter, `biquad coefficients` (117 bytes).** It resets to zeros,
+  which is silence. The values are read at start-up from the unit's own
+  `/system/etc/audio_device.xml`, one for the speaker and one for the jack,
+  and never carried in the repository.
+- **Its own bass band.** Band 1 of the unit's own `MBCL.cfg` is 0 to 70Hz
+  from -25dB; the Dot 2's is 0 to 115Hz from -50dB, which removed the
+  woofer's bass at any normal level.
+- **Start-up.** The driver ramps the codec itself for about 1.3s before the
+  stream runs. The amp comes on, the DAC goes to unity, and the mute is
+  released last: of the orders tried, the quietest on the unit's own
+  microphones.
+
+No mute button LED is stated (`MuteLEDGPIO` empty), and there is no thermal
+profile, so emOS runs the kernel's defaults.
+
+## The Echo Dot 3rd gen (`donut`)
+
+Read from one unit (41C8, stock FireOS 6.5.7.5, build NS6575) on 2026-10-24.
+An MT8167 board with its own layout; no input device or PCM shares the Dot
+2's name. The fixture is `device/pkg/board/testdata/donut-fireos6/`.
+
+- **Buttons.** `gpio-keys` carries the action button (`KEY_HELP`) and the
+  volume pair, and autorepeats while a key is held; `gpio-privacy`, Amazon's
+  privacy driver, delivers the mute button. The mute LED is the privacy
+  driver's own, so the board states no mute LED GPIO: GPIO 444 here is an
+  audio pin, and exporting it silences the amplifier until reboot.
+- **Speaker.** `DL1_Playback` into a TAS2770, which has no amp switch. Its
+  digital volume (`PCM Playback Volume`, 0dB at 255) is held at unity and is
+  what silences it. Routes, the speaker path and the headphone path are read
+  from the unit's own `/system/vendor/etc/mixer_paths.xml`. The firmware runs
+  the Dot 2's 2048-frame period on it.
+- **Microphones.** `TDM_Capture`, 4 channels of S32_LE at 16kHz (24 bits
+  used), one microphone per corner and none in the centre, on two
+  tlv320aic3101 (ADC_A and ADC_B, which are also the only mutes). The wake
+  word listens on the first corner clockwise from the action button, ch1.
+  The playback loopback is its own PCM, `DL1_AWB_Record`, 2 channels of S16
+  at 48kHz, and it **must be open before the microphones**: the other way
+  round the amplifier loses its clock until reboot. The board states it as
+  `Loopback`; if it is not found the microphones are not opened at all.
+  It is also the echo canceller's reference, once the firmware has measured
+  the echo delay from the audio, and the software reference until then:
+  26-28 dB of cancellation against 8.5-17 dB (41C8, 2026-11-07). The firmware
+  reads it a period at a time, because a whole-buffer read repeated stale
+  audio.
+- **Light sensor.** tsl2572 on the IIO bus, `in_illuminance0_input`, which
+  reads lux as a decimal. The i2c bus also lists an opt3001 with no driver
+  bound.
+- **Bluetooth.** `/dev/stpbt`, MediaTek's node as on the Dot 2, but its
+  driver (`btmtk_fops_*` in the kernel log) returns 0 bytes from `read()`
+  when nothing is queued, so the firmware reads it through `poll(2)`
+  (@Starker3, #1044). Measured on one unit under stock FireOS 6.5.7.5
+  (2026-10-24): the proxy ran with 0 HCI errors, and Home Assistant saw 24
+  BLE devices through it in 30 s against 7 through its own adapter. The
+  driver is a module, `btmtksdio.ko`, for the MT7668 that also carries the
+  WiFi; emOS loads it after the WiFi modules and makes the node from its
+  uevent. Measured on 41C8 under emOS (2026-11-07): the scan starts about
+  30 s after power-on with no HCI errors, and Home Assistant takes adverts
+  through the Echo's proxy.
+- **Bluetooth address.** Each Echo's own, from idme `bt_mac_addr`, is loaded
+  into the chip at the start of every Bluetooth session; without it every
+  Dot 2 shares one default address. A new board gets this if its idme has
+  the address.

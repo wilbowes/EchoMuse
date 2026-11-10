@@ -5271,3 +5271,317 @@ the full acceptance run.
 was 0.9 MB. An add-on's `/data` shares Home Assistant's partition, so
 something else filled it. #995 asks the controller to show free space and
 stop its optional writes below 500 MB.
+
+## 2026-10-21 — an issue review that found its own sweep's mistakes, and "never mind" as the way to stop a reply
+
+**The 10-19 sweep closed four issues wrongly.** #688 was closed as "we're not
+adding stop words", under the 10-04 decision about English words matched in
+the transcript to stop a ringing timer. It asked something else: a way to stop
+a reply after a false wake from the TV, and on 09-29 we had said yes to a
+Voice PE-shaped stop detector for it. Wil reopened it on 10-20. #90 was closed
+for "no reply since August" when griley had replied on 08-11 with
+`last_kmsg` and the review was ours; #141 and #325 were closed for silence
+when our own last comment said the fault was unfixed. The rule now: close for
+silence only when the reporter owes the next move, decided per issue after
+reading the thread.
+
+**#90's crash is kernel memory corruption.** griley's log is an oops in
+`anon_vma_interval_tree_remove` ← `unlink_anon_vmas` ← `exit_mmap` as `sh`
+exits, at a garbage address (`e501600000000010`): the sensor read corrupts
+memory and the fault lands later in unrelated code. That fits ruhlmcu's
+watchdog resets (`wdt_by_pass_pwk`) about 90s after reading on two FireOS Dots
+of a new batch, `G090LF107`. Their emOS Dot surviving one read shows nothing,
+since it runs the same kernel. Which attribute does it is not known.
+
+**Stopping a reply: HA already has the Alexa behaviour, narrowly.** Wil's
+view: the natural response to a false wake is the wake word again and "stop"
+or "shut up", and a separately trained cancel word is not intuitive; the
+cancel model is held. On Alexa the cloud does that work; here it is Home
+Assistant. Read in home-assistant/intents and core: `HassNevermind` matches
+"never mind" and "nevermind" in English, its handler returns an empty reply,
+and the pipeline then skips TTS. "Stop" alone matches `HassMediaPause`; "be
+quiet" and "shut up" match nothing. With an LLM agent HA only tries its own
+sentences when "Prefer handling commands locally" is on.
+
+We ended that silent run as `no_tts` with the error cue. #1005 makes it
+`silent_reply`, ending on a brief solid green (Wil, after seeing the thinking
+ring go dark). On VVV, on the dev add-on: two "never mind" turns with nothing
+playing ended `silent_reply` in about 3s. Said over a reply it failed: the
+barge-in fired and cut the reply, but the new turn heard
+`" one quince. Never mind."`, its first 640ms at 63-68dB where a normal wake
+turn's speech gate opens at 560ms and this one opened at 80ms. Most likely the
+reply still playing through the 250ms arbitration hold before the flush. HA
+did not match the sentence and the LLM answered 11s later. Barge-in itself
+was hard to trigger over replies: five windows, peaks 0.414 and 0.315 over the
+0.25 bar without firing (two consecutive frames are needed; per-frame scores
+were not logged), one fired at 0.991. VVV runs #975's de-aliased reference
+and the louder volume law.
+
+Also from the review: #697's fastboot timeouts were TLP's USB autosuspend on
+the host (now in the FAQ); #712's layout was fixed by reinstalling amonet v2
+as a zip from TWRP, a second Echo; #1001 is the third 413 at Build emOS (#800);
+#423's deadlock was fixed by #878 in 2.26.1 and nobody had told the reporter.
+
+## 2026-10-22 — the BLE scan under live Sendspin, a boot image in pieces, and an Echo that woke on its own reply
+
+**#1004: under a live Sendspin source the BLE scan never ran.** Music
+Assistant streams a live source (Spotify Connect, radio, a plugin) at exactly
+the player's `min_buffer_ms`, 1862 ms measured against aiosendspin 9.1.1,
+and `MusicDuty` needed 2.5 s of lead before it would scan. Library tracks get
+up to 30 s, which is why it never showed in testing. #1009 sizes scan bursts
+from the lead itself, learns the reserve it needs (1–3 s), backs off at the
+cap, and has Sendspin ask for 4 s while the BLE proxy is on, at the cost of
+about 2 s of group start latency. On C95 with live silence through
+aiosendspin: 3.77–3.79 s held, no underruns, adverts about 0.9/s. URL radio
+through MA buffers about 9 s (an Icecast burst), so it does not reproduce the
+report; a real Spotify Connect run is still untried.
+
+**#800: the wizard's boot image goes up in 512 KB pieces** (#1010), because a
+reverse proxy in front of the add-on refused the single 9 MB POST with a 413
+(stock `nginx:alpine` does the same). The pieces are held in memory, taken
+once, and expire after 600 s. #1011 pinned CI runners to `ubuntu-24.04`, with
+a test that every pin holds, after a runner image change broke main's build.
+
+**#1008: the second ALS part, read safely.** On the `G090LF096` batch the
+light sensor is a TSL2584 reached through IIO. Its `calibrated_lux` attribute
+frees a pointer that `strsep` has moved (read in the mt8163 kernel source), and
+its `get_baseline()` leaks and logs two lines per lit read unless the idme
+`alscal` value contains `ams_0_0`. The firmware reads it only then and reports
+`unsafe` otherwise. It has not been run on a 2584 unit.
+
+**#841: a 7 s hold to pair** (#1012), and only when the Echo is not on the
+encrypted link. On VVV, 5.7 s and 9.5 s holds went to HA as a long press with
+no pairing request, the longer one because VVV is on the encrypted link. #1002 (kill only the LED controller's PID in
+`start_server.sh`) passed a dry run on VVV with both `ps` layouts.
+
+**VVV woke on its own reply.** With the stock-sound chain at level 87 it
+scored 0.923 on its own "tell me a story" answer, over playback at the barge
+bar, with echo attenuation at 7–17 dB while the canceller re-adapted. Replayed
+digitally, ordinary replies score about zero on every chain; through a linear
+model of the driver correction even the near misses ("jars" 0.99 before the
+speaker) fall back to 0.02–0.05. So the self-wake is acoustic, residual echo
+and distortion, not a wake-like tone. A harness to count self-wakes on the
+Echo's own replies was written; the acoustic comparison of old and new chains
+is still owed.
+
+## 2026-10-23 — a command run on from the wake word, and what a barge-in hears in the first quarter second
+
+**A command run on from the wake word lost its first word, quiet or not.**
+A bench build saved each private-listening session as the gate saw it, with
+three seconds before it. Of nine one-breath commands on VVV with nothing
+playing, the full captures transcribe whole and the sessions do not on five:
+"time is it?", "joke.", "the office light.", "office blind.", "mind.". The
+scorer crosses a few frames into the command, and the session started at the
+crossing. Replayed through HA's faster-whisper, a start 240–280 ms earlier
+gave all nine whole without "Jarvis". #1014 starts the session 260 ms before
+the crossing; live, five of five came through.
+
+**Two things moved the start by a frame.** The mic is read in 160 ms
+batches, so frames reach the gate in pairs stamped microseconds apart, with the
+pairs 130–190 ms apart; a start chosen by time landed at 240 or 320 ms. It is
+now counted in frames from the crossing frame. And a crossing at the barge
+bar, which needs two frames, was dated from the second, against what
+docs/listening.md said; that session started a frame late and "stop" became
+"Nope".
+
+**Over a reply, the first 320 ms of a barge session was the reply.** "Oh,
+never mind" broke HA's `HassNevermind` match; the burst sat at the reply
+voice's pitch, not the speaker's. The controller's flush comes a round trip
+later, so the Echo now cuts its own reply at the crossing. That alone did not
+remove the burst, since the ALSA ring and a period are already committed. A
+hold-back that dropped reply frames at the start of the session fixed the
+paused case and ate one-breath barges ("it." for "what time is it"). Once the
+session started earlier and the Echo cut its own reply, the paused case
+replayed clean without it, so it was removed before merging.
+
+**The ordering fix exposed two faults** (#1007). The reply can end inside the
+250 ms claim hold, so the turn recorded `ok` instead of `barged`; it is now
+marked at the flush. And the turn loop started the interrupting turn before
+the claim resolved, which killed it in 199 ms; it now waits for the decision,
+bounded at 3 s.
+
+**Anchoring on the score's peak is no better than the crossing.** Re-scored
+with openwakeword (the controller and the Echo agree to four decimals), the
+score plateaus at 0.99–1.00 for two to four frames, so the peak wanders. On
+38 dumps the best start was 37/38 whole for either anchor, and the crossing
+tolerated more error. What still fails is a one-word command over a reply:
+"stop" over a story was wrong 2 times in 5, and whisper flips on the same
+audio with a 20 ms change at its start. Dropping the ALSA ring at the cut,
+so less reply lies under the command, is the next step and is not built.
+
+Also: HA's satellite ignores the conversation id we send
+(`assist_satellite/entity.py`) and keeps one chat per satellite until it has
+been idle five minutes, so an LLM agent sees every turn of a testing session as
+one conversation; a local model looped one tool call to HA's ten-iteration
+limit and answered "Unable to get response". Rebuilding
+the dev add-on from plain main stopped it at start: its database is at schema
+v32 from the unmerged stock-sound branch, and the check refused before writing
+anything. A radar (Echo gen 2, FireOS 6, 32-bit kernel) is on the bench with
+root adb.
+
+## 2026-10-24 — radar in, a GA fix cut from the GA tag, and the radar's own speaker measured
+
+**Radar runs EchoMuse, on FireOS 6 and on emOS** (#1016, #1017, merged the
+evening of 10-23). From #687's port by @jcsnider and @vithurshanselvarajah,
+with @sascha-hemi's jack and bass findings and @colin715's runs, rebuilt as
+our own series: the speaker's differences are board data (a hardware mute the
+driver asserts at every open, a 117-byte codec filter read off the unit's own
+HAL config, a 70 Hz bass band from radar's own MBCL), one init for both
+boards, and the kernel patch checked by structure where #687 pinned one hash
+that refused both of our kernels. The second unit, 07MU, was provisioned by
+the wizard end to end and network-updated to `emos-v0.11-ea.1`, the first
+emOS Early Access (#1018). Its first boot on 0.10's init associated without
+the WMT calls #687 found necessary on NS6572; they are kept.
+
+**Every release download failed, for every controller** (#1021, reported with
+the cause by @volfyd). github.com's 302 to a release asset now carries a
+9,243-byte `Content-Security-Policy` header, and aiohttp refuses a header
+field over 8,190 bytes, so firmware OTA, the wizard's firmware step and the
+emOS update all failed while release polling, on api.github.com, kept offering
+the update. Main had moved 12 commits past 2.26.1, so 2.26.2 was cut from
+2.26.1's own commit with only the fix (`release/2.26.2`). The branch did not
+build at first: 2.26.1 predates the runner pins (#1011), and `ubuntu-latest`
+is now 26.04 with no `qemu-user-static`. On the UAT rig the 2.26.2 image
+downloaded v2.18.1 (12,591,808 bytes) and installed it on VVV, which came back
+in 6 s. The GA add-on's changelog then showed 2.27.0-ea.1's notes directly
+under 2.26.2's, because Supervisor shows the whole file; EA notes now live in
+the channel's own file (#1023).
+
+**07MU went back to stock FireOS 6 as the radar reference.** The XDA sequence
+installs, flips the active slot and installs again, but this TWRP marks the
+slot it wrote as active, so the flip sent the second install to B again; an
+extra install wrote A. `boot-root.zip` roots slot `_b` only, so the unit
+boots `_b`.
+
+**Radar's driver is not biscuit's, and stock's EQ says the same.** Through its
+own centre mic against the playback loopback (one placement, 0.18 dB between
+two sweeps): within +1 to +3 dB of 1 kHz from 160 Hz to 1 kHz, −10 dB at
+100 Hz, −28 dB at 63 Hz, where biscuit's is −18 dB at 250 Hz. Stock's FIR
+cuts where this measures peaks (−2.9 dB at 200 Hz against +2.8; −3.8 at 2 kHz
+against +4.6) and boosts the 3.15 kHz dip; the two disagree only at 1.25 kHz
+and 6.3 kHz, which one placement cannot settle. Its bass boost falls as the
+volume rises (+15 dB at 80 Hz at 50%, +5 at 100%), the opposite of biscuit's.
+Distortion is low from 300 Hz up and climbs fast below 150 Hz: at −6 dBFS a
+70 Hz tone's third harmonic is 3.7 dB under the tone. Stock answers that with
+four compressor bands at 70/200/3250 Hz, which map one to one onto the
+chain's bass guard and three upper bands. The stock-sound voicing moved into
+board data on a local branch so radar keeps the plain chain until its own is
+heard; a candidate fitted to these numbers is built and not yet played.
+
+## 2026-10-24 — a 9KB header, the Dot's own voicing in Early Access, and an approval that cut off its own install
+
+**Every download from a GitHub release failed on GA, and the dashboard still
+offered the update.** github.com now answers a release-asset download with a
+302 whose Content-Security-Policy header is 9,243 bytes; aiohttp refuses a
+header field over 8,190 by default. So every firmware OTA, wizard firmware
+step and emOS update died with "Got more than 8190 bytes" before the redirect
+was followed, while api.github.com's short headers kept release polling
+working. The change was GitHub's, some time between about 10-16 and 10-23.
+It went out as 2.26.2 from `release/2.26.2` (the first GA hotfix branch,
+2.26.1 plus the fix, bench-checked on the UAT rig), and the same fix is on
+main (#1021, #1022).
+
+**Early Access 2.27.0-ea.2 / v2.19.0-ea.2 is out, on 683cd60.** It carries
+the Dot's own voicing (#1026, part of #229, which stays open for field
+feedback), the second-sourced tsl2584tsv light sensor read over IIO (#1008,
+#90), the 7 s pairing hold (#1012, #841), and radar. Schema v32 resets the
+old Speech and Music presets and cannot be undone by an older controller,
+and the notes say so. Before the tags, voice turns on all four bench Echoes
+and a 7 s hold on VVV, which reached HA as a long press.
+
+**Radar panicked on every connect under the stock-sound build** (#1028).
+`DefaultParams` asks for the stock profile on every board and the output
+chain clears it only on its own copy, so `refreshStock` switched the stock
+volume law on for a board with no voicing and dereferenced nil. 035T restarted
+four times before it was found. The law now needs a voicing.
+
+**An approval cut off the install it started** (#1029). Approving a device
+bounces its link about 3 s after connect to hand over credentials, which
+landed in the middle of 035T's first wake word push: `Hey_Verona.onnx` arrived
+truncated ("md5 mismatch"), and the reconcile's 15-minute stamp, taken before
+the work, turned away the redial and every reconnect after it. The dashboard's
+**Install assets** then installed the file and told the user to restart the
+Echo, since nothing sent the config the scorer is built from; restarting the
+firmware over the console was what got it listening. A run that does not
+finish now gives the stamp back (an immediate rerun if the device has already
+redialled, otherwise a retry on the next connect after 60 s), and an install
+is followed by the config.
+
+**Radar's candidate voicing, modelled against stock** (07MU restored to stock
+FireOS 6, its chain read off the unit, the real Go chain rendered offline):
+at matched loudness the tone is within ±2 dB of stock from 125 Hz to 2 kHz,
+5–7 dB under it at 3.15 kHz, and about 4.5 dB quieter at 100%; a 10/12/14 dB
+ceiling narrows that to −3.6/−2.9/−2.2 dB. Not shipped: radar keeps the plain
+chain until it is measured in a second placement.
+
+Also: the "never mind" ring takes the scene's colour instead of a fixed green
+(#1030). For #1013, hostap 2.10 skips the deauth at deinit when WoWLAN is
+configured (`wpa_supplicant.c`), and the FireOS conf sets
+`wowlan_triggers=disconnect` where emOS's sets none. The controller build now
+also runs on `controller-ea/**` changes (#1027): 2.27.0-ea.2's release-prep
+commit had no image.
+
+## 2026-10-25 — the Dot 3 on emOS, and hearing its own wake word
+
+**The Dot 3 (donut, 41C8) boots emOS, and the reason it would not was two
+things in its bootloader** (#1034-#1036, from disassembly of its LK the night
+of 10-24). LK copies the boot header's cmdline into a 200-byte buffer, and
+stock's is already 199 bytes, so every appended parameter, `emos.system=`
+included, was silently dropped. And LK hands the kernel a ramdisk only in
+recovery mode, though it copies one to the header's address every boot. So the
+donut's image carries a short cmdline of its own: stock's `bootopt=` (kaeru
+reads it to pick the 64-bit kernel), `emos.system=`, and `initrd=` pointing at
+that copy for arm64's early initrd. The packer builds it, and its own output
+booted. The boot ring was wrong too: init drove biscuit's sysfs path for the
+ring, so on the donut the kernel's spinner ran for the whole boot. It now finds the `is31fl3236` by name, and
+reads the spinner's colours off the ring (the donut's are darker blues) so
+the handover waits for the head to reach the bottom on every board.
+
+**emOS had been destroying the cache filesystem on every boot.** Its trail was
+written raw from byte 1024 of cache, which is ext4's superblock. Biscuit's
+cache recovers from a backup group; the donut's 32 MB cache has none and would
+not mount again. The raw trail now stays in the first 1 KB, the padding ext4
+never touches, and the whole trail is a fixed 3 KB file on `/data`, written
+one block per line with no journal commit (Wil: minimise eMMC wear).
+
+**A warm reboot out of emOS hung the donut's next boot before init, and it was
+the ring.** Every hang followed a boot whose init still used biscuit's ring
+path, so the kernel's spinner was animating over i2c when the reset hit; none
+has followed since. Ruled out first: uptime, the read-only remount, WiFi down,
+kernel threads (all ignore signals), and the packer's GNU gzip kernel, which
+had looked guilty because its first test followed such a boot.
+
+**The donut reads its microphones and hears its own wake word** (#1037,
+#1038, #1040). The capture layout became board data, proven unchanged on
+biscuit by replaying a VVV capture through both: byte-identical. The donut's
+is 4 channels of S32 with one microphone beside each button and none in the
+centre (a tap on each hole), and its playback loopback must be running before
+the microphones open, or the amplifier loses its clock until reboot. On 41C8
+under FireOS: "Hey Jarvis" scored 0.99, 0.73 and 0.53 on its own microphone,
+mute held, and capture ran 60.2 s of audio in 60.0 s. The wake models would
+not install at first: the controller's transfer looked only for busybox or
+Python to decode with, and the donut's FireOS has neither, though its own
+`base64` works (#1039). The loopback carries exactly the samples played, so it
+is the hardware echo reference still to be wired in.
+
+**The donut's stock sound, read off 41C8 and measured once.** Stock lifts the
+bass about 20 dB at 80-160 Hz up to 60% volume and eases it to 9 dB at 100%,
+cuts 7 dB at 2.5 kHz, and lifts the treble 16-19 dB above 8 kHz; its
+compressor runs at 70/500/7500 Hz with +5 dB in. A 19-second sweep at
+-15 dBFS through its own four microphones agrees with stock's EQ below 2 kHz;
+above it the microphones, on top of the unit, disagree with each other by
+5-9 dB. A candidate voicing fitted to stock's 70% curve (0.43 dB RMS) matches
+stock's loudness at 100% in the model and is within 3 dB on tone; it waits on
+a listen.
+
+**Open:** the first FireOS boot after emOS on 41C8 had no WiFi, with a stale
+root-owned control socket left by emOS's supplicant in
+`/data/misc/wifi/sockets/`. Removing it alone did not bring WiFi back; the
+reboot after it did, so the socket and the WiFi chip's state after a warm
+reboot are both still in the frame.
+
+---
+
+**Archived 2026-11-03.** No entries after 2026-10-25. Findings since then
+are in `docs/history/` as dated bullets under the heading they belong to; the
+why of each change is in its commit.

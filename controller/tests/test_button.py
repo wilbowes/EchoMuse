@@ -108,3 +108,45 @@ def test_off_by_default_is_the_old_behaviour():
     rather than emitting to an entity HA was never offered."""
     assert decide(held_ms=10, tap_event=False) == em_button.TURN
     assert decide(held_ms=10, turn_active=True, tap_event=False) == em_button.CANCEL
+
+
+# ── No microphone ────────────────────────────────────────────────────────────
+
+def test_no_mic_starts_no_turn_and_cancels_nothing():
+    """A turn on an Echo that cannot hear streams nothing and times out."""
+    for muted in (False, True):
+        for turn_active in (False, True):
+            assert em_button.decide(held_ms=0, hold_ms=HOLD_MS, muted=muted,
+                                    turn_active=turn_active, has_mic=False) == em_button.NO_MIC
+
+
+def test_no_mic_still_forwards_holds_and_tap_events():
+    """Not speech, so HA automations on the button keep working."""
+    assert em_button.decide(held_ms=800, hold_ms=HOLD_MS, muted=False,
+                            turn_active=False, has_mic=False) == em_button.HOLD
+    assert em_button.decide(held_ms=0, hold_ms=HOLD_MS, muted=False,
+                            turn_active=False, tap_event=True, has_mic=False) == em_button.TAP_EVENT
+
+
+def test_the_controller_passes_the_mic_capability_and_handles_no_mic():
+    import re
+    import _sources
+    body = _sources.code_only(_sources.def_source("handle_button_event"))
+    assert re.search(r"has_mic\s*=\s*device\.mic_capable", body)
+    assert "em_button.NO_MIC" in body
+
+
+def test_an_echo_with_no_mic_is_not_listened_to_and_gets_no_wake_word_install():
+    """Before the private-listening branch, which would send mic_start to an
+    Echo that cannot hear and log that it is listening privately; and before
+    the wake-word runtime install, which it can never use."""
+    import re
+    import _sources
+    loop = _sources.code_only(_sources.def_source("wake_word_listener"))
+    no_mic, private = loop.find("device.mic_capable"), loop.find("device.private_listening")
+    assert 0 <= no_mic < private, "the no-mic branch must come first"
+    waits = _sources.code_only(_sources.def_source("_no_mic"))
+    assert "mic_start" not in waits
+    sync = _sources.code_only(_sources.def_source("em_oww_sync.reconcile"))
+    assert re.search(r"not live\.mic_capable", sync)
+

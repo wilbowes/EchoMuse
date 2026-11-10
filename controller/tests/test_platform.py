@@ -209,3 +209,43 @@ def test_shell_lock_release_is_ownership_checked():
     # and surfacing as an empty result three steps away.
     assert "locks[device_id].release()" not in _sources.all_code(), \
         "an unguarded shell-lock release is back"
+
+
+def _probe(tmp_path, tools):
+    """Run the transfer's decoder probe in sh with only `tools` on PATH."""
+    import os, shutil, subprocess
+    import em_shell
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    for name, script in tools.items():
+        f = bin_ / name
+        if script is None:
+            os.symlink(shutil.which(name), f)
+        else:
+            f.write_text("#!/bin/sh\n" + script)
+            f.chmod(0o755)
+    out = subprocess.run(["/bin/sh", "-c", em_shell._DECODER_PROBE],
+                         env={"PATH": str(bin_)}, capture_output=True, text=True)
+    return out.stdout.strip()
+
+
+def test_a_plain_base64_is_a_decoder(tmp_path):
+    """
+    The Dot 3 runs FireOS 6 with no busybox, and its toybox base64 is the only
+    decoder it has: without this tier the wake word models never installed on
+    one (41C8, 2026-10-25).
+    """
+    assert _probe(tmp_path, {"base64": None}) == "DECODER:base64"
+
+
+def test_busybox_still_comes_first(tmp_path):
+    assert _probe(tmp_path, {"base64": None,
+                             "busybox": 'shift; exec base64 "$@"'}) == "DECODER:busybox"
+
+
+def test_a_base64_that_does_not_decode_is_not_used(tmp_path):
+    assert _probe(tmp_path, {"base64": "cat"}) == "DECODER:none"
+
+
+def test_no_decoder_is_reported_as_none(tmp_path):
+    assert _probe(tmp_path, {}) == "DECODER:none"

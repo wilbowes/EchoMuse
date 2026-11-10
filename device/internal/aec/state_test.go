@@ -13,7 +13,7 @@ import (
 // runs it. tailMs is the configured (software tap) length, which the
 // hardware path does not use.
 func hwCanceller(tailMs int) *Canceller {
-	c := New()
+	c := New(NumMics)
 	c.SetParams(true, 0, tailMs)
 	c.SetHardwareRef(true)
 	return c
@@ -69,7 +69,7 @@ func TestLoadedStateCancelsFromTheFirstFrame(t *testing.T) {
 
 func TestImportRefusesAMismatchedFilter(t *testing.T) {
 	saved, _ := hwCanceller(300).ExportState()
-	sw := New()
+	sw := New(NumMics)
 	sw.SetParams(true, 0, 300) // software tap: a 300ms filter
 	if err := sw.ImportState(saved); err == nil {
 		t.Fatal("a hardware-path state must not load into a software-tap filter")
@@ -116,7 +116,7 @@ func TestImportRefusesGarbage(t *testing.T) {
 }
 
 func TestExportNeedsARunningCanceller(t *testing.T) {
-	if _, err := New().ExportState(); err == nil {
+	if _, err := New(NumMics).ExportState(); err == nil {
 		t.Fatal("export from a disabled canceller must fail")
 	}
 }
@@ -127,7 +127,7 @@ func TestEchoPathIsSavedAndLoadedAcrossARestart(t *testing.T) {
 	path := t.TempDir() + "/aec_echo_path.bin"
 	signal := synth(200 * FrameSize)
 
-	first := New()
+	first := New(NumMics)
 	first.SetStatePath(path)
 	first.SetParams(true, 0, 300)
 	first.SetHardwareRef(true)
@@ -141,7 +141,7 @@ func TestEchoPathIsSavedAndLoadedAcrossARestart(t *testing.T) {
 		t.Fatal("a converged filter was not saved")
 	}
 
-	restarted := New()
+	restarted := New(NumMics)
 	restarted.SetStatePath(path)
 	restarted.SetParams(true, 0, 300)
 	restarted.SetHardwareRef(true)
@@ -158,7 +158,7 @@ func TestEchoPathIsNotRewrittenWithinADay(t *testing.T) {
 	if err := os.WriteFile(path, []byte("recent"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	c := New()
+	c := New(NumMics)
 	c.SetStatePath(path)
 	c.SetParams(true, 0, 300)
 	c.SetHardwareRef(true)
@@ -173,7 +173,7 @@ func TestEchoPathIsNotRewrittenWithinADay(t *testing.T) {
 // transfer, so it is never saved.
 func TestSoftwareTapNeverSaves(t *testing.T) {
 	path := t.TempDir() + "/aec_echo_path.bin"
-	c := New()
+	c := New(NumMics)
 	c.SetStatePath(path)
 	c.SetParams(true, 0, 300)
 	c.maybeSaveLocked(30, true)

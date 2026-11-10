@@ -292,5 +292,28 @@ const armB = [{ name: "boot_b", arch: "arm" }];
   check("release and layout must BOTH say FireOS 6", !r.ok);
 }
 
+// ── radar (Echo 2nd gen): one unlock, FireOS 6 only ────────────────────────
+{
+  const r = (p, layout, heads) => donorVerdict({ probe: p, layout, heads, files: FILES,
+                                                 board: "radar" });
+  const armBoth = [{ name: "boot_a", arch: "arm" }, { name: "boot_b", arch: "arm" }];
+  // 035T's lk_a head (2026-10-23): MTK magic and a length neither amonet-biscuit has.
+  const RADAR_LK = "88168858f86f0500";
+  const ok = r(probe({ lk: RADAR_LK }), "v2", armBoth);
+  check("radar with FireOS 6 in both slots builds, as generation 6", ok.ok && ok.gen === 6);
+  check("radar does not need lk_a to be readable", r(probe({ lk: "" }), "v2", armBoth).ok);
+  check("radar's LK is never read as amonet-biscuit's",
+        !donorVerdict({ probe: probe({ lk: RADAR_LK }), layout: "v2", heads: armBoth,
+                        files: FILES }).ok);
+  check("radar still needs FireOS 6 in BOTH slots",
+        !r(probe({ lk: RADAR_LK, b: FOS5 }), "v2", armBoth).ok);
+  check("radar refuses a 64-bit kernel",
+        !r(probe({ lk: RADAR_LK }), "v2", [{ name: "boot_a", arch: "arm64" }]).ok);
+  check("radar refuses amonet-biscuit's _x layout", !r(probe({ lk: RADAR_LK }), "v1", armBoth).ok);
+  check("radar still needs the TWRP version", !r(probe({ lk: RADAR_LK, twrp: "" }), "v2", armBoth).ok);
+  const bad = r(probe({ lk: RADAR_LK, b: FOS5 }), "v2", armBoth);
+  check("radar's refusal names the Echo 2nd gen", /Echo 2nd gen/.test(bad.reason));
+}
+
 if (fails) { console.log(`\n${fails} failure(s)`); process.exit(1); }
 console.log("\nall passed");

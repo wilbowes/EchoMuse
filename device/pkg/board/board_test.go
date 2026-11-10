@@ -30,6 +30,10 @@ func TestDetectMatchesDeviceTypeExactly(t *testing.T) {
 		"A3S5BH2HU6VAYF\n":   Biscuit,
 		"\x00A3S5BH2HU6VAYF": nil,
 		"A3S5BH2HU6VAYF":     Biscuit,
+		"A7WXQPH584YP\x00":   Radar,
+		"A32DOYMUN6DTXA\x00": Donut,
+		"A32DOYMUN6DTX":      nil,
+		"A7WXQPH584YPX":      nil,
 		"A3S5BH2HU6VAYFX":    nil,
 		"a3s5bh2hu6vayf":     nil,
 		"":                   nil,
@@ -209,4 +213,16 @@ func contains(s []string, v string) bool {
 		}
 	}
 	return false
+}
+
+// Every board must be told apart from every other by idme alone, and report a
+// name the controller can key on.
+func TestKnownBoardsAreDistinct(t *testing.T) {
+	ids, types := map[string]bool{}, map[string]bool{}
+	for _, b := range Known {
+		if b.ID == "" || b.ID == "unknown" || ids[b.ID] || types[b.DeviceTypeID] || b.Hardware == nil {
+			t.Errorf("board %+v: empty, reserved or duplicate identity, or no hardware", b)
+		}
+		ids[b.ID], types[b.DeviceTypeID] = true, true
+	}
 }

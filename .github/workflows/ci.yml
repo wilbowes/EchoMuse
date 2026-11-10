@@ -13,10 +13,10 @@ permissions:
 jobs:
   controller-tests:
     name: Controller unit tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       # The controller's own imports (aiohttp, websockets, bcrypt, zeroconf,
@@ -47,13 +47,18 @@ jobs:
       - name: Coverage floors
         working-directory: controller
         run: python tools/coverage_floor.py check coverage.json
+      # The bench's scoring rules (#892). Its runs need captures, which stay
+      # off the repository; the rules that score them are tested here.
+      - name: Audio bench metrics
+        working-directory: tools/audio_bench
+        run: python -m pytest test_metrics.py -q
 
   forge-metadata-tests:
     name: ONNX metadata round trip
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       # Keep runtime/model dependencies out of the lightweight controller suite.
@@ -62,10 +67,10 @@ jobs:
 
   controller-lint:
     name: Controller lint (undefined names)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - name: Install pyflakes
@@ -100,10 +105,10 @@ jobs:
 
   dashboard-tests:
     name: Dashboard logic tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # No setup-node step: ubuntu-latest ships a node, and this test needs
+      # No setup-node step: ubuntu-24.04 ships a node, and this test needs
       # nothing beyond the standard library. The dashboard is otherwise
       # untested by construction — it compiles to a single classic script
       # with no module boundary to import across — so this covers the pure
@@ -119,8 +124,10 @@ jobs:
           node controller/tests/web_usb_blocked.test.mjs
           node controller/tests/emos_md5.test.mjs
           node controller/tests/boot_image_length.test.mjs
+          node controller/tests/send_in_chunks.test.mjs
           node controller/tests/number_field.test.mjs
           node controller/tests/unlock_verdict.test.mjs
+          node controller/tests/echo_board.test.mjs
           node controller/tests/slot_choice.test.mjs
           node controller/tests/server_binary.test.mjs
           node controller/tests/fetch_deadline.test.mjs
@@ -152,7 +159,7 @@ jobs:
 
   device-tests:
     name: Device Go tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -179,10 +186,10 @@ jobs:
 
   python-deps-audit:
     name: Python dependency audit
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - name: Install pip-audit
@@ -209,7 +216,7 @@ jobs:
 
   device-vulncheck:
     name: Device Go vulnerability check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -253,7 +260,7 @@ jobs:
 
   controller-image:
     name: Controller image builds
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -344,7 +351,7 @@ jobs:
 
   controller-imports:
     name: Controller modules import and the controller boots
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # WHY THIS EXISTS: the two largest files in the controller have no
@@ -479,7 +486,7 @@ jobs:
 
   dashboard-console-errors:
     name: Dashboard console errors (headless Chromium)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # WHY THIS EXISTS: the dashboard is verified by a person opening it and
@@ -537,6 +544,33 @@ jobs:
           echo "::error::controller did not report ready within 90s"
           docker logs em-uat
           exit 1
+      # The dashboard reads /api/releases/latest on load, and on a fresh
+      # database that endpoint answers only after the controller has fetched
+      # GitHub's releases list, unauthenticated. From a shared runner IP that
+      # fetch fails intermittently (rate limit), the endpoint 404s, the browser
+      # logs it and the walk fails on a PR that touched nothing (#1148 three
+      # times in a row, feat/donut-bt on 2026-11-07). Seeding the cache with
+      # last_update_check = now makes the endpoint answer from the database for
+      # the hour, as it does on any controller that has polled once; the poll
+      # loop's own fetch may still fail, harmlessly. update_check_interval is
+      # left alone, so the Updates panel renders its normal state, not "checks
+      # off". Written with sqlite3 rather than em_db, whose init() runs the
+      # migrations; `-i` or the heredoc never reaches python.
+      - name: Seed the release cache, so the walk does not depend on GitHub
+        run: |
+          docker exec -i em-uat python - <<'EOF'
+          import os, sqlite3, time
+          db = sqlite3.connect(os.environ["DB_PATH"])
+          with db:
+              db.executemany(
+                  "INSERT OR REPLACE INTO system_config (key, value) VALUES (?, ?)",
+                  [("latest_version", "v0.0.0"),
+                   ("latest_binary_url",
+                    "https://github.com/wilbowes/EchoMuse/releases/download/v0.0.0/server"),
+                   ("latest_notes", "Seeded by CI; never downloaded."),
+                   ("last_update_check", str(time.time()))])
+          print("release cache seeded")
+          EOF
       # The browser is the PINNED PLAYWRIGHT IMAGE BY DIGEST, which is the whole
       # reason for a container rather than `npx playwright install`: the digest
       # addresses the exact Chromium build (the script prints which), so this
@@ -586,6 +620,11 @@ jobs:
               npm install --no-save --silent playwright@1.63.0
               cp /uat/console_check.mjs .
               node console_check.mjs'
+      # A console problem is a symptom; the controller log says why (a failed
+      # fetch, a traceback). Without it the 404 above could only be inferred.
+      - name: Controller log, on failure
+        if: failure()
+        run: docker logs em-uat 2>&1 | tail -n 300
       - name: Stop the controller
         if: always()
         run: |
@@ -594,7 +633,7 @@ jobs:
 
   device-firmware-build:
     name: Device and emOS builds (pinned compiler)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -689,7 +728,7 @@ jobs:
 
   emos-checks:
     name: emOS init checks (ring and password)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # WHY THIS EXISTS: emos/ is ~1,900 lines of C that until now nothing in
@@ -740,6 +779,19 @@ jobs:
           /tmp/cmdlinecheck
           cc -O2 -o /tmp/serialcheck emos/init/serialcheck.c
           /tmp/serialcheck
+      # DNS comes from the DHCP lease (#1066), by RFC 2131/2132/3396. A wrong
+      # parse keeps the address and the controller and loses only names.
+      - name: DNS is taken from the lease, by the spec
+        run: |
+          cc -O2 -o /tmp/dnscheck emos/init/dnscheck.c
+          /tmp/dnscheck
+      # Every node in /dev comes from the kernel's uevents. A node with the
+      # wrong numbers opens something else: on the Echo Dot 3 the old table's
+      # ttyGS0 was the jack detector, and the USB console sat silent.
+      - name: Device nodes are made the way the kernel describes them
+        run: |
+          cc -O2 -o /tmp/devcheck emos/init/devcheck.c
+          /tmp/devcheck
       # The trial mark is written by the controller and read by init, and it
       # decides whether an image updated over the network is rolled back. Read
       # as absent, a broken image is promoted; a leftover read as live rolls a
@@ -820,7 +872,7 @@ jobs:
 
   device-vet:
     name: Device go vet
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

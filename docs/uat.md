@@ -378,7 +378,7 @@ the end. See [led-ring-states.md](led-ring-states.md).
 
 ### I1 · Pairing
 **Do:** Device → Status. If Link reads `plain ws`, hold the Echo's action
-button for 5 seconds, then press **Approve pairing** (on older firmware,
+button for 7 seconds, then press **Approve pairing** (on older firmware,
 press **Pair**).
 **Expect:** The device reconnects within a few seconds and Link reads
 `wss (TLS)`.

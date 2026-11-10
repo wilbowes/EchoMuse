@@ -38,6 +38,7 @@ DEFAULTS = {
     "bands": [0.0] * 8, "loudness": False,
     "guardEnabled": True, "guardDb": -30.0,
     "limiterEnabled": True, "limiterThreshold": -1.0, "limiterRelease": 150.0,
+    "stockSound": False,
 }
 
 
@@ -96,6 +97,16 @@ CASES = [
          [3, {"limiterEnabled": False}],
          [4, {"limiterEnabled": True, "limiterThreshold": 0.0}],
      ]},
+    # The stock-sound profile (#229): driver correction and the three bands
+    # above the guard. Set from the first chunk only: the Python fixes its
+    # extra crossovers at construction (em_mbc.BassGuard upper_bands).
+    {"name": "stock_speech", "signal": "speechlike", "chunks": 8, "seed": 9,
+     "schedule": [[0, {"stockSound": True}]]},
+    {"name": "stock_bursts_silence", "signal": "bursts", "chunks": 8, "seed": 10,
+     "schedule": [[0, {"stockSound": True}]]},
+    {"name": "stock_bypassed", "signal": "sweep", "chunks": 6, "seed": 11,
+     "schedule": [[0, {"stockSound": True, "guardEnabled": False,
+                       "limiterEnabled": False}]]},
     # Every kind of mid-stream change, each on its own chunk boundary.
     {"name": "live_changes", "signal": "speechlike", "chunks": 20, "seed": 7,
      "schedule": [
@@ -128,9 +139,11 @@ def render(case):
                              release_ms=p0["limiterRelease"],
                              enabled=p0["limiterEnabled"])
     guard = em_mbc.BassGuard(FS, bass_guard_db=p0["guardDb"],
-                             enabled=p0["guardEnabled"])
+                             enabled=p0["guardEnabled"],
+                             upper_bands=p0["stockSound"])
     chain = em_eq.StreamingEQ(FS, p0["bands"], p0["loudness"],
-                              limiter=lim, guard=guard)
+                              limiter=lim, guard=guard,
+                              driver_correction=p0["stockSound"])
     out = []
     for c in range(case["chunks"]):
         p = _params_at(case["schedule"], c)
@@ -172,6 +185,20 @@ def main():
     with open(os.path.join(HERE, "vectors.json"), "w") as f:
         json.dump(manifest, f, indent=1)
         f.write("\n")
+    voice_filter()
+
+
+def voice_filter():
+    """The voice plane's filter (em_eq.voice_sos) on speech-like input, in
+    float: it runs before the mix, so it has no S16 output of its own."""
+    from scipy.signal import sosfilt
+    x = _signal("speechlike", 4, 12)
+    y = sosfilt(em_eq.voice_sos(FS), x.astype(np.float64))
+    for name, data in (("voice_filter.in.s16.gz", x.astype("<i2")),
+                       ("voice_filter.out.f64.gz", y.astype("<f8"))):
+        with open(os.path.join(HERE, name), "wb") as f, gzip.GzipFile(fileobj=f, mode="wb",
+                                                                    mtime=0) as gz:
+            gz.write(data.tobytes())
 
 
 if __name__ == "__main__":

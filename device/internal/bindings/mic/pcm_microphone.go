@@ -3,8 +3,12 @@
 package mic
 
 import (
+	"encoding/binary"
+	"unsafe"
+
 	"context"
 	"errors"
+	"github.com/wilbowes/EchoMuse/internal/echoref"
 	"log"
 	"os/exec"
 	"sync"
@@ -17,36 +21,92 @@ import (
 	pkgmic "github.com/wilbowes/EchoMuse/pkg/mic"
 )
 
-// rawTap receives every raw 9-channel batch, and is nil in release builds.
+// rawTap receives every raw capture batch, and is nil in release builds.
 // Only rawtap_bench.go sets it (build tag bench): it records the mics to
 // disk, which release firmware must be unable to do.
 var rawTap func([]byte)
 
+// rawLoopTap receives every loopback chunk, and is nil in release builds.
+var rawLoopTap func([]byte)
+
 // PcmMicrophone opens the ALSA device once and fans out to multiple subscribers.
 // Callers register via Listen(); each gets their own buffered channel.
 type PcmMicrophone struct {
-	device *tinyalsa.AlsaDevice
-	mu     sync.Mutex
-	subs   []chan []byte
+	device        *tinyalsa.AlsaDevice
+	bytesPerFrame int
+	mu            sync.Mutex
+	subs          []chan []byte
+
+	// aligner is the separate loopback as an echo reference (echoref), nil
+	// on a board whose loopback is in the microphone frame or absent.
+	aligner *echoref.Aligner
+	// recent maps the last batches the fan-out delivered to their position
+	// in the stream, for BatchIndex.
+	idxMu  sync.Mutex
+	recent [64]batchPos
+	next   int
+}
+
+type batchPos struct {
+	p   unsafe.Pointer
+	idx int64
+}
+
+// firstChannel is channel 0 of a capture batch as int16: the top 16 bits of
+// each frame's first sample, whatever its width (S32 or S24_3LE, both
+// little-endian).
+func firstChannel(buf []byte, frames, bytesPerFrame int) []int16 {
+	w := bytesPerFrame / board.CurrentLayout().Mics.Channels
+	out := make([]int16, frames)
+	for i := range out {
+		o := i*bytesPerFrame + w - 2
+		out[i] = int16(binary.LittleEndian.Uint16(buf[o:]))
+	}
+	return out
+}
+
+// EchoAligner implements mic.EchoAligned.
+func (p *PcmMicrophone) EchoAligner() *echoref.Aligner { return p.aligner }
+
+// BatchIndex implements mic.EchoAligned.
+func (p *PcmMicrophone) BatchIndex(batch []byte) (int64, bool) {
+	if len(batch) == 0 {
+		return 0, false
+	}
+	k := unsafe.Pointer(&batch[0])
+	p.idxMu.Lock()
+	defer p.idxMu.Unlock()
+	for _, r := range p.recent {
+		if r.p == k {
+			return r.idx, true
+		}
+	}
+	return 0, false
 }
 
 // NewMicrophone returns the pre-configured microphone alsa device and starts
 // the permanent ALSA read loop.
 func NewMicrophone() (*PcmMicrophone, error) {
 	// The capture PCM is found by name (pkg/board), never by device number.
-	capture := board.CurrentLayout().Capture
+	layout := board.CurrentLayout()
+	capture := layout.Capture
 	if capture == nil {
-		return nil, errors.New("mic: capture PCM not found on this board")
+		return nil, errors.New("no microphone this firmware can read on this board")
 	}
-	device := tinyalsa.NewDevice(capture.Card, capture.Device, pcm.Config{
-		Channels:    9,
+	cfg := pcm.Config{
+		Channels:    layout.Mics.Channels,
 		SampleRate:  16000,
 		PeriodSize:  512,
 		PeriodCount: 5,
 		Format:      tinyalsa.PCM_FORMAT_S24_3LE,
-	})
+	}
+	if layout.Mics.Format == board.S32LE {
+		cfg.Format = tinyalsa.PCM_FORMAT_S32_LE
+	}
+	device := tinyalsa.NewDevice(capture.Card, capture.Device, cfg)
 	m := &PcmMicrophone{
-		device: &device,
+		device:        &device,
+		bytesPerFrame: layout.Mics.Channels * layout.Mics.Format.Bytes(),
 	}
 	if err := m.Init(); err != nil {
 		return nil, err
@@ -66,8 +126,105 @@ func (p *PcmMicrophone) Init() error {
 	// own noise floor — with a perfectly healthy ALSA clock, which is what
 	// makes it so hard to see. See the codec package.
 	codec.EnsureRoutes()
+	l := board.CurrentLayout()
+	if l.Loopback != nil {
+		p.aligner = echoref.New()
+	}
+	if err := openLoopback(l, p.aligner); err != nil {
+		return err
+	}
 	go p.readLoop()
 	return nil
+}
+
+// openLoopback opens the board's playback loopback, if it states one, and
+// returns once it is delivering audio, so that it is running before the
+// microphones open: the Dot 3's amplifier loses its clock until reboot the
+// other way round (41C8, 2026-10-24). It is read for as long as the process
+// runs; nothing uses its audio yet.
+//
+// It is retried for a few seconds because "stop mixer" returns before
+// Amazon's mixer has let the PCM go, and the first open then fails at once
+// (41C8, 2026-10-25).
+func openLoopback(l *board.Layout, al *echoref.Aligner) error {
+	if l.Loopback == nil {
+		return nil
+	}
+	for try := 1; ; try++ {
+		stream, err := startLoopback(l)
+		if err == nil {
+			log.Printf("mic: loopback open at card %d device %d, before the microphones (try %d)",
+				l.Loopback.Card, l.Loopback.Device, try)
+			go drainLoopback(stream, l.LoopbackRate, 2*l.LoopbackChs, al)
+			return nil
+		}
+		if try == loopbackTries {
+			return err
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+const loopbackTries = 8
+
+// drainLoopback reads the loopback for the life of the process and logs the
+// mic loop's audio-vs-wall ledger for it once a minute (see readLoop's note
+// on what the sign means).
+func drainLoopback(stream chan []byte, rate, bytesPerFrame int, al *echoref.Aligner) {
+	var first, last time.Time
+	var frames int64
+	for audio := range stream {
+		if al != nil {
+			al.PushLoopback(audio)
+		}
+		if rawLoopTap != nil {
+			rawLoopTap(audio)
+		}
+		now := time.Now()
+		if first.IsZero() {
+			first, last = now, now
+			continue // the ledger starts at the first arrival, as the mic's does
+		}
+		frames += int64(len(audio) / bytesPerFrame)
+		if now.Sub(last) >= time.Minute {
+			wall := now.Sub(first)
+			audioDur := time.Duration(frames) * time.Second / time.Duration(rate)
+			log.Printf("[mic] loopback clock: %.1fs audio over %.1fs wall (skew %+dms)",
+				audioDur.Seconds(), wall.Seconds(), (wall - audioDur).Milliseconds())
+			last = now
+		}
+	}
+}
+
+// startLoopback opens the loopback once and waits for its first audio.
+func startLoopback(l *board.Layout) (chan []byte, error) {
+	dev := tinyalsa.NewDevice(l.Loopback.Card, l.Loopback.Device, pcm.Config{
+		Channels:    l.LoopbackChs,
+		SampleRate:  l.LoopbackRate,
+		PeriodSize:  768,
+		PeriodCount: 10,
+		Format:      tinyalsa.PCM_FORMAT_S16_LE,
+	})
+	stream := make(chan []byte, 40)
+	go func() {
+		// A period per read, the ring as slack. A whole-ring read is lapped
+		// by the hardware and silently repeats stale audio: 144 ms and 32 ms
+		// discontinuities a minute on 41C8 (2026-11-07), which no echo
+		// reference survives.
+		if err := dev.GetAudioStreamChunked(dev.DeviceConfig, 768, 768, stream); err != nil {
+			log.Printf("mic: loopback stream error: %v", err)
+		}
+		close(stream)
+	}()
+	select {
+	case _, ok := <-stream:
+		if !ok {
+			return nil, errors.New("the loopback that must open before the microphones did not start")
+		}
+	case <-time.After(2 * time.Second):
+		return nil, errors.New("the loopback that must open before the microphones delivered nothing in 2s")
+	}
+	return stream, nil
 }
 
 // readLoop opens the ALSA device and reads periods forever, fanning each
@@ -114,7 +271,7 @@ func (p *PcmMicrophone) readLoop() {
 	}()
 
 	rate := int64(p.device.DeviceConfig.SampleRate)
-	bytesPerFrame := p.device.DeviceConfig.Channels * 3 // S24_3LE
+	bytesPerFrame := p.bytesPerFrame
 	var (
 		firstArrival time.Time
 		lastArrival  time.Time
@@ -158,6 +315,15 @@ func (p *PcmMicrophone) readLoop() {
 		// library reused one buffer, and a batch still queued in stream was
 		// overwritten by the next read — repeated or torn audio (#607).
 		buf := audio
+		if len(buf) > 0 {
+			p.idxMu.Lock()
+			p.recent[p.next%len(p.recent)] = batchPos{unsafe.Pointer(&buf[0]), framesTotal - frames}
+			p.next++
+			p.idxMu.Unlock()
+		}
+		if p.aligner != nil {
+			p.aligner.Observe(framesTotal-frames, firstChannel(buf, int(frames), bytesPerFrame))
+		}
 		if rawTap != nil {
 			rawTap(buf)
 		}

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/wilbowes/EchoMuse/internal/outchain"
+	"github.com/wilbowes/EchoMuse/pkg/board"
 )
 
 func settledVolume(level int) *softVolume {
@@ -29,7 +30,7 @@ func renderResponse(voice, music []byte, response *responseGain, volume *softVol
 	period.fillGains(gains)
 	var mixer Mixer
 	mixer.SetGainImmediate(unityGain)
-	wide := mixer.MixResponse(make([]float64, frames*2), voice, music, unityGain, gains)
+	wide := mixer.MixResponse(make([]float64, frames*2), voice, music, unityGain, gains, nil)
 	if chain != nil {
 		chain.ProcessFloat(wide, gains)
 	}
@@ -73,7 +74,7 @@ func TestResponseGainIsAppliedBeforeMix(t *testing.T) {
 	responsePeriod.fillGains(gains)
 	var mixer Mixer
 	mixer.SetGainImmediate(unityGain)
-	wide := mixer.MixResponse(make([]float64, 16), period(8, 10000), period(8, 1000), unityGain, gains)
+	wide := mixer.MixResponse(make([]float64, 16), period(8, 10000), period(8, 1000), unityGain, gains, nil)
 	if got := wide[14]; got < 40809 || got > 40813 {
 		t.Fatalf("pre-mix voice gain got %.1f, want about 40811", got)
 	}
@@ -164,7 +165,7 @@ func TestResponsePeriodUsesOneVolumeTarget(t *testing.T) {
 	volume.set(1)
 	var mixer Mixer
 	mixer.SetGainImmediate(unityGain)
-	wide := mixer.MixResponse(make([]float64, frames*2), period(frames, 30000), nil, unityGain, gains)
+	wide := mixer.MixResponse(make([]float64, frames*2), period(frames, 30000), nil, unityGain, gains, nil)
 	out := make([]byte, frames*4)
 	volume.applyFloat(wide, out, volumeTarget)
 
@@ -187,6 +188,34 @@ func TestMusicKeepsDeviceVolumeUnderBoostedVoice(t *testing.T) {
 		actual, want := sampleAt(got, i, 0), sampleAt(plain, i, 0)
 		if actual < want-1 || actual > want+1 {
 			t.Fatalf("frame %d: music moved from %d to %d", i, want, actual)
+		}
+	}
+}
+
+// The stock-sound voice filter shapes the voice only: music summed under it
+// arrives untouched, and the voice is exactly the filter's output.
+func TestMixResponseFiltersVoiceNotMusic(t *testing.T) {
+	const frames = 64
+	gains := make([]float64, frames)
+	for i := range gains {
+		gains[i] = 1
+	}
+	var mixer Mixer
+	mixer.SetGainImmediate(unityGain)
+	got := mixer.MixResponse(make([]float64, frames*2), period(frames, 0), period(frames, 1000), unityGain,
+		gains, outchain.NewVoiceFilter(48000, board.BiscuitVoicing()))
+	for i, x := range got {
+		if x != 1000 {
+			t.Fatalf("sample %d: music came out %v, want 1000", i, x)
+		}
+	}
+	vf, ref := outchain.NewVoiceFilter(48000, board.BiscuitVoicing()), outchain.NewVoiceFilter(48000, board.BiscuitVoicing())
+	got = mixer.MixResponse(make([]float64, frames*2), period(frames, 8000), nil, unityGain, gains, vf)
+	for i := 0; i < frames; i++ {
+		for ch := 0; ch < 2; ch++ {
+			if want := ref.Step(ch, 8000); got[i*2+ch] != want {
+				t.Fatalf("frame %d ch %d: %v, filter gives %v", i, ch, got[i*2+ch], want)
+			}
 		}
 	}
 }

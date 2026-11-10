@@ -111,7 +111,7 @@ func TestPairRepeaterRestartsAfterItStops(t *testing.T) {
 
 func TestPairHold(t *testing.T) {
 	var fired atomic.Int32
-	h := NewPairHold(func() { fired.Add(1) })
+	h := NewPairHold(func() bool { return true }, func() { fired.Add(1) })
 	h.hold = 30 * time.Millisecond
 
 	// A tap: forwarded, nothing fires.
@@ -143,6 +143,50 @@ func TestPairHold(t *testing.T) {
 	time.Sleep(60 * time.Millisecond)
 	if fired.Load() != 1 {
 		t.Fatal("a released press fired later")
+	}
+}
+
+// A hold on an Echo that is already paired (on wss) fires nothing, and its
+// release goes on to HA as a long press (#841).
+func TestPairHoldNotNeeded(t *testing.T) {
+	var fired atomic.Int32
+	var needed atomic.Bool
+	h := NewPairHold(needed.Load, func() { fired.Add(1) })
+	h.hold = 30 * time.Millisecond
+
+	if h.Event(true) {
+		t.Fatal("the press was swallowed")
+	}
+	time.Sleep(60 * time.Millisecond)
+	if fired.Load() != 0 {
+		t.Fatal("a hold on a paired Echo started pairing")
+	}
+	if h.Event(false) {
+		t.Fatal("the release of an unneeded hold was swallowed")
+	}
+
+	// Asked when the hold completes: the link dropping mid-hold counts.
+	h.Event(true)
+	needed.Store(true)
+	time.Sleep(60 * time.Millisecond)
+	if fired.Load() != 1 || !h.Event(false) {
+		t.Fatal("a hold that became needed did not pair")
+	}
+}
+
+func TestPairingNeeded(t *testing.T) {
+	for _, c := range []struct{ connected, tls, want bool }{
+		{false, false, true}, // no link: the Echo that most needs it
+		{false, true, true},  // a stale TLS flag with no link
+		{true, false, true},  // plain: should be paired
+		{true, true, false},  // wss: paired, the token was accepted
+	} {
+		if got := pairingNeeded(c.connected, c.tls); got != c.want {
+			t.Errorf("connected=%v tls=%v: %v, want %v", c.connected, c.tls, got, c.want)
+		}
+	}
+	if PairHoldDuration != 7*time.Second {
+		t.Errorf("hold is %v, want 7s (#841)", PairHoldDuration)
 	}
 }
 

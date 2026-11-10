@@ -20,7 +20,7 @@ func benchFrames(n int) ([]byte, []byte) {
 
 // One 512-sample (32ms) period through one canceller at the shipped tail.
 func BenchmarkCancelOnePeriod300ms(b *testing.B) {
-	c := New()
+	c := New(NumMics)
 	c.SetParams(true, 0, 300)
 	c.SetHardwareRef(true)
 	mic, ref := benchFrames(FrameSize)
@@ -31,7 +31,7 @@ func BenchmarkCancelOnePeriod300ms(b *testing.B) {
 }
 
 func BenchmarkCancelOnePeriod150ms(b *testing.B) {
-	c := New()
+	c := New(NumMics)
 	c.SetParams(true, 0, 150)
 	c.SetHardwareRef(true)
 	mic, ref := benchFrames(FrameSize)
@@ -44,9 +44,9 @@ func BenchmarkCancelOnePeriod150ms(b *testing.B) {
 // Seven cancellers, one per microphone, on the same period — the
 // "AEC before the beamformer" architecture.
 func BenchmarkCancelSevenMics300ms(b *testing.B) {
-	var cs [7]*Canceller
+	var cs [NumMics]*Canceller
 	for i := range cs {
-		cs[i] = New()
+		cs[i] = New(NumMics)
 		cs[i].SetParams(true, 0, 300)
 		cs[i].SetHardwareRef(true)
 	}

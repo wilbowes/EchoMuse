@@ -52,6 +52,7 @@ type Client struct {
 	rankOf     map[*session]int
 	sessions   map[*session]bool
 	extBusy    bool
+	bufferMs   int // declared min_buffer_ms, above minBufferMs when set
 	unpaired   bool
 	onChange   func()
 	onSettings func(playerSettings)
@@ -230,6 +231,32 @@ func (c *Client) SetExternal(busy bool) {
 		s.sendState()
 	}
 	c.changed()
+}
+
+// SetMinBuffer sets the buffer the player declares (min_buffer_ms), never
+// below minBufferMs. Music Assistant holds a live source (Spotify, radio) at
+// exactly this lead, and the BLE scan bursts can only spend what is buffered
+// (bluetooth.MusicDuty, #1004). A change reaches the server at once; on a
+// live stream it costs one gap of the difference while the lead grows.
+func (c *Client) SetMinBuffer(d time.Duration) {
+	ms := max(int(d.Milliseconds()), minBufferMs)
+	c.mu.Lock()
+	if c.bufferMs == ms {
+		c.mu.Unlock()
+		return
+	}
+	c.bufferMs = ms
+	s := c.admitted
+	c.mu.Unlock()
+	if s != nil {
+		s.sendState()
+	}
+}
+
+func (c *Client) minBufferMs() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return max(c.bufferMs, minBufferMs)
 }
 
 func (c *Client) external() bool {

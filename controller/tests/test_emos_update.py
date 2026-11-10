@@ -50,14 +50,16 @@ def osr_of(image):
 # ── Versions ─────────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("text,key", [
-    ("emos-v0.9", (0, 9, 0, 0)),
-    ("0.9", (0, 9, 0, 0)),
-    ("v0.10", (0, 10, 0, 0)),
-    ("emos-v1.0.2", (1, 0, 2, 0)),
-    ("emos-v0.9-3-gabc1234", (0, 9, 0, 3)),
-    ("emos-v0.9-3-gabc1234-dirty", (0, 9, 0, 3)),
+    ("emos-v0.9", (0, 9, 0, 1, 0, 0)),
+    ("0.9", (0, 9, 0, 1, 0, 0)),
+    ("v0.10", (0, 10, 0, 1, 0, 0)),
+    ("emos-v1.0.2", (1, 0, 2, 1, 0, 0)),
+    ("emos-v0.9-3-gabc1234", (0, 9, 0, 1, 0, 3)),
+    ("emos-v0.9-3-gabc1234-dirty", (0, 9, 0, 1, 0, 3)),
+    ("emos-v0.11-ea.2", (0, 11, 0, 0, 2, 0)),
+    ("emos-v0.11-ea.2-4-gabc1234", (0, 11, 0, 0, 2, 4)),
     ("", None), (None, None), ("dev", None), ("emos-v", None),
-    ("1", None), ("0.9.1.2", None), ("0.x", None),
+    ("1", None), ("0.9.1.2", None), ("0.x", None), ("emos-v0.11-ea.x", None),
 ])
 def test_version_key(text, key):
     assert up.version_key(text) == key

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/wilbowes/EchoMuse/internal/aec"
+	"github.com/wilbowes/EchoMuse/pkg/board"
 )
 
 // Adverts moved off the control plane because that is where liveness is
@@ -42,7 +43,7 @@ func TestControllerFeaturesAreReadFromTheAck(t *testing.T) {
 }
 
 func TestAdvertsYieldToTheMicStream(t *testing.T) {
-	d := NewDataClient("ble-test", newFanoutMic(), nil, aec.New())
+	d := NewDataClient("ble-test", newFanoutMic(), nil, aec.New(board.BiscuitMics().NumMics()))
 
 	// No connection: refused, and the caller is told so. This is the drop
 	// path — deliberately NOT a fall back to the control plane, which would
@@ -71,7 +72,7 @@ func TestAdvertsYieldToTheMicStream(t *testing.T) {
 // discriminator is that the turn check does not fire first. Reaching the
 // connection check at all is what this pins.
 func TestTheAlwaysOnWakeStreamDoesNotHoldAdvertsBack(t *testing.T) {
-	d := NewDataClient("ble-test", newFanoutMic(), nil, aec.New())
+	d := NewDataClient("ble-test", newFanoutMic(), nil, aec.New(board.BiscuitMics().NumMics()))
 
 	d.micMu.Lock()
 	d.micActive, d.micWantedLock = true, false // ungated wake stream

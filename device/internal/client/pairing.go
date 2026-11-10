@@ -10,7 +10,8 @@ import (
 )
 
 // Pairing is how an Echo asks to be (re)issued link credentials: its owner
-// holds the action button for PairHoldDuration, the device opens a window of
+// holds the action button for PairHoldDuration while the Echo could need it
+// (pairingNeeded), the device opens a window of
 // pairWindow, and an admin's Approve in the dashboard issues a fresh token
 // and the CA (controller/em_pairing.py, Wil 2026-09-26).
 //
@@ -24,7 +25,10 @@ import (
 // approval installs new ones and bounces the link, and a redial that still
 // carried `pairing` would raise a second request for a device already paired.
 const (
-	PairHoldDuration = 5 * time.Second
+	// 7 s, not 5, and only when pairing could be needed (#841): a shorter
+	// hold on a paired Echo raised requests nobody wanted for anyone holding
+	// the button for a Home Assistant long press.
+	PairHoldDuration = 7 * time.Second
 	pairWindow       = 2 * time.Minute
 	// How often a request is repeated while the window is open, on a live link
 	// (pair_request) or by redialling. The controller drops a request 30s
@@ -100,8 +104,23 @@ func credFingerprint() string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// StartPairing opens a pairing window. Called on a 5 s hold of the action
-// button, whether or not the device is connected.
+// pairingNeeded says whether a hold should ask to pair: when the Echo has no
+// controller link, or has one over plain. An Echo on the encrypted link is
+// paired, since the controller refuses a wrong or missing token there, which
+// leaves it disconnected (#841).
+func pairingNeeded(connected, tls bool) bool {
+	return !connected || !tls
+}
+
+// PairingNeeded is pairingNeeded for this client's live link.
+func (c *ControlClient) PairingNeeded() bool {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	return pairingNeeded(c.conn != nil, c.connTLS)
+}
+
+// StartPairing opens a pairing window. Called on a PairHoldDuration hold of
+// the action button while PairingNeeded.
 func (c *ControlClient) StartPairing() {
 	log.Printf("[pair] action button held — asking to pair for %s", pairWindow)
 	if c.pair.open(time.Now(), credFingerprint()) {
@@ -162,18 +181,21 @@ func dialPlan(hasCA bool, tlsPort int, pairing bool) []dialAttempt {
 
 // PairHold turns a long hold of the action button into StartPairing. It sits
 // in front of the link-down gate in cmd, since the device that most needs it
-// is the one that cannot connect.
+// is the one that cannot connect. needed is asked when the hold completes,
+// not at the press: a hold that is not needed fires nothing and its release
+// reaches HA as an ordinary long press.
 type PairHold struct {
-	mu    sync.Mutex
-	hold  time.Duration
-	fire  func()
-	timer *time.Timer
-	gen   uint64 // bumped on every press and release; a stale timer is ignored
-	fired bool
+	mu     sync.Mutex
+	hold   time.Duration
+	needed func() bool
+	fire   func()
+	timer  *time.Timer
+	gen    uint64 // bumped on every press and release; a stale timer is ignored
+	fired  bool
 }
 
-func NewPairHold(fire func()) *PairHold {
-	return &PairHold{hold: PairHoldDuration, fire: fire}
+func NewPairHold(needed func() bool, fire func()) *PairHold {
+	return &PairHold{hold: PairHoldDuration, needed: needed, fire: fire}
 }
 
 // Event takes each action-button edge and reports whether to swallow it. The
@@ -192,7 +214,7 @@ func (h *PairHold) Event(down bool) bool {
 		gen := h.gen
 		h.timer = time.AfterFunc(h.hold, func() {
 			h.mu.Lock()
-			if h.gen != gen {
+			if h.gen != gen || !h.needed() {
 				h.mu.Unlock()
 				return
 			}

@@ -1,0 +1,10 @@
+00-00: HMDI_PLayback (*) :  : playback 1
+00-01: TDM_Capture (*) :  : capture 1
+00-02: MultiMedia1_Capture (*) :  : capture 1
+00-03: AWB_Record (*) :  : capture 1
+00-04: BTCVSD_Capture snd-soc-dummy-dai-4 :  : playback 1 : capture 1
+00-05: BTCVSD_Playback snd-soc-dummy-dai-5 :  : playback 1 : capture 1
+00-06: DL1_Playback (*) :  : playback 1
+00-07: DL1_AWB_Record (*) :  : capture 1
+00-08: MultiMedia2_PLayback (*) :  : playback 1
+00-09: VOIP_Call_BT_Capture (*) :  : capture 1

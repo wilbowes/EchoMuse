@@ -135,11 +135,11 @@ class BluetoothProxySatellite(SatelliteServerProtocol):
                 friendly_name=f"{self.label} BT Proxy",
                 mac_address=self.mac_address,
                 manufacturer="EchoMuse",
-                model=_device_model(),
+                model=_device_model(self.device_id),
                 # Dot required — HA splits project_name on "." (see
                 # em_esphome.EchoMuseSatellite.handle_message), and shows
                 # the part after it as the device Model.
-                project_name=f"EchoMuse.{_device_model()}",
+                project_name=f"EchoMuse.{_device_model(self.device_id)}",
                 project_version=_project_version(),
                 bluetooth_proxy_feature_flags=(
                     BT_PROXY_FLAGS_ACTIVE if self._gatt is not None else BT_PROXY_FLAGS),
@@ -326,9 +326,9 @@ def _project_version() -> str:
     return ESPHOME_PROJECT_VERSION
 
 
-def _device_model() -> str:
-    from em_esphome import ESPHOME_DEVICE_MODEL
-    return ESPHOME_DEVICE_MODEL
+def _device_model(device_id: str) -> str:
+    from em_esphome import device_model
+    return device_model(device_id)
 
 
 def _proxy_mac(device_id: str) -> str:
@@ -364,7 +364,7 @@ def _make_mdns_info(device_id: str, label: str, port: int,
             # em_esphome._make_device_mdns_info.
             "mac": _proxy_mac(device_id).replace(":", "").lower(),
             "network": "ethwifi",
-            "project_name": f"EchoMuse.{_device_model()}",
+            "project_name": f"EchoMuse.{_device_model(device_id)}",
             "project_version": _project_version(),
         },
         server=f"{svc_name}.local.",

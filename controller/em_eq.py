@@ -101,6 +101,59 @@ def _hishelf_sos(fc: float, gain_db: float, fs: float) -> np.ndarray:
     return np.array([[b0/a0, b1/a0, b2/a0, 1.0, a1/a0, a2/a0]])
 
 
+# ─── Driver correction (#247) ─────────────────────────────────────────────────
+#
+# This speaker is ~18dB down at 250Hz and ~9dB up near 3kHz relative to 1kHz
+# (#247), confirmed with an external mic 30cm away (Yeti Nano, VVV,
+# 2026-10-18: -17dB at 250Hz, -25 at 175, +8-9 at 2.3-4.5kHz, a -14dB hole
+# at 8-9kHz). The curve is a VOICING chosen by ear from that measurement,
+# not the response inverted: loudness-matched A/B on two voices and three
+# songs, the inverse ("flat") sounded thin, stock's curve warm but dull at
+# 2-2.5kHz; this is halfway between the two, which Wil picked for music.
+# Voice gets stock's warmth back through voice_sos(). Four peaks and a shelf,
+# within 0.6dB RMS of the curve that was heard, 120Hz-12kHz.
+# A property of the hardware, not a preference: it is not a user control.
+CORRECTION_PEAKS = (            # (Hz, dB, Q)
+    (174.9, 26.13, 0.388),
+    (3277.5, -10.94, 0.753),
+    (576.3, -10.93, 0.735),
+    (8707.8, 5.52, 2.985),
+)
+CORRECTION_SHELF = (11874.4, 12.0)   # (Hz, dB), S=1
+# The peaks keep boosting below 100Hz (+11 to +28dB at 30-80Hz) where stock's
+# curve falls to about 0dB and cuts a notch at 65Hz: more bass than this
+# driver can move, heard as distortion on the first trial (VVV, 2026-10-16).
+# An LR4 high-pass and the notch keep ours at or under stock below 120Hz.
+CORRECTION_HIGHPASS_HZ = 80.0
+CORRECTION_NOTCH = (65.0, -25.0, 4.0)   # (Hz, dB, Q)
+
+
+# The voice plane's own filter, stock-sound profile only: +3dB of body at
+# 230Hz and less 2.1kHz and 8.6kHz than the music gets, which puts speech
+# within 1.1dB (1/3-octave) of stock's curve. Picked by ear over the shared
+# curve on both a male and a female voice at 50 and 70% (VVV, 2026-10-18).
+# Applied to the voice before the mix, in float, since it boosts.
+VOICE_PEAKS = (                 # (Hz, dB, Q)
+    (228.0, 3.0, 0.76),
+    (2105.5, -2.8, 1.25),
+    (8583.1, -5.17, 5.0),
+)
+
+
+def voice_sos(fs: float) -> np.ndarray:
+    """The voice plane's filter as a stacked SOS matrix."""
+    return np.vstack([_peak_sos(f, g, q, fs) for f, g, q in VOICE_PEAKS])
+
+
+def correction_sos(fs: float) -> np.ndarray:
+    """The driver correction as a stacked SOS matrix."""
+    sections = [_peak_sos(f, g, q, fs) for f, g, q in CORRECTION_PEAKS]
+    sections.append(_hishelf_sos(*CORRECTION_SHELF, fs))
+    sections.append(_peak_sos(*CORRECTION_NOTCH, fs))
+    sections.append(em_mbc._lr4(CORRECTION_HIGHPASS_HZ, fs, "high"))
+    return np.vstack(sections)
+
+
 def _loudness_sos(fs: float) -> np.ndarray:
     """Speech-range presence boost for lower listening volumes."""
     return _peak_sos(2500, 5.0, 0.8, fs)
@@ -195,9 +248,15 @@ class StreamingEQ:
     def __init__(self, sample_rate: int, bands: list | None = None,
                  loudness: bool = False,
                  limiter: "em_limiter.Limiter | None" = None,
-                 guard: "em_mbc.BassGuard | None" = None):
+                 guard: "em_mbc.BassGuard | None" = None,
+                 driver_correction: bool = False):
         self._limiter = limiter
         self._guard = guard
+        # After the user's EQ, before the guard: taste, then the hardware's
+        # correction, then protection, which is stock's order (AFE.cfg).
+        self._corr_sos = correction_sos(sample_rate) if driver_correction else None
+        self._corr_zi = (np.zeros((self._corr_sos.shape[0], 2))
+                         if self._corr_sos is not None else None)
         self._sample_rate = int(sample_rate)   # set_bands rebuilds against it
         # Last values update() applied; None until it is first called, so the
         # first call always lands rather than matching a coincidental default.
@@ -297,11 +356,13 @@ class StreamingEQ:
 
     def process(self, pcm: bytes) -> bytes:
         if len(pcm) < 2 or (self._sos is None and self._limiter is None
-                            and self._guard is None):
+                            and self._guard is None and self._corr_sos is None):
             return pcm
         samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float64)
         if self._sos is not None:
             samples, self._zi = _signal().sosfilt(self._sos, samples, zi=self._zi)
+        if self._corr_sos is not None:
+            samples, self._corr_zi = _signal().sosfilt(self._corr_sos, samples, zi=self._corr_zi)
         if self._guard is not None:
             samples = self._guard.process(samples)
         if self._limiter is not None:

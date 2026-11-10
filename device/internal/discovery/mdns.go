@@ -24,39 +24,8 @@ type ServerInfo struct {
 	TLSPort int
 }
 
-func FindServer(ctx context.Context) (*ServerInfo, error) {
-	backoff := 5 * time.Second
-	maxBackoff := 60 * time.Second
-
-	for {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-
-		log.Printf("mDNS: browsing for %s.local...", serviceType)
-		info, err := browse(ctx)
-		if err == nil && info != nil {
-			log.Printf("mDNS: found Clara server at %s", info.Addr)
-			return info, nil
-		}
-
-		log.Printf("mDNS: no server found, retrying in %s", backoff)
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(backoff):
-		}
-
-		backoff *= 2
-		if backoff > maxBackoff {
-			backoff = maxBackoff
-		}
-	}
-}
-
-// FindServerOnce is a single browse round with no retry loop — for
-// callers that want fresher TXT data (e.g. a tls_port that appeared after
-// the endpoint was cached) but have a working fallback if mDNS fails.
+// FindServerOnce is a single browse round with no retry loop. The caller
+// retries, so it can try other addresses between browses (#1081).
 func FindServerOnce(ctx context.Context) (*ServerInfo, error) {
 	return browse(ctx)
 }

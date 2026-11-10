@@ -1149,6 +1149,26 @@ MIGRATIONS: list[str] = [
 
     UPDATE system_config SET value = '31' WHERE key = 'schema_version';
     """,
+
+    # v32 — the old EQ presets on top of the stock-sound voicing (#229).
+    # Speech and Music were partial driver corrections; firmware with the
+    # profile corrects the driver itself, so either would stack another
+    # +4-8dB at 250Hz on it. The work is in _fixup_v32.
+    """
+    UPDATE system_config SET value = '32' WHERE key = 'schema_version';
+    """,
+
+    # v33 — whether the boot before this one ended cleanly, from the emOS
+    # kernel log it saved (em_crashlog.is_clean). MediaTek reports every
+    # software restart as wdt_by_pass_pwk, so the boot reason alone cannot
+    # tell an ordinary reboot from a watchdog reset; this can. 1 clean, 0 not,
+    # NULL never examined (FireOS, older init, a log already handled before
+    # this column existed).
+    """
+    ALTER TABLE device_boots ADD COLUMN prev_clean INTEGER;
+
+    UPDATE system_config SET value = '33' WHERE key = 'schema_version';
+    """,
 ]
 
 # Post-migration fixups that need Python rather than SQL. Keyed by the schema
@@ -1270,8 +1290,56 @@ def _fixup_v25(conn) -> None:
         (json.dumps(cfg),))
 
 
+# The two presets the dashboard offered before the stock-sound voicing.
+_OLD_EQ_PRESETS = ([0, 4, 2, 0, -2, -5, 0, 0], [0, 8, 3, 0, -3, -6, 0, 0])
+
+
+def _reset_old_eq(cfg: dict) -> bool:
+    """Flatten an exact old preset and turn Speech boost off; True if changed."""
+    changed = False
+    bands = cfg.get("eqBands")
+    if (isinstance(bands, list) and len(bands) == 8
+            and all(isinstance(b, (int, float)) for b in bands)
+            and [float(b) for b in bands] in [[float(x) for x in p] for p in _OLD_EQ_PRESETS]):
+        cfg["eqBands"] = [0.0] * 8
+        changed = True
+    if cfg.get("eqLoudness") is True:
+        cfg["eqLoudness"] = False
+        changed = True
+    return changed
+
+
+def _fixup_v32(conn) -> None:
+    """
+    Reset the old Speech/Music presets to Flat and Speech boost to off, per
+    device and fleet. A custom curve is the owner's choice and is left alone,
+    as is a config that will not parse. Speech boost has no control any more,
+    so a stored True could never be turned off.
+    """
+    for row in conn.execute("SELECT device_id, config FROM devices").fetchall():
+        try:
+            cfg = json.loads(row["config"] or "{}") or {}
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(cfg, dict) and _reset_old_eq(cfg):
+            conn.execute("UPDATE devices SET config = ? WHERE device_id = ?",
+                         (json.dumps(cfg), row["device_id"]))
+    row = conn.execute(
+        "SELECT value FROM system_config WHERE key = 'global_device_config'").fetchone()
+    if not row:
+        return
+    try:
+        cfg = json.loads(row["value"] or "{}") or {}
+    except (json.JSONDecodeError, TypeError):
+        return
+    if isinstance(cfg, dict) and _reset_old_eq(cfg):
+        conn.execute(
+            "UPDATE system_config SET value = ? WHERE key = 'global_device_config'",
+            (json.dumps(cfg),))
+
+
 _MIGRATION_FIXUPS = {11: _fixup_v11, 19: _fixup_v19, 24: _fixup_v24,
-                     25: _fixup_v25}
+                     25: _fixup_v25, 32: _fixup_v32}
 
 # ─── Connection management ────────────────────────────────────────────────────
 
@@ -1308,6 +1376,28 @@ def init(path: str = "echomuse.db") -> None:
     _conn.commit()
     _migrate(_conn)
     log.info("Database ready")
+
+
+def close() -> None:
+    """
+    Fold the WAL back into the database and close it, at shutdown.
+
+    A kill does not need this to stay intact (WAL replays on the next open),
+    but it leaves echomuse.db complete on its own, so a copy of just that file
+    (a backup, a move to another host) has every write in it. Safe to call
+    twice; any db call after it fails the init assertion.
+    """
+    global _conn
+    with _db_lock:
+        if _conn is None:
+            return
+        try:
+            _conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.Error as e:
+            log.warning(f"WAL checkpoint at shutdown failed: {e}")
+        _conn.close()
+        _conn = None
+    log.info("Database closed")
 
 
 @contextmanager
@@ -1803,6 +1893,17 @@ def record_boot(device_id: str, boot_id: str, firmware_ver: Optional[str],
         )
 
 
+def set_boot_prev_clean(device_id: str, boot_id: str, clean: bool) -> None:
+    """Record whether the boot before `boot_id` ended cleanly. The row exists
+    once the register message was written; if it does not, nothing is
+    recorded, and the boot reason stands alone."""
+    with _tx() as conn:
+        conn.execute(
+            "UPDATE device_boots SET prev_clean = ? WHERE device_id = ? AND boot_id = ?",
+            (1 if clean else 0, device_id, boot_id),
+        )
+
+
 def record_wear(device_id: str, day: str, values: tuple) -> None:
     """Upsert the day's eMMC reading: the latest reading of the day wins."""
     with _tx() as conn:
@@ -1825,7 +1926,8 @@ def latest_health() -> dict[str, dict]:
     """Each device's latest boot and latest wear reading merged into one dict,
     keyed by device_id: one pass for the device list, not a query per device."""
     out: dict[str, dict] = {}
-    for r in _q("""SELECT b.device_id, b.first_seen AS boot_at, b.boot_reason, b.firmware_ver
+    for r in _q("""SELECT b.device_id, b.first_seen AS boot_at, b.boot_reason, b.firmware_ver,
+                          b.prev_clean
                    FROM device_boots b
                    JOIN (SELECT device_id, MAX(first_seen) AS t FROM device_boots
                          GROUP BY device_id) m

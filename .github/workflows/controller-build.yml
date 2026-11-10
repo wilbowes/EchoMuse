@@ -28,6 +28,10 @@ on:
     branches: [main]
     paths:
       - 'controller/**'
+      # An EA release-prep commit touches only the channel (its notes live
+      # there since #1023), and a release refuses a commit with no image:
+      # ff06544, 2.27.0-ea.2's, had to be built by hand.
+      - 'controller-ea/**'
       - '.github/workflows/controller-build.yml'
   workflow_dispatch:
 
@@ -38,7 +42,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
@@ -81,7 +85,7 @@ jobs:
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}

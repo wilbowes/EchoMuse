@@ -18,6 +18,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/processor"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/ort"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/shadow"
+	"github.com/wilbowes/EchoMuse/pkg/board"
 	"github.com/wilbowes/EchoMuse/pkg/mic"
 	"github.com/wilbowes/EchoMuse/pkg/speaker"
 )
@@ -317,7 +318,7 @@ func NewDataClient(deviceID string, microphone mic.Subscribable, spk speaker.Spe
 		mic:        microphone,
 		spk:        spk,
 		readyCh:    make(chan string, 1),
-		beam:       beamformer.New(),
+		beam:       beamformer.New(board.CurrentLayout().Mics),
 		proc:       processor.New(),
 		aec:        canceller,
 		listenGate: listen.New(0, 0, 0),
@@ -440,6 +441,45 @@ func (d *DataClient) noteEchoRef(ref []byte) bool {
 		return true
 	}
 	return false
+}
+
+// loopbackRef is the aligned reference for this batch from a microphone
+// whose board has a separate loopback (mic.EchoAligned), or (nil, false) on
+// every other board. A nil reference with true means the aligner has not
+// found the delay (the capture loop feeds its search, so it is warm before a
+// turn starts); mono is only measured for its length.
+func (d *DataClient) loopbackRef(raw, mono []byte) ([]byte, bool) {
+	ea, ok := d.mic.(mic.EchoAligned)
+	if !ok || ea.EchoAligner() == nil {
+		return nil, false
+	}
+	if d.hwRefMode.Load() == hwRefForceSW {
+		return nil, true
+	}
+	idx, ok := ea.BatchIndex(raw)
+	if !ok {
+		return nil, true
+	}
+	return ea.EchoAligner().Take(idx, len(mono)/2), true
+}
+
+// useLoopbackRef moves the canceller between the aligned loopback and the
+// software tap. Reversible both ways, unlike noteEchoRef's latch: the
+// aligner lets go when it loses the delay, and a rebuilt filter costs a
+// few seconds of playback, where an unaligned one cancels nothing.
+func (d *DataClient) useLoopbackRef(on bool) {
+	if on == d.hwRefOn {
+		return
+	}
+	d.hwRefOn = on
+	d.aec.SetRefClean(on) // echoref low-passes it; nothing for dealias to repair
+	d.aec.SetHardwareRef(on)
+	if on {
+		log.Printf("[aec] loopback aligned (offset %d samples) — using it as the reference",
+			d.mic.(mic.EchoAligned).EchoAligner().Offset())
+	} else {
+		log.Printf("[aec] loopback not aligned — software tap until it is")
+	}
 }
 
 // OnDirectionChanged registers a callback invoked when the estimated dominant
@@ -858,6 +898,12 @@ func (d *DataClient) connect(ctx context.Context, baseURL string) error {
 		if owned {
 			d.CloseAnyListen(listen.ReasonLink)
 		}
+		// The same holds for playback: a stream's EOS cannot arrive on the
+		// next connection, and one left open holds the wake bar down and
+		// makes a later stop swallow the next stream (2026-10-23).
+		if d.spk != nil {
+			d.spk.AbandonStreams(time.Now())
+		}
 
 		d.connMu.Lock()
 		if d.conn == conn {
@@ -1267,10 +1313,21 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			// defaults to off, and this is an allocation and a copy per
 			// period on the deadline-bound mic goroutine.
 			var echoRef []byte
+			loopRef := false
 			if d.aec.Enabled() {
 				echoRef = d.beam.EchoRef(raw)
+				if echoRef == nil {
+					echoRef, loopRef = d.loopbackRef(raw, mono)
+				}
 			}
-			if echoRef != nil && d.noteEchoRef(echoRef) {
+			if loopRef {
+				// The Dot 3's loopback, aligned by echoref: the hardware path
+				// only while it is locked, never the one-way latch below,
+				// since a hardware path with no reference passes audio
+				// through uncancelled.
+				d.useLoopbackRef(echoRef != nil)
+			}
+			if echoRef != nil && (loopRef || d.noteEchoRef(echoRef)) {
 				// Every microphone is cancelled, not only the one in use:
 				// the echo path differs per microphone and a turn locks to
 				// a different one each time (#814).

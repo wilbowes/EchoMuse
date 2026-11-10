@@ -267,6 +267,27 @@ def test_an_update_ends_confirmed_on_the_new_image(tmp_path, arch):
     assert io.records[0][0] == "emos-v0.9" and io.records[-1][0] == "emos-v0.10"
 
 
+def test_the_update_builds_for_the_board_the_device_reported(tmp_path):
+    # A board's recipe (em_emos_build.CMDLINE_RECIPES) has to reach the build
+    # on an update as well as at provisioning, or a donut's rebuilt image would
+    # keep its old ramdisk size and gain a cmdline its LK cuts off.
+    old = installed("emos-v0.9", arch="arm64")
+    dev = Device(tmp_path, old)
+    io = IO(dev)
+    io.board = "biscuit"
+    seen = []
+    real = io.offload
+
+    async def offload(fn, *args):
+        if fn is eb.build_emos_image:
+            seen.append(args)
+        return await real(fn, *args)
+
+    io.offload = offload
+    assert run(io) == "emos-v0.10"
+    assert seen and seen[0][-1] == "biscuit"
+
+
 def test_the_fos6_payload_rides_into_the_image(tmp_path):
     old = installed("emos-v0.9", arch="arm")
     dev = Device(tmp_path, old)
@@ -278,6 +299,29 @@ def test_the_fos6_payload_rides_into_the_image(tmp_path):
     roff = up.BLOCK + len(eb.pad(b"\0" * ksz))
     cpio = gzip.decompress(dev.image()[roff:roff + rsz])
     assert b"sbin/wpa_supplicant" in cpio and b"sbin/udhcpc" in cpio
+
+
+@pytest.mark.parametrize("arch,board,tools", [
+    ("arm", None, True),          # FireOS 6 on biscuit or radar: 32-bit kernel
+    ("arm64", "donut", True),     # FireOS 6 on an arm64 kernel
+    ("arm64", "biscuit", False),  # FireOS 5: Amazon's supplicant stays
+    ("arm64", None, False),       # board unknown: as before
+])
+def test_the_wifi_tools_follow_the_userspace_not_the_kernel(arch, board, tools):
+    import em_emos_ota as ota
+    files = {"init": new_init("arm64"), "init32": new_init("arm"),
+             **{n: n.encode() for n in ota.SBIN_ASSETS}}
+    _, sbin, _, err = ota.select_payload(files, arch, "emos-v0.11", board)
+    assert err is None
+    assert ("wpa_supplicant" in sbin) is tools
+    assert "em-wifi" in sbin
+
+
+def test_a_donut_payload_without_wifi_tools_is_refused():
+    import em_emos_ota as ota
+    _, _, _, err = ota.select_payload({"init": new_init("arm64")}, "arm64",
+                                      "emos-v0.11", "donut")
+    assert err is not None and err.status == 404
 
 
 def test_a_stale_known_good_is_refreshed_before_anything_is_written(tmp_path, old):

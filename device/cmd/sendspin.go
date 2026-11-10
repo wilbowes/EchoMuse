@@ -6,10 +6,12 @@ import (
 	"time"
 
 	"github.com/wilbowes/EchoMuse/internal/bindings/speaker"
+	"github.com/wilbowes/EchoMuse/internal/bluetooth"
 	"github.com/wilbowes/EchoMuse/internal/client"
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/firewall"
 	"github.com/wilbowes/EchoMuse/internal/sendspin"
+	"github.com/wilbowes/EchoMuse/internal/server"
 	"github.com/wilbowes/EchoMuse/pkg/board"
 )
 
@@ -25,9 +27,10 @@ import (
 const sendspinStore = "/data/local/etc/echomuse/sendspin.json"
 
 var ss struct {
-	mu   sync.Mutex
-	c    *sendspin.Client
-	name string
+	mu    sync.Mutex
+	c     *sendspin.Client
+	name  string
+	proxy bool // the BLE proxy is on, so the player asks for headroom
 }
 
 func sendspinPlayer() *sendspin.Client {
@@ -37,18 +40,19 @@ func sendspinPlayer() *sendspin.Client {
 }
 
 // deviceVolume is the Echo's one volume: the level HA and the buttons move,
-// 0..127 with unity at 127. Server volume is mapped onto it with the same
-// proportion as HA's percentage (controller em_volume), so the same volume
-// reads the same number in Music Assistant and in Home Assistant.
+// 0..127 with unity at 127. Server volume is mapped onto it with the same law
+// as HA's percentage (server.PercentToLevel, controller em_volume), so the
+// same volume reads the same number in Music Assistant and in Home Assistant.
 type deviceVolume interface {
 	VolumeLevel() int
 	SetVolume(level int)
 }
 
-const volumeMax = 127
+// ssVolume converts Sendspin's percentage, echoing a server's own command.
+var ssVolume server.PercentEcho
 
-func levelToPct(level int) int { return sendspin.LevelToPercent(level, volumeMax) }
-func pctToLevel(pct int) int   { return sendspin.PercentToLevel(pct, volumeMax) }
+func pctToLevel(pct int) int   { return ssVolume.ToLevel(pct) }
+func levelToPct(level int) int { return ssVolume.ToPercent(level) }
 
 // sendspinVolumeChanged tells the player the device's volume moved, by any
 // route. Wired into the volume change callback.
@@ -56,6 +60,24 @@ func sendspinVolumeChanged(level int) {
 	if c := sendspinPlayer(); c != nil {
 		c.SetVolume(levelToPct(level))
 	}
+}
+
+// sendspinProxy follows the BLE proxy switch: while it is on, the player
+// declares the buffer a full scan burst needs (bluetooth.MusicHeadroom).
+func sendspinProxy(on bool) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	ss.proxy = on
+	if ss.c != nil {
+		ss.c.SetMinBuffer(sendspinBuffer(on))
+	}
+}
+
+func sendspinBuffer(proxy bool) time.Duration {
+	if proxy {
+		return bluetooth.MusicHeadroom
+	}
+	return 0
 }
 
 // sendspinLinkDown stops the player when the controller link goes: EchoMuse
@@ -119,6 +141,7 @@ func applySendspinConfig(spk *speaker.PcmSpeaker, cc *client.ControlClient, vol 
 			// Before Start: a server can connect and command the volume at once.
 			c.OnVolume(func(pct int) { vol.SetVolume(pctToLevel(pct)) })
 			c.SetVolume(levelToPct(vol.VolumeLevel()))
+			c.SetMinBuffer(sendspinBuffer(ss.proxy))
 			// Open before Start advertises: Music Assistant dials when the
 			// record appears and may not retry a timeout. Logged, not
 			// fatal: FireOS has no filter to open.

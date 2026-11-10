@@ -1,6 +1,6 @@
 # EchoMuse
 
-**Turn an old Amazon Echo Dot (2nd gen) into a local voice assistant for Home Assistant.**
+**Turn an old Amazon Echo Dot (2nd gen) or Echo (2nd gen) into a local voice assistant for Home Assistant.**
 
 [![CI](https://github.com/wilbowes/EchoMuse/actions/workflows/ci.yml/badge.svg)](https://github.com/wilbowes/EchoMuse/actions/workflows/ci.yml)
 [![Firmware](https://img.shields.io/github/v/release/wilbowes/EchoMuse?filter=v*&label=firmware)](https://github.com/wilbowes/EchoMuse/releases)
@@ -11,6 +11,8 @@
 **Join the community —
 [Discord](https://discord.gg/Bb5GfuV7Sa) ·
 [r/echomuse](https://www.reddit.com/r/echomuse/)**
+
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-echomuse-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/echomuse)
 
 <!-- Demo video goes here. -->
 
@@ -25,8 +27,9 @@ install there.
 
 **What it is**
 
-- A replacement for the software on an **Echo Dot 2nd generation (2016)**. Its
-  microphones, speaker, LED ring and buttons all work.
+- A replacement for the software on an **Echo Dot 2nd generation (2016)** or
+  an **Echo 2nd generation (2017)**. Their microphones, speaker, LED ring and
+  buttons all work.
 - A **controller** you run on your own network, as a Home Assistant add-on or
   a Docker container. It detects the wake word, manages your devices and has
   a web dashboard.
@@ -40,33 +43,32 @@ install there.
 - **Not standalone.** You need a working Home Assistant with an
   [Assist pipeline](https://www.home-assistant.io/voice_control/). Home
   Assistant does the speech recognition, the understanding and the voice.
-- **Not ready out of the box.** The Dot needs a one-time unlock over USB
+- **Not ready out of the box.** The Echo needs a one-time unlock over USB
   first, which [firebreak](https://github.com/bboe/firebreak) runs from one
-  command. If
-  a step goes wrong the Dot can end up soft-bricked, and the
-  [XDA thread](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/)
-  covers recovering it.
-- **Not for other Echo models, yet.** Only the Echo Dot 2nd gen works today.
-  Ports to the Echo Dot 3, Echo 2 and Echo Show 8 are in progress with
-  community help.
+  command. If a step goes wrong the Echo can end up soft-bricked, and the XDA
+  thread for [the Dot](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/) or [the Echo](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-2nd-gen-2017-radar.4801290/) covers recovering it.
+- **Not for other Echo models, yet.** The Echo Dot 2nd gen and the Echo 2nd
+  gen are supported. The Echo Dot 3rd gen is planned.
 - **Not affiliated with Amazon.**
 
 ## What you need
 
 | | |
 |---|---|
-| An Echo Dot 2nd gen | The hardware being repurposed. |
+| An Echo Dot 2nd gen or an Echo 2nd gen | The hardware being repurposed. |
 | Home Assistant | With a working Assist pipeline. |
 | An always-on computer | Runs the controller. The Home Assistant machine itself is fine if it runs add-ons. |
-| A computer (macOS, Linux or Windows) and a micro-USB cable, once | To unlock the Dot with firebreak. |
-| Chrome or Edge, once | The setup wizard talks to the Dot over USB from the browser. |
+| A computer (macOS, Linux or Windows) and a micro-USB cable, once | To unlock the Echo with firebreak. |
+| Chrome or Edge, once | The setup wizard talks to the Echo over USB from the browser. |
 
 ## Getting started
 
-1. **Unlock the Dot** with [firebreak](https://github.com/bboe/firebreak),
-   which runs R0rt1z2's [amonet-biscuit](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/).
-   Either version works: v1.1.0 leaves it on FireOS 5, v2.0.0 moves it to
-   FireOS 6. The [rooting guide](docs/rooting.md) explains the choice. **You
+1. **Unlock the Echo** with [firebreak](https://github.com/bboe/firebreak),
+   which runs R0rt1z2's unlocks: [amonet-biscuit](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/) for the Dot and
+   [amonet-radar](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-2nd-gen-2017-radar.4801290/) for the Echo. On the Dot either target works:
+   `unlock fireos5` leaves it on FireOS 5, `unlock fireos6` (the default) on
+   FireOS 6, and the [rooting guide](docs/rooting.md) explains the choice.
+   The Echo has one, to FireOS 6. **You
    do this at your own risk.**
 2. **Start the controller**, as an add-on:
 
@@ -88,7 +90,8 @@ The [quickstart](docs/quickstart.md) walks through all three.
 
 ### emOS or FireOS?
 
-The wizard offers two ways to run EchoMuse on the Dot:
+The wizard offers two ways to run EchoMuse on the Dot. The Echo 2nd gen runs
+emOS only:
 
 - **emOS** (the default) replaces Amazon's Android with our own small Linux
   userspace, keeping only the Dot's kernel. It runs on FireOS 5 and FireOS 6
@@ -177,7 +180,7 @@ Everything else is in the [issue tracker](https://github.com/wilbowes/EchoMuse/i
 | | |
 |---|---|
 | [Quickstart](docs/quickstart.md) | From nothing to talking to your Dot. |
-| [Rooting](docs/rooting.md) | Unlocking the Dot, and which amonet version to use. |
+| [Rooting](docs/rooting.md) | Unlocking the Echo, and which target to use. |
 | [Configuration](docs/configuration.md) | Every setting, in plain language. |
 | [FAQ](docs/faq.md) | Common problems and their fixes. |
 | [emOS](emos/README.md) | How our own userspace on the Dot works. |
@@ -199,8 +202,10 @@ are signed "Team EchoMuse (powered by Claude)". Nothing about that is hidden.
 
 EchoMuse would not exist without:
 
-- **R0rt1z2**, for [amonet-biscuit](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/),
-  the unlock that everything here depends on.
+- **R0rt1z2**, for [amonet-biscuit](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/)
+  and [amonet-radar](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-2nd-gen-2017-radar.4801290/), the unlocks that everything here depends on.
+- **bboe**, for [firebreak](https://github.com/bboe/firebreak), which runs
+  them from one command.
 - **Binozo**, for [EchoGo](https://github.com/Binozo/EchoGo), the original SDK
   for this hardware, and [GoTinyAlsa](https://github.com/Binozo/GoTinyAlsa).
 - **Dragon863**, for [EchoCLI](https://github.com/Dragon863/EchoCLI).

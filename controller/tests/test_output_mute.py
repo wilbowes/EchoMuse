@@ -33,19 +33,19 @@ def test_our_own_zero_is_not_a_volume_to_keep():
 
 
 def test_volume_up_on_the_echo_unmutes_one_step_above_the_old_level():
-    # UAT 2026-09-27: the device stepped up from 0 to its button floor (47)
-    # and that replaced the stored volume. It should come back above 102.
+    # UAT 2026-09-27: the device stepped up from 0 to its button floor and
+    # that replaced the stored volume. It should come back a step above 101.
     m = OutputMute()
-    m.mute(102)
-    assert m.device_report(47) == (False, 110)
+    m.mute(101)
+    assert m.device_report(57) == (False, 103)
     assert not m.muted
     assert m.unmute() is None
 
 
 def test_volume_up_restore_is_capped_at_unity():
     m = OutputMute()
-    m.mute(124)
-    assert m.device_report(47) == (False, 127)
+    m.mute(127)
+    assert m.device_report(57) == (False, 127)
 
 
 def test_a_volume_from_ha_unmutes():

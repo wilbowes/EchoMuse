@@ -115,6 +115,14 @@ def test_volume_cue_capability_is_surfaced_to_the_dashboard():
         "the dashboard must gate the volume button sound on the capability"
 
 
+def test_speaker_protection_hides_on_stock_sound():
+    assert "stock_sound" in device_capabilities()
+    assert "stock_sound_capable" in CONTROLLER.read_text()
+    assert "stockSoundCapable" in _device_record()
+    jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
+    assert re.search(r"\{!stockSoundCapable && \(\s*<StageAdvanced", jsx)
+
+
 def test_response_level_is_gated_on_its_capability():
     assert "response_level" in device_capabilities()
     assert "response_level_capable" in CONTROLLER.read_text()

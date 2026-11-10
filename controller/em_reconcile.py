@@ -16,12 +16,15 @@ import re
 import time
 
 import em_crashlog
+import em_db as db
+import em_dbwriter
 import em_emos_ota
 import em_events
 import em_oww_sync
 import em_payloads
 import em_shell
 import em_state
+import em_tasks
 
 log = logging.getLogger("echomuse.api")
 
@@ -34,6 +37,13 @@ log = logging.getLogger("echomuse.api")
 # change when someone deploys a controller or edits a config, which is minutes
 # to days apart, never seconds.
 DEBOUNCE_S = 15 * 60
+
+# How soon a run that did not finish may try again on the same connection's
+# next reconnect. A failed run keeps nothing it was owed, so waiting out the
+# full debounce left 035T without its wake word for 15 minutes (2026-10-24);
+# a minute still stops a device that fails every time from pushing on every
+# blip.
+RETRY_S = 60
 
 
 # device_id -> monotonic time of the last connect-time reconcile.
@@ -91,7 +101,12 @@ async def _collect_crash_log(live, device_id: str) -> None:
         log.info(f"[api] [{device_id}] crash log: read incomplete, will retry "
                  f"on the next connect")
         return
-    msg = em_crashlog.summarise(out[:out.rindex(em_shell.OK_MARK)])
+    text = out[:out.rindex(em_shell.OK_MARK)]
+    # On this boot's row: the log explains how this boot's reason came about.
+    if getattr(live, "boot_id", None):
+        em_dbwriter.submit(db.set_boot_prev_clean, device_id, live.boot_id,
+                           em_crashlog.is_clean(text))
+    msg = em_crashlog.summarise(text)
     if msg:
         log.warning(f"[api] [{device_id}] previous boot did not end cleanly — "
                     f"kernel log saved to the device's log events")
@@ -146,7 +161,12 @@ async def on_connect(device_id: str, live) -> None:
             log.warning(f"[api] [{device_id}] emOS status check failed ({e})")
     if not _due(device_id, time.monotonic()):
         return
+    if not await _reconcile_payloads(device_id, live):
+        _after_failure(device_id, live)
 
+
+async def _reconcile_payloads(device_id: str, live) -> bool:
+    """The debounced steps. Returns whether every one of them finished."""
     # Held as callables, not coroutines: building all three up front and
     # abandoning two of them leaves un-awaited coroutines to warn about later.
     steps = [
@@ -162,6 +182,7 @@ async def on_connect(device_id: str, live) -> None:
     # why absence keeps today's behaviour.
     if live.android_userspace:
         steps.append(("debloat", lambda: em_payloads.sync_debloat(live, device_id)))
+    finished = True
     for name, make in steps:
         # Re-read each time, and compare IDENTITY rather than presence: these
         # take seconds, and a device that dropped and redialled part-way
@@ -171,12 +192,48 @@ async def on_connect(device_id: str, live) -> None:
         if em_state.devices.get(device_id) is not live:
             log.info(f"[api] [{device_id}] reconcile: device went away — "
                      f"stopping before {name}")
-            return
+            return False
         try:
-            await make()
+            # Only an explicit False is a failure: start script and debloat
+            # return nothing, and raise when they fail.
+            if await make() is False:
+                finished = False
         except Exception as e:
+            finished = False
             log.warning(f"[api] [{device_id}] reconcile: {name} failed ({e}) "
                         f"— continuing with the rest")
+    return finished
+
+
+def _after_failure(device_id: str, live) -> None:
+    """
+    A run that did not finish must not hold the debounce. Approving a device
+    bounces its link about 3s after it connects, to hand it credentials, which
+    lands in the middle of the first push; its redial was then turned away by
+    this run's stamp and every reconnect for 15 minutes after it (035T,
+    2026-10-24: Hey_Verona.onnx cut off, no wake word).
+    """
+    current = em_state.devices.get(device_id)
+    if current is not None and current is not live:
+        # It redialled while this run was failing, and that connect found the
+        # stamp held: run again for the connection it has now.
+        log.info(f"[api] [{device_id}] reconcile: did not finish and the device "
+                 f"has reconnected — running again")
+        stamps[device_id] = time.monotonic()
+        em_tasks.spawn(_rerun(device_id, current), name=f"reconcile-{device_id}")
+        return
+    log.info(f"[api] [{device_id}] reconcile: did not finish — next connect "
+             f"after {RETRY_S}s tries again")
+    stamps[device_id] = time.monotonic() - DEBOUNCE_S + RETRY_S
+
+
+async def _rerun(device_id: str, live) -> None:
+    # Once only: a second failure here waits for a reconnect, so a device
+    # that keeps failing cannot spin.
+    if not await _reconcile_payloads(device_id, live):
+        log.info(f"[api] [{device_id}] reconcile: did not finish again — next "
+                 f"connect after {RETRY_S}s tries again")
+        stamps[device_id] = time.monotonic() - DEBOUNCE_S + RETRY_S
 
 
 def forget(device_id: str) -> None:

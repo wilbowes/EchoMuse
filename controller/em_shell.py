@@ -212,6 +212,19 @@ def _transfer_failed(stage: str, extra: str = "") -> TransferResult:
     return TransferResult(False, stage, detail)
 
 
+# Which base64 decoder the device has, as one shell line. busybox first
+# (Magisk provides it), then a plain base64: FireOS 6's toybox has one, and on
+# the Dot 3, which ships no busybox, it is the only one (41C8, 2026-10-25).
+# Each is tested round trip, so a decode flag that does not work is skipped.
+_DECODER_PROBE = (
+    "if echo dGVzdA== | busybox base64 -d >/dev/null 2>&1; then echo DECODER:busybox; "
+    "elif [ \"$(echo dGVzdA== | base64 -d 2>/dev/null)\" = test ]; then echo DECODER:base64; "
+    "elif python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' </dev/null >/dev/null 2>&1; then echo DECODER:python3; "
+    "elif python  -c 'import base64,sys; sys.stdout.write(base64.b64decode(sys.stdin.read()))' </dev/null >/dev/null 2>&1; then echo DECODER:python; "
+    "else echo DECODER:none; fi; "
+)
+
+
 async def stream_file(live, data: bytes, dest: str,
                                  mode: str = "755",
                                  require_verify: bool = False) -> TransferResult:
@@ -261,16 +274,13 @@ async def stream_file(live, data: bytes, dest: str,
         # arrives by `mv` over whatever was there.
 
         # ── Detect available base64 decoder ──────────────────────────────────
-        # Try busybox first (Magisk provides it), then python3/python.
-        # We run a round-trip sanity test so we know the decode flag works.
+        # _DECODER_PROBE: busybox, a plain base64, then python3/python, each
+        # round-trip tested so we know the decode flag works.
         # The md5 tool is detected in the SAME round trip, not a second one.
         # busybox first for the same reason as the decoder (Magisk provides
         # it); bare md5sum as a fallback since some SKUs have it in PATH.
         await ws.send(
-            "if echo dGVzdA== | busybox base64 -d >/dev/null 2>&1; then echo DECODER:busybox; "
-            "elif python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' </dev/null >/dev/null 2>&1; then echo DECODER:python3; "
-            "elif python  -c 'import base64,sys; sys.stdout.write(base64.b64decode(sys.stdin.read()))' </dev/null >/dev/null 2>&1; then echo DECODER:python; "
-            "else echo DECODER:none; fi; "
+            _DECODER_PROBE +
             "if echo x | busybox md5sum >/dev/null 2>&1; then echo MD5:busybox; "
             "elif echo x | md5sum >/dev/null 2>&1; then echo MD5:plain; "
             f"else echo MD5:none; fi; "
@@ -314,6 +324,8 @@ async def stream_file(live, data: bytes, dest: str,
 
         if "DECODER:busybox" in detect_buf:
             decode_cmd = "busybox base64 -d"
+        elif "DECODER:base64" in detect_buf:
+            decode_cmd = "base64 -d"
         elif "DECODER:python3" in detect_buf:
             decode_cmd = ("python3 -c "
                           "'import sys,base64; "

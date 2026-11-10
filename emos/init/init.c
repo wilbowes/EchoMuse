@@ -47,57 +47,148 @@
 #define CACHE     "/dev/block/mmcblk0p15"
 #define USBDIR    "/sys/class/android_usb/android0"
 #define TTY       "/dev/ttyGS0"
-#define TRAIL_OFF 1024
+/* The raw trail fits in the 1024 bytes before ext4's superblock, the only
+ * part of the cache filesystem ext4 never reads or writes. Writing from 1024
+ * destroyed the superblock on every boot: biscuit's cache recovers it from a
+ * backup group, the donut's 32 MB single-group cache has none (2026-10-24). */
+#define TRAIL_RAW 1024
+/* The whole trail, once /data is mounted. */
+#ifndef TRAILFILE
+#define TRAILFILE "/data/emos/trail"
+#endif
 
 
-/* Every device node this system needs, created by hand.
+/* Device nodes, made from what the kernel says it registered.
  *
  * There is no devtmpfs on this kernel — Android's /dev is a tmpfs populated by
- * ueventd from uevents, and we do not run ueventd. Numbers were read off a
- * running FireOS device, never guessed. The firmware resolves input devices by
- * NAME via /proc/bus/input/devices, so the node numbering here only has to
- * make them openable, not meaningful: event2 is the volume button on biscuit
- * and something else entirely on other boards.
+ * ueventd from uevents, and we do not run ueventd. So we read the same thing
+ * ueventd would: every registered device has /sys/dev/{char,block}/MAJ:MIN,
+ * and its uevent gives MAJOR, MINOR, DEVNAME and, for the few that want
+ * something other than root-only, DEVMODE. That is devtmpfs's own recipe.
+ *
+ * It replaced a table of numbers read off a biscuit, which was right on
+ * biscuit and wrong everywhere else: majors such as ttyGS's are allocated at
+ * boot, so on the Echo Dot 3 ttyGS0 is 246:0 and 247:0 is the jack detector.
+ * The console's shell opened that and the USB console sat silent (41C8,
+ * 2026-10-24). The sound minors differ by board as well.
+ *
+ * A device registered after a walk has no node until the next one, so init
+ * walks again where drivers are known to appear: around the WiFi chip's
+ * bring-up, and while waiting for the console's tty. A walk only adds nodes,
+ * so repeating it is safe.
  */
-struct node { const char *path; int major, minor; };
+/* Overridable so devcheck.c can drive the walk off-target. */
+#ifndef SYSDEV
+#define SYSDEV  "/sys/dev"
+#endif
+#ifndef DEVROOT
+#define DEVROOT "/dev"
+#endif
 
-static const struct node nodes[] = {
-    { "/dev/input/event0", 13, 64 },   /* ACCDET  */
-    { "/dev/input/event1", 13, 65 },   /* mtk-kpd */
-    { "/dev/input/event2", 13, 66 },   /* keys    */
+/* Where one uevent's node goes and what it is. 0 on success; -1 for a device
+ * with no node, or a name we refuse to turn into a path. */
+static int uevent_node(const char *ev, int block, char *path, size_t plen,
+                       unsigned *maj, unsigned *min, mode_t *mode)
+{
+    int have_maj = 0, have_min = 0;
+    const char *name = NULL;
+    size_t nlen = 0;
+    *mode = 0600;
+    for (const char *l = ev; *l; ) {
+        const char *e = strchr(l, '\n');
+        size_t len = e ? (size_t)(e - l) : strlen(l);
+        if (len > 6 && !strncmp(l, "MAJOR=", 6)) {
+            *maj = (unsigned)strtoul(l + 6, NULL, 10);
+            have_maj = 1;
+        } else if (len > 6 && !strncmp(l, "MINOR=", 6)) {
+            *min = (unsigned)strtoul(l + 6, NULL, 10);
+            have_min = 1;
+        } else if (len > 8 && !strncmp(l, "DEVNAME=", 8)) {
+            name = l + 8;
+            nlen = len - 8;
+        } else if (len > 8 && !strncmp(l, "DEVMODE=", 8)) {
+            unsigned long m = strtoul(l + 8, NULL, 8);
+            if (m <= 0777)
+                *mode = (mode_t)m;
+        }
+        l += len + (e ? 1 : 0);
+    }
+    if (!have_maj || !have_min || !name || !nlen)
+        return -1;
+    /* The name becomes a path under /dev, so it may not climb out of it. */
+    if (name[0] == '/')
+        return -1;
+    for (size_t i = 0; i < nlen; i++) {
+        if (name[i] <= ' ' || name[i] > '~')
+            return -1;
+        if (name[i] == '.' && (i == 0 || name[i - 1] == '/') &&
+            i + 1 < nlen && name[i + 1] == '.' &&
+            (i + 2 == nlen || name[i + 2] == '/'))
+            return -1;
+    }
+    int n = snprintf(path, plen, "%s/%s%.*s", DEVROOT, block ? "block/" : "",
+                     (int)nlen, name);
+    return n > 0 && (size_t)n < plen ? 0 : -1;
+}
 
-    { "/dev/snd/controlC0", 116,  2 },
-    { "/dev/snd/seq",       116,  1 },
-    { "/dev/snd/timer",     116, 33 },
-    { "/dev/snd/pcmC0D0p",  116,  3 }, { "/dev/snd/pcmC0D1c",  116,  4 },
-    { "/dev/snd/pcmC0D2p",  116,  5 }, { "/dev/snd/pcmC0D2c",  116,  6 },
-    { "/dev/snd/pcmC0D3p",  116,  7 }, { "/dev/snd/pcmC0D3c",  116,  8 },
-    { "/dev/snd/pcmC0D4p",  116,  9 }, { "/dev/snd/pcmC0D4c",  116, 10 },
-    { "/dev/snd/pcmC0D5p",  116, 11 }, { "/dev/snd/pcmC0D5c",  116, 12 },
-    { "/dev/snd/pcmC0D6p",  116, 13 }, { "/dev/snd/pcmC0D6c",  116, 14 },
-    { "/dev/snd/pcmC0D7p",  116, 15 }, { "/dev/snd/pcmC0D7c",  116, 16 },
-    { "/dev/snd/pcmC0D8p",  116, 17 }, { "/dev/snd/pcmC0D9c",  116, 18 },
-    { "/dev/snd/pcmC0D10p", 116, 19 }, { "/dev/snd/pcmC0D11p", 116, 20 },
-    { "/dev/snd/pcmC0D12c", 116, 21 }, { "/dev/snd/pcmC0D13c", 116, 22 },
-    { "/dev/snd/pcmC0D14p", 116, 23 }, { "/dev/snd/pcmC0D15c", 116, 24 },
-    { "/dev/snd/pcmC0D16c", 116, 25 }, { "/dev/snd/pcmC0D17p", 116, 26 },
-    { "/dev/snd/pcmC0D17c", 116, 27 }, { "/dev/snd/pcmC0D18p", 116, 28 },
-    { "/dev/snd/pcmC0D19p", 116, 29 }, { "/dev/snd/pcmC0D20p", 116, 30 },
-    { "/dev/snd/pcmC0D21p", 116, 31 }, { "/dev/snd/pcmC0D21c", 116, 34 },
-    { "/dev/snd/pcmC0D22p", 116, 35 }, { "/dev/snd/pcmC0D22c", 116, 36 },
-    { "/dev/snd/pcmC0D23p", 116, 37 }, /* speaker */
-    { "/dev/snd/pcmC0D24c", 116, 38 }, /* the 9-channel mic array */
-    { "/dev/snd/pcmC0D25p", 116, 39 },
+/* mkdir -p for the directories above a node, e.g. /dev/snd. */
+static void mkparents(const char *path)
+{
+    char d[160];
+    snprintf(d, sizeof d, "%s", path);
+    for (char *s = d + 1; *s; s++) {
+        if (*s != '/')
+            continue;
+        *s = 0;
+        mkdir(d, 0755);
+        *s = '/';
+    }
+}
 
-    /* MediaTek combo chip (WiFi + BT). wmtdetect is registered by the kernel
-     * at boot; the other three chrdevs do not exist until wmt_loader has
-     * detected the chip, but a node is only a pair of numbers, so creating
-     * them up front is harmless and keeps all the numbering in one table. */
-    { "/dev/wmtdetect", 154, 0 },
-    { "/dev/stpwmt",    190, 0 },
-    { "/dev/wmtWifi",   153, 0 },
-    { "/dev/stpbt",     192, 0 },
-};
+/* Make a node for every registered device that lacks one. Returns how many
+ * were made. */
+static int mknodes(void)
+{
+    static const char *const kinds[] = { "char", "block" };
+    int made = 0;
+    /* mknod's mode is masked by the umask: under 022 /dev/null comes out 0644,
+     * which is how dhcpcd's hook script once could not write to it. The mask
+     * is put back afterwards because every child inherits it, and a PID 1
+     * left at 0 made the syslog and anything a shell created world-writable. */
+    mode_t old = umask(0);
+    for (int k = 0; k < 2; k++) {
+        char dir[64];
+        snprintf(dir, sizeof dir, "%s/%s", SYSDEV, kinds[k]);
+        DIR *d = opendir(dir);
+        if (!d)
+            continue;
+        struct dirent *de;
+        while ((de = readdir(d))) {
+            if (de->d_name[0] == '.')
+                continue;
+            char p[160], ev[512], path[160];
+            snprintf(p, sizeof p, "%s/%s/uevent", dir, de->d_name);
+            int fd = open(p, O_RDONLY);
+            if (fd < 0)
+                continue;
+            ssize_t n = read(fd, ev, sizeof ev - 1);
+            close(fd);
+            if (n <= 0)
+                continue;
+            ev[n] = 0;
+            unsigned ma, mi;
+            mode_t mode;
+            if (uevent_node(ev, k, path, sizeof path, &ma, &mi, &mode))
+                continue;
+            mkparents(path);
+            if (mknod(path, (k ? S_IFBLK : S_IFCHR) | mode, makedev(ma, mi)) == 0)
+                made++;
+        }
+        closedir(d);
+    }
+    umask(old);
+    return made;
+}
 
 /* ── The boot progress ring ──────────────────────────────────────────────────
  *
@@ -140,12 +231,61 @@ static const struct node nodes[] = {
  * 1 for seconds at a time. The parent only ever publishes the stage it has
  * reached into shared memory; it never writes a frame while the child lives.
  */
-/* Overridable so the ring animation can be rendered and checked off-target;
- * see emos/init/ringsim.c. */
-#ifndef LEDDIR
-#define LEDDIR "/sys/devices/soc/11007000.i2c/i2c-0/0-003f"
-#endif
+/* Found by the i2c device's name, as the firmware finds it (device/pkg/board
+ * I2CDevice): biscuit's sits at 11007000.i2c, the donut's at
+ * platform/soc/11009000.i2c, and a path that misses leaves the kernel's own
+ * animation running for ever. Biscuit's path is the fallback.
+ *
+ * LEDDIR is overridable so the ring animation can be rendered and checked
+ * off-target (emos/init/ringsim.c); defined, it is used as given. */
+#define LED_DRIVER  "is31fl3236"
+#define LED_FALLBACK "/sys/devices/soc/11007000.i2c/i2c-0/0-003f"
 #define LED_N  12
+
+static char led_dir_buf[256];
+
+/* Resolved once, in led_claim before the animator forks, so both share it. */
+static const char *led_dir(void)
+{
+    if (led_dir_buf[0])
+        return led_dir_buf;
+#ifdef LEDDIR
+    snprintf(led_dir_buf, sizeof led_dir_buf, "%s", LEDDIR);
+#else
+    int found = 0;
+    DIR *d = opendir("/sys/bus/i2c/devices");
+    struct dirent *e;
+    while (d && (e = readdir(d))) {
+        char p[256], name[64];
+        snprintf(p, sizeof p, "/sys/bus/i2c/devices/%s/name", e->d_name);
+        int fd = open(p, O_RDONLY);
+        if (fd < 0)
+            continue;
+        ssize_t n = read(fd, name, sizeof name - 1);
+        close(fd);
+        if (n <= 0)
+            continue;
+        name[n] = 0;
+        name[strcspn(name, "\n")] = 0;
+        if (strcmp(name, LED_DRIVER) == 0 && !found++)
+            snprintf(led_dir_buf, sizeof led_dir_buf,
+                     "/sys/bus/i2c/devices/%s", e->d_name);
+    }
+    if (d)
+        closedir(d);
+    if (found != 1)
+        snprintf(led_dir_buf, sizeof led_dir_buf, "%s", LED_FALLBACK);
+#endif
+    return led_dir_buf;
+}
+
+/* led_dir()/leaf, for the four attributes the ring is driven through. */
+static int led_open(const char *leaf, int flags)
+{
+    char p[300];
+    snprintf(p, sizeof p, "%s/%s", led_dir(), leaf);
+    return open(p, flags);
+}
 
 /* Defined further down; declared here so the orbit probe and the stage marks
  * can record into the boot trail and the network log. */
@@ -196,9 +336,12 @@ static long mono_ms(void);
  * the orbit ever needs re-measuring, on this board or another. */
 #define ORBIT_PROBE 0
 
-/* The orbit's ring, which is also what the tail repaints it with. */
-static const unsigned char C_ORBIT[3]  = { 0x00, 0x00, 0xFF };
-static const unsigned char C_HEAD[3]   = { 0x00, 0xFF, 0xFF }; /* the orbit's head */
+/* The orbit's ring, which is also what the tail repaints it with. Biscuit's
+ * kernel draws these; the donut's draws 0000C1 and 00FFC1 (41C8,
+ * 2026-10-25), so led_claim reads both off the orbit it is taking over
+ * (orbit_learn) and these are what is used when there is none to read. */
+static unsigned char C_ORBIT[3]  = { 0x00, 0x00, 0xFF };
+static unsigned char C_HEAD[3]   = { 0x00, 0xFF, 0xFF }; /* the orbit's head */
 static const unsigned char C_FAIL[3]   = { 0xFF, 0x00, 0x00 };
 static const unsigned char C_AMBER[3]  = { 0xFF, 0x60, 0x00 };
 /* Cyan is already full on two channels, so the only way UP is toward white —
@@ -265,7 +408,7 @@ static void led_write(const unsigned char f[LED_N][3])
         puthex(hex + p * 6 + 2, f[i][1]);
         puthex(hex + p * 6 + 4, f[i][2]);
     }
-    int fd = open(LEDDIR "/frame", O_WRONLY);
+    int fd = led_open("frame", O_WRONLY);
     if (fd < 0)
         return;
     write(fd, hex, sizeof hex);
@@ -391,10 +534,16 @@ static void anim_render(int head_q, int still, int failed, int trail)
      * the first version of this — put the tail and the ground two shades of
      * the same blue apart, and on the device that read as no progress bar at
      * all (Wil, from video, 2026-09-05). The handover is covered by fading the
-     * ring out rather than by keeping it lit; see anim_handover. */
+     * ring out rather than by keeping it lit; see anim_handover.
+     *
+     * The trail includes segment i itself: once the head is past the midpoint
+     * that segment is the far one, taking the head's glow over whatever is
+     * beneath it. Over dark it faded to black and blinked back on as trail
+     * when the head reached the next segment; over the trail it fades straight
+     * down to blue. While the head is nearer, i is drawn as the head anyway. */
     int i = head_q / SUB, fr = head_q % SUB;
     for (int p = 0; p < LED_N; p++) {
-        if (trail && p < i)
+        if (trail && p <= i)
             memcpy(f[p], C_ORBIT, 3);
         else
             memset(f[p], 0, 3);
@@ -420,42 +569,76 @@ static void anim_render(int head_q, int still, int failed, int trail)
     led_write(f);
 }
 
-/* Where the kernel's orbit had got to, in logical positions, so ours can carry
- * on from there instead of jumping to the bottom. The head is whichever single
- * segment is not the ground colour; anything else — a dark ring, a frame
- * already claimed by somebody, two lit segments — is not an orbit we can join,
- * and returns -1 to start at the bottom as before. */
-static int orbit_head_pos(void)
+static int hexval(char c)
 {
-    int fd = open(LEDDIR "/frame", O_RDONLY);
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Read the ring as 12 physical RGB triplets; 0 when `frame` cannot be read or
+ * is not 72 hex digits. */
+static int frame_read(unsigned char f[LED_N][3])
+{
+    int fd = led_open("frame", O_RDONLY);
     if (fd < 0)
-        return -1;
+        return 0;
     char b[LED_N * 6 + 8];
     int n = read(fd, b, sizeof b - 1);
     close(fd);
     if (n < LED_N * 6)
-        return -1;
-
-    char want[6];
-    puthex(want,     C_ORBIT[0]);
-    puthex(want + 2, C_ORBIT[1]);
-    puthex(want + 4, C_ORBIT[2]);
-
-    int found = -1, count = 0;
-    for (int L = 0; L < LED_N; L++) {
-        int p = (LED_BOTTOM + LED_DIR * L) % LED_N;
-        if (p < 0)
-            p += LED_N;
-        int same = 1;
-        for (int k = 0; k < 6; k++) {
-            char a = b[p * 6 + k], w = want[k];
-            if (a >= 'a' && a <= 'f') a -= 32;   /* the kernel prints lower */
-            if (w >= 'a' && w <= 'f') w -= 32;
-            if (a != w) { same = 0; break; }
-        }
-        if (!same) { found = L; count++; }
+        return 0;
+    for (int i = 0; i < LED_N * 3; i++) {
+        int hi = hexval(b[i * 2]), lo = hexval(b[i * 2 + 1]);
+        if (hi < 0 || lo < 0)
+            return 0;
+        f[i / 3][i % 3] = (unsigned char)(hi << 4 | lo);
     }
-    return count == 1 ? found : -1;
+    return 1;
+}
+
+/* The kernel's orbit is eleven segments of one colour and one of another.
+ * Returns the PHYSICAL index of the odd one out, or -1 for anything else — a
+ * dark ring, a frame already claimed by somebody, two lit segments. */
+static int orbit_odd_one(const unsigned char f[LED_N][3])
+{
+    /* The ground is whichever colour two of the first three share. */
+    int g = memcmp(f[0], f[1], 3) == 0 || memcmp(f[0], f[2], 3) == 0 ? 0 : 1;
+    int odd = -1, count = 0;
+    for (int p = 0; p < LED_N; p++)
+        if (memcmp(f[p], f[g], 3) != 0) { odd = p; count++; }
+    return count == 1 ? odd : -1;
+}
+
+/* Take the orbit's two colours off the ring itself, so the continuation is
+ * drawn in whatever blues this board's kernel uses. */
+static void orbit_learn(void)
+{
+    unsigned char f[LED_N][3];
+    if (!frame_read(f))
+        return;
+    int odd = orbit_odd_one(f);
+    if (odd < 0)
+        return;
+    memcpy(C_HEAD, f[odd], 3);
+    memcpy(C_ORBIT, f[(odd + 1) % LED_N], 3);
+    note("orbit colours %02x%02x%02x head %02x%02x%02x\n", C_ORBIT[0],
+         C_ORBIT[1], C_ORBIT[2], C_HEAD[0], C_HEAD[1], C_HEAD[2]);
+}
+
+/* Where the kernel's orbit had got to, in logical positions, so ours can carry
+ * on from there instead of jumping to the bottom; -1 when there is no orbit
+ * to join, which starts at the bottom as before. */
+static int orbit_head_pos(void)
+{
+    unsigned char f[LED_N][3];
+    if (!frame_read(f))
+        return -1;
+    int p = orbit_odd_one(f);
+    if (p < 0)
+        return -1;
+    return ((p - LED_BOTTOM) * LED_DIR % LED_N + LED_N) % LED_N;
 }
 
 /* Boot complete: close the ring, fill both sides from the bottom to the top,
@@ -559,9 +742,9 @@ static void anim_claim(void)
             break;
         usleep(20000);
     }
-    int fd = open(LEDDIR "/boot_animation", O_WRONLY);
+    int fd = led_open("boot_animation", O_WRONLY);
     if (fd >= 0) { write(fd, "0", 1); close(fd); }
-    fd = open(LEDDIR "/led_current", O_WRONLY);
+    fd = led_open("led_current", O_WRONLY);
     if (fd >= 0) { write(fd, "3", 1); close(fd); }
 }
 
@@ -637,7 +820,7 @@ static void orbit_probe(void)
 {
 #if ORBIT_PROBE
     for (int i = 0; i < 10; i++) {
-        int fd = open(LEDDIR "/frame", O_RDONLY);
+        int fd = led_open("frame", O_RDONLY);
         if (fd < 0) {
             note("orbit probe: frame unreadable errno=%d\n", errno);
             return;
@@ -663,6 +846,8 @@ static void orbit_probe(void)
 static void led_claim(void)
 {
     main_pid = getpid();
+    note("led ring at %s\n", led_dir());
+    orbit_learn();
     orbit_probe();
     note("orbit head at %d\n", orbit_head_pos());
 
@@ -751,6 +936,10 @@ static void netlog(const char *fmt, ...);
 static int  readint(const char *path);
 
 /* Overridable so trialcheck.c can point them at files and run off-target. */
+/* boot_a_x, so emOS can reflash itself over the network. It is also the
+ * recovery target, so verify any write to it by dropping caches and reading
+ * BACK — a dd here can complete at page-cache speed, verify against that same
+ * cache, and be lost on the next reboot. Real writes run at about 9MB/s. */
 #ifndef BOOTDEV
 #define BOOTDEV   "/dev/block/mmcblk0p10"
 #endif
@@ -1065,6 +1254,12 @@ static long mono_ms(void)
     return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
 }
 
+/* The trail file, open from /data's mount to the shutdown. Kept at its full
+ * size so that each line is one pwrite and an fdatasync with no change of
+ * size: one data block per line, no journal commit, which matters to an eMMC
+ * that cannot be replaced. */
+static int trail_fd = -1;
+
 static void note(const char *fmt, ...)
 {
     char line[256];
@@ -1080,12 +1275,47 @@ static void note(const char *fmt, ...)
     n += p;
     if (n > (int)sizeof line - 1)
         n = sizeof line - 1;
-    if (trail_len + n + 1 < sizeof trail) {
-        memcpy(trail + trail_len, line, n);
-        trail_len += n;
-        trail[trail_len] = 0;
+    /* Full: nothing new to write, so nothing is written. */
+    if (trail_len + n + 1 >= sizeof trail)
+        return;
+    size_t off = trail_len;
+    memcpy(trail + trail_len, line, n);
+    trail_len += n;
+    trail[trail_len] = 0;
+
+    /* The raw 1024 is zeroed by the first line of each boot, so a shorter
+     * trail never leaves an earlier boot's tail to be misread; after that each
+     * line is written at its own offset until the 1024 is full. */
+    static int raw_fresh;
+    if (!raw_fresh) {
+        char raw[TRAIL_RAW] = { 0 };
+        memcpy(raw, trail, trail_len < TRAIL_RAW ? trail_len : TRAIL_RAW);
+        write_at(0, raw, sizeof raw);
+        raw_fresh = 1;
+    } else if (off < TRAIL_RAW) {
+        write_at(off, line, off + n <= TRAIL_RAW ? (size_t)n : TRAIL_RAW - off);
     }
-    write_at(TRAIL_OFF, trail, trail_len);
+    if (trail_fd >= 0) {
+        if (pwrite(trail_fd, line, n, off) == n)
+            fdatasync(trail_fd);
+    }
+}
+
+/* Called once /data is mounted. The file is opened without O_TRUNC and
+ * rewritten whole at its fixed size, so after the first boot it keeps the
+ * blocks it already has. */
+static void trail_open(void)
+{
+    mkdir("/data/emos", 0755);
+    int fd = open(TRAILFILE, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    if (fd < 0)
+        return;
+    if (pwrite(fd, trail, sizeof trail, 0) != (ssize_t)sizeof trail) {
+        close(fd);
+        return;
+    }
+    fsync(fd);
+    trail_fd = fd;
 }
 
 static int wr(const char *path, const char *val)
@@ -1295,6 +1525,50 @@ static const char *serialno(void)
     return buf;
 }
 
+/* Which board this is: Amazon's idme product id, the identity the firmware
+ * uses too (device/pkg/board), because the device tree reads MT8163 on every
+ * product. Matched exactly, with serial_copy's rules for idme's trailing NUL.
+ * Anything else is biscuit, which every emOS image before radar assumed. */
+#define RADAR_TYPE_ID "A7WXQPH584YP"
+#define DONUT_TYPE_ID "A32DOYMUN6DTXA"
+
+enum board { BOARD_BISCUIT, BOARD_RADAR, BOARD_DONUT };
+
+static int idme_type_is(const char *raw, const char *id)
+{
+    char got[32];
+    return serial_copy(raw, got, sizeof got) && strcmp(got, id) == 0;
+}
+
+static enum board board_of(const char *raw)
+{
+    if (idme_type_is(raw, RADAR_TYPE_ID))
+        return BOARD_RADAR;
+    if (idme_type_is(raw, DONUT_TYPE_ID))
+        return BOARD_DONUT;
+    return BOARD_BISCUIT;
+}
+
+static enum board board(void)
+{
+    static int known;
+    static enum board b;
+    if (known)
+        return b;
+    known = 1;
+    char raw[64];
+    int fd = open("/proc/idme/device_type_id", O_RDONLY);
+    if (fd < 0)
+        return b;
+    ssize_t n = read(fd, raw, sizeof raw - 1);
+    close(fd);
+    if (n <= 0)
+        return b;
+    raw[n] = 0;
+    b = board_of(raw);
+    return b;
+}
+
 static void usbwr(const char *leaf, const char *val)
 {
     char p[256];
@@ -1491,46 +1765,247 @@ static int run_wait(char *const argv[])
     return st;
 }
 
-/* Write /etc/resolv.conf pointing at the default gateway.
+/* /etc/resolv.conf from the DHCP lease (#1066).
  *
  * The device has NO working DNS otherwise: FireOS keeps resolvers in Android
  * properties rather than a file, there is no /system/etc/resolv.conf at all,
  * and dhcpcd's "could not set property" lines are it failing to publish them
- * to a property service we do not run. Nothing noticed for a long time because
- * EchoMuse finds its controller over mDNS and connects by IP.
+ * to a property service we do not run.
  *
- * The gateway is an ASSUMPTION, not a lease value: parsing dhcpcd's binary
- * lease would be the correct source, and on the overwhelming majority of home
- * networks the router that served DHCP is also the resolver. Stated here so
- * that whoever hits the exception knows exactly which line lied to them.
+ * The servers come from the lease, DHCP option 6 (RFC 2132 3.8), from
+ * whichever client this layout runs: Amazon's dhcpcd keeps the raw DHCPACK in
+ * DHCPCD_LEASE, and the udhcpc hook writes $dns to UDHCPC_DNS. The gateway is
+ * used only when the lease names no server, as before #1066, where it was
+ * always used and a network whose router serves no DNS resolved nothing.
+ * init is the one writer; update_resolv() runs every turn of net_main's loop,
+ * so a renewal or a WiFi change reaches the file within one turn.
  */
+#ifndef RESOLV_CONF
+#define RESOLV_CONF  "/etc/resolv.conf"
+#endif
+#ifndef DHCPCD_LEASE
+#define DHCPCD_LEASE "/data/misc/dhcp/dhcpcd-wlan0.lease"
+#endif
+#ifndef UDHCPC_DNS
+#define UDHCPC_DNS   "/run/udhcpc-dns"
+#endif
+#ifndef DHCPCD_LEASE_DIR
+#define DHCPCD_LEASE_DIR "/data/misc/dhcp"
+#endif
+#define AID_DHCP 1014
+
+/* The directory dhcpcd keeps DHCPCD_LEASE in, as Android's init.rc makes it
+ * (`mkdir /data/misc/dhcp 0770 dhcp dhcp`). Nothing else makes it under emOS,
+ * and the wizard wipes /data, so on a fresh install dhcpcd (which drops to the
+ * dhcp user) had nowhere to write a lease and the DNS fell back to the gateway
+ * silently -- seen on C95. Writes only what differs: a chown to the same owner
+ * still dirties the inode, and this runs every boot (eMMC wear). */
+static int lease_dir_ready(const char *dir, uid_t uid, gid_t gid)
+{
+    struct stat sb;
+    if (stat(dir, &sb) != 0) {
+        if (mkdir(dir, 0770) != 0 || stat(dir, &sb) != 0)
+            return -1;
+    }
+    if (!S_ISDIR(sb.st_mode))
+        return -1;
+    if ((sb.st_uid != uid || sb.st_gid != gid) && chown(dir, uid, gid) != 0)
+        return -1;
+    if ((sb.st_mode & 07777) != 0770 && chmod(dir, 0770) != 0)
+        return -1;
+    return 0;
+}
+/* MAXNS in bionic, musl and glibc: a fourth nameserver line is ignored. */
+#define RESOLV_MAXNS 3
+
 static char gwip[32];
 
-static void write_resolv_conf(void)
+/* Append an address to ns[] unless it is unusable or already there. */
+static int add_ns(uint32_t *ns, int n, int max, const unsigned char *a)
+{
+    uint32_t v = (uint32_t)a[0] << 24 | a[1] << 16 | a[2] << 8 | a[3];
+    if (v == 0 || v == 0xffffffffu || n >= max)
+        return n;
+    for (int i = 0; i < n; i++)
+        if (ns[i] == v)
+            return n;
+    ns[n] = v;
+    return n + 1;
+}
+
+/* Collect option `code` from one area of a DHCP message, concatenating
+ * repeated instances (RFC 3396). Returns the new length of buf, or -1 for an
+ * option that runs past the end of the area. *overload picks up option 52. */
+static int dhcp_area(const unsigned char *a, size_t len, int code,
+                     unsigned char *buf, int have, int cap, int *overload)
+{
+    size_t i = 0;
+    while (i < len) {
+        int t = a[i];
+        if (t == 0) { i++; continue; }          /* pad */
+        if (t == 255) break;                    /* end */
+        if (i + 1 >= len || i + 2 + a[i + 1] > len)
+            return -1;
+        int l = a[i + 1];
+        if (t == code) {
+            if (have + l > cap)
+                return -1;
+            memcpy(buf + have, a + i + 2, l);
+            have += l;
+        } else if (t == 52 && overload && l == 1) {
+            *overload = a[i + 2];
+        }
+        i += 2 + l;
+    }
+    return have;
+}
+
+/* The DNS servers in a raw DHCP reply (RFC 2131 message, RFC 2132 option 6),
+ * at most max, in the order given. Options are read from the options field,
+ * then file and sname when option 52 overloads them (RFC 3396 7's order).
+ * Anything malformed reads as no servers, so the caller falls back. */
+static int lease_dns(const unsigned char *b, size_t n, uint32_t *ns, int max)
+{
+    static const unsigned char magic[4] = { 99, 130, 83, 99 };
+    if (n < 240 || b[0] != 2 || memcmp(b + 236, magic, 4) != 0)
+        return 0;
+    unsigned char buf[255 * 3];
+    int overload = 0;
+    int have = dhcp_area(b + 240, n - 240, 6, buf, 0, sizeof buf, &overload);
+    if (have >= 0 && (overload & 1))
+        have = dhcp_area(b + 108, 128, 6, buf, have, sizeof buf, NULL);
+    if (have >= 0 && (overload & 2))
+        have = dhcp_area(b + 44, 64, 6, buf, have, sizeof buf, NULL);
+    if (have <= 0 || have % 4)
+        return 0;
+    int c = 0;
+    for (int i = 0; i < have; i += 4)
+        c = add_ns(ns, c, max, buf + i);
+    return c;
+}
+
+/* The servers in udhcpc's $dns: dotted quads separated by spaces. A token
+ * that is not exactly a.b.c.d is skipped. */
+static int text_dns(const char *s, uint32_t *ns, int max)
+{
+    int c = 0;
+    while (*s) {
+        while (*s == ' ' || *s == '\t' || *s == '\n')
+            s++;
+        if (!*s)
+            break;
+        unsigned char a[4];
+        int ok = 1, k = 0;
+        for (; k < 4 && ok; k++) {
+            int v = 0, d = 0;
+            while (*s >= '0' && *s <= '9' && d < 4) { v = v * 10 + (*s++ - '0'); d++; }
+            if (d == 0 || d > 3 || v > 255) ok = 0;
+            a[k] = (unsigned char)v;
+            if (k < 3) { if (*s == '.') s++; else ok = 0; }
+        }
+        if (ok && (*s == 0 || *s == ' ' || *s == '\t' || *s == '\n'))
+            c = add_ns(ns, c, max, a);
+        while (*s && *s != ' ' && *s != '\t' && *s != '\n')
+            s++;
+    }
+    return c;
+}
+
+/* resolv.conf's text: the lease's servers, else the gateway, else nothing. */
+static int resolv_text(const uint32_t *ns, int n, const char *gw, char *out, size_t sz)
+{
+    size_t o = 0;
+    out[0] = 0;
+    for (int i = 0; i < n && o < sz; i++)
+        o += snprintf(out + o, sz - o, "nameserver %u.%u.%u.%u\n",
+                      ns[i] >> 24, (ns[i] >> 16) & 0xff, (ns[i] >> 8) & 0xff, ns[i] & 0xff);
+    if (n == 0 && gw[0])
+        o += snprintf(out + o, sz - o, "nameserver %s\n", gw);
+    return o < sz ? (int)o : -1;
+}
+
+static void read_gateway(char *out, size_t sz)
 {
     FILE *f = fopen("/proc/net/route", "r");
+    out[0] = 0;
     if (!f)
         return;
     char line[256], iface[32];
     unsigned dest, gw;
     while (fgets(line, sizeof line, f)) {
         if (sscanf(line, "%31s %x %x", iface, &dest, &gw) == 3 && dest == 0 && gw) {
-            snprintf(gwip, sizeof gwip, "%u.%u.%u.%u",
+            snprintf(out, sz, "%u.%u.%u.%u",
                      gw & 0xff, (gw >> 8) & 0xff, (gw >> 16) & 0xff, (gw >> 24) & 0xff);
             break;
         }
     }
     fclose(f);
-    if (!gwip[0])
+}
+
+/* dhcpcd's lease survives reboots in /data, so the one there at boot may be
+ * another network's. It is believed only once dhcpcd has rewritten it. */
+static struct stat lease_at_boot;
+static int lease_at_boot_ok;
+
+static void lease_snapshot(void)
+{
+    lease_at_boot_ok = stat(DHCPCD_LEASE, &lease_at_boot) == 0;
+}
+
+static int lease_fresh(const struct stat *st)
+{
+    return !lease_at_boot_ok || st->st_ino != lease_at_boot.st_ino
+        || st->st_size != lease_at_boot.st_size
+        || st->st_mtime != lease_at_boot.st_mtime;
+}
+
+/* The servers this boot's lease names, from either client. */
+static int current_dns(uint32_t *ns, int max)
+{
+    char txt[512];
+    int fd = open(UDHCPC_DNS, O_RDONLY);
+    if (fd >= 0) {
+        ssize_t r = read(fd, txt, sizeof txt - 1);
+        close(fd);
+        txt[r > 0 ? r : 0] = 0;
+        return text_dns(txt, ns, max);
+    }
+    struct stat st;
+    if (stat(DHCPCD_LEASE, &st) != 0 || !lease_fresh(&st))
+        return 0;
+    unsigned char b[4096];
+    fd = open(DHCPCD_LEASE, O_RDONLY);
+    if (fd < 0)
+        return 0;
+    ssize_t r = read(fd, b, sizeof b);
+    close(fd);
+    return r > 0 ? lease_dns(b, (size_t)r, ns, max) : 0;
+}
+
+/* Rewrite resolv.conf when what it should say has changed. /etc is the
+ * ramdisk, but an unchanged file is still left alone. */
+static void update_resolv(void)
+{
+    static char last[256];
+    uint32_t ns[RESOLV_MAXNS];
+    int n = current_dns(ns, RESOLV_MAXNS);
+    /* gwip is also ntpd's server, so a turn with no route keeps the last. */
+    char gw[32];
+    read_gateway(gw, sizeof gw);
+    if (gw[0])
+        memcpy(gwip, gw, sizeof gwip);
+    char want[256];
+    if (resolv_text(ns, n, gw, want, sizeof want) <= 0 || strcmp(want, last) == 0)
         return;
-    int fd = open("/etc/resolv.conf", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    int fd = open(RESOLV_CONF ".tmp", O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0)
         return;
-    char buf[64];
-    int n = snprintf(buf, sizeof buf, "nameserver %s\n", gwip);
-    write(fd, buf, n);
+    ssize_t w = write(fd, want, strlen(want));
     close(fd);
-    netlog("resolv.conf nameserver %s\n", gwip);
+    if (w != (ssize_t)strlen(want) || rename(RESOLV_CONF ".tmp", RESOLV_CONF) != 0)
+        return;
+    memcpy(last, want, sizeof last);
+    netlog("resolv.conf from %s: %s", n ? "the lease" : "the gateway", want);
 }
 
 /* Outbound-only packet filter, applied BEFORE the interface comes up.
@@ -1683,6 +2158,18 @@ static int ifup(const char *name)
 #define WMT_FM_COMM       0x2
 #define WMT_HIF_ARG       ((WMT_FM_COMM << 4) | WMT_STP_BTIF_FULL)
 
+/* Radar's kernel also wants what Amazon's radar launcher sends, captured from
+ * it with an ioctl shim in #687 and confirmed there on two units: the chip id
+ * on /dev/wmtdetect first, then three calls on stpwmt after SET_STP_MODE.
+ * Without them SET_STP_MODE succeeds, the HIF stays unset and the wmtWifi
+ * write fails EIO. Names from MediaTek's wmt_dev.c and wmt_detect.c. */
+#define WMT_DETECT_IOC_MAGIC        'w'
+#define WMT_DETECT_SET_CHIP_ID      _IOW(WMT_DETECT_IOC_MAGIC, 1, int)
+#define WMT_IOCTL_LPBK_POWER_CTRL   _IOW(WMT_IOC_MAGIC, 7, int)
+#define WMT_IOCTL_SET_LAUNCHER_KILL _IOW(WMT_IOC_MAGIC, 13, int)
+#define WMT_IOCTL_COREDUMP_CTRL     _IOW(WMT_IOC_MAGIC, 24, int)
+#define RADAR_CHIP_ID               0x8163
+
 #define WMT_PATCH_MAX 8
 
 /* WMT_PATCH_INFO, wmt_lib.h. The layout is fixed by the driver's
@@ -1816,8 +2303,12 @@ static void wmt_daemon(int fd, const char *dir)
         }
         char cmd[64] = { 0 };
         ssize_t n = read(fd, cmd, sizeof cmd - 1);
-        if (n <= 0)
+        if (n <= 0) {
+            /* Readable with nothing to read: radar's stpwmt does this while
+             * the chip is between power cycles. Without the pause it spins. */
+            usleep(50000);
             continue;
+        }
         cmd[n] = '\0';
         if (!strncmp(cmd, "srh_patch", 9)) {
             int got = wmt_answer_patches(fd, dir);
@@ -1834,9 +2325,20 @@ static void wmt_daemon(int fd, const char *dir)
     }
 }
 
-/* Configure the HIF and fork the daemon. Returns 0 when the HIF took. */
-static int wmt_bringup(const char *patch_dir)
+/* Configure the HIF and fork the daemon. Returns 0 when the HIF took.
+ *
+ * On radar the daemon is forked FIRST, because the power-on its setup calls
+ * start asks for patches before they return, and nobody would answer. */
+static int wmt_bringup(const char *patch_dir, int radar)
 {
+    if (radar) {
+        int det = open("/dev/wmtdetect", O_RDWR);
+        int r = det < 0 ? -1 : ioctl(det, WMT_DETECT_SET_CHIP_ID, RADAR_CHIP_ID);
+        netlog("wmt: radar chip id 0x%x rc=%d errno=%d\n", RADAR_CHIP_ID, r,
+               r ? errno : 0);
+        if (det >= 0)
+            close(det);
+    }
     int fd = open("/dev/stpwmt", O_RDWR);
     if (fd < 0) {
         netlog("wmt: open /dev/stpwmt failed errno=%d\n", errno);
@@ -1845,16 +2347,32 @@ static int wmt_bringup(const char *patch_dir)
     if (ioctl(fd, WMT_IOCTL_SET_PATCH_NAME, patch_dir) < 0)
         netlog("wmt: SET_PATCH_NAME failed errno=%d\n", errno);
 
+    pid_t p = -1;
+    if (radar && (p = fork()) == 0) {
+        wmt_daemon(fd, patch_dir);
+        _exit(0);
+    }
+
     int r = ioctl(fd, WMT_IOCTL_SET_STP_MODE, WMT_HIF_ARG);
     netlog("wmt: SET_STP_MODE(0x%x) rc=%d errno=%d\n",
            WMT_HIF_ARG, r, r ? errno : 0);
     if (r < 0) {
+        if (p > 0)
+            kill(p, SIGKILL);
         close(fd);
         return -1;
     }
 
-    pid_t p = fork();
-    if (p == 0) {
+    if (radar) {
+        /* LPBK_POWER_CTRL takes a POINTER: given the value it runs the whole
+         * power-on and then fails the copy-out with EFAULT (#687). */
+        int zero = 0, one = 1;
+        int c = ioctl(fd, WMT_IOCTL_COREDUMP_CTRL, zero);
+        int k = ioctl(fd, WMT_IOCTL_SET_LAUNCHER_KILL, zero);
+        int l = ioctl(fd, WMT_IOCTL_LPBK_POWER_CTRL, &one);
+        netlog("wmt: radar setup coredump=%d launcher=%d power=%d errno=%d\n",
+               c, k, l, errno);
+    } else if ((p = fork()) == 0) {
         wmt_daemon(fd, patch_dir);
         _exit(0);
     }
@@ -1938,6 +2456,82 @@ static void wpa_ctrl_dir(const char *conf, char *out, size_t n)
     }
 }
 
+/* The Dot 3's WiFi is an MT7668 on SDIO: two kernel modules and no WMT
+ * stack, so no wmt_loader, no launcher and no /dev/wmtWifi. Under FireOS
+ * its init loads them; under emOS nothing does.
+ *
+ * The firmware path is set FIRST. Without it the driver's direct load fails
+ * -2 and the kernel falls back to the user helper, which waits out its
+ * timeout once per file with nobody to answer (41C8, 2026-10-24). Never
+ * unload mid-probe: an rmmod then panicked the kernel. */
+#define SDIO_FW_DIR "/system/vendor/firmware"
+
+static int sdio_wifi_bringup(void)
+{
+    static const char *const mods[] = {
+        "/system/lib/modules/wlan_mt76x8_sdio_prealloc.ko",
+        "/system/lib/modules/wlan_mt76x8_sdio.ko", NULL };
+    int r = wr("/sys/module/firmware_class/parameters/path", SDIO_FW_DIR);
+    netlog("wifi: firmware path rc=%d errno=%d\n", r, r ? errno : 0);
+    for (int i = 0; mods[i]; i++) {
+        int fd = open(mods[i], O_RDONLY | O_CLOEXEC);
+        if (fd < 0) {
+            netlog("wifi: open %s failed errno=%d\n", mods[i], errno);
+            return -1;
+        }
+        long m = syscall(SYS_finit_module, fd, "", 0);
+        int e = errno;
+        close(fd);
+        netlog("wifi: load %s rc=%ld errno=%d\n", mods[i], m, m ? e : 0);
+        /* EEXIST: already loaded, by an earlier stage or by hand. */
+        if (m && e != EEXIST)
+            return -1;
+    }
+    return 0;
+}
+
+/* The udhcpc hook. $dns goes to a file for update_resolv(), written whole
+ * and renamed so init never reads half of it; written even when empty, so a
+ * new network without DNS falls back to its own gateway rather than keeping
+ * the last one's servers. The old default route is removed first: a second
+ * `route add default` fails, and kept the previous network's. $router may
+ * list several; the first is used. Returns snprintf's length. */
+static int udhcpc_hook(char *out, size_t sz, const char *bbp)
+{
+    return snprintf(out, sz,
+             "#!/system/bin/sh\n"
+             "[ \"$1\" = bound ] || [ \"$1\" = renew ] || exit 0\n"
+             "%s ifconfig $interface $ip netmask $subnet\n"
+             "if [ -n \"$router\" ]; then %s route del default 2>/dev/null;"
+             " %s route add default gw ${router%%%% *}; fi\n"
+             "echo \"$dns\" > " UDHCPC_DNS ".tmp && %s mv " UDHCPC_DNS ".tmp " UDHCPC_DNS "\n",
+             bbp, bbp, bbp, bbp);
+}
+
+/* The donut's Bluetooth is the same MT7668 behind its own module, which
+ * FireOS loads and nothing here did, so /dev/stpbt never existed under emOS.
+ * Loaded after WiFi (measured on 41C8, 2026-11-07: the ROM patch downloads
+ * from SDIO_FW_DIR in ~280ms with wlan0 up, and the link stayed up), and the
+ * node made from the uevent it registers (BT_chrdev, DEVNAME=stpbt). A
+ * failure costs Bluetooth only: WiFi is already up and the firmware's
+ * scanner reports the missing node. */
+static void sdio_bt_bringup(void)
+{
+    static const char mod[] = "/system/lib/modules/btmtksdio.ko";
+    int fd = open(mod, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        netlog("bt: open %s failed errno=%d\n", mod, errno);
+        return;
+    }
+    long m = syscall(SYS_finit_module, fd, "", 0);
+    int e = errno;
+    close(fd);
+    netlog("bt: load %s rc=%ld errno=%d\n", mod, m, m ? e : 0);
+    if (m && e != EEXIST)
+        return;
+    netlog("bt: nodes after load=%d\n", mknodes());
+}
+
 #define UDHCPC_SCRIPT "/tmp/udhcpc.sh"
 
 /* 24 turns of a 5s loop = two minutes. */
@@ -1952,8 +2546,11 @@ static void net_main(void)
     static const char *const loaders[] = { "/system/bin/wmt_loader",
                                            "/system/vendor/bin/wmt_loader", NULL };
     const char *ldr = first_exec(loaders);
-    int vendor = access("/system/bin/6620_launcher", X_OK) != 0
-              && access("/system/vendor/bin/wmt_launcher", X_OK) == 0;
+    /* The donut has neither launcher but is a FireOS 6 userspace, so it takes
+     * the vendor layout's supplicant and DHCP. */
+    int sdio = board() == BOARD_DONUT;
+    int vendor = sdio || (access("/system/bin/6620_launcher", X_OK) != 0
+                          && access("/system/vendor/bin/wmt_launcher", X_OK) == 0);
     char *loader[] = { (char *)(ldr ? ldr : loaders[0]), NULL };
     char *launch[] = { vendor ? "/system/vendor/bin/wmt_launcher"
                               : "/system/bin/6620_launcher", "-p",
@@ -1979,7 +2576,9 @@ static void net_main(void)
                                          "/system/bin/wpa_supplicant", NULL };
     const char *sup = first_exec(supps);
     netlog("wifi tools: %s layout, loader %s, supplicant %s\n",
-           vendor ? "vendor (FireOS 6)" : "system (FireOS 5)", loader[0],
+           sdio ? "SDIO modules" : vendor ? "vendor (FireOS 6)"
+                                         : "system (FireOS 5)",
+           sdio ? "none" : loader[0],
            sup ? sup : supps[1]);
     char cflag[160] = "-c" ANDROID_WPA_CONF;
     char *supp[]   = { (char *)(sup ? sup : supps[1]), "-iwlan0", "-Dnl80211",
@@ -1994,16 +2593,13 @@ static void net_main(void)
      *
      * FireOS 5 keeps dhcpcd: it works on the fleet today. */
     /* Sized generously: the busybox path is itself up to ~40 bytes and appears
-     * twice, and snprintf truncates SILENTLY -- a short buffer here cost a
+     * four times, and snprintf truncates SILENTLY -- a short buffer here cost a
      * boot with an address but no default route, because the line that adds
      * it was cut in half. */
-    char udhcpc_script[512];
-    snprintf(udhcpc_script, sizeof udhcpc_script,
-             "#!/system/bin/sh\n"
-             "[ \"$1\" = bound ] || [ \"$1\" = renew ] || exit 0\n"
-             "%s ifconfig $interface $ip netmask $subnet\n"
-             "[ -n \"$router\" ] && %s route add default gw $router\n",
-             bbp, bbp);
+    char udhcpc_script[1024];
+    int sl = udhcpc_hook(udhcpc_script, sizeof udhcpc_script, bbp);
+    if (sl >= (int)sizeof udhcpc_script)
+        netlog("udhcpc script truncated (%d bytes)\n", sl);
     /* Not wr(): that is for sysfs and opens O_WRONLY without O_CREAT, so it
      * cannot make a file that does not exist yet. */
     int sfd = open(UDHCPC_SCRIPT, O_WRONLY | O_CREAT | O_TRUNC, 0755);
@@ -2021,27 +2617,41 @@ static void net_main(void)
     char *dhcp_fos6[] = { "/sbin/udhcpc", "-B", "-f", "-i", "wlan0",
                           "-s", (char *)UDHCPC_SCRIPT, NULL };
     char **dhcp = vendor ? dhcp_fos6 : dhcp_fos5;
-    int st = 0;
+    if (!vendor && lease_dir_ready(DHCPCD_LEASE_DIR, AID_DHCP, AID_DHCP) != 0)
+        netlog("%s not usable (errno=%d): DNS will come from the gateway\n",
+               DHCPCD_LEASE_DIR, errno);
+    lease_snapshot();
+    int st = 0, r;
 
-    waitpid(spawn(loader), &st, 0);
-    netlog("wmt_loader status=%d\n", st);
-
-    /* FireOS 6's wmt_launcher does not work here (see wmt_bringup above), so
-     * on that layout emOS configures the HIF and answers patch searches
-     * itself. FireOS 5's 6620_launcher is left alone: it works today on the
-     * fleet, and replacing a working path with an untested one is not a trade
-     * worth making until ours has run on hardware. */
     pid_t launcher = -1;
-    if (vendor) {
-        if (wmt_bringup("/system/vendor/firmware/"))
-            netlog("wmt: bring-up failed, wlan0 will not appear\n");
+    if (sdio) {
+        if (sdio_wifi_bringup())
+            netlog("wifi: module load failed, wlan0 will not appear\n");
+        else
+            sdio_bt_bringup();
     } else {
-        launcher = spawn(launch);
-    }
-    sleep(2);
+        waitpid(spawn(loader), &st, 0);
+        netlog("wmt_loader status=%d\n", st);
+        /* wmt_loader's chip detection is what registers stpwmt and stpbt. */
+        netlog("wmt: nodes after loader=%d\n", mknodes());
 
-    int r = wr("/dev/wmtWifi", "1");
-    netlog("wmtWifi=1 rc=%d errno=%d\n", r, r ? errno : 0);
+        /* FireOS 6's wmt_launcher does not work here (see wmt_bringup
+         * above), so on that layout emOS configures the HIF and answers patch
+         * searches itself. FireOS 5's 6620_launcher is left alone: it works
+         * today on the fleet, and replacing a working path with an untested
+         * one is not a trade worth making until ours has run on hardware. */
+        if (vendor) {
+            if (wmt_bringup("/system/vendor/firmware/", board() == BOARD_RADAR))
+                netlog("wmt: bring-up failed, wlan0 will not appear\n");
+        } else {
+            launcher = spawn(launch);
+        }
+        sleep(2);
+
+        mknodes();                          /* wmtWifi, once the chip is up */
+        r = wr("/dev/wmtWifi", "1");
+        netlog("wmtWifi=1 rc=%d errno=%d\n", r, r ? errno : 0);
+    }
 
     for (int i = 0; i < 20 && access("/sys/class/net/wlan0", F_OK); i++)
         sleep(1);
@@ -2213,9 +2823,10 @@ static void net_main(void)
                         write_state(0);
                         promote_good();
                     }
-                    write_resolv_conf();
+                    update_resolv();
                     ntp = spawn(ntpd);
                 }
+                update_resolv();
             } else if (++dry >= 4) {
                 kill(dhc, SIGTERM);
                 dry = 0;
@@ -2271,21 +2882,8 @@ static int tool_main(int argc, char **argv)
 
 int main(int argc, char **argv)
 {
-    char buf[512];
-
     if (getpid() != 1)
         return tool_main(argc, argv);
-
-    /* mknod's mode is masked by the umask, so without this every node below
-     * comes out 0644 no matter what it asks for — which is how dhcpcd's hook
-     * script ended up unable to open /dev/null for writing.
-     *
-     * It is restored to 022 as soon as the nodes exist, and that matters more
-     * than it looks: umask is INHERITED by every child, so leaving it at 0
-     * made PID 1 hand a permissive mask to every process on the device. The
-     * syslog and anything a spawned shell created came out world-writable
-     * (-rw-rw-rw-). Narrow the window to the thing that needs it. */
-    umask(0);
 
     mkdir("/dev", 0755);
     mkdir("/proc", 0755);
@@ -2313,53 +2911,15 @@ int main(int argc, char **argv)
     mount("debugfs", "/sys/kernel/debug", "debugfs", 0, NULL);
     mkdir("/dev/block", 0755);
 
-    /* Every device node is created by hand.
-     *
-     * This kernel has no devtmpfs — Android's /dev is a plain tmpfs populated
-     * by ueventd from uevents, and we are not running ueventd. Nothing appears
-     * on its own. The block nodes worked only because they were mknod'd
-     * explicitly; /dev/ttyGS0 was assumed and therefore absent, which is why
-     * the gadget reached CONFIGURED with nothing listening on it.
-     *
-     * 247:0 is ttyGS0, read off a running FireOS device rather than guessed.
-     */
-    mknod(CACHE, S_IFBLK | 0600, makedev(179, 15));
-    /* boot_a_x, so emOS can reflash itself over the network: the device has
-     * curl, busybox and dd, which turns a flash cycle from a TWRP trip into
-     * about thirty seconds. It is also the recovery target, so verify any
-     * write to it by dropping caches and reading BACK — a dd here can complete
-     * at page-cache speed, verify against that same cache, and be lost on the
-     * next reboot. Real writes to this eMMC run at about 9MB/s. */
-    mknod("/dev/block/mmcblk0p10", S_IFBLK | 0600, makedev(179, 10));
-    mknod("/dev/null",    S_IFCHR | 0666, makedev(1, 3));
-    mknod("/dev/zero",    S_IFCHR | 0666, makedev(1, 5));
-    mknod("/dev/tty",     S_IFCHR | 0666, makedev(5, 0));
-    mknod("/dev/console", S_IFCHR | 0600, makedev(5, 1));
-    mknod("/dev/ptmx",    S_IFCHR | 0666, makedev(5, 2));
-    /* wpa_supplicant refuses to start without both of these. */
-    mknod("/dev/random",  S_IFCHR | 0666, makedev(1, 8));
-    mknod("/dev/urandom", S_IFCHR | 0666, makedev(1, 9));
-    mknod(TTY,            S_IFCHR | 0600, makedev(247, 0));
+    /* Every device node, from sysfs -- see mknodes(). Before anything else,
+     * because the boot trail is written to a raw partition node. */
+    int nodes = mknodes();
     mkdir("/dev/pts", 0755);
     mount("devpts", "/dev/pts", "devpts", 0, NULL);
-    mkdir("/dev/input", 0755);
-    mkdir("/dev/snd", 0755);
-    for (unsigned i = 0; i < sizeof nodes / sizeof nodes[0]; i++)
-        mknod(nodes[i].path, S_IFCHR | 0600,
-              makedev(nodes[i].major, nodes[i].minor));
 
-    umask(022);   /* nodes exist; every child inherits a sane mask from here */
-
-    snprintf(buf, sizeof buf, "EM64-INIT-OK acm-console\n");
-    write_at(0, buf, strlen(buf));
-
-    int fd = open("/proc/version", O_RDONLY);
-    if (fd >= 0) {
-        int n = read(fd, buf, sizeof buf - 1);
-        close(fd);
-        if (n > 0) write_at(512, buf, n);
-    }
-    note("stage=mounts done devtmpfs_rc=%d tty=%d\n", dtr, access(TTY, F_OK));
+    note("EM64-INIT-OK acm-console\n");
+    note("stage=mounts done devtmpfs_rc=%d nodes=%d tty=%d\n", dtr, nodes,
+         access(TTY, F_OK));
     led_claim();
     led_step();                                  /* 1: mounts and device nodes */
 
@@ -2380,7 +2940,6 @@ int main(int argc, char **argv)
     int sysp = cmdline_system_part(cmdl);
     char sysdev[48];
     snprintf(sysdev, sizeof sysdev, "/dev/block/mmcblk0p%d", sysp);
-    mknod(sysdev, S_IFBLK | 0600, makedev(179, sysp));
     int r = mount(sysdev, "/system", "ext4", MS_RDONLY, NULL);
 
     /* FireOS 6 is SYSTEM-AS-ROOT: the partition's root is the Android root
@@ -2426,7 +2985,6 @@ int main(int argc, char **argv)
      * there. /system stays read-only — nothing here should be able to damage
      * the Android install we still rely on for recovery. */
     mkdir("/data", 0755);
-    mknod("/dev/block/mmcblk0p16", S_IFBLK | 0600, makedev(179, 16));
 
     /* Check /data before mounting it read-write.
      *
@@ -2443,7 +3001,22 @@ int main(int argc, char **argv)
     led_step();                                  /* 3: fsck /data */
 
     r = mount("/dev/block/mmcblk0p16", "/data", "ext4", 0, NULL);
+    if (r == 0)
+        trail_open();
     note("stage=mount_data rc=%d errno=%d\n", r, r ? errno : 0);
+    /* Which kernel booted, in the file only: it is ~200 bytes the raw 1024
+     * cannot spare, and only matters once the boot gets this far. */
+    int vfd = open("/proc/version", O_RDONLY);
+    if (vfd >= 0) {
+        char v[200];
+        int vn = read(vfd, v, sizeof v - 1);
+        close(vfd);
+        if (vn > 0) {
+            v[vn] = 0;
+            v[strcspn(v, "\n")] = 0;
+            note("kernel %s\n", v);
+        }
+    }
     if (r) led_fail(); else led_step();          /* 4: /data */
 
     /* Android's own root has these two symlinks and a surprising amount of
@@ -2654,6 +3227,8 @@ int main(int argc, char **argv)
 
     for (int i = 0; i < 15; i++) {
         sleep(1);
+        if (access(TTY, F_OK))
+            mknodes();                  /* registered with the gadget */
         char tag[32];
         snprintf(tag, sizeof tag, "wait=%d tty=%d", i, access(TTY, F_OK));
         rdstate(tag);
@@ -3336,8 +3911,12 @@ static void do_shutdown(void)
     run_wait(dump);
     sync();
     sync();
-    mount(NULL, "/data", NULL, MS_REMOUNT | MS_RDONLY, NULL);
     note("stage=shutdown done\n");
+    if (trail_fd >= 0) {
+        close(trail_fd);
+        trail_fd = -1;
+    }
+    mount(NULL, "/data", NULL, MS_REMOUNT | MS_RDONLY, NULL);
     sync();
     reboot(RB_AUTOBOOT);
 }

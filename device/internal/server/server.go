@@ -1,6 +1,7 @@
 package server
 
 import (
+	"golang.org/x/sys/unix"
 	"log"
 	"math"
 	"sync"
@@ -8,11 +9,11 @@ import (
 	"time"
 
 	internalLed "github.com/wilbowes/EchoMuse/internal/bindings/led"
+	"github.com/wilbowes/EchoMuse/pkg/board"
 	"github.com/wilbowes/EchoMuse/pkg/buttons"
 	"github.com/wilbowes/EchoMuse/pkg/led"
 	"github.com/wilbowes/EchoMuse/pkg/mic"
 	"github.com/wilbowes/EchoMuse/pkg/speaker"
-	"golang.org/x/sys/unix"
 )
 
 // ledMode controls which subsystem currently owns the LED ring.
@@ -365,6 +366,18 @@ func (s *Server) LEDModeSystem() { s.SetLEDMode(ledModeSystem) }
 func (s *Server) LEDModeDirection() { s.SetLEDMode(ledModeDirection) }
 
 // SetDirectionLEDs overlays a direction marker onto the current LED ring state.
+// ringLEDFor is the LED nearest angleDeg on a 12-LED ring whose LED 0 sits at
+// led0 degrees, both clockwise from 12 o'clock. Biscuit's LEDs sit on the
+// hours (240); the Dot 3's straddle them (195), so a microphone on the hour
+// lands halfway and takes the LED clockwise of it, its neighbour lit beside.
+func ringLEDFor(angleDeg, led0 float64) int {
+	i := int(math.Floor((angleDeg-led0)/30+0.5)) % 12
+	if i < 0 {
+		i += 12
+	}
+	return i
+}
+
 func (s *Server) SetDirectionLEDs(angleDeg float64) {
 	if angleDeg < 0 {
 		return
@@ -390,13 +403,8 @@ func (s *Server) SetDirectionLEDs(angleDeg float64) {
 		return
 	}
 
-	const (
-		nLEDs     = 12
-		ledOffset = 240
-	)
-
-	normAngle := int(math.Round(angleDeg/30)) * 30
-	primary := ((normAngle - ledOffset + 360) % 360) / 30 % nLEDs
+	const nLEDs = 12
+	primary := ringLEDFor(angleDeg, board.CurrentLayout().RingLED0)
 	secondary := (primary + 1) % nLEDs
 	tertiary := (primary + nLEDs - 1) % nLEDs
 

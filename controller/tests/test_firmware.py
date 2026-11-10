@@ -200,3 +200,30 @@ def test_a_digest_goes_with_the_payload_it_belongs_to(cache):
 def test_pruning_an_absent_directory_is_quiet(tmp_path, monkeypatch):
     monkeypatch.setenv("DB_PATH", str(tmp_path / "nope" / "echomuse.db"))
     assert em_firmware.prune() == []
+
+
+def test_a_download_follows_a_redirect_with_a_long_header(cache):
+    # github.com's redirect to the asset carries a 9,243-byte CSP header,
+    # over aiohttp's default 8,190-byte field limit (#1021).
+    import asyncio
+
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+
+    import em_releases
+
+    async def redirect(request):
+        raise web.HTTPFound("/asset", headers={"Content-Security-Policy": "x" * 9243})
+
+    async def asset(request):
+        return web.Response(body=b"server-binary")
+
+    async def run():
+        app = web.Application()
+        app.router.add_get("/download", redirect)
+        app.router.add_get("/asset", asset)
+        async with TestServer(app) as server:
+            return await em_releases.download(str(server.make_url("/download")), "v9.9.9")
+
+    assert asyncio.run(run()) == b"server-binary"
+    assert em_firmware.read("v9.9.9") == b"server-binary"

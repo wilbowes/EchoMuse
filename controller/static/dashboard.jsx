@@ -694,11 +694,25 @@ function Select({ label, sub, value, options, onChange, disabled = false }) {
 
 // ─── EQ frequency response curve ─────────────────────────────────────────────
 
-function EqCurve({ bands, fs = 22050 }) {
-  const FREQS = [125, 250, 500, 1000, 2000, 3500, 5500, 8000];
-  const Q = 1.4, DB_RANGE = 14, N = 130, F_MIN = 60, F_MAX = 11000;
-  const W = 380, H = 90, PT = 8, PB = 20, PL = 8, PR = 8;
-  const IW = W - PL - PR, IH = H - PT - PB;
+// The x axis gives each band an equal column, so every band's centre sits
+// directly above its fader in EqSliders (both span the same width with eight
+// equal columns). Between centres it is logarithmic; past the ends it carries
+// on at the outer pair's spacing. fs is the device's chain rate: drawn at
+// 22050 the 8k shelf bent the top of the curve the device never produces.
+const EQ_FREQS = [125, 250, 500, 1000, 2000, 3500, 5500, 8000];
+
+function eqFreqAt(u) {
+  const F = EQ_FREQS, n = F.length, s = u * n - 0.5;
+  if (s < 0) return F[0] * Math.pow(F[1] / F[0], s);
+  if (s >= n - 1) return F[n-1] * Math.pow(F[n-1] / F[n-2], s - (n - 1));
+  const i = Math.floor(s);
+  return F[i] * Math.pow(F[i+1] / F[i], s - i);
+}
+
+function EqCurve({ bands, fs = 48000 }) {
+  const Q = 1.4, DB_RANGE = 14, N = 160;
+  const W = 400, H = 120, PT = 8, PB = 8;
+  const IH = H - PT - PB;
 
   function peakCoeffs(fc, g) {
     const A = Math.pow(10, g/40), w0 = 2*Math.PI*fc/fs;
@@ -725,47 +739,39 @@ function EqCurve({ bands, fs = 22050 }) {
     const dR=1+a[1]*c1+a[2]*c2,    dI=-(a[1]*s1+a[2]*s2);
     return Math.sqrt((nR*nR+nI*nI)/(dR*dR+dI*dI));
   }
+  const n = EQ_FREQS.length;
+  const filters = bands.map((g, i) =>
+    i === 0 ? loShelfCoeffs(EQ_FREQS[i], g) : i === n-1 ? hiShelfCoeffs(EQ_FREQS[i], g) : peakCoeffs(EQ_FREQS[i], g));
+  const dbAt = f => 20*Math.log10(Math.max(filters.reduce((m, c) => m * biquadMag(c, f), 1), 1e-10));
 
-  const pts = Array.from({length:N}, (_,i) => Math.exp(Math.log(F_MIN) + i/(N-1)*Math.log(F_MAX/F_MIN)));
-  const dbs = pts.map(f => {
-    let mag = 1;
-    bands.forEach((g,i) => {
-      mag *= biquadMag(i===0 ? loShelfCoeffs(FREQS[i],g) : i===7 ? hiShelfCoeffs(FREQS[i],g) : peakCoeffs(FREQS[i],g), f);
-    });
-    return 20*Math.log10(Math.max(mag, 1e-10));
-  });
-
-  const xOf = f  => PL + IW*(Math.log(f/F_MIN)/Math.log(F_MAX/F_MIN));
+  const xOf = u  => W * u;
   const yOf = db => PT + IH*(1 - (Math.max(-DB_RANGE, Math.min(DB_RANGE, db))+DB_RANGE)/(2*DB_RANGE));
 
-  const line = pts.map((f,i) => `${i===0?'M':'L'}${xOf(f).toFixed(1)},${yOf(dbs[i]).toFixed(1)}`).join(' ');
-  const fill = `${line} L${xOf(F_MAX).toFixed(1)},${yOf(0).toFixed(1)} L${xOf(F_MIN).toFixed(1)},${yOf(0).toFixed(1)}Z`;
+  const us = Array.from({length: N}, (_, i) => i / (N - 1));
+  const line = us.map((u, i) => `${i===0?'M':'L'}${xOf(u).toFixed(1)},${yOf(dbAt(eqFreqAt(u))).toFixed(1)}`).join(' ');
+  const fill = `${line} L${W},${yOf(0).toFixed(1)} L0,${yOf(0).toFixed(1)}Z`;
+  const centres = EQ_FREQS.map((f, i) => ({ x: xOf((i + 0.5) / n), y: yOf(dbAt(f)), on: bands[i] !== 0 }));
 
-  const dbTicks = [-12,-6,0,6,12];
-  const fTicks  = [{f:125,label:'125'},{f:500,label:'500'},{f:1000,label:'1k'},{f:4000,label:'4k'},{f:8000,label:'8k'}];
-
+  const mono = { fontFamily: "var(--font-mono)", fontSize: 8, fill: 'var(--muted)' };
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} style={{ width:'100%', display:'block', marginBottom:'var(--space-2)', borderRadius:'var(--radius-sm)', overflow:'hidden' }}>
-      <rect x={PL} y={PT} width={IW} height={IH} fill="var(--hairline)" rx="2"/>
-      {dbTicks.map(db => (
-        <line key={db} x1={PL} x2={PL+IW} y1={yOf(db)} y2={yOf(db)}
-          stroke={db===0?'rgba(0,0,0,0.18)':'var(--hairline)'}
-          strokeWidth={db===0?1:0.5} strokeDasharray={db===0?undefined:'2,3'}/>
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width:'100%', display:'block', marginBottom:'var(--space-3)', borderRadius:'var(--radius-sm)', overflow:'hidden' }}>
+      <rect x={0} y={0} width={W} height={H} fill="var(--hairline)"/>
+      {[-12, -6, 6, 12].map(db => (
+        <line key={db} x1={0} x2={W} y1={yOf(db)} y2={yOf(db)}
+          stroke="var(--muted)" strokeOpacity={0.25} strokeWidth={0.5} strokeDasharray="2,3"/>
       ))}
-      {fTicks.map(({f}) => (
-        <line key={f} x1={xOf(f)} x2={xOf(f)} y1={PT} y2={PT+IH}
-          stroke="var(--hairline)" strokeWidth={0.5}/>
+      {centres.map(({x}, i) => (
+        <line key={i} x1={x} x2={x} y1={PT} y2={H-PB} stroke="var(--muted)" strokeOpacity={0.15} strokeWidth={0.5}/>
       ))}
-      <path d={fill} fill="rgba(64,88,120,0.10)"/>
-      <path d={line} fill="none" stroke="var(--accent)" strokeWidth="1.5"
-        style={{filter:'drop-shadow(0 0 4px rgba(64,88,120,0.4))'}}/>
-      {dbTicks.filter(d=>d!==0).map(db => (
-        <text key={db} x={PL+2} y={yOf(db)+4}
-          style={{fontFamily:"var(--font-mono)",fontSize:6,fill:'var(--muted)'}}>{db>0?'+':''}{db}</text>
+      <line x1={0} x2={W} y1={yOf(0)} y2={yOf(0)} stroke="var(--muted)" strokeOpacity={0.5} strokeWidth={0.75}/>
+      <path d={fill} fill="color-mix(in srgb, var(--accent) 18%, transparent)"/>
+      <path d={line} fill="none" stroke="var(--accent)" strokeWidth={2} strokeLinejoin="round" strokeLinecap="round"/>
+      {centres.map(({x, y, on}, i) => (
+        <circle key={i} cx={x} cy={y} r={3} fill={on ? 'var(--accent)' : 'var(--hairline)'}
+          stroke="var(--accent)" strokeWidth={1.25}/>
       ))}
-      {fTicks.map(({f,label}) => (
-        <text key={f} x={xOf(f)} y={H-4} textAnchor="middle"
-          style={{fontFamily:"var(--font-mono)",fontSize:6,fill:'var(--muted)'}}>{label}</text>
+      {[-12, -6, 6, 12].map(db => (
+        <text key={db} x={3} y={yOf(db) + 3} style={mono}>{db > 0 ? '+' : ''}{db}</text>
       ))}
     </svg>
   );
@@ -1773,7 +1779,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
       setAssetNow(null);
       setAssetResult({ ok: true, text: n === 0
         ? 'Already up to date — nothing needed installing.'
-        : `Installed ${n} file${n === 1 ? '' : 's'}. Restart the device to start scoring on-device.` });
+        : `Installed ${n} file${n === 1 ? '' : 's'}.` });
       setAssets(await API.get(`/api/devices/${device.device_id}/oww_assets`));
     } catch(e) {
       setAssetNow(null);
@@ -2459,6 +2465,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 volumeCueCapable={!device.connected || !!device.volumeCueCapable}
                 remoteVolumeArcCapable={!device.connected || !!device.remoteVolumeArcCapable}
                 responseLevelCapable={!device.connected || !!device.responseLevelCapable}
+                stockSoundCapable={device.connected && !!device.stockSoundCapable}
                 wakeMicCapable={!device.connected || !!device.wakeMicCapable}
                 sendspinCapable={!device.connected || !!device.sendspinCapable}
                 sendspinPanel={device.connected && device.sendspinCapable
@@ -3466,6 +3473,20 @@ const _unlockVerdict = ({ release = '', lk = '', twrp = '' }) => {
   return { v2: evidence.length > 0, evidence };
 };
 
+// Which Echo this is, from the identity /system reports (in TWRP, read off
+// /system by readFireosBuild, since TWRP answers getprop with its own). The
+// boards the firmware knows (device/pkg/board); '' is neither, and the wizard
+// refuses it. A model naming Amazon still passes as biscuit, but only when no
+// codename was read: every Echo's brand is Amazon, and a Dot 3 (AEODN /
+// donut_puffin) must never reach biscuit's boot patch.
+const _echoBoard = (model = '', name = '') => {
+  const m = model.trim(), n = name.trim().toLowerCase();
+  if (m.toUpperCase() === 'AEORD' || n === 'radar_puffin') return 'radar';
+  if (n.includes('biscuit')) return 'biscuit';
+  if (!n && m.toLowerCase().includes('amazon')) return 'biscuit';
+  return '';
+};
+
 // Did the optional factory reset actually happen? Read from the probe
 // runWipeData sends after `twrp wipe data` / `twrp wipe cache`, whose exit
 // status says nothing. The probe prints:
@@ -4356,6 +4377,8 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // device has connected, rather than inferring it from the device list
   // having grown.
   const [provSerial, setProvSerial] = useState('');
+  // Which Echo the detect step found (_echoBoard): the build needs it.
+  const [provBoard, setProvBoard] = useState('');
   const [initFile, setInitFile]     = useState(null);
   const [emosConsole, setEmosConsole] = useState(null);
   const [wifiSsid, setWifiSsid] = useState('');
@@ -4779,7 +4802,20 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // escrow-build-flash sequence the emOS flow runs is not FireOS-5-specific at
     // any step: it reads the device's own boot image, rebuilds it with an init
     // matching that image's kernel, and writes it back.
-    const unlock = _unlockVerdict({ release: effRelease, lk, twrp });
+    const board = _echoBoard(model, name);
+    setProvBoard(board);
+    // Radar runs emOS only: FireOS 6 on it is Amazon's headless build, which
+    // EchoMuse does not drive. Its one unlock (amonet-radar) has none of
+    // amonet-biscuit's generations, so _unlockVerdict is biscuit's alone.
+    if (board === 'radar' && !isEmos) {
+      expectDisconnect.current = true;
+      try { await c.close(); } catch {}
+      setAdb(null);
+      throw new Error('This is an Echo 2nd gen (radar), which EchoMuse supports on emOS only. '
+        + 'Nothing has been written. Use the emOS flow.');
+    }
+    const unlock = board === 'radar' ? { v2: false, evidence: [] }
+                                     : _unlockVerdict({ release: effRelease, lk, twrp });
     if (unlock.v2 && !isEmos) {
       expectDisconnect.current = true;
       try { await c.close(); } catch {}
@@ -4816,27 +4852,26 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         `Expected ${isEmos ? 'FireOS 5 or 6 (Android 5.x or 7.x)' : 'FireOS 5 (Android 5.x)'}`
         + `, got Android ${effRelease}. Wrong device?`);
     }
-    // The emOS flow REFUSES a board it does not recognise, where the FireOS
-    // flow warns. The difference is what each one goes on to do: the FireOS
-    // path patches and boots the device's own Android, so a near-miss board
-    // has a fair chance of working, while emOS replaces the userspace and
-    // mounts /system at runtime for bionic and tinyalsa. On an unrecognised
-    // board that is not a lower chance of working, it is an unknown one, and
-    // the failure lands after the boot partition has been written.
-    const boardOk = (model && model.toLowerCase().includes('amazon'))
-                 || (name && name.toLowerCase().includes('biscuit'));
-    if (!boardOk) {
-      if (isEmos) {
-        expectDisconnect.current = true;
-        try { await c.close(); } catch {}
-        setAdb(null);
-        throw new Error(
-          `This does not look like an Echo Dot 2nd gen (model "${model || 'unknown'}", `
-          + `codename "${name || 'unknown'}"). emOS is built for biscuit and reuses this `
-          + `board's own kernel and /system, so it cannot be installed on anything else. `
-          + `Use ?flow=fireos if you meant to provision under FireOS.`);
-      }
-      addLog('Warning: device may not be an Echo Dot 2nd gen — proceeding anyway.', 'warn');
+    // Both flows REFUSE a board they do not recognise. emOS replaces the
+    // userspace and mounts /system at runtime for bionic and tinyalsa; the
+    // FireOS flow patches the boot image with biscuit's assumptions. On an
+    // unrecognised board either one fails after the boot partition has been
+    // written. The FireOS flow used to warn and carry on, and its release
+    // check is skipped when TWRP cannot read /system, so a Dot 3 in recovery
+    // reached the patch.
+    if (board === 'radar') {
+      addLog('Echo 2nd gen (radar): expecting FireOS 6 in both slots. The Escrow Boot Image '
+           + 'step checks that before anything is written, and is the way back — keep that file.', 'warn');
+    }
+    if (!board) {
+      expectDisconnect.current = true;
+      try { await c.close(); } catch {}
+      setAdb(null);
+      throw new Error(
+        `This does not look like an Echo Dot 2nd gen or an Echo 2nd gen (model `
+        + `"${model || 'unknown'}", codename "${name || 'unknown'}"). Nothing has been `
+        + `written. The wizard sets up only those two, because it reuses the board's `
+        + `own kernel and boot image.`);
     }
     // The untested-build case stays a WARNING in both flows, deliberately, and
     // it is the one place the two agree to be lenient: emOS mounts this
@@ -5381,23 +5416,31 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   //     carries no emos.system= stamp, so emOS mounts SYSTEM_PART_DEFAULT
   //     (emos/init/init.c). C95 on 2026-09-25 had FireOS 6 in system_b beside
   //     a working FireOS 5 system_a; that is a warning, not a refusal.
-  function donorVerdict({ probe, layout, heads, files }) {
+  // Radar (board 'radar') has one unlock, amonet-radar, and only ever FireOS 6,
+  // so lk_a's head tells nothing there and is not asked for; everything after
+  // the unlock is the amonet 2 check unchanged.
+  function donorVerdict({ probe, layout, heads, files, board = 'biscuit' }) {
     const why = [], seen = [], notes = [];
     if (!probe || !probe.complete) {
       return { ok: false, gen: 0, confirmed: seen, notes, reason:
         'The check of this Echo\'s partitions did not finish, so nothing about it can be '
         + 'trusted yet. Nothing has been written. Check the cable and try this step again.' };
     }
+    const radar = board === 'radar';
     const amonet = _amonetLk(probe.lk);
     const lkSays = amonet ? `lk_a holds amonet ${amonet}'s LK` : 'lk_a holds neither amonet\'s LK';
     const tw = probe.twrp;
     let gen = 0, unreadable = false;
-    if (!probe.lk) {
+    if (!radar && !probe.lk) {
       unreadable = true;
       why.push('the wizard could not read the lk_a partition, so it cannot tell amonet 1 from amonet 2');
     } else if (!tw) {
       unreadable = true;
       why.push('the wizard could not read the TWRP version');
+    } else if (radar) {
+      if (layout === 'v2') gen = 6;
+      else why.push('the boot partitions carry amonet-biscuit\'s renamed (_x) entries, '
+        + 'which an Echo 2nd gen should never have');
     } else if (amonet === 2 && /^3\.7\.0(?![0-9])(?!_9-bboe)/.test(tw) && layout === 'v2') {
       gen = 6;
     } else if (amonet === 1 && /^3\.2\.3(?![0-9])|^3\.7\.0_9-bboe\d+$/.test(tw) && layout === 'v1') {
@@ -5408,7 +5451,8 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         + 'amonet 2 means TWRP 3.7.0 and FireOS 6)');
     }
     if (gen) {
-      seen.push(`amonet ${gen === 6 ? 2 : 1}: ${lkSays}, TWRP ${tw}`);
+      seen.push(radar ? `Echo 2nd gen (radar) unlock, TWRP ${tw}`
+                      : `amonet ${gen === 6 ? 2 : 1}: ${lkSays}, TWRP ${tw}`);
       const want = gen === 6
         ? { layout: 'nested', release: '7.', arch: 'arm', label: 'FireOS 6' }
         : { layout: 'root', release: '5.', arch: 'arm64', label: 'FireOS 5' };
@@ -5452,7 +5496,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     }
     if (!why.length) return { ok: true, gen, confirmed: seen, notes };
     const fix = gen === 6
-      ? ' amonet 2 needs FireOS 6 in BOTH slots. If the FireOS 6 flash from the unlock '
+      ? ` ${radar ? 'An Echo 2nd gen' : 'amonet 2'} needs FireOS 6 in BOTH slots. If the FireOS 6 flash from the unlock `
         + 'instructions did not complete for both, finish it, then run this step again.'
       : gen === 5
         ? ' amonet 1 needs FireOS 5 in system_a (mmcblk0p13) and a FireOS 5 kernel to build from.'
@@ -5520,6 +5564,24 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         }
         const show = ms => [...ms].sort()
           .map(([n, d]) => `${n} → ${d}`).join(', ');
+        // _x on the kernel and the bare name on a different partition, with no
+        // _amonet, is amonet v1's table under a v2 unlock whose restore never
+        // ran (#712, #1056). Still refused, but it is a known state with a
+        // known way out, so say so rather than ask for a report. Any other
+        // shape (#598's bare and _x on one partition) keeps asking.
+        const keys = [...aliasDevs.keys()];
+        const mixed = keys.every(n => n.endsWith('_x')
+          && bare.has(n.slice(0, -2)) && bare.get(n.slice(0, -2)) !== aliasDevs.get(n));
+        if (mixed) {
+          return { ok: false, target, names, reason:
+            `The by-name map carries ${show(aliasDevs)}`
+            + (bare.size ? ` and ${show(bare)}` : '')
+            + ', which is amonet v1\'s partition table under a v2 unlock. Installing v2 '
+            + 'should have restored the original table, and on this Echo it has not. '
+            + 'Nothing has been read or written. Reflashing FireOS will not change it. '
+            + 'See the FAQ: https://github.com/wilbowes/EchoMuse/blob/main/docs/faq.md'
+            + '#the-wizard-stops-at-escrow-boot-image-and-mentions-boot_a_x' };
+        }
         return { ok: false, target, names, reason:
           `/dev/block/other-boot does not exist, but the by-name map carries `
           + `${show(aliasDevs)} — which belongs to the older amonet layout, `
@@ -6309,11 +6371,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     const ssidConf = _confSsid(ssidB);
 
     // What the scan said about this network, if it was picked from the list.
-    // A typed SSID that no scan saw is treated as hidden, which needs
-    // scan_ssid=1 or wpa_supplicant never probes for it and sits in SCANNING
-    // indefinitely.
     const known  = (wifiNetworks || []).find(n => n.ssid === ssid);
-    const hidden = !known;
     const security = known ? known.security : (psk ? 'wpa2' : 'open');
 
     const blocker = securityBlocker(security);
@@ -6327,7 +6385,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
            + `${known.bands.length ? ', ' + known.bands.join(' + ') : ''}`
            + `, ${known.signal} dBm`);
     } else {
-      addLog(`"${ssid}" was not in the last scan — configuring it as a hidden network.`, 'warn');
+      addLog(`"${ssid}" was not in the last scan — treating it as hidden.`, 'warn');
     }
 
     // Android 5.1's WifiAutoJoinController blocks auto-join after enough
@@ -6388,10 +6446,10 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
             ? ['\tkey_mgmt=NONE']
             : [/^[0-9a-fA-F]{64}$/.test(psk) ? `\tpsk=${psk.toLowerCase()}` : `\tpsk="${psk}"`,
                '\tkey_mgmt=WPA-PSK']),
-      // Without this, wpa_supplicant only ever joins networks that appear in
-      // a passive scan, so a hidden SSID never associates and reports nothing
-      // more useful than SCANNING.
-      ...(hidden ? ['\tscan_ssid=1'] : []),
+      // Always, not only for an SSID the scan missed: without it the
+      // supplicant joins only a network that beacons its name, so one hidden
+      // after setup is lost at the next boot.
+      '\tscan_ssid=1',
       '\tpriority=1',
       '}',
       '',
@@ -7405,7 +7463,8 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       await c.shell('rm -f /tmp/em_head.img');
       heads.push({ name: t.name, arch: await _kernelArchOf(head) });
     }
-    const gate = donorVerdict({ probe: donorProbe, layout: boot.layout, heads, files });
+    const gate = donorVerdict({ probe: donorProbe, layout: boot.layout, heads, files,
+                                board: provBoard });
     for (const line of gate.confirmed) addLog(`  ✓ ${line}`, 'ok');
     for (const line of gate.notes) addLog(`  ${line}`, 'warn');
     if (!gate.ok) throw new Error(gate.reason);
@@ -7509,6 +7568,40 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     }
   }
 
+  // Sends `bytes` to /api/provision/upload_chunk in pieces under nginx's 1MB
+  // default body limit and returns the upload's id for the build POST (#800).
+  // A proxy in front of Home Assistant refused the image in one request
+  // (#769, #1001), with a 413 the controller never saw. `post(query, piece)`
+  // makes the request; a piece that fails on the network is retried, which
+  // the controller accepts because the bytes match what it already holds.
+  async function _sendInChunks(bytes, post) {
+    const CHUNK = 512 * 1024;
+    const id = Array.from(crypto.getRandomValues(new Uint8Array(16)),
+      b => b.toString(16).padStart(2, '0')).join('');
+    for (let offset = 0; offset < bytes.length; offset += CHUNK) {
+      const piece = bytes.subarray(offset, offset + CHUNK);
+      const query = `?id=${id}&offset=${offset}&total=${bytes.length}`;
+      let resp;
+      for (let attempt = 1; ; attempt++) {
+        try { resp = await post(query, piece); break; } catch (e) {
+          if (attempt >= 3) throw e;
+        }
+      }
+      if (resp.status === 413) {
+        throw new Error('Something in front of Home Assistant refused a 512 KB '
+          + 'request (HTTP 413). That is a reverse proxy\'s upload limit '
+          + '(nginx: client_max_body_size); raise it to 2m or more and retry. '
+          + 'Nothing has been written to the Echo.');
+      }
+      if (!resp.ok) {
+        let detail = `HTTP ${resp.status}`;
+        try { const j = await resp.json(); detail = j.message || j.error || detail; } catch {}
+        throw new Error(`The controller refused part of the image: ${detail}`);
+      }
+    }
+    return id;
+  }
+
   function _bootImageLength(bytes) {
     if (!bytes || bytes.length < 2048) return 0;
     if (new TextDecoder().decode(bytes.slice(0, 8)) !== 'ANDROID!') return 0;
@@ -7592,8 +7685,15 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     addLog(`Sending the escrowed image (${(reference.length/1024/1024).toFixed(1)} MB) `
          + `to the controller…`);
 
+    const post = (query, piece) => fetchWithDeadline(
+      ingressPath('/api/provision/upload_chunk' + query), {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`,
+                   'Content-Type': 'application/octet-stream' },
+        body: piece,
+      }, 60000);
     const fd = new FormData();
-    fd.append('reference', new Blob([reference]), 'reference.img');
+    fd.append('reference_upload', await _sendInChunks(reference, post));
     // The controller checks this before it reads a byte of the image. It is
     // the integrity check on the escrow — the packer's round trip used to
     // provide one as a side effect of reproducing the boot header's SHA1, and
@@ -7603,7 +7703,8 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // reference's own kernel when asked, and an explicit part wins when the
     // operator picked a file by hand.
     if (initBlob) {
-      fd.append('init', initBlob, 'init');
+      fd.append('init_upload', await _sendInChunks(
+        new Uint8Array(await initBlob.arrayBuffer()), post));
     } else {
       fd.append('use_latest_init', '1');
     }
@@ -7619,6 +7720,9 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     if (emosPlan && emosPlan.ok && emosPlan.systemPart) {
       fd.append('system_part', String(emosPlan.systemPart));
     }
+    // The board the detect step read off the device: radar's kernel has to be
+    // told not to skip the ramdisk (em_emos_build.keep_initramfs).
+    if (provBoard) fd.append('board', provBoard);
     const started = Date.now();
     const ticker = setInterval(() => {
       addLog(`  still waiting for the controller (${Math.round((Date.now() - started) / 1000)}s)…`);
@@ -7658,6 +7762,9 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     if (info) {
       addLog(`  kernel and device trees carried over from your image `
            + `(${(info.zimage_size/1024/1024).toFixed(1)} MB + ${info.dtb_size} bytes)`);
+      if (info.kernel_patched) {
+        addLog('  kernel told not to skip the ramdisk (keep_initramfs), as this board\'s bootloader asks it to');
+      }
       addLog(`  ramdisk ${(info.ramdisk_size/1024).toFixed(0)} KB`);
       addLog(`  cmdline ${info.cmdline}`);
     }
@@ -8222,7 +8329,6 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // shell: an SSID or password with a quote in it used to break the command.
     const ssidHex = _bytesHex(ssidB);
     const pskHex = wifiPsk ? await _wpaPsk(wifiPsk, ssidB) : '';
-    const hidden = !(wifiNetworks || []).some(n => n.ssidHex === ssidHex);
 
     addLog(`Joining ${wifiSsid}…`);
     // Every call carries -p. wpa_cli defaults to /var/run/wpa_supplicant and
@@ -8246,8 +8352,8 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     await setNet('ssid', ssidHex);
     if (pskHex) await setNet('psk', pskHex);
     else await setNet('key_mgmt', 'NONE');
-    // Not in the last scan: probe for it by name, or it is never found.
-    if (hidden) await setNet('scan_ssid', '1');
+    // Probe by name always, or a network hidden after setup is never found.
+    await setNet('scan_ssid', '1');
     const en = await con.run(`wpa_cli -p /data/misc/wifi/sockets -i wlan0 enable_network ${id}`);
     if (!/OK/.test(en)) throw new Error(`wpa_cli refused to enable the network: ${en.trim()}`);
 
@@ -8453,8 +8559,8 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       }
       addLog(`  ✓ ${a.name}`);
     }
-    addLog('Wake word assets installed. On-device scoring is off by default — '
-         + 'enable it per device under Config → Wake word.', 'ok');
+    addLog('Wake word assets installed. Where the wake word runs is set per '
+         + 'device under Config → Wake word.', 'ok');
 
     // The finishing reboot lives in the LAST step, deliberately — it closes
     // the ADB connection, so any step after it can never run. Keeping it on
@@ -9446,7 +9552,9 @@ function ScopeChip({ children, tone }) {
 function EqSliders({ bands, onChange, disabled }) {
   const FREQ_LABELS = ['125', '250', '500', '1k', '2k', '3.5k', '5.5k', '8k'];
   return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 'var(--space-1)', ...(disabled ? { opacity: 0.45, pointerEvents: 'none' } : {}) }}>
+    // Eight equal columns and no gap, so each fader sits under its band's
+    // centre on EqCurve, which uses the same columns.
+    <div style={{ display: 'flex', ...(disabled ? { opacity: 0.45, pointerEvents: 'none' } : {}) }}>
       {bands.map((g, i) => (
         <div key={i} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', flex: 1, minWidth: 0 }}>
           <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-2xs)', color: g !== 0 ? 'var(--accent)' : 'var(--muted)', marginBottom: 'var(--space-1)', fontWeight: g !== 0 ? 600 : 400 }}>
@@ -9649,6 +9757,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                             volumeCueCapable = true,
                             remoteVolumeArcCapable = true,
                             responseLevelCapable = true,
+                            stockSoundCapable = false,
                             wakeMicCapable = true,
                             sendspinCapable = true, sendspinPanel = null,
                             bleConnectCapable = true, blePanel = null }) {
@@ -9798,36 +9907,22 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
     { value: 'pride',      label: 'Pride',      swatches: ['#bf0000', '#bf7700', '#a9bf00', '#00bf2c', '#0055bf', '#8b00bf'] },
     { value: 'custom',     label: 'Custom',     swatches: null },
   ];
-  // Measured, not chosen (2026-08-29). The driver was swept in three
-  // placements against the hardware echo reference, and the result agrees with
-  // stock's own FIR to 0.1dB at 315Hz and 0.0dB at 630Hz — two methods sharing
-  // no assumptions (#247). Relative to 1kHz the driver is ~18dB down at 250Hz
-  // and peaks ~+8.9dB at 3150Hz.
+  // Relative to the device's own voicing (#229). Firmware with the stock-sound
+  // profile corrects the driver itself, so Flat is the voicing picked by ear
+  // (the C/E midpoint, 2026-10-18) and these faders only lean it one way. The
+  // old Speech/Music presets were partial driver corrections and would stack
+  // on it; v32 resets them to Flat.
   //
-  // The old presets predate that measurement and one of them was backwards:
-  // 'Clarity' put +7dB on band 5 (3500Hz), which is exactly where the driver
-  // already peaks, landing around +16dB at 3150 — sibilance, not clarity.
-  // 'Warmth' had the right shape and a fraction of the size.
-  //
+  // Warm and Clear are the two voicings either side of Flat, C and E, fitted
+  // to these bands relative to it (within 1dB RMS, 3dB worst, 120Hz-8kHz).
   // Bands are [125 shelf, 250, 500, 1000, 2000, 3500, 5500, 8000 shelf].
-  // 125 stays 0 in every preset: it is a SHELF, so lifting it pushes
-  // everything below into the bass guard, which then removes it — the boost
-  // belongs at 250 where the band is a peaking filter. 5500 and 8000 stay 0
-  // on evidence rather than omission: those bands moved up to 13.8dB between
-  // placements, which is more than the whole ±12dB range, so anything set
-  // there tunes one room.
+  // 125 stays 0: it is a shelf, so a lift there goes straight into the bass
+  // guard, which removes it.
   const EQ_PRESETS = [
     // The bypass, and the reference for any A/B. Keep it exactly zero.
-    ['Flat',   [0, 0, 0, 0,  0,  0, 0, 0]],
-    // Gentler low-mid lift than Music: speech carries little energy below
-    // 300Hz, and the boost spends headroom the limiter then reclaims from the
-    // midrange. Keeps most of the driver's natural presence — 2-4kHz carries
-    // consonants — while taking the harsh edge off the 3150 peak.
-    ['Speech', [0, 4, 2, 0, -2, -5, 0, 0]],
-    // The full measured correction, bounded by what this driver will stand.
-    // Stock puts +19.9dB at 250Hz; +8 is the honest fraction our ±12 range and
-    // the limiter leave room for, and it is a value to walk up by ear.
-    ['Music',  [0, 8, 3, 0, -3, -6, 0, 0]],
+    ['Flat',  [0,  0,  0, 0,  0,  0, 0,  0]],
+    ['Warm',  [0,  4,  0, 0, -3, -1, 2, -6]],
+    ['Clear', [0, -2, -3, 1,  4, -1, 0,  4]],
   ];
   const activeEqPreset = (EQ_PRESETS.find(([, vals]) => JSON.stringify(vals) === JSON.stringify(bands)) || [null])[0];
 
@@ -9872,9 +9967,6 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
           </div>
           <div>
             <div style={inputStyle}>
-              <Toggle label="Speech boost" sub="presence boost for voice" value={config.eqLoudness ?? false} onChange={v => set('eqLoudness', v)}/>
-            </div>
-            <div style={{ marginTop: 'var(--space-4)', ...inputStyle }}>
               <Toggle label="Speak while the reply is written"
                 sub="faster with a quick model; a slow one may pause"
                 value={config.streamReply ?? false} onChange={v => set('streamReply', v)}/>
@@ -9943,6 +10035,12 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             </div>
           </div>
         </div>
+        {/* Hidden on an Echo that voices its own speaker (stock_sound,
+            #229): its firmware keeps the guard on whatever this says, and
+            this is the only control in the section. Shown in the fleet view
+            and for an offline Echo, where it still governs older firmware
+            and the headphone jack. */}
+        {!stockSoundCapable && (
         <StageAdvanced open={advPlay} onToggle={() => setAdvPlay(o => !o)} disabledStyle={inputStyle}>
           <div style={inputStyle}>
             <Toggle label="Speaker protection"
@@ -9956,6 +10054,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             subtle by design and there is no reason to turn it off.
           </div>
         </StageAdvanced>
+        )}
       </Stage>
 
       {/* 02 WAKE WORD */}

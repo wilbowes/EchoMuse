@@ -31,6 +31,11 @@ if TYPE_CHECKING:
 # The live device registry — keyed by device_id (ro.serialno).
 devices: dict[str, "Device"] = {}
 
+# Device id -> the board its firmware reported (em_boards), connected or not.
+# Seeded from the database at startup so satellites started before their Echo
+# connects show the right model.
+boards: dict[str, str] = {}
+
 
 # Shell session coordination — keyed by device_id.
 #

@@ -1,5 +1,7 @@
 package speaker
 
+import "time"
+
 type Speaker interface {
 	Init() error
 	PumpPeriod(data []byte) error
@@ -24,6 +26,10 @@ type Speaker interface {
 	FlushMusic()
 	// SetDuck sets music attenuation in dB while voice plays (0 = none).
 	SetDuck(db float64)
+
+	// AbandonStreams ends any stream still open when the data link that
+	// carried it closed at linkLost: its EOS cannot arrive on the next link.
+	AbandonStreams(linkLost time.Time)
 
 	Close()
 }

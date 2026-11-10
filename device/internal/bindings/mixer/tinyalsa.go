@@ -48,6 +48,18 @@ func (t *tinyalsa) Set(name string, values []string) error {
 	if err != nil {
 		return err
 	}
+	if C.mixer_ctl_get_type(c) == C.MIXER_CTL_TYPE_BYTE {
+		// A filter's coefficients: one write of the whole array, since a
+		// half-written filter is a different filter.
+		b, err := byteValues(name, values, int(C.mixer_ctl_get_num_values(c)))
+		if err != nil {
+			return err
+		}
+		if C.mixer_ctl_set_array(c, unsafe.Pointer(&b[0]), C.size_t(len(b))) != 0 {
+			return fmt.Errorf("mixer: %q: write of %d bytes failed", name, len(b))
+		}
+		return nil
+	}
 	if C.mixer_ctl_get_type(c) == C.MIXER_CTL_TYPE_ENUM {
 		cs := C.CString(values[0])
 		defer C.free(unsafe.Pointer(cs))

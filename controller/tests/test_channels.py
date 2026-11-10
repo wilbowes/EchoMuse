@@ -220,3 +220,35 @@ def test_every_channel_documents_the_version_it_pins():
             f"{path.name}/CHANGELOG.md never mentions {version}, the version "
             f"its config.yaml pins — an update to it shows notes for some "
             f"other release")
+
+
+def test_ga_changelog_lists_nothing_ahead_of_ga():
+    """
+    Supervisor shows a GA user the whole CHANGELOG.md, so an EA section
+    there reads as part of the GA update. 2.26.2, cut from 2.26.1, shipped
+    with 2.27.0-ea.1's notes directly under its own. EA notes belong in
+    controller-ea/CHANGELOG.md; sync_channels.py puts them ahead of GA's.
+    """
+    import version as _version
+    ga = _version.parse(str(yaml.safe_load((CONTROLLER / "config.yaml").read_text())["version"]))
+    for line in (CONTROLLER / "CHANGELOG.md").read_text().splitlines():
+        if line.startswith("## "):
+            v = _version.parse(line[3:].split()[0])
+            assert v is None or v <= ga, (
+                f"controller/CHANGELOG.md has '{line}', ahead of GA {ga}: "
+                f"write it in controller-ea/CHANGELOG.md")
+
+
+def test_ea_changelog_carries_every_ga_section():
+    ga = (CONTROLLER / "CHANGELOG.md").read_text()
+    ea = (EA_PATH / "CHANGELOG.md").read_text()
+    _, ga_secs = sync_channels._changelog_sections(ga)
+    for _, sec in ga_secs:
+        assert sec in ea
+
+
+def test_channel_changelog_puts_its_own_sections_first_and_defers_to_ga():
+    ga = "# Changelog\n\n## 2.1.0\n\nga\n\n## 2.0.0\n\nold\n"
+    ea = "# Changelog\n\n## 2.2.0-ea.1\n\nnew\n\n## 2.1.0\n\nstale copy\n"
+    assert sync_channels.channel_changelog(ga, ea) == (
+        "# Changelog\n\n## 2.2.0-ea.1\n\nnew\n\n## 2.1.0\n\nga\n\n## 2.0.0\n\nold\n")

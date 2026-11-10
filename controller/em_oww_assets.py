@@ -56,7 +56,10 @@ RUNTIME_NAME = "libonnxruntime.so"
 SHARED_NAMES = ("melspectrogram.onnx", "embedding_model.onnx")
 
 # Where the vendored ARM runtime lands in the image (see Dockerfile).
-RUNTIME_DIR = "/app/models/oww_runtime"
+# EM_OWW_RUNTIME_DIR moves it for a controller run from source, where /app
+# does not exist — on macOS the sealed root volume cannot even create it.
+# Empty counts as unset, so a blank line in .env keeps the image's path.
+RUNTIME_DIR = os.environ.get("EM_OWW_RUNTIME_DIR") or "/app/models/oww_runtime"
 
 # Silero VAD for the device's turn-stream speech gate (device
 # internal/client/speechgate.go, sileroModel). Built into RUNTIME_DIR by the

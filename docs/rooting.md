@@ -1,15 +1,16 @@
-# Rooting the Echo Dot Gen 2 (biscuit)
+# Rooting the Echo Dot 2nd gen (biscuit) and the Echo 2nd gen (radar)
 
 > **You do this at your own risk. We accept no responsibility for negative
 > outcomes experienced.**
 
-> **Which amonet version?** Either. **v1.1.0** leaves the Echo on FireOS 5,
-> where the wizard offers emOS or FireOS with root. **v2.0.0** moves it to
-> FireOS 6, where the wizard offers emOS. [firebreak](#unlocking-with-firebreak)
-> moves a Dot between them.
+> **Which target?** On the Dot, either. `unlock fireos5` leaves it on
+> FireOS 5, where the wizard offers emOS or FireOS with root. `unlock fireos6`
+> (firebreak's default) leaves it on FireOS 6, where the wizard offers emOS.
+> [firebreak](#unlocking-with-firebreak) moves a Dot between them. The Echo
+> 2nd gen has only `unlock fireos6`, and EchoMuse runs on it as emOS only.
 
-EchoMuse needs an Echo Dot Gen 2 that is already unlocked and running
-FireOS 5, or FireOS 6 for emOS. Two separate jobs get you there, and they carry very different
+EchoMuse needs an Echo Dot 2nd gen or an Echo 2nd gen that is already
+unlocked and running FireOS 5 (Dot only), or FireOS 6 for emOS. Two separate jobs get you there, and they carry very different
 risk.
 
 ## Hardware
@@ -20,6 +21,10 @@ risk.
 - RAM: 512MB
 - OS: FireOS 5 (Android 5.1, API 22) — see the note below on FireOS 6
 - MicroUSB cable required
+
+The Echo 2nd gen (radar, 2017) shares the Dot's SoC, microphones, LED ring
+and buttons; its speaker differs ([boards](boards.md#the-echo-2nd-gen-radar)).
+It ships with FireOS 6 only.
 
 > **Which FireOS boots depends on which amonet you used.** Up to v1.1.0, only
 > FireOS 5 based ROMs boot after unlocking; R0rt1z2's thread said flashing
@@ -68,56 +73,59 @@ risk.
 
 ## Unlocking with firebreak
 
-[firebreak](https://github.com/bboe/firebreak) unlocks the Dot over USB with
-R0rt1z2's amonet, from one command. It reads the state the Dot is in, does
-the next step, and stops at the target you name. A stopped run picks up where
-it left off.
+[firebreak](https://github.com/bboe/firebreak) unlocks the Echo over USB
+with R0rt1z2's amonet, from one command. It reads the state the Echo is in,
+does the next step, and stops at the target you name. A stopped run picks up
+where it left off. Its README is the source of truth for what each device
+supports; this is a summary of v1.0.0.
 
-| target | the Dot ends with |
-| --- | --- |
-| `amonet-biscuit-v1.1.0-bboe` (default) | rooted FireOS 5.5.5.4 on amonet v1.1.0, with Magisk 17.3 and TWRP 3.7.0_9-bboe2 |
-| `amonet-biscuit-v2.0.0` | rooted FireOS 6 on amonet v2.0.0, for emOS |
-| `stock` | stock FireOS 6, build 8149 unless you name another, with the Dot erased |
+| device | command | the Echo ends with |
+| --- | --- | --- |
+| Dot 2nd gen | `unlock` (or `unlock fireos6`) | rooted FireOS 6 on amonet v2, for emOS |
+| Dot 2nd gen | `unlock fireos5` | rooted FireOS 5.5.5.4 on amonet v1.1.0, with TWRP 3.7.0_9-bboe2 |
+| Echo 2nd gen | `unlock` (or `unlock fireos6`) | rooted FireOS 6 on amonet-radar, for emOS |
+| either | `stock` | stock FireOS 6, build 8149 unless you name another, with the Echo erased |
 
 Install adb, fastboot and uv as [its
-README](https://github.com/bboe/firebreak#run-it) says for your OS, then run:
+README](https://github.com/bboe/firebreak#install) says for your OS, then run:
 
 ```sh
-uvx firebreak@latest
+uvx firebreak@latest unlock
 ```
 
-Add a target to the end to move the Dot to it, for example
-`uvx firebreak@latest amonet-biscuit-v2.0.0`.
-
-- The `amonet-biscuit-v2.0.0` target opens your browser to download
-  `boot-root.zip` from the XDA thread. Save it to your Downloads folder and
-  the run carries on.
-- Do not set up a stock Dot in the Alexa app first. On WiFi it can update to
+- `unlock fireos6` roots the FireOS 6 already on the Echo and keeps its
+  setup. With `--factory-reset` it installs FireOS 6 8149 in both slots and
+  erases the Echo. If the wizard reports that FireOS 6 is not in both slots,
+  this is the fix.
+- Do not set up a stock Echo in the Alexa app first. On WiFi it can update to
   a build firebreak does not support.
 - The wizard accepts TWRP 3.7.0_9-bboe2 as amonet v1.1.0's.
-- The wizard's FireOS flow needs `f1r30s.zip` from the XDA thread, which
-  firebreak does not install. Have it ready for step 3. The emOS flow does
-  not need it.
-- When a run fails, run it again with `--report` and paste what it prints in
-  `#support-device-unlocking` on the
+- The wizard's FireOS flow (Dot on FireOS 5 only) needs `f1r30s.zip` from the
+  XDA thread, which firebreak does not install. Have it ready for step 3. The
+  emOS flow does not need it.
+- When a run fails, run `uvx firebreak@latest report` and paste what it
+  prints in `#support-device-unlocking` on the
   [Discord](https://discord.gg/vAPHMDvREG).
 
 **This is the part that can ruin a device.** It runs a bootrom exploit,
-rewrites the bootloaders and the partition table, and wipes userdata. A
-failure here can leave a Dot that needs its case opened and a contact on the
-board shorted, which `uvx firebreak@latest --short` walks through. Do not
+rewrites the bootloaders and the partition table, and can wipe userdata. A
+failure here can leave an Echo that needs its case opened and a contact on
+the board shorted, which `uvx firebreak@latest short` walks through. Do not
 start on a device you cannot afford to lose.
 
 The bootrom exploit, the persistent unlock and TWRP are R0rt1z2's
-[amonet-biscuit](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/), and the XDA thread is the reference for them.
+[amonet-biscuit](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/) for the Dot and [amonet-radar](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-2nd-gen-2017-radar.4801290/) for the Echo, and
+each XDA thread is the reference for its device.
 
 ## Where EchoMuse picks up
 
 Everything below assumes you already have:
 
-- An Echo Dot Gen 2 (**biscuit**) with the persistent unlock applied
+- An Echo Dot 2nd gen (**biscuit**) or Echo 2nd gen (**radar**) with the
+  persistent unlock applied
 - **TWRP** installed and bootable
-- **FireOS 5** installed (amonet v1.1.0), or **FireOS 6** in both slots (v2.0.0)
+- On the Dot, **FireOS 5** installed (amonet v1.1.0) or **FireOS 6** in both
+  slots (amonet v2); on the Echo, **FireOS 6** in both slots
 
 Once those are done, EchoMuse takes over. The provisioning wizard in the
 dashboard handles the rest — see the [Quickstart](quickstart.md). It starts
@@ -217,7 +225,7 @@ because it is time-critical:
 That state is recoverable, but the easy routes are gone: getting back in means
 opening the case and shorting a pin on the board to reach the bootrom, which
 R0rt1z2's thread documents and describes as not especially difficult, and
-`uvx firebreak@latest --short` walks through. A device
+`uvx firebreak@latest short` walks through. A device
 sitting in fastboot or TWRP on the end of a cable needs none of that.
 Repeatedly power cycling one that will not boot is what turns the first
 situation into the second.
@@ -299,8 +307,10 @@ recovery and unbricking.
 
 ## Credits
 
-- **R0rt1z2** — [amonet-biscuit](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/):
-  persistent unlock, TWRP and unbrick for this device
+- **R0rt1z2** — [amonet-biscuit](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/) and
+  [amonet-radar](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-2nd-gen-2017-radar.4801290/): persistent unlock, TWRP and unbrick for each device
+- **bboe** — [firebreak](https://github.com/bboe/firebreak): runs those
+  unlocks from one command
 - **Dragon863** — [EchoCLI](https://github.com/Dragon863/EchoCLI): tethered root research
 - **Binozo** — [GoTinyAlsa](https://github.com/Binozo/GoTinyAlsa) and the original EchoGo SDK
 

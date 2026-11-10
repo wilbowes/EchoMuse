@@ -3,6 +3,8 @@ package speaker
 import (
 	"encoding/binary"
 	"math"
+
+	"github.com/wilbowes/EchoMuse/internal/outchain"
 )
 
 // Ducking and mixing for the two playback streams.
@@ -123,8 +125,10 @@ func (m *Mixer) Mix(voice, music []byte, target int32) []byte {
 // the voice before the master attenuation can act.
 //
 // dst is interleaved stereo in S16 sample units. gains has one value per
-// frame, already capped against the matching device-volume ramp.
-func (m *Mixer) MixResponse(dst []float64, voice, music []byte, target int32, gains []float64) []float64 {
+// frame, already capped against the matching device-volume ramp. vf, when
+// not nil, filters the voice before its gain (the stock-sound profile's
+// voice plane, which boosts, hence here in float rather than on the S16).
+func (m *Mixer) MixResponse(dst []float64, voice, music []byte, target int32, gains []float64, vf *outchain.VoiceFilter) []float64 {
 	if voice == nil {
 		return nil
 	}
@@ -140,7 +144,11 @@ func (m *Mixer) MixResponse(dst []float64, voice, music []byte, target int32, ga
 		gain := gains[i]
 		for ch := 0; ch < 2; ch++ {
 			off := i*4 + ch*2
-			x := float64(int16(binary.LittleEndian.Uint16(voice[off:]))) * gain
+			x := float64(int16(binary.LittleEndian.Uint16(voice[off:])))
+			if vf != nil {
+				x = vf.Step(ch, x)
+			}
+			x *= gain
 			if off+2 <= len(music) {
 				x += float64(int16(binary.LittleEndian.Uint16(music[off:])))
 			}
