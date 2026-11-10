@@ -1932,6 +1932,32 @@ checking the release's attestation before use (firmware does not either).
 `POST /api/emos/upload` takes a locally built `emos-payload.zip`, as Local
 Build does for firmware.
 
+**FireOS 5 to emOS over the network (2026-11-10, planning; `em_emos_migrate`):**
+
+- **Every FireOS-native Echo is amonet 1 / FireOS 5 / 64-bit**: the wizard's
+  FireOS flow refuses amonet 2. Nothing below init can recover a first emOS
+  boot that fails before init on either amonet: v2's LK starts `boot_a`
+  whatever the BCB says (#544), and v1 has one real boot partition (p10,
+  GPT `boot_a_x`; Android's bare `boot_a` is p17, the exploit payload). So
+  the LK-fallback measurement once planned for this is moot; the risk is the
+  #573 one, accepted the same way.
+- **On FireOS 5, emOS runs on Android's WiFi conf with Amazon's supplicant.**
+  C95 (emos-v0.11-ea.2, `3.18.19+ aarch64`): no `/data/emos/wpa.conf`,
+  `/system/bin/wpa_supplicant` running, no `/sbin/wpa_supplicant`. The binary
+  that wrote the conf reads it, so FireOS's own fields do not drop the block as
+  they do under FireOS 6's 2.10 build — hence no WiFi writer for a FOS5
+  migration, only a check that the conf holds the associated network.
+- **A conf FireOS 5's framework rewrote** (VVV, FireOS-native) carries
+  `driver_param=use_p2p_group_interface=1`, `p2p_no_group_iface=1`,
+  `external_sim=1`, `wowlan_triggers=disconnect` and a per-network
+  `last_connect_time`; C95's wizard skeleton has none. Not yet run under emOS:
+  the VVV migration run is the proof.
+- **#1144's kernel is FireOS 6's**: its trace says `3.18.19-gecb8cb46060-dirty`,
+  which is 15LE's (`armv7l`, our `/sbin` supplicant); C95's FireOS 5 kernel
+  reads `3.18.19+`. The WPA-only refusal stays as a cheap precaution.
+- FireOS 5's shell has no `sed`, `head`, `grep` or `which` on the path, and VVV
+  has no `/data/local/bin/busybox`; probes there use shell builtins.
+
 ## Provisioning wizard (`dashboard.jsx`, `_WIZARD_STEPS`)
 
 The WebUSB/ADB wizard that takes a stock Dot to a fielded device. Four rules,
