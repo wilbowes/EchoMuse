@@ -35,8 +35,8 @@ set -euo pipefail
 image="${1:?usage: $0 <image> [amd64|arm64]}"
 arch="${2:-amd64}"
 case "$arch" in
-  amd64) qemu_name=qemu-x86_64-static;  cpu=kvm64 ;;
-  arm64) qemu_name=qemu-aarch64-static; cpu=cortex-a53 ;;
+  amd64) qemu_name="qemu-x86_64-static";  cpu=kvm64 ;;
+  arm64) qemu_name="qemu-aarch64-static"; cpu=cortex-a53 ;;
   *) echo "unknown arch '$arch' (amd64 or arm64)" >&2; exit 2 ;;
 esac
 here="$(cd "$(dirname "$0")" && pwd)"

@@ -29,7 +29,7 @@ ENV CGO_LDFLAGS="-Wl,--hash-style=both"
 # Recompile tinyalsa for API 22
 WORKDIR /tinyalsa/src
 RUN make clean && \
-    make CC=$CC LD=$LD AR=$AR AS=$AS libtinyalsa.a libtinyalsa.so && \
+    make CC="$CC" LD="$LD" AR="$AR" AS="$AS" libtinyalsa.a libtinyalsa.so && \
     cp /tinyalsa/src/libtinyalsa.so $NDK_LIBS/libtinyalsa.so
 
 WORKDIR /sdk
