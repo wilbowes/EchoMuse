@@ -34,6 +34,9 @@ type Device struct {
 	// Wake word
 	OwwThreshold float64
 	OwwModel     string
+	// OwwMinFrames is how many consecutive 80ms frames must clear the wake bar
+	// before on-device scoring reports a wake. 1 is the single-frame rule.
+	OwwMinFrames int
 	// BargeInEnabled / BargeInThreshold mirror the controller's barge-in
 	// settings. The device needs them for on-device scoring: while the speaker
 	// is streaming, the controller lowers its wake bar to BargeInThreshold
@@ -214,6 +217,7 @@ func (d *Device) loadDefaults() {
 	d.StartupVolume = envInt("STARTUP_VOLUME", 85)
 	d.VolumeButtonSound = envBool("VOLUME_BUTTON_SOUND", true)
 	d.OwwThreshold = envFloat("OWW_THRESHOLD", 0.5)
+	d.OwwMinFrames = envInt("OWW_MIN_FRAMES", 1)
 	d.OwwModel = envStr("OWW_MODEL", "hey_jarvis_v0.1")
 	d.OwwOnDevice = normaliseOnDevice(envStr("OWW_ON_DEVICE", OnDeviceOff))
 	d.BargeInThreshold = envFloat("BARGE_IN_THRESHOLD", 0.05)
@@ -271,6 +275,9 @@ func (d *Device) Apply(msg ConfigMessage) {
 	}
 	if msg.OwwThreshold > 0 {
 		d.OwwThreshold = msg.OwwThreshold
+	}
+	if msg.OwwMinFrames > 0 {
+		d.OwwMinFrames = msg.OwwMinFrames
 	}
 	if msg.OwwModel != "" {
 		d.OwwModel = msg.OwwModel
@@ -507,6 +514,7 @@ func (d *Device) Snapshot() ConfigMessage {
 		VadSpeechMs:         d.VadSpeechMs,
 		VadSilenceMs:        d.VadSilenceMs,
 		OwwThreshold:        d.OwwThreshold,
+		OwwMinFrames:        d.OwwMinFrames,
 		OwwModel:            d.OwwModel,
 		OwwOnDevice:         d.OwwOnDevice,
 		BargeInEnabled:      &bargeInEnabled,
@@ -554,6 +562,7 @@ type ConfigMessage struct {
 	VadSpeechMs    int     `json:"vadSpeechMs,omitempty"`
 	VadSilenceMs   int     `json:"vadSilenceMs,omitempty"`
 	OwwThreshold   float64 `json:"owwThreshold,omitempty"`
+	OwwMinFrames   int     `json:"owwMinFrames,omitempty"`
 	OwwModel       string  `json:"owwModel,omitempty"`
 	OwwOnDevice    string  `json:"owwOnDevice,omitempty"`
 	// ConsolePassword is the hashed record emOS's init checks before handing

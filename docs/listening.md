@@ -207,6 +207,11 @@ The Echo scores against:
   above it (`em_barge.decide`'s rule), because a single frame at a bar ten
   times below the wake threshold fired on the assistant's own voice.
 
+At `owwThreshold` one frame is enough by default. `OWW_MIN_FRAMES` on the
+Echo (1–4, #294) asks for that many consecutive frames instead; the wake is
+dated from the first of them, so the session starts at the same audio. It is
+not on the dashboard and changes nothing at the barge-in bar.
+
 With barge-in off, a wake heard while a reply plays is still reported and the
 controller declines it (`listen_close`), so the rule lives in one place.
 

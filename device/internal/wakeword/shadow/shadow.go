@@ -146,6 +146,13 @@ type Scorer struct {
 	// for the two-frame rule at the barge-in bar, and prevAt its capture time.
 	prevAbove bool
 	prevAt    time.Time
+	// minFrames is how many consecutive frames must clear the NORMAL bar before
+	// it crosses. 1 (the default, and what 0 means) is the single-frame rule a
+	// wake has always used. runAts holds the capture times of the frames in the
+	// current run at the normal bar, newest last, so a crossing can be dated
+	// from the first frame of the run that earned it.
+	minFrames int
+	runAts    []time.Time
 	// The barge window: frames scored at the barge-in bar since the last
 	// TakeBargeWindow, and the highest score among them. The answer to "did
 	// barge-in nearly fire, or was it nowhere close" — the controller's
@@ -258,6 +265,24 @@ func NewScorer(inf wakeword.Inferer, threshold float32, onCross func(score, thre
 func (s *Scorer) SetThreshold(t float32) {
 	s.mu.Lock()
 	s.threshold = t
+	s.mu.Unlock()
+}
+
+// MaxMinFrames caps SetMinFrames. Deliberate wakes held 4-6 frames on #294's
+// Echo, and hey_computer held 0-2 (#1094), so a larger value turns the wake
+// word off for some models without saying so.
+const MaxMinFrames = 4
+
+// SetMinFrames sets how many consecutive 80ms frames must clear the normal
+// wake bar before it crosses. 1, or anything below it, keeps the single-frame
+// rule; above MaxMinFrames is held to it. It never applies at the barge-in
+// bar, which always needs two frames.
+//
+// A real wake word holds its score for several frames, while a click or a
+// consonant in passing TV speech can spike for one (#294, #838).
+func (s *Scorer) SetMinFrames(n int) {
+	s.mu.Lock()
+	s.minFrames = min(n, MaxMinFrames)
 	s.mu.Unlock()
 }
 
@@ -441,6 +466,7 @@ func (s *Scorer) run() {
 			s.mu.Lock()
 			s.ready = false
 			s.prevAbove = false
+			s.runAts = s.runAts[:0]
 			s.hist, s.trace = nil, nil
 			s.mu.Unlock()
 		}
@@ -489,13 +515,35 @@ func (s *Scorer) run() {
 			}
 		}
 		above := score >= threshold
-		crossed := above && (!lowBar || s.prevAbove) && now.Sub(s.lastCross) >= s.refract
+		// At the normal bar a crossing needs minFrames consecutive frames (1 by
+		// default). run is the frames in the current run at that bar, trimmed to
+		// the last `need`; a frame below the bar, or any frame at the barge bar,
+		// ends it.
+		need := 1
+		if !lowBar && s.minFrames > 1 {
+			need = s.minFrames
+		}
+		if above && !lowBar {
+			s.runAts = append(s.runAts, q.at)
+			if len(s.runAts) > need {
+				copy(s.runAts, s.runAts[len(s.runAts)-need:])
+				s.runAts = s.runAts[:need]
+			}
+		} else {
+			s.runAts = s.runAts[:0]
+		}
+		crossed := above && (!lowBar || s.prevAbove) && (lowBar || len(s.runAts) >= need) &&
+			now.Sub(s.lastCross) >= s.refract
 		// A crossing at the barge bar is dated from the first of its two
 		// frames (docs/listening.md). Dated from the second, the session
-		// started a frame late and lost "st" of "stop" (VVV, 2026-10-23).
+		// started a frame late and lost "st" of "stop" (VVV, 2026-10-23). A
+		// multi-frame wake is dated from the first frame of the run for the
+		// same reason.
 		at := q.at
 		if crossed && lowBar {
 			at = s.prevAt
+		} else if crossed && need > 1 {
+			at = s.runAts[0]
 		}
 		s.prevAbove, s.prevAt = above, q.at
 		if crossed {
