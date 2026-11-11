@@ -561,10 +561,13 @@ def digests_cmd(length: int) -> str:
             f"echo {OK}")
 
 
-def mark_cmd(image_id: str, build_id: str, version: str) -> str:
+def mark_cmd(image_id: str, build_id: str, version: str,
+             printf: str = "printf") -> str:
+    """`printf` is a parameter for FireOS 5, whose shell has none on its
+    path (em_emos_migrate passes busybox's)."""
     body = trial_mark(image_id, build_id, version)
     args = " ".join(f"'{ln}'" for ln in body.splitlines())
-    return (f"printf '%s\\n' {args} > {TRIAL_MARK}.tmp && sync && "
+    return (f"{printf} '%s\\n' {args} > {TRIAL_MARK}.tmp && sync && "
             f"mv {TRIAL_MARK}.tmp {TRIAL_MARK} && sync && "
             f"echo MARK_BEGIN; cat {TRIAL_MARK}; echo MARK_END; echo {OK}")
 

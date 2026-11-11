@@ -1941,6 +1941,42 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
     }
   }
 
+  // FireOS 5 to emOS over the network (em_emos_migrate). The same controller
+  // queue and panel fields as the emOS update, so the same poll relays it.
+  async function doEmosMigrate() {
+    const name = device.label || device.device_id;
+    if (!confirm(`Migrate ${name} from FireOS to emOS?\n\n`
+        + `The Echo restarts into emOS and keeps its name, settings and Home Assistant entities. `
+        + `If emOS does not reach the controller it puts FireOS back by itself, in about 12 minutes.\n\n`
+        + `Keep it powered throughout. If the power is cut while the boot partition is being `
+        + `written (about a second), or emOS fails before it starts, the Echo needs TWRP, `
+        + `a USB cable and the FireOS image this controller keeps to recover. `
+        + `Download that image from this panel afterwards.`)) return;
+    setEmosBusy(true);
+    setPushLog(['Starting migration to emOS…']);
+    try {
+      const res = await API.post(`/api/devices/${device.device_id}/emos_migrate`, {});
+      _pollEmosUpdate(res.version);
+    } catch(e) {
+      setPushLog(l => [...l, `Error: ${e.error || 'migration failed'}`]);
+      setEmosBusy(false);
+    }
+  }
+
+  async function downloadFireosImage() {
+    try {
+      const url = URL.createObjectURL(await API.blob(
+        `/api/devices/${device.device_id}/fireos_image`));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `fireos-boot-${device.device_id}.img`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } catch(e) {
+      setPushLog(l => [...l, `Error: ${e.error || 'download failed'}`]);
+    }
+  }
+
   function _pollEmosUpdate(version) {
     let last = '';
     let failures = 0;
@@ -2674,6 +2710,38 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                       </span>
                     )}
                   </div>
+                </Panel>
+                );
+              })()}
+
+              {/* Migration from FireOS 5 to emOS, on an Echo that has said it
+                  runs FireOS. The kept FireOS image stays downloadable after,
+                  whatever the Echo now reports (or while it is offline). */}
+              {(device.baseOs === 'fireos' || device.migrate?.image) && (() => {
+                const busy = emosBusy || device.emos_update_in_progress || device.emos_update_queued;
+                const why = device.migrate?.why;
+                return (
+                <Panel label={device.baseOs === 'fireos' ? 'emOS' : 'FireOS'}>
+                  {device.baseOs === 'fireos' && (
+                  <div style={{ display:'flex', alignItems:'center', gap:'var(--space-5)', flexWrap:'wrap' }}>
+                    <Pill accent={device.connected && !busy && !pushing && isAdmin && !why}
+                          disabled={!device.connected || busy || pushing || !isAdmin || !!why}
+                          onClick={doEmosMigrate}>
+                      {busy ? 'Migrating…' : `Migrate to emOS${device.emosLatest ? ' ' + _emosLabel(device.emosLatest) : ''}`}
+                    </Pill>
+                    <span style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-xs)', color:'var(--muted)', lineHeight:1.5, flex:'1 1 220px', minWidth:0 }}>
+                      {why || 'Replaces FireOS over the network. Puts FireOS back by itself if emOS fails.'}
+                    </span>
+                  </div>
+                  )}
+                  {device.migrate?.image && (
+                    <div style={{ display:'flex', gap:'var(--space-5)', alignItems:'center', flexWrap:'wrap', ...(device.baseOs === 'fireos' ? { marginTop:'var(--space-7)', borderTop:'1px solid var(--hairline)', paddingTop:'var(--space-5)' } : {}) }}>
+                      <Pill small disabled={!isAdmin} onClick={downloadFireosImage}>FireOS image</Pill>
+                      <span style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-xs)', color:'var(--muted)' }}>
+                        This Echo's own boot image, to restore with TWRP.
+                      </span>
+                    </div>
+                  )}
                 </Panel>
                 );
               })()}
