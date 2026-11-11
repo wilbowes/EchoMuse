@@ -68,6 +68,16 @@ const audioChanDepth = 128
 // sleep allows for the delayed start (SPEAKER_PRIME_SECONDS).
 const primePeriods = 24
 
+// IntercomPrimePeriods is the voice plane's prime while an intercom call
+// is flowing: 3 periods ≈ 130ms. The 24-period prime is what makes the
+// call walkie-talkie grade (~1s one-way); a live conversation cannot
+// wait a second to hear its first syllable. The risk the prime buys
+// protection against — a WiFi stall in the opening seconds — is
+// covered for intercom audio by the call's own jitter buffer instead
+// (device/internal/intercom), which holds ~170ms before the first
+// pump. Set by SetIntercomMode; the music plane keeps primePeriods.
+const IntercomPrimePeriods = 3
+
 var silencePeriod = make([]byte, periodBytes)
 
 type PcmSpeaker struct {
@@ -119,6 +129,14 @@ type PcmSpeaker struct {
 	// ALSA goroutine every period, hence atomic; the ramp toward it lives in
 	// the Mixer, which is single-consumer and needs no synchronisation.
 	duckTarget atomic.Int32
+	// voicePrime is the voice plane's prime gate, in periods — the
+	// number of periods that must be queued before playback starts.
+	// Normally primePeriods; SetIntercomMode lowers it to
+	// IntercomPrimePeriods while a call is flowing and restores it
+	// when the call suspends or ends, so a nested turn's TTS reply
+	// gets the usual stall protection. Atomic because the ALSA
+	// goroutine reads it every round and the intercom call writes it.
+	voicePrime atomic.Int32
 	mixer      Mixer
 
 	// chain is the output chain (EQ, bass guard, limiter), run on the MIX,
@@ -291,6 +309,7 @@ func NewPcmSpeaker(echoTap func([]byte), levelTap func(rms float64)) (*PcmSpeake
 	s.voice = newAudioStream(audioChanDepth, s.deadCh)
 	s.music = newAudioStream(audioChanDepth, s.deadCh)
 	s.duckTarget.Store(unityGain)
+	s.voicePrime.Store(primePeriods)
 	s.mixer.SetGainImmediate(unityGain)
 	s.response.setDB(0)
 	s.response.cur = 1
@@ -571,7 +590,7 @@ func (p *PcmSpeaker) silenceLoop() {
 		}
 
 		var voice, music []byte
-		if p.voice.ready(primePeriods) {
+		if p.voice.ready(int(p.voicePrime.Load())) {
 			voice = p.voice.take()
 		} else if p.voice.playing {
 			p.report(p.voice.drained(), "voice")
@@ -896,6 +915,21 @@ func (p *PcmSpeaker) MusicLead() time.Duration {
 // MusicAudible is VoiceAudible for the music plane, from either producer.
 func (p *PcmSpeaker) MusicAudible(hold time.Duration) bool {
 	return p.music.playedWithin(time.Now(), hold) || p.SourceAudible(max(hold, 100*time.Millisecond))
+}
+
+// SetIntercomMode switches the voice plane's prime gate for a live
+// intercom call: IntercomPrimePeriods (~130ms) while peer audio is
+// flowing, the usual primePeriods (~1s) otherwise. The gate only
+// matters at stream start — once playing, ready() stays out of the
+// way — so switching mid-call takes effect on the next stream: the
+// nested turn's TTS reply gets the full prime, and the resumed call
+// gets the low one. The music plane is untouched.
+func (p *PcmSpeaker) SetIntercomMode(on bool) {
+	if on {
+		p.voicePrime.Store(IntercomPrimePeriods)
+	} else {
+		p.voicePrime.Store(primePeriods)
+	}
 }
 
 // EndStream marks the in-flight voice stream complete (0x03). Always arrives

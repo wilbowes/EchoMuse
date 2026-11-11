@@ -6,8 +6,8 @@
 // resampler and the audio pumps. The LED ring is driven by cmd/server.go,
 // which also owns the button: the package reports state changes through
 // callbacks and server.go turns them into light and control messages.
-// The low-prime speaker plane arrives in Phase 3; until then the peer
-// audio rides the voice plane with its ~1s prime.
+// Peer audio rides the voice plane with its prime lowered to 3 periods
+// while the call flows, plus a jitter buffer in the receiver.
 package intercom
 
 import (

@@ -220,6 +220,7 @@ absent optional fields take prior/default behaviour.
 | `music_flush` / `speaker_flush` | — | Flush the music / voice buffer (barge-in uses `speaker_flush`) |
 | `sendspin_token_request` | — | Ask for the Sendspin pairing token, for the dashboard to show on an admin's request; answered with `sendspin_token` |
 | `intercom_offer` / `intercom_end` | `session`, `peer_id`, `peer_label`, `token`, `role` (`caller` / `callee`), `peer_addr` / `session`, `reason` | Enter / leave a call. The offer starts an attempt: the callee rings and dials the caller's `peer_addr` on its button, the caller waits to be dialled, and the peer link carries raw 48 kHz PCM after a token handshake. The end is fanned out to both devices and is idempotent: a duplicated or late end is a no-op. Answered with `intercom_state` |
+| `intercom_suspend` / `intercom_resume` | `session` / `session` | Pause a flowing call for a nested HA turn and flow it again after. Suspend stops the mic going to the peer and peer audio playing, flushes the voice plane and restores its prime for the turn's TTS; the peer link stays up and the receiver keeps draining (discarding). Resume lowers the prime again and re-registers the mic hook. Both are refused unless the call is flowing (suspend) or suspended (resume), so a duplicate or late message is a no-op. Answered with `intercom_state` (`suspended` / `in_call`) |
 
 **An SSID is 0–32 arbitrary bytes**, so a name alone cannot always address
 one. `ssid` is for display (invalid UTF-8 shown as U+FFFD); `ssid_hex` is the

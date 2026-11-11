@@ -1,5 +1,5 @@
 """
-Intercom sessions and the controller's switchboard (Phases 1–2).
+Intercom sessions and the controller's switchboard (Phases 1–3).
 
 The registry rules are tested against the pure module; the controller
 wiring is tested against em_controller with fake devices, the way
@@ -7,6 +7,7 @@ test_control_handlers.py drives the control-plane handlers.
 """
 
 import asyncio
+import types
 from unittest.mock import AsyncMock
 
 import pytest
@@ -378,3 +379,190 @@ def test_label_falls_back_to_the_device_id(_two_devices, _no_events, monkeypatch
         assert offer["peer_label"] == "bedroom"
         assert session.state == em_intercom.STATE_ACTIVE
     _run(go())
+
+
+# ── Phase 3: nested turns ────────────────────────────────────────────────
+
+def test_wake_action():
+    assert em_intercom.wake_action("in_call") == "nest"
+    for state in ("ringing", "calling", "suspended"):
+        assert em_intercom.wake_action(state) == "decline"
+    assert em_intercom.wake_action("idle") is None
+    assert em_intercom.wake_action(None) is None
+
+
+def test_suspend_and_resume_send_the_control_messages(_two_devices, _no_events):
+    a, b = _two_devices
+
+    async def go():
+        session = await em_intercom.start_intercom("kitchen", "bedroom")
+        a.intercom_state = "in_call"
+        a.intercom_session = session.session_id
+        assert await em_intercom.suspend_intercom(a) is True
+        assert a.send_control.call_args.args[0]["type"] == "intercom_suspend"
+        assert a.send_control.call_args.args[0]["session"] == session.session_id
+        assert await em_intercom.resume_intercom(a) is True
+        assert a.send_control.call_args.args[0]["type"] == "intercom_resume"
+        assert a.send_control.call_args.args[0]["session"] == session.session_id
+    _run(go())
+
+
+def test_suspend_and_resume_without_a_call_send_nothing(_two_devices, _no_events):
+    a, b = _two_devices
+
+    async def go():
+        assert await em_intercom.suspend_intercom(a) is False
+        assert await em_intercom.resume_intercom(a) is False
+    _run(go())
+    assert a.send_control.call_count == 0
+
+
+def test_suspend_is_idempotent_and_resume_tolerates_a_lost_ack(_two_devices, _no_events):
+    a, b = _two_devices
+
+    async def go():
+        session = await em_intercom.start_intercom("kitchen", "bedroom")
+        a.intercom_state = "in_call"
+        a.intercom_session = session.session_id
+        assert await em_intercom.suspend_intercom(a) is True
+        assert a.send_control.call_count == 2  # offer + suspend
+        # The device suspended but its ack was lost: the controller
+        # still believes in_call, and a second suspend reports success
+        # without sending anything.
+        a.intercom_state = "suspended"
+        assert await em_intercom.suspend_intercom(a) is True
+        assert a.send_control.call_count == 2
+        # And the resume goes out even when the controller's state is
+        # the stale one — the device's resume is a no-op when it is
+        # not suspended, so the tolerant send is the correct one.
+        a.intercom_state = "in_call"
+        assert await em_intercom.resume_intercom(a) is True
+        assert a.send_control.call_args.args[0]["type"] == "intercom_resume"
+    _run(go())
+
+
+def test_a_failed_suspend_does_not_fail_the_turn(_two_devices, _no_events):
+    a, b = _two_devices
+
+    async def go():
+        session = await em_intercom.start_intercom("kitchen", "bedroom")
+        a.intercom_state = "in_call"
+        a.intercom_session = session.session_id
+        a.send_control = AsyncMock(side_effect=Exception("link down"))
+        assert await em_intercom.suspend_intercom(a) is False
+        assert await em_intercom.resume_intercom(a) is False
+    _run(go())
+
+
+def test_hangup_phrase_normalisation():
+    assert em_controller._normalise_hangup("End the call.") == "end the call"
+    assert em_controller._normalise_hangup("  PLEASE   hang up! ") == "hang up"
+    assert em_controller._normalise_hangup("don't end the call") == "don't end the call"
+    assert "end the call" in em_controller.INTERCOM_HANGUP_PHRASES
+    assert "don't end the call" not in em_controller.INTERCOM_HANGUP_PHRASES
+
+
+def test_hangup_phrase_ends_the_call(_two_devices, _no_events, monkeypatch):
+    a, b = _two_devices
+    cancelled = []
+    monkeypatch.setattr(em_controller.esphome, "cancel_voice_turn",
+                        lambda device_id, abort_ha=False, reason="cancelled":
+                        cancelled.append((device_id, abort_ha, reason)))
+
+    async def go():
+        session = await em_intercom.start_intercom("kitchen", "bedroom")
+        a.intercom_state = "in_call"
+        a.intercom_session = session.session_id
+        await em_controller._handle_intercom_stt_end(a, "Please end the call.")
+        assert cancelled == [("kitchen", True, "intercom_hangup")]
+        assert em_intercom.INTERCOM.active_for("kitchen") is None
+        # Both ends heard the end.
+        for device in (a, b):
+            types = [c.args[0]["type"] for c in device.send_control.call_args_list]
+            assert "intercom_end" in types
+    _run(go())
+
+
+def test_other_speech_during_a_call_does_not_hang_up(_two_devices, _no_events, monkeypatch):
+    a, b = _two_devices
+    cancelled = []
+    monkeypatch.setattr(em_controller.esphome, "cancel_voice_turn",
+                        lambda device_id, abort_ha=False, reason="cancelled":
+                        cancelled.append((device_id, abort_ha, reason)))
+
+    async def go():
+        session = await em_intercom.start_intercom("kitchen", "bedroom")
+        a.intercom_state = "in_call"
+        a.intercom_session = session.session_id
+        await em_controller._handle_intercom_stt_end(a, "turn on the kitchen lights")
+        await em_controller._handle_intercom_stt_end(a, "don't end the call")
+        assert cancelled == []
+        assert em_intercom.INTERCOM.active_for("kitchen") is session
+    _run(go())
+
+
+def test_hangup_phrase_without_a_call_is_just_speech(_two_devices, _no_events, monkeypatch):
+    a, b = _two_devices
+    cancelled = []
+    monkeypatch.setattr(em_controller.esphome, "cancel_voice_turn",
+                        lambda device_id, abort_ha=False, reason="cancelled":
+                        cancelled.append((device_id, abort_ha, reason)))
+
+    async def go():
+        await em_controller._handle_intercom_stt_end(a, "end the call")
+        assert cancelled == []
+    _run(go())
+    assert a.send_control.call_count == 0
+
+
+def _run_turn(monkeypatch, device, in_call=False):
+    """Run one wake turn through _run_voice_locked with HA answering
+    no continuation, and return the control types the device was sent,
+    plus the satellite the turn wired its STT_END hook onto."""
+    async def nothing(*_args, **_kwargs):
+        return None
+
+    async def trigger_voice_turn(**_kw):
+        return False
+
+    satellite = types.SimpleNamespace(_on_stt_end=None)
+    server = types.SimpleNamespace(get_satellite=lambda: satellite)
+    monkeypatch.setattr(em_controller.esphome, "get_server",
+                        lambda device_id: server)
+    monkeypatch.setattr(em_controller.esphome, "trigger_voice_turn",
+                        trigger_voice_turn)
+    for name in ("leds_listening", "_leds_turn_end", "_push_device_state"):
+        monkeypatch.setattr(em_controller, name, nothing)
+    monkeypatch.setattr(em_controller.em_player, "interrupt", nothing)
+    monkeypatch.setattr(em_controller.em_player, "resume_interrupted", nothing)
+    monkeypatch.setattr(em_controller.Device, "private_listening",
+                        property(lambda _d: False))
+
+    asyncio.run(em_controller._run_voice_locked(
+        device, trigger_label="wakeword(0.990)", is_wakeword=True))
+    types_sent = [c.args[0]["type"] for c in device.send_control.call_args_list]
+    return types_sent, satellite
+
+
+def test_a_turn_during_a_call_suspends_and_resumes_it(_two_devices, _no_events, monkeypatch):
+    a, b = _two_devices
+
+    async def go():
+        session = await em_intercom.start_intercom("kitchen", "bedroom")
+        a.intercom_state = "in_call"
+        a.intercom_session = session.session_id
+    _run(go())
+
+    types_sent, satellite = _run_turn(monkeypatch, a, in_call=True)
+    assert "intercom_suspend" in types_sent
+    assert "intercom_resume" in types_sent
+    assert types_sent.index("intercom_suspend") < types_sent.index("intercom_resume")
+    assert satellite._on_stt_end is not None, "the STT_END hook was not wired"
+
+
+def test_a_turn_not_in_a_call_suspends_nothing(_two_devices, _no_events, monkeypatch):
+    a, b = _two_devices
+    types_sent, satellite = _run_turn(monkeypatch, a)
+    assert "intercom_suspend" not in types_sent
+    assert "intercom_resume" not in types_sent
+    assert satellite._on_stt_end is not None, "the hook is wired per turn, call or not"

@@ -12,11 +12,13 @@
 // test: the peer hears exactly what the wake-word scorer hears.
 //
 // Audio out: peer 48 kHz PCM straight into the voice plane
-// (PumpPeriod). Phase 2 accepts the voice plane's ~1s prime — the
-// low-prime intercom plane is Phase 3 — so this version is
-// walkie-talkie grade by design, and what it proves is the lifecycle:
-// offer, ring, answer, flow, hangup, and that the AEC holds under
-// continuous two-way speech.
+// (PumpPeriod), with the plane's prime lowered to 3 periods (~130ms)
+// while the call flows (SetIntercomMode) and a jitter buffer holding
+// ~170ms before the first pump, so a live conversation starts ~300ms
+// after the first byte instead of ~1s. The call can also suspend:
+// a nested HA turn stops the mic going to the peer and peer audio
+// playing, the peer link stays up, and the receiver keeps draining
+// (discarding) so the peer's sender never blocks on its deadline.
 //
 // The Call owns the machine transitions from Connect onward and the
 // firewall rule for its listener port. server.go owns the LED ring and
@@ -28,6 +30,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wilbowes/EchoMuse/internal/firewall"
@@ -42,12 +45,73 @@ const DefaultRingTimeout = 30 * time.Second
 // must not wedge the sender goroutine forever.
 const WriteTimeout = 5 * time.Second
 
+// intercomPeriodBytes is one speaker period of mono PCM: 2048 samples
+// at 48 kHz, ~43ms. The speaker's periodBytes is the stereo form of
+// the same period (8192); the jitter buffer works in mono bytes
+// because that is what the peer sends.
+const intercomPeriodBytes = 4096
+
+// jitterTargetBytes is how much peer audio the receiver holds before
+// the first pump: 4 periods, ~170ms. The prime gate adds ~130ms on
+// top, so a call starts ~300ms after the first byte and then rides out
+// network stalls up to the cushion.
+const jitterTargetBytes = 4 * intercomPeriodBytes
+
+// jitterMaxBytes bounds the cushion: a peer sending faster than
+// realtime (a backlog after a stall) cannot grow the latency without
+// limit — the oldest audio is dropped instead.
+const jitterMaxBytes = 8 * intercomPeriodBytes
+
+// jitterBuffer accumulates peer PCM until it holds the target cushion,
+// then releases it a period at a time. It is owned by the receiver
+// loop alone: no lock, no sharing. Reset drops the cushion, which is
+// what a suspend does — the queued peer audio is stale by resume.
+type jitterBuffer struct {
+	buf    []byte
+	primed bool
+}
+
+// write appends peer PCM and returns the whole periods ready to pump.
+// Before the buffer first reaches the target, nothing is returned:
+// the first pump happens only once the cushion exists.
+func (j *jitterBuffer) write(p []byte) [][]byte {
+	j.buf = append(j.buf, p...)
+	if !j.primed {
+		if len(j.buf) < jitterTargetBytes {
+			return nil
+		}
+		j.primed = true
+	}
+	if len(j.buf) > jitterMaxBytes {
+		// Drop the oldest down to the target, whole periods at a
+		// time so the remainder stays period-aligned. Stale audio
+		// is worse than a gap, and the gap is one underrun at most.
+		drop := (len(j.buf) - jitterTargetBytes) / intercomPeriodBytes * intercomPeriodBytes
+		j.buf = j.buf[drop:]
+	}
+	var out [][]byte
+	for len(j.buf) >= intercomPeriodBytes {
+		out = append(out, j.buf[:intercomPeriodBytes])
+		j.buf = j.buf[intercomPeriodBytes:]
+	}
+	return out
+}
+
+// reset drops the cushion and the primed flag: the next audio must
+// rebuild it before anything pumps.
+func (j *jitterBuffer) reset() {
+	j.buf = j.buf[:0]
+	j.primed = false
+}
+
 // Speaker is the sink for peer audio: the voice plane. PcmSpeaker
 // satisfies it. PumpPeriod blocks at playback speed, which paces the
 // receiver to what the speaker can actually play.
 type Speaker interface {
 	PumpPeriod([]byte) error
 	Flush()
+	EndStream()
+	SetIntercomMode(bool)
 }
 
 // MicTap is the source of this end's audio: the DataClient's
@@ -89,6 +153,10 @@ type Call struct {
 	micCh     chan []byte
 	resampler Resampler
 	drops     uint64
+	// suspended is set while a nested HA turn owns the mic and the
+	// speaker. The sender and receiver read it per frame; the
+	// machine's state is the authority, this is the hot-path copy.
+	suspended atomic.Bool
 }
 
 // NewCall returns a call for the offered session. mic may be nil — a
@@ -171,6 +239,50 @@ func (c *Call) Answer() {
 	}()
 }
 
+// Suspend pauses the call for a nested HA turn: the mic stops going
+// to the peer, peer audio stops playing, the peer link stays up. The
+// receiver keeps reading and discarding, so the peer's sender never
+// blocks on its write deadline and the call does not end itself
+// mid-turn. The voice plane is flushed and its prime restored, so the
+// turn's TTS reply gets the usual ~1s stall protection; Resume lowers
+// the prime again before any peer audio flows.
+func (c *Call) Suspend() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.machine.Suspend(); err != nil {
+		return err
+	}
+	if c.mic != nil {
+		c.mic.OnProcessedMic(nil)
+	}
+	c.suspended.Store(true)
+	if c.spk != nil {
+		c.spk.Flush()
+		c.spk.EndStream()
+		c.spk.SetIntercomMode(false)
+	}
+	return nil
+}
+
+// Resume restarts a suspended call after the nested turn ends. The
+// prime is lowered before the mic hook goes back on, so no peer
+// audio can flow while the plane still waits on the long prime.
+func (c *Call) Resume() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.machine.Resume(); err != nil {
+		return err
+	}
+	c.suspended.Store(false)
+	if c.spk != nil {
+		c.spk.SetIntercomMode(true)
+	}
+	if c.mic != nil {
+		c.mic.OnProcessedMic(c.onMicFrame)
+	}
+	return nil
+}
+
 // Stop tears the call down without invoking OnEnded: the caller is
 // ending it itself (intercom_end, button cancel, controller link drop)
 // and reports the state itself.
@@ -219,6 +331,7 @@ func (c *Call) teardown(reason string, notify bool) {
 
 	firewall.Close(port)
 	if spk != nil {
+		spk.SetIntercomMode(false)
 		spk.Flush()
 	}
 	if notify && cb != nil {
@@ -271,6 +384,11 @@ func (c *Call) connected(conn net.Conn) {
 	if c.mic != nil {
 		c.mic.OnProcessedMic(c.onMicFrame)
 	}
+	if c.spk != nil {
+		// Low prime from the first peer byte: the call starts
+		// ~300ms after it, not ~1s.
+		c.spk.SetIntercomMode(true)
+	}
 	done := c.done
 	cb := c.OnConnected
 	c.mu.Unlock()
@@ -309,13 +427,20 @@ func (c *Call) onMicFrame(mono []byte) {
 }
 
 // sendLoop resamples queued mic frames to 48 kHz and writes them to the
-// peer until the call ends or the peer stops reading.
+// peer until the call ends or the peer stops reading. While suspended
+// it drops queued frames instead of sending them: the hook is already
+// off, so these are only pre-suspend frames, and the resampler is not
+// fed — its pending sample stays the last pre-turn one, one stale
+// interpolant at most when the call resumes.
 func (c *Call) sendLoop(conn net.Conn, done chan struct{}) {
 	for {
 		select {
 		case <-done:
 			return
 		case frame := <-c.micCh:
+			if c.suspended.Load() {
+				continue
+			}
 			up := c.resampler.Write(frame)
 			if len(up) == 0 {
 				continue
@@ -335,9 +460,14 @@ func (c *Call) sendLoop(conn net.Conn, done chan struct{}) {
 // recvLoop reads peer PCM and pumps it to the voice plane until the
 // peer closes or the call ends. PumpPeriod paces the loop to playback
 // speed, so a fast peer is throttled by TCP backpressure, not by a
-// growing buffer.
+// growing buffer — and the jitter buffer holds the first ~170ms so a
+// stall shorter than the cushion never reaches the speaker. While
+// suspended the loop keeps reading and discarding: the peer's sender
+// must never block on its write deadline, and the cushion is dropped
+// so no stale audio pumps when the call resumes.
 func (c *Call) recvLoop(conn net.Conn, done chan struct{}) {
 	buf := make([]byte, 4096)
+	var jb jitterBuffer
 	for {
 		select {
 		case <-done:
@@ -346,10 +476,16 @@ func (c *Call) recvLoop(conn net.Conn, done chan struct{}) {
 		}
 		n, err := conn.Read(buf)
 		if n > 0 {
-			if perr := c.spk.PumpPeriod(buf[:n]); perr != nil {
-				log.Printf("[intercom] speaker error: %v", perr)
-				c.end("speaker_error")
-				return
+			if c.suspended.Load() {
+				jb.reset()
+			} else {
+				for _, period := range jb.write(buf[:n]) {
+					if perr := c.spk.PumpPeriod(period); perr != nil {
+						log.Printf("[intercom] speaker error: %v", perr)
+						c.end("speaker_error")
+						return
+					}
+				}
 			}
 		}
 		if err != nil {

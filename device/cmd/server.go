@@ -799,6 +799,42 @@ func main() {
 		_ = controlClient.SendIntercomState(intercom.StateIdle, session, reason)
 	})
 
+	// Pause a flowing call for a nested HA turn, and flow it again
+	// after. The machine refuses unless the call is flowing (suspend)
+	// or suspended (resume), so a duplicate or late message is a
+	// no-op here — the controller can send both without knowing
+	// exactly when the device heard the last one. The ring is left
+	// alone on suspend: the turn's listen session paints the
+	// listening ring when it opens, and the controller's turn-end
+	// clear lands before the resume below, so the solid green
+	// repainted here is the last word.
+	controlClient.OnIntercomSuspend(func(session string) {
+		if intercomCall == nil {
+			log.Printf("[intercom] suspend for session %s with no call — ignored", session)
+			return
+		}
+		if err := intercomCall.Suspend(); err != nil {
+			log.Printf("[intercom] suspend refused: %v", err)
+			return
+		}
+		_ = controlClient.SendIntercomState(intercom.StateSuspended, session, "")
+	})
+
+	controlClient.OnIntercomResume(func(session string) {
+		if intercomCall == nil {
+			log.Printf("[intercom] resume for session %s with no call — ignored", session)
+			return
+		}
+		if err := intercomCall.Resume(); err != nil {
+			log.Printf("[intercom] resume refused: %v", err)
+			return
+		}
+		s.StartAnim(server.AnimSpec{
+			Pattern: "solid", Colors: [][3]uint8{{0, 255, 0}},
+		})
+		_ = controlClient.SendIntercomState(intercom.StateInCall, session, "")
+	})
+
 	// Duck — music is attenuated under a voice turn and restored at the end.
 	// The depth is read at duck time rather than latched, so a config change
 	// takes effect on the next turn without a restart.

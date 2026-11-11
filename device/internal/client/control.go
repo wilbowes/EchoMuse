@@ -131,6 +131,13 @@ type IntercomOfferCallback func(offer IntercomOffer)
 // and the controller's reason (hangup, timeout, peer gone).
 type IntercomEndCallback func(session, reason string)
 
+// IntercomSuspendCallback receives an intercom_suspend: the session to
+// pause while this end runs a nested HA turn. The call stays up; the
+// peer link stays open. IntercomResumeCallback receives an
+// intercom_resume: the turn ended and the call flows again.
+type IntercomSuspendCallback func(session string)
+type IntercomResumeCallback func(session string)
+
 // WifiChangeCallback receives a wifi_change request, with the SSID as its exact
 // bytes (see internal/wifi/ssid.go). It must return
 // quickly (the executor runs in its own goroutine) — the control
@@ -142,28 +149,30 @@ type WifiChangeCallback func(ssid []byte, psk string)
 type ControlClient struct {
 	deviceID string
 
-	ledCallback           LEDCallback
-	ledAnimCallback       LEDAnimCallback
-	micStartCallback      MicStartCallback
-	micStopCallback       MicStopCallback
-	disconnectedCallback  StateCallback
-	connectedCallback     StateCallback
-	pendingCallback       StateCallback
-	refusedCallback       StateCallback
-	configAppliedCallback ConfigAppliedCallback
-	playCueCallback       func(string)
-	sendspinTokenCallback func() map[string]any
-	volumeSetCallback     VolumeSetCallback
-	beamLockCallback      BeamLockCallback
-	speakerFlushCallback  StateCallback
-	musicFlushCallback    StateCallback
-	duckCallback          func(on bool)
-	intercomOfferCallback IntercomOfferCallback
-	intercomEndCallback   IntercomEndCallback
-	wifiChangeCallback    WifiChangeCallback
-	wifiCommitCallback    StateCallback
-	wifiScanCallback      StateCallback
-	listenCallback        ListenCallback
+	ledCallback             LEDCallback
+	ledAnimCallback         LEDAnimCallback
+	micStartCallback        MicStartCallback
+	micStopCallback         MicStopCallback
+	disconnectedCallback    StateCallback
+	connectedCallback       StateCallback
+	pendingCallback         StateCallback
+	refusedCallback         StateCallback
+	configAppliedCallback   ConfigAppliedCallback
+	playCueCallback         func(string)
+	sendspinTokenCallback   func() map[string]any
+	volumeSetCallback       VolumeSetCallback
+	beamLockCallback        BeamLockCallback
+	speakerFlushCallback    StateCallback
+	musicFlushCallback      StateCallback
+	duckCallback            func(on bool)
+	intercomOfferCallback   IntercomOfferCallback
+	intercomEndCallback     IntercomEndCallback
+	intercomSuspendCallback IntercomSuspendCallback
+	intercomResumeCallback  IntercomResumeCallback
+	wifiChangeCallback      WifiChangeCallback
+	wifiCommitCallback      StateCallback
+	wifiScanCallback        StateCallback
+	listenCallback          ListenCallback
 
 	conn    *websocket.Conn
 	connTLS bool // conn is over wss; guarded by connMu
@@ -242,8 +251,16 @@ func (c *ControlClient) OnSendspinToken(cb func() map[string]any) { c.sendspinTo
 
 // OnIntercomOffer receives the controller's instruction to enter a call.
 // OnIntercomEnd receives its instruction to leave one.
+// OnIntercomSuspend / OnIntercomResume receive its instruction to pause
+// the call for a nested HA turn and to flow it again after.
 func (c *ControlClient) OnIntercomOffer(cb IntercomOfferCallback) { c.intercomOfferCallback = cb }
 func (c *ControlClient) OnIntercomEnd(cb IntercomEndCallback)     { c.intercomEndCallback = cb }
+func (c *ControlClient) OnIntercomSuspend(cb IntercomSuspendCallback) {
+	c.intercomSuspendCallback = cb
+}
+func (c *ControlClient) OnIntercomResume(cb IntercomResumeCallback) {
+	c.intercomResumeCallback = cb
+}
 
 // SendIntercomState reports this device's call state as it changes —
 // the ack for an offer or an end, and the source of truth the
@@ -1132,6 +1149,40 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 				msg.Session, msg.Reason)
 			if c.intercomEndCallback != nil {
 				c.intercomEndCallback(msg.Session, msg.Reason)
+			}
+
+		case "intercom_suspend":
+			// Pause a flowing call for a nested HA turn. The machine
+			// refuses unless the call is flowing, so a duplicate or
+			// late suspend is a no-op in server.go — the controller
+			// can send it without knowing exactly when the device
+			// heard the last one.
+			var msg struct {
+				Session string `json:"session"`
+			}
+			if err := json.Unmarshal(raw, &msg); err != nil {
+				log.Printf("[control] intercom_suspend: bad message: %v", err)
+				break
+			}
+			log.Printf("[control] intercom_suspend received — session %s",
+				msg.Session)
+			if c.intercomSuspendCallback != nil {
+				c.intercomSuspendCallback(msg.Session)
+			}
+
+		case "intercom_resume":
+			// Flow a suspended call again after the nested turn.
+			var msg struct {
+				Session string `json:"session"`
+			}
+			if err := json.Unmarshal(raw, &msg); err != nil {
+				log.Printf("[control] intercom_resume: bad message: %v", err)
+				break
+			}
+			log.Printf("[control] intercom_resume received — session %s",
+				msg.Session)
+			if c.intercomResumeCallback != nil {
+				c.intercomResumeCallback(msg.Session)
 			}
 
 		case "ping":
