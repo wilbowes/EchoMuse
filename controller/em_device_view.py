@@ -256,6 +256,13 @@ def merge_device(row, boot: dict | None = None) -> dict:
         "sendspinCapable": getattr(live, "sendspin_capable", False) if live else False,
         "bleConnectCapable": getattr(live, "ble_connect_capable", False) if live else False,
         "sendspin":        getattr(live, "sendspin", None) if live else None,
+        # Intercom call: whether the firmware can enter a call, and the
+        # call state the device last reported (idle/in_call/suspended),
+        # with the session and peer the controller's session tracks.
+        "intercomCapable": getattr(live, "intercom_capable", False) if live else False,
+        "intercom":        getattr(live, "intercom_state", None) if live else None,
+        "intercomSession": getattr(live, "intercom_session", None) if live else None,
+        "intercomPeer":    getattr(live, "intercom_peer", None) if live else None,
         "audioMixCapable": getattr(live, "audio_mix_capable", False) if live else False,
         # Gates the AEC delay slider, which only means anything on the
         # software tap. Paired with aecRef because the capability says the

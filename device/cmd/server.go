@@ -33,6 +33,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/client"
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/cue"
+	"github.com/wilbowes/EchoMuse/internal/intercom"
 	"github.com/wilbowes/EchoMuse/internal/listen"
 	"github.com/wilbowes/EchoMuse/internal/platform"
 	"github.com/wilbowes/EchoMuse/internal/server"
@@ -172,6 +173,11 @@ func main() {
 
 	s := server.NewServer(buttonController, micIn, pcmSpeaker)
 	srvPtr.Store(s)
+
+	// Intercom call state. Declared here, before the control callbacks,
+	// because OnDisconnected below ends a call the controller can no
+	// longer hang up — the machine must already be in scope there.
+	intercomMachine := intercom.NewMachine()
 
 	// Local duck at the device's own wake crossing, confirmed or released by
 	// the controller's duck message (OnDuck below).
@@ -480,6 +486,15 @@ func main() {
 	go pcmSpeaker.WatchJackRouting(ctx)
 
 	controlClient.OnDisconnected(func() {
+		// A call cannot survive the loss of its switchboard: the
+		// controller is the only end that can hang it up, and a device
+		// left showing in-call with no call is a lie. End it locally
+		// and clear the ring; the reconnect repaints whatever the
+		// controller wants next.
+		if _, ok := intercomMachine.Current(); ok {
+			intercomMachine.End()
+			s.StartAnim(server.AnimSpec{Pattern: "off"})
+		}
 		// A Bluetooth link's results have nowhere to go now, and a
 		// controller that comes back starts from no links.
 		bleBridge.DropAll()
@@ -667,6 +682,51 @@ func main() {
 	// instead and must never send this.
 	controlClient.OnMusicFlush(func() {
 		pcmSpeaker.FlushMusic()
+	})
+
+	// Intercom — the mode switch (Phase 1). An offer enters the call and
+	// lights the in-call ring; an end leaves it and clears the ring.
+	// There is no peer audio yet, so the offer IS the call: what Phase 1
+	// proves is that the switch itself is solid — no stuck state, no
+	// wedged ring, no lost wake word afterwards.
+	//
+	// The wake-word scorer is deliberately NOT paused for a call.
+	// oww_paused is what makes a device deaf during a normal turn, and a
+	// call that cannot hear its own wake word cannot be ended by voice.
+	// The controller declines turns for in-call devices until Phase 3
+	// nests them inside the call instead.
+	controlClient.OnIntercomOffer(func(offer client.IntercomOffer) {
+		sess := intercom.Session{
+			ID: offer.Session, PeerID: offer.PeerID,
+			PeerLabel: offer.PeerLabel, Token: offer.Token,
+		}
+		if err := intercomMachine.Offer(sess); err != nil {
+			log.Printf("[intercom] offer for session %s refused: %v", offer.Session, err)
+			// Report the state we are actually in, so the controller's
+			// session tracking never believes a call it did not get.
+			if cur, ok := intercomMachine.Current(); ok {
+				_ = controlClient.SendIntercomState(intercom.StateInCall, cur.ID, "busy")
+			}
+			return
+		}
+		// Slow green pulse: distinct from the cyan listening ring and
+		// the white thinking ring, and readable from across a room.
+		s.StartAnim(server.AnimSpec{
+			Pattern: "pulse", Colors: [][3]uint8{{0, 255, 0}}, PeriodMs: 2000,
+		})
+		_ = controlClient.SendIntercomState(intercom.StateInCall, offer.Session, "")
+	})
+
+	controlClient.OnIntercomEnd(func(session, reason string) {
+		ended, _ := intercomMachine.End()
+		if ended.ID != "" && ended.ID != session {
+			log.Printf("[intercom] end for session %s arrived while %s was active — ending the active call", session, ended.ID)
+		}
+		// Clear the in-call ring and hand the ring back to whatever the
+		// controller sends next. "off" paints black through the same
+		// path the volume arc uses to clear itself.
+		s.StartAnim(server.AnimSpec{Pattern: "off"})
+		_ = controlClient.SendIntercomState(intercom.StateIdle, session, reason)
 	})
 
 	// Duck — music is attenuated under a voice turn and restored at the end.
