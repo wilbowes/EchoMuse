@@ -24,7 +24,7 @@
 # costs minutes rather than the ordeal config.yaml's comment implies.
 set -eu
 
-SRC="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+SRC="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 OUT="${1:-$SRC/../dist/echomuse-dev}"
 
 [ -f "$SRC/config.yaml" ] || { echo "no config.yaml in $SRC" >&2; exit 1; }
