@@ -255,3 +255,80 @@ async def end_intercom_for_device(device, reason: str = "hangup") -> IntercomSes
     if session is None:
         return None
     return await end_intercom(session.session_id, reason)
+
+
+def wake_action(state: str | None) -> str | None:
+    """What a wake word does while a device is in an intercom state.
+
+    "nest" — the call is flowing (in_call): the wake starts a normal
+    HA turn, and the turn suspends the call for its duration (see
+    suspend_intercom) and resumes it after.
+    "decline" — the call is being attempted (ringing / calling) or
+    already suspended for a turn: the wake is logged and dropped, the
+    call continues. A wake during an attempt would start a turn the
+    call would then collide with, and a wake during a suspend belongs
+    to the turn already running (its voice_lock is held, so the
+    listener's busy path handles it first).
+    None — no call: the wake is an ordinary one.
+    """
+    if state == "in_call":
+        return "nest"
+    if state in ("ringing", "calling", "suspended"):
+        return "decline"
+    return None
+
+
+async def suspend_intercom(device) -> bool:
+    """Pause a flowing call on one device for a nested HA turn.
+
+    True when the device was told to suspend (or already is). The
+    device stops sending its mic to the peer, stops playing peer
+    audio, and reports intercom_state "suspended"; the peer link stays
+    up. The send is not awaited for an ack: the suspend lands in
+    milliseconds, and the command itself does not start for a beat
+    after the wake word, so the race it would close does not exist in
+    practice — the peer hears the wake word it already heard live,
+    not the command. A failed send logs and returns False, and the
+    turn proceeds anyway: the user's command outranks the call.
+    """
+    session = INTERCOM.active_for(device.device_id)
+    if session is None:
+        return False
+    if device.intercom_state == "suspended":
+        return True
+    if device.intercom_state != "in_call":
+        return False
+    try:
+        await device.send_control({
+            "type": "intercom_suspend", "session": session.session_id,
+        })
+    except Exception:
+        log.warning(f"[{device.device_id}] intercom_suspend for "
+                    f"{session.session_id} could not be sent")
+        return False
+    return True
+
+
+async def resume_intercom(device) -> bool:
+    """Flow a suspended call again after the nested turn ends.
+
+    True when the device was told to resume. The message goes out
+    whether the controller believes the device is in_call or
+    suspended: an ack lost on the way back leaves the controller
+    believing in_call while the device is suspended, and the device's
+    resume is a no-op when it is not suspended — so the tolerant
+    send is the correct one, and a lost ack cannot wedge a call
+    silent. False only when there is no call to resume.
+    """
+    session = INTERCOM.active_for(device.device_id)
+    if session is None:
+        return False
+    try:
+        await device.send_control({
+            "type": "intercom_resume", "session": session.session_id,
+        })
+    except Exception:
+        log.warning(f"[{device.device_id}] intercom_resume for "
+                    f"{session.session_id} could not be sent")
+        return False
+    return True

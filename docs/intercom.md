@@ -44,14 +44,14 @@ its switchboard.
   playback is; the controller declines to start a turn for it until
   Phase 3 nests turns inside the call.
 
-## Phase 2 — peer audio (this phase)
+## Phase 2 — peer audio (done)
 
 Phase 2 streams the call. The peer link is a plain TCP connection on
 port 8929 (Sendspin holds 8928), carrying raw 48 kHz mono S16LE after
 a short handshake; the firewall rule for the port opens only while a
-call is being attempted or is live. This version is walkie-talkie grade
-by design — the voice plane's ~1 s prime still dominates latency — and
-what it proves is the lifecycle plus the AEC question: whether echo
+call is being attempted or is live. This version was walkie-talkie
+grade by design — the voice plane's ~1 s prime dominated latency — and
+what it proved was the lifecycle plus the AEC question: whether echo
 cancellation holds under continuous two-way speech on real hardware.
 
 - **Ringing and consent.** The callee rings (slow green pulse) for up
@@ -128,12 +128,59 @@ one device fails after the other was offered, the session is ended
 immediately so no device is left in a call the controller does not
 know about.
 
-### Voice and button behaviour during a call (Phases 1–2)
+## Phase 3 — conversational latency and voice control (this phase)
 
-- **Wake word:** detected and logged, no turn starts. The private
-  listener closes the session (`listen_close`, reason `intercom`); the
-  controller-scored listener drops the wake before arming capture
-  routing. Either way the call continues.
+Phase 3 makes the call conversational. Three changes, all in the
+audio path and the turn:
+
+- **Low-prime voice plane.** While a call is flowing, the device
+  lowers the voice plane's prime gate from 24 periods (~1 s) to 3
+  (~130 ms) — `SetIntercomMode` on the speaker, called by the Call
+  on connect and restored on suspend and teardown. The gate only
+  matters at stream start, so switching mid-call takes effect on the
+  next stream: a nested turn's TTS reply gets the full prime, and
+  the resumed call gets the low one. The music plane is untouched.
+- **Jitter buffer.** The receiver holds ~170 ms of peer audio (4
+  periods) before the first pump, then releases it a period at a
+  time; a peer sending faster than realtime cannot grow the latency
+  without limit — past 8 periods the oldest audio is dropped. With
+  the low prime, a call now starts ~300 ms after the first byte.
+  While suspended the receiver keeps reading and discarding, so the
+  peer's sender never blocks on its write deadline, and the cushion
+  is dropped so no stale audio pumps on resume.
+- **Nested HA turns.** A wake during a flowing call starts a normal
+  HA turn, nested inside it: `_run_voice_locked` suspends the call
+  first (the mic stops going to the peer, peer audio stops playing,
+  the voice plane is flushed and its prime restored) and resumes it
+  in the turn's finally, so a turn that dies mid-command cannot leave
+  a call suspended. The suspend is not awaited for an ack — it lands
+  in milliseconds, and the command does not start for a beat after
+  the wake word. A wake while the Dot is ringing, calling, or already
+  suspended is still declined: the attempt owns the device until it
+  resolves, and a wake during a suspend belongs to the turn already
+  running. The far end hears silence during the turn — no hold chime
+  or LED cue on that side yet.
+- **Voice hangup.** "End the call" (and "hang up", "hangup", "end
+  call", "end the intercom call", with an optional "please" and
+  trailing punctuation) is caught at STT_END: the turn is cancelled
+  with `abort_ha` so HA's pipeline stops before the intent runs,
+  then the call is ended for both ends. The STT_END → intent window
+  is tight and HA may occasionally start an intent first, which is
+  harmless by default. The hook is wired per turn on the current
+  satellite (a reconnect makes a new one); it only acts when the
+  device is in a call, so ordinary turns are unaffected. A substring
+  match is deliberately not used — "don't end the call" must not
+  hang up.
+
+### Voice and button behaviour during a call (Phases 1–3)
+
+- **Wake word:** during a flowing call it starts a nested HA turn
+  (above) — every ordinary HA command works mid-call, including
+  "end the call". During a call attempt (ringing / calling) or an
+  already-suspended call it is detected and logged, no turn starts:
+  the private listener closes the session (`listen_close`, reason
+  `intercom`); the controller-scored listener drops the wake before
+  arming capture routing. Either way the call continues.
 - **Action button:** a tap during a flowing call hangs up (the
   controller ends the session for both ends). A tap while ringing
   answers; a tap while calling cancels. Button hangup is the one
@@ -154,14 +201,17 @@ know about.
 
 ## What is not built yet
 
-- **Phase 3 — conversational latency and voice control:** the low-prime
-  intercom speaker plane (the ~1 s prime is the dominant latency cost;
-  a direct link alone only reaches ~1.1 s one way), the jitter buffer,
-  nested Home Assistant turns (suspend / turn / resume), and the
-  speech-to-text intercept for the hangup phrase.
 - **Phase 4 — codec and transport, only if needed:** FLAC first for
   bandwidth, Opus on a datagram transport for loss resilience — only if
   Phase 2/3 measurements show raw PCM glitching on real devices.
+- **Peer hold cue:** during a nested turn the far end hears silence
+  and sees nothing different — no chime, no LED change. Worth adding
+  (a controller-to-peer `intercom_hold` message, or an in-band tone)
+  once the nested turn itself is proven on hardware.
+- **Announcements during a call:** an announcement (or a timer alarm)
+  writes to the same voice plane as peer audio, so the two interleave
+  for the length of the announcement. Suppression or queueing during
+  calls is not built yet.
 
 Auto-answer (a per-device opt-in to answer without the button) is not
 built either: ringing plus the button is the consent model, and
