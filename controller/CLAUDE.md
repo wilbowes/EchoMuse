@@ -131,6 +131,11 @@ registration/server order (`tests/test_capabilities.py`).
   (`em_button.decide`); mute is enforced by `cmd/server.go`'s `mic_start`
   rejection — keep it there. The evdev reader filters to `EV_KEY`.
 - **Ambient Light** (`ambient_light`): no sensor sends `missing_state`, not 0.
+- **CPU / Hottest Zone Temperature** (`thermal`, keys 5/6): off the stats
+  report's `cpuTempC`/`maxTempC`; diagnostic and disabled by default (the
+  chip, not the room). "Hottest Zone", never "Max": it is now, not a peak.
+  The push re-checks the capability, since older firmware sends the fields
+  with no entity to receive them; a missing reading is `missing_state`.
 
 ## Schema migrations
 
