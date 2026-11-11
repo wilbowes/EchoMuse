@@ -104,6 +104,7 @@ import em_mbc
 import em_scenes
 import em_shadow
 import em_health
+import em_intercom
 import em_wake_samples
 import em_oww_warmup
 import em_barge
@@ -448,6 +449,13 @@ class Device:
         self.sendspin: dict | None = None
         # An outstanding sendspin_token_request, answered by sendspin_token.
         self.sendspin_token_waiter: asyncio.Future | None = None
+        # Intercom call state, from intercom_state and the controller's own
+        # session tracking. None while the device is not in a call; the
+        # device is the source of truth for its own state, and the
+        # controller's session is the source of truth for who the peer is.
+        self.intercom_state: str | None = None
+        self.intercom_session: str | None = None
+        self.intercom_peer: str | None = None
         # Set from the register message; None on firmware that predates it.
         self.ambient_light_status: dict | None = None
         # Which userspace the device booted, from its register message.
@@ -1100,6 +1108,15 @@ class Device:
         shows the section disabled with the reason without it.
         """
         return "sendspin" in (self.capabilities or [])
+
+    @property
+    def intercom_capable(self) -> bool:
+        """
+        Whether this firmware can enter an intercom call. The dashboard
+        offers calls only to devices that announce it; older firmware is
+        simply never offered a call.
+        """
+        return "intercom" in (self.capabilities or [])
 
     @property
     def wake_cue_capable(self) -> bool:
@@ -3311,6 +3328,18 @@ async def _private_listen(device: Device) -> None:
             # skips its own frames here too, so a wake over it is not acted on.
             await device.listen_close(ev["session"], "speaking")
             continue
+        if device.intercom_state == "in_call":
+            # Intercom Phase 1: the wake word stays live during a call,
+            # but nested HA turns (suspend/resume) do not exist yet — a
+            # turn here would hold voice_lock and route the mic while
+            # the call owns both. The wake is logged and the session
+            # closed; the call continues. Phase 3 replaces this close
+            # with a nested turn.
+            log.info(f"[{device.device_id}] wake during intercom call — "
+                     f"no turn until nested turns land (session "
+                     f"{ev['session']} closed)")
+            await device.listen_close(ev["session"], "intercom")
+            continue
         device.private_turn_task = asyncio.create_task(_private_wake_turn(device, ev))
         device.private_turn_task.add_done_callback(_log_task_exception)
     log.info(f"[{device.device_id}] no longer listening privately")
@@ -4001,6 +4030,19 @@ async def _stream_listen(device: Device):
                         device.device_id, "info", "device",
                         f"Wake word detected (score={score:.3f}, {source})"
                     )
+                    if device.intercom_state == "in_call":
+                        # Intercom Phase 1, controller-scored side: the
+                        # wake word stays live during a call, but nested
+                        # HA turns do not exist yet — arming capture
+                        # routing (oww_paused, beam lock) here would
+                        # route the mic to a turn while the call owns
+                        # it. The wake is logged and dropped; scoring
+                        # continues and the call continues. Phase 3
+                        # replaces this with a nested turn.
+                        log.info(f"[{device.device_id}] wake during "
+                                 f"intercom call — no turn until nested "
+                                 f"turns land")
+                        continue
                     if _ringing_devices():
                         # Silence the ring now rather than at turn start: the
                         # person is already speaking by the time the turn is
@@ -4253,6 +4295,16 @@ async def handle_button_event(device: Device, event: dict):
         if device.timer_alarm_task is not None:
             log.info(f"[{device.device_id}] Dot button — dismissing timer alarm")
             await esphome.dismiss_timer_alarm(device.device_id)
+            return
+
+        if device.intercom_state == "in_call":
+            # A tap during a call hangs up — the one hangup that works
+            # while muted, because the button event flows over the
+            # control plane whatever the mic state is. It is checked
+            # before the tap/hold decision, so a tap can never start a
+            # turn while the call owns the mic.
+            log.info(f"[{device.device_id}] Dot button — hanging up intercom call")
+            await em_intercom.end_intercom_for_device(device, "button")
             return
 
         # A HOLD is a separate gesture, forwarded to HA rather than starting a
@@ -4727,6 +4779,51 @@ async def _on_sendspin_status(device: Device, msg: dict) -> None:
     })
 
 
+# ── Intercom ───────────────────────────────────────────────────────────────
+# The switchboard itself (sessions, offers, ends) lives in em_intercom,
+# which the routes can import — no module but this one may import
+# em_controller by name. What lives here is only the device's own state
+# reports and the in-call guards.
+INTERCOM_STATES = {"idle", "in_call", "suspended"}
+
+
+async def _on_intercom_state(device: Device, msg: dict) -> None:
+    """A device reporting its call state — the ack for an offer or an end.
+
+    The device is the source of truth for its own state: the controller
+    records what the device says it is doing, and clears the session and
+    peer when the device reports idle. A state for a session the
+    controller does not know is logged and ignored rather than trusted —
+    a stale device must not resurrect a call the controller ended.
+    """
+    device_id = device.device_id
+    state = msg.get("state")
+    session_id = msg.get("session")
+    if state not in INTERCOM_STATES:
+        log.warning(f"[{device_id}] intercom_state {state!r} ignored — "
+                    f"unknown state")
+        return
+    if state == "idle":
+        device.intercom_state = "idle"
+        device.intercom_session = None
+        device.intercom_peer = None
+    else:
+        session = em_intercom.INTERCOM.get(session_id) if session_id else None
+        if session is None:
+            log.warning(f"[{device_id}] intercom_state {state} for unknown "
+                        f"session {session_id!r} ignored")
+            return
+        device.intercom_state = state
+        device.intercom_session = session_id
+        device.intercom_peer = session.peer(device_id)
+    await em_events.push({
+        "type": "device_update", "device_id": device_id,
+        "state": {"intercom": device.intercom_state,
+                  "intercom_session": device.intercom_session,
+                  "intercom_peer": device.intercom_peer},
+    })
+
+
 async def _on_sendspin_token(device: Device, msg: dict) -> None:
     # The answer to sendspin_token_request. A secret: it
     # goes to the one waiting request and nowhere else,
@@ -5095,6 +5192,7 @@ CONTROL_HANDLERS = {
     "stats":            _on_stats,
     "sendspin_status":  _on_sendspin_status,
     "sendspin_token":   _on_sendspin_token,
+    "intercom_state":   _on_intercom_state,
     "wifi_result":      _on_wifi_result,
     "playback_stats":   _on_playback_stats,
     "oww_shadow_cross": _on_oww_shadow_cross,

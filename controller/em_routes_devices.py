@@ -26,6 +26,7 @@ import em_device_view
 import em_esphome
 import em_events
 import em_http
+import em_intercom
 import em_labels
 import em_pairing
 import em_reconcile
@@ -53,6 +54,8 @@ def register(app: web.Application) -> None:
     app.router.add_get("/api/devices/{id}/logs",          _get_device_logs)
     app.router.add_post("/api/devices/{id}/wifi",         _post_device_wifi)
     app.router.add_post("/api/devices/{id}/wifi/scan",    _post_device_wifi_scan)
+    app.router.add_post("/api/devices/{id}/intercom/start", _post_intercom_start)
+    app.router.add_post("/api/devices/{id}/intercom/end",   _post_intercom_end)
 
 
 @auth.require_auth
@@ -263,6 +266,57 @@ async def _post_approve(request: web.Request) -> web.Response:
     await em_events.push({"type": "device_approved", "device_id": device_id,
                        "label": label})
     return em_http.ok({"device_id": device_id, "label": label})
+
+
+@auth.require_admin
+async def _post_intercom_start(request: web.Request) -> web.Response:
+    """
+    POST /api/devices/{id}/intercom/start
+
+    Body: {peer_id}
+    Starts an intercom call from this device to the peer. Both devices
+    are offered the call, and the session id is returned for the end
+    call. Either device not being intercom-capable, muted, offline, in
+    a voice turn or already in a call is a 409, not a half-started call.
+    """
+    device_id = request.match_info["id"]
+    body = await em_http.json_body(request)
+    peer_id = (body.get("peer_id") or "").strip()
+    if not peer_id:
+        return em_http.error("peer_required", "peer_id is required", 400)
+    try:
+        session = await em_intercom.start_intercom(device_id, peer_id)
+    except em_intercom.IntercomError as e:
+        return em_http.error("intercom_unavailable", str(e), 409)
+    return em_http.ok({"session_id": session.session_id,
+                       "caller_id": session.caller_id,
+                       "callee_id": session.callee_id,
+                       "state": session.state})
+
+
+@auth.require_admin
+async def _post_intercom_end(request: web.Request) -> web.Response:
+    """
+    POST /api/devices/{id}/intercom/end
+
+    Body: {session_id?} — {} ends whatever call this device is in.
+    Ends the call, fanning intercom_end out to both devices. A device
+    that is not in a call is a 409.
+    """
+    device_id = request.match_info["id"]
+    body = await em_http.json_body(request)
+    session_id = (body.get("session_id") or "").strip() or None
+    if session_id is None:
+        session = em_intercom.INTERCOM.active_for(device_id)
+        if session is None:
+            return em_http.error("no_active_call",
+                                 "This Echo is not in a call", 409)
+        session_id = session.session_id
+    session = await em_intercom.end_intercom(session_id, "dashboard")
+    if session is None:
+        return em_http.error("no_active_call", "No such call", 409)
+    return em_http.ok({"session_id": session.session_id,
+                       "state": session.state})
 
 
 @auth.require_auth

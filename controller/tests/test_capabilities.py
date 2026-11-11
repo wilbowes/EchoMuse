@@ -102,6 +102,20 @@ def test_wake_mic_capability_is_surfaced_to_the_dashboard():
     assert "disabled={!wakeMicCapable}" in jsx
 
 
+def test_intercom_capability_is_surfaced_to_the_api():
+    """A call must only be offered to firmware that announces `intercom`
+    (docs/intercom.md). The dashboard UI that offers it is a later phase;
+    what Phase 1 guarantees is the firmware announcement, the controller
+    property, and the API record the UI will read."""
+    assert "intercom" in device_capabilities(), "firmware no longer announces intercom"
+    assert "intercom_capable" in CONTROLLER.read_text(), \
+        "em_controller must expose the intercom capability as a property"
+    assert "intercomCapable" in _device_record(), \
+        "/api/devices must surface the intercom capability"
+    assert "intercom" in _device_record(), \
+        "/api/devices must surface the call state"
+
+
 def test_volume_cue_capability_is_surfaced_to_the_dashboard():
     """Old firmware must not be offered a switch it cannot honour."""
     caps = device_capabilities()

@@ -135,6 +135,7 @@ COPY em_support.py .
 COPY em_shadow.py .
 COPY em_wake_samples.py .
 COPY em_barge.py .
+COPY em_intercom.py .
 COPY em_earlytts.py .
 COPY em_ns.py .
 COPY em_speechgate.py .
