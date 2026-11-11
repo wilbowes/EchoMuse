@@ -262,6 +262,8 @@ MEDIA_PLAYER_KEY = 1
 EVENT_KEY        = 2   # action-button hold, as an HA event entity
 AMBIENT_LUX_KEY  = 3   # TSL2540 ambient light, as an HA sensor
 MIC_MUTED_KEY    = 4   # the mic mute button, as a read-only binary sensor (#438)
+CPU_TEMP_KEY     = 5   # the CPU thermal zone (cpuTempC), as an HA sensor
+MAX_TEMP_KEY     = 6   # the hottest thermal zone now (maxTempC), as an HA sensor
 
 # Press types the event entity advertises. double/triple were parked because
 # detecting them means delaying the single press by the multi-tap window to
@@ -546,6 +548,10 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         return self._device_has("ambient_light")
 
     @property
+    def _thermal_capable(self) -> bool:
+        return self._device_has("thermal")
+
+    @property
     def _mic_capable(self) -> bool:
         return self._device_has("mic")
 
@@ -679,6 +685,24 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     device_class="illuminance",
                     state_class=1,   # STATE_CLASS_MEASUREMENT
                 )
+            # The chip, not the room: diagnostics, off until enabled in HA.
+            if self._thermal_capable:
+                for object_id, key, name in (
+                    ("cpu_temperature", CPU_TEMP_KEY, "CPU Temperature"),
+                    ("hottest_zone_temperature", MAX_TEMP_KEY,
+                     "Hottest Zone Temperature"),
+                ):
+                    yield api_pb2.ListEntitiesSensorResponse(
+                        object_id=object_id,
+                        key=key,
+                        name=name,
+                        unit_of_measurement="°C",
+                        accuracy_decimals=1,
+                        device_class="temperature",
+                        state_class=1,   # STATE_CLASS_MEASUREMENT
+                        entity_category=api_pb2.ENTITY_CATEGORY_DIAGNOSTIC,
+                        disabled_by_default=True,
+                    )
             # Read-only (#438): a writable entity would be a remote unmute.
             if self._mic_capable:
                 yield api_pb2.ListEntitiesBinarySensorResponse(
@@ -3518,6 +3542,28 @@ def update_ambient_lux(device_id: str, lux) -> None:
         state=float(lux) if lux is not None else 0.0,
         missing_state=lux is None,
     ))
+
+
+def update_temperatures(device_id: str, cpu_c, max_c) -> None:
+    """
+    Push the two thermal readings to HA, off the stats report.
+
+    None is a reading the device could not take, sent as missing_state rather
+    than 0: 0 is a temperature. Older firmware reports these on stats too but
+    has no entity to receive them, hence the capability check.
+    """
+    server = _servers.get(device_id)
+    if server is None:
+        return
+    satellite = server.get_satellite()
+    if satellite is None or not satellite._thermal_capable:
+        return
+    for key, celsius in ((CPU_TEMP_KEY, cpu_c), (MAX_TEMP_KEY, max_c)):
+        satellite._send_one(api_pb2.SensorStateResponse(
+            key=key,
+            state=float(celsius) if celsius is not None else 0.0,
+            missing_state=celsius is None,
+        ))
 
 
 def get_mic_muted_and_wake_word(device_id: str) -> tuple[bool, bool]:
