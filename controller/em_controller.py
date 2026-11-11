@@ -104,6 +104,7 @@ import em_mbc
 import em_scenes
 import em_shadow
 import em_health
+import em_intercom
 import em_wake_samples
 import em_oww_warmup
 import em_barge
@@ -448,6 +449,13 @@ class Device:
         self.sendspin: dict | None = None
         # An outstanding sendspin_token_request, answered by sendspin_token.
         self.sendspin_token_waiter: asyncio.Future | None = None
+        # Intercom call state, from intercom_state and the controller's own
+        # session tracking. None while the device is not in a call; the
+        # device is the source of truth for its own state, and the
+        # controller's session is the source of truth for who the peer is.
+        self.intercom_state: str | None = None
+        self.intercom_session: str | None = None
+        self.intercom_peer: str | None = None
         # Set from the register message; None on firmware that predates it.
         self.ambient_light_status: dict | None = None
         # Which userspace the device booted, from its register message.
@@ -1100,6 +1108,15 @@ class Device:
         shows the section disabled with the reason without it.
         """
         return "sendspin" in (self.capabilities or [])
+
+    @property
+    def intercom_capable(self) -> bool:
+        """
+        Whether this firmware can enter an intercom call. The dashboard
+        offers calls only to devices that announce it; older firmware is
+        simply never offered a call.
+        """
+        return "intercom" in (self.capabilities or [])
 
     @property
     def wake_cue_capable(self) -> bool:
@@ -2707,6 +2724,48 @@ def _put_voice_frame(device: Device, chunk: bytes) -> None:
             pass
 
 
+# Phrases that end an intercom call when spoken during one. Matched
+# after normalisation against the WHOLE transcript: a substring match
+# would also catch "don't end the call".
+INTERCOM_HANGUP_PHRASES = frozenset({
+    "end the call", "hang up", "hangup", "end call",
+    "end the intercom call",
+})
+
+
+def _normalise_hangup(text: str) -> str:
+    """Normalise a transcript for a hangup-phrase match: lowercase,
+    collapsed whitespace, a leading "please" and trailing punctuation
+    stripped."""
+    text = " ".join(text.strip().lower().split())
+    if text.startswith("please "):
+        text = text[len("please "):]
+    return text.rstrip(".!?")
+
+
+async def _handle_intercom_stt_end(device: Device, text: str) -> None:
+    """STT_END during a call: end the call instead of letting HA answer.
+
+    HA has no concept of the call, so "end the call" would otherwise
+    run as an ordinary (and meaningless) intent. The turn is cancelled
+    with abort_ha so HA's pipeline stops before the intent runs — the
+    STT_END → INTENT_END window is tight, and HA may occasionally
+    start an intent first, which is harmless by default — and then the
+    call is ended for both ends. The turn's finally still runs its
+    intercom resume, but the session is gone by then, so it is a
+    no-op; a resume racing in ahead of the end is harmless for the
+    same reason, the end still lands.
+    """
+    if device.intercom_state not in ("in_call", "suspended"):
+        return
+    if _normalise_hangup(text) not in INTERCOM_HANGUP_PHRASES:
+        return
+    log.info(f"[{device.device_id}] hangup phrase {text!r} — ending intercom call")
+    esphome.cancel_voice_turn(device.device_id, abort_ha=True,
+                              reason="intercom_hangup")
+    await em_intercom.end_intercom_for_device(device, "hangup")
+
+
 async def _run_voice_locked(device: Device, trigger_label: str = "unknown",
                             is_wakeword: bool = False, session: int | None = None):
     """
@@ -2737,6 +2796,17 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown",
             break
     if drained:
         log.info(f"[{device.device_id}] Voice turn: drained {drained} stale frames")
+    # Intercom Phase 3: hangup is caught at STT_END — wire the hook on
+    # the current satellite. A reconnect makes a new satellite, so this
+    # is set per turn, idempotently; the handler only acts when the
+    # device is in a call, so a turn on a device that is not calling
+    # is unaffected.
+    _server = esphome.get_server(device.device_id)
+    _satellite = _server.get_satellite() if _server is not None else None
+    if _satellite is not None:
+        async def _stt_end(text: str) -> None:
+            await _handle_intercom_stt_end(device, text)
+        _satellite._on_stt_end = _stt_end
     if session is not None:
         # After the drain, never before it: the drain is for stale audio, and
         # this is the command. The router held whatever arrived ahead of the
@@ -2752,6 +2822,14 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown",
     # matching resume_interrupted below only fires if this interrupt
     # actually paused something.
     await em_player.interrupt(device.device_id)
+    # Intercom Phase 3: a wake during a flowing call nests the turn
+    # inside it — the call pauses (mic stops going to the peer, peer
+    # audio stops playing) and resumes when the turn ends. Only a
+    # flowing call suspends; a turn on a device in any other state
+    # never reaches here, because the listeners decline those wakes.
+    intercom_suspended = False
+    if device.intercom_state == "in_call":
+        intercom_suspended = await em_intercom.suspend_intercom(device)
     try:
         async with device.voice_lock:
             if is_wakeword and _ringing_devices():
@@ -3141,6 +3219,13 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown",
         em_state.wake_arbiter.release(device.device_id)
         # Conversation over — un-pause a media session this turn preempted.
         await em_player.resume_interrupted(device.device_id)
+        # And flow a nested intercom call again, if this turn suspended
+        # one. The finally runs on every exit path, including a cancel
+        # mid-command (the hangup intercept), so a call cannot be left
+        # suspended by a turn that died. If the call was ended meanwhile
+        # there is no session left and the resume is a no-op.
+        if intercom_suspended:
+            await em_intercom.resume_intercom(device)
 
 
 # ─── Wake word listener ───────────────────────────────────────────────────────
@@ -3310,6 +3395,20 @@ async def _private_listen(device: Device) -> None:
             # An announcement is playing and no turn owns it — the stream path
             # skips its own frames here too, so a wake over it is not acted on.
             await device.listen_close(ev["session"], "speaking")
+            continue
+        if em_intercom.wake_action(device.intercom_state) == "decline":
+            # Intercom: the wake word stays live during a call, but a
+            # wake while the Dot is ringing, calling, or already
+            # suspended for a turn must not start a turn the call would
+            # then collide with. The wake is logged and the session
+            # closed; the call continues. A wake while the call is
+            # flowing (in_call) falls through below: _private_wake_turn
+            # runs it, and _run_voice_locked suspends the call for the
+            # turn and resumes it after.
+            log.info(f"[{device.device_id}] wake during intercom "
+                     f"{device.intercom_state} — no turn (session "
+                     f"{ev['session']} closed)")
+            await device.listen_close(ev["session"], "intercom")
             continue
         device.private_turn_task = asyncio.create_task(_private_wake_turn(device, ev))
         device.private_turn_task.add_done_callback(_log_task_exception)
@@ -4001,6 +4100,21 @@ async def _stream_listen(device: Device):
                         device.device_id, "info", "device",
                         f"Wake word detected (score={score:.3f}, {source})"
                     )
+                    if em_intercom.wake_action(device.intercom_state) == "decline":
+                        # Intercom, controller-scored side: a wake while
+                        # the Dot is ringing, calling, or already
+                        # suspended for a turn must not start one — arming
+                        # capture routing (oww_paused, beam lock) here
+                        # would route the mic to a turn while the call
+                        # owns it. The wake is logged and dropped; scoring
+                        # continues and the call continues. A wake while
+                        # the call is flowing (in_call) falls through
+                        # below: the turn runs, and _run_voice_locked
+                        # suspends the call for it and resumes it after.
+                        log.info(f"[{device.device_id}] wake during "
+                                 f"intercom {device.intercom_state} — "
+                                 f"no turn")
+                        continue
                     if _ringing_devices():
                         # Silence the ring now rather than at turn start: the
                         # person is already speaking by the time the turn is
@@ -4253,6 +4367,26 @@ async def handle_button_event(device: Device, event: dict):
         if device.timer_alarm_task is not None:
             log.info(f"[{device.device_id}] Dot button — dismissing timer alarm")
             await esphome.dismiss_timer_alarm(device.device_id)
+            return
+
+        if device.intercom_state == "in_call":
+            # A tap during a call hangs up — the one hangup that works
+            # while muted, because the button event flows over the
+            # control plane whatever the mic state is. It is checked
+            # before the tap/hold decision, so a tap can never start a
+            # turn while the call owns the mic.
+            log.info(f"[{device.device_id}] Dot button — hanging up intercom call")
+            await em_intercom.end_intercom_for_device(device, "button")
+            return
+
+        if device.intercom_state in ("ringing", "calling"):
+            # A press during a call attempt is answered or cancelled on
+            # the device and never forwarded — so one arriving here is
+            # a stale duplicate. It must not start a turn: the attempt
+            # owns the device until it resolves.
+            log.info(f"[{device.device_id}] Dot button during intercom "
+                     f"{device.intercom_state} — ignored, the device "
+                     f"answers or cancels it itself")
             return
 
         # A HOLD is a separate gesture, forwarded to HA rather than starting a
@@ -4727,6 +4861,61 @@ async def _on_sendspin_status(device: Device, msg: dict) -> None:
     })
 
 
+# ── Intercom ───────────────────────────────────────────────────────────────
+# The switchboard itself (sessions, offers, ends) lives in em_intercom,
+# which the routes can import — no module but this one may import
+# em_controller by name. What lives here is only the device's own state
+# reports and the in-call guards.
+INTERCOM_STATES = {"idle", "ringing", "calling", "in_call", "suspended"}
+
+
+async def _on_intercom_state(device: Device, msg: dict) -> None:
+    """A device reporting its call state — the ack for an offer or an end.
+
+    The device is the source of truth for its own state: the controller
+    records what the device says it is doing, and clears the session and
+    peer when the device reports idle. A state for a session the
+    controller does not know is logged and ignored rather than trusted —
+    a stale device must not resurrect a call the controller ended.
+
+    An idle report for a session that is still active ends the session:
+    a device only reports idle mid-call because it left the call on its
+    own — ring timeout, peer gone, dial failed, button cancel — and the
+    other end must hear about it through intercom_end, not be left
+    ringing. An idle report for a session the controller already ended
+    is a no-op: end_intercom short-circuits on STATE_ENDED.
+    """
+    device_id = device.device_id
+    state = msg.get("state")
+    session_id = msg.get("session")
+    reason = msg.get("reason") or "peer_idle"
+    if state not in INTERCOM_STATES:
+        log.warning(f"[{device_id}] intercom_state {state!r} ignored — "
+                    f"unknown state")
+        return
+    if state == "idle":
+        device.intercom_state = "idle"
+        device.intercom_session = None
+        device.intercom_peer = None
+        if session_id:
+            await em_intercom.end_intercom(session_id, reason)
+    else:
+        session = em_intercom.INTERCOM.get(session_id) if session_id else None
+        if session is None:
+            log.warning(f"[{device_id}] intercom_state {state} for unknown "
+                        f"session {session_id!r} ignored")
+            return
+        device.intercom_state = state
+        device.intercom_session = session_id
+        device.intercom_peer = session.peer(device_id)
+    await em_events.push({
+        "type": "device_update", "device_id": device_id,
+        "state": {"intercom": device.intercom_state,
+                  "intercom_session": device.intercom_session,
+                  "intercom_peer": device.intercom_peer},
+    })
+
+
 async def _on_sendspin_token(device: Device, msg: dict) -> None:
     # The answer to sendspin_token_request. A secret: it
     # goes to the one waiting request and nowhere else,
@@ -5095,6 +5284,7 @@ CONTROL_HANDLERS = {
     "stats":            _on_stats,
     "sendspin_status":  _on_sendspin_status,
     "sendspin_token":   _on_sendspin_token,
+    "intercom_state":   _on_intercom_state,
     "wifi_result":      _on_wifi_result,
     "playback_stats":   _on_playback_stats,
     "oww_shadow_cross": _on_oww_shadow_cross,

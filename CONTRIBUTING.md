@@ -1,5 +1,5 @@
 # Contributing
-
+ 
 Contributions are welcome, and the most useful ones are usually small. This
 page exists so you can tell, before spending an evening, whether a change is
 wanted and what shape it should take.

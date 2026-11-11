@@ -109,6 +109,35 @@ type BeamLockCallback func(lock bool)
 // ListenCallback receives listen_ack / listen_close, by type.
 type ListenCallback func(kind string, session uint32)
 
+// IntercomOffer is a controller instruction to enter a call: the session
+// id, the peer to talk to, the one-time token the callee checks a
+// dialler against, the role this end plays, and the peer's intercom
+// listener address (ip:port) so the callee can dial it on answer
+// without another round trip. The callee rings and dials on its button;
+// the caller waits to be dialled.
+type IntercomOffer struct {
+	Session   string `json:"session"`
+	PeerID    string `json:"peer_id"`
+	PeerLabel string `json:"peer_label"`
+	Token     string `json:"token"`
+	Role      string `json:"role"`
+	PeerAddr  string `json:"peer_addr"`
+}
+
+// IntercomOfferCallback receives an intercom_offer.
+type IntercomOfferCallback func(offer IntercomOffer)
+
+// IntercomEndCallback receives an intercom_end: the session to leave
+// and the controller's reason (hangup, timeout, peer gone).
+type IntercomEndCallback func(session, reason string)
+
+// IntercomSuspendCallback receives an intercom_suspend: the session to
+// pause while this end runs a nested HA turn. The call stays up; the
+// peer link stays open. IntercomResumeCallback receives an
+// intercom_resume: the turn ended and the call flows again.
+type IntercomSuspendCallback func(session string)
+type IntercomResumeCallback func(session string)
+
 // WifiChangeCallback receives a wifi_change request, with the SSID as its exact
 // bytes (see internal/wifi/ssid.go). It must return
 // quickly (the executor runs in its own goroutine) — the control
@@ -120,26 +149,30 @@ type WifiChangeCallback func(ssid []byte, psk string)
 type ControlClient struct {
 	deviceID string
 
-	ledCallback           LEDCallback
-	ledAnimCallback       LEDAnimCallback
-	micStartCallback      MicStartCallback
-	micStopCallback       MicStopCallback
-	disconnectedCallback  StateCallback
-	connectedCallback     StateCallback
-	pendingCallback       StateCallback
-	refusedCallback       StateCallback
-	configAppliedCallback ConfigAppliedCallback
-	playCueCallback       func(string)
-	sendspinTokenCallback func() map[string]any
-	volumeSetCallback     VolumeSetCallback
-	beamLockCallback      BeamLockCallback
-	speakerFlushCallback  StateCallback
-	musicFlushCallback    StateCallback
-	duckCallback          func(on bool)
-	wifiChangeCallback    WifiChangeCallback
-	wifiCommitCallback    StateCallback
-	wifiScanCallback      StateCallback
-	listenCallback        ListenCallback
+	ledCallback             LEDCallback
+	ledAnimCallback         LEDAnimCallback
+	micStartCallback        MicStartCallback
+	micStopCallback         MicStopCallback
+	disconnectedCallback    StateCallback
+	connectedCallback       StateCallback
+	pendingCallback         StateCallback
+	refusedCallback         StateCallback
+	configAppliedCallback   ConfigAppliedCallback
+	playCueCallback         func(string)
+	sendspinTokenCallback   func() map[string]any
+	volumeSetCallback       VolumeSetCallback
+	beamLockCallback        BeamLockCallback
+	speakerFlushCallback    StateCallback
+	musicFlushCallback      StateCallback
+	duckCallback            func(on bool)
+	intercomOfferCallback   IntercomOfferCallback
+	intercomEndCallback     IntercomEndCallback
+	intercomSuspendCallback IntercomSuspendCallback
+	intercomResumeCallback  IntercomResumeCallback
+	wifiChangeCallback      WifiChangeCallback
+	wifiCommitCallback      StateCallback
+	wifiScanCallback        StateCallback
+	listenCallback          ListenCallback
 
 	conn    *websocket.Conn
 	connTLS bool // conn is over wss; guarded by connMu
@@ -215,6 +248,31 @@ func (c *ControlClient) OnWifiScan(cb StateCallback)              { c.wifiScanCa
 // the stats report, which lands in support bundles. The callback returns nil
 // when the player is off.
 func (c *ControlClient) OnSendspinToken(cb func() map[string]any) { c.sendspinTokenCallback = cb }
+
+// OnIntercomOffer receives the controller's instruction to enter a call.
+// OnIntercomEnd receives its instruction to leave one.
+// OnIntercomSuspend / OnIntercomResume receive its instruction to pause
+// the call for a nested HA turn and to flow it again after.
+func (c *ControlClient) OnIntercomOffer(cb IntercomOfferCallback) { c.intercomOfferCallback = cb }
+func (c *ControlClient) OnIntercomEnd(cb IntercomEndCallback)     { c.intercomEndCallback = cb }
+func (c *ControlClient) OnIntercomSuspend(cb IntercomSuspendCallback) {
+	c.intercomSuspendCallback = cb
+}
+func (c *ControlClient) OnIntercomResume(cb IntercomResumeCallback) {
+	c.intercomResumeCallback = cb
+}
+
+// SendIntercomState reports this device's call state as it changes —
+// the ack for an offer or an end, and the source of truth the
+// controller's session tracking reads. Unknown message types are
+// ignored by older controllers.
+func (c *ControlClient) SendIntercomState(state, session, reason string) error {
+	msg := map[string]any{"type": "intercom_state", "state": state, "session": session}
+	if reason != "" {
+		msg["reason"] = reason
+	}
+	return c.writeJSON(msg)
+}
 
 // SendSendspinStatus reports the Sendspin player's state as it changes. The
 // stats tick carries it too; this is what makes the dashboard follow a
@@ -1054,6 +1112,79 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 				c.duckCallback(msg.On)
 			}
 
+		case "intercom_offer":
+			// Enter a call. The offer carries the session, the peer and
+			// the one-time token; Phase 1 has no peer link, so entering
+			// the mode is the whole of it. A malformed offer is logged
+			// and dropped — it must never wedge the device in a call.
+			var offer IntercomOffer
+			if err := json.Unmarshal(raw, &offer); err != nil {
+				log.Printf("[control] intercom_offer: bad message: %v", err)
+				break
+			}
+			if offer.Session == "" {
+				log.Printf("[control] intercom_offer: no session — ignored")
+				break
+			}
+			log.Printf("[control] intercom_offer received — session %s peer %s",
+				offer.Session, offer.PeerID)
+			if c.intercomOfferCallback != nil {
+				c.intercomOfferCallback(offer)
+			}
+
+		case "intercom_end":
+			// Leave a call, for any reason. Teardown is idempotent: a
+			// duplicated or late end is a no-op on the state machine, so
+			// the controller can fan it out to both ends without
+			// coordinating which one heard it first.
+			var msg struct {
+				Session string `json:"session"`
+				Reason  string `json:"reason"`
+			}
+			if err := json.Unmarshal(raw, &msg); err != nil {
+				log.Printf("[control] intercom_end: bad message: %v", err)
+				break
+			}
+			log.Printf("[control] intercom_end received — session %s (%s)",
+				msg.Session, msg.Reason)
+			if c.intercomEndCallback != nil {
+				c.intercomEndCallback(msg.Session, msg.Reason)
+			}
+
+		case "intercom_suspend":
+			// Pause a flowing call for a nested HA turn. The machine
+			// refuses unless the call is flowing, so a duplicate or
+			// late suspend is a no-op in server.go — the controller
+			// can send it without knowing exactly when the device
+			// heard the last one.
+			var msg struct {
+				Session string `json:"session"`
+			}
+			if err := json.Unmarshal(raw, &msg); err != nil {
+				log.Printf("[control] intercom_suspend: bad message: %v", err)
+				break
+			}
+			log.Printf("[control] intercom_suspend received — session %s",
+				msg.Session)
+			if c.intercomSuspendCallback != nil {
+				c.intercomSuspendCallback(msg.Session)
+			}
+
+		case "intercom_resume":
+			// Flow a suspended call again after the nested turn.
+			var msg struct {
+				Session string `json:"session"`
+			}
+			if err := json.Unmarshal(raw, &msg); err != nil {
+				log.Printf("[control] intercom_resume: bad message: %v", err)
+				break
+			}
+			log.Printf("[control] intercom_resume received — session %s",
+				msg.Session)
+			if c.intercomResumeCallback != nil {
+				c.intercomResumeCallback(msg.Session)
+			}
+
 		case "ping":
 			// Echo the controller's sequence id so it can pair the reply
 			// with the send it timed. RTT is measured entirely
@@ -1333,11 +1464,17 @@ func capabilities() []string {
 	// "sendspin": this firmware can be a Sendspin player (internal/sendspin),
 	// switched by sendspinEnabled. Whether it is running, and paired, is the
 	// sendspin status, for the aec_hw_ref reason.
+	//
+	// "intercom": this firmware can enter an intercom call
+	// (internal/intercom), switched by intercom_offer / intercom_end from
+	// the controller. Audio between the two devices is a later phase; the
+	// capability is the mode switch — enter the call, keep the wake-word
+	// scorer live, show the in-call ring, and leave cleanly.
 	caps := []string{"speaker", "leds", "led_anim", "buttons",
 		"oww_shadow", "oww_trigger", "button_hold", "audio_mix",
 		"aec_hw_ref", "oww_local_only", "output_chain", "wake_cue", "volume_cue", "remote_volume_arc",
 		"response_level", "wake_mic", "pairing",
-		"wake_word_off", "sendspin", "ble_connect"}
+		"wake_word_off", "sendspin", "intercom", "ble_connect"}
 	if MicUnavailable() == "" {
 		caps = append(caps, "mic")
 	}

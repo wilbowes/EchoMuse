@@ -55,18 +55,23 @@ def test_each_cause_of_an_early_end_records_its_own_outcome():
     detection signature — a barged turn followed by a turn triggered by
     barge-in — which could only ever find a PLAYBACK barge while a thinking
     barge recorded "cancelled".
+
+    A fourth cause joined in Phase 3 of intercom: the hangup phrase
+    ("end the call") spoken during a call cancels the turn so the call
+    can end, and it records "intercom_hangup" — a hangup is not a
+    button press, and the stats should be able to tell them apart.
     """
     ctrl = (CONTROLLER / "em_controller.py").read_text()
     calls = re.findall(r"cancel_voice_turn\(([^)]*)\)", ctrl, re.S)
     # Two barge paths since private listening (docs/listening.md): the stream
     # path's _barge_watcher and _private_barge. Both must say "barged".
-    assert len(calls) == 4, f"expected 4 call sites, got {len(calls)}"
+    assert len(calls) == 5, f"expected 5 call sites, got {len(calls)}"
 
     reasons = sorted(
         re.search(r'reason="(\w+)"', c).group(1)
         for c in calls if re.search(r'reason="(\w+)"', c)
     )
-    assert reasons == ["barged", "barged", "cancelled", "muted"], (
+    assert reasons == ["barged", "barged", "cancelled", "intercom_hangup", "muted"], (
         f"each cancel path must name its own cause; got {reasons}"
     )
 
