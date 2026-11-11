@@ -110,15 +110,18 @@ type BeamLockCallback func(lock bool)
 type ListenCallback func(kind string, session uint32)
 
 // IntercomOffer is a controller instruction to enter a call: the session
-// id, the peer to talk to, and the one-time token the callee checks a
-// dialler against (Phase 2). Phase 1 carries the token without acting
-// on it — no peer link exists yet, so the offer is the mode switch
-// itself: enter the call, show it, stay there until intercom_end.
+// id, the peer to talk to, the one-time token the callee checks a
+// dialler against, the role this end plays, and the peer's intercom
+// listener address (ip:port) so the callee can dial it on answer
+// without another round trip. The callee rings and dials on its button;
+// the caller waits to be dialled.
 type IntercomOffer struct {
 	Session   string `json:"session"`
 	PeerID    string `json:"peer_id"`
 	PeerLabel string `json:"peer_label"`
 	Token     string `json:"token"`
+	Role      string `json:"role"`
+	PeerAddr  string `json:"peer_addr"`
 }
 
 // IntercomOfferCallback receives an intercom_offer.

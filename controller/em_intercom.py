@@ -29,6 +29,12 @@ import em_state
 
 log = logging.getLogger("echomuse.intercom")
 
+# The device intercom listener port (device/internal/intercom, DefaultPort).
+# Sendspin holds 8928; the intercom takes the next port up. The device
+# opens its firewall rule for this port only while a call is being
+# attempted or is live.
+INTERCOM_PORT = 8929
+
 
 # A session is active from the moment the controller offers it to both
 # devices until it is ended, for any reason. There is no separate
@@ -152,10 +158,11 @@ async def start_intercom(caller_id: str, callee_id: str) -> IntercomSession:
     """Start a call between two devices.
 
     Both must be connected, intercom-capable, not muted, not in a voice
-    turn and not already in a call. The offer goes to both devices: in
-    Phase 1 the offer IS the call — there is no peer link yet, so
-    entering the mode is the whole of it. The token travels with the
-    offer for the Phase 2 dialler to present.
+    turn and not already in a call. The offer goes to both devices with
+    the role each plays and the other's intercom listener address: the
+    callee rings and dials the caller on its button, the caller waits
+    to be dialled. The token travels with the offer for the dialler to
+    present.
 
     Raises IntercomError for anything that cannot start.
     """
@@ -183,12 +190,14 @@ async def start_intercom(caller_id: str, callee_id: str) -> IntercomSession:
         await caller.send_control({
             "type": "intercom_offer", "session": session.session_id,
             "peer_id": callee_id, "peer_label": callee_label,
-            "token": session.token,
+            "token": session.token, "role": "caller",
+            "peer_addr": f"{callee.ip}:{INTERCOM_PORT}",
         })
         await callee.send_control({
             "type": "intercom_offer", "session": session.session_id,
             "peer_id": caller_id, "peer_label": caller_label,
-            "token": session.token,
+            "token": session.token, "role": "callee",
+            "peer_addr": f"{caller.ip}:{INTERCOM_PORT}",
         })
     except Exception:
         await end_intercom(session.session_id, "offer_failed")

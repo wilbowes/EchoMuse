@@ -5,18 +5,40 @@ import (
 	"testing"
 )
 
-func TestOfferFromIdleEntersCall(t *testing.T) {
+func TestOfferCalleeRings(t *testing.T) {
 	m := NewMachine()
-	sess := Session{ID: "s1", PeerID: "kitchen", PeerLabel: "Kitchen", Token: "tok"}
+	sess := Session{ID: "s1", PeerID: "kitchen", PeerLabel: "Kitchen", Token: "tok", Role: RoleCallee}
 	if err := m.Offer(sess); err != nil {
 		t.Fatalf("Offer: %v", err)
 	}
-	if got := m.State(); got != StateInCall {
-		t.Fatalf("state = %q, want in_call", got)
+	if got := m.State(); got != StateRinging {
+		t.Fatalf("state = %q, want ringing", got)
 	}
 	cur, ok := m.Current()
 	if !ok || cur != sess {
 		t.Fatalf("Current = %+v, %v; want %+v, true", cur, ok, sess)
+	}
+}
+
+func TestOfferCallerCalls(t *testing.T) {
+	m := NewMachine()
+	if err := m.Offer(Session{ID: "s1", Role: RoleCaller}); err != nil {
+		t.Fatalf("Offer: %v", err)
+	}
+	if got := m.State(); got != StateCalling {
+		t.Fatalf("state = %q, want calling", got)
+	}
+}
+
+func TestOfferNoRoleRings(t *testing.T) {
+	// An offer with no role is a callee: the safe default is to ring
+	// and wait for a human, never to assume this end placed the call.
+	m := NewMachine()
+	if err := m.Offer(Session{ID: "s1"}); err != nil {
+		t.Fatalf("Offer: %v", err)
+	}
+	if got := m.State(); got != StateRinging {
+		t.Fatalf("state = %q, want ringing", got)
 	}
 }
 
@@ -30,8 +52,8 @@ func TestOfferSameSessionIsIdempotent(t *testing.T) {
 	if err := m.Offer(Session{ID: "s1", PeerID: "kitchen", Token: "tok2"}); err != nil {
 		t.Fatalf("re-Offer same session: %v", err)
 	}
-	if got := m.State(); got != StateInCall {
-		t.Fatalf("state = %q, want in_call", got)
+	if got := m.State(); got != StateRinging {
+		t.Fatalf("state = %q, want ringing", got)
 	}
 }
 
@@ -42,6 +64,32 @@ func TestOfferDifferentSessionWhileInCall(t *testing.T) {
 	}
 	if err := m.Offer(Session{ID: "s2"}); !errors.Is(err, ErrNotIdle) {
 		t.Fatalf("Offer second session: err = %v, want ErrNotIdle", err)
+	}
+}
+
+func TestConnectFromRingingAndCalling(t *testing.T) {
+	for _, role := range []string{RoleCallee, RoleCaller} {
+		m := NewMachine()
+		if err := m.Offer(Session{ID: "s1", Role: role}); err != nil {
+			t.Fatalf("Offer %s: %v", role, err)
+		}
+		if err := m.Connect(); err != nil {
+			t.Fatalf("Connect %s: %v", role, err)
+		}
+		if got := m.State(); got != StateInCall {
+			t.Fatalf("state = %q, want in_call", got)
+		}
+		// Connecting an already-flowing call is a no-op.
+		if err := m.Connect(); err != nil {
+			t.Fatalf("second Connect %s: %v", role, err)
+		}
+	}
+}
+
+func TestConnectWhenIdleIsNoSession(t *testing.T) {
+	m := NewMachine()
+	if err := m.Connect(); !errors.Is(err, ErrNoSession) {
+		t.Fatalf("Connect when idle: err = %v, want ErrNoSession", err)
 	}
 }
 
@@ -76,6 +124,21 @@ func TestEndWhenIdleIsNoop(t *testing.T) {
 	}
 }
 
+func TestEndFromRingingAndCalling(t *testing.T) {
+	for _, role := range []string{RoleCallee, RoleCaller} {
+		m := NewMachine()
+		if err := m.Offer(Session{ID: "s1", Role: role}); err != nil {
+			t.Fatalf("Offer %s: %v", role, err)
+		}
+		if _, err := m.End(); err != nil {
+			t.Fatalf("End %s: %v", role, err)
+		}
+		if got := m.State(); got != StateIdle {
+			t.Fatalf("state = %q, want idle", got)
+		}
+	}
+}
+
 func TestSuspendResumeRoundTrip(t *testing.T) {
 	m := NewMachine()
 	if err := m.Suspend(); !errors.Is(err, ErrNoSession) {
@@ -83,6 +146,13 @@ func TestSuspendResumeRoundTrip(t *testing.T) {
 	}
 	if err := m.Offer(Session{ID: "s1"}); err != nil {
 		t.Fatalf("Offer: %v", err)
+	}
+	// A ringing call cannot suspend: there is no audio flowing yet.
+	if err := m.Suspend(); !errors.Is(err, ErrNotInCall) {
+		t.Fatalf("Suspend while ringing: err = %v, want ErrNotInCall", err)
+	}
+	if err := m.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
 	}
 	if err := m.Suspend(); err != nil {
 		t.Fatalf("Suspend: %v", err)
