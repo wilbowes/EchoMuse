@@ -369,7 +369,7 @@ async def _post_device_emos_migrate(request: web.Request) -> web.Response:
     # Positively FireOS: unknown is not FireOS (em_platform).
     if getattr(live, "base_os", None) != "fireos":
         return em_http.error("not_fireos", "This Echo is not running FireOS", 409)
-    if em_state.boards.get(device_id) != "biscuit":
+    if em_state.boards.get(device_id) not in em_emos_ota.MIGRATE_BOARDS:
         return em_http.error(
             "not_supported",
             "Only an Echo Dot 2nd gen can be migrated over the network", 409)

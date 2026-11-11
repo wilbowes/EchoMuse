@@ -91,6 +91,24 @@ def test_the_fireos_image_is_kept_only_once_verified(tmp_path, monkeypatch):
     assert ota.escrow_path("../x") is None
 
 
+def test_the_dashboard_view_knows_the_image_and_the_board(tmp_path, monkeypatch):
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "echomuse.db"))
+    monkeypatch.setattr(ota, "_escrowed", None)
+    monkeypatch.setattr(ota.em_state, "boards",
+                        {"G090TESTDOT2000A": "biscuit", "G000TESTRADAR00B": "radar"})
+    assert ota.migrate_view("G090TESTDOT2000A") == {"image": False, "why": None}
+    # The button is off on a board the route refuses, with the reason.
+    assert "Echo Dot 2" in ota.migrate_view("G000TESTRADAR00B")["why"]
+    assert ota.migrate_view("unknown")["why"]
+    # A kept image shows from the moment it is written, with no new listing.
+    data = b"FIREOS" * 100
+    assert ota.write_escrow("G090TESTDOT2000A", data, hashlib.md5(data).hexdigest()) == ""
+    assert ota.migrate_view("G090TESTDOT2000A")["image"] is True
+    # And a fresh start finds it on disk.
+    monkeypatch.setattr(ota, "_escrowed", None)
+    assert ota.has_escrow("G090TESTDOT2000A")
+
+
 # ── The routes ───────────────────────────────────────────────────────────────
 
 @pytest.fixture

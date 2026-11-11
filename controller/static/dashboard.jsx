@@ -2714,25 +2714,28 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 );
               })()}
 
-              {/* Migration from FireOS 5 to emOS. Where the emOS panel would
-                  be, on an Echo that has said it runs FireOS; the controller
-                  refuses anything but a Dot 2 on amonet 1, with the reason. */}
-              {device.baseOs === 'fireos' && (() => {
+              {/* Migration from FireOS 5 to emOS, on an Echo that has said it
+                  runs FireOS. The kept FireOS image stays downloadable after,
+                  whatever the Echo now reports (or while it is offline). */}
+              {(device.baseOs === 'fireos' || device.migrate?.image) && (() => {
                 const busy = emosBusy || device.emos_update_in_progress || device.emos_update_queued;
+                const why = device.migrate?.why;
                 return (
-                <Panel label="emOS">
+                <Panel label={device.baseOs === 'fireos' ? 'emOS' : 'FireOS'}>
+                  {device.baseOs === 'fireos' && (
                   <div style={{ display:'flex', alignItems:'center', gap:'var(--space-5)', flexWrap:'wrap' }}>
-                    <Pill accent={device.connected && !busy && !pushing && isAdmin}
-                          disabled={!device.connected || busy || pushing || !isAdmin}
+                    <Pill accent={device.connected && !busy && !pushing && isAdmin && !why}
+                          disabled={!device.connected || busy || pushing || !isAdmin || !!why}
                           onClick={doEmosMigrate}>
                       {busy ? 'Migrating…' : `Migrate to emOS${device.emosLatest ? ' ' + _emosLabel(device.emosLatest) : ''}`}
                     </Pill>
                     <span style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-xs)', color:'var(--muted)', lineHeight:1.5, flex:'1 1 220px', minWidth:0 }}>
-                      Replaces FireOS over the network. Puts FireOS back by itself if emOS fails.
+                      {why || 'Replaces FireOS over the network. Puts FireOS back by itself if emOS fails.'}
                     </span>
                   </div>
-                  {device.fireosImage && (
-                    <div style={{ display:'flex', gap:'var(--space-5)', alignItems:'center', flexWrap:'wrap', marginTop:'var(--space-7)', borderTop:'1px solid var(--hairline)', paddingTop:'var(--space-5)' }}>
+                  )}
+                  {device.migrate?.image && (
+                    <div style={{ display:'flex', gap:'var(--space-5)', alignItems:'center', flexWrap:'wrap', ...(device.baseOs === 'fireos' ? { marginTop:'var(--space-7)', borderTop:'1px solid var(--hairline)', paddingTop:'var(--space-5)' } : {}) }}>
                       <Pill small disabled={!isAdmin} onClick={downloadFireosImage}>FireOS image</Pill>
                       <span style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-xs)', color:'var(--muted)' }}>
                         This Echo's own boot image, to restore with TWRP.

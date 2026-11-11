@@ -246,7 +246,6 @@ def preflight_cmd() -> str:
     """
     hdr = "busybox dd if={} bs={} count={} 2>/dev/null | busybox base64"
     return (
-        "busybox mkdir -p /data/emos; "
         "echo \"REL:$(getprop ro.build.version.release)\"; "
         "echo \"SLOT:$(getprop ro.boot.slot_suffix)\"; "
         "echo BANNER_BEGIN; cat /proc/version; echo BANNER_END; "
@@ -258,9 +257,6 @@ def preflight_cmd() -> str:
         f"echo \"SECTORS:$(cat /sys/class/block/mmcblk0p10/size 2>/dev/null)\"; "
         f"echo \"MD5TOOL:$(echo x | busybox md5sum 2>/dev/null)\"; "
         f"echo \"B64TOOL:$(echo x | busybox base64 2>/dev/null)\"; "
-        f"busybox dd if=/dev/zero of={up.NEW_IMG}.probe bs={up.BLOCK} count=1 "
-        f"conv=notrunc,fsync 2>/dev/null && echo DDTOOL:ok; "
-        f"rm -f {up.NEW_IMG}.probe; "
         f"echo \"FREE $(busybox df -m /data 2>/dev/null | busybox tail -1)\"; "
         f"[ -e {EMOS_CONF} ] && echo EMOSCONF:present; "
         "echo CONF_BEGIN; while IFS= read -r l; do case \"$l\" in "
@@ -291,7 +287,6 @@ def parse_preflight(out: str) -> dict:
         "partition_bytes": int(sectors) * 512 if sectors.isdigit() else 0,
         "md5_ok": up._MD5_PROBE in up._line(out, "MD5TOOL:"),
         "b64_ok": up._line(out, "B64TOOL:") == "eAo=",
-        "dd_ok": up._line(out, "DDTOOL:") == "ok",
         "free_line": up._line(out, "FREE "),
         "emos_conf": up._line(out, "EMOSCONF:") == "present",
         "conf": b(out, "CONF_BEGIN", "CONF_END"),
@@ -324,9 +319,6 @@ def preflight_problems(pre: dict) -> list:
     if not pre["md5_ok"]:
         problems.append("busybox md5sum does not run, so nothing sent could "
                         "be verified")
-    if not pre["dd_ok"]:
-        problems.append("busybox dd cannot write the way the migration needs "
-                        "(conv=notrunc,fsync)")
     if not pre["b64_ok"]:
         problems.append("busybox base64 does not run, so the boot image "
                         "cannot be read")
@@ -402,6 +394,29 @@ def migrated_problems(reference: bytes, image: bytes, version: str,
     return problems
 
 
+# The pre-flight only reads. This is its one write, run once every check
+# has passed: /data/emos, and a probe that busybox dd can write the way
+# write_cmd does. A failed probe removes the directory it made, if empty.
+PROBE_CMD = (
+    f"busybox mkdir -p /data/emos && busybox dd if=/dev/zero "
+    f"of={up.NEW_IMG}.probe bs={up.BLOCK} count=1 conv=notrunc,fsync "
+    f"2>/dev/null && echo DDTOOL:ok; rm -f {up.NEW_IMG}.probe; "
+    f"[ -e {up.NEW_IMG}.probe ] || echo PROBE:clean; echo {up.OK}")
+PROBE_UNDO_CMD = f"rmdir /data/emos 2>/dev/null; echo {up.OK}"
+
+# Undoes PREPARE_CMD's one change to keep (a renamed wpa.conf) and drops the
+# known-good copy, for a refusal after PREPARE and before the write.
+UNDO_CMD = (
+    f"[ -e {EMOS_CONF}.pre-migration ] && [ ! -e {EMOS_CONF} ] && "
+    f"mv {EMOS_CONF}.pre-migration {EMOS_CONF}; "
+    f"rm -f {up.GOOD_IMG} {up.NEW_IMG} {up.NEW_IMG}.part "
+    f"{up.TRIAL_MARK} {up.TRIAL_MARK}.tmp; sync; echo {up.OK}")
+
+# What a refusal after PREPARE says instead of up.UNCHANGED: FireOS and its
+# boot partition are as they were; /data/emos is not.
+AFTER_PREP = (" — FireOS and its boot partition are unchanged; an earlier "
+              "emOS's boot records on /data were cleared")
+
 # Clears what an earlier emOS life left on /data. `boot.state` first: init
 # counts from it, and a 3 there would restore the known-good on the first
 # boot. A wpa.conf is renamed rather than deleted: it is somebody's network.
@@ -412,9 +427,10 @@ PREPARE_CMD = (
     f"sync; [ -e {up.BOOT_STATE} ] || [ -e {EMOS_CONF} ] || echo PREP:ok; "
     f"echo {up.OK}")
 
-# Android's own restart: init stops services and syncs. FireOS's shell dies
-# with the server, so OK is echoed first.
-REBOOT_CMD = f"sync; echo {up.OK}; setprop sys.powerctl reboot"
+# Android's own restart: init stops services and syncs. The property is
+# set BEFORE OK, as em_emos_update's REBOOT_CMD does: the shell is closed as
+# soon as OK arrives, and closing it first could kill the setprop.
+REBOOT_CMD = f"sync; setprop sys.powerctl reboot; echo {up.OK}"
 
 
 async def run_migration(io) -> str:
@@ -431,6 +447,10 @@ async def run_migration(io) -> str:
     why = up.space_problem(pre["free_line"], length)
     if why:
         raise up.Refused(why + U)
+    if "DDTOOL:ok" not in await io.sh(PROBE_CMD, 30.0):
+        await io.sh(PROBE_UNDO_CMD, 20.0)
+        raise up.Refused("busybox dd cannot write the way the migration needs "
+                         "(conv=notrunc,fsync)" + U)
 
     # 2. Read the FireOS image and prove it is the one running.
     await io.step("Reading the FireOS boot image")
@@ -447,56 +467,64 @@ async def run_migration(io) -> str:
     why = await io.escrow(reference, ref_md5)
     if why:
         raise up.Refused(f"could not keep a copy of the FireOS image: {why}" + U)
-    out = await io.sh(PREPARE_CMD, 30.0)
-    if "PREP:ok" not in out:
-        raise up.Refused("could not clear what an earlier emOS left on /data"
-                         + U)
-    out = await io.sh(up.refresh_good_cmd(length), 120.0)
-    if up.md5_after(out, "DEVMD5:") != ref_md5:
-        raise up.Refused("the boot partition changed while it was being read"
-                         + U)
-    if up.md5_after(out, "GOODMD5:") != ref_md5:
-        raise up.Refused("could not save a verified copy of the FireOS image "
-                         "to roll back to" + U)
-
-    # 4. Build.
-    init_bin, sbin, version = await io.payload(build.ARCH_ARM64)
-    if not up._VERSION_SAFE.fullmatch(version or ""):
-        raise up.Refused(f"{version!r} is not a usable version string" + U)
-    if not up.init_supports_trial(init_bin):
-        raise up.Refused(f"emOS {version}'s init cannot roll a failed boot "
-                         f"back by itself, so it is not installed over the "
-                         f"network" + U)
-    await io.step(f"Building emOS {version} for this Echo's kernel")
+    A = AFTER_PREP
     try:
-        info = await io.offload(build.build_emos_image, reference, init_bin,
-                                version, "", sbin, None,
-                                getattr(io, "board", None))
-    except build.BuildError as e:
-        raise up.Refused(f"{e}" + U)
-    image = info["image"]
-    problems = await io.offload(migrated_problems, reference, image, version,
-                                pre["partition_bytes"])
-    if problems:
-        raise up.Refused("; ".join(problems) + U)
-    new_id = up.stored_id(image)
-    new_build = up.ramdisk_os_release(image).get("BUILD_ID", "")
+        out = await io.sh(PREPARE_CMD, 30.0)
+        if "PREP:ok" not in out:
+            raise up.Refused("could not clear what an earlier emOS left on /data"
+                             + A)
+        out = await io.sh(up.refresh_good_cmd(length), 120.0)
+        if up.md5_after(out, "DEVMD5:") != ref_md5:
+            raise up.Refused("the boot partition changed while it was being read"
+                             + A)
+        if up.md5_after(out, "GOODMD5:") != ref_md5:
+            raise up.Refused("could not save a verified copy of the FireOS image "
+                             "to roll back to" + A)
 
-    # 5. Push, mark, write: em_emos_update's, unchanged.
-    await io.step(f"Sending the image ({len(image):,} bytes)")
-    why = await io.send(image, up.NEW_IMG)
-    if why:
-        await io.sh(up.CLEANUP_CMD, 20.0)
-        raise up.Refused(f"sending the image failed: {why}" + U)
-    if io.relink() != "same":
-        await io.sh(up.CLEANUP_CMD, 20.0)
-        raise up.Refused("the Echo reconnected during the transfer" + U
-                         + "; try again")
-    out = await io.sh(up.mark_cmd(new_id, new_build, version), 30.0)
-    if up.OK not in out or up.parse_mark(
-            up._between(out, "MARK_BEGIN", "MARK_END")).get("id") != new_id:
-        await io.sh(up.CONFIRM_CMD, 20.0)
-        raise up.Refused("could not write the trial mark" + U)
+        # 4. Build.
+        init_bin, sbin, version = await io.payload(build.ARCH_ARM64)
+        if not up._VERSION_SAFE.fullmatch(version or ""):
+            raise up.Refused(f"{version!r} is not a usable version string" + A)
+        if not up.init_supports_trial(init_bin):
+            raise up.Refused(f"emOS {version}'s init cannot roll a failed boot "
+                             f"back by itself, so it is not installed over the "
+                             f"network" + A)
+        await io.step(f"Building emOS {version} for this Echo's kernel")
+        try:
+            info = await io.offload(build.build_emos_image, reference, init_bin,
+                                    version, "", sbin, None,
+                                    getattr(io, "board", None))
+        except build.BuildError as e:
+            raise up.Refused(f"{e}" + A)
+        image = info["image"]
+        problems = await io.offload(migrated_problems, reference, image, version,
+                                    pre["partition_bytes"])
+        if problems:
+            raise up.Refused("; ".join(problems) + A)
+        new_id = up.stored_id(image)
+        new_build = up.ramdisk_os_release(image).get("BUILD_ID", "")
+
+        # 5. Push, mark, write: em_emos_update's, unchanged.
+        await io.step(f"Sending the image ({len(image):,} bytes)")
+        why = await io.send(image, up.NEW_IMG)
+        if why:
+            await io.sh(up.CLEANUP_CMD, 20.0)
+            raise up.Refused(f"sending the image failed: {why}" + A)
+        if io.relink() != "same":
+            await io.sh(up.CLEANUP_CMD, 20.0)
+            raise up.Refused("the Echo reconnected during the transfer" + A
+                             + "; try again")
+        out = await io.sh(up.mark_cmd(new_id, new_build, version,
+                                      printf="busybox printf"), 30.0)
+        if up.OK not in out or up.parse_mark(
+                up._between(out, "MARK_BEGIN", "MARK_END")).get("id") != new_id:
+            await io.sh(up.CONFIRM_CMD, 20.0)
+            raise up.Refused("could not write the trial mark" + A)
+    except up.Refused:
+        # Nothing has touched the boot partition yet: put back what PREPARE
+        # moved, and leave no image or mark that init or settle could act on.
+        await io.sh(UNDO_CMD, 30.0)
+        raise
 
     await io.step("Writing the boot partition — do not unplug the Echo")
     verdict = up.write_verdict(
@@ -507,6 +535,10 @@ async def run_migration(io) -> str:
         if up.md5_after(out, "DEVMD5:") == info["md5"]:
             verdict = "ok"
     if verdict != "ok":
+        # The mark goes first: if the write-back fails too, a mark naming
+        # an image that never verified would have settle_fireos report emOS
+        # as written and waiting for a restart.
+        await io.sh(up.CONFIRM_CMD, 20.0)
         await up._restore(io, length, ref_md5)
 
     # 6. Restart into emOS and watch.

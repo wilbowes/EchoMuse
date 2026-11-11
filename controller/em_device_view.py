@@ -312,7 +312,7 @@ def merge_device(row, boot: dict | None = None) -> dict:
         "emos_update_queued":      device_id in em_emos_ota.queued,
         "emos_update_stage":       em_emos_ota.stage.get(device_id),
         "emos_update_error":       em_emos_ota.errors.get(device_id),
-        "fireosImage":      em_emos_ota.escrow_path(device_id) is not None,  # migration's way back
+        "migrate":          em_emos_ota.migrate_view(device_id),  # FireOS 5 -> emOS
         "update_in_progress": device_id in em_ota.in_progress,
         # Waiting on the global OTA lock — started, but nothing has been sent
         # to this device yet. Distinct from update_in_progress so the panel

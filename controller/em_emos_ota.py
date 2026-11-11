@@ -83,6 +83,33 @@ def escrow_path(device_id: str) -> Path | None:
     return p if p.is_file() else None
 
 
+# Ids with a kept image, read off the directory once and kept current by
+# write_escrow, so the device list (polled every 3 s) costs no filesystem
+# calls. None until first asked.
+_escrowed: set | None = None
+
+
+def has_escrow(device_id: str) -> bool:
+    global _escrowed
+    if _escrowed is None:
+        try:
+            _escrowed = {p.stem for p in escrow_dir().glob("*.img")}
+        except OSError:
+            return False
+    return device_id in _escrowed
+
+
+MIGRATE_BOARDS = {"biscuit"}
+
+
+def migrate_view(device_id: str) -> dict:
+    """The dashboard's migration facts: a kept image to download, and why
+    the button is off on this board (None when it is not)."""
+    ok = em_state.boards.get(device_id) in MIGRATE_BOARDS
+    return {"image": has_escrow(device_id),
+            "why": None if ok else "Only an Echo Dot 2 can be migrated"}
+
+
 def write_escrow(device_id: str, data: bytes, md5: str) -> str:
     """Keep `data` as this Echo's FireOS image. "" once it reads back with
     `md5`, else why. Written beside and renamed, so a failed write never
@@ -102,6 +129,8 @@ def write_escrow(device_id: str, data: bytes, md5: str) -> str:
             return "the copy did not read back intact"
         (d / f"{device_id}.img.md5").write_text(md5 + "\n")
         part.replace(d / f"{device_id}.img")
+        if _escrowed is not None:
+            _escrowed.add(device_id)
     except OSError as e:
         return f"{e.strerror or e}"
     return ""

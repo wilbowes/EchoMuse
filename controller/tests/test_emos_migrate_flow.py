@@ -382,7 +382,6 @@ def _good_pre(tmp_path):
 @pytest.mark.parametrize("change,why", [
     ({"banner": ""}, "version could not be read"),
     ({"md5_ok": False}, "md5sum does not run"),
-    ({"dd_ok": False}, "busybox dd cannot write"),
     ({"b64_ok": False}, "base64 does not run"),
     ({"header": b""}, "could not be read as a boot image"),
     ({"partition_bytes": 0}, "size could not be read"),
@@ -557,3 +556,67 @@ def test_back_on_some_other_emos_is_reported(tmp_path, monkeypatch):
         return orig()
     dev.reboot = reboot
     assert "not the image written" in refused(IO(dev))
+
+
+# ── 2026-11-11 review: what a refusal leaves, and the commands FireOS runs ──
+
+def test_a_refusal_after_prepare_puts_back_what_it_moved(tmp_path):
+    """The send fails after PREPARE and refresh_good ran: the old wpa.conf
+    comes back, no image, copy or mark is left, and the message does not
+    claim nothing changed."""
+    dev = FireOS(tmp_path)
+    old_conf = dev.root / "data/emos/wpa.conf"
+    old_conf.write_text('network={\n\tssid="Old"\n}\n')
+    io = IO(dev)
+    io.send_fails = "link dropped"
+    msg = refused(io)
+    assert "sending the image failed" in msg
+    assert "boot partition are unchanged" in msg and "nothing was changed" not in msg
+    assert old_conf.read_text().startswith("network=")
+    assert not (dev.root / "data/emos/wpa.conf.pre-migration").exists()
+    for f in ("boot-good.img", "boot-new.img", "update.pending"):
+        assert not (dev.root / "data/emos" / f).exists(), f
+    assert dev.on_fireos() and not (dev.root / "reboot").exists()
+
+
+def test_a_failed_write_probe_refuses_and_tidies(tmp_path):
+    dev = FireOS(tmp_path)
+    io = IO(dev)
+    io.fail = "conv=notrunc,fsync 2>/dev/null && echo DDTOOL"
+    msg = refused(io)
+    assert "busybox dd cannot write" in msg and "nothing was changed" in msg
+    assert not io.escrowed
+
+
+def test_the_preflight_writes_nothing(tmp_path):
+    dev = FireOS(tmp_path)
+    cmd = mg.preflight_cmd()
+    assert "mkdir" not in cmd and "of=" not in cmd and "dd if=/dev/zero" not in cmd
+
+
+def test_the_mark_is_gone_before_a_write_back_that_fails(tmp_path):
+    """Write and write-back both fail: no mark may name the unverified image,
+    or settle_fireos would report emOS as waiting for a restart."""
+    dev = FireOS(tmp_path)
+    dev.corrupt_writes = 99
+    msg = refused(IO(dev))
+    assert "DO NOT RESTART" in msg
+    assert not dev.mark.exists()
+
+
+def test_fireos_commands_name_busybox_for_what_fireos_5_lacks():
+    """FireOS 5's shell has no printf, sed, head, grep or which on its path
+    (docs/history/controller.md, 2026-11-10)."""
+    import re
+    cmds = [mg.preflight_cmd(), mg.PROBE_CMD, mg.PREPARE_CMD, mg.UNDO_CMD,
+            mg.settle_cmd(), up.mark_cmd("a" * 40, "b", "v", printf="busybox printf")]
+    for c in cmds:
+        for tool in ("printf", "sed", "head", "grep", "which", "md5sum",
+                     "base64", "dd", "tail"):
+            for m in re.finditer(rf"(?<![\w-]){tool}\b", c):
+                assert c[:m.start()].endswith("busybox "), (tool, c[max(0, m.start() - 40):m.end()])
+
+
+def test_the_restart_is_asked_before_ok():
+    """The shell is closed when OK arrives; setprop must already have run."""
+    assert mg.REBOOT_CMD.index("setprop") < mg.REBOOT_CMD.index(up.OK)
