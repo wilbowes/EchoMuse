@@ -231,6 +231,27 @@ jobs:
           file emos/build/bb/busybox | grep -q "statically linked" || {
             echo "::error::busybox is not statically linked"; exit 1; }
 
+      # tinysshd, the SSH server init runs when the owner turns SSH on for an
+      # Echo. Same container and reasons as busybox; public domain, so there is
+      # no source obligation. The script refuses a dynamic or non-ARM binary
+      # and proves the makekey dispatch under qemu.
+      - name: Build tinysshd (armv7, static)
+        run: |
+          mkdir -p emos/build/ts
+          docker run --rm --platform linux/arm/v7 \
+            -v "${{ github.workspace }}/emos":/emos \
+            -v "${{ github.workspace }}/emos/build/ts":/out -w /tmp \
+            alpine@${{ env.ALPINE_ARMV7_DIGEST }} \
+            sh /emos/tools/build-tinyssh.sh /out
+
+      - name: Verify tinysshd is static 32-bit ARM
+        run: |
+          file emos/build/ts/tinysshd
+          file emos/build/ts/tinysshd | grep -q "32-bit LSB executable, ARM" || {
+            echo "::error::tinysshd is not a 32-bit ARM executable"; exit 1; }
+          file emos/build/ts/tinysshd | grep -q "statically linked" || {
+            echo "::error::tinysshd is not statically linked"; exit 1; }
+
       - name: Verify the GPL-2.0 obligation is actually satisfiable
         # This is a RELEASE gate, not a build detail. If the binary ships and
         # the source does not, we have distributed GPL-2.0 object code with no
@@ -273,7 +294,8 @@ jobs:
             emos/build/emos-payload.zip \
             emos/build/init emos/build/init32 \
             emos/build/wpa/wpa_supplicant emos/build/wpa/wpa_cli \
-            emos/build/wpa/em-wifi emos/build/bb/busybox
+            emos/build/wpa/em-wifi emos/build/bb/busybox \
+            emos/build/ts/tinysshd
 
       # The off-target checks, against the exact source being published. All
       # of them: each drives a parser or an invariant whose failure is
@@ -298,6 +320,8 @@ jobs:
           /tmp/dnscheck
           cc -O2 -o /tmp/devcheck emos/init/devcheck.c
           /tmp/devcheck
+          cc -O2 -o /tmp/sshcheck emos/init/sshcheck.c
+          /tmp/sshcheck
           sh emos/device/em-wifi-check.sh
 
       # Same rule as the firmware release: the notes come from the ANNOTATED

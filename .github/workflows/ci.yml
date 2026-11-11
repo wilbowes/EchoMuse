@@ -811,6 +811,14 @@ jobs:
         run: |
           cc -O2 -o /tmp/trialcheck emos/init/trialcheck.c
           /tmp/trialcheck
+      # SSH is init's own service, independent of EchoMuse. Listening with no
+      # key, copying anything but whole ssh-ed25519 lines, or turning it off
+      # and leaving port 22 open or a session running are all silent on the
+      # device. Runs ssh_main for real against a stub tinysshd.
+      - name: SSH listens only while the owner wants it, and closes whole
+        run: |
+          cc -O2 -o /tmp/sshcheck emos/init/sshcheck.c
+          /tmp/sshcheck
       # em-wifi decides from wpa_supplicant's scan flags which networks it
       # offers. Tested SAE before PSK, it refused every WPA2/WPA3 transition-
       # mode network as WPA3 -- the default on current routers -- and sent

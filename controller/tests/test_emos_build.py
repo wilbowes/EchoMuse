@@ -875,6 +875,14 @@ def test_em_wifi_rides_in_both_architectures():
         "a name that is not in the payload allowlist can never be in a bundle"
     )
 
+    # tinysshd rides in both images when present and is never required: in
+    # SBIN_ASSETS it would strand every emOS release cut before it.
+    m = re.search(r"^SBIN_OPTIONAL = \(([^)]*)\)", api, re.M)
+    assert m, "em_emos_ota no longer declares SBIN_OPTIONAL"
+    optional = set(re.findall(r'"([^"]+)"', m.group(1)))
+    assert "tinysshd" in optional
+    assert not optional & every, "an optional binary must not be required"
+
 
 def test_em_wifi_resolves_its_tools_the_way_init_does():
     """

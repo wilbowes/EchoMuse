@@ -317,6 +317,21 @@ def test_the_wifi_tools_follow_the_userspace_not_the_kernel(arch, board, tools):
     assert "em-wifi" in sbin
 
 
+@pytest.mark.parametrize("arch,board", [
+    ("arm", None), ("arm64", "donut"), ("arm64", "biscuit"), ("arm64", None),
+])
+def test_tinysshd_rides_in_every_image_when_the_release_has_it(arch, board):
+    import em_emos_ota as ota
+    files = {"init": new_init("arm64"), "init32": new_init("arm"),
+             **{n: n.encode() for n in ota.SBIN_ASSETS}}
+    _, sbin, _, err = ota.select_payload(dict(files, tinysshd=b"ts"), arch,
+                                         "emos-v0.12", board)
+    assert err is None and sbin.get("tinysshd") == b"ts"
+    # A release cut before it still builds, without it.
+    _, sbin, _, err = ota.select_payload(files, arch, "emos-v0.11", board)
+    assert err is None and "tinysshd" not in sbin
+
+
 def test_a_donut_payload_without_wifi_tools_is_refused():
     import em_emos_ota as ota
     _, _, _, err = ota.select_payload({"init": new_init("arm64")}, "arm64",
