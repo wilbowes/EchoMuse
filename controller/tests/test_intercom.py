@@ -1,5 +1,5 @@
 """
-Intercom sessions and the controller's switchboard (Phase 1).
+Intercom sessions and the controller's switchboard (Phases 1–2).
 
 The registry rules are tested against the pure module; the controller
 wiring is tested against em_controller with fake devices, the way
@@ -154,7 +154,8 @@ def test_start_offers_both_devices_and_end_fans_out(_two_devices, _no_events):
     async def go():
         session = await em_intercom.start_intercom("kitchen", "bedroom")
         assert session.state == em_intercom.STATE_ACTIVE
-        for device, peer in ((a, "bedroom"), (b, "kitchen")):
+        for device, peer, role in ((a, "bedroom", "caller"),
+                                   (b, "kitchen", "callee")):
             device.send_control.assert_called_once()
             offer = device.send_control.call_args.args[0]
             assert offer["type"] == "intercom_offer"
@@ -162,6 +163,8 @@ def test_start_offers_both_devices_and_end_fans_out(_two_devices, _no_events):
             assert offer["peer_id"] == peer
             assert offer["peer_label"] == peer + "-label"
             assert offer["token"] == session.token
+            assert offer["role"] == role
+            assert offer["peer_addr"] == "10.0.0.1:8929"
         ended = await em_intercom.end_intercom(session.session_id, "hangup")
         assert ended.state == em_intercom.STATE_ENDED
         for device in (a, b):
@@ -169,6 +172,61 @@ def test_start_offers_both_devices_and_end_fans_out(_two_devices, _no_events):
             end = device.send_control.call_args.args[0]
             assert end == {"type": "intercom_end",
                            "session": session.session_id, "reason": "hangup"}
+    _run(go())
+
+
+def test_ringing_and_calling_states_are_tracked(_two_devices, _no_events):
+    a, b = _two_devices
+
+    async def go():
+        session = await em_intercom.start_intercom("kitchen", "bedroom")
+        await em_controller._on_intercom_state(
+            a, {"state": "calling", "session": session.session_id})
+        await em_controller._on_intercom_state(
+            b, {"state": "ringing", "session": session.session_id})
+        assert a.intercom_state == "calling"
+        assert b.intercom_state == "ringing"
+        assert a.intercom_session == session.session_id
+        assert b.intercom_peer == "kitchen"
+        assert em_intercom.INTERCOM.active_for("kitchen") is session
+    _run(go())
+
+
+def test_an_idle_report_mid_call_ends_the_session(_two_devices, _no_events):
+    a, b = _two_devices
+
+    async def go():
+        session = await em_intercom.start_intercom("kitchen", "bedroom")
+        await em_controller._on_intercom_state(
+            b, {"state": "ringing", "session": session.session_id})
+        # The callee's ring timed out: it reports idle, and the
+        # controller ends the session for both ends.
+        await em_controller._on_intercom_state(
+            b, {"state": "idle", "session": session.session_id,
+                "reason": "no_answer"})
+        assert em_intercom.INTERCOM.active_for("kitchen") is None
+        assert b.intercom_state == "idle"
+        for device in (a, b):
+            assert device.send_control.call_count == 2
+        end = a.send_control.call_args.args[0]
+        assert end == {"type": "intercom_end",
+                       "session": session.session_id, "reason": "no_answer"}
+    _run(go())
+
+
+def test_an_idle_report_after_the_controller_ended_is_a_noop(
+        _two_devices, _no_events):
+    a, b = _two_devices
+
+    async def go():
+        session = await em_intercom.start_intercom("kitchen", "bedroom")
+        await em_intercom.end_intercom(session.session_id, "hangup")
+        assert a.send_control.call_count == 2
+        # The idle ack for the already-ended session must not resend.
+        await em_controller._on_intercom_state(
+            a, {"state": "idle", "session": session.session_id,
+                "reason": "hangup"})
+        assert a.send_control.call_count == 2
     _run(go())
 
 
@@ -213,6 +271,25 @@ def test_end_is_idempotent_from_the_api_side(_two_devices, _no_events):
             ends = [c.args[0] for c in device.send_control.call_args_list
                     if c.args[0]["type"] == "intercom_end"]
             assert len(ends) == 1
+    _run(go())
+
+
+def test_button_during_a_call_attempt_is_ignored(_two_devices, _no_events):
+    a, b = _two_devices
+
+    async def go():
+        session = await em_intercom.start_intercom("kitchen", "bedroom")
+        # A press while ringing or calling is answered or cancelled on
+        # the device and never forwarded; one arriving here is a stale
+        # duplicate, and it must not start a turn or end the call.
+        for state in ("ringing", "calling"):
+            a.intercom_state = state
+            a.intercom_session = session.session_id
+            await em_controller.handle_button_event(a, {
+                "clickType": 138, "down": False, "heldMs": 0, "muted": False})
+            assert em_intercom.INTERCOM.active_for("kitchen") is session
+            assert a.send_control.call_count == 1, \
+                "a stale press must not send anything"
     _run(go())
 
 

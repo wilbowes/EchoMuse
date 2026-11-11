@@ -2,11 +2,12 @@
 // voice call between two EchoMuse devices, peer to peer, with the
 // controller as switchboard only (docs/intercom.md).
 //
-// This package owns the call's state machine. It knows nothing about
-// audio, networking or the LED ring: Phase 1 is the mode switch only
-// (enter the call, show it, leave it cleanly). The peer link, the
-// resampler and the low-prime speaker plane arrive in later phases and
-// hang off the states defined here.
+// This package owns the call's state machine, the peer link, the
+// resampler and the audio pumps. The LED ring is driven by cmd/server.go,
+// which also owns the button: the package reports state changes through
+// callbacks and server.go turns them into light and control messages.
+// The low-prime speaker plane arrives in Phase 3; until then the peer
+// audio rides the voice plane with its ~1s prime.
 package intercom
 
 import (
@@ -19,18 +20,30 @@ import (
 // from the start so the state table never has to be relearned.
 const (
 	StateIdle      = "idle"
+	StateRinging   = "ringing"
+	StateCalling   = "calling"
 	StateInCall    = "in_call"
 	StateSuspended = "suspended"
 )
 
+// Roles. The caller waits for the callee to answer; the callee rings
+// and dials the caller when its button is pressed.
+const (
+	RoleCaller = "caller"
+	RoleCallee = "callee"
+)
+
 // Session identifies one call. The token is issued by the controller and
-// is what the callee checks a dialler against in Phase 2; Phase 1
-// carries it without acting on it.
+// is what the callee checks a dialler against; PeerAddr is the other
+// end's intercom listener (ip:port), put in the offer by the controller
+// so the callee can dial it on answer without another round trip.
 type Session struct {
 	ID        string
 	PeerID    string
 	PeerLabel string
 	Token     string
+	Role      string
+	PeerAddr  string
 }
 
 var (
@@ -76,22 +89,47 @@ func (m *Machine) Current() (Session, bool) {
 	return m.session, true
 }
 
-// Offer enters a call. From idle it starts the session; re-offering the
-// same session is a no-op, because the controller fans every offer out
-// to both ends and a retried offer must not look like a second call.
-// Offering a different session while one runs is ErrNotIdle.
+// Offer enters a call attempt. From idle it starts the session: the
+// callee rings and waits for its button, the caller waits for the
+// callee to answer. Re-offering the same session is a no-op, because
+// the controller fans every offer out to both ends and a retried offer
+// must not look like a second call. Offering a different session while
+// one runs is ErrNotIdle.
 func (m *Machine) Offer(sess Session) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.state == StateIdle {
 		m.session = sess
-		m.state = StateInCall
+		if sess.Role == RoleCaller {
+			m.state = StateCalling
+		} else {
+			m.state = StateRinging
+		}
 		return nil
 	}
 	if m.session.ID == sess.ID {
 		return nil
 	}
 	return ErrNotIdle
+}
+
+// Connect moves a ringing or calling attempt into a flowing call, once
+// the peer link is up. Connecting a call that is already flowing is a
+// no-op; connecting anything else is an error.
+func (m *Machine) Connect() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	switch m.state {
+	case StateRinging, StateCalling:
+		m.state = StateInCall
+		return nil
+	case StateInCall:
+		return nil
+	case StateIdle:
+		return ErrNoSession
+	default:
+		return ErrNotInCall
+	}
 }
 
 // End leaves the call and returns the session that was active. Ending

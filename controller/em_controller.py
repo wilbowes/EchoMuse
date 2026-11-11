@@ -3328,13 +3328,15 @@ async def _private_listen(device: Device) -> None:
             # skips its own frames here too, so a wake over it is not acted on.
             await device.listen_close(ev["session"], "speaking")
             continue
-        if device.intercom_state == "in_call":
-            # Intercom Phase 1: the wake word stays live during a call,
-            # but nested HA turns (suspend/resume) do not exist yet — a
-            # turn here would hold voice_lock and route the mic while
-            # the call owns both. The wake is logged and the session
-            # closed; the call continues. Phase 3 replaces this close
-            # with a nested turn.
+        if device.intercom_state not in (None, "idle"):
+            # Intercom: the wake word stays live during a call, but
+            # nested HA turns (suspend/resume) do not exist yet — a turn
+            # here would hold voice_lock and route the mic while the
+            # call owns both. That covers the attempt too (ringing /
+            # calling): a wake while the Dot is ringing must not start
+            # a turn the call would then collide with. The wake is
+            # logged and the session closed; the call continues. Phase
+            # 3 replaces this close with a nested turn.
             log.info(f"[{device.device_id}] wake during intercom call — "
                      f"no turn until nested turns land (session "
                      f"{ev['session']} closed)")
@@ -4030,13 +4032,14 @@ async def _stream_listen(device: Device):
                         device.device_id, "info", "device",
                         f"Wake word detected (score={score:.3f}, {source})"
                     )
-                    if device.intercom_state == "in_call":
-                        # Intercom Phase 1, controller-scored side: the
-                        # wake word stays live during a call, but nested
-                        # HA turns do not exist yet — arming capture
-                        # routing (oww_paused, beam lock) here would
-                        # route the mic to a turn while the call owns
-                        # it. The wake is logged and dropped; scoring
+                    if device.intercom_state not in (None, "idle"):
+                        # Intercom, controller-scored side: the wake word
+                        # stays live during a call, but nested HA turns
+                        # do not exist yet — arming capture routing
+                        # (oww_paused, beam lock) here would route the
+                        # mic to a turn while the call owns it. That
+                        # covers the attempt too (ringing / calling).
+                        # The wake is logged and dropped; scoring
                         # continues and the call continues. Phase 3
                         # replaces this with a nested turn.
                         log.info(f"[{device.device_id}] wake during "
@@ -4305,6 +4308,16 @@ async def handle_button_event(device: Device, event: dict):
             # turn while the call owns the mic.
             log.info(f"[{device.device_id}] Dot button — hanging up intercom call")
             await em_intercom.end_intercom_for_device(device, "button")
+            return
+
+        if device.intercom_state in ("ringing", "calling"):
+            # A press during a call attempt is answered or cancelled on
+            # the device and never forwarded — so one arriving here is
+            # a stale duplicate. It must not start a turn: the attempt
+            # owns the device until it resolves.
+            log.info(f"[{device.device_id}] Dot button during intercom "
+                     f"{device.intercom_state} — ignored, the device "
+                     f"answers or cancels it itself")
             return
 
         # A HOLD is a separate gesture, forwarded to HA rather than starting a
@@ -4784,7 +4797,7 @@ async def _on_sendspin_status(device: Device, msg: dict) -> None:
 # which the routes can import — no module but this one may import
 # em_controller by name. What lives here is only the device's own state
 # reports and the in-call guards.
-INTERCOM_STATES = {"idle", "in_call", "suspended"}
+INTERCOM_STATES = {"idle", "ringing", "calling", "in_call", "suspended"}
 
 
 async def _on_intercom_state(device: Device, msg: dict) -> None:
@@ -4795,10 +4808,18 @@ async def _on_intercom_state(device: Device, msg: dict) -> None:
     peer when the device reports idle. A state for a session the
     controller does not know is logged and ignored rather than trusted —
     a stale device must not resurrect a call the controller ended.
+
+    An idle report for a session that is still active ends the session:
+    a device only reports idle mid-call because it left the call on its
+    own — ring timeout, peer gone, dial failed, button cancel — and the
+    other end must hear about it through intercom_end, not be left
+    ringing. An idle report for a session the controller already ended
+    is a no-op: end_intercom short-circuits on STATE_ENDED.
     """
     device_id = device.device_id
     state = msg.get("state")
     session_id = msg.get("session")
+    reason = msg.get("reason") or "peer_idle"
     if state not in INTERCOM_STATES:
         log.warning(f"[{device_id}] intercom_state {state!r} ignored — "
                     f"unknown state")
@@ -4807,6 +4828,8 @@ async def _on_intercom_state(device: Device, msg: dict) -> None:
         device.intercom_state = "idle"
         device.intercom_session = None
         device.intercom_peer = None
+        if session_id:
+            await em_intercom.end_intercom(session_id, reason)
     else:
         session = em_intercom.INTERCOM.get(session_id) if session_id else None
         if session is None:

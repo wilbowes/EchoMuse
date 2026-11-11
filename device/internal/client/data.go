@@ -186,6 +186,15 @@ type DataClient struct {
 
 	bleGattCallback func([]byte)
 
+	// processedMic is the intercom tap: the post-AEC mono mic frame,
+	// offered to one consumer (the intercom call) per period. It is
+	// read on the deadline-bound mic goroutine, so the hook must not
+	// block and must copy the frame if it keeps it. Guarded by
+	// processedMicMu because the call registers it mid-stream, unlike
+	// the setup-time callbacks above.
+	processedMicMu sync.Mutex
+	processedMic   func([]byte)
+
 	readyCh chan string
 
 	micMu     sync.Mutex
@@ -706,6 +715,24 @@ func (d *DataClient) SendBleAdverts(payload []byte) bool {
 // OnBleGatt registers the receiver for ble-gatt frames from the controller.
 // It is called on the data plane's read loop and must not block.
 func (d *DataClient) OnBleGatt(cb func([]byte)) { d.bleGattCallback = cb }
+
+// OnProcessedMic registers the receiver for post-AEC mono mic frames —
+// the intercom call's audio source. The hook runs on the mic goroutine
+// for every period the always-on stream (and any turn stream) produces,
+// so it must not block and must copy the frame if it keeps it. Passing
+// nil unregisters. One consumer at a time: only one call can exist, so
+// the call registers on connect and unregisters on teardown.
+func (d *DataClient) OnProcessedMic(cb func([]byte)) {
+	d.processedMicMu.Lock()
+	d.processedMic = cb
+	d.processedMicMu.Unlock()
+}
+
+func (d *DataClient) processedMicHook() func([]byte) {
+	d.processedMicMu.Lock()
+	defer d.processedMicMu.Unlock()
+	return d.processedMic
+}
 
 // SendBleGatt writes one bridge message to the controller. Unlike an advert
 // batch it never yields to a turn: a result is owed to a request, and a
@@ -1338,6 +1365,13 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			}
 			if aecArmed {
 				d.makeupClipped += applyMakeup(mono, aecHeadroom)
+			}
+			// Intercom tap — the post-AEC mono, for the peer link (see
+			// OnProcessedMic). After AEC and make-up, before anything
+			// measures or gates the signal: the peer hears silence too,
+			// and it hears exactly what STT hears.
+			if hook := d.processedMicHook(); hook != nil {
+				hook(mono)
 			}
 			clipped := d.beam.ClippedSamples() + d.makeupClipped
 

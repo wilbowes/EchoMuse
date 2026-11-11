@@ -177,7 +177,10 @@ func main() {
 	// Intercom call state. Declared here, before the control callbacks,
 	// because OnDisconnected below ends a call the controller can no
 	// longer hang up — the machine must already be in scope there.
+	// intercomCall is the peer link itself, created on offer and
+	// cleared when the call ends (by either end, or by the link dying).
 	intercomMachine := intercom.NewMachine()
+	var intercomCall *intercom.Call
 
 	// Local duck at the device's own wake crossing, confirmed or released by
 	// the controller's duck message (OnDuck below).
@@ -437,6 +440,33 @@ func main() {
 		if event.ClickType == pkgbuttons.DotClick && !event.Down {
 			s.CancelVolumeDisplay()
 		}
+		// Intercom — a Dot press while a call is being attempted is
+		// answered or cancelled here, on the device, and NOT forwarded:
+		// forwarding it would also start a voice turn. A ringing
+		// callee answers (dials the caller); a calling caller cancels
+		// the attempt. A press during a flowing call still goes to the
+		// controller, which hangs up (Phase 1).
+		if event.ClickType == pkgbuttons.DotClick && !event.Down {
+			switch intercomMachine.State() {
+			case intercom.StateRinging:
+				if intercomCall != nil {
+					intercomCall.Answer()
+				} else {
+					log.Println("[intercom] button answer with no call — ignored")
+				}
+				return
+			case intercom.StateCalling:
+				sess, _ := intercomMachine.Current()
+				if intercomCall != nil {
+					intercomCall.Stop()
+					intercomCall = nil
+				}
+				intercomMachine.End()
+				s.StartAnim(server.AnimSpec{Pattern: "off"})
+				_ = controlClient.SendIntercomState(intercom.StateIdle, sess.ID, "cancelled")
+				return
+			}
+		}
 		controlClient.SendButton(event)
 	})
 	if err != nil {
@@ -491,6 +521,10 @@ func main() {
 		// left showing in-call with no call is a lie. End it locally
 		// and clear the ring; the reconnect repaints whatever the
 		// controller wants next.
+		if intercomCall != nil {
+			intercomCall.Stop()
+			intercomCall = nil
+		}
 		if _, ok := intercomMachine.Current(); ok {
 			intercomMachine.End()
 			s.StartAnim(server.AnimSpec{Pattern: "off"})
@@ -684,11 +718,11 @@ func main() {
 		pcmSpeaker.FlushMusic()
 	})
 
-	// Intercom — the mode switch (Phase 1). An offer enters the call and
-	// lights the in-call ring; an end leaves it and clears the ring.
-	// There is no peer audio yet, so the offer IS the call: what Phase 1
-	// proves is that the switch itself is solid — no stuck state, no
-	// wedged ring, no lost wake word afterwards.
+	// Intercom — the mode switch (Phases 1–2). An offer starts a call
+	// attempt: the callee rings and waits for its button, the caller
+	// waits to be dialled. Both ends listen from the offer, so either
+	// can be dialled; the callee dials on answer, and the peer link
+	// carries raw 48 kHz PCM both ways until one end hangs up.
 	//
 	// The wake-word scorer is deliberately NOT paused for a call.
 	// oww_paused is what makes a device deaf during a normal turn, and a
@@ -699,30 +733,66 @@ func main() {
 		sess := intercom.Session{
 			ID: offer.Session, PeerID: offer.PeerID,
 			PeerLabel: offer.PeerLabel, Token: offer.Token,
+			Role: offer.Role, PeerAddr: offer.PeerAddr,
 		}
 		if err := intercomMachine.Offer(sess); err != nil {
 			log.Printf("[intercom] offer for session %s refused: %v", offer.Session, err)
 			// Report the state we are actually in, so the controller's
 			// session tracking never believes a call it did not get.
 			if cur, ok := intercomMachine.Current(); ok {
-				_ = controlClient.SendIntercomState(intercom.StateInCall, cur.ID, "busy")
+				_ = controlClient.SendIntercomState(intercomMachine.State(), cur.ID, "busy")
 			}
 			return
 		}
-		// Slow green pulse: distinct from the cyan listening ring and
-		// the white thinking ring, and readable from across a room.
+		// The listener and the ring timer live in the Call; the machine
+		// already entered ringing or calling above. Audio flows on the
+		// DataClient's post-AEC mono tap — the same mono STT hears —
+		// and out through the voice plane.
+		call := intercom.NewCall(deviceID, sess, intercomMachine, dataClient, pcmSpeaker)
+		call.OnConnected = func() {
+			// Solid green: the pulse was the attempt, the solid ring
+			// is the call.
+			s.StartAnim(server.AnimSpec{
+				Pattern: "solid", Colors: [][3]uint8{{0, 255, 0}},
+			})
+			_ = controlClient.SendIntercomState(intercom.StateInCall, offer.Session, "")
+		}
+		call.OnEnded = func(reason string) {
+			// The peer went away, the ring timed out, or the dial
+			// failed: the machine already ended inside the Call.
+			// Clear the ring and tell the controller, which ends the
+			// session for both ends (the other side gets intercom_end).
+			s.StartAnim(server.AnimSpec{Pattern: "off"})
+			_ = controlClient.SendIntercomState(intercom.StateIdle, offer.Session, reason)
+			intercomCall = nil
+		}
+		if err := call.Start(); err != nil {
+			log.Printf("[intercom] peer listener failed: %v", err)
+			intercomMachine.End()
+			s.StartAnim(server.AnimSpec{Pattern: "off"})
+			_ = controlClient.SendIntercomState(intercom.StateIdle, offer.Session, "listen_failed")
+			return
+		}
+		intercomCall = call
+		// Slow green pulse while the call is being attempted: distinct
+		// from the cyan listening ring and the white thinking ring,
+		// and readable from across a room.
 		s.StartAnim(server.AnimSpec{
 			Pattern: "pulse", Colors: [][3]uint8{{0, 255, 0}}, PeriodMs: 2000,
 		})
-		_ = controlClient.SendIntercomState(intercom.StateInCall, offer.Session, "")
+		_ = controlClient.SendIntercomState(intercomMachine.State(), offer.Session, "")
 	})
 
 	controlClient.OnIntercomEnd(func(session, reason string) {
+		if intercomCall != nil {
+			intercomCall.Stop()
+			intercomCall = nil
+		}
 		ended, _ := intercomMachine.End()
 		if ended.ID != "" && ended.ID != session {
 			log.Printf("[intercom] end for session %s arrived while %s was active — ending the active call", session, ended.ID)
 		}
-		// Clear the in-call ring and hand the ring back to whatever the
+		// Clear the ring and hand the ring back to whatever the
 		// controller sends next. "off" paints black through the same
 		// path the volume arc uses to clear itself.
 		s.StartAnim(server.AnimSpec{Pattern: "off"})
