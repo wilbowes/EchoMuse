@@ -588,7 +588,7 @@ type ConfigMessage struct {
 	//
 	// Written to disk for init like the password above, and ignored on
 	// FireOS, which uses adbd.
-	ConsoleTimeoutMin *int  `json:"consoleTimeoutMin,omitempty"`
+	ConsoleTimeoutMin *int `json:"consoleTimeoutMin,omitempty"`
 	// SSHEnabled and SSHAuthorizedKeys turn on emOS's SSH server for this
 	// Echo and say who may log in (Ed25519 public keys, authorized_keys
 	// form). POINTERS for ConsolePassword's reason: false and "" are the
@@ -597,7 +597,7 @@ type ConfigMessage struct {
 	// firmware does not. Ignored on FireOS.
 	SSHEnabled        *bool   `json:"sshEnabled,omitempty"`
 	SSHAuthorizedKeys *string `json:"sshAuthorizedKeys,omitempty"`
-	BargeInEnabled    *bool `json:"bargeInEnabled,omitempty"`
+	BargeInEnabled    *bool   `json:"bargeInEnabled,omitempty"`
 	// A pointer because false ("No wake word") is the value that matters.
 	WakeWordEnabled     *bool    `json:"wakeWordEnabled,omitempty"`
 	BargeInThreshold    float64  `json:"bargeInThreshold,omitempty"`
