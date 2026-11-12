@@ -33,7 +33,7 @@ def test_every_config_key_belongs_somewhere():
             mapped.add(key)
 
     defaults = set(em_db.DEFAULT_DEVICE_CONFIG)
-    orphans = defaults - mapped - cs.STATE_KEYS
+    orphans = defaults - mapped - cs.STATE_KEYS - cs.DEVICE_KEYS
     assert not orphans, (
         f"config key(s) belong to no section and are not declared state: "
         f"{sorted(orphans)} — add them to em_config_sections.SECTIONS"
@@ -305,3 +305,22 @@ def test_a_device_value_for_a_fleet_key_never_wins():
     device = {"controllerEndpoints": []}
     eff = cs.merge(fleet, device, list(cs.SECTION_IDS))
     assert eff["controllerEndpoints"] == fleet["controllerEndpoints"]
+
+
+def test_device_keys_are_never_inherited_from_the_fleet():
+    """SSH is root on ONE Echo: a fleet value must not turn it on anywhere,
+    whatever the scoping, and a device's own value always wins."""
+    mapped = {k for sec in cs.SECTIONS.values() for k in sec["keys"]}
+    assert not (cs.DEVICE_KEYS & mapped)
+    assert cs.DEVICE_KEY_DEFAULTS == {k: em_db.DEFAULT_DEVICE_CONFIG[k]
+                                      for k in cs.DEVICE_KEYS}
+    fleet = {**_glob(), "sshEnabled": True, "sshAuthorizedKeys": "fleet"}
+    for secs in ([], list(cs.SECTION_IDS)):
+        out = cs.merge(fleet, {}, secs)
+        assert out["sshEnabled"] is False and out["sshAuthorizedKeys"] == ""
+        own = {"sshEnabled": True, "sshAuthorizedKeys": "mine"}
+        out = cs.merge(fleet, own, secs)
+        assert out["sshEnabled"] is True and out["sshAuthorizedKeys"] == "mine"
+    assert not (cs.DEVICE_KEYS & cs.keys_for(cs.SECTION_IDS)), (
+        "the config POST must not be able to write them; /ssh is their writer"
+    )

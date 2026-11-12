@@ -1,0 +1,155 @@
+{
+ "_doc": "authorized_keys vectors shared by device/internal/config (ParseSSHKeys) and controller/em_ssh_keys.py. Ed25519 only, per RFC 8709 §4 / RFC 4253 §6.6. 'line' is the 1-based line the error must name; 0 = a whole-list error.",
+ "accept": [
+  {
+   "name": "one key with comment",
+   "text": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG40C5z/s3qYnKVE5rt4Cix4kB0/szc4doURowYXr6Ad wil@laptop\n",
+   "keys": [
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG40C5z/s3qYnKVE5rt4Cix4kB0/szc4doURowYXr6Ad wil@laptop"
+   ]
+  },
+  {
+   "name": "CRLF, blank lines, # comments, extra spaces, tab",
+   "text": "# mine\r\n\r\n  ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG40C5z/s3qYnKVE5rt4Cix4kB0/szc4doURowYXr6Ad   wil@laptop  \r\nssh-ed25519\tAAAAC3NzaC1lZDI1NTE5AAAAIEv1Ei80RVTFO94uu4zSt+PRYArWMcOFpdfM4jx3hUWa\n",
+   "keys": [
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG40C5z/s3qYnKVE5rt4Cix4kB0/szc4doURowYXr6Ad wil@laptop",
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEv1Ei80RVTFO94uu4zSt+PRYArWMcOFpdfM4jx3hUWa"
+   ]
+  },
+  {
+   "name": "duplicate key kept once, first comment wins",
+   "text": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG40C5z/s3qYnKVE5rt4Cix4kB0/szc4doURowYXr6Ad one\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG40C5z/s3qYnKVE5rt4Cix4kB0/szc4doURowYXr6Ad two\n",
+   "keys": [
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG40C5z/s3qYnKVE5rt4Cix4kB0/szc4doURowYXr6Ad one"
+   ]
+  },
+  {
+   "name": "comment with spaces",
+   "text": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG40C5z/s3qYnKVE5rt4Cix4kB0/szc4doURowYXr6Ad my  work laptop",
+   "keys": [
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG40C5z/s3qYnKVE5rt4Cix4kB0/szc4doURowYXr6Ad my work laptop"
+   ]
+  },
+  {
+   "name": "every printable ASCII character in a comment",
+   "text": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG40C5z/s3qYnKVE5rt4Cix4kB0/szc4doURowYXr6Ad !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~",
+   "keys": [
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG40C5z/s3qYnKVE5rt4Cix4kB0/szc4doURowYXr6Ad !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+   ]
+  },
+  {
+   "name": "empty",
+   "text": "",
+   "keys": []
+  },
+  {
+   "name": "only comments",
+   "text": "# nothing\n\n",
+   "keys": []
+  },
+  {
+   "name": "sixteen keys",
+   "text": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG40C5z/s3qYnKVE5rt4Cix4kB0/szc4doURowYXr6Ad\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEv1Ei80RVTFO94uu4zSt+PRYArWMcOFpdfM4jx3hUWa\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINvBtMkA/+SNV1tdpcY4BAEl9l2w/j4kSUt26phkV9mG\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAhP7Qi5eK9NfRlqdEaoa1gAnmNrYR2xYhG2Wpqt/ynF\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOUtnFCMUCNHNE2MB62Ry9YGivx1/2KS8GKgnKOByJ5x\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOd7mprp4wsNvbb1EKJk753ngVAde2uSronrBZxat0Pb\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGdYbpj60n2guZaLwDmh7zTJObm45SOovvidR4YIxez2\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMo1h1j20n5s9FJyk3l3p0j9iDkdtnnO2n3Hvx8AXuh5\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIL7q13mUz1czQewXtYu/frNNJxHJk8HZdrEosxiNwYKa\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICtMNC9UM+vlkaHad+AT0bckdVYtSFeNyouEusZlHDy5\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAG6RxnIC2/pEbCRp8BRJLZO7s6WTgnAWO+PmAXaylRr\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOfPRqB4/tT6/QteOv8USAK4U/iuRZpPDBSt0zFLfMOm\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO9svSFh6up5Q86Gk7mCTSPReT/7HA/KBbYA04mbRMl3\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ0eDi2UWdBlI60T4opAk8Ixa6r+euxbJfMOui4RNZnE\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE17PvcwCs9wyJLYMn24Jy9UQ0rbxhpOEwpWPLWaDQ9H\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINwOnDZYoaPtHslCdNixmSXJPhq7fduilJI62b3jD4y4\n",
+   "keys": [
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG40C5z/s3qYnKVE5rt4Cix4kB0/szc4doURowYXr6Ad",
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEv1Ei80RVTFO94uu4zSt+PRYArWMcOFpdfM4jx3hUWa",
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINvBtMkA/+SNV1tdpcY4BAEl9l2w/j4kSUt26phkV9mG",
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAhP7Qi5eK9NfRlqdEaoa1gAnmNrYR2xYhG2Wpqt/ynF",
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOUtnFCMUCNHNE2MB62Ry9YGivx1/2KS8GKgnKOByJ5x",
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOd7mprp4wsNvbb1EKJk753ngVAde2uSronrBZxat0Pb",
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGdYbpj60n2guZaLwDmh7zTJObm45SOovvidR4YIxez2",
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMo1h1j20n5s9FJyk3l3p0j9iDkdtnnO2n3Hvx8AXuh5",
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIL7q13mUz1czQewXtYu/frNNJxHJk8HZdrEosxiNwYKa",
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICtMNC9UM+vlkaHad+AT0bckdVYtSFeNyouEusZlHDy5",
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAG6RxnIC2/pEbCRp8BRJLZO7s6WTgnAWO+PmAXaylRr",
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOfPRqB4/tT6/QteOv8USAK4U/iuRZpPDBSt0zFLfMOm",
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO9svSFh6up5Q86Gk7mCTSPReT/7HA/KBbYA04mbRMl3",
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ0eDi2UWdBlI60T4opAk8Ixa6r+euxbJfMOui4RNZnE",
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE17PvcwCs9wyJLYMn24Jy9UQ0rbxhpOEwpWPLWaDQ9H",
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINwOnDZYoaPtHslCdNixmSXJPhq7fduilJI62b3jD4y4"
+   ]
+  }
+ ],
+ "refuse": [
+  {
+   "name": "rsa",
+   "text": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEv1Ei80RVTFO94uu4zSt+PRYArWMcOFpdfM4jx3hUWa\nssh-rsa AAAAC3NzaC1lZDI1NTE5AAAAIG40C5z/s3qYnKVE5rt4Cix4kB0/szc4doURowYXr6Ad",
+   "line": 2
+  },
+  {
+   "name": "ecdsa",
+   "text": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEv1Ei80RVTFO94uu4zSt+PRYArWMcOFpdfM4jx3hUWa\necdsa-sha2-nistp256 AAAAC3NzaC1lZDI1NTE5AAAAIG40C5z/s3qYnKVE5rt4Cix4kB0/szc4doURowYXr6Ad",
+   "line": 2
+  },
+  {
+   "name": "options",
+   "text": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEv1Ei80RVTFO94uu4zSt+PRYArWMcOFpdfM4jx3hUWa\nfrom=\"10.0.0.1\" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG40C5z/s3qYnKVE5rt4Cix4kB0/szc4doURowYXr6Ad",
+   "line": 2
+  },
+  {
+   "name": "command option",
+   "text": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEv1Ei80RVTFO94uu4zSt+PRYArWMcOFpdfM4jx3hUWa\ncommand=\"x\" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG40C5z/s3qYnKVE5rt4Cix4kB0/szc4doURowYXr6Ad",
+   "line": 2
+  },
+  {
+   "name": "no key",
+   "text": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEv1Ei80RVTFO94uu4zSt+PRYArWMcOFpdfM4jx3hUWa\nssh-ed25519",
+   "line": 2
+  },
+  {
+   "name": "bad base64",
+   "text": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEv1Ei80RVTFO94uu4zSt+PRYArWMcOFpdfM4jx3hUWa\nssh-ed25519 !!!!",
+   "line": 2
+  },
+  {
+   "name": "unpadded base64",
+   "text": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEv1Ei80RVTFO94uu4zSt+PRYArWMcOFpdfM4jx3hUWa\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAH240C5z/s3qYnKVE5rt4Cix4kB0/szc4doURowYXr6A",
+   "line": 2
+  },
+  {
+   "name": "31-byte key",
+   "text": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEv1Ei80RVTFO94uu4zSt+PRYArWMcOFpdfM4jx3hUWa\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAH240C5z/s3qYnKVE5rt4Cix4kB0/szc4doURowYXr6A=",
+   "line": 2
+  },
+  {
+   "name": "33-byte key",
+   "text": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEv1Ei80RVTFO94uu4zSt+PRYArWMcOFpdfM4jx3hUWa\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIW40C5z/s3qYnKVE5rt4Cix4kB0/szc4doURowYXr6AdAA==",
+   "line": 2
+  },
+  {
+   "name": "inner type rsa",
+   "text": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEv1Ei80RVTFO94uu4zSt+PRYArWMcOFpdfM4jx3hUWa\nssh-ed25519 AAAAB3NzaC1yc2EAAAAgbjQLnP+zepicpUTmu3gKLHiQHT+zNzh2hRGjBhevoB0=",
+   "line": 2
+  },
+  {
+   "name": "trailing bytes",
+   "text": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEv1Ei80RVTFO94uu4zSt+PRYArWMcOFpdfM4jx3hUWa\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG40C5z/s3qYnKVE5rt4Cix4kB0/szc4doURowYXr6AdAA==",
+   "line": 2
+  },
+  {
+   "name": "truncated length",
+   "text": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEv1Ei80RVTFO94uu4zSt+PRYArWMcOFpdfM4jx3hUWa\nssh-ed25519 AAAAC3M=",
+   "line": 2
+  },
+  {
+   "name": "control character in comment",
+   "text": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEv1Ei80RVTFO94uu4zSt+PRYArWMcOFpdfM4jx3hUWa\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG40C5z/s3qYnKVE5rt4Cix4kB0/szc4doURowYXr6Ad a\u0001b",
+   "line": 2
+  },
+  {
+   "name": "non-ASCII comment",
+   "text": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEv1Ei80RVTFO94uu4zSt+PRYArWMcOFpdfM4jx3hUWa\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG40C5z/s3qYnKVE5rt4Cix4kB0/szc4doURowYXr6Ad café",
+   "line": 2
+  },
+  {
+   "name": "comment over 100 characters",
+   "text": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEv1Ei80RVTFO94uu4zSt+PRYArWMcOFpdfM4jx3hUWa\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG40C5z/s3qYnKVE5rt4Cix4kB0/szc4doURowYXr6Ad xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "line": 2
+  },
+  {
+   "name": "seventeen keys",
+   "text": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG40C5z/s3qYnKVE5rt4Cix4kB0/szc4doURowYXr6Ad\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEv1Ei80RVTFO94uu4zSt+PRYArWMcOFpdfM4jx3hUWa\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINvBtMkA/+SNV1tdpcY4BAEl9l2w/j4kSUt26phkV9mG\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAhP7Qi5eK9NfRlqdEaoa1gAnmNrYR2xYhG2Wpqt/ynF\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOUtnFCMUCNHNE2MB62Ry9YGivx1/2KS8GKgnKOByJ5x\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOd7mprp4wsNvbb1EKJk753ngVAde2uSronrBZxat0Pb\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGdYbpj60n2guZaLwDmh7zTJObm45SOovvidR4YIxez2\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMo1h1j20n5s9FJyk3l3p0j9iDkdtnnO2n3Hvx8AXuh5\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIL7q13mUz1czQewXtYu/frNNJxHJk8HZdrEosxiNwYKa\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICtMNC9UM+vlkaHad+AT0bckdVYtSFeNyouEusZlHDy5\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAG6RxnIC2/pEbCRp8BRJLZO7s6WTgnAWO+PmAXaylRr\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOfPRqB4/tT6/QteOv8USAK4U/iuRZpPDBSt0zFLfMOm\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO9svSFh6up5Q86Gk7mCTSPReT/7HA/KBbYA04mbRMl3\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ0eDi2UWdBlI60T4opAk8Ixa6r+euxbJfMOui4RNZnE\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE17PvcwCs9wyJLYMn24Jy9UQ0rbxhpOEwpWPLWaDQ9H\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINwOnDZYoaPtHslCdNixmSXJPhq7fduilJI62b3jD4y4\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMVV6rRdCIRa6fENRSqZv8sG90pQuYj+fkjdMjeJuI7j\n",
+   "line": 0
+  }
+ ]
+}

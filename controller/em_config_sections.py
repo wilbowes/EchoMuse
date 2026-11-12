@@ -101,6 +101,14 @@ STATE_KEYS: frozenset[str] = frozenset({"startupVolume"})
 # drops, and nobody reading the fleet setting would know.
 FLEET_KEYS: frozenset[str] = frozenset({"controllerEndpoints"})
 
+# The opposite: keys that are ONLY ever one device's, set on that device by
+# name and never inherited from the fleet, whatever the fleet holds. SSH is
+# remote root on one Echo, so a fleet value must never be able to turn it on
+# everywhere. Written only by POST /api/devices/{id}/ssh; a device without
+# its own value gets DEVICE_KEY_DEFAULTS, which is off.
+DEVICE_KEY_DEFAULTS: dict = {"sshEnabled": False, "sshAuthorizedKeys": ""}
+DEVICE_KEYS: frozenset[str] = frozenset(DEVICE_KEY_DEFAULTS)
+
 SECTION_IDS: tuple[str, ...] = tuple(SECTIONS)
 
 
@@ -147,6 +155,8 @@ def merge(global_cfg: dict, device_cfg: dict, section_ids) -> dict:
     for key in STATE_KEYS:
         if key in device_cfg:
             effective[key] = device_cfg[key]
+    for key, default in DEVICE_KEY_DEFAULTS.items():
+        effective[key] = device_cfg.get(key, default)
     return effective
 
 

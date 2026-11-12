@@ -74,6 +74,10 @@ type DeviceStats struct {
 	// rather than per tick: wear moves in 10% steps over years, and a device
 	// can run for months without the reboot that the register copy needs.
 	Emmc interface{} `json:"emmc,omitempty"`
+	// SSH is what the Echo's SSH server is DOING (SSHStatus), read from the
+	// kernel's socket table, never from the setting: nil where the image has
+	// no tinysshd.
+	SSH *SSHStatus `json:"ssh"`
 	// The base OS deliberately does NOT ride this message — it is a static
 	// property of the boot and goes out once, on registration (control.go).
 	// It was here first and that was the bug: the payload reconcile asks for
@@ -113,5 +117,6 @@ func (c *ControlClient) SendStats(s DeviceStats) {
 		"aecRef":           s.AecRef,
 		"sendspin":         s.Sendspin,
 		"emmc":             s.Emmc,
+		"ssh":              s.SSH,
 	})
 }

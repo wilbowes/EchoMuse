@@ -863,9 +863,14 @@ maintenance cost, and helps against neither realistic threat: a compromised
 controller already has a root shell by design, and physical access means
 reflashing.
 
-Remote shell is the controller's outbound-dialled `/shell/{device_id}` plane,
-not sshd. If someone genuinely needs sshd it is dropbear, per-device opt-in,
-off by default — not a listener every device carries.
+Remote shell is the controller's outbound-dialled `/shell/{device_id}` plane.
+SSH is a per-Echo opt-in, off by default: tinysshd (key-only Ed25519, no
+password code), accepted by init itself (`ssh_main`) so it works when the
+EchoMuse server does not. Port 22 is opened in the filter only while it
+listens; turning it off closes the port and ends live sessions within 2 s.
+The owner sets it on one Echo from the dashboard; the firmware writes
+`/data/local/etc/echomuse/ssh/{enabled,authorized_keys}` and reports what is
+listening. The host key is made on first use and kept on `/data`.
 
 ## Flashing safely
 

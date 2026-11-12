@@ -909,6 +909,22 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 						}
 					}
 				}
+				// SSH, the same way: files for init. Keys before the flag, so
+				// turning both on in one push never finds the flag first.
+				if msg.SSHAuthorizedKeys != nil {
+					if changed, err := config.WriteSSHKeys(*msg.SSHAuthorizedKeys); err != nil {
+						log.Printf("[control] SSH keys refused: %v", err)
+					} else if changed {
+						log.Printf("[control] SSH keys updated")
+					}
+				}
+				if msg.SSHEnabled != nil {
+					if changed, err := config.WriteSSHEnabled(*msg.SSHEnabled); err != nil {
+						log.Printf("[control] SSH: %v", err)
+					} else if changed {
+						log.Printf("[control] SSH %s", map[bool]string{true: "on", false: "off"}[*msg.SSHEnabled])
+					}
+				}
 				snap := cfg.Snapshot() // read back under the config lock
 				log.Printf("[control] Config applied: vad_threshold=%.4f oww_threshold=%.2f",
 					snap.VadThreshold, snap.OwwThreshold)
@@ -1349,6 +1365,9 @@ func capabilities() []string {
 	}
 	if thermalReadable() {
 		caps = append(caps, "thermal")
+	}
+	if sshAvailable() {
+		caps = append(caps, "ssh")
 	}
 	return caps
 }

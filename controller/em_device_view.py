@@ -264,6 +264,8 @@ def merge_device(row, boot: dict | None = None) -> dict:
         # capable and still be running on the software tap.
         "aecHwRefCapable": getattr(live, "aec_hw_ref_capable", False) if live else False,
         "aecRef":          getattr(live, "aec_ref", None) if live else None,
+        # SSH as the Echo reports it; the dashboard states this, never the setting.
+        "ssh":             (getattr(live, "stats", None) or {}).get("ssh") if live else None,
         # Which userspace the device booted: "emos", "fireos", or null from
         # firmware that cannot say. Null is not FireOS — the wizard, the
         # support bundle and the payload reconcile all need to tell "Android"
@@ -297,6 +299,7 @@ def merge_device(row, boot: dict | None = None) -> dict:
         # check was a support bundle.
         "ambientLightCapable":
             "ambient_light" in (getattr(live, "capabilities", []) or []) if live else False,
+        "sshCapable": "ssh" in (getattr(live, "capabilities", []) or []) if live else False,
         # WiFi change state (survives the reconnect a change causes)
         "wifi":             wifi_state(device_id),
         # The emOS image it runs (schema v30), and whether the newest release

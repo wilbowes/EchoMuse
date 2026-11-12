@@ -293,7 +293,10 @@ Every key belongs to one of six sections in `em_config_sections.py`;
 sections (`use_global_config` is derived, never authoritative). Guarded by
 `tests/test_config_sections.py`: the partition is total (new key → a section,
 same change); `dashboard.jsx`'s `CONFIG_SECTIONS` mirrors it (JSON, no
-comments); `STATE_KEYS` are never scoped. Reverting discards values. Writes
+comments); `STATE_KEYS` are never scoped. **`DEVICE_KEYS` (`sshEnabled`,
+`sshAuthorizedKeys`) are never fleet-inherited**: a device without its own
+value gets `DEVICE_KEY_DEFAULTS` (off), the fleet POST strips them, and
+`POST /api/devices/{id}/ssh` is their only writer. Reverting discards values. Writes
 push the **effective** config via `apply_live_config`, never the body. A fleet
 edit is ignored by a device overriding that section — such a control must say
 so. **Controller-consumed keys are mirrored in `handle_control` AND

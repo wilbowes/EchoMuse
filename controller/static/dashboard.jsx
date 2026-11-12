@@ -2475,6 +2475,10 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 blePanel={device.connected && device.bleConnectCapable
                   ? <BleProxyKey deviceId={device.device_id} status={device.bleProxy} isAdmin={isAdmin}/>
                   : null}
+                sshPanel={device.sshCapable
+                  ? <SshAccess deviceId={device.device_id} status={device.ssh}
+                      own={device.config || {}} isAdmin={isAdmin}/>
+                  : null}
                 mixCapable={!device.connected || !!device.audioMixCapable}
                 holdCapable={!device.connected || !!device.buttonHoldCapable}
                 hwEchoRef={device.connected && device.aecRef === 'hw'}
@@ -9611,6 +9615,9 @@ Object.entries(CONFIG_SECTIONS).forEach(([sid, keys]) => {
 // Mirror of em_config_sections.STATE_KEYS — always the device's own,
 // never fleet-inherited, whatever the section scoping says.
 const STATE_KEYS = ['startupVolume'];
+// Mirror of em_config_sections.DEVICE_KEY_DEFAULTS — one Echo's own, never
+// the fleet's: off unless set on that Echo.
+const DEVICE_KEY_DEFAULTS = { sshEnabled: false, sshAuthorizedKeys: '' };
 
 // Effective config = fleet, with the device's own values layered over it for
 // the sections it overrides. This must FILTER rather than blind-merge
@@ -9626,6 +9633,7 @@ function effectiveConfig(globalConfig, device) {
     const sec = KEY_SECTION[k];
     if ((sec && secs.includes(sec)) || STATE_KEYS.includes(k)) out[k] = own[k];
   });
+  Object.entries(DEVICE_KEY_DEFAULTS).forEach(([k, d]) => { out[k] = own[k] ?? d; });
   return out;
 }
 
@@ -9760,7 +9768,8 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                             stockSoundCapable = false,
                             wakeMicCapable = true,
                             sendspinCapable = true, sendspinPanel = null,
-                            bleConnectCapable = true, blePanel = null }) {
+                            bleConnectCapable = true, blePanel = null,
+                            sshPanel = null }) {
   // emosFleet defaults TRUE for the same reason the capability props above do,
   // and for one more: it gates the console password, which is emOS-only, and
   // disabling a setting because we do not KNOW the fleet has an emOS device
@@ -10430,6 +10439,13 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             disabled={!emosFleet}
             onChange={v => set('consoleTimeoutMin', v)}/>
         </div>
+        {subHeader('SSH')}
+        <div style={{ ...inputStyle }}>
+          {/* Per Echo, never fleet: the fleet view says where it lives. */}
+          {sshPanel || <div style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-sm)', color: 'var(--muted)' }}>
+            {scoped ? 'Needs emOS on this Echo, with an image that includes SSH.' : 'Turned on per Echo, in that Echo\'s config.'}
+          </div>}
+        </div>
         {subHeader('Controller address')}
         <div style={{ ...inputStyle }}>
           <ControllerEndpointsField readOnly={scoped || disabled}
@@ -10535,6 +10551,61 @@ function BleProxyKey({ deviceId, status, isAdmin }) {
         </div>
       )}
       {key && <div style={{ color: 'var(--muted)', fontSize: 'var(--fs-sm)' }}>Home Assistant asks for this on the BT Proxy device. Anyone with it can use this Echo's connections.</div>}
+      {error && <div style={{ color: 'var(--error)' }}>{error}</div>}
+    </div>
+  );
+}
+
+// SshAccess: emOS's SSH server for ONE Echo. Saved on its own, not with
+// "Push config": the keys are this Echo's, never the fleet's
+// (em_config_sections.DEVICE_KEYS). The status line is what the Echo
+// REPORTS (listening on 22, host key fingerprint), never the setting.
+function SshAccess({ deviceId, status, own, isAdmin }) {
+  const mono = "var(--font-mono)";
+  const [on, setOn] = useState(!!own.sshEnabled);
+  const [keys, setKeys] = useState(own.sshAuthorizedKeys || '');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [saved, setSaved] = useState(false);
+  const dirty = on !== !!own.sshEnabled || keys !== (own.sshAuthorizedKeys || '');
+
+  const save = async () => {
+    setBusy(true); setError(''); setSaved(false);
+    try {
+      const r = await API.post(`/api/devices/${deviceId}/ssh`, { enabled: on, authorized_keys: keys });
+      setKeys(r.authorized_keys);  // normalised, as stored
+      setSaved(true);
+    } catch (e) {
+      setError(e.error || e.message || 'Could not save');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  let line = 'Waiting for the Echo';
+  if (status) line = status.listening ? 'Listening on port 22' : 'Not listening';
+  return (
+    <div style={{ fontFamily: mono, fontSize: 'var(--fs-md)', color: 'var(--text2)', display: 'flex', flexDirection: 'column', gap: 'var(--space-4)', minWidth: 0 }}>
+      <Toggle label="SSH" disabled={!isAdmin}
+        sub="root login with the keys below; runs even when EchoMuse does not"
+        value={on} onChange={setOn}/>
+      <label style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)', minWidth: 0 }}>
+        <span style={{ color: 'var(--muted)', fontSize: 'var(--fs-sm)' }}>Public keys (ssh-ed25519, one per line)</span>
+        <textarea value={keys} disabled={!isAdmin} rows={3} spellCheck={false}
+          onChange={e => setKeys(e.target.value)}
+          placeholder="ssh-ed25519 AAAA… you@laptop"
+          style={{ fontFamily: mono, fontSize: 'var(--fs-sm)', width: '100%', boxSizing: 'border-box', resize: 'vertical' }}/>
+      </label>
+      <div>{line}</div>
+      {status && status.hostKey && (
+        <div style={{ color: 'var(--muted)', fontSize: 'var(--fs-sm)', wordBreak: 'break-all' }}>
+          Host key {status.hostKey}
+        </div>
+      )}
+      {isAdmin && dirty && (
+        <div><Pill small disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save SSH'}</Pill></div>
+      )}
+      {saved && !dirty && <div style={{ color: 'var(--muted)', fontSize: 'var(--fs-sm)' }}>Saved</div>}
       {error && <div style={{ color: 'var(--error)' }}>{error}</div>}
     </div>
   );
