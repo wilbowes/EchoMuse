@@ -2,7 +2,7 @@
  "files": {
   "em_controller.py": 6291,
   "em_db.py": 3457,
-  "em_esphome.py": 3701
+  "em_esphome.py": 3433
  },
  "functions": {
   "em_controller.Device.__init__": 391,

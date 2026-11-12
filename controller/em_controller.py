@@ -1749,7 +1749,7 @@ async def leds_spin_green(device: Device, stop_event: asyncio.Event):
 # ─── Audio conversion ─────────────────────────────────────────────────────────
 
 # (The numpy linear-interpolation resample_to_48k that used to live here is
-# gone: _fetch_tts_audio now decodes at SPEAKER_RATE directly, with ffmpeg
+# gone: em_tts_audio.fetch now decodes at SPEAKER_RATE directly, with ffmpeg
 # doing any rate conversion — and HA transcodes to 48kHz at source when it
 # honours the media player's declared supported_formats.)
 
@@ -2056,7 +2056,7 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
     """
     Post-turn timing concern: EQ, stream to device, acoustic-feedback wait.
 
-    voice_response is 48kHz mono S16_LE PCM (_fetch_tts_audio decodes at the
+    voice_response is 48kHz mono S16_LE PCM (em_tts_audio.fetch decodes at the
     wire rate now — no controller-side resample). Returns once the device
     audio buffer has drained (or cancel_event fires), so the caller can
     safely restart the mic without acoustic feedback into the next turn.
