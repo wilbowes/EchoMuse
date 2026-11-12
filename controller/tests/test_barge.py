@@ -169,7 +169,7 @@ def test_a_missing_pipeline_outranks_a_claim_the_caller_should_never_have_taken(
 def test_the_recorded_label_reads_as_a_barge_and_not_a_wake_word():
     """
     Readers key on the trigger's "wakeword" PREFIX: `wake_word_phrase` sent to
-    HA, and `_persist_turn`'s on-device shadow block, both test
+    HA, and `em_turn_record.persist_turn`'s on-device shadow block, both test
     `startswith("wakeword")`, and the wake statistics in the Activity tab are
     read the same way. A borrowed prefix would file a barge inside the
     wake-word numbers and name a wake word this turn never sent to HA —

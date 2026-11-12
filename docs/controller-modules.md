@@ -17,8 +17,8 @@ A name that kept its leading underscore is still private to its new module.
 One that lost it is now a module's interface, and callers say
 `module.name(...)`; em_api re-exports nothing.
 
-`em_controller` and `em_esphome` have not been split yet. Only
-`handle_control` changed shape there: one `_on_<type>` handler per control
+`em_controller` has not been split yet, and `em_esphome` only in part (see
+"Moved out of em_esphome" below). Only `handle_control` changed shape there: one `_on_<type>` handler per control
 message, looked up in `CONTROL_HANDLERS` (#910).
 
 ## The modules
@@ -432,6 +432,20 @@ Grouped by where each one lives now.
 | `_forget_oww_models` | `em_state.forget_oww_models` |
 | `_wake_arbiter` | `em_state.wake_arbiter` |
 | `_loop_lag_peak_ms` | `em_state.loop_lag_peak_ms` |
+
+## Moved out of em_esphome (2026-11)
+
+| Was in em_esphome | Now |
+|---|---|
+| `_stream_tts_audio` / `_fetch_tts_audio` | `em_tts_audio.stream` / `fetch` |
+| `_stream_tts_audio_once` | `em_tts_audio._stream_once` |
+| `_prepend`, `_ffmpeg_decode` | `em_tts_audio` (same names) |
+| `WIRE_RATE` | `em_tts_audio.WIRE_RATE` |
+| `TurnTrace` | `em_turn_record.TurnTrace` |
+| `_persist_turn` / `_record_dropped_turn` | `em_turn_record.persist_turn` / `record_dropped_turn` |
+| `_save_utterance` | `em_turn_record._save_utterance` |
+
+`record_dropped_wake` stays in em_esphome: em_controller calls it there.
 
 ## Still in em_api
 

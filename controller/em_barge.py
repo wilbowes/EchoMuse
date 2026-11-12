@@ -66,7 +66,7 @@ something in the house answered them, and they heard it.
 
 The trigger label is therefore its own decision here rather than a format
 string at the call site. Readers key on the trigger's PREFIX: `wake_word_phrase`
-sent to HA and `_persist_turn`'s shadow block both test
+sent to HA and `em_turn_record.persist_turn`'s shadow block both test
 `startswith("wakeword")`, and the wake statistics in the Activity tab are read
 the same way — so a borrowed prefix files a barge inside the wake-word numbers
 and names a wake word this turn never sent. "barge-in" is what a barge turn
