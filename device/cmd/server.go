@@ -655,6 +655,10 @@ func main() {
 		playWakeCue(pcmSpeaker)
 	})
 
+	// Identify (#860): the dashboard asks which Echo this is, and the device
+	// takes the whole ring for its own fixed time.
+	controlClient.OnIdentify(s.Identify)
+
 	controlClient.OnSendspinToken(sendspinToken)
 
 	// Speaker flush — barge-in: cut buffered TTS the moment the controller

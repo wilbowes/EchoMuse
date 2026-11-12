@@ -29,9 +29,8 @@ func (r *recordingRing) last() led.Led {
 
 func testServer(ring *recordingRing) *Server {
 	s := &Server{ledController: ring}
-	get := func() led.Controller { return ring }
-	s.volume = newVolumeController(get)
-	s.mute = newMuteController(get, nil)
+	s.volume = newVolumeController(s.gatedLED)
+	s.mute = newMuteController(s.gatedLED, nil)
 	return s
 }
 
