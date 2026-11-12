@@ -575,7 +575,7 @@ class Device:
         # streamReply. Off by default.
         self.stream_reply:  bool  = False
         # This turn's captured mic audio, handed from _stream_mic_audio to
-        # _persist_turn (which owns the write — it has the rowid the
+        # em_turn_record.persist_turn (which owns the write — it has the rowid the
         # filename is keyed on) and consumed there.
         self.last_utterance_pcm: bytes | None = None
         self.eq_bands:      list  = [0.0] * 8
@@ -738,7 +738,7 @@ class Device:
         # use so an announcement's report can't overwrite a turn's stats).
         # pending_playback_stats covers stats-before-persist: (ts, periods,
         # underruns) stashed by handle_control, folded into the record by
-        # em_esphome._persist_turn if fresh (staleness window keeps a
+        # em_turn_record.persist_turn if fresh (staleness window keeps a
         # long-ago announcement's stats out of an unrelated later turn).
         self.last_turn_id: int | None = None
         self.pending_playback_stats: tuple | None = None
@@ -2004,7 +2004,7 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                         # Only CARRIED here. The turn loop's ceded branch is
                         # where it is recorded, because this block runs before
                         # anything below can unwind the turn: the interrupted
-                        # turn's own _persist_turn then overwrites the outcome
+                        # turn's own em_turn_record.persist_turn then overwrites the outcome
                         # with "barged", and _leds_turn_end — which
                         # cleanup_esphome ends on, and which owns the ring —
                         # reads that. Recording here meant the row was right
@@ -3564,7 +3564,7 @@ async def _private_barge(device: Device, ev: dict) -> None:
         #
         # Carried, not recorded — see the same note in _barge_watcher. This
         # path runs before the interrupted turn unwinds, so a row written here
-        # is overwritten by its _persist_turn before the ring reads it. The
+        # is overwritten by its em_turn_record.persist_turn before the ring reads it. The
         # loop's ceded branch is where it lands.
         device.barge_no_ha = (verdict.trigger_label, device.last_wake)
         device.last_wake = None
@@ -4182,7 +4182,7 @@ async def _stream_listen(device: Device):
 
                         # "wakeword-dev" rather than a separate field: every
                         # reader of trigger already matches on the "wakeword"
-                        # prefix (including _persist_turn's shadow block), so
+                        # prefix (including em_turn_record.persist_turn's shadow block), so
                         # this distinguishes the two sources in the Activity
                         # tab and in queries without any of them changing.
                         label = "wakeword-dev" if source == "device" else "wakeword"
@@ -4832,7 +4832,7 @@ async def _on_playback_stats(device: Device, msg: dict) -> None:
     else:
         # The turn row may not exist yet (device buffers
         # usually drain before the controller's drain sleep
-        # ends) — stash for _persist_turn to fold in. A
+        # ends) — stash for em_turn_record.persist_turn to fold in. A
         # displaced earlier stash was an announcement's:
         # keep its underruns in the hourly counters.
         prev = device.pending_playback_stats

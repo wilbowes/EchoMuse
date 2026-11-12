@@ -1926,8 +1926,7 @@ def test_a_dropped_turn_surfaces_its_outcome_to_the_ring():
     it; a turn that never started has to as well, or the cleanup finds None
     and blacks the ring with no signal at all.
     """
-    src = (CONTROLLER / "em_esphome.py").read_text()
-    fn  = _fn_body(src, "_record_dropped_turn")
+    fn  = _sources.def_source("em_turn_record.record_dropped_turn")
     assert "device.last_turn_outcome" in fn, (
         "a turn dropped for no HA must tell the ring cleanup why, or the "
         "user gets a ring that flashes and clears"
@@ -2001,7 +2000,7 @@ def test_a_barge_that_stands_down_for_no_ha_leaves_the_same_trace_as_a_wake():
 
     The record and the cue are NOT written where the barge fires. That block
     runs before anything can unwind the turn, so the interrupted turn's own
-    `_persist_turn` overwrites `last_turn_outcome` with "barged" before the
+    `em_turn_record.persist_turn` overwrites `last_turn_outcome` with "barged" before the
     ring reads it, and clearing `barge_detected` there skips the turn loop's
     ceded branch — leaving `barge_ceded` and `cancel_event` set into the next
     turn. So the watcher only CARRIES the reason across, and the loop's ceded
@@ -2030,7 +2029,7 @@ def test_a_barge_that_stands_down_for_no_ha_leaves_the_same_trace_as_a_wake():
         )
         assert "record_dropped_wake" not in no_ha, (
             f"{name}: recorded here, the row is overwritten by the interrupted "
-            f"turn's _persist_turn before _leds_turn_end can read it"
+            f"turn's em_turn_record.persist_turn before _leds_turn_end can read it"
         )
         assert "device.barge_detected = False" not in no_ha, (
             f"{name}: clearing this skips the ceded branch, so barge_ceded and "

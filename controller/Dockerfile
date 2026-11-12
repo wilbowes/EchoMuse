@@ -206,6 +206,7 @@ COPY em_emos_build.py .
 COPY em_emos_update.py .
 COPY em_recordings.py .
 COPY em_tts_audio.py .
+COPY em_turn_record.py .
 COPY em_turnclock.py .
 COPY em_firmware.py .
 COPY em_announce.py .

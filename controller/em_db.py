@@ -504,7 +504,7 @@ MIGRATIONS: list[str] = [
     # ── v5 — persistent activity stats ────────────────────────────────────────
     #
     # turns: one row per voice turn (wake/button/barge-in/continuation),
-    # written at turn completion from the TurnTrace in em_esphome. Survives
+    # written at turn completion from the TurnTrace in em_turn_record. Survives
     # controller and device restarts — the in-memory Device.turn_history is
     # hydrated from here on connect. trigger_type not "trigger": TRIGGER is
     # an SQLite keyword. underruns/playback_periods arrive asynchronously

@@ -459,7 +459,7 @@ with no known mechanism; do not call it the cause.
   counter). `listening: true` on listening frames drives the direction overlay.
   Mute red and volume cyan are device-local.
 - Outcomes by rhythm, not colour, from `device.last_turn_outcome` (set in
-  `_persist_turn` **and `_record_dropped_turn`**, consumed by
+  `em_turn_record.persist_turn` **and `em_turn_record.record_dropped_turn`**, consumed by
   `_leds_turn_end`); **`no_ha` alone uses colour** (orange), after a 600ms
   listening hold.
 - **Start a device-local pulse ONCE per state** (`pulseKind`); phase from
