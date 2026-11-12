@@ -57,7 +57,8 @@ jobs:
         working-directory: controller
         run: |
           pip install -c requirements.txt aioesphomeapi==36.0.1
-          python -m pytest scenarios/ -v Its runs need captures, which stay
+          python -m pytest scenarios/ -v
+      # The bench's scoring rules (#892). Its runs need captures, which stay
       # off the repository; the rules that score them are tested here.
       - name: Audio bench metrics
         working-directory: tools/audio_bench
