@@ -232,3 +232,50 @@ def test_a_late_run_end_from_an_abandoned_turn_does_not_kill_the_next(scenario):
             assert (await _turn_row(ctl, echo, 2))["outcome"] == "ok"
 
     scenario(body)
+
+
+def test_home_assistant_hears_exactly_what_the_echo_sent(scenario):
+    """#1173: words from the wake word turning up in the transcript. A session
+    is trimmed on the Echo (listen.WakeLead); the controller must pass it on
+    from its first frame, adding and dropping nothing, so a wake word remnant
+    in what HA hears was in what the Echo sent."""
+    async def body(ctl):
+        async with room(ctl) as (echo, ha, tts):
+            _, url = _reply(tts)
+            ha.pipeline = lambda h: h.answer("weather report", "Sunny.", url, hear_s=1.6)
+
+            await echo.wake(SPEECH)
+            await wait_for(lambda: len(ha.audio) >= len(SPEECH), 10,
+                           "the whole question to reach HA")
+
+            heard = bytes(ha.audio)
+            assert heard[:len(SPEECH)] == SPEECH, (
+                "HA did not hear the session as sent: first difference at byte "
+                f"{next(i for i, (a, b) in enumerate(zip(heard, SPEECH)) if a != b)}")
+            await wait_for(lambda: echo.voice_eos >= 1, 20, "the reply to finish")
+    scenario(body)
+
+
+def test_a_reply_home_assistant_cannot_serve_ends_the_turn_and_the_next_one_works(scenario):
+    """#842: HA hands over a reply URL the controller cannot fetch (#504's
+    unreachable address). Today: the turn is stored as tts_error, nothing
+    plays, the Echo is not left listening, and the next question is answered.
+    #842 adds the reason to the turn; extend this test when it lands."""
+    async def body(ctl):
+        async with room(ctl) as (echo, ha, tts):
+            dead = f"http://127.0.0.1:{harness.free_port()}/tts/gone.wav"
+            ha.pipeline = lambda h: h.answer("what time is it", "It is noon.", dead)
+
+            sid = await echo.wake(SPEECH)
+            row = await _turn_row(ctl, echo, 1)
+            assert row["outcome"] == "tts_error", row
+            assert echo.closed(sid) and not echo.max_open_hit
+            assert not echo.voice, f"{len(echo.voice)} bytes played for a reply that never came"
+
+            reply_pcm, url = _reply(tts)
+            ha.pipeline = lambda h: h.answer("what time is it", "It is noon.", url)
+            await echo.wake(SPEECH)
+            await wait_for(lambda: echo.voice_eos >= 1, 20, "the second reply")
+            assert bytes(echo.voice)[:len(reply_pcm)] == reply_pcm
+            assert (await _turn_row(ctl, echo, 2))["outcome"] == "ok"
+    scenario(body)

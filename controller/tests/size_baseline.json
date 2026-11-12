@@ -1,6 +1,6 @@
 {
  "files": {
-  "em_controller.py": 6291,
+  "em_controller.py": 6295,
   "em_db.py": 3457,
   "em_esphome.py": 3169
  },
@@ -11,7 +11,7 @@
   "em_controller._run_voice_locked": 434,
   "em_controller._stream_listen": 658,
   "em_controller.handle_control": 589,
-  "em_controller.handle_data": 193,
+  "em_controller.handle_data": 197,
   "em_db.record_device_stats": 206,
   "em_device_view.merge_device": 178,
   "em_esphome.EchoMuseSatellite._handle_voice_event": 225,

@@ -5824,7 +5824,11 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
             await ws.close()
             return
 
-        device.data_ws = ws
+        replaced, device.data_ws = device.data_ws, ws
+        if replaced is not None and replaced is not ws:
+            # #751: a redial means the old link is dead; left open it lasts
+            # to the ping timeout. Playback carries on over this connection.
+            em_tasks.spawn(replaced.close(code=1000, reason="replaced"))
         # The connection bridge rides this plane: ask what the device holds
         # now that there is somewhere for the answer to arrive.
         em_tasks.spawn(em_ble_proxy.sync_slots(device.device_id))
