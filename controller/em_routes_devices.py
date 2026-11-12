@@ -30,6 +30,7 @@ import em_labels
 import em_pairing
 import em_reconcile
 import em_shell
+import em_ssh_keys
 import em_state
 import em_wifi
 
@@ -53,6 +54,7 @@ def register(app: web.Application) -> None:
     app.router.add_get("/api/devices/{id}/logs",          _get_device_logs)
     app.router.add_post("/api/devices/{id}/wifi",         _post_device_wifi)
     app.router.add_post("/api/devices/{id}/wifi/scan",    _post_device_wifi_scan)
+    app.router.add_post("/api/devices/{id}/ssh",          _post_device_ssh)
 
 
 @auth.require_auth
@@ -569,3 +571,65 @@ async def _require_unique_label(label: str, device_id: str) -> None:
             body=json.dumps({"error": f'Another Echo is already called "{other}".',
                              "code": "duplicate_label"}),
         )
+
+
+@auth.require_admin
+async def _post_device_ssh(request: web.Request) -> web.Response:
+    """
+    POST /api/devices/{id}/ssh — turn SSH on or off for ONE Echo.
+
+    Body: {"enabled": bool, "authorized_keys": str} (authorized_keys form,
+    Ed25519 only, em_ssh_keys). These keys are per Echo and never fleet
+    (em_config_sections.DEVICE_KEYS), so this is their only writer. The Echo
+    writes them for emOS's init, which runs SSH whether or not EchoMuse is
+    running; whether it is LISTENING is what the Echo reports (`ssh` on
+    stats), never this setting.
+
+    On with no key is refused: a listener nobody can log into is surface
+    with no use, and init would not open it anyway. A live Echo without the
+    `ssh` capability is refused (FireOS, or an emOS image with no tinysshd).
+    """
+    device_id = request.match_info["id"]
+    body = await em_http.json_body(request)
+    enabled = body.get("enabled")
+    keys_text = body.get("authorized_keys", "")
+    if not isinstance(enabled, bool) or not isinstance(keys_text, str):
+        return em_http.error("bad_request",
+                             "enabled must be true or false and "
+                             "authorized_keys a string", 400)
+    try:
+        keys = em_ssh_keys.parse(keys_text)
+    except em_ssh_keys.KeyError_ as e:
+        return em_http.error("bad_ssh_keys", f"SSH keys: {e}.", 400)
+    if enabled and not keys:
+        return em_http.error("bad_ssh_keys",
+                             "Add at least one ssh-ed25519 public key before "
+                             "turning SSH on.", 400)
+
+    loop = asyncio.get_event_loop()
+    if await loop.run_in_executor(None, db.get_device, device_id) is None:
+        return em_http.error("device_not_found", f"No device: {device_id}", 404)
+    live = em_state.devices.get(device_id)
+    if (enabled and live is not None
+            and "ssh" not in (getattr(live, "capabilities", None) or [])):
+        return em_http.error("ssh_unavailable",
+                             "This Echo cannot run SSH: it needs emOS with "
+                             "an image that carries tinysshd.", 409)
+
+    current = await loop.run_in_executor(None, db.get_device_config, device_id)
+    stored = "\n".join(keys) + ("\n" if keys else "")
+    await loop.run_in_executor(None, db.set_device_config, device_id, {
+        **current, "sshEnabled": enabled, "sshAuthorizedKeys": stored})
+    config = await loop.run_in_executor(
+        None, db.get_effective_device_config, device_id)
+    log.info(f"[api] SSH {'on' if enabled else 'off'} for {device_id} "
+             f"({len(keys)} key(s))")
+
+    pushed = False
+    if live is not None:
+        await em_device_config.apply_live_config(device_id, live, config)
+        pushed = True
+    await em_events.push({"type": "device_update", "device_id": device_id,
+                          "state": {"config": config}})
+    return em_http.ok({"device_id": device_id, "enabled": enabled,
+                       "authorized_keys": stored, "pushed": pushed})

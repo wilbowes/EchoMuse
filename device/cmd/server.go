@@ -953,6 +953,7 @@ func collectStats() client.DeviceStats {
 	cpuC, maxC, coreLimit := thermals()
 	return client.DeviceStats{
 		AmbientLux:       als.Lux(),
+		SSH:              client.ReadSSHStatus(),
 		CPUTempC:         cpuC,
 		MaxTempC:         maxC,
 		CoresOnline:      coresOnline(),

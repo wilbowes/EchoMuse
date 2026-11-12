@@ -357,6 +357,10 @@ DEFAULT_DEVICE_CONFIG = {
     #
     # emOS only, like the password beside it.
     "consoleTimeoutMin": 0,
+    # emOS SSH for ONE Echo and its Ed25519 keys; never fleet-inherited
+    # (em_config_sections.DEVICE_KEYS), written by POST /api/devices/{id}/ssh.
+    "sshEnabled": False,
+    "sshAuthorizedKeys": "",
     # controllerEndpoints: addresses an Echo dials before mDNS, in order —
     # [{host, port, tlsPort}]. Fleet-only (em_config_sections.FLEET_KEYS);
     # delivered as a file, not by the config push (em_endpoints). Empty =
@@ -2148,7 +2152,8 @@ def set_device_config_sections(device_id: str, section_ids) -> list:
     use_global_config is kept in step as the compat view for older readers.
     """
     sections = em_config_sections.normalise(section_ids)
-    kept = em_config_sections.keys_for(sections) | em_config_sections.STATE_KEYS
+    kept = (em_config_sections.keys_for(sections) | em_config_sections.STATE_KEYS
+            | em_config_sections.DEVICE_KEYS)
     stored = get_device_config(device_id)
     pruned = {k: v for k, v in stored.items() if k in kept}
     with _tx() as conn:

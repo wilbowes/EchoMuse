@@ -280,6 +280,14 @@ SBIN_ASSETS = ("wpa_supplicant", "wpa_cli", "em-wifi", "busybox")
 SBIN_BOTH_ARCHES = ("em-wifi",)
 
 
+# Ride in both images when the release has them, and are never required: a
+# release cut before them still builds. tinysshd is the SSH server init runs
+# only when the owner turns SSH on for that Echo (init.c ssh_main); nothing
+# else execs it, so it changes nothing on an Echo with SSH off. Not in
+# SBIN_ASSETS, which would strand every older release.
+SBIN_OPTIONAL = ("tinysshd",)
+
+
 # One archive with a manifest of sha256s — see build_payload_bundle.
 PAYLOAD_ASSET = "emos-payload.zip"
 
@@ -379,7 +387,7 @@ def select_payload(files: dict, arch: str, version: str,
     # em-wifi is exempt and rides in both: it is a script nothing execs, so it
     # cannot change which supplicant init starts. Not fatal when missing — a
     # release predating it still builds a FireOS 5 image, exactly as before.
-    sbin = {n: files[n] for n in SBIN_BOTH_ARCHES if n in files}
+    sbin = {n: files[n] for n in SBIN_BOTH_ARCHES + SBIN_OPTIONAL if n in files}
     if (arch == em_emos_build.ARCH_ARM
             or board in em_emos_build.FIREOS6_BOARDS):
         missing = [n for n in SBIN_ASSETS if n not in files]

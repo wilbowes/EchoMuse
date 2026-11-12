@@ -85,6 +85,28 @@
 #define DEVROOT "/dev"
 #endif
 
+/* SSH paths, overridable for sshcheck.c; see ssh_main(). */
+#ifndef SSH_DIR
+#define SSH_DIR    "/data/local/etc/echomuse/ssh"
+#endif
+#ifndef SSH_HOME
+#define SSH_HOME   "/run/ssh"
+#endif
+#ifndef SSH_PASSWD
+#define SSH_PASSWD "/etc/passwd"
+#endif
+#ifndef SSH_BIN
+#define SSH_BIN    "/sbin/tinysshd"
+#endif
+#ifndef SSH_PORT
+#define SSH_PORT   22
+#endif
+#ifndef SSH_SH
+#define SSH_SH     "/system/bin/sh"
+#endif
+#define SSH_POLL_S   2
+#define SSH_MAX_CONN 4
+
 /* Where one uevent's node goes and what it is. 0 on success; -1 for a device
  * with no node, or a name we refuse to turn into a path. */
 static int uevent_node(const char *ev, int block, char *path, size_t plen,
@@ -2656,6 +2678,9 @@ static void net_main(void)
     for (int i = 0; i < 20 && access("/sys/class/net/wlan0", F_OK); i++)
         sleep(1);
     firewall();                 /* before the interface is ever up */
+    /* ssh waits for this: firewall() flushes INPUT, which would drop the
+     * port 22 rule if ssh_main had opened it first. */
+    close(open("/run/fw-up", O_WRONLY | O_CREAT, 0644));
     r = ifup("wlan0");
     netlog("wlan0 present=%d ifup=%d\n",
          access("/sys/class/net/wlan0", F_OK) == 0, r);
@@ -2849,6 +2874,7 @@ static void rdstate(const char *tag)
 static void svc_add(const char *name, char *const *argv, const char *req,
                     const char *after);
 static void supervise(void);
+static void ssh_main(void);
 
 /* Run as anything other than PID 1, this binary is a small tool instead of an
  * init. It is the obvious place for the reboot: it is already static, already
@@ -3313,6 +3339,10 @@ int main(int argc, char **argv)
      * passed and the ring throbbing happily. Every other service would have
      * said `svc <name> absent` once and stopped. */
     svc_add("console", NULL, "/system/bin/sh", NULL);  /* tty is its stdio */
+    /* SSH, forked in-process like net. Independent of EchoMuse on purpose:
+     * it is the way in when the server will not start. Absent on an image
+     * with no tinysshd, said once. Off until the owner turns it on. */
+    svc_add("ssh", NULL, SSH_BIN, "/run/fw-up");
 
     supervise();
     return 0;
@@ -3921,6 +3951,255 @@ static void do_shutdown(void)
     reboot(RB_AUTOBOOT);
 }
 
+/* ── SSH (tinysshd), per-Echo opt-in ─────────────────────────────────────────
+ *
+ * Off unless the owner turns it on for this Echo. The firmware writes the flag
+ * and the keys from the controller's config push (config.WriteSSH); everything
+ * else is here, in init, so SSH stays reachable when the EchoMuse server is
+ * not running -- an out-of-band way in, which is the point of having it (Wil,
+ * 2026-11-11). The firmware only REPORTS what is listening.
+ *
+ * init does the accept, because busybox is built with no listening daemons
+ * (build-busybox.sh refuses tcpsvd) and tinysshd serves one connection on
+ * stdin/stdout. Port 22 is opened in the filter only while listening, so an
+ * Echo with SSH off stays outbound-only (see firewall()).
+ *
+ * Re-read every SSH_POLL_S: removing the flag, or the last key, closes the
+ * port, ends live sessions and clears the copied keys within one tick.
+ *
+ * Keys are COPIED to a home on the ramdisk because tinysshd refuses an
+ * authorized_keys whose directories are group-writable or not owned by the
+ * user or root, and /data (system 0771) and /data/local (shell 0751) are
+ * both. The host key stays on /data so its fingerprint survives a reboot.
+ */
+/* SSH_DIR and the rest are defined at the top, beside SYSDEV. */
+
+/* Whether the owner wants SSH: the flag exists and at least one Ed25519 key
+ * line is on record. A flag with no usable key is off -- a listener nobody can
+ * log into is attack surface with no use. */
+static int ssh_wanted(void)
+{
+    if (access(SSH_DIR "/enabled", F_OK) != 0)
+        return 0;
+    FILE *f = fopen(SSH_DIR "/authorized_keys", "r");
+    if (!f)
+        return 0;
+    char line[2048];
+    int ok = 0;
+    while (!ok && fgets(line, sizeof line, f))
+        ok = strncmp(line, "ssh-ed25519 ", 12) == 0;
+    fclose(f);
+    return ok;
+}
+
+/* Write `body` to `path` via a temp file and rename, so tinysshd never reads
+ * a half-written file. Skips the write when the content is already there. */
+static int ssh_put(const char *path, const char *body, size_t n, mode_t mode)
+{
+    char cur[8192];
+    int fd = open(path, O_RDONLY);
+    if (fd >= 0) {
+        ssize_t r = read(fd, cur, sizeof cur);
+        close(fd);
+        if (r == (ssize_t)n && memcmp(cur, body, n) == 0)
+            return 0;
+    }
+    char tmp[256];
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, mode);
+    if (fd < 0)
+        return -1;
+    int bad = write(fd, body, n) != (ssize_t)n;
+    fchmod(fd, mode);
+    close(fd);
+    if (bad || rename(tmp, path) != 0) {
+        unlink(tmp);
+        return -1;
+    }
+    return 1;
+}
+
+/* Copy only the ssh-ed25519 lines, the one key type tinysshd accepts, so
+ * nothing else on record is passed to it. Returns how many were copied. */
+static int ssh_copy_keys(void)
+{
+    char out[8192];
+    size_t n = 0;
+    int keys = 0;
+    FILE *f = fopen(SSH_DIR "/authorized_keys", "r");
+    if (f) {
+        char line[2048];
+        while (fgets(line, sizeof line, f)) {
+            size_t l = strlen(line);
+            if (strncmp(line, "ssh-ed25519 ", 12) != 0 || line[l - 1] != '\n'
+                || n + l >= sizeof out)
+                continue;
+            memcpy(out + n, line, l);
+            n += l;
+            keys++;
+        }
+        fclose(f);
+    }
+    mkdir(SSH_HOME, 0755);
+    chmod(SSH_HOME, 0755);
+    mkdir(SSH_HOME "/.ssh", 0700);
+    chmod(SSH_HOME "/.ssh", 0700);
+    if (ssh_put(SSH_HOME "/.ssh/authorized_keys", out, n, 0600) < 0)
+        return -1;
+    return keys;
+}
+
+/* tinysshd finds root's home and shell with getpwnam(), and Android ships no
+ * /etc/passwd; /etc is the ramdisk's own directory (a symlink farm), so this
+ * file never reaches /system. */
+static int ssh_passwd(void)
+{
+    static const char pw[] = "root:x:0:0:root:" SSH_HOME ":" SSH_SH "\n";
+    struct stat st;
+    if (lstat(SSH_PASSWD, &st) == 0 && S_ISLNK(st.st_mode))
+        unlink(SSH_PASSWD);
+    return ssh_put(SSH_PASSWD, pw, sizeof pw - 1, 0644) < 0 ? -1 : 0;
+}
+
+/* The host key, made once and kept on /data. tinysshd is a multi-call binary
+ * that picks the program from argv[0]. */
+static int ssh_hostkey(void)
+{
+    if (access(SSH_DIR "/hostkeys/ed25519.pk", F_OK) == 0)
+        return 0;
+    char *mk[] = { "tinysshd-makekey", SSH_DIR "/hostkeys", NULL };
+    pid_t p = fork();
+    if (p == 0) {
+        execv(SSH_BIN, mk);
+        _exit(127);
+    }
+    int st = 0;
+    if (p < 0 || waitpid(p, &st, 0) != p || !WIFEXITED(st)
+        || WEXITSTATUS(st) != 0)
+        return -1;
+    return access(SSH_DIR "/hostkeys/ed25519.pk", F_OK) == 0 ? 0 : -1;
+}
+
+/* Admit or stop admitting inbound TCP to SSH_PORT. -D is repeated so a rule
+ * added twice (a restart mid-open) is removed whole. */
+static void ssh_firewall(int open_it)
+{
+    char cmd[256];
+    if (open_it)
+        snprintf(cmd, sizeof cmd,
+                 "for T in iptables ip6tables; do $T -C INPUT -p tcp --dport %d"
+                 " -j ACCEPT 2>/dev/null || $T -I INPUT -p tcp --dport %d"
+                 " -j ACCEPT 2>/dev/null; done; true", SSH_PORT, SSH_PORT);
+    else
+        snprintf(cmd, sizeof cmd,
+                 "for T in iptables ip6tables; do i=0; while [ $i -lt 8 ] &&"
+                 " $T -D INPUT -p tcp --dport %d -j ACCEPT 2>/dev/null; do"
+                 " i=$((i+1)); done; done; true", SSH_PORT);
+    char *argv[] = { SSH_SH, "-c", cmd, NULL };
+    run_wait(argv);
+}
+
+static int ssh_listen(void)
+{
+    int s = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (s < 0)
+        return -1;
+    int one = 1;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    struct sockaddr_in a = { .sin_family = AF_INET,
+                             .sin_port = htons(SSH_PORT),
+                             .sin_addr.s_addr = htonl(INADDR_ANY) };
+    if (bind(s, (struct sockaddr *)&a, sizeof a) != 0 || listen(s, 4) != 0) {
+        close(s);
+        return -1;
+    }
+    return s;
+}
+
+/* One connection: tinysshd on the socket, in its own session so turning SSH
+ * off can end it and everything under it. stderr is tinysshd's log. */
+static pid_t ssh_serve(int c)
+{
+    pid_t p = fork();
+    if (p != 0)
+        return p;
+    setsid();
+    dup2(c, 0);
+    dup2(c, 1);
+    int n = netlog_open();
+    if (n < 0)
+        n = open("/dev/null", O_RDWR);
+    if (n >= 0)
+        dup2(n, 2);
+    for (int fd = 3; fd < 64; fd++)
+        close(fd);
+    char *argv[] = { "tinysshd", SSH_DIR "/hostkeys", NULL };
+    char *envp[] = { "PATH=/sbin:/system/bin:/system/xbin",
+                     "ANDROID_ROOT=/system", "ANDROID_DATA=/data", NULL };
+    execve(SSH_BIN, argv, envp);
+    _exit(127);
+}
+
+/* The service: wait for the owner to want SSH, listen while they do, close
+ * everything when they stop. Never returns; init respawns it if it dies. */
+static void ssh_main(void)
+{
+    pid_t conn[SSH_MAX_CONN] = {0};
+    int ls = -1;
+    for (;;) {
+        int pid;
+        while ((pid = waitpid(-1, NULL, WNOHANG)) > 0)
+            for (int i = 0; i < SSH_MAX_CONN; i++)
+                if (conn[i] == pid)
+                    conn[i] = 0;
+
+        int want = ssh_wanted();
+        if (want && ssh_copy_keys() < 1)
+            want = 0;
+        if (want && ls < 0) {
+            if (ssh_passwd() == 0 && ssh_hostkey() == 0
+                && (ls = ssh_listen()) >= 0) {
+                ssh_firewall(1);
+                netlog("ssh: listening on %d\n", SSH_PORT);
+            } else {
+                netlog("ssh: cannot start (errno=%d)\n", errno);
+                sleep(30);
+                continue;
+            }
+        } else if (!want && ls >= 0) {
+            ssh_firewall(0);
+            close(ls);
+            ls = -1;
+            for (int i = 0; i < SSH_MAX_CONN; i++)
+                if (conn[i] > 0)
+                    kill(-conn[i], SIGTERM);
+            netlog("ssh: off\n");
+        }
+        if (!want) {
+            unlink(SSH_HOME "/.ssh/authorized_keys");
+            sleep(SSH_POLL_S);
+            continue;
+        }
+
+        struct pollfd pf = { .fd = ls, .events = POLLIN };
+        if (poll(&pf, 1, SSH_POLL_S * 1000) <= 0)
+            continue;
+        int c = accept(ls, NULL, NULL);
+        if (c < 0)
+            continue;
+        int slot = -1;
+        for (int i = 0; i < SSH_MAX_CONN && slot < 0; i++)
+            if (conn[i] == 0)
+                slot = i;
+        if (slot >= 0) {
+            pid_t p = ssh_serve(c);
+            if (p > 0)
+                conn[slot] = p;
+        }
+        close(c);
+    }
+}
+
 static void supervise(void)
 {
     signal(SIGTERM, on_term);
@@ -3979,6 +4258,10 @@ static void supervise(void)
             else if (!strcmp(s->name, "net")) {
                 pid_t p = fork();
                 if (p == 0) { net_main(); _exit(0); }
+                s->pid = p;
+            } else if (!strcmp(s->name, "ssh")) {
+                pid_t p = fork();
+                if (p == 0) { ssh_main(); _exit(0); }
                 s->pid = p;
             } else
                 s->pid = spawn(s->argv);
