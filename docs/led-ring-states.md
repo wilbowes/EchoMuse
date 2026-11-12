@@ -45,6 +45,7 @@ expiry.
 
 | # | Owner | Visual | Lifetime | Sovereignty | Code |
 |---|---|---|---|---|---|
+| 0 | **Identify** | Violet pulse on all 12 LEDs (150,70,255), 600ms period | 30s from the dashboard's `identify`; a repeat extends it | Device-local timer; overrides **every** layer below, mute included. The mute BUTTON's LED is a separate GPIO and still shows mute | `identify.go` |
 | 1 | **Volume arc** | Cyan, N of 12 proportional | 2s window (`volumeLEDSecs`) | Device-local; physical presses, plus changed remote levels when opted in | `volume.go:145` |
 | 2 | **Mute ring** | Solid red `(180,0,0)` + button LED (gpio444, active-high) | Until unmuted; survives reboot + OTA | **Device-sovereign**, persisted to `/data/local/etc/echomuse/state.json` | `mute.go:132` |
 | 3 | **Link state** | Orange sine pulse (disconnected) / white slow pulse (pending approval) | Until link resolves | Device-local | `cmd/server.go:161,174` |
@@ -53,6 +54,8 @@ expiry.
 | 6 | **Idle** | All off | — | — | — |
 
 ### Suppression rules [today]
+
+Layer 0 sits above all of these. While identify runs, every ring write except its own is dropped at one chokepoint (`gatedRing`, `Server.gatedLED()`), which the volume arc, the mute ring, flashes, the animators and the direction overlay all paint through. Their state still updates underneath (`baseLEDs`, mute, volume level). When identify ends the ring goes back to the volume arc if its window is still open, else the red ring if muted and the link is up, else `baseLEDs`.
 
 Both layer 1 and layer 2 suppress the hardware paint for layers 3–5, while
 still recording into `baseLEDs`:
@@ -216,6 +219,7 @@ Mute is the reference implementation of principle 5, and its behaviour is
 | C3 | `led_anim` `meter` (playing) | any unsuppressed | Throbs with live speaker RMS at the ALSA write — the **voice plane only**, measured before the music mix (v2.10.0). The AEC far-end tap deliberately sees the mixed output, since that is what must be cancelled from the mic; the meter must not, or it throbs to a song nobody asked it to visualise | [today] |
 | C4 | `led_anim` `off` | any unsuppressed | Ring black | [today] |
 | C5 | Any `led_anim` / `leds` | MUTED or VOL-DISPLAY | **Recorded into `baseLEDs`, not painted** | [today] |
+| C5a | `identify` | any, including MUTED, VOL-DISPLAY and link down | Violet pulse on the whole ring for 30s, then the hand-back above. Other paints during it are recorded, not painted | [today] |
 | C6 | Legacy `leds` frame | any unsuppressed | Atomically replaces any running animation (generation counter) | [today] |
 | C7 | No replacement within `ttlSec` | animation running | Dead-man clears the ring — protects against a controller that died mid-turn | [today] |
 
