@@ -261,6 +261,7 @@ git submodule update --init          # GoTinyAlsa fork — see device/CLAUDE.md
 cd device && ./compile.sh            # needs the echomuse-compiler image
 cd device && go test ./...
 cd controller && python -m pytest tests/   # needs: pytest numpy scipy pyyaml
+cd controller && python -m pytest scenarios/   # + aioesphomeapi; never in one run with tests/ (protobuf clash)
 cd emos/init && cc -O2 -o /tmp/ringsim ringsim.c -lm && /tmp/ringsim --check
 cd emos/init && cc -O2 -o /tmp/pwcheck pwcheck.c && /tmp/pwcheck
 cd emos/init && cc -O2 -o /tmp/tmoutcheck tmoutcheck.c && /tmp/tmoutcheck

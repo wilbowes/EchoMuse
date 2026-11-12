@@ -41,6 +41,14 @@ Key env vars in `.env` (see `.env.example` for the full list):
   directions; the missing env mapping is the quiet one, since Supervisor
   accepts, displays and stores the setting and `em_start` warns to a log
   nobody reads.
+- **2026-11-12: `DEVICE_APPROVAL` / the add-on's "Device approval policy" has
+  no effect.** Found by the scenario harness. The first migration seeds
+  `system_config.device_approval = 'strict'`, and `handle_control` reads
+  `db.get_config("device_approval", DEVICE_APPROVAL)`, so the env value is
+  only a default for a key that always exists. `auto` set in the add-on is
+  stored and shown by Supervisor and silently ignored; only the dashboard's
+  PATCH `/api/system/config` changes it. Fails safe (strict). Not fixed yet:
+  which should win, the option or the dashboard, is Wil's call.
 
 ### Home Assistant add-on
 
