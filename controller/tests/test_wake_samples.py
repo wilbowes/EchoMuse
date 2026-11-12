@@ -1,5 +1,7 @@
+import io
 import json
 import wave
+import zipfile
 
 import pytest
 
@@ -310,3 +312,40 @@ def test_deleting_device_removes_sample_rows_and_audio(fresh_db, monkeypatch):
     assert observed == [True]
     assert db.get_wake_samples("dev1") == []
     assert not path.exists()
+
+
+def test_zip_groups_by_label_and_skips_missing_or_foreign_files(fresh_db):
+    wake, plain, pruned = (samples.filename("dev1") for _ in range(3))
+    foreign = samples.filename("dev2")
+    assert samples.save("dev1", wake, _pcm())
+    assert samples.save("dev1", plain, _pcm(byte=2))
+    assert samples.save("dev1", pruned, _pcm(byte=3))
+    assert samples.save("dev2", foreign, _pcm(byte=4))
+    samples.unlink("dev1", pruned)
+    rows = [
+        {"audio_file": wake, "label": "wake"},
+        {"audio_file": plain, "label": "weird"},      # unknown label: unreviewed
+        {"audio_file": pruned, "label": "not_wake"},  # file pruned: skipped
+        {"audio_file": foreign, "label": "wake"},     # another device's: skipped
+    ]
+    data = samples.build_zip("dev1", rows)
+    assert data is not None
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        assert sorted(zf.namelist()) == [f"unreviewed/{plain}", f"wake/{wake}"]
+        assert zf.read(f"wake/{wake}") == samples.encode_wav(_pcm())
+    assert samples.build_zip("dev1", []) is None
+
+
+def test_zip_keeps_the_newest_clips_when_capped(fresh_db, monkeypatch):
+    # The archive's memory bound is the retention constant itself, so a
+    # caller handing build_zip more rows than retention allows still gets
+    # KEEP_PER_DEVICE of them — taken from the top, rows arriving id DESC.
+    monkeypatch.setattr(samples, "KEEP_PER_DEVICE", 2)
+    rows = []
+    for i in range(4):
+        name = samples.filename("dev1")
+        assert samples.save("dev1", name, _pcm(byte=i + 1))
+        rows.append({"audio_file": name, "label": "wake"})
+    with zipfile.ZipFile(io.BytesIO(samples.build_zip("dev1", rows))) as zf:
+        expected = sorted(f"wake/{r['audio_file']}" for r in rows[:2])
+        assert sorted(zf.namelist()) == expected
