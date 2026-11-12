@@ -102,7 +102,7 @@ def test_turn_state_ttls_are_bounded():
     scene = em_scenes.resolve({})
     assert scene["listening_anim"]["ttlSec"] <= 30
     # The spinner spans HA think time AND the TTS fetch, so its TTL has to
-    # outlast _fetch_tts_audio's timeout (60s, two attempts) or it clears
+    # outlast em_tts_audio.fetch's timeout (60s, two attempts) or it clears
     # the ring during exactly the long responses that need it. Guard the
     # coupling so moving one without the other fails here.
     assert scene["spin_anim"]["ttlSec"] >= 120
