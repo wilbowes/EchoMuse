@@ -203,7 +203,7 @@ class FakeEcho:
         # As device/internal/client/data.go: identify before anything else.
         await self._data.send(json.dumps({"type": "identify", "device_id": self.device_id}))
         self._tasks = [asyncio.create_task(self._read_control()),
-                       asyncio.create_task(self._read_data())]
+                       asyncio.create_task(self._read_data(self._data))]
         await self.send({"type": "listen_state",
                          "state": "local" if "listen_session" in self.features else "stream"})
 
@@ -228,8 +228,19 @@ class FakeEcho:
                     reply.update(id=msg["id"], mono=int(time.monotonic() * 1000))
                 await self.send(reply)
 
-    async def _read_data(self) -> None:
-        async for raw in self._data:
+    async def redial_data(self):
+        """Open a second /data connection, as an Echo that lost power mid-
+        stream does before the controller notices the first is dead. The old
+        socket is returned, left open from this end."""
+        old = self._data
+        self._data = await websockets.connect(
+            f"ws://127.0.0.1:{self.controller.port}/data", max_size=None)
+        await self._data.send(json.dumps({"type": "identify", "device_id": self.device_id}))
+        self._tasks.append(asyncio.create_task(self._read_data(self._data)))
+        return old
+
+    async def _read_data(self, ws) -> None:
+        async for raw in ws:
             if not isinstance(raw, bytes) or not raw:
                 continue
             if raw[0] == 0x02:
