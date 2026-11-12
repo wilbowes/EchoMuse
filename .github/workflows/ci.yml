@@ -47,6 +47,17 @@ jobs:
       - name: Coverage floors
         working-directory: controller
         run: python tools/coverage_floor.py check coverage.json
+      # The real controller process, an Echo speaking the wire contract, and
+      # Home Assistant played by aioesphomeapi, the library HA's ESPHome
+      # integration uses (scenarios/harness.py). Its own pytest run, after the
+      # unit suite: aioesphomeapi and our vendored esphome/ register the same
+      # protobuf messages, which one process refuses. ffmpeg is not needed:
+      # the scenarios serve TTS as wire-rate WAV, which is passed through.
+      - name: Scenario tests
+        working-directory: controller
+        run: |
+          pip install -c requirements.txt aioesphomeapi==36.0.1
+          python -m pytest scenarios/ -v
       # The bench's scoring rules (#892). Its runs need captures, which stay
       # off the repository; the rules that score them are tested here.
       - name: Audio bench metrics
@@ -94,7 +105,7 @@ jobs:
       - name: Check for undefined names
         working-directory: controller
         run: |
-          out=$(python -m pyflakes em_*.py tools/*.py tests/*.py esphome/*.py 2>&1 \
+          out=$(python -m pyflakes em_*.py tools/*.py tests/*.py scenarios/*.py esphome/*.py 2>&1 \
                 | grep -i "undefined name" || true)
           if [ -n "$out" ]; then
             echo "$out"
