@@ -213,8 +213,8 @@ async def _run_update_locked(device_id: str, release: dict,
         else:
             binary = await em_releases.download(release["url"], release.get("version", ""))
             if binary is None:
-                await _update_failed(device_id,
-                                     "Failed to fetch binary from GitHub")
+                await _update_failed(device_id, em_releases.why_failed(
+                    release["url"], "Failed to fetch binary from GitHub"))
                 return
 
         # Record current version as previous before anything changes

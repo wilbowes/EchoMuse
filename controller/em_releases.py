@@ -24,6 +24,7 @@ import em_dbwriter
 import em_events
 import em_emos_update
 import em_firmware
+import em_release_sig
 from version import VERSION as CONTROLLER_VERSION
 from version import compare as _compare_versions
 from version import parse as _parse_version
@@ -509,6 +510,34 @@ async def poll_loop() -> None:
         await asyncio.sleep(max(interval, 1))
 
 
+async def _get(url: str, timeout: float) -> Optional[bytes]:
+    """The body of `url`, or None on any failure (logged)."""
+    try:
+        async with aiohttp.ClientSession(
+            max_field_size=DOWNLOAD_MAX_FIELD_SIZE,
+        ) as session:
+            async with session.get(
+                url, timeout=aiohttp.ClientTimeout(total=timeout),
+            ) as resp:
+                if resp.status != 200:
+                    log.error(f"[api] Download failed: HTTP {resp.status} for {url}")
+                    return None
+                return await resp.read()
+    except Exception as e:
+        log.error(f"[api] Download exception for {url}: {e}")
+        return None
+
+
+# Why the last download of a URL was refused, for the caller's error message.
+_refused: dict[str, str] = {}
+
+
+def why_failed(download_url: str, default: str) -> str:
+    """The refusal reason for a failed download(), else `default`."""
+    why = _refused.get(download_url)
+    return f"Refused: {why}" if why else default
+
+
 async def download(download_url: str,
                         version: str = "") -> Optional[bytes]:
     """
@@ -522,35 +551,39 @@ async def download(download_url: str,
     `version` is optional so a caller with only a URL still works; it simply
     does not get the cache. Nothing here can fail an update: a cache miss, an
     unwritable directory or a corrupt entry all end in an ordinary download.
+
+    Once em_release_sig has a key, the asset must carry a valid signature,
+    cache hit or not; a refusal returns None and why_failed() says why.
     """
+    loop = asyncio.get_event_loop()
+    data = None
     if version:
-        cached = await asyncio.get_event_loop().run_in_executor(
-            None, em_firmware.read, version
-        )
-        if cached is not None:
-            return cached
+        data = await loop.run_in_executor(None, em_firmware.read, version)
+    from_cache = data is not None
+    if data is None:
+        log.info(f"[api] Fetching binary: {download_url}")
+        data = await _get(download_url, 120)
+        if not data:
+            return None
 
-    log.info(f"[api] Fetching binary: {download_url}")
-    try:
-        async with aiohttp.ClientSession(
-            max_field_size=DOWNLOAD_MAX_FIELD_SIZE,
-        ) as session:
-            async with session.get(
-                download_url,
-                timeout=aiohttp.ClientTimeout(total=120),
-            ) as resp:
-                if resp.status != 200:
-                    log.error(f"[api] Binary download failed: HTTP {resp.status}")
-                    return None
-                data = await resp.read()
-    except Exception as e:
-        log.error(f"[api] Binary download exception: {e}")
-        return None
+    sig = None
+    if em_release_sig.enforced():
+        if from_cache:
+            sig = await loop.run_in_executor(None, em_firmware.read_sig, version)
+        if sig is None:
+            sig = await _get(download_url + em_release_sig.SIG_SUFFIX, 15)
+        why = em_release_sig.problem(download_url, data, sig)
+        if why:
+            _refused[download_url] = why
+            log.error(f"[api] REFUSED {download_url}: {why}")
+            return None
+        _refused.pop(download_url, None)
 
-    if version and data:
+    if version and not from_cache:
         # Off the event loop: hashing and writing 10MB blocks it for long
         # enough to delay speaker frames, and this runs during an OTA.
-        await asyncio.get_event_loop().run_in_executor(
-            None, em_firmware.write, version, data
-        )
+        await loop.run_in_executor(
+            None, lambda: em_firmware.write(version, data, sig=sig))
+    elif version and sig:
+        await loop.run_in_executor(None, em_firmware.write_sig, version, sig)
     return data

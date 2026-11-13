@@ -115,7 +115,8 @@ async def _get_provision_latest_binary(request: web.Request) -> web.Response:
 
     binary = await em_releases.download(release["url"], release.get("version", ""))
     if binary is None:
-        return em_http.error("fetch_failed", "Could not download binary from GitHub", 502)
+        return em_http.error("fetch_failed", em_releases.why_failed(
+            release["url"], "Could not download binary from GitHub"), 502)
 
     return web.Response(
         body=binary,
