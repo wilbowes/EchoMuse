@@ -16,7 +16,7 @@ sys.path.insert(0, str(CONTROLLER / "tools"))
 
 import bundle_check  # noqa: E402
 
-DID = "G090LF1180130NJG"
+DID = "G090LF9920230NJG"
 CAPS = ["mic", "speaker", "wake_cue", "volume_cue", "oww_local_only"]
 
 

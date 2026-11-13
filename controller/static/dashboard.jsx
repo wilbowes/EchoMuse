@@ -4081,7 +4081,7 @@ function _md5Hex(bytes) {
 // busybox at all, while a device with a root component added may well have
 // both. So neither form can be assumed and both have to be tried.
 //
-// Measured 2026-09-13 on G090LF11752215LE, TWRP 3.7.0_9-0, stock FireOS 6:
+// Measured 2026-09-13 on G090LF99305515LE, TWRP 3.7.0_9-0, stock FireOS 6:
 // `busybox md5sum` exits 127 and produces an empty string, which surfaced as
 // "start_server.sh reads unreadable" on a device whose script was installed
 // perfectly. The transfer was fine; the CHECK could not run.
@@ -4115,7 +4115,7 @@ async function deviceTools(c) {
   // FireOS 6 recovery has it compiled OUT: the command exits with
   // "dd: conv option disabled" having written nothing at all, which on a
   // partition write reads as 180MB/s and a read-back that still holds the old
-  // image. Measured 2026-09-13 on G090LF11752215LE; the device was never
+  // image. Measured 2026-09-13 on G090LF99305515LE; the device was never
   // modified, because a dd that refuses its arguments does nothing.
   //
   // Asked with a one-byte write to a temp file rather than by parsing a
@@ -7238,7 +7238,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // whether the binary or its interpreter is the thing missing. That made a
     // failed first attempt hand the retry a broken shim, which then SKIPPED
     // this whole block and reported the environment ready (measured on
-    // G090LF11803611NF, 2026-09-06: step 3 green, every su in step 4 dead).
+    // G090LF99207711NF, 2026-09-06: step 3 green, every su in step 4 dead).
     let suUid = (await c.shell('su -c "id -u" 2>&1')).trim();
     if (suUid !== '0') {
       addLog('  no working su in recovery — installing a shim (everything here is already root)');
@@ -7537,7 +7537,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // reached the add-on at all (measured 2026-09-06).
   //
   // Four little-endian u32s at fixed offsets, verified against real headers off
-  // G090LF1180440C95 and G090LF11803611NF. This is NOT a second copy of
+  // G090LF9920110C95 and G090LF99207711NF. This is NOT a second copy of
   // split_reference(): that goes on to parse the MTK wrapper and split the DTBs,
   // and everything it reads lives inside the region computed here. It also
   // validates what it is given, so a wrong answer here fails loudly on the next

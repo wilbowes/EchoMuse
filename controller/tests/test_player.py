@@ -1298,7 +1298,7 @@ def test_a_music_assistant_flow_is_known_unseekable_up_front():
     rejoining the live edge: 7.2s from "resume the music" to sound, measured
     2026-09-27. The URL says what it is, so the answer is known at play().
     """
-    flow = ("http://10.10.1.81:8097/flow/2gNgkp6Q/media_player.dev_test_1/"
+    flow = ("http://10.99.1.81:8097/flow/2gNgkp6Q/media_player.dev_test_1/"
             "f7c6af51508f43bdbec08d4b1e1ff139/media_player.dev_test_1.wav")
     assert em_player.known_unseekable(flow)
     for url in ("http://ma/track/def.flac", "http://radio/stream",
