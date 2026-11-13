@@ -38,15 +38,26 @@ check("biscuit, from /system", _echoBoard("AEOBC", "csm_biscuit"), "biscuit");
 check("TWRP's own biscuit strings", _echoBoard("Echo Dot 2nd Gen", "omni_biscuit"), "biscuit");
 check("a model naming Amazon, no codename read", _echoBoard("Amazon Echo Dot", ""), "biscuit");
 
-// Nothing else.
-check("Dot 3 (donut)", _echoBoard("", "donut_puffin"), "");
 // Read off 41C8 (stock FireOS 6) on 2026-11-01; ro.product.brand is Amazon.
-check("Dot 3, from /system", _echoBoard("AEODN", "donut_puffin"), "");
-check("Dot 3 with a model naming Amazon", _echoBoard("Amazon Echo Dot", "donut_puffin"), "");
-check("Dot 3 under a TWRP build", _echoBoard("Echo Dot 3rd Gen", "omni_donut"), "");
+check("Dot 3, from /system", _echoBoard("AEODN", "donut_puffin"), "donut");
+check("Dot 3 by codename alone", _echoBoard("", "donut_puffin"), "donut");
+check("Dot 3 by model alone", _echoBoard("AEODN", ""), "donut");
+check("Dot 3 with a model naming Amazon", _echoBoard("Amazon Echo Dot", "donut_puffin"), "donut");
+// TWRP's own strings are never the identity: in recovery it is read off /system.
+check("Dot 3 under a TWRP build's own strings", _echoBoard("Echo Dot 3rd Gen", "omni_donut"), "");
+check("a codename merely containing donut", _echoBoard("", "donut_puffin_x"), "");
+
+// Nothing else.
 check("Spot (rook)", _echoBoard("AEORK", "rook_puffin"), "");
 check("an unread identity", _echoBoard("", ""), "");
 check("a codename merely containing radar", _echoBoard("", "radar_puffin_x"), "");
+
+// Radar and donut run emOS only: the FireOS flow refuses both, by name.
+const emosOnly = src.slice(src.indexOf("const emosOnly = {"), src.indexOf("\n    }\n", src.indexOf("const emosOnly = {")));
+check("the FireOS flow refuses radar", /radar:/.test(emosOnly) && /!isEmos/.test(emosOnly), true);
+check("the FireOS flow refuses donut", /donut:/.test(emosOnly), true);
+check("and skips amonet-biscuit's unlock check for both",
+      /const unlock = emosOnly\[board\]/.test(src), true);
 
 // The detect step refuses '' in BOTH flows. The FireOS flow used to warn
 // and carry on, and a Dot 3 in TWRP (release unread) reached biscuit's patch.

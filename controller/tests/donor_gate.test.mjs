@@ -68,7 +68,7 @@ const FILES = _emosSystemFiles();
   // the files are the same relative paths). Firmware and the linker are loaded
   // by the kernel and by every dynamic binary, not named by init, so they are
   // checked by directory.
-  for (const gen of [5, 6]) {
+  for (const gen of [5, 6, "donut"]) {
     for (const f of FILES[gen]) {
       if (f === "bin/linker") continue;
       const named = f.includes("firmware/")
@@ -81,6 +81,10 @@ const FILES = _emosSystemFiles();
         !FILES[6].includes("bin/wpa_supplicant"));
   check("both generations need e2fsck, which checks /data every boot",
         FILES[5].includes("bin/e2fsck") && FILES[6].includes("bin/e2fsck"));
+  check("the donut needs e2fsck too", FILES.donut.includes("bin/e2fsck"));
+  check("the donut's WiFi is the SDIO modules, not biscuit's MT6620 tools",
+        FILES.donut.some(f => f.endsWith("wlan_mt76x8_sdio.ko"))
+        && !FILES.donut.some(f => f.includes("wmt_")));
 }
 
 // ── the probe script ────────────────────────────────────────────────────────
@@ -100,7 +104,7 @@ const FILES = _emosSystemFiles();
   check("tests files are non-empty, not merely present", s.includes('[ -s "$R/$f" ]'));
   check("checks the nested (FireOS 6) layout before the root one",
         s.indexOf("$M/system/build.prop") < s.indexOf('"$M/build.prop"'));
-  for (const f of new Set([...FILES[5], ...FILES[6]])) {
+  for (const f of new Set(Object.values(FILES).flat())) {
     check(`asks about ${f}`, s.includes(f));
   }
   check("ends with a sentinel, so a cut-off probe is not a clean one",
@@ -116,7 +120,7 @@ function sysLines(x, { node = `/dev/block/mmcblk0p1${x === "a" ? 3 : 4}`, mount 
   if (mount !== "ok") return out;
   out.push(`SYS_${x}_layout=${layout}`, `SYS_${x}_release=${release}`,
            `SYS_${x}_name=${name}`, `SYS_${x}_incremental=${build}`);
-  for (const f of new Set([...FILES[5], ...FILES[6]])) {
+  for (const f of new Set(Object.values(FILES).flat())) {
     out.push(`FILE_${x} ${f} ${files.includes(f) && !missing.includes(f) ? "yes" : "no"}`);
   }
   return out;
@@ -313,6 +317,33 @@ const armB = [{ name: "boot_b", arch: "arm" }];
   check("radar still needs the TWRP version", !r(probe({ lk: RADAR_LK, twrp: "" }), "v2", armBoth).ok);
   const bad = r(probe({ lk: RADAR_LK, b: FOS5 }), "v2", armBoth);
   check("radar's refusal names the Echo 2nd gen", /Echo 2nd gen/.test(bad.reason));
+}
+
+// ── donut (Echo Dot 3rd gen): kaeru, FireOS 6 on a 64-bit kernel ──────────
+{
+  const d = (p, layout, heads) => donorVerdict({ probe: p, layout, heads, files: FILES,
+                                                 board: "donut" });
+  const DONUT6 = { ...FOS6, name: "Fire OS 6.5.7.5 (NS6575/8344)", files: FILES.donut };
+  const arm64Both = [{ name: "boot_a", arch: "arm64" }, { name: "boot_b", arch: "arm64" }];
+  const p = (o = {}) => probe({ lk: "", a: DONUT6, b: DONUT6, ...o });
+  const ok = d(p(), "v2", arm64Both);
+  check("donut with FireOS 6 in both slots and 64-bit kernels builds, as generation 6",
+        ok.ok && ok.gen === 6);
+  check("donut does not need lk_a to be readable (kaeru, not amonet)", ok.ok);
+  check("donut refuses a 32-bit kernel",
+        !d(p(), "v2", [{ name: "boot_a", arch: "arm" }, { name: "boot_b", arch: "arm64" }]).ok);
+  const nomod = d(p({ a: { ...DONUT6, missing: ["lib/modules/wlan_mt76x8_sdio.ko"] } }), "v2", arm64Both);
+  check("donut refuses a /system without the SDIO WiFi module",
+        !nomod.ok && /wlan_mt76x8_sdio\.ko/.test(nomod.reason));
+  check("donut still needs FireOS 6 in BOTH slots", !d(p({ b: FOS5 }), "v2", arm64Both).ok);
+  check("donut refuses amonet-biscuit's _x layout", !d(p(), "v1", arm64Both).ok);
+  check("donut still needs the TWRP version", !d(p({ twrp: "" }), "v2", arm64Both).ok);
+  check("without its board, a donut is not built as biscuit",
+        !donorVerdict({ probe: p(), layout: "v2", heads: arm64Both, files: FILES }).ok);
+  const bad = d(p({ b: FOS5 }), "v2", arm64Both);
+  check("donut's refusal names the Echo Dot 3rd gen", /Echo Dot 3rd gen/.test(bad.reason));
+  const k32 = d(p(), "v2", [{ name: "boot_a", arch: "arm" }, { name: "boot_b", arch: "arm64" }]);
+  check("donut's kernel refusal says 64-bit is what it runs", /64-bit kernel an Echo Dot 3rd gen/.test(k32.reason));
 }
 
 if (fails) { console.log(`\n${fails} failure(s)`); process.exit(1); }

@@ -2085,6 +2085,24 @@ this TWRP marks the slot it installed to as active, so the post's flip makes
 the second install hit B again: install until slot A has been written, and
 finish on `_b`, the slot `boot-root.zip` patches for root.
 
+### Donut (2026-11-10, not yet run on hardware)
+
+- **2026-11-10, walked the emOS flow for a donut, code only.** Before this a
+  donut was refused at Connect (`_echoBoard` knew biscuit and radar), and past
+  that `donorVerdict` would have refused it three ways: no amonet LK (it is
+  unlocked with kaeru), a 64-bit kernel where FireOS 6 meant 32-bit, and
+  `/system` lacking biscuit's MT6620 WiFi tools (its MT7668 is SDIO, brought
+  up from `wlan_mt76x8_sdio*.ko`). All three are now board-aware. The
+  controller side already knew the donut (`em_emos_build` cmdline recipe,
+  `skip_initramfs`, `FIREOS6_BOARDS`; `em_boards` model; init's ttyGS0 major).
+- **Owed to a bench run with 41C8** (now on emOS, so stock first): what the
+  donut's TWRP reports as its version and how it maps by-name partitions
+  (`classifyBootTarget`); whether `system_a` and `system_b` both hold FireOS
+  6, which the gate requires as for radar (41C8 booted `_b`); whether
+  `bin/e2fsck` is on its `/system`.
+- **The latest emOS release (`emos-v0.11`, 2026-11-08) predates #1134**, so a
+  wizard-built donut has no Bluetooth until the next emOS release.
+
 ### The emOS flow, and what a run against real hardware found
 
 The nine-step emOS flow ran end to end for the first time on 2026-09-06 and
