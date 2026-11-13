@@ -387,10 +387,13 @@ def cmd_build(args) -> None:
 
     import torch
 
-    if torch.cuda.is_available():
-        log(f"torch {torch.__version__} — CUDA: {torch.cuda.get_device_name(0)}")
+    if torch.cuda.is_available():  # ROCm torch answers here too
+        stack = f"ROCm {torch.version.hip}" if torch.version.hip else "CUDA"
+        log(f"torch {torch.__version__} — {stack}: {torch.cuda.get_device_name(0)}")
+    elif hasattr(torch, "xpu") and torch.xpu.is_available():
+        log(f"torch {torch.__version__} — XPU: {torch.xpu.get_device_name(0)}")
     else:
-        log(f"torch {torch.__version__} — no CUDA device visible, falling back to CPU "
+        log(f"torch {torch.__version__} — no GPU visible, falling back to CPU "
             "(generation and training will be slow)")
 
     steps = BUILD_STEPS[BUILD_STEPS.index(args.from_step):]

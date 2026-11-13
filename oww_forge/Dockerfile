@@ -1,8 +1,12 @@
 # oww_forge — openWakeWord custom wake-word trainer.
 #
 # Build args:
-#   GPU=1  → CUDA torch wheels (large image, fast piper generation + training)
-#   GPU=0  → CPU-only torch (default; ~3GB image, generation/training is slower)
+#   GPU=1     → CUDA torch wheels (NVIDIA; large image, fast generation + training)
+#   GPU=rocm  → ROCm 6.3 torch wheels (AMD). ROCm torch answers as torch.cuda,
+#               so upstream runs unchanged; the host needs the amdgpu driver.
+#   GPU=xpu   → XPU torch wheels (Intel Arc / Core Ultra), Intel's user-space
+#               GPU driver, and patch_xpu.py over upstream's CUDA-only calls.
+#   GPU=0     → CPU-only torch (default; ~3GB image, generation/training is slower)
 #
 # All pins are deliberate: openwakeword's train.py imports `generate_samples`
 # from the piper-sample-generator repo ROOT, which only exists up to the
@@ -19,19 +23,51 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git wget ca-certificates libsndfile1 ffmpeg build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# torch first, so the CPU/GPU split doesn't invalidate the rest of the cache.
-# cu128 is required for Blackwell cards (RTX 50xx = sm_120); these wheels fall
-# back to CPU cleanly at runtime when no GPU is visible.
-RUN if [ "$GPU" = "1" ]; then \
-        pip install --no-cache-dir torch==2.7.1 torchaudio==2.7.1 \
-            --index-url https://download.pytorch.org/whl/cu128; \
-    else \
-        pip install --no-cache-dir torch==2.7.1 torchaudio==2.7.1 \
-            --index-url https://download.pytorch.org/whl/cpu; \
+# Intel's user-space GPU driver (Level Zero), for GPU=xpu only. Debian has no
+# packages for it; these are Intel's release debs for compute-runtime
+# 26.40.40196.8 and what its release notes pair it with, by hash (the
+# compute-runtime three match Intel's ww40.sum).
+RUN if [ "$GPU" = "xpu" ]; then \
+        cd /tmp \
+        && for u in \
+            intel/intel-graphics-compiler/releases/download/v2.42.6/intel-igc-core-2_2.42.6+23070_amd64.deb \
+            intel/intel-graphics-compiler/releases/download/v2.42.6/intel-igc-opencl-2_2.42.6+23070_amd64.deb \
+            intel/compute-runtime/releases/download/26.40.40196.8/intel-opencl-icd_26.40.40196.8-0_amd64.deb \
+            intel/compute-runtime/releases/download/26.40.40196.8/libigdgmm12_22.10.2_amd64.deb \
+            intel/compute-runtime/releases/download/26.40.40196.8/libze-intel-gpu1_26.40.40196.8-0_amd64.deb \
+            oneapi-src/level-zero/releases/download/v1.34.0/libze1_1.34.0+u24.04_amd64.deb; \
+           do wget -q "https://github.com/$u"; done \
+        && printf '%s\n' \
+            'e20539632f2d99875d8f8b225d5da58b31f98baa54bb47c6328aa98ec473ab9d  intel-igc-core-2_2.42.6+23070_amd64.deb' \
+            '7f5593cf828503ffb8450967768bde9209e22753bc576296e846b5a751011fa3  intel-igc-opencl-2_2.42.6+23070_amd64.deb' \
+            '96046069e94680b761df6e83ddc64244721178b826e3e1f8af3ca104cfd0c7c2  intel-opencl-icd_26.40.40196.8-0_amd64.deb' \
+            '053fceadb84a1d2f9a30a0d1bc9b16424b3f1a90cc49900fcd80aadcf25c8a4d  libigdgmm12_22.10.2_amd64.deb' \
+            'd9c86b2bb195baea6936c2708846cd1fceeadc39bc5e167f728858a5ca6fb86e  libze-intel-gpu1_26.40.40196.8-0_amd64.deb' \
+            '45210e4549cd965ad7b9f160eefe53cbcdba01af341bea7ac7ba0aedeeb613ba  libze1_1.34.0+u24.04_amd64.deb' \
+           | sha256sum -c - \
+        && apt-get update && apt-get install -y --no-install-recommends ./*.deb \
+        && rm -rf /tmp/*.deb /var/lib/apt/lists/*; \
     fi
 
+# torch first, so the CPU/GPU split doesn't invalidate the rest of the cache.
+# cu128 is required for Blackwell cards (RTX 50xx = sm_120); every variant
+# falls back to CPU at runtime when no GPU is visible. The checks fail the
+# build if the wrong variant was installed, or a later install replaced it
+# (the CPU index is not checked: its arm64 wheels carry no +cpu).
+RUN case "$GPU" in \
+        1)    index=cu128 ;; \
+        rocm) index=rocm6.3 ;; \
+        xpu)  index=xpu ;; \
+        *)    index=cpu ;; \
+    esac \
+    && pip install --no-cache-dir torch==2.7.1 torchaudio==2.7.1 \
+        --index-url "https://download.pytorch.org/whl/$index" \
+    && python -c "import torch; v = torch.__version__; print('torch', v); assert '$index' == 'cpu' or v.endswith('+$index'), v"
+
 COPY requirements.txt /opt/forge/requirements.txt
-RUN pip install --no-cache-dir -r /opt/forge/requirements.txt
+RUN pip install --no-cache-dir -r /opt/forge/requirements.txt \
+    && python -c "import torch, sys; print('torch', torch.__version__)" \
+    && if [ "$GPU" != "0" ]; then python -c "import torch; assert '+' in torch.__version__ and not torch.__version__.endswith('+cpu'), torch.__version__"; fi
 
 # openWakeWord, pinned to a known-good main commit (train.py + example config
 # verified against this SHA — see oww_forge/README.md)
@@ -95,6 +131,16 @@ RUN python /tmp/patch_oww_g2p.py /opt/openwakeword/openwakeword/data.py && rm /t
 COPY forge_negatives.py /opt/openwakeword/openwakeword/forge_negatives.py
 COPY patch_oww_negatives.py /tmp/patch_oww_negatives.py
 RUN python /tmp/patch_oww_negatives.py /opt/openwakeword/openwakeword/train.py && rm /tmp/patch_oww_negatives.py
+
+# Intel GPUs are torch.xpu, and upstream asks only for torch.cuda; see
+# patch_xpu.py. Every other image keeps upstream's device code as it is.
+COPY patch_xpu.py /tmp/patch_xpu.py
+RUN if [ "$GPU" = "xpu" ]; then \
+        for f in /opt/openwakeword/openwakeword/train.py /opt/openwakeword/openwakeword/data.py \
+                 /opt/piper-sample-generator/generate_samples.py; do \
+            python /tmp/patch_xpu.py "$f" || exit 1; \
+        done; \
+    fi && rm /tmp/patch_xpu.py
 
 COPY forge.py model_metadata.py google_tts.py forge_web.py forge_progress.py piper_voices.py config.template.yml /opt/forge/
 COPY static/ /opt/forge/static/
