@@ -8,10 +8,14 @@
 ## what was verified — a local build re-resolves the floating layers under
 ## piper-sample-generator and openWakeWord every time it runs.
 ##
-## TWO IMAGES, and picking the wrong one costs you a night:
+## FOUR IMAGES, and picking the wrong one costs you a night:
 ##
 ##   :latest       CUDA, linux/amd64 only. What you want with an NVIDIA GPU.
+##   :latest-rocm  ROCm 6.3, linux/amd64 only. An AMD GPU: the forge-ui-amd service.
+##   :latest-xpu   XPU, linux/amd64 only. Intel Arc / Core Ultra: forge-ui-intel.
 ##   :latest-cpu   CPU torch, linux/amd64 + linux/arm64.
+##
+## The AMD and Intel images have not yet been run on AMD or Intel hardware.
 ##
 ## On Apple Silicon use `-cpu` and the `forge-cpu` service. The arm64 image
 ## runs natively rather than under emulation, which is the difference between
@@ -26,6 +30,16 @@ x-forge-base: &forge-base
     # Assets (~25GB), per-wake-word workdirs, and finished models.
     # Point this at a disk with room.
     - ./data:/data
+
+# AMD: the amdgpu kernel driver on the host; the ROCm runtime is in the image.
+# A card ROCm does not list may run as the nearest one it does, e.g.
+# HSA_OVERRIDE_GFX_VERSION=10.3.0 (RDNA 2) or 11.0.0 (RDNA 3).
+x-amd: &amd
+  devices: [/dev/kfd, /dev/dri]
+
+# Intel: the i915 or xe kernel driver on the host; the user-space driver is in the image.
+x-intel: &intel
+  devices: [/dev/dri]
 
 x-gpu: &gpu
   deploy:
@@ -57,6 +71,27 @@ services:
       - "8769:8769"
     restart: unless-stopped
     profiles: ["cpu"]
+
+  # the web frontend on an AMD or Intel GPU
+  forge-ui-amd:
+    <<: [*forge-base, *amd]
+    image: ghcr.io/wilbowes/echomuse-forge:latest-rocm
+    container_name: oww-forge-ui-amd
+    command: ["ui"]
+    ports:
+      - "8769:8769"
+    restart: unless-stopped
+    profiles: ["amd"]
+
+  forge-ui-intel:
+    <<: [*forge-base, *intel]
+    image: ghcr.io/wilbowes/echomuse-forge:latest-xpu
+    container_name: oww-forge-ui-intel
+    command: ["ui"]
+    ports:
+      - "8769:8769"
+    restart: unless-stopped
+    profiles: ["intel"]
 
   # one-shot CLI with GPU
   forge:

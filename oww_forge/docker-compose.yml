@@ -20,7 +20,8 @@ x-forge-base: &forge-base
   build:
     context: .
     args:
-      # GPU=0 docker compose build … for the ~3GB CPU-only image
+      # GPU=0 docker compose build … for the ~3GB CPU-only image;
+      # GPU=rocm (AMD) or GPU=xpu (Intel) for those GPUs
       GPU: "${GPU:-1}"
   # torch DataLoader workers pass tensors via /dev/shm; Docker's 64MB
   # default kills them with bus errors during the training step
@@ -33,6 +34,13 @@ x-forge-base: &forge-base
     # Only needed for Google TTS positives — put a service-account JSON at
     # ./data/google-credentials.json (gitignored) or drop this mapping.
     - GOOGLE_APPLICATION_CREDENTIALS=/data/google-credentials.json
+
+# AMD and Intel GPUs are passed through as devices (see docker-compose.deploy.yml).
+x-amd: &amd
+  devices: [/dev/kfd, /dev/dri]
+
+x-intel: &intel
+  devices: [/dev/dri]
 
 x-gpu: &gpu
   deploy:
@@ -63,6 +71,27 @@ services:
       - "8769:8769"
     restart: unless-stopped
     profiles: ["cpu"]
+
+  # the web frontend on an AMD or Intel GPU:
+  #   GPU=rocm docker compose --profile amd up -d --build forge-ui-amd
+  #   GPU=xpu docker compose --profile intel up -d --build forge-ui-intel
+  forge-ui-amd:
+    <<: [*forge-base, *amd]
+    container_name: oww-forge-ui-amd
+    command: ["ui"]
+    ports:
+      - "8769:8769"
+    restart: unless-stopped
+    profiles: ["amd"]
+
+  forge-ui-intel:
+    <<: [*forge-base, *intel]
+    container_name: oww-forge-ui-intel
+    command: ["ui"]
+    ports:
+      - "8769:8769"
+    restart: unless-stopped
+    profiles: ["intel"]
 
   # one-shot CLI with GPU
   forge:

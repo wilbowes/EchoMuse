@@ -11,14 +11,16 @@ name: Forge Release (Docker image)
 # what was actually verified. Same argument as the controller's
 # promote-don't-rebuild flow, arrived at from the other direction.
 #
-# TWO VARIANTS, and the split is deliberate:
+# FOUR VARIANTS, and the split is deliberate:
 #
-#   :X.Y.Z / :latest          CUDA, linux/amd64 ONLY
-#   :X.Y.Z-cpu / :latest-cpu  CPU torch, linux/amd64 + linux/arm64
+#   :X.Y.Z / :latest            CUDA (NVIDIA), linux/amd64 ONLY
+#   :X.Y.Z-rocm / :latest-rocm  ROCm 6.3 (AMD), linux/amd64 ONLY
+#   :X.Y.Z-xpu / :latest-xpu    XPU (Intel Arc / Core Ultra), linux/amd64 ONLY
+#   :X.Y.Z-cpu / :latest-cpu    CPU torch, linux/amd64 + linux/arm64
 #
-# CUDA is amd64-only because there is no arm64 machine anyone would train on
-# with an NVIDIA GPU attached; building it would spend runner time producing
-# an image for hardware that does not exist.
+# The GPU images are amd64-only because there is no arm64 machine anyone
+# would train on with one of those GPUs attached; building it would spend
+# runner time producing an image for hardware that does not exist.
 #
 # The CPU variant IS multi-arch, for Apple Silicon. Note what that does and
 # does not buy: Docker Desktop on macOS runs containers in a Linux VM with no
@@ -51,9 +53,17 @@ permissions:
   contents: read
 
 jobs:
-  # ── CUDA, amd64 ──────────────────────────────────────────────────────────
-  cuda:
+  # ── GPU images, amd64: NVIDIA, AMD, Intel ────────────────────────────────
+  gpu:
+    name: gpu (${{ matrix.name }})
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: CUDA, arg: "1", suffix: "", floating: latest}
+          - {name: ROCm, arg: rocm, suffix: "-rocm", floating: latest-rocm}
+          - {name: XPU, arg: xpu, suffix: "-xpu", floating: latest-xpu}
     permissions:
       contents: read
       packages: write
@@ -61,9 +71,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # A hosted runner has roughly 14GB free on /, and CUDA torch does not
-      # fit in it: the wheels alone are ~3GB and the installed image lands
-      # near 10GB before the build cache. Without this the build dies partway
+      # A hosted runner has roughly 14GB free on /, and GPU torch does not
+      # fit in it: the CUDA wheels alone are ~3GB and the installed image
+      # lands near 10GB before the build cache (ROCm's is larger). Without this the build dies partway
       # with a disk error that reads like a broken Dockerfile. Done inline
       # rather than with a third-party action, so nothing outside this repo
       # gets to run as part of a publish.
@@ -98,21 +108,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push (CUDA, amd64)
+      - name: Build and push (${{ matrix.name }}, amd64)
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: oww_forge
           file: oww_forge/Dockerfile
           platforms: linux/amd64
-          build-args: GPU=1
+          build-args: GPU=${{ matrix.arg }}
           push: ${{ steps.v.outputs.publish == 'true' }}
           tags: |
-            ${{ env.IMAGE }}:${{ steps.v.outputs.version }}
-            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ steps.v.outputs.version }}${{ matrix.suffix }}
+            ${{ env.IMAGE }}:${{ matrix.floating }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.version=${{ steps.v.outputs.version }}
-            org.opencontainers.image.description=EchoMuse wake-word trainer (CUDA)
+            org.opencontainers.image.version=${{ steps.v.outputs.version }}${{ matrix.suffix }}
+            org.opencontainers.image.description=EchoMuse wake-word trainer (${{ matrix.name }})
 
   # ── CPU, one job per architecture on its OWN runner ──────────────────────
   #
