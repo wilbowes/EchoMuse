@@ -324,7 +324,8 @@ async def fetch_payload(arch: str, board: str | None = None) -> tuple:
     if raw is None:
         return None, {}, version, em_http.error(
             "fetch_failed",
-            f"Could not download {PAYLOAD_ASSET} from GitHub", 502)
+            em_releases.why_failed(bundle_asset["url"],
+                                   f"Could not download {PAYLOAD_ASSET} from GitHub"), 502)
 
     # Checked against the digests the release recorded. Loud, because a bad
     # release is bad for everyone and the next move is a partition write.
@@ -434,7 +435,8 @@ async def _fetch_one_init(release: dict, arch: str) -> tuple:
     binary = await em_releases.download(asset["url"], f"{release['version']}-{name}")
     if binary is None:
         return None, release["version"], em_http.error(
-            "fetch_failed", "Could not download the emOS init from GitHub", 502)
+            "fetch_failed", em_releases.why_failed(
+                asset["url"], "Could not download the emOS init from GitHub"), 502)
 
     problems = em_emos_build.init_binary_problems(binary, arch)
     if problems:

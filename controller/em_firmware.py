@@ -131,7 +131,8 @@ def read(version: str, db_path: str | None = None) -> bytes | None:
     return data
 
 
-def write(version: str, data: bytes, db_path: str | None = None) -> bool:
+def write(version: str, data: bytes, db_path: str | None = None,
+          sig: bytes | None = None) -> bool:
     """
     Cache `data` for `version`. False if it could not be cached — which is
     never a reason for the caller to fail.
@@ -147,6 +148,8 @@ def write(version: str, data: bytes, db_path: str | None = None) -> bool:
         path.parent.mkdir(parents=True, exist_ok=True)
         part.write_bytes(data)
         _sidecar(path, ".md5").write_text(md5_bytes(data), encoding="utf-8")
+        if sig:
+            _sidecar(path, ".sig").write_bytes(sig)
         part.replace(path)
     except OSError as e:
         log.warning(f"[firmware] could not cache {version}: {e}")
@@ -158,6 +161,26 @@ def write(version: str, data: bytes, db_path: str | None = None) -> bool:
     log.info(f"[firmware] cached {version} ({len(data):,} bytes)")
     prune(db_path)
     return True
+
+
+def read_sig(version: str, db_path: str | None = None) -> bytes | None:
+    """The release signature cached beside `version`, or None."""
+    path = cache_path(version, db_path)
+    try:
+        return _sidecar(path, ".sig").read_bytes() if path else None
+    except OSError:
+        return None
+
+
+def write_sig(version: str, sig: bytes, db_path: str | None = None) -> None:
+    """Cache a signature fetched for an already-cached binary; best effort."""
+    path = cache_path(version, db_path)
+    if path is None or not path.is_file():
+        return
+    try:
+        _sidecar(path, ".sig").write_bytes(sig)
+    except OSError as e:
+        log.warning(f"[firmware] could not cache the signature for {version}: {e}")
 
 
 def prune(db_path: str | None = None, keep: int = KEEP_RELEASES) -> list[str]:
@@ -172,7 +195,7 @@ def prune(db_path: str | None = None, keep: int = KEEP_RELEASES) -> list[str]:
     try:
         entries = [p for p in d.iterdir()
                    if p.is_file() and p.name.startswith("server-")
-                   and not p.name.endswith((".md5", ".part"))]
+                   and not p.name.endswith((".md5", ".part", ".sig"))]
     except OSError:
         return []
 
@@ -182,6 +205,7 @@ def prune(db_path: str | None = None, keep: int = KEEP_RELEASES) -> list[str]:
         try:
             p.unlink()
             _sidecar(p, ".md5").unlink(missing_ok=True)
+            _sidecar(p, ".sig").unlink(missing_ok=True)
             removed.append(p.name)
         except OSError as e:
             log.warning(f"[firmware] could not prune {p.name}: {e}")

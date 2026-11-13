@@ -379,6 +379,13 @@ system`/`Power down`; marker after a complete read; SSIDs dropped.
   sending.** `TransferResult` names the stage; a silent shell is a link
   fault. No `cut`; firmware `require_verify=True`. Free space via
   `parse_free_mb`; unreadable = carry on.
+- **Release assets must be signed** once `em_release_sig.KEYS` holds a key:
+  `em_releases.download` (all four install paths) verifies `<asset>.sig`
+  (Ed25519 over tag + name + sha256) on download AND cache hit, and refuses
+  otherwise (`why_failed` gives the reason). Empty KEYS = not enforced. User
+  uploads are exempt. Signing is `tools/sign_release.py`, off GitHub and off
+  this box; the key PR also turns release workflows to drafts (immutable
+  releases forbid adding a `.sig` after publishing).
 - **The running version is refused** on a single update (`already_running`),
   skipped in a fleet one (`extract_binary_version`); `force` must stay; the
   upload token is popped only on commit.

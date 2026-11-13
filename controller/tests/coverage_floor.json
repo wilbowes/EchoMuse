@@ -60,6 +60,7 @@
  "em_process_stats.py": 81.0,
  "em_reconcile.py": 24.0,
  "em_recordings.py": 95.0,
+ "em_release_sig.py": 95.0,
  "em_releases.py": 32.0,
  "em_routes_activity.py": 21.0,
  "em_routes_auth.py": 32.0,
