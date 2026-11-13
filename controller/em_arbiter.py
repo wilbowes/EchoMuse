@@ -124,16 +124,25 @@ class Claim(NamedTuple):
     gains: tuple | None = None
     # Heard over this Echo's own speaker output.
     over_playback: bool = False
+    # This Echo has a timer ringing.
+    ringing: bool = False
 
 
 def pick(claims: list) -> tuple:
     """
     (winner, why) among claims for one utterance.
 
-    The loudest wins. Without levels that can be compared the earliest heard
-    wins, and a tie goes to the claim that arrived first. `why` is for the
-    log line.
+    An Echo with a timer ringing wins (#862): a wake word over a ring is
+    answering that ring, and the ringer is always heard over its own
+    playback, so on time alone a neighbour that heard it sooner took it.
+    Otherwise the loudest wins. Without levels that can be compared the
+    earliest heard wins, and a tie goes to the claim that arrived first.
+    `why` is for the log line.
     """
+    ringers = [c for c in claims if c.ringing]
+    if ringers and len(ringers) < len(claims):
+        won, why = pick(ringers)
+        return won, "ringing" if len(ringers) == 1 else f"ringing; {why}"
     earliest = min(claims, key=lambda c: c.heard)
     if len(claims) < 2:
         return earliest, "only claim"
@@ -200,7 +209,8 @@ class WakeArbiter:
     async def contest(self, device_id: str, window_s: float,
                       heard_at: float | None = None, slack_s: float = 0.0,
                       hold_s: float = 0.0, level: float | None = None,
-                      gains: tuple | None = None, over_playback: bool = False) -> str:
+                      gains: tuple | None = None, over_playback: bool = False,
+                      ringing: bool = False) -> str:
         """
         claim(), held so that every Echo that heard the utterance is counted
         and `pick()` chooses the loudest, or failing a usable level the one
@@ -220,7 +230,7 @@ class WakeArbiter:
         if self._contest is not None:
             opened, entries, decided = self._contest
             if abs(heard - opened) < window_s:
-                entries.append(Claim(heard, device_id, level, gains, over_playback))
+                entries.append(Claim(heard, device_id, level, gains, over_playback, ringing))
                 return await asyncio.shield(decided)
 
         # No contest to join. A granted winner still holds this utterance.
@@ -229,7 +239,7 @@ class WakeArbiter:
                 and now - self._heard_at < window_s + max(0.0, slack_s)):
             return self._winner
 
-        entries = [Claim(heard, device_id, level, gains, over_playback)]
+        entries = [Claim(heard, device_id, level, gains, over_playback, ringing)]
         decided: asyncio.Future = loop.create_future()
         self._contest = (heard, entries, decided)
         try:

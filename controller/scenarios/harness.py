@@ -259,20 +259,21 @@ class FakeEcho:
         return any(m.get("session") == sid for m in self.sent("listen_close"))
 
     async def wake(self, speech: bytes, score: float = 0.9,
-                   max_open: float = 30.0) -> int:
+                   max_open: float = 30.0, **extra) -> int:
         """Say the wake word, then `speech` (16 kHz PCM), as a session.
 
         As the firmware does: the session streams until the controller closes
         it or `max_open` passes (the Echo's own limit), so after the speech
         the room is silent but frames keep coming. Returns once the speech
-        has been sent; the silence streams in the background.
+        has been sent; the silence streams in the background. `extra` goes
+        on the oww_wake (level, peak, barge).
         """
         self._session += 1
         sid = self._session
         await self.send({"type": "oww_wake", "score": score, "threshold": 0.5,
                          "ageMs": 0, "session": sid, "barge": False,
                          # RMS 0..1, as listen.Gate.Floor(): a quiet room.
-                         "floor": 0.003})
+                         "floor": 0.003, **extra})
         frames = [speech[i:i + FRAME_BYTES] for i in range(0, len(speech), FRAME_BYTES)]
         done = asyncio.Event()
 

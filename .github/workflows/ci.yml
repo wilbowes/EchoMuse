@@ -51,11 +51,12 @@ jobs:
       # Home Assistant played by aioesphomeapi, the library HA's ESPHome
       # integration uses (scenarios/harness.py). Its own pytest run, after the
       # unit suite: aioesphomeapi and our vendored esphome/ register the same
-      # protobuf messages, which one process refuses. ffmpeg is not needed:
-      # the scenarios serve TTS as wire-rate WAV, which is passed through.
+      # protobuf messages, which one process refuses. TTS is served as wire-
+      # rate WAV and passed through; ffmpeg decodes the timer alarm's FLAC.
       - name: Scenario tests
         working-directory: controller
         run: |
+          command -v ffmpeg || { sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ffmpeg; }
           pip install -c requirements.txt aioesphomeapi==36.0.1
           python -m pytest scenarios/ -v
       # The bench's scoring rules (#892). Its runs need captures, which stay

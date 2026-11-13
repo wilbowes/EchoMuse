@@ -276,6 +276,12 @@ earliest-heard when:
 - the Echoes' MICPGA or digital gain settings differ, since those are still
   inside the reading.
 
+**An Echo with a timer ringing wins before any of that** (#862): a wake word
+over a ring is answering it, and the ringer, heard over its own alarm, would
+otherwise lose on time to whichever neighbour heard it first. Among several
+ringing Echoes the rules above choose. A ringer's claim that arrives after
+the hold has ended still meets the granted winner.
+
 Why not time: the scorer works in 80 ms frames on a grid that starts at a
 different moment on each Echo, so the order of hearing is mostly frame
 alignment. Three Echoes side by side reported one word 89 to 224 ms apart
