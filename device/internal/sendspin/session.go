@@ -80,6 +80,9 @@ var errProtocol = errors.New("sendspin: protocol error")
 // run drives the connection to its end. Every exit path closes the socket.
 func (s *session) run() {
 	defer s.close()
+	// s.dec is only touched from this goroutine (the reader), so it is
+	// freed here rather than in close, which other goroutines call.
+	defer func() { s.dec.close() }()
 	s.ws.SetReadLimit(maxReadBytes)
 	if err := s.handshake(); err != nil {
 		log.Printf("[sendspin] %s: handshake failed: %v", s.remote, err)
@@ -177,8 +180,11 @@ func (s *session) dispatch(env envelope) error {
 	case "stream/clear":
 		var r streamRoles
 		json.Unmarshal(env.Payload, &r)
-		if r.covers("player") && s.isAdmitted() {
-			s.c.player.clear()
+		if r.covers("player") {
+			s.dec.reset()
+			if s.isAdmitted() {
+				s.c.player.clear()
+			}
 		}
 	case "stream/end":
 		var r streamRoles
@@ -402,7 +408,8 @@ func (s *session) isAdmitted() bool { return s.c.isAdmitted(s) }
 // and moves the device out of its group, so it must never be sent merely
 // because the clock is still converging. The spec's rule — never true before
 // the clock has converged — is kept by holding the first report until it
-// has (sendState), about 0.4s after activation against 9.1.1's 5s allowance.
+// has (sendState), two round trips after activation (onTime) against 9.1.1's
+// 5s allowance.
 func (s *session) available() bool { return !s.c.external() }
 
 // sendState reports availability and the player's state: on activation, on
@@ -428,6 +435,7 @@ func (s *session) sendState() {
 			Volume:            set.Volume,
 			Muted:             set.Muted,
 			StaticDelayMs:     set.StaticDelayMs,
+			OutputDelayMs:     set.StaticDelayMs,
 			RequiredLeadMs:    requiredLeadMs,
 			MinBufferMs:       s.c.minBufferMs(),
 			SupportedCommands: []string{"set_static_delay"},
@@ -450,10 +458,20 @@ func (s *session) onTime(t serverTime) {
 	offset := float64((t.ServerReceived-t.ClientTransmitted)+(t.ServerTransmitted-now)) / 2
 	delay := float64((now-t.ClientTransmitted)-(t.ServerTransmitted-t.ServerReceived)) / 2
 	s.filter.update(pyRound(offset), pyRound(delay), now)
+	if !s.filter.synchronized() {
+		// Ask again at once rather than on timeSync's 200ms ladder: until
+		// the clock converges the first client/state is held, and 10.x
+		// holds this player's audio until that state arrives, then joins it
+		// to a stream already running as a late joiner, skipping ahead by
+		// its lead (~2s lost at a cold start, docs/history/device.md
+		// 2026-11-10). Two round trips instead of 200ms closes the window.
+		s.send("client/time", clientTime{ClientTransmitted: nowUs()})
+		return
+	}
 	s.mu.Lock()
 	due := s.stateDue
 	s.mu.Unlock()
-	if due && s.filter.synchronized() {
+	if due {
 		s.sendState()
 	}
 }
@@ -473,6 +491,7 @@ func (s *session) timeSync(stop <-chan struct{}) {
 }
 
 func (s *session) onStreamStart(f streamFormat) {
+	s.dec.close()
 	d, err := newDecoder(f)
 	if err != nil {
 		log.Printf("[sendspin] %v", err)
@@ -492,6 +511,7 @@ func (s *session) endStream() {
 	if s.streaming && s.isAdmitted() {
 		s.c.player.clear()
 	}
+	s.dec.close()
 	s.dec, s.streaming = nil, false
 	s.c.changed()
 }

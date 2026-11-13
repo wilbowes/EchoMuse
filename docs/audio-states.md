@@ -213,7 +213,7 @@ The alternative — the controller runs the client and re-streams over `0x04`
 | Identity | X25519 keypair in `/data/local/etc/echomuse/sendspin.json`; its public key is the `client_id`. Losing the file unpairs the device from every server | spec vectors |
 | Pairing | The Pairing PSK method only (the one a client must offer): the dashboard shows the `SP:0…` token, the user pastes it into Music Assistant. Unpaired access is a setting, off by default | 9.1.1 `initiate_pairing`; spec token vector |
 | Clock | The spec's 2-D Kalman time filter, ported line for line | aiosendspin's own filter, to the microsecond over 300 steps |
-| Codec | FLAC only, 48kHz 16-bit **mono** — one format, so the server resamples and downmixes and the device never switches output mid-stream | aiosendspin's own FLAC encoder, bit-exact |
+| Codec | **Stereo Opus first, mono FLAC second**, both 48kHz 16-bit (2026-11-10): stereo from the source, downmixed on the device (libopus for Opus, the average of the sides for FLAC and PCM). Opus is a third of mono FLAC's bytes and cheaper to decode. One list, so the device never switches output mid-stream | FLAC: aiosendspin's own encoder, bit-exact. Opus: libopus through PyAV as aiosendspin encodes, tone levels per side and in the downmix; interop on 10.2.1 and 9.1.1 |
 | DAC position | `OutputClock`: an alpha-beta tracker over the per-period ALSA delay reading — least-squares at first, narrowing to fixed gains | host test, ±2ms noise |
 | Correction | The spec's suggested strategy: whole-frame drops/repeats, ≤8 per 2048-frame period (0.39%, under the 0.5% cap); a one-shot resync past 5ms | host test, DAC ±600ppm |
 
@@ -241,10 +241,13 @@ firmware logs `[sendspin] playing:` once a minute with these counts.
 A stereo pair works with the mono-only player: set one Echo to the left
 channel and the other to the right in Music Assistant, and it selects each
 player's channel before encoding, so each Echo receives its own side as mono
-(confirmed by ear with a left/right test track).
+(confirmed by ear with a left/right test track). Asking for stereo keeps
+that: for a left or right player MA 2.10.9 pans `pan=stereo|c0=FL|c1=FL`,
+the same side on both channels, and the device's downmix gives that side
+back (from MA's code, 2026-11-10; by ear owed).
 
 CPU: 3.68% of one core for FLAC decode and ChaCha20-Poly1305 (PR #271's bench
-on a Dot). On hardware, playing and paused measured the same within noise
+on a Dot); stereo Opus at 128k decodes for 2.14% (VVV, 2026-11-10). On hardware, playing and paused measured the same within noise
 (/proc ticks over 10s), so the player's cost is below what that resolves.
 
 ### 6.3 Ownership and arbitration
@@ -285,9 +288,12 @@ places that is not what the spec (main, 2026-09-17) says. The device sends
 
 - **Fragments**: 9.1.1 uses type bytes 2 ("more") and 3 ("end"); the spec a
   type 1 with a flags byte. Both are accepted; the device never sends one.
-- **Audio chunk header**: 9 bytes in 9.1.1, 13 in the spec (adds
-  `send_ahead`). Told apart by where the FLAC frame sync sits — one reason
-  the device advertises FLAC only.
+- **Audio chunk header**: 9 bytes in 9.1.1, 13 in the spec and in 10.x
+  (Music Assistant 2.10 ships 10.2.1) (adds `send_ahead`). FLAC: told apart
+  by where the frame sync sits. Opus has none, so by byte 9: zero is
+  `send_ahead`'s top byte (any lead under 16.7s), anything else is the
+  packet's TOC, and a TOC of zero (SILK narrowband 10ms mono) is not what an
+  encoder makes of 48kHz stereo music.
 - **`supported_pair_methods`**: a list in 9.1.1, an object in the spec.
   9.1.1 rejects the object, so the list is sent.
 - **Pairing PSK flow**: `client/pair-finalize` alone in 9.1.1; the spec puts

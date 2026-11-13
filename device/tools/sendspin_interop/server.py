@@ -1,6 +1,9 @@
-"""The server half of the Sendspin interop test: aiosendspin 9.1.1, as Music
-Assistant ships it, driving the device's player (main.go) through every path
-the device claims to support. Run it with run.sh.
+"""The server half of the Sendspin interop test: aiosendspin (run.sh picks the
+version; Music Assistant 2.10 ships 10.2.1) driving the device's player
+(main.go) through every path the device claims to support.
+
+The sync scenarios pin the player to FLAC (main.go's -codecs default): they
+read exact sawtooth values back, which a lossy codec cannot give.
 
 Each scenario starts a fresh client process and fails loudly on the first
 thing that does not happen. The sync check does not trust the client's own
@@ -14,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import statistics
 import struct
 import sys
@@ -22,7 +26,10 @@ from aiosendspin.audio.format import AudioFormat
 from aiosendspin.models.types import PairMethod
 from aiosendspin.noise.keys import Identity
 from aiosendspin.noise.pairing import PairingAttempt
-from aiosendspin.noise.pairing_token import decode_token
+try:  # 10.x names it for its version-0 format, which is unchanged
+    from aiosendspin.noise.pairing_token import decode_psk_token as decode_token
+except ImportError:  # 9.1.1
+    from aiosendspin.noise.pairing_token import decode_token
 from aiosendspin.noise.trust_store import InMemoryServerPairingStore
 from aiosendspin.server.server import SendspinServer
 
@@ -69,7 +76,9 @@ class Client:
     async def _stderr(self) -> None:
         assert self.proc and self.proc.stderr
         async for line in self.proc.stderr:
-            print("   client:", line.decode().rstrip()[20:])
+            text = line.decode().rstrip()[20:]
+            self.events.append({"event": "log", "line": text})
+            print("   client:", text)
 
     async def wait(self, event: str, timeout: float, pred=lambda e: True) -> dict:
         start = len(self.events)
@@ -103,6 +112,14 @@ class Client:
                 self.proc.kill()
 
 
+def psk_attempt(cid: str, psk: bytes) -> PairingAttempt:
+    """10.x names the client in the attempt; 9.1.1 has no such field."""
+    try:
+        return PairingAttempt(PairMethod.PAIRING_PSK, pairing_psk=psk, client_id=cid)
+    except TypeError:
+        return PairingAttempt(PairMethod.PAIRING_PSK, pairing_psk=psk)
+
+
 def sawtooth(start: int, n: int) -> bytes:
     return struct.pack(f"<{n}h", *(((start + i) % SAW) - SAW // 2 for i in range(n)))
 
@@ -123,7 +140,10 @@ async def stream(server: SendspinServer, client_id: str, seconds: float, *, keep
         k += chunk
         await st.sleep_to_limit_buffer(3_000_000)
     if not keep:
-        await asyncio.sleep(3.5)  # let the buffered tail play
+        # Let the buffered tail play: up to 3s queued behind a ~2s lead. 10.x
+        # ends the stream at stop() and the player clears on stream/end, as
+        # the spec says; 9.1.1 let it play out.
+        await asyncio.sleep(5.5)
         st.stop()
     return st, start_us
 
@@ -159,7 +179,9 @@ def player_available(server: SendspinServer, cid: str) -> bool:
 def check_sync(periods, start_us, label: str, delay_us: int = 0) -> None:
     errs = sync_errors(periods, start_us, delay_us)[40:]  # past the first ~1.7s
     if len(errs) < 40:
-        raise Fail(f"{label}: only {len(errs)} periods played")
+        first = (periods[0]["rawUs"] - start_us) / 1000 if periods else None
+        raise Fail(f"{label}: only {len(errs)} periods played past the first 40 "
+                   f"({len(periods)} in all, the first {first}ms after the stream's start)")
     worst = max(abs(e) for e in errs)
     print(f"   {label}: {len(errs)} periods, mean {statistics.mean(errs):+.0f}us, "
           f"p99 |err| {sorted(abs(e) for e in errs)[int(len(errs) * 0.99)]:.0f}us, worst {worst:.0f}us")
@@ -183,7 +205,7 @@ async def scenario_pair_and_play() -> None:
         token = decode_token(ready["token"])
         if token.client_id != cid:
             raise Fail("token names a different client")
-        await server.initiate_pairing(cid, PairingAttempt(PairMethod.PAIRING_PSK, pairing_psk=token.pairing_psk))
+        await server.initiate_pairing(cid, psk_attempt(cid, token.pairing_psk))
         await until(lambda: server.get_client(cid).is_paired, 10, "not paired")
         print("   paired by token")
         await until(lambda: player_available(server, cid), 15, "paired player never became available")
@@ -235,6 +257,19 @@ async def scenario_pair_and_play() -> None:
         await client.command("volume 100")
         await until(lambda: server.get_client(cid).role("player@v1").volume == 100, 5,
                     "volume did not return to 100")
+
+        # Delay from the server: the Echo applies it and reports it back
+        # under the name this server reads (9.1.1 static_delay_ms, 10.x
+        # output_delay_ms; the Echo sends both).
+        role = server.get_client(cid).role("player@v1")
+        set_delay = getattr(role, "set_output_delay", None) or role.set_static_delay
+        reported = lambda: getattr(role, "output_delay_ms", getattr(role, "static_delay_ms", None))
+        set_delay(120)
+        await client.wait("settings", 5, lambda e: e["delayMs"] == 120)
+        await until(lambda: reported() == 120, 5, f"server reads the delay as {reported()}, not 120")
+        set_delay(0)
+        await until(lambda: reported() == 0, 5, "delay did not return to 0")
+        print("   delay 120ms: applied, and read back by the server")
 
         # stream/clear (a seek): the buffer empties and play resumes in sync.
         st.clear()
@@ -310,9 +345,21 @@ async def scenario_unpaired() -> None:
         await until(lambda: (c := server.get_client(cid)) is not None and c.is_connected, 10, "never connected")
         await server.trust_unpaired(cid)
         await until(lambda: player_available(server, cid), 15, "approved unpaired client never available")
+        # 10.x keeps a player out of a stream until its first client/state,
+        # then joins it late, skipping by its lead: a stream started in that
+        # window loses ~2s on any spec client (docs/history/device.md,
+        # 2026-11-10). Start once the server has the state, as Music
+        # Assistant does for a player it is already connected to.
+        awaits = getattr(server.get_client(cid), "awaits_role_state", lambda _f: False)
+        await until(lambda: not awaits("player"), 5, "server never received the player's state")
         n0 = len(client.events)
         _, start_us = await stream(server, cid, 5)
-        check_sync(client.periods(n0), start_us, "unpaired sync")
+        periods = client.periods(n0)
+        first_ms = (periods[0]["rawUs"] - start_us) / 1000 if periods else None
+        print(f"   first sample played {first_ms:.0f}ms after it was due" if periods else "   nothing played")
+        if first_ms is None or abs(first_ms) > 100:
+            raise Fail(f"the stream's first audio played {first_ms}ms after it was due")
+        check_sync(periods, start_us, "unpaired sync")
     finally:
         await client.stop()
         await server.close()
@@ -374,10 +421,68 @@ async def scenario_live_buffer() -> None:
         await server.close()
 
 
+def tones(start: int, n: int, amp: float) -> bytes:
+    """Stereo: 1kHz on the left, 440Hz on the right."""
+    out = []
+    for i in range(start, start + n):
+        out.append(round(amp * math.sin(2 * math.pi * 1000 * i / RATE)))
+        out.append(round(amp * math.sin(2 * math.pi * 440 * i / RATE)))
+    return struct.pack(f"<{2 * n}h", *out)
+
+
+async def scenario_opus() -> None:
+    print("== the device's own format list: the server picks stereo Opus, the player downmixes")
+    server = SendspinServer(asyncio.get_running_loop(), Identity.generate(), "interop-server",
+                            pairing_store=InMemoryServerPairingStore())
+    client = Client("-unpaired", "-codecs", "")
+    ready = await client.start("/tmp/opus.json")
+    cid = ready["clientId"]
+    try:
+        server.connect_to_client(URL)
+        await until(lambda: (c := server.get_client(cid)) is not None and c.is_connected, 10, "never connected")
+        await server.trust_unpaired(cid)
+        await until(lambda: player_available(server, cid), 15, "never available")
+        awaits = getattr(server.get_client(cid), "awaits_role_state", lambda _f: False)
+        await until(lambda: not awaits("player"), 5, "server never received the player's state")
+        amp = 32767 * 10 ** (-12 / 20)
+        group = server.get_client(cid).group
+        st = group.start_stream()
+        fmt = AudioFormat(sample_rate=RATE, bit_depth=16, channels=2)
+        n0 = len(client.events)
+        k = 0
+        while k < 8 * RATE:
+            st.prepare_audio(tones(k, RATE // 50, amp), fmt)
+            await st.commit_audio()
+            k += RATE // 50
+            await st.sleep_to_limit_buffer(3_000_000)
+        await asyncio.sleep(1.1)  # a status tick, with audio still queued
+        if client.status()["player"]["underruns"]:
+            raise Fail("underrun on a local link")
+        await asyncio.sleep(4.4)
+        st.stop()
+        started = [e["line"] for e in client.events[n0:] if e.get("event") == "log" and "stream:" in e["line"]]
+        if not started or "stream: opus 48000Hz 2ch" not in started[0]:
+            raise Fail(f"server did not pick stereo Opus: {started}")
+        print(f"   {started[0].split('] ', 1)[-1]}")
+        if any("decode:" in e.get("line", "") for e in client.events[n0:]):
+            raise Fail("the player logged a decode error")
+        periods = client.periods(n0)[40:-40]
+        if len(periods) < 60:
+            raise Fail(f"only {len(periods)} periods played")
+        # Each side a sine at amp, uncorrelated: the average's mean square is amp^2/4.
+        db = 10 * math.log10(statistics.mean(p["rms"] for p in periods) / (amp * amp / 4))
+        print(f"   {len(periods)} periods, downmix level {db:+.2f} dB from expected")
+        if abs(db) > 1:
+            raise Fail(f"downmix {db:+.2f} dB from the average of the two sides")
+    finally:
+        await client.stop()
+        await server.close()
+
+
 async def main() -> int:
     logging.basicConfig(level=logging.WARNING)
     failed = 0
-    for sc in (scenario_pair_and_play, scenario_unpaired, scenario_live_buffer):
+    for sc in (scenario_pair_and_play, scenario_unpaired, scenario_live_buffer, scenario_opus):
         try:
             await sc()
             print("   PASS")

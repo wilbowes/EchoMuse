@@ -334,6 +334,49 @@ own files that informed it stay off the repo (Amazon's).
   `wget` are Amazon's bionic builds, which resolve through netd's
   `dnsproxyd` and so fail; the firmware resolves since #1085. Debugging only.
 
+- **2026-11-10, Sendspin asks for stereo Opus** (Wil: stereo from the
+  source, downmixed on the device where the output is mono). libopus 1.5.2
+  decoder, fixed point with NEON, measured on VVV at 1.3GHz with 60s of
+  synthetic audio: stereo 128k **2.14%** of one core, 160k 2.22%, mono 64k
+  speech 1.42%, music and speech at once 3.53-3.62%, three identical runs.
+  Mono FLAC, what it replaces, was 3.28% (PR #271), at about three times the
+  bytes. Firmware +193KB. Built from libopus's own source lists with the NDK
+  clang in echomuse-compiler: no cmake; the encoder needs OPUS_SOURCES_FLOAT
+  (analysis.c), the decoder alone does not.
+- **2026-11-10, Music Assistant 2.10.9 pins aiosendspin 10.2.1** (dev: 10.3.0),
+  not the 9.1.1 the interop test was written against. 10.x always sends the
+  13-byte chunk header; renames `decode_token` to `decode_psk_token` with the
+  `SP:0` token format unchanged (an Echo's token still pairs); and wants
+  `client_id` in a `PairingAttempt`. The interop test now runs both versions.
+- **2026-11-10, `client/state` carries the delay under both names.** 9.1.1
+  reads `static_delay_ms`, 10.x `output_delay_ms` (it maps the old key, logs
+  "non-compliant client ... pre-rename" twice per connection, key and
+  `set_static_delay`, and aiosendspin #393 plans to stop accepting them).
+  Neither handshake identifies the server, and 9.1.1 rejects an unknown
+  command name, so the command keeps its 9.1.1 name. MA moved to 10.x in
+  2.10.7 (2026-10-17); 2.10.0-2.10.6 run 9.1.1. Drop the old names when
+  supporting those stops being worth the warnings. Interop now checks the
+  delay round trip on both.
+- **2026-11-10, left/right pairs survive a stereo request.** MA 2.10.9
+  (`controllers/streams/audio.py`) pans a left or right player with
+  `pan=stereo|c0=FL|c1=FL` when the format is stereo, so the Echo gets its own
+  side on both channels and the average is that side. From the code; by ear
+  owed.
+- **2026-11-10, under 10.x a stream that starts before the player's first
+  `client/state` loses ~its lead (~1.8-2s for us).** Not the clock and not a
+  drop on the device: 10.x keeps a role "awaiting state" out of every stream
+  (`SendspinClient.join_active_stream`), and when the state arrives joins it
+  to the running stream as a late joiner at now + that role's lead
+  (`get_late_join_target_timestamp_us`); the skipped audio is never sent.
+  Timeline (interop, ms after activation): stream started 52, our state 78,
+  first chunk stamped 1.86s past the stream's start. Generic to every spec
+  client (the spec holds the first state until the clock converges); ours
+  loses more because we ask for a 2s lead. Narrowed, spec-aligned: the
+  clock now converges in two round trips (onTime asks again at once) where
+  the 200ms ladder took ~250ms. Wil: keep spec-aligned, no early state. Real
+  exposure: MA starting a stream within ~80ms of connecting. The fix belongs
+  upstream: hold a stream whose members all await state rather than skip.
+
 ## Boards: hardware is found by name (#541, 2026-10-04)
 
 **`docs/boards.md` is the guide for anyone trying a new board; this is what
