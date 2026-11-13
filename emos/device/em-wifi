@@ -373,7 +373,7 @@ mkdir -p /data/emos
 # ours. A root-owned 0600 conf is unreadable to it, so it exits the moment
 # init starts it, init respawns it five seconds later, and the device sits at
 # boot stage 11 for ever -- with the conf perfectly correct and the password
-# right. Measured on G090LF11803611NF, 2026-09-21: em-wifi reported the join,
+# right. Measured on G090LF99207711NF, 2026-09-21: em-wifi reported the join,
 # and the device dropped off the network seconds later.
 #
 # Root ignores permissions, so this is also correct for emOS's own supplicant

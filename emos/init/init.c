@@ -2036,7 +2036,7 @@ static void update_resolv(void)
  *   - udp sport 5353: mDNS responses. The device FINDS ITS CONTROLLER this
  *     way, so dropping these is a device that boots perfectly and never
  *     connects to anything. Tested by killing the server and watching it
- *     rediscover: "mDNS: found Clara server at 10.10.1.81:8767".
+ *     rediscover: "mDNS: found Clara server at 192.0.2.81:8767".
  *
  * ICMP is allowed deliberately. It is not attack surface in any meaningful
  * sense and ping is the cheapest way to tell whether a device is alive — the
@@ -3094,7 +3094,7 @@ int main(int argc, char **argv)
      * no property service — and then the LITERAL string "android". So the
      * hostname was set correctly on every boot and every prompt still read
      * root@android. Measured on EFF 2026-09-21: `hostname` answered
-     * em-G090LF1180440EFF while $HOSTNAME in the same shell was "android".
+     * em-G090LF9920110EFF while $HOSTNAME in the same shell was "android".
      *
      * The fix is to put HOSTNAME in the environment init hands its children,
      * which makes mkshrc's `: ${HOSTNAME:=...}` a no-op. Both envp arrays

@@ -7,7 +7,7 @@
 # One package per line; lines starting with # are ignored.
 #
 # Canonical list = the live hidden set pulled from the Lounge device
-# (G090LF1180130NJG) 2026-07-18: diff of `pm list packages` against
+# (G090LF9920230NJG) 2026-07-18: diff of `pm list packages` against
 # `pm list packages -u` — 31 packages. Validated in service since
 # 2026-07-15: −130MB RAM, cpu_avg −2-3pp, Java apps 24→7, no voice
 # regressions. Deliberately NOT hidden (needed): zygote/system_server,

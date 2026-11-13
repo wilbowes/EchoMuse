@@ -41,7 +41,7 @@ STATE = Path(os.environ.get("UAT_STATE", Path.home() / ".echomuse-uat"))
 CONTAINER = "em-uat"
 BROWSER = "em-uat-browser"
 PLAYWRIGHT_IMAGE = "mcr.microsoft.com/playwright/python:v1.49.1-noble"
-HOST_IP = os.environ.get("UAT_HOST_IP", "10.10.1.236")
+HOST_IP = os.environ.get("UAT_HOST_IP", "")  # the rig host's LAN address; required
 PORT, TLS_PORT, API_PORT = 8767, 8770, 8778
 API = f"http://127.0.0.1:{API_PORT}"
 DEVICE_ETC = "/data/local/etc/echomuse"
@@ -192,6 +192,12 @@ def _hex(text: str) -> str:
 
 # ─── Commands ────────────────────────────────────────────────────────────────
 
+def _host_ip() -> str:
+    if not HOST_IP:
+        sys.exit("rig: set UAT_HOST_IP to this host's LAN address")
+    return HOST_IP
+
+
 def up(image: str) -> None:
     subprocess.run(["docker", "rm", "-f", CONTAINER], capture_output=True)
     data = STATE / "controller-data"
@@ -200,7 +206,7 @@ def up(image: str) -> None:
     subprocess.run([
         "docker", "run", "-d", "--name", CONTAINER,
         "-p", f"{PORT}:{PORT}", "-p", f"{TLS_PORT}:{TLS_PORT}", "-p", f"{API_PORT}:8768",
-        "-e", f"SERVER_IP={HOST_IP}", "-e", f"SERVER_PORT={PORT}", "-e", "API_PORT=8768",
+        "-e", f"SERVER_IP={_host_ip()}", "-e", f"SERVER_PORT={PORT}", "-e", "API_PORT=8768",
         "-e", "DB_PATH=/app/data/echomuse.db", "-e", "DEVICE_APPROVAL=strict",
         "-e", "VOICE_MODE=esphome", "-e", "MDNS_NAME=em-uat", "-e", "LOG_LEVEL=DEBUG",
         "-v", f"{data}:/app/data", image], check=True, capture_output=True)
@@ -236,7 +242,7 @@ def attach(serial: str) -> None:
         # Joins as a fresh device: its credentials belong to another
         # controller (they are in the backup, and detach restores them).
         echo.run(f"rm -f {DEVICE_ETC}/ca.pem {DEVICE_ETC}/token")
-        endpoint = json.dumps({"endpoints": [{"host": HOST_IP, "port": PORT,
+        endpoint = json.dumps({"endpoints": [{"host": _host_ip(), "port": PORT,
                                               "tls_port": TLS_PORT}], "mdns": False})
         echo.run(f"printf '{_hex(endpoint)}' > {DEVICE_ETC}/controller.json")
         echo.restart_firmware()

@@ -66,7 +66,7 @@ const RAW = [
   "bssid / frequency / signal level / flags / ssid",
   "aa:bb:cc:00:00:01\t2437\t-45\t[WPA2-PSK-CCMP][ESS]\tHomeNet",
   "aa:bb:cc:00:00:02\t5180\t-52\t[WPA2-PSK-CCMP][ESS]\tHomeNet",
-  "aa:bb:cc:00:00:03\t5745\t-60\t[SAE-CCMP][ESS]\tPixel_7793",
+  "aa:bb:cc:00:00:03\t5745\t-60\t[SAE-CCMP][ESS]\tPixel_0042",
   "aa:bb:cc:00:00:04\t2412\t-70\t[ESS]\tCoffeeShop",
   "aa:bb:cc:00:00:05\t2462\t-66\t[WPA2-EAP-CCMP][ESS]\tCorpWiFi",
   "aa:bb:cc:00:00:06\t2412\t-80\t[WPA2-PSK-CCMP][SAE-CCMP][ESS]\tMixedMode",
@@ -95,8 +95,8 @@ check("strongest AP wins the headline signal", by("HomeNet").signal, -45);
 // The measured capability of this radio is NONE/IEEE8021X/WPA-EAP/WPA-PSK.
 // No SAE, so a WPA3-only AP can never be joined and must be refused rather
 // than attempted.
-check("WPA3-only is classified", by("Pixel_7793").security, "wpa3");
-check("WPA3-only is refused", typeof by("Pixel_7793").blocker, "string");
+check("WPA3-only is classified", by("Pixel_0042").security, "wpa3");
+check("WPA3-only is refused", typeof by("Pixel_0042").blocker, "string");
 
 // The one that would be easy to get wrong in the other direction: a mixed
 // WPA2/WPA3 AP advertises both, and is perfectly joinable through the WPA2
@@ -111,7 +111,7 @@ check("WEP is refused", typeof by("OldRouter").blocker, "string");
 
 check("header row is skipped", nets.some(n => n.ssid === "ssid"), false);
 check("sorted by signal", nets[0].ssid, "HomeNet");
-check("label attached for the UI", by("Pixel_7793").securityLabel, "WPA3");
+check("label attached for the UI", by("Pixel_0042").securityLabel, "WPA3");
 check("empty input", parseScanResults("").length, 0);
 check("garbage input", parseScanResults("nonsense\nlines").length, 0);
 check("null input", parseScanResults(null).length, 0);

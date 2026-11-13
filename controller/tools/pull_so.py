@@ -1,7 +1,7 @@
 import asyncio, secrets, sqlite3, sys, time, base64, re
 import websockets
 
-DEVICE = "G090LF11803611NF"
+DEVICE = __import__("os").environ.get("EM_DEVICE") or sys.exit("pull_so: set EM_DEVICE to a device id")
 
 def _resolve_db() -> str:
     # #270: the container keeps its database at /app/data, the HA add-on at

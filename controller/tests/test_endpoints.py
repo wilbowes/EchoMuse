@@ -30,7 +30,7 @@ def test_hosts_a_device_can_dial(host):
     ".".join(["a" * 63] * 3) + "." + "a" * 62,  # 254 characters
     "-controller", "controller-", "ctl.-x.example",
     "under_score.example", "has space", "ctl..example", ".example",
-    "10.10.1.300", "999.1.1.1", "10.10.1",       # a mistyped IP is not a name
+    "10.99.1.300", "999.1.1.1", "10.99.1",       # a mistyped IP is not a name
     "fe80::zz", "1:2:3:4:5:6:7:8:9",
     "bücher.example",                           # must be sent as xn--
     "http://10.0.0.1", "10.0.0.1:8767",
