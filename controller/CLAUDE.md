@@ -160,7 +160,8 @@ A backup `<db>.pre-v<N>.bak` is taken first and a failed backup refuses
    **Arbitration** (`em_arbiter`): hold `ARB_HOLD_S` 250ms from first heard,
    collect within `wakeArbitrationMs` (700), `pick()` the **loudest, no
    margin** (`em_wakelevel`); earliest-heard only when levels cannot be
-   compared (missing, heard over own playback, differing gains). Do not return
+   compared (missing, heard over own playback, differing gains). An Echo
+   ringing a timer wins before either (#862). Do not return
    to SNR or first-detector-wins. **An Echo with no HA behind it stands down
    BEFORE the claim** (`can_serve_turn` before `_claim_wake`, `test_deploy.py`)
    and still records the wake and plays the cue (`record_dropped_wake`);
