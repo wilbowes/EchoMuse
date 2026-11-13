@@ -110,6 +110,7 @@ import em_barge
 import em_listen
 import em_ble_gatt
 import em_wakelevel
+import em_kiosk_arbitration
 import em_button
 import em_wakeword
 import em_tap_burst
@@ -210,6 +211,9 @@ API_PORT     = int(os.environ.get("API_PORT", "8768"))
 SERVER_IP    = em_hostip.server_ip(os.environ.get("SERVER_IP"))
 MDNS_NAME    = os.environ.get("MDNS_NAME", "echomuse")
 DB_PATH      = os.environ.get("DB_PATH", "echomuse.db")
+
+KIOSK_ARBITRATION = os.environ.get("EM_KIOSK_ARBITRATION", "0") == "1"
+kiosk_arbiter: em_kiosk_arbitration.KioskArbiter | None = None
 
 # Device approval mode — overridden by system_config after db.init()
 DEVICE_APPROVAL = os.environ.get("DEVICE_APPROVAL", "strict")
@@ -1957,7 +1961,7 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                         await device.send_control({"type": "speaker_flush"})
                     serves = esphome.can_serve_turn(device.device_id)
                     won_by = device.device_id
-                    if serves and device.wake_arb_ms > 0 and len(em_state.devices) > 1:
+                    if serves and _should_arbitrate(device):
                         # Capture time already carries the link's least
                         # delay; its smoothed RTT would count it twice.
                         won_by = await _claim_wake(
@@ -3329,6 +3333,12 @@ def _arbitration_hold() -> float:
     )
 
 
+def _should_arbitrate(device: Device) -> bool:
+    return device.wake_arb_ms > 0 and (
+        (kiosk_arbiter is not None and kiosk_arbiter.active) or len(em_state.devices) > 1
+    )
+
+
 async def _claim_wake(device: "Device", heard_at: float | None,
                       level: tuple[float, float] | None = None,
                       by: str = "controller",
@@ -3336,11 +3346,28 @@ async def _claim_wake(device: "Device", heard_at: float | None,
     """Claim the utterance for `device`; returns the winner's id.
 
     `level` is the wake's (level, peak) in dBFS. Its level is what the arbiter
-    compares across Echoes (em_arbiter.pick), and it is logged with its
-    capture time so contested wakes can be paired later; see em_wakelevel.
-    `over_playback` says this Echo heard the wake over its own speaker, which
-    the reading then contains, so the contest is decided on time.
+    compares across Echoes (em_arbiter.pick). Kiosk mode compares an
+    estimate of dB above the room noise. The native arbiter uses capture
+    time if any claim was heard over its own speaker.
     """
+    if kiosk_arbiter is not None and kiosk_arbiter.active:
+        server = esphome.get_server(device.device_id)
+        satellite = server.get_satellite() if server is not None else None
+        if satellite is not None:
+            energy = em_kiosk_arbitration.wake_energy(
+                level[0] if level is not None else None,
+                device.noise_floor, device.mic_gain_db, kiosk_arbiter.offset_db,
+            )
+            winner = await kiosk_arbiter.contest(
+                device.device_id, satellite.oww_model_info.name, energy,
+            )
+            won_by = winner.device_id or f"kiosk:{winner.peer_id}"
+            log.info("[%s] Kiosk arbitration: score %s, winner %s (score %s)",
+                     device.device_id, energy, won_by, winner.energy)
+            if level is not None:
+                _log_wake_level(device, heard_at, level, by)
+            return won_by
+
     hold = _arbitration_hold()
     won_by = await em_state.wake_arbiter.contest(
         device.device_id, device.wake_arb_ms / 1000.0,
@@ -3349,18 +3376,24 @@ async def _claim_wake(device: "Device", heard_at: float | None,
         gains=device.adc_gains, over_playback=over_playback,
         ringing=device.timer_alarm_ringing,
     )
-    now = asyncio.get_event_loop().time()
     if hold > 0:
+        now = asyncio.get_running_loop().time()
         ago = (now - heard_at) * 1000.0 if heard_at is not None else 0.0
         log.info(f"[{device.device_id}] arbitration (held {hold * 1000:.0f}ms): "
                  f"heard {ago:.0f}ms ago, won by {won_by} "
                  f"({em_state.wake_arbiter.last_why})")
     if level is not None:
-        heard_wall = time.time() - (now - (heard_at if heard_at is not None else now))
-        em_dbwriter.submit(db.log_device, device.device_id, "info", "controller", em_wakelevel.log_line(
-            level[0], level[1], device.noise_floor, device.mic_gain_db,
-            heard_wall, by))
+        _log_wake_level(device, heard_at, level, by)
     return won_by
+
+
+def _log_wake_level(device: Device, heard_at: float | None,
+                    level: tuple[float, float], source: str) -> None:
+    now = asyncio.get_running_loop().time()
+    heard_wall = time.time() - (now - (heard_at if heard_at is not None else now))
+    em_dbwriter.submit(db.log_device, device.device_id, "info", "controller",
+                       em_wakelevel.log_line(level[0], level[1], device.noise_floor,
+                                             device.mic_gain_db, heard_wall, source))
 
 
 def _device_level(ev: dict) -> tuple[float, float] | None:
@@ -3438,7 +3471,7 @@ async def _private_wake_turn(device: Device, ev: dict) -> None:
 
     serves = esphome.can_serve_turn(device.device_id)
     won_by = device.device_id
-    if serves and device.wake_arb_ms > 0 and len(em_state.devices) > 1:
+    if serves and _should_arbitrate(device):
         won_by = await _claim_wake(device, _wake_heard_at(device, ev),
                                    _device_level(ev), by="device",
                                    over_playback=bool(ev.get("barge")))
@@ -3527,9 +3560,11 @@ async def _private_barge(device: Device, ev: dict) -> None:
         # `ok` before abort_ha_run runs.
         esphome.note_barged(device.device_id)
         await device.send_control({"type": "speaker_flush"})
+    if ev["floor"] is not None:
+        device.noise_floor = float(ev["floor"])
     serves = esphome.can_serve_turn(device.device_id)
     won_by = device.device_id
-    if serves and device.wake_arb_ms > 0 and len(em_state.devices) > 1:
+    if serves and _should_arbitrate(device):
         won_by = await _claim_wake(device, _wake_heard_at(device, ev),
                                    _device_level(ev), by="device",
                                    over_playback=True)
@@ -3550,8 +3585,6 @@ async def _private_barge(device: Device, ev: dict) -> None:
         device.listen_session = session
         for chunk in device.listen_router.open(session, asyncio.get_event_loop().time()):
             _put_voice_frame(device, chunk)
-    if ev["floor"] is not None:
-        device.noise_floor = float(ev["floor"])
     device.last_wake = {
         "model":       em_oww_models.prediction_key(device.oww_model),
         "score":       round(float(score), 4),
@@ -4100,7 +4133,7 @@ async def _stream_listen(device: Device):
                         # for any reason the controller already knows about.
                         serves = esphome.can_serve_turn(device.device_id)
                         won_by = device.device_id
-                        if serves and device.wake_arb_ms > 0 and len(em_state.devices) > 1:
+                        if serves and _should_arbitrate(device):
                             # Held ARB_HOLD_S from when it was heard, so
                             # every Echo that heard it is counted.
                             # Capture time, not arrival (docs/listening.md):
@@ -6187,6 +6220,8 @@ def _close_db() -> None:
 
 
 async def main():
+    global kiosk_arbiter
+
     log.info(f"EchoMuse Controller {CONTROLLER_VERSION}")
     db.init(DB_PATH)
     em_state.boards.update(em_boards.decode(await asyncio.get_running_loop()
@@ -6274,6 +6309,19 @@ async def main():
             # After the voice satellites — BT proxies reuse their zeroconf.
             em_ble_proxy.set_gatt_sender(_send_gatt)
             await em_ble_proxy.start_ble_proxy_servers(SERVER_HOST)
+
+            if KIOSK_ARBITRATION:
+                try:
+                    kiosk_arbiter = em_kiosk_arbitration.KioskArbiter(
+                        window_ms=int(os.environ.get("EM_KIOSK_ARBITRATION_WINDOW_MS", "400")),
+                        offset_db=float(os.environ.get("EM_KIOSK_ARBITRATION_OFFSET_DB", "0")),
+                    )
+                    if await kiosk_arbiter.start():
+                        stack.callback(kiosk_arbiter.close)
+                        log.info("Kiosk Satellite arbitration listening on UDP %s",
+                                 em_kiosk_arbitration.PORT)
+                except ValueError as err:
+                    log.warning("Kiosk arbitration disabled: %s", err)
 
             log.info("EchoMuse Controller ready — waiting for devices")
             await _until_stopped()

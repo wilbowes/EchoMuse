@@ -193,6 +193,7 @@ COPY em_emos_ota.py .
 COPY em_reconcile.py .
 COPY em_listen.py .
 COPY em_wakelevel.py .
+COPY em_kiosk_arbitration.py .
 COPY em_endpoints.py .
 COPY em_health.py .
 COPY em_button.py .

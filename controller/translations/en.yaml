@@ -59,6 +59,22 @@ configuration:
     description: >-
       Detection threshold from 0 to 1. Lower values are more sensitive and
       may produce more false detections. The upstream default is 0.5.
+  kiosk_arbitration:
+    name: Kiosk Satellite wake arbitration
+    description: >-
+      Let Echoes and Kiosk Satellite devices on the same local network choose
+      one responder when they hear the same wake word. Uses unauthenticated
+      UDP claims. Enable only on a trusted local network.
+  kiosk_arbitration_window_ms:
+    name: Kiosk arbitration window (milliseconds)
+    description: >-
+      Wait for other wake claims before answering. Match the setting on your
+      kiosks. The default is 400 ms.
+  kiosk_arbitration_offset_db:
+    name: EchoMuse arbitration offset (dB)
+    description: >-
+      Adjust EchoMuse scores against kiosk scores. Raise it if nearby Echoes
+      regularly lose to more distant kiosks, or lower it if the reverse happens.
   require_device_tls:
     name: Require encrypted device connections
     description: >-

@@ -321,6 +321,30 @@ second Echo counts as "the same utterance". `0` disables arbitration.
 Before controller 2.26.0 the first Echo to hear the word answered.
 [listening.md](listening.md) has the reasons that changed.
 
+### Kiosk Satellite wake arbitration
+
+Enable **Kiosk Satellite wake arbitration** in the Home Assistant add-on
+configuration, or set `EM_KIOSK_ARBITRATION=1` in Docker's `.env`, then
+restart the controller. On each kiosk, enable **Voice Satellite → Wake Word
+→ Wake Word Arbitration** and select the same wake word as on the Echoes
+you want to compete. Put the controller and kiosks on the same IPv4 network
+segment and allow UDP 2330 between them.
+
+Keep the same arbitration window on both sides. It defaults to 400 ms
+(`EM_KIOSK_ARBITRATION_WINDOW_MS`). In this mode each participating Echo
+waits that long, including a lone Echo. Delayed or missed claims can still
+leave two devices answering. Set an Echo's own **Arbitration window** to 0
+to exclude it.
+
+Kiosks and Echoes estimate wake loudness differently. If the wrong device
+wins consistently, check the controller's arbitration scores and adjust
+**EchoMuse arbitration offset (dB)** (`EM_KIOSK_ARBITRATION_OFFSET_DB`).
+A positive value favors Echoes. Echoes that lack a usable wake measurement
+can yield to another claim but do not send an estimated score.
+
+Kiosk Satellite claims are unauthenticated. Enable this mode only on a
+trusted LAN. A host on that network can influence which device answers.
+
 ### Wake sound
 Plays a short rising tone when the Echo hears the wake word. Off by
 default, because it adds a beat between the wake word and the request. It's

@@ -82,6 +82,9 @@ options:
   # add-on install is precisely the case that default exists for, and
   # test_addon_default_threshold_matches_the_controller pins the pair.
   oww_threshold: 0.5
+  kiosk_arbitration: false
+  kiosk_arbitration_window_ms: 400
+  kiosk_arbitration_offset_db: 0
   require_device_tls: false
   device_approval: "strict"
   debug: false
@@ -114,6 +117,9 @@ schema:
   esphome_port_base: "int(1024,60000)"
   oww_model: "str"
   oww_threshold: "float(0,1)"
+  kiosk_arbitration: "bool"
+  kiosk_arbitration_window_ms: "int(100,500)"
+  kiosk_arbitration_offset_db: "float(-30,30)"
   require_device_tls: "bool"
   device_approval: "list(strict|auto)"
   debug: "bool"
