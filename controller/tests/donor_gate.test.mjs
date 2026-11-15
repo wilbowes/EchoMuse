@@ -81,7 +81,9 @@ const FILES = _emosSystemFiles();
         !FILES[6].includes("bin/wpa_supplicant"));
   check("both generations need e2fsck, which checks /data every boot",
         FILES[5].includes("bin/e2fsck") && FILES[6].includes("bin/e2fsck"));
-  check("the donut needs e2fsck too", FILES.donut.includes("bin/e2fsck"));
+  // The donut's FireOS 6 has no ext4 checker; emOS's own payload carries it
+  // (#1182), so requiring Amazon's would refuse every donut.
+  check("the donut does not require Amazon's e2fsck", !FILES.donut.includes("bin/e2fsck"));
   check("the donut's WiFi is the SDIO modules, not biscuit's MT6620 tools",
         FILES.donut.some(f => f.endsWith("wlan_mt76x8_sdio.ko"))
         && !FILES.donut.some(f => f.includes("wmt_")));

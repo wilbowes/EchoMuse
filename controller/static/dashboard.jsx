@@ -5322,8 +5322,11 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       // two modules (sdio_wifi_bringup) rather than biscuit's MT6620 tools. Its
       // firmware is loaded by the kernel from /system/vendor/firmware, by name
       // the driver chooses, so it is not listed. Bluetooth's btmtksdio.ko is
-      // not required: emOS without it still serves voice.
-      donut: ['bin/sh', 'bin/linker', 'bin/e2fsck',
+      // not required: emOS without it still serves voice. No e2fsck: the
+      // donut's FireOS 6 has none (only vendor/bin/fsck_msdos_mtk, 41C8
+      // 2026-11-15), so emOS carries its own and the controller refuses a
+      // donut payload without it (em_emos_ota.NEEDS_OWN_E2FSCK, #1182).
+      donut: ['bin/sh', 'bin/linker',
               'lib/modules/wlan_mt76x8_sdio_prealloc.ko', 'lib/modules/wlan_mt76x8_sdio.ko'],
     };
   }

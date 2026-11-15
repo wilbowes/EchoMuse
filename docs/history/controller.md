@@ -2087,11 +2087,19 @@ finish on `_b`, the slot `boot-root.zip` patches for root.
   up from `wlan_mt76x8_sdio*.ko`). All three are now board-aware. The
   controller side already knew the donut (`em_emos_build` cmdline recipe,
   `skip_initramfs`, `FIREOS6_BOARDS`; `em_boards` model; init's ttyGS0 major).
-- **Owed to a bench run with 41C8** (now on emOS, so stock first): what the
-  donut's TWRP reports as its version and how it maps by-name partitions
-  (`classifyBootTarget`); whether `system_a` and `system_b` both hold FireOS
-  6, which the gate requires as for radar (41C8 booted `_b`); whether
-  `bin/e2fsck` is on its `/system`.
+- **Bench run on 41C8, 2026-11-15** (back to stock first: boot_a d57017aa,
+  boot_b 5e10fa26, cache and data wiped in TWRP). TWRP reports **3.7.0_9-0**
+  (omni_donut); by-name is the same under `platform/bootdevice` and
+  `platform/mtk-msdc.0`: boot_a p10, boot_b p11, swdl p12 (`recovery` →
+  swdl), system_a p13, system_b p14, cache p15, userdata p16. `lk_a`, `lk_b`,
+  `tee1`, `tee2` and `preloader` point at `/tmp/ota-decoy/*`, the real ones at
+  `*_real`: the unlock's guard against an OTA, and names the wizard never
+  writes. Both slots hold FireOS 6 but different builds (system_a 6.5.5.5,
+  system_b 6.5.7.5); slot B was active, and the gate read it right. **No
+  `bin/e2fsck` in either slot**, only `vendor/bin/fsck_msdos_mtk`: the gate
+  refused before any write. emOS now carries its own (#1182), so the donut
+  list no longer asks for Amazon's. `/init recovery` from the emOS console
+  reaches TWRP on the donut too.
 - **The latest emOS release (`emos-v0.11`, 2026-11-08) predates #1134**, so a
   wizard-built donut has no Bluetooth until the next emOS release.
 
