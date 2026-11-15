@@ -2085,7 +2085,7 @@ this TWRP marks the slot it installed to as active, so the post's flip makes
 the second install hit B again: install until slot A has been written, and
 finish on `_b`, the slot `boot-root.zip` patches for root.
 
-### Donut (2026-11-10, not yet run on hardware)
+### Donut (2026-11-10, first run on hardware 2026-11-15)
 
 - **2026-11-10, walked the emOS flow for a donut, code only.** Before this a
   donut was refused at Connect (`_echoBoard` knew biscuit and radar), and past
@@ -2132,7 +2132,8 @@ finish on `_b`, the slot `boot-root.zip` patches for root.
   nothing. With a cached model it would have landed in the window. Fixed by
   `em_listen.awaiting_report`: an `unknown` Echo is waited on, and
   `_stream_listen` re-checks before `mic_start`. The firmware's boot default
-  (stream until config) is the other half, open for discussion.
+  (stream until config) is the other half: **Wil 2026-11-15, the Echo is
+  inert until its first config** (device side owed, spec first).
 - **`test_a_signature_is_kept_beside_its_binary_and_pruned_with_it` is flaky**
   (2026-11-15: pass, fail, pass on one checkout): `em_firmware.prune` orders by
   mtime and the test's three writes share a tick. Not yet fixed.
