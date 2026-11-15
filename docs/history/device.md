@@ -361,7 +361,7 @@ own files that informed it stay off the repo (Amazon's).
   (`controllers/streams/audio.py`) pans a left or right player with
   `pan=stereo|c0=FL|c1=FL` when the format is stereo, so the Echo gets its own
   side on both channels and the average is that side. From the code; by ear
-  owed.
+  on 2026-11-15 (below).
 - **2026-11-10, under 10.x a stream that starts before the player's first
   `client/state` loses ~its lead (~1.8-2s for us).** Not the clock and not a
   drop on the device: 10.x keeps a role "awaiting state" out of every stream
@@ -376,6 +376,21 @@ own files that informed it stay off the repo (Amazon's).
   the 200ms ladder took ~250ms. Wil: keep spec-aligned, no early state. Real
   exposure: MA starting a stream within ~80ms of connecting. The fix belongs
   upstream: hold a stream whose members all await state rather than skip.
+- **2026-11-15, real music through Music Assistant 2.10.9, on hardware.** MA
+  chose `opus 48000Hz 2ch` on its own for VVV, 15LE and C95, 0 underruns.
+  The `server` process's CPU (utime+stime over 60s, music minus idle, % of
+  one core), ea.4's FLAC → #1159's Opus: 15LE 36.4 → 35.5, VVV 43.1 → 38.4,
+  C95 40.9 → 38.4; one window each, so read it as "no worse", the decoder
+  difference being ~1 point. **Playing music costs 35-43% of a core whatever
+  the codec**: decode is a few percent of that; the rest is the playback path
+  (voicing, mix, ALSA writes, the echo cancellers waking on a live reference),
+  which is where to look if music ever needs to get cheaper. aiosendspin
+  10.2.1 opens libopus with no bitrate (its options argument is ignored), so
+  it is FFmpeg's default: 96k stereo, 64k mono, VBR, 20ms frames. A 15LE +
+  C95 left/right group passed by ear (Wil); each Echo held syncErr 68-73us
+  against the server clock and ~30s buffered (MA sends a group that far
+  ahead). ea.4 drops a standalone aiosendspin 9.1.1 or 10.2.1 server after
+  the hello (WS 1006) yet plays with MA; not chased, #1159 replaces it.
 
 ## Boards: hardware is found by name (#541, 2026-10-04)
 
