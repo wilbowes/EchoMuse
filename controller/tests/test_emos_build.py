@@ -871,7 +871,9 @@ def test_em_wifi_rides_in_both_architectures():
             f"{binary} would be installed into a FireOS 5 image, which moves "
             f"that fleet off Amazon's supplicant as a side effect"
         )
-    assert both <= every, (
+    # e2fsck is the one optional member: in both images when a release has it,
+    # required of none but a board with no checker of its own (NEEDS_OWN_E2FSCK).
+    assert both - {"e2fsck"} <= every, (
         "a name that is not in the payload allowlist can never be in a bundle"
     )
 

@@ -268,16 +268,26 @@ INIT_ASSETS = {
 SBIN_ASSETS = ("wpa_supplicant", "wpa_cli", "em-wifi", "busybox")
 
 
-# The one member that rides in BOTH images. em-wifi is a shell script init
-# never execs, and it resolves wpa_cli and wpa_supplicant the same
-# /sbin-then-/system/bin way init does — so adding it to a FireOS 5 image
-# changes nothing about which supplicant runs, which is the constraint the
-# rest of this payload is held to.
+# What rides in BOTH images. em-wifi is a shell script init never execs, and
+# it resolves wpa_cli and wpa_supplicant the same /sbin-then-/system/bin way
+# init does — so adding it to a FireOS 5 image changes nothing about which
+# supplicant runs, which is the constraint the rest of this payload is held to.
+# e2fsck is the deliberate exception: init does exec it, so a FireOS 5 image
+# checks /data with ours instead of Amazon's (see NEEDS_OWN_E2FSCK).
 #
 # Without it a FireOS 5 device has no console way to set WiFi at all, and that
 # is most of the fleet. Found on Office, 2026-09-21: emos-v0.8, /sbin/em-wifi
 # absent, and correctly so under the old rule.
-SBIN_BOTH_ARCHES = ("em-wifi",)
+SBIN_BOTH_ARCHES = ("em-wifi", "e2fsck")
+
+
+# e2fsck checks /data before init mounts it read-write, and init prefers
+# /sbin/e2fsck to /system/bin/e2fsck. It rides in both images and is not
+# required of a release (an older one still builds every board it did), with
+# one exception: a board whose /system has NO ext4 checker, where an image
+# without ours mounts /data unchecked on every boot. The Dot 3's FireOS 6 ships
+# only vendor/bin/fsck_msdos_mtk (41C8, 2026-11-15).
+NEEDS_OWN_E2FSCK = {"donut"}
 
 
 # One archive with a manifest of sha256s — see build_payload_bundle.
@@ -377,10 +387,17 @@ def select_payload(files: dict, arch: str, version: str,
     # supplicant as a side effect. Same for wpa_cli, which init's reassociate
     # nudge now prefers.
     #
-    # em-wifi is exempt and rides in both: it is a script nothing execs, so it
-    # cannot change which supplicant init starts. Not fatal when missing — a
-    # release predating it still builds a FireOS 5 image, exactly as before.
+    # SBIN_BOTH_ARCHES is exempt and rides in both (em-wifi cannot change which
+    # supplicant init starts; e2fsck replaces Amazon's on purpose). Not fatal
+    # when missing — a release predating them still builds a FireOS 5 image,
+    # exactly as before — except e2fsck on a board with none of its own.
     sbin = {n: files[n] for n in SBIN_BOTH_ARCHES if n in files}
+    if board in NEEDS_OWN_E2FSCK and "e2fsck" not in files:
+        return None, {}, version, em_http.error(
+            "no_e2fsck_for_board",
+            f"emOS release {version} carries no e2fsck, and this Echo's "
+            f"FireOS has none of its own, so the image would mount /data "
+            f"unchecked on every boot. Cut a newer emos-v* tag.", 404)
     if (arch == em_emos_build.ARCH_ARM
             or board in em_emos_build.FIREOS6_BOARDS):
         missing = [n for n in SBIN_ASSETS if n not in files]

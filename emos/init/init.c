@@ -2994,10 +2994,21 @@ int main(int argc, char **argv)
      * fix only what is unambiguously safe and never ask a question, because
      * there is nobody at the console to answer one. Anything needing a real
      * decision is left alone and shows up in the trail.
+     *
+     * OURS FIRST (/sbin/e2fsck, emos/tools/build-e2fsck.sh), then Amazon's.
+     * The Dot 3's FireOS 6 has no ext4 checker at all, so before emOS carried
+     * one every donut boot mounted /data unchecked behind a failed exec's
+     * status. Now a missing checker is named in the trail.
      */
-    char *fsck[] = { "/system/bin/e2fsck", "-p", "/dev/block/mmcblk0p16", NULL };
-    int fs = run_wait(fsck);
-    note("stage=fsck_data status=%d\n", fs);
+    static const char *const fscks[] = { "/sbin/e2fsck", "/system/bin/e2fsck",
+                                         NULL };
+    const char *fsck_bin = first_exec(fscks);
+    int fs = -1;
+    if (fsck_bin) {
+        char *fsck[] = { (char *)fsck_bin, "-p", "/dev/block/mmcblk0p16", NULL };
+        fs = run_wait(fsck);
+    }
+    note("stage=fsck_data status=%d by=%s\n", fs, fsck_bin ? fsck_bin : "none");
     led_step();                                  /* 3: fsck /data */
 
     r = mount("/dev/block/mmcblk0p16", "/data", "ext4", 0, NULL);

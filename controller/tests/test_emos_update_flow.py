@@ -310,18 +310,42 @@ def test_the_fos6_payload_rides_into_the_image(tmp_path):
 def test_the_wifi_tools_follow_the_userspace_not_the_kernel(arch, board, tools):
     import em_emos_ota as ota
     files = {"init": new_init("arm64"), "init32": new_init("arm"),
-             **{n: n.encode() for n in ota.SBIN_ASSETS}}
+             "e2fsck": b"E", **{n: n.encode() for n in ota.SBIN_ASSETS}}
     _, sbin, _, err = ota.select_payload(files, arch, "emos-v0.11", board)
     assert err is None
     assert ("wpa_supplicant" in sbin) is tools
     assert "em-wifi" in sbin
+    assert "e2fsck" in sbin, "init prefers ours on every board"
 
 
 def test_a_donut_payload_without_wifi_tools_is_refused():
     import em_emos_ota as ota
-    _, _, _, err = ota.select_payload({"init": new_init("arm64")}, "arm64",
-                                      "emos-v0.11", "donut")
+    _, _, _, err = ota.select_payload({"init": new_init("arm64"), "e2fsck": b"E"},
+                                      "arm64", "emos-v0.11", "donut")
     assert err is not None and err.status == 404
+
+
+def test_a_donut_payload_without_e2fsck_is_refused():
+    # The Dot 3's FireOS 6 has no ext4 checker (41C8, 2026-11-15): an image
+    # without ours would mount /data unchecked on every boot.
+    import em_emos_ota as ota
+    files = {"init": new_init("arm64"), **{n: n.encode() for n in ota.SBIN_ASSETS}}
+    _, _, _, err = ota.select_payload(files, "arm64", "emos-v0.11", "donut")
+    assert err is not None and err.status == 404
+    assert "no_e2fsck_for_board" in err.text
+
+
+@pytest.mark.parametrize("arch,board", [("arm", None), ("arm64", "biscuit"),
+                                        ("arm64", "radar"), ("arm64", None)])
+def test_a_release_without_e2fsck_still_builds_boards_that_have_one(arch, board):
+    # Amazon's /system/bin/e2fsck is init's fallback there, so an emOS release
+    # cut before ours keeps building them exactly as it did.
+    import em_emos_ota as ota
+    files = {"init": new_init("arm64"), "init32": new_init("arm"),
+             **{n: n.encode() for n in ota.SBIN_ASSETS}}
+    _, sbin, _, err = ota.select_payload(files, arch, "emos-v0.11", board)
+    assert err is None
+    assert "e2fsck" not in sbin
 
 
 def test_a_stale_known_good_is_refreshed_before_anything_is_written(tmp_path, old):

@@ -2910,7 +2910,7 @@ def test_the_emos_release_workflow_asserts_what_it_publishes():
     # that skipped building it would publish an empty-handed payload.
     assert "make-payload-bundle.py" in wf, \
         "the release must build the payload bundle"
-    for f in ("init32", "wpa_supplicant", "wpa_cli", "em-wifi"):
+    for f in ("init32", "wpa_supplicant", "wpa_cli", "em-wifi", "e2/e2fsck"):
         assert f in wf, f"{f} must go into the bundle"
 
     published = set()
@@ -2931,19 +2931,23 @@ def test_the_emos_release_workflow_asserts_what_it_publishes():
     # tarball and the licence text are published beside it — a link to busybox.net
     # would leave compliance depending on a third party's server. Dropping either
     # ships GPL-2.0 object code with no source, which is why they are pinned here
-    # rather than left to the release step.
+    # rather than left to the release step. The two e2fsprogs-* assets are the
+    # same obligation for e2fsck (GPL-2.0; NOTICE is e2fsprogs' licence text).
     #
     # A BOOT IMAGE MUST NEVER APPEAR. It carries the device's own kernel and
     # DTBs, so publishing one would redistribute Amazon's code — the image is
     # assembled on the user's side from the partition they read off their device.
     assert published == {"emos/build/init", "emos/build/emos-payload.zip",
                          "emos/build/bb/busybox-*.tar.bz2",
-                         "emos/build/bb/busybox-LICENSE"}, (
+                         "emos/build/bb/busybox-LICENSE",
+                         "emos/build/e2/e2fsprogs-*.tar.gz",
+                         "emos/build/e2/e2fsprogs-NOTICE"}, (
         f"the published set changed — got {sorted(published)}. Everything here "
         f"must be redistributable by us, and a boot image must never be among "
         f"it. The loose `init` is not redundant: _fetch_latest_emos_release "
         f"matches it by exact name, so dropping it strands every fielded "
-        f"controller. The busybox source and licence are a GPL-2.0 obligation.")
+        f"controller. The busybox and e2fsprogs sources and licences are a "
+        f"GPL-2.0 obligation.")
     assert not any(".img" in f or "boot" in f.rsplit("/", 1)[-1]
                    for f in published), (
         "an image or boot partition must never be a release asset — it carries "
