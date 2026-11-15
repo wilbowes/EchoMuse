@@ -109,6 +109,13 @@ own wake word is either broken or waiting on an install, and it still answers
 the button. Quietly streaming instead would make the dashboard's privacy
 statement false without anyone choosing it.
 
+**Nor does `unknown`.** Until a private-capable Echo set to On this Echo
+reports `local` or `degraded`, the controller starts nothing for it: no
+`mic_start`, no scorer (`em_listen.awaiting_report`). The Echo boots in the
+streaming state and holds it until its first config arrives, so a `mic_start`
+sent in that window would stream; one Echo that never reports stays
+unanswered, which is button-only, never a stream.
+
 `legacy` does stream, and is shown doing so. That is today's firmware
 behaviour; the fix is a firmware update, and the dashboard says so.
 
