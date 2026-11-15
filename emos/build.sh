@@ -134,6 +134,15 @@ if [ -f "$BUSYBOX" ]; then
     echo "including busybox ($(stat -c%s "$BUSYBOX") bytes)"
 fi
 
+# e2fsck, when one has been built (tools/build-e2fsck.sh). init prefers it to
+# /system/bin/e2fsck for the /data check; the Dot 3's FireOS 6 has no ext4
+# checker at all, so there it is the only one.
+E2FSCK=${E2FSCK:-$HERE/prebuilt/e2fsck}
+if [ -f "$E2FSCK" ]; then
+    install -m 0755 "$E2FSCK" "$WORK/root/sbin/e2fsck"
+    echo "including e2fsck ($(stat -c%s "$E2FSCK") bytes)"
+fi
+
 # Build identity, stamped in at build time rather than written at boot: it
 # describes the IMAGE, so it must not be something a running system can drift
 # from. /etc/os-release is the standard location and format, so ordinary
