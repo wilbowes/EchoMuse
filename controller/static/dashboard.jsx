@@ -8626,6 +8626,18 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     const epoch = stepEpoch.current;
     const abandoned = () => epoch !== stepEpoch.current;
 
+    // Every button runs the step it is drawn on. One that names another step,
+    // or none, is a wizard bug: #1183 dropped a step and left the emOS
+    // buttons on their old numbers, so "Flash emOS" ran Reboot and Watch with
+    // nothing flashed, and Configure WiFi's Connect named a step that no longer
+    // existed and hung on "Working on this step" (41C8, 2026-11-15). Refused
+    // here, before anything runs or the step is marked.
+    if (!STEPS[stepIdx] || stepIdx !== step) {
+      addLog(`Error: wizard bug — asked to run step ${stepIdx + 1} from step `
+           + `${step + 1}. Nothing has been run. Please report this.`, 'error');
+      return;
+    }
+
     setRunning(true);
     setStepError('');
     markStep(stepIdx, 'running');
@@ -9051,7 +9063,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
             {isEmos && step === _E.install_em && stepState[step] !== 'done' && !running && (
               <div style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                  <Pill accent onClick={() => runStep(3, true)}>Install latest from GitHub</Pill>
+                  <Pill accent onClick={() => runStep(_E.install_em, true)}>Install latest from GitHub</Pill>
                   <Pill small onClick={doCheckRelease} disabled={checkingRelease}>
                     {checkingRelease ? 'Checking…' : 'Check for newer release'}
                   </Pill>
@@ -9067,7 +9079,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                   onChange={e => setBinaryFile(e.target.files[0])}
                   style={{ fontFamily: "'DM Mono',monospace", fontSize: 11 }}
                 />
-                {!!binaryFile && <Pill onClick={() => runStep(3, false)}>Install Custom Build</Pill>}
+                {!!binaryFile && <Pill onClick={() => runStep(_E.install_em, false)}>Install Custom Build</Pill>}
               </div>
             )}
 
@@ -9076,7 +9088,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                 version that is not published yet. */}
             {isEmos && step === _E.build_emos && stepState[step] !== 'done' && !running && (
               <div style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
-                <Pill accent onClick={() => runStep(5, true)}>Build with the latest emOS release</Pill>
+                <Pill accent onClick={() => runStep(_E.build_emos, true)}>Build with the latest emOS release</Pill>
                 <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', letterSpacing: '0.04em' }}>— or —</div>
                 <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--text2)', letterSpacing: '0.08em' }}>
                   {stepState[step] === 'error' ? 'SELECT A DIFFERENT INIT' : 'YOUR OWN INIT BINARY (AARCH64, STATIC)'}
@@ -9086,7 +9098,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                   onChange={e => setInitFile(e.target.files[0])}
                   style={{ fontFamily: "'DM Mono',monospace", fontSize: 11 }}
                 />
-                {!!initFile && <Pill onClick={() => runStep(5, false)}>Build with this init</Pill>}
+                {!!initFile && <Pill onClick={() => runStep(_E.build_emos, false)}>Build with this init</Pill>}
               </div>
             )}
 
@@ -9099,7 +9111,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                   Writes the built image to {emosTarget || 'the boot partition'}.
                   Your escrowed image restores it in about ten seconds and leaves /data alone.
                 </div>
-                <Pill accent onClick={() => runStep(6)}>Flash emOS</Pill>
+                <Pill accent onClick={() => runStep(_E.flash_emos)}>Flash emOS</Pill>
               </div>
             )}
 
@@ -9164,7 +9176,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                   {/* After the reboot there is no ADB handle and
                       runRebootAndWatch skips it, so a second click only opens
                       the port picker, which times out if emOS is slow. */}
-                  <Pill accent onClick={() => runStep(7)}>{adb ? 'Reboot and Connect Console' : 'Connect Console'}</Pill>
+                  <Pill accent onClick={() => runStep(_E.reboot_watch)}>{adb ? 'Reboot and Connect Console' : 'Connect Console'}</Pill>
                 </div>
                 <div className="em-label" style={{ marginBottom: 6 }}>The ring</div>
                 <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)', lineHeight: 1.7 }}>
@@ -9201,8 +9213,8 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                   .then(nets => setWifiNetworks(nets))
                   .catch(e => addLog(`Scan failed: ${e.message}`, 'error'))}
                 networks={wifiNetworks}
-                onConnect={() => { if (wifiSsid) runStep(8); }}
-                onSkip={() => runStep(8, true)}
+                onConnect={() => { if (wifiSsid) runStep(_E.wifi_register); }}
+                onSkip={() => runStep(_E.wifi_register, true)}
               />
             )}
             {/* Step 10: WiFi configuration (FireOS flow — emOS configures WiFi over the console at step 8) */}

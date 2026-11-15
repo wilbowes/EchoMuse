@@ -3265,3 +3265,28 @@ def test_the_image_keeps_its_data_on_the_mounted_directory():
         assert ":/app/data" in (root / compose).read_text(), compose
     # The add-on keeps its own path, which has to win over the image's.
     assert 'DB_PATH: "/data/echomuse.db"' in (root / "config.yaml").read_text()
+
+
+def test_every_emos_panel_button_runs_its_own_step_by_id():
+    """
+    #1183 dropped the wake word step and moved the emOS runner and panel
+    conditions to ids, but left the panel BUTTONS on their old numbers. On
+    41C8 (2026-11-15) "Flash emOS" ran Reboot and Watch, so nothing was
+    flashed, and Configure WiFi's Connect named a step that no longer existed
+    and hung. Each emOS panel's buttons must run that panel's step, by id.
+    """
+    from pathlib import Path
+    jsx = (Path(__file__).resolve().parent.parent / "static" / "dashboard.jsx").read_text()
+    marks = list(re.finditer(
+        r"\{(?:!isEmos && step === \d+|isEmos && step === _E\.(\w+)|\(isEmos \?)", jsx))
+    assert marks, "no wizard panels found; update this test"
+    emos = [(m, marks[i + 1].start() if i + 1 < len(marks) else len(jsx))
+            for i, m in enumerate(marks) if m.group(1)]
+    assert len(emos) >= 5, f"expected the emOS panels, found {[m.group(1) for m, _ in emos]}"
+    for m, end in emos:
+        region = jsx[m.start():end]
+        args = re.findall(r"runStep\(([^,)]*)", region)
+        for a in args:
+            assert a.strip() == f"_E.{m.group(1)}", (
+                f"a button in the {m.group(1)} panel runs runStep({a}); it must "
+                f"run its own step, by id")
