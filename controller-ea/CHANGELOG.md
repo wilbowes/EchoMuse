@@ -4,7 +4,7 @@
 
 The Echo Dot 3rd gen joins the setup wizard, and Home Assistant gets each Echo's CPU temperature. Pair with firmware v2.20.0-ea.1 and emOS emos-v0.12-ea.1, which this controller offers.
 
-**This release upgrades the controller's database to v33, and that cannot be undone in place.** A backup, `echomuse.db.pre-v33.bak`, is written beside the database first. To go back to 2.27.0-ea.6 or 2.27.0 you must restore that backup, losing anything recorded since; an older controller refuses to start on a v33 database.
+**This release upgrades the controller's database to v33, and that cannot be undone in place.** A backup of the v32 database, `echomuse.db.pre-v32.bak`, is written beside it first. To go back to 2.27.0-ea.6 or 2.27.0 you must restore that backup, losing anything recorded since; an older controller refuses to start on a v33 database.
 
 ### New
 
