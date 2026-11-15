@@ -143,7 +143,7 @@ registration/server order (`tests/test_capabilities.py`).
 `em_db.MIGRATIONS` is **append-only and forward-only** (`schema_version`
 indexes it). v3 is an f-string over `DEFAULT_DEVICE_CONFIG`; leave it so.
 Each migration is one transaction with its fixup; failure refuses startup.
-A backup `<db>.pre-v<N>.bak` is taken first and a failed backup refuses
+A backup `<db>.pre-v<N>.bak` is taken first, **N being the version left** (v32 → v33 writes `pre-v32.bak`) and a failed backup refuses
 (`EM_SKIP_DB_BACKUP=1`). **A newer database refuses to start.** The image sets
 `DB_PATH=/app/data/echomuse.db`. mDNS binds SERVER_IP's interface only
 (`em_hostip.bind_mdns`).
@@ -456,12 +456,19 @@ FireOS, board sent with the build; **read off the device, never the page**.
 `donorVerdict` skips biscuit's bootloader fingerprint. Restoring to stock:
 finish on `_b`.
 
-### Donut (2026-11-10, not yet run on hardware)
+### Donut (2026-11-10, first run on hardware 2026-11-15)
 
 As radar: `AEODN`/`donut_puffin` from `/system`, emOS only, no LK fingerprint
 (kaeru). Its 32-bit FireOS 6 runs on a **64-bit** kernel, so the gate wants
 arm64 for it, and its WiFi files are the SDIO modules
-(`_emosSystemFiles().donut`), not MT6620's tools.
+(`_emosSystemFiles().donut`), not MT6620's tools. Its FireOS has **no
+`e2fsck`**: emOS carries its own (#1182). TWRP's format of /data sets max
+mount count 10, so e2fsck runs a full check every tenth boot (0.07 s).
+
+**The emOS flow has no wake word asset step** (#1183): the on-connect
+reconcile delivers them and the Echo reports `degraded` until they land.
+Steps are addressed by id (`_E`), never position. `AdbClient.close()` is
+bounded (3 s); an unbounded close hung step 1 on the donut's TWRP.
 
 ### The emOS flow, and what a run against real hardware found
 

@@ -62,7 +62,7 @@ raw frame (the board's MicArray: biscuit 9ch S24_3LE, Dot 3 4ch S32_LE) → beam
   in household noise; only noisy-room captures can rank beams, and until they
   do the selector stays.
 - **AEC** (`internal/aec/`, vendored SpeexDSP-1.2.1), whole mic path incl. the
-  wake stream; default off (`aecEnabled`).
+  wake stream; **on by default** (`aecEnabled`, since #144, 2026-08-13: barge-in needs it).
   - **Hardware reference (#385)**: ch8 is an in-frame loopback of our playback
     (+33 samples, inverted, pre-DAC); no ring, `aecDelayMs` or governor.
     Promoted only when BIT-EXACT ZERO while silent AND carrying audio while
@@ -295,8 +295,9 @@ frames sent to the wire.
 
 ### Asset distribution (`em_oww_assets.py`)
 
-`em_oww_assets` plans (pure); `em_api` executes over the wizard (USB/ADB,
-**mandatory step**) or the shell plane.
+`em_oww_assets` plans (pure); `em_api` executes over the shell plane (the
+on-connect reconcile, the only delivery for emOS since #1183) or, in the
+FireOS flow while it exists, the wizard over USB/ADB.
 
 - ARM runtime **vendored in the controller image**, pinned by AAR sha256
   (`onnxruntime-android` 1.19.2); models from openwakeword or `oww_models/`.
