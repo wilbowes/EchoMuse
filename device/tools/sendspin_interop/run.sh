@@ -17,7 +17,8 @@ docker run --rm -v "$dev/..:/src" -v "$out:/out" -w /src/device -e CGO_ENABLED=1
   golang:1.24 go build -o /out/interop ./tools/sendspin_interop
 cp "$here/server.py" "$out/"
 status=0
-for v in ${*:-10.2.1 9.1.1}; do
+[ $# -gt 0 ] || set -- 10.2.1 9.1.1
+for v in "$@"; do
   echo "#### aiosendspin $v"
   docker run --rm -v "$out:/w" -w /w python:3.13-slim sh -c \
     "pip -q --disable-pip-version-check install 'aiosendspin[server]==$v' 2>/dev/null && python -u server.py" || status=1
