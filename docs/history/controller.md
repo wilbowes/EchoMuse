@@ -2122,6 +2122,17 @@ finish on `_b`, the slot `boot-root.zip` patches for root.
   10** (biscuits read -1), so e2fsck runs a full check every tenth boot; a
   read-only full check of its 1.5 GB /data took 0.07 s. TWRP's toybox `dd`
   rejects `conv=fsync`. Led to: no picker, no asset step, bounded close.
+- **An Echo reports `stream` from boot until its first config, and the
+  controller could start a stream into it** (41C8, 2026-11-15). After a
+  reboot the Echo registered with `stream` (firmware default before config),
+  the controller logged "listening: unknown (streams continuously)" and began
+  `_stream_listen`, which loads its model and THEN sends `mic_start`. The
+  Echo reported `local` 0.9s after connecting; the load took 2.9s (no other
+  Echo had the model cached), so `mic_start` reached a private Echo and sent
+  nothing. With a cached model it would have landed in the window. Fixed by
+  `em_listen.awaiting_report`: an `unknown` Echo is waited on, and
+  `_stream_listen` re-checks before `mic_start`. The firmware's boot default
+  (stream until config) is the other half, open for discussion.
 - **`test_a_signature_is_kept_beside_its_binary_and_pruned_with_it` is flaky**
   (2026-11-15: pass, fail, pass on one checkout): `em_firmware.prune` orders by
   mtime and the test's three writes share a tick. Not yet fixed.

@@ -3249,6 +3249,8 @@ async def wake_word_listener(device: Device):
     while em_state.devices.get(device.device_id) is device:
         if not device.mic_capable:
             await _no_mic(device)
+        elif em_listen.awaiting_report(device.listen_view):
+            await _await_listen_report(device)
         elif device.private_listening:
             # Nothing here scores a private Echo, so its cached models (three
             # ONNX sessions each) are released, not held for the life of the
@@ -3258,6 +3260,18 @@ async def wake_word_listener(device: Device):
             await _private_listen(device)
         else:
             await _stream_listen(device)
+
+
+async def _await_listen_report(device: Device) -> None:
+    """Start nothing until the Echo reports how it listens (em_listen.awaiting_report)."""
+    log.info(f"[{device.device_id}] waiting for the Echo to report private listening — not streaming")
+    t0 = asyncio.get_event_loop().time()
+    while (em_state.devices.get(device.device_id) is device
+           and em_listen.awaiting_report(device.listen_view)):
+        await asyncio.sleep(0.25)
+        if t0 and asyncio.get_event_loop().time() - t0 > 30:
+            log.warning(f"[{device.device_id}] no listen_state report after 30s — not listening")
+            t0 = 0
 
 
 async def _no_mic(device: Device) -> None:
@@ -3594,6 +3608,10 @@ async def _stream_listen(device: Device):
     # the prediction dict by the filename stem — never score by the raw name.
     model_key = em_oww_models.prediction_key(current_model_name)
 
+    # The Echo may have gone private, or still be waiting to report, while the
+    # model loaded: never send mic_start into that (em_listen.awaiting_report).
+    if device.private_listening or em_listen.awaiting_report(device.listen_view):
+        return
     log.info(f"[{device.device_id}] OWW: starting (initial threshold={device.oww_threshold:.3f})")
     await device.mic_start()
 
